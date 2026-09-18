@@ -126,8 +126,24 @@ repository. Instead:
 - Those gated suites are shared, AGPL test code that exercises Enterprise
   behavior. That makes them a clean source for the feature specs, and ready-made
   acceptance tests for the rebuilds.
+- First boot (2026-09-18): the stripped debug binary, run in a local
+  container with the upstream `v0.16.22` image used only as a Debian runtime
+  (its glibc 2.41 covers the binary's 2.39), through ihasmail-oneshot's
+  sequence over JMAP. Every step worked:
+  - it started in bootstrap mode on port 8080;
+  - `x:Bootstrap/get` confirmed bootstrap mode, and `x:Bootstrap/set` returned
+    a permanent admin and wrote `config.json`;
+  - after a restart, the admin signed in, the server reported edition `oss`
+    (Enterprise reports `enterprise`) with 637 permissions against
+    Enterprise's 641, and the domain existed with DKIM keys generated;
+  - two users were created, and the DNS zone exported;
+  - one user's message went over SMTP submission (465), was DKIM-signed, and
+    was read by the other over IMAP (993) and JMAP;
+  - `x:MaskedEmail` and `x:ArchivedItem` answered `forbidden` with an
+    Enterprise upsell (`crates/jmap/src/registry/mod.rs`), and `x:Tenant/query`
+    answered an empty list.
 - Not yet run: the integration suite itself, which needs its database
-  services, and a first boot of the binary (SPEC.md §6).
+  services.
 
 Layout on `main`: the server source at the root, exactly as upstream lays it
 out (so merges line up), the specs under `docs/spec/`, strip reports under
@@ -327,6 +343,20 @@ Oneshot's sequence, all over JMAP, with no web interface involved:
 5. Trust forwarded addresses from the reverse proxy, and allow its IP, so the
    auto-ban doesn't ban the proxy.
 6. Create the first user; write the credentials file and the DNS zone file.
+
+Found at the fork's first boot, and to fix:
+
+- On first boot the server downloads Stalwart's web interface
+  (`webui.zip` from GitHub) before anything is configured. §5.3 removes this.
+- Whenever `STALWART_RECOVERY_ADMIN` is set, its password is a full admin
+  login, outside bootstrap and recovery mode too. oneshot is safe, because
+  it recreates the container without the variable once setup is done, but a
+  plain restart keeps it. The fork honors the variable only in bootstrap and
+  recovery mode, and logs a warning when it's set otherwise.
+- Default listeners after setup: HTTP 8080, HTTPS 443, SMTP 25, submissions
+  465, IMAPS 993, POP3S 995, ManageSieve 4190. There's no plain 587 or 143.
+- The Enterprise upsell error (`crates/jmap/src/registry/mod.rs`) goes. With
+  every feature built in, there's nothing to sell.
 
 Additions for the fork:
 
