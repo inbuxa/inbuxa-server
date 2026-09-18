@@ -389,6 +389,92 @@ pub async fn test(test: &mut TestServer) {
     admin.registry_destroy(ObjectType::Tenant, [t_id]).await;
 }
 
+/// Acceptance test 12 (compat): masks written before the cutover resolve by
+/// their stored address, deliver, and read back unchanged through `x:`.
+///
+/// INBUXA most likely holds no masks (spec, observed 8), so the masks to
+/// check are made on a copy of its data, through the Enterprise server,
+/// before the copy is opened here:
+///
+/// - `INBUXA_COMPAT_ADMIN`: `name:password` of a server-level administrator
+///   in that data;
+/// - `INBUXA_COMPAT_MASKS`: a JSON file recorded against the Enterprise
+///   server, `[{"id", "accountId", "email", "enabled"}]`;
+///
+/// and the data itself in place of the test store: run with `NO_INSERT=1`
+/// and the store's `TMPDIR`/`STORE` pointing at the copy, so it isn't reset.
+#[ignore]
+#[tokio::test(flavor = "multi_thread")]
+pub async fn masked_email_compat() {
+    use std::str::FromStr;
+
+    let admin = std::env::var("INBUXA_COMPAT_ADMIN").expect("INBUXA_COMPAT_ADMIN");
+    let masks: Vec<Value> = serde_json::from_slice(
+        &std::fs::read(std::env::var("INBUXA_COMPAT_MASKS").expect("INBUXA_COMPAT_MASKS"))
+            .expect("masks file"),
+    )
+    .expect("masks JSON");
+    assert!(
+        std::env::var("NO_INSERT").is_ok(),
+        "NO_INSERT must be set, or the copy of INBUXA's data is wiped"
+    );
+
+    let test = TestServerBuilder::new("masked_email_compat")
+        .await
+        .with_default_listeners()
+        .await
+        .build_with_opts(false)
+        .await;
+    let (name, secret) = admin.split_once(':').expect("name:password");
+    let admin = Account::new(
+        Box::leak(name.to_string().into_boxed_str()),
+        Box::leak(secret.to_string().into_boxed_str()),
+        &[],
+        "Compat admin",
+        Id::from(u32::MAX),
+    );
+
+    for mask in masks {
+        let id = Id::from_str(mask["id"].as_str().unwrap()).unwrap();
+        let account = mask["accountId"].as_str().unwrap();
+        let email = mask["email"].as_str().unwrap();
+        let enabled = mask["enabled"].as_bool().unwrap();
+
+        // Reads back unchanged through x:
+        let response = admin
+            .jmap_method_call(
+                "x:MaskedEmail/get",
+                json!({"accountId": account, "ids": [id.to_string()]}),
+            )
+            .await;
+        let stored = &response.method_response()["list"][0];
+        assert_eq!(stored["email"], email, "{id}: {response:?}");
+        assert_eq!(stored["enabled"], enabled, "{id}");
+
+        // Resolves by its stored address, to its owner
+        let resolved = inbuxa_features::masked_email::ops::resolve(
+            &test.server.core.storage.data,
+            test.server.registry(),
+            email,
+        )
+        .await
+        .unwrap();
+        if enabled {
+            assert_eq!(
+                resolved.map(|m| m.object.account_id.to_string()),
+                Some(account.to_string()),
+                "{email} doesn't resolve to its owner"
+            );
+            // ... and is accepted for delivery
+            let mut lmtp = SmtpConnection::connect().await;
+            lmtp.mail_from("compat@remote.example.org", 2).await;
+            lmtp.rcpt_to(email, 2).await;
+        } else {
+            assert!(resolved.is_none(), "{email} is disabled but resolves");
+        }
+    }
+}
+
 /// Runs the masked email tests alone:
 /// `cargo test -p tests masked_email_tests -- --ignored`.
 #[ignore]
