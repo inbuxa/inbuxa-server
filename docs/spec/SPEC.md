@@ -336,6 +336,9 @@ which this design exists to avoid.
 
 ### 5.2 The contract between them
 
+The full contract is in `contract.md` (drafted 2026-09-18). What follows is
+the summary it expands.
+
 Versioned, and advertised in the JMAP session so either side can check it.
 
 - **Discovery.** The server's session names its webmail URL and the contract
@@ -510,7 +513,7 @@ before anything that could prompt that notice happens.
 
 ## 8. Open decisions
 
-- The INBUXA fork of ihasmail: its name, its repository, and how it tracks
+- The INBUXA fork of ihasmail is **ihasmail-inbuxa** (named 2026-09-18). Open: its repository, and how it tracks
   public ihasmail (§5).
 - Product name: whether the shipped product is called inbuxa-server or
   something else inside the INBUXA brand.
