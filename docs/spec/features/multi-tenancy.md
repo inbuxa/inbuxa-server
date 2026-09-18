@@ -320,6 +320,35 @@ marked **(compat)** also run against a copy of INBUXA's data.
 15. **(compat)** INBUXA's existing tenants, their members and quotas read back
     unchanged, and each tenant admin sees exactly what it saw before.
 
+## Implementation status
+
+Built 2026-09-18 from this spec, clean-room (hand-off brief
+`handoff/multi-tenancy.md`). The rules live in `crates/features`
+(`inbuxa-features`, module `tenancy`); upstream files carry only hooks marked
+`inbuxa: MT-n`. Acceptance tests 1 to 14 pass as `tests/src/system/tenant.rs`,
+called from `system_tests` with no gate.
+
+- **MT-1 to MT-18, MT-20 to MT-23:** built.
+- **MT-19, MT-19a:** built, except the submission-time warning, **deferred**
+  (see MT-19a) until the contract defines a warnings shape.
+- **ihasmail changes** (the section above) belong to ihasmail-inbuxa and
+  aren't part of this repository. Its branding and quota warnings wait for
+  ihasmail-inbuxa.
+- **Test 15 (compat)** is written as `tenant_compat`, ignored, and unrun until
+  a copy of INBUXA's data is provided. Its doc comment says how to run it.
+- **Known limits, not requirements of this spec:**
+  - Changing `Authentication.defaultTenantRoleIds` reaches tenants whose roles
+    are `Default` after a settings reload and a cache invalidation
+    (`x:Action` `ReloadSettings`, then `InvalidateCaches`), as upstream's other
+    default role lists do. MT-16 covers changes to the tenant itself, and to
+    any role a tenant holds, without either.
+  - `recalculateQuota` corrects the stored figure by the difference, so it's
+    safe while mail arrives, but a delivery that lands between its two reads
+    leaves the figure off by that message until the next run (MT-21).
+  - A domain's move (MT-8) saves the domain and then each object that follows
+    it, not as one transaction. An object changed by someone else in between
+    is skipped rather than overwritten.
+
 ## Observed
 
 Settled on 2026-09-18 against INBUXA's live Enterprise server (Stalwart
