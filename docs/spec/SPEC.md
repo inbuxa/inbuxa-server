@@ -7,18 +7,20 @@ remote, and nothing public before the cutover in §7.
 ## 1. What this is
 
 An AGPL-3.0-only fork of the Stalwart mail server that ships every feature
-under the AGPL, with nothing held back for a paid edition. ihasmail is built
-in as the product's web front end: webmail, account self-service and
-administration. Stalwart's own web interface is dropped.
+under the AGPL, with nothing held back for a paid edition. Two web front ends
+come with it, both separate from the mail host: ihasmail for webmail, account
+self-service and day-to-day account and tenant administration, and INBUXA
+Admin, a fork of Stalwart's own web interface, for full server administration,
+setup and recovery.
 
 **Goals**
 
 - Everything Stalwart's Enterprise Edition adds is available to everybody,
   under the AGPL, rebuilt clean-room.
-- One product: server, webmail and administration installed and versioned as
-  a pair.
-- No web interface on the mail host. Administration happens over JMAP from
-  ihasmail, which can run beside the server or on another machine.
+- One product: server, webmail and administration installed and versioned
+  together.
+- No web interface on the mail host. Both front ends talk to the server over
+  JMAP and OAuth, and can run beside it or on another machine.
 - Stay close enough to upstream that its releases can be taken quickly.
 
 **Non-goals**
@@ -249,9 +251,35 @@ is written.
 | 8 | Scale-out storage | SQL read replicas; sharded blob and in-memory stores | For large installs only. |
 | — | Seat limits, license keys | Nothing: there's no license | Removed, not rebuilt. |
 
-## 5. ihasmail as the product's web front end
+## 5. The web front ends
+
+Decided 2026-09-18: two front ends, each with its own job.
+
+- **ihasmail**: webmail, account self-service, and the day-to-day account and
+  tenant work done from inside the mail app by helpdesk staff and tenant
+  administrators. Its Administration stays as it is (accounts, domains, groups,
+  lists, roles, tenants, the dashboard), not grown to cover the whole server.
+- **INBUXA Admin** (repository `inbuxa-admin`): full server administration,
+  first-boot setup and recovery-mode repair. It's a fork of Stalwart's own
+  web interface, `stalwartlabs/webui`, taken at `v1.0.11`.
+
+Why fork `webui` rather than grow ihasmail: `webui` is entirely schema-driven,
+building every form, list and menu from the schema the server serves, so it
+already covers all ~125 setting types where ihasmail covers 18. It's the same
+stack as ihasmail (React, Radix). And it contains no Enterprise-only code: all
+111 files are dual-licensed AGPL, with no Enterprise-only files or snippets
+anywhere in its 28-commit history. So it's an ordinary git fork with upstream's
+history, needs no stripping and has no clean-room concerns. Its Enterprise
+gating was client-side (hide or disable items when the server reports
+`oss`/`community`), and the fork removes it at the one place the edition is
+stored.
 
 ### 5.1 Shape
+
+Both front ends run as their own containers, never installed onto the mail
+server. INBUXA Admin is a static build. Its server address is set at build
+time (`VITE_API_BASE_URL`) or deploy time (`<meta name="api-base-url">`), so
+the same build can point at any server.
 
 ihasmail stays a separate process: its Node server and its web app, run as a
 container. It can run:
@@ -286,46 +314,55 @@ Versioned, and advertised in the JMAP session so either side can check it.
 - **Admin lane.** Administrative JMAP calls can be limited to ihasmail's
   address or network, so an admin credential is useless from anywhere else.
 - **Push.** Unchanged: JMAP push with VAPID, as ihasmail uses today.
+- **INBUXA Admin's client.** INBUXA Admin signs in by OAuth (authorization
+  code with PKCE) as upstream's `webui` does, as client `stalwart-webui` for
+  now. The fork registers a first-party `inbuxa-admin` client with the
+  admin's own redirect URIs, and the admin switches to it (its
+  `<meta name="oauth-client-id">`).
+- **Cross-origin access.** Verified 2026-09-18 against a separate
+  inbuxa-server: the whole admin flow works from another origin (sign-in, code
+  for the admin's redirect URI, token exchange, preflights, JMAP session,
+  `/api/schema`, admin calls). But the server answers
+  `Access-Control-Allow-Origin: *` on all of it. The fork restricts that to the
+  configured INBUXA Admin and ihasmail origins, since an admin API shouldn't be
+  callable from any web page.
+- **A server without a public URL** returns relative OAuth endpoints (`/login`,
+  `/auth/token`) and an empty issuer. INBUXA Admin now resolves them against
+  the server's address. The installer sets the public URL (`INBUXA_PUBLIC_URL`)
+  so the server returns absolute ones.
 
-### 5.3 Stalwart's web interface is removed
+### 5.3 No web interface on the mail host
 
 Upstream installs its web interface at first boot, serving `/admin` and
-`/account`, by inserting a default web application that downloads a release
-of `stalwartlabs/webui`. The fork:
+`/account` from the mail server itself, by inserting a default web application
+that downloads a release of `stalwartlabs/webui` from GitHub. The fork:
 
-- inserts no default web application, and never fetches `webui`;
+- inserts no default web application, and never fetches anything at boot;
 - keeps the generic web-application mechanism for operators who want it,
-  documented as unsupported;
-- therefore carries no part of `webui`, which has its own Enterprise-only
-  parts.
+  documented as unsupported.
 
-What the web interface did moves to ihasmail:
+Where each of the web interface's jobs goes:
 
 | Was | Becomes |
 |---|---|
 | `/account`: password, app passwords, two-factor | ihasmail Settings: password and app passwords today; its two-factor work is written but backlogged |
-| `/admin`: server administration | ihasmail Administration (§5.4) |
-| First-boot setup | the installer and a setup screen in ihasmail (§6) |
-| Fixing a server the web front end can't reach | the host-side CLI (§6.3) |
+| `/admin`: server administration | INBUXA Admin, deployed separately (§5.4) |
+| First-boot setup | the installer, or INBUXA Admin's setup wizard against a server in bootstrap mode (§6) |
+| Fixing a server the web front end can't reach | INBUXA Admin in recovery mode, or the host-side CLI (§6.3) |
 
-### 5.4 Administration at full coverage
+### 5.4 Administration: who does what
 
-The server's registry has about 125 object types. ihasmail Administration
-uses 18 today: accounts, domains, groups, mailing lists, roles, tenants, the
-dashboard, credentials and a few supporting types.
-
-- **Hand-built screens** for what operators change often: domains and DNS,
-  DKIM, certificates and ACME, spam settings, the queue, tenants and quotas,
-  reports.
-- **Schema-generated forms** for the rest. Upstream already publishes a
-  complete UI schema, `resources/schema/schema.json.gz`, with objects, fields
-  (with descriptions), forms, lists, enums, dashboards and layouts. It's what
-  Stalwart's own web interface draws from, and it ships under the repository's
-  dual license, so the fork has it under the AGPL. The fork serves it over
-  JMAP, and ihasmail renders a correct, if plain, editor for any object type
-  from it. New types upstream
-  adds then appear without an ihasmail release.
-- Everything stays permission-gated, as Administration is today.
+- **INBUXA Admin** covers the whole server, every object type, generated from
+  the schema the server serves at `/api/schema`. New types upstream adds
+  appear with no admin release. Hand-built screens stay where upstream has
+  them: dashboards, live tracing, the delivery tester, the Sieve editor.
+- **ihasmail Administration** keeps its scope: accounts, domains, groups,
+  lists, roles, tenants and the dashboard, for people who work from the mail
+  app. Where an ihasmail screen stops short, it links to the matching INBUXA
+  Admin page instead of growing to match it.
+- **Overlap is fine** where both need it (accounts and domains appear in
+  both). Both are permission-gated by the server, so they can't disagree about
+  what anyone is allowed to do.
 
 ## 6. First boot, setup and recovery
 
@@ -393,8 +430,9 @@ Additions for the fork:
   that fails isn't retried on restart, some network settings need a restart,
   and the default log path doesn't exist in the image. Each is a candidate for
   fixing in the fork, and oneshot's workaround drops out once it is.
-- A setup screen in ihasmail for operators who install without the
-  installer. It performs the same steps against a server in bootstrap mode.
+- For operators who install without the installer, INBUXA Admin's setup
+  wizard (upstream's bootstrap wizard, rebranded) performs the same steps
+  against a server in bootstrap mode.
 
 ### 6.3 Recovery without a web front end
 
