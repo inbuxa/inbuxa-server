@@ -13,6 +13,7 @@ sources, and nothing else:
 | Stalwart documentation, "Tenants" (`website` repo, `docs/auth/authorization/tenants.md`) | Unlicensed public documentation: facts used, prose not copied | Isolation, the permission ceiling, quota semantics, branding |
 | ihasmail FEATURES.md, "Tenants", and its admin code | AGPL-3.0-or-later, ours | Behavior observed against a live Enterprise server |
 | RFC 8620 | IETF | JMAP semantics for errors and `/set` |
+| Probes of INBUXA's live Enterprise server, 2026-09-18 (Stalwart 0.16.22) | Observation | Everything under "Observed" |
 
 No Enterprise-only file or snippet was used. The session that drafted this
 had seen short Enterprise snippets while surveying the license split, so it
@@ -103,19 +104,21 @@ Each requirement has an ID, and tests name the IDs they check.
   principal in a tenant can't read or change them, except what every account
   already reads about itself: its own account, its own settings, and the
   server's public capabilities.
-- **MT-3.** Any operation that would link objects across tenants is refused
-  with `forbidden`: a group member, a list member or owner, a role, a sharing
-  grant, an alias domain. This includes linking a tenant object to a
-  server-level one, unless the server-level object is shared infrastructure the
-  operator made available (see "To observe" 1).
+- **MT-3.** Any write that would link an object to one in a different
+  tenant is refused with `invalidForeignKey`, naming the object it can't
+  link to: a group member, a list member or owner, a role, a sharing grant, a
+  domain's ACME or DNS provider. "Different" includes no tenant. A tenant's
+  domain can't use a server-level provider, even when a server-level admin
+  makes the change (observed 1). Shared infrastructure is therefore
+  per-tenant: each tenant brings its own providers.
 - **MT-4.** Mail flow isn't isolation. Mail between addresses in different
   tenants is delivered like any other mail, through the normal delivery path.
   Tenants separate administration and resources, not the network.
 - **MT-5.** Queued and outgoing mail are resources. A tenant administrator sees
-  and acts on queued messages only for senders or recipients on the tenant's
-  own domains, and never sees another tenant's. **Decision**, derived from
-  MT-1. Upstream's behavior here isn't publicly documented. Confirm it doesn't
-  contradict "To observe" 4.
+  and acts on queued messages whose recipients are on the tenant's own
+  domains, whoever sent them, and never sees anything else in the queue
+  (observed 4). **Decision** for the sender side, not yet observed: it also
+  sees messages its own principals sent, until they leave the queue.
 
 ### Membership
 
@@ -126,15 +129,23 @@ Each requirement has an ID, and tests name the IDs they check.
 - **MT-7.** A principal's tenant always matches its domain's tenant. A
   principal on a domain in tenant T is in T. A principal on a domain in no
   tenant is in no tenant. On create, `memberTenantId` defaults to the domain's
-  tenant. A write that sets any other value is refused with `invalidProperties`
-  naming `memberTenantId`.
+  tenant. A write that sets any other value is refused with
+  `invalidForeignKey` naming the domain, which is upstream's own refusal
+  (observed 7).
+  **Decision**, a deliberate difference: upstream doesn't default the tenant.
+  An account created on a tenant's domain without one lands in no tenant, a
+  server-level account on a tenant's domain. inbuxa-server never creates that
+  state. Existing accounts found in it (none at INBUXA, possible elsewhere)
+  are left working and listed in the admin dashboard for an operator to
+  resolve.
 - **MT-8.** A domain can move into a tenant only from no tenant, and out of one
   only back to no tenant. It moves only when no principal on it belongs to
   anything other than the destination. **Decision**, a deliberate improvement
-  on the observed upstream behavior: upstream lets a domain leave a tenant
-  while the tenant's accounts are still on it, stranding them.
+  on upstream (observed 8): upstream lets a domain leave a tenant while the
+  tenant's accounts are still on it. They stay in the tenant, on a domain
+  that isn't, and can still sign in.
 - **MT-9.** Creating a domain inside a tenant also puts its DKIM keys in that
-  tenant (observed).
+  tenant. Upstream generates two per domain (observed 9).
 - **MT-10.** A tenant can be deleted only when nothing references it. Otherwise
   deletion is refused with `objectIsLinked`, listing what still refers to it.
   **Decision**: ihasmail already enforces this in its interface, and the server
@@ -143,13 +154,17 @@ Each requirement has an ID, and tests name the IDs they check.
 ### Administering a tenant
 
 - **MT-11.** A tenant's administrator is an account inside the tenant that
-  holds administrative permissions. Within the tenant it can do what those
+  holds administrative permissions (upstream: the `Admin` role, which inside a
+  tenant carries 290 permissions against 641 at server level; observed 3). Within the tenant it can do what those
   permissions allow, on every object type that carries `memberTenantId`.
-  Everything it creates lands in its own tenant. It never needs to, and may
-  not, set `memberTenantId` itself.
+  Everything it creates lands in its own tenant (observed 1). It never needs
+  to, and may not, set `memberTenantId` itself. `memberTenantId` isn't
+  returned to it at all (observed 3).
 - **MT-12.** A tenant administrator can read its own tenant's `x:Tenant` object
   (name, logo, quotas, usage) but can't change it. Changing the tenant object
-  itself is server-level.
+  itself is server-level. **Decision**, a deliberate difference: upstream
+  refuses the read with `forbidden` (observed 3), so a tenant admin can't see
+  its own limits or usage. ihasmail needs them to warn before a limit is hit.
 
 ### The permission ceiling
 
@@ -172,7 +187,11 @@ Each requirement has an ID, and tests name the IDs they check.
   them.
 - **MT-16.** Changing a tenant's roles, permissions or quotas takes effect for
   its people without a restart and without them signing in again. The next
-  request is judged by the new rules.
+  request is judged by the new rules. **Decision**, a deliberate improvement:
+  upstream caches each principal's permissions, and a change to the tenant
+  hadn't reached an already-authenticated admin after seven minutes
+  (observed 6). A change must invalidate the cached permissions of everyone it
+  affects.
 
 ### Quotas
 
@@ -184,11 +203,18 @@ Each requirement has an ID, and tests name the IDs they check.
 - **MT-18.** Existing objects over a lowered limit stay. Only new ones are
   refused.
 - **MT-19.** Disk quota. `maxDiskQuota` bounds the total storage of every
-  member together. Once the total reaches it, no more mail is accepted for
-  any account in the tenant until usage falls. Per-account quotas still apply
-  as well, whichever is reached first.
-- **MT-20.** `usedDiskQuota` is kept current as members' usage changes, and is
-  never written by a client.
+  member together. A message that would take the total past it isn't
+  delivered, even if usage is still under the limit (observed 2). Per-account
+  quotas still apply as well, whichever is reached first.
+- **MT-19a.** The refusal matches upstream: local delivery answers
+  `451 4.3.0 Organization over quota.`, a temporary failure, so the message
+  waits in the queue and retries until the queue gives up. Submission itself
+  still succeeds, so the sender learns nothing until the delay notice.
+  **Decision** on top: when a sender inside the server submits to a
+  recipient whose tenant is over quota, say so at submission time too (a
+  JMAP `EmailSubmission` warning, not a refusal).
+- **MT-20.** `usedDiskQuota` is kept current as members' usage changes: it
+  moved on the delivery itself (observed 2). It is never written by a client.
 - **MT-21.** The `recalculateQuota` task recomputes one tenant's
   `usedDiskQuota` from its members' actual usage. `resetTenantQuotas`
   recomputes every tenant. Both can run while the server is live.
@@ -253,22 +279,58 @@ marked **(compat)** also run against a copy of INBUXA's data.
 15. **(compat)** INBUXA's existing tenants, their members and quotas read back
     unchanged, and each tenant admin sees exactly what it saw before.
 
-## To observe
+## Observed
 
-Behavior no public source settles. Settled by watching INBUXA's live
-Enterprise server with throwaway objects, never by reading upstream code:
+Settled on 2026-09-18 against INBUXA's live Enterprise server (Stalwart
+0.16.22), over JMAP and SMTP submission. The probes ran as a temporary
+server-level admin, and created two tenants, two domains under `ttlhost.com`
+with manual certificates, four accounts, three ACME providers pointed at
+Let's Encrypt staging, and two probe messages. Everything was deleted
+afterwards, and a sweep of every affected object type found nothing left.
+No upstream code was read.
 
-1. Which server-level objects a tenant's things may reference: a shared DNS
-   provider, ACME provider or directory in no tenant, used by a domain in a
-   tenant.
-2. The SMTP reply when delivery is refused for a full tenant disk quota: the
-   code, whether temporary or permanent, and the text.
-3. Whether a tenant administrator can read server-level settings at all, even
-   read-only.
-4. What a tenant administrator sees in the mail queue.
-5. Whether a principal's directory search (JMAP principals) crosses tenants.
-6. What happens to active sessions when a principal's tenant is changed by a
-   server-level admin.
+1. **References across tenants.** A tenant's domain can't use an ACME
+   provider in no tenant, or one in another tenant. Both are refused with
+   `invalidForeignKey`, even when a server-level admin makes the change. A
+   provider the tenant admin creates lands in its tenant and works. The tenant
+   admin can't see server-level providers at all.
+2. **Full tenant disk quota.** With usage at 1,191 bytes and a 1,200-byte
+   limit, the next message wasn't delivered: the check is on what delivery
+   would bring the total to. Local delivery answered `451 4.3.0 Organization
+   over quota.` at `RCPT TO` (temporary). Submission was accepted, and the
+   message stayed queued with a retry due in 2 minutes, a delay notice due
+   after 1 day, and expiry after 3 days. Usage rose on the delivery itself.
+3. **What a tenant admin can read.** Its tenant's accounts, domain, DKIM keys
+   and its own ACME providers, roles, DNS providers and queue. It gets
+   `forbidden` for listeners, certificates, system settings and every tenant
+   object, its own included. Objects in no tenant or another tenant, fetched by
+   id, come back in `notFound`. `memberTenantId` isn't returned to it. Its
+   `Admin` role carried 290 permissions (server-level admin: 641).
+4. **The queue.** Tenant 1's admin saw exactly the two queued messages
+   addressed to its domain, both sent from tenant 2. It saw none of the other
+   23 entries in the server's queue. The sender side (a tenant admin seeing its
+   own people's outgoing mail) wasn't tested: there was no admin in tenant 2.
+5. **Directory search.** A tenant user's JMAP `Principal/query`, with and
+   without a text filter, returned only its own tenant's two principals: not
+   the other tenant's, and not the server-level accounts.
+6. **Changes to a tenant's roles and permissions.** Setting tenant 1's
+   `permissions` to `Replace` with nothing enabled, then its `roles` to an
+   empty custom set, left its already-signed-in admin with all 290
+   permissions for 2.5 minutes. A new admin created during the change was
+   refused everything, including its JMAP session (HTTP 403): the ceiling
+   works, but permissions are cached per principal. After the roles were
+   restored, the new admin was still refused 6.7 minutes later, when polling
+   stopped. The cache lifetime wasn't measured. The `permissions` field on its
+   own wasn't isolated from the `roles` field, because only cached principals
+   saw that change.
+7. **An account's tenant.** Creating accounts on a tenant's domain without
+   `memberTenantId` put them in no tenant. Giving one a tenant other than its
+   domain's was refused with `invalidForeignKey` naming the domain. The same
+   happened for a no-tenant domain with a tenant set.
+8. **A domain leaving its tenant.** Allowed while one of the tenant's accounts
+   was on it. The account kept its tenant and could still sign in.
+9. **DKIM.** Each new domain got two DKIM keys, each in the domain's tenant.
 
-Record each answer here with its date and how it was observed, before
-implementation starts.
+Not yet settled: whether deleting a tenant that still holds objects is
+refused (the probe accounts were deleted first), and the sender side of 4.
+Both are low-risk to leave for implementation-time tests.
