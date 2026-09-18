@@ -45,7 +45,7 @@ use store::{
 };
 use trc::AddContext;
 use types::{blob::BlobId, blob_hash::BlobHash, id::Id};
-use utils::{DomainPart, map::vec_map::VecMap};
+use utils::map::vec_map::VecMap;
 
 pub(crate) async fn queued_message_set(
     mut set: RegistrySetResponse<'_>,
@@ -69,13 +69,11 @@ pub(crate) async fn queued_message_set(
             continue;
         };
         let archived_message = archive.to_unarchived::<Message>()?;
-        if !tenant_domains.as_ref().is_none_or(|domains| {
-            archived_message
-                .inner
-                .return_path
-                .try_domain_part()
-                .is_some_and(|domain| domains.contains(domain))
-        }) {
+        // inbuxa: MT-5
+        if !tenant_domains
+            .as_ref()
+            .is_none_or(|domains| tenant_sees_archived(domains, archived_message.inner))
+        {
             set.response.not_updated.append(id, SetError::not_found());
             continue;
         }
@@ -243,13 +241,11 @@ pub(crate) async fn queued_message_set(
             continue;
         };
 
-        if tenant_domains.as_ref().is_none_or(|domains| {
-            message
-                .message
-                .return_path
-                .try_domain_part()
-                .is_some_and(|domain| domains.contains(domain))
-        }) {
+        // inbuxa: MT-5
+        if tenant_domains
+            .as_ref()
+            .is_none_or(|domains| tenant_sees(domains, &message.message))
+        {
             if message.remove(set.server, None).await {
                 set.response.destroyed.push(id);
             } else {
@@ -295,12 +291,11 @@ pub(crate) async fn queued_message_get(
             continue;
         };
         let message_in = message_archive.unarchive::<Message>()?;
-        if tenant_domains.as_ref().is_none_or(|domains| {
-            message_in
-                .return_path
-                .try_domain_part()
-                .is_some_and(|domain| domains.contains(domain))
-        }) {
+        // inbuxa: MT-5
+        if tenant_domains
+            .as_ref()
+            .is_none_or(|domains| tenant_sees_archived(domains, message_in))
+        {
             get.insert(id, map_message(message_in).into_value());
         } else if client_ids {
             get.not_found(id);
@@ -421,9 +416,10 @@ pub(crate) async fn queued_message_query(
                         .add_context(|ctx| ctx.ctx(trc::Key::Key, key))?;
 
                     if let Some(due) = message.next_delivery_event(queue_name)
+                        // inbuxa: MT-5
                         && tenant_domains
                             .as_ref()
-                            .is_none_or(|domains| message.has_domain(domains))
+                            .is_none_or(|domains| tenant_sees_archived(domains, message))
                         && (due_from..=due_to).contains(&due)
                         && queue_name
                             .as_ref()
@@ -565,10 +561,27 @@ pub(crate) async fn queued_message_query(
     }
 }
 
+// inbuxa: MT-5: a tenant sees mail to its domains, and its own people's sent mail
+async fn tenant_domains(server: &Server, tenant_id: u32) -> trc::Result<AHashSet<String>> {
+    inbuxa_features::tenancy::queue::tenant_domains(server.registry(), tenant_id).await
+}
 
-#[cfg(not(feature = "enterprise"))]
-async fn tenant_domains(_server: &Server, _tenant_id: u32) -> trc::Result<AHashSet<String>> {
-    Ok(AHashSet::new())
+fn tenant_sees(domains: &AHashSet<String>, message: &Message) -> bool {
+    inbuxa_features::tenancy::queue::sees(
+        domains,
+        message.recipients.iter().map(|rcpt| rcpt.address()),
+        &message.return_path,
+        message.flags & FROM_AUTHENTICATED != 0,
+    )
+}
+
+fn tenant_sees_archived(domains: &AHashSet<String>, message: &ArchivedMessage) -> bool {
+    inbuxa_features::tenancy::queue::sees(
+        domains,
+        message.recipients.iter().map(|rcpt| rcpt.address()),
+        &message.return_path,
+        message.flags.to_native() & FROM_AUTHENTICATED != 0,
+    )
 }
 
 fn map_message(message_in: &ArchivedMessage) -> QueuedMessage {
