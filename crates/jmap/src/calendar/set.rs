@@ -105,7 +105,7 @@ impl CalendarSet for Server {
 
             // Validate ACLs
             if !calendar.acls.is_empty() {
-                if let Err(err) = self.acl_validate(&calendar.acls).await {
+                if let Err(err) = self.acl_validate(account_id, &calendar.acls).await {
                     response.not_created.append(id, err.into());
                     continue 'create;
                 }
@@ -206,7 +206,7 @@ impl CalendarSet for Server {
                 }
             }
             if has_acl_changes {
-                if let Err(err) = self.acl_validate(&new_calendar.acls).await {
+                if let Err(err) = self.acl_validate(account_id, &new_calendar.acls).await {
                     response.not_updated.append(id, err.into());
                     continue 'update;
                 }

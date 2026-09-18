@@ -137,6 +137,26 @@ impl DavAclHandler for Server {
             .validate_and_map_aces(access_token, request, collection)
             .await?;
 
+        // inbuxa: MT-3: grants stay within the owner's tenant
+        let tenant_id = self
+            .try_account(account_id)
+            .await
+            .caused_by(trc::location!())?
+            .and_then(|owner| owner.id_tenant);
+        for grant in &grants {
+            if self
+                .try_account(grant.account_id)
+                .await
+                .caused_by(trc::location!())?
+                .is_none_or(|grantee| grantee.id_tenant != tenant_id)
+            {
+                return Err(DavError::Condition(DavErrorCondition::new(
+                    StatusCode::FORBIDDEN,
+                    BaseCondition::AllowedPrincipal,
+                )));
+            }
+        }
+
         if grants.len() != acls.len() || acls.iter().zip(grants.iter()).any(|(a, b)| a != b) {
             // Refresh ACLs
             self.refresh_archived_acls(&grants, acls)

@@ -286,6 +286,28 @@ impl<T: SessionStream> Session<T> {
                         .caused_by(trc::location!())
                 })?;
 
+            // inbuxa: MT-3: grants stay within the owner's tenant, refused
+            // as if the account didn't exist
+            let owner_tenant = data
+                .server
+                .try_account(mailbox_id.account_id)
+                .await
+                .imap_ctx(&arguments.tag, trc::location!())?
+                .and_then(|owner| owner.id_tenant);
+            if data
+                .server
+                .try_account(acl_account_id)
+                .await
+                .imap_ctx(&arguments.tag, trc::location!())?
+                .is_none_or(|grantee| grantee.id_tenant != owner_tenant)
+            {
+                return Err(trc::ImapEvent::Error
+                    .into_err()
+                    .details("Account does not exist")
+                    .id(arguments.tag.to_string())
+                    .caused_by(trc::location!()));
+            }
+
             // Prepare changes
             let mut mailbox = current_mailbox.inner.clone();
             let (op, rights) = arguments

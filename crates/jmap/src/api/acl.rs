@@ -6,11 +6,11 @@
 
 use common::{Server, auth::AccessToken, sharing::EffectiveAcl};
 use jmap_proto::{
-    error::set::SetError,
+    error::set::{SetError, SetErrorType},
     object::{JmapRight, JmapSharedObject},
 };
 use jmap_tools::{JsonPointerIter, Key, Map, Property, Value};
-use registry::schema::prelude::ObjectType;
+use registry::{schema::prelude::ObjectType, types::id::ObjectId};
 use store::{registry::RegistryQuery, roaring::RoaringBitmap};
 use types::{
     acl::{Acl, AclGrant},
@@ -229,6 +229,7 @@ impl JmapRights {
 pub trait JmapAcl {
     fn acl_validate(
         &self,
+        account_id: u32,
         grants: &[AclGrant],
     ) -> impl Future<Output = Result<(), ShareValidationError>> + Send;
 }
@@ -239,7 +240,11 @@ pub enum ShareValidationError {
 }
 
 impl JmapAcl for Server {
-    async fn acl_validate(&self, grants: &[AclGrant]) -> Result<(), ShareValidationError> {
+    async fn acl_validate(
+        &self,
+        account_id: u32,
+        grants: &[AclGrant],
+    ) -> Result<(), ShareValidationError> {
         if grants.len() > self.core.groupware.max_shares_per_item {
             return Err(ShareValidationError::MaxSharesExceeded(
                 self.core.groupware.max_shares_per_item,
@@ -252,8 +257,23 @@ impl JmapAcl for Server {
             .await
             .unwrap_or_default();
 
+        // inbuxa: MT-3: grants stay within the owner's tenant
+        let tenant_id = self
+            .try_account(account_id)
+            .await
+            .ok()
+            .flatten()
+            .and_then(|owner| owner.id_tenant);
+
         for grant in grants {
-            if !principal_ids.contains(grant.account_id) {
+            if !principal_ids.contains(grant.account_id)
+                || self
+                    .try_account(grant.account_id)
+                    .await
+                    .ok()
+                    .flatten()
+                    .is_none_or(|grantee| grantee.id_tenant != tenant_id)
+            {
                 return Err(ShareValidationError::InvalidAccountId(Id::from(
                     grant.account_id,
                 )));
@@ -271,8 +291,13 @@ impl<T: Property> From<ShareValidationError> for SetError<T> {
                 .with_description(format!(
                     "Maximum number of shares per item exceeded (max: {max})"
                 )),
-            ShareValidationError::InvalidAccountId(id) => SetError::invalid_properties()
-                .with_description(format!("Account id {id} is invalid.")),
+            // inbuxa: MT-3: the same error whether the account is missing or
+            // in another tenant, so it never confirms the account exists
+            ShareValidationError::InvalidAccountId(id) => {
+                SetError::new(SetErrorType::InvalidForeignKey)
+                    .with_object_id(ObjectId::new(ObjectType::Account, id))
+                    .with_description(format!("Account id {id} is invalid."))
+            }
         }
     }
 }

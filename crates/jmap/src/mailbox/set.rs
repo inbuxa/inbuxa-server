@@ -612,7 +612,7 @@ impl MailboxSet for Server {
         let current = update.map(|(_, current)| current);
         if has_acl_changes {
             if !changes.acls.is_empty()
-                && let Err(err) = self.acl_validate(&changes.acls).await
+                && let Err(err) = self.acl_validate(ctx.account_id, &changes.acls).await
             {
                 return Ok(Err(err.into()));
             }

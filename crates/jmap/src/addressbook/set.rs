@@ -101,7 +101,7 @@ impl AddressBookSet for Server {
 
             // Validate ACLs
             if !address_book.acls.is_empty() {
-                if let Err(err) = self.acl_validate(&address_book.acls).await {
+                if let Err(err) = self.acl_validate(account_id, &address_book.acls).await {
                     response.not_created.append(id, err.into());
                     continue 'create;
                 }
@@ -202,7 +202,7 @@ impl AddressBookSet for Server {
                 }
             }
             if has_acl_changes {
-                if let Err(err) = self.acl_validate(&new_address_book.acls).await {
+                if let Err(err) = self.acl_validate(account_id, &new_address_book.acls).await {
                     response.not_updated.append(id, err.into());
                     continue 'update;
                 }

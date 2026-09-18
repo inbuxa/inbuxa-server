@@ -270,7 +270,7 @@ impl FileNodeSet for Server {
 
             // Validate ACLs
             if !file_node.acls.is_empty() {
-                if let Err(err) = self.acl_validate(&file_node.acls).await {
+                if let Err(err) = self.acl_validate(account_id, &file_node.acls).await {
                     response.not_created.append(id, err.into());
                     continue 'create;
                 }
@@ -502,7 +502,7 @@ impl FileNodeSet for Server {
                 }
             }
             if has_acl_changes {
-                if let Err(err) = self.acl_validate(&new_file_node.acls).await {
+                if let Err(err) = self.acl_validate(account_id, &new_file_node.acls).await {
                     response.not_updated.append(id, err.into());
                     continue 'update;
                 }

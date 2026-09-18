@@ -370,7 +370,7 @@ impl FileNodeCopy for Server {
             }
 
             if !file_node.acls.is_empty() {
-                if let Err(err) = self.acl_validate(&file_node.acls).await {
+                if let Err(err) = self.acl_validate(account_id, &file_node.acls).await {
                     response.not_created.append(id, err.into());
                     continue 'create;
                 }
