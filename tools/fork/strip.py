@@ -1,0 +1,304 @@
+#!/usr/bin/env python3
+# SPDX-FileCopyrightText: 2026 John Coffey
+# SPDX-License-Identifier: AGPL-3.0-only
+"""
+Produce an Enterprise-free snapshot of an upstream Stalwart release.
+
+    tools/fork/strip.py --upstream PATH/TO/stalwart --ref v0.16.22 --out DIR
+
+What it does, in order (SPEC.md §2.2):
+
+1. Exports the tree at `--ref` with `git archive`. The snapshot never carries
+   upstream's git history, because that history contains the Enterprise code.
+2. Checks every Enterprise snippet is well-formed *before* stripping. Upstream's
+   remover swallows an unterminated snippet to the end of the file without a
+   word, so a malformed marker fails the run here instead.
+3. Runs upstream's own remover, `resources/scripts/ossify.py` from the same
+   ref, over every directory that holds Rust.
+4. Turns the `enterprise` Cargo feature off wherever it's switched on: a
+   crate's `default` list, and dependency `features` lists. Definitions of the
+   feature are left alone. They're inert once nothing turns them on, and
+   leaving them keeps each sync's diff small.
+5. Verifies the result independently of `ossify.py`: no license header or
+   snippet anywhere in the tree, in any file type, may name `LicenseRef-SEL`
+   without `AGPL-3.0-only` alongside it, and no Cargo manifest may still turn
+   `enterprise` on.
+6. Writes `STRIP-REPORT.json` and `STRIP-REPORT.md` beside the tree: what was
+   removed, what was edited, what upstream's schema flags as Enterprise, and
+   how many `enterprise` feature gates and edition checks remain in shared
+   code for the rebuilt features to replace.
+
+Only license markers and Cargo manifests are read for meaning. The code inside
+an Enterprise file or snippet is never printed, reported or kept, which is what
+lets anyone run this outside the clean room (SPEC.md §3).
+
+Exit status: 0 clean, 1 verification failed, 2 usage or environment error.
+"""
+
+import argparse
+import gzip
+import json
+import re
+import shutil
+import subprocess
+import sys
+import tarfile
+import tempfile
+from pathlib import Path
+
+SEL = 'LicenseRef-SEL'
+AGPL = 'AGPL-3.0-only'
+# A license identifier as it appears in a comment header, in any comment style.
+IDENT = re.compile(r'^\s*(?://+|/?\*+|#+|--|<!--)?\s*SPDX-License-Identifier:\s*(.+?)\s*(?:\*/|-->)?\s*$')
+# Matched anywhere on the line, as upstream's remover matches them: an end
+# marker is often a trailing comment on the snippet's last code line, as in
+# `} // SPDX-SnippetEnd`.
+SNIP_BEGIN = re.compile(r'//\s*SPDX-SnippetBegin\b')
+SNIP_END = re.compile(r'//\s*SPDX-SnippetEnd\b')
+TEXT_SUFFIXES = {
+    '.rs', '.toml', '.md', '.txt', '.py', '.sh', '.json', '.yml', '.yaml', '.js',
+    '.ts', '.html', '.css', '.sieve', '.sql', '.lua', '.hcl', '.cfg', '.conf', '',
+}
+
+
+def fail(msg, code=2):
+    print(f'strip: {msg}', file=sys.stderr)
+    sys.exit(code)
+
+
+def is_sel_only(expression):
+    return SEL in expression and AGPL not in expression
+
+
+def export(upstream, ref, out):
+    """`git archive` the ref into `out`; returns the resolved commit."""
+    try:
+        sha = subprocess.run(['git', '-C', upstream, 'rev-parse', '--verify', f'{ref}^{{commit}}'],
+                             check=True, capture_output=True, text=True).stdout.strip()
+    except subprocess.CalledProcessError:
+        fail(f'{ref!r} is not a commit in {upstream}. Fetch it first, e.g. '
+             f'`git -C {upstream} fetch --depth 1 origin tag {ref}`')
+    out.mkdir(parents=True)
+    with tempfile.TemporaryFile() as tar:
+        subprocess.run(['git', '-C', upstream, 'archive', '--format=tar', sha], check=True, stdout=tar)
+        tar.seek(0)
+        with tarfile.open(fileobj=tar) as t:
+            t.extractall(out, filter='data')
+    return sha
+
+
+def rust_roots(tree):
+    """Top-level directories that contain Rust, so ossify.py sees all of it."""
+    return sorted({p.relative_to(tree).parts[0] for p in tree.rglob('*.rs')})
+
+
+def check_snippets_wellformed(tree):
+    """Every SnippetBegin has an End before the next Begin, and every snippet declares a license."""
+    problems = []
+    for path in tree.rglob('*.rs'):
+        lines = path.read_text(encoding='utf-8', errors='replace').split('\n')
+        open_at = None
+        for n, line in enumerate(lines, 1):
+            if SNIP_BEGIN.search(line):
+                if open_at is not None:
+                    problems.append(f'{path.relative_to(tree)}:{open_at}: snippet begins again at line {n} before ending')
+                open_at = n
+            elif SNIP_END.search(line):
+                if open_at is None:
+                    problems.append(f'{path.relative_to(tree)}:{n}: snippet ends without beginning')
+                open_at = None
+        if open_at is not None:
+            problems.append(f'{path.relative_to(tree)}:{open_at}: snippet never ends')
+    return problems
+
+
+def sel_inventory(tree):
+    """Before stripping: which files are SEL-only, and how many SEL snippets each file holds."""
+    whole, snippets = [], {}
+    for path in tree.rglob('*.rs'):
+        rel = str(path.relative_to(tree))
+        lines = path.read_text(encoding='utf-8', errors='replace').split('\n')
+        header = next((IDENT.match(l).group(1) for l in lines[:12] if IDENT.match(l)), None)
+        if header and is_sel_only(header):
+            whole.append(rel)
+            continue
+        count, i = 0, 0
+        while i < len(lines):
+            if SNIP_BEGIN.search(lines[i]):
+                j = i
+                while j < len(lines) and not SNIP_END.search(lines[j]):
+                    j += 1
+                block = lines[i:j + 1]
+                if any((m := IDENT.match(l)) and is_sel_only(m.group(1)) for l in block[:6]):
+                    count += 1
+                i = j
+            i += 1
+        if count:
+            snippets[rel] = count
+    return sorted(whole), dict(sorted(snippets.items()))
+
+
+def run_ossify(tree, roots):
+    script = tree / 'resources' / 'scripts' / 'ossify.py'
+    if not script.is_file():
+        fail('upstream has no resources/scripts/ossify.py at this ref; stripping needs it')
+    log = []
+    for root in roots:
+        r = subprocess.run([sys.executable, str(script), str(tree / root)], capture_output=True, text=True)
+        log.append(f'$ ossify.py {root}\n{r.stdout}{r.stderr}')
+        if r.returncode != 0:
+            fail(f'ossify.py failed on {root}:\n{r.stdout}{r.stderr}')
+    return '\n'.join(log)
+
+
+def deactivate_enterprise(tree):
+    """Remove every activation of the `enterprise` feature from Cargo manifests."""
+    edits = []
+    entry = re.compile(r'"(?:[A-Za-z0-9_-]+/)?enterprise"\s*,?\s*')
+    for manifest in sorted(tree.rglob('Cargo.toml')):
+        text = manifest.read_text(encoding='utf-8')
+        new_lines = []
+        for n, line in enumerate(text.split('\n'), 1):
+            code = line.split('#', 1)[0]
+            key = code.split('=', 1)[0].strip() if '=' in code else ''
+            activates = (
+                key == 'default'
+                or re.search(r'\bfeatures\s*=\s*\[', code) is not None
+            )
+            if activates and entry.search(code):
+                cleaned = entry.sub('', line)
+                cleaned = re.sub(r',\s*\]', ']', cleaned)
+                edits.append({'file': str(manifest.relative_to(tree)), 'line': n,
+                              'before': line.strip(), 'after': cleaned.strip()})
+                line = cleaned
+            new_lines.append(line)
+        new = '\n'.join(new_lines)
+        if new != text:
+            manifest.write_text(new, encoding='utf-8')
+    return edits
+
+
+def verify(tree):
+    """Independent of ossify.py. Returns a list of problems; empty means clean."""
+    problems = []
+    for path in tree.rglob('*'):
+        if not path.is_file() or path.suffix not in TEXT_SUFFIXES:
+            continue
+        rel = path.relative_to(tree)
+        if rel.parts[0] == 'LICENSES':
+            continue  # the license texts themselves, not code under them
+        try:
+            lines = path.read_text(encoding='utf-8').split('\n')
+        except UnicodeDecodeError:
+            continue
+        for n, line in enumerate(lines, 1):
+            m = IDENT.match(line)
+            if m and is_sel_only(m.group(1)):
+                problems.append(f'{rel}:{n}: Enterprise-only license marker survived')
+    for manifest in tree.rglob('Cargo.toml'):
+        for n, line in enumerate(manifest.read_text(encoding='utf-8').split('\n'), 1):
+            code = line.split('#', 1)[0]
+            key = code.split('=', 1)[0].strip() if '=' in code else ''
+            if (key == 'default' or re.search(r'\bfeatures\s*=\s*\[', code)) and re.search(r'"(?:[\w-]+/)?enterprise"', code):
+                problems.append(f'{manifest.relative_to(tree)}:{n}: enterprise feature still switched on')
+    return problems
+
+
+def schema_flags(tree):
+    path = tree / 'resources' / 'schema' / 'schema.json.gz'
+    if not path.is_file():
+        return None
+    d = json.loads(gzip.decompress(path.read_bytes()))
+    objects = sorted(k for k, v in d.get('objects', {}).items() if v.get('enterprise'))
+    fields = sorted(
+        f'{obj}.{name}'
+        for obj, spec in d.get('fields', {}).items() if isinstance(spec, dict)
+        for name, prop in spec.get('properties', {}).items()
+        if isinstance(prop, dict) and prop.get('enterprise')
+    )
+    return {'objects': objects, 'fields': fields}
+
+
+def remaining_hooks(tree):
+    gates, checks = {}, {}
+    for path in tree.rglob('*.rs'):
+        text = path.read_text(encoding='utf-8', errors='replace')
+        rel = str(path.relative_to(tree))
+        g = len(re.findall(r'feature\s*=\s*"enterprise"', text))
+        c = text.count('is_enterprise_edition()')
+        if g:
+            gates[rel] = g
+        if c:
+            checks[rel] = c
+    return dict(sorted(gates.items())), dict(sorted(checks.items()))
+
+
+def write_report(out_dir, report):
+    (out_dir / 'STRIP-REPORT.json').write_text(json.dumps(report, indent=2) + '\n', encoding='utf-8')
+    r = report
+    md = [
+        f'# Strip report: upstream {r["ref"]} ({r["commit"][:12]})',
+        '',
+        f'- Enterprise-only files removed or emptied: **{len(r["removed_files"])}**',
+        f'- Enterprise-only snippets removed: **{sum(r["removed_snippets"].values())}** in {len(r["removed_snippets"])} files',
+        f'- Cargo edits turning `enterprise` off: **{len(r["cargo_edits"])}**',
+        f'- Verification: **{"clean" if not r["problems"] else f"{len(r["problems"])} problems"}**',
+        f'- Left for the rebuilt features to replace: {sum(r["feature_gates"].values())} `enterprise` feature gates '
+        f'in {len(r["feature_gates"])} files; {sum(r["edition_checks"].values())} `is_enterprise_edition()` checks '
+        f'in {len(r["edition_checks"])} files',
+    ]
+    if r['schema']:
+        md.append(f'- Upstream schema flags {len(r["schema"]["objects"])} objects and {len(r["schema"]["fields"])} fields as Enterprise')
+    md += ['', '## Removed files', ''] + [f'- `{f}`' for f in r['removed_files']]
+    md += ['', '## Removed snippets', ''] + [f'- `{f}`: {n}' for f, n in r['removed_snippets'].items()]
+    md += ['', '## Cargo edits', ''] + [f'- `{e["file"]}:{e["line"]}`: `{e["before"]}` → `{e["after"]}`' for e in r['cargo_edits']]
+    if r['schema']:
+        md += ['', '## Flagged Enterprise in upstream\'s schema', '', '**Objects:** ' + ', '.join(f'`{o}`' for o in r['schema']['objects']),
+               '', '**Fields:** ' + ', '.join(f'`{f}`' for f in r['schema']['fields'])]
+    if r['problems']:
+        md += ['', '## Problems', ''] + [f'- {p}' for p in r['problems']]
+    (out_dir / 'STRIP-REPORT.md').write_text('\n'.join(md) + '\n', encoding='utf-8')
+
+
+def main():
+    ap = argparse.ArgumentParser(description='Produce an Enterprise-free snapshot of an upstream Stalwart release.')
+    ap.add_argument('--upstream', required=True, type=Path, help='a git clone of upstream Stalwart')
+    ap.add_argument('--ref', required=True, help='tag, branch or commit to snapshot, e.g. v0.16.22')
+    ap.add_argument('--out', required=True, type=Path, help='new directory; the tree goes in OUT/tree')
+    args = ap.parse_args()
+
+    if args.out.exists():
+        fail(f'{args.out} already exists; choose a new directory')
+    tree = args.out / 'tree'
+    commit = export(args.upstream, args.ref, tree)
+
+    malformed = check_snippets_wellformed(tree)
+    if malformed:
+        write_report(args.out, {'ref': args.ref, 'commit': commit, 'removed_files': [], 'removed_snippets': {},
+                                'cargo_edits': [], 'problems': malformed, 'feature_gates': {}, 'edition_checks': {},
+                                'schema': None, 'ossify_log': ''})
+        print('\n'.join(malformed), file=sys.stderr)
+        fail('malformed snippet markers; nothing stripped', code=1)
+
+    removed_files, removed_snippets = sel_inventory(tree)
+    log = run_ossify(tree, rust_roots(tree))
+    edits = deactivate_enterprise(tree)
+    problems = verify(tree)
+    gates, checks = remaining_hooks(tree)
+
+    report = {
+        'ref': args.ref, 'commit': commit,
+        'removed_files': removed_files, 'removed_snippets': removed_snippets,
+        'cargo_edits': edits, 'problems': problems,
+        'feature_gates': gates, 'edition_checks': checks,
+        'schema': schema_flags(tree), 'ossify_log': log,
+    }
+    write_report(args.out, report)
+    print(f'{args.ref} ({commit[:12]}): removed {len(removed_files)} files and '
+          f'{sum(removed_snippets.values())} snippets, {len(edits)} Cargo edits, '
+          f'{"verified clean" if not problems else f"{len(problems)} PROBLEMS"}. Report: {args.out}/STRIP-REPORT.md')
+    sys.exit(1 if problems else 0)
+
+
+if __name__ == '__main__':
+    main()

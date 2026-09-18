@@ -64,6 +64,38 @@ It reads only the SPDX markers, never the code between them. That keeps the
 people running it outside the clean room's restrictions. The removed code is
 never committed to any branch of the fork, including history.
 
+The wrapper is `tools/fork/strip.py`. Beyond `ossify.py` it:
+
+- exports the release with `git archive`, never a checkout, so no upstream
+  history comes with it;
+- checks every snippet's begin and end markers pair up before anything is
+  stripped (`ossify.py` would swallow an unterminated snippet to the end of the
+  file without saying so). Markers are matched anywhere on a line, because
+  upstream often ends a snippet with a trailing `} // SPDX-SnippetEnd`;
+- turns the `enterprise` Cargo feature off where it's switched on. At
+  `v0.16.22` that's `crates/main`'s default features and 13 dependencies in
+  `tests/Cargo.toml`: 14 edits. `ossify.py` doesn't touch manifests, so without
+  this the stripped tree can't build;
+- verifies the result across every text file, not just Rust, and reports what
+  was removed, the Cargo edits, upstream's Enterprise flags, and the feature
+  gates left for §2.3 to replace.
+
+### 2.2a Snapshots, not a git fork
+
+Upstream's git history contains the Enterprise code, so the fork can never
+share it. There's no `git fork`, and no upstream remote in the fork's
+repository. Instead:
+
+- An **`upstream`** branch holds one commit per upstream release: the
+  stripped tree, and its strip report in the commit message (release tag,
+  upstream commit, counts, verification result). Nothing else is ever
+  committed there.
+- **`main`** is the fork. A new release arrives by stripping it onto
+  `upstream`, then merging `upstream` into `main`. Git's three-way merge then
+  does what a fork's rebase would, without the history.
+- The upstream clone the tool reads from lives outside the fork's repository
+  and is never pushed anywhere.
+
 ### 2.3 Where the rebuilt features go
 
 Upstream's published registry schema (`resources/schema/schema.json.gz`)
