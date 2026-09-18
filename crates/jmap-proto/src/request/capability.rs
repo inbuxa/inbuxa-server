@@ -95,6 +95,9 @@ pub enum Capability {
     WebPushVapid = 1 << 18,
     #[serde(rename(serialize = "urn:ietf:params:jmap:emailpush"))]
     EmailPush = 1 << 19,
+    // inbuxa: the fork's own capability (contract C-1, multi-tenancy MT-22)
+    #[serde(rename(serialize = "urn:inbuxa:jmap"))]
+    Inbuxa = 1 << 20,
 }
 
 #[derive(Debug, Clone, Copy, Default)]
@@ -124,7 +127,16 @@ pub enum Capabilities {
     Calendar(CalendarCapabilities),
     FileNode(FileNodeCapabilities),
     WebPush(WebPushCapabilities),
+    Inbuxa(InbuxaAccountCapabilities),
     Empty(EmptyCapabilities),
+}
+
+/// inbuxa: `urn:inbuxa:jmap` on the signed-in principal's own account.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct InbuxaAccountCapabilities {
+    /// The logo that applies to the principal (MT-22): a URL or a data URL.
+    #[serde(rename(serialize = "logo"))]
+    pub logo: Option<String>,
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -334,6 +346,7 @@ impl Capability {
             Capability::Stalwart => "urn:stalwart:jmap",
             Capability::WebPushVapid => "urn:ietf:params:jmap:webpush-vapid",
             Capability::EmailPush => "urn:ietf:params:jmap:emailpush",
+            Capability::Inbuxa => "urn:inbuxa:jmap",
         }
     }
 
@@ -480,6 +493,7 @@ impl Capability {
             "urn:stalwart:jmap" => Capability::Stalwart,
             "urn:ietf:params:jmap:webpush-vapid" => Capability::WebPushVapid,
             "urn:ietf:params:jmap:emailpush" => Capability::EmailPush,
+            "urn:inbuxa:jmap" => Capability::Inbuxa,
         )
     }
 }

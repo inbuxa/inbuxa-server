@@ -6,7 +6,7 @@
 
 use common::{Server, auth::AccessToken};
 use jmap_proto::request::capability::{
-    Account, Capabilities, Capability, EmptyCapabilities, Session,
+    Account, Capabilities, Capability, EmptyCapabilities, InbuxaAccountCapabilities, Session,
 };
 use registry::schema::enums::Permission;
 use std::future::Future;
@@ -55,6 +55,19 @@ impl SessionHandler for Server {
                     .unwrap_or_else(|| Capabilities::Empty(EmptyCapabilities::default())),
             );
         }
+        // inbuxa: MT-22: the logo that applies to the signed-in principal
+        let logo =
+            inbuxa_features::tenancy::logo::for_account(self.registry(), access_token.account_id())
+                .await
+                .caused_by(trc::location!())?;
+        session.capabilities.append(
+            Capability::Inbuxa,
+            Capabilities::Empty(EmptyCapabilities::default()),
+        );
+        account.account_capabilities.append(
+            Capability::Inbuxa,
+            Capabilities::Inbuxa(InbuxaAccountCapabilities { logo }),
+        );
         session.accounts.append(account_id, account);
 
         // Add secondary accounts
@@ -123,7 +136,10 @@ impl AccountCapabilities for AccessToken {
                     | Capability::Principals
                     | Capability::PrincipalsAvailability
                     | Capability::Stalwart => return true,
-                    Capability::Core | Capability::PrincipalsOwner | Capability::WebPushVapid => {
+                    Capability::Core
+                    | Capability::PrincipalsOwner
+                    | Capability::WebPushVapid
+                    | Capability::Inbuxa => {
                         return false;
                     }
                 };
