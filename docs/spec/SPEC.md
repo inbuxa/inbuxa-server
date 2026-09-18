@@ -271,7 +271,7 @@ is written.
 
 | # | Feature | What an operator gets | Notes |
 |---|---|---|---|
-| 1 | Multi-tenancy | Tenants with their own domains, admins, quotas and queue visibility | Needed for anybody hosting mail for others. ihasmail already has a Tenants screen. |
+| 1 | Multi-tenancy | Tenants with their own domains, admins, quotas and queue visibility | Needed for anybody hosting mail for others. ihasmail already has a Tenants screen. Spec'd; hand-off brief in `handoff/multi-tenancy.md`. |
 | 2 | Masked email | Per-sender disposable addresses that deliver to the account | Existing addresses must keep delivering (§3.4). |
 | 3 | Undelete | Deleted mail held for a set period and restorable | Existing archived items must stay restorable. |
 | 4 | Branding and templates | Operator logo, and the text of calendar alarm and invitation emails | INBUXA's branding is the default. |
