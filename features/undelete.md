@@ -11,7 +11,7 @@ Written for the clean room (SPEC.md §3). Sources, and nothing else:
 | Stalwart's registry schema: `x:ArchivedItem` and its five variants, `x:TaskRestoreArchivedItem`, `x:DataRetention`, the related enums and permissions, upstream `d9dee0a` | AGPL-3.0-only OR LicenseRef-SEL, taken under the AGPL | The stored records, field meanings, statuses, the restore task, the settings |
 | Stalwart documentation: "Storage overview" (Un-deleting emails), the ArchivedItem and DataRetention object references, "Tasks" (Restore archived item) | Unlicensed public documentation: facts used, prose not copied | What counts as deleted, who can recover, how restore is asked for, the retention switch |
 | RFC 8620, RFC 8621 | IETF | JMAP semantics; `Email` and mailbox behavior on restore |
-| Observation of INBUXA's live server | Observation | Everything under "To observe" once settled |
+| Probes of INBUXA's live Enterprise server, 2026-09-18 (Stalwart 0.16.22) | Observation | Everything under "Observed" |
 
 No Enterprise-only file or snippet was used. The drafting session writes specs
 only. Gaps are settled by observation or marked **Decision**, never filled
@@ -80,7 +80,10 @@ Task type `RestoreArchivedItem`, carrying the `accountId`, the
 
 - **UD-1.** With `archiveDeletedItemsFor` set, a copy is kept whenever an item
   of one of the five kinds is permanently removed from an account, whatever
-  removed it:
+  removed it. **Decision**, a deliberate extension: upstream defines all five
+  kinds but archives only email. A contact, calendar event, file and Sieve
+  script destroyed over JMAP produced no record (observed 2). inbuxa-server
+  archives all five:
   - **Email:** JMAP `Email/set` destroy, IMAP `EXPUNGE` and
     `UID EXPUNGE`, POP3 `DELE` then `QUIT`, the automatic emptying of Trash
     and Junk (`expungeTrashAfter`), and a Sieve action that removes a stored
@@ -103,6 +106,10 @@ Task type `RestoreArchivedItem`, carrying the `accountId`, the
   a user was told they could still recover.
 - **UD-6.** Switching archiving off (unsetting the duration) stops new copies.
   Copies already kept stay until their own `archivedUntil`.
+- **UD-6a.** A change to either retention setting takes effect at once.
+  **Decision**, a fix: upstream applies it only after a settings reload
+  (observed 1). Until then, deletions are destroyed as if archiving were off,
+  while the setting reads as on.
 
 ### Recovering
 
@@ -124,10 +131,14 @@ Task type `RestoreArchivedItem`, carrying the `accountId`, the
     address book if it exists, else the default.
   - **Sieve scripts:** back as an inactive script, suffixed if the name is
     taken. A restored script never activates itself.
-  Upstream's placement for each kind is to observe (5). Where it's sensible
-  it's matched, since users of both will expect the same result.
-- **UD-9.** Once restored, the archived record is removed. The restored item
-  is a new item with a new id, and JMAP `/changes` reports it as created.
+  **Decision**, a deliberate improvement: upstream restores every message
+  to the Inbox, whatever mailboxes it was in (Trash included), with all
+  keywords dropped (`$seen` and `$flagged` gone), under a new id and a new
+  thread. It keeps only `receivedAt` (observed 5). That makes a restore look
+  like new, unread mail, and loses the user's filing.
+- **UD-9.** Once restored, the archived record is removed, as upstream
+  (observed 5). The restored item is a new item with a new id, and JMAP
+  `/changes` reports it as created.
 - **UD-10.** A restore still counts against quota. It's refused if it would
   take the account, or its tenant, past a limit. The item stays archived, and
   the task records why.
@@ -137,8 +148,8 @@ Task type `RestoreArchivedItem`, carrying the `accountId`, the
 ### Destroying
 
 - **UD-12.** A user may permanently destroy its own archived items early
-  (`x:ArchivedItem/set` destroy). **Decision**: "delete means delete" must
-  stay possible for the person whose data it is. Undelete protects against
+  (`x:ArchivedItem/set` destroy), as upstream allows (observed 8). "Delete
+  means delete" must stay possible for the person whose data it is. Undelete protects against
   accidents, not against the user. An operator who needs retention against
   users' wishes needs a legal-hold feature, which this isn't.
 - **UD-13.** Past `archivedUntil`, the scheduled clean-up destroys the record
@@ -146,8 +157,8 @@ Task type `RestoreArchivedItem`, carrying the `accountId`, the
 
 ### Storage
 
-- **UD-14.** **Decision**: archived copies don't count toward the account's or
-  tenant's quota while archived. Counting them would make deleting mail to
+- **UD-14.** Archived copies don't count toward the account's or tenant's
+  quota while archived, as upstream (observed 7). Counting them would make deleting mail to
   free space fail. They do count in server storage reporting, and ihasmail's
   admin dashboard shows the archive's total size per account.
 
@@ -158,18 +169,24 @@ Task type `RestoreArchivedItem`, carrying the `accountId`, the
   that period. The account can't sign in or receive mail while deleted.
   Mail to it is refused as for an unknown address.
 - **UD-16.** Its name and addresses stay reserved while it's kept, so nobody
-  else can take them and receive its mail.
+  else can take them and receive its mail. **Decision**, a fix: upstream
+  doesn't reserve them. A new account with the deleted one's name was created
+  at once, while the old one's data was still waiting to be destroyed
+  (observed 6).
 - **UD-17.** A server-level administrator (or a tenant administrator, for its
   tenant) can restore a kept account within the period. It comes back as it
-  was, with the same id and a new password to be set. How upstream exposes
-  kept accounts, and whether it can restore them, is to observe (6). If
-  upstream offers no restore, this is an addition.
+  was, with the same id and a new password to be set. **Decision**, an
+  addition: upstream offers no restore. A deleted account disappears from the
+  account list at once, and only a pending `DestroyAccount` task, due at the
+  end of the period, shows it's still held (observed 6).
 
 ## Interfaces
 
-- **Existing, unchanged:** `x:ArchivedItem/get`, `/query` (filter by
-  `accountId`), `/set` (update `status`; destroy); the task and settings
-  objects; the permission names.
+- **Existing, unchanged:** `x:ArchivedItem/get`, `/query`, `/set` (update
+  `status`; destroy); the task and settings objects; the permission names.
+  Upstream's `/query` accepts no filter at all, and its `/get` omits `status`
+  and `accountId` even when asked (observed 8). inbuxa-server returns every
+  property it lists.
 - **New, Decision:** `x:ArchivedItem/changes`; `/query` filters on `@type`
   and `archivedAt` ranges, and text over the summary fields, so ihasmail can
   offer "deleted in the last week" and search. Kept deleted accounts listed
@@ -218,26 +235,55 @@ Task type `RestoreArchivedItem`, carrying the `accountId`, the
 16. **(compat)** Archived items already held at INBUXA read back unchanged
     through `x:ArchivedItem` after cutover, and restore.
 
-## To observe
+## Observed
 
-Settle against INBUXA before implementation, never by reading upstream code.
-Most of these need archiving on at INBUXA, which is a server-wide setting
-change.
+Settled on 2026-09-18 against INBUXA's live Enterprise server (Stalwart
+0.16.22). With the operator's approval, both retention settings were set to 1
+day, made effective with a settings reload at 16:57:09 UTC, and restored to
+their recorded values (unset) with a second reload at 17:01:50 UTC. The probes
+ran as the throwaway ordinary account and a temporary admin. Everything the
+probes created was deleted afterwards. The one exception is a deleted probe
+account whose scheduled destroy task, due 2026-09-19 17:01 UTC, removes its one
+message. Deletions by other users during those 4 minutes 41 seconds are kept
+until their own 1-day deadline, then destroyed. No upstream code was read.
 
-1. Whether INBUXA has archiving on now (`archiveDeletedItemsFor`), and
-   whether it holds any archived items. Sizes the compatibility test.
-2. Which deletions produce a record: JMAP destroy, IMAP expunge, POP3,
-   automatic Trash and Junk emptying, a Sieve `discard` at delivery.
-3. What a record looks like for each kind, and what the email summary fields
-   hold.
-4. Whether an ordinary user holds the `sysArchivedItem*` permissions, and
-   can restore and destroy its own items.
-5. Where a restored item lands: mailboxes, keywords and thread for email; the
-   original folder, calendar, address book and script state for the others.
-   Whether the record disappears afterwards.
-6. What happens to a deleted account under `archiveDeletedAccountsFor`: can it
-   sign in, is mail refused and how, is its name reserved, and how does an
-   admin see and restore it.
-7. Whether archived copies count toward the account's quota.
-8. Whether upstream's `x:ArchivedItem/query` supports any filter beyond
-   `accountId`, and whether `/changes` exists.
+1. **Before, and switching on.** Archiving was off (both settings unset) and
+   INBUXA held no archived items, so nothing needs carrying over at cutover.
+   Setting the duration over JMAP read back as set, but deletions weren't
+   archived, not even after an account purge task, until a `ReloadSettings`
+   action. After that, archiving was immediate.
+2. **What produced a record.** Email destroyed over JMAP, email destroyed from
+   Trash over JMAP, and email expunged over IMAP each produced one `Email`
+   record within seconds. A contact card, calendar event, file and Sieve script
+   destroyed over JMAP produced none. Automatic Trash emptying, POP3 and Sieve
+   `discard` weren't tested.
+3. **The record.** `@type`, `from`, `subject`, `receivedAt`, `size`,
+   `archivedAt`, `archivedUntil` (`archivedAt` plus the retention), `blobId`,
+   `id`.
+4. **Permissions.** The ordinary account holds all five `sysArchivedItem*`
+   permissions, but not `taskRestoreArchivedItem`. It didn't need that one to
+   restore.
+5. **Restore.** Setting `status: requestRestore` restored within 10 seconds.
+   A message that had been in Inbox and a second mailbox, flagged and read, came
+   back in Inbox only, with no keywords, a new id and a new thread.
+   `receivedAt` was kept. A message deleted from Trash also came back to Inbox.
+   The archived record was removed on restore.
+6. **Deleted accounts.** Destroying an account made sign-in fail (401) at
+   once. The account left the list and `get` (`notFound`). Mail to it was
+   refused `550 5.1.2 Mailbox does not exist.` A `DestroyAccount` task was
+   scheduled for the end of the period, carrying the id, name and domain. No
+   archived item appeared, and no restore path was visible. A new account with
+   the same name was created successfully straight away. With retention off, a
+   destroyed account left no task: it was deleted immediately.
+7. **Quota.** The account's usage stayed at 185 bytes with three messages
+   archived, and rose to 2,303 once two were restored.
+8. **API.** `x:ArchivedItem/changes` is an unknown method. `/query` rejected
+   every filter tried, `accountId` included, as `unsupportedFilter`. `/get`
+   omitted `status` and `accountId` even when named in `properties`. The user
+   could destroy its own archived item.
+
+Not settled: automatic Trash and Junk emptying, POP3 deletion, Sieve
+`discard`; whether a pending `DestroyAccount` task can be cancelled to keep an
+account; and why the test account's usage read 486 bytes after cleanup
+against 185 before (probably deletions not yet subtracted, not archiving).
+None blocks the spec.
