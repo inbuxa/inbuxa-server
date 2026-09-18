@@ -111,6 +111,13 @@ Each requirement has an ID, and tests name the IDs they check.
   domain can't use a server-level provider, even when a server-level admin
   makes the change (observed 1). Shared infrastructure is therefore
   per-tenant: each tenant brings its own providers.
+  **Decision** (2026-09-18) for sharing grants: a grantee that doesn't exist
+  is refused with the same `invalidForeignKey`, naming the account id, so the
+  error never confirms that another tenant's account exists (as acceptance
+  test 2). This replaces upstream's `invalidProperties` for a nonexistent
+  grantee, for everyone. Mailing-list recipients are addresses, not links,
+  and lists have no owner field, so MT-3 has no list link to govern: mail to
+  a list's recipients is mail flow (MT-4).
 - **MT-4.** Mail flow isn't isolation. Mail between addresses in different
   tenants is delivered like any other mail, through the normal delivery path.
   Tenants separate administration and resources, not the network.
