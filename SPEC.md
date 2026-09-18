@@ -47,10 +47,14 @@ Upstream marks Enterprise-only code two ways, and both must go:
 
 ### 2.2 The strip step
 
-A script, run on every upstream sync, that:
+Upstream publishes its own remover, `resources/scripts/ossify.py`, licensed
+AGPL-3.0-only. It deletes Enterprise-only files and snippets by their markers,
+which is this step's core. The fork runs it on every sync, wrapped by a
+script of its own that:
 
-1. Deletes every whole Enterprise-only file.
-2. Removes every Enterprise-only snippet, markers included.
+1. Runs `ossify.py` over `crates/` and `tests/`.
+2. Checks independently that no `LicenseRef-SEL`-only marker survives
+   anywhere in the tree, not just in `.rs` files.
 3. Fails the sync if a marker is malformed, e.g. a snippet with no end, a
    file whose header can't be read, or a new license identifier.
 4. Writes a report listing what was removed and where, committed with the
@@ -61,6 +65,12 @@ people running it outside the clean room's restrictions. The removed code is
 never committed to any branch of the fork, including history.
 
 ### 2.3 Where the rebuilt features go
+
+Upstream's published registry schema (`resources/schema/schema.json.gz`)
+flags every Enterprise object and field with `"enterprise": true`: 9 objects
+and 30 fields at `d9dee0a`. That list is the checklist for §4, and the wrapper
+in §2.2 reports it on every sync, so a newly flagged field is noticed.
+
 
 Rebuilt features live in one new crate of the fork's own, licensed
 AGPL-3.0-only, plus the smallest possible hooks in upstream files. The hooks
@@ -193,10 +203,13 @@ dashboard, credentials and a few supporting types.
 - **Hand-built screens** for what operators change often: domains and DNS,
   DKIM, certificates and ACME, spam settings, the queue, tenants and quotas,
   reports.
-- **Schema-generated forms** for the rest. The registry schema describes every
-  object's fields, types and constraints, and it's dual-licensed code the
-  fork has under the AGPL. The fork exposes it over JMAP, and ihasmail renders
-  a correct, if plain, editor for any object type from it. New types upstream
+- **Schema-generated forms** for the rest. Upstream already publishes a
+  complete UI schema, `resources/schema/schema.json.gz`, with objects, fields
+  (with descriptions), forms, lists, enums, dashboards and layouts. It's what
+  Stalwart's own web interface draws from, and it ships under the repository's
+  dual license, so the fork has it under the AGPL. The fork serves it over
+  JMAP, and ihasmail renders a correct, if plain, editor for any object type
+  from it. New types upstream
   adds then appear without an ihasmail release.
 - Everything stays permission-gated, as Administration is today.
 
@@ -266,6 +279,9 @@ bad certificate, a lockout), there has to be a way back in on the host:
 - Minimum it covers: list and edit listeners and certificates, reset an
   administrator's password, lift IP bans, and export or import the
   configuration.
+- Upstream documents a CLI with `get`, `describe` and `snapshot` commands
+  (public docs, `management/cli`). Check how much of the above it already
+  covers before building anything.
 - Open: whether this lives in the server binary or in the installer as
   `oneshot recover`.
 
