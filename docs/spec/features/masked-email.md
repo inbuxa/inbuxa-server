@@ -76,6 +76,12 @@ stays byte-for-byte what upstream wrote:
 - **Tombstones**: every address ever issued, including destroyed ones, so an
   address is never issued twice.
 
+**Decision** (2026-09-18) on where: one new data-store subspace owned by the
+fork (`X`), with its own SQL table, included in backup and restore. It also
+holds an index from address to mask, since upstream's record doesn't index
+`email`, and a per-account change log for `/changes`. Masks written before
+the fork are indexed on first start.
+
 ## One state, two APIs
 
 Fastmail and upstream disagree about what "disabled" means. inbuxa-server
@@ -126,6 +132,10 @@ accepted, which is the fact `enabled` reports.
   still works when it doesn't. Expired masks aren't removed automatically.
 - **ME-7.** Arriving mail sets `lastMessageAt`, and moves a `pending` mask to
   `enabled`.
+- **ME-7a.** **Decision** (2026-09-18): a mask created through the Fastmail
+  API starts `pending` unless the create sets `state`. One created through
+  upstream's `x:` API, which ihasmail and existing clients use, starts
+  `enabled` and is never removed automatically.
 - **ME-8.** A `pending` mask with no mail within 24 hours of creation is
   removed, per Fastmail's rule, and tombstoned. It's hidden from ihasmail's
   list while pending, as Fastmail's own interface hides it.
@@ -169,7 +179,9 @@ accepted, which is the fact `enabled` reports.
   `disabled`. A create past it fails with `overQuota`. 0 turns creation off.
 - **ME-15.** Create-rate limit per account, as Fastmail's API allows: past it,
   create fails with `rateLimit`. **Decision**: 50 an hour per account,
-  configurable.
+  configurable. **Decision** (2026-09-18) on where: the environment variable
+  `INBUXA_MASKED_EMAIL_CREATE_RATE` (creates per hour, default 50, 0 for no
+  limit), read at startup, until the fork has a settings object of its own.
 - **ME-16.** `createdBy` is set by the server from the authenticated client's
   name (the OAuth client's name once SPEC.md §5.2 is in place). Fastmail's API
   treats it as server-set. Upstream's API accepts and stores a client-supplied
@@ -185,7 +197,10 @@ accepted, which is the fact `enabled` reports.
   destroy. Its role needs the `sysMaskedEmail*` permissions, which the default
   user role carries: an ordinary account holds all five (observed 7).
 - **ME-19.** An administrator with the same permissions can manage another
-  account's masks, for support. A tenant administrator can manage only masks
+  account's masks, for support. **Decision** (2026-09-18) on who counts as
+  one: at server level, a principal holding `impersonate`; in a tenant, one
+  holding `sysAccountUpdate`, for accounts in its own tenant only. Either
+  also needs the matching `sysMaskedEmail*` permission. A tenant administrator can manage only masks
   owned by accounts in its tenant (multi-tenancy MT-1).
 
 ## The two APIs
@@ -236,7 +251,8 @@ Stalwart-facing (SPEC.md §5).
 ## Acceptance tests
 
 1. Create with no arguments: gets a unique address on the account's primary
-   domain, state `pending` in the Fastmail API and `enabled: true` in `x:`.
+   domain. Through the Fastmail API it's `pending`, and reads `enabled: true`
+   in `x:`. Through `x:` it's `enabled` in both (ME-7a).
 2. Mail to a pending mask: delivered, state becomes `enabled`,
    `lastMessageAt` set (ME-7).
 3. Pending mask with no mail for 24 hours: removed and tombstoned (ME-8).
