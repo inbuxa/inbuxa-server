@@ -223,6 +223,10 @@ Each requirement has an ID, and tests name the IDs they check.
   emits `limit.tenant-quota`. Moving a domain into a tenant counts its
   principals and keys against the tenant's limits first, and is refused the
   same way if any limit would be crossed.
+  **Decision** (2026-09-18): creating a domain with automatic DKIM in a
+  tenant counts the keys the server will generate for it (MT-9) against
+  `maxDkimKeys`, and the domain is refused with `overQuota` if they wouldn't
+  fit. Nothing is ever generated past the limit.
 - **MT-18.** Existing objects over a lowered limit stay. Only new ones are
   refused.
 - **MT-19.** Disk quota. `maxDiskQuota` bounds the total storage of every
