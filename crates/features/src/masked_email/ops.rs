@@ -332,3 +332,73 @@ pub async fn ensure_indexed(data: &Store, registry: &RegistryStore) -> trc::Resu
     data::set_indexed(&mut batch);
     data.write(batch.build_all()).await.map(|_| ())
 }
+
+/// What an address is, as far as masks go.
+#[derive(Debug)]
+pub enum Lookup {
+    /// A mask that accepts mail.
+    Accepts(Mask),
+    /// A live mask that refuses mail now (deleted or expired), which may
+    /// accept it again later, so a refusal mustn't be cached (ME-6).
+    Refuses,
+    /// Not a mask, or a destroyed one.
+    Unknown,
+}
+
+/// Looks an address up among masks, for accepting a recipient.
+pub async fn lookup(data: &Store, registry: &RegistryStore, address: &str) -> trc::Result<Lookup> {
+    if let Some(mask) = resolve(data, registry, address).await? {
+        Ok(Lookup::Accepts(mask))
+    } else if data::address(data, address)
+        .await?
+        .is_some_and(|entry| entry.live)
+    {
+        Ok(Lookup::Refuses)
+    } else {
+        Ok(Lookup::Unknown)
+    }
+}
+
+/// The mask a recipient reaches, as written or with a `+tag` sub-address
+/// removed, since a mask takes sub-addresses as the account's own addresses
+/// do (ME-10).
+pub async fn resolve_recipient(
+    data: &Store,
+    registry: &RegistryStore,
+    recipient: &str,
+) -> trc::Result<Option<Mask>> {
+    if let Some(mask) = resolve(data, registry, recipient).await? {
+        return Ok(Some(mask));
+    }
+    if let Some((local, domain)) = recipient.rsplit_once('@')
+        && let Some((base, _)) = local.split_once('+')
+    {
+        return resolve(data, registry, &format!("{base}@{domain}")).await;
+    }
+    Ok(None)
+}
+
+/// The message as delivered through a mask: an `X-Masked-Email` header
+/// names the mask, so the user can tell even when it was only BCC'd (ME-9).
+/// Nothing else in the message changes.
+pub fn with_header(address: &str, message: &[u8]) -> Vec<u8> {
+    let header = format!("X-Masked-Email: {address}\r\n");
+    let mut out = Vec::with_capacity(header.len() + message.len());
+    out.extend_from_slice(header.as_bytes());
+    out.extend_from_slice(message);
+    out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn header_goes_first() {
+        let out = with_header("shop_ab12@example.org", b"Subject: hi\r\n\r\nbody");
+        assert_eq!(
+            out,
+            b"X-Masked-Email: shop_ab12@example.org\r\nSubject: hi\r\n\r\nbody".to_vec()
+        );
+    }
+}

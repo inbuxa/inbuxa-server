@@ -5,7 +5,10 @@
  */
 
 use super::ingest::{EmailIngest, IngestEmail, IngestSource};
-use crate::{mailbox::INBOX_ID, sieve::ingest::SieveScriptIngest};
+use crate::{
+    mailbox::{INBOX_ID, TRASH_ID},
+    sieve::ingest::SieveScriptIngest,
+};
 use common::{
     Server,
     auth::BuildAccessToken,
@@ -126,7 +129,32 @@ impl MailDelivery for Server {
         };
 
         for rcpt in message.recipients {
-            let account_id = match self.account_id_from_email(&rcpt.address, false).await {
+            // inbuxa: ME-4, ME-10: a masked address delivers to its owner
+            let mask = match inbuxa_features::masked_email::ops::resolve_recipient(
+                &self.core.storage.data,
+                self.registry(),
+                &rcpt.address,
+            )
+            .await
+            {
+                Ok(mask) => mask,
+                Err(err) => {
+                    trc::error!(
+                        err.details("Failed to look up masked address.")
+                            .ctx(trc::Key::To, rcpt.address.to_string())
+                            .span_id(message.session_id)
+                    );
+                    result.status.push(LocalDeliveryStatus::TemporaryFailure {
+                        reason: "Address lookup failed.".into(),
+                    });
+                    continue;
+                }
+            };
+            let account_lookup = match &mask {
+                Some(mask) => Ok(Some(mask.object.account_id.document_id())),
+                None => self.account_id_from_email(&rcpt.address, false).await,
+            };
+            let account_id = match account_lookup {
                 Ok(Some(account_id)) => account_id,
                 Ok(None) => {
                     // Something went wrong
@@ -157,6 +185,35 @@ impl MailDelivery for Server {
                 continue;
             }
 
+            // inbuxa: ME-9: the message names the mask it came through
+            let masked = match &mask {
+                Some(mask) => {
+                    let raw = inbuxa_features::masked_email::ops::with_header(
+                        &mask.object.email,
+                        &raw_message,
+                    );
+                    match self.put_temporary_blob(account_id, &raw, 600).await {
+                        Ok((hash, _)) => Some((raw, hash)),
+                        Err(err) => {
+                            trc::error!(err.span_id(message.session_id));
+                            result.status.push(LocalDeliveryStatus::TemporaryFailure {
+                                reason: "Temporary I/O error.".into(),
+                            });
+                            continue;
+                        }
+                    }
+                }
+                None => None,
+            };
+            let (raw_message, message_blob) = masked
+                .as_ref()
+                .map(|(raw, hash)| (raw.as_slice(), hash))
+                .unwrap_or((raw_message.as_slice(), &message.message_blob));
+            // inbuxa: ME-5: a disabled mask files straight to Trash
+            let to_trash = mask.as_ref().is_some_and(|mask| {
+                mask.state == inbuxa_features::masked_email::State::Disabled
+            });
+
             // Obtain access token
             let status = match self.access_token(account_id).await.and_then(|token| {
                 token
@@ -165,15 +222,20 @@ impl MailDelivery for Server {
             }) {
                 Ok(access_token) => {
                     // Check if there is an active sieve script
-                    match self.sieve_script_get_active(account_id).await {
+                    let active_script = if to_trash {
+                        Ok(None)
+                    } else {
+                        self.sieve_script_get_active(account_id).await
+                    };
+                    match active_script {
                         Ok(None) => {
                             // Ingest message
                             self.email_ingest(IngestEmail {
-                                raw_message: &raw_message,
-                                blob_hash: Some(&message.message_blob),
-                                message: MessageParser::new().parse(&raw_message),
+                                raw_message,
+                                blob_hash: Some(message_blob),
+                                message: MessageParser::new().parse(raw_message),
                                 access_token: &access_token,
-                                mailbox_ids: vec![INBOX_ID],
+                                mailbox_ids: vec![if to_trash { TRASH_ID } else { INBOX_ID }],
                                 keywords: vec![],
                                 received_at: None,
                                 source: IngestSource::Smtp {
@@ -188,8 +250,8 @@ impl MailDelivery for Server {
                         Ok(Some(active_script)) => {
                             self.sieve_script_ingest(
                                 &access_token,
-                                &message.message_blob,
-                                &raw_message,
+                                message_blob,
+                                raw_message,
                                 &message.sender_address,
                                 message.sender_authenticated,
                                 &rcpt,
@@ -208,6 +270,18 @@ impl MailDelivery for Server {
 
             let status = match status {
                 Ok(ingested_message) => {
+                    // inbuxa: ME-7: the mask saw mail, and a pending one is now enabled
+                    if let Some(mask) = &mask
+                        && let Err(err) = inbuxa_features::masked_email::ops::delivered(
+                            &self.core.storage.data,
+                            self.registry(),
+                            mask,
+                        )
+                        .await
+                    {
+                        trc::error!(err.span_id(message.session_id));
+                    }
+
                     // Notify state change
                     if ingested_message.change_id != u64::MAX {
                         self.broadcast_push_notification(PushNotification::EmailPush(EmailPush {

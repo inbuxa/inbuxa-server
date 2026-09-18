@@ -293,6 +293,29 @@ impl Server {
 
                     Ok(Some(result))
                 } else {
+                    // inbuxa: ME-4, ME-6: a live masked address reaches its
+                    // owner; a refused one isn't cached, as it can come back
+                    if let Some(domain) = self.domain_by_id(domain_id).await?
+                        && let Some(name) = domain.names.first()
+                    {
+                        use inbuxa_features::masked_email::ops::{Lookup, lookup};
+                        match lookup(
+                            &self.core.storage.data,
+                            self.registry(),
+                            &format!("{local_part}@{name}"),
+                        )
+                        .await?
+                        {
+                            Lookup::Accepts(mask) => {
+                                return Ok(Some(EmailCache::Account(
+                                    mask.object.account_id.document_id(),
+                                )));
+                            }
+                            Lookup::Refuses => return Ok(None),
+                            Lookup::Unknown => {}
+                        }
+                    }
+
                     // Cache negative result
                     emails_negative.insert(
                         EmailAddress::new(local_part, domain_id),
