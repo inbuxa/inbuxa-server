@@ -16,7 +16,8 @@ What it does, in order (docs/spec/SPEC.md §2.2):
 3. Runs upstream's own remover, `resources/scripts/ossify.py` from the same
    ref, over every directory that holds Rust.
 4. Removes `mod` declarations left pointing at deleted Enterprise files, then
-   turns the `enterprise` Cargo feature off wherever it's switched on: a
+   turns the `enterprise` Cargo feature off wherever it's switched on: in build
+   scripts' `--features "..."` lists (Dockerfiles, CI), and in manifests: a
    crate's `default` list, and dependency `features` lists. Definitions of the
    feature are left alone. They're inert once nothing turns them on, and
    leaving them keeps each sync's diff small.
@@ -60,6 +61,11 @@ TEXT_SUFFIXES = {
     '.rs', '.toml', '.md', '.txt', '.py', '.sh', '.json', '.yml', '.yaml', '.js',
     '.ts', '.html', '.css', '.sieve', '.sql', '.lua', '.hcl', '.cfg', '.conf', '',
 }
+
+
+def is_text(path):
+    """Files worth scanning: known text suffixes, plus every `Dockerfile*` whatever its suffix."""
+    return path.is_file() and (path.suffix in TEXT_SUFFIXES or path.name.startswith('Dockerfile'))
 
 
 def fail(msg, code=2):
@@ -179,6 +185,44 @@ def deactivate_enterprise(tree):
     return edits
 
 
+FEATURE_ARG = re.compile(r'(--features(?:\s+|=)")([^"]*)(")')
+
+
+def deactivate_enterprise_in_scripts(tree):
+    """
+    Remove `enterprise` from `--features "..."` lists in build scripts.
+
+    Upstream's Dockerfiles and CI pass the feature on the cargo command line,
+    which the manifest edits don't reach. Left in, the image and release
+    builds fail on a feature whose code is gone.
+    """
+    edits = []
+    for path in sorted(tree.rglob('*')):
+        if path.name == 'Cargo.toml' or not is_text(path):
+            continue
+        try:
+            text = path.read_text(encoding='utf-8')
+        except UnicodeDecodeError:
+            continue
+        if '--features' not in text or 'enterprise' not in text:
+            continue
+        lines = text.split('\n')
+        changed = False
+        for n, line in enumerate(lines):
+            def drop(m):
+                kept = [f for f in m.group(2).split() if f != 'enterprise' and not f.endswith('/enterprise')]
+                return m.group(1) + ' '.join(kept) + m.group(3)
+            new = FEATURE_ARG.sub(drop, line)
+            if new != line:
+                edits.append({'file': str(path.relative_to(tree)), 'line': n + 1,
+                              'before': line.strip(), 'after': new.strip()})
+                lines[n] = new
+                changed = True
+        if changed:
+            path.write_text('\n'.join(lines), encoding='utf-8')
+    return edits
+
+
 def remove_dangling_mods(tree):
     """
     Remove `mod x;` declarations whose file ossify.py deleted.
@@ -214,7 +258,7 @@ def verify(tree):
     """Independent of ossify.py. Returns a list of problems; empty means clean."""
     problems = []
     for path in tree.rglob('*'):
-        if not path.is_file() or path.suffix not in TEXT_SUFFIXES:
+        if not is_text(path):
             continue
         rel = path.relative_to(tree)
         if rel.parts[0] == 'LICENSES':
@@ -227,6 +271,17 @@ def verify(tree):
             m = IDENT.match(line)
             if m and is_sel_only(m.group(1)):
                 problems.append(f'{rel}:{n}: Enterprise-only license marker survived')
+    for path in tree.rglob('*'):
+        if path.name == 'Cargo.toml' or not is_text(path):
+            continue
+        try:
+            text = path.read_text(encoding='utf-8')
+        except UnicodeDecodeError:
+            continue
+        for n, line in enumerate(text.split('\n'), 1):
+            for m in FEATURE_ARG.finditer(line):
+                if any(f == 'enterprise' or f.endswith('/enterprise') for f in m.group(2).split()):
+                    problems.append(f'{path.relative_to(tree)}:{n}: build script still passes the enterprise feature')
     for manifest in tree.rglob('Cargo.toml'):
         for n, line in enumerate(manifest.read_text(encoding='utf-8').split('\n'), 1):
             code = line.split('#', 1)[0]
@@ -316,7 +371,7 @@ def main():
 
     removed_files, removed_snippets = sel_inventory(tree)
     log = run_ossify(tree, rust_roots(tree))
-    edits = deactivate_enterprise(tree)
+    edits = deactivate_enterprise(tree) + deactivate_enterprise_in_scripts(tree)
     dangling = remove_dangling_mods(tree)
     problems = verify(tree)
     gates, checks = remaining_hooks(tree)
