@@ -64,7 +64,9 @@ pub async fn test(test: &TestServer) {
         "urn:ietf:params:jmap:websocket": {
           "url": "wss://127.0.0.1:8899/jmap/ws",
           "supportsPush": true
-        }
+        },
+        // inbuxa: the fork's own capability (contract C-1, multi-tenancy MT-22)
+        "urn:inbuxa:jmap": {}
       },
       "accounts": {
         john_id: {
@@ -244,7 +246,9 @@ pub async fn test(test: &TestServer) {
               "webWriteUrlTemplate": null
             },
             "urn:ietf:params:jmap:mail:share": {},
-            "urn:stalwart:jmap": {}
+            "urn:stalwart:jmap": {},
+            // inbuxa: MT-22, the logo that applies to the account
+            "urn:inbuxa:jmap": { "logo": null }
           }
         }
       },
