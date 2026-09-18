@@ -22,7 +22,7 @@ use registry::{
     jmap::{IntoValue, JsonPointerPatch, RegistryJsonPatch},
     schema::{
         enums::{DeliveryErrorType, MessageFlag, RecipientFlag},
-        prelude::{ObjectType, Property},
+        prelude::Property,
         structs::{
             DeliveryError, QueueExpiry, QueueExpiryAttempts, QueueExpiryTtl, QueuedMessage,
             QueuedRecipient, RecipientStatus, ServerResponse,
@@ -40,7 +40,7 @@ use std::str::FromStr;
 use store::{
     Deserialize, IterateParams, U64_LEN, ValueKey,
     ahash::AHashSet,
-    registry::{RegistryFilterOp, RegistryQuery},
+    registry::RegistryFilterOp,
     write::{AlignedBytes, Archive, QueueClass, ValueClass, key::DeserializeBigEndian, now},
 };
 use trc::AddContext;

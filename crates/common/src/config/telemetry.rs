@@ -141,7 +141,8 @@ impl Telemetry {
 }
 
 impl Tracers {
-    pub async fn parse(bp: &mut Bootstrap, storage: &Storage) -> Self {
+    // inbuxa: `_storage` is unused until monitoring history (stored traces and metrics) is rebuilt
+    pub async fn parse(bp: &mut Bootstrap, _storage: &Storage) -> Self {
         let mut custom_levels = AHashMap::new();
         let mut tracers: Vec<TelemetrySubscriber> = Vec::new();
         let mut global_interests = Interests::default();

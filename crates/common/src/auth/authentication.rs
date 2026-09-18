@@ -514,13 +514,15 @@ impl Server {
 
     pub async fn get_directory_for_domain(
         &self,
-        domain_name: &str,
+        // inbuxa: unused until per-domain directories (Domain.directoryId) are rebuilt; see docs/spec/SPEC.md §4
+        _domain_name: &str,
     ) -> trc::Result<Option<&Arc<Directory>>> {
 
         Ok(self.get_default_directory())
     }
 
-    pub fn get_directory_for_cached_domain(&self, domain: &DomainCache) -> Option<&Arc<Directory>> {
+    // inbuxa: `_domain` is unused until per-domain directories (Domain.directoryId) are rebuilt
+    pub fn get_directory_for_cached_domain(&self, _domain: &DomainCache) -> Option<&Arc<Directory>> {
 
         self.get_default_directory()
     }

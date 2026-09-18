@@ -11,7 +11,6 @@ use groupware::{cache::GroupwareCache, calendar::CalendarEvent, contact::Contact
 use registry::{
     schema::{
         enums::IndexDocumentType,
-        prelude::{ObjectType, Property},
         structs::{TaskIndexDocument, TaskIndexTrace, TaskStatus},
     },
     types::EnumImpl,
@@ -29,7 +28,6 @@ use store::{
 };
 use trc::{AddContext, TaskManagerEvent};
 use types::{
-    blob_hash::BlobHash,
     collection::{Collection, SyncCollection},
     field::EmailField,
 };

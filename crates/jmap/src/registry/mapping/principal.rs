@@ -20,10 +20,7 @@ use registry::{
     },
     types::EnumImpl,
 };
-use store::{
-    registry::{RegistryObjectCounter, RegistryQuery},
-    write::{BatchBuilder, RegistryClass, ValueClass, now},
-};
+use store::write::{BatchBuilder, RegistryClass, ValueClass, now};
 use trc::AddContext;
 use types::id::Id;
 

@@ -28,7 +28,7 @@ use registry::{
         enums::{DkimRotationStage, Locale, StorageQuota, TenantStorageQuota},
         prelude::{ObjectType, Property},
         structs::{
-            Account, DkimSignature, Domain, EncryptionAtRest, MailingList, MaskedEmail,
+            Account, DkimSignature, Domain, EncryptionAtRest, MailingList,
             Permissions, PublicKey, Role, SubAddressing, Tenant,
         },
     },
@@ -38,7 +38,7 @@ use std::{borrow::Cow, sync::Arc};
 use store::{
     U64_LEN,
     registry::{RegistryQuery, bootstrap::Bootstrap},
-    write::{key::KeySerializer, now},
+    write::key::KeySerializer,
 };
 use trc::{AddContext, StoreEvent};
 use types::id::Id;

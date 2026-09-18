@@ -29,9 +29,13 @@ impl EnterpriseRegistry for Server {
         }
 
 
+        // These are the Enterprise features INBUXA hasn't rebuilt yet
+        // (docs/spec/SPEC.md §4). Each type leaves this list when its rebuild
+        // lands. There's no edition to upgrade to, so the message says so.
         Err(trc::JmapEvent::Forbidden.into_err().details(concat!(
-            "This feature is only available in the Enterprise edition. ",
-            "Obtain your trial license at https://license.stalw.art/trial."
+            "This feature isn't available in ",
+            types::brand!(),
+            " yet."
         )))
     }
 }

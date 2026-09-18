@@ -10,9 +10,14 @@ use common::enterprise::llm::{
 };
 #[cfg(feature = "pending-rebuild")]
 use spam_filter::analysis::llm::SpamFilterAnalyzeLlm;
+#[cfg(feature = "pending-rebuild")]
+use crate::utils::http_server::{HttpMessage, spawn_mock_http_server};
+#[cfg(feature = "pending-rebuild")]
+use http_proto::{JsonResponse, ToHttpResponse};
+#[cfg(feature = "pending-rebuild")]
+use hyper::Method;
 use crate::utils::{
     dns::DnsCache,
-    http_server::{HttpMessage, spawn_mock_http_server},
     server::TestServerBuilder,
 };
 use ahash::AHashSet;
@@ -21,8 +26,6 @@ use common::{
     auth::{AccountCache, AccountInfo},
     config::mailstore::spamfilter::SpamFilterAction,
 };
-use http_proto::{JsonResponse, ToHttpResponse};
-use hyper::Method;
 use mail_auth::{
     ArcOutput, DkimOutput, DkimResult, DmarcResult, DnssecStatus, IprevOutput, IprevResult, MX,
     SpfOutput, SpfResult, dkim::Signature, dmarc::Policy,

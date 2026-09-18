@@ -23,7 +23,7 @@ use crate::{
 };
 use directory::Recipient;
 use mail_auth::IpLookupStrategy;
-use registry::schema::{enums::ExpressionVariable, structs::MaskedEmail};
+use registry::schema::enums::ExpressionVariable;
 use sieve::Sieve;
 use std::{
     borrow::Cow,
@@ -32,10 +32,9 @@ use std::{
 };
 use store::{
     Deserialize, IterateParams, ValueKey,
-    write::{AlignedBytes, Archive, QueueClass, ValueClass, now},
+    write::{AlignedBytes, Archive, QueueClass, ValueClass},
 };
 use trc::{AddContext, SpamEvent};
-use types::id::Id;
 
 impl Server {
     pub async fn rcpt_resolve(

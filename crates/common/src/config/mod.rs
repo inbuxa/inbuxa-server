@@ -38,7 +38,7 @@ pub mod storage;
 pub mod telemetry;
 
 impl Core {
-    pub async fn parse(bp: &mut Bootstrap, mut storage: Storage) -> Self {
+    pub async fn parse(bp: &mut Bootstrap, storage: Storage) -> Self {
 
         Self {
             sieve: Scripting::parse(bp).await,

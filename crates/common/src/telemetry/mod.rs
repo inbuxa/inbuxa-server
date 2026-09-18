@@ -96,7 +96,8 @@ impl Telemetry {
 }
 
 impl TelemetrySubscriberType {
-    pub fn spawn(self, builder: SubscriberBuilder, is_enterprise: bool) {
+    // inbuxa: `_is_enterprise` is unused until monitoring history is rebuilt, and goes when it is: there is one edition
+    pub fn spawn(self, builder: SubscriberBuilder, _is_enterprise: bool) {
         match self {
             TelemetrySubscriberType::ConsoleTracer(settings) => {
                 spawn_console_tracer(builder, settings)

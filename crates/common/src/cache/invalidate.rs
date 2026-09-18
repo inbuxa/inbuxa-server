@@ -17,7 +17,6 @@ use registry::{
     },
     types::id::ObjectId,
 };
-use store::{registry::RegistryQuery, roaring::RoaringBitmap};
 use types::id::Id;
 
 #[derive(Debug, Default)]

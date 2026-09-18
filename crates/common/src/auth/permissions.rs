@@ -45,7 +45,8 @@ impl Server {
         &self,
         permissions: &structs::Permissions,
         role_ids: &[Id],
-        tenant_id: Option<u32>,
+        // inbuxa: unused until multi-tenancy is rebuilt: the tenant permission ceiling (docs/spec/features/multi-tenancy.md MT-13)
+        _tenant_id: Option<u32>,
     ) -> trc::Result<PermissionsGroup> {
         // Calculate effective permissions
         let (mut permissions, roles) = match permissions {

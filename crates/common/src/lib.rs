@@ -161,6 +161,9 @@ pub struct Data {
 pub struct LogoCache {
     domain_id: u32,
     tenant_id: Option<u32>,
+    // inbuxa: read again when the /logo endpoint (per-tenant and per-domain
+    // branding) is rebuilt; docs/spec/features/multi-tenancy.md MT-22.
+    #[allow(dead_code)]
     data: Option<Resource<Vec<u8>>>,
 }
 

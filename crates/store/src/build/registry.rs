@@ -18,7 +18,21 @@ impl RegistryStore {
 
         // Build store
         inner.store = match inner.read_data_store().await {
-            RegistryInit::Ok(data_store) => Store::build(data_store).await?,
+            RegistryInit::Ok(data_store) => {
+                // The recovery administrator exists for first-boot setup and
+                // for recovery mode. On a configured server running normally
+                // it would be a standing full-admin login for whoever knows the
+                // variable, so it's ignored there, and loudly.
+                if !inner.env_recovery_mode && inner.env_recovery_admin.take().is_some() {
+                    eprintln!();
+                    eprintln!("⚠️  INBUXA_RECOVERY_ADMIN (or STALWART_RECOVERY_ADMIN) is set, but the");
+                    eprintln!("   server is configured and not in recovery mode, so it is ignored.");
+                    eprintln!("   Remove it from the environment. To use it for recovery, also set");
+                    eprintln!("   INBUXA_RECOVERY_MODE=1.");
+                    eprintln!();
+                }
+                Store::build(data_store).await?
+            }
             RegistryInit::Err(err) => return Err(err),
             RegistryInit::Bootstrap => {
                 inner.env_recovery_mode = true;
