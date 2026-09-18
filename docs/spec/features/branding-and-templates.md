@@ -378,3 +378,41 @@ the operator's approval first, as with the other features' probes.
 8. **INBUXA Admin's logo.** Upstream documents that its web interface picks its
    logo by request hostname. Check in `inbuxa-admin` (an ordinary AGPL fork,
    SPEC.md §5) whether it calls `/logo`, so it keeps working against BT-5.
+
+## Observed
+
+Settled on 2026-09-18 against INBUXA's live Enterprise server (Stalwart
+0.16.22), read-only, as a server-level administrator and the throwaway test
+account. No upstream code was read.
+
+1. **What INBUXA holds** (open question 1). `x:Enterprise.logoUrl`, all three
+   templates and every tenant logo are null. Six of nine domains had a logo:
+   four held the same `https:` URL, pointing at a retired website that now
+   answers with an HTML page, and two held the literal string `admin`. With
+   the operator's approval, the four URL logos were removed the same day (a
+   write). The two `admin` values remain. BT-4 skips them as unusable, and
+   upstream already answers `404` for those domains.
+2. **Upstream fetches URL logos itself** (open questions 2 and 3). While the
+   URL logos were set, `GET /logo` returned `200 text/html`: the retired
+   site's page, served from the mail server's own origin with no
+   `X-Content-Type-Options` and no CSP. So upstream fetches the URL on the
+   server side and passes on whatever comes back, content type included.
+   BT-7 (never fetch) and BT-8 (sandbox what is served) are deliberate
+   differences, and this is why.
+3. **`/logo` shape.** `/logo` with no parameter used the request's host, and
+   `?domain=` selected a domain. `/logo/<domain>` answered the same as
+   `/logo`, so the path segment is ignored. An unknown domain, a domain with
+   an unusable value, and (after the removal) every domain answered `404`
+   with `application/problem+json`. No caching headers were sent. BT-5 keeps
+   `/logo?domain=` and `404`, and adds its own headers.
+4. **Reload** (open question 4). Removing the logos took effect on the very
+   next `/logo` request, with no settings reload.
+5. **RSVP page headers** (open question 6). `GET /calendar/rsvp` sends only
+   `Content-Type: text/html; charset=utf-8` and
+   `Cache-Control: no-store, no-cache, must-revalidate`: no CSP and no
+   `Referrer-Policy`. BT-21's headers are a difference.
+6. **The stored `fromName`** (open question 7). INBUXA stores
+   `INBUXA Calendar` as a value already. Nothing to change at cutover.
+
+Not settled: open question 5 (invalid templates on write) needs a write, and
+question 8 is a check in `inbuxa-admin`, not on the server.

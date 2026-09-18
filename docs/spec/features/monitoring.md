@@ -508,3 +508,55 @@ these needs a write.
     `sysMetric*` or live permission, and whether a tenant view of its own
     domains' traces is wanted (MON-31).
 12. Size of INBUXA's `o` and `x` subspaces, to check MON-19's estimate.
+
+## Observed
+
+Settled on 2026-09-18 against INBUXA's live Enterprise server (Stalwart
+0.16.22), read-only, as a server-level administrator and the throwaway test
+account. No upstream code was read.
+
+1. **Settings** (open question 6). `holdTracesFor` 30 days, `holdMetricsFor`
+   90 days, `metricsCollectionInterval` hourly at minute 0, `indexTelemetry`
+   on with `eventType`, `queueId` and `keywords` indexed. Tracing and metrics
+   stores are both `Default`. No `x:Alert` exists (open question 10).
+2. **Traces** (open questions 1 to 3). 395 stored, the oldest exactly one day
+   old, although retention is 30 days. Why is unexplained: the history may
+   have been cleared a day earlier. Worth checking before cutover, since
+   metrics go back 24 days. Each trace is one message's journey: 4 to 44
+   events (10 on average), mostly delivery, queue, SMTP and authentication
+   results. Every stored inbound SMTP session reached `MAIL FROM` (82 of 82),
+   so connection-only sessions aren't stored, which matches MON-11. Events
+   carry `event`, `timestamp` and typed `keyValues`. There is no level field
+   and no raw I/O (MON-12). `to` is a string. No stored trace had more than
+   one recipient, so MON-14's multi-recipient case wasn't seen.
+3. **Trace queries** (open question 8). `timestampAfter` and `after` are
+   refused with `unsupportedFilter`. The accepted filters weren't listed
+   further.
+4. **Metrics** (open questions 4 and 5). 10,755 samples over 597 hourly ticks
+   since 2026-08-25, with no gaps: 5,598 `Counter`, 4,025 `Histogram` and
+   1,132 `Gauge`. Histograms are stored for eight metrics: delivery attempt
+   and total time, DNS lookup time, ingest time, and blob and data store
+   read and write times. Gauges are `queue.count` and `server.memory`. Only
+   four metrics appear in every tick, so a counter with nothing to report
+   isn't stored for that tick. Counter values read as per-interval
+   increases, not running totals. `queue.count` moved between 20 and 30 over
+   the last eight hours, so it tracks the queue. Whether it's right straight
+   after a restart wasn't tested.
+5. **Live telemetry** (open question 9).
+   - `GET /api/token/tracing` and `/api/token/metrics` answer `200` with the
+     token as a bare 90-byte body and no content type.
+   - The streams are `GET /api/live/tracing` and `/api/live/metrics`, with
+     the token in the `token` query parameter. The same token in an
+     `Authorization: Bearer` header is refused (`401`).
+   - Both answer `text/event-stream`. Tracing sends
+     `event: ping` with `data: {"interval": 30000}` while idle. Metrics sends
+     `event: metrics` with a JSON array of `{metric, @type, count}` holding
+     totals since the server started.
+   - `/api/telemetry/traces/live` and `/api/telemetry/metrics/live` don't
+     exist upstream (`404`). The aliases in "Interfaces" are the fork's own.
+6. **Tenant administrators** (open question 11). The default
+   `Tenant Administrator` role holds 50 permissions and none for telemetry.
+   The `System Administrator` role holds all of them, live ones included.
+
+Not settled: open question 7 (null retention) needs a write, and question
+12 (subspace sizes) needs access to the store itself.

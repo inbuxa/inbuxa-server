@@ -839,3 +839,28 @@ removed suites (`auth`, `bulk`, `discovery`, `groups`, `limits`, `query`,
 14. **`SCIM_DOMAIN` and `HTTP_PORT` in the test helpers.** The surviving
     tests imply `scim.example.com` and port 8899 (from addresses and URLs in
     them). Confirm when rebuilding `mod.rs`.
+
+## Observed
+
+Settled on 2026-09-18 against INBUXA's live Enterprise server (Stalwart
+0.16.22), read-only, as a server-level administrator and the throwaway test
+account. No upstream code was read.
+
+1. **SCIM isn't used** (open question 2). No domain has
+   `allowScimProvisioning` on, and none of the 8 accounts has an
+   `externalId`. Cutover has nothing to carry.
+2. **Discovery is anonymous.** `/scim/v2/ServiceProviderConfig`, `/Schemas`
+   and `/ResourceTypes` answer `200` with no credentials, as
+   `application/scim+json`. `/scim/v2/Users` without credentials answers
+   `401` with `WWW-Authenticate: Bearer realm="Stalwart SCIM"`.
+3. **What upstream advertises:** PATCH, Bulk (1,000 operations, 1 MiB),
+   filtering (`maxResults` 200), sorting and ETags supported; password change
+   not supported; pagination by index and by cursor, index by default, page
+   size 100, at most 200. One authentication scheme, `oauthbearertoken`,
+   described as an API key presented as a bearer token. `interopProfileConformant`
+   is `false`. `/ResourceTypes` lists `User` and `Group` with no schema
+   extensions, which matches this spec's decision. `documentationUri` points at
+   upstream's documentation. The fork points it at its own.
+
+The per-account behaviors (open questions 3 and 5 to 9) need an API key and
+a SCIM-enabled domain, so they stay open.

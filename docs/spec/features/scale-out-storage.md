@@ -521,3 +521,13 @@ and PostgreSQL), to show members of different kinds work together (ST-16).
 - **`LookupStore::RedisSentinel` has no build arm** in `build/lookup.rs`. It's
   outside this feature. Check a stock build to see whether a sentinel lookup
   store works at all.
+
+## Observed
+
+Settled on 2026-09-18 against INBUXA's live Enterprise server (Stalwart
+0.16.22), read-only, as a server-level administrator and the throwaway test
+account. No upstream code was read.
+
+INBUXA runs a single RocksDB data store, with the default blob, in-memory
+and search stores. No replicas, and no sharded stores. Nothing to carry
+over, and nothing here affects its cutover.

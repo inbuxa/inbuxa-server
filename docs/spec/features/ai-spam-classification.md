@@ -460,3 +460,25 @@ Not for observation, but open:
    schema. A later addition in the fork's namespace if asked for.
 9. A "test this model" action for INBUXA Admin. Useful, not required.
 10. The name of the fork's limits singleton, with the namespace (SPEC.md §8).
+
+## Observed
+
+Settled on 2026-09-18 against INBUXA's live Enterprise server (Stalwart
+0.16.22), read-only, as a server-level administrator and the throwaway test
+account. No upstream code was read.
+
+1. **Configured models** (open question 1). No `x:AiModel` exists and
+   `x:SpamLlm` is `Disable`. Compat test 22 carries only the tags below.
+2. **`LLM_*` tags** (open question 2). Twelve entries, all `Score`, for every
+   category and confidence: `HIGH` 3.0, `MEDIUM` 2.0, `LOW` 0.5 for
+   `UNSOLICITED`, `COMMERCIAL` and `HARMFUL`, and −3.0, −2.0, −0.5 for
+   `LEGITIMATE`. AI-13's clamp (+5.0, −1.0) cuts only the `LEGITIMATE`
+   `HIGH` and `MEDIUM` scores.
+3. **`X-Spam-LLM`** (open question 3). Not observable: the classifier has
+   never run on INBUXA.
+4. **`interactAi`** (open question 5). Ordinary accounts hold it: the test
+   account's effective permissions include it, through the default `User`
+   role. This repository's defaults match what upstream ships. The public
+   permissions table is out of date.
+
+Questions 4, 6 and 7 need a model configured, so they stay open.

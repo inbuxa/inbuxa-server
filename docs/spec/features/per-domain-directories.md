@@ -534,3 +534,19 @@ data.
    `auth/mod.rs` and 2 from `cache/principals.rs`. This spec doesn't say what
    they did and doesn't need to. The rules they may have enforced (quota,
    SCIM authority, tenant checks) are specified here from other sources.
+
+## Observed
+
+Settled on 2026-09-18 against INBUXA's live Enterprise server (Stalwart
+0.16.22), read-only, as a server-level administrator and the throwaway test
+account. No upstream code was read.
+
+1. **The cutover check passes.** INBUXA has no external directory
+   (`x:Directory` is empty), `x:Authentication.directoryId` is null, and all
+   nine domains have `directoryId` null. The fork ignoring `directoryId` today
+   changes nothing for INBUXA.
+2. **Tenant domains** (open question 7). INBUXA has no tenants, so no tenant
+   domain relies on a default. DIR-23 stands as written.
+
+Open question 2 (the `requireAudience` default) needs a directory to be
+created, so it stays open.
