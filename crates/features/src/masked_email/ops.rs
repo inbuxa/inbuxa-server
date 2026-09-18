@@ -346,6 +346,55 @@ pub async fn sends_as(
         .is_some_and(|mask| mask.object.account_id.document_id() == account_id))
 }
 
+/// Changes to an account's masks since a state, for `/changes`.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct Changes {
+    pub created: Vec<Id>,
+    pub updated: Vec<Id>,
+    pub destroyed: Vec<Id>,
+    /// The state after the changes returned.
+    pub new_state: u64,
+    pub has_more: bool,
+}
+
+/// The changes since `since`, at most `max` masks' worth. A mask created and
+/// destroyed within the window isn't reported; one created and changed is
+/// reported as created.
+pub fn collapse(since: u64, entries: &[(u64, Id, Change)], max: usize) -> Changes {
+    use ahash::AHashMap;
+    let mut state: AHashMap<Id, (bool, bool)> = AHashMap::new(); // (created, destroyed)
+    let mut order = Vec::new();
+    let mut result = Changes {
+        new_state: since,
+        ..Default::default()
+    };
+    for (change_id, id, change) in entries {
+        if !state.contains_key(id) {
+            if order.len() == max {
+                result.has_more = true;
+                break;
+            }
+            order.push(*id);
+        }
+        let entry = state.entry(*id).or_insert((false, false));
+        match change {
+            Change::Created => entry.0 = true,
+            Change::Destroyed => entry.1 = true,
+            Change::Updated => {}
+        }
+        result.new_state = *change_id;
+    }
+    for id in order {
+        match state[&id] {
+            (true, true) => {}
+            (true, false) => result.created.push(id),
+            (false, true) => result.destroyed.push(id),
+            (false, false) => result.updated.push(id),
+        }
+    }
+    result
+}
+
 /// What an address is, as far as masks go.
 #[derive(Debug)]
 pub enum Lookup {
@@ -405,6 +454,30 @@ pub fn with_header(address: &str, message: &[u8]) -> Vec<u8> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn changes_collapse() {
+        let (a, b, c) = (Id::new(1), Id::new(2), Id::new(3));
+        let entries = [
+            (10, a, Change::Created),
+            (11, a, Change::Updated),
+            (12, b, Change::Updated),
+            (13, c, Change::Created),
+            (14, c, Change::Destroyed),
+            (15, b, Change::Destroyed),
+        ];
+        let all = collapse(9, &entries, 100);
+        assert_eq!(all.created, vec![a]);
+        assert_eq!(all.destroyed, vec![b]);
+        assert!(all.updated.is_empty());
+        assert_eq!(all.new_state, 15);
+        assert!(!all.has_more);
+
+        let first = collapse(9, &entries, 1);
+        assert_eq!(first.created, vec![a]);
+        assert_eq!(first.new_state, 11);
+        assert!(first.has_more);
+    }
 
     #[test]
     fn header_goes_first() {

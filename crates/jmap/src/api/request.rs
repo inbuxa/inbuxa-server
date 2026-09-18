@@ -592,9 +592,14 @@ impl RequestHandler for Server {
             RequestMethod::Changes(mut req) => {
                 resolve_account_id(&mut req.account_id, method_name.obj, access_token)?;
 
-                self.changes(*req, method_name.obj, access_token)
-                    .await?
-                    .into_method_response()
+                // inbuxa: x:MaskedEmail/changes
+                if matches!(method_name.obj, MethodObject::Registry(_)) {
+                    crate::inbuxa::masked_email::changes(self, access_token, *req).await?
+                } else {
+                    self.changes(*req, method_name.obj, access_token)
+                        .await?
+                        .into_method_response()
+                }
             }
             RequestMethod::Copy(req) => match req {
                 CopyRequestMethod::Email(mut req) => {

@@ -128,6 +128,10 @@ impl Response<'_> {
                         ChangesResponseMethod::ShareNotification(response) => {
                             response.eval_jptr(path, &mut results)
                         }
+                        // inbuxa: x:MaskedEmail/changes
+                        ChangesResponseMethod::Registry(response) => {
+                            response.eval_jptr(path, &mut results)
+                        }
                     },
                     ResponseMethod::Query(response) => response.eval_jptr(path, &mut results),
                     ResponseMethod::QueryChanges(response) => {

@@ -350,3 +350,67 @@ pub async fn query(mut req: RegistryQueryResponse<'_>) -> trc::Result<QueryRespo
     }
     Ok(response)
 }
+
+/// The state of an account's masks, for `/get` and `/changes` (a fork
+/// addition: upstream's `/get` has none).
+pub async fn state(server: &Server, account_id: u32) -> trc::Result<JmapState> {
+    let latest =
+        inbuxa_features::masked_email::data::latest_change(&server.core.storage.data, account_id)
+            .await?;
+    Ok(if latest == 0 {
+        JmapState::Initial
+    } else {
+        JmapState::Exact(latest)
+    })
+}
+
+/// `x:MaskedEmail/changes` (a fork addition).
+pub async fn changes(
+    server: &Server,
+    access_token: &AccessToken,
+    request: jmap_proto::method::changes::ChangesRequest,
+) -> trc::Result<jmap_proto::response::ResponseMethod<'static>> {
+    use jmap_proto::{
+        method::changes::ChangesResponse,
+        response::{ChangesResponseMethod, ResponseMethod},
+    };
+
+    let account_id = request.account_id.document_id();
+    assert_can_manage(server, access_token, account_id).await?;
+    let since = match &request.since_state {
+        JmapState::Initial => 0,
+        JmapState::Exact(change_id) => *change_id,
+        JmapState::Intermediate(_) => {
+            return Err(trc::JmapEvent::CannotCalculateChanges.into_err());
+        }
+    };
+    let max = request
+        .max_changes
+        .filter(|max| *max != 0)
+        .unwrap_or(usize::MAX)
+        .min(server.core.jmap.changes_max_results);
+    let entries = inbuxa_features::masked_email::data::changes_since(
+        &server.core.storage.data,
+        account_id,
+        since,
+    )
+    .await?;
+    let changes = ops::collapse(since, &entries, max);
+
+    Ok(ResponseMethod::Changes(ChangesResponseMethod::Registry(
+        Box::new(ChangesResponse {
+            account_id: request.account_id,
+            old_state: request.since_state,
+            new_state: if changes.new_state == 0 {
+                JmapState::Initial
+            } else {
+                JmapState::Exact(changes.new_state)
+            },
+            has_more_changes: changes.has_more,
+            created: changes.created,
+            updated: changes.updated,
+            destroyed: changes.destroyed,
+            updated_properties: None,
+        }),
+    )))
+}

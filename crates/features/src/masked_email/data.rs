@@ -196,15 +196,14 @@ fn change_key(account_id: u32, change_id: u64) -> ValueKey<ValueClass> {
     key(KIND_CHANGE, &rest)
 }
 
-/// The account's changes after `since`, oldest first, and the latest change
-/// id (`since` when there are none).
+/// The account's changes after `since`, oldest first, each with its change
+/// id.
 pub async fn changes_since(
     data: &Store,
     account_id: u32,
     since: u64,
-) -> trc::Result<(Vec<(Id, Change)>, u64)> {
+) -> trc::Result<Vec<(u64, Id, Change)>> {
     let mut changes = Vec::new();
-    let mut latest = since;
     data.iterate(
         IterateParams::new(
             change_key(account_id, since.saturating_add(1)),
@@ -213,13 +212,13 @@ pub async fn changes_since(
         .ascending(),
         |key, value| {
             if key.len() >= 8 && value.len() == 9 {
-                latest = latest.max(u64::from_be_bytes(key[key.len() - 8..].try_into().unwrap()));
                 let change = match value[8] {
                     0 => Change::Created,
                     1 => Change::Updated,
                     _ => Change::Destroyed,
                 };
                 changes.push((
+                    u64::from_be_bytes(key[key.len() - 8..].try_into().unwrap()),
                     Id::new(u64::from_be_bytes(value[0..8].try_into().unwrap())),
                     change,
                 ));
@@ -229,7 +228,7 @@ pub async fn changes_since(
     )
     .await
     .caused_by(trc::location!())?;
-    Ok((changes, latest))
+    Ok(changes)
 }
 
 /// The account's latest change id, 0 when there's none.

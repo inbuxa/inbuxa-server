@@ -361,7 +361,12 @@ impl MethodName {
                 "get" => MethodFunction::Get,
                 "set" => MethodFunction::Set,
                 "query" => MethodFunction::Query,
+                "changes" => MethodFunction::Changes,
             )?;
+            // inbuxa: only masked email has /changes (a fork addition)
+            if fnc == MethodFunction::Changes && obj != ObjectType::MaskedEmail {
+                return None;
+            }
 
             if obj.flags() & OBJ_SINGLETON == 0 || fnc != MethodFunction::Query {
                 (MethodObject::Registry(obj), fnc).into()

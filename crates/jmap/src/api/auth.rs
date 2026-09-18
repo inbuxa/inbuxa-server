@@ -247,8 +247,9 @@ impl JmapAuthorization for AccessToken {
                 | MethodObject::PushSubscription
                 | MethodObject::SearchSnippet
                 | MethodObject::VacationResponse
-                | MethodObject::SieveScript
-                | MethodObject::Registry(_) => Permission::JmapEmailChanges,
+                | MethodObject::SieveScript => Permission::JmapEmailChanges,
+                // inbuxa: x:MaskedEmail/changes reads what /get reads
+                MethodObject::Registry(object_type) => object_type.get_permission(),
             },
             RequestMethod::Copy(m) => match &m {
                 CopyRequestMethod::Email(_) => Permission::JmapEmailCopy,

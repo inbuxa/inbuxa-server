@@ -137,6 +137,8 @@ pub enum ChangesResponseMethod {
     CalendarEvent(Box<ChangesResponse<CalendarEvent>>),
     CalendarEventNotification(Box<ChangesResponse<CalendarEventNotification>>),
     ShareNotification(Box<ChangesResponse<ShareNotification>>),
+    // inbuxa: x:MaskedEmail/changes
+    Registry(Box<ChangesResponse<crate::object::registry::Registry>>),
 }
 
 #[derive(Debug, serde::Serialize)]

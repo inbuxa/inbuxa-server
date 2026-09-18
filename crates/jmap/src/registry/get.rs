@@ -357,6 +357,12 @@ impl RegistryGet for Server {
                     get.insert(id, object);
                 }
 
+                // inbuxa: a state for masked email (a fork addition)
+                if object_type == ObjectType::MaskedEmail {
+                    get.response.state =
+                        Some(crate::inbuxa::masked_email::state(self, get.account_id).await?);
+                }
+
                 Ok(get.into_response())
             }
             ObjectType::QueuedMessage => {
