@@ -16,6 +16,7 @@ types = { path = "../types" }
 jmap_proto = { path = "../jmap-proto" }
 jmap-tools = { version = "0.1" }
 registry = { path =  "../registry" }
+inbuxa-features = { path = "../features" }
 smtp-proto = { version = "0.2", features = ["rkyv", "serde"] }
 tokio = { version = "1.53", features = ["rt"] }
 mail-parser = { version = "0.11", features = ["full_encoding", "rkyv"] }

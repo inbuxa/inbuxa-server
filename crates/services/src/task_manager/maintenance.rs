@@ -227,7 +227,6 @@ async fn store_maintenance(
                 .await
                 .caused_by(trc::location!())?;
 
-
             trc::event!(
                 Store(StoreEvent::DataStorePurged),
                 Elapsed = started.elapsed()
@@ -328,7 +327,12 @@ async fn store_maintenance(
                     .await?;
             }
         }
+        // inbuxa: MT-21: recompute every tenant's usage
         TaskStoreMaintenanceType::ResetTenantQuotas => {
+            for tenant_id in inbuxa_features::tenancy::quota::all_tenants(server.registry()).await?
+            {
+                recalculate_tenant_quota(server, tenant_id).await?;
+            }
         }
     }
 
@@ -431,10 +435,15 @@ async fn recalculate_quota(server: &Server, account_id: u32) -> trc::Result<()> 
         .map(|_| ())
 }
 
-
-#[cfg(not(feature = "enterprise"))]
-async fn recalculate_tenant_quota(_server: &Server, _tenant_id: u32) -> trc::Result<()> {
-    Ok(())
+// inbuxa: MT-21: recompute a tenant's usage from its members'
+async fn recalculate_tenant_quota(server: &Server, tenant_id: u32) -> trc::Result<()> {
+    inbuxa_features::tenancy::quota::recalculate(
+        &server.core.storage.data,
+        server.registry(),
+        tenant_id,
+    )
+    .await
+    .map(|_| ())
 }
 
 async fn reset_imap_uids(server: &Server, account_id: u32) -> trc::Result<(u32, u32)> {
