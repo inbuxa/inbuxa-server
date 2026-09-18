@@ -114,7 +114,7 @@ impl<'x, T: Display> Response<'x, T> {
                     "EXPIRE NEVER",
                     "UIDL",
                     "UTF8",
-                    "IMPLEMENTATION Stalwart Server",
+                    concat!("IMPLEMENTATION ", types::brand_server!()),
                 ] {
                     buf.extend_from_slice(capa.as_bytes());
                     buf.extend_from_slice(b"\r\n");
@@ -200,7 +200,7 @@ mod tests {
                     "EXPIRE NEVER\r\n",
                     "UIDL\r\n",
                     "UTF8\r\n",
-                    "IMPLEMENTATION Stalwart Server\r\n.\r\n"
+                    concat!("IMPLEMENTATION ", types::brand_server!(), "\r\n.\r\n")
                 ),
             ),
             (

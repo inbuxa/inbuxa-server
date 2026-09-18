@@ -9,7 +9,7 @@
 pub mod core;
 pub mod op;
 
-static SERVER_GREETING: &str = "Stalwart ManageSieve at your service.";
+static SERVER_GREETING: &str = concat!(types::brand!(), " ManageSieve at your service.");
 
 #[cfg(test)]
 mod tests {

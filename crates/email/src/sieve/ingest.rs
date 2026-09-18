@@ -779,7 +779,7 @@ impl SieveScriptIngest for Server {
 fn write_received_header(buf: &mut Vec<u8>, hostname: &str, id: u64) {
     buf.extend_from_slice(b"Received: from localhost (localhost [127.0.0.1])\r\n\tby ");
     buf.extend_from_slice(hostname.as_bytes());
-    buf.extend_from_slice(b" (Stalwart SMTP) with LMTP id ");
+    buf.extend_from_slice(concat!(" (", types::brand!(), " SMTP) with LMTP id ").as_bytes());
     buf.extend_from_slice(format!("{id:X}").as_bytes());
     buf.extend_from_slice(b";\r\n\t");
     buf.extend_from_slice(Date::now().to_rfc822().as_bytes());

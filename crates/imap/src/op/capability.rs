@@ -68,8 +68,11 @@ impl<T: SessionStream> Session<T> {
                 .with_tag(request.tag)
                 .serialize(
                     concat!(
-                        "* ID (\"name\" \"Stalwart\" \"version\" \"1.0.0\" \"vendor\" \"Stalwart Labs LLC\" ",
-                        "\"support-url\" \"https://stalw.art\")\r\n"
+                        "* ID (\"name\" \"",
+                        types::brand!(),
+                        "\" \"version\" \"1.0.0\" \"vendor\" \"",
+                        types::brand!(),
+                        "\")\r\n"
                     )
                     .as_bytes()
                     .to_vec(),

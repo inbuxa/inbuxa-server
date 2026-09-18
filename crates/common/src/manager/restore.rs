@@ -52,9 +52,9 @@ impl Core {
         if !conflicts.is_empty() {
             eprintln!(
                 "Cannot import: the target database already contains data in the key ranges being \
-                 imported. This usually means Stalwart was started before the import ran, which \
+                 imported. This usually means the server was started before the import ran, which \
                  can create duplicate entries. Import into a fresh, empty database and do not \
-                 start Stalwart before importing. Conflicting dumps:"
+                 start the server before importing. Conflicting dumps:"
             );
             for path in conflicts {
                 eprintln!("  {}", path.display());

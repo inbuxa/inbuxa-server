@@ -14,7 +14,7 @@ impl<T: SessionStream> Session<T> {
         let op_start = Instant::now();
 
         let mut response = Vec::with_capacity(128);
-        response.extend_from_slice(b"\"IMPLEMENTATION\" \"Stalwart ManageSieve\"\r\n");
+        response.extend_from_slice(concat!("\"IMPLEMENTATION\" \"", types::brand!(), " ManageSieve\"\r\n").as_bytes());
         response.extend_from_slice(b"\"VERSION\" \"1.0\"\r\n");
         if !self.stream.is_tls() {
             response.extend_from_slice(b"\"STARTTLS\"\r\n");

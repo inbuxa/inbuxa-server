@@ -47,7 +47,7 @@ summary.rrule: Rrule(ICalendarRecurrenceRule { freq: Daily, until: None, count: 
 summary.summary: Text("Review Internet-Draft")
 BEGIN:VCALENDAR
 METHOD:REQUEST
-PRODID:-//Stalwart Labs LLC//Stalwart Server//EN
+PRODID:-//INBUXA//INBUXA Server//EN
 VERSION:2.0
 BEGIN:VEVENT
 SUMMARY:Review Internet-Draft
@@ -89,7 +89,7 @@ END:VCALENDAR
 # Make sure the participant receives the event
 > get bernard@example.net 9263504FD3AD
 BEGIN:VCALENDAR
-PRODID:-//Stalwart Labs LLC//Stalwart Server//EN
+PRODID:-//INBUXA//INBUXA Server//EN
 VERSION:2.0
 BEGIN:VEVENT
 SUMMARY:Review Internet-Draft
@@ -185,7 +185,7 @@ summary.rrule: Rrule(ICalendarRecurrenceRule { freq: Daily, until: None, count: 
 summary.summary: Text("Review Internet-Draft")
 BEGIN:VCALENDAR
 METHOD:REPLY
-PRODID:-//Stalwart Labs LLC//Stalwart Server//EN
+PRODID:-//INBUXA//INBUXA Server//EN
 VERSION:2.0
 BEGIN:VEVENT
 SUMMARY:Review Internet-Draft
@@ -343,7 +343,7 @@ summary.rrule: Rrule(ICalendarRecurrenceRule { freq: Daily, until: None, count: 
 summary.summary: Text("Review Internet-Draft")
 BEGIN:VCALENDAR
 METHOD:REPLY
-PRODID:-//Stalwart Labs LLC//Stalwart Server//EN
+PRODID:-//INBUXA//INBUXA Server//EN
 VERSION:2.0
 BEGIN:VEVENT
 SUMMARY:Review Internet-Draft

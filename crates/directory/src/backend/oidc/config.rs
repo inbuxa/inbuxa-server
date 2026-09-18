@@ -38,7 +38,7 @@ impl OpenIdDirectory {
 
     pub async fn new(config: OidcConfig) -> Result<Self, OidcError> {
         let http = utils::http::http_client_builder(false)
-            .user_agent("Stalwart/1.0")
+            .user_agent("INBUXA/1.0") // types::brand!(); this crate does not depend on types
             .timeout(Duration::from_secs(30))
             .build()
             .map_err(|e| OidcError::Network(format!("HTTP client build failed: {e}")))?;

@@ -32,7 +32,7 @@ summary.dtstart: Time(ItipTime { start: 867776400, tz_id: 32768 })
 summary.summary: Text("Create the requirements document")
 BEGIN:VCALENDAR
 METHOD:REQUEST
-PRODID:-//Stalwart Labs LLC//Stalwart Server//EN
+PRODID:-//INBUXA//INBUXA Server//EN
 VERSION:2.0
 BEGIN:VTODO
 PRIORITY:1
@@ -57,7 +57,7 @@ END:VCALENDAR
 # Make sure B received the todo
 > get b@example.com calsrv.example.com-873970198738777-00@example.com
 BEGIN:VCALENDAR
-PRODID:-//Stalwart Labs LLC//Stalwart Server//EN
+PRODID:-//INBUXA//INBUXA Server//EN
 VERSION:2.0
 BEGIN:VTODO
 PRIORITY:1
@@ -103,7 +103,7 @@ summary.attendee: Participants([ItipParticipant { email: "a@example.com", name: 
 summary.dtstart: Time(ItipTime { start: 867776400, tz_id: 32768 })
 BEGIN:VCALENDAR
 METHOD:REPLY
-PRODID:-//Stalwart Labs LLC//Stalwart Server//EN
+PRODID:-//INBUXA//INBUXA Server//EN
 VERSION:2.0
 BEGIN:VTODO
 STATUS:IN-PROCESS
@@ -172,7 +172,7 @@ summary.attendee: Participants([ItipParticipant { email: "a@example.com", name: 
 summary.dtstart: Time(ItipTime { start: 867776400, tz_id: 32768 })
 BEGIN:VCALENDAR
 METHOD:REPLY
-PRODID:-//Stalwart Labs LLC//Stalwart Server//EN
+PRODID:-//INBUXA//INBUXA Server//EN
 VERSION:2.0
 BEGIN:VTODO
 PERCENT-COMPLETE:75
@@ -241,7 +241,7 @@ summary.attendee: Participants([ItipParticipant { email: "a@example.com", name: 
 summary.dtstart: Time(ItipTime { start: 867776400, tz_id: 32768 })
 BEGIN:VCALENDAR
 METHOD:REPLY
-PRODID:-//Stalwart Labs LLC//Stalwart Server//EN
+PRODID:-//INBUXA//INBUXA Server//EN
 VERSION:2.0
 BEGIN:VTODO
 DUE:19970722T170000Z
@@ -317,7 +317,7 @@ summary.summary: Text("Send Status Reports to Area Managers")
 ~summary.summary: Text("Create the requirements document")
 BEGIN:VCALENDAR
 METHOD:REQUEST
-PRODID:-//Stalwart Labs LLC//Stalwart Server//EN
+PRODID:-//INBUXA//INBUXA Server//EN
 VERSION:2.0
 BEGIN:VTODO
 PRIORITY:1
@@ -347,7 +347,7 @@ summary.rrule: Rrule(ICalendarRecurrenceRule { freq: Monthly, until: None, count
 summary.summary: Text("Create the requirements document")
 BEGIN:VCALENDAR
 METHOD:CANCEL
-PRODID:-//Stalwart Labs LLC//Stalwart Server//EN
+PRODID:-//INBUXA//INBUXA Server//EN
 VERSION:2.0
 BEGIN:VTODO
 STATUS:CANCELLED
@@ -367,7 +367,7 @@ END:VCALENDAR
 # Make sure "C" received the cancel request
 > get c@example.com calsrv.example.com-873970198738777-00@example.com
 BEGIN:VCALENDAR
-PRODID:-//Stalwart Labs LLC//Stalwart Server//EN
+PRODID:-//INBUXA//INBUXA Server//EN
 VERSION:2.0
 BEGIN:VTODO
 PRIORITY:1
@@ -451,7 +451,7 @@ summary.rrule: Rrule(ICalendarRecurrenceRule { freq: Monthly, until: None, count
 summary.summary: Text("Send Status Reports to Area Managers")
 BEGIN:VCALENDAR
 METHOD:REPLY
-PRODID:-//Stalwart Labs LLC//Stalwart Server//EN
+PRODID:-//INBUXA//INBUXA Server//EN
 VERSION:2.0
 BEGIN:VTODO
 PERCENT-COMPLETE:75

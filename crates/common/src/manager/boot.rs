@@ -38,7 +38,8 @@ pub struct IpcReceivers {
 }
 
 const HELP: &str = concat!(
-    "Stalwart Server v",
+    types::brand_server!(),
+    " v",
     env!("CARGO_PKG_VERSION"),
     r#"
 

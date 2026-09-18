@@ -61,7 +61,7 @@ summary.rrule: Rrule(ICalendarRecurrenceRule { freq: Weekly, until: None, count:
 summary.summary: Text("Meet me maybe")
 BEGIN:VCALENDAR
 METHOD:REQUEST
-PRODID:-//Stalwart Labs LLC//Stalwart Server//EN
+PRODID:-//INBUXA//INBUXA Server//EN
 VERSION:2.0
 BEGIN:VEVENT
 X-MICROSOFT-CDO-OWNERAPPTID:299828133
@@ -176,7 +176,7 @@ summary.summary: Text("Meet me maybe")
 ~summary.description: Text("This is the event description")
 BEGIN:VCALENDAR
 METHOD:REQUEST
-PRODID:-//Stalwart Labs LLC//Stalwart Server//EN
+PRODID:-//INBUXA//INBUXA Server//EN
 VERSION:2.0
 BEGIN:VEVENT
 X-MICROSOFT-CDO-OWNERAPPTID:299828133
@@ -224,7 +224,7 @@ END:VCALENDAR
 # Make sure the original alarms are preserved
 > get b@gmail.com 1qnf39p0m9h6n1cm9qa9d8mocv@google.com
 BEGIN:VCALENDAR
-PRODID:-//Stalwart Labs LLC//Stalwart Server//EN
+PRODID:-//INBUXA//INBUXA Server//EN
 VERSION:2.0
 BEGIN:VEVENT
 X-MICROSOFT-CDO-OWNERAPPTID:299828133

@@ -267,10 +267,10 @@ pub fn accept_language(req: &HttpRequest) -> &str {
 }
 
 const BEARER_CHALLENGE: &str = concat!(
-    "Bearer realm=\"Stalwart Server\", ",
+    concat!("Bearer realm=\"", types::brand_server!(), "\", "),
     "resource_metadata=\"/.well-known/oauth-protected-resource\""
 );
-const BASIC_CHALLENGE: &str = "Basic realm=\"Stalwart Server\"";
+const BASIC_CHALLENGE: &str = concat!("Basic realm=\"", types::brand_server!(), "\"");
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AuthChallenge {

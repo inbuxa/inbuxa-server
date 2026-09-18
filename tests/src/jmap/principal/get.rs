@@ -54,7 +54,7 @@ pub async fn test(test: &TestServer) {
         "urn:ietf:params:jmap:submission": {},
         "urn:ietf:params:jmap:vacationresponse": {},
         "urn:ietf:params:jmap:sieve": {
-          "implementation": "Stalwart v1.0.0"
+          "implementation": "INBUXA v1.0.0"
         },
         "urn:ietf:params:jmap:blob": {},
         "urn:ietf:params:jmap:quota": {},

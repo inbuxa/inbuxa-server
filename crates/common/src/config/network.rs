@@ -190,7 +190,7 @@ impl Network {
             }),
             info: Info {
                 provider: Provider {
-                    name: "Stalwart".into(),
+                    name: types::brand!().into(),
                     ..Default::default()
                 },
                 ..Default::default()
