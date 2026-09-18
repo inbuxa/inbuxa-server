@@ -1,7 +1,8 @@
-# Fork specification (draft)
+# inbuxa-server: specification (draft)
 
-Working title only. The product has no name yet. It ships under the INBUXA
-brand, and the folder is renamed once the name is chosen.
+inbuxa-server is the project. Whether the product it ships carries that name
+or another inside the INBUXA brand is still open (§8). Not published: no
+remote, and nothing public before the cutover in §7.
 
 ## 1. What this is
 
@@ -287,7 +288,8 @@ before anything that could prompt that notice happens.
 
 ## 8. Open decisions
 
-- Product name, and whether the server and the whole product share it.
+- Product name: whether the shipped product is called inbuxa-server or
+  something else inside the INBUXA brand.
 - The namespace for the fork's own JMAP capabilities.
 - Whether the recovery CLI lives in the server binary or in the installer.
 - Whether the installer stays its own repository or joins the fork's.
