@@ -18,7 +18,7 @@ sources, and nothing else:
 No Enterprise-only file or snippet was used. The session that drafted this
 had seen short Enterprise snippets while surveying the license split, so it
 writes specs only. Where this spec needs a behavior no public source settles,
-it says so under "To observe" or makes a decision of its own, marked
+it settles it by observation (see "Observed") or makes a decision of its own, marked
 **Decision**. It never fills a gap from memory of upstream code.
 
 ## What it is
