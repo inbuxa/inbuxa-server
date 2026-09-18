@@ -10,6 +10,7 @@ pub mod authorization;
 pub mod crypto;
 pub mod delivery;
 pub mod directory;
+pub mod masked_email;
 pub mod oidc;
 pub mod purge;
 pub mod quota;
@@ -62,6 +63,7 @@ pub async fn system_tests() {
     oidc::test(&mut test).await;
     authorization::test(&mut test).await;
     tenant::test(&mut test).await;
+    masked_email::test(&mut test).await;
     security::test(&mut test).await;
     quota::test(&mut test).await;
     purge::test(&mut test).await;

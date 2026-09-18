@@ -45,6 +45,7 @@ pop3 = { path = "../crates/pop3", features = ["test_mode"] }
 smtp = { path = "../crates/smtp", features = ["test_mode"] }
 common = { path = "../crates/common", features = ["test_mode"] }
 registry = { path = "../crates/registry" }
+inbuxa-features = { path = "../crates/features" }
 email = { path = "../crates/email", features = ["test_mode"] }
 spam-filter = { path = "../crates/spam-filter", features = ["test_mode"] }
 trc = { path = "../crates/trc", features = [] }

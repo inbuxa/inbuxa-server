@@ -186,7 +186,7 @@ impl CreateRefusal {
 /// `x:MaskedEmail/set`: a mask about to be created or changed (ME-12 to
 /// ME-17). On an update, the server-set and create-only fields keep their
 /// stored values.
-pub async fn validate(
+pub(crate) async fn validate(
     set: &RegistrySetResponse<'_>,
     mask: &mut MaskedEmail,
     old: Option<&MaskedEmail>,
@@ -285,7 +285,7 @@ pub async fn read(server: &Server, id: Id, mask: &mut MaskedEmail) -> trc::Resul
 
 /// `x:MaskedEmail/query`, which also filters on `enabled`, `forDomain` and
 /// text in the address and description (a fork addition).
-pub async fn query(mut req: RegistryQueryResponse<'_>) -> trc::Result<QueryResponseBuilder> {
+pub(crate) async fn query(mut req: RegistryQueryResponse<'_>) -> trc::Result<QueryResponseBuilder> {
     let account_id = req.request.account_id.document_id();
     assert_can_manage(req.server, req.access_token, account_id).await?;
 

@@ -274,13 +274,18 @@ pub async fn set(
         }
         changed.enabled = new_state.is_live();
         if changed != mask.object {
-            let old = Object::from(mask.object.clone());
+            // The stored object carries the revision the write is checked against
+            let Some(old) = registry
+                .get(ObjectId::new(ObjectType::MaskedEmail, id))
+                .await?
+            else {
+                response.not_updated.append(id, SetError::not_found());
+                continue;
+            };
+            let mut new = old.clone();
+            new.inner = Object::from(changed.clone()).inner;
             match registry
-                .write(RegistryWrite::update(
-                    id,
-                    &Object::from(changed.clone()),
-                    &old,
-                ))
+                .write(RegistryWrite::update(id, &new, &old))
                 .await?
             {
                 RegistryWriteResult::Success(_) => {}
