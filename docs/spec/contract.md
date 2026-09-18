@@ -98,6 +98,31 @@ Each has an ID, and tests name the IDs they check.
   INBUXA Admin's `<meta name="oauth-client-id">` is set to `inbuxa-admin`.
   Until then it keeps upstream's `stalwart-webui`, which only works while
   registration isn't required.
+
+  **Built (interim), 2026-09-18.** C-5's defaults are in the server, and
+  `crates/common/src/manager/first_party.rs` registers the clients on every
+  start. Until `x:FrontEnds` exists, three environment variables stand in for
+  it: `INBUXA_ADMIN_URL`, `INBUXA_WEBMAIL_URL` and
+  `INBUXA_WEBMAIL_CLIENT_SECRET` (the webmail client is registered only when
+  both of its variables are set). The web interface the server still serves
+  itself (`/admin`, `/account`, until SPEC.md §5.3 removes it) is registered
+  too, as its application's OAuth client id or `stalwart-webui`, at the
+  server's public URL. A missing client is created. An existing one gains any
+  redirect URI it lacks, and the webmail client gets the configured secret.
+  Nothing an operator added is removed. Bootstrap and recovery mode skip this:
+  their recovery admin holds `oAuthClientOverride`.
+
+  Checked on a local first boot of the debug build: setup still signed in;
+  after a restart with the three variables set, the server reported
+  registration required and anonymous registration off, and held the three
+  clients with the expected redirect URIs. A user signed in through each
+  public client. A foreign redirect, an unregistered client and anonymous
+  registration were refused, and so was the webmail client's code exchange
+  with a wrong or missing secret. A second restart left three clients.
+
+  An existing server that saved its OAuth settings keeps them (INBUXA's
+  production server did). One upgraded from Stalwart that never saved them
+  moves to the new defaults, with its web interface registered first.
 - **C-7.** Third-party apps that want OAuth (Thunderbird, mobile apps) get a
   client in one of two ways: an administrator registers it (`x:OAuthClient`,
   in INBUXA Admin), or the operator turns anonymous dynamic registration back

@@ -30641,8 +30641,9 @@ impl Default for OidcProvider {
     fn default() -> Self {
         Self {
             auth_code_max_attempts: 3u64,
-            anonymous_client_registration: true,
-            require_client_registration: false,
+            // inbuxa: registration required, anonymous registration off (docs/spec/contract.md C-5)
+            anonymous_client_registration: false,
+            require_client_registration: true,
             auth_code_expiry: Duration::from_millis(600000),
             refresh_token_expiry: Duration::from_millis(2592000000),
             refresh_token_renewal: Duration::from_millis(345600000),

@@ -98,6 +98,10 @@ async fn insert_safe_defaults(bp: &mut Bootstrap) -> trc::Result<()> {
         return Ok(());
     }
 
+    // inbuxa: registration is required (contract C-5), so the first-party
+    // front ends are registered on every start (C-6)
+    super::first_party::ensure_first_party_clients(bp).await?;
+
     if bp.registry.count_object(ObjectType::MtaQueueQuota).await? == 0 {
         bp.registry
             .write(RegistryWrite::insert(

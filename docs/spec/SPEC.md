@@ -468,7 +468,8 @@ Found at the fork's first boot, and to fix:
 
 Additions for the fork:
 
-- Register ihasmail as the first-party OAuth client (§5.2).
+- Register the first-party OAuth clients (§5.2). Done 2026-09-18: see
+  contract.md C-6.
 - Behavior fixes where upstream's first boot needs workarounds: an ACME order
   that fails isn't retried on restart, some network settings need a restart,
   and the default log path doesn't exist in the image. Each is a candidate for
