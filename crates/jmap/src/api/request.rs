@@ -162,6 +162,9 @@ impl RequestHandler for Server {
                                     SetResponseMethod::VacationResponse(set_response) => {
                                         set_response.update_created_ids(&mut response);
                                     }
+                                    SetResponseMethod::MaskedEmail(set_response) => {
+                                        set_response.update_created_ids(&mut response);
+                                    }
                                     SetResponseMethod::AddressBook(set_response) => {
                                         set_response.update_created_ids(&mut response);
                                     }
@@ -295,6 +298,13 @@ impl RequestHandler for Server {
                     access_token.assert_is_member(req.account_id)?;
 
                     self.vacation_response_get(*req).await?.into()
+                }
+                // inbuxa: Fastmail's MaskedEmail/get
+                GetRequestMethod::MaskedEmail(mut req) => {
+                    resolve_account_id(&mut req.account_id, method_name.obj, access_token)?;
+                    crate::inbuxa::fastmail::get(self, access_token, *req)
+                        .await?
+                        .into()
                 }
                 GetRequestMethod::Principal(req) => {
                     self.principal_get(*req, access_token).await?.into()
@@ -515,6 +525,13 @@ impl RequestHandler for Server {
                     access_token.assert_is_member(req.account_id)?;
 
                     self.vacation_response_set(*req, access_token).await?.into()
+                }
+                // inbuxa: Fastmail's MaskedEmail/set
+                SetRequestMethod::MaskedEmail(mut req) => {
+                    resolve_account_id(&mut req.account_id, method_name.obj, access_token)?;
+                    crate::inbuxa::fastmail::set(self, access_token, *req)
+                        .await?
+                        .into()
                 }
                 SetRequestMethod::AddressBook(mut req) => {
                     resolve_account_id(&mut req.account_id, method_name.obj, access_token)?;

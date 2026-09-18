@@ -68,6 +68,20 @@ impl SessionHandler for Server {
             Capability::Inbuxa,
             Capabilities::Inbuxa(InbuxaAccountCapabilities { logo }),
         );
+        // inbuxa: Fastmail's Masked Email API, for accounts that may hold masks
+        if access_token.has_permission(Permission::SysMaskedEmailGet) {
+            session.capabilities.append(
+                Capability::FastmailMaskedEmail,
+                Capabilities::Empty(EmptyCapabilities::default()),
+            );
+            account.account_capabilities.append(
+                Capability::FastmailMaskedEmail,
+                Capabilities::Empty(EmptyCapabilities::default()),
+            );
+            session
+                .primary_accounts
+                .append(Capability::FastmailMaskedEmail, account_id);
+        }
         session.accounts.append(account_id, account);
 
         // Add secondary accounts
@@ -139,7 +153,8 @@ impl AccountCapabilities for AccessToken {
                     Capability::Core
                     | Capability::PrincipalsOwner
                     | Capability::WebPushVapid
-                    | Capability::Inbuxa => {
+                    | Capability::Inbuxa
+                    | Capability::FastmailMaskedEmail => {
                         return false;
                     }
                 };

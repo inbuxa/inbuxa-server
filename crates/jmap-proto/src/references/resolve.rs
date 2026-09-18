@@ -41,6 +41,7 @@ impl Response<'_> {
                 GetRequestMethod::PushSubscription(request) => request.resolve_references(self)?,
                 GetRequestMethod::Sieve(request) => request.resolve_references(self)?,
                 GetRequestMethod::VacationResponse(request) => request.resolve_references(self)?,
+                GetRequestMethod::MaskedEmail(request) => request.resolve_references(self)?,
                 GetRequestMethod::Principal(request) => request.resolve_references(self)?,
                 GetRequestMethod::Quota(request) => request.resolve_references(self)?,
                 GetRequestMethod::Blob(request) => request.resolve_references(self)?,
@@ -73,6 +74,9 @@ impl Response<'_> {
                 }
                 SetRequestMethod::Sieve(request) => request.resolve_references(self, 1, false)?,
                 SetRequestMethod::VacationResponse(request) => {
+                    request.resolve_references(self, 1, false)?
+                }
+                SetRequestMethod::MaskedEmail(request) => {
                     request.resolve_references(self, 1, false)?
                 }
                 SetRequestMethod::AddressBook(request) => {

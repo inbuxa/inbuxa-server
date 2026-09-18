@@ -98,6 +98,9 @@ pub enum Capability {
     // inbuxa: the fork's own capability (contract C-1, multi-tenancy MT-22)
     #[serde(rename(serialize = "urn:inbuxa:jmap"))]
     Inbuxa = 1 << 20,
+    // inbuxa: Fastmail's Masked Email API (masked email)
+    #[serde(rename(serialize = "https://www.fastmail.com/dev/maskedemail"))]
+    FastmailMaskedEmail = 1 << 21,
 }
 
 #[derive(Debug, Clone, Copy, Default)]
@@ -347,6 +350,7 @@ impl Capability {
             Capability::WebPushVapid => "urn:ietf:params:jmap:webpush-vapid",
             Capability::EmailPush => "urn:ietf:params:jmap:emailpush",
             Capability::Inbuxa => "urn:inbuxa:jmap",
+            Capability::FastmailMaskedEmail => "https://www.fastmail.com/dev/maskedemail",
         }
     }
 
@@ -494,6 +498,7 @@ impl Capability {
             "urn:ietf:params:jmap:webpush-vapid" => Capability::WebPushVapid,
             "urn:ietf:params:jmap:emailpush" => Capability::EmailPush,
             "urn:inbuxa:jmap" => Capability::Inbuxa,
+            "https://www.fastmail.com/dev/maskedemail" => Capability::FastmailMaskedEmail,
         )
     }
 }

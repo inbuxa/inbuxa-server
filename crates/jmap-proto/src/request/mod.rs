@@ -111,6 +111,7 @@ pub enum GetRequestMethod {
     ParticipantIdentity(Box<GetRequest<ParticipantIdentity>>),
     ShareNotification(Box<GetRequest<ShareNotification>>),
     Registry(Box<GetRequest<Registry>>),
+    MaskedEmail(Box<GetRequest<crate::object::fastmail_masked_email::FastmailMaskedEmail>>),
 }
 
 #[derive(Debug)]
@@ -131,6 +132,7 @@ pub enum SetRequestMethod<'x> {
     CalendarEventNotification(Box<SetRequest<'x, CalendarEventNotification>>),
     ParticipantIdentity(Box<SetRequest<'x, ParticipantIdentity>>),
     Registry(Box<SetRequest<'x, Registry>>),
+    MaskedEmail(Box<SetRequest<'x, crate::object::fastmail_masked_email::FastmailMaskedEmail>>),
 }
 
 #[derive(Debug)]

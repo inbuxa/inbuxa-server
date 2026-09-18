@@ -41,6 +41,8 @@ pub enum MethodObject {
     ParticipantIdentity,
     ShareNotification,
     Registry(ObjectType),
+    // inbuxa: Fastmail's MaskedEmail
+    MaskedEmail,
 }
 
 impl MethodObject {
@@ -64,6 +66,7 @@ impl MethodObject {
             MethodObject::AddressBook | MethodObject::ContactCard => Capability::Contacts,
             MethodObject::FileNode => Capability::FileNode,
             MethodObject::Registry(_) => Capability::Stalwart,
+            MethodObject::MaskedEmail => Capability::FastmailMaskedEmail,
         }
     }
 }
@@ -235,6 +238,8 @@ impl MethodName {
             (MethodFunction::Set, MethodObject::ParticipantIdentity) => "ParticipantIdentity/set",
 
             (MethodFunction::Echo, MethodObject::Core) => "Core/echo",
+            (MethodFunction::Get, MethodObject::MaskedEmail) => "MaskedEmail/get",
+            (MethodFunction::Set, MethodObject::MaskedEmail) => "MaskedEmail/set",
             (method, MethodObject::Registry(obj)) => {
                 return Cow::Owned(format!("x:{}/{}", obj.as_str(), method.as_str()));
             }
@@ -354,6 +359,9 @@ impl MethodName {
 
             "Core/echo" => (MethodObject::Core, MethodFunction::Echo),
 
+            "MaskedEmail/get" => (MethodObject::MaskedEmail, MethodFunction::Get),
+            "MaskedEmail/set" => (MethodObject::MaskedEmail, MethodFunction::Set),
+
         ).or_else(|| {
             let (obj, fnc) = s.strip_prefix("x:")?.split_once('/')?;
             let obj = ObjectType::parse(obj)?;
@@ -401,6 +409,7 @@ impl Display for MethodObject {
             MethodObject::CalendarEvent => "CalendarEvent",
             MethodObject::CalendarEventNotification => "CalendarEventNotification",
             MethodObject::ShareNotification => "ShareNotification",
+            MethodObject::MaskedEmail => "MaskedEmail",
             MethodObject::Registry(obj) => {
                 f.write_str("x:")?;
                 return f.write_str(obj.as_str());

@@ -18,6 +18,7 @@ pub mod calendar_event_notification;
 pub mod contact;
 pub mod email;
 pub mod email_submission;
+pub mod fastmail_masked_email; // inbuxa: masked email
 pub mod file_node;
 pub mod identity;
 pub mod mailbox;

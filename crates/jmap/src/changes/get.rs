@@ -413,6 +413,7 @@ impl IntermediateChangesResponse {
             | MethodObject::SieveScript
             | MethodObject::Principal
             | MethodObject::Quota
+            | MethodObject::MaskedEmail
             | MethodObject::Registry(_) => unreachable!(),
         })
     }

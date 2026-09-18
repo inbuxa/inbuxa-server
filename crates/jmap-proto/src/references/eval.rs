@@ -50,6 +50,9 @@ impl Response<'_> {
                         GetResponseMethod::VacationResponse(response) => {
                             response.eval_jptr(path, &mut results)
                         }
+                        GetResponseMethod::MaskedEmail(response) => {
+                            response.eval_jptr(path, &mut results)
+                        }
                         GetResponseMethod::Principal(response) => {
                             response.eval_jptr(path, &mut results)
                         }

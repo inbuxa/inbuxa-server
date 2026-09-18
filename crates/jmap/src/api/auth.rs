@@ -69,6 +69,8 @@ impl JmapAuthorization for AccessToken {
                 GetRequestMethod::PushSubscription(_) => Permission::JmapPushSubscriptionGet,
                 GetRequestMethod::Sieve(_) => Permission::JmapSieveScriptGet,
                 GetRequestMethod::VacationResponse(_) => Permission::JmapVacationResponseGet,
+                // inbuxa: Fastmail's MaskedEmail (ME-18)
+                GetRequestMethod::MaskedEmail(_) => Permission::SysMaskedEmailGet,
                 GetRequestMethod::Principal(_) => Permission::JmapPrincipalGet,
                 GetRequestMethod::Quota(_) => Permission::JmapQuotaGet,
                 GetRequestMethod::Blob(_) => Permission::JmapBlobGet,
@@ -140,6 +142,14 @@ impl JmapAuthorization for AccessToken {
                         Permission::JmapSieveScriptCreate,
                         Permission::JmapSieveScriptUpdate,
                         Permission::JmapSieveScriptDestroy,
+                    ),
+                    // inbuxa: Fastmail's MaskedEmail (ME-18)
+                    SetRequestMethod::MaskedEmail(s) => validate_set(
+                        s,
+                        self,
+                        Permission::SysMaskedEmailCreate,
+                        Permission::SysMaskedEmailUpdate,
+                        Permission::SysMaskedEmailDestroy,
                     ),
                     SetRequestMethod::VacationResponse(s) => validate_set(
                         s,
@@ -247,7 +257,8 @@ impl JmapAuthorization for AccessToken {
                 | MethodObject::PushSubscription
                 | MethodObject::SearchSnippet
                 | MethodObject::VacationResponse
-                | MethodObject::SieveScript => Permission::JmapEmailChanges,
+                | MethodObject::SieveScript
+                | MethodObject::MaskedEmail => Permission::JmapEmailChanges,
                 // inbuxa: x:MaskedEmail/changes reads what /get reads
                 MethodObject::Registry(object_type) => object_type.get_permission(),
             },

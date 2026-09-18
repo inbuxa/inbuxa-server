@@ -98,6 +98,7 @@ pub enum GetResponseMethod {
     ParticipantIdentity(GetResponse<ParticipantIdentity>),
     ShareNotification(GetResponse<ShareNotification>),
     Registry(GetResponse<Registry>),
+    MaskedEmail(GetResponse<crate::object::fastmail_masked_email::FastmailMaskedEmail>),
 }
 
 #[derive(Debug, serde::Serialize)]
@@ -119,6 +120,7 @@ pub enum SetResponseMethod {
     CalendarEventNotification(Box<SetResponse<CalendarEventNotification>>),
     ParticipantIdentity(Box<SetResponse<ParticipantIdentity>>),
     Registry(Box<SetResponse<Registry>>),
+    MaskedEmail(Box<SetResponse<crate::object::fastmail_masked_email::FastmailMaskedEmail>>),
 }
 
 #[derive(Debug, serde::Serialize)]
@@ -262,6 +264,19 @@ impl<'x> From<GetResponse<PushSubscription>> for ResponseMethod<'x> {
 impl<'x> From<GetResponse<Sieve>> for ResponseMethod<'x> {
     fn from(value: GetResponse<Sieve>) -> Self {
         ResponseMethod::Get(GetResponseMethod::Sieve(value))
+    }
+}
+
+// inbuxa: Fastmail's MaskedEmail
+impl<'x> From<GetResponse<crate::object::fastmail_masked_email::FastmailMaskedEmail>> for ResponseMethod<'x> {
+    fn from(value: GetResponse<crate::object::fastmail_masked_email::FastmailMaskedEmail>) -> Self {
+        ResponseMethod::Get(GetResponseMethod::MaskedEmail(value))
+    }
+}
+
+impl<'x> From<SetResponse<crate::object::fastmail_masked_email::FastmailMaskedEmail>> for ResponseMethod<'x> {
+    fn from(value: SetResponse<crate::object::fastmail_masked_email::FastmailMaskedEmail>) -> Self {
+        ResponseMethod::Set(SetResponseMethod::MaskedEmail(Box::new(value)))
     }
 }
 

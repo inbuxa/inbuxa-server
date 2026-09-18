@@ -66,7 +66,9 @@ pub async fn test(test: &TestServer) {
           "supportsPush": true
         },
         // inbuxa: the fork's own capability (contract C-1, multi-tenancy MT-22)
-        "urn:inbuxa:jmap": {}
+        "urn:inbuxa:jmap": {},
+        // inbuxa: Fastmail's Masked Email API (masked email)
+        "https://www.fastmail.com/dev/maskedemail": {}
       },
       "accounts": {
         john_id: {
@@ -248,7 +250,8 @@ pub async fn test(test: &TestServer) {
             "urn:ietf:params:jmap:mail:share": {},
             "urn:stalwart:jmap": {},
             // inbuxa: MT-22, the logo that applies to the account
-            "urn:inbuxa:jmap": { "logo": null }
+            "urn:inbuxa:jmap": { "logo": null },
+            "https://www.fastmail.com/dev/maskedemail": {}
           }
         }
       },
@@ -269,7 +272,8 @@ pub async fn test(test: &TestServer) {
         "urn:ietf:params:jmap:principals:availability": john_id,
         "urn:ietf:params:jmap:filenode": john_id,
         "urn:ietf:params:jmap:mail:share": john_id,
-        "urn:stalwart:jmap": john_id
+        "urn:stalwart:jmap": john_id,
+        "https://www.fastmail.com/dev/maskedemail": john_id
       },
       "username": "jdoe@example.com",
       "apiUrl": "https://127.0.0.1:8899/jmap/",
