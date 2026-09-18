@@ -321,6 +321,7 @@ impl Family {
                 SUBSPACE_REGISTRY_IDX,
                 SUBSPACE_REGISTRY_PK,
                 SUBSPACE_DIRECTORY,
+                store::SUBSPACE_INBUXA, // inbuxa: masked email
             ],
             Family::Changelog => &[SUBSPACE_LOGS],
             Family::Queue => &[SUBSPACE_QUEUE_MESSAGE, SUBSPACE_QUEUE_EVENT],

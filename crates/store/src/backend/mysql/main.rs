@@ -81,6 +81,7 @@ impl MysqlStore {
             SUBSPACE_TASK_QUEUE,
             SUBSPACE_DELETED_ITEMS,
             SUBSPACE_SPAM_SAMPLES,
+            crate::SUBSPACE_INBUXA, // inbuxa: masked email
             SUBSPACE_BLOB_LINK,
             SUBSPACE_IN_MEMORY_VALUE,
             SUBSPACE_PROPERTY,

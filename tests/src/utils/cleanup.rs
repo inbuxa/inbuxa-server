@@ -25,6 +25,7 @@ pub async fn store_destroy(store: &Store) {
         SUBSPACE_INDEXES,
         SUBSPACE_DELETED_ITEMS,
         SUBSPACE_SPAM_SAMPLES,
+        store::SUBSPACE_INBUXA, // inbuxa: masked email
         SUBSPACE_BLOB_LINK,
         SUBSPACE_LOGS,
         SUBSPACE_IN_MEMORY_COUNTER,

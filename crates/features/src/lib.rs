@@ -18,4 +18,5 @@
 //! it. It works on registry objects and the store directly, never on
 //! `common::Server`.
 
+pub mod masked_email;
 pub mod tenancy;

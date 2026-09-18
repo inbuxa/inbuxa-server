@@ -124,6 +124,9 @@ pub const SUBSPACE_TELEMETRY_METRIC: u8 = b'x';
 pub const SUBSPACE_SEARCH_INDEX: u8 = b'z';
 pub const SUBSPACE_DELETED_ITEMS: u8 = b'j';
 pub const SUBSPACE_SPAM_SAMPLES: u8 = b'w';
+// inbuxa: the fork's own data (masked email ME-*). Not a letter: SQL tables are
+// named after the byte, unquoted, and upstream uses every lowercase letter.
+pub const SUBSPACE_INBUXA: u8 = b'_';
 
 // TODO: Remove in v1.0
 pub const LEGACY_SUBSPACE_BITMAP_TEXT: u8 = b'v';
