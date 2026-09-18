@@ -4,9 +4,13 @@
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
  */
 
+#[cfg(feature = "pending-rebuild")] // inbuxa: pending-rebuild, see docs/spec/features/
 pub mod alerts;
+#[cfg(feature = "pending-rebuild")] // inbuxa: pending-rebuild, see docs/spec/features/
 pub mod metrics;
+#[cfg(feature = "pending-rebuild")] // inbuxa: pending-rebuild, see docs/spec/features/
 pub mod tracing;
+#[cfg(feature = "pending-rebuild")] // inbuxa: pending-rebuild, see docs/spec/features/
 pub mod webhooks;
 
 use crate::utils::server::TestServerBuilder;
@@ -55,9 +59,13 @@ pub async fn telemetry_tests() {
         .await;
     test.insert_account(admin);
 
+    #[cfg(feature = "pending-rebuild")]
     alerts::test(&test).await;
+    #[cfg(feature = "pending-rebuild")]
     metrics::test(&test).await;
+    #[cfg(feature = "pending-rebuild")]
     tracing::test(&test).await;
+    #[cfg(feature = "pending-rebuild")]
     webhooks::test(&test).await;
 
     if test.is_reset() {

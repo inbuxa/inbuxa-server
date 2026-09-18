@@ -15,6 +15,7 @@ pub mod unavailable;
 #[tokio::test(flavor = "multi_thread")]
 pub async fn directory_tests() {
     ldap::test().await;
+    #[cfg(feature = "pending-rebuild")] // inbuxa: pending-rebuild, see docs/spec/features/
     oidc::test().await;
     unavailable::test().await;
     discovery::test().await;

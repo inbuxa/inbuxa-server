@@ -60,6 +60,7 @@ pub async fn system_tests() {
     authentication::test(&test).await;
     oidc::test(&mut test).await;
     authorization::test(&mut test).await;
+    #[cfg(feature = "pending-rebuild")] // inbuxa: pending-rebuild, see docs/spec/features/multi-tenancy.md
     tenant::test(&mut test).await;
     security::test(&mut test).await;
     quota::test(&mut test).await;
@@ -67,6 +68,7 @@ pub async fn system_tests() {
     delivery::test(&mut test).await;
     crypto::test(&mut test).await;
     antispam::test(&mut test).await;
+    #[cfg(feature = "pending-rebuild")] // inbuxa: pending-rebuild, see docs/spec/features/undelete.md
     archiving::test(&mut test).await;
     task::test(&mut test).await;
 

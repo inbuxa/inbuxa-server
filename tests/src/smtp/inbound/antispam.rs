@@ -4,6 +4,12 @@
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
  */
 
+#[cfg(feature = "pending-rebuild")] // inbuxa: pending-rebuild, see docs/spec/features/
+use common::enterprise::llm::{
+    ChatCompletionChoice, ChatCompletionRequest, ChatCompletionResponse, Message,
+};
+#[cfg(feature = "pending-rebuild")]
+use spam_filter::analysis::llm::SpamFilterAnalyzeLlm;
 use crate::utils::{
     dns::DnsCache,
     http_server::{HttpMessage, spawn_mock_http_server},
@@ -14,9 +20,6 @@ use common::{
     Server,
     auth::{AccountCache, AccountInfo},
     config::mailstore::spamfilter::SpamFilterAction,
-    enterprise::llm::{
-        ChatCompletionChoice, ChatCompletionRequest, ChatCompletionResponse, Message,
-    },
 };
 use http_proto::{JsonResponse, ToHttpResponse};
 use hyper::Method;
@@ -46,7 +49,7 @@ use spam_filter::{
         dmarc::SpamFilterAnalyzeDmarc, domain::SpamFilterAnalyzeDomain,
         ehlo::SpamFilterAnalyzeEhlo, from::SpamFilterAnalyzeFrom,
         headers::SpamFilterAnalyzeHeaders, html::SpamFilterAnalyzeHtml, init::SpamFilterInit,
-        ip::SpamFilterAnalyzeIp, llm::SpamFilterAnalyzeLlm, messageid::SpamFilterAnalyzeMid,
+        ip::SpamFilterAnalyzeIp, messageid::SpamFilterAnalyzeMid,
         mime::SpamFilterAnalyzeMime, pyzor::SpamFilterAnalyzePyzor,
         received::SpamFilterAnalyzeReceived, recipient::SpamFilterAnalyzeRecipient,
         replyto::SpamFilterAnalyzeReplyTo, rules::SpamFilterAnalyzeRules,
@@ -220,6 +223,7 @@ async fn antispam() {
     }
 
     // Spawn mock OpenAI server
+    #[cfg(feature = "pending-rebuild")] // inbuxa: pending-rebuild, see docs/spec/features/
     let _tx = spawn_mock_http_server(
         &test,
         Arc::new(|req: HttpMessage| {
@@ -287,6 +291,10 @@ async fn antispam() {
             .as_ref()
             .is_some_and(|s| !s.eq_ignore_ascii_case(test_name))
         {
+            continue;
+        }
+        // inbuxa: pending-rebuild. The LLM case needs the AI classifier rebuilt.
+        if cfg!(not(feature = "pending-rebuild")) && test_name == "llm" {
             continue;
         }
 
@@ -657,6 +665,7 @@ async fn antispam() {
                 "pyzor" => {
                     server.spam_filter_analyze_pyzor(&mut spam_ctx).await;
                 }
+                #[cfg(feature = "pending-rebuild")] // inbuxa: pending-rebuild, see docs/spec/features/
                 "llm" => {
                     server.spam_filter_analyze_llm(&mut spam_ctx).await;
                 }

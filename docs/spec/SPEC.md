@@ -108,6 +108,27 @@ repository. Instead:
   disabled or replaced on `main` before the repository is ever pushed
   anywhere that runs them.
 
+### 2.2b What the first import proved (v0.16.22, 2026-09-18)
+
+- The stripped tree builds (`cargo build -p stalwart`, 3 min 14 s on 16
+  cores) and the binary runs. There are 6 warnings, all unused imports left
+  where Enterprise snippets were cut out.
+- Every crate's unit tests pass: 263 passed, 0 failed, 2 ignored. They build
+  with the integration crate in the build, because that's what switches on the
+  test features the unit tests rely on, and run from each crate's own directory
+  (`dav-proto` loads fixtures by relative path).
+- The integration crate (`tests/`) compiles once the shared tests of
+  unrebuilt features are gated behind its `pending-rebuild` feature, off by
+  default: the OIDC-directory, tenant and archiving suites; the four
+  telemetry suites (alerts, metrics, tracing, webhooks); and the LLM parts of
+  the spam-filter suite. Each gate carries an `inbuxa: pending-rebuild` comment
+  and comes off when its feature is rebuilt.
+- Those gated suites are shared, AGPL test code that exercises Enterprise
+  behavior. That makes them a clean source for the feature specs, and ready-made
+  acceptance tests for the rebuilds.
+- Not yet run: the integration suite itself, which needs its database
+  services, and a first boot of the binary (SPEC.md §6).
+
 Layout on `main`: the server source at the root, exactly as upstream lays it
 out (so merges line up), the specs under `docs/spec/`, strip reports under
 `docs/fork/`, and the fork tooling under `tools/fork/`. Upstream has no
