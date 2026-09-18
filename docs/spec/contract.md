@@ -248,7 +248,8 @@ interface working throughout:
 Verified over the API with a test account: `stalwart-webui` signs in to both
 callbacks and exchanges its code for a token; the same client with a foreign
 redirect URI, an unregistered `client_id`, and anonymous dynamic registration
-are all refused (401). To roll back, set the two settings back, destroy the
+are all refused (401). Signing in to `/admin` and `/account` in a browser
+was confirmed working the same day. To roll back, set the two settings back, destroy the
 client and reload settings. This is the state C-5 and C-6 make the default.
 
 ## Acceptance tests
