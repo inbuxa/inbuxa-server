@@ -224,7 +224,9 @@ Each requirement has an ID, and tests name the IDs they check.
 - **MT-22.** A signed-in principal can read the logo that applies to it: its
   domain's `logo` if set, else its tenant's `logo` if set, else none.
   **Decision** on the order: a domain is more specific than a tenant. Exposed
-  over JMAP so ihasmail can draw it (see "Interfaces").
+  over JMAP so ihasmail can draw it (see "Interfaces"). Branding BT-1 and BT-2
+  (`branding-and-templates.md`) extend the chain past the tenant, to the
+  server-wide logo and then the built-in one, and are the full rule.
 - **MT-23.** The server never fetches a logo URL itself. ihasmail draws URL
   logos through its image proxy, as it does today.
 

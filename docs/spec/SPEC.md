@@ -171,6 +171,10 @@ each sync's conflicts few and predictable.
 The `enterprise` Cargo feature and every edition check are removed. There is
 one edition.
 
+One exception: scale-out storage lives in new AGPL files inside
+`crates/store` (`backend/scaleout/`), because the rebuilt-features crate
+depends on `store` and can't be called from it (`features/scale-out-storage.md`).
+
 ### 2.4 Name and marks
 
 - No "Stalwart" in product names, binaries, images, UI text, packaging or
@@ -272,13 +276,14 @@ is written.
 | # | Feature | What an operator gets | Notes |
 |---|---|---|---|
 | 1 | Multi-tenancy | Tenants with their own domains, admins, quotas and queue visibility | Needed for anybody hosting mail for others. ihasmail already has a Tenants screen. Spec'd; hand-off brief in `handoff/multi-tenancy.md`. |
-| 2 | Masked email | Per-sender disposable addresses that deliver to the account | Existing addresses must keep delivering (§3.4). |
-| 3 | Undelete | Deleted mail held for a set period and restorable | Existing archived items must stay restorable. |
-| 4 | Branding and templates | Operator logo, and the text of calendar alarm and invitation emails | INBUXA's branding is the default. |
-| 5 | AI spam classification | An optional model's opinion as one spam signal, and a Sieve function that asks a model | Local and auditable model only: no hosted API by default. |
-| 6 | Monitoring history, live tracing, alerts | Stored metrics and traces, a live trace view, and threshold alerts | ihasmail's dashboard shows them. |
-| 7 | SCIM 2.0 provisioning | Accounts and groups managed by an identity provider | From RFC 7643 and RFC 7644. The largest piece. |
-| 8 | Scale-out storage | SQL read replicas; sharded blob and in-memory stores | For large installs only. |
+| 2 | Masked email | Per-sender disposable addresses that deliver to the account | Existing addresses must keep delivering (§3.4). Spec: `features/masked-email.md`. |
+| 3 | Undelete | Deleted mail held for a set period and restorable | Existing archived items must stay restorable. Spec: `features/undelete.md`. |
+| 4 | Branding and templates | Operator logo, and the text of calendar alarm and invitation emails | INBUXA's branding is the default. Spec: `features/branding-and-templates.md`. |
+| 5 | AI spam classification | An optional model's opinion as one spam signal, and a Sieve function that asks a model | Local and auditable model only: no hosted API by default. Spec: `features/ai-spam-classification.md`. |
+| 6 | Monitoring history, live tracing, alerts | Stored metrics and traces, a live trace view, and threshold alerts | ihasmail's dashboard shows them. Spec: `features/monitoring.md`. |
+| 7 | SCIM 2.0 provisioning | Accounts and groups managed by an identity provider | From RFC 7643 and RFC 7644. The largest piece. Spec: `features/scim.md`. |
+| 8 | Scale-out storage | SQL read replicas; sharded blob and in-memory stores | For large installs only. Spec: `features/scale-out-storage.md`. |
+| 9 | Per-domain directories | A domain signs in against its own LDAP, SQL or OIDC directory | Added 2026-09-18. Signing in through an OIDC provider as the server's directory is already AGPL; only the per-domain choice is Enterprise. Spec: `features/per-domain-directories.md`. |
 | — | Seat limits, license keys | Nothing: there's no license | Removed, not rebuilt. |
 
 ## 5. The web front ends

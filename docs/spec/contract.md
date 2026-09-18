@@ -199,7 +199,9 @@ Each has an ID, and tests name the IDs they check.
   that token, even though the account could.
 - **C-19.** ihasmail-inbuxa's own administration (accounts, domains, groups,
   lists, roles, tenants, the dashboard) uses the scope `inbuxa:account-admin`,
-  granted only to `ihasmail-inbuxa`, and limited to those object types.
+  granted only to `ihasmail-inbuxa`, and limited to those object types, plus
+  `x:Metric` get and query for the dashboard's message cards (monitoring
+  spec).
 - **C-20.** Optionally, `x:FrontEnds.adminNetworks` (a list of CIDRs) limits
   where `inbuxa:admin` requests may come from. Empty means anywhere.
 - **C-21.** Basic auth never reaches the admin lane outside recovery mode. An
