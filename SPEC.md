@@ -1,0 +1,296 @@
+# Fork specification (draft)
+
+Working title only. The product has no name yet. It ships under the INBUXA
+brand, and the folder is renamed once the name is chosen.
+
+## 1. What this is
+
+An AGPL-3.0-only fork of the Stalwart mail server that ships every feature
+under the AGPL, with nothing held back for a paid edition. ihasmail is built
+in as the product's web front end: webmail, account self-service and
+administration. Stalwart's own web interface is dropped.
+
+**Goals**
+
+- Everything Stalwart's Enterprise Edition adds is available to everybody,
+  under the AGPL, rebuilt clean-room.
+- One product: server, webmail and administration installed and versioned as
+  a pair.
+- No web interface on the mail host. Administration happens over JMAP from
+  ihasmail, which can run beside the server or on another machine.
+- Stay close enough to upstream that its releases can be taken quickly.
+
+**Non-goals**
+
+- Carrying, adapting or reading Stalwart Enterprise code (see §3).
+- Using Stalwart's name or logo anywhere in the product (see §2.4).
+- Changing Stalwart's storage formats beyond what upstream changes. Existing
+  Stalwart 0.16 data, including data written by Enterprise features, must
+  open unchanged (see §7).
+
+## 2. The fork itself
+
+### 2.1 What is taken
+
+Every upstream file licensed `AGPL-3.0-only OR LicenseRef-SEL` is taken under
+the AGPL. Nothing licensed only `LicenseRef-SEL` is taken.
+
+Upstream marks Enterprise-only code two ways, and both must go:
+
+- **Whole files** whose SPDX header is `LicenseRef-SEL` alone. At upstream
+  `d9dee0a` (2026-09-15) that is 63 files, about 21,000 lines, 5,500 of them
+  tests.
+- **Snippets** inside dual-licensed files, between `SPDX-SnippetBegin` and
+  `SPDX-SnippetEnd`, whose identifier is `LicenseRef-SEL` alone. At the same
+  commit that is 117 snippets in 50 files, about 1,700 lines.
+
+### 2.2 The strip step
+
+A script, run on every upstream sync, that:
+
+1. Deletes every whole Enterprise-only file.
+2. Removes every Enterprise-only snippet, markers included.
+3. Fails the sync if a marker is malformed, e.g. a snippet with no end, a
+   file whose header can't be read, or a new license identifier.
+4. Writes a report listing what was removed and where, committed with the
+   sync.
+
+It reads only the SPDX markers, never the code between them. That keeps the
+people running it outside the clean room's restrictions. The removed code is
+never committed to any branch of the fork, including history.
+
+### 2.3 Where the rebuilt features go
+
+Rebuilt features live in one new crate of the fork's own, licensed
+AGPL-3.0-only, plus the smallest possible hooks in upstream files. The hooks
+sit where upstream's `enterprise` Cargo feature and `is_enterprise_edition()`
+checks already are: 30 checks across 18 files at the commit above. That keeps
+each sync's conflicts few and predictable.
+
+The `enterprise` Cargo feature and every edition check are removed. There is
+one edition.
+
+### 2.4 Name and marks
+
+- No "Stalwart" in product names, binaries, images, UI text, packaging or
+  domains.
+- Factual statements are allowed and required: "a fork of Stalwart",
+  "compatible with Stalwart 0.16 data". Upstream copyright notices stay on
+  every file they cover.
+- Protocol identifiers stay as upstream has them, for example the JMAP
+  capability `urn:stalwart:jmap` and the `x:` object names. They're
+  interoperability, not branding, and renaming them breaks every existing
+  client. Anything the fork adds uses its own namespace (open: which one).
+
+## 3. Clean room
+
+INBUXA runs on a paid Stalwart Enterprise license, so its maintainer is a
+licensee with access to the Enterprise code. That license forbids publishing
+derivative works of it, so the burden of showing independent creation falls
+on this project. Rules:
+
+1. **Spec writers** may use Stalwart's public documentation, the RFCs and
+   drafts, the published JMAP and registry schema (dual-licensed, so
+   available under the AGPL), and the observed behavior of a running server.
+   They may not use Enterprise source, snippets, private documentation,
+   support correspondence or anything from the license portal.
+2. **Implementers** work only from the written specs in `features/`. They
+   must never have read Enterprise-only files or snippets. An AI session that
+   has seen Enterprise code (including the one that drafted this document)
+   doesn't implement.
+3. **Records.** Each feature spec is dated and committed before its
+   implementation starts, and names its sources. Implementation PRs link the
+   spec they build from.
+4. **Behavioral compatibility, not code compatibility.** Where existing data
+   has to keep working (masked addresses already handed out, archived items
+   already held), the behavior is specified from stored records and observed
+   results, not from how upstream implements it.
+5. Legal review before anything is published.
+
+## 4. Features to rebuild
+
+In order. Each gets its own clean-room spec under `features/` before any code
+is written.
+
+| # | Feature | What an operator gets | Notes |
+|---|---|---|---|
+| 1 | Multi-tenancy | Tenants with their own domains, admins, quotas and queue visibility | Needed for anybody hosting mail for others. ihasmail already has a Tenants screen. |
+| 2 | Masked email | Per-sender disposable addresses that deliver to the account | Existing addresses must keep delivering (§3.4). |
+| 3 | Undelete | Deleted mail held for a set period and restorable | Existing archived items must stay restorable. |
+| 4 | Branding and templates | Operator logo, and the text of calendar alarm and invitation emails | INBUXA's branding is the default. |
+| 5 | AI spam classification | An optional model's opinion as one spam signal, and a Sieve function that asks a model | Local and auditable model only: no hosted API by default. |
+| 6 | Monitoring history, live tracing, alerts | Stored metrics and traces, a live trace view, and threshold alerts | ihasmail's dashboard shows them. |
+| 7 | SCIM 2.0 provisioning | Accounts and groups managed by an identity provider | From RFC 7643 and RFC 7644. The largest piece. |
+| 8 | Scale-out storage | SQL read replicas; sharded blob and in-memory stores | For large installs only. |
+| — | Seat limits, license keys | Nothing: there's no license | Removed, not rebuilt. |
+
+## 5. ihasmail as the product's web front end
+
+### 5.1 Shape
+
+ihasmail stays a separate process: its Node server and its web app, run as a
+container. It can run:
+
+- **on the same host**, on a private network or loopback, which is the
+  default the installer sets up; or
+- **on another host**, for operators who want no web front end near the mail
+  store.
+
+It isn't compiled into the server. Its server side (sessions, image and
+calendar-link proxies, push relay, rate limits, settings policy) would have to
+be rewritten in Rust and would put a web front end back on the mail host,
+which this design exists to avoid.
+
+### 5.2 The contract between them
+
+Versioned, and advertised in the JMAP session so either side can check it.
+
+- **Discovery.** The server's session names its webmail URL and the contract
+  version it speaks. ihasmail refuses a server outside its supported range,
+  with a clear message. Its current Stalwart 0.16 check becomes this check.
+- **Sign-in by OAuth.** The server pre-registers ihasmail as a first-party
+  OAuth client (authorization code with PKCE). ihasmail holds tokens, never
+  passwords. Today it signs in with Basic auth and keeps the password in its
+  session.
+- **Token revocation.** The server can revoke individual tokens and every
+  token for a client. Upstream's tokens are stateless and can only be revoked
+  by changing the password. ihasmail's "sign out other sessions" relies on
+  this.
+- **Two-factor.** Handled in the OAuth flow, not by appending codes to
+  passwords.
+- **Admin lane.** Administrative JMAP calls can be limited to ihasmail's
+  address or network, so an admin credential is useless from anywhere else.
+- **Push.** Unchanged: JMAP push with VAPID, as ihasmail uses today.
+
+### 5.3 Stalwart's web interface is removed
+
+Upstream installs its web interface at first boot, serving `/admin` and
+`/account`, by inserting a default web application that downloads a release
+of `stalwartlabs/webui`. The fork:
+
+- inserts no default web application, and never fetches `webui`;
+- keeps the generic web-application mechanism for operators who want it,
+  documented as unsupported;
+- therefore carries no part of `webui`, which has its own Enterprise-only
+  parts.
+
+What the web interface did moves to ihasmail:
+
+| Was | Becomes |
+|---|---|
+| `/account`: password, app passwords, two-factor | ihasmail Settings: password and app passwords today; its two-factor work is written but backlogged |
+| `/admin`: server administration | ihasmail Administration (§5.4) |
+| First-boot setup | the installer and a setup screen in ihasmail (§6) |
+| Fixing a server the web front end can't reach | the host-side CLI (§6.3) |
+
+### 5.4 Administration at full coverage
+
+The server's registry has about 125 object types. ihasmail Administration
+uses 18 today: accounts, domains, groups, mailing lists, roles, tenants, the
+dashboard, credentials and a few supporting types.
+
+- **Hand-built screens** for what operators change often: domains and DNS,
+  DKIM, certificates and ACME, spam settings, the queue, tenants and quotas,
+  reports.
+- **Schema-generated forms** for the rest. The registry schema describes every
+  object's fields, types and constraints, and it's dual-licensed code the
+  fork has under the AGPL. The fork exposes it over JMAP, and ihasmail renders
+  a correct, if plain, editor for any object type from it. New types upstream
+  adds then appear without an ihasmail release.
+- Everything stays permission-gated, as Administration is today.
+
+## 6. First boot, setup and recovery
+
+### 6.1 The installer
+
+ihasmail-oneshot is the starting point: a Go binary using only the standard
+library, which drives `docker compose`. Its commands and options carry over.
+
+Commands: `deploy`, `certs`, `destroy`, `version`.
+
+`deploy` options:
+
+| Option | Default | Meaning |
+|---|---|---|
+| `--domain` | (required; `example.test` with `--local`) | Mail domain |
+| `--mail-host` | `mail.DOMAIN` | Mail server's hostname |
+| `--webmail-host` | `webmail.DOMAIN` | Webmail's hostname |
+| `--email` | `postmaster@DOMAIN` | ACME contact |
+| `--local` | off | Loopback-only evaluation: no mail ports, no Caddy, no certificates |
+| `--dir` | `./PROJECT` | Deployment directory, new or empty |
+| `--project` | `ihasmail-DOMAIN` | Compose project name |
+| `--stalwart-image` | pinned | Server image; renamed for the fork |
+| `--ihasmail-image` | newest release, written as its dated tag | Webmail image |
+| `--caddy-image` | pinned | Caddy image |
+| `--webmail-bind` | `127.0.0.1:8080` | Host address for ihasmail's port |
+| `--stalwart-bind` | `127.0.0.1:8081` | Host address for the server's plain HTTP. Renamed; it no longer carries an admin UI |
+| `--subnet` | `172.31.253.0/24` | Private network for the stack |
+| `--acme-directory`, `--acme-ca-root` | Let's Encrypt | Private CA for ACME |
+| `--yes` | off | Skip confirmation |
+
+### 6.2 What first boot does
+
+Oneshot's sequence, all over JMAP, with no web interface involved:
+
+1. Start the server with an empty configuration, which puts it in bootstrap
+   mode with a temporary admin pinned by environment variable.
+2. Check it really is in bootstrap mode. A configured server refuses
+   bootstrap credentials, and oneshot stops.
+3. Complete bootstrap through `x:Bootstrap`, which returns the permanent
+   administrator.
+4. Look up the domain; turn on ACME explicitly (upstream's certificate flag
+   alone creates no ACME provider); retry certificates.
+5. Trust forwarded addresses from the reverse proxy, and allow its IP, so the
+   auto-ban doesn't ban the proxy.
+6. Create the first user; write the credentials file and the DNS zone file.
+
+Additions for the fork:
+
+- Register ihasmail as the first-party OAuth client (§5.2).
+- Behavior fixes where upstream's first boot needs workarounds: an ACME order
+  that fails isn't retried on restart, some network settings need a restart,
+  and the default log path doesn't exist in the image. Each is a candidate for
+  fixing in the fork, and oneshot's workaround drops out once it is.
+- A setup screen in ihasmail for operators who install without the
+  installer. It performs the same steps against a server in bootstrap mode.
+
+### 6.3 Recovery without a web front end
+
+When a settings change cuts ihasmail off from the server (a bad listener, a
+bad certificate, a lockout), there has to be a way back in on the host:
+
+- A CLI subcommand of the server binary that runs locally and edits the
+  registry directly, or starts the server in upstream's recovery mode with
+  only a loopback listener.
+- Minimum it covers: list and edit listeners and certificates, reset an
+  administrator's password, lift IP bans, and export or import the
+  configuration.
+- Open: whether this lives in the server binary or in the installer as
+  `oneshot recover`.
+
+## 7. INBUXA cutover
+
+INBUXA moves to the fork **before** the fork is announced. Its Enterprise
+subscription can be ended at 30 days' notice, and the server falls back to
+the Community Edition 15 days later. So the fork must be carrying INBUXA
+before anything that could prompt that notice happens.
+
+1. Fork builds and passes upstream's test suite, minus the removed Enterprise
+   tests, plus the fork's own.
+2. INBUXA's data opens in the fork on a copy: tenants, masked addresses,
+   archived items, every account.
+3. Masked addresses already handed out still deliver; archived items still
+   restore.
+4. Cutover on the running host, with the Enterprise build kept for rollback.
+5. Only then: public repository, announcement, and ihasmail accepting the
+   fork.
+
+## 8. Open decisions
+
+- Product name, and whether the server and the whole product share it.
+- The namespace for the fork's own JMAP capabilities.
+- Whether the recovery CLI lives in the server binary or in the installer.
+- Whether the installer stays its own repository or joins the fork's.
+- Governance: solo, or set up for outside contributors from the start
+  (contributing guide, sign-off on contributions).
+- Whether the fork follows upstream's version numbers or has its own.
