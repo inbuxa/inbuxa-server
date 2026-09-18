@@ -276,7 +276,7 @@ is written.
 | # | Feature | What an operator gets | Notes |
 |---|---|---|---|
 | 1 | Multi-tenancy | Tenants with their own domains, admins, quotas and queue visibility | Needed for anybody hosting mail for others. ihasmail already has a Tenants screen. Built 2026-09-18 in `crates/features`; status in `features/multi-tenancy.md`. |
-| 2 | Masked email | Per-sender disposable addresses that deliver to the account | Existing addresses must keep delivering (§3.4). Spec: `features/masked-email.md`. |
+| 2 | Masked email | Per-sender disposable addresses that deliver to the account | Existing addresses must keep delivering (§3.4). Built 2026-09-18 in `crates/features`; status in `features/masked-email.md`. |
 | 3 | Undelete | Deleted mail held for a set period and restorable | Existing archived items must stay restorable. Spec: `features/undelete.md`. |
 | 4 | Branding and templates | Operator logo, and the text of calendar alarm and invitation emails | INBUXA's branding is the default. Spec: `features/branding-and-templates.md`. |
 | 5 | AI spam classification | An optional model's opinion as one spam signal, and a Sieve function that asks a model | Local and auditable model only: no hosted API by default. Spec: `features/ai-spam-classification.md`. |

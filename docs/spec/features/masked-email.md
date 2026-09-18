@@ -277,6 +277,35 @@ Stalwart-facing (SPEC.md §5).
 12. **(compat)** INBUXA's existing masks all resolve by stored address and
     deliver after cutover, and read back identically through `x:`.
 
+## Implementation status
+
+Built 2026-09-18 from this spec, clean-room, under the multi-tenancy hand-off
+brief's rules. The rules live in `crates/features` (`inbuxa-features`, module
+`masked_email`); the JMAP glue in `crates/jmap/src/inbuxa/`, with Fastmail's
+object type in `crates/jmap-proto/src/object/fastmail_masked_email.rs`;
+upstream files carry hooks marked `inbuxa:`. Acceptance tests 1 to 11 pass as
+`tests/src/system/masked_email.rs`, with ME-9, ME-10, ME-11 and `/changes`.
+
+- **ME-1 to ME-15, ME-17 to ME-19:** built.
+- **ME-16:** built for the `x:` API, which stores a client-supplied
+  `createdBy`. The server-set name is **deferred** until sign-in goes through
+  OAuth (contract C-8): with Basic auth there's no client name, so a mask
+  created through the Fastmail API has none.
+- **ihasmail changes** belong to ihasmail-inbuxa and aren't part of this
+  repository.
+- **Test 12 (compat)** is written as `masked_email_compat`, ignored, and unrun
+  until a copy of INBUXA's data with masks made on it is provided. Its doc
+  comment says how to run it.
+- **Known limits, not requirements of this spec:**
+  - A pending mask past its 24 hours is removed the next time anything reads
+    it or mail arrives for it, not by a timer. Nothing can see it in between,
+    so the effect is the same (ME-8).
+  - Creating an account or alias doesn't consult the mask index, so an
+    account could be given an address a mask holds; the account then wins
+    delivery. A random 12-character mask address makes this unlikely.
+  - The `x:` API's create response carries only the new id, as upstream's
+    registry responses do. The address is read with `/get`.
+
 ## Observed
 
 Settled on 2026-09-18 against INBUXA's live Enterprise server (Stalwart
