@@ -1,0 +1,78 @@
+[package]
+name = "store"
+version = "0.16.22"
+edition = "2024"
+
+[dependencies]
+utils = { path = "../utils" }
+types = { path = "../types" }
+nlp = { path = "../nlp" }
+trc = { path = "../trc" }
+registry = { path = "../registry" }
+rocksdb = { version = "0.24", optional = true, features = ["multi-threaded-cf"] }
+foundationdb = { version = "0.11", features = ["embedded-fdb-include", "fdb-7_4"], optional = true }
+rusqlite = { version = "0.40", features = ["bundled"], optional = true }
+rust-s3 = { version = "0.37", default-features = false, features = ["tokio-rustls-tls"], optional = true }
+reqwest_s3 = { package = "reqwest", version = "0.12", default-features = false, features = ["rustls-tls-native-roots"], optional = true }
+azure_core = { version = "0.21.0", optional = true }
+azure_storage = { version = "0.21.0", default-features = false, features = ["enable_reqwest_rustls", "hmac_rust"], optional = true }
+azure_storage_blobs = { version = "0.21.0", default-features = false, features = ["enable_reqwest_rustls", "hmac_rust"], optional = true }
+reqwest = { version = "0.13", default-features = false, features = ["rustls", "http2", "stream"]}
+tokio = { version = "1.53", features = ["sync", "fs", "io-util"] }
+r2d2 = { version = "0.8.10", optional = true }
+futures = { version = "0.3", optional = true }
+rand = "0.10.2"
+roaring = "0.11"
+rayon = { version = "1.12", optional = true }
+serde = { version = "1.0", features = ["derive"]}
+ahash = { version = "0.8.12", features = ["serde"] }
+xxhash-rust = { version = "0.8.18", features = ["xxh3"] }
+parking_lot = "0.12"
+lru-cache = { version = "0.1.2", optional = true }
+num_cpus = { version = "1.17", optional = true }
+blake3 = "1.8"
+lz4_flex = { version = "0.14", features = ["alloc"], default-features = false }
+deadpool-postgres = { version = "0.14", optional = true }
+tokio-postgres = { version = "0.7.18", features = ["with-serde_json-1"], optional = true }
+tokio-rustls = { version = "0.26", optional = true, default-features = false, features = ["aws_lc_rs", "tls12"] }
+rustls = { version = "0.23.43", optional = true, default-features = false, features = ["std", "aws_lc_rs", "tls12"] }
+rustls-pki-types = { version = "1", optional = true }
+aws-lc-rs = { version = "1", optional = true }
+x509-parser = { version = "0.18", optional = true }
+bytes = { version = "1.12", optional = true }
+mysql_async = { version = "0.37", default-features = false, features = ["default-rustls", "minimal"], optional = true }
+serde_json = { version = "1.0.151" }
+flate2 = "1.1"
+redis = { version = "1.6", features = [ "tokio-comp", "tokio-rustls-comp", "tls-rustls-insecure", "tls-rustls", "cluster-async", "sentinel"], optional = true }
+deadpool = { version = "0.13", features = ["managed"], optional = true }
+arc-swap = "1.9.2"
+bitpacking = "0.9.3"
+rkyv = { version = "0.8.18", features = ["little_endian"] }
+compact_str = "0.10.0"
+gethostname = "1.1.0"
+radsort = "0.1.1"
+
+[dev-dependencies]
+tokio = { version = "1.53", features = ["full"] }
+
+[features]
+# Data Stores
+rocks = ["rocksdb", "rayon", "num_cpus"]
+sqlite = ["rusqlite", "rayon", "r2d2", "num_cpus", "lru-cache"]
+postgres = ["tokio-postgres", "deadpool", "deadpool-postgres", "tokio-rustls", "rustls", "aws-lc-rs", "rustls-pki-types", "x509-parser", "futures", "bytes"]
+mysql = ["mysql_async", "futures"]
+foundation = ["foundationdb", "futures"]
+fdb-chunked-bm = []
+
+# Blob stores
+s3 = ["rust-s3", "dep:reqwest_s3"]
+azure = ["azure_core", "azure_storage", "azure_storage_blobs", "futures"]
+
+# In-memory stores
+redis = ["dep:redis", "deadpool", "deadpool/rt_tokio_1", "futures"]
+
+enterprise = []
+test_mode = []
+
+[lints]
+workspace = true

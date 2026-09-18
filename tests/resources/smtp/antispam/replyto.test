@@ -1,0 +1,112 @@
+expect REPLYTO_UNPARSABLE
+
+Reply-to: hello
+
+Test
+<!-- NEXT TEST -->
+expect REPLYTO_EQ_FROM HAS_REPLYTO 
+
+From: hello@domain.org
+Reply-to: hello@domain.org
+
+Test
+<!-- NEXT TEST -->
+expect REPLYTO_DOM_EQ_FROM_DOM REPLYTO_DN_EQ_FROM_DN HAS_REPLYTO
+
+From: "Hello" <hello@host.domain.org.uk>
+Reply-to: "Hello" <hello@domain.org.uk>
+
+Test
+<!-- NEXT TEST -->
+envelope_from hello@otherdomain.org.uk
+envelope_to user@somedomain.com
+expect REPLYTO_DOM_NEQ_FROM_DOM HAS_REPLYTO
+
+From: hello@otherdomain.org.uk
+To: user@somedomain.com, hello@otherdomain.org.uk
+Reply-to: hello@domain.org.uk
+
+Test
+<!-- NEXT TEST -->
+envelope_from sender@foo.org
+envelope_to user@somedomain.com
+expect REPLYTO_EQ_TO_ADDR SPOOF_REPLYTO HAS_REPLYTO
+
+From: sender@foo.org
+To: user@somedomain.com
+Reply-to: user@somedomain.com
+
+Test
+<!-- NEXT TEST -->
+envelope_from list@foo.org
+envelope_to user@somedomain.com
+expect REPLYTO_DOM_NEQ_FROM_DOM HAS_REPLYTO
+
+From: list@foo.org
+List-Unsubscribe: unsubcribe@foo.org
+To: user@somedomain.com
+Reply-to: user@somedomain.com
+
+Test
+<!-- NEXT TEST -->
+envelope_from user@foo.org
+envelope_to other@foo.org
+expect REPLYTO_DOM_NEQ_FROM_DOM HAS_REPLYTO
+
+From: user@foo.org
+To: otheruser@foo.org
+Reply-to: user@otherdomain.org
+
+Test
+<!-- NEXT TEST -->
+envelope_from user@foo.org
+envelope_to otheruser@domain.org
+expect SPOOF_REPLYTO REPLYTO_DOM_NEQ_FROM_DOM HAS_REPLYTO
+
+From: user@foo.org
+To: otheruser@domain.org
+Reply-to: user@otherdomain.org
+
+Test
+<!-- NEXT TEST -->
+expect REPLYTO_EXCESS_QP REPLYTO_DOM_EQ_FROM_DOM HAS_REPLYTO 
+
+From: hello@domain.org
+Reply-to: =?iso-8859-1?Q?Die_Hasen_und_die_Froesche?= <bye@domain.org>
+
+Test
+<!-- NEXT TEST -->
+expect REPLYTO_EXCESS_BASE64 REPLYTO_DOM_EQ_FROM_DOM HAS_REPLYTO 
+
+From: hello@domain.org
+Reply-to: "=?iso-8859-1?B?RGllIEhhc2VuIHVuIGRpZSBGcm9lc2NoZQ==?=" <bye@domain.org>
+
+Test
+<!-- NEXT TEST -->
+expect REPLYTO_EMAIL_HAS_TITLE REPLYTO_DOM_EQ_FROM_DOM HAS_REPLYTO 
+
+From: hello@domain.org
+Reply-to: "Mr. Hello" <bye@domain.org>
+
+Test
+<!-- NEXT TEST -->
+expect FREEMAIL_REPLY_TO FREEMAIL_FROM REPLYTO_DOM_EQ_FROM_DOM HAS_REPLYTO 
+
+From: hello@gmail.com
+Reply-to: bye@gmail.com
+
+Test
+<!-- NEXT TEST -->
+expect DISPOSABLE_REPLY_TO DISPOSABLE_FROM REPLYTO_DOM_EQ_FROM_DOM HAS_REPLYTO 
+
+From: hello@custom.disposable.org
+Reply-to: bye@custom.disposable.org
+
+Test
+<!-- NEXT TEST -->
+expect FREEMAIL_REPLY_TO_NEQ_FROM_DOM FREEMAIL_REPLY_TO FREEMAIL_FROM REPLYTO_DOM_NEQ_FROM_DOM SPOOF_REPLYTO HAS_REPLYTO 
+
+From: hello@gmail.com
+Reply-to: hello@yahoomail.com
+
+Test

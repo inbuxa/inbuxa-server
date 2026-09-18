@@ -1,0 +1,124 @@
+expect URL_ONLY
+
+Subject: test
+
+https://url.org
+<!-- NEXT TEST -->
+expect 
+
+Subject: test
+
+my site is https://url.org
+<!-- NEXT TEST -->
+expect SUSPICIOUS_URL
+
+Subject: test
+
+my site is https://192.168.1.1
+<!-- NEXT TEST -->
+expect HOMOGRAPH_URL
+
+Subject: test
+
+my site is https://xn--youtue-tg7b.com
+<!-- NEXT TEST -->
+expect MIXED_CHARSET_URL
+
+Subject: test
+
+my site is https://www.xn--1ca81o6aa92e.com/
+<!-- NEXT TEST -->
+expect UNPARSABLE_URL
+
+Subject: test
+
+login to your account at https://bánk.com/
+<!-- NEXT TEST -->
+expect URL_REDIRECTOR_NESTED REDIRECTOR_URL
+
+Subject: nested redirect
+
+login to https://redirect.com/?https://redirect.org/?https://redirect.net/?https://redirect.io/?https://redirect.me/?https://redirect.com
+<!-- NEXT TEST -->
+expect REDIRECTOR_URL HOMOGRAPH_URL
+
+Subject: redirect to omograph
+
+login to https://www.redirect.com/?https://xn--twiter-507b.com
+<!-- NEXT TEST -->
+expect HAS_ONION_URI HAS_ANON_DOMAIN
+
+Subject: url in title darkweb.onion/login
+
+test
+<!-- NEXT TEST -->
+expect HAS_IPFS_GATEWAY_URL HAS_WP_URI URI_HIDDEN_PATH
+
+Content-Type: text/html; charset="utf-8"
+Subject: html test
+
+<link href="https://site.com/ipfs/Qm123">
+<a href="https://web.org/../../login.php"><img src="http://site.org/wp-static/img.png"></a>
+
+<!-- NEXT TEST -->
+expect HAS_GUC_PROXY_URI HAS_GOOGLE_FIREBASE_URL HAS_GOOGLE_REDIR HAS_ANON_DOMAIN URL_ONLY
+
+Content-Type: text/html; charset="utf-8"
+Subject: mixed urls googleusercontent.com/proxy/url
+
+<a href="https://firebasestorage.googleapis.com/content">google.com/url?otherurl.org</a>
+
+<!-- NEXT TEST -->
+expect WP_COMPROMISED
+
+Subject: plain test
+
+http://url.com/Well-known/../assetlinks.json
+http://wp.com/WP-content/content.pdf
+
+<!-- NEXT TEST -->
+expect HAS_WP_URI
+
+Subject: plain test
+
+http://url.com/Well-known/../assetlinks.json
+http://wp.com/WP-other/content.pdf
+
+<!-- NEXT TEST -->
+expect PHISHED_OPENPHISH PHISHED_PHISHTANK
+
+Subject: plain test
+
+https://phishing-open.org
+https://phishing-tank.com
+
+<!-- NEXT TEST -->
+expect 
+
+Subject: IPs are not urls
+
+192.168.1.1
+
+<!-- NEXT TEST -->
+expect 
+
+Content-Type: text/html; charset="utf-8"
+Subject: IPs in HTML are not urls
+
+<html>
+Das System wurde um 01.01.1970 08:28:00 für die IP-Adresse
+123.123.123.123 gesperrt.<br>
+<br>
+Der Besucher hat versucht, sich mit folgenden Daten anzumelden.<br>
+Partner: 12345678<br>
+Portal: <a href="https://www.localhost.de/example.php" target="_blank">IP-Sperre einsehen</a>
+</html>
+
+<!-- NEXT TEST -->
+expect RCPT_DOMAIN_IN_BODY
+
+To: hello@world.com
+Subject: Special offer 
+
+An offer for world.com
+

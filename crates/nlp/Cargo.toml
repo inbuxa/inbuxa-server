@@ -1,0 +1,25 @@
+[package]
+name = "nlp"
+version = "0.16.22"
+edition = "2024"
+
+[dependencies]
+xxhash-rust = { version = "0.8.18", features = ["xxh3"] }
+serde = { version = "1.0", features = ["derive"]}
+ahash = { version = "0.8.12", features = ["serde"] }
+whatlang = "0.18" # Language detection
+rust-stemmers = "1.2" # Stemmers
+jieba-rs = "0.10" # Chinese stemmer
+psl = "2"
+maplit = "1.0.2"
+hashify = "0.2.9"
+rand = "0.10.2"
+rkyv = { version = "0.8.18", features = ["little_endian"] }
+
+[features]
+test_mode = []
+
+[dev-dependencies]
+
+[lints]
+workspace = true

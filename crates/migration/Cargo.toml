@@ -1,0 +1,24 @@
+[package]
+name = "migration"
+version = "0.16.22"
+edition = "2024"
+
+[dependencies]
+store = { path = "../store" }
+trc = { path = "../trc" }
+types = { path = "../types" }
+common = { path =  "../common" }
+email = { path =  "../email" }
+spam-filter = { path =  "../spam-filter" }
+registry = { path =  "../registry" }
+tokio = { version = "1.53", features = ["net", "macros"] }
+
+[features]
+test_mode = []
+enterprise = []
+
+[dev-dependencies]
+tokio = { version = "1.53", features = ["full"] }
+
+[lints]
+workspace = true

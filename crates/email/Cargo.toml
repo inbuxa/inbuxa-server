@@ -1,0 +1,42 @@
+[package]
+name = "email"
+version = "0.16.22"
+edition = "2024"
+
+[dependencies]
+utils = { path = "../utils" }
+nlp = { path = "../nlp" }
+store = { path = "../store" }
+trc = { path = "../trc" }
+types = { path = "../types" }
+jmap_proto = { path = "../jmap-proto" }
+jmap-tools = { version = "0.1" }
+common = { path =  "../common" }
+groupware = { path =  "../groupware" }
+registry = { path =  "../registry" }
+mail-parser = { version = "0.11", features = ["full_encoding"] } 
+mail-builder = { version = "1.0" }
+sieve-rs = { version = "0.7", features = ["rkyv"] } 
+tokio = { version = "1.53", features = ["net", "macros"] }
+aes = "0.9"
+aes-gcm = "0.11.1"
+chacha20poly1305 = "0.11"
+cbc = { version = "0.2", features = ["alloc"] }
+rasn = "0.28"
+rasn-cms = "0.28"
+rasn-pkix = "0.28"
+rsa = { version = "0.9.10", features = ["sha2"] }
+rand = "0.8"
+sequoia-openpgp = { version = "2.4", default-features = false, features = ["crypto-rust", "allow-experimental-crypto", "allow-variable-time-crypto"] }
+hashify = "0.2"
+rkyv = { version = "0.8.18", features = ["little_endian"] }
+
+[features]
+test_mode = []
+enterprise = []
+
+[dev-dependencies]
+tokio = { version = "1.53", features = ["full"] }
+
+[lints]
+workspace = true

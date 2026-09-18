@@ -1,0 +1,40 @@
+[package]
+name = "spam-filter"
+version = "0.16.22"
+edition = "2024"
+
+[dependencies]
+utils = { path = "../utils" }
+types = { path = "../types" }
+nlp = { path = "../nlp" }
+store = { path = "../store" }
+trc = { path = "../trc" }
+common = { path =  "../common" }
+registry = { path =  "../registry" }
+smtp-proto = { version = "0.2", features = ["rkyv"] }
+mail-parser = { version = "0.11", features = ["full_encoding"] } 
+mail-auth = { version = "0.13" }
+tokio = { version = "1.53", features = ["net", "macros"] }
+psl = "2"
+hyper = { version = "1.11.1", features = ["server", "http1", "http2"] }
+idna = "1.1"
+decancer = "3.3.3"
+unicode-security = "0.1.2"
+infer = "0.22"
+hashify = "0.2"
+sha1 = "0.11"
+compact_str = "0.10.0"
+rkyv = { version = "0.8.18", features = ["little_endian"] }
+serde = { version = "1.0", features = ["derive"]}
+unicode-general-category = "1.1.0"
+unicode-normalization = "0.1.25"
+
+[features]
+test_mode = []
+enterprise = []
+
+[dev-dependencies]
+tokio = { version = "1.53", features = ["full"] }
+
+[lints]
+workspace = true

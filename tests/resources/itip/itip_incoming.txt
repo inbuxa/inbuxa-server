@@ -1,0 +1,138 @@
+# iTIP tests
+
+# Recipient is not organizer or attendee
+> itip x@example.com y@example.com
+BEGIN:VCALENDAR
+PRODID:-//Example/ExampleCalendarClient//EN
+METHOD:REQUEST
+VERSION:2.0
+BEGIN:VEVENT
+ORGANIZER:mailto:a@example.com
+ATTENDEE;ROLE=CHAIR;PARTSTAT=ACCEPTED;CN=A:mailto:a@example.com
+ATTENDEE;RSVP=TRUE;CUTYPE=INDIVIDUAL;CN=B:mailto:b@example.com
+ATTENDEE;RSVP=TRUE;CUTYPE=INDIVIDUAL;CN=C:mailto:c@example.com
+ATTENDEE;RSVP=TRUE;CUTYPE=INDIVIDUAL;CN=Hal:mailto:d@example.com
+ATTENDEE;RSVP=FALSE;CUTYPE=ROOM:conf_big@example.com
+ATTENDEE;ROLE=NON-PARTICIPANT;RSVP=FALSE:mailto:e@example.com
+DTSTAMP:19970611T190000Z
+DTSTART:19970701T200000Z
+DTEND:19970701T2100000Z
+SUMMARY:Conference
+UID:calsrv.example.com-873970198738777@example.com
+SEQUENCE:0
+STATUS:CONFIRMED
+END:VEVENT
+END:VCALENDAR
+
+> send
+NotOrganizerNorAttendee
+
+> reset
+
+# Refreshing an event (1)
+> put a@example.com 123456789@example.com
+BEGIN:VCALENDAR
+METHOD:REQUEST
+PRODID:-//Example/ExampleCalendarClient//EN
+VERSION:2.0
+BEGIN:VEVENT
+UID:123456789@example.com
+SEQUENCE:0
+RDATE:19980304T180000Z
+RDATE:19980311T180000Z
+RDATE:19980318T180000Z
+ORGANIZER:mailto:a@example.com
+ATTENDEE;ROLE=CHAIR;PARTSTAT=ACCEPTED:mailto:a@example.com
+ATTENDEE;RSVP=TRUE:mailto:b@example.com
+SUMMARY:Review Accounts
+DTSTART:19980304T180000Z
+DTEND:19980304T200000Z
+DTSTAMP:19980303T193000Z
+LOCATION:Conference Room A
+STATUS:CONFIRMED
+END:VEVENT
+END:VCALENDAR
+
+# Refreshing an event (2)
+> expect
+from: a@example.com
+to: b@example.com
+summary: invite
+summary.attendee: Participants([ItipParticipant { email: "a@example.com", name: None, is_organizer: true }, ItipParticipant { email: "b@example.com", name: None, is_organizer: false }])
+summary.dtstart: Time(ItipTime { start: 889034400, tz_id: 32768 })
+summary.location: Text("Conference Room A")
+summary.summary: Text("Review Accounts")
+BEGIN:VCALENDAR
+METHOD:REQUEST
+PRODID:-//Stalwart Labs LLC//Stalwart Server//EN
+VERSION:2.0
+BEGIN:VEVENT
+LOCATION:Conference Room A
+STATUS:CONFIRMED
+SUMMARY:Review Accounts
+DTEND:19980304T200000Z
+DTSTART:19980304T180000Z
+ATTENDEE;ROLE=CHAIR;PARTSTAT=ACCEPTED:mailto:a@example.com
+ATTENDEE;RSVP=TRUE;PARTSTAT=NEEDS-ACTION:mailto:b@example.com
+ORGANIZER:mailto:a@example.com
+UID:123456789@example.com
+RDATE:19980304T180000Z
+RDATE:19980311T180000Z
+RDATE:19980318T180000Z
+DTSTAMP:0
+SEQUENCE:0
+END:VEVENT
+END:VCALENDAR
+
+# Refreshing an event (3)
+> send
+
+# Refreshing an event (4)
+> itip b@example.com a@example.com
+BEGIN:VCALENDAR
+METHOD:REFRESH
+PRODID:-//Example/ExampleCalendarClient//EN
+VERSION:2.0
+BEGIN:VEVENT
+UID:123456789@example.com
+SEQUENCE:0
+ORGANIZER:mailto:a@example.com
+ATTENDEE;ROLE=CHAIR;PARTSTAT=ACCEPTED:mailto:a@example.com
+ATTENDEE;RSVP=TRUE:mailto:b@example.com
+DTSTART:19980304T180000Z
+END:VEVENT
+END:VCALENDAR
+
+# Refreshing an event (5)
+> send
+from: a@example.com
+to: b@example.com
+summary: invite
+summary.attendee: Participants([ItipParticipant { email: "a@example.com", name: None, is_organizer: true }, ItipParticipant { email: "b@example.com", name: None, is_organizer: false }])
+summary.dtstart: Time(ItipTime { start: 889034400, tz_id: 32768 })
+summary.location: Text("Conference Room A")
+summary.summary: Text("Review Accounts")
+BEGIN:VCALENDAR
+METHOD:REQUEST
+PRODID:-//Stalwart Labs LLC//Stalwart Server//EN
+VERSION:2.0
+BEGIN:VEVENT
+LOCATION:Conference Room A
+STATUS:CONFIRMED
+SUMMARY:Review Accounts
+DTEND:19980304T200000Z
+DTSTART:19980304T180000Z
+ATTENDEE;ROLE=CHAIR;PARTSTAT=ACCEPTED:mailto:a@example.com
+ATTENDEE;RSVP=TRUE;PARTSTAT=NEEDS-ACTION:mailto:b@example.com
+ORGANIZER:mailto:a@example.com
+UID:123456789@example.com
+RDATE:19980304T180000Z
+RDATE:19980311T180000Z
+RDATE:19980318T180000Z
+DTSTAMP:0
+SEQUENCE:0
+END:VEVENT
+END:VCALENDAR
+
+
+

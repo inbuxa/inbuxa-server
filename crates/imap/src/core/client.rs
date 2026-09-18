@@ -1,0 +1,519 @@
+/*
+ * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
+ *
+ * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
+ */
+
+use std::{iter::Peekable, sync::Arc, vec::IntoIter};
+
+use common::{
+    KV_RATE_LIMIT_IMAP,
+    network::{SessionResult, SessionStream},
+};
+use imap_proto::{
+    Command, ResponseCode, ResponseType, StatusResponse,
+    receiver::{self, Request},
+};
+use trc::SecurityEvent;
+
+use super::{SelectedMailbox, Session, SessionData, State};
+
+impl<T: SessionStream> Session<T> {
+    pub async fn ingest(&mut self, bytes: &[u8]) -> SessionResult {
+        trc::event!(
+            Imap(trc::ImapEvent::RawInput),
+            SpanId = self.session_id,
+            Size = bytes.len(),
+            Contents = trc::Value::from_maybe_string(bytes),
+        );
+
+        let mut bytes = bytes.iter();
+        let mut requests = Vec::with_capacity(2);
+        let mut needs_literal = None;
+        let mut has_expunge = false;
+
+        loop {
+            match self.receiver.parse(&mut bytes) {
+                Ok(request) => match self.is_allowed(request).await {
+                    Ok(request) => {
+                        has_expunge |=
+                            matches!(request.command, Command::Expunge(_) | Command::Close);
+                        requests.push(request);
+                    }
+                    Err(err) => {
+                        if !self.write_error(err).await {
+                            return SessionResult::Close;
+                        }
+                    }
+                },
+                Err(receiver::Error::NeedsMoreData) => {
+                    break;
+                }
+                Err(receiver::Error::NeedsLiteral { size }) => {
+                    needs_literal = size.into();
+                    break;
+                }
+                Err(receiver::Error::Error { response }) => {
+                    // Check for port scanners
+                    if matches!(
+                        (&self.state, response.key(trc::Key::Code)),
+                        (
+                            State::NotAuthenticated { .. },
+                            Some(trc::Value::String(v))
+                        ) if v == "PARSE"
+                    ) {
+                        match self.server.is_scanner_fail2banned(self.remote_addr).await {
+                            Ok(true) => {
+                                trc::event!(
+                                    Security(SecurityEvent::ScanBan),
+                                    SpanId = self.session_id,
+                                    RemoteIp = self.remote_addr,
+                                    Reason = "Invalid IMAP command",
+                                );
+
+                                return SessionResult::Close;
+                            }
+                            Ok(false) => {}
+                            Err(err) => {
+                                trc::error!(
+                                    err.span_id(self.session_id)
+                                        .details("Failed to check for fail2ban")
+                                );
+                            }
+                        }
+                    }
+
+                    if !self.write_error(response).await {
+                        return SessionResult::Close;
+                    }
+                    break;
+                }
+            }
+        }
+
+        let mut requests = requests.into_iter().peekable();
+        while let Some(request) = requests.next() {
+            let result = match request.command {
+                Command::List | Command::Lsub => self
+                    .handle_list(request)
+                    .await
+                    .map(|_| SessionResult::Continue),
+                Command::Select | Command::Examine => self
+                    .handle_select(request)
+                    .await
+                    .map(|_| SessionResult::Continue),
+                Command::Create => self
+                    .handle_create(group_requests(&mut requests, vec![request]))
+                    .await
+                    .map(|_| SessionResult::Continue),
+                Command::Delete => self
+                    .handle_delete(group_requests(&mut requests, vec![request]))
+                    .await
+                    .map(|_| SessionResult::Continue),
+                Command::Rename => self
+                    .handle_rename(request)
+                    .await
+                    .map(|_| SessionResult::Continue),
+                Command::Status => self
+                    .handle_status(group_requests(&mut requests, vec![request]))
+                    .await
+                    .map(|_| SessionResult::Continue),
+                Command::Append => self
+                    .handle_append(request)
+                    .await
+                    .map(|_| SessionResult::Continue),
+                Command::Close => self
+                    .handle_close(request)
+                    .await
+                    .map(|_| SessionResult::Continue),
+                Command::Unselect => self
+                    .handle_unselect(request)
+                    .await
+                    .map(|_| SessionResult::Continue),
+                Command::Expunge(is_uid) => self
+                    .handle_expunge(request, is_uid)
+                    .await
+                    .map(|_| SessionResult::Continue),
+                Command::Search(is_uid) => self
+                    .handle_search(request, false, is_uid)
+                    .await
+                    .map(|_| SessionResult::Continue),
+                Command::Fetch(_) => self
+                    .handle_fetch(group_requests(&mut requests, vec![request]))
+                    .await
+                    .map(|_| SessionResult::Continue),
+                Command::Store(is_uid) => self
+                    .handle_store(request, is_uid, !has_expunge)
+                    .await
+                    .map(|_| SessionResult::Continue),
+                Command::Copy(is_uid) => self
+                    .handle_copy_move(request, false, is_uid)
+                    .await
+                    .map(|_| SessionResult::Continue),
+                Command::Move(is_uid) => self
+                    .handle_copy_move(request, true, is_uid)
+                    .await
+                    .map(|_| SessionResult::Continue),
+                Command::Sort(is_uid) => self
+                    .handle_search(request, true, is_uid)
+                    .await
+                    .map(|_| SessionResult::Continue),
+                Command::Thread(is_uid) => self
+                    .handle_thread(request, is_uid)
+                    .await
+                    .map(|_| SessionResult::Continue),
+                Command::Idle => self
+                    .handle_idle(request)
+                    .await
+                    .map(|_| SessionResult::Continue),
+                Command::Subscribe => self
+                    .handle_subscribe(request, true)
+                    .await
+                    .map(|_| SessionResult::Continue),
+                Command::Unsubscribe => self
+                    .handle_subscribe(request, false)
+                    .await
+                    .map(|_| SessionResult::Continue),
+                Command::Namespace => self
+                    .handle_namespace(request)
+                    .await
+                    .map(|_| SessionResult::Continue),
+                Command::Authenticate => Box::pin(self.handle_authenticate(request))
+                    .await
+                    .map(|_| SessionResult::Continue),
+                Command::Login => Box::pin(self.handle_login(request))
+                    .await
+                    .map(|_| SessionResult::Continue),
+                Command::Capability => self
+                    .handle_capability(request)
+                    .await
+                    .map(|_| SessionResult::Continue),
+                Command::Enable => self
+                    .handle_enable(request)
+                    .await
+                    .map(|_| SessionResult::Continue),
+                Command::StartTls => self
+                    .write_bytes(
+                        StatusResponse::ok("Begin TLS negotiation now")
+                            .with_tag(request.tag)
+                            .into_bytes(),
+                    )
+                    .await
+                    .map(|_| SessionResult::UpgradeTls),
+                Command::Noop => self
+                    .handle_noop(request)
+                    .await
+                    .map(|_| SessionResult::Continue),
+                Command::Check => self
+                    .handle_noop(request)
+                    .await
+                    .map(|_| SessionResult::Continue),
+                Command::Logout => self
+                    .handle_logout(request)
+                    .await
+                    .map(|_| SessionResult::Close),
+                Command::SetAcl => self
+                    .handle_set_acl(request)
+                    .await
+                    .map(|_| SessionResult::Continue),
+                Command::DeleteAcl => self
+                    .handle_set_acl(request)
+                    .await
+                    .map(|_| SessionResult::Continue),
+                Command::GetAcl => self
+                    .handle_get_acl(request)
+                    .await
+                    .map(|_| SessionResult::Continue),
+                Command::ListRights => self
+                    .handle_list_rights(request)
+                    .await
+                    .map(|_| SessionResult::Continue),
+                Command::MyRights => self
+                    .handle_my_rights(request)
+                    .await
+                    .map(|_| SessionResult::Continue),
+                Command::GetQuota => self
+                    .handle_get_quota(request)
+                    .await
+                    .map(|_| SessionResult::Continue),
+                Command::GetQuotaRoot => self
+                    .handle_get_quota_root(request)
+                    .await
+                    .map(|_| SessionResult::Continue),
+                Command::Unauthenticate => self
+                    .handle_unauthenticate(request)
+                    .await
+                    .map(|_| SessionResult::Continue),
+                Command::Id => self
+                    .handle_id(request)
+                    .await
+                    .map(|_| SessionResult::Continue),
+                Command::GetJmapAccess => self
+                    .handle_jmap_access(request)
+                    .await
+                    .map(|_| SessionResult::Continue),
+                Command::UidBatches => self
+                    .handle_uidbatches(request)
+                    .await
+                    .map(|_| SessionResult::Continue),
+            };
+
+            match result {
+                Ok(SessionResult::Continue) => (),
+                Ok(result) => return result,
+                Err(err) => {
+                    if !self.write_error(err).await {
+                        return SessionResult::Close;
+                    }
+                }
+            }
+        }
+
+        if let Some(needs_literal) = needs_literal
+            && let Err(err) = self
+                .write_bytes(format!("+ Ready for {} bytes.\r\n", needs_literal).into_bytes())
+                .await
+        {
+            self.write_error(err).await;
+            return SessionResult::Close;
+        }
+
+        SessionResult::Continue
+    }
+}
+
+pub fn group_requests(
+    requests: &mut Peekable<IntoIter<Request<Command>>>,
+    mut grouped_requests: Vec<Request<Command>>,
+) -> Vec<Request<Command>> {
+    let last_command = grouped_requests.last().unwrap().command;
+    loop {
+        match requests.peek() {
+            Some(request) if request.command == last_command => {
+                grouped_requests.push(requests.next().unwrap());
+            }
+            _ => break,
+        }
+    }
+    grouped_requests
+}
+
+impl<T: SessionStream> Session<T> {
+    async fn is_allowed(&self, request: Request<Command>) -> trc::Result<Request<Command>> {
+        let state = &self.state;
+        // Rate limit request
+        if let State::Authenticated { data } | State::Selected { data, .. } = state
+            && let Some(rate) = &self.server.core.imap.rate_requests
+            && data
+                .server
+                .in_memory_store()
+                .is_rate_allowed(
+                    KV_RATE_LIMIT_IMAP,
+                    &data.account_id.to_be_bytes(),
+                    rate,
+                    true,
+                )
+                .await?
+                .is_some()
+        {
+            return Err(trc::LimitEvent::TooManyRequests.into_err());
+        }
+
+        match &request.command {
+            Command::Capability | Command::Noop | Command::Logout | Command::Id => Ok(request),
+            Command::StartTls => {
+                if !self.is_tls {
+                    if self.instance.acceptor.is_tls() {
+                        Ok(request)
+                    } else {
+                        Err(trc::ImapEvent::Error
+                            .into_err()
+                            .details("TLS is not available.")
+                            .id(request.tag))
+                    }
+                } else {
+                    Err(trc::ImapEvent::Error
+                        .into_err()
+                        .details("Already in TLS mode.")
+                        .id(request.tag))
+                }
+            }
+            Command::Authenticate => {
+                if let State::NotAuthenticated { .. } = state {
+                    if self.is_tls || self.server.core.imap.allow_plain_auth {
+                        Ok(request)
+                    } else {
+                        Err(trc::ImapEvent::Error
+                            .into_err()
+                            .details("Cannot authenticate over plain-text.")
+                            .code(ResponseCode::PrivacyRequired)
+                            .id(request.tag))
+                    }
+                } else {
+                    Err(trc::ImapEvent::Error
+                        .into_err()
+                        .details("Already authenticated.")
+                        .id(request.tag))
+                }
+            }
+            Command::Login => {
+                if let State::NotAuthenticated { .. } = state {
+                    if self.is_tls || self.server.core.imap.allow_plain_auth {
+                        Ok(request)
+                    } else {
+                        Err(trc::ImapEvent::Error
+                            .into_err()
+                            .details("LOGIN is disabled on the clear-text port.")
+                            .id(request.tag))
+                    }
+                } else {
+                    Err(trc::ImapEvent::Error
+                        .into_err()
+                        .details("Already authenticated.")
+                        .id(request.tag))
+                }
+            }
+            Command::Enable
+            | Command::Select
+            | Command::Examine
+            | Command::Create
+            | Command::Delete
+            | Command::Rename
+            | Command::Subscribe
+            | Command::Unsubscribe
+            | Command::List
+            | Command::Lsub
+            | Command::Namespace
+            | Command::Status
+            | Command::Append
+            | Command::Idle
+            | Command::SetAcl
+            | Command::DeleteAcl
+            | Command::GetAcl
+            | Command::ListRights
+            | Command::MyRights
+            | Command::Unauthenticate
+            | Command::GetQuota
+            | Command::GetQuotaRoot
+            | Command::GetJmapAccess => {
+                if let State::Authenticated { .. } | State::Selected { .. } = state {
+                    Ok(request)
+                } else {
+                    Err(trc::ImapEvent::Error
+                        .into_err()
+                        .details("Not authenticated.")
+                        .id(request.tag))
+                }
+            }
+            Command::Close
+            | Command::Unselect
+            | Command::Expunge(_)
+            | Command::Search(_)
+            | Command::Fetch(_)
+            | Command::Store(_)
+            | Command::Copy(_)
+            | Command::Move(_)
+            | Command::Check
+            | Command::Sort(_)
+            | Command::Thread(_)
+            | Command::UidBatches => match state {
+                State::Selected { mailbox, .. } => {
+                    // RFC 9586 forbids message numbers once UIDONLY is enabled
+                    if self.is_uidonly && request.command.requires_uid() {
+                        Err(trc::ImapEvent::Error
+                            .into_err()
+                            .details("Message numbers are not allowed once UIDONLY is enabled.")
+                            .code(ResponseCode::UidRequired)
+                            .ctx(trc::Key::Type, ResponseType::Bad)
+                            .id(request.tag))
+                    } else if mailbox.is_select
+                        || !matches!(
+                            request.command,
+                            Command::Store(_) | Command::Expunge(_) | Command::Move(_),
+                        )
+                    {
+                        Ok(request)
+                    } else {
+                        Err(trc::ImapEvent::Error
+                            .into_err()
+                            .details("Not permitted in EXAMINE state.")
+                            .id(request.tag))
+                    }
+                }
+                State::Authenticated { .. } => Err(trc::ImapEvent::Error
+                    .into_err()
+                    .details("No mailbox is selected.")
+                    .ctx(trc::Key::Type, ResponseType::Bad)
+                    .id(request.tag)),
+                State::NotAuthenticated { .. } => Err(trc::ImapEvent::Error
+                    .into_err()
+                    .details("Not authenticated.")
+                    .id(request.tag)),
+            },
+        }
+    }
+}
+
+impl<T: SessionStream> State<T> {
+    pub fn auth_failures(&self) -> u32 {
+        match self {
+            State::NotAuthenticated { auth_failures, .. } => *auth_failures,
+            _ => unreachable!(),
+        }
+    }
+
+    pub fn session_data(&self) -> Arc<SessionData<T>> {
+        match self {
+            State::Authenticated { data } => data.clone(),
+            State::Selected { data, .. } => data.clone(),
+            _ => unreachable!(),
+        }
+    }
+
+    pub fn mailbox_state(&self) -> (Arc<SessionData<T>>, Arc<SelectedMailbox>) {
+        match self {
+            State::Selected { data, mailbox, .. } => (data.clone(), mailbox.clone()),
+            _ => unreachable!(),
+        }
+    }
+
+    pub fn session_mailbox_state(&self) -> (Arc<SessionData<T>>, Option<Arc<SelectedMailbox>>) {
+        match self {
+            State::Authenticated { data } => (data.clone(), None),
+            State::Selected { data, mailbox, .. } => (data.clone(), mailbox.clone().into()),
+            _ => unreachable!(),
+        }
+    }
+
+    pub fn select_data(&self) -> (Arc<SessionData<T>>, Arc<SelectedMailbox>) {
+        match self {
+            State::Selected { data, mailbox } => (data.clone(), mailbox.clone()),
+            _ => unreachable!(),
+        }
+    }
+
+    pub fn spawn_task<F, R, P>(&self, params: P, fnc: F) -> trc::Result<()>
+    where
+        F: FnOnce(P, &super::SessionData<T>) -> R + Send + 'static,
+        P: Send + Sync + 'static,
+        R: std::future::Future<Output = trc::Result<()>> + Send + 'static,
+    {
+        let data = self.session_data();
+
+        tokio::spawn(async move {
+            if let Err(err) = fnc(params, &data).await {
+                let _ = data.write_error(err).await;
+            }
+        });
+
+        Ok(())
+    }
+
+    pub fn is_authenticated(&self) -> bool {
+        matches!(self, State::Authenticated { .. } | State::Selected { .. })
+    }
+
+    pub fn close_mailbox(&self) -> bool {
+        matches!(self, State::Selected { .. })
+    }
+}

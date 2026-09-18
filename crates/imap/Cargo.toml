@@ -1,0 +1,30 @@
+[package]
+name = "imap"
+version = "0.16.22"
+edition = "2024"
+
+[dependencies]
+imap_proto = { path = "../imap-proto" }
+types = { path = "../types" }
+directory = { path = "../directory" }
+trc = { path = "../trc" }
+store = { path = "../store" }
+common = { path = "../common" }
+email = { path = "../email" }
+nlp = { path = "../nlp" }
+utils = { path = "../utils" }
+registry = { path = "../registry" }
+mail-parser = { version = "0.11", features = ["full_encoding"] } 
+tokio = { version = "1.53", features = ["full"] }
+tokio-rustls = { version = "0.26", default-features = false, features = ["aws_lc_rs", "tls12"] }
+parking_lot = "0.12"
+ahash = { version = "0.8" }
+md5 = "0.8.1"
+rand = "0.10.2"
+compact_str = "0.10.0"
+
+[features]
+test_mode = []
+
+[lints]
+workspace = true

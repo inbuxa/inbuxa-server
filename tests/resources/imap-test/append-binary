@@ -1,0 +1,39 @@
+capabilities: BINARY
+state: created
+
+ok append $mailbox ~{{{
+From: user@domain.org
+Date: Sat, 24 Mar 2007 23:00:00 +0200
+Mime-Version: 1.0
+Content-Type: application/octet-stream
+Content-Transfer-Encoding: binary
+
+nil
+
+
+
+}}}
+
+ok select $mailbox
+
+# should have been converted to base64, or something
+ok fetch 1 (body.peek[1])
+! 1 fetch (body[1] {{{
+nil
+
+}}})
+! 1 fetch (body[1] {{{
+nil
+
+}}})
+! 1 fetch (body[1] ~{{{
+nil
+
+
+}}})
+
+ok fetch 1 (binary.size[1] binary.peek[1])
+! 1 fetch (binary.size[1] 6 binary[1] ~{{{
+nil
+
+}}})

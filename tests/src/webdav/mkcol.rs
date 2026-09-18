@@ -1,0 +1,293 @@
+/*
+ * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
+ *
+ * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
+ */
+
+use hyper::StatusCode;
+
+use crate::webdav::{TEST_FILE_1, TEST_ICAL_1, TEST_VCARD_1, TEST_VTIMEZONE_1};
+
+use crate::utils::server::TestServer;
+
+pub async fn test(test: &TestServer) {
+    println!("Running MKCOL tests...");
+    let client = test.account("john@example.com").webdav_client();
+
+    // Creating collections in root elements is not allowed
+    for path in [
+        "/dav/file/test",
+        "/dav/card/test",
+        "/dav/cal/test",
+        "/dav/test",
+    ] {
+        client
+            .request("MKCOL", path, "")
+            .await
+            .with_status(StatusCode::NOT_FOUND);
+    }
+
+    // Create collections using MKCOL (empty body)
+    for path in [
+        "/dav/file/john%40example.com/my-files",
+        "/dav/card/john%40example.com/my-cards",
+        "/dav/cal/john%40example.com/my-events",
+    ] {
+        client
+            .request("MKCOL", path, "")
+            .await
+            .with_status(StatusCode::CREATED);
+    }
+
+    // Create resources under the newly created collections
+    for (path, content) in [
+        (
+            "/dav/file/john%40example.com/my-files/file1.txt",
+            TEST_FILE_1,
+        ),
+        (
+            "/dav/card/john%40example.com/my-cards/card1.vcf",
+            TEST_VCARD_1,
+        ),
+        (
+            "/dav/cal/john%40example.com/my-events/event1.ics",
+            TEST_ICAL_1,
+        ),
+    ] {
+        client
+            .request("PUT", path, content)
+            .await
+            .with_status(StatusCode::CREATED);
+    }
+
+    // Creating a collection on a mapped resource should fail
+    for path in [
+        "/dav/file/john%40example.com/my-files",
+        "/dav/card/john%40example.com/my-cards",
+        "/dav/cal/john%40example.com/my-events",
+        "/dav/file/john%40example.com/my-files/file1.txt",
+        "/dav/card/john%40example.com/my-cards/card1.vcf",
+        "/dav/cal/john%40example.com/my-events/event1.ics",
+    ] {
+        client
+            .request("MKCOL", path, "")
+            .await
+            .with_status(StatusCode::METHOD_NOT_ALLOWED);
+    }
+
+    // Creating a sub-collections is allowed in FileDAV but in CalDAV and CardDAV
+    for (path, expected_status) in [
+        (
+            "/dav/file/john%40example.com/my-files/my-sub-files",
+            StatusCode::CREATED,
+        ),
+        (
+            "/dav/card/john%40example.com/my-cards/my-sub-cards",
+            StatusCode::METHOD_NOT_ALLOWED,
+        ),
+        (
+            "/dav/cal/john%40example.com/my-events/my-sub-events",
+            StatusCode::METHOD_NOT_ALLOWED,
+        ),
+    ] {
+        client
+            .request("MKCOL", path, "")
+            .await
+            .with_status(expected_status);
+    }
+
+    // Extended MKCOL with an unsupported resource types should fail
+    for (path, resource_type) in [
+        (
+            "/dav/file/john%40example.com/my-named-files",
+            "B:addressbook",
+        ),
+        ("/dav/card/john%40example.com/my-named-cards", "A:calendar"),
+        (
+            "/dav/cal/john%40example.com/my-named-events",
+            "B:addressbook",
+        ),
+    ] {
+        client
+            .mkcol("MKCOL", path, ["D:collection", resource_type], [])
+            .await
+            .with_status(StatusCode::FORBIDDEN)
+            .with_value(
+                "D:mkcol-response.D:propstat.D:error.D:valid-resourcetype",
+                "",
+            )
+            .with_value("D:mkcol-response.D:propstat.D:prop.D:resourcetype", "");
+    }
+
+    // Create using extended MKCOL
+    for (path, expected_properties, resource_types) in [
+        (
+            "/dav/file/john%40example.com/my-named-files/",
+            [("D:displayname", "Named Files")].as_slice(),
+            ["D:collection"].as_slice(),
+        ),
+        (
+            "/dav/card/john%40example.com/my-named-cards/",
+            [
+                ("D:displayname", "Named Cards"),
+                ("B:addressbook-description", "Some amazing contacts"),
+            ]
+            .as_slice(),
+            ["D:collection", "B:addressbook"].as_slice(),
+        ),
+        (
+            "/dav/cal/john%40example.com/my-named-events/",
+            [
+                ("D:displayname", "Named Events"),
+                ("A:calendar-description", "Some amazing events"),
+                (
+                    "A:calendar-timezone",
+                    &TEST_VTIMEZONE_1.replace("\n", "\r\n"),
+                ),
+            ]
+            .as_slice(),
+            ["D:collection", "A:calendar"].as_slice(),
+        ),
+    ] {
+        let response = client
+            .mkcol(
+                "MKCOL",
+                path,
+                resource_types.iter().copied(),
+                expected_properties.iter().copied(),
+            )
+            .await
+            .with_status(StatusCode::CREATED)
+            .into_propfind_response("D:mkcol-response".into());
+        let properties = response.properties("");
+        for (property, _) in expected_properties {
+            properties
+                .get(property)
+                .with_status(StatusCode::OK)
+                .with_values([""]);
+        }
+
+        // Check the properties of the created collection
+        let response = client
+            .propfind(path, expected_properties.iter().map(|x| x.0))
+            .await;
+        let properties = response.properties(path);
+        for (property, value) in expected_properties {
+            properties
+                .get(property)
+                .with_status(StatusCode::OK)
+                .with_values([*value]);
+        }
+    }
+
+    // Test MKCALENDAR
+    client
+        .mkcol(
+            "MKCALENDAR",
+            "/dav/cal/john%40example.com/my-named-events2",
+            [],
+            [
+                ("D:displayname", "Named Events 2"),
+                ("A:calendar-description", ""),
+            ],
+        )
+        .await
+        .with_status(StatusCode::CREATED)
+        .with_value("A:mkcalendar-response.D:propstat.D:prop.D:displayname", "")
+        .with_values(
+            "A:mkcalendar-response.D:propstat.D:status",
+            ["HTTP/1.1 200 OK"],
+        );
+    client
+        .mkcol(
+            "MKCALENDAR",
+            "/dav/cal/john%40example.com/my-named-events3",
+            [],
+            [
+                ("D:displayname", "Named Events 3"),
+                (
+                    "A:supported-calendar-component-set",
+                    "<A:comp name=\"VEVENT\"/><A:comp name=\"VTODO\"/>",
+                ),
+            ],
+        )
+        .await
+        .with_status(StatusCode::CREATED)
+        .with_value("A:mkcalendar-response.D:propstat.D:prop.D:displayname", "")
+        .with_values(
+            "A:mkcalendar-response.D:propstat.D:status",
+            ["HTTP/1.1 200 OK"],
+        );
+    // Check the properties of the created calendars
+    client
+        .propfind(
+            "/dav/cal/john%40example.com/my-named-events2/",
+            ["A:supported-calendar-component-set"],
+        )
+        .await
+        .properties("/dav/cal/john%40example.com/my-named-events2/")
+        .get("A:supported-calendar-component-set")
+        .with_status(StatusCode::OK)
+        .with_values([
+            "A:comp.[name]:VJOURNAL",
+            "A:comp.[name]:VTIMEZONE",
+            "A:comp.[name]:VAVAILABILITY",
+            "A:comp.[name]:VALARM",
+            "A:comp.[name]:VRESOURCE",
+            "A:comp.[name]:AVAILABLE",
+            "A:comp.[name]:VTODO",
+            "A:comp.[name]:VFREEBUSY",
+            "A:comp.[name]:VEVENT",
+            "A:comp.[name]:STANDARD",
+            "A:comp.[name]:DAYLIGHT",
+            "A:comp.[name]:VLOCATION",
+            "A:comp.[name]:PARTICIPANT",
+        ]);
+    client
+        .propfind(
+            "/dav/cal/john%40example.com/my-named-events3/",
+            ["A:supported-calendar-component-set"],
+        )
+        .await
+        .properties("/dav/cal/john%40example.com/my-named-events3/")
+        .get("A:supported-calendar-component-set")
+        .with_status(StatusCode::OK)
+        .with_values(["A:comp.[name]:VEVENT", "A:comp.[name]:VTODO"]);
+
+    // Resource names arriving through the URI are echoed back verbatim
+    for name in ["My%20Folder", "file(1)+a:b", "%C3%9Cnterlagen", "Q&A"] {
+        let path = format!("/dav/file/john%40example.com/{name}");
+        let href = format!("{path}/");
+        client
+            .request("MKCOL", &path, "")
+            .await
+            .with_status(StatusCode::CREATED);
+        client
+            .propfind(&path, ["D:getetag"])
+            .await
+            .with_hrefs([href.as_str()]);
+    }
+
+    // Delete everything
+    for path in [
+        "/dav/file/john%40example.com/My%20Folder",
+        "/dav/file/john%40example.com/file(1)+a:b",
+        "/dav/file/john%40example.com/%C3%9Cnterlagen",
+        "/dav/file/john%40example.com/Q&A",
+        "/dav/file/john%40example.com/my-files",
+        "/dav/card/john%40example.com/my-cards",
+        "/dav/cal/john%40example.com/my-events",
+        "/dav/file/john%40example.com/my-named-files",
+        "/dav/card/john%40example.com/my-named-cards",
+        "/dav/cal/john%40example.com/my-named-events",
+        "/dav/cal/john%40example.com/my-named-events2",
+        "/dav/cal/john%40example.com/my-named-events3",
+    ] {
+        client
+            .request("DELETE", path, "")
+            .await
+            .with_status(StatusCode::NO_CONTENT);
+    }
+    client.delete_default_containers().await;
+    test.assert_is_empty().await;
+}

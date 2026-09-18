@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple Computer//DTD PLIST 1.0//EN"
+    "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+    <dict>
+        <key>Label</key>
+        <string>stalwart.mail</string>
+        <key>ServiceDescription</key>
+        <string>Stalwart</string>
+        <key>ProgramArguments</key>
+        <array>
+            <string>__PATH__/bin/stalwart</string>
+            <string>--config=__PATH__/etc/config.json</string>
+        </array>
+        <key>RunAtLoad</key>
+        <true/>
+        <key>KeepAlive</key>
+        <true/>
+    </dict>
+</plist>

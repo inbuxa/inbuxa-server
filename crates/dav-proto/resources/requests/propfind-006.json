@@ -1,0 +1,17 @@
+{
+  "type": "Prop",
+  "data": [
+    {
+      "type": "Principal",
+      "data": {
+        "type": "CalendarHomeSet"
+      }
+    },
+    {
+      "type": "Principal",
+      "data": {
+        "type": "GroupMembership"
+      }
+    }
+  ]
+}

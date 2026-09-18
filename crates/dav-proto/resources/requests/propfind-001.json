@@ -1,0 +1,33 @@
+{
+  "type": "Prop",
+  "data": [
+    {
+      "type": "DeadProperty",
+      "data": {
+        "name": "bigbox",
+        "attrs": "xmlns=\"http://ns.example.com/boxschema/\""
+      }
+    },
+    {
+      "type": "DeadProperty",
+      "data": {
+        "name": "author",
+        "attrs": "xmlns=\"http://ns.example.com/boxschema/\""
+      }
+    },
+    {
+      "type": "DeadProperty",
+      "data": {
+        "name": "DingALing",
+        "attrs": "xmlns=\"http://ns.example.com/boxschema/\""
+      }
+    },
+    {
+      "type": "DeadProperty",
+      "data": {
+        "name": "Random",
+        "attrs": "xmlns=\"http://ns.example.com/boxschema/\""
+      }
+    }
+  ]
+}

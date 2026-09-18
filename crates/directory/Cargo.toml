@@ -1,0 +1,43 @@
+[package]
+name = "directory"
+version = "0.16.22"
+edition = "2024"
+
+[dependencies]
+utils = { path =  "../utils" }
+store = { path =  "../store" }
+trc = { path = "../trc" }
+registry = { path = "../registry" }
+mail-parser = { version = "0.11" }
+mail-builder = { version = "1.0" } 
+tokio = { version = "1.53", features = ["net"] }
+ldap3 = { version = "0.12", default-features = false, features = ["tls-rustls-aws-lc-rs"] }
+deadpool = { version = "0.13", features = ["managed", "rt_tokio_1"] }
+ahash = { version = "0.8" }
+pwhash = "1"
+argon2 = "0.6.0"
+pbkdf2 = { version = "0.13.0", features = ["phc"] }
+scrypt = { version = "0.12.0", features = ["phc"] }
+sha1 = "0.11"
+sha2 = "0.11"
+md5 = "0.8.1"
+serde = { version = "1.0", features = ["derive"]}
+totp-rs = { version = "6.0.0", features = ["otpauth"] }
+reqwest = { version = "0.13", default-features = false, features = ["rustls", "http2"] }
+serde_json = "1.0"
+base64 = "0.23"
+nohash-hasher = "0.2.0"
+jsonwebtoken = { version = "11.0.0", features = ["aws_lc_rs"] }
+
+[dev-dependencies]
+tokio = { version = "1.53", features = ["full"] }
+
+[features]
+test_mode = []
+enterprise = []
+mysql = []
+postgres = []
+sqlite = []
+
+[lints]
+workspace = true

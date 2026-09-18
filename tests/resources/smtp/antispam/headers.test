@@ -1,0 +1,90 @@
+expect HAS_X_PRIO_ONE
+
+X-Priority: 1
+From: test@test.com
+To: test@test.com
+
+Test
+<!-- NEXT TEST -->
+expect MULTIPLE_UNIQUE_HEADERS HAS_X_PRIO_TWO
+
+X-Mailer: my mailer 1
+X-Priority: 2
+From: test@test.com
+From: test@test.com
+To: test@test.com
+
+Test
+<!-- NEXT TEST -->
+expect XM_CASE HAS_LIST_UNSUB PRECEDENCE_BULK MULTIPLE_UNIQUE_HEADERS
+
+X-mailer: my mailer 1
+List-Unsubscribe: <unsub@list.org>
+Precedence: bulk
+Subject: first subject
+Subject: second subject
+
+Test
+<!-- NEXT TEST -->
+expect KLMS_SPAM UNITEDINTERNET_SPAM SPAM_FLAG XM_UA_NO_VERSION
+
+X-Mailer: my mailer
+X-KLMS-AntiSpam-Status: spam
+X-Spam: Yes
+X-UI-Filterresults: JUNK
+Subject: test
+
+Test
+<!-- NEXT TEST -->
+expect X_PHP_EVAL HIDDEN_SOURCE_OBJ HAS_X_GMSV HAS_X_AS
+
+X-PHP-Script: sendmail.php
+X-PHP-Originating-Script: eval()
+X-Source-Args: ../script
+X-Authenticated-Sender: sender: test@test.org
+X-Get-Message-Sender-Via: authenticated_id: 123
+X-AntiAbuse: 1
+X-Authentication-Warning: 1
+Subject: test
+
+Test
+<!-- NEXT TEST -->
+expect HEADER_EMPTY_DELIMITER
+
+Subject:test
+
+Test
+<!-- NEXT TEST -->
+expect 
+
+Subject:
+ test
+
+Test
+<!-- NEXT TEST -->
+expect MAILLIST
+
+List-Archive: 1
+List-Owner: 1
+List-Help: 1
+List-Post: 1
+X-Loop: 1
+List-Id: 1
+Subject: test
+
+Test
+<!-- NEXT TEST -->
+expect MAILLIST HAS_LIST_UNSUB
+
+List-Id: 1
+List-Subscribe: 1
+List-Unsubscribe: 1
+Subject: test
+
+Test
+<!-- NEXT TEST -->
+expect MISSING_ESSENTIAL_HEADERS
+
+X-Other: test
+
+Test
