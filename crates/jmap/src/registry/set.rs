@@ -500,6 +500,23 @@ impl RegistrySet for Server {
                             )
                             .await?
                         }
+                        // inbuxa: ME-12 to ME-17
+                        ObjectInner::MaskedEmail(mask) => {
+                            let old = match &modification {
+                                Modification::Update { object, .. } => match &object.inner {
+                                    ObjectInner::MaskedEmail(old) => Some(old),
+                                    _ => None,
+                                },
+                                Modification::Create { .. } => None,
+                            };
+                            crate::inbuxa::masked_email::validate(
+                                &set,
+                                mask,
+                                old,
+                                unpatched_properties,
+                            )
+                            .await?
+                        }
                         ObjectInner::AcmeProvider(provider) if is_create => {
                             validate_acme_provider(&set, provider, unpatched_properties).await?
                         }
@@ -629,6 +646,12 @@ impl RegistrySet for Server {
                             {
                                 cache_invalidator.process_update(id, &old, &new);
                             }
+                            // inbuxa: ME-1, ME-2
+                            if let (ObjectInner::MaskedEmail(old), ObjectInner::MaskedEmail(new)) =
+                                (&object.inner, &new_object.inner)
+                            {
+                                crate::inbuxa::masked_email::updated(self, id, old, new).await?;
+                            }
                             if let (
                                 ObjectInner::Application(previous),
                                 ObjectInner::Application(updated),
@@ -656,6 +679,10 @@ impl RegistrySet for Server {
                             RegistryWriteResult::Success(id),
                         ) => {
                             cache_invalidator.process_create(&new_object);
+                            // inbuxa: ME-7a
+                            if let ObjectInner::MaskedEmail(mask) = &new_object.inner {
+                                crate::inbuxa::masked_email::created(self, id, mask).await?;
+                            }
                             response.object.insert(Property::Id, RegistryValue::Id(id));
                             set.response
                                 .created
@@ -746,6 +773,10 @@ impl RegistrySet for Server {
                                     );
                                 }
 
+                                // inbuxa: ME-3
+                                if let ObjectInner::MaskedEmail(mask) = &object.inner {
+                                    crate::inbuxa::masked_email::destroyed(self, id, mask).await?;
+                                }
                                 cache_invalidator.process_delete(id, &object);
                                 set.response.destroyed.push(id);
                             }

@@ -20,8 +20,7 @@ impl EnterpriseRegistry for Server {
     fn assert_enterprise_object(&self, object_type: ObjectType) -> trc::Result<()> {
         if !matches!(
             object_type,
-            ObjectType::MaskedEmail
-                | ObjectType::ArchivedItem
+            ObjectType::ArchivedItem
                 | ObjectType::Metric
                 | ObjectType::Trace
         ) {

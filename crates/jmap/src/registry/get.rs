@@ -196,6 +196,7 @@ impl RegistryGet for Server {
             | ObjectType::Domain => {
                 let is_singleton = (get.object_flags & OBJ_SINGLETON) != 0;
 
+                let ids_requested = get.ids.is_some();
                 let ids = if let Some(ids) = get.ids.take() {
                     ids
                 } else if object_type == ObjectType::Tenant
@@ -217,7 +218,7 @@ impl RegistryGet for Server {
                 get.response.list.reserve(ids.len());
 
                 for id in ids {
-                    let object = if let Some(object) = self
+                    let mut object = if let Some(object) = self
                         .registry()
                         .get(ObjectId::new(object_type, id))
                         .await
@@ -244,6 +245,16 @@ impl RegistryGet for Server {
                         get.not_found(id);
                         continue;
                     };
+
+                    // inbuxa: ME-6a, ME-8
+                    if let ObjectInner::MaskedEmail(mask) = &mut object.inner
+                        && !crate::inbuxa::masked_email::read(self, id, mask).await?
+                    {
+                        if ids_requested {
+                            get.not_found(id);
+                        }
+                        continue;
+                    }
 
                     let mut extra_properties: VecMap<Property, _> = VecMap::new();
                     match &object.inner {

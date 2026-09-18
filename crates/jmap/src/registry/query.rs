@@ -131,6 +131,16 @@ impl RegistryQuery for Server {
             .await
             .and_then(|response| response.build()),
 
+            // inbuxa: filters on enabled, forDomain and text (masked email)
+            ObjectType::MaskedEmail => crate::inbuxa::masked_email::query(RegistryQueryResponse {
+                server: self,
+                access_token,
+                object_type,
+                request,
+            })
+            .await
+            .and_then(|response| response.build()),
+
             ObjectType::Action => Err(trc::JmapEvent::InvalidArguments
                 .into_err()
                 .details("Actions cannot be queried")),

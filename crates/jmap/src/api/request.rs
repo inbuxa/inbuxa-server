@@ -367,7 +367,8 @@ impl RequestHandler for Server {
                 }
                 GetRequestMethod::Registry(mut req) => {
                     resolve_account_id(&mut req.account_id, method_name.obj, access_token)?;
-                    access_token.assert_is_member(req.account_id)?;
+                    assert_registry_account(self, method_name.obj, access_token, req.account_id)
+                        .await?;
 
                     Box::pin(self.registry_get(
                         method_name.obj.unwrap_registry(),
@@ -458,7 +459,8 @@ impl RequestHandler for Server {
                 }
                 QueryRequestMethod::Registry(mut req) => {
                     resolve_account_id(&mut req.account_id, method_name.obj, access_token)?;
-                    access_token.assert_is_member(req.account_id)?;
+                    assert_registry_account(self, method_name.obj, access_token, req.account_id)
+                        .await?;
 
                     Box::pin(self.registry_query(
                         method_name.obj.unwrap_registry(),
@@ -574,7 +576,8 @@ impl RequestHandler for Server {
                 }
                 SetRequestMethod::Registry(mut req) => {
                     resolve_account_id(&mut req.account_id, method_name.obj, access_token)?;
-                    access_token.assert_is_member(req.account_id)?;
+                    assert_registry_account(self, method_name.obj, access_token, req.account_id)
+                        .await?;
 
                     Box::pin(self.registry_set(
                         method_name.obj.unwrap_registry(),
@@ -713,6 +716,27 @@ impl RequestHandler for Server {
         );
 
         Ok(response)
+    }
+}
+
+// inbuxa: ME-19: a tenant administrator reaches the masks of its tenant's
+// accounts without impersonate, and a tenant principal never reaches beyond
+// its tenant
+async fn assert_registry_account(
+    server: &Server,
+    obj: MethodObject,
+    access_token: &AccessToken,
+    account_id: Id,
+) -> trc::Result<()> {
+    if obj == MethodObject::Registry(registry::schema::prelude::ObjectType::MaskedEmail) {
+        crate::inbuxa::masked_email::assert_can_manage(
+            server,
+            access_token,
+            account_id.document_id(),
+        )
+        .await
+    } else {
+        access_token.assert_is_member(account_id).map(|_| ())
     }
 }
 

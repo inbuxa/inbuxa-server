@@ -33,6 +33,7 @@ pub mod contact;
 pub mod email;
 pub mod file;
 pub mod identity;
+pub mod inbuxa; // inbuxa: the fork's own features
 pub mod mailbox;
 pub mod participant_identity;
 pub mod principal;
