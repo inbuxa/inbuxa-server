@@ -25,7 +25,7 @@ use registry::{
     schema::{
         enums::TenantStorageQuota,
         prelude::{Object, ObjectInner, Property},
-        structs::{Account, Domain, Tenant},
+        structs::{Account, DkimManagement, Domain, Tenant},
     },
     types::{EnumImpl, id::ObjectId},
 };
@@ -125,6 +125,21 @@ pub async fn check(
             quota::check(registry, tenant_id.document_id(), quota, limit(quota), 1).await?
         {
             return Ok(Err(over_quota(reached, tenant_id)));
+        }
+
+        // A new domain's generated DKIM keys, one per algorithm, count too (MT-9)
+        if let ObjectInner::Domain(Domain {
+            dkim_management: DkimManagement::Automatic(dkim),
+            ..
+        }) = &new.inner
+        {
+            let quota = TenantStorageQuota::MaxDkimKeys;
+            let keys = dkim.algorithms.iter().count() as u64;
+            if let Err(reached) =
+                quota::check(registry, tenant_id.document_id(), quota, limit(quota), keys).await?
+            {
+                return Ok(Err(over_quota(reached, tenant_id)));
+            }
         }
     }
 
