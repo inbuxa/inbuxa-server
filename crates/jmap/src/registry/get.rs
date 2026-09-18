@@ -198,6 +198,11 @@ impl RegistryGet for Server {
 
                 let ids = if let Some(ids) = get.ids.take() {
                     ids
+                } else if object_type == ObjectType::Tenant
+                    && let Some(tenant_id) = access_token.tenant_id()
+                {
+                    // inbuxa: MT-12: inside a tenant, only its own tenant object
+                    vec![Id::from(tenant_id)]
                 } else {
                     self.registry()
                         .query::<Vec<Id>>(
@@ -223,6 +228,11 @@ impl RegistryGet for Server {
                                 != object.inner.member_tenant_id())
                             || (is_account_filtered
                                 && object.inner.account_id() != Some(Id::from(get.account_id)))
+                            // inbuxa: MT-12: inside a tenant, only its own tenant object
+                            || (object_type == ObjectType::Tenant
+                                && access_token
+                                    .tenant_id()
+                                    .is_some_and(|tenant_id| tenant_id != id.document_id()))
                         {
                             get.not_found(id);
                             continue;

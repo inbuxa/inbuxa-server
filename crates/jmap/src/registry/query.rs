@@ -265,6 +265,14 @@ impl RegistryQuery for Server {
                     }
                 };
 
+                // inbuxa: MT-12: inside a tenant, only its own tenant object
+                let mut results = results;
+                if object_type == ObjectType::Tenant
+                    && let Some(tenant_id) = access_token.tenant_id()
+                {
+                    results.retain(|id| id.document_id() == tenant_id);
+                }
+
                 // Build response
                 let mut response = QueryResponseBuilder::new(
                     results.len(),

@@ -89,6 +89,11 @@ impl JmapAuthorization for AccessToken {
                     let MethodObject::Registry(object_type) = object else {
                         unreachable!()
                     };
+                    // inbuxa: MT-2: server-level objects are out of a tenant's reach
+                    assert_tenant_reach(
+                        self,
+                        inbuxa_features::tenancy::reach::can_read(object_type),
+                    )?;
                     object_type.get_permission()
                 }
             },
@@ -203,6 +208,11 @@ impl JmapAuthorization for AccessToken {
                         let MethodObject::Registry(object_type) = object else {
                             unreachable!()
                         };
+                        // inbuxa: MT-2, MT-12: server-level objects are out of a tenant's reach
+                        assert_tenant_reach(
+                            self,
+                            inbuxa_features::tenancy::reach::can_write(object_type),
+                        )?;
                         let set_permissions = object_type.set_permission();
                         validate_set(
                             s,
@@ -295,6 +305,11 @@ impl JmapAuthorization for AccessToken {
                     let MethodObject::Registry(object_type) = object else {
                         unreachable!()
                     };
+                    // inbuxa: MT-2: server-level objects are out of a tenant's reach
+                    assert_tenant_reach(
+                        self,
+                        inbuxa_features::tenancy::reach::can_read(object_type),
+                    )?;
                     object_type.query_permission()
                 }
             },
@@ -313,6 +328,17 @@ impl JmapAuthorization for AccessToken {
                 .into_err()
                 .details("You are not authorized to perform this action"))
         }
+    }
+}
+
+// inbuxa: MT-2
+fn assert_tenant_reach(access_token: &AccessToken, reachable: bool) -> trc::Result<()> {
+    if reachable || access_token.tenant_id().is_none() {
+        Ok(())
+    } else {
+        Err(trc::JmapEvent::Forbidden
+            .into_err()
+            .details("You are not authorized to perform this action"))
     }
 }
 

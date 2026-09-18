@@ -381,6 +381,15 @@ impl RegistrySet for Server {
                             new_object.inner.set_member_tenant_id(tenant_id.into());
                         }
 
+                        // inbuxa: MT-7: a principal takes its domain's tenant
+                        if can_set_tenant {
+                            inbuxa_features::tenancy::writes::default_tenant(
+                                self.registry(),
+                                &mut new_object,
+                            )
+                            .await?;
+                        }
+
                         // Add accountId
                         if has_account_id {
                             new_object.inner.set_account_id(set.account_id.into());
@@ -526,6 +535,26 @@ impl RegistrySet for Server {
                         }
                     };
 
+                    // inbuxa: MT-3, MT-8, MT-17
+                    let (stored_id, stored) = match &modification {
+                        Modification::Update { id, object } => (Some(*id), Some(object)),
+                        Modification::Create { .. } => (None, None),
+                    };
+                    let after_save = match inbuxa_features::tenancy::writes::check(
+                        self.registry(),
+                        stored_id,
+                        stored,
+                        &new_object,
+                    )
+                    .await?
+                    {
+                        Ok(after_save) => after_save,
+                        Err(err) => {
+                            set.failed(modification, err);
+                            continue 'outer;
+                        }
+                    };
+
                     // Validate expressions
                     if let Some(expressions) = new_object.inner.expression_ctxs() {
                         let mut bp = Bootstrap::new_uninitialized(self.registry().clone());
@@ -590,6 +619,16 @@ impl RegistrySet for Server {
                     let object_id = match (modification, result) {
                         (Modification::Update { id, object }, RegistryWriteResult::Success(_)) => {
                             cache_invalidator.process_update(id, &object, &new_object);
+                            // inbuxa: MT-8: what moves with a domain follows it
+                            for (id, old, new) in inbuxa_features::tenancy::writes::after_save(
+                                &self.core.storage.data,
+                                self.registry(),
+                                after_save,
+                            )
+                            .await?
+                            {
+                                cache_invalidator.process_update(id, &old, &new);
+                            }
                             if let (
                                 ObjectInner::Application(previous),
                                 ObjectInner::Application(updated),
