@@ -45,8 +45,7 @@ impl Server {
         &self,
         permissions: &structs::Permissions,
         role_ids: &[Id],
-        // inbuxa: unused until multi-tenancy is rebuilt: the tenant permission ceiling (docs/spec/features/multi-tenancy.md MT-13)
-        _tenant_id: Option<u32>,
+        tenant_id: Option<u32>,
     ) -> trc::Result<PermissionsGroup> {
         // Calculate effective permissions
         let (mut permissions, roles) = match permissions {
@@ -65,8 +64,44 @@ impl Server {
                 .caused_by(trc::location!())?
         }
 
+        // inbuxa: MT-13, MT-14, MT-15: cut down to what the tenant allows
+        if let Some(tenant_id) = tenant_id {
+            self.apply_tenant_ceiling(&mut permissions, tenant_id)
+                .await
+                .caused_by(trc::location!())?;
+        }
 
         Ok(permissions)
+    }
+
+    /// inbuxa: MT-13. The tenant's roles give the base; its own permission
+    /// lists adjust it (`inbuxa_features::tenancy::ceiling`).
+    async fn apply_tenant_ceiling(
+        &self,
+        permissions: &mut PermissionsGroup,
+        tenant_id: u32,
+    ) -> trc::Result<()> {
+        use inbuxa_features::tenancy::ceiling::{Policy, ceiling};
+
+        let tenant = self.tenant(tenant_id).await?;
+        let base = self
+            .add_role_permissions(PermissionsGroup::default(), tenant.id_roles.iter().copied())
+            .await?
+            .finalize();
+        let policy = match tenant.permissions.as_deref() {
+            None => Policy::Inherit,
+            Some(list) if list.merge => Policy::Merge {
+                enabled: &list.enabled,
+                disabled: &list.disabled,
+            },
+            Some(list) => Policy::Replace {
+                enabled: &list.enabled,
+                disabled: &list.disabled,
+            },
+        };
+        ceiling(base, policy).apply(&mut permissions.enabled, &mut permissions.disabled);
+
+        Ok(())
     }
 
     pub async fn can_set_permissions(
@@ -222,6 +257,11 @@ impl Default for DefaultPermissions {
                     default.superuser.push(permission);
                 }
                 Permission::FetchAnyBlob | Permission::LiveDeliveryTest => {
+                    default.superuser.push(permission);
+                    default.tenant.push(permission);
+                }
+                // inbuxa: MT-12: a tenant administrator reads its own tenant
+                Permission::SysTenantGet | Permission::SysTenantQuery => {
                     default.superuser.push(permission);
                     default.tenant.push(permission);
                 }

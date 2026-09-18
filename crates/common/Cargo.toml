@@ -13,6 +13,7 @@ directory = { path = "../directory" }
 coordinator = { path = "../coordinator" }
 types = { path = "../types" }
 registry = { path = "../registry" }
+inbuxa-features = { path = "../features" }
 jmap_proto = { path = "../jmap-proto" }
 sieve-rs = { version = "0.7", features = ["rkyv", "serde"] }
 mail-parser = { version = "0.11", features = ["full_encoding"] } 

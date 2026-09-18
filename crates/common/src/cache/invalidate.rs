@@ -280,6 +280,15 @@ impl Server {
                         .registry()
                         .linked_objects(ObjectId::new(ObjectType::Role, role_id.into()))
                         .await?;
+                    // inbuxa: MT-16: a role a tenant holds sets its ceiling
+                    for tenant_id in inbuxa_features::tenancy::members::tenants_using_role(
+                        self.registry(),
+                        &linked_objects,
+                    )
+                    .await?
+                    {
+                        changes.insert(CacheInvalidation::Tenant(tenant_id));
+                    }
                     for linked_object in linked_objects {
                         match linked_object.object() {
                             ObjectType::Account => {
@@ -294,6 +303,22 @@ impl Server {
                         }
                     }
                 }
+            }
+        }
+
+        // inbuxa: MT-16: a tenant's change reaches its people on their next request
+        let tenant_ids = changes
+            .iter()
+            .filter_map(|change| match change {
+                CacheInvalidation::Tenant(tenant_id) => Some(*tenant_id),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        for tenant_id in tenant_ids {
+            for account_id in
+                inbuxa_features::tenancy::members::accounts(self.registry(), tenant_id).await?
+            {
+                changes.insert(CacheInvalidation::AccessToken(account_id));
             }
         }
 

@@ -31,9 +31,9 @@ impl Server {
             .add_context(|err| err.caused_by(trc::location!()).account_id(account_id))
     }
 
-    #[cfg(not(feature = "enterprise"))]
-    pub async fn get_used_quota_tenant(&self, _tenant_id: u32) -> trc::Result<i64> {
-        Ok(0)
+    // inbuxa: MT-20: storage used by all a tenant's members together
+    pub async fn get_used_quota_tenant(&self, tenant_id: u32) -> trc::Result<i64> {
+        inbuxa_features::tenancy::quota::used(&self.core.storage.data, tenant_id).await
     }
 
     pub async fn has_available_quota(
@@ -52,6 +52,21 @@ impl Server {
             }
         }
 
+        // inbuxa: MT-19: the tenant's limit applies too, whichever is reached first
+        if let Some(tenant_id) = account.id_tenant {
+            let tenant = self.tenant(tenant_id).await?;
+            if tenant.quota_disk != 0 {
+                let used_quota = self.get_used_quota_tenant(tenant_id).await?.max(0) as u64;
+
+                if used_quota + item_size > tenant.quota_disk {
+                    return Err(trc::LimitEvent::TenantQuota
+                        .into_err()
+                        .ctx(trc::Key::Id, tenant_id)
+                        .ctx(trc::Key::Limit, tenant.quota_disk)
+                        .ctx(trc::Key::Size, used_quota));
+                }
+            }
+        }
 
         Ok(())
     }

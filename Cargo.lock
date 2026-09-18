@@ -1330,6 +1330,7 @@ dependencies = [
  "hyper",
  "idna",
  "imagesize",
+ "inbuxa-features",
  "infer 0.22.0",
  "jmap_proto",
  "jsonwebtoken",
@@ -3956,6 +3957,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "inbuxa-features"
+version = "0.16.22"
+dependencies = [
+ "ahash",
+ "jmap_proto",
+ "registry",
+ "store",
+ "tokio",
+ "trc",
+ "types",
+ "utils",
+]
+
+[[package]]
 name = "include-flate"
 version = "0.3.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4212,6 +4227,7 @@ dependencies = [
  "http_proto",
  "hyper",
  "hyper-util",
+ "inbuxa-features",
  "jmap-tools",
  "jmap_proto",
  "mail-auth",
@@ -7751,6 +7767,7 @@ dependencies = [
  "email",
  "groupware",
  "hkdf 0.13.0",
+ "inbuxa-features",
  "jmap-tools",
  "jmap_proto",
  "mail-builder 1.0.0",

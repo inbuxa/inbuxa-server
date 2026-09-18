@@ -1,0 +1,18 @@
+[package]
+name = "inbuxa-features"
+description = "INBUXA's rebuilt features: behavior Stalwart ships only in its Enterprise Edition, rebuilt clean-room"
+license = "AGPL-3.0-only"
+version = "0.16.22"
+edition = "2024"
+
+[dependencies]
+registry = { path = "../registry" }
+jmap_proto = { path = "../jmap-proto" }
+store = { path = "../store" }
+trc = { path = "../trc" }
+types = { path = "../types" }
+utils = { path = "../utils" }
+ahash = { version = "0.8.12", features = ["serde"] }
+
+[dev-dependencies]
+tokio = { version = "1.53", features = ["macros", "rt"] }

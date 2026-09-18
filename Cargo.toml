@@ -29,6 +29,7 @@ members = [
     "crates/common",
     "crates/trc",
     "crates/migration",
+    "crates/features",
     "tests",
 ]
 
