@@ -1,5 +1,5 @@
 /*
- * SPDX-FileCopyrightText: 2026 John Coffey
+ * SPDX-FileCopyrightText: 2026 Coffey Labs
  *
  * SPDX-License-Identifier: AGPL-3.0-only
  */
