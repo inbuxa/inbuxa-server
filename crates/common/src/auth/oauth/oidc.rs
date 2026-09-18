@@ -1,0 +1,182 @@
+/*
+ * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
+ *
+ * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
+ */
+
+use std::fmt;
+
+use jsonwebtoken::Header;
+
+use serde::{
+    Deserialize, Deserializer, Serialize,
+    de::{self, Visitor},
+};
+use store::write::now;
+
+use crate::Server;
+
+#[derive(Debug, Default, Clone, Eq, PartialEq, Deserialize, Serialize)]
+pub struct Userinfo {
+    #[serde(default)]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sub: Option<String>,
+
+    #[serde(default)]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+
+    #[serde(default)]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub given_name: Option<String>,
+
+    #[serde(default)]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub family_name: Option<String>,
+
+    #[serde(default)]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub middle_name: Option<String>,
+
+    #[serde(default)]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub nickname: Option<String>,
+
+    #[serde(default)]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub preferred_username: Option<String>,
+
+    #[serde(default)]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub profile: Option<String>,
+
+    #[serde(default)]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub picture: Option<String>,
+
+    #[serde(default)]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub website: Option<String>,
+
+    #[serde(default)]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub email: Option<String>,
+
+    #[serde(default, deserialize_with = "any_bool")]
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub email_verified: bool,
+
+    #[serde(default)]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub zoneinfo: Option<String>,
+
+    #[serde(default)]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub locale: Option<String>,
+
+    #[serde(default)]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub updated_at: Option<i64>,
+}
+
+#[derive(Debug, Default, Eq, PartialEq, Deserialize, Serialize)]
+pub struct StandardClaims {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
+    pub nonce: Option<String>,
+
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
+    pub preferred_username: Option<String>,
+
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
+    pub email: Option<String>,
+
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
+    pub description: Option<String>,
+}
+
+#[derive(Serialize)]
+struct IdTokenClaims {
+    iss: String,
+    sub: String,
+    aud: String,
+    nbf: i64,
+    iat: i64,
+    exp: i64,
+
+    #[serde(flatten)]
+    private: StandardClaims,
+}
+
+impl Server {
+    pub fn issue_id_token(
+        &self,
+        subject: impl Into<String>,
+        issuer: impl Into<String>,
+        audience: impl Into<String>,
+        claims: StandardClaims,
+    ) -> trc::Result<String> {
+        let now = now() as i64;
+
+        jsonwebtoken::encode(
+            &Header {
+                kid: Some("default".into()),
+                ..Header::new(self.core.oauth.oidc_signature_algorithm)
+            },
+            &IdTokenClaims {
+                iss: issuer.into(),
+                sub: subject.into(),
+                aud: audience.into(),
+                nbf: now,
+                iat: now,
+                exp: now + self.core.oauth.oidc_expiry_id_token as i64,
+                private: claims,
+            },
+            &self.core.oauth.oidc_signing_secret,
+        )
+        .map_err(|err| {
+            trc::AuthEvent::Error
+                .into_err()
+                .reason(err)
+                .details("Failed to encode ID token")
+        })
+    }
+}
+
+fn any_bool<'de, D>(deserializer: D) -> Result<bool, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    struct AnyBoolVisitor;
+
+    impl Visitor<'_> for AnyBoolVisitor {
+        type Value = bool;
+
+        fn expecting(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
+            formatter.write_str("a boolean value")
+        }
+
+        fn visit_str<E>(self, value: &str) -> Result<bool, E>
+        where
+            E: de::Error,
+        {
+            match value {
+                "true" => Ok(true),
+                "false" => Ok(false),
+                _ => Err(E::custom(format!("Unknown boolean: {value}"))),
+            }
+        }
+
+        fn visit_bool<E>(self, value: bool) -> Result<bool, E>
+        where
+            E: de::Error,
+        {
+            Ok(value)
+        }
+    }
+
+    deserializer.deserialize_any(AnyBoolVisitor)
+}

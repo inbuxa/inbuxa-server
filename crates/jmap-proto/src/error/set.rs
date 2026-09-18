@@ -1,0 +1,352 @@
+/*
+ * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
+ *
+ * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
+ */
+
+use jmap_tools::{Key, Property};
+use registry::types::{
+    error::{PatchError, ValidationError},
+    id::ObjectId,
+};
+use std::borrow::Cow;
+use types::id::Id;
+
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(bound(serialize = "InvalidProperty<P>: serde::Serialize"))]
+#[serde(transparent)]
+#[repr(transparent)]
+pub struct SetError<P: Property>(Box<SetErrorInner<P>>);
+
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(bound(serialize = "InvalidProperty<P>: serde::Serialize"))]
+struct SetErrorInner<P: Property> {
+    #[serde(rename = "type")]
+    type_: SetErrorType,
+
+    #[serde(skip_serializing_if = "Option::is_none")]
+    description: Option<Cow<'static, str>>,
+
+    #[serde(skip_serializing_if = "Option::is_none")]
+    properties: Option<Vec<InvalidProperty<P>>>,
+
+    #[serde(rename = "existingId")]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    existing_id: Option<Id>,
+
+    #[serde(rename = "objectId")]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    object_id: Option<ObjectId>,
+
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    #[serde(rename = "linkedObjects")]
+    linked_objects: Vec<ObjectId>,
+
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    #[serde(rename = "validationErrors")]
+    validation_errors: Vec<ValidationError>,
+}
+
+#[derive(Debug, Clone)]
+pub enum InvalidProperty<T: Property> {
+    Property(Key<'static, T>),
+    Path(Vec<Key<'static, T>>),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum SetErrorType {
+    #[serde(rename = "forbidden")]
+    Forbidden,
+    #[serde(rename = "overQuota")]
+    OverQuota,
+    #[serde(rename = "tooLarge")]
+    TooLarge,
+    #[serde(rename = "rateLimit")]
+    RateLimit,
+    #[serde(rename = "notFound")]
+    NotFound,
+    #[serde(rename = "invalidPatch")]
+    InvalidPatch,
+    #[serde(rename = "willDestroy")]
+    WillDestroy,
+    #[serde(rename = "invalidProperties")]
+    InvalidProperties,
+    #[serde(rename = "singleton")]
+    Singleton,
+    #[serde(rename = "mailboxHasChild")]
+    MailboxHasChild,
+    #[serde(rename = "mailboxHasEmail")]
+    MailboxHasEmail,
+    #[serde(rename = "blobNotFound")]
+    BlobNotFound,
+    #[serde(rename = "tooManyKeywords")]
+    TooManyKeywords,
+    #[serde(rename = "tooManyMailboxes")]
+    TooManyMailboxes,
+    #[serde(rename = "forbiddenFrom")]
+    ForbiddenFrom,
+    #[serde(rename = "invalidEmail")]
+    InvalidEmail,
+    #[serde(rename = "tooManyRecipients")]
+    TooManyRecipients,
+    #[serde(rename = "noRecipients")]
+    NoRecipients,
+    #[serde(rename = "invalidRecipients")]
+    InvalidRecipients,
+    #[serde(rename = "forbiddenMailFrom")]
+    ForbiddenMailFrom,
+    #[serde(rename = "forbiddenToSend")]
+    ForbiddenToSend,
+    #[serde(rename = "cannotUnsend")]
+    CannotUnsend,
+    #[serde(rename = "alreadyExists")]
+    AlreadyExists,
+    #[serde(rename = "invalidScript")]
+    InvalidScript,
+    #[serde(rename = "scriptIsActive")]
+    ScriptIsActive,
+    #[serde(rename = "addressBookHasContents")]
+    AddressBookHasContents,
+    #[serde(rename = "nodeHasChildren")]
+    NodeHasChildren,
+    #[serde(rename = "calendarHasEvent")]
+    CalendarHasEvent,
+    #[serde(rename = "noSupportedScheduleMethods")]
+    NoSupportedScheduleMethods,
+    // Stalwart registry errors
+    #[serde(rename = "objectIsLinked")]
+    ObjectIsLinked,
+    #[serde(rename = "invalidForeignKey")]
+    InvalidForeignKey,
+    #[serde(rename = "primaryKeyViolation")]
+    PrimaryKeyViolation,
+    #[serde(rename = "validationFailed")]
+    ValidationFailed,
+}
+
+impl SetErrorType {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            SetErrorType::Forbidden => "forbidden",
+            SetErrorType::OverQuota => "overQuota",
+            SetErrorType::TooLarge => "tooLarge",
+            SetErrorType::RateLimit => "rateLimit",
+            SetErrorType::NotFound => "notFound",
+            SetErrorType::InvalidPatch => "invalidPatch",
+            SetErrorType::WillDestroy => "willDestroy",
+            SetErrorType::InvalidProperties => "invalidProperties",
+            SetErrorType::Singleton => "singleton",
+            SetErrorType::BlobNotFound => "blobNotFound",
+            SetErrorType::MailboxHasChild => "mailboxHasChild",
+            SetErrorType::MailboxHasEmail => "mailboxHasEmail",
+            SetErrorType::TooManyKeywords => "tooManyKeywords",
+            SetErrorType::TooManyMailboxes => "tooManyMailboxes",
+            SetErrorType::ForbiddenFrom => "forbiddenFrom",
+            SetErrorType::InvalidEmail => "invalidEmail",
+            SetErrorType::TooManyRecipients => "tooManyRecipients",
+            SetErrorType::NoRecipients => "noRecipients",
+            SetErrorType::InvalidRecipients => "invalidRecipients",
+            SetErrorType::ForbiddenMailFrom => "forbiddenMailFrom",
+            SetErrorType::ForbiddenToSend => "forbiddenToSend",
+            SetErrorType::CannotUnsend => "cannotUnsend",
+            SetErrorType::AlreadyExists => "alreadyExists",
+            SetErrorType::InvalidScript => "invalidScript",
+            SetErrorType::ScriptIsActive => "scriptIsActive",
+            SetErrorType::AddressBookHasContents => "addressBookHasContents",
+            SetErrorType::NodeHasChildren => "nodeHasChildren",
+            SetErrorType::CalendarHasEvent => "calendarHasEvent",
+            SetErrorType::NoSupportedScheduleMethods => "noSupportedScheduleMethods",
+            SetErrorType::ObjectIsLinked => "objectIsLinked",
+            SetErrorType::InvalidForeignKey => "invalidForeignKey",
+            SetErrorType::PrimaryKeyViolation => "primaryKeyViolation",
+            SetErrorType::ValidationFailed => "validationFailed",
+        }
+    }
+}
+
+impl<T: Property> SetError<T> {
+    pub fn new(type_: SetErrorType) -> Self {
+        SetError(Box::new(SetErrorInner {
+            type_,
+            description: None,
+            properties: None,
+            existing_id: None,
+            object_id: None,
+            linked_objects: Vec::new(),
+            validation_errors: Vec::new(),
+        }))
+    }
+
+    pub fn with_description(mut self, description: impl Into<Cow<'static, str>>) -> Self {
+        self.0.description = description.into().into();
+        self
+    }
+
+    pub fn error_type(&self) -> &SetErrorType {
+        &self.0.type_
+    }
+
+    pub fn description(&self) -> Option<&str> {
+        self.0.description.as_deref()
+    }
+
+    pub fn validation_errors(&self) -> &[ValidationError] {
+        &self.0.validation_errors
+    }
+
+    pub fn with_property(mut self, property: impl Into<InvalidProperty<T>>) -> Self {
+        self.0.properties = vec![property.into()].into();
+        self
+    }
+
+    pub fn with_properties(
+        mut self,
+        properties: impl IntoIterator<Item = impl Into<InvalidProperty<T>>>,
+    ) -> Self {
+        self.0.properties = properties
+            .into_iter()
+            .map(Into::into)
+            .collect::<Vec<_>>()
+            .into();
+        self
+    }
+
+    pub fn with_object_id(mut self, object_id: ObjectId) -> Self {
+        self.0.object_id = object_id.into();
+        self
+    }
+
+    pub fn with_object_id_opt(mut self, object_id: Option<ObjectId>) -> Self {
+        self.0.object_id = object_id;
+        self
+    }
+
+    pub fn with_linked_objects(mut self, linked_objects: Vec<ObjectId>) -> Self {
+        self.0.linked_objects = linked_objects;
+        self
+    }
+
+    pub fn with_validation_errors(mut self, validation_errors: Vec<ValidationError>) -> Self {
+        self.0.validation_errors = validation_errors;
+        self
+    }
+
+    pub fn with_existing_id(mut self, id: Id) -> Self {
+        self.0.existing_id = id.into();
+        self
+    }
+
+    pub fn invalid_properties() -> Self {
+        Self::new(SetErrorType::InvalidProperties)
+    }
+
+    pub fn invalid_patch() -> Self {
+        Self::new(SetErrorType::InvalidPatch)
+    }
+
+    pub fn forbidden() -> Self {
+        Self::new(SetErrorType::Forbidden)
+    }
+
+    pub fn not_found() -> Self {
+        Self::new(SetErrorType::NotFound)
+    }
+
+    pub fn blob_not_found() -> Self {
+        Self::new(SetErrorType::BlobNotFound)
+    }
+
+    pub fn over_quota() -> Self {
+        Self::new(SetErrorType::OverQuota).with_description("Account quota exceeded.")
+    }
+
+    pub fn already_exists() -> Self {
+        Self::new(SetErrorType::AlreadyExists)
+    }
+
+    pub fn no_supported_schedule_methods(calendar_address: &str) -> Self {
+        Self::new(SetErrorType::NoSupportedScheduleMethods).with_description(format!(
+            "No supported scheduling method for calendar address {calendar_address}."
+        ))
+    }
+
+    pub fn too_large() -> Self {
+        Self::new(SetErrorType::TooLarge)
+    }
+
+    pub fn will_destroy() -> Self {
+        Self::new(SetErrorType::WillDestroy).with_description("ID will be destroyed.")
+    }
+
+    pub fn singleton() -> Self {
+        Self::new(SetErrorType::Singleton)
+            .with_description("Singletons cannot be created or destroyed.")
+    }
+
+    pub fn address_book_has_contents() -> Self {
+        Self::new(SetErrorType::AddressBookHasContents)
+            .with_description("Address book is not empty.")
+    }
+
+    pub fn node_has_children() -> Self {
+        Self::new(SetErrorType::NodeHasChildren).with_description("Cannot delete non-empty folder.")
+    }
+
+    pub fn calendar_has_event() -> Self {
+        Self::new(SetErrorType::CalendarHasEvent).with_description("Calendar is not empty.")
+    }
+}
+
+impl<T: Property> From<T> for InvalidProperty<T> {
+    fn from(property: T) -> Self {
+        InvalidProperty::Property(Key::Property(property))
+    }
+}
+
+impl<T: Property> From<(T, T)> for InvalidProperty<T> {
+    fn from((a, b): (T, T)) -> Self {
+        InvalidProperty::Path(vec![Key::Property(a), Key::Property(b)])
+    }
+}
+
+impl<T: Property> From<Key<'static, T>> for InvalidProperty<T> {
+    fn from(property: Key<'static, T>) -> Self {
+        InvalidProperty::Property(property)
+    }
+}
+
+impl<T: Property> serde::Serialize for InvalidProperty<T> {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        match self {
+            InvalidProperty::Property(p) => p.serialize(serializer),
+            InvalidProperty::Path(p) => {
+                use std::fmt::Write;
+                let mut path = String::with_capacity(64);
+                for (i, p) in p.iter().enumerate() {
+                    if i > 0 {
+                        path.push('/');
+                    }
+                    let _ = write!(path, "{}", p.to_string());
+                }
+                path.serialize(serializer)
+            }
+        }
+    }
+}
+
+impl From<PatchError> for SetError<registry::schema::properties::Property> {
+    fn from(err: PatchError) -> Self {
+        SetError(Box::new(SetErrorInner {
+            type_: SetErrorType::InvalidPatch,
+            description: err.message.into(),
+            properties: Some(vec![InvalidProperty::Property(Key::Owned(err.path))]),
+            existing_id: None,
+            object_id: None,
+            linked_objects: Vec::new(),
+            validation_errors: Vec::new(),
+        }))
+    }
+}

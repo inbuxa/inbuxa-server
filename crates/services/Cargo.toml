@@ -1,0 +1,43 @@
+[package]
+name = "services"
+version = "0.16.22"
+edition = "2024"
+
+[dependencies]
+store = { path = "../store" }
+common = { path =  "../common" }
+utils = { path =  "../utils" }
+trc = { path = "../trc" }
+email = { path = "../email" }
+smtp = { path = "../smtp" }
+groupware = { path = "../groupware" }
+spam-filter = { path = "../spam-filter" }
+types = { path = "../types" }
+jmap_proto = { path = "../jmap-proto" }
+jmap-tools = { version = "0.1" }
+registry = { path =  "../registry" }
+smtp-proto = { version = "0.2", features = ["rkyv", "serde"] }
+tokio = { version = "1.53", features = ["rt"] }
+mail-parser = { version = "0.11", features = ["full_encoding", "rkyv"] }
+mail-builder = { version = "1.0" }
+aho-corasick = { version = "1.1" }
+calcard = { version = "0.3", features = ["rkyv"] }
+serde_json = "1.0"
+memory-stats = "1.2.0"
+aes-gcm = "0.11.1"
+p256 = { version = "0.13", features = ["ecdh"] }
+hkdf = "0.13"
+sha2 = "0.11"
+reqwest = { version = "0.13", default-features = false, features = ["rustls", "http2"]}
+base64 = "0.23"
+dns-update = { version = "0.5" }
+psl = "2"
+
+[dev-dependencies]
+
+[features]
+test_mode = []
+enterprise = []
+
+[lints]
+workspace = true

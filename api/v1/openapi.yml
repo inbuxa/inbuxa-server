@@ -1,0 +1,586 @@
+openapi: 3.0.3
+info:
+  title: Stalwart Management API
+  description: |
+    REST Management API for Stalwart server. These endpoints are helpers
+    that complement the JMAP API — most of the server's configuration and data
+    is managed via JMAP (see `POST /jmap/`). The endpoints documented here cover
+    interactive login, account introspection, configuration schema retrieval and
+    live (Server-Sent Events) telemetry streams.
+  version: "1.0"
+  license:
+    name: AGPL-3.0-only OR LicenseRef-SEL
+servers:
+  - url: https://{host}
+    description: Stalwart server
+    variables:
+      host:
+        default: mail.example.com
+        description: The hostname of Stalwart server
+security:
+  - bearerAuth: []
+  - basicAuth: []
+paths:
+  /api/auth:
+    post:
+      operationId: login
+      summary: Authenticate a user and obtain an authorization code
+      description: |
+        Anonymous endpoint used by the web UI and device-flow clients to exchange
+        user credentials (plus optional MFA token and PKCE challenge) for an
+        OAuth authorization `client_code` that can then be exchanged for an
+        access token via `POST /auth/token`. Rate-limited as an anonymous request.
+      security: []
+      tags: [Authentication]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/LoginRequest'
+            examples:
+              authCode:
+                summary: Authorization-code flow (web UI)
+                value:
+                  type: authCode
+                  accountName: jane@example.com
+                  accountSecret: s3cret
+                  clientId: webadmin
+                  redirectUri: https://mail.example.com/login
+                  codeChallenge: E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM
+                  codeChallengeMethod: S256
+              authDevice:
+                summary: Device-flow completion
+                value:
+                  type: authDevice
+                  accountName: jane@example.com
+                  accountSecret: s3cret
+                  code: BDWP-HQPK
+      responses:
+        '200':
+          description: Result of the authentication attempt
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LoginResponse'
+              examples:
+                authenticated:
+                  value:
+                    type: authenticated
+                    clientCode: 3F7A9C1E4B2D8E6F
+                mfaRequired:
+                  value:
+                    type: mfaRequired
+                failure:
+                  value:
+                    type: failure
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+
+  /api/discover/{email}:
+    get:
+      operationId: discoverOidc
+      summary: Discover the OpenID Connect provider for an email address
+      description: |
+        Returns the OpenID Connect discovery document for the directory that
+        owns the domain part of `email`. If the domain is not bound to an
+        external OIDC directory, the server's own OIDC discovery document
+        (equivalent to `/.well-known/openid-configuration`) is returned.
+        Anonymous endpoint, rate-limited.
+      security: []
+      tags: [Authentication]
+      parameters:
+        - name: email
+          in: path
+          required: true
+          description: Email address or account name
+          schema:
+            type: string
+            format: email
+      responses:
+        '200':
+          description: OpenID Connect discovery document
+          content:
+            application/json:
+              schema:
+                type: object
+                description: OIDC discovery metadata (RFC 8414)
+                additionalProperties: true
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+
+  /api/account:
+    get:
+      operationId: getAccount
+      summary: Return the authenticated account's permissions, edition and locale
+      tags: [Account]
+      responses:
+        '200':
+          description: Account descriptor
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Account'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  /api/schema:
+    get:
+      operationId: getSchemaRedirect
+      summary: Redirect to the versioned configuration schema URL
+      description: |
+        Redirects (302) to `/api/schema/{hash}` where `{hash}` is the SHA-256
+        of the current configuration schema. Use this when you do not yet know
+        the hash; once you have cached a schema at a given hash the immutable
+        cache will never require re-download.
+      tags: [Schema]
+      responses:
+        '302':
+          description: Redirect to the hashed schema URL
+          headers:
+            Location:
+              schema:
+                type: string
+                example: /api/schema/a1b2c3d4e5f6...
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  /api/schema/{hash}:
+    get:
+      operationId: getSchema
+      summary: Return the configuration schema at a specific hash
+      description: |
+        Returns the JSON Schema describing the full Stalwart configuration tree.
+        The response is always gzip-encoded (`Content-Encoding: gzip`) and served
+        with an immutable cache policy — the schema for a given hash never
+        changes. If the hash does not match the server's current schema, the
+        server redirects to the correct URL.
+      tags: [Schema]
+      parameters:
+        - name: hash
+          in: path
+          required: true
+          description: SHA-256 hex digest of the configuration schema
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Gzipped JSON Schema document
+          headers:
+            Content-Encoding:
+              schema:
+                type: string
+                example: gzip
+            Cache-Control:
+              schema:
+                type: string
+                example: public, max-age=31536000, immutable
+          content:
+            application/json:
+              schema:
+                type: object
+                description: JSON Schema document describing Stalwart config
+                additionalProperties: true
+        '302':
+          description: Redirect to the current schema URL when the hash is stale
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  /api/token/delivery:
+    get:
+      operationId: issueDeliveryToken
+      summary: Issue a short-lived token for live delivery diagnostics
+      description: |
+        Returns a plain-text bearer token, valid for 60 seconds, that authorises
+        connecting to `/api/live/delivery/{target}` as a query parameter
+        (`?token=...`). Useful for EventSource clients that cannot send
+        `Authorization` headers. Requires `LiveDeliveryTest` permission.
+      tags: [Live Telemetry]
+      responses:
+        '200':
+          description: Short-lived delivery token
+          content:
+            text/plain:
+              schema:
+                type: string
+                example: eyJhbGciOi...
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+
+  /api/token/tracing:
+    get:
+      operationId: issueTracingToken
+      summary: Issue a short-lived token for live tracing (Enterprise)
+      description: |
+        Returns a plain-text bearer token, valid for 60 seconds, that authorises
+        connecting to `/api/live/tracing` as a query parameter. Requires the
+        `LiveTracing` permission. Available only in the Enterprise edition.
+      tags: [Live Telemetry]
+      responses:
+        '200':
+          description: Short-lived tracing token
+          content:
+            text/plain:
+              schema:
+                type: string
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          description: Enterprise feature not available in this edition
+
+  /api/token/metrics:
+    get:
+      operationId: issueMetricsToken
+      summary: Issue a short-lived token for live metrics (Enterprise)
+      description: |
+        Returns a plain-text bearer token, valid for 60 seconds, that authorises
+        connecting to `/api/live/metrics` as a query parameter. Requires the
+        `LiveMetrics` permission. Available only in the Enterprise edition.
+      tags: [Live Telemetry]
+      responses:
+        '200':
+          description: Short-lived metrics token
+          content:
+            text/plain:
+              schema:
+                type: string
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          description: Enterprise feature not available in this edition
+
+  /api/live/delivery/{target}:
+    get:
+      operationId: liveDelivery
+      summary: Stream outbound-delivery diagnostics as Server-Sent Events
+      description: |
+        Opens a `text/event-stream` connection that streams each stage of an
+        outbound delivery attempt to `target` (a domain or email address): MX
+        lookup, MTA-STS fetch, TLSA/DANE validation, SMTP conversation, and so
+        on. Each SSE frame carries a JSON-encoded `DeliveryStage` wrapped in a
+        single-element array (`data: [{...}]`). The stream ends with a final
+        `completed` event. Requires `LiveDeliveryTest` permission; may also be
+        authenticated via the `?token=` query parameter obtained from
+        `/api/token/delivery`.
+      tags: [Live Telemetry]
+      security:
+        - bearerAuth: []
+        - basicAuth: []
+        - liveToken: []
+      parameters:
+        - name: target
+          in: path
+          required: true
+          description: Target domain or email address to diagnose
+          schema:
+            type: string
+        - name: timeout
+          in: query
+          required: false
+          description: Maximum stream lifetime in seconds (minimum 1, default 30)
+          schema:
+            type: integer
+            minimum: 1
+            default: 30
+      responses:
+        '200':
+          description: Server-Sent Events stream of delivery-diagnose stages
+          content:
+            text/event-stream:
+              schema:
+                type: string
+                description: |
+                  Series of SSE frames. Each `event: event` frame carries
+                  `data: [<DeliveryStage JSON>]`; the final frame's stage is
+                  `{"type":"completed"}`.
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+
+  /api/live/tracing:
+    get:
+      operationId: liveTracing
+      summary: Stream live tracing events (Enterprise)
+      description: |
+        Opens a `text/event-stream` connection streaming server trace events in
+        real time. Requires `LiveTracing` permission; may be authenticated via
+        the `?token=` query parameter from `/api/token/tracing`. Enterprise only.
+      tags: [Live Telemetry]
+      security:
+        - bearerAuth: []
+        - basicAuth: []
+        - liveToken: []
+      responses:
+        '200':
+          description: Server-Sent Events stream of tracing events
+          content:
+            text/event-stream:
+              schema:
+                type: string
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          description: Enterprise feature not available in this edition
+
+  /api/live/metrics:
+    get:
+      operationId: liveMetrics
+      summary: Stream live metrics events (Enterprise)
+      description: |
+        Opens a `text/event-stream` connection streaming server metrics in real
+        time. Requires `LiveMetrics` permission; may be authenticated via the
+        `?token=` query parameter from `/api/token/metrics`. Enterprise only.
+      tags: [Live Telemetry]
+      security:
+        - bearerAuth: []
+        - basicAuth: []
+        - liveToken: []
+      responses:
+        '200':
+          description: Server-Sent Events stream of metric events
+          content:
+            text/event-stream:
+              schema:
+                type: string
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          description: Enterprise feature not available in this edition
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: OAuth2 access token issued by `POST /auth/token`.
+    basicAuth:
+      type: http
+      scheme: basic
+      description: HTTP Basic authentication using account name and secret.
+    liveToken:
+      type: apiKey
+      in: query
+      name: token
+      description: |
+        Short-lived token (60s lifetime) issued by `/api/token/{kind}` and used
+        to authorise Server-Sent Events streams where an `Authorization` header
+        cannot be set (e.g. browser `EventSource`).
+
+  responses:
+    BadRequest:
+      description: Request payload is malformed or fails validation
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/ProblemDetails'
+    Unauthorized:
+      description: Missing or invalid credentials
+      headers:
+        WWW-Authenticate:
+          schema:
+            type: string
+            example: Bearer realm="Stalwart Server"
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/ProblemDetails'
+    Forbidden:
+      description: Authenticated principal lacks the required permission
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/ProblemDetails'
+    NotFound:
+      description: Resource not found
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/ProblemDetails'
+    TooManyRequests:
+      description: Anonymous-request rate limit exceeded
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/ProblemDetails'
+
+  schemas:
+    LoginRequest:
+      type: object
+      description: |
+        Tagged union discriminated by `type`. Use `authCode` for the standard
+        OAuth authorization-code flow (optionally with PKCE) and `authDevice`
+        to complete an OAuth device-authorization flow.
+      oneOf:
+        - $ref: '#/components/schemas/LoginRequestAuthCode'
+        - $ref: '#/components/schemas/LoginRequestAuthDevice'
+      discriminator:
+        propertyName: type
+        mapping:
+          authCode: '#/components/schemas/LoginRequestAuthCode'
+          authDevice: '#/components/schemas/LoginRequestAuthDevice'
+
+    LoginRequestAuthCode:
+      type: object
+      required: [type, accountName, accountSecret, clientId]
+      properties:
+        type:
+          type: string
+          enum: [authCode]
+        accountName:
+          type: string
+        accountSecret:
+          type: string
+          format: password
+        mfaToken:
+          type: string
+          nullable: true
+          description: MFA token returned by a previous `mfaRequired` response
+        clientId:
+          type: string
+          description: OAuth client identifier
+        redirectUri:
+          type: string
+          format: uri
+          nullable: true
+          description: Must use `https://` unless the server is in recovery or dev mode
+        nonce:
+          type: string
+          nullable: true
+        scope:
+          type: string
+          nullable: true
+        codeChallenge:
+          type: string
+          nullable: true
+          description: PKCE code challenge (RFC 7636)
+        codeChallengeMethod:
+          type: string
+          enum: [plain, S256]
+          nullable: true
+          description: Defaults to `plain` when a `codeChallenge` is present
+        state:
+          type: string
+          nullable: true
+
+    LoginRequestAuthDevice:
+      type: object
+      required: [type, accountName, accountSecret, code]
+      properties:
+        type:
+          type: string
+          enum: [authDevice]
+        accountName:
+          type: string
+        accountSecret:
+          type: string
+          format: password
+        mfaToken:
+          type: string
+          nullable: true
+        code:
+          type: string
+          description: User-facing device code issued by `POST /auth/device`
+
+    LoginResponse:
+      type: object
+      description: Tagged union discriminated by `type`.
+      oneOf:
+        - $ref: '#/components/schemas/LoginResponseAuthenticated'
+        - $ref: '#/components/schemas/LoginResponseVerified'
+        - $ref: '#/components/schemas/LoginResponseMfaRequired'
+        - $ref: '#/components/schemas/LoginResponseFailure'
+      discriminator:
+        propertyName: type
+        mapping:
+          authenticated: '#/components/schemas/LoginResponseAuthenticated'
+          verified: '#/components/schemas/LoginResponseVerified'
+          mfaRequired: '#/components/schemas/LoginResponseMfaRequired'
+          failure: '#/components/schemas/LoginResponseFailure'
+
+    LoginResponseAuthenticated:
+      type: object
+      required: [type, clientCode]
+      properties:
+        type:
+          type: string
+          enum: [authenticated]
+        clientCode:
+          type: string
+          description: Authorization code to exchange at `POST /auth/token`
+
+    LoginResponseVerified:
+      type: object
+      required: [type]
+      properties:
+        type:
+          type: string
+          enum: [verified]
+
+    LoginResponseMfaRequired:
+      type: object
+      required: [type]
+      properties:
+        type:
+          type: string
+          enum: [mfaRequired]
+
+    LoginResponseFailure:
+      type: object
+      required: [type]
+      properties:
+        type:
+          type: string
+          enum: [failure]
+
+    Account:
+      type: object
+      required: [permissions, edition, locale]
+      properties:
+        permissions:
+          type: array
+          description: |
+            Effective permissions for the authenticated principal, filtered to
+            exclude internal/system-only permissions. Values are from the
+            `Permission` enum (e.g. `authenticate`, `jmap-email-get`,
+            `sys-account-settings-get`).
+          items:
+            type: string
+        edition:
+          type: string
+          enum: [oss, community, enterprise]
+          description: Server edition
+        locale:
+          type: string
+          description: Preferred locale for the account (IETF BCP 47-style tag)
+
+    ProblemDetails:
+      type: object
+      description: RFC 7807 problem details document
+      properties:
+        type:
+          type: string
+          format: uri
+        title:
+          type: string
+        status:
+          type: integer
+        detail:
+          type: string
+        instance:
+          type: string

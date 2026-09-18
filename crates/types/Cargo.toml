@@ -1,0 +1,22 @@
+[package]
+name = "types"
+version = "0.16.22"
+edition = "2024"
+
+[dependencies]
+utils = { path = "../utils" }
+trc = { path = "../trc" }
+jmap-tools = { version = "0.1" }
+hashify = "0.2"
+serde = { version = "1.0", features = ["derive"]}
+rkyv = { version = "0.8.18", features = ["little_endian"] }
+compact_str = { version = "0.10.0", features = ["rkyv", "serde"] }
+blake3 = "1.8.7"
+
+
+[features]
+test_mode = []
+
+
+[lints]
+workspace = true

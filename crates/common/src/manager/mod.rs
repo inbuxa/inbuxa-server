@@ -1,0 +1,82 @@
+/*
+ * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
+ *
+ * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
+ */
+
+use crate::USER_AGENT;
+use hyper::HeaderMap;
+use mail_auth::flate2;
+use std::{
+    io::{BufReader, Read},
+    time::Duration,
+};
+use utils::HttpLimitResponse;
+
+pub mod application;
+pub mod backup;
+pub mod boot;
+pub mod console;
+pub mod defaults;
+pub mod restore;
+
+pub const SPAM_TRAINER_KEY: &[u8] = "STALWART_SPAM_TRAIN_DATA.lz4".as_bytes();
+pub const SPAM_CLASSIFIER_KEY: &[u8] = "STALWART_SPAM_CLASSIFIER_MODEL.lz4".as_bytes();
+
+pub async fn fetch_resource(
+    url: &str,
+    headers: Option<HeaderMap>,
+    timeout: Duration,
+    max_size: usize,
+) -> Result<Vec<u8>, String> {
+    if let Some(path) = url.strip_prefix("file://") {
+        tokio::fs::read(path)
+            .await
+            .map_err(|err| format!("Failed to read {path}: {err}"))
+    } else {
+        let response = utils::http::http_client_builder(is_localhost_url(url))
+            .timeout(timeout)
+            .user_agent(USER_AGENT)
+            .build()
+            .unwrap_or_default()
+            .get(url)
+            .headers(headers.unwrap_or_default())
+            .send()
+            .await
+            .map_err(|err| format!("Failed to fetch {url}: {err}"))?;
+
+        if response.status().is_success() {
+            response
+                .bytes_with_limit(max_size)
+                .await
+                .map_err(|err| format!("Failed to fetch {url}: {err}"))
+                .and_then(|bytes| bytes.ok_or_else(|| format!("Resource too large: {url}")))
+        } else {
+            let code = response.status().canonical_reason().unwrap_or_default();
+            let reason = response.text().await.unwrap_or_default();
+
+            Err(format!(
+                "Failed to fetch {url}: Code: {code}, Details: {reason}",
+            ))
+        }
+    }
+    .and_then(|bytes| {
+        if url.ends_with(".gz") || url.ends_with(".gzip") {
+            BufReader::new(flate2::read::GzDecoder::new(&bytes[..]))
+                .bytes()
+                .collect::<Result<Vec<u8>, _>>()
+                .map_err(|err| format!("Failed to decompress {url}: {err}"))
+        } else {
+            Ok(bytes)
+        }
+    })
+}
+
+pub fn is_localhost_url(url: &str) -> bool {
+    url.split_once("://")
+        .map(|(_, url)| url.split_once('/').map_or(url, |(host, _)| host))
+        .is_some_and(|host| {
+            let host = host.rsplit_once(':').map_or(host, |(host, _)| host);
+            host == "localhost" || host == "127.0.0.1" || host == "[::1]"
+        })
+}

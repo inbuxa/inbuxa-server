@@ -1,0 +1,21 @@
+[Unit]
+Description=Stalwart Server
+Conflicts=postfix.service sendmail.service exim4.service
+ConditionPathExists=__PATH__/etc/config.json
+After=network-online.target
+
+[Service]
+Type=simple
+LimitNOFILE=65536
+KillMode=process
+KillSignal=SIGINT
+Restart=on-failure
+RestartSec=5
+ExecStart=__PATH__/bin/stalwart --config=__PATH__/etc/config.json
+SyslogIdentifier=stalwart
+User=stalwart
+Group=stalwart
+AmbientCapabilities=CAP_NET_BIND_SERVICE
+
+[Install]
+WantedBy=multi-user.target

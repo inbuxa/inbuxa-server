@@ -1,0 +1,9 @@
+/target
+*.failed
+*_failed
+run.sh
+.*
+!.gitignore
+!.gitattributes
+!.github
+CLAUDE.md

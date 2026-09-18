@@ -1,0 +1,140 @@
+/*
+ * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
+ *
+ * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
+ */
+
+use std::{
+    sync::atomic::{AtomicU64, Ordering},
+    time::{Duration, SystemTime},
+};
+
+#[derive(Debug)]
+pub struct SnowflakeIdGenerator {
+    epoch: SystemTime,
+    sequence: AtomicU64,
+}
+
+const SEQUENCE_LEN: u64 = 12;
+const NODE_ID_LEN: u64 = 9;
+
+const SEQUENCE_MASK: u64 = (1 << SEQUENCE_LEN) - 1;
+const NODE_ID_MASK: u64 = (1 << NODE_ID_LEN) - 1;
+
+pub const MAX_NODE_ID: u16 = NODE_ID_MASK as u16;
+
+const DEFAULT_EPOCH: u64 = 1632280000; // 52 years after UNIX_EPOCH
+
+static mut NODE_ID: u64 = 1;
+static SEQUENCE_ID: AtomicU64 = AtomicU64::new(0);
+
+/*
+
+ID characteristics:
+
+- 43 bits for milliseconds since January 1st, 2022: 2^43 / (1000 * 60 * 60 * 24 * 365) = 278.92 years (from year 2022 until 2300)
+- 9 bits for a node id: 2^9 = 512 nodes
+- 12 bits for a sequence number: 2^12 = 4096 ids per millisecond
+
+*/
+
+#[inline(always)]
+fn node_id() -> u64 {
+    unsafe { std::ptr::read_volatile(&raw const NODE_ID) }
+}
+
+impl SnowflakeIdGenerator {
+    pub fn new() -> Self {
+        Self {
+            epoch: SystemTime::UNIX_EPOCH + Duration::from_secs(DEFAULT_EPOCH), // 52 years after UNIX_EPOCH
+            sequence: 0.into(),
+        }
+    }
+
+    pub fn set_node_id(set_node_id: u64) {
+        let set_node_id = set_node_id & NODE_ID_MASK;
+
+        if set_node_id != node_id() {
+            unsafe {
+                NODE_ID = set_node_id;
+            }
+        }
+    }
+
+    pub fn from_duration(period: Duration) -> Option<u64> {
+        (SystemTime::UNIX_EPOCH + Duration::from_secs(DEFAULT_EPOCH))
+            .elapsed()
+            .ok()
+            .map(|elapsed| {
+                (elapsed.saturating_sub(period).as_millis() as u64) << (SEQUENCE_LEN + NODE_ID_LEN)
+            })
+    }
+
+    pub fn from_timestamp(timestamp: u64) -> Option<u64> {
+        SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .ok()
+            .and_then(|now| now.as_secs().checked_sub(timestamp))
+            .and_then(|diff| Self::from_duration(Duration::from_secs(diff)))
+    }
+
+    pub fn global_id_from_timestamp(timestamp: u64) -> Option<u64> {
+        let sequence = SEQUENCE_ID.fetch_add(1, Ordering::Relaxed) & SEQUENCE_MASK;
+        Self::from_timestamp(timestamp).map(|id| id | (sequence << NODE_ID_LEN) | node_id())
+    }
+
+    pub fn global_id() -> Option<u64> {
+        let sequence = SEQUENCE_ID.fetch_add(1, Ordering::Relaxed) & SEQUENCE_MASK;
+
+        (SystemTime::UNIX_EPOCH + Duration::from_secs(DEFAULT_EPOCH))
+            .elapsed()
+            .ok()
+            .map(|elapsed| {
+                ((elapsed.as_millis() as u64) << (SEQUENCE_LEN + NODE_ID_LEN))
+                    | (sequence << NODE_ID_LEN)
+                    | node_id()
+            })
+    }
+
+    pub fn to_timestamp(id: u64) -> u64 {
+        (id >> (SEQUENCE_LEN + NODE_ID_LEN)) / 1000 + DEFAULT_EPOCH
+    }
+
+    #[inline(always)]
+    pub fn past_id(&self, period: Duration) -> Option<u64> {
+        self.epoch.elapsed().ok().map(|elapsed| {
+            (elapsed.saturating_sub(period).as_millis() as u64) << (SEQUENCE_LEN + NODE_ID_LEN)
+        })
+    }
+
+    pub fn is_valid(&self) -> bool {
+        self.epoch.elapsed().is_ok()
+    }
+
+    #[inline(always)]
+    pub fn generate(&self) -> u64 {
+        let elapsed = self
+            .epoch
+            .elapsed()
+            .map(|e| e.as_millis())
+            .unwrap_or_default() as u64;
+        let sequence = self.sequence.fetch_add(1, Ordering::Relaxed) & SEQUENCE_MASK;
+
+        (elapsed << (SEQUENCE_LEN + NODE_ID_LEN)) | (sequence << NODE_ID_LEN) | node_id()
+    }
+}
+
+impl Default for SnowflakeIdGenerator {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl Clone for SnowflakeIdGenerator {
+    fn clone(&self) -> Self {
+        Self {
+            epoch: self.epoch,
+            sequence: 0.into(),
+        }
+    }
+}

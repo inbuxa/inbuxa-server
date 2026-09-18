@@ -1,0 +1,97 @@
+/*
+ * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
+ *
+ * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
+ */
+
+use super::{ArchivedFileNode, FileNode};
+use common::storage::index::{IndexValue, IndexableAndSerializableObject, IndexableObject};
+use types::{acl::AclGrant, collection::SyncCollection};
+
+impl IndexableObject for FileNode {
+    fn index_values(&self) -> impl Iterator<Item = IndexValue<'_>> {
+        let mut values = Vec::with_capacity(6);
+
+        values.extend([
+            IndexValue::Acl {
+                value: (&self.acls).into(),
+            },
+            IndexValue::LogItem {
+                prefix: None,
+                sync_collection: SyncCollection::FileNode,
+            },
+            IndexValue::Quota {
+                used: self.size() as u32,
+            },
+        ]);
+
+        if let Some(file) = &self.file {
+            values.extend([IndexValue::Blob {
+                value: file.blob_hash.clone(),
+            }]);
+        }
+
+        values.into_iter()
+    }
+}
+
+impl IndexableObject for &ArchivedFileNode {
+    fn index_values(&self) -> impl Iterator<Item = IndexValue<'_>> {
+        let mut values = Vec::with_capacity(6);
+
+        values.extend([
+            IndexValue::Acl {
+                value: self
+                    .acls
+                    .iter()
+                    .map(AclGrant::from)
+                    .collect::<Vec<_>>()
+                    .into(),
+            },
+            IndexValue::LogItem {
+                prefix: None,
+                sync_collection: SyncCollection::FileNode,
+            },
+            IndexValue::Quota {
+                used: self.size() as u32,
+            },
+        ]);
+
+        if let Some(file) = self.file.as_ref() {
+            values.extend([IndexValue::Blob {
+                value: (&file.blob_hash).into(),
+            }]);
+        }
+
+        values.into_iter()
+    }
+}
+
+impl IndexableAndSerializableObject for FileNode {
+    fn is_versioned() -> bool {
+        true
+    }
+}
+
+impl FileNode {
+    pub fn size(&self) -> usize {
+        self.dead_properties.size()
+            + self.display_name.as_ref().map_or(0, |n| n.len())
+            + self.name.len()
+            + self.file.as_ref().map_or(0, |f| f.size as usize)
+            + std::mem::size_of::<FileNode>()
+    }
+}
+
+impl ArchivedFileNode {
+    pub fn size(&self) -> usize {
+        self.dead_properties.size()
+            + self.display_name.as_ref().map_or(0, |n| n.len())
+            + self.name.len()
+            + self
+                .file
+                .as_ref()
+                .map_or(0, |f| f.size.to_native() as usize)
+            + std::mem::size_of::<FileNode>()
+    }
+}

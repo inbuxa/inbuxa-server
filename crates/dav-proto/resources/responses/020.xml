@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="utf-8" ?>
+<A:schedule-response xmlns:D="DAV:" xmlns:A="urn:ietf:params:xml:ns:caldav">
+<A:response>
+<A:recipient>
+<D:href>mailto:wilfredo@example.com</D:href>
+</A:recipient>
+<A:request-status>2.0;Success</A:request-status>
+<A:calendar-data><![CDATA[BEGIN:VCALENDAR]]></A:calendar-data>
+</A:response>
+<A:response>
+<A:recipient>
+<D:href>mailto:bernard@example.net</D:href>
+</A:recipient>
+<A:request-status>2.0;Success</A:request-status>
+<A:calendar-data><![CDATA[END:VCALENDAR]]></A:calendar-data>
+</A:response>
+<A:response>
+<A:recipient>
+<D:href>mailto:mike@example.org</D:href>
+</A:recipient>
+<A:request-status>3.7;Invalid calendar user</A:request-status>
+</A:response>
+</A:schedule-response>

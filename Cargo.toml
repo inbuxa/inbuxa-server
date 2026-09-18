@@ -1,0 +1,79 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/main",
+    "crates/types",
+    "crates/http",
+    "crates/http-proto",
+    "crates/jmap",
+    "crates/jmap-proto",
+    "crates/email",
+    "crates/imap",
+    "crates/imap-proto",
+    "crates/smtp",
+    "crates/managesieve",
+    "crates/pop3",
+    "crates/dav-proto",
+    "crates/scim-proto",
+    "crates/scim",
+    "crates/dav",
+    "crates/groupware",
+    "crates/spam-filter",
+    "crates/nlp",
+    "crates/store",
+    "crates/coordinator",
+    "crates/directory",
+    "crates/registry",
+    "crates/services",
+    "crates/utils",
+    "crates/common",
+    "crates/trc",
+    "crates/migration",
+    "tests",
+]
+
+[workspace.lints.clippy]
+result_unit_err = "allow"
+
+[profile.dev]
+opt-level = 0
+debug = 1
+#codegen-units = 4
+lto = false
+incremental = true
+panic = 'unwind'
+debug-assertions = true
+overflow-checks = false
+rpath = false
+
+[profile.release]
+opt-level = 3
+debug = false
+codegen-units = 1
+lto = true
+incremental = false
+panic = 'unwind'
+debug-assertions = false
+overflow-checks = false
+rpath = false
+strip = true
+
+[profile.test]
+opt-level = 0
+debug = 1
+#codegen-units = 16
+lto = false
+incremental = true
+debug-assertions = true
+overflow-checks = true
+rpath = false
+
+[profile.bench]
+opt-level = 3
+debug = false
+codegen-units = 1
+lto = true
+incremental = false
+debug-assertions = false
+overflow-checks = false
+rpath = false

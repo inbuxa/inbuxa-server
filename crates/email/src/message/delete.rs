@@ -1,0 +1,315 @@
+/*
+ * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
+ *
+ * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
+ */
+
+use super::metadata::MessageData;
+use crate::cache::{MessageCacheFetch, email::MessageCacheAccess};
+use common::{Server, storage::index::ObjectIndexBuilder};
+use groupware::calendar::storage::ItipAutoExpunge;
+use registry::schema::enums::IndexDocumentType;
+use registry::schema::structs::{Task, TaskIndexDocument, TaskStatus};
+use std::future::Future;
+use store::write::key::DeserializeBigEndian;
+use store::write::{IndexPropertyClass, now};
+use store::{IterateParams, U32_LEN, U64_LEN, ValueKey};
+use store::{
+    roaring::RoaringBitmap,
+    write::{BatchBuilder, ValueClass},
+};
+use trc::AddContext;
+use types::collection::{Collection, SyncCollection, VanishedCollection};
+use types::field::{EmailField, EmailSubmissionField};
+
+pub trait EmailDeletion: Sync + Send {
+    fn emails_delete(
+        &self,
+        account_id: u32,
+        tenant_id: Option<u32>,
+        batch: &mut BatchBuilder,
+        document_ids: RoaringBitmap,
+    ) -> impl Future<Output = trc::Result<RoaringBitmap>> + Send;
+
+    fn purge_account(&self, account_id: u32) -> impl Future<Output = trc::Result<()>> + Send;
+
+    fn purge_email_submissions(
+        &self,
+        account_id: u32,
+        hold_period: u64,
+    ) -> impl Future<Output = trc::Result<()>> + Send;
+
+    fn emails_auto_expunge(
+        &self,
+        account_id: u32,
+        hold_period: u64,
+    ) -> impl Future<Output = trc::Result<()>> + Send;
+
+    fn log_emptied_threads(
+        &self,
+        account_id: u32,
+        batch: &mut BatchBuilder,
+        thread_ids: RoaringBitmap,
+        deleted_ids: &RoaringBitmap,
+    ) -> impl Future<Output = trc::Result<()>> + Send;
+}
+
+impl EmailDeletion for Server {
+    async fn emails_delete(
+        &self,
+        account_id: u32,
+        tenant_id: Option<u32>,
+        batch: &mut BatchBuilder,
+        document_ids: RoaringBitmap,
+    ) -> trc::Result<RoaringBitmap> {
+        let mut deleted_ids = RoaringBitmap::new();
+        let mut thread_ids = RoaringBitmap::new();
+        batch
+            .with_account_id(account_id)
+            .with_collection(Collection::Email);
+        self.archives(
+            account_id,
+            Collection::Email,
+            &document_ids,
+            |document_id, data_| {
+                // Add changes to batch
+                let metadata = data_
+                    .to_unarchived::<MessageData>()
+                    .caused_by(trc::location!())?;
+                for mailbox in metadata.inner.mailboxes.iter() {
+                    batch.log_vanished_item(
+                        VanishedCollection::Email,
+                        (mailbox.mailbox_id.to_native(), mailbox.uid.to_native()),
+                    );
+                }
+                thread_ids.insert(metadata.inner.thread_id.to_native());
+                batch
+                    .with_document(document_id)
+                    .custom(
+                        ObjectIndexBuilder::<_, ()>::new()
+                            .with_tenant_id(tenant_id)
+                            .with_current(metadata),
+                    )
+                    .caused_by(trc::location!())?
+                    .schedule_task(Task::UnindexDocument(TaskIndexDocument {
+                        account_id: account_id.into(),
+                        document_id: document_id.into(),
+                        document_type: IndexDocumentType::Email,
+                        status: TaskStatus::now(),
+                    }))
+                    .commit_point();
+
+                deleted_ids.insert(document_id);
+
+                Ok(true)
+            },
+        )
+        .await?;
+
+        self.log_emptied_threads(account_id, batch, thread_ids, &deleted_ids)
+            .await?;
+
+        let not_destroyed = if document_ids.len() == deleted_ids.len() {
+            RoaringBitmap::new()
+        } else {
+            deleted_ids ^= document_ids;
+            deleted_ids
+        };
+
+        Ok(not_destroyed)
+    }
+
+    async fn log_emptied_threads(
+        &self,
+        account_id: u32,
+        batch: &mut BatchBuilder,
+        thread_ids: RoaringBitmap,
+        deleted_ids: &RoaringBitmap,
+    ) -> trc::Result<()> {
+        if !thread_ids.is_empty() {
+            let cache = self
+                .get_cached_messages(account_id)
+                .await
+                .caused_by(trc::location!())?;
+            for thread_id in &thread_ids {
+                if cache
+                    .in_thread(thread_id)
+                    .all(|message| deleted_ids.contains(message.document_id))
+                {
+                    batch
+                        .with_account_id(account_id)
+                        .with_collection(Collection::Thread)
+                        .with_document(thread_id)
+                        .log_container_delete(SyncCollection::Thread);
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    async fn purge_account(&self, account_id: u32) -> trc::Result<()> {
+        // Auto-expunge deleted and junk messages
+        if let Some(hold_period) = self.core.email.mail_autoexpunge_after {
+            self.emails_auto_expunge(account_id, hold_period)
+                .await
+                .caused_by(trc::location!())?;
+        }
+
+        // Auto-expunge iMIP messages
+        if let Some(hold_period) = self.core.groupware.itip_inbox_auto_expunge {
+            self.itip_auto_expunge(account_id, hold_period)
+                .await
+                .caused_by(trc::location!())?;
+        }
+
+        // Delete old e-mail submissions
+        if let Some(hold_period) = self.core.email.email_submission_autoexpunge_after {
+            self.purge_email_submissions(account_id, hold_period)
+                .await
+                .caused_by(trc::location!())?;
+        }
+
+        // Purge changelogs
+        self.delete_changes(
+            account_id,
+            self.core.email.changes_max_history,
+            self.core.email.share_notification_max_history,
+        )
+        .await
+        .caused_by(trc::location!())?;
+
+        Ok(())
+    }
+
+    async fn emails_auto_expunge(&self, account_id: u32, hold_period: u64) -> trc::Result<()> {
+        // Filter messages by received date
+        let mut destroy_ids = RoaringBitmap::new();
+        let cutoff = now().saturating_sub(hold_period);
+        self.store()
+            .iterate(
+                IterateParams::new(
+                    ValueKey {
+                        account_id,
+                        collection: Collection::Email.into(),
+                        document_id: 0,
+                        class: ValueClass::Property(EmailField::DeletedAt.into()),
+                    },
+                    ValueKey {
+                        account_id,
+                        collection: Collection::Email.into(),
+                        document_id: u32::MAX,
+                        class: ValueClass::Property(EmailField::DeletedAt.into()),
+                    },
+                )
+                .ascending(),
+                |key, value| {
+                    let deleted_at = value.deserialize_be_u64(0)?;
+                    if deleted_at <= cutoff {
+                        destroy_ids.insert(key.deserialize_be_u32(key.len() - U32_LEN)?);
+                    }
+
+                    Ok(true)
+                },
+            )
+            .await
+            .caused_by(trc::location!())?;
+
+        if destroy_ids.is_empty() {
+            return Ok(());
+        }
+
+        trc::event!(
+            Store(trc::StoreEvent::AutoExpunge),
+            Collection = Collection::Email.as_str(),
+            AccountId = account_id,
+            Total = destroy_ids.len(),
+        );
+
+        // Delete messages
+        let mut batch = BatchBuilder::new();
+        let tenant_id = self
+            .account(account_id)
+            .await
+            .caused_by(trc::location!())?
+            .tenant_id();
+        self.emails_delete(account_id, tenant_id, &mut batch, destroy_ids)
+            .await?;
+        self.commit_batch(batch).await?;
+        self.notify_task_queue();
+
+        Ok(())
+    }
+
+    async fn purge_email_submissions(&self, account_id: u32, hold_period: u64) -> trc::Result<()> {
+        // Filter messages by received date
+        let mut destroy_ids = Vec::new();
+        self.store()
+            .iterate(
+                IterateParams::new(
+                    ValueKey {
+                        account_id,
+                        collection: Collection::EmailSubmission.into(),
+                        document_id: 0,
+                        class: ValueClass::IndexProperty(IndexPropertyClass::Integer {
+                            property: EmailSubmissionField::Metadata.into(),
+                            value: 0,
+                        }),
+                    },
+                    ValueKey {
+                        account_id,
+                        collection: Collection::Email.into(),
+                        document_id: u32::MAX,
+                        class: ValueClass::IndexProperty(IndexPropertyClass::Integer {
+                            property: EmailSubmissionField::Metadata.into(),
+                            value: now().saturating_sub(hold_period),
+                        }),
+                    },
+                )
+                .ascending()
+                .no_values(),
+                |key, _| {
+                    destroy_ids.push((
+                        key.deserialize_be_u32(key.len() - U32_LEN)?,
+                        key.deserialize_be_u64(key.len() - U32_LEN - U64_LEN)?,
+                    ));
+
+                    Ok(true)
+                },
+            )
+            .await
+            .caused_by(trc::location!())?;
+
+        if destroy_ids.is_empty() {
+            return Ok(());
+        }
+
+        trc::event!(
+            Store(trc::StoreEvent::AutoExpunge),
+            Collection = Collection::EmailSubmission.as_str(),
+            AccountId = account_id,
+            Total = destroy_ids.len(),
+        );
+
+        // Delete messages
+        let mut batch = BatchBuilder::new();
+        batch
+            .with_account_id(account_id)
+            .with_collection(Collection::EmailSubmission);
+
+        for (document_id, send_at) in destroy_ids {
+            batch
+                .with_document(document_id)
+                .clear(EmailSubmissionField::Metadata)
+                .clear(ValueClass::IndexProperty(IndexPropertyClass::Integer {
+                    property: EmailSubmissionField::Metadata.into(),
+                    value: send_at,
+                }))
+                .commit_point();
+        }
+
+        self.commit_batch(batch).await?;
+
+        Ok(())
+    }
+}

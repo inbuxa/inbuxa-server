@@ -1,0 +1,57 @@
+name: Test
+
+on:
+  workflow_dispatch:
+
+jobs:
+  style:
+    name: Check Style
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Check Style
+        run: cargo fmt --all --check
+
+  test:
+    name: Test
+    needs: style
+    runs-on: ubuntu-latest
+
+    env:
+      STORE: RocksDb
+      RUST_MIN_STACK: "16777216"
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      # External services (OpenLDAP, Keycloak, PostgreSQL, MySQL, Redis, NATS,
+      # MinIO, OpenSearch, Meilisearch) are provisioned on demand by the test
+      # suite via testcontainers using the Docker daemon available on the
+      # runner; see tests/src/utils/containers.rs.
+
+      - name: Rust Cache
+        uses: Swatinem/rust-cache@v2
+
+      - name: JMAP Protocol Tests
+        run: cargo test -p jmap_proto -- --nocapture
+
+      - name: IMAP Protocol Tests
+        run: cargo test -p imap_proto -- --nocapture
+
+      - name: Full-text search Tests
+        run: cargo test -p store -- --nocapture
+
+      - name: Directory Tests
+        run: cargo test -p tests directory -- --nocapture
+
+      - name: SMTP Tests
+        run: cargo test -p tests smtp -- --nocapture
+
+      - name: IMAP Tests
+        run: cargo test -p tests imap -- --nocapture
+
+      - name: JMAP Tests
+        run: cargo test -p tests jmap -- --nocapture

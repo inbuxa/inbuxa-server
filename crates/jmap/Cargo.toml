@@ -1,0 +1,55 @@
+[package]
+name = "jmap"
+version = "0.16.22"
+edition = "2024"
+
+[dependencies]
+store = { path = "../store" }
+nlp = { path = "../nlp" }
+http_proto = { path = "../http-proto" }
+jmap_proto = { path = "../jmap-proto" }
+types = { path = "../types" }
+smtp = { path =  "../smtp" }
+utils = { path =  "../utils" }
+common = { path =  "../common" }
+services = { path =  "../services" }
+directory = { path =  "../directory" }
+trc = { path = "../trc" }
+spam-filter = { path = "../spam-filter" }
+email = { path = "../email" }
+groupware = { path = "../groupware" }
+registry = { path = "../registry" }
+calcard = { version = "0.3" }
+smtp-proto = { version = "0.2" }
+mail-parser = { version = "0.11", features = ["full_encoding", "rkyv"] } 
+mail-builder = { version = "1.0" }
+mail-auth = { version = "0.13", features = ["generate", "arc"] }
+sieve-rs = { version = "0.7", features = ["rkyv"] } 
+jmap-tools = { version = "0.1", features = ["rkyv"] }
+serde = { version = "1.0", features = ["derive"]}
+serde_json = "1.0"
+hyper = { version = "1.11.1", features = ["server", "http1", "http2"] }
+hyper-util = { version = "0.1.20", features = ["tokio"] }
+http-body-util = "0.1.5"
+tokio = { version = "1.53", features = ["rt"] }
+futures-util = "0.3.34"
+async-stream = "0.3.6"
+base64 = "0.23"
+p256 = { version = "0.13", features = ["ecdh"] }
+sha1 = "0.11"
+sha2 = "0.11"
+reqwest = { version = "0.13", default-features = false, features = ["rustls", "http2"]}
+tokio-tungstenite = "0.30"
+tungstenite = "0.30"
+chrono = "0.4"
+rand = "0.10.2"
+rkyv = { version = "0.8.18", features = ["little_endian"] }
+hashify = "0.2"
+
+[features]
+test_mode = []
+dev_mode = []
+enterprise = []
+
+[lints]
+workspace = true

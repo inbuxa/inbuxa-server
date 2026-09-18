@@ -1,0 +1,737 @@
+/*
+ * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
+ *
+ * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
+ */
+
+#![warn(clippy::large_futures)]
+
+pub mod backend;
+pub mod build;
+pub mod dispatch;
+pub mod query;
+pub mod registry;
+pub mod search;
+pub mod write;
+
+use ::registry::schema::enums::CompressionAlgo;
+pub use ahash;
+pub use blake3;
+pub use parking_lot;
+pub use rand;
+pub use rkyv;
+pub use roaring;
+use utils::snowflake::SnowflakeIdGenerator;
+pub use xxhash_rust;
+
+use crate::backend::{elastic::ElasticSearchStore, meili::MeiliSearchStore};
+use ahash::AHashMap;
+use backend::{ephemeral::EphemeralStore, fs::FsStore, http::HttpStore, memory::StaticMemoryStore};
+use std::{borrow::Cow, path::PathBuf, sync::Arc};
+use write::ValueClass;
+
+pub trait Deserialize: Sized + Sync + Send {
+    fn deserialize(bytes: &[u8]) -> trc::Result<Self>;
+
+    #[inline(always)]
+    fn deserialize_owned(bytes: Vec<u8>) -> trc::Result<Self> {
+        Self::deserialize(&bytes)
+    }
+
+    #[inline(always)]
+    fn deserialize_with_key(_: &[u8], bytes: &[u8]) -> trc::Result<Self> {
+        Self::deserialize(bytes)
+    }
+
+    #[inline(always)]
+    fn deserialize_owned_with_key(key: &[u8], bytes: Vec<u8>) -> trc::Result<Self> {
+        Self::deserialize_with_key(key, &bytes)
+    }
+}
+
+pub trait Serialize {
+    fn serialize(&self) -> trc::Result<Vec<u8>>;
+}
+
+pub trait SerializeInfallible {
+    fn serialize(&self) -> Vec<u8>;
+}
+
+// Key serialization flags
+pub(crate) const WITH_SUBSPACE: u32 = 1;
+
+pub trait Key: Sync + Send + Clone {
+    fn serialize(&self, flags: u32) -> Vec<u8>;
+    fn subspace(&self) -> u8;
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct IndexKey<T: AsRef<[u8]>> {
+    pub account_id: u32,
+    pub collection: u8,
+    pub document_id: u32,
+    pub field: u8,
+    pub key: T,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct IndexKeyPrefix {
+    pub account_id: u32,
+    pub collection: u8,
+    pub field: u8,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct ValueKey<T: AsRef<ValueClass>> {
+    pub account_id: u32,
+    pub collection: u8,
+    pub document_id: u32,
+    pub class: T,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct LogKey {
+    pub account_id: u32,
+    pub collection: u8,
+    pub change_id: u64,
+}
+
+pub const U64_LEN: usize = std::mem::size_of::<u64>();
+pub const U32_LEN: usize = std::mem::size_of::<u32>();
+pub const U16_LEN: usize = std::mem::size_of::<u16>();
+
+pub const SUBSPACE_ACL: u8 = b'a';
+pub const SUBSPACE_TASK_QUEUE: u8 = b'f';
+pub const SUBSPACE_INDEXES: u8 = b'i';
+pub const SUBSPACE_BLOB_LINK: u8 = b'k';
+pub const SUBSPACE_BLOBS: u8 = b't';
+pub const SUBSPACE_LOGS: u8 = b'l';
+pub const SUBSPACE_COUNTER: u8 = b'n';
+pub const SUBSPACE_IN_MEMORY_VALUE: u8 = b'm';
+pub const SUBSPACE_IN_MEMORY_COUNTER: u8 = b'y';
+pub const SUBSPACE_PROPERTY: u8 = b'p';
+pub const SUBSPACE_REGISTRY: u8 = b's';
+pub const SUBSPACE_REGISTRY_IDX: u8 = b'b';
+pub const SUBSPACE_REGISTRY_PK: u8 = b'g';
+pub const SUBSPACE_DIRECTORY: u8 = b'd';
+pub const SUBSPACE_QUEUE_MESSAGE: u8 = b'e';
+pub const SUBSPACE_QUEUE_EVENT: u8 = b'q';
+pub const SUBSPACE_QUOTA: u8 = b'u';
+pub const SUBSPACE_REPORT_OUT: u8 = b'h';
+pub const SUBSPACE_REPORT_IN: u8 = b'r';
+pub const SUBSPACE_TELEMETRY_SPAN: u8 = b'o';
+pub const SUBSPACE_TELEMETRY_METRIC: u8 = b'x';
+pub const SUBSPACE_SEARCH_INDEX: u8 = b'z';
+pub const SUBSPACE_DELETED_ITEMS: u8 = b'j';
+pub const SUBSPACE_SPAM_SAMPLES: u8 = b'w';
+
+// TODO: Remove in v1.0
+pub const LEGACY_SUBSPACE_BITMAP_TEXT: u8 = b'v';
+pub const LEGACY_SUBSPACE_BITMAP_TAG: u8 = b'c';
+
+#[derive(Clone)]
+pub struct IterateParams<T: Key> {
+    begin: T,
+    end: T,
+    first: bool,
+    ascending: bool,
+    values: bool,
+}
+
+#[derive(Clone, Default)]
+pub struct LookupStores {
+    pub stores: AHashMap<Box<str>, InMemoryStore>,
+}
+
+#[derive(Clone, Default)]
+pub enum Store {
+    #[cfg(feature = "sqlite")]
+    SQLite(Arc<backend::sqlite::SqliteStore>),
+    #[cfg(feature = "foundation")]
+    FoundationDb(Arc<backend::foundationdb::FdbStore>),
+    #[cfg(feature = "postgres")]
+    PostgreSQL(Arc<backend::postgres::PostgresStore>),
+    #[cfg(feature = "mysql")]
+    MySQL(Arc<backend::mysql::MysqlStore>),
+    #[cfg(feature = "rocks")]
+    RocksDb(Arc<backend::rocksdb::RocksDbStore>),
+    Ephemeral(Arc<EphemeralStore>),
+    #[default]
+    None,
+}
+
+#[derive(Clone)]
+pub enum BlobStore {
+    Store(Store),
+    Fs(Arc<FsStore>),
+    #[cfg(feature = "s3")]
+    S3(Arc<backend::s3::S3Store>),
+    #[cfg(feature = "azure")]
+    Azure(Arc<backend::azure::AzureStore>),
+}
+
+#[derive(Clone)]
+pub enum SearchStore {
+    Store(Store),
+    ElasticSearch(Arc<ElasticSearchStore>),
+    MeiliSearch(Arc<MeiliSearchStore>),
+}
+
+#[derive(Clone, Debug)]
+pub enum InMemoryStore {
+    Store(Store),
+    #[cfg(feature = "redis")]
+    Redis(Arc<backend::redis::RedisStore>),
+    Http(Arc<HttpStore>),
+    Static(Arc<StaticMemoryStore>),
+}
+
+#[derive(Clone)]
+pub struct RegistryStore(pub(crate) Arc<RegistryStoreInner>);
+
+#[derive(Clone)]
+pub struct RegistryStoreInner {
+    pub(crate) local_path: PathBuf,
+    pub(crate) store: Store,
+    pub(crate) node_id: u16,
+    pub(crate) env_recovery_mode: bool,
+    pub(crate) env_recovery_admin: Option<(String, String)>,
+    pub(crate) env_cluster_role: Option<String>,
+    pub(crate) env_push_shard_id: u32,
+    pub(crate) env_hostname: String,
+    pub(crate) env_public_url: Option<String>,
+    pub(crate) id_generator: SnowflakeIdGenerator,
+}
+
+#[cfg(feature = "sqlite")]
+impl From<backend::sqlite::SqliteStore> for Store {
+    fn from(store: backend::sqlite::SqliteStore) -> Self {
+        Self::SQLite(Arc::new(store))
+    }
+}
+
+#[cfg(feature = "foundation")]
+impl From<backend::foundationdb::FdbStore> for Store {
+    fn from(store: backend::foundationdb::FdbStore) -> Self {
+        Self::FoundationDb(Arc::new(store))
+    }
+}
+
+#[cfg(feature = "postgres")]
+impl From<backend::postgres::PostgresStore> for Store {
+    fn from(store: backend::postgres::PostgresStore) -> Self {
+        Self::PostgreSQL(Arc::new(store))
+    }
+}
+
+#[cfg(feature = "mysql")]
+impl From<backend::mysql::MysqlStore> for Store {
+    fn from(store: backend::mysql::MysqlStore) -> Self {
+        Self::MySQL(Arc::new(store))
+    }
+}
+
+#[cfg(feature = "rocks")]
+impl From<backend::rocksdb::RocksDbStore> for Store {
+    fn from(store: backend::rocksdb::RocksDbStore) -> Self {
+        Self::RocksDb(Arc::new(store))
+    }
+}
+
+impl From<EphemeralStore> for Store {
+    fn from(store: EphemeralStore) -> Self {
+        Self::Ephemeral(Arc::new(store))
+    }
+}
+
+impl From<ElasticSearchStore> for SearchStore {
+    fn from(store: ElasticSearchStore) -> Self {
+        Self::ElasticSearch(Arc::new(store))
+    }
+}
+
+impl From<MeiliSearchStore> for SearchStore {
+    fn from(store: MeiliSearchStore) -> Self {
+        Self::MeiliSearch(Arc::new(store))
+    }
+}
+
+#[cfg(feature = "redis")]
+impl From<backend::redis::RedisStore> for InMemoryStore {
+    fn from(store: backend::redis::RedisStore) -> Self {
+        Self::Redis(Arc::new(store))
+    }
+}
+
+impl From<Store> for SearchStore {
+    fn from(store: Store) -> Self {
+        Self::Store(store)
+    }
+}
+
+impl From<Store> for InMemoryStore {
+    fn from(store: Store) -> Self {
+        Self::Store(store)
+    }
+}
+
+impl From<Store> for BlobStore {
+    fn from(store: Store) -> Self {
+        Self::Store(store)
+    }
+}
+
+impl Default for BlobStore {
+    fn default() -> Self {
+        Self::Store(Store::None)
+    }
+}
+
+impl Default for InMemoryStore {
+    fn default() -> Self {
+        Self::Store(Store::None)
+    }
+}
+
+impl Default for SearchStore {
+    fn default() -> Self {
+        Self::Store(Store::None)
+    }
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub enum Value<'x> {
+    Integer(i64),
+    Bool(bool),
+    Float(f64),
+    Text(Cow<'x, str>),
+    Blob(Cow<'x, [u8]>),
+    Null,
+}
+
+impl Eq for Value<'_> {}
+
+impl<'x> Value<'x> {
+    pub fn to_str<'y: 'x>(&'y self) -> Cow<'x, str> {
+        match self {
+            Value::Text(s) => s.as_ref().into(),
+            Value::Integer(i) => Cow::Owned(i.to_string()),
+            Value::Bool(b) => Cow::Owned(b.to_string()),
+            Value::Float(f) => Cow::Owned(f.to_string()),
+            Value::Blob(b) => String::from_utf8_lossy(b.as_ref()),
+            Value::Null => Cow::Borrowed(""),
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct Row {
+    pub values: Vec<Value<'static>>,
+}
+
+#[derive(Clone, Debug)]
+pub struct Rows {
+    pub rows: Vec<Row>,
+}
+
+#[derive(Clone, Debug)]
+pub struct NamedRows {
+    pub names: Vec<String>,
+    pub rows: Vec<Row>,
+}
+
+#[derive(Clone, Copy)]
+pub enum QueryType {
+    Execute,
+    Exists,
+    QueryAll,
+    QueryOne,
+}
+
+pub trait QueryResult: Sync + Send + 'static {
+    fn from_exec(items: usize) -> Self;
+    fn from_exists(exists: bool) -> Self;
+    fn from_query_one(items: impl IntoRows) -> Self;
+    fn from_query_all(items: impl IntoRows) -> Self;
+
+    fn query_type() -> QueryType;
+}
+
+pub trait IntoRows {
+    fn into_row(self) -> Option<Row>;
+    fn into_rows(self) -> Rows;
+    fn into_named_rows(self) -> NamedRows;
+}
+
+impl QueryResult for Option<Row> {
+    fn query_type() -> QueryType {
+        QueryType::QueryOne
+    }
+
+    fn from_exec(_: usize) -> Self {
+        unreachable!()
+    }
+
+    fn from_exists(_: bool) -> Self {
+        unreachable!()
+    }
+
+    fn from_query_all(_: impl IntoRows) -> Self {
+        unreachable!()
+    }
+
+    fn from_query_one(items: impl IntoRows) -> Self {
+        items.into_row()
+    }
+}
+
+impl QueryResult for Rows {
+    fn query_type() -> QueryType {
+        QueryType::QueryAll
+    }
+
+    fn from_exec(_: usize) -> Self {
+        unreachable!()
+    }
+
+    fn from_exists(_: bool) -> Self {
+        unreachable!()
+    }
+
+    fn from_query_all(items: impl IntoRows) -> Self {
+        items.into_rows()
+    }
+
+    fn from_query_one(_: impl IntoRows) -> Self {
+        unreachable!()
+    }
+}
+
+impl QueryResult for NamedRows {
+    fn query_type() -> QueryType {
+        QueryType::QueryAll
+    }
+
+    fn from_exec(_: usize) -> Self {
+        unreachable!()
+    }
+
+    fn from_exists(_: bool) -> Self {
+        unreachable!()
+    }
+
+    fn from_query_all(items: impl IntoRows) -> Self {
+        items.into_named_rows()
+    }
+
+    fn from_query_one(_: impl IntoRows) -> Self {
+        unreachable!()
+    }
+}
+
+impl QueryResult for bool {
+    fn query_type() -> QueryType {
+        QueryType::Exists
+    }
+
+    fn from_exec(_: usize) -> Self {
+        unreachable!()
+    }
+
+    fn from_exists(exists: bool) -> Self {
+        exists
+    }
+
+    fn from_query_all(_: impl IntoRows) -> Self {
+        unreachable!()
+    }
+
+    fn from_query_one(_: impl IntoRows) -> Self {
+        unreachable!()
+    }
+}
+
+impl QueryResult for usize {
+    fn query_type() -> QueryType {
+        QueryType::Execute
+    }
+
+    fn from_exec(items: usize) -> Self {
+        items
+    }
+
+    fn from_exists(_: bool) -> Self {
+        unreachable!()
+    }
+
+    fn from_query_all(_: impl IntoRows) -> Self {
+        unreachable!()
+    }
+
+    fn from_query_one(_: impl IntoRows) -> Self {
+        unreachable!()
+    }
+}
+
+impl<'x> From<&'x str> for Value<'x> {
+    fn from(value: &'x str) -> Self {
+        Self::Text(value.into())
+    }
+}
+
+impl From<String> for Value<'_> {
+    fn from(value: String) -> Self {
+        Self::Text(value.into())
+    }
+}
+
+impl<'x> From<&'x String> for Value<'x> {
+    fn from(value: &'x String) -> Self {
+        Self::Text(value.into())
+    }
+}
+
+impl<'x> From<Cow<'x, str>> for Value<'x> {
+    fn from(value: Cow<'x, str>) -> Self {
+        Self::Text(value)
+    }
+}
+
+impl From<bool> for Value<'_> {
+    fn from(value: bool) -> Self {
+        Self::Bool(value)
+    }
+}
+
+impl From<i64> for Value<'_> {
+    fn from(value: i64) -> Self {
+        Self::Integer(value)
+    }
+}
+
+impl From<Value<'static>> for i64 {
+    fn from(value: Value<'static>) -> Self {
+        if let Value::Integer(value) = value {
+            value
+        } else {
+            0
+        }
+    }
+}
+
+impl From<u64> for Value<'_> {
+    fn from(value: u64) -> Self {
+        Self::Integer(value as i64)
+    }
+}
+
+impl From<u32> for Value<'_> {
+    fn from(value: u32) -> Self {
+        Self::Integer(value as i64)
+    }
+}
+
+impl From<f64> for Value<'_> {
+    fn from(value: f64) -> Self {
+        Self::Float(value)
+    }
+}
+
+impl<'x> From<&'x [u8]> for Value<'x> {
+    fn from(value: &'x [u8]) -> Self {
+        Self::Blob(value.into())
+    }
+}
+
+impl From<Vec<u8>> for Value<'_> {
+    fn from(value: Vec<u8>) -> Self {
+        Self::Blob(value.into())
+    }
+}
+
+impl Value<'_> {
+    pub fn into_string(self) -> String {
+        match self {
+            Value::Text(s) => s.into_owned(),
+            Value::Integer(i) => i.to_string(),
+            Value::Bool(b) => b.to_string(),
+            Value::Float(f) => f.to_string(),
+            Value::Blob(b) => String::from_utf8_lossy(b.as_ref()).into_owned(),
+            Value::Null => "".into(),
+        }
+    }
+
+    pub fn into_lower_string(self) -> String {
+        match self {
+            Value::Text(s) => s.as_ref().to_lowercase(),
+            Value::Integer(i) => i.to_string(),
+            Value::Bool(b) => b.to_string(),
+            Value::Float(f) => f.to_string(),
+            Value::Blob(b) => String::from_utf8_lossy(b.as_ref()).to_lowercase(),
+            Value::Null => "".into(),
+        }
+    }
+}
+
+impl From<Row> for Vec<String> {
+    fn from(value: Row) -> Self {
+        value.values.into_iter().map(|v| v.into_string()).collect()
+    }
+}
+
+impl From<Row> for Vec<u32> {
+    fn from(value: Row) -> Self {
+        value
+            .values
+            .into_iter()
+            .filter_map(|v| {
+                if let Value::Integer(v) = v {
+                    Some(v as u32)
+                } else {
+                    None
+                }
+            })
+            .collect()
+    }
+}
+
+impl From<Rows> for Vec<String> {
+    fn from(value: Rows) -> Self {
+        value
+            .rows
+            .into_iter()
+            .flat_map(|v| v.values.into_iter().map(|v| v.into_string()))
+            .collect()
+    }
+}
+
+impl From<Rows> for Vec<u32> {
+    fn from(value: Rows) -> Self {
+        value
+            .rows
+            .into_iter()
+            .flat_map(|v| {
+                v.values.into_iter().filter_map(|v| {
+                    if let Value::Integer(v) = v {
+                        Some(v as u32)
+                    } else {
+                        None
+                    }
+                })
+            })
+            .collect()
+    }
+}
+
+impl Store {
+    #[inline(always)]
+    pub fn is_none(&self) -> bool {
+        matches!(self, Self::None)
+    }
+
+    #[inline(always)]
+    pub fn is_active(&self) -> bool {
+        !matches!(self, Self::None)
+    }
+
+    pub fn is_same(&self, other: &Store) -> bool {
+        match (self, other) {
+            #[cfg(feature = "sqlite")]
+            (Store::SQLite(a), Store::SQLite(b)) => Arc::ptr_eq(a, b),
+            #[cfg(feature = "foundation")]
+            (Store::FoundationDb(a), Store::FoundationDb(b)) => Arc::ptr_eq(a, b),
+            #[cfg(feature = "postgres")]
+            (Store::PostgreSQL(a), Store::PostgreSQL(b)) => Arc::ptr_eq(a, b),
+            #[cfg(feature = "mysql")]
+            (Store::MySQL(a), Store::MySQL(b)) => Arc::ptr_eq(a, b),
+            #[cfg(feature = "rocks")]
+            (Store::RocksDb(a), Store::RocksDb(b)) => Arc::ptr_eq(a, b),
+            (Store::Ephemeral(a), Store::Ephemeral(b)) => Arc::ptr_eq(a, b),
+            #[cfg(all(feature = "enterprise", any(feature = "postgres", feature = "mysql")))]
+            (Store::SQLReadReplica(a), Store::SQLReadReplica(b)) => Arc::ptr_eq(a, b),
+            (Store::None, Store::None) => true,
+            _ => false,
+        }
+    }
+
+    #[inline(always)]
+    pub fn is_sql(&self) -> bool {
+        match self {
+            #[cfg(feature = "sqlite")]
+            Store::SQLite(_) => true,
+            #[cfg(feature = "postgres")]
+            Store::PostgreSQL(_) => true,
+            #[cfg(feature = "mysql")]
+            Store::MySQL(_) => true,
+            _ => false,
+        }
+    }
+
+    #[inline(always)]
+    pub fn is_pg_or_mysql(&self) -> bool {
+        match self {
+            #[cfg(feature = "mysql")]
+            Store::MySQL(_) => true,
+            #[cfg(feature = "postgres")]
+            Store::PostgreSQL(_) => true,
+            _ => false,
+        }
+    }
+
+    #[inline(always)]
+    pub fn is_foundationdb(&self) -> bool {
+        match self {
+            #[cfg(feature = "foundation")]
+            Store::FoundationDb(_) => true,
+            _ => false,
+        }
+    }
+
+    #[inline(always)]
+    pub fn is_ephemeral(&self) -> bool {
+        matches!(self, Self::Ephemeral(_))
+    }
+
+}
+
+impl std::fmt::Debug for Store {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            #[cfg(feature = "sqlite")]
+            Self::SQLite(_) => f.debug_tuple("SQLite").finish(),
+            #[cfg(feature = "foundation")]
+            Self::FoundationDb(_) => f.debug_tuple("FoundationDb").finish(),
+            #[cfg(feature = "postgres")]
+            Self::PostgreSQL(_) => f.debug_tuple("PostgreSQL").finish(),
+            #[cfg(feature = "mysql")]
+            Self::MySQL(_) => f.debug_tuple("MySQL").finish(),
+            #[cfg(feature = "rocks")]
+            Self::RocksDb(_) => f.debug_tuple("RocksDb").finish(),
+            Self::Ephemeral(_) => f.debug_tuple("Ephemeral").finish(),
+
+            Self::None => f.debug_tuple("None").finish(),
+        }
+    }
+}
+
+impl From<Value<'_>> for trc::Value {
+    fn from(value: Value) -> Self {
+        match value {
+            Value::Integer(v) => trc::Value::Int(v),
+            Value::Bool(v) => trc::Value::Bool(v),
+            Value::Float(v) => trc::Value::Float(v),
+            Value::Text(v) => trc::Value::String(match v {
+                Cow::Borrowed(v) => v.into(),
+                Cow::Owned(v) => v.into(),
+            }),
+            Value::Blob(v) => trc::Value::Bytes(v.into_owned()),
+            Value::Null => trc::Value::None,
+        }
+    }
+}
+
+impl From<Value<'static>> for () {
+    fn from(_: Value<'static>) -> Self {
+        unreachable!()
+    }
+}

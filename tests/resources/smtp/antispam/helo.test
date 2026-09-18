@@ -1,0 +1,65 @@
+helo_domain localhost
+expect HELO_NOT_FQDN
+
+Subject: test
+
+test
+<!-- NEXT TEST -->
+helo_domain user
+expect RCVD_HELO_USER HELO_NOT_FQDN
+
+Subject: test
+
+test
+<!-- NEXT TEST -->
+helo_domain 8.8.8.8
+remote_ip 8.8.8.8
+expect HELO_BAREIP
+
+Subject: test
+
+test
+<!-- NEXT TEST -->
+helo_domain 8.8.8.8
+remote_ip 1.1.1.1
+expect HELO_IP_A HELO_BAREIP
+
+Subject: test
+
+test
+<!-- NEXT TEST -->
+helo_domain domain.org
+iprev.ptr domain.org
+remote_ip 1.1.1.1
+expect 
+
+Subject: test
+
+test
+<!-- NEXT TEST -->
+helo_domain domain.org
+iprev.ptr otherdomain.org
+remote_ip 1.1.1.1
+expect HELO_IPREV_MISMATCH
+
+Subject: test
+
+test
+<!-- NEXT TEST -->
+helo_domain otherdomain.org
+iprev.ptr otherdomain.org
+remote_ip 1.1.1.1
+expect HELO_NORES_A_OR_MX
+
+Subject: test
+
+test
+<!-- NEXT TEST -->
+helo_domain otherdomain.org
+iprev.ptr otherdomain.net
+remote_ip 1.1.1.1
+expect HELO_NORES_A_OR_MX HELO_IPREV_MISMATCH
+
+Subject: test
+
+test

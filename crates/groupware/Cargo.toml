@@ -1,0 +1,36 @@
+[package]
+name = "groupware"
+version = "0.16.22"
+edition = "2024"
+
+[dependencies]
+utils = { path = "../utils" }
+store = { path = "../store" }
+common = { path =  "../common" }
+types = { path = "../types" }
+trc = { path = "../trc" }
+nlp = { path = "../nlp" }
+registry = { path = "../registry" }
+calcard = { version = "0.3", features = ["rkyv"] }
+hashify = "0.2"
+rkyv = { version = "0.8.18", features = ["little_endian"] }
+percent-encoding = "2.3.2"
+compact_str = "0.10.0"
+ahash = { version = "0.8" }
+indexmap = "2.14.1"
+chrono = "0.4.45"
+icu_locale_core = "2"
+icu_provider = { version = "2", features = ["sync"] }
+icu_plurals = "2"
+serde = { version = "1.0", features = ["derive"]}
+serde_json = "1.0"
+icu_datetime = { version = "~2.3", features = ["unstable_chrono_0_4"] }
+
+[features]
+test_mode = []
+enterprise = []
+
+[dev-dependencies]
+
+[lints]
+workspace = true

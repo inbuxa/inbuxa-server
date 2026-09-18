@@ -1,0 +1,218 @@
+# RFC6638 - Simple Event Scheduling
+
+# Organizer Inviting Multiple Attendees
+> put cyrus@example.com 9263504FD3AD
+BEGIN:VCALENDAR
+VERSION:2.0
+PRODID:-//Example Corp.//CalDAV Client//EN
+BEGIN:VEVENT
+UID:9263504FD3AD
+SEQUENCE:0
+DTSTAMP:20090602T185254Z
+DTSTART:20090602T160000Z
+DTEND:20090602T170000Z
+TRANSP:OPAQUE
+SUMMARY:Lunch
+ORGANIZER;CN="Cyrus Daboo":mailto:cyrus@example.com
+ATTENDEE;CN="Cyrus Daboo";CUTYPE=INDIVIDUAL;PARTSTAT=ACCEPTED:mailto:cyrus@example.com
+ATTENDEE;CN="Wilfredo Sanchez Vega";CUTYPE=INDIVIDUAL;PARTSTAT=NEEDS-ACTION;ROLE=REQ-PARTICIPANT;RSVP=TRUE:mailto:wilfredo@example.com
+ATTENDEE;CN="Bernard Desruisseaux";CUTYPE=INDIVIDUAL;PARTSTAT=NEEDS-ACTION;ROLE=REQ-PARTICIPANT;RSVP=TRUE:mailto:bernard@example.net
+ATTENDEE;CN="Mike Douglass";CUTYPE=INDIVIDUAL;RSVP=TRUE:mailto:mike@example.org
+END:VEVENT
+END:VCALENDAR
+
+> expect
+from: cyrus@example.com
+to: bernard@example.net, mike@example.org, wilfredo@example.com
+summary: invite
+summary.attendee: Participants([ItipParticipant { email: "cyrus@example.com", name: Some("Cyrus Daboo"), is_organizer: true }, ItipParticipant { email: "bernard@example.net", name: Some("Bernard Desruisseaux"), is_organizer: false }, ItipParticipant { email: "mike@example.org", name: Some("Mike Douglass"), is_organizer: false }, ItipParticipant { email: "wilfredo@example.com", name: Some("Wilfredo Sanchez Vega"), is_organizer: false }])
+summary.dtstart: Time(ItipTime { start: 1243958400, tz_id: 32768 })
+summary.summary: Text("Lunch")
+BEGIN:VCALENDAR
+METHOD:REQUEST
+PRODID:-//Stalwart Labs LLC//Stalwart Server//EN
+VERSION:2.0
+BEGIN:VEVENT
+SUMMARY:Lunch
+DTEND:20090602T170000Z
+DTSTART:20090602T160000Z
+TRANSP:OPAQUE
+ATTENDEE;CN="Bernard Desruisseaux";CUTYPE=INDIVIDUAL;PARTSTAT=NEEDS-ACTION;
+ ROLE=REQ-PARTICIPANT;RSVP=TRUE:mailto:bernard@example.net
+ATTENDEE;CN="Cyrus Daboo";CUTYPE=INDIVIDUAL;PARTSTAT=ACCEPTED:mailto:cyrus@
+ example.com
+ATTENDEE;CN="Mike Douglass";CUTYPE=INDIVIDUAL;RSVP=TRUE;PARTSTAT=NEEDS-ACTI
+ ON:mailto:mike@example.org
+ATTENDEE;CN="Wilfredo Sanchez Vega";CUTYPE=INDIVIDUAL;PARTSTAT=NEEDS-ACTION
+ ;ROLE=REQ-PARTICIPANT;RSVP=TRUE:mailto:wilfredo@example.com
+ORGANIZER;CN="Cyrus Daboo":mailto:cyrus@example.com
+UID:9263504FD3AD
+DTSTAMP:0
+SEQUENCE:0
+END:VEVENT
+END:VCALENDAR
+
+# Make sure the initial request leaves the sequence number at 0
+> get cyrus@example.com 9263504FD3AD
+BEGIN:VCALENDAR
+PRODID:-//Example Corp.//CalDAV Client//EN
+VERSION:2.0
+BEGIN:VEVENT
+SUMMARY:Lunch
+DTEND:20090602T170000Z
+DTSTART:20090602T160000Z
+TRANSP:OPAQUE
+ATTENDEE;CN="Bernard Desruisseaux";CUTYPE=INDIVIDUAL;PARTSTAT=NEEDS-ACTION;
+ ROLE=REQ-PARTICIPANT;RSVP=TRUE:mailto:bernard@example.net
+ATTENDEE;CN="Cyrus Daboo";CUTYPE=INDIVIDUAL;PARTSTAT=ACCEPTED:mailto:cyrus@
+ example.com
+ATTENDEE;CN="Mike Douglass";CUTYPE=INDIVIDUAL;RSVP=TRUE:mailto:mike@example
+ .org
+ATTENDEE;CN="Wilfredo Sanchez Vega";CUTYPE=INDIVIDUAL;PARTSTAT=NEEDS-ACTION
+ ;ROLE=REQ-PARTICIPANT;RSVP=TRUE:mailto:wilfredo@example.com
+ORGANIZER;CN="Cyrus Daboo":mailto:cyrus@example.com
+UID:9263504FD3AD
+DTSTAMP:1
+SEQUENCE:0
+END:VEVENT
+END:VCALENDAR
+
+# Send iTIP message to attendees
+> send
+
+# Make sure the message was received by the attendees
+> get wilfredo@example.com 9263504FD3AD
+BEGIN:VCALENDAR
+PRODID:-//Stalwart Labs LLC//Stalwart Server//EN
+VERSION:2.0
+BEGIN:VEVENT
+SUMMARY:Lunch
+DTEND:20090602T170000Z
+DTSTART:20090602T160000Z
+TRANSP:OPAQUE
+ATTENDEE;CN="Bernard Desruisseaux";CUTYPE=INDIVIDUAL;PARTSTAT=NEEDS-ACTION;
+ ROLE=REQ-PARTICIPANT;RSVP=TRUE:mailto:bernard@example.net
+ATTENDEE;CN="Cyrus Daboo";CUTYPE=INDIVIDUAL;PARTSTAT=ACCEPTED:mailto:cyrus@
+ example.com
+ATTENDEE;CN="Mike Douglass";CUTYPE=INDIVIDUAL;RSVP=TRUE;PARTSTAT=NEEDS-ACTI
+ ON:mailto:mike@example.org
+ATTENDEE;CN="Wilfredo Sanchez Vega";CUTYPE=INDIVIDUAL;PARTSTAT=NEEDS-ACTION
+ ;ROLE=REQ-PARTICIPANT;RSVP=TRUE:mailto:wilfredo@example.com
+ORGANIZER;CN="Cyrus Daboo":mailto:cyrus@example.com
+UID:9263504FD3AD
+DTSTAMP:0
+SEQUENCE:0
+END:VEVENT
+END:VCALENDAR
+
+# Wilfredo accepts the invitation
+> put wilfredo@example.com 9263504FD3AD
+BEGIN:VCALENDAR
+VERSION:2.0
+PRODID:-//Example Corp.//CalDAV Client//EN
+BEGIN:VEVENT
+UID:9263504FD3AD
+SEQUENCE:0
+DTSTAMP:20090602T185254Z
+DTSTART:20090602T160000Z
+DTEND:20090602T170000Z
+TRANSP:OPAQUE
+SUMMARY:Lunch
+ORGANIZER;CN="Cyrus Daboo":mailto:cyrus@example.com
+ATTENDEE;CN="Cyrus Daboo";CUTYPE=INDIVIDUAL;PARTSTAT=ACCEPTED:mailto:cyrus@example.com
+ATTENDEE;CN="Wilfredo Sanchez Vega";CUTYPE=INDIVIDUAL;PARTSTAT=ACCEPTED;ROLE=REQ-PARTICIPANT;RSVP=TRUE:mailto:wilfredo@example.com
+ATTENDEE;CN="Bernard Desruisseaux";CUTYPE=INDIVIDUAL;PARTSTAT=NEEDS-ACTION;ROLE=REQ-PARTICIPANT;RSVP=TRUE:mailto:bernard@example.net
+ATTENDEE;CN="Mike Douglass";CUTYPE=INDIVIDUAL;PARTSTAT=NEEDS-ACTION;RSVP=TRUE:mailto:mike@example.org
+BEGIN:VALARM
+TRIGGER:-PT15M
+ACTION:DISPLAY
+DESCRIPTION:Reminder
+END:VALARM
+END:VEVENT
+END:VCALENDAR
+
+# Make sure the sequence number is not updated
+> get wilfredo@example.com 9263504FD3AD
+BEGIN:VCALENDAR
+PRODID:-//Example Corp.//CalDAV Client//EN
+VERSION:2.0
+BEGIN:VEVENT
+SUMMARY:Lunch
+DTEND:20090602T170000Z
+DTSTART:20090602T160000Z
+TRANSP:OPAQUE
+ATTENDEE;CN="Bernard Desruisseaux";CUTYPE=INDIVIDUAL;PARTSTAT=NEEDS-ACTION;
+ ROLE=REQ-PARTICIPANT;RSVP=TRUE:mailto:bernard@example.net
+ATTENDEE;CN="Cyrus Daboo";CUTYPE=INDIVIDUAL;PARTSTAT=ACCEPTED:mailto:cyrus@
+ example.com
+ATTENDEE;CN="Mike Douglass";CUTYPE=INDIVIDUAL;PARTSTAT=NEEDS-ACTION;RSVP=
+ TRUE:mailto:mike@example.org
+ATTENDEE;CN="Wilfredo Sanchez Vega";CUTYPE=INDIVIDUAL;PARTSTAT=ACCEPTED;
+ ROLE=REQ-PARTICIPANT;RSVP=TRUE:mailto:wilfredo@example.com
+ORGANIZER;CN="Cyrus Daboo":mailto:cyrus@example.com
+UID:9263504FD3AD
+DTSTAMP:1
+SEQUENCE:0
+BEGIN:VALARM
+DESCRIPTION:Reminder
+ACTION:DISPLAY
+TRIGGER:-PT15M
+END:VALARM
+END:VEVENT
+END:VCALENDAR
+
+> expect
+from: wilfredo@example.com
+to: cyrus@example.com
+summary: rsvp ACCEPTED
+summary.attendee: Participants([ItipParticipant { email: "cyrus@example.com", name: Some("Cyrus Daboo"), is_organizer: true }, ItipParticipant { email: "bernard@example.net", name: Some("Bernard Desruisseaux"), is_organizer: false }, ItipParticipant { email: "mike@example.org", name: Some("Mike Douglass"), is_organizer: false }, ItipParticipant { email: "wilfredo@example.com", name: Some("Wilfredo Sanchez Vega"), is_organizer: false }])
+summary.dtstart: Time(ItipTime { start: 1243958400, tz_id: 32768 })
+summary.summary: Text("Lunch")
+BEGIN:VCALENDAR
+METHOD:REPLY
+PRODID:-//Stalwart Labs LLC//Stalwart Server//EN
+VERSION:2.0
+BEGIN:VEVENT
+SUMMARY:Lunch
+DTEND:20090602T170000Z
+DTSTART:20090602T160000Z
+ATTENDEE;CN="Wilfredo Sanchez Vega";CUTYPE=INDIVIDUAL;PARTSTAT=ACCEPTED;
+ ROLE=REQ-PARTICIPANT;RSVP=TRUE:mailto:wilfredo@example.com
+ORGANIZER;CN="Cyrus Daboo":mailto:cyrus@example.com
+UID:9263504FD3AD
+DTSTAMP:0
+SEQUENCE:0
+REQUEST-STATUS:2.0;Success
+END:VEVENT
+END:VCALENDAR
+
+# Send ITIP message to organizer
+> send
+
+# Make sure the message was received by the organizer
+> get cyrus@example.com 9263504FD3AD
+BEGIN:VCALENDAR
+PRODID:-//Example Corp.//CalDAV Client//EN
+VERSION:2.0
+BEGIN:VEVENT
+SUMMARY:Lunch
+DTEND:20090602T170000Z
+DTSTART:20090602T160000Z
+TRANSP:OPAQUE
+ATTENDEE;CN="Bernard Desruisseaux";CUTYPE=INDIVIDUAL;PARTSTAT=NEEDS-ACTION;
+ ROLE=REQ-PARTICIPANT;RSVP=TRUE:mailto:bernard@example.net
+ATTENDEE;CN="Cyrus Daboo";CUTYPE=INDIVIDUAL;PARTSTAT=ACCEPTED:mailto:cyrus@
+ example.com
+ATTENDEE;CN="Mike Douglass";CUTYPE=INDIVIDUAL;RSVP=TRUE:mailto:mike@example
+ .org
+ATTENDEE;CN="Wilfredo Sanchez Vega";CUTYPE=INDIVIDUAL;ROLE=REQ-PARTICIPANT;
+ RSVP=TRUE;PARTSTAT=ACCEPTED;SCHEDULE-STATUS=2.0:mailto:wilfredo@example.co
+ m
+ORGANIZER;CN="Cyrus Daboo":mailto:cyrus@example.com
+UID:9263504FD3AD
+DTSTAMP:1
+SEQUENCE:0
+END:VEVENT
+END:VCALENDAR
+
+
