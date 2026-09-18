@@ -15,6 +15,7 @@ pub mod purge;
 pub mod quota;
 pub mod security;
 pub mod task;
+pub mod tenant;
 
 use crate::utils::server::TestServerBuilder;
 use registry::schema::structs::{Expression, Imap, MtaStageAuth};
@@ -60,7 +61,6 @@ pub async fn system_tests() {
     authentication::test(&test).await;
     oidc::test(&mut test).await;
     authorization::test(&mut test).await;
-    #[cfg(feature = "pending-rebuild")] // inbuxa: pending-rebuild, see docs/spec/features/multi-tenancy.md
     tenant::test(&mut test).await;
     security::test(&mut test).await;
     quota::test(&mut test).await;
