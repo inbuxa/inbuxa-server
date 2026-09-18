@@ -147,6 +147,12 @@ Each requirement has an ID, and tests name the IDs they check.
   on upstream (observed 8): upstream lets a domain leave a tenant while the
   tenant's accounts are still on it. They stay in the tenant, on a domain
   that isn't, and can still sign in.
+  **Decision** (2026-09-18) on what moves with it. Into tenant T from no
+  tenant, the domain's principals (accounts, groups, mailing lists) and its
+  DKIM keys move into T with it, after MT-17's limit check. Out of T, back to
+  no tenant, it's refused while any principal on it is in T; a domain with
+  none moves with its DKIM keys. It never moves straight from one tenant to
+  another. A principal on it that's in a third tenant blocks either move.
 - **MT-9.** Creating a domain inside a tenant also puts its DKIM keys in that
   tenant. Upstream generates two per domain (observed 9).
 - **MT-10.** A tenant can be deleted only when nothing references it. Otherwise
