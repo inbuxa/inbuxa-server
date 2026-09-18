@@ -98,10 +98,14 @@ Each has an ID, and tests name the IDs they check.
   INBUXA Admin's `<meta name="oauth-client-id">` is set to `inbuxa-admin`.
   Until then it keeps upstream's `stalwart-webui`, which only works while
   registration isn't required.
-- **C-7.** Third-party mail clients (Thunderbird, mobile apps) keep working
-  through dynamic registration (`/auth/register`), whose stateless client ids
-  carry their own redirect URIs. That's upstream's mechanism and is left as it
-  is.
+- **C-7.** Third-party apps that want OAuth (Thunderbird, mobile apps) get a
+  client in one of two ways: an administrator registers it (`x:OAuthClient`,
+  in INBUXA Admin), or the operator turns anonymous dynamic registration back
+  on (`/auth/register`, whose stateless client ids carry their own redirect
+  URIs), accepting that anyone can then register. Either way, C-9's consent
+  page names the app and its redirect host. Mail apps that sign in with a
+  password or app password are unaffected, and that's everything INBUXA's
+  users were observed doing (see "Security note").
 - **C-8.** People sign in on **the server's own sign-in page** (`/login`,
   already INBUXA-branded), never on a front end's form. Two-factor happens
   there, on the page's existing one-time-code step. Front ends never see a
