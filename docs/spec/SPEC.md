@@ -100,6 +100,18 @@ repository. Instead:
   does what a fork's rebase would, without the history.
 - The upstream clone the tool reads from lives outside the fork's repository
   and is never pushed anywhere.
+- Each import's full strip report is committed on `main` under
+  `docs/fork/strip-reports/<ref>.md` (and `.json`), beside the merge that
+  brought the release in.
+- The snapshot includes upstream's `.github/` workflows, release automation
+  included. They're kept on `upstream` as upstream shipped them, but must be
+  disabled or replaced on `main` before the repository is ever pushed
+  anywhere that runs them.
+
+Layout on `main`: the server source at the root, exactly as upstream lays it
+out (so merges line up), the specs under `docs/spec/`, strip reports under
+`docs/fork/`, and the fork tooling under `tools/fork/`. Upstream has no
+top-level `docs/` or `tools/`, so these never collide.
 
 ### 2.3 Where the rebuilt features go
 
