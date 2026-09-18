@@ -62,6 +62,9 @@ pub struct Http {
     pub url_https: String,
     pub allowed_endpoint: IfBlock,
     pub response_headers: Vec<(hyper::header::HeaderName, hyper::header::HeaderValue)>,
+    /// inbuxa: origins allowed cross-origin access (contract C-14). Empty when
+    /// CORS is permissive (bootstrap, recovery, or `usePermissiveCors`).
+    pub cors_origins: Vec<hyper::header::HeaderValue>,
     pub use_forwarded: bool,
     pub redirect_root: Option<String>,
 }
@@ -408,6 +411,17 @@ impl Http {
         #[cfg(not(feature = "dev_mode"))]
         let use_permissive_cors = http.use_permissive_cors || bp.registry.is_recovery_mode();
 
+        // inbuxa: otherwise only the front ends' origins get cross-origin
+        // access, echoed per request (contract C-14)
+        let cors_origins = if use_permissive_cors {
+            Vec::new()
+        } else {
+            crate::manager::first_party::front_end_origins()
+                .into_iter()
+                .filter_map(|origin| hyper::header::HeaderValue::from_str(&origin).ok())
+                .collect()
+        };
+
         if use_permissive_cors {
             http_headers.push((
                 hyper::header::ACCESS_CONTROL_ALLOW_ORIGIN,
@@ -464,6 +478,7 @@ impl Http {
                 http.rate_limit_anonymous
             },
             response_headers: http_headers,
+            cors_origins,
             use_forwarded: http.use_x_forwarded,
             redirect_root: http.redirect_root,
         }

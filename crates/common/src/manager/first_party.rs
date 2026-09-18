@@ -142,6 +142,43 @@ fn base_url(bp: &Bootstrap, system: &SystemSettings) -> String {
     format!("https://{host}")
 }
 
+/// The origin (`scheme://host[:port]`) of a front end's address, lowercased,
+/// without a default port. `None` if it isn't an `http` or `https` URL.
+pub fn origin_of(url: &str) -> Option<String> {
+    let uri = url.trim().parse::<hyper::Uri>().ok()?;
+    let scheme = uri.scheme_str()?.to_ascii_lowercase();
+    let default_port = match scheme.as_str() {
+        "https" => 443,
+        "http" => 80,
+        _ => return None,
+    };
+    let host = uri.host()?.to_ascii_lowercase();
+    if host.is_empty() {
+        return None;
+    }
+    Some(match uri.port_u16() {
+        Some(port) if port != default_port => format!("{scheme}://{host}:{port}"),
+        _ => format!("{scheme}://{host}"),
+    })
+}
+
+/// The origins allowed to make cross-origin requests (contract C-14): INBUXA
+/// Admin's, the webmail's, and `INBUXA_CORS_EXTRA_ORIGINS` (comma-separated).
+///
+/// inbuxa: read from the environment until `x:FrontEnds` exists (C-4).
+pub fn front_end_origins() -> Vec<String> {
+    let mut origins = Vec::new();
+    for url in [env("ADMIN_URL"), env("WEBMAIL_URL")].into_iter().flatten() {
+        origins.extend(origin_of(&url));
+    }
+    if let Some(extra) = env("CORS_EXTRA_ORIGINS") {
+        origins.extend(extra.split(',').filter_map(origin_of));
+    }
+    origins.sort();
+    origins.dedup();
+    origins
+}
+
 fn env(name: &str) -> Option<String> {
     types::branding::env_var(name)
         .ok()
@@ -313,6 +350,17 @@ mod tests {
         assert_eq!(clients[1].client_id, WEBMAIL_CLIENT_ID);
         assert_eq!(clients[1].redirect_uris, vec!["https://webmail.example.org/api/auth/callback"]);
         assert_eq!(clients[1].secret.as_deref(), Some("s3cret"));
+    }
+
+    #[test]
+    fn origins() {
+        assert_eq!(origin_of("https://Admin.Example.org/"), Some("https://admin.example.org".into()));
+        assert_eq!(origin_of("https://admin.example.org:443/x"), Some("https://admin.example.org".into()));
+        assert_eq!(origin_of("http://localhost:5173"), Some("http://localhost:5173".into()));
+        assert_eq!(origin_of("https://h:8443/app"), Some("https://h:8443".into()));
+        assert_eq!(origin_of("ftp://h"), None);
+        assert_eq!(origin_of("not a url"), None);
+        assert_eq!(origin_of(""), None);
     }
 
     #[test]

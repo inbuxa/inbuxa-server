@@ -739,6 +739,9 @@ async fn handle_session<T: SessionStream>(inner: Arc<Inner>, session: SessionDat
                         );
                     }
 
+                    // inbuxa: kept for the cross-origin allowlist (contract C-14)
+                    let origin = req.headers().get(hyper::header::ORIGIN).cloned();
+
                     // Parse HTTP request
                     let response = match Box::pin(server.parse_http_request(
                         req,
@@ -786,6 +789,37 @@ async fn handle_session<T: SessionStream>(inner: Arc<Inner>, session: SessionDat
 
                         for (header, value) in &server.core.network.http.response_headers {
                             headers.insert(header.clone(), value.clone());
+                        }
+                    }
+
+                    // inbuxa: echo an allowed front end's origin, never `*`
+                    // (contract C-14). Responses that already set their own
+                    // CORS headers, such as public discovery metadata, keep
+                    // them (C-15).
+                    let cors_origins = &server.core.network.http.cors_origins;
+                    if !cors_origins.is_empty() {
+                        let headers = response.headers_mut();
+                        headers.append(
+                            hyper::header::VARY,
+                            hyper::header::HeaderValue::from_static("Origin"),
+                        );
+                        if let Some(origin) = origin.filter(|origin| {
+                            cors_origins.contains(origin)
+                                && !headers.contains_key(hyper::header::ACCESS_CONTROL_ALLOW_ORIGIN)
+                        }) {
+                            headers.insert(hyper::header::ACCESS_CONTROL_ALLOW_ORIGIN, origin);
+                            headers.insert(
+                                hyper::header::ACCESS_CONTROL_ALLOW_HEADERS,
+                                hyper::header::HeaderValue::from_static(
+                                    "Authorization, Content-Type, Accept, X-Requested-With",
+                                ),
+                            );
+                            headers.insert(
+                                hyper::header::ACCESS_CONTROL_ALLOW_METHODS,
+                                hyper::header::HeaderValue::from_static(
+                                    "POST, GET, PATCH, PUT, DELETE, HEAD, OPTIONS",
+                                ),
+                            );
                         }
                     }
 

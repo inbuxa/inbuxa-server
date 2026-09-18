@@ -180,6 +180,21 @@ Each has an ID, and tests name the IDs they check.
   `extraOrigins`. The server echoes the matching origin in
   `Access-Control-Allow-Origin` with `Vary: Origin`, never `*`, and sends
   nothing for any other origin.
+
+  **Built (interim), 2026-09-18.** Until `x:FrontEnds` exists, the allowed
+  origins come from `INBUXA_ADMIN_URL`, `INBUXA_WEBMAIL_URL` and
+  `INBUXA_CORS_EXTRA_ORIGINS` (comma-separated). Each is reduced to its origin,
+  lowercased and without a default port, and anything that isn't an `http` or
+  `https` URL is skipped. Every response carries `Vary: Origin`. A matching
+  origin gets `Access-Control-Allow-Origin` echoed with the allowed headers and
+  methods, and any other origin gets none. Responses that set their own CORS
+  headers keep them (C-15). With `usePermissiveCors` on, or in bootstrap or
+  recovery mode, upstream's `*` applies instead (C-16). Checked on a local
+  build: in bootstrap mode every origin got `*`; after setup, the admin,
+  webmail and extra origins were echoed on `/jmap/session` and on preflights
+  for `/jmap/`, `/auth/token` and `/api/account`, a foreign origin and a
+  request with no origin got none, and the OAuth discovery document stayed
+  `*`.
 - **C-15.** OAuth discovery metadata may stay `*`, since it's public and
   read-only. The token, revocation, introspection and userinfo endpoints follow
   C-14, so a random web page can't exchange or probe tokens.
