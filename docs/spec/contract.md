@@ -64,6 +64,10 @@ Each has an ID, and tests name the IDs they check.
     fork no longer tracks upstream;
   - `contract`: this contract's version, an integer, starting at `1`;
   - `webmailUrl` and `adminUrl`: where the front ends are, if configured.
+
+  In `accountCapabilities`, the signed-in principal's own account carries
+  `urn:inbuxa:jmap` with `logo`: the logo that applies to it (multi-tenancy
+  MT-22), a string (URL or data URL) or `null`. Added 2026-09-18.
 - **C-2.** Each front end states the contract versions it supports and checks
   `contract` after signing in. Outside its range it stops, with a message
   naming both versions. For ihasmail-inbuxa this replaces public ihasmail's

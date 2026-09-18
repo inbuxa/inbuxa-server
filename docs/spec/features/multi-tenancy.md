@@ -138,6 +138,9 @@ Each requirement has an ID, and tests name the IDs they check.
   state. Existing accounts found in it (none at INBUXA, possible elsewhere)
   are left working and listed in the admin dashboard for an operator to
   resolve.
+  **Decision** (2026-09-18): the server exposes nothing new for that list.
+  ihasmail finds such accounts itself by comparing each account's
+  `memberTenantId` with its domain's.
 - **MT-8.** A domain can move into a tenant only from no tenant, and out of one
   only back to no tenant. It moves only when no principal on it belongs to
   anything other than the destination. **Decision**, a deliberate improvement
@@ -165,6 +168,13 @@ Each requirement has an ID, and tests name the IDs they check.
   itself is server-level. **Decision**, a deliberate difference: upstream
   refuses the read with `forbidden` (observed 3), so a tenant admin can't see
   its own limits or usage. ihasmail needs them to warn before a limit is hit.
+  **Decision** (2026-09-18) on how: the read needs `sysTenantGet` (and
+  `sysTenantQuery` to list), which the default Tenant Administrator role now
+  holds. Inside a tenant they reach only its own `x:Tenant`; any other comes
+  back `notFound`. `x:Tenant/set` is refused inside a tenant whatever the
+  permissions (MT-6). Only the defaults change: roles already stored on an
+  existing server are left as they are (SPEC.md §7), and an operator adds the
+  two permissions to an existing tenant-admin role by hand.
 
 ### The permission ceiling
 
@@ -212,7 +222,9 @@ Each requirement has an ID, and tests name the IDs they check.
   still succeeds, so the sender learns nothing until the delay notice.
   **Decision** on top: when a sender inside the server submits to a
   recipient whose tenant is over quota, say so at submission time too (a
-  JMAP `EmailSubmission` warning, not a refusal).
+  JMAP `EmailSubmission` warning, not a refusal). **Deferred** (2026-09-18):
+  RFC 8621 has no warnings field, so the submission-time warning waits until
+  the contract defines one. The `451` refusal is built.
 - **MT-20.** `usedDiskQuota` is kept current as members' usage changes: it
   moved on the delivery itself (observed 2). It is never written by a client.
 - **MT-21.** The `recalculateQuota` task recomputes one tenant's
@@ -227,6 +239,11 @@ Each requirement has an ID, and tests name the IDs they check.
   over JMAP so ihasmail can draw it (see "Interfaces"). Branding BT-1 and BT-2
   (`branding-and-templates.md`) extend the chain past the tenant, to the
   server-wide logo and then the built-in one, and are the full rule.
+  **Decision** (2026-09-18) on the shape: in the JMAP session, the
+  principal's own account's `accountCapabilities` carry `urn:inbuxa:jmap`
+  (contract C-1) with `logo`: a string (the URL or data URL as stored) or
+  `null`. Until branding is built it follows this chain, steps 1 and 2 of
+  BT-1.
 - **MT-23.** The server never fetches a logo URL itself. ihasmail draws URL
   logos through its image proxy, as it does today.
 
@@ -235,9 +252,9 @@ Each requirement has an ID, and tests name the IDs they check.
 - **Existing, unchanged:** `x:Tenant/get`, `/set`, `/query`, `/changes`; the
   `memberTenantId` field on the types listed above; the permission names; the
   task and maintenance types; the event.
-- **New:** the signed-in principal's applicable logo (MT-22). Proposed as a
-  read-only property on the principal's own account object in the fork's
-  namespace, with the exact shape settled in the contract spec (SPEC.md §5.2).
+- **New:** the signed-in principal's applicable logo (MT-22), as `logo` in
+  the `urn:inbuxa:jmap` account capability of its own account in the JMAP
+  session (contract C-1).
 - **Errors:** RFC 8620 `SetError` types, as named above. Each refusal names
   the property or limit involved, so ihasmail can say which one.
 
@@ -263,7 +280,9 @@ marked **(compat)** also run against a copy of INBUXA's data.
 1. Tenant admin in T lists accounts: sees only T's (MT-1).
 2. Tenant admin in T gets a U account by id: `notFound`, not `forbidden`.
    **Decision**: don't confirm that another tenant's object exists.
-3. Tenant admin adds a U account to a T group: `forbidden` (MT-3).
+3. Tenant admin adds a U account to a T group: `invalidForeignKey` (MT-3).
+   **Decision** (2026-09-18): MT-3's error, not `forbidden` as this test
+   first said.
 4. Mail from a T address to a U address is delivered (MT-4).
 5. Tenant admin sets `memberTenantId` on anything: refused (MT-6, MT-11).
 6. Account created on a T domain is in T with no `memberTenantId` sent (MT-7).
