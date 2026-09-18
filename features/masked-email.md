@@ -292,9 +292,10 @@ deleted, and nothing was left. No upstream code was read.
 
 8. **How many masks INBUXA holds.** Operator's estimate, 2026-09-18: fewer
    than 20 special addresses in all, 7 on the operator's own account and the
-   rest postmaster addresses. Those may be ordinary account aliases rather
-   than masks. Aliases carry over unchanged and aren't part of this feature.
-   If none are masks, the compatibility test (acceptance 12) has no existing
+   rest postmaster addresses. The operator confirmed none of the 7 has the
+   masked format, so they're ordinary aliases, and INBUXA most likely holds no
+   masks at all. Aliases carry over unchanged and aren't part of this feature.
+   With no masks, the compatibility test (acceptance 12) has no existing
    masks to carry over, and instead checks that upstream-shaped addresses
    created on a copy before cutover still deliver after it. Count masks
    exactly (`x:MaskedEmail/query` as an admin) during the cutover dry run
