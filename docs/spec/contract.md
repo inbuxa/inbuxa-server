@@ -82,8 +82,12 @@ Each has an ID, and tests name the IDs they check.
 ### Sign-in
 
 - **C-5.** INBUXA requires client registration: `requireClientRegistration`
-  defaults to **true**. This is a deliberate difference from upstream (see
-  "Security note").
+  defaults to **true**, and `anonymousClientRegistration` to **false**, since
+  anonymous dynamic registration would otherwise let anyone register a client
+  with their own redirect URI and sidestep the requirement. Both are
+  deliberate differences from upstream (see "Security note"). An operator who
+  wants open dynamic registration for third-party apps can turn it back on;
+  C-9's consent page still names every non-first-party client.
 - **C-6.** Two first-party clients are registered as `x:OAuthClient` whenever
   `x:FrontEnds` is set or changed:
   - **`inbuxa-admin`**: a public client (no secret), authorization code with
@@ -208,11 +212,26 @@ INBUXA closes this with C-5 (registration required), C-9 (consent naming the
 redirect host), C-15 (token endpoint not callable from arbitrary pages) and
 C-18 (no admin scope for anything but `inbuxa-admin`).
 
-INBUXA's production server runs upstream Stalwart Enterprise today. Whether
-`requireClientRegistration` is on there hasn't been checked. It needs an
-admin to read `x:OidcProvider`. Turning it on would break any client that uses
-OAuth without registering, so check which clients INBUXA's users sign in with
-before changing it.
+**Checked on INBUXA's production server (upstream Stalwart Enterprise
+0.16.22), 2026-09-18, read-only:**
+
+- `requireClientRegistration: false` and `anonymousClientRegistration: true`.
+  So the gap is open, and turning registration on **alone wouldn't close it**:
+  anyone can dynamically register a client with their own redirect URI without
+  signing in, then run the same phishing flow with a "registered" client. C-5
+  therefore also needs anonymous registration **off** by default, and C-9's
+  consent page covers dynamically registered clients too.
+- No `x:OAuthClient` is registered, and no dynamic registrations appear in the
+  server log for September 6–18.
+- The same log shows no sign of OAuth sign-ins by mail clients (no
+  `OAUTHBEARER` or `XOAUTH2`). Sign-ins over those 12 days: IMAP 606, HTTPS
+  208, submission 102. Of the HTTPS ones, 102 came from ihasmail's host (Basic
+  auth), 26 were test probes, and 80 were two accounts' own devices. The log
+  doesn't record the sign-in method, so this is strong circumstantial evidence,
+  not proof.
+- The one client that very likely depends on the open setting is Stalwart's
+  own web interface (`/admin`, `/account`), which signs in as the unregistered
+  client `stalwart-webui`.
 
 ## Acceptance tests
 
