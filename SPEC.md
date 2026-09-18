@@ -76,6 +76,11 @@ The wrapper is `tools/fork/strip.py`. Beyond `ossify.py` it:
   `v0.16.22` that's `crates/main`'s default features and 13 dependencies in
   `tests/Cargo.toml`: 14 edits. `ossify.py` doesn't touch manifests, so without
   this the stripped tree can't build;
+- removes `mod` declarations left pointing at deleted Enterprise files. They
+  sit just outside the snippets `ossify.py` removes, so they survive it. At
+  `v0.16.22` there are 5: one in `common`, behind the test features, and four
+  in the integration tests. The normal build never meets them, but the tests
+  don't compile until they're gone;
 - verifies the result across every text file, not just Rust, and reports what
   was removed, the Cargo edits, upstream's Enterprise flags, and the feature
   gates left for §2.3 to replace.

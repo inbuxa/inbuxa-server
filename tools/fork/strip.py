@@ -15,7 +15,8 @@ What it does, in order (SPEC.md §2.2):
    word, so a malformed marker fails the run here instead.
 3. Runs upstream's own remover, `resources/scripts/ossify.py` from the same
    ref, over every directory that holds Rust.
-4. Turns the `enterprise` Cargo feature off wherever it's switched on: a
+4. Removes `mod` declarations left pointing at deleted Enterprise files, then
+   turns the `enterprise` Cargo feature off wherever it's switched on: a
    crate's `default` list, and dependency `features` lists. Definitions of the
    feature are left alone. They're inert once nothing turns them on, and
    leaving them keeps each sync's diff small.
@@ -178,6 +179,37 @@ def deactivate_enterprise(tree):
     return edits
 
 
+def remove_dangling_mods(tree):
+    """
+    Remove `mod x;` declarations whose file ossify.py deleted.
+
+    An Enterprise-only file can be declared from shared code just outside the
+    snippet that ossify.py removes, so the declaration survives and points at
+    nothing. Only shared (AGPL) code is read here, and only for `mod` lines. A
+    declaration goes with the attribute lines directly above it, e.g. its
+    `#[cfg(...)]`.
+    """
+    decl = re.compile(r'^\s*(?:pub(?:\([^)]*\))?\s+)?mod\s+([A-Za-z_][A-Za-z0-9_]*)\s*;\s*(?://.*)?$')
+    removed = []
+    for path in sorted(tree.rglob('*.rs')):
+        base = path.parent if path.name in ('mod.rs', 'lib.rs', 'main.rs') else path.parent / path.stem
+        lines = path.read_text(encoding='utf-8').split('\n')
+        keep = []
+        for n, line in enumerate(lines, 1):
+            m = decl.match(line)
+            if m and not (base / f'{m.group(1)}.rs').is_file() and not (base / m.group(1) / 'mod.rs').is_file():
+                dropped = [line]
+                while keep and keep[-1].strip().startswith('#['):
+                    dropped.insert(0, keep.pop())
+                removed.append({'file': str(path.relative_to(tree)), 'line': n, 'module': m.group(1),
+                                'lines': [l.strip() for l in dropped]})
+                continue
+            keep.append(line)
+        if len(keep) != len(lines):
+            path.write_text('\n'.join(keep), encoding='utf-8')
+    return removed
+
+
 def verify(tree):
     """Independent of ossify.py. Returns a list of problems; empty means clean."""
     problems = []
@@ -242,6 +274,7 @@ def write_report(out_dir, report):
         f'- Enterprise-only files removed or emptied: **{len(r["removed_files"])}**',
         f'- Enterprise-only snippets removed: **{sum(r["removed_snippets"].values())}** in {len(r["removed_snippets"])} files',
         f'- Cargo edits turning `enterprise` off: **{len(r["cargo_edits"])}**',
+        f'- Dangling module declarations removed: **{len(r["dangling_mods"])}**',
         f'- Verification: **{"clean" if not r["problems"] else f"{len(r["problems"])} problems"}**',
         f'- Left for the rebuilt features to replace: {sum(r["feature_gates"].values())} `enterprise` feature gates '
         f'in {len(r["feature_gates"])} files; {sum(r["edition_checks"].values())} `is_enterprise_edition()` checks '
@@ -251,6 +284,7 @@ def write_report(out_dir, report):
         md.append(f'- Upstream schema flags {len(r["schema"]["objects"])} objects and {len(r["schema"]["fields"])} fields as Enterprise')
     md += ['', '## Removed files', ''] + [f'- `{f}`' for f in r['removed_files']]
     md += ['', '## Removed snippets', ''] + [f'- `{f}`: {n}' for f, n in r['removed_snippets'].items()]
+    md += ['', '## Dangling module declarations removed', ''] + [f'- `{d["file"]}:{d["line"]}`: `mod {d["module"]}` ({" / ".join(d["lines"])})' for d in r['dangling_mods']]
     md += ['', '## Cargo edits', ''] + [f'- `{e["file"]}:{e["line"]}`: `{e["before"]}` → `{e["after"]}`' for e in r['cargo_edits']]
     if r['schema']:
         md += ['', '## Flagged Enterprise in upstream\'s schema', '', '**Objects:** ' + ', '.join(f'`{o}`' for o in r['schema']['objects']),
@@ -275,7 +309,7 @@ def main():
     malformed = check_snippets_wellformed(tree)
     if malformed:
         write_report(args.out, {'ref': args.ref, 'commit': commit, 'removed_files': [], 'removed_snippets': {},
-                                'cargo_edits': [], 'problems': malformed, 'feature_gates': {}, 'edition_checks': {},
+                                'cargo_edits': [], 'dangling_mods': [], 'problems': malformed, 'feature_gates': {}, 'edition_checks': {},
                                 'schema': None, 'ossify_log': ''})
         print('\n'.join(malformed), file=sys.stderr)
         fail('malformed snippet markers; nothing stripped', code=1)
@@ -283,19 +317,20 @@ def main():
     removed_files, removed_snippets = sel_inventory(tree)
     log = run_ossify(tree, rust_roots(tree))
     edits = deactivate_enterprise(tree)
+    dangling = remove_dangling_mods(tree)
     problems = verify(tree)
     gates, checks = remaining_hooks(tree)
 
     report = {
         'ref': args.ref, 'commit': commit,
         'removed_files': removed_files, 'removed_snippets': removed_snippets,
-        'cargo_edits': edits, 'problems': problems,
+        'cargo_edits': edits, 'dangling_mods': dangling, 'problems': problems,
         'feature_gates': gates, 'edition_checks': checks,
         'schema': schema_flags(tree), 'ossify_log': log,
     }
     write_report(args.out, report)
     print(f'{args.ref} ({commit[:12]}): removed {len(removed_files)} files and '
-          f'{sum(removed_snippets.values())} snippets, {len(edits)} Cargo edits, '
+          f'{sum(removed_snippets.values())} snippets, {len(dangling)} dangling mods, {len(edits)} Cargo edits, '
           f'{"verified clean" if not problems else f"{len(problems)} PROBLEMS"}. Report: {args.out}/STRIP-REPORT.md')
     sys.exit(1 if problems else 0)
 
