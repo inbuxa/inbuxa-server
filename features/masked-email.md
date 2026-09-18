@@ -12,7 +12,7 @@ Written for the clean room (SPEC.md §3). Sources, and nothing else:
 | Stalwart documentation: "Masked email" (`email/management/masked-email.md`) and the MaskedEmail object reference | Unlicensed public documentation: facts used, prose not copied | Lifecycle, domain choice, quota, permissions, API |
 | Fastmail's Masked Email API (`https://www.fastmail.com/for-developers/masked-email/`) | Published vendor API: facts used, prose not copied | The second API, its states and rules |
 | RFC 8620 | IETF | `/get` and `/set` semantics, `SetError` types |
-| Observation of INBUXA's live server | Observation | Everything under "To observe" once settled |
+| Probes of INBUXA's live Enterprise server, 2026-09-18 (Stalwart 0.16.22), as an ordinary account | Observation | Everything under "Observed" |
 
 No Enterprise-only file or snippet was used. As with multi-tenancy, the
 drafting session writes specs only, and gaps are settled by observation or
@@ -88,7 +88,7 @@ keeps one state per mask, and each API shows it in its own terms.
 | `disabled` | Accepted, filed straight to Trash | `disabled` | `true` |
 | `deleted` | Refused | `deleted` | `false` |
 | (destroyed) | Refused, as an unknown address | not returned | not returned |
-| (expired) | Refused | `deleted` | `false` |
+| (expired) | Refused | `deleted` | `false`, see ME-6a |
 
 Writes map back:
 
@@ -116,34 +116,45 @@ accepted, which is the fact `enabled` reports.
 - **ME-5.** `disabled` delivers into the account's Trash mailbox, skipping
   the user's filing rules but not spam checks.
 - **ME-6.** `deleted`, expired and destroyed masks refuse the message at
-  `RCPT TO`. The reply code matches upstream's reply for a disabled mask (to
-  observe, 1), so senders see the same result whichever server they meet.
+  `RCPT TO` with `550 5.1.2 Mailbox does not exist.`, upstream's own reply for
+  disabled and expired masks (observed 1). It's permanent, and identical to
+  the reply for an address that never existed, so a sender learns nothing
+  about the mask.
+- **ME-6a.** **Decision**, a deliberate difference: an expired mask reads
+  `enabled: false` in the `x:` API. Upstream keeps reporting `enabled: true`
+  after expiry and keeps listing it (observed 1), which tells the user it
+  still works when it doesn't. Expired masks aren't removed automatically.
 - **ME-7.** Arriving mail sets `lastMessageAt`, and moves a `pending` mask to
   `enabled`.
 - **ME-8.** A `pending` mask with no mail within 24 hours of creation is
   removed, per Fastmail's rule, and tombstoned. It's hidden from ihasmail's
   list while pending, as Fastmail's own interface hides it.
-- **ME-9.** Delivered mail keeps the masked address visible to the user: in
-  the `To` or `Cc` header as sent, and in a `Delivered-To` header naming the
-  mask, so filters and the reader can tell which mask it came through (to
-  observe, 3: match upstream if it already does this).
+- **ME-9.** Delivered mail keeps the masked address visible to the user.
+  `To` and `Cc` are never rewritten (as upstream, observed 3). **Decision**,
+  an addition: an `X-Masked-Email` header names the mask it came through,
+  so filters and ihasmail can tell even when the mask was only BCC'd.
+  Upstream's `Delivered-To` names the account's real address, not the mask
+  (observed 3), and that stays as it is.
 - **ME-10.** Sub-addressing (`mask+tag@domain`) on a mask works exactly as it
-  does on the account's own addresses (to observe, 4).
+  does on the account's own addresses, as it does upstream (observed 4).
 
 ### Sending
 
-- **ME-11.** A user may send from any of their masks in `pending`, `enabled`
-  or `disabled` state, as they can from their own aliases. Replying to mail
-  that came through a mask should default to sending from that mask:
-  ihasmail's job (see "ihasmail"), made possible by ME-9. Whether upstream
-  allows sending as a mask at all is to observe, 5.
+- **ME-11.** **Decision**, an addition: a user may send from any of their
+  masks in `pending`, `enabled` or `disabled` state, as they can from their
+  own aliases. A mask can be a JMAP `Identity`, and SMTP submission accepts it
+  as `MAIL FROM` and `From` for its owner. Upstream allows neither (observed
+  5), so a masked address today can receive but never reply. Replying to mail
+  that came through a mask defaults to sending from that mask: ihasmail's
+  job, made possible by ME-9.
 
 ### Creating
 
 - **ME-12.** The server generates the address. The domain is `emailDomain` if
   given, else the owning account's primary domain. `emailDomain` may be any
   domain or alias domain the account is linked to. Anything else fails with
-  `invalidProperties` naming `emailDomain`. In a tenant, only the tenant's
+  `forbidden` naming `emailDomain`, as upstream (observed 2). A default create
+  lands on the account's own domain (observed 2). In a tenant, only the tenant's
   domains qualify (multi-tenancy MT-3).
 - **ME-13.** Address format, **Decision**: the local part is
   `{emailPrefix}_{random}` when a prefix is given, else `{random}`, where
@@ -151,7 +162,9 @@ accepted, which is the fact `enabled` reports.
   against every address the server knows (accounts, aliases, lists, masks and
   tombstones) and redrawn on collision. inbuxa-server doesn't copy upstream's
   shape and doesn't need to. The expiry isn't encoded in the address, since
-  it's stored in `expiresAt`.
+  it's stored in `expiresAt`. Upstream's addresses always contain a `.` (see
+  observed 2). This format never does, so a fork-issued address can't be
+  mistaken for an upstream one.
 - **ME-14.** `maxMaskedAddresses` counts live masks: `pending`, `enabled`,
   `disabled`. A create past it fails with `overQuota`. 0 turns creation off.
 - **ME-15.** Create-rate limit per account, as Fastmail's API allows: past it,
@@ -159,18 +172,18 @@ accepted, which is the fact `enabled` reports.
   configurable.
 - **ME-16.** `createdBy` is set by the server from the authenticated client's
   name (the OAuth client's name once SPEC.md §5.2 is in place). Fastmail's API
-  treats it as server-set. Upstream's API accepts a client-supplied value
-  (its docs show one in a create), so the `x:` API still accepts it when the
-  server has no client name of its own.
+  treats it as server-set. Upstream's API accepts and stores a client-supplied
+  value (observed 2), so the `x:` API still accepts it when the server has no
+  client name of its own.
 - **ME-17.** `forDomain` is stored as given. The Fastmail API asks integrators
-  for an origin only, but inbuxa-server doesn't reject paths, since existing
-  upstream records may hold them.
+  for an origin only, but inbuxa-server doesn't reject paths: upstream stores
+  them as given (observed 2), so existing records may hold them.
 
 ### Who can do what
 
 - **ME-18.** A user manages its own masks: get, query, create, update,
   destroy. Its role needs the `sysMaskedEmail*` permissions, which the default
-  user role carries.
+  user role carries: an ordinary account holds all five (observed 7).
 - **ME-19.** An administrator with the same permissions can manage another
   account's masks, for support. A tenant administrator can manage only masks
   owned by accounts in its tenant (multi-tenancy MT-1).
@@ -180,8 +193,13 @@ accepted, which is the fact `enabled` reports.
 ### Upstream's, unchanged
 
 `x:MaskedEmail/get`, `/query`, `/set` under `urn:stalwart:jmap`, standard RFC
-8620 shapes, the record above, filtered by `accountId` in `/query`. Plus
-`/changes`, if upstream offers it (to observe, 6).
+8620 shapes, the record above. Upstream's `/query` accepts only an
+`accountId` filter, and it has no `/changes` (observed 6).
+
+**Decision**, additions: `/changes`, so ihasmail can keep its list current
+without refetching; `/query` filters on `enabled`, `forDomain` and text
+(address and description); and a `state` in every `/get` response, as RFC 8620
+expects and upstream omits.
 
 ### Fastmail's
 
@@ -237,26 +255,40 @@ masks.
 12. **(compat)** INBUXA's existing masks all resolve by stored address and
     deliver after cutover, and read back identically through `x:`.
 
-## To observe
+## Observed
 
-Settle against INBUXA before implementation, with a throwaway ordinary
-account, never by reading upstream code:
+Settled on 2026-09-18 against INBUXA's live Enterprise server (Stalwart
+0.16.22), as the ordinary throwaway account on `ttlhost.com`, over JMAP and
+SMTP submission. The probes created four masks and six small messages, all to
+the account itself: nothing was sent off the server. Two recipients were
+refused, which triggered no IP ban. Afterwards the masks and messages were
+deleted, and nothing was left. No upstream code was read.
 
-1. The SMTP reply for mail to a disabled mask, and to an expired one: code,
-   temporary or permanent, and text.
-2. What an upstream address looks like: length, characters, where a prefix
-   goes, which domain is chosen by default. Needed only so ME-13 can't mint a
-   look-alike, and to confirm existing addresses fit in the tombstone and
-   lookup design.
-3. What a delivered message shows: headers naming the mask, whether `To` is
-   rewritten.
-4. Whether `mask+tag@domain` delivers.
-5. Whether a user can send as a mask (as an identity, or through a
-   submission `MAIL FROM`), and what the recipient sees.
-6. Whether `x:MaskedEmail/changes` exists, and whether masks can be queried
-   by fields other than `accountId`.
-7. Whether an ordinary user holds the `sysMaskedEmail*` permissions by
-   default.
-8. How many masks INBUXA already holds, over all accounts (count only), to
-   size the compatibility test. This needs an admin, or the operator can
-   report it.
+1. **Refused delivery.** A disabled mask and an expired mask were each refused
+   at `RCPT TO` on the submission connection with `550 5.1.2 Mailbox does not
+   exist.`: permanent, and worded as for a nonexistent address. The expired
+   mask kept `enabled: true` in its record and stayed in the list.
+2. **Upstream's addresses and creation.** A default mask is
+   `{16 chars}.{24 chars}@{account's domain}`. With `emailPrefix` the prefix
+   replaces the first part (`probe_shop.{24 chars}@…`). Every character is
+   `a-z0-9`. The 24-character part began with the same 9 characters for every
+   mask created in the same second, so it carries data. It wasn't decoded, and
+   doesn't need to be (ME-13). A prefix with a capital and `!` was refused
+   `invalidProperties`. A domain the account isn't linked to was refused
+   `forbidden` with `properties: ["emailDomain"]`. A client-supplied
+   `createdBy`, and a `forDomain` with a path, were both stored as given.
+3. **What arrives.** `To` shows the mask, unchanged. `Delivered-To` shows the
+   account's real address.
+4. **Sub-addressing.** `mask+news@domain` was delivered to the account.
+5. **Sending as a mask.** Refused both ways. JMAP `Identity/set` gave
+   `invalidProperties` ("E-mail address not configured for this account"), and
+   SMTP `MAIL FROM` the mask gave `501 5.5.4 You are not allowed to send from
+   this address.`
+6. **API.** `x:MaskedEmail/changes` is an unknown method. `/query` accepts
+   only `accountId` as a filter: `enabled`, `text`, `email` and `forDomain`
+   are all `unsupportedFilter`. `/get` returns no `state`.
+7. **Permissions.** The ordinary account holds all five `sysMaskedEmail*`
+   permissions.
+
+Not settled: 8, how many masks INBUXA holds across all accounts. It needs
+admin rights or the operator's count, and only sizes the compatibility test.
