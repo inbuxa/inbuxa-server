@@ -194,6 +194,9 @@ Task type `RestoreArchivedItem`, carrying the `accountId`, the
 
 ## ihasmail
 
+These go in the INBUXA fork of ihasmail, not public ihasmail, which stays
+Stalwart-facing (SPEC.md §5).
+
 - **Recently deleted**, a view in Mail (and in Files, Calendar and Contacts
   for their kinds). It lists what's restorable, newest first, with how long is
   left, searchable, with **Restore** and **Delete forever**. Visible only when

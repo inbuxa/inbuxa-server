@@ -283,6 +283,16 @@ is written.
 
 ## 5. The web front ends
 
+**Which ihasmail.** Public ihasmail stays Stalwart-facing: its code, docs,
+site and releases serve Stalwart users, and don't mention INBUXA. Everything
+in these specs that changes ihasmail (the contract below, the "ihasmail"
+sections of the feature specs, branding) goes into an **INBUXA-specific fork
+of ihasmail**, until one product can confidently support both servers. In
+this spec, "ihasmail" means that fork unless it says "public ihasmail".
+Improvements that also help Stalwart users can still go to public ihasmail on
+their own merits, framed for Stalwart. (Decided 2026-09-18. The fork's name and
+location are open, §8.)
+
 Decided 2026-09-18: two front ends, each with its own job.
 
 - **ihasmail**: webmail, account self-service, and the day-to-day account and
@@ -495,11 +505,13 @@ before anything that could prompt that notice happens.
 3. Masked addresses already handed out still deliver; archived items still
    restore.
 4. Cutover on the running host, with the Enterprise build kept for rollback.
-5. Only then: public repository, announcement, and ihasmail accepting the
-   fork.
+5. Only then: public repository and announcement, with the INBUXA fork of
+   ihasmail released alongside. Public ihasmail stays Stalwart-facing (§5).
 
 ## 8. Open decisions
 
+- The INBUXA fork of ihasmail: its name, its repository, and how it tracks
+  public ihasmail (§5).
 - Product name: whether the shipped product is called inbuxa-server or
   something else inside the INBUXA brand.
 - The namespace for the fork's own JMAP capabilities.

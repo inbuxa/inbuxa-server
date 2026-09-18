@@ -241,6 +241,9 @@ Each requirement has an ID, and tests name the IDs they check.
 
 ## ihasmail changes
 
+These go in the INBUXA fork of ihasmail, not public ihasmail, which stays
+Stalwart-facing (SPEC.md §5).
+
 - Drop the "Tenants are a Stalwart Enterprise feature" notice and the edition
   check in front of the Tenants page. Keep `SHOW_ENTERPRISE_NOTICES` for
   talking to upstream Stalwart.

@@ -217,6 +217,9 @@ masks.
 
 ## ihasmail
 
+These go in the INBUXA fork of ihasmail, not public ihasmail, which stays
+Stalwart-facing (SPEC.md §5).
+
 - A **Masked addresses** section in Settings: the list (address, description,
   site, created, last mail, state), create with an optional description and
   site, copy, switch between enabled, disabled (to Trash) and deleted, and
