@@ -37,3 +37,11 @@ macro_rules! brand_prodid {
         concat!("-//", $crate::brand!(), "//", $crate::brand_server!(), "//EN")
     };
 }
+
+/// The project's website, given to clients as the support URL (IMAP `ID`).
+#[macro_export]
+macro_rules! brand_url {
+    () => {
+        "https://inbuxa.org"
+    };
+}

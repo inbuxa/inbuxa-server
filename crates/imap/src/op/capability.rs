@@ -72,6 +72,8 @@ impl<T: SessionStream> Session<T> {
                         types::brand!(),
                         "\" \"version\" \"1.0.0\" \"vendor\" \"",
                         types::brand!(),
+                        "\" \"support-url\" \"",
+                        types::brand_url!(),
                         "\")\r\n"
                     )
                     .as_bytes()
