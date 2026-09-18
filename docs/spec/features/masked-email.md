@@ -77,7 +77,10 @@ stays byte-for-byte what upstream wrote:
   address is never issued twice.
 
 **Decision** (2026-09-18) on where: one new data-store subspace owned by the
-fork (`X`), with its own SQL table, included in backup and restore. It also
+fork (`_`), with its own SQL table, included in backup and restore. Not a
+letter: SQL backends name each subspace's table after its byte, unquoted, so
+Postgres and SQLite would fold `X` into upstream's `x`, and upstream already
+uses every lowercase letter. It also
 holds an index from address to mask, since upstream's record doesn't index
 `email`, and a per-account change log for `/changes`. Masks written before
 the fork are indexed on first start.
