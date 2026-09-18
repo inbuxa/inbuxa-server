@@ -45,11 +45,15 @@ The report for every import is in `docs/fork/strip-reports/`. See
 ## Building
 
 ```bash
-cargo build --release -p stalwart
+cargo build --release -p inbuxa          # the binary is target/release/inbuxa
+docker build -t inbuxa .                 # or the container image
 ```
 
-The binary and package are still named `stalwart` while the packaging is
-reworked.
+Settings are read from `INBUXA_*` environment variables. An existing Stalwart
+install's `STALWART_*` variables still work, with a warning to rename them.
+New installs keep their data in `/var/lib/inbuxa` and logs in
+`/var/log/inbuxa`. Existing installs keep the paths their configuration
+already names, so none of their data moves.
 
 ## License and credits
 

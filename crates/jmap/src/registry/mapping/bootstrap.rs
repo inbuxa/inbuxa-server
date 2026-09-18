@@ -657,7 +657,7 @@ fn map_dns_server(dns_server: &DnsServerBootstrap) -> Option<registry::schema::s
 const DEFAULT_DATA_PATH: &str = if cfg!(target_os = "freebsd") {
     "/var/db/stalwart/"
 } else {
-    "/var/lib/stalwart/"
+    "/var/lib/inbuxa/"
 };
 
 fn build_default_bootstrap(server: &Server) -> Bootstrap {
@@ -676,7 +676,7 @@ fn build_default_bootstrap(server: &Server) -> Bootstrap {
         in_memory_store: InMemoryStore::Default,
         directory: DirectoryBootstrap::Internal,
         tracer: Tracer::Log(TracerLog {
-            path: "/var/log/stalwart/".to_string(),
+            path: "/var/log/inbuxa/".to_string(),
             prefix: "stalwart".to_string(),
             ansi: true,
             enable: true,

@@ -45,3 +45,22 @@ macro_rules! brand_url {
         "https://inbuxa.org"
     };
 }
+
+/// Reads one of the server's environment variables by its unprefixed name,
+/// such as `RECOVERY_ADMIN`.
+///
+/// `INBUXA_<name>` wins. `STALWART_<name>` is still read when the new name
+/// isn't set, so an existing Stalwart install moves over without editing its
+/// environment, and a warning says which variable to rename.
+pub fn env_var(name: &str) -> Result<String, std::env::VarError> {
+    match std::env::var(format!("INBUXA_{name}")) {
+        Err(std::env::VarError::NotPresent) => {
+            let legacy = std::env::var(format!("STALWART_{name}"));
+            if legacy.is_ok() {
+                eprintln!("Warning: STALWART_{name} is deprecated; set INBUXA_{name} instead.");
+            }
+            legacy
+        }
+        found => found,
+    }
+}

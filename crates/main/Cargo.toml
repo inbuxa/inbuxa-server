@@ -1,17 +1,17 @@
 [package]
-name = "stalwart"
+name = "inbuxa"
 description = "INBUXA Mail and Collaboration Server, a fork of Stalwart"
 authors = [ "Stalwart Labs LLC <hello@stalw.art>"]
-repository = "https://github.com/stalwartlabs/stalwart"
-homepage = "https://stalw.art"
+homepage = "https://inbuxa.org"
 keywords = ["imap", "jmap", "smtp", "email", "mail", "webdav", "server"]
 categories = ["email"]
-license = "AGPL-3.0-only OR LicenseRef-SEL"
+# Upstream offers AGPL-3.0-only OR LicenseRef-SEL; INBUXA takes the AGPL only.
+license = "AGPL-3.0-only"
 version = "0.16.22"
 edition = "2024"
 
 [[bin]]
-name = "stalwart"
+name = "inbuxa"
 path = "src/main.rs"
 
 [dependencies]

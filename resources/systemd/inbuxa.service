@@ -1,5 +1,5 @@
 [Unit]
-Description=Stalwart Server
+Description=INBUXA Server
 Conflicts=postfix.service sendmail.service exim4.service
 ConditionPathExists=__PATH__/etc/config.json
 After=network-online.target
@@ -11,10 +11,10 @@ KillMode=process
 KillSignal=SIGINT
 Restart=on-failure
 RestartSec=5
-ExecStart=__PATH__/bin/stalwart --config=__PATH__/etc/config.json
-SyslogIdentifier=stalwart
-User=stalwart
-Group=stalwart
+ExecStart=__PATH__/bin/inbuxa --config=__PATH__/etc/config.json
+SyslogIdentifier=inbuxa
+User=inbuxa
+Group=inbuxa
 AmbientCapabilities=CAP_NET_BIND_SERVICE
 
 [Install]

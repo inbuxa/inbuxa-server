@@ -43,7 +43,7 @@ const HELP: &str = concat!(
     env!("CARGO_PKG_VERSION"),
     r#"
 
-Usage: stalwart [OPTIONS]
+Usage: inbuxa [OPTIONS]
 
 Options:
   -c, --config <PATH>              Start server with the specified configuration file

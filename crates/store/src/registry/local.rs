@@ -17,7 +17,7 @@ pub(crate) enum RegistryInit {
 
 impl RegistryStoreInner {
     pub(crate) fn new(local_path: PathBuf) -> Self {
-        let env_hostname = std::env::var("STALWART_HOSTNAME")
+        let env_hostname = types::branding::env_var("HOSTNAME")
             .ok()
             .filter(|h| !h.is_empty())
             .unwrap_or_else(|| {
@@ -35,30 +35,30 @@ impl RegistryStoreInner {
             store: Store::None,
             id_generator: SnowflakeIdGenerator::new(),
             node_id: 0,
-            env_recovery_mode: std::env::var("STALWART_RECOVERY_MODE")
+            env_recovery_mode: types::branding::env_var("RECOVERY_MODE")
                 .ok()
                 .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
                 .unwrap_or(false),
-            env_recovery_admin: std::env::var("STALWART_RECOVERY_ADMIN")
+            env_recovery_admin: types::branding::env_var("RECOVERY_ADMIN")
                 .ok()
                 .and_then(|v| {
                     v.split_once(':')
                         .map(|(a, p)| (a.trim().to_string(), p.trim().to_string()))
                 })
                 .filter(|(a, p)| !a.is_empty() && !p.is_empty()),
-            env_cluster_role: std::env::var("STALWART_ROLE")
+            env_cluster_role: types::branding::env_var("ROLE")
                 .ok()
                 .filter(|r| !r.is_empty()),
-            env_push_shard_id: std::env::var("STALWART_PUSH_SHARD")
+            env_push_shard_id: types::branding::env_var("PUSH_SHARD")
                 .ok()
                 .and_then(|id| id.parse::<u32>().ok().and_then(|v| v.checked_sub(1)))
                 .unwrap_or(0),
-            env_public_url: std::env::var("STALWART_PUBLIC_URL")
+            env_public_url: types::branding::env_var("PUBLIC_URL")
                 .ok()
                 .map(|v| v.trim().trim_end_matches('/').to_string())
                 .filter(|u| !u.is_empty())
                 .or_else(|| {
-                    std::env::var("STALWART_HTTPS_PORT").ok().and_then(|p| {
+                    types::branding::env_var("HTTPS_PORT").ok().and_then(|p| {
                         p.parse::<u16>()
                             .ok()
                             .map(|port| format!("https://{}:{}", env_hostname, port))

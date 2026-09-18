@@ -4,12 +4,12 @@
 <plist version="1.0">
     <dict>
         <key>Label</key>
-        <string>stalwart.mail</string>
+        <string>inbuxa.mail</string>
         <key>ServiceDescription</key>
-        <string>Stalwart</string>
+        <string>INBUXA</string>
         <key>ProgramArguments</key>
         <array>
-            <string>__PATH__/bin/stalwart</string>
+            <string>__PATH__/bin/inbuxa</string>
             <string>--config=__PATH__/etc/config.json</string>
         </array>
         <key>RunAtLoad</key>

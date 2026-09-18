@@ -3924,6 +3924,38 @@ dependencies = [
 ]
 
 [[package]]
+name = "inbuxa"
+version = "0.16.22"
+dependencies = [
+ "common",
+ "coordinator",
+ "dav",
+ "directory",
+ "email",
+ "groupware",
+ "http 0.16.22",
+ "http_proto",
+ "imap",
+ "jmap",
+ "managesieve",
+ "migration",
+ "pop3",
+ "registry",
+ "rustls",
+ "scim",
+ "services",
+ "smtp",
+ "smtp-proto",
+ "spam-filter",
+ "store",
+ "tikv-jemallocator",
+ "tokio",
+ "trc",
+ "types",
+ "utils",
+]
+
+[[package]]
 name = "include-flate"
 version = "0.3.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -8221,38 +8253,6 @@ name = "stable_deref_trait"
 version = "1.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6ce2be8dc25455e1f91df71bfa12ad37d7af1092ae736f3a6cd0e37bc7810596"
-
-[[package]]
-name = "stalwart"
-version = "0.16.22"
-dependencies = [
- "common",
- "coordinator",
- "dav",
- "directory",
- "email",
- "groupware",
- "http 0.16.22",
- "http_proto",
- "imap",
- "jmap",
- "managesieve",
- "migration",
- "pop3",
- "registry",
- "rustls",
- "scim",
- "services",
- "smtp",
- "smtp-proto",
- "spam-filter",
- "store",
- "tikv-jemallocator",
- "tokio",
- "trc",
- "types",
- "utils",
-]
 
 [[package]]
 name = "static_assertions"

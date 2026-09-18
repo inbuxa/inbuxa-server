@@ -503,7 +503,7 @@ impl Tracers {
             }
         } else {
             // Add default tracer if none were found
-            let level = std::env::var("STALWART_RECOVERY_MODE_LOG_LEVEL")
+            let level = types::branding::env_var("RECOVERY_MODE_LOG_LEVEL")
                 .ok()
                 .and_then(|level| Level::from_str(&level).ok())
                 .unwrap_or(Level::Info);

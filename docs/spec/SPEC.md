@@ -103,10 +103,12 @@ repository. Instead:
 - Each import's full strip report is committed on `main` under
   `docs/fork/strip-reports/<ref>.md` (and `.json`), beside the merge that
   brought the release in.
-- The snapshot includes upstream's `.github/` workflows, release automation
-  included. They're kept on `upstream` as upstream shipped them, but must be
-  disabled or replaced on `main` before the repository is ever pushed
-  anywhere that runs them.
+- The snapshot includes upstream's `.github/`: its CI and release workflows,
+  workflows that auto-close issues and PRs from anyone not on its allowlist,
+  issue templates and Dependabot. On `main` the whole directory is moved to
+  `.github-upstream/`, so GitHub never runs it. Upstream changes to it still
+  merge there on each sync. INBUXA writes its own `.github/` when the
+  repository is first published.
 
 ### 2.2b What the first import proved (v0.16.22, 2026-09-18)
 
@@ -178,6 +180,32 @@ one edition.
   capability `urn:stalwart:jmap` and the `x:` object names. They're
   interoperability, not branding, and renaming them breaks every existing
   client. Anything the fork adds uses its own namespace (open: which one).
+
+### 2.5 Packaging
+
+Done 2026-09-18:
+
+- The package and binary are `inbuxa` (`cargo build -p inbuxa`). The binary's
+  help, banner and every protocol greeting say INBUXA (the branding module,
+  `types::brand!()`).
+- Settings come from `INBUXA_*` environment variables. Each still falls back
+  to its `STALWART_*` name, with a startup warning to rename it
+  (`types::branding::env_var`). That covers all nine the server reads:
+  `HOSTNAME`, `RECOVERY_MODE`, `RECOVERY_ADMIN`, `RECOVERY_MODE_PORT`,
+  `RECOVERY_MODE_LOG_LEVEL`, `ROLE`, `PUSH_SHARD`, `PUBLIC_URL`, `HTTPS_PORT`.
+- **Not renamed, on purpose:** `STALWART_APP_` and the two `STALWART_SPAM_...`
+  names. They look like environment variables, but they're keys inside the
+  data store, so renaming them would orphan existing installed apps and
+  spam-classifier models.
+- New installs default to `/var/lib/inbuxa` for data and `/var/log/inbuxa` for
+  logs. Existing installs keep the paths their configuration names, so no data
+  moves.
+- The container image runs as user `inbuxa` (uid 2000, as upstream), with
+  `/etc/inbuxa` and `/var/lib/inbuxa` as volumes, `INBUXA_HEALTHCHECK_URL`, and
+  `inbuxa --config /etc/inbuxa/config.json`. The systemd unit
+  (`inbuxa.service`), launchd plist and AppArmor profile are renamed to match.
+- `install.sh` is a stub that says there's no release yet. Upstream's version
+  would download and install Stalwart itself.
 
 ## 3. Clean room
 
