@@ -513,7 +513,7 @@ async fn insert_safe_defaults(bp: &mut Bootstrap) -> trc::Result<()> {
                 &Tracer::Log(TracerLog {
                     enable: true,
                     ansi: false,
-                    prefix: "stalwart.log".into(),
+                    prefix: "inbuxa.log".into(),
                     rotate: LogRotateFrequency::Daily,
                     path: "/var/log/inbuxa".into(),
                     ..Default::default()
