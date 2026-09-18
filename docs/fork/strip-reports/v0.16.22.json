@@ -202,6 +202,72 @@
       "line": 47,
       "before": "managesieve = { path = \"../crates/managesieve\", features = [\"test_mode\", \"enterprise\"] }",
       "after": "managesieve = { path = \"../crates/managesieve\", features = [\"test_mode\"] }"
+    },
+    {
+      "file": ".github/workflows/ci.yml",
+      "line": 341,
+      "before": "cargo build --release --target ${{matrix.target}} -p stalwart --no-default-features --features \"sqlite postgres mysql rocks s3 redis azure nats enterprise\"",
+      "after": "cargo build --release --target ${{matrix.target}} -p stalwart --no-default-features --features \"sqlite postgres mysql rocks s3 redis azure nats\""
+    },
+    {
+      "file": ".github/workflows/ci.yml",
+      "line": 379,
+      "before": "#    cargo build --release --target ${{matrix.target}} -p stalwart --no-default-features --features \"foundationdb s3 redis nats enterprise\"",
+      "after": "#    cargo build --release --target ${{matrix.target}} -p stalwart --no-default-features --features \"foundationdb s3 redis nats\""
+    },
+    {
+      "file": ".github/workflows/ci.yml",
+      "line": 386,
+      "before": "cargo build --release --target ${{matrix.target}} -p stalwart --no-default-features --features \"sqlite postgres mysql rocks s3 redis azure nats enterprise\"",
+      "after": "cargo build --release --target ${{matrix.target}} -p stalwart --no-default-features --features \"sqlite postgres mysql rocks s3 redis azure nats\""
+    },
+    {
+      "file": ".github/workflows/ci.yml",
+      "line": 442,
+      "before": "cargo build --release -p stalwart --no-default-features --features \"sqlite postgres mysql rocks s3 redis azure nats enterprise\"",
+      "after": "cargo build --release -p stalwart --no-default-features --features \"sqlite postgres mysql rocks s3 redis azure nats\""
+    },
+    {
+      "file": "Dockerfile",
+      "line": 22,
+      "before": "RUN RUSTFLAGS=\"$(cat /flags.txt)\" cargo chef cook --target \"$(cat /target.txt)\" --release --no-default-features --features \"sqlite postgres mysql rocks s3 redis azure nats enterprise\" --recipe-path /recipe.json",
+      "after": "RUN RUSTFLAGS=\"$(cat /flags.txt)\" cargo chef cook --target \"$(cat /target.txt)\" --release --no-default-features --features \"sqlite postgres mysql rocks s3 redis azure nats\" --recipe-path /recipe.json"
+    },
+    {
+      "file": "Dockerfile",
+      "line": 24,
+      "before": "RUN RUSTFLAGS=\"$(cat /flags.txt)\" cargo build --target \"$(cat /target.txt)\" --release -p stalwart --no-default-features --features \"sqlite postgres mysql rocks s3 redis azure nats enterprise\"",
+      "after": "RUN RUSTFLAGS=\"$(cat /flags.txt)\" cargo build --target \"$(cat /target.txt)\" --release -p stalwart --no-default-features --features \"sqlite postgres mysql rocks s3 redis azure nats\""
+    },
+    {
+      "file": "Dockerfile.build",
+      "line": 111,
+      "before": "RUSTFLAGS=\"-L /usr/lib\" cargo chef cook --recipe-path recipe.json --zigbuild --release --target ${TARGET} -p stalwart --no-default-features --features \"foundationdb s3 redis nats enterprise\"; \\",
+      "after": "RUSTFLAGS=\"-L /usr/lib\" cargo chef cook --recipe-path recipe.json --zigbuild --release --target ${TARGET} -p stalwart --no-default-features --features \"foundationdb s3 redis nats\"; \\"
+    },
+    {
+      "file": "Dockerfile.build",
+      "line": 119,
+      "before": "cargo chef cook --recipe-path recipe.json --zigbuild --release --target ${TARGET} -p stalwart --no-default-features --features \"sqlite postgres mysql rocks s3 redis azure nats enterprise\"",
+      "after": "cargo chef cook --recipe-path recipe.json --zigbuild --release --target ${TARGET} -p stalwart --no-default-features --features \"sqlite postgres mysql rocks s3 redis azure nats\""
+    },
+    {
+      "file": "Dockerfile.build",
+      "line": 132,
+      "before": "RUSTFLAGS=\"-L /usr/lib\" cargo zigbuild --release --target ${TARGET} -p stalwart --no-default-features --features \"foundationdb s3 redis nats enterprise\" && \\",
+      "after": "RUSTFLAGS=\"-L /usr/lib\" cargo zigbuild --release --target ${TARGET} -p stalwart --no-default-features --features \"foundationdb s3 redis nats\" && \\"
+    },
+    {
+      "file": "Dockerfile.build",
+      "line": 142,
+      "before": "cargo zigbuild --release --target ${TARGET} -p stalwart --no-default-features --features \"sqlite postgres mysql rocks s3 redis azure nats enterprise\" && \\",
+      "after": "cargo zigbuild --release --target ${TARGET} -p stalwart --no-default-features --features \"sqlite postgres mysql rocks s3 redis azure nats\" && \\"
+    },
+    {
+      "file": "Dockerfile.fdb",
+      "line": 56,
+      "before": "RUN cargo build -p stalwart --no-default-features --features \"foundationdb s3 redis azure nats enterprise\" --release",
+      "after": "RUN cargo build -p stalwart --no-default-features --features \"foundationdb s3 redis azure nats\" --release"
     }
   ],
   "dangling_mods": [
