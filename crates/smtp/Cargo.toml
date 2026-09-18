@@ -18,6 +18,7 @@ directory = { path =  "../directory" }
 common = { path =  "../common" }
 email = { path =  "../email" }
 registry = { path =  "../registry" }
+inbuxa-features = { path = "../features" }
 spam-filter = { path =  "../spam-filter" }
 trc = { path = "../trc" }
 mail-auth = { version = "0.13", features = ["rkyv"] }

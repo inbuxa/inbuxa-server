@@ -75,6 +75,14 @@ impl IdentitySet for Server {
                     .addresses()
                     .iter()
                     .any(|e| e == &identity.email)
+                    // inbuxa: ME-11: a live mask of the account's own is an identity too
+                    && !inbuxa_features::masked_email::ops::sends_as(
+                        &self.core.storage.data,
+                        self.registry(),
+                        account_id,
+                        &identity.email,
+                    )
+                    .await?
                 {
                     response.not_created.append(
                         id,

@@ -248,6 +248,15 @@ impl<T: SessionStream> Session<T> {
                         .authenticated_emails()
                         .iter()
                         .any(|e| e == address_lcase)
+                    // inbuxa: ME-11: the sender's own live masks are its addresses too
+                    && !inbuxa_features::masked_email::ops::sends_as(
+                        &self.server.core.storage.data,
+                        self.server.registry(),
+                        self.data.authenticated_as.as_ref().unwrap().account_id,
+                        address_lcase,
+                    )
+                    .await
+                    .unwrap_or(false)
                 {
                     trc::event!(
                         Smtp(SmtpEvent::MailFromUnauthorized),

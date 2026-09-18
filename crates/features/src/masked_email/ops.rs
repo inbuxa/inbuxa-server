@@ -333,6 +333,19 @@ pub async fn ensure_indexed(data: &Store, registry: &RegistryStore) -> trc::Resu
     data.write(batch.build_all()).await.map(|_| ())
 }
 
+/// Whether an account may send as an address because it's one of the
+/// account's live masks (ME-11).
+pub async fn sends_as(
+    data: &Store,
+    registry: &RegistryStore,
+    account_id: u32,
+    address: &str,
+) -> trc::Result<bool> {
+    Ok(resolve(data, registry, address)
+        .await?
+        .is_some_and(|mask| mask.object.account_id.document_id() == account_id))
+}
+
 /// What an address is, as far as masks go.
 #[derive(Debug)]
 pub enum Lookup {
