@@ -390,8 +390,8 @@ account. No upstream code was read.
    four held the same `https:` URL, pointing at a retired website that now
    answers with an HTML page, and two held the literal string `admin`. With
    the operator's approval, the four URL logos were removed the same day (a
-   write). The two `admin` values remain. BT-4 skips them as unusable, and
-   upstream already answers `404` for those domains.
+   write). The two `admin` values were removed too, also with approval, so
+   INBUXA holds no logos at all and compat test 18 has nothing to carry.
 2. **Upstream fetches URL logos itself** (open questions 2 and 3). While the
    URL logos were set, `GET /logo` returned `200 text/html`: the retired
    site's page, served from the mail server's own origin with no
