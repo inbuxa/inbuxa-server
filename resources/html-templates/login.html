@@ -347,6 +347,8 @@
                 setText($('title'), 'Sign in with an app');
                 setText($('subtitle'), 'This page is opened automatically by your mail, calendar or contacts app to authorize access to your account.');
                 showError('This sign-in page cannot be used directly. Please start the sign-in from your app instead. (The required "redirect_uri" parameter is missing.)');
+                // The logo loader below never runs on this path, so reveal the default logo here.
+                $('logo-wrap').removeAttribute('data-loading');
                 return;
             }
 
