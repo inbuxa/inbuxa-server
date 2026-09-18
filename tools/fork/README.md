@@ -3,7 +3,7 @@
 ## strip.py
 
 Makes an Enterprise-free snapshot of an upstream release. See the docstring
-and SPEC.md §2.2 for what it does and why.
+and docs/spec/SPEC.md §2.2 for what it does and why.
 
 ```bash
 git clone https://github.com/stalwartlabs/stalwart.git ~/src/stalwart-upstream   # outside this repo

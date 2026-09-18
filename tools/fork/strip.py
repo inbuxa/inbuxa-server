@@ -6,7 +6,7 @@ Produce an Enterprise-free snapshot of an upstream Stalwart release.
 
     tools/fork/strip.py --upstream PATH/TO/stalwart --ref v0.16.22 --out DIR
 
-What it does, in order (SPEC.md §2.2):
+What it does, in order (docs/spec/SPEC.md §2.2):
 
 1. Exports the tree at `--ref` with `git archive`. The snapshot never carries
    upstream's git history, because that history contains the Enterprise code.
@@ -31,7 +31,7 @@ What it does, in order (SPEC.md §2.2):
 
 Only license markers and Cargo manifests are read for meaning. The code inside
 an Enterprise file or snippet is never printed, reported or kept, which is what
-lets anyone run this outside the clean room (SPEC.md §3).
+lets anyone run this outside the clean room (docs/spec/SPEC.md §3).
 
 Exit status: 0 clean, 1 verification failed, 2 usage or environment error.
 """
