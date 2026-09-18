@@ -237,6 +237,20 @@ C-18 (no admin scope for anything but `inbuxa-admin`).
   own web interface (`/admin`, `/account`), which signs in as the unregistered
   client `stalwart-webui`.
 
+**Fixed on production, 2026-09-18,** in the order that keeps the web
+interface working throughout:
+
+1. Registered `stalwart-webui` as an `x:OAuthClient` with exactly two redirect
+   URIs, the `/admin` and `/account` OAuth callbacks.
+2. Turned `anonymousClientRegistration` off and `requireClientRegistration` on,
+   then reloaded settings.
+
+Verified over the API with a test account: `stalwart-webui` signs in to both
+callbacks and exchanges its code for a token; the same client with a foreign
+redirect URI, an unregistered `client_id`, and anonymous dynamic registration
+are all refused (401). To roll back, set the two settings back, destroy the
+client and reload settings. This is the state C-5 and C-6 make the default.
+
 ## Acceptance tests
 
 1. The session shows `urn:inbuxa:jmap` with `version`, `base`, `contract: 1`
