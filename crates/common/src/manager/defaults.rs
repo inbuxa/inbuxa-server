@@ -54,28 +54,10 @@ async fn insert_safe_defaults(bp: &mut Bootstrap) -> trc::Result<()> {
     let is_recovery_mode = bp.registry.is_recovery_mode();
     let is_bootstrap_mode = bp.registry.is_bootstrap_mode();
 
-    #[cfg(not(feature = "test_mode"))]
-    if bp.registry.count_object(ObjectType::Application).await? == 0 {
-        bp.registry
-            .write(RegistryWrite::insert(
-                &Application {
-                    auto_update_frequency: Duration::from_millis(30 * 24 * 60 * 60 * 1000),
-                    description: "Stalwart Web Interface".to_string(),
-                    enabled: true,
-                    #[cfg(not(feature = "dev_mode"))]
-                    resource_url:
-                        "https://github.com/stalwartlabs/webui/releases/latest/download/webui.zip"
-                            .into(),
-                    #[cfg(feature = "dev_mode")]
-                    resource_url: "file:///Users/me/code/webui/.ignore/webui.zip".into(),
-                    unpack_directory: None,
-                    oauth_client_id: None,
-                    url_prefix: Map::new(vec!["/admin".into(), "/account".into()]),
-                }
-                .into(),
-            ))
-            .await?;
-    }
+    // inbuxa: no web interface is installed on the mail host, and nothing is
+    // downloaded for one (docs/spec/SPEC.md §5.3). Administration is INBUXA
+    // Admin and webmail is ihasmail, both deployed separately. An install
+    // upgraded from Stalwart keeps any web application it already has.
 
     if is_bootstrap_mode {
         #[cfg(not(any(feature = "dev_mode", feature = "test_mode")))]

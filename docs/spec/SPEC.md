@@ -380,9 +380,15 @@ Upstream installs its web interface at first boot, serving `/admin` and
 `/account` from the mail server itself, by inserting a default web application
 that downloads a release of `stalwartlabs/webui` from GitHub. The fork:
 
-- inserts no default web application, and never fetches anything at boot;
+- inserts no default web application, and downloads no web interface;
 - keeps the generic web-application mechanism for operators who want it,
   documented as unsupported.
+
+Done 2026-09-18. A first boot of the debug build answered 404 on `/admin` and
+`/account` in bootstrap mode and after setup, held no web application and no
+OAuth client, and logged no download. Setup worked over JMAP. An install
+upgraded from Stalwart keeps any web application it has, and contract C-6
+still registers its OAuth client.
 
 Where each of the web interface's jobs goes:
 
@@ -455,7 +461,8 @@ Oneshot's sequence, all over JMAP, with no web interface involved:
 Found at the fork's first boot, and to fix:
 
 - On first boot the server downloads Stalwart's web interface
-  (`webui.zip` from GitHub) before anything is configured. §5.3 removes this.
+  (`webui.zip` from GitHub) before anything is configured. Removed
+  2026-09-18 (§5.3).
 - Whenever `STALWART_RECOVERY_ADMIN` is set, its password is a full admin
   login, outside bootstrap and recovery mode too. oneshot is safe, because
   it recreates the container without the variable once setup is done, but a

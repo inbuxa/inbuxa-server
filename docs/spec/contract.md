@@ -104,9 +104,9 @@ Each has an ID, and tests name the IDs they check.
   start. Until `x:FrontEnds` exists, three environment variables stand in for
   it: `INBUXA_ADMIN_URL`, `INBUXA_WEBMAIL_URL` and
   `INBUXA_WEBMAIL_CLIENT_SECRET` (the webmail client is registered only when
-  both of its variables are set). The web interface the server still serves
-  itself (`/admin`, `/account`, until SPEC.md §5.3 removes it) is registered
-  too, as its application's OAuth client id or `stalwart-webui`, at the
+  both of its variables are set). A web interface the server serves itself
+  (none on a new install since SPEC.md §5.3; possible on one upgraded from
+  Stalwart) is registered too, as its application's OAuth client id or `stalwart-webui`, at the
   server's public URL. A missing client is created. An existing one gains any
   redirect URI it lacks, and the webmail client gets the configured secret.
   Nothing an operator added is removed. Bootstrap and recovery mode skip this:
