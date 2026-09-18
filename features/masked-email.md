@@ -245,7 +245,7 @@ masks.
    (ME-3, ME-13).
 7. `emailPrefix: "shop"` gives `shop_…`. `emailPrefix: "Shop!"` fails
    `invalidProperties`.
-8. `emailDomain` the account isn't linked to fails `invalidProperties`
+8. `emailDomain` the account isn't linked to fails `forbidden`
    (ME-12).
 9. `maxMaskedAddresses` 2: the third fails `overQuota`. 0 blocks creation
    (ME-14).
