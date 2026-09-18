@@ -536,3 +536,8 @@ before anything that could prompt that notice happens.
 - Governance: solo, or set up for outside contributors from the start
   (contributing guide, sign-off on contributions).
 - Whether the fork follows upstream's version numbers or has its own.
+- The Enterprise License text (`LICENSES/LicenseRef-SEL.txt`) stays while
+  upstream files still name it in their headers (`AGPL-3.0-only OR
+  LicenseRef-SEL`, 1,112 files at v0.16.22). Deferred (John, 2026-09-18) until
+  the files are cleaned up: then the headers become `AGPL-3.0-only`, the text
+  goes, and the question joins the legal review (§3, rule 5).
