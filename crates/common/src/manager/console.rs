@@ -13,8 +13,8 @@ use store::{Deserialize, IterateParams, SUBSPACE_INDEXES, SUBSPACE_REGISTRY_IDX,
 
 const HELP: &str = concat!(
     types::brand_server!(),
-    " v",
-    env!("CARGO_PKG_VERSION"),
+    " ",
+    types::brand_version_full!(),
     r#" Data Store CLI
 
 Enter commands (type 'help' for available commands).

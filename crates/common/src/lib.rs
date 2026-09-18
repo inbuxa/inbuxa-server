@@ -79,7 +79,7 @@ pub static VERSION_PRIVATE: &str = env!("CARGO_PKG_VERSION");
 pub static VERSION_PUBLIC: &str = "1.0.0";
 
 pub static USER_AGENT: &str = concat!(types::brand!(), "/1.0.0");
-pub static DAEMON_NAME: &str = concat!(types::brand!(), " v", env!("CARGO_PKG_VERSION"),);
+pub static DAEMON_NAME: &str = concat!(types::brand!(), " v", types::brand_version!(),);
 pub static PROD_ID: &str = types::brand_prodid!();
 
 /*

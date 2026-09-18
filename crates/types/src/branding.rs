@@ -64,3 +64,25 @@ pub fn env_var(name: &str) -> Result<String, std::env::VarError> {
         found => found,
     }
 }
+
+/// INBUXA's own version, dated like the rest of its family: `YYYY.M.D`, with
+/// a letter or `.N` suffix for a second release on one day. It's set here and
+/// not in Cargo.toml, so upstream's version bumps merge without conflicts.
+#[macro_export]
+macro_rules! brand_version {
+    () => {
+        "2026.9.18"
+    };
+}
+
+/// The version with the Stalwart release it's built on, e.g.
+/// `2026.9.18 (Stalwart 0.16.22)`. The base comes from Cargo, which follows
+/// upstream, so it's always the base actually compiled in. It matters because
+/// Stalwart's data upgrades are one-way. Once INBUXA stops tracking upstream,
+/// this becomes just the version.
+#[macro_export]
+macro_rules! brand_version_full {
+    () => {
+        concat!($crate::brand_version!(), " (Stalwart ", env!("CARGO_PKG_VERSION"), ")")
+    };
+}

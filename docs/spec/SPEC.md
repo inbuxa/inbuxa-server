@@ -209,6 +209,36 @@ Done 2026-09-18:
 - `install.sh` is a stub that says there's no release yet. Upstream's version
   would download and install Stalwart itself.
 
+### 2.6 Versioning
+
+Decided 2026-09-18.
+
+- **INBUXA has its own version,** dated like the rest of its family
+  (ihasmail, ihasmail-oneshot, stalwart-migrator): `YYYY.M.D`, tagged
+  `vYYYY.M.D`, with a suffix for a second release on one day. The server's is
+  `types::brand_version!()`, and INBUXA Admin has its own.
+- **The Stalwart base stays visible** while INBUXA tracks upstream:
+  `inbuxa --version`, the startup banner and events, OpenTelemetry's
+  `service.version`, and the JMAP `implementation` string all read
+  `2026.9.18 (Stalwart 0.16.22)`. It matters because Stalwart's data upgrades
+  are one-way, so anyone upgrading needs to know which base their data will be
+  converted to. Release notes and the strip report say it too.
+- **Cargo versions follow upstream, untouched.** Every upstream release bumps
+  all ~30 manifests, so overriding them would conflict on every sync. The base
+  shown is read from Cargo, so it's always what was actually compiled in.
+  Upstream's internal data-format version (`types/src/semver.rs`), which drives
+  store migrations, is upstream's and is never changed.
+- `DAEMON_NAME` (the `Received:` header) and the IMAP `ID` response carry the
+  INBUXA version alone. `VERSION_PUBLIC`'s deliberately vague `1.0.0` for Sieve
+  is left as upstream has it.
+- **Stalwart 1.0** arrives like any release (strip, merge, release under the
+  next date), but as its own milestone: a merge dry run, a strip-report
+  comparison against 0.16, and an upgrade test on a copy of real data, because
+  it will almost certainly bring a one-way store migration.
+- **Diverging from upstream** is expected eventually, though not soon. When it
+  happens, the base drops out of the version string and nothing else about
+  versioning changes.
+
 ## 3. Clean room
 
 INBUXA runs on a paid Stalwart Enterprise license, so its maintainer is a

@@ -70,7 +70,9 @@ impl<T: SessionStream> Session<T> {
                     concat!(
                         "* ID (\"name\" \"",
                         types::brand!(),
-                        "\" \"version\" \"1.0.0\" \"vendor\" \"",
+                        "\" \"version\" \"",
+                        types::brand_version!(),
+                        "\" \"vendor\" \"",
                         types::brand!(),
                         "\" \"support-url\" \"",
                         types::brand_url!(),
