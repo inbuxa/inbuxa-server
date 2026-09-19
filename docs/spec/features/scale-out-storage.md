@@ -173,6 +173,11 @@ Each requirement has an ID, and tests name the IDs they check.
   with `readReplicas` or `Sharded` either works as this spec says, or the
   server reports why at startup (ST-15, ST-23, ST-29). Silently ignoring a
   configured replica or shard, as the fork does today, isn't allowed.
+  **Decision** (2026-09-19): built in two steps. Sharded stores (ST-16 to
+  ST-29) come first; read-replica routing (ST-5 to ST-15) follows after
+  per-domain directories (feature 9). Until then each configured replica is
+  reported at startup with an error event naming it, saying replicas aren't
+  used yet, and every operation goes to the primary.
 - **ST-3.** Composite stores are transparent. Every check on what kind of
   backend a store is answers as its primary does (for replicas) or as its
   members do (for shards): `Store::id()`, `is_sql()`, `is_pg_or_mysql()`,
