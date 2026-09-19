@@ -119,6 +119,10 @@ impl CacheInvalidationBuilder {
                     || (current.sub_addressing != new.sub_addressing)
                     || (current.allow_relaying != new.allow_relaying)
                     || (current.is_enabled != new.is_enabled)
+                    // inbuxa: SCIM-60, the flag is cached as DOMAIN_FLAG_SCIM,
+                    // so turning SCIM's authority on or off has to take effect
+                    // without a restart
+                    || (current.allow_scim_provisioning != new.allow_scim_provisioning)
                 {
                     self.invalidate(CacheInvalidation::Domain(id));
                 }

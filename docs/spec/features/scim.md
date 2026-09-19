@@ -888,6 +888,12 @@ with errors only for its generated non-address `userName`.
     `lastModified`): scim2-client builds its models from it.
   - The five `scim.*` events (SCIM-54) have ids 637 to 641, the fork's own,
     and are in the packaged schema's event list.
+  - `allowScimProvisioning` is cached with the domain, so it joins the
+    fields whose change drops that cache entry
+    (`crates/common/src/cache/invalidate.rs`); without that, SCIM-60's
+    "takes effect without a restart" held only until something else
+    evicted the domain. Found on 2026-09-19 by the two acceptance checks
+    below.
 - **Known limits, not requirements of this spec:**
   - Ending open sessions on suspension (SCIM-52) covers subscriptions to
     changes (IMAP IDLE, JMAP event streams and WebSockets), and only on the

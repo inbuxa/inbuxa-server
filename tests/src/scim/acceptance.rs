@@ -65,6 +65,8 @@ pub async fn test(test: &TestServer, scim: &ScimTest) {
     deletion(test, scim).await;
     adoption(test, scim).await;
     tenants(test, scim).await;
+    authority(test, scim, closed_id).await;
+    rate_limits(test, scim).await;
 
     admin
         .registry_destroy(ObjectType::Domain, [closed_id])
