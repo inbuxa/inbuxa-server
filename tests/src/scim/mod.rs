@@ -451,3 +451,50 @@ pub async fn scim_oidc_tests() {
     let scim = ScimTest::new(&test).await;
     oidc::test(&test, &scim).await;
 }
+
+/// Acceptance test 31 (compat): on a copy of INBUXA's data, the SCIM
+/// fields read back as observed 1: no domain open to SCIM, and no account
+/// with an `externalId`. Run with `INBUXA_COMPAT_ADMIN` (`name:password`),
+/// `NO_INSERT=1`, and the store's `TMPDIR`/`STORE` pointing at the copy.
+#[ignore]
+#[tokio::test(flavor = "multi_thread")]
+pub async fn scim_compat() {
+    let admin = std::env::var("INBUXA_COMPAT_ADMIN").expect("INBUXA_COMPAT_ADMIN");
+    assert!(std::env::var("NO_INSERT").is_ok(), "NO_INSERT must be set");
+    let _test = crate::utils::server::TestServerBuilder::new("scim_compat")
+        .await
+        .with_default_listeners()
+        .await
+        .build_with_opts(false)
+        .await;
+    let (name, secret) = admin.split_once(':').expect("name:password");
+    let admin = Account::new(
+        Box::leak(name.to_string().into_boxed_str()),
+        Box::leak(secret.to_string().into_boxed_str()),
+        &[],
+        "Compat admin",
+        Id::from(u32::MAX),
+    );
+    let domains = admin
+        .jmap_method_call("x:Domain/get", json!({"ids": null}))
+        .await;
+    for domain in domains.list() {
+        assert_eq!(
+            domain["allowScimProvisioning"],
+            json!(false),
+            "observed 1: {}",
+            domain["name"]
+        );
+    }
+    let accounts = admin
+        .jmap_method_call("x:Account/get", json!({"ids": null}))
+        .await;
+    assert!(!accounts.list().is_empty(), "the copy has accounts");
+    for account in accounts.list() {
+        assert!(
+            account["externalId"].is_null(),
+            "observed 1: {}",
+            account["name"]
+        );
+    }
+}

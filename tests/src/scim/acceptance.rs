@@ -1586,3 +1586,65 @@ async fn authority(test: &TestServer, scim: &ScimTest, closed_id: Id) {
     scim.destroy(&format!("/Users/{id}")).await;
     let _ = closed_id;
 }
+
+/// SCIM-14: the authenticated rate limit, per principal, with
+/// `unlimitedRequests` exempt.
+async fn rate_limits(test: &TestServer, scim: &ScimTest) {
+    let admin = test.account("admin");
+    admin
+        .registry_update_setting(
+            structs::Http {
+                rate_limit_authenticated: Some(structs::Rate {
+                    count: 2,
+                    period: Duration::from_millis(60_000),
+                }),
+                ..Default::default()
+            },
+            &[Property::RateLimitAuthenticated],
+        )
+        .await;
+    admin.reload_settings().await;
+
+    let principal = Account::new(
+        "scim-svc@scim.example.com",
+        PRINCIPAL_SECRET,
+        &[],
+        "",
+        scim.principal_id,
+    );
+    let limited = ScimClient::bearer(
+        &api_key(
+            admin,
+            &principal,
+            json!({"@type": "Disable", "permissions": {"unlimitedRequests": true}}),
+        )
+        .await,
+    );
+    let mut refused = None;
+    for _ in 0..6 {
+        let reply = limited.get("/Users?count=1").await;
+        if reply.status == 429 {
+            refused = Some(reply);
+            break;
+        }
+        reply.assert_status(200);
+    }
+    let refused = refused.expect("SCIM-14: never rate limited");
+    refused.assert_error(429, None);
+    assert!(
+        refused.header("retry-after").is_some(),
+        "SCIM-14: Retry-After"
+    );
+    scim.client.get("/Users?count=1").await.assert_status(200);
+
+    admin
+        .registry_update_setting(
+            structs::Http {
+                rate_limit_authenticated: None,
+                ..Default::default()
+            },
+            &[Property::RateLimitAuthenticated],
+        )
+        .await;
+    admin.reload_settings().await;
+}
