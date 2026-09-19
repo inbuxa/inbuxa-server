@@ -691,6 +691,18 @@ pub async fn replace(
         external_id,
     );
     if active_change.is_some() {
+        // SCIM-52: sessions the account has open are ended
+        if !active {
+            let _ = ctx
+                .server
+                .inner
+                .ipc
+                .push_tx
+                .send(common::ipc::PushEvent::Revoke {
+                    account_id: id.document_id(),
+                })
+                .await;
+        }
         audit(
             ctx,
             if active {

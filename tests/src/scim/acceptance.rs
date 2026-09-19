@@ -1184,11 +1184,78 @@ async fn imap_login(address: &str, ok: bool) {
     assert_eq!(accepted, ok, "IMAP login of {address}");
 }
 
+type IdleLines = tokio::io::Lines<tokio::io::BufReader<tokio::io::ReadHalf<tokio::net::TcpStream>>>;
+
+/// An IMAP session in IDLE.
+async fn idle_session(address: &str) -> (IdleLines, tokio::io::WriteHalf<tokio::net::TcpStream>) {
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+    let stream = tokio::net::TcpStream::connect("127.0.0.1:9991")
+        .await
+        .unwrap();
+    let (reader, mut writer) = tokio::io::split(stream);
+    let mut lines = BufReader::new(reader).lines();
+    lines.next_line().await.unwrap();
+    for (tag, command) in [
+        ("a", format!("LOGIN \"{address}\" \"{USER_SECRET}\"")),
+        ("b", "SELECT INBOX".to_string()),
+    ] {
+        writer
+            .write_all(format!("{tag} {command}\r\n").as_bytes())
+            .await
+            .unwrap();
+        loop {
+            let line = lines.next_line().await.unwrap().unwrap();
+            if let Some(status) = line.strip_prefix(&format!("{tag} ")) {
+                assert!(status.starts_with("OK"), "{command}: {line}");
+                break;
+            }
+        }
+    }
+    writer.write_all(b"c IDLE\r\n").await.unwrap();
+    let line = lines.next_line().await.unwrap().unwrap();
+    assert!(line.starts_with('+'), "IDLE: {line}");
+    (lines, writer)
+}
+
+/// Whether the server ends an IDLE session within ten seconds.
+async fn idle_ends(idle: &mut (IdleLines, tokio::io::WriteHalf<tokio::net::TcpStream>)) -> bool {
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
+    loop {
+        match tokio::time::timeout_at(deadline, idle.0.next_line()).await {
+            Ok(Ok(Some(line))) if line.starts_with("* BYE") => return true,
+            Ok(Ok(Some(_))) => continue,
+            Ok(Ok(None)) | Ok(Err(_)) => return true,
+            Err(_) => return false,
+        }
+    }
+}
+
 /// Test 28 (SCIM-52): suspension stops sign-in, not mail.
 async fn suspension(test: &TestServer, scim: &ScimTest) {
     let address = format!("suspended@{SCIM_DOMAIN}");
     let id = manual_user(test, scim, "suspended").await;
     imap_login(&address, true).await;
+
+    // Credentials used, and cached, before the suspension
+    let user = Account::new("suspended@scim.example.com", USER_SECRET, &[], "", id);
+    let (_, user_key) = api_key_with_id(&user, json!({"@type": "Inherit"})).await;
+    let basic = format!(
+        "Basic {}",
+        base64::Engine::encode(
+            &base64::engine::general_purpose::STANDARD,
+            format!("{address}:{USER_SECRET}")
+        )
+    );
+    let bearer = format!("Bearer {user_key}");
+    for authorization in [&basic, &bearer] {
+        assert_eq!(
+            crate::scim::jmap_session_status(authorization).await,
+            200,
+            "test 28"
+        );
+    }
+    let mut idle = idle_session(&address).await;
+
     scim.client
         .patch(
             &format!("/Users/{id}"),
@@ -1197,6 +1264,11 @@ async fn suspension(test: &TestServer, scim: &ScimTest) {
         .await
         .assert_status(200);
     imap_login(&address, false).await;
+    assert!(idle_ends(&mut idle).await, "test 28: an open IDLE is ended");
+    for authorization in [&basic, &bearer] {
+        let status = crate::scim::jmap_session_status(authorization).await;
+        assert!(matches!(status, 401 | 403), "test 28: {status}");
+    }
     let mut lmtp = SmtpConnection::connect().await;
     lmtp.ingest(
         "sender@remote.example.org",

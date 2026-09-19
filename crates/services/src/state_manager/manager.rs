@@ -49,6 +49,7 @@ pub fn spawn_push_router(inner: Arc<Inner>, mut change_rx: mpsc::Receiver<PushEv
                     types,
                     tx,
                 } => {
+                    let owner = account_ids.first().copied().unwrap_or(u32::MAX);
                     for account_id in account_ids {
                         subscribers
                             .entry(account_id)
@@ -57,8 +58,20 @@ pub fn spawn_push_router(inner: Arc<Inner>, mut change_rx: mpsc::Receiver<PushEv
                             .push(IpcSubscriber {
                                 types,
                                 tx: tx.clone(),
+                                owner,
                             });
                     }
+                }
+
+                // inbuxa: SCIM-52: dropping every sender closes the session's
+                // channel, which ends it
+                PushEvent::Revoke { account_id } => {
+                    for subscriber_list in subscribers.values_mut() {
+                        subscriber_list
+                            .ipc
+                            .retain(|subscriber| subscriber.owner != account_id);
+                    }
+                    purge_needed = true;
                 }
 
                 PushEvent::PushServerRegister { activate, expired } => {

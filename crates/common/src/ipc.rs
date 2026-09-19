@@ -43,6 +43,11 @@ pub enum PushEvent {
         account_id: u32,
         broadcast: bool,
     },
+    // inbuxa: SCIM-52: ends the push subscriptions the account itself holds
+    // (IMAP IDLE, JMAP event streams and WebSockets) on this node
+    Revoke {
+        account_id: u32,
+    },
     Stop,
 }
 

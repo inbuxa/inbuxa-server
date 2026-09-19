@@ -28,6 +28,8 @@ const SEND_TIMEOUT: Duration = Duration::from_millis(500);
 struct IpcSubscriber {
     types: Bitmap<DataType>,
     tx: mpsc::Sender<PushNotification>,
+    // inbuxa: SCIM-52: the account whose session subscribed
+    owner: u32,
 }
 
 #[derive(Debug)]
