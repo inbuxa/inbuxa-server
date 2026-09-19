@@ -553,18 +553,19 @@ Decision).
   treats as two members. `store::replica::replica_tests`, built with
   `postgres` and run with `STORE=PostgreSqlReplicated`, runs a primary and a
   streaming hot standby in containers and covers tests 9, 10, 12, 13, 14
-  and 15. Test 1 is the existing store, blob and protocol suites passing
-  unchanged.
+  and 15. `replica_cluster_tests` (with `redis`) covers test 11, and
+  `replica_mysql` covers tests 17 to 19 against two MySQL pairs, one
+  replicating with GTIDs and one by binary log position. Test 1 is the
+  existing store, blob and protocol suites passing unchanged.
 - **Not exercised:** test 3's downloads over JMAP and IMAP after a restart
   (the same blob reads are checked at the store), test 5's queued delivery
   (the failing write is checked), test 21 (one of two Redis servers stopped),
   the `resetRateLimiters` and `removeLock*` maintenance types (the store
-  operations they use are checked), test 11 (two nodes), test 16 (the
-  primary stopped), and tests 17 to 19: the MySQL code (GTID and
-  `Seconds_Behind_Source` lag, the read-only and commit-order checks) is
-  built but hasn't run against a MySQL replica. Test 9 checks that the
-  replica served the reads, not the replica's statement log, and test 15
-  checks full-text search, not a SQL directory.
+  operations they use are checked), and test 16 (the primary stopped).
+  Test 9 checks that the replica served the reads, not the replica's
+  statement log, and test 15 checks full-text search, not a SQL directory.
+  Test 11 uses one server and a second replicated store with its own
+  marks, rather than two whole nodes.
 - **Settled from the code, not a change of intent:**
   - The FileSystem backend reports any unreadable file as missing, so a
     FileSystem member that can't be read looks like a miss (ST-17's search
@@ -590,8 +591,9 @@ Decision).
   - Placement is the fork's own (ST-16), so an install coming from a
     sharded upstream deployment reads through ST-17's search (open
     question).
-  - ST-7's step 4 raises the mark from a JMAP `sinceState` only; IMAP
-    `CONDSTORE` and `QRESYNC` values and push resumption don't yet.
+  - ST-7's step 4 raises the mark from a JMAP `sinceState` and an IMAP
+    `FETCH ... CHANGEDSINCE`; a JMAP `queryChanges` state, `QRESYNC` on
+    SELECT and push resumption don't yet.
   - The store's `enterprise` Cargo feature stays: other crates' feature
     lists name it.
 

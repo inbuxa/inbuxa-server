@@ -551,18 +551,18 @@ marked `inbuxa:`.
 - **Tests.** `directory::per_domain::per_domain_directory_tests` covers
   tests 1, 3, 4, 6, 7, 9, 11, 15 and 19, and DIR-20 and DIR-21, over SQL
   directories on SQLite files, with no container. `directory_tests` runs a
-  new `oidc` module in place of the removed one, against Keycloak: tests 5,
-  8, 12, 13, 14, 16 and 17 in part (below). SCIM's acceptance test 5
+  new `oidc` module in place of the removed one, against Keycloak, whose
+  container now imports a second realm: tests 5, 8, 10, 12, 13, 14, 16, 17
+  and 18, the last two in part (below). SCIM's acceptance test 5
   (`scim_oidc_tests`) now runs and passes.
 - **Test 20 (compat)** is `per_domain_directory_compat`, ignored, and unrun
   until a copy of INBUXA's data is provided. It checks observed 1.
 - **Not exercised, or only in part:**
   - Test 2 and test 9 use an SQL directory that can't open instead of a
-    stopped LDAP server, and test 18 (a stopped provider, and the sign-in
-    ban) isn't run: the Keycloak container is shared.
-  - Test 10 needs a second provider, and test 12's later sign-ins (an empty
-    groups claim clearing groups, a missing one keeping them) need changes
-    to Keycloak users; neither is run.
+    stopped LDAP server.
+  - Test 12's later sign-ins (an empty groups claim clearing groups, a
+    missing one keeping them) need changes to Keycloak users, and aren't
+    run.
   - Test 13 is checked through synchronization itself, since the realm's
     users aren't on the tenant's domain. Test 14 reuses an account an
     administrator made, not one from an earlier LDAP directory.
@@ -570,7 +570,10 @@ marked `inbuxa:`.
     token. Keycloak grants every required scope whatever is asked, so the
     missing-scope refusal isn't reached; audience and key rotation aren't
     run. Test 17 checks password sign-in and a malformed token; an opaque
-    token and `usernameDomain` aren't run.
+    token that the provider accepts, and `usernameDomain`, aren't run.
+    Test 18 stops the provider and checks an outage doesn't ban the
+    client, and that bad tokens do; it doesn't measure the failure's
+    latency.
   - DIR-22's rule that `Authentication.directoryId` names a server-level
     directory, and DIR-24 (a tenant administrator setting its own domains'
     directory), aren't tested.
@@ -583,6 +586,9 @@ marked `inbuxa:`.
     reload from applying.
   - A server default naming no directory is unavailable, like a domain's
     (DIR-5); it used to mean the internal directory.
+  - A token the OIDC directory refuses is an authentication failure, so it
+    counts toward the sign-in ban (DIR-30); it used to be an error, which
+    counts toward nothing.
 - **Known limits, not requirements of this spec:**
   - An SQL directory on a SQLite path that can't be opened holds the reload,
     and the request that caused it, for the pool's 30-second connection
