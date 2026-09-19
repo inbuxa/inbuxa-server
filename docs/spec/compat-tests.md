@@ -7,6 +7,9 @@ INBUXA's own data opens in inbuxa-server and reads back as it did on the
 Enterprise server (SPEC.md §7). They are written, `#[ignore]`d, and unrun,
 because the repository has no copy of that data.
 
+The fork's other `#[ignore]`d suites, the ones that need containers rather
+than INBUXA's data, are in `container-tests.md`.
+
 **Run them against a copy, never against the live server.** Two of them
 delete data as part of what they check: `monitoring_compat` purges the
 telemetry history it has just read, and `per_domain_directory_compat` reads
