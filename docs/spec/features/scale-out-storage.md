@@ -529,31 +529,42 @@ and PostgreSQL), to show members of different kinds work together (ST-16).
 
 ## Implementation status
 
-Sharded stores built 2026-09-19 from this spec, clean-room, under the
-multi-tenancy hand-off brief's rules, in `crates/store/src/backend/scaleout/`
-(as decided above), with one variant added to `BlobStore` and
-`InMemoryStore` and one arm to each dispatch and build `match`, marked
-`inbuxa:`. Read-replica routing waits for per-domain directories (the ST-2
+Built 2026-09-19 from this spec, clean-room, under the multi-tenancy hand-off
+brief's rules, in `crates/store/src/backend/scaleout/` (as decided above),
+with one variant added to `Store`, `BlobStore` and `InMemoryStore` and one
+arm to each dispatch and build `match`, marked `inbuxa:`. Sharded stores
+came first; read replicas followed per-domain directories (the ST-2
 Decision).
 
-- **ST-1 to ST-4, ST-16 to ST-30:** built, with the limits below.
-- **ST-5 to ST-15:** not built yet. Each configured replica is reported at
-  startup with `store.postgresql-error` or `store.mysql-error` naming it, and
-  nothing connects to it (the pools the stripped code opened and dropped are
-  gone).
+- **ST-1 to ST-30:** built, with the limits below.
+- **Read replicas.** A data store with `readReplicas` becomes
+  `Store::Replicated`. The read handle of "Interfaces" is a read scope that
+  the call sites ST-6 names open around a request (`replica_read`), and that
+  spawned work carries along. Only account data (properties, indexes,
+  change logs, counters, ACLs, blobs, the search index) is read from a
+  replica; the registry, in-memory values, the task queue and everything
+  else go to the primary (ST-5).
 - **Tests.** `store::scaleout::scaleout_blob_tests` covers tests 2 to 7 on
   three and four FileSystem members, opening the store directly against the
   data store. The existing blob suite passes against a sharded store with
   `BLOB_STORE=Sharded` (three FileSystem members), which is test 8 and the
   second half of test 2. `scaleout_memory_tests`, built with `redis`, covers
   tests 20, 22 and 23 over two databases of one Redis server, which the store
-  treats as two members. Test 1 is the existing store and blob suites
-  passing unchanged.
+  treats as two members. `store::replica::replica_tests`, built with
+  `postgres` and run with `STORE=PostgreSqlReplicated`, runs a primary and a
+  streaming hot standby in containers and covers tests 9, 10, 12, 13, 14
+  and 15. Test 1 is the existing store, blob and protocol suites passing
+  unchanged.
 - **Not exercised:** test 3's downloads over JMAP and IMAP after a restart
   (the same blob reads are checked at the store), test 5's queued delivery
   (the failing write is checked), test 21 (one of two Redis servers stopped),
   the `resetRateLimiters` and `removeLock*` maintenance types (the store
-  operations they use are checked), and tests 9 to 19 (replicas).
+  operations they use are checked), test 11 (two nodes), test 16 (the
+  primary stopped), and tests 17 to 19: the MySQL code (GTID and
+  `Seconds_Behind_Source` lag, the read-only and commit-order checks) is
+  built but hasn't run against a MySQL replica. Test 9 checks that the
+  replica served the reads, not the replica's statement log, and test 15
+  checks full-text search, not a SQL directory.
 - **Settled from the code, not a change of intent:**
   - The FileSystem backend reports any unreadable file as missing, so a
     FileSystem member that can't be read looks like a miss (ST-17's search
@@ -566,12 +577,23 @@ Decision).
     made by restarting every node settles.
   - A misplaced blob is logged as `store.unexpected-error`, naming the
     member it was found on and its home.
+  - Any write made inside a read scope (a first mailbox read creating the
+    default mailboxes, an IMAP `FETCH` setting `\Seen`) sends the rest of
+    the scope to the primary, as ST-6 asks of requests that write.
+  - A replica that hasn't shown the startup marker within the lag limit is
+    tried again at each 10-second probe, and left out after six misses: at
+    startup a replica can still be replaying a burst of writes.
+  - Shared high-water marks (ST-7, step 2) go through the in-memory store
+    only when it's Redis; a cluster whose in-memory store is the data store
+    relies on the state-change broadcasts and ST-8.
 - **Known limits, not requirements of this spec:**
   - Placement is the fork's own (ST-16), so an install coming from a
     sharded upstream deployment reads through ST-17's search (open
     question).
-  - The leftover `Store::SQLReadReplica` arm and the store's `enterprise`
-    feature stay until replica routing lands.
+  - ST-7's step 4 raises the mark from a JMAP `sinceState` only; IMAP
+    `CONDSTORE` and `QRESYNC` values and push resumption don't yet.
+  - The store's `enterprise` Cargo feature stays: other crates' feature
+    lists name it.
 
 ## Observed
 
