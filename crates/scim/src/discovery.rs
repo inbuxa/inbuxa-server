@@ -239,6 +239,18 @@ fn schema(base: &str, id: &str, name: &str, description: &str, attributes: Vec<A
     })
 }
 
+/// `meta` as the mapping tables give it: no `lastModified` (SCIM-30).
+fn meta() -> Attr {
+    Attr::new("meta", "complex").read_only().with(vec![
+        Attr::new("resourceType", "string").read_only().case_exact(),
+        Attr::new("created", "dateTime").read_only(),
+        Attr::new("location", "reference")
+            .read_only()
+            .refs(&["uri"]),
+        Attr::new("version", "string").read_only().case_exact(),
+    ])
+}
+
 /// The User attributes of the mapping table (SCIM-6); `password` isn't
 /// published.
 pub fn user_schema(base: &str) -> Value {
@@ -269,6 +281,7 @@ pub fn user_schema(base: &str) -> Value {
                     Attr::new("display", "string").read_only(),
                     Attr::new("$ref", "reference").read_only().refs(&["Group"]),
                 ]),
+            meta(),
         ],
     )
 }
@@ -289,6 +302,7 @@ pub fn group_schema(base: &str) -> Value {
                 Attr::new("type", "string").immutable().canonical(&["User"]),
                 Attr::new("$ref", "reference").immutable().refs(&["User"]),
             ]),
+            meta(),
         ],
     )
 }

@@ -312,6 +312,9 @@ pub async fn ensure_scim_tester() -> &'static ContainerAsync<GenericImage> {
                 .expect("Failed to build the SCIM tester image");
             image
                 .with_host("host.docker.internal", Host::HostGateway)
+                // inbuxa: on the host's network, so a host firewall that
+                // drops the Docker bridge doesn't block the test server
+                .with_network("host")
                 .with_startup_timeout(READY_TIMEOUT)
                 .with_container_name("stalwart-test-scim-tester")
                 .with_reuse(ReuseDirective::Always)
