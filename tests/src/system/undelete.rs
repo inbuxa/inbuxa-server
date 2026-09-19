@@ -831,25 +831,6 @@ impl Account {
         .await;
     }
 
-    async fn inbox_ids(&self) -> Vec<String> {
-        self.jmap_method_call(
-            "Email/query",
-            json!({
-                "accountId": self.id_string(),
-                "filter": {"inMailbox": Id::from(INBOX_ID).to_string()}
-            }),
-        )
-        .await
-        .method_response()["ids"]
-            .as_array()
-            .map(|ids| {
-                ids.iter()
-                    .map(|id| id.as_str().unwrap().to_string())
-                    .collect()
-            })
-            .unwrap_or_default()
-    }
-
     async fn emails_with_subject(&self, subject: &str) -> Vec<Value> {
         let response = self
             .jmap_method_calls(json!([
