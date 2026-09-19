@@ -37,9 +37,13 @@ const JANE: &str = "jane.smith@example.org";
 const BILL: &str = "bill.foobar@example.org";
 
 fn directory(tenant: Option<Id>) -> structs::Directory {
+    realm_directory("stalwart", tenant)
+}
+
+fn realm_directory(realm: &str, tenant: Option<Id>) -> structs::Directory {
     structs::Directory::Oidc(OidcDirectory {
-        description: "Keycloak".to_string(),
-        issuer_url: "http://localhost:9080/realms/stalwart".to_string(),
+        description: format!("Keycloak {realm}"),
+        issuer_url: format!("http://localhost:9080/realms/{realm}"),
         claim_username: "email".to_string(),
         claim_name: Some("name".to_string()),
         claim_groups: Some("groups".to_string()),
@@ -234,7 +238,7 @@ pub async fn test() {
     assert!(bearer(&test, None, "not a token").await.is_err(), "test 17");
 
     // Test 16: JWTs the directory must refuse (DIR-26)
-    let header = |alg: &str, kid: Option<&str>| {
+    let header = |alg: &str, kid: Option<&str>| -> serde_json::Value {
         let mut header = json!({"alg": alg, "typ": "JWT"});
         if let Some(kid) = kid {
             header["kid"] = json!(kid);
@@ -299,6 +303,48 @@ pub async fn test() {
         .await;
     assert_eq!(rcpt(BILL).await, '2', "test 8: created by an administrator");
 
+    // Test 10: each domain's own provider answers discovery (DIR-12)
+    let second = admin
+        .registry_create_object(realm_directory("inbuxa", None))
+        .await;
+    let other_domain = admin
+        .registry_create_object(Domain {
+            is_enabled: true,
+            name: "second.example.org".to_string(),
+            certificate_management: CertificateManagement::Manual,
+            dns_management: DnsManagement::Manual,
+            dkim_management: DkimManagement::Manual,
+            directory_id: Some(second),
+            ..Default::default()
+        })
+        .await;
+    let http = reqwest::Client::builder()
+        .danger_accept_invalid_certs(true)
+        .build()
+        .unwrap();
+    for (address, realm) in [
+        (JOHN, "realms/stalwart"),
+        ("someone@second.example.org", "realms/inbuxa"),
+    ] {
+        let document = http
+            .get(format!("https://127.0.0.1:8899/api/discover/{address}"))
+            .send()
+            .await
+            .unwrap()
+            .text()
+            .await
+            .unwrap();
+        assert!(document.contains(realm), "test 10: {address}: {document}");
+    }
+    for (domain, realm) in [
+        ("example.org", "realms/stalwart"),
+        ("second.example.org", "realms/inbuxa"),
+    ] {
+        let pacc = server(&test).get_pacc_for_domain(domain).await.unwrap();
+        assert!(pacc.contains(realm), "test 10: PACC for {domain}: {pacc}");
+    }
+    let _ = other_domain;
+
     // Test 13: sign-in can't pass a tenant's limit (DIR-15)
     let tenant = admin
         .registry_create_object(Tenant {
@@ -334,6 +380,50 @@ pub async fn test() {
         Collector::read_metric(MetricType::LimitTenantQuota) > events,
         "test 13: limit.tenant-quota"
     );
+
+    // Test 18: an outage isn't a wrong password (DIR-30)
+    admin
+        .registry_update_setting(
+            structs::Security {
+                auth_ban_rate: Some(structs::Rate {
+                    count: 3,
+                    period: registry::types::duration::Duration::from_millis(60_000),
+                }),
+                ..Default::default()
+            },
+            &[Property::AuthBanRate],
+        )
+        .await;
+    admin.reload_settings().await;
+    // An opaque token has to reach the provider's userinfo endpoint, so with
+    // the provider stopped this is an outage, not a bad token
+    crate::utils::containers::docker("stop", "stalwart-test-keycloak");
+    for attempt in 0..8 {
+        let err = bearer(&test, Some(JOHN), "an-opaque-token")
+            .await
+            .unwrap_err();
+        assert!(
+            !err.matches(trc::EventType::Security(
+                trc::SecurityEvent::AuthenticationBan
+            )),
+            "test 18: an outage counted toward the ban (attempt {attempt})"
+        );
+    }
+    crate::utils::containers::docker("start", "stalwart-test-keycloak");
+    crate::utils::containers::ensure_keycloak().await;
+
+    // ... but bad tokens are, and they end in a ban
+    let mut banned = false;
+    for _ in 0..8 {
+        let err = bearer(&test, Some(JOHN), "not.a.token").await.unwrap_err();
+        if err.matches(trc::EventType::Security(
+            trc::SecurityEvent::AuthenticationBan,
+        )) {
+            banned = true;
+            break;
+        }
+    }
+    assert!(banned, "test 18: bad tokens must end in a ban");
 
     let _ = tenant_domain;
     test.temp_dir.delete();

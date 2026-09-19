@@ -307,6 +307,11 @@ pub async fn ensure_keycloak() {
                     "/opt/keycloak/data/import/stalwart-realm.json",
                     include_bytes!("../../docker/keycloak/stalwart-realm.json").to_vec(),
                 )
+                // inbuxa: a second provider, for per-domain directories (test 10)
+                .with_copy_to(
+                    "/opt/keycloak/data/import/inbuxa-realm.json",
+                    include_bytes!("../../docker/keycloak/inbuxa-realm.json").to_vec(),
+                )
                 .with_mapped_port(9080, 9080.tcp())
                 .with_startup_timeout(READY_TIMEOUT)
                 .with_container_name("stalwart-test-keycloak")
@@ -317,6 +322,7 @@ pub async fn ensure_keycloak() {
         })
         .await;
     wait_for_http("http://localhost:9080/realms/stalwart/.well-known/openid-configuration").await;
+    wait_for_http("http://localhost:9080/realms/inbuxa/.well-known/openid-configuration").await;
 }
 
 pub async fn ensure_scim_tester() -> &'static ContainerAsync<GenericImage> {

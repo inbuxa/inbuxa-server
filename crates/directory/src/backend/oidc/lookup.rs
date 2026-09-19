@@ -33,7 +33,10 @@ impl OpenIdDirectory {
                 self.authenticate_opaque(token).await
             }
             .map_err(|err| match err {
-                OidcError::AuthorizationFailed(reason) => {
+                // inbuxa: DIR-30: a refused token is an authentication
+                // failure and counts toward the sign-in ban; a network,
+                // provider or configuration fault is an error and doesn't
+                OidcError::AuthorizationFailed(reason) | OidcError::TokenValidation(reason) => {
                     AuthEvent::Failed.into_err().reason(reason)
                 }
                 err => AuthEvent::Error.into_err().reason(err),
