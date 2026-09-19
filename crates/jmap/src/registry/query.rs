@@ -122,6 +122,15 @@ impl RegistryQuery for Server {
             .await
             .and_then(|response| response.build()),
 
+            // inbuxa: monitoring history (MON-17, MON-31)
+            ObjectType::Metric => crate::inbuxa::telemetry::metric_query(RegistryQueryResponse {
+                server: self,
+                access_token,
+                object_type,
+                request,
+            })
+            .await
+            .and_then(|response| response.build()),
             ObjectType::Log => log_query(RegistryQueryResponse {
                 server: self,
                 access_token,

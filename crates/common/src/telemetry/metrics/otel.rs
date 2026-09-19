@@ -17,12 +17,12 @@ use std::time::SystemTime;
 use trc::{Collector, TelemetryEvent};
 
 impl OtelMetrics {
-    pub async fn push_metrics(&self, is_enterprise: bool, start_time: SystemTime) {
+    pub async fn push_metrics(&self, start_time: SystemTime) {
         let mut metrics = Vec::with_capacity(256);
         let time = SystemTime::now();
 
         // Add counters
-        for counter in Collector::collect_counters(is_enterprise) {
+        for counter in Collector::collect_counters() {
             metrics.push(Metric::new(
                 counter.id().as_str(),
                 counter.id().description(),
@@ -38,7 +38,7 @@ impl OtelMetrics {
         }
 
         // Add gauges
-        for gauge in Collector::collect_gauges(is_enterprise) {
+        for gauge in Collector::collect_gauges() {
             metrics.push(Metric::new(
                 gauge.id().as_str(),
                 gauge.id().description(),
@@ -52,7 +52,7 @@ impl OtelMetrics {
         }
 
         // Add histograms
-        for histogram in Collector::collect_histograms(is_enterprise) {
+        for histogram in Collector::collect_histograms() {
             metrics.push(Metric::new(
                 histogram.id().as_str(),
                 histogram.id().description(),

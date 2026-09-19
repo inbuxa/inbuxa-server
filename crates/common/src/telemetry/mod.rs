@@ -17,14 +17,13 @@ use webhooks::spawn_webhook_tracer;
 use crate::config::telemetry::{Telemetry, TelemetrySubscriberType};
 
 impl Telemetry {
-    pub fn enable(self, is_enterprise: bool) {
+    pub fn enable(self) {
         // Spawn tracers
         for tracer in self.tracers.subscribers {
             tracer.typ.spawn(
                 SubscriberBuilder::new(tracer.id)
                     .with_interests(tracer.interests)
                     .with_lossy(tracer.lossy),
-                is_enterprise,
             );
         }
 
@@ -35,7 +34,7 @@ impl Telemetry {
         Collector::reload();
     }
 
-    pub fn update(self, is_enterprise: bool) {
+    pub fn update(self) {
         // Remove tracers that are no longer active
         let active_subscribers = Collector::get_subscribers();
         for subscribed_id in &active_subscribers {
@@ -58,7 +57,6 @@ impl Telemetry {
                     SubscriberBuilder::new(tracer.id)
                         .with_interests(tracer.interests)
                         .with_lossy(tracer.lossy),
-                    is_enterprise,
                 );
             }
         }
@@ -96,8 +94,7 @@ impl Telemetry {
 }
 
 impl TelemetrySubscriberType {
-    // inbuxa: `_is_enterprise` is unused until monitoring history is rebuilt, and goes when it is: there is one edition
-    pub fn spawn(self, builder: SubscriberBuilder, _is_enterprise: bool) {
+    pub fn spawn(self, builder: SubscriberBuilder) {
         match self {
             TelemetrySubscriberType::ConsoleTracer(settings) => {
                 spawn_console_tracer(builder, settings)

@@ -235,6 +235,20 @@ async fn store_maintenance(
             .await
             .caused_by(trc::location!())?;
 
+            use common::telemetry::metrics::store::MetricsStore;
+            // inbuxa: MON-17, MON-38: history past its retention goes; a
+            // failure leaves it for the next run
+            let retention = common::telemetry::metrics::store::retention(server).await;
+            if let Some(keep) = retention.hold_metrics_for
+                && !server.metrics_store().is_none()
+                && let Err(err) = server
+                    .metrics_store()
+                    .purge_metrics(keep.into_inner())
+                    .await
+            {
+                trc::error!(err.details("Failed to purge metric history"));
+            }
+
             trc::event!(
                 Store(StoreEvent::DataStorePurged),
                 Elapsed = started.elapsed()

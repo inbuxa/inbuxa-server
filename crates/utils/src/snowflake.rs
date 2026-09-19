@@ -96,6 +96,12 @@ impl SnowflakeIdGenerator {
             })
     }
 
+    // inbuxa: the first id of a UNIX second, so ids can be searched by time
+    // (monitoring history)
+    pub fn first_id_at(timestamp: u64) -> u64 {
+        (timestamp.saturating_sub(DEFAULT_EPOCH) * 1000) << (SEQUENCE_LEN + NODE_ID_LEN)
+    }
+
     pub fn to_timestamp(id: u64) -> u64 {
         (id >> (SEQUENCE_LEN + NODE_ID_LEN)) / 1000 + DEFAULT_EPOCH
     }

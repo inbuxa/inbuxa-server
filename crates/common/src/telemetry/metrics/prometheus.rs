@@ -18,10 +18,9 @@ impl Server {
 
 
         #[cfg(not(feature = "enterprise"))]
-        let is_enterprise = false;
 
         // Add counters
-        for counter in Collector::collect_counters(is_enterprise) {
+        for counter in Collector::collect_counters() {
             let mut metric = MetricFamily::default();
             metric.set_name(metric_name(counter.id().as_str()));
             metric.set_help(counter.id().description().into());
@@ -31,7 +30,7 @@ impl Server {
         }
 
         // Add gauges
-        for gauge in Collector::collect_gauges(is_enterprise) {
+        for gauge in Collector::collect_gauges() {
             let mut metric = MetricFamily::default();
             metric.set_name(metric_name(gauge.id().as_str()));
             metric.set_help(gauge.id().description().into());
@@ -41,7 +40,7 @@ impl Server {
         }
 
         // Add histograms
-        for histogram in Collector::collect_histograms(is_enterprise) {
+        for histogram in Collector::collect_histograms() {
             let mut metric = MetricFamily::default();
             metric.set_name(metric_name(histogram.id().as_str()));
             metric.set_help(histogram.id().description().into());

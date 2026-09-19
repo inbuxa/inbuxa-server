@@ -362,7 +362,7 @@ impl TestServerBuilder {
         let cache = Caches::parse(&mut self.bootstrap).await;
 
         // Enable telemetry
-        telemetry.enable(true);
+        telemetry.enable();
 
         // Build inner
         let (ipc, mut ipc_rxs) = build_ipc(!core.storage.coordinator.is_none());

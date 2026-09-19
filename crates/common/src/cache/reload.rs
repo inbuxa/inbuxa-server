@@ -131,7 +131,7 @@ impl Server {
                             // Update tracers
 
                             #[cfg(not(feature = "enterprise"))]
-                            tracers.update(false);
+                            tracers.update();
 
                             // Reload queue settings
                             self.inner

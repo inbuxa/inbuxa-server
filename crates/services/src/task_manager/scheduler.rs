@@ -40,6 +40,19 @@ enum Event {
     CalculateMetrics,
     TrainSpamClassifier,
     RenewNodeIdLease,
+    // inbuxa: MON-4: metric history
+    StoreMetrics,
+}
+
+/// When the next metric-history tick is due (MON-4), read from the registry
+/// so a change needs no reload (MON-3).
+async fn metrics_collection_delay(server: &common::Server) -> Duration {
+    utils::cron::SimpleCron::from(
+        common::telemetry::metrics::store::retention(server)
+            .await
+            .metrics_collection_interval,
+    )
+    .time_to_next()
 }
 
 #[derive(Default)]
@@ -112,6 +125,12 @@ pub fn spawn_task_scheduler(inner: Arc<Inner>) {
 
             // Calculate expensive metrics
             queue.schedule(Instant::now(), Event::CalculateMetrics);
+
+            // inbuxa: MON-4: metric history on its own schedule
+            queue.schedule(
+                Instant::now() + metrics_collection_delay(&server).await,
+                Event::StoreMetrics,
+            );
 
         }
 
@@ -210,13 +229,9 @@ pub fn spawn_task_scheduler(inner: Arc<Inner>) {
                             if roles.metrics_push {
                                 let otel = otel.clone();
 
-
-                                #[cfg(not(feature = "enterprise"))]
-                                let is_enterprise = false;
-
                                 tokio::spawn(async move {
                                     let elapsed = Instant::now();
-                                    otel.push_metrics(is_enterprise, start_time).await;
+                                    otel.push_metrics(start_time).await;
 
                                     trc::event!(
                                         Telemetry(TelemetryEvent::MetricsPushed),
@@ -244,6 +259,16 @@ pub fn spawn_task_scheduler(inner: Arc<Inner>) {
                         tokio::spawn(async move {
                             let elapsed = Instant::now();
                             if server.core.network.roles.metrics_calculate {
+                                // inbuxa: MON-7: the queue gauge from the queue itself,
+                                // so it's right after a restart
+                                match server.total_queued_messages().await {
+                                    Ok(total) => {
+                                        Collector::update_gauge(MetricType::QueueCount, total);
+                                    }
+                                    Err(err) => {
+                                        trc::error!(err.details("Failed to count queued messages"));
+                                    }
+                                }
 
                                 if update_other_metrics {
                                     match server.total_accounts().await {
@@ -298,6 +323,17 @@ pub fn spawn_task_scheduler(inner: Arc<Inner>) {
                                 Telemetry(TelemetryEvent::MetricsCollected),
                                 Elapsed = elapsed.elapsed()
                             );
+                        });
+                    }
+                    // inbuxa: MON-4: every node writes its own samples
+                    Event::StoreMetrics => {
+                        queue.schedule(
+                            Instant::now() + metrics_collection_delay(&server).await,
+                            Event::StoreMetrics,
+                        );
+                        let server = server.clone();
+                        tokio::spawn(async move {
+                            server.store_metrics().await;
                         });
                     }
                     Event::TrainSpamClassifier => {
@@ -394,6 +430,7 @@ impl Event {
             Event::CalculateMetrics => "calculateMetrics",
             Event::TrainSpamClassifier => "trainSpamClassifier",
             Event::RenewNodeIdLease => "renewNodeIdLease",
+            Event::StoreMetrics => "storeMetrics",
         }
     }
 }

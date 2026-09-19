@@ -380,6 +380,10 @@ impl RegistryGet for Server {
                 spam_sample_get(get).await.map(|get| get.into_response())
             }
             ObjectType::Log => log_get(get).await.map(|get| get.into_response()),
+            // inbuxa: monitoring history (MON-17, MON-31)
+            ObjectType::Metric => crate::inbuxa::telemetry::metric_get(get)
+                .await
+                .map(|get| get.into_response()),
             ObjectType::Bootstrap => bootstrap_get(get).await.map(|get| get.into_response()),
             ObjectType::AccountSettings
             | ObjectType::ApiKey

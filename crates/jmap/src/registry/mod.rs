@@ -17,23 +17,9 @@ pub trait EnterpriseRegistry {
 }
 
 impl EnterpriseRegistry for Server {
-    fn assert_enterprise_object(&self, object_type: ObjectType) -> trc::Result<()> {
-        if !matches!(
-            object_type,
-            ObjectType::Metric
-                | ObjectType::Trace
-        ) {
-            return Ok(());
-        }
-
-
-        // These are the Enterprise features INBUXA hasn't rebuilt yet
-        // (docs/spec/SPEC.md §4). Each type leaves this list when its rebuild
-        // lands. There's no edition to upgrade to, so the message says so.
-        Err(trc::JmapEvent::Forbidden.into_err().details(concat!(
-            "This feature isn't available in ",
-            types::brand!(),
-            " yet."
-        )))
+    // inbuxa: every Enterprise feature is rebuilt (docs/spec/SPEC.md §4), the
+    // last being monitoring (MON-39), so nothing is refused here any more
+    fn assert_enterprise_object(&self, _: ObjectType) -> trc::Result<()> {
+        Ok(())
     }
 }

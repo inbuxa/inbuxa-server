@@ -207,7 +207,7 @@ impl Collector {
         METRIC_INTERESTS.update(interests);
     }
 
-    pub fn collect_counters(_is_enterprise: bool) -> impl Iterator<Item = EventCounter> {
+    pub fn collect_counters() -> impl Iterator<Item = EventCounter> {
         EVENT_COUNTERS
             .inner()
             .iter()
@@ -225,21 +225,20 @@ impl Collector {
             })
     }
 
-    pub fn collect_gauges(is_enterprise: bool) -> impl Iterator<Item = &'static AtomicGauge> {
-        static E_GAUGES: &[&AtomicGauge] =
+    // inbuxa: MON-6: one edition, every gauge
+    pub fn collect_gauges() -> impl Iterator<Item = &'static AtomicGauge> {
+        static GAUGES: &[&AtomicGauge] =
             &[&SERVER_MEMORY, &QUEUE_COUNT, &USER_COUNT, &DOMAIN_COUNT];
-        static C_GAUGES: &[&AtomicGauge] = &[&SERVER_MEMORY, &USER_COUNT, &DOMAIN_COUNT];
 
-        if is_enterprise { E_GAUGES } else { C_GAUGES }
+        GAUGES
             .iter()
             .copied()
             .chain(CONNECTION_METRICS.iter().map(|m| &m.active_connections))
     }
 
-    pub fn collect_histograms(
-        is_enterprise: bool,
-    ) -> impl Iterator<Item = &'static AtomicHistogram<12>> {
-        static E_HISTOGRAMS: &[&AtomicHistogram<12>] = &[
+    // inbuxa: MON-6: one edition, every histogram
+    pub fn collect_histograms() -> impl Iterator<Item = &'static AtomicHistogram<12>> {
+        static HISTOGRAMS: &[&AtomicHistogram<12>] = &[
             &MESSAGE_INGESTION_TIME,
             &MESSAGE_INDEX_TIME,
             &MESSAGE_DELIVERY_TIME,
@@ -252,17 +251,7 @@ impl Collector {
             &STORE_BLOB_WRITE_TIME,
             &DNS_LOOKUP_TIME,
         ];
-        static C_HISTOGRAMS: &[&AtomicHistogram<12>] = &[
-            &MESSAGE_DELIVERY_TIME,
-            &MESSAGE_INCOMING_SIZE,
-            &MESSAGE_SUBMISSION_SIZE,
-        ];
-
-        if is_enterprise {
-            E_HISTOGRAMS
-        } else {
-            C_HISTOGRAMS
-        }
+        HISTOGRAMS
         .iter()
         .copied()
         .chain(CONNECTION_METRICS.iter().map(|m| &m.elapsed))

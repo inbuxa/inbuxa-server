@@ -158,7 +158,7 @@ impl BootManager {
 
 
                 #[cfg(not(feature = "enterprise"))]
-                telemetry.enable(false);
+                telemetry.enable();
 
                 if bootstrap.registry.is_bootstrap_mode() {
                     trc::event!(
@@ -241,7 +241,7 @@ impl BootManager {
             }
             StoreOp::Export(path) => {
                 // Enable telemetry
-                telemetry.enable(false);
+                telemetry.enable();
 
                 // Parse settings and backup
                 Box::pin(Core::parse(&mut bootstrap, storage))
@@ -252,7 +252,7 @@ impl BootManager {
             }
             StoreOp::Import(path) => {
                 // Enable telemetry
-                telemetry.enable(false);
+                telemetry.enable();
 
                 // Parse settings and restore
                 Box::pin(Core::parse(&mut bootstrap, storage))
