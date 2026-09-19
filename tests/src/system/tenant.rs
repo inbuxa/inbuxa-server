@@ -523,6 +523,59 @@ pub async fn test(test: &mut TestServer) {
         "test 9, outside a tenant"
     );
 
+    // MT-15: impersonate has no effect in a tenant, even when the tenant
+    // allows it and the user holds it
+    admin
+        .registry_update_object(
+            ObjectType::Tenant,
+            p_id,
+            json!({
+                Property::Permissions: Permissions::Merge(PermissionsList {
+                    enabled_permissions: Map::new(vec![Permission::Impersonate]),
+                    disabled_permissions: Map::default(),
+                })
+            }),
+        )
+        .await;
+    admin
+        .registry_update_object(
+            ObjectType::Account,
+            p_user.id(),
+            json!({
+                Property::Permissions: Permissions::Merge(PermissionsList {
+                    enabled_permissions: Map::new(vec![Permission::Impersonate]),
+                    disabled_permissions: Map::default(),
+                })
+            }),
+        )
+        .await;
+    assert!(
+        !test
+            .permissions_of(p_user.id())
+            .await
+            .has_permission(Permission::Impersonate),
+        "MT-15: impersonate"
+    );
+    assert_eq!(
+        p_user
+            .jmap_method_call(
+                "Mailbox/get",
+                json!({ "accountId": admin.id_string(), "ids": null }),
+            )
+            .await
+            .method_response()
+            .text_field("type"),
+        "forbidden",
+        "MT-1: no reach into another account's mail"
+    );
+    admin
+        .registry_update_object(
+            ObjectType::Tenant,
+            p_id,
+            json!({ Property::Permissions: Permissions::Inherit }),
+        )
+        .await;
+
     // Acceptance test 10: disabled wins over enabled in Replace (MT-14)
     admin
         .registry_update_object(

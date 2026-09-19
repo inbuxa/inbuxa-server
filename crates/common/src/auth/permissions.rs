@@ -100,6 +100,8 @@ impl Server {
             },
         };
         ceiling(base, policy).apply(&mut permissions.enabled, &mut permissions.disabled);
+        // inbuxa: MT-1, MT-15: impersonation would reach beyond the tenant
+        permissions.disabled.set(Permission::Impersonate as usize);
 
         Ok(())
     }
