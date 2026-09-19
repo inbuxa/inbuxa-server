@@ -25,11 +25,13 @@ impl PatchPath {
         let text = text.trim();
         let (head, filter, after) = match text.find('[') {
             Some(open) => {
-                let close = text.rfind(']').filter(|close| *close > open).ok_or_else(invalid)?;
+                let close = text
+                    .rfind(']')
+                    .filter(|close| *close > open)
+                    .ok_or_else(invalid)?;
                 let inner = &text[open + 1..close];
-                let filter = Filter::parse(inner).map_err(|err| {
-                    ScimError::invalid_path(format!("'{text}': {}", err.detail))
-                })?;
+                let filter = Filter::parse(inner)
+                    .map_err(|err| ScimError::invalid_path(format!("'{text}': {}", err.detail)))?;
                 let after = &text[close + 1..];
                 let after = if after.is_empty() {
                     None
@@ -85,7 +87,14 @@ mod tests {
 
     #[test]
     fn refuses_bad_paths() {
-        for text in ["", "members[", "members[value eq]", "a[b eq 1]x", "1a", "a.b[c eq 1]"] {
+        for text in [
+            "",
+            "members[",
+            "members[value eq]",
+            "a[b eq 1]x",
+            "1a",
+            "a.b[c eq 1]",
+        ] {
             assert!(PatchPath::parse(text).is_err(), "{text}");
         }
     }

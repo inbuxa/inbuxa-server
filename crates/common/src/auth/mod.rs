@@ -69,7 +69,8 @@ pub struct DomainCache {
 
 pub const DOMAIN_FLAG_RELAY: u8 = 1;
 pub const DOMAIN_FLAG_SUB_ADDRESSING: u8 = 1 << 1;
-
+// inbuxa: SCIM-15, SCIM-58
+pub const DOMAIN_FLAG_SCIM: u8 = 1 << 2;
 
 #[derive(Debug, Clone, Default)]
 pub struct AccountCache {
@@ -329,4 +330,8 @@ impl DomainCache {
         self.names.first().map(|s| s.as_ref()).unwrap_or_default()
     }
 
+    // inbuxa: SCIM-15, SCIM-58
+    pub fn allows_scim(&self) -> bool {
+        self.flags & DOMAIN_FLAG_SCIM != 0
+    }
 }

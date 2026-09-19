@@ -478,6 +478,12 @@ impl ParseHttp for Server {
                     return crate::branding::rsvp_page(self, RSVP_PAGE).await;
                 }
             }
+            // inbuxa: SCIM 2.0 provisioning (feature 7)
+            "scim" => {
+                if path.next() == Some("v2") {
+                    return Ok(crate::scim::handle(self, &mut req, &session).await);
+                }
+            }
             // inbuxa: BT-5: the logo that applies, anonymous
             "logo" if req.method() == Method::GET => {
                 self.is_http_anonymous_request_allowed(session.remote_ip)

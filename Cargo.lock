@@ -3337,6 +3337,7 @@ dependencies = [
  "registry",
  "rkyv",
  "scim",
+ "scim-proto",
  "serde",
  "serde_json",
  "services",
@@ -7417,8 +7418,11 @@ dependencies = [
 name = "scim"
 version = "0.16.22"
 dependencies = [
+ "ahash",
+ "base64 0.23.1",
  "common",
  "directory",
+ "hmac 0.13.0",
  "http_proto",
  "hyper",
  "icu_locale",
@@ -7428,6 +7432,7 @@ dependencies = [
  "scim-proto",
  "serde",
  "serde_json",
+ "sha2 0.11.0",
  "store",
  "trc",
  "types",

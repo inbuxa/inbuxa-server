@@ -13,6 +13,7 @@ smtp = { path = "../smtp" }
 jmap = { path = "../jmap" }
 dav = { path = "../dav" }
 scim = { path = "../scim" }
+scim-proto = { path = "../scim-proto" }
 groupware = { path = "../groupware" }
 http_proto = { path = "../http-proto" }
 jmap_proto = { path = "../jmap-proto" }

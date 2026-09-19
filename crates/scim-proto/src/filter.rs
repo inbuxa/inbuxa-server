@@ -133,7 +133,10 @@ pub enum Filter {
     Or(Box<Filter>, Box<Filter>),
     Not(Box<Filter>),
     /// `attr[filter]`, with the inner filter's paths relative to `attr`.
-    ValuePath { path: AttrPath, filter: Box<Filter> },
+    ValuePath {
+        path: AttrPath,
+        filter: Box<Filter>,
+    },
 }
 
 impl Filter {
@@ -280,18 +283,18 @@ impl Parser {
         let inner = self.or()?;
         match self.next() {
             Some(Token::Close) => Ok(inner),
-            _ => Err(ScimError::invalid_filter("A '(' without its ')' in the filter")),
+            _ => Err(ScimError::invalid_filter(
+                "A '(' without its ')' in the filter",
+            )),
         }
     }
 
     fn unary(&mut self) -> Result<Filter, ScimError> {
         match self.next() {
-            Some(Token::Word(word)) if word.eq_ignore_ascii_case("not") => {
-                match self.next() {
-                    Some(Token::Open) => Ok(Filter::Not(Box::new(self.group()?))),
-                    _ => Err(ScimError::invalid_filter("'not' must be followed by '('")),
-                }
-            }
+            Some(Token::Word(word)) if word.eq_ignore_ascii_case("not") => match self.next() {
+                Some(Token::Open) => Ok(Filter::Not(Box::new(self.group()?))),
+                _ => Err(ScimError::invalid_filter("'not' must be followed by '('")),
+            },
             Some(Token::Open) => self.group(),
             Some(Token::Word(word)) => {
                 let path = AttrPath::parse(&word).ok_or_else(|| {
@@ -385,11 +388,14 @@ mod tests {
             Filter::parse("emails.value eq \"a\\\"b\"").unwrap(),
             eq("emails.value", json!("a\"b"))
         );
-        let urn = Filter::parse("urn:ietf:params:scim:schemas:core:2.0:User:userName eq \"x\"")
-            .unwrap();
+        let urn =
+            Filter::parse("urn:ietf:params:scim:schemas:core:2.0:User:userName eq \"x\"").unwrap();
         match urn {
             Filter::Compare { path, .. } => {
-                assert_eq!(path.urn.as_deref(), Some("urn:ietf:params:scim:schemas:core:2.0:User"));
+                assert_eq!(
+                    path.urn.as_deref(),
+                    Some("urn:ietf:params:scim:schemas:core:2.0:User")
+                );
                 assert!(path.is("username", None));
             }
             other => panic!("{other:?}"),
@@ -426,7 +432,11 @@ mod tests {
             "1abc eq \"a\"",
         ] {
             let err = Filter::parse(text).unwrap_err();
-            assert_eq!(err.scim_type, Some(crate::ScimType::InvalidFilter), "{text}");
+            assert_eq!(
+                err.scim_type,
+                Some(crate::ScimType::InvalidFilter),
+                "{text}"
+            );
         }
     }
 }

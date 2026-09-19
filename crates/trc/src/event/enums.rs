@@ -6,7 +6,8 @@
 
 // This file is auto-generated. Do not edit directly.
 
-pub const TOTAL_EVENT_COUNT: usize = 637;
+// inbuxa: 637 to 641 are the fork's SCIM events (SCIM-54)
+pub const TOTAL_EVENT_COUNT: usize = 642;
 pub const TOTAL_METRIC_COUNT: usize = 369;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -42,6 +43,8 @@ pub enum EventType {
     Queue(QueueEvent),
     Registry(RegistryEvent),
     Resource(ResourceEvent),
+    // inbuxa: SCIM-54
+    Scim(ScimEvent),
     Security(SecurityEvent),
     Server(ServerEvent),
     Sieve(SieveEvent),
@@ -622,6 +625,17 @@ pub enum ResourceEvent {
     DownloadExternal = 387,
     ApplicationUpdated = 601,
     ApplicationUnpacked = 602,
+}
+
+// inbuxa: SCIM-54: every write an identity provider makes
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[repr(u16)]
+pub enum ScimEvent {
+    ResourceCreated = 637,
+    ResourceUpdated = 638,
+    ResourceSuspended = 639,
+    ResourceReactivated = 640,
+    ResourceDeleted = 641,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]

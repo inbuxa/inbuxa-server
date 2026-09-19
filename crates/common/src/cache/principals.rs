@@ -158,7 +158,11 @@ impl Server {
                 if domain.allow_relaying {
                     flags |= DOMAIN_FLAG_RELAY;
                 }
-
+                // inbuxa: SCIM-15, SCIM-58: the domain is open to SCIM, and SCIM is
+                // authoritative for its accounts
+                if domain.allow_scim_provisioning {
+                    flags |= crate::auth::DOMAIN_FLAG_SCIM;
+                }
 
                 let sub_addressing_custom = match domain.sub_addressing {
                     SubAddressing::Enabled => {

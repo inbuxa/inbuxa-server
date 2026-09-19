@@ -12,6 +12,7 @@ pub mod branding; // inbuxa: branding
 pub mod form;
 pub mod live; // inbuxa: monitoring (MON-20 to MON-24)
 pub mod request;
+pub mod scim; // inbuxa: SCIM 2.0 provisioning
 
 use common::Inner;
 use std::sync::Arc;

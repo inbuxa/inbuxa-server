@@ -796,6 +796,14 @@ impl AccessToken {
 }
 
 impl AccessTokenInner {
+    /// inbuxa: SCIM-27: the account's own effective permission, from its
+    /// roles, its own settings and its tenant, before a credential narrows it
+    pub fn account_has_permission(&self, permission: Permission) -> bool {
+        self.scopes
+            .first()
+            .is_some_and(|scope| scope.permissions.get(permission as usize))
+    }
+
     pub fn from_id(account_id: u32) -> Self {
         Self {
             account_id,
