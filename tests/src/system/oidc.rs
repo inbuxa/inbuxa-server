@@ -93,13 +93,15 @@ pub async fn test(test: &mut TestServer) {
     let admin = test.account("admin@example.org");
 
     // Set test parameters
+    // inbuxa: five times upstream's lifetimes. Expiry counts whole seconds, so
+    // a 1s token could lapse before a debug build's next request.
     let settings = OidcProvider {
-        access_token_expiry: registry::schema::prelude::Duration::from_millis(1000),
-        auth_code_expiry: registry::schema::prelude::Duration::from_millis(1000),
+        access_token_expiry: registry::schema::prelude::Duration::from_millis(5000),
+        auth_code_expiry: registry::schema::prelude::Duration::from_millis(5000),
         auth_code_max_attempts: 1,
-        user_code_expiry: registry::schema::prelude::Duration::from_millis(1000),
-        refresh_token_expiry: registry::schema::prelude::Duration::from_millis(3000),
-        refresh_token_renewal: registry::schema::prelude::Duration::from_millis(2000),
+        user_code_expiry: registry::schema::prelude::Duration::from_millis(5000),
+        refresh_token_expiry: registry::schema::prelude::Duration::from_millis(15000),
+        refresh_token_renewal: registry::schema::prelude::Duration::from_millis(10000),
         anonymous_client_registration: true,
         require_client_registration: true,
         signature_algorithm: JwtSignatureAlgorithm::Rs256,
@@ -722,7 +724,7 @@ pub async fn test(test: &mut TestServer) {
     );
 
     // Let the code expire and make sure it's invalidated
-    tokio::time::sleep(Duration::from_secs(1)).await;
+    tokio::time::sleep(Duration::from_secs(6)).await; // inbuxa: past the 5s code
     assert_eq!(
         http.post::<LoginResponse>(
             "/api/auth",
@@ -835,19 +837,19 @@ pub async fn test(test: &mut TestServer) {
     );
 
     // Wait 1 second and make sure the access token expired
-    tokio::time::sleep(Duration::from_secs(1)).await;
+    tokio::time::sleep(Duration::from_secs(6)).await; // inbuxa: past the 5s token
     assert_unauthorized("https://127.0.0.1:8899", &token).await;
 
     // Wait another second for the refresh token to be about to expire
     // and expect a new refresh token
-    tokio::time::sleep(Duration::from_secs(1)).await;
+    tokio::time::sleep(Duration::from_secs(2)).await; // inbuxa: ~8s in, inside renewal
     let (_, new_refresh_token, _) =
         unwrap_token_response(post(&metadata.token_endpoint, &refresh_params).await);
     //println!("New refresh token: {:?}", new_refresh_token);
     assert_ne!(new_refresh_token, None);
 
     // Wait another second and make sure the refresh token expired
-    tokio::time::sleep(Duration::from_secs(1)).await;
+    tokio::time::sleep(Duration::from_secs(8)).await; // inbuxa: ~16s in, past 15s
     assert_eq!(
         post::<TokenResponse>(&metadata.token_endpoint, &refresh_params).await,
         TokenResponse::Error {
