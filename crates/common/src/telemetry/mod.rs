@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
  */
 
+pub mod alerts; // inbuxa: monitoring (MON-25 to MON-30)
 pub mod metrics;
 pub mod tracers;
 pub mod webhooks;

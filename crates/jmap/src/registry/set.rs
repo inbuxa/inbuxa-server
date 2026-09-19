@@ -606,7 +606,23 @@ impl RegistrySet for Server {
                     }
 
                     // Validate expressions
-                    if let Some(expressions) = new_object.inner.expression_ctxs() {
+                    // inbuxa: MON-25: an alert condition may name metrics with underscores
+                    let alert_condition = match &new_object.inner {
+                        ObjectInner::Alert(alert) => Some(
+                            common::telemetry::alerts::rewrite_condition(&alert.condition),
+                        ),
+                        _ => None,
+                    };
+                    let expressions = match (&new_object.inner, &alert_condition) {
+                        (ObjectInner::Alert(alert), Some(condition)) => {
+                            Some(vec![registry::schema::prelude::ExpressionContext {
+                                expr: condition,
+                                ..alert.ctx_condition()
+                            }])
+                        }
+                        _ => new_object.inner.expression_ctxs(),
+                    };
+                    if let Some(expressions) = expressions {
                         let mut bp = Bootstrap::new_uninitialized(self.registry().clone());
 
                         for expression in expressions {

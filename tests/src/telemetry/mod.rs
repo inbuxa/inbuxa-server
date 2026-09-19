@@ -4,7 +4,6 @@
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
  */
 
-#[cfg(feature = "pending-rebuild")] // inbuxa: pending-rebuild, see docs/spec/features/
 pub mod alerts;
 pub mod metrics;
 pub mod tracing;
@@ -56,7 +55,6 @@ pub async fn telemetry_tests() {
         .await;
     test.insert_account(admin);
 
-    #[cfg(feature = "pending-rebuild")]
     alerts::test(&test).await;
     metrics::test(&test).await;
     tracing::test(&test).await;
