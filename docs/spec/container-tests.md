@@ -63,6 +63,30 @@ STORE=PostgreSqlReplicated cargo test -p tests --features postgres,redis \
     replica_cluster_tests -- --ignored
 ```
 
+## What a plain regression leaves failing
+
+`STORE=RocksDb cargo test -p tests -- --test-threads=1` was 86 passed, 4
+failed, 27 ignored on 2026-09-19. None of the four was a fork regression,
+and three are the invocation or the environment rather than the code:
+
+- `smtp::inbound::antispam::antispam` fails every time. Its rules URL
+  defaults to `file:///Users/me/code/spam-filter/spam-filter-rules.json.gz`,
+  a path from the upstream import that exists on no machine here, so no
+  rules load and every tag scores 0.00 against an expectation full of
+  weights. Give it `SPAM_RULES_URL`.
+- `cluster::broadcast::cluster_tests` needs `COORDINATOR=Redis` (or `Nats`)
+  and a store the nodes can share: it passes on `STORE=PostgreSql`, and
+  can't work on RocksDb, where each node gets its own.
+- `smtp::outbound::lmtp::lmtp_delivery` counted three DSNs where it wanted
+  four, and passes on its own: queue timing under a loaded sequential run.
+- `automation::automation_tests` fails against pebble with
+  `400 malformed: "Cannot update challenge with status processing, only
+  status pending"`. `crates/common/src/network/acme/order.rs` re-POSTs the
+  challenge each time it polls an authorization that is still pending;
+  pebble accepts that only while the challenge itself is pending. Upstream
+  code, untouched by the fork, and unfixed: worth treating as a real
+  renewal bug rather than a test artefact.
+
 ## When one fails
 
 The containers are reused between runs, so a suite that fails in a way its
