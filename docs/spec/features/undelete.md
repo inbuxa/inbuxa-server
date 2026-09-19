@@ -190,6 +190,14 @@ Task type `RestoreArchivedItem`, carrying the `accountId`, the
   addition: upstream offers no restore. A deleted account disappears from the
   account list at once, and only a pending `DestroyAccount` task, due at the
   end of the period, shows it's still held (observed 6).
+- **UD-17a.** **Decision** (2026-09-18) on sharing: "as it was" includes
+  shares, in both directions. At deletion, upstream revokes what the account
+  shared with others, and leaves what others shared with it in place (inert,
+  since it can't sign in). inbuxa-server records both directions in the
+  fork's own subspace and revokes both, so nobody reaches a deleted account's
+  data and it reaches nobody's. Restoring reinstates each share whose other
+  account still exists, with its permissions. Destroying it for good drops
+  the record.
 
 ## Interfaces
 
