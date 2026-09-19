@@ -56,6 +56,9 @@ impl Response<'_> {
                         GetResponseMethod::DeletedAccount(response) => {
                             response.eval_jptr(path, &mut results)
                         }
+                        GetResponseMethod::AiLimits(response) => {
+                            response.eval_jptr(path, &mut results)
+                        }
                         GetResponseMethod::Principal(response) => {
                             response.eval_jptr(path, &mut results)
                         }

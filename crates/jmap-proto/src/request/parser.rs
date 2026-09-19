@@ -160,6 +160,13 @@ impl<'de> Visitor<'de> for CallVisitor {
                     return Err(de::Error::invalid_length(1, &self));
                 }
             },
+            (MethodFunction::Get, MethodObject::AiLimits) => match seq.next_element() {
+                Ok(Some(value)) => RequestMethod::Get(GetRequestMethod::AiLimits(value)),
+                Err(err) => RequestMethod::invalid(err),
+                Ok(None) => {
+                    return Err(de::Error::invalid_length(1, &self));
+                }
+            },
             (MethodFunction::Get, MethodObject::VacationResponse) => match seq.next_element() {
                 Ok(Some(value)) => RequestMethod::Get(GetRequestMethod::VacationResponse(value)),
                 Err(err) => RequestMethod::invalid(err),
@@ -313,6 +320,13 @@ impl<'de> Visitor<'de> for CallVisitor {
             },
             (MethodFunction::Set, MethodObject::DeletedAccount) => match seq.next_element() {
                 Ok(Some(value)) => RequestMethod::Set(SetRequestMethod::DeletedAccount(value)),
+                Err(err) => RequestMethod::invalid(err),
+                Ok(None) => {
+                    return Err(de::Error::invalid_length(1, &self));
+                }
+            },
+            (MethodFunction::Set, MethodObject::AiLimits) => match seq.next_element() {
+                Ok(Some(value)) => RequestMethod::Set(SetRequestMethod::AiLimits(value)),
                 Err(err) => RequestMethod::invalid(err),
                 Ok(None) => {
                     return Err(de::Error::invalid_length(1, &self));

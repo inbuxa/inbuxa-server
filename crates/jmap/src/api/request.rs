@@ -168,6 +168,9 @@ impl RequestHandler for Server {
                                     SetResponseMethod::DeletedAccount(set_response) => {
                                         set_response.update_created_ids(&mut response);
                                     }
+                                    SetResponseMethod::AiLimits(set_response) => {
+                                        set_response.update_created_ids(&mut response);
+                                    }
                                     SetResponseMethod::AddressBook(set_response) => {
                                         set_response.update_created_ids(&mut response);
                                     }
@@ -313,6 +316,13 @@ impl RequestHandler for Server {
                 GetRequestMethod::DeletedAccount(mut req) => {
                     resolve_account_id(&mut req.account_id, method_name.obj, access_token)?;
                     crate::inbuxa::deleted_account::get(self, access_token, *req)
+                        .await?
+                        .into()
+                }
+                // inbuxa: inbuxa:AiLimits/get
+                GetRequestMethod::AiLimits(mut req) => {
+                    resolve_account_id(&mut req.account_id, method_name.obj, access_token)?;
+                    crate::inbuxa::ai_limits::get(self, access_token, *req)
                         .await?
                         .into()
                 }
@@ -547,6 +557,13 @@ impl RequestHandler for Server {
                 SetRequestMethod::DeletedAccount(mut req) => {
                     resolve_account_id(&mut req.account_id, method_name.obj, access_token)?;
                     crate::inbuxa::deleted_account::set(self, access_token, *req)
+                        .await?
+                        .into()
+                }
+                // inbuxa: inbuxa:AiLimits/set
+                SetRequestMethod::AiLimits(mut req) => {
+                    resolve_account_id(&mut req.account_id, method_name.obj, access_token)?;
+                    crate::inbuxa::ai_limits::set(self, access_token, *req)
                         .await?
                         .into()
                 }

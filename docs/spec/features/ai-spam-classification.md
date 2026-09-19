@@ -470,6 +470,37 @@ Not for observation, but open:
 10. ~~The name of the fork's limits singleton.~~ Settled 2026-09-18:
     `inbuxa:AiLimits` (see "Added by inbuxa-server").
 
+## Implementation status
+
+Built 2026-09-19 from this spec, clean-room, under the multi-tenancy hand-off
+brief's rules. The rules live in `crates/features` (`inbuxa-features`, module
+`ai`); the model call in `crates/common/src/enterprise/llm.rs`, at the path
+the shared tests name; the classifier step in
+`crates/spam-filter/src/analysis/llm.rs`; `inbuxa:AiLimits` in
+`crates/jmap/src/inbuxa/ai_limits.rs`; upstream files carry hooks marked
+`inbuxa:`. Acceptance tests 1 and 3 to 21 pass as `tests/src/system/ai.rs`,
+against a stub model on loopback. Test 2 passes as the shared `llm` case in
+`tests/src/smtp/inbound/antispam.rs`, re-enabled with its mock reading the
+last message.
+
+- **AI-1 to AI-28:** built.
+- **Test 22 (compat)** is written as `ai_compat`, ignored, and unrun until a
+  copy of INBUXA's data is provided. It checks the twelve `LLM_*` tags and
+  scores in observed 2.
+- **No model is calibrated.** The code speaks the OpenAI-compatible API and
+  has only met stubs. How well a given local model follows the default
+  prompt, and how accurate it is, isn't measured yet.
+- **Known limits, not requirements of this spec:**
+  - The call limits (AI-10, AI-11, AI-24) are per server node, as the spec
+    says; a cluster of n nodes can have n times `maxConcurrentCalls` in
+    flight.
+  - The shared antispam suite's setup reads spam rules from a developer's own
+    checkout path. It now carries on when that file is missing (a test-only
+    change marked `inbuxa:`), so its `llm` case runs; its other cases still
+    need the rules file.
+  - Test 21's warning count is checked only when `registry.build-warning` is
+    a metric of interest; the warning itself is always logged.
+
 ## Observed
 
 Settled on 2026-09-18 against INBUXA's live Enterprise server (Stalwart

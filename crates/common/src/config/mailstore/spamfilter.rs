@@ -426,13 +426,24 @@ impl SpamFilterLists {
                     &tag.tag,
                     SpamFilterAction::Allow(tag.score.into_inner() as f32),
                 ),
-                SpamTag::Discard(tag) => lists
-                    .scores
-                    .insert_pattern(&tag.tag, SpamFilterAction::Discard),
-                SpamTag::Reject(tag) => lists
-                    .scores
-                    .insert_pattern(&tag.tag, SpamFilterAction::Reject),
+                SpamTag::Discard(tag) => {
+                    warn_llm_refusal(&tag.tag);
+                    lists
+                        .scores
+                        .insert_pattern(&tag.tag, SpamFilterAction::Discard)
+                }
+                SpamTag::Reject(tag) => {
+                    warn_llm_refusal(&tag.tag);
+                    lists
+                        .scores
+                        .insert_pattern(&tag.tag, SpamFilterAction::Reject)
+                }
             }
+        }
+
+        // inbuxa: AI-2: at start and each reload, models off this network are flagged
+        for model in bp.list_infallible::<registry::schema::structs::AiModel>().await {
+            crate::enterprise::llm::warn_if_remote(&model.object).await;
         }
 
         for ext in bp.list_infallible::<SpamFileExtension>().await {
@@ -738,5 +749,18 @@ mod tests {
             spam_status(Some(50)),
             SpamStatus::MaybeSpam(fraction) if fraction == 0.5
         ));
+    }
+}
+
+// inbuxa: AI-13: a Discard or Reject on the model's tag counts as no entry
+fn warn_llm_refusal(tag: &str) {
+    if inbuxa_features::ai::answer::is_llm_tag(tag) {
+        trc::event!(
+            Registry(trc::RegistryEvent::BuildWarning),
+            Details = format!(
+                "Spam tag {tag} discards or rejects, which the language model's opinion alone \
+                 may not do: it scores 0 (AI-13)"
+            ),
+        );
     }
 }

@@ -113,6 +113,8 @@ pub struct SpamFilterResult {
     pub rbl_url_checks: usize,
     pub rbl_email_checks: usize,
     pub llm_result: Option<(String, String)>,
+    // inbuxa: AI-13: how far the model's tag may move the score (added, subtracted)
+    pub llm_bounds: Option<(f32, f32)>,
 }
 
 pub struct SpamFilterContext<'x> {

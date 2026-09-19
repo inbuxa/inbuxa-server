@@ -67,6 +67,7 @@ pub mod i18n;
 pub mod ipc;
 pub mod manager;
 pub mod network;
+pub mod enterprise; // inbuxa: rebuilt features (AI spam classification)
 pub mod scripts;
 pub mod sharing;
 pub mod storage;

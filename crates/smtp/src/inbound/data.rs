@@ -794,6 +794,12 @@ impl<T: SessionStream> Session<T> {
         // Update size
         let original_message = raw_message.as_slice();
         let raw_message = edited_message.as_deref().unwrap_or(raw_message.as_slice());
+        // inbuxa: AI-15: a sender can't plant its own X-Spam-LLM
+        let stripped_message = spam_result
+            .is_some()
+            .then(|| inbuxa_features::ai::answer::strip_header(raw_message))
+            .flatten();
+        let raw_message = stripped_message.as_deref().unwrap_or(raw_message);
         message.message.size = (raw_message.len() + headers.len()) as u64;
 
         // Verify queue quota

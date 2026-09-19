@@ -100,6 +100,7 @@ pub enum GetResponseMethod {
     Registry(GetResponse<Registry>),
     MaskedEmail(GetResponse<crate::object::fastmail_masked_email::FastmailMaskedEmail>),
     DeletedAccount(GetResponse<crate::object::inbuxa_deleted_account::DeletedAccount>),
+    AiLimits(GetResponse<crate::object::inbuxa_ai_limits::AiLimits>),
 }
 
 #[derive(Debug, serde::Serialize)]
@@ -123,6 +124,7 @@ pub enum SetResponseMethod {
     Registry(Box<SetResponse<Registry>>),
     MaskedEmail(Box<SetResponse<crate::object::fastmail_masked_email::FastmailMaskedEmail>>),
     DeletedAccount(Box<SetResponse<crate::object::inbuxa_deleted_account::DeletedAccount>>),
+    AiLimits(Box<SetResponse<crate::object::inbuxa_ai_limits::AiLimits>>),
 }
 
 #[derive(Debug, serde::Serialize)]
@@ -279,6 +281,19 @@ impl<'x> From<GetResponse<crate::object::fastmail_masked_email::FastmailMaskedEm
 impl<'x> From<SetResponse<crate::object::fastmail_masked_email::FastmailMaskedEmail>> for ResponseMethod<'x> {
     fn from(value: SetResponse<crate::object::fastmail_masked_email::FastmailMaskedEmail>) -> Self {
         ResponseMethod::Set(SetResponseMethod::MaskedEmail(Box::new(value)))
+    }
+}
+
+// inbuxa: AI call limits
+impl<'x> From<GetResponse<crate::object::inbuxa_ai_limits::AiLimits>> for ResponseMethod<'x> {
+    fn from(value: GetResponse<crate::object::inbuxa_ai_limits::AiLimits>) -> Self {
+        ResponseMethod::Get(GetResponseMethod::AiLimits(value))
+    }
+}
+
+impl<'x> From<SetResponse<crate::object::inbuxa_ai_limits::AiLimits>> for ResponseMethod<'x> {
+    fn from(value: SetResponse<crate::object::inbuxa_ai_limits::AiLimits>) -> Self {
+        ResponseMethod::Set(SetResponseMethod::AiLimits(Box::new(value)))
     }
 }
 

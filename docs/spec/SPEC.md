@@ -279,7 +279,7 @@ is written.
 | 2 | Masked email | Per-sender disposable addresses that deliver to the account | Existing addresses must keep delivering (§3.4). Built 2026-09-18 in `crates/features`; status in `features/masked-email.md`. |
 | 3 | Undelete | Deleted mail held for a set period and restorable | Existing archived items must stay restorable. Built 2026-09-18 in `crates/features`; status in `features/undelete.md`. |
 | 4 | Branding and templates | Operator logo, and the text of calendar alarm and invitation emails | INBUXA's branding is the default. Built 2026-09-18 in `crates/features`; status in `features/branding-and-templates.md`. |
-| 5 | AI spam classification | An optional model's opinion as one spam signal, and a Sieve function that asks a model | Local and auditable model only: no hosted API by default. Spec: `features/ai-spam-classification.md`. |
+| 5 | AI spam classification | An optional model's opinion as one spam signal, and a Sieve function that asks a model | Local and auditable model only: no hosted API by default. Built 2026-09-19 in `crates/features`; status in `features/ai-spam-classification.md`. |
 | 6 | Monitoring history, live tracing, alerts | Stored metrics and traces, a live trace view, and threshold alerts | ihasmail's dashboard shows them. Spec: `features/monitoring.md`. |
 | 7 | SCIM 2.0 provisioning | Accounts and groups managed by an identity provider | From RFC 7643 and RFC 7644. The largest piece. Spec: `features/scim.md`. |
 | 8 | Scale-out storage | SQL read replicas; sharded blob and in-memory stores | For large installs only. Spec: `features/scale-out-storage.md`. |

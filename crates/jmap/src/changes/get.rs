@@ -415,6 +415,7 @@ impl IntermediateChangesResponse {
             | MethodObject::Quota
             | MethodObject::MaskedEmail
             | MethodObject::DeletedAccount
+            | MethodObject::AiLimits
             | MethodObject::Registry(_) => unreachable!(),
         })
     }

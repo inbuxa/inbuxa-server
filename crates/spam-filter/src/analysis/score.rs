@@ -16,6 +16,7 @@ use crate::{
         recipient::SpamFilterAnalyzeRecipient, replyto::SpamFilterAnalyzeReplyTo,
         rules::SpamFilterAnalyzeRules, subject::SpamFilterAnalyzeSubject,
         url::SpamFilterAnalyzeUrl,
+        llm::SpamFilterAnalyzeLlm,
     },
 };
 use common::{Server, config::mailstore::spamfilter::SpamFilterAction};
@@ -55,6 +56,21 @@ impl SpamFilterAnalyzeScore for Server {
         let mut rbl_count = 0;
 
         for tag in &ctx.result.tags {
+            // inbuxa: AI-13: the model's tag moves the score only so far, and
+            // never discards or rejects on its own
+            if inbuxa_features::ai::answer::is_llm_tag(tag) {
+                let (max_added, max_subtracted) = ctx.result.llm_bounds.unwrap_or((5.0, 1.0));
+                let score = match self.core.spam.lists.scores.get(tag) {
+                    Some(SpamFilterAction::Allow(score)) => {
+                        inbuxa_features::ai::answer::clamp(*score, max_added, max_subtracted)
+                    }
+                    _ => 0.0,
+                };
+                ctx.result.score += score;
+                header_len += tag.len() + 10;
+                results.push((tag.as_str(), score));
+                continue;
+            }
             let score = match self.core.spam.lists.scores.get(tag) {
                 Some(SpamFilterAction::Allow(score)) => *score,
                 Some(SpamFilterAction::Discard) => {
@@ -139,8 +155,12 @@ impl SpamFilterAnalyzeScore for Server {
             }
             headers.push_str("\r\n");
 
-            if let Some((category, explanation)) = &ctx.result.llm_result {
-                let _ = write!(&mut headers, "X-Spam-LLM: {category} ({explanation})\r\n",);
+            // inbuxa: AI-15: sanitized, encoded and folded
+            if let Some((tag, explanation)) = &ctx.result.llm_result {
+                headers.push_str(&inbuxa_features::ai::answer::header(
+                    tag,
+                    Some(explanation.as_str()).filter(|e| !e.is_empty()),
+                ));
             }
 
             let is_spam = final_score >= self.core.spam.scores.spam_threshold;
@@ -238,6 +258,10 @@ impl SpamFilterAnalyzeScore for Server {
 
         // Model classification
         self.spam_filter_analyze_classify(ctx).await;
+
+        // inbuxa: AI-17: the language model, after every other analysis and
+        // before user-defined rules, so rules can test its tags
+        self.spam_filter_analyze_llm(ctx).await;
 
         // User-defined rules
         self.spam_filter_analyze_rules(ctx).await;

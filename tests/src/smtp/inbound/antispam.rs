@@ -4,17 +4,12 @@
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
  */
 
-#[cfg(feature = "pending-rebuild")] // inbuxa: pending-rebuild, see docs/spec/features/
 use common::enterprise::llm::{
     ChatCompletionChoice, ChatCompletionRequest, ChatCompletionResponse, Message,
 };
-#[cfg(feature = "pending-rebuild")]
 use spam_filter::analysis::llm::SpamFilterAnalyzeLlm;
-#[cfg(feature = "pending-rebuild")]
 use crate::utils::http_server::{HttpMessage, spawn_mock_http_server};
-#[cfg(feature = "pending-rebuild")]
 use http_proto::{JsonResponse, ToHttpResponse};
-#[cfg(feature = "pending-rebuild")]
 use hyper::Method;
 use crate::utils::{
     dns::DnsCache,
@@ -158,7 +153,9 @@ async fn antispam() {
             status: TaskStatus::now(),
         }))
         .await;
-    test.wait_for_tasks().await;
+    // inbuxa: a rules file that can't be read is retried later; don't wait
+    // for that retry (the path above is a developer's own checkout)
+    test.wait_for_tasks_skip_not_due().await;
     admin.reload_settings().await;
     admin.reload_lookup_stores().await;
     test.reload_core();
@@ -226,7 +223,6 @@ async fn antispam() {
     }
 
     // Spawn mock OpenAI server
-    #[cfg(feature = "pending-rebuild")] // inbuxa: pending-rebuild, see docs/spec/features/
     let _tx = spawn_mock_http_server(
         &test,
         Arc::new(|req: HttpMessage| {
@@ -235,8 +231,13 @@ async fn antispam() {
             let req = serde_json::from_slice::<ChatCompletionRequest>(req.body.as_ref().unwrap())
                 .unwrap();
             assert_eq!(req.model, "gpt-dummy");
-            let message = &req.messages[0].content;
-            assert!(message.contains("You are an AI assistant specialized in analyzing email"));
+            // inbuxa: AI-6: the prompt is the system message, the email the last
+            assert!(
+                req.messages[0]
+                    .content
+                    .contains("You are an AI assistant specialized in analyzing email")
+            );
+            let message = &req.messages.last().unwrap().content;
 
             JsonResponse::new(&ChatCompletionResponse {
                 created: 0,
@@ -294,10 +295,6 @@ async fn antispam() {
             .as_ref()
             .is_some_and(|s| !s.eq_ignore_ascii_case(test_name))
         {
-            continue;
-        }
-        // inbuxa: pending-rebuild. The LLM case needs the AI classifier rebuilt.
-        if cfg!(not(feature = "pending-rebuild")) && test_name == "llm" {
             continue;
         }
 
@@ -668,7 +665,6 @@ async fn antispam() {
                 "pyzor" => {
                     server.spam_filter_analyze_pyzor(&mut spam_ctx).await;
                 }
-                #[cfg(feature = "pending-rebuild")] // inbuxa: pending-rebuild, see docs/spec/features/
                 "llm" => {
                     server.spam_filter_analyze_llm(&mut spam_ctx).await;
                 }

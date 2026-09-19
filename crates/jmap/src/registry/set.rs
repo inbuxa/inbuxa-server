@@ -588,6 +588,15 @@ impl RegistrySet for Server {
                         continue 'outer;
                     }
 
+                    // inbuxa: AI-12, AI-18: the classifier and its models follow their rules
+                    match inbuxa_features::ai::writes::check(self.registry(), &new_object).await? {
+                        Ok(()) => {}
+                        Err(err) => {
+                            set.failed(modification, err);
+                            continue 'outer;
+                        }
+                    }
+
                     // inbuxa: UD-16: a kept account's addresses stay its own
                     if let Some(err) =
                         crate::inbuxa::deleted_account::reserved(self, stored, &new_object).await?
@@ -660,6 +669,10 @@ impl RegistrySet for Server {
                     let object_id = match (modification, result) {
                         (Modification::Update { id, object }, RegistryWriteResult::Success(_)) => {
                             cache_invalidator.process_update(id, &object, &new_object);
+                            // inbuxa: AI-2: content leaving the network is flagged
+                            if let ObjectInner::AiModel(model) = &new_object.inner {
+                                self.ai_warn_if_remote(model).await;
+                            }
                             // inbuxa: MT-8: what moves with a domain follows it
                             for (id, old, new) in inbuxa_features::tenancy::writes::after_save(
                                 &self.core.storage.data,
@@ -703,6 +716,10 @@ impl RegistrySet for Server {
                             RegistryWriteResult::Success(id),
                         ) => {
                             cache_invalidator.process_create(&new_object);
+                            // inbuxa: AI-2: content leaving the network is flagged
+                            if let ObjectInner::AiModel(model) = &new_object.inner {
+                                self.ai_warn_if_remote(model).await;
+                            }
                             // inbuxa: ME-7a
                             if let ObjectInner::MaskedEmail(mask) = &new_object.inner {
                                 crate::inbuxa::masked_email::created(self, id, mask).await?;

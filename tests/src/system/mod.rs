@@ -6,6 +6,7 @@
 
 pub mod antispam;
 pub mod authentication;
+pub mod ai;
 pub mod authorization;
 pub mod branding;
 pub mod crypto;

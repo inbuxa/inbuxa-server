@@ -23,6 +23,7 @@ pub mod from;
 pub mod headers;
 pub mod html;
 pub mod init;
+pub mod llm; // inbuxa: AI spam classification
 pub mod ip;
 pub mod messageid;
 pub mod mime;

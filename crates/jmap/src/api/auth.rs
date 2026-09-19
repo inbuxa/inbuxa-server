@@ -73,6 +73,8 @@ impl JmapAuthorization for AccessToken {
                 GetRequestMethod::MaskedEmail(_) => Permission::SysMaskedEmailGet,
                 // inbuxa: deleted accounts (UD-17)
                 GetRequestMethod::DeletedAccount(_) => Permission::SysAccountGet,
+                // inbuxa: AI call limits, with the classifier's permissions
+                GetRequestMethod::AiLimits(_) => Permission::SysSpamLlmGet,
                 GetRequestMethod::Principal(_) => Permission::JmapPrincipalGet,
                 GetRequestMethod::Quota(_) => Permission::JmapQuotaGet,
                 GetRequestMethod::Blob(_) => Permission::JmapBlobGet,
@@ -160,6 +162,14 @@ impl JmapAuthorization for AccessToken {
                         Permission::SysAccountCreate,
                         Permission::SysAccountCreate,
                         Permission::SysAccountDestroy,
+                    ),
+                    // inbuxa: AI call limits, with the classifier's permissions
+                    SetRequestMethod::AiLimits(s) => validate_set(
+                        s,
+                        self,
+                        Permission::SysSpamLlmUpdate,
+                        Permission::SysSpamLlmUpdate,
+                        Permission::SysSpamLlmUpdate,
                     ),
                     SetRequestMethod::VacationResponse(s) => validate_set(
                         s,
@@ -269,7 +279,8 @@ impl JmapAuthorization for AccessToken {
                 | MethodObject::VacationResponse
                 | MethodObject::SieveScript
                 | MethodObject::MaskedEmail
-                | MethodObject::DeletedAccount => Permission::JmapEmailChanges,
+                | MethodObject::DeletedAccount
+                | MethodObject::AiLimits => Permission::JmapEmailChanges,
                 // inbuxa: x:MaskedEmail/changes reads what /get reads
                 MethodObject::Registry(object_type) => object_type.get_permission(),
             },

@@ -8176,6 +8176,7 @@ dependencies = [
  "hashify",
  "hyper",
  "idna",
+ "inbuxa-features",
  "infer 0.22.0",
  "mail-auth",
  "mail-parser",
