@@ -117,10 +117,17 @@ Permissions: `sysSpamLlmGet`, `sysSpamLlmUpdate`.
 
 ### Added by inbuxa-server
 
-A server-level singleton for the fork's limits, in the fork's own namespace
-(name open, SPEC.md §8), so upstream's records stay exactly as upstream wrote
-them. **Decision**: these are new, and every default below is this spec's
-own.
+A server-level singleton for the fork's limits, in the fork's own namespace,
+so upstream's records stay exactly as upstream wrote them. **Decision**: these
+are new, and every default below is this spec's own. **Decision** (2026-09-18)
+on where: `inbuxa:AiLimits`, a singleton read and changed with
+`inbuxa:AiLimits/get` and `inbuxa:AiLimits/set` under `urn:inbuxa:jmap`
+(the pattern of undelete's `inbuxa:DeletedAccount`), stored in the fork's own
+subspace. Its id is `singleton`, as for `x:` singletons. It's server-level:
+reading needs `sysSpamLlmGet` and changing needs `sysSpamLlmUpdate`, and a
+principal in a tenant can do neither (AI-27). Unset fields read as the
+defaults below. Changes take effect for the next message or call, with no
+reload.
 
 | Field | Default | Meaning |
 |---|---|---|
@@ -329,7 +336,8 @@ own.
   `temperature`, a `modelId` that doesn't exist). Destroying a model in use is
   refused with the registry's existing error for a linked object, naming
   `x:SpamLlm`.
-- **New:** the limits singleton, in the fork's namespace.
+- **New:** `inbuxa:AiLimits/get` and `/set` (the limits singleton) under
+  `urn:inbuxa:jmap`.
 - **The model's wire format** is AI-6 to AI-8 and AI-21. Any server that speaks
   the OpenAI-compatible chat or text completions API works. The docs name
   local servers first.
@@ -459,7 +467,8 @@ Not for observation, but open:
    don't want their mail read by a model even locally. Not in upstream's
    schema. A later addition in the fork's namespace if asked for.
 9. A "test this model" action for INBUXA Admin. Useful, not required.
-10. The name of the fork's limits singleton, with the namespace (SPEC.md §8).
+10. ~~The name of the fork's limits singleton.~~ Settled 2026-09-18:
+    `inbuxa:AiLimits` (see "Added by inbuxa-server").
 
 ## Observed
 
