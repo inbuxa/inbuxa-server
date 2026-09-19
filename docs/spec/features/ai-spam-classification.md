@@ -493,9 +493,8 @@ last message.
 - **Test 22 (compat)** is written as `ai_compat`, ignored, and unrun until a
   copy of INBUXA's data is provided. It checks the twelve `LLM_*` tags and
   scores in observed 2.
-- **No model is calibrated.** The code speaks the OpenAI-compatible API and
-  has only met stubs. How well a given local model follows the default
-  prompt, and how accurate it is, isn't measured yet.
+- **Calibrated** 2026-09-19 against real local models; see "Calibration".
+  The recommended model is Qwen3 4B Instruct 2507 (Apache-2.0) on 4 vCPU.
 - **Known limits, not requirements of this spec:**
   - The call limits (AI-10, AI-11, AI-24) are per server node, as the spec
     says; a cluster of n nodes can have n times `maxConcurrentCalls` in
@@ -540,9 +539,31 @@ Findings:
 - **Size.** Below 3B, models don't follow the one-line format reliably.
   Phi-3.5 mini writes "High confidence" on a new line, which the parser
   rightly doesn't accept.
-- **Licences.** Qwen2.5 3B, the best small model tested, is licensed for
-  non-commercial use only, so it can't be the recommendation for INBUXA's
-  customers.
+- **Licences.** Qwen2.5 3B is licensed for non-commercial use only, so it
+  can't be the recommendation for INBUXA's customers. Commercially usable
+  models were measured next, at 2 KiB:
+
+| Model (licence) | In format | Spam pushed ≥ +2 | Ham pushed ≥ +2 | 2 cores, p50 / p95 | 4 cores, p50 / p95 |
+|---|---|---|---|---|---|
+| **Qwen3 4B Instruct 2507 (Apache-2.0)** | 100% | 99% | 28% | 10.8 / 20.4 s | 6.3 / 11.0 s |
+| Llama 3.2 3B (Llama 3.2) | 100% | 99% | 60% | 8.2 / 14.7 s | 4.6 / 7.8 s |
+| Granite 3.3 8B (Apache-2.0) | 98% | 93% | 33% | 27.5 / 50.8 s | 14.6 / 26.4 s |
+| Granite 3.3 2B (Apache-2.0) | 1% | | | | |
+| SmolLM3 3B (Apache-2.0) | 11% | | | | |
+| Gemma 3 4B (Gemma) | 5% | | | | |
+
+- **Recommendation: Qwen3 4B Instruct 2507, Q4_K_M** (about 2.5 GB). It's
+  Apache-2.0, answers in format every time, and catches the most spam for
+  its size. On 4 vCPU it stays well inside `spamCallCeiling`. On 2 vCPU the
+  median is 11 s and about 8% of messages run past 20 s here, more on slower
+  cores; those simply go unclassified (AI-9). 4 vCPU is the recommended
+  minimum, 2 vCPU workable. Its false positives on legitimate mail (28%) are
+  the reason for the +2.0 cap.
+- Llama 3.2 3B is as fast but pushed 60% of ham up: not recommended. Granite
+  8B is too slow for small instances.
+- Granite 2B, SmolLM3 and Gemma 3 4B answer `Category: X, Confidence: Y,
+  …`, labelling each field, which AI-12 doesn't accept. Accepting such
+  labels is a possible later change; the recommended model doesn't need it.
 
 ## Observed
 
