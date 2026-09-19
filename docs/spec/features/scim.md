@@ -855,6 +855,60 @@ cover the clients meanwhile.
     tests imply `scim.example.com` and port 8899 (from addresses and URLs in
     them). Confirm when rebuilding `mod.rs`.
 
+## Implementation status
+
+Built 2026-09-19 from this spec, clean-room, under the multi-tenancy hand-off
+brief's rules. The wire contract is in `crates/scim-proto`, the service in
+`crates/scim`, the endpoint and its authentication in
+`crates/http/src/scim.rs`; upstream files carry hooks marked `inbuxa:`
+(the domain flag in the domain cache, just-in-time sync in
+`crates/common/src/cache/directory.rs`, session revocation in the push
+router). Every SCIM operation is the same `x:Account` get, query or set
+JMAP makes, as the service principal.
+
+`scim::scim_tests` runs the rebuilt helpers (`tests/src/scim/mod.rs`), the
+new `acceptance.rs` (tests 6 to 30, SCIM-14, and SCIM-58 to SCIM-60 through
+`synchronize_account` itself) and the surviving `tenant.rs` (test 4); all
+pass. With `SCIM_CONFORMANCE=1` it also runs the surviving
+`conformance.rs` (tests 1 to 3), which passes: scim2-client's 12 lifecycle
+steps, the 8 replayed Okta, Keycloak and Entra payloads, and scim2-tester
+with errors only for its generated non-address `userName`.
+
+- **SCIM-1 to SCIM-61:** built, with the limits below.
+- **Test 5** (`oidc.rs`) is `scim_oidc_tests`, ignored until per-domain
+  directories (feature 9) are built (Decision, SCIM-61).
+- **Test 31 (compat)** is `scim_compat`, ignored, and unrun until a copy of
+  INBUXA's data is provided. It checks observed 1.
+- **Settled from the code, not a change of intent:**
+  - Locales are stored hyphenated (`en-US`, `ca-ES-valencia`), not with an
+    underscore as SCIM-26 assumed, so SCIM's form needs no conversion;
+    `ca-ES@valencia` is read as `ca-ES-valencia`. "A locale the server has
+    no translation for" is one outside the registry's locale list.
+  - `/Schemas` describes `meta` (as the mapping tables give it, without
+    `lastModified`): scim2-client builds its models from it.
+  - The five `scim.*` events (SCIM-54) have ids 637 to 641, the fork's own,
+    and are in the packaged schema's event list.
+- **Known limits, not requirements of this spec:**
+  - Ending open sessions on suspension (SCIM-52) covers subscriptions to
+    changes (IMAP IDLE, JMAP event streams and WebSockets), and only on the
+    node that took the SCIM request. An IMAP, POP3 or ManageSieve session
+    already signed in and not idling isn't ended; by the code it keeps
+    working until it disconnects (not tested), and can't sign in again.
+  - A suspended account's cached HTTP credentials are refused with `403`
+    rather than `401`.
+  - Changing a group's membership writes each member in turn. Everything
+    is validated first, but a store failure midway leaves the change
+    partly made.
+  - `externalId` and group `displayName` uniqueness (SCIM-29, SCIM-34) are
+    checked before the write, without a lock, so two simultaneous writes
+    can both pass.
+  - With a `displayName` stored, a PATCH of only `name.givenName` or
+    `name.familyName` changes nothing, by SCIM-24's precedence.
+  - An email entry marked primary whose value isn't the `userName` is kept
+    as an alias.
+  - The conformance container runs on the host's network (a test-only
+    change), since a host firewall can drop the Docker bridge.
+
 ## Observed
 
 Settled on 2026-09-18 against INBUXA's live Enterprise server (Stalwart
