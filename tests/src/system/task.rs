@@ -39,7 +39,9 @@ pub async fn test(test: &mut TestServer) {
     admin.assert_no_tasks().await;
 
     // Create a successful task for future execution
-    admin.schedule_test_task(TASK_SUCCESS, 1).await;
+    // inbuxa: three seconds, not one: the query below takes longer than a
+    // second under load, and the task had already run and been removed
+    admin.schedule_test_task(TASK_SUCCESS, 3).await;
     admin.assert_has_tasks(1).await;
     admin.assert_no_tasks().await;
 

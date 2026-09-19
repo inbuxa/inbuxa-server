@@ -174,8 +174,11 @@ pub async fn test(test: &mut TestServer) {
         .registry_update_object(
             ObjectType::Security,
             Id::singleton(),
+            // inbuxa: five seconds, not one: the checks below make a hundred
+            // more requests before the ban is tested, and under load a
+            // one-second ban expired first
             json!({
-                Property::AuthBanPeriod: registry::types::duration::Duration::from_millis(1000)
+                Property::AuthBanPeriod: registry::types::duration::Duration::from_millis(5000)
             }),
         )
         .await;
@@ -206,8 +209,8 @@ pub async fn test(test: &mut TestServer) {
     assert_eq!(blocked_ip.reason, BlockReason::AuthFailure);
     assert!(blocked_ip.expires_at.is_some());
 
-    // After 1 second the ban should be lifted
-    tokio::time::sleep(Duration::from_secs(2)).await;
+    // After the ban period the ban should be lifted
+    tokio::time::sleep(Duration::from_secs(6)).await;
     validate_password_with_ip(
         "user@example.org",
         "this is a very strong password",
