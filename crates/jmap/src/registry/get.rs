@@ -398,6 +398,7 @@ impl RegistryGet for Server {
                 .await
                 .map(|get| get.into_response()),
             #[cfg(not(feature = "enterprise"))]
+            #[allow(unreachable_patterns)] // inbuxa: every object type has an arm now
             _ => Ok(get.not_found_any().into_response()),
         }
     }

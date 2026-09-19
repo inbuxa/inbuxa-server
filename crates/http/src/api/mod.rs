@@ -146,9 +146,44 @@ impl ManagementApi for Server {
                                 .await?,
                             ))
                     }
-                    Some("tracing") | Some("metrics") => {
-                        Err(trc::ResourceEvent::NotFound
-                            .ctx(trc::Key::Details, "Enterprise feature"))
+                    // inbuxa: MON-23: a live telemetry token, valid 60 seconds
+                    Some(kind @ ("tracing" | "metrics")) => {
+                        let (grant, permission) = if kind == "tracing" {
+                            (GrantType::LiveTracing, Permission::LiveTracing)
+                        } else {
+                            (GrantType::LiveMetrics, Permission::LiveMetrics)
+                        };
+                        access_token.enforce_permission(permission)?;
+                        crate::live::assert_server_level(&access_token)?;
+                        Ok(HttpResponse::new(StatusCode::OK)
+                            .with_no_cache()
+                            .with_text_body(
+                                self.encode_access_token(
+                                    grant,
+                                    account_id,
+                                    self.account(account_id).await?.name(),
+                                    60,
+                                    None,
+                                    None,
+                                )
+                                .await?,
+                            ))
+                    }
+                    _ => Err(trc::ResourceEvent::NotFound.into_err()),
+                }
+            }
+            // inbuxa: the paths upstream's docs name, as aliases (MON-20, MON-22)
+            "telemetry" if req.method() == Method::GET && path.get(2).copied() == Some("live") => {
+                let access_token = self.management_access_token(req, session).await?;
+                crate::live::assert_server_level(&access_token)?;
+                match path.get(1).copied() {
+                    Some("traces") => {
+                        access_token.enforce_permission(Permission::LiveTracing)?;
+                        crate::live::live_tracing(req.uri().query())
+                    }
+                    Some("metrics") => {
+                        access_token.enforce_permission(Permission::LiveMetrics)?;
+                        crate::live::live_metrics(&UrlParams::new(req.uri().query()))
                     }
                     _ => Err(trc::ResourceEvent::NotFound.into_err()),
                 }
@@ -192,9 +227,16 @@ impl ManagementApi for Server {
                                 },
                             ))))
                     }
-                    ("tracing" | "metrics", _, &Method::GET) => {
-                        Err(trc::ResourceEvent::NotFound
-                            .ctx(trc::Key::Details, "Enterprise feature"))
+                    // inbuxa: MON-20 to MON-22: live telemetry
+                    ("tracing", _, &Method::GET) => {
+                        access_token.enforce_permission(Permission::LiveTracing)?;
+                        crate::live::assert_server_level(&access_token)?;
+                        crate::live::live_tracing(req.uri().query())
+                    }
+                    ("metrics", _, &Method::GET) => {
+                        access_token.enforce_permission(Permission::LiveMetrics)?;
+                        crate::live::assert_server_level(&access_token)?;
+                        crate::live::live_metrics(&params)
                     }
                     _ => Err(trc::ResourceEvent::NotFound.into_err()),
                 }
@@ -213,11 +255,17 @@ impl ManagementApi for Server {
             let path = req.uri().path();
             let grant = if path.starts_with("/api/live/delivery") {
                 Some((GrantType::LiveDelivery, Permission::LiveDeliveryTest))
+            } else if path.starts_with("/api/live/tracing")
+                || path.starts_with("/api/telemetry/traces/live")
+            {
+                // inbuxa: MON-23
+                Some((GrantType::LiveTracing, Permission::LiveTracing))
+            } else if path.starts_with("/api/live/metrics")
+                || path.starts_with("/api/telemetry/metrics/live")
+            {
+                Some((GrantType::LiveMetrics, Permission::LiveMetrics))
             } else {
-                #[cfg(not(feature = "enterprise"))]
-                {
-                    None
-                }
+                None
             };
 
             if let Some((grant_type, permission)) = grant {

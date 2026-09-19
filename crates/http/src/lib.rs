@@ -10,6 +10,7 @@ pub mod api;
 pub mod auth;
 pub mod branding; // inbuxa: branding
 pub mod form;
+pub mod live; // inbuxa: monitoring (MON-20 to MON-24)
 pub mod request;
 
 use common::Inner;
