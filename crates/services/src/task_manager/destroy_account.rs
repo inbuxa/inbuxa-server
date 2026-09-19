@@ -91,6 +91,14 @@ async fn destroy_account(server: &Server, task: &TaskDestroyAccount) -> trc::Res
         }
     }
 
+    // inbuxa: UD-15: the account's hold and undelete's own records go first
+    inbuxa_features::undelete::accounts::forget(
+        &server.core.storage.data,
+        server.registry(),
+        account_id,
+    )
+    .await?;
+
     // Remove archived items
     let mut batch = BatchBuilder::new();
     let ids = server

@@ -572,6 +572,14 @@ impl RegistrySet for Server {
                         }
                     };
 
+                    // inbuxa: UD-16: a kept account's addresses stay its own
+                    if let Some(err) =
+                        crate::inbuxa::deleted_account::reserved(self, stored, &new_object).await?
+                    {
+                        set.failed(modification, err);
+                        continue 'outer;
+                    }
+
                     // Validate expressions
                     if let Some(expressions) = new_object.inner.expression_ctxs() {
                         let mut bp = Bootstrap::new_uninitialized(self.registry().clone());
@@ -750,7 +758,17 @@ impl RegistrySet for Server {
                             .await?
                         {
                             RegistryWriteResult::Success(_) => {
-                                if let ObjectInner::Account(account) = &object.inner {
+                                // inbuxa: UD-15, UD-17a: kept for its period, shares suspended
+                                if let ObjectInner::Account(account) = &object.inner
+                                    && let Some(others) =
+                                        crate::inbuxa::deleted_account::keep(self, id, account)
+                                            .await?
+                                {
+                                    for other in others {
+                                        cache_invalidator
+                                            .invalidate(CacheInvalidation::AccessToken(other));
+                                    }
+                                } else if let ObjectInner::Account(account) = &object.inner {
                                     for sharee_id in self
                                         .store()
                                         .acl_revoke_all(id.document_id())
@@ -837,6 +855,7 @@ impl RegistrySet for Server {
                 Ok(set.into_response())
             }
             #[cfg(not(feature = "enterprise"))]
+            #[allow(unreachable_patterns)] // inbuxa: ArchivedItem was the last one
             _ => {
                 set.fail_all_create("Enterprise objects cannot be created");
                 set.fail_all_update("Enterprise objects cannot be modified");

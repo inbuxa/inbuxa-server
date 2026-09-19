@@ -71,6 +71,8 @@ impl JmapAuthorization for AccessToken {
                 GetRequestMethod::VacationResponse(_) => Permission::JmapVacationResponseGet,
                 // inbuxa: Fastmail's MaskedEmail (ME-18)
                 GetRequestMethod::MaskedEmail(_) => Permission::SysMaskedEmailGet,
+                // inbuxa: deleted accounts (UD-17)
+                GetRequestMethod::DeletedAccount(_) => Permission::SysAccountGet,
                 GetRequestMethod::Principal(_) => Permission::JmapPrincipalGet,
                 GetRequestMethod::Quota(_) => Permission::JmapQuotaGet,
                 GetRequestMethod::Blob(_) => Permission::JmapBlobGet,
@@ -150,6 +152,14 @@ impl JmapAuthorization for AccessToken {
                         Permission::SysMaskedEmailCreate,
                         Permission::SysMaskedEmailUpdate,
                         Permission::SysMaskedEmailDestroy,
+                    ),
+                    // inbuxa: deleted accounts; a restore creates the account again (UD-17)
+                    SetRequestMethod::DeletedAccount(s) => validate_set(
+                        s,
+                        self,
+                        Permission::SysAccountCreate,
+                        Permission::SysAccountCreate,
+                        Permission::SysAccountDestroy,
                     ),
                     SetRequestMethod::VacationResponse(s) => validate_set(
                         s,
@@ -258,7 +268,8 @@ impl JmapAuthorization for AccessToken {
                 | MethodObject::SearchSnippet
                 | MethodObject::VacationResponse
                 | MethodObject::SieveScript
-                | MethodObject::MaskedEmail => Permission::JmapEmailChanges,
+                | MethodObject::MaskedEmail
+                | MethodObject::DeletedAccount => Permission::JmapEmailChanges,
                 // inbuxa: x:MaskedEmail/changes reads what /get reads
                 MethodObject::Registry(object_type) => object_type.get_permission(),
             },

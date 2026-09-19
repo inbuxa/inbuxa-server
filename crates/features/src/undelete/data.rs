@@ -163,6 +163,22 @@ pub struct KeptAccount {
     pub member_tenant_id: Option<u64>,
     pub deleted_at: u64,
     pub kept_until: u64,
+    /// The id of its `DestroyAccount` task, due at `kept_until`.
+    #[serde(default)]
+    pub task_id: u64,
+    /// Its shares, both ways, suspended while it's kept (UD-17a).
+    #[serde(default)]
+    pub shares: Vec<Share>,
+}
+
+/// One share: `grantee` may reach `owner`'s document with `permissions`.
+#[derive(Debug, Clone, PartialEq, Eq, SerdeSerialize, SerdeDeserialize)]
+pub struct Share {
+    pub grantee: u32,
+    pub owner: u32,
+    pub collection: u8,
+    pub document_id: u32,
+    pub permissions: u64,
 }
 
 pub fn note_email(
@@ -380,6 +396,44 @@ pub async fn kept_accounts(data: &Store) -> trc::Result<Vec<(u32, KeptAccount)>>
     .await
     .caused_by(trc::location!())?;
     Ok(kept)
+}
+
+/// Clears what's kept under an account's id: its notes, archive links and
+/// change log. The records themselves go with `records::remove`.
+pub async fn clear_account(data: &Store, account_id: u32) -> trc::Result<()> {
+    // Account ids stop short of u32::MAX, the store's sentinel
+    let (from, to) = (account_id.to_be_bytes(), (account_id + 1).to_be_bytes());
+    let mut ranges = vec![
+        (vec![KIND_NOTE], vec![KIND_NOTE]),
+        (vec![KIND_BLOB], vec![KIND_BLOB]),
+        (vec![KIND_CHANGE], vec![KIND_CHANGE]),
+    ];
+    // The groupware notes, `Ug` + kind + account + document
+    for kind in 0u8..3 {
+        ranges.push((vec![b'g', kind], vec![b'g', kind]));
+    }
+    for (mut start, mut end) in ranges {
+        start.extend_from_slice(&from);
+        end.extend_from_slice(&to);
+        data.delete_range(
+            ValueKey::from(class_raw(&start)),
+            ValueKey::from(class_raw(&end)),
+        )
+        .await
+        .caused_by(trc::location!())?;
+    }
+    Ok(())
+}
+
+/// A key under `U` spelled out in full (the groupware notes, `Ug`).
+fn class_raw(rest: &[u8]) -> ValueClass {
+    let mut key = Vec::with_capacity(1 + rest.len());
+    key.push(FEATURE);
+    key.extend_from_slice(rest);
+    ValueClass::Any(AnyClass {
+        subspace: SUBSPACE_INBUXA,
+        key,
+    })
 }
 
 /// The kept account an address is reserved for (UD-16).

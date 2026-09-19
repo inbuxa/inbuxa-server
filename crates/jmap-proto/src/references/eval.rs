@@ -53,6 +53,9 @@ impl Response<'_> {
                         GetResponseMethod::MaskedEmail(response) => {
                             response.eval_jptr(path, &mut results)
                         }
+                        GetResponseMethod::DeletedAccount(response) => {
+                            response.eval_jptr(path, &mut results)
+                        }
                         GetResponseMethod::Principal(response) => {
                             response.eval_jptr(path, &mut results)
                         }

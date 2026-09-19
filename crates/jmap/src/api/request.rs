@@ -165,6 +165,9 @@ impl RequestHandler for Server {
                                     SetResponseMethod::MaskedEmail(set_response) => {
                                         set_response.update_created_ids(&mut response);
                                     }
+                                    SetResponseMethod::DeletedAccount(set_response) => {
+                                        set_response.update_created_ids(&mut response);
+                                    }
                                     SetResponseMethod::AddressBook(set_response) => {
                                         set_response.update_created_ids(&mut response);
                                     }
@@ -303,6 +306,13 @@ impl RequestHandler for Server {
                 GetRequestMethod::MaskedEmail(mut req) => {
                     resolve_account_id(&mut req.account_id, method_name.obj, access_token)?;
                     crate::inbuxa::fastmail::get(self, access_token, *req)
+                        .await?
+                        .into()
+                }
+                // inbuxa: inbuxa:DeletedAccount/get (UD-17)
+                GetRequestMethod::DeletedAccount(mut req) => {
+                    resolve_account_id(&mut req.account_id, method_name.obj, access_token)?;
+                    crate::inbuxa::deleted_account::get(self, access_token, *req)
                         .await?
                         .into()
                 }
@@ -530,6 +540,13 @@ impl RequestHandler for Server {
                 SetRequestMethod::MaskedEmail(mut req) => {
                     resolve_account_id(&mut req.account_id, method_name.obj, access_token)?;
                     crate::inbuxa::fastmail::set(self, access_token, *req)
+                        .await?
+                        .into()
+                }
+                // inbuxa: inbuxa:DeletedAccount/set (UD-17)
+                SetRequestMethod::DeletedAccount(mut req) => {
+                    resolve_account_id(&mut req.account_id, method_name.obj, access_token)?;
+                    crate::inbuxa::deleted_account::set(self, access_token, *req)
                         .await?
                         .into()
                 }

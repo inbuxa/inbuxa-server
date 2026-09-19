@@ -42,6 +42,7 @@ impl Response<'_> {
                 GetRequestMethod::Sieve(request) => request.resolve_references(self)?,
                 GetRequestMethod::VacationResponse(request) => request.resolve_references(self)?,
                 GetRequestMethod::MaskedEmail(request) => request.resolve_references(self)?,
+                GetRequestMethod::DeletedAccount(request) => request.resolve_references(self)?,
                 GetRequestMethod::Principal(request) => request.resolve_references(self)?,
                 GetRequestMethod::Quota(request) => request.resolve_references(self)?,
                 GetRequestMethod::Blob(request) => request.resolve_references(self)?,
@@ -77,6 +78,9 @@ impl Response<'_> {
                     request.resolve_references(self, 1, false)?
                 }
                 SetRequestMethod::MaskedEmail(request) => {
+                    request.resolve_references(self, 1, false)?
+                }
+                SetRequestMethod::DeletedAccount(request) => {
                     request.resolve_references(self, 1, false)?
                 }
                 SetRequestMethod::AddressBook(request) => {

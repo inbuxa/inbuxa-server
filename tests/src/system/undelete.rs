@@ -11,25 +11,31 @@ use crate::utils::{
     account::Account,
     webdav::DummyWebDavClient,
     imap::{ImapConnection, Type},
-    jmap::JmapUtils,
+    jmap::{JmapResponse, JmapUtils},
     pop3::{self, Pop3Connection},
     server::{TestServer, TestServerBuilder},
+    smtp::SmtpConnection,
 };
 use email::{
     mailbox::{INBOX_ID, TRASH_ID},
     message::delete::EmailDeletion,
 };
 use imap_proto::ResponseType;
-use jmap_client::client::Client;
+use jmap_client::client::{Client, Credentials};
 use registry::{
     schema::{
         prelude::{ObjectType, Property},
-        structs::{DataRetention, Expression, Imap, MtaStageAuth},
+        structs::{DataRetention, Expression, Imap, MtaStageAuth, MtaStageRcpt, Task},
     },
     types::duration::Duration,
 };
 use hyper::StatusCode;
 use serde_json::{Value, json};
+use store::{
+    Deserialize, IterateParams, ValueKey,
+    query::acl::AclQuery,
+    write::{TaskQueueClass, ValueClass},
+};
 use types::id::Id;
 
 const SECRET: &str = "undelete test user passphrase";
@@ -398,6 +404,138 @@ pub async fn test(test: &mut TestServer) {
         "test 12"
     );
 
+    // Acceptance test 14: a deleted account is kept: it can't sign in or
+    // receive mail, its name stays held, and an admin restores it whole,
+    // shares both ways included (UD-15 to UD-17a)
+    admin
+        .registry_update_setting(
+            MtaStageRcpt {
+                wait_on_fail: Expression {
+                    else_: "1ms".into(),
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+            &[Property::WaitOnFail],
+        )
+        .await;
+    admin.reload_settings().await;
+    admin.set_account_retention(Some(30 * DAY)).await;
+    let gone = admin
+        .create_user_account("gone@example.org", SECRET, "Gone", &[], vec![])
+        .await;
+    let gone_id = gone.id();
+    import(&gone.jmap_client().await, "Kept with the account", &[INBOX_ID], &[]).await;
+    share_inbox(&gone, user.id()).await;
+    share_inbox(&user, gone_id).await;
+    assert!(has_access(test, user.id(), gone_id).await, "test 14: shared");
+    assert!(has_access(test, gone_id, user.id()).await, "test 14: shared");
+
+    admin
+        .registry_destroy(ObjectType::Account, [gone_id])
+        .await
+        .assert_destroyed(&[gone_id]);
+    assert!(
+        matches!(
+            Client::new()
+                .credentials(Credentials::basic("gone@example.org", SECRET))
+                .accept_invalid_certs(true)
+                .follow_redirects(["127.0.0.1"])
+                .connect(&gone.base_url())
+                .await,
+            Err(jmap_client::Error::Problem(err)) if err.status() == Some(401)
+        ),
+        "test 14: can't sign in"
+    );
+    let mut lmtp = SmtpConnection::connect().await;
+    lmtp.mail_from("sender@remote.example.org", 2).await;
+    let reply = lmtp.rcpt_to("gone@example.org", 5).await;
+    assert!(
+        reply.iter().any(|line| line.starts_with("550 5.1.2")),
+        "test 14: mail refused, {reply:?}"
+    );
+    assert!(!has_access(test, user.id(), gone_id).await, "test 14: suspended");
+    assert!(!has_access(test, gone_id, user.id()).await, "test 14: suspended");
+    assert!(pending_destroy(test, gone_id).await, "test 14: destruction due");
+
+    // Its name is held (UD-16)
+    let domain_id = admin
+        .jmap_method_call(
+            "x:Account/get",
+            json!({"ids": [user.id_string()], "properties": ["domainId"]}),
+        )
+        .await
+        .list()[0]["domainId"]
+        .clone();
+    let response = admin
+        .jmap_method_call(
+            "x:Account/set",
+            json!({"create": {"i0": {"@type": "User", "name": "gone", "domainId": domain_id}}}),
+        )
+        .await;
+    assert_eq!(
+        response.not_created(0)["type"],
+        "primaryKeyViolation",
+        "test 14: name held"
+    );
+
+    // Listed for admins only (UD-17)
+    let listed = admin.deleted_accounts().await;
+    assert_eq!(listed.len(), 1, "test 14: listed");
+    assert_eq!(listed[0]["id"], gone_id.to_string());
+    assert_eq!(listed[0]["name"], "gone");
+    assert_eq!(listed[0]["addresses"], json!(["gone@example.org"]));
+    assert_eq!(
+        seconds(&listed[0]["keptUntil"]) - seconds(&listed[0]["deletedAt"]),
+        (30 * DAY) as i64
+    );
+    let response = user
+        .jmap_request(
+            &["urn:ietf:params:jmap:core", "urn:inbuxa:jmap"],
+            json!([["inbuxa:DeletedAccount/get", {"accountId": user.id_string(), "ids": null}, "0"]]),
+        )
+        .await;
+    assert_eq!(
+        response.0.pointer("/methodResponses/0/0"),
+        Some(&json!("error")),
+        "test 14: not for users"
+    );
+
+    // Restored with the same id, its mail and its shares
+    let response = admin
+        .deleted_account_set(json!({"update": {gone_id.to_string(): {"restore": true, "password": SECRET}}}))
+        .await;
+    response.updated_id(gone_id);
+    assert_eq!(gone.count_with_subject("Kept with the account").await, 1, "test 14: data intact");
+    assert!(has_access(test, user.id(), gone_id).await, "test 14: reinstated");
+    assert!(has_access(test, gone_id, user.id()).await, "test 14: reinstated");
+    assert!(!pending_destroy(test, gone_id).await, "test 14: destruction off");
+    assert!(admin.deleted_accounts().await.is_empty());
+    test.wait_for_tasks().await;
+
+    // Destroyed for good: the task runs now and the name is free
+    admin
+        .registry_destroy(ObjectType::Account, [gone_id])
+        .await
+        .assert_destroyed(&[gone_id]);
+    admin
+        .deleted_account_set(json!({"destroy": [gone_id.to_string()]}))
+        .await
+        .assert_destroyed(&[gone_id]);
+    test.wait_for_tasks().await;
+    assert!(admin.deleted_accounts().await.is_empty(), "test 14: gone");
+    assert!(!pending_destroy(test, gone_id).await);
+    admin.set_account_retention(None).await;
+    let again = admin
+        .create_user_account("gone@example.org", SECRET, "Gone", &[], vec![])
+        .await;
+    assert_eq!(again.count_with_subject("Kept with the account").await, 0);
+    admin.destroy_account(again).await;
+    admin
+        .registry_update_setting(MtaStageRcpt::default(), &[Property::WaitOnFail])
+        .await;
+    admin.reload_settings().await;
+
     // Clean up
     admin.set_retention(None).await;
     for item in user.archived().await {
@@ -441,6 +579,92 @@ pub async fn undelete_tests() {
     }
 }
 
+/// Acceptance test 16 (compat): archived items written before the cutover
+/// read back unchanged through `x:ArchivedItem`, and restore.
+///
+/// INBUXA held no archived items (spec, observed 1), so the items to check
+/// are made on a copy of its data, through the Enterprise server, before the
+/// copy is opened here:
+///
+/// - `INBUXA_COMPAT_ADMIN`: `name:password` of a server-level administrator
+///   in that data;
+/// - `INBUXA_COMPAT_ARCHIVED`: a JSON file of `x:ArchivedItem/get` results
+///   recorded against the Enterprise server, each with its `id` and
+///   `accountId`;
+///
+/// and the data itself in place of the test store: run with `NO_INSERT=1`
+/// and the store's `TMPDIR`/`STORE` pointing at the copy, so it isn't reset.
+#[ignore]
+#[tokio::test(flavor = "multi_thread")]
+pub async fn undelete_compat() {
+    let admin = std::env::var("INBUXA_COMPAT_ADMIN").expect("INBUXA_COMPAT_ADMIN");
+    let items: Vec<Value> = serde_json::from_slice(
+        &std::fs::read(std::env::var("INBUXA_COMPAT_ARCHIVED").expect("INBUXA_COMPAT_ARCHIVED"))
+            .expect("archived items file"),
+    )
+    .expect("archived items JSON");
+    assert!(
+        std::env::var("NO_INSERT").is_ok(),
+        "NO_INSERT must be set, or the copy of INBUXA's data is wiped"
+    );
+
+    let test = TestServerBuilder::new("undelete_compat")
+        .await
+        .with_default_listeners()
+        .await
+        .build_with_opts(false)
+        .await;
+    let (name, secret) = admin.split_once(':').expect("name:password");
+    let admin = Account::new(
+        Box::leak(name.to_string().into_boxed_str()),
+        Box::leak(secret.to_string().into_boxed_str()),
+        &[],
+        "Compat admin",
+        Id::from(u32::MAX),
+    );
+
+    for recorded in &items {
+        let id = recorded["id"].as_str().unwrap();
+        let account = recorded["accountId"].as_str().unwrap();
+
+        // Reads back unchanged: every recorded property, same value
+        let response = admin
+            .jmap_method_call(
+                "x:ArchivedItem/get",
+                json!({"accountId": account, "ids": [id]}),
+            )
+            .await;
+        let stored = &response.method_response()["list"][0];
+        for (property, value) in recorded.as_object().unwrap() {
+            assert_eq!(&stored[property], value, "{id} {property}: {response:?}");
+        }
+
+        // Restores: the record goes once the item is back (UD-9)
+        admin
+            .jmap_method_call(
+                "x:ArchivedItem/set",
+                json!({"accountId": account, "update": {id: {"status": "requestRestore"}}}),
+            )
+            .await
+            .updated(id);
+    }
+    test.wait_for_tasks_skip_failures().await;
+    for recorded in &items {
+        let id = recorded["id"].as_str().unwrap();
+        let response = admin
+            .jmap_method_call(
+                "x:ArchivedItem/get",
+                json!({"accountId": recorded["accountId"], "ids": [id]}),
+            )
+            .await;
+        assert_eq!(
+            response.method_response()["notFound"],
+            json!([id]),
+            "{id} not restored"
+        );
+    }
+}
+
 fn seconds(value: &Value) -> i64 {
     value
         .as_str()
@@ -469,7 +693,92 @@ async fn import(client: &Client, subject: &str, mailboxes: &[u32], keywords: &[&
         .take_id()
 }
 
+/// Shares `owner`'s Inbox with `grantee`, read-only.
+async fn share_inbox(owner: &Account, grantee: Id) {
+    owner
+        .jmap_method_call(
+            "Mailbox/set",
+            json!({
+                "accountId": owner.id_string(),
+                "update": {
+                    Id::from(INBOX_ID).to_string(): {
+                        "shareWith": { grantee.to_string(): { "mayReadItems": true } }
+                    }
+                }
+            }),
+        )
+        .await
+        .updated_id(Id::from(INBOX_ID));
+}
+
+/// Whether `grantee` may reach anything of `owner`'s.
+async fn has_access(test: &TestServer, grantee: Id, owner: Id) -> bool {
+    test.server
+        .store()
+        .acl_query(AclQuery::HasAccess {
+            grant_account_id: grantee.document_id(),
+        })
+        .await
+        .unwrap()
+        .iter()
+        .any(|item| item.to_account_id == owner.document_id())
+}
+
+/// Whether a `DestroyAccount` task for the account is queued.
+async fn pending_destroy(test: &TestServer, account: Id) -> bool {
+    let mut found = false;
+    test.server
+        .store()
+        .iterate(
+            IterateParams::new(
+                ValueKey::from(ValueClass::TaskQueue(TaskQueueClass::Task { id: 0 })),
+                ValueKey::from(ValueClass::TaskQueue(TaskQueueClass::Task { id: u64::MAX })),
+            )
+            .ascending(),
+            |_, value| {
+                if let Task::DestroyAccount(task) = Task::deserialize(value)? {
+                    found |= task.account_id == account;
+                }
+                Ok(!found)
+            },
+        )
+        .await
+        .unwrap();
+    found
+}
+
 impl Account {
+    async fn set_account_retention(&self, keep_for: Option<u64>) {
+        self.registry_update_setting(
+            DataRetention {
+                archive_deleted_accounts_for: keep_for
+                    .map(|secs| Duration::from_millis(secs * 1000)),
+                ..Default::default()
+            },
+            &[Property::ArchiveDeletedAccountsFor],
+        )
+        .await;
+    }
+
+    async fn deleted_accounts(&self) -> Vec<Value> {
+        self.jmap_request(
+            &["urn:ietf:params:jmap:core", "urn:inbuxa:jmap"],
+            json!([["inbuxa:DeletedAccount/get", {"accountId": self.id_string(), "ids": null}, "0"]]),
+        )
+        .await
+        .list()
+        .to_vec()
+    }
+
+    async fn deleted_account_set(&self, mut args: Value) -> JmapResponse {
+        args["accountId"] = json!(self.id_string());
+        self.jmap_request(
+            &["urn:ietf:params:jmap:core", "urn:inbuxa:jmap"],
+            json!([["inbuxa:DeletedAccount/set", args, "0"]]),
+        )
+        .await
+    }
+
     async fn set_retention(&self, keep_for: Option<u64>) {
         self.registry_update_setting(
             DataRetention {

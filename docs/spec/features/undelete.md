@@ -265,6 +265,34 @@ Stalwart-facing (SPEC.md §5).
 16. **(compat)** Archived items already held at INBUXA read back unchanged
     through `x:ArchivedItem` after cutover, and restore.
 
+## Implementation status
+
+Built 2026-09-18 from this spec, clean-room, under the multi-tenancy hand-off
+brief's rules. The rules live in `crates/features` (`inbuxa-features`, module
+`undelete`); the JMAP glue in `crates/jmap/src/inbuxa/`, with the deleted
+account object type in `crates/jmap-proto/src/object/inbuxa_deleted_account.rs`;
+restoring in `crates/services/src/task_manager/`; upstream files carry hooks
+marked `inbuxa:`. Acceptance tests 1 to 15 pass as
+`tests/src/system/undelete.rs`, with `/changes` and the `/query` filters.
+
+- **UD-1 to UD-17a:** built.
+- **ihasmail changes** belong to ihasmail-inbuxa and aren't part of this
+  repository.
+- **Test 16 (compat)** is written as `undelete_compat`, ignored, and unrun
+  until a copy of INBUXA's data with archived items made on it is provided.
+  Its doc comment says how to run it.
+- **Known limits, not requirements of this spec:**
+  - A kept account holds the addresses it had under its domain's names at
+    deletion. A domain renamed while it's kept doesn't move the hold.
+  - The hold is checked when accounts, aliases, mailing lists and masks are
+    created or changed through `x:`. A mask made through Fastmail's API
+    isn't checked; its random address makes a clash unlikely.
+  - A restored user keeps its other credentials (app passwords, API keys,
+    its one-time-password setup) as they were; only the password is new.
+  - Restoring needs `sysAccountCreate` and the right to grant everything the
+    account holds, so a tenant administrator can't bring back an account
+    with more than it could create.
+
 ## Observed
 
 Settled on 2026-09-18 against INBUXA's live Enterprise server (Stalwart

@@ -112,6 +112,7 @@ pub enum GetRequestMethod {
     ShareNotification(Box<GetRequest<ShareNotification>>),
     Registry(Box<GetRequest<Registry>>),
     MaskedEmail(Box<GetRequest<crate::object::fastmail_masked_email::FastmailMaskedEmail>>),
+    DeletedAccount(Box<GetRequest<crate::object::inbuxa_deleted_account::DeletedAccount>>),
 }
 
 #[derive(Debug)]
@@ -133,6 +134,7 @@ pub enum SetRequestMethod<'x> {
     ParticipantIdentity(Box<SetRequest<'x, ParticipantIdentity>>),
     Registry(Box<SetRequest<'x, Registry>>),
     MaskedEmail(Box<SetRequest<'x, crate::object::fastmail_masked_email::FastmailMaskedEmail>>),
+    DeletedAccount(Box<SetRequest<'x, crate::object::inbuxa_deleted_account::DeletedAccount>>),
 }
 
 #[derive(Debug)]

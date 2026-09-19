@@ -8,6 +8,7 @@
 //! `crates/features`; this module only speaks JMAP for them.
 
 pub mod access;
+pub mod deleted_account;
 pub mod fastmail;
 pub mod masked_email;
 pub mod undelete;

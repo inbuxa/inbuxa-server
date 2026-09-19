@@ -99,6 +99,7 @@ pub enum GetResponseMethod {
     ShareNotification(GetResponse<ShareNotification>),
     Registry(GetResponse<Registry>),
     MaskedEmail(GetResponse<crate::object::fastmail_masked_email::FastmailMaskedEmail>),
+    DeletedAccount(GetResponse<crate::object::inbuxa_deleted_account::DeletedAccount>),
 }
 
 #[derive(Debug, serde::Serialize)]
@@ -121,6 +122,7 @@ pub enum SetResponseMethod {
     ParticipantIdentity(Box<SetResponse<ParticipantIdentity>>),
     Registry(Box<SetResponse<Registry>>),
     MaskedEmail(Box<SetResponse<crate::object::fastmail_masked_email::FastmailMaskedEmail>>),
+    DeletedAccount(Box<SetResponse<crate::object::inbuxa_deleted_account::DeletedAccount>>),
 }
 
 #[derive(Debug, serde::Serialize)]
@@ -277,6 +279,19 @@ impl<'x> From<GetResponse<crate::object::fastmail_masked_email::FastmailMaskedEm
 impl<'x> From<SetResponse<crate::object::fastmail_masked_email::FastmailMaskedEmail>> for ResponseMethod<'x> {
     fn from(value: SetResponse<crate::object::fastmail_masked_email::FastmailMaskedEmail>) -> Self {
         ResponseMethod::Set(SetResponseMethod::MaskedEmail(Box::new(value)))
+    }
+}
+
+// inbuxa: deleted accounts (UD-17)
+impl<'x> From<GetResponse<crate::object::inbuxa_deleted_account::DeletedAccount>> for ResponseMethod<'x> {
+    fn from(value: GetResponse<crate::object::inbuxa_deleted_account::DeletedAccount>) -> Self {
+        ResponseMethod::Get(GetResponseMethod::DeletedAccount(value))
+    }
+}
+
+impl<'x> From<SetResponse<crate::object::inbuxa_deleted_account::DeletedAccount>> for ResponseMethod<'x> {
+    fn from(value: SetResponse<crate::object::inbuxa_deleted_account::DeletedAccount>) -> Self {
+        ResponseMethod::Set(SetResponseMethod::DeletedAccount(Box::new(value)))
     }
 }
 

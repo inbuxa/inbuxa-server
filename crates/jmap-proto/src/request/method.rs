@@ -43,6 +43,8 @@ pub enum MethodObject {
     Registry(ObjectType),
     // inbuxa: Fastmail's MaskedEmail
     MaskedEmail,
+    // inbuxa: deleted accounts (UD-17)
+    DeletedAccount,
 }
 
 impl MethodObject {
@@ -67,6 +69,7 @@ impl MethodObject {
             MethodObject::FileNode => Capability::FileNode,
             MethodObject::Registry(_) => Capability::Stalwart,
             MethodObject::MaskedEmail => Capability::FastmailMaskedEmail,
+            MethodObject::DeletedAccount => Capability::Inbuxa,
         }
     }
 }
@@ -240,6 +243,8 @@ impl MethodName {
             (MethodFunction::Echo, MethodObject::Core) => "Core/echo",
             (MethodFunction::Get, MethodObject::MaskedEmail) => "MaskedEmail/get",
             (MethodFunction::Set, MethodObject::MaskedEmail) => "MaskedEmail/set",
+            (MethodFunction::Get, MethodObject::DeletedAccount) => "inbuxa:DeletedAccount/get",
+            (MethodFunction::Set, MethodObject::DeletedAccount) => "inbuxa:DeletedAccount/set",
             (method, MethodObject::Registry(obj)) => {
                 return Cow::Owned(format!("x:{}/{}", obj.as_str(), method.as_str()));
             }
@@ -361,6 +366,8 @@ impl MethodName {
 
             "MaskedEmail/get" => (MethodObject::MaskedEmail, MethodFunction::Get),
             "MaskedEmail/set" => (MethodObject::MaskedEmail, MethodFunction::Set),
+            "inbuxa:DeletedAccount/get" => (MethodObject::DeletedAccount, MethodFunction::Get),
+            "inbuxa:DeletedAccount/set" => (MethodObject::DeletedAccount, MethodFunction::Set),
 
         ).or_else(|| {
             let (obj, fnc) = s.strip_prefix("x:")?.split_once('/')?;
@@ -412,6 +419,7 @@ impl Display for MethodObject {
             MethodObject::CalendarEventNotification => "CalendarEventNotification",
             MethodObject::ShareNotification => "ShareNotification",
             MethodObject::MaskedEmail => "MaskedEmail",
+            MethodObject::DeletedAccount => "inbuxa:DeletedAccount",
             MethodObject::Registry(obj) => {
                 f.write_str("x:")?;
                 return f.write_str(obj.as_str());

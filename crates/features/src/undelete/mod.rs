@@ -13,6 +13,7 @@
 //! beyond them, and the fork's bookkeeping, live in the fork's own subspace
 //! (`data`). Requirements are named `UD-n`, after the spec.
 
+pub mod accounts;
 pub mod data;
 pub mod email;
 pub mod groupware;
