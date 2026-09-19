@@ -100,6 +100,12 @@ Task type `RestoreArchivedItem`, carrying the `accountId`, the
 - **UD-4.** The copy is whole: for email, the full message as stored, with its
   mailboxes and keywords recorded so restore can put them back (UD-8). The
   archived record shows only the summary fields above.
+  **Decision** (2026-09-18) on where: what restore needs beyond the kept
+  copy (an email's mailboxes and keywords, a file's folder and name, an
+  event's calendar, a contact's address book) is kept beside the unchanged
+  `x:ArchivedItem` record, in the fork's own subspace (`_`, as masked email),
+  keyed by archived item id. Items archived before the fork have none, and
+  restore as upstream did: email to the Inbox.
 - **UD-5.** `archivedUntil` is `archivedAt` plus the retention in force when
   the item was archived. Changing the setting later doesn't move existing
   deadlines. **Decision**: a shorter setting must never silently destroy what
@@ -168,6 +174,11 @@ Task type `RestoreArchivedItem`, carrying the `accountId`, the
   the whole account (mail, files, calendars, contacts, scripts, settings) for
   that period. The account can't sign in or receive mail while deleted.
   Mail to it is refused as for an unknown address.
+- **UD-15a.** **Decision** (2026-09-18) on how it's kept: the `x:Account`
+  record is removed as upstream removes it, so sign-in and delivery fail as
+  they already do, and a copy of it is kept in the fork's own subspace until
+  the deadline, with its id. The data waits for upstream's `DestroyAccount`
+  task, as it does today.
 - **UD-16.** Its name and addresses stay reserved while it's kept, so nobody
   else can take them and receive its mail. **Decision**, a fix: upstream
   doesn't reserve them. A new account with the deleted one's name was created
@@ -191,6 +202,14 @@ Task type `RestoreArchivedItem`, carrying the `accountId`, the
   and `archivedAt` ranges, and text over the summary fields, so ihasmail can
   offer "deleted in the last week" and search. Kept deleted accounts listed
   and restored through `x:Account` (shape settled with UD-17 once observed).
+  **Decision** (2026-09-18) on the shape: a method pair in the fork's
+  namespace, under `urn:inbuxa:jmap`: `inbuxa:DeletedAccount/get` lists kept
+  accounts (`id`, `name`, `addresses`, `memberTenantId`, `deletedAt`,
+  `keptUntil`), and `inbuxa:DeletedAccount/set` restores one (update
+  `{"restore": true, "password": "..."}`, which writes the record back with
+  the same id and cancels its `DestroyAccount` task) or destroys it for good
+  (destroy, which runs the task now). Server administrators see every kept
+  account; tenant administrators their own tenant's (MT-1).
 
 ## ihasmail
 
