@@ -9,6 +9,7 @@
 //! names the test number or requirement.
 
 use crate::utils::{
+    account::Account,
     server::{TestServer, TestServerBuilder},
     smtp::SmtpConnection,
 };
@@ -24,6 +25,7 @@ use registry::schema::{
 use serde_json::{Value, json};
 use std::time::Duration;
 use trc::{ClusterEvent, Collector, EventType, MetricType};
+use types::id::Id;
 
 const SECRET: &str = "monitoring test user passphrase";
 
@@ -380,6 +382,86 @@ pub async fn test(test: &mut TestServer) {
         .assert_destroyed(&[tenant]);
     admin.destroy_account(user).await;
     test.wait_for_tasks().await;
+}
+
+/// Acceptance test 26 (compat): INBUXA's settings read back as observed 1,
+/// its stored history in the stripped encoding is skipped, not an error, and
+/// one purge past its age removes it. Run against a copy of its data with
+/// `INBUXA_COMPAT_ADMIN` (`name:password`), `NO_INSERT=1`, and the store's
+/// `TMPDIR`/`STORE` pointing at the copy. The purge deletes history, so never
+/// point it at the live store.
+#[ignore]
+#[tokio::test(flavor = "multi_thread")]
+pub async fn monitoring_compat() {
+    let admin = std::env::var("INBUXA_COMPAT_ADMIN").expect("INBUXA_COMPAT_ADMIN");
+    assert!(std::env::var("NO_INSERT").is_ok(), "NO_INSERT must be set");
+    let test = TestServerBuilder::new("monitoring_compat")
+        .await
+        .with_default_listeners()
+        .await
+        .build_with_opts(false)
+        .await;
+    let (name, secret) = admin.split_once(':').expect("name:password");
+    let admin = Account::new(
+        Box::leak(name.to_string().into_boxed_str()),
+        Box::leak(secret.to_string().into_boxed_str()),
+        &[],
+        "Compat admin",
+        Id::from(u32::MAX),
+    );
+
+    // Observed 1: 30 and 90 days, hourly, both stores Default, no alerts
+    let retention = admin
+        .jmap_method_call("x:DataRetention/get", json!({"ids": ["singleton"]}))
+        .await;
+    let retention = &retention.list()[0];
+    assert_eq!(retention["holdTracesFor"], 30 * 86_400_000u64, "{retention}");
+    assert_eq!(retention["holdMetricsFor"], 90 * 86_400_000u64, "{retention}");
+    assert_eq!(retention["metricsCollectionInterval"]["@type"], "Hourly");
+    for object in ["x:TracingStore/get", "x:MetricsStore/get"] {
+        let store = admin
+            .jmap_method_call(object, json!({"ids": ["singleton"]}))
+            .await;
+        assert_eq!(store.list()[0]["@type"], "Default", "{object}");
+    }
+    let search = admin
+        .jmap_method_call("x:Search/get", json!({"ids": ["singleton"]}))
+        .await;
+    let search = &search.list()[0];
+    assert_eq!(search["indexTelemetry"], true, "{search}");
+    let alerts = admin
+        .jmap_method_call("x:Alert/get", json!({"ids": null}))
+        .await;
+    assert!(alerts.list().is_empty(), "{alerts:?}");
+
+    // Old history: read without an error, whatever can't be decoded skipped
+    for method in ["x:Trace/get", "x:Metric/get"] {
+        let response = admin.jmap_method_call(method, json!({"ids": null})).await;
+        assert!(
+            response.0.pointer("/methodResponses/0/1/list").is_some(),
+            "{method}: {response:?}"
+        );
+    }
+
+    // One purge past its age, and nothing old is left
+    test.server
+        .tracing_store()
+        .purge_spans(Duration::ZERO, Some(test.server.search_store()))
+        .await
+        .unwrap();
+    test.server
+        .metrics_store()
+        .purge_metrics(Duration::ZERO)
+        .await
+        .unwrap();
+    for method in ["x:Trace/query", "x:Metric/query"] {
+        let response = admin.jmap_method_call(method, json!({})).await;
+        assert_eq!(
+            response.0.pointer("/methodResponses/0/1/ids"),
+            Some(&json!([])),
+            "{method}: {response:?}"
+        );
+    }
 }
 
 /// The first `event:` frame of that name on an event stream, its data.

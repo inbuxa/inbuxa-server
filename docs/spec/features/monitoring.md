@@ -530,6 +530,40 @@ these needs a write.
     domains' traces is wanted (MON-31).
 12. Size of INBUXA's `o` and `x` subspaces, to check MON-19's estimate.
 
+## Implementation status
+
+Built 2026-09-19 from this spec, clean-room, under the multi-tenancy hand-off
+brief's rules. Metric history is in `crates/common/src/telemetry/metrics/store.rs`,
+trace history in `crates/common/src/telemetry/tracers/store.rs`, alerts in
+`crates/common/src/telemetry/alerts.rs`, the live streams in
+`crates/http/src/live.rs`, and `x:Metric` and `x:Trace` in
+`crates/jmap/src/inbuxa/telemetry.rs`, at the paths the shared tests name;
+upstream files carry hooks marked `inbuxa:`. All four suites in
+`tests/src/telemetry` are un-gated and pass, so the table above is history:
+they cover tests 10 and 12 (`tracing.rs`), 13 (`metrics.rs`) and 18
+(`alerts.rs`). Tests 1, 3, 5 to 9, 11, 14 to 17, 19 to 21, 23 and 24 pass as
+`tests/src/system/monitoring.rs`.
+
+- **MON-1 to MON-39:** built, with the limits below.
+- **Test 26 (compat)** is written as `monitoring_compat`, ignored, and unrun
+  until a copy of INBUXA's data is provided. It checks observed 1, reads the
+  old history without an error, and purges it. It deletes history, so only
+  ever run it against a copy.
+- **Not exercised by a test:** 2 (an unreachable PostgreSQL tracing store),
+  4 (`queue.count` after a restart; the gauge is set from the queue on each
+  calculation), 22 (a webhook for `telemetry.alert-event`; webhooks are the
+  shared, unchanged path), 25 (a full buffer; the subscriber is lossy by
+  construction), and test 17's 30-minute close.
+- **Known limits, not requirements of this spec:**
+  - A trace cut at 1000 events (MON-15) carries the number cut as a `total`
+    value on its closing event, since no event type fits a separate marker.
+  - The `inbuxa:admin` scope check on live tokens (MON-23) waits for the auth
+    contract; until then the permission and server-level checks apply.
+  - A live token can be reused within its 60 seconds (Decision, MON-23).
+  - The alert edge trigger (MON-26) is held in memory, so an alert whose
+    condition holds across a restart fires once more.
+  - The stream limit (MON-24) is per node.
+
 ## Observed
 
 Settled on 2026-09-18 against INBUXA's live Enterprise server (Stalwart
