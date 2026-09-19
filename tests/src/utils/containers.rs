@@ -40,6 +40,15 @@ pub const PG_PRIMARY_PORT: u16 = 5442;
 pub const PG_REPLICA_PORT: u16 = 5443;
 pub const PG_REPLICA_CONTAINER: &str = "inbuxa-test-pg-replica";
 pub const PG_PRIMARY_CONTAINER: &str = "inbuxa-test-pg-primary";
+static MYSQL_GTID: OnceCell<(ContainerAsync<GenericImage>, ContainerAsync<GenericImage>)> =
+    OnceCell::const_new();
+static MYSQL_POS: OnceCell<(ContainerAsync<GenericImage>, ContainerAsync<GenericImage>)> =
+    OnceCell::const_new();
+const MYSQL_REPLICATION_NETWORK: &str = "inbuxa-test-mysql-replication";
+/// The MySQL pair that replicates with GTIDs, and the one that replicates
+/// by binary log position.
+pub const MYSQL_GTID_PORTS: (u16, u16) = (3317, 3318);
+pub const MYSQL_POS_PORTS: (u16, u16) = (3327, 3328);
 
 const OPENLDAP_LDAPI_URL: &str = "ldapi://%2Fvar%2Frun%2Fslapd%2Fldapi/";
 
@@ -623,7 +632,9 @@ pub async fn ensure_postgres_replicated() {
 /// inbuxa: runs SQL on a test container, through `psql`.
 pub fn psql(container: &str, sql: &str) -> String {
     let output = std::process::Command::new("docker")
-        .args(["exec", container, "psql", "-U", "stalwart", "-d", "stalwart", "-tAc", sql])
+        .args([
+            "exec", container, "psql", "-U", "stalwart", "-d", "stalwart", "-tAc", sql,
+        ])
         .output()
         .expect("docker exec");
     String::from_utf8_lossy(&output.stdout).trim().to_string()
@@ -636,4 +647,134 @@ pub fn docker(action: &str, container: &str) {
         .status()
         .expect("docker");
     assert!(status.success(), "docker {action} {container}");
+}
+
+fn mysql_container(
+    name: &str,
+    port: u16,
+    gtid: bool,
+    server_id: &str,
+) -> testcontainers::ContainerRequest<GenericImage> {
+    let mut cmd = vec![
+        format!("--server-id={server_id}"),
+        "--log-bin=binlog".to_string(),
+        "--binlog-format=ROW".to_string(),
+        "--default-authentication-plugin=mysql_native_password".to_string(),
+    ];
+    if gtid {
+        cmd.push("--gtid-mode=ON".to_string());
+        cmd.push("--enforce-gtid-consistency=ON".to_string());
+    }
+    let _ = name;
+    GenericImage::new("mysql", "8.0")
+        .with_wait_for(WaitFor::message_on_stderr("port: 3306  MySQL"))
+        .with_env_var("MYSQL_ROOT_PASSWORD", "password")
+        .with_env_var("MYSQL_DATABASE", "stalwart")
+        .with_cmd(cmd)
+        .with_network(MYSQL_REPLICATION_NETWORK)
+        .with_mapped_port(port, 3306.tcp())
+        .with_startup_timeout(READY_TIMEOUT)
+        .with_container_name(name)
+        .with_reuse(ReuseDirective::Always)
+}
+
+/// inbuxa: runs SQL on a MySQL test container, through the `mysql` client.
+pub fn mysql_query(container: &str, sql: &str) -> String {
+    let output = std::process::Command::new("docker")
+        .args([
+            "exec",
+            container,
+            "mysql",
+            "-uroot",
+            "-ppassword",
+            "-N",
+            "-B",
+            "-e",
+            sql,
+        ])
+        .output()
+        .expect("docker exec");
+    if !output.status.success() {
+        panic!(
+            "{sql}: {}",
+            String::from_utf8_lossy(&output.stderr).trim().to_string()
+        );
+    }
+    String::from_utf8_lossy(&output.stdout).trim().to_string()
+}
+
+/// inbuxa: a MySQL source and replica, replicating with GTIDs or by binary
+/// log position (ST-10, ST-15).
+pub async fn ensure_mysql_replicated(gtid: bool) {
+    let (cell, ports, names) = if gtid {
+        (
+            &MYSQL_GTID,
+            MYSQL_GTID_PORTS,
+            (
+                "inbuxa-test-mysql-gtid-primary",
+                "inbuxa-test-mysql-gtid-replica",
+            ),
+        )
+    } else {
+        (
+            &MYSQL_POS,
+            MYSQL_POS_PORTS,
+            (
+                "inbuxa-test-mysql-pos-primary",
+                "inbuxa-test-mysql-pos-replica",
+            ),
+        )
+    };
+    cell.get_or_init(|| async {
+        let primary = mysql_container(names.0, ports.0, gtid, "1")
+            .start()
+            .await
+            .expect("Failed to start the MySQL source");
+        let replica = mysql_container(names.1, ports.1, gtid, "2")
+            .start()
+            .await
+            .expect("Failed to start the MySQL replica");
+        wait_for_tcp(ports.0).await;
+        wait_for_tcp(ports.1).await;
+
+        // A replication account, and one without REPLICATION CLIENT (test 18)
+        mysql_query(
+            names.0,
+            concat!(
+                "CREATE USER IF NOT EXISTS 'repl'@'%' IDENTIFIED WITH mysql_native_password BY 'repl';",
+                "GRANT REPLICATION SLAVE ON *.* TO 'repl'@'%';",
+                "CREATE USER IF NOT EXISTS 'plain'@'%' IDENTIFIED WITH mysql_native_password BY 'plain';",
+                "GRANT ALL ON stalwart.* TO 'plain'@'%'; FLUSH PRIVILEGES;"
+            ),
+        );
+        if mysql_query(names.1, "SELECT SERVICE_STATE FROM performance_schema.replication_applier_status")
+            .is_empty()
+        {
+            let source = if gtid {
+                format!(
+                    "CHANGE REPLICATION SOURCE TO SOURCE_HOST='{}', SOURCE_PORT=3306, \
+                     SOURCE_USER='repl', SOURCE_PASSWORD='repl', SOURCE_AUTO_POSITION=1",
+                    names.0
+                )
+            } else {
+                let status = mysql_query(names.0, "SHOW MASTER STATUS");
+                let mut fields = status.split('\t');
+                let file = fields.next().unwrap_or_default().to_string();
+                let position = fields.next().unwrap_or("4").to_string();
+                format!(
+                    "CHANGE REPLICATION SOURCE TO SOURCE_HOST='{}', SOURCE_PORT=3306, \
+                     SOURCE_USER='repl', SOURCE_PASSWORD='repl', SOURCE_LOG_FILE='{file}', \
+                     SOURCE_LOG_POS={position}",
+                    names.0
+                )
+            };
+            mysql_query(names.1, &source);
+            mysql_query(names.1, "START REPLICA");
+            mysql_query(names.1, "SET GLOBAL super_read_only=ON");
+        }
+        (primary, replica)
+    })
+    .await;
+    wait_for_tcp(ports.0).await;
+    wait_for_tcp(ports.1).await;
 }

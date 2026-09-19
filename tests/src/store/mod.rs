@@ -12,6 +12,8 @@ pub mod query;
 pub mod registry;
 #[cfg(feature = "postgres")]
 pub mod replica; // inbuxa: read replicas
+#[cfg(feature = "mysql")]
+pub mod replica_mysql; // inbuxa: read replicas on MySQL
 pub mod scaleout; // inbuxa: scale-out storage
 #[cfg(any(feature = "postgres", feature = "mysql"))]
 pub mod sql_timeout;

@@ -91,6 +91,43 @@ pub async fn build_data_store(typ: &str, path: &str) -> DataStore {
             ..Default::default()
         });
     }
+    // inbuxa: a MySQL source with a replica, with and without GTIDs
+    if let Some(gtid) = match typ {
+        "MySqlReplicated" => Some(true),
+        "MySqlReplicatedPosition" => Some(false),
+        _ => None,
+    } {
+        crate::utils::containers::ensure_mysql_replicated(gtid).await;
+        let (primary, replica) = if gtid {
+            crate::utils::containers::MYSQL_GTID_PORTS
+        } else {
+            crate::utils::containers::MYSQL_POS_PORTS
+        };
+        let secret = || {
+            SecretKeyOptional::Value(SecretKeyValue {
+                secret: "password".into(),
+            })
+        };
+        return DataStore::MySql(MySqlStore {
+            host: "localhost".into(),
+            port: primary as u64,
+            auth_username: "root".to_string().into(),
+            auth_secret: secret(),
+            database: "stalwart".into(),
+            use_tls: false,
+            allow_invalid_certs: true,
+            read_replicas: registry::types::list::List::from_iter([
+                registry::schema::structs::MySqlSettings {
+                    host: "localhost".into(),
+                    port: replica as u64,
+                    database: "stalwart".into(),
+                    auth_username: "root".to_string().into(),
+                    auth_secret: secret(),
+                },
+            ]),
+            ..Default::default()
+        });
+    }
     if typ == "MariaDb" {
         crate::utils::containers::ensure_mariadb().await;
         return DataStore::MySql(MySqlStore {

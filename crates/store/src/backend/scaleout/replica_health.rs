@@ -410,17 +410,42 @@ async fn replica_lag(
                 let row: Option<mysql_async::Row> =
                     match conn.query_first("SHOW REPLICA STATUS").await {
                         Ok(row) => row,
-                        Err(_) => return Ok(None),
+                        Err(err) => {
+                            report(
+                                store.kind,
+                                format!(
+                                    "Read replica {} won't report its status: {err}",
+                                    replica.label
+                                ),
+                            );
+                            return Ok(None);
+                        }
                     };
                 let Some(row) = row else {
                     return Ok(None);
                 };
-                match row.get_opt::<Option<u64>, _>("Seconds_Behind_Source") {
-                    Some(Ok(Some(seconds))) => Ok(Some(seconds * 1000)),
-                    Some(Ok(None)) => Err(trc::StoreEvent::MysqlError
+                let behind = ["Seconds_Behind_Source", "Seconds_Behind_Master"]
+                    .into_iter()
+                    .find_map(|column| row.get_opt::<mysql_async::Value, _>(column))
+                    .and_then(|value| value.ok());
+                match behind {
+                    Some(mysql_async::Value::NULL) => Err(trc::StoreEvent::MysqlError
                         .into_err()
                         .details("Replication is stopped")),
-                    _ => Ok(None),
+                    Some(value) => match mysql_async::from_value_opt::<u64>(value.clone()) {
+                        Ok(seconds) => Ok(Some(seconds * 1000)),
+                        Err(_) => {
+                            report(
+                                store.kind,
+                                format!(
+                                    "Read replica {}: Seconds_Behind_Source isn't a number ({value:?})",
+                                    replica.label
+                                ),
+                            );
+                            Ok(None)
+                        }
+                    },
+                    None => Ok(None),
                 }
             }
         }
