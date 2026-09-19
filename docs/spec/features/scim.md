@@ -590,6 +590,11 @@ Each requirement has an ID, and tests name the IDs they check.
 - **SCIM-61.** The rule follows whichever directory serves the domain. Until
   per-domain directories (`Domain.directoryId`) are rebuilt, that's the
   default directory.
+  **Decision** (2026-09-19): SCIM is built before per-domain directories
+  (feature 9). Acceptance test 5 (`oidc.rs`) binds an OIDC directory to one
+  domain, so it stays ignored until feature 9 is built, and runs unchanged
+  then. Until then SCIM-58 to SCIM-60 are tested against the default
+  directory.
 
 ## Interfaces
 
@@ -829,6 +834,12 @@ removed suites (`auth`, `bulk`, `discovery`, `groups`, `limits`, `query`,
     OAuth mode would want it. Decide with `contract.md`'s OAuth work.
 11. **Tenant quota status** (SCIM-20) and the rate-limit accounting of
     `/Bulk` (SCIM-14) are our Decisions.
+**Decision** (2026-09-19) on 12 and 13: SCIM is built to this spec without
+reading the profile drafts or the vendors' documentation, since each point
+they'd inform already has a Decision here. Both stay open, to check after
+the build; the replayed Okta, Keycloak and Entra payloads in `driver.py`
+cover the clients meanwhile.
+
 12. **The interop and IPSIE profiles.** Upstream's docs say it follows
     draft-zollner-scim-interop-profile (except unknown-attribute rejection)
     and the IPSIE profile's lifecycle rules. Neither draft was read for this
