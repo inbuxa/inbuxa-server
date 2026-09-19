@@ -881,7 +881,11 @@ impl RegistrySet for Server {
                 .await
                 .map(|set| set.into_response()),
 
-            ObjectType::Log | ObjectType::Metric | ObjectType::Trace | ObjectType::ClusterNode => {
+            // inbuxa: MON-32: a trace can be destroyed, never created or changed
+            ObjectType::Trace => crate::inbuxa::telemetry::trace_set(set)
+                .await
+                .map(|set| set.into_response()),
+            ObjectType::Log | ObjectType::Metric | ObjectType::ClusterNode => {
                 set.fail_all_create("Telemetry objects cannot be created");
                 set.fail_all_update("Telemetry objects cannot be modified");
                 set.fail_all_destroy("Telemetry objects cannot be deleted");

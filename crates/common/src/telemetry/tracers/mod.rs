@@ -9,6 +9,7 @@ pub mod journald;
 pub mod log;
 pub mod otel;
 pub mod stdout;
+pub mod store; // inbuxa: monitoring history (MON-10 to MON-17)
 
 
 use registry::{

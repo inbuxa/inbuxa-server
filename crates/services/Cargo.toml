@@ -5,6 +5,7 @@ edition = "2024"
 
 [dependencies]
 store = { path = "../store" }
+nlp = { path = "../nlp" }
 common = { path =  "../common" }
 utils = { path =  "../utils" }
 trc = { path = "../trc" }

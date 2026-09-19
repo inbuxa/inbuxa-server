@@ -248,6 +248,18 @@ async fn store_maintenance(
             {
                 trc::error!(err.details("Failed to purge metric history"));
             }
+            if let Some(keep) = retention.hold_traces_for
+                && !server.tracing_store().is_none()
+            {
+                use common::telemetry::tracers::store::TracingStore;
+                if let Err(err) = server
+                    .tracing_store()
+                    .purge_spans(keep.into_inner(), Some(server.search_store()))
+                    .await
+                {
+                    trc::error!(err.details("Failed to purge trace history"));
+                }
+            }
 
             trc::event!(
                 Store(StoreEvent::DataStorePurged),

@@ -7,9 +7,7 @@
 #[cfg(feature = "pending-rebuild")] // inbuxa: pending-rebuild, see docs/spec/features/
 pub mod alerts;
 pub mod metrics;
-#[cfg(feature = "pending-rebuild")] // inbuxa: pending-rebuild, see docs/spec/features/
 pub mod tracing;
-#[cfg(feature = "pending-rebuild")] // inbuxa: pending-rebuild, see docs/spec/features/
 pub mod webhooks;
 
 use crate::utils::server::TestServerBuilder;
@@ -61,9 +59,7 @@ pub async fn telemetry_tests() {
     #[cfg(feature = "pending-rebuild")]
     alerts::test(&test).await;
     metrics::test(&test).await;
-    #[cfg(feature = "pending-rebuild")]
     tracing::test(&test).await;
-    #[cfg(feature = "pending-rebuild")]
     webhooks::test(&test).await;
 
     if test.is_reset() {

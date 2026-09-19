@@ -40,6 +40,15 @@ pub enum TelemetrySubscriberType {
     Webhook(WebhookTracer),
     #[cfg(unix)]
     JournalTracer(crate::telemetry::tracers::journald::Subscriber),
+    // inbuxa: MON-10: trace history
+    StoreTracer(StoreTracer),
+}
+
+/// Where trace history goes: traces to `tracing`, index tasks to `data`.
+#[derive(Debug)]
+pub struct StoreTracer {
+    pub tracing: store::Store,
+    pub data: store::Store,
 }
 
 #[derive(Debug)]
@@ -141,8 +150,7 @@ impl Telemetry {
 }
 
 impl Tracers {
-    // inbuxa: `_storage` is unused until monitoring history (stored traces and metrics) is rebuilt
-    pub async fn parse(bp: &mut Bootstrap, _storage: &Storage) -> Self {
+    pub async fn parse(bp: &mut Bootstrap, storage: &Storage) -> Self {
         let mut custom_levels = AHashMap::new();
         let mut tracers: Vec<TelemetrySubscriber> = Vec::new();
         let mut global_interests = Interests::default();
@@ -387,6 +395,7 @@ impl Tracers {
                     TelemetrySubscriberType::JournalTracer(_) => {
                         EventType::Telemetry(TelemetryEvent::JournalError).into()
                     }
+                    TelemetrySubscriberType::StoreTracer(_) => None,
                 };
 
                 // Parse disabled events
@@ -476,6 +485,36 @@ impl Tracers {
                 } else {
                     bp.build_error(id, "No events enabled for webhook");
                 }
+            }
+
+            // inbuxa: MON-10 to MON-12: trace history, when a tracing store is set:
+            // info and above, the span edges and MAIL FROM, never raw I/O
+            if !storage.tracing.is_none() {
+                let mut interests = Interests::default();
+                for event_type in EventType::variants() {
+                    let event_level = custom_levels
+                        .get(event_type)
+                        .copied()
+                        .unwrap_or(event_type.level());
+                    if !event_type.is_raw_io()
+                        && (Level::Info.is_contained(event_level)
+                            || event_type.is_span_start()
+                            || event_type.is_span_end()
+                            || event_type.as_str().starts_with("smtp.mail-from"))
+                    {
+                        interests.set(event_type.to_id() as usize);
+                        global_interests.set(event_type.to_id() as usize);
+                    }
+                }
+                tracers.push(TelemetrySubscriber {
+                    id: "trace-history".to_string(),
+                    interests,
+                    typ: TelemetrySubscriberType::StoreTracer(StoreTracer {
+                        tracing: storage.tracing.clone(),
+                        data: storage.data.clone(),
+                    }),
+                    lossy: true,
+                });
             }
 
             #[cfg(feature = "dev_mode")]

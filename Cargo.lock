@@ -7780,6 +7780,7 @@ dependencies = [
  "mail-builder 1.0.0",
  "mail-parser",
  "memory-stats",
+ "nlp",
  "p256",
  "psl",
  "registry",

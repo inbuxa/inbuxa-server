@@ -102,6 +102,10 @@ impl TelemetrySubscriberType {
             TelemetrySubscriberType::LogTracer(settings) => spawn_log_tracer(builder, settings),
             TelemetrySubscriberType::Webhook(settings) => spawn_webhook_tracer(builder, settings),
             TelemetrySubscriberType::OtelTracer(settings) => spawn_otel_tracer(builder, settings),
+            // inbuxa: MON-10: trace history
+            TelemetrySubscriberType::StoreTracer(settings) => {
+                tracers::store::spawn_store_tracer(builder, settings.tracing, settings.data)
+            }
             #[cfg(unix)]
             TelemetrySubscriberType::JournalTracer(subscriber) => {
                 tracers::journald::spawn_journald_tracer(builder, subscriber)

@@ -381,6 +381,9 @@ impl RegistryGet for Server {
             }
             ObjectType::Log => log_get(get).await.map(|get| get.into_response()),
             // inbuxa: monitoring history (MON-17, MON-31)
+            ObjectType::Trace => crate::inbuxa::telemetry::trace_get(get)
+                .await
+                .map(|get| get.into_response()),
             ObjectType::Metric => crate::inbuxa::telemetry::metric_get(get)
                 .await
                 .map(|get| get.into_response()),

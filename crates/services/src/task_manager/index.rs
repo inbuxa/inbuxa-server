@@ -582,8 +582,88 @@ async fn build_contact_document(
 
 
 #[cfg(not(feature = "enterprise"))]
-async fn build_tracing_span_document(_: &Server, _: u64) -> trc::Result<Option<IndexDocument>> {
-    Ok(None)
+// inbuxa: MON-16: a trace's search document, when trace search is on:
+// its event types, queue ids, and addresses, their domains, hosts, IPs,
+// message ids and account names as keywords
+async fn build_tracing_span_document(
+    server: &Server,
+    span_id: u64,
+) -> trc::Result<Option<IndexDocument>> {
+    use common::telemetry::tracers::store::MaybeTrace;
+    use registry::schema::{enums::SearchTracingField, structs::Search};
+    use store::{
+        search::TracingSearchField,
+        write::{TelemetryClass, ValueClass},
+    };
+    use trc::Key;
+
+    let settings = server
+        .registry()
+        .object::<Search>(types::id::Id::singleton())
+        .await?
+        .unwrap_or_default();
+    if !settings.index_telemetry {
+        return Ok(None);
+    }
+    let wants = |field: SearchTracingField| settings.index_tracing_fields.iter().any(|f| *f == field);
+    let Some(MaybeTrace(Some(trace))) = server
+        .tracing_store()
+        .get_value::<MaybeTrace>(ValueKey::from(ValueClass::Telemetry(TelemetryClass::Span(
+            span_id,
+        ))))
+        .await?
+    else {
+        return Ok(None);
+    };
+
+    let mut document = IndexDocument::new(SearchIndex::Tracing).with_id(span_id);
+    let mut seen = store::ahash::AHashSet::new();
+    for event in trace.events.iter() {
+        if wants(SearchTracingField::EventType) && seen.insert(event.event.as_str().to_string()) {
+            document.index_keyword(TracingSearchField::EventType, event.event.as_str());
+        }
+        for kv in event.key_values.iter() {
+            let text = match &kv.value {
+                registry::schema::structs::TraceValue::String(v) => v.value.clone(),
+                registry::schema::structs::TraceValue::UnsignedInt(v) => v.value.to_string(),
+                registry::schema::structs::TraceValue::IpAddr(v) => v.value.to_string(),
+                _ => continue,
+            };
+            match kv.key {
+                Key::QueueId if wants(SearchTracingField::QueueId) => {
+                    if seen.insert(format!("q:{text}")) {
+                        document.index_keyword(TracingSearchField::QueueId, &text);
+                    }
+                }
+                Key::From
+                | Key::To
+                | Key::Domain
+                | Key::Hostname
+                | Key::RemoteIp
+                | Key::MessageId
+                | Key::AccountName
+                    if wants(SearchTracingField::Keywords) =>
+                {
+                    let text = text.to_lowercase();
+                    if seen.insert(format!("k:{text}")) {
+                        document.index_text(TracingSearchField::Keywords, &text, nlp::language::Language::None);
+                        // An address's domain, so a domain search finds it
+                        if let Some((_, domain)) = text.rsplit_once('@')
+                            && seen.insert(format!("k:{domain}"))
+                        {
+                            document.index_text(
+                                TracingSearchField::Keywords,
+                                domain,
+                                nlp::language::Language::None,
+                            );
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    Ok(Some(document))
 }
 
 // inbuxa: UD-1, UD-4: archives a deleted file, event or contact noted at
