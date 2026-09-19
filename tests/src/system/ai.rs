@@ -276,7 +276,7 @@ pub async fn test(test: &mut TestServer) {
     deliver(&[USER], "Long", &"a".repeat(100 * 1024)).await;
     let (_, long) = stub.last();
     let text = long["messages"][1]["content"].as_str().unwrap();
-    assert!(text.len() < 16_384 + 256 && text.contains("[truncated]"), "test 7");
+    assert!(text.len() < 2_048 + 256 && text.contains("[truncated]"), "test 7");
 
     // Acceptance test 12: a hostile explanation and a planted header
     // AI-12 reads the first line only, so the hostile part rides on a lone CR
@@ -324,7 +324,7 @@ pub async fn test(test: &mut TestServer) {
         .await;
     admin.reload_settings().await;
     for (answer, expected) in [
-        ("Unsolicited,High,x", "LLM_UNSOLICITED_HIGH (5.00)"),
+        ("Unsolicited,High,x", "LLM_UNSOLICITED_HIGH (2.00)"),
         ("Legitimate,High,x", "LLM_LEGITIMATE_HIGH (-1.00)"),
         ("Harmful,High,x", "LLM_HARMFUL_HIGH (0.00)"),
     ] {

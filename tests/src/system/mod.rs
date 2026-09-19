@@ -7,6 +7,7 @@
 pub mod antispam;
 pub mod authentication;
 pub mod ai;
+pub mod ai_calibration;
 pub mod authorization;
 pub mod branding;
 pub mod crypto;

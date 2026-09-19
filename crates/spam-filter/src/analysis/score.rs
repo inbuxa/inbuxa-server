@@ -59,7 +59,7 @@ impl SpamFilterAnalyzeScore for Server {
             // inbuxa: AI-13: the model's tag moves the score only so far, and
             // never discards or rejects on its own
             if inbuxa_features::ai::answer::is_llm_tag(tag) {
-                let (max_added, max_subtracted) = ctx.result.llm_bounds.unwrap_or((5.0, 1.0));
+                let (max_added, max_subtracted) = ctx.result.llm_bounds.unwrap_or((2.0, 1.0));
                 let score = match self.core.spam.lists.scores.get(tag) {
                     Some(SpamFilterAction::Allow(score)) => {
                         inbuxa_features::ai::answer::clamp(*score, max_added, max_subtracted)

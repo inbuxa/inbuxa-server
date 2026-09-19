@@ -31,11 +31,11 @@ pub struct AiLimits {
 impl Default for AiLimits {
     fn default() -> Self {
         AiLimits {
-            spam_max_added: 5.0,
+            spam_max_added: 2.0,
             spam_max_subtracted: 1.0,
             spam_call_ceiling: Duration::from_millis(20_000),
             max_concurrent_calls: 4,
-            max_content_bytes: 16_384,
+            max_content_bytes: 2_048,
             failure_backoff: Duration::from_millis(60_000),
             user_calls_per_hour: 60,
         }
