@@ -208,6 +208,11 @@ Each requirement has an ID, and tests name the IDs they check.
 - **MT-15.** The ceiling can never exceed what the server grants. No setting
   on a tenant can give its people a permission the server has disabled for
   them.
+  **Decision** (2026-09-18): `impersonate` never takes effect inside a
+  tenant, whatever the tenant allows. Impersonation reaches any account, so
+  in a tenant it would break MT-1. A tenant administrator manages its own
+  people's accounts and masks through its administrative permissions
+  instead.
 - **MT-16.** Changing a tenant's roles, permissions or quotas takes effect for
   its people without a restart and without them signing in again. The next
   request is judged by the new rules. **Decision**, a deliberate improvement:
