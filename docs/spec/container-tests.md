@@ -30,11 +30,11 @@ covers the rest.
 
 | Suite | Feature | Needs | `STORE` |
 |---|---|---|---|
-| `scim::scim_tests` | 7, SCIM | Nothing (`SCIM_CONFORMANCE=1` adds the third-party clients, in a container) | default |
-| `scim::scim_oidc_tests` | 7 and 9 (test 5) | Keycloak | default |
-| `directory::per_domain::per_domain_directory_tests` | 9, per-domain directories | Nothing; needs the `sqlite` feature | default |
-| `store::scaleout::scaleout_blob_tests` | 8, scale-out storage (tests 2 to 8) | Nothing: the members are directories | default |
-| `store::scaleout::scaleout_memory_tests` | 8 (tests 20, 22, 23) | Redis; needs the `redis` feature | default |
+| `scim::scim_tests` | 7, SCIM | Nothing (`SCIM_CONFORMANCE=1` adds the third-party clients, in a container) | `RocksDb` |
+| `scim::scim_oidc_tests` | 7 and 9 (test 5) | Keycloak | `RocksDb` |
+| `directory::per_domain::per_domain_directory_tests` | 9, per-domain directories | Nothing; needs the `sqlite` feature | `RocksDb` |
+| `store::scaleout::scaleout_blob_tests` | 8, scale-out storage (tests 2 to 8) | Nothing: the members are directories | `RocksDb` |
+| `store::scaleout::scaleout_memory_tests` | 8 (tests 20, 22, 23) | Redis; needs the `redis` feature | `RocksDb` |
 | `store::replica::replica_tests` | 8 (tests 9, 10, 12 to 15) | PostgreSQL primary and hot standby | `PostgreSqlReplicated` |
 | `store::replica_cluster::replica_cluster_tests` | 8 (test 11) | The same pair, and Redis | `PostgreSqlReplicated` |
 | `store::replica_mysql::mysql_replica_tests` | 8 (test 17) | MySQL source and replica, GTIDs | `MySqlReplicated` |
@@ -52,9 +52,12 @@ STORE=<store> cargo test -p tests --features <backends> <suite> -- --ignored
 ```
 
 `<suite>` is the test's name, such as `scim_tests` or `replica_tests`, and
-`--exact` with its full path if the name matches more than one. The three
-replicated `STORE` values are the harness's own (`tests/src/utils/storage.rs`);
-they bring up the pair they name and point the server at the primary.
+`--exact` with its full path if the name matches more than one. `STORE` has
+no default: without it the harness panics with "Missing or invalid store
+type" before the suite starts, so the table names one for every suite. The
+three replicated values are the harness's own
+(`tests/src/utils/storage.rs`); they bring up the pair they name and point
+the server at the primary.
 
 For example:
 
@@ -115,6 +118,31 @@ and three are the invocation or the environment rather than the code:
   listener to test it needs a permission this session didn't have — so
   before reading anything into an ACME failure, check that path first.
 
+## The last sweep
+
+All nine were re-run on 2026-09-19, one at a time, after `docker rm -f` on
+every `inbuxa-test-` and `stalwart-test-` container, so each suite built
+its own from scratch. All nine pass:
+
+| Suite | Time |
+|---|---|
+| `scim_tests` | 21s |
+| `scim_oidc_tests` | 23s |
+| `per_domain_directory_tests` | 4s |
+| `scaleout_blob_tests` | 1s |
+| `scaleout_memory_tests` | 1s |
+| `replica_tests` | 15s |
+| `replica_cluster_tests` | 12s |
+| `mysql_replica_tests` | 36s |
+| `mysql_replica_position_tests` | 27s, failed; 7s on a second run |
+
+`mysql_replica_position_tests` was the one failure, on test 18's first
+assertion: the replica's lag has to be under five seconds, and
+`Seconds_Behind_Source` is still above that while a pair seeded half a
+minute earlier catches up. It failed before the point where the suite
+changes the replica's settings, so nothing was left to restore, and it
+passed on a second run against the same, now warm, pair.
+
 ## When one fails
 
 The containers are reused between runs, so a suite that fails in a way its
@@ -124,3 +152,7 @@ own assertions don't explain is worth re-running once against fresh ones:
 an interrupted run is the usual cause — `replica_tests` pauses WAL replay,
 and `mysql_replica_position_tests` changes the replica's parallel-apply
 settings, both of which they restore only if they finish.
+
+A pair built fresh has the opposite problem: it is still catching up, and a
+lag assertion can fail on a replica that is working perfectly well. Give
+the suite a second run before reading anything into it.
