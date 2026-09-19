@@ -63,6 +63,28 @@ STORE=PostgreSqlReplicated cargo test -p tests --features postgres,redis \
     replica_cluster_tests -- --ignored
 ```
 
+`LOG=<level>` turns on the test server's own logging, which is the only way
+to see why a task failed rather than that it failed: `LOG=error` is what
+found the ACME fault below.
+
+## The suites the regression runs, but not with its own settings
+
+Three of the suites a plain `cargo test -p tests` runs can't pass on the
+settings it uses. Run them by name, with these:
+
+```
+# Two nodes, so a shared store and a coordinator, never RocksDb
+STORE=PostgreSql COORDINATOR=Redis cargo test -p tests --features postgres,redis \
+    -- --exact cluster::broadcast::cluster_tests
+
+# The spam rules the expectations were recorded against
+STORE=RocksDb SPAM_RULES_URL=file:///path/to/spam-filter-rules.json.gz \
+    cargo test -p tests -- --exact smtp::inbound::antispam::antispam
+
+# The ACME pair, which keeps its containers between runs
+STORE=RocksDb cargo test -p tests -- --exact automation::automation_tests
+```
+
 ## What a plain regression leaves failing
 
 `STORE=RocksDb cargo test -p tests -- --test-threads=1` was 86 passed, 4
@@ -79,13 +101,19 @@ and three are the invocation or the environment rather than the code:
   can't work on RocksDb, where each node gets its own.
 - `smtp::outbound::lmtp::lmtp_delivery` counted three DSNs where it wanted
   four, and passes on its own: queue timing under a loaded sequential run.
-- `automation::automation_tests` fails against pebble with
+- `automation::automation_tests` failed against pebble with
   `400 malformed: "Cannot update challenge with status processing, only
-  status pending"`. `crates/common/src/network/acme/order.rs` re-POSTs the
-  challenge each time it polls an authorization that is still pending;
-  pebble accepts that only while the challenge itself is pending. Upstream
-  code, untouched by the fork, and unfixed: worth treating as a real
-  renewal bug rather than a test artefact.
+  status pending"`, because the client re-posted the challenge on every
+  poll. That was a real renewal bug and is fixed; the 400s are gone and the
+  client polls as RFC 8555 section 7.5.1 says to.
+
+  The suite still doesn't pass here: pebble never validates the TLS-ALPN
+  challenge, so the authorizations stay pending until the client gives up
+  and no certificate is issued. Validation needs pebble, in its container,
+  to reach the test server's `0.0.0.0:8899` across the docker bridge, and
+  `ufw` is active on this machine. That wasn't proved — standing up a
+  listener to test it needs a permission this session didn't have — so
+  before reading anything into an ACME failure, check that path first.
 
 ## When one fails
 

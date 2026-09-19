@@ -234,7 +234,7 @@ impl AcmeRequestBuilder {
         let mut retry_after = response.retry_after;
         let auth = response.body;
 
-        let (domain, challenge_url) = match auth.status {
+        let domain = match auth.status {
             AuthStatus::Pending => {
                 let Identifier::Dns(domain) = auth.identifier;
 
@@ -318,7 +318,7 @@ impl AcmeRequestBuilder {
                 }
 
                 self.challenge(&challenge.url).await?;
-                (domain, challenge.url.clone())
+                domain
             }
             AuthStatus::Valid => return Ok(()),
             _ => {
@@ -345,14 +345,20 @@ impl AcmeRequestBuilder {
 
             match response.body.status {
                 AuthStatus::Pending => {
+                    // inbuxa: keep polling, don't post the challenge again.
+                    // RFC 8555 section 7.5.1 has the client post a challenge
+                    // once to say it's ready and then poll the authorization,
+                    // which stays pending while validation runs. Posting it
+                    // again is refused once the server has moved the
+                    // challenge to "processing" (pebble answers 400
+                    // malformed, "Cannot update challenge with status
+                    // processing"), and that refusal failed the renewal.
                     trc::event!(
                         Acme(AcmeEvent::AuthPending),
                         Hostname = domain.to_string(),
                         Url = self.directory.new_order.to_string(),
                         Total = i,
                     );
-
-                    self.challenge(&challenge_url).await?
                 }
                 AuthStatus::Valid => {
                     trc::event!(
