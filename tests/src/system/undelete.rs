@@ -25,7 +25,7 @@ use jmap_client::client::{Client, Credentials};
 use registry::{
     schema::{
         prelude::{ObjectType, Property},
-        structs::{DataRetention, Expression, Imap, MtaStageAuth, MtaStageRcpt, Task},
+        structs::{DataRetention, Expression, Imap, Jmap, MtaStageAuth, MtaStageRcpt, Task},
     },
     types::duration::Duration,
 };
@@ -46,6 +46,19 @@ const DAY: u64 = 86_400;
 pub async fn test(test: &mut TestServer) {
     println!("Running undelete tests...");
     let admin = test.account("admin@example.org");
+    // Inside system_tests the quota suite leaves a 1-second upload lifetime,
+    // which a script upload can outlive before its set
+    admin
+        .registry_update_setting(
+            Jmap::default(),
+            &[
+                Property::UploadQuota,
+                Property::MaxUploadCount,
+                Property::UploadTtl,
+            ],
+        )
+        .await;
+    admin.reload_settings().await;
     let user = admin
         .create_user_account("undelete@example.org", SECRET, "Undelete", &[], vec![])
         .await;
