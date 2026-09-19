@@ -535,6 +535,59 @@ data.
    they did and doesn't need to. The rules they may have enforced (quota,
    SCIM authority, tenant checks) are specified here from other sources.
 
+## Implementation status
+
+Built 2026-09-19 from this spec, clean-room, under the multi-tenancy
+hand-off brief's rules. The two lookups every caller goes through now
+honor the domain (`crates/common/src/auth/authentication.rs`), with the
+rules around them in `cache/directory.rs` (synchronization),
+`network/mta.rs` (recipients), `crates/directory/src/core/config.rs`
+(building) and `crates/jmap/src/registry/set.rs` (reloading); each change is
+marked `inbuxa:`.
+
+- **DIR-1 to DIR-32:** built, with the limits below. DIR-2, DIR-8, DIR-12,
+  DIR-13 and DIR-25 to DIR-30 were already in the AGPL code and now follow
+  the domain.
+- **Tests.** `directory::per_domain::per_domain_directory_tests` covers
+  tests 1, 3, 4, 6, 7, 9, 11, 15 and 19, and DIR-20 and DIR-21, over SQL
+  directories on SQLite files, with no container. `directory_tests` runs a
+  new `oidc` module in place of the removed one, against Keycloak: tests 5,
+  8, 12, 13, 14, 16 and 17 in part (below). SCIM's acceptance test 5
+  (`scim_oidc_tests`) now runs and passes.
+- **Test 20 (compat)** is `per_domain_directory_compat`, ignored, and unrun
+  until a copy of INBUXA's data is provided. It checks observed 1.
+- **Not exercised, or only in part:**
+  - Test 2 and test 9 use an SQL directory that can't open instead of a
+    stopped LDAP server, and test 18 (a stopped provider, and the sign-in
+    ban) isn't run: the Keycloak container is shared.
+  - Test 10 needs a second provider, and test 12's later sign-ins (an empty
+    groups claim clearing groups, a missing one keeping them) need changes
+    to Keycloak users; neither is run.
+  - Test 13 is checked through synchronization itself, since the realm's
+    users aren't on the tenant's domain. Test 14 reuses an account an
+    administrator made, not one from an earlier LDAP directory.
+  - Test 16 checks `HS256`, an unknown `kid`, another issuer and an expired
+    token. Keycloak grants every required scope whatever is asked, so the
+    missing-scope refusal isn't reached; audience and key rotation aren't
+    run. Test 17 checks password sign-in and a malformed token; an opaque
+    token and `usernameDomain` aren't run.
+  - DIR-22's rule that `Authentication.directoryId` names a server-level
+    directory, and DIR-24 (a tenant administrator setting its own domains'
+    directory), aren't tested.
+- **Settled from the code, not a change of intent:**
+  - A write to `x:Directory` or `Authentication` reloads the directories
+    at once, on every node (DIR-17). Settings otherwise apply on an
+    explicit reload.
+  - A directory that fails to open is a build warning, not an error
+    (DIR-21, open question 6): before, one error stopped every later
+    reload from applying.
+  - A server default naming no directory is unavailable, like a domain's
+    (DIR-5); it used to mean the internal directory.
+- **Known limits, not requirements of this spec:**
+  - An SQL directory on a SQLite path that can't be opened holds the reload,
+    and the request that caused it, for the pool's 30-second connection
+    timeout before it's marked unavailable.
+
 ## Observed
 
 Settled on 2026-09-18 against INBUXA's live Enterprise server (Stalwart

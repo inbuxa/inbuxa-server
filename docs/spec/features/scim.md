@@ -875,8 +875,8 @@ steps, the 8 replayed Okta, Keycloak and Entra payloads, and scim2-tester
 with errors only for its generated non-address `userName`.
 
 - **SCIM-1 to SCIM-61:** built, with the limits below.
-- **Test 5** (`oidc.rs`) is `scim_oidc_tests`, ignored until per-domain
-  directories (feature 9) are built (Decision, SCIM-61).
+- **Test 5** (`oidc.rs`) is `scim_oidc_tests`, and passes since per-domain
+  directories (feature 9) were built (Decision, SCIM-61).
 - **Test 31 (compat)** is `scim_compat`, ignored, and unrun until a copy of
   INBUXA's data is provided. It checks observed 1.
 - **Settled from the code, not a change of intent:**

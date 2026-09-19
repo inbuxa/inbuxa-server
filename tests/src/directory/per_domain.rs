@@ -468,3 +468,54 @@ pub async fn per_domain_directory_tests() {
     let _ = (c, d);
     test.temp_dir.delete();
 }
+
+/// Acceptance test 20 (compat): on a copy of INBUXA's data, every domain
+/// signs in against the same source as before cutover. Observed 1: no
+/// directory, no server default, and no domain with `directoryId` set, so
+/// every domain stays on the internal directory. Any domain with one is
+/// listed first. Run with `INBUXA_COMPAT_ADMIN` (`name:password`),
+/// `NO_INSERT=1`, and the store's `TMPDIR`/`STORE` pointing at the copy.
+#[ignore]
+#[tokio::test(flavor = "multi_thread")]
+pub async fn per_domain_directory_compat() {
+    let admin = std::env::var("INBUXA_COMPAT_ADMIN").expect("INBUXA_COMPAT_ADMIN");
+    assert!(std::env::var("NO_INSERT").is_ok(), "NO_INSERT must be set");
+    let _test = TestServerBuilder::new("per_domain_directory_compat")
+        .await
+        .with_default_listeners()
+        .await
+        .build_with_opts(false)
+        .await;
+    let (name, secret) = admin.split_once(':').expect("name:password");
+    let admin = Account::new(
+        Box::leak(name.to_string().into_boxed_str()),
+        Box::leak(secret.to_string().into_boxed_str()),
+        &[],
+        "Compat admin",
+        Id::from(u32::MAX),
+    );
+    let domains = admin
+        .jmap_method_call("x:Domain/get", json!({"ids": null}))
+        .await;
+    let with_directory = domains
+        .list()
+        .iter()
+        .filter(|domain| !domain["directoryId"].is_null())
+        .map(|domain| domain["name"].to_string())
+        .collect::<Vec<_>>();
+    assert!(
+        with_directory.is_empty(),
+        "domains with their own directory, a cutover blocker: {with_directory:?}"
+    );
+    let directories = admin
+        .jmap_method_call("x:Directory/get", json!({"ids": null}))
+        .await;
+    assert!(directories.list().is_empty(), "observed 1: no directory");
+    let authentication = admin
+        .jmap_method_call("x:Authentication/get", json!({"ids": ["singleton"]}))
+        .await;
+    assert!(
+        authentication.list()[0]["directoryId"].is_null(),
+        "observed 1: no server default"
+    );
+}
