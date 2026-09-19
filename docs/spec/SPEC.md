@@ -85,7 +85,13 @@ The wrapper is `tools/fork/strip.py`. Beyond `ossify.py` it:
   don't compile until they're gone;
 - verifies the result across every text file, not just Rust, and reports what
   was removed, the Cargo edits, upstream's Enterprise flags, and the feature
-  gates left for §2.3 to replace.
+  gates left for §2.3 to replace;
+- lists the third-party code left in the stripped tree, as upstream's
+  comments mark it: another copyright holder or license, or a note that code
+  was ported or adapted from elsewhere. Any file `THIRD-PARTY.md` doesn't
+  cover yet is flagged as new. It's reported, not a failure: the notice goes
+  into `THIRD-PARTY.md` in the merge that brings the release in, since the
+  fork redistributes that code and its license requires the notice.
 
 ### 2.2a Snapshots, not a git fork
 

@@ -29,6 +29,10 @@ What it does, in order (docs/spec/SPEC.md §2.2):
    removed, what was edited, what upstream's schema flags as Enterprise, and
    how many `enterprise` feature gates and edition checks remain in shared
    code for the rebuilt features to replace.
+7. Lists the third-party code left in the stripped tree, as upstream's
+   comments mark it (another copyright holder or license, or "ported from"
+   and the like), and names any file THIRD-PARTY.md doesn't cover yet. That's
+   a report, not a failure: the notice goes in THIRD-PARTY.md with the merge.
 
 Only license markers and Cargo manifests are read for meaning. The code inside
 an Enterprise file or snippet is never printed, reported or kept, which is what
@@ -291,6 +295,57 @@ def verify(tree):
     return problems
 
 
+# Third-party code as upstream marks it, in comments only: a license
+# identifier other than upstream's own, a copyright line naming anyone but
+# Stalwart Labs, or a note that code came from somewhere else.
+COMMENT = re.compile(r'^\s*(?://+!?|/?\*+|#+|--|<!--)\s*(.*?)\s*(?:\*/|-->)?\s*$')
+COPYRIGHT = re.compile(r'(?i)(?:SPDX-FileCopyrightText:|\bcopyright\b|©)')
+ORIGIN = re.compile(r'(?i)\b(?:(?:ported|derived|adapted|taken|copied|borrowed)\s+from|credits?\b\s*:|inspired\s+by'
+                    r'|licen[cs]e(?:d)?\s*(?:under|:)|\w+\s+licen[cs]ed\b|^from\s+https?://)')
+OWN = ('Stalwart Labs',)
+OWN_LICENSES = {AGPL, f'{AGPL} OR {SEL}'}
+
+
+def third_party(tree):
+    """
+    Every comment line in the stripped tree that points at someone else's code.
+
+    Runs after stripping, so only shared (AGPL) code is read. Each hit is a
+    notice the fork passes on when it distributes, so it's matched against
+    THIRD-PARTY.md, and a file that isn't listed there yet is reported as new.
+    """
+    hits = {}
+    for path in sorted(tree.rglob('*')):
+        if not is_text(path):
+            continue
+        rel = path.relative_to(tree)
+        if rel.parts[0] == 'LICENSES' or path.suffix in ('.md', '.txt', '.json'):
+            continue  # license texts, prose and data, not code
+        try:
+            lines = path.read_text(encoding='utf-8').split('\n')
+        except UnicodeDecodeError:
+            continue
+        for n, line in enumerate(lines, 1):
+            ident = IDENT.match(line)
+            if ident:
+                if ident.group(1) not in OWN_LICENSES and SEL not in ident.group(1):
+                    hits.setdefault(str(rel), []).append({'line': n, 'text': f'SPDX-License-Identifier: {ident.group(1)}'})
+                continue
+            m = COMMENT.match(line)
+            if not m or any(o in m.group(1) for o in OWN):
+                continue
+            if COPYRIGHT.search(m.group(1)) or ORIGIN.search(m.group(1)):
+                hits.setdefault(str(rel), []).append({'line': n, 'text': m.group(1)[:160]})
+    return hits
+
+
+def unlisted(hits):
+    """Files with third-party notices that THIRD-PARTY.md doesn't name yet."""
+    notices = Path(__file__).resolve().parents[2] / 'THIRD-PARTY.md'
+    listed = set(re.findall(r'`([^`\s]+?)(?::\d+)?`', notices.read_text(encoding='utf-8'))) if notices.is_file() else set()
+    return sorted(f for f in hits if f not in listed)
+
+
 def schema_flags(tree):
     path = tree / 'resources' / 'schema' / 'schema.json.gz'
     if not path.is_file():
@@ -334,6 +389,7 @@ def write_report(out_dir, report):
         f'- Left for the rebuilt features to replace: {sum(r["feature_gates"].values())} `enterprise` feature gates '
         f'in {len(r["feature_gates"])} files; {sum(r["edition_checks"].values())} `is_enterprise_edition()` checks '
         f'in {len(r["edition_checks"])} files',
+        f'- Third-party code: {len(r["third_party"])} files, **{len(r["third_party_unlisted"])}** not in THIRD-PARTY.md',
     ]
     if r['schema']:
         md.append(f'- Upstream schema flags {len(r["schema"]["objects"])} objects and {len(r["schema"]["fields"])} fields as Enterprise')
@@ -344,6 +400,12 @@ def write_report(out_dir, report):
     if r['schema']:
         md += ['', '## Flagged Enterprise in upstream\'s schema', '', '**Objects:** ' + ', '.join(f'`{o}`' for o in r['schema']['objects']),
                '', '**Fields:** ' + ', '.join(f'`{f}`' for f in r['schema']['fields'])]
+    md += ['', '## Third-party code', '',
+           'Comments in the stripped tree that name another copyright holder, another license, or a source the '
+           'code came from. Files marked **new** aren\'t in THIRD-PARTY.md yet.', '']
+    for f, found in r['third_party'].items():
+        md.append(f'- `{f}`{" **new**" if f in r["third_party_unlisted"] else ""}')
+        md += [f'  - {h["line"]}: {h["text"]}' for h in found]
     if r['problems']:
         md += ['', '## Problems', ''] + [f'- {p}' for p in r['problems']]
     (out_dir / 'STRIP-REPORT.md').write_text('\n'.join(md) + '\n', encoding='utf-8')
@@ -365,7 +427,8 @@ def main():
     if malformed:
         write_report(args.out, {'ref': args.ref, 'commit': commit, 'removed_files': [], 'removed_snippets': {},
                                 'cargo_edits': [], 'dangling_mods': [], 'problems': malformed, 'feature_gates': {}, 'edition_checks': {},
-                                'schema': None, 'ossify_log': ''})
+                                'schema': None, 'third_party': {}, 'third_party_unlisted': [],
+                                'ossify_log': ''})
         print('\n'.join(malformed), file=sys.stderr)
         fail('malformed snippet markers; nothing stripped', code=1)
 
@@ -375,18 +438,22 @@ def main():
     dangling = remove_dangling_mods(tree)
     problems = verify(tree)
     gates, checks = remaining_hooks(tree)
+    others = third_party(tree)
+    new_others = unlisted(others)
 
     report = {
         'ref': args.ref, 'commit': commit,
         'removed_files': removed_files, 'removed_snippets': removed_snippets,
         'cargo_edits': edits, 'dangling_mods': dangling, 'problems': problems,
         'feature_gates': gates, 'edition_checks': checks,
-        'schema': schema_flags(tree), 'ossify_log': log,
+        'schema': schema_flags(tree), 'third_party': others, 'third_party_unlisted': new_others,
+        'ossify_log': log,
     }
     write_report(args.out, report)
     print(f'{args.ref} ({commit[:12]}): removed {len(removed_files)} files and '
           f'{sum(removed_snippets.values())} snippets, {len(dangling)} dangling mods, {len(edits)} Cargo edits, '
-          f'{"verified clean" if not problems else f"{len(problems)} PROBLEMS"}. Report: {args.out}/STRIP-REPORT.md')
+          f'{"verified clean" if not problems else f"{len(problems)} PROBLEMS"}'
+          f'{f", {len(new_others)} files of third-party code not in THIRD-PARTY.md" if new_others else ""}. Report: {args.out}/STRIP-REPORT.md')
     sys.exit(1 if problems else 0)
 
 
