@@ -100,6 +100,17 @@ impl GroupwareConfig {
         let dr = bp.setting_infallible::<DataRetention>().await;
         let system = bp.setting_infallible::<SystemSettings>().await;
 
+        // inbuxa: BT-19: a stored template that doesn't parse is reported at
+        // start and on each reload; the built-in is used meanwhile
+        inbuxa_features::branding::templates::warn_unusable::<CalendarTemplateVariable>(
+            "CalendarAlarm.template",
+            alarm.template.as_deref(),
+        );
+        inbuxa_features::branding::templates::warn_unusable::<CalendarTemplateVariable>(
+            "CalendarScheduling.emailTemplate",
+            sched.email_template.as_deref(),
+        );
+
         GroupwareConfig {
             max_request_size: dav.request_max_size as usize,
             dead_property_size: dav.dead_property_max_size.map(|v| v as usize),

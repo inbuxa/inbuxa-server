@@ -3326,6 +3326,7 @@ dependencies = [
  "http_proto",
  "hyper",
  "hyper-util",
+ "inbuxa-features",
  "jmap",
  "jmap_proto",
  "mail-auth",
@@ -3964,6 +3965,7 @@ name = "inbuxa-features"
 version = "0.16.22"
 dependencies = [
  "ahash",
+ "base64 0.23.1",
  "jmap_proto",
  "registry",
  "serde",

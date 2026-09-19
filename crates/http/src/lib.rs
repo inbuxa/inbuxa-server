@@ -8,6 +8,7 @@
 
 pub mod api;
 pub mod auth;
+pub mod branding; // inbuxa: branding
 pub mod form;
 pub mod request;
 

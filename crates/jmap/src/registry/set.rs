@@ -572,6 +572,22 @@ impl RegistrySet for Server {
                         }
                     };
 
+                    // inbuxa: BT-3, BT-15, BT-22: logos and templates follow their rules
+                    let before = match &modification {
+                        Modification::Update { object, .. }
+                        | Modification::Create {
+                            object: Some(object),
+                            ..
+                        } => Some(object),
+                        Modification::Create { object: None, .. } => None,
+                    };
+                    if let Err(err) =
+                        inbuxa_features::branding::writes::check(before, &new_object)
+                    {
+                        set.failed(modification, err);
+                        continue 'outer;
+                    }
+
                     // inbuxa: UD-16: a kept account's addresses stay its own
                     if let Some(err) =
                         crate::inbuxa::deleted_account::reserved(self, stored, &new_object).await?

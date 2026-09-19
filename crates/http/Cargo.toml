@@ -25,6 +25,7 @@ mail-builder = { version = "1.0" }
 mail-auth = { version = "0.13", features = ["generate", "arc"] }
 tokio = { version = "1.53", features = ["rt"] }
 hyper = { version = "1.11.1", features = ["server", "http1", "http2"] }
+inbuxa-features = { path = "../features" }
 hyper-util = { version = "0.1.20", features = ["tokio"] }
 http-body-util = "0.1.5"
 async-stream = "0.3.6"

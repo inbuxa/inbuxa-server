@@ -379,6 +379,33 @@ the operator's approval first, as with the other features' probes.
    logo by request hostname. Check in `inbuxa-admin` (an ordinary AGPL fork,
    SPEC.md §5) whether it calls `/logo`, so it keeps working against BT-5.
 
+## Implementation status
+
+Built 2026-09-18 from this spec, clean-room, under the multi-tenancy hand-off
+brief's rules. The rules live in `crates/features` (`inbuxa-features`, module
+`branding`); the domain lookup in `crates/common/src/storage/branding.rs`;
+`/logo` and the RSVP page's answer in `crates/http/src/branding.rs`; upstream
+files carry hooks marked `inbuxa:`. Acceptance tests 1 to 17 pass as
+`tests/src/system/branding.rs`.
+
+- **BT-1 to BT-26:** built.
+- **ihasmail changes** belong to ihasmail-inbuxa and aren't part of this
+  repository.
+- **Test 18 (compat)** is written as `branding_compat`, ignored, and unrun
+  until a copy of INBUXA's data is provided. INBUXA holds no logos or
+  templates (observed 1), so it has nothing to carry today.
+- **Known limits, not requirements of this spec:**
+  - Logos are read from the registry on each `/logo` request and each email,
+    not cached. That is what makes BT-10 hold on every node with nothing to
+    invalidate; the existing logo cache is left unused.
+  - Test 9 runs on one node. The cluster half of BT-10 follows from reading
+    the registry each time, and isn't exercised by a test.
+  - Test 7 checks the sandboxing header. That the script doesn't run is the
+    browser honouring it, which no test here drives.
+  - Test 17 checks the pages' source, not a browser loading them.
+  - `httpRsvpEnable` still needs a settings reload, as upstream (it isn't one
+    of this spec's fields); the templates and logos don't (BT-18, BT-10).
+
 ## Observed
 
 Settled on 2026-09-18 against INBUXA's live Enterprise server (Stalwart
@@ -414,5 +441,14 @@ account. No upstream code was read.
 6. **The stored `fromName`** (open question 7). INBUXA stores
    `INBUXA Calendar` as a value already. Nothing to change at cutover.
 
-Not settled: open question 5 (invalid templates on write) needs a write, and
-question 8 is a check in `inbuxa-admin`, not on the server.
+7. **INBUXA Admin's logo** (open question 8), checked 2026-09-18 in the
+   `inbuxa-admin` source, not on a server. It requests `/logo` with no
+   parameter (so the server goes by `Host`), through `fetch()`, and draws its
+   built-in logo whenever the answer isn't an `image/*` response. It reads no
+   logo fields and never asks the server to fetch a URL. Against BT-5, a
+   data-URL logo shows; a URL logo's cross-origin redirect falls back to the
+   built-in unless the logo's host sends CORS headers. Moving it to an image
+   element, as BT-26 does for the server's own pages, is a change for that
+   repository.
+
+Not settled: open question 5 (invalid templates on write) needs a write.

@@ -7,6 +7,7 @@
 pub mod antispam;
 pub mod authentication;
 pub mod authorization;
+pub mod branding;
 pub mod crypto;
 pub mod delivery;
 pub mod directory;

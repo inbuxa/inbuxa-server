@@ -18,6 +18,7 @@ use store::{BlobStore, InMemoryStore, RegistryStore, SearchStore, Store};
 
 pub mod archive;
 pub mod blob;
+pub mod branding; // inbuxa: branding BT-1, BT-2
 pub mod dav;
 pub mod document;
 pub mod encryption;
@@ -95,11 +96,27 @@ impl Server {
         self.registry().count_object(ObjectType::Domain).await
     }
 
+    // inbuxa: BT-9: the first logo mail can carry inline; none leaves the
+    // built-in INBUXA logo
     #[cfg(not(feature = "enterprise"))]
     pub async fn logo_resource(
         &self,
-        _: &str,
+        domain: &str,
     ) -> trc::Result<Option<crate::manager::application::Resource<Vec<u8>>>> {
-        Ok(None)
+        Ok(self
+            .logos_for(domain)
+            .await?
+            .into_iter()
+            .find(|logo| logo.is_embeddable())
+            .and_then(|logo| match logo {
+                inbuxa_features::branding::logo::Logo::Image {
+                    content_type,
+                    bytes,
+                } => Some(crate::manager::application::Resource::new(
+                    content_type,
+                    bytes,
+                )),
+                inbuxa_features::branding::logo::Logo::Url(_) => None,
+            }))
     }
 }

@@ -264,8 +264,8 @@ Each requirement has an ID, and tests name the IDs they check.
   **Decision** (2026-09-18) on the shape: in the JMAP session, the
   principal's own account's `accountCapabilities` carry `urn:inbuxa:jmap`
   (contract C-1) with `logo`: a string (the URL or data URL as stored) or
-  `null`. Until branding is built it follows this chain, steps 1 and 2 of
-  BT-1.
+  `null`. With branding built (2026-09-18) it follows BT-1 steps 1 to 3,
+  skipping unusable values (BT-4); `null` means the built-in logo, step 4.
 - **MT-23.** The server never fetches a logo URL itself. ihasmail draws URL
   logos through its image proxy, as it does today.
 

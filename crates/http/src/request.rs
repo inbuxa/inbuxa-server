@@ -474,13 +474,15 @@ impl ParseHttp for Server {
                     && req.method() == Method::GET
                     && path.next().unwrap_or_default() == "rsvp"
                 {
-
-                    return Ok(HttpResponse::new(StatusCode::OK)
-                        .with_content_type("text/html; charset=utf-8")
-                        .with_header(CONTENT_ENCODING, "gzip")
-                        .with_binary_body(RSVP_PAGE)
-                        .with_no_store());
+                    // inbuxa: BT-20, BT-21
+                    return crate::branding::rsvp_page(self, RSVP_PAGE).await;
                 }
+            }
+            // inbuxa: BT-5: the logo that applies, anonymous
+            "logo" if req.method() == Method::GET => {
+                self.is_http_anonymous_request_allowed(session.remote_ip)
+                    .await?;
+                return crate::branding::logo(self, &req).await;
             }
             "autodiscover" | "Autodiscover" | "AutoDiscover" => {
                 let document_name = path.next().unwrap_or_default();

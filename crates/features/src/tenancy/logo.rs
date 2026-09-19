@@ -8,9 +8,10 @@
 //!
 //! Its domain's logo if set, else its tenant's. The value is returned as
 //! stored, a URL or a data URL: the server never fetches a logo URL itself
-//! (MT-23). Branding extends the chain past the tenant (BT-1).
+//! (MT-23). Branding extends the chain past the tenant to the server-wide
+//! logo (BT-2); none means the client's built-in INBUXA logo.
 
-use registry::schema::structs::{Account, Domain, Tenant};
+use registry::schema::structs::{Account, Domain, Enterprise, Tenant};
 use store::RegistryStore;
 use types::id::Id;
 
@@ -28,29 +29,19 @@ pub async fn for_account(registry: &RegistryStore, account_id: u32) -> trc::Resu
         Some(tenant_id) => registry.object::<Tenant>(tenant_id).await?,
         None => None,
     };
-    Ok(applicable(
+    // BT-2: past the tenant, the server-wide logo; each value as stored, and
+    // an unusable one skipped (BT-4)
+    let server = registry
+        .object::<Enterprise>(Id::singleton())
+        .await?
+        .and_then(|e| e.logo_url);
+    Ok([
         domain.as_ref().and_then(|d| d.logo.as_deref()),
         tenant.as_ref().and_then(|t| t.logo.as_deref()),
-    )
+        server.as_deref(),
+    ]
+    .into_iter()
+    .flatten()
+    .find(|value| crate::branding::logo::read(value).is_some())
     .map(str::to_string))
-}
-
-/// The logo that applies, from the principal's domain's and tenant's logos.
-pub fn applicable<'x>(domain: Option<&'x str>, tenant: Option<&'x str>) -> Option<&'x str> {
-    domain
-        .filter(|logo| !logo.is_empty())
-        .or(tenant.filter(|logo| !logo.is_empty()))
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn domain_then_tenant() {
-        assert_eq!(applicable(Some("d"), Some("t")), Some("d"));
-        assert_eq!(applicable(None, Some("t")), Some("t"));
-        assert_eq!(applicable(Some(""), Some("t")), Some("t"));
-        assert_eq!(applicable(None, None), None);
-    }
 }

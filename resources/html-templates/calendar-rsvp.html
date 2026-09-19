@@ -1055,28 +1055,18 @@
                 function showDefault() { wrap.removeAttribute('data-loading'); }
                 var target = apiUrl.replace(/\/api\/calendar\/rsvp$/, '') + '/logo';
                 if (domain) target += '?domain=' + encodeURIComponent(domain);
-                fetch(target, { method: 'GET', credentials: 'omit' })
-                    .then(function (res) {
-                        if (!res.ok) return null;
-                        var ct = (res.headers.get('content-type') || '').toLowerCase();
-                        if (ct.indexOf('image/') !== 0) return null;
-                        return res.blob();
-                    })
-                    .then(function (blob) {
-                        if (!blob) { showDefault(); return; }
-                        var objectUrl = URL.createObjectURL(blob);
-                        var img = new Image();
-                        img.className = 'custom-logo';
-                        img.alt = 'Logo';
-                        img.onload = function () {
-                            while (wrap.firstChild) wrap.removeChild(wrap.firstChild);
-                            wrap.appendChild(img);
-                            wrap.removeAttribute('data-loading');
-                        };
-                        img.onerror = function () { URL.revokeObjectURL(objectUrl); showDefault(); };
-                        img.src = objectUrl;
-                    })
-                    .catch(function () { showDefault(); });
+                // An image element, not fetch: it can follow /logo's redirect to
+                // a URL logo on another origin (branding BT-26)
+                var img = new Image();
+                img.className = 'custom-logo';
+                img.alt = 'Logo';
+                img.onload = function () {
+                    while (wrap.firstChild) wrap.removeChild(wrap.firstChild);
+                    wrap.appendChild(img);
+                    wrap.removeAttribute('data-loading');
+                };
+                img.onerror = showDefault;
+                img.src = target;
             }
 
             function findOrganizer(resp) {
