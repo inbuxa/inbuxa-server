@@ -271,12 +271,18 @@ unchanged.
   (`features/dashboard/stores/liveMetricsStore.ts`).
 - **MON-23.** **Tokens.** Browsers can't put headers on an event stream, so
   as with the delivery tester, `GET /api/token/tracing` and
-  `/api/token/metrics` return a single-use token, valid 60 seconds, bound to
+  `/api/token/metrics` return a token, valid 60 seconds, bound to
   the account and to grant type `live_tracing` or `live_metrics` (both already
   defined). The token is the response body as plain text, as upstream sends
   it and INBUXA Admin reads it (observed 5). The stream accepts it as
-  `?token=`, or a normal `Authorization` header. Issuing the token needs `liveTracing` or `liveMetrics`, and on this
-  fork a token with the `inbuxa:admin` scope (contract.md C-18).
+  `?token=`, or a normal `Authorization` header. Issuing the token needs
+  `liveTracing` or `liveMetrics`, and on this fork a token with the
+  `inbuxa:admin` scope (contract.md C-18). **Decision** (2026-09-19): the
+  token can be used again within its 60 seconds, not once only. INBUXA Admin
+  reconnects a dropped stream up to five times with the same token URL
+  (`LiveTracingPage.tsx`), in line with the choice to match INBUXA Admin for
+  these streams. The `inbuxa:admin` scope check applies once the auth
+  contract's scopes are built; until then the permission is the gate.
 - **MON-24.** A live subscriber is lossy: a slow client loses events, never
   slows the server. At most 8 live streams run at once per node, and each ends
   after 30 minutes, when the client reconnects with a fresh token.
