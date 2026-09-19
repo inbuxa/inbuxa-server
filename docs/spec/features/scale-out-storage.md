@@ -527,6 +527,52 @@ and PostgreSQL), to show members of different kinds work together (ST-16).
   outside this feature. Check a stock build to see whether a sentinel lookup
   store works at all.
 
+## Implementation status
+
+Sharded stores built 2026-09-19 from this spec, clean-room, under the
+multi-tenancy hand-off brief's rules, in `crates/store/src/backend/scaleout/`
+(as decided above), with one variant added to `BlobStore` and
+`InMemoryStore` and one arm to each dispatch and build `match`, marked
+`inbuxa:`. Read-replica routing waits for per-domain directories (the ST-2
+Decision).
+
+- **ST-1 to ST-4, ST-16 to ST-30:** built, with the limits below.
+- **ST-5 to ST-15:** not built yet. Each configured replica is reported at
+  startup with `store.postgresql-error` or `store.mysql-error` naming it, and
+  nothing connects to it (the pools the stripped code opened and dropped are
+  gone).
+- **Tests.** `store::scaleout::scaleout_blob_tests` covers tests 2 to 7 on
+  three and four FileSystem members, opening the store directly against the
+  data store. The existing blob suite passes against a sharded store with
+  `BLOB_STORE=Sharded` (three FileSystem members), which is test 8 and the
+  second half of test 2. `scaleout_memory_tests`, built with `redis`, covers
+  tests 20, 22 and 23 over two databases of one Redis server, which the store
+  treats as two members. Test 1 is the existing store and blob suites
+  passing unchanged.
+- **Not exercised:** test 3's downloads over JMAP and IMAP after a restart
+  (the same blob reads are checked at the store), test 5's queued delivery
+  (the failing write is checked), test 21 (one of two Redis servers stopped),
+  the `resetRateLimiters` and `removeLock*` maintenance types (the store
+  operations they use are checked), and tests 9 to 19 (replicas).
+- **Settled from the code, not a change of intent:**
+  - The FileSystem backend reports any unreadable file as missing, so a
+    FileSystem member that can't be read looks like a miss (ST-17's search
+    of the other members), not ST-21's error. Its blobs still aren't
+    returned, and writes homed on it fail.
+  - Member lists are recorded under the fork's own keys (`_` subspace,
+    `Sb` for the blob store, `Sm` for the in-memory store, `Sl` and the
+    namespace for a lookup store). An in-memory list that differs is
+    recorded as the new one after the error is logged, so a planned change
+    made by restarting every node settles.
+  - A misplaced blob is logged as `store.unexpected-error`, naming the
+    member it was found on and its home.
+- **Known limits, not requirements of this spec:**
+  - Placement is the fork's own (ST-16), so an install coming from a
+    sharded upstream deployment reads through ST-17's search (open
+    question).
+  - The leftover `Store::SQLReadReplica` arm and the store's `enterprise`
+    feature stay until replica routing lands.
+
 ## Observed
 
 Settled on 2026-09-18 against INBUXA's live Enterprise server (Stalwart
