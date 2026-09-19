@@ -207,7 +207,7 @@ async fn run_one(
         data.to_string().into_bytes()
     };
 
-    match dispatch(ctx, kind, &route, None, &headers, &body).await {
+    match Box::pin(dispatch(ctx, kind, &route, None, &headers, &body)).await {
         Ok(response) => {
             let location = response
                 .body
