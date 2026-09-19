@@ -4,6 +4,10 @@
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
  */
 
+// inbuxa: composite stores nest store futures deeply enough to pass
+// rustc's default query depth
+#![recursion_limit = "512"]
+
 #[cfg(test)]
 use ::store::registry::bootstrap::Bootstrap;
 #[cfg(not(any(target_env = "msvc", target_os = "freebsd")))]

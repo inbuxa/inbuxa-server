@@ -175,6 +175,8 @@ impl<T: SessionStream> SessionData<T> {
 
         // Convert state to modseq
         if let Some(changed_since) = arguments.changed_since {
+            // inbuxa: ST-7: a replica must have the state the client knows
+            store::backend::scaleout::replica::present_change(self.account_id, changed_since);
             // Obtain changes since the modseq.
             let changelog = self
                 .server

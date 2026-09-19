@@ -141,10 +141,24 @@ pub fn is_replica_subspace(subspace: u8) -> bool {
 /// the client presented (ST-7, step 4), and the replica it settled on.
 pub struct ReadScope {
     accounts: Vec<(u32, u64)>,
+    /// Change ids the client presented during the scope (ST-7, step 4).
+    presented: Mutex<Vec<(u32, u64)>>,
     choice: tokio::sync::OnceCell<Option<usize>>,
     /// Set by any write made inside the scope: from then on it reads from
     /// the primary (ST-6: a read in a request that writes).
     wrote: std::sync::atomic::AtomicBool,
+}
+
+/// A state the client presented raises the mark a replica must have
+/// reached before it may answer this scope (ST-7, step 4).
+pub fn present_change(account_id: u32, change_id: u64) {
+    let _ = READ_SCOPE.try_with(|scope| {
+        scope
+            .presented
+            .lock()
+            .unwrap()
+            .push((account_id, change_id))
+    });
 }
 
 /// A write happened in the current task: a read scope, if any, stops using
@@ -167,6 +181,7 @@ pub async fn replica_read<F: Future>(
         .scope(
             Arc::new(ReadScope {
                 accounts: accounts.into_iter().collect(),
+                presented: Mutex::new(Vec::new()),
                 choice: tokio::sync::OnceCell::new(),
                 wrote: std::sync::atomic::AtomicBool::new(false),
             }),
@@ -310,8 +325,15 @@ impl ReplicatedStore {
             if !replica.usable() {
                 continue;
             }
-            for (account_id, presented) in &scope.accounts {
-                let mark = self.mark(*account_id).await.max(*presented);
+            let presented = scope.presented.lock().unwrap().clone();
+            for (account_id, from_request) in &scope.accounts {
+                let highest = presented
+                    .iter()
+                    .filter(|(id, _)| id == account_id)
+                    .map(|(_, change_id)| *change_id)
+                    .max()
+                    .unwrap_or_default();
+                let mark = self.mark(*account_id).await.max(*from_request).max(highest);
                 if mark == 0 {
                     continue;
                 }
