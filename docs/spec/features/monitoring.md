@@ -111,16 +111,17 @@ generator (milliseconds since an epoch in the high bits), so key order is time
 order. The trace search index is `SearchIndex::Tracing`, with fields
 `EventType`, `QueueId` and `Keywords`.
 
-**Existing data at cutover, Decision** (revised 2026-09-19). The store's
-AGPL key layout files `x:Trace` and `x:Metric` registry items under these
-subspaces (`store/src/write/key.rs`), so a trace or sample is stored as that
-registry object, with the registry's own AGPL encoding (`ObjectInner`
-pickling). If INBUXA's history was written the same way, it reads back after
-cutover; this can't be confirmed without a copy of the data (compat test 26).
-Records that can't be decoded are skipped, never an error, and are removed by
-the normal age purge (MON-17), so anything unreadable ages out within 30 and
-90 days. At cutover, run `reindexTelemetry` once so the search index holds
-only readable traces. Settings, alerts and every other registry object open
+**Existing data at cutover, Decision** (revised 2026-09-19). Traces and
+samples are stored under the AGPL telemetry key classes the surviving code
+reads (`TelemetryClass::Span` and `TelemetryClass::Metric`, used by
+`reindex_telemetry` and the index task), each value encoded as the matching
+registry object (`x:Trace`, `x:Metric`) with the registry's own AGPL encoding,
+so no new format is invented. INBUXA's existing history sits under the same
+keys but in the encoding the strip removed (`trc/src/serializers/binary.rs`),
+so it can't be read. Records that can't be decoded are skipped, never an
+error, and are removed by the normal age purge (MON-17), so INBUXA's old
+history ages out within 30 and 90 days. At cutover, run `reindexTelemetry`
+once so the search index holds only readable traces. Settings, alerts and every other registry object open
 unchanged.
 
 ## Required behavior
