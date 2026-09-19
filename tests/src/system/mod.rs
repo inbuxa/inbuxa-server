@@ -14,6 +14,7 @@ pub mod crypto;
 pub mod delivery;
 pub mod directory;
 pub mod masked_email;
+pub mod monitoring;
 pub mod oidc;
 pub mod purge;
 pub mod quota;

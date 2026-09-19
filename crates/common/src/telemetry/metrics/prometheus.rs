@@ -16,9 +16,6 @@ impl Server {
     pub async fn export_prometheus_metrics(&self) -> trc::Result<String> {
         let mut metrics = Vec::new();
 
-
-        #[cfg(not(feature = "enterprise"))]
-
         // Add counters
         for counter in Collector::collect_counters() {
             let mut metric = MetricFamily::default();
