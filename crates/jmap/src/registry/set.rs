@@ -167,7 +167,7 @@ impl RegistrySet for Server {
             update,
             destroy,
         };
-        match object_type {
+        let result = match object_type {
             ObjectType::AddressBook
             | ObjectType::Asn
             | ObjectType::Authentication
@@ -915,7 +915,34 @@ impl RegistrySet for Server {
                 set.fail_all_destroy("Enterprise objects cannot be deleted");
                 Ok(set.into_response())
             }
+        };
+
+        // inbuxa: DIR-17: a directory or the server default applies on the
+        // next request, here and on every node
+        if matches!(
+            object_type,
+            ObjectType::Directory | ObjectType::Authentication
+        ) && let Ok(response) = &result
+            && (!response.created.is_empty()
+                || !response.updated.is_empty()
+                || !response.destroyed.is_empty())
+        {
+            let change = common::ipc::RegistryChange::Reload(ObjectType::Directory);
+            match Box::pin(self.reload_registry(change)).await {
+                Ok(reload) if !reload.has_errors() => {
+                    self.cluster_broadcast(common::ipc::BroadcastEvent::RegistryChange(change))
+                        .await;
+                }
+                Ok(_) => trc::event!(
+                    Registry(trc::RegistryEvent::BuildWarning),
+                    Details = "Settings didn't reload after a directory change",
+                ),
+                Err(err) => {
+                    trc::error!(err.details("Failed to reload directories"));
+                }
+            }
         }
+        result
     }
 }
 

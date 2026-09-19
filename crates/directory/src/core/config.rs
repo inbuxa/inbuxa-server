@@ -33,7 +33,9 @@ impl Directories {
             let directory = match result {
                 Ok(directory) => directory,
                 Err(err) => {
-                    bp.build_error(id, err.clone());
+                    // inbuxa: DIR-21: logged against the directory, which becomes
+                    // unavailable; the rest of the reload carries on
+                    bp.build_warning(id, err.clone());
                     Directory::Unavailable(UnavailableDirectory::new(directory_type, err))
                 }
             };
@@ -45,7 +47,7 @@ impl Directories {
             match directories.get(&(directory_id.id() as u32)) {
                 Some(default_directory) => default_directory.clone().into(),
                 None => {
-                    bp.build_error(
+                    bp.build_warning(
                         ObjectType::Authentication.singleton(),
                         format!("Default directory with ID {} not found", directory_id),
                     );

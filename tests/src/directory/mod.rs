@@ -8,6 +8,8 @@ pub mod discovery;
 pub mod integration;
 pub mod ldap;
 #[cfg(feature = "sqlite")]
+pub mod per_domain; // inbuxa: per-domain directories
+#[cfg(feature = "sqlite")]
 pub mod sql;
 pub mod synchronization;
 pub mod unavailable;
