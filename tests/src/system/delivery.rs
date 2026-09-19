@@ -216,8 +216,11 @@ pub async fn test(test: &mut TestServer) {
     let masked = response.created(0);
     let masked_random_id = masked.object_id();
     let masked_random_email = masked.text_field("email").to_string();
+    // inbuxa: ME-13: the fork's addresses never contain a '.' in the local
+    // part, so they can't be mistaken for upstream's
     assert!(
-        masked_random_email.contains(".") && masked_random_email.ends_with("@example.org"),
+        !masked_random_email.split('@').next().unwrap().contains('.')
+            && masked_random_email.ends_with("@example.org"),
         "Unexpected masked email: {masked_random_email}"
     );
 

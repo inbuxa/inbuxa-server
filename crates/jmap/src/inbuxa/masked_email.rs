@@ -170,7 +170,7 @@ impl CreateRefusal {
                 .with_description("emailPrefix must be 1 to 64 characters from a-z, 0-9 and _."),
             CreateRefusal::DomainNotAllowed => SetError::forbidden()
                 .with_property(domain)
-                .with_description("The account can't have masked addresses on this domain."),
+                .with_description("The specified domain is not valid for this account."),
             CreateRefusal::OverQuota => {
                 SetError::new(jmap_proto::error::set::SetErrorType::OverQuota)
                     .with_description("The account's maxMaskedAddresses limit is reached.")
@@ -210,7 +210,15 @@ pub(crate) async fn validate(
                 domain.as_deref(),
             )
             .await?
-            .map(|_| ObjectResponse::default())
+            .map(|_| {
+                // The address is server-set, so the create response carries it
+                let mut response = ObjectResponse::default();
+                response.object.insert_unchecked(
+                    jmap_tools::Key::Property(Property::Email),
+                    JmapValue::Str(mask.email.clone().into()),
+                );
+                response
+            })
             .map_err(|refusal| {
                 refusal.into_set_error(Property::EmailPrefix, Property::EmailDomain)
             }))
@@ -286,10 +294,8 @@ pub async fn read(server: &Server, id: Id, mask: &mut MaskedEmail) -> trc::Resul
 /// `x:MaskedEmail/query`, which also filters on `enabled`, `forDomain` and
 /// text in the address and description (a fork addition).
 pub(crate) async fn query(mut req: RegistryQueryResponse<'_>) -> trc::Result<QueryResponseBuilder> {
-    let account_id = req.request.account_id.document_id();
-    assert_can_manage(req.server, req.access_token, account_id).await?;
-
     let mut enabled = None;
+    let mut filter_account = None;
     let mut for_domain = None;
     let mut text = None;
     req.request
@@ -306,35 +312,52 @@ pub(crate) async fn query(mut req: RegistryQueryResponse<'_>) -> trc::Result<Que
                 text = Some(v.to_lowercase());
                 true
             }
-            (Property::AccountId, _, _) => true,
+            (Property::AccountId, RegistryFilterOp::Equal, serde_json::Value::String(v)) => {
+                filter_account = <Id as std::str::FromStr>::from_str(&v).ok();
+                filter_account.is_some()
+            }
             _ => false,
         })?;
     req.request
         .extract_parameters(req.server.core.jmap.query_max_results, Some(Property::Id))?;
 
-    let mut ids = ops::of_account(
-        &req.server.core.storage.data,
-        req.server.registry(),
-        account_id,
-    )
-    .await?
-    .into_iter()
-    .filter(|mask: &Mask| {
-        enabled.is_none_or(|e| mask.state.as_upstream_enabled(mask.expired) == e)
-            && for_domain
-                .as_deref()
-                .is_none_or(|d| mask.object.for_domain.as_deref() == Some(d))
-            && text.as_deref().is_none_or(|t| {
-                mask.object.email.to_lowercase().contains(t)
-                    || mask
-                        .object
-                        .description
-                        .as_deref()
-                        .is_some_and(|d| d.to_lowercase().contains(t))
-            })
-    })
-    .map(|mask| mask.id)
-    .collect::<Vec<_>>();
+    // ME-19: one account's masks, or every mask for a server-level
+    // administrator who asks for no account in particular
+    let data = &req.server.core.storage.data;
+    let masks = match filter_account {
+        Some(account) => {
+            assert_can_manage(req.server, req.access_token, account.document_id()).await?;
+            ops::of_account(data, req.server.registry(), account.document_id()).await?
+        }
+        None if req.access_token.tenant_id().is_none()
+            && req.access_token.has_permission(Permission::Impersonate) =>
+        {
+            ops::all(data, req.server.registry()).await?
+        }
+        None => {
+            let account_id = req.request.account_id.document_id();
+            assert_can_manage(req.server, req.access_token, account_id).await?;
+            ops::of_account(data, req.server.registry(), account_id).await?
+        }
+    };
+    let mut ids = masks
+        .into_iter()
+        .filter(|mask: &Mask| {
+            enabled.is_none_or(|e| mask.state.as_upstream_enabled(mask.expired) == e)
+                && for_domain
+                    .as_deref()
+                    .is_none_or(|d| mask.object.for_domain.as_deref() == Some(d))
+                && text.as_deref().is_none_or(|t| {
+                    mask.object.email.to_lowercase().contains(t)
+                        || mask
+                            .object
+                            .description
+                            .as_deref()
+                            .is_some_and(|d| d.to_lowercase().contains(t))
+                })
+        })
+        .map(|mask| mask.id)
+        .collect::<Vec<_>>();
     ids.sort_unstable();
 
     let mut response = QueryResponseBuilder::new(

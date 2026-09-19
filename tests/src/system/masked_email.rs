@@ -107,6 +107,12 @@ pub async fn test(test: &mut TestServer) {
         pending_email,
         "ME-9"
     );
+    // ... and Delivered-To stays the account's real address (observed 3)
+    assert_eq!(
+        alice.latest_header("Delivered-To").await.trim(),
+        "alice@example.org",
+        "ME-9: Delivered-To"
+    );
 
     // ME-10: sub-addressing on a mask
     let (local, domain) = pending_email.split_once('@').unwrap();
@@ -259,6 +265,9 @@ pub async fn test(test: &mut TestServer) {
             name: "mask-tenant.example.org".to_string(),
             is_enabled: true,
             member_tenant_id: Some(t_id),
+            certificate_management: registry::schema::structs::CertificateManagement::Manual,
+            dns_management: registry::schema::structs::DnsManagement::Manual,
+            dkim_management: registry::schema::structs::DkimManagement::Manual,
             ..Default::default()
         })
         .await;
@@ -385,8 +394,14 @@ pub async fn test(test: &mut TestServer) {
         admin.destroy_account(account).await;
     }
     test.wait_for_tasks().await;
-    admin.registry_destroy(ObjectType::Domain, [t_domain]).await;
-    admin.registry_destroy(ObjectType::Tenant, [t_id]).await;
+    admin
+        .registry_destroy(ObjectType::Domain, [t_domain])
+        .await
+        .assert_destroyed(&[t_domain]);
+    admin
+        .registry_destroy(ObjectType::Tenant, [t_id])
+        .await
+        .assert_destroyed(&[t_id]);
 }
 
 /// Acceptance test 12 (compat): masks written before the cutover resolve by

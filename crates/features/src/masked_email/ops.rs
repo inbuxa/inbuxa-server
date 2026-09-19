@@ -105,6 +105,21 @@ pub async fn of_account(
     Ok(masks)
 }
 
+/// Every mask on the server, for a server-level administrator (ME-19).
+pub async fn all(data: &Store, registry: &RegistryStore) -> trc::Result<Vec<Mask>> {
+    let mut masks = Vec::new();
+    for id in registry
+        .query::<Vec<Id>>(RegistryQuery::new(ObjectType::MaskedEmail))
+        .await
+        .caused_by(trc::location!())?
+    {
+        if let Some(mask) = load(data, registry, id).await? {
+            masks.push(mask);
+        }
+    }
+    Ok(masks)
+}
+
 /// How many masks count against the account's limit (ME-14).
 pub async fn live_count(
     data: &Store,
@@ -438,6 +453,30 @@ pub async fn resolve_recipient(
         return resolve(data, registry, &format!("{base}@{domain}")).await;
     }
     Ok(None)
+}
+
+/// The mask a delivery came through, when the recipient was rewritten from
+/// a mask to its owner's address at `RCPT TO`: the mask is the original
+/// recipient (`ORCPT`, `rfc822;address`), and must belong to the recipient
+/// account (ME-4, ME-9).
+pub async fn resolve_original(
+    data: &Store,
+    registry: &RegistryStore,
+    orcpt: Option<&str>,
+    account_id: u32,
+) -> trc::Result<Option<Mask>> {
+    let Some(original) = orcpt.map(|orcpt| {
+        orcpt
+            .split_once(';')
+            .map(|(_, address)| address)
+            .unwrap_or(orcpt)
+            .trim()
+    }) else {
+        return Ok(None);
+    };
+    Ok(resolve_recipient(data, registry, original)
+        .await?
+        .filter(|mask| mask.object.account_id.document_id() == account_id))
 }
 
 /// The message as delivered through a mask: an `X-Masked-Email` header

@@ -130,7 +130,7 @@ impl MailDelivery for Server {
 
         for rcpt in message.recipients {
             // inbuxa: ME-4, ME-10: a masked address delivers to its owner
-            let mask = match inbuxa_features::masked_email::ops::resolve_recipient(
+            let mut mask = match inbuxa_features::masked_email::ops::resolve_recipient(
                 &self.core.storage.data,
                 self.registry(),
                 &rcpt.address,
@@ -177,6 +177,22 @@ impl MailDelivery for Server {
                     continue;
                 }
             };
+            // inbuxa: ME-9: rewritten at RCPT TO, the mask is the original recipient
+            if mask.is_none() {
+                match inbuxa_features::masked_email::ops::resolve_original(
+                    &self.core.storage.data,
+                    self.registry(),
+                    rcpt.orcpt.as_deref(),
+                    account_id,
+                )
+                .await
+                {
+                    Ok(original) => mask = original,
+                    Err(err) => {
+                        trc::error!(err.span_id(message.session_id));
+                    }
+                }
+            }
             if let Some(status) = account_ids
                 .get(&account_id)
                 .and_then(|pos| result.status.get(*pos))

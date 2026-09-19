@@ -303,8 +303,16 @@ upstream files carry hooks marked `inbuxa:`. Acceptance tests 1 to 11 pass as
   - Creating an account or alias doesn't consult the mask index, so an
     account could be given an address a mask holds; the account then wins
     delivery. A random 12-character mask address makes this unlikely.
-  - The `x:` API's create response carries only the new id, as upstream's
-    registry responses do. The address is read with `/get`.
+  - At `RCPT TO` a live mask is rewritten to its owner's address, as
+    upstream's shared tests expect, so `Delivered-To` names the account
+    (ME-9). Delivery recognizes the mask from the original recipient
+    (`ORCPT`) when that mask belongs to the recipient. A sender who knows a
+    mask can set that `ORCPT` on mail to the owner's own address, which at
+    most files its own mail to Trash (through a disabled mask) or adds a header
+    naming the mask.
+  - Upstream's shared delivery test expected a `.` in a generated address.
+    ME-13 deliberately differs, so that one assertion checks the fork's
+    format instead, marked `inbuxa: ME-13`.
 
 ## Observed
 

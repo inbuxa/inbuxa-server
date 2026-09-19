@@ -72,6 +72,27 @@ impl Server {
             }
         }
 
+        // inbuxa: ME-4, ME-9: a live masked address is rewritten to its
+        // owner's, which keeps the mask as the original recipient
+        if let inbuxa_features::masked_email::ops::Lookup::Accepts(mask) =
+            inbuxa_features::masked_email::ops::lookup(
+                &self.core.storage.data,
+                self.registry(),
+                &format!("{local_part}@{domain_part}"),
+            )
+            .await?
+        {
+            let owner = self.account(mask.object.account_id.document_id()).await?;
+            if let Some(address) = owner.addresses.first()
+                && let Some(owner_domain) = self.domain_by_id(address.domain_id).await?
+                && let Some(owner_domain) = owner_domain.names.first()
+            {
+                return Ok(RcptResolution::Rewrite(format!(
+                    "{}@{}",
+                    address.local_part, owner_domain
+                )));
+            }
+        }
 
         // Obtain external directory, if configured
         let directory = self
