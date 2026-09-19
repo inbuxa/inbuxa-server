@@ -51,6 +51,14 @@ impl Server {
                             .ctx(trc::Key::AccountId, account_id)
                     })?;
 
+                // inbuxa: SCIM-58: SCIM is authoritative; sign-in changes nothing
+                if domain.allows_scim() {
+                    return Ok(AccountWithId {
+                        id: account_id,
+                        account: Account::from(current_account),
+                    });
+                }
+
                 let mut updated_account = Account::from(current_account.clone())
                     .into_user()
                     .ok_or_else(|| {
@@ -96,6 +104,10 @@ impl Server {
                 if let Some(groups) = account.groups {
                     let mut member_group_ids = Vec::with_capacity(groups.len());
                     for email in groups {
+                        // inbuxa: SCIM-58: no group comes from a claim on a SCIM domain
+                        if self.is_scim_address(&email).await? {
+                            continue;
+                        }
                         member_group_ids.push(
                             self.synchronize_group(directory::Group {
                                 email,
@@ -155,6 +167,13 @@ impl Server {
                 }
             }
             None => {
+                // inbuxa: SCIM-58: accounts on this domain come from SCIM only
+                if domain.allows_scim() {
+                    return Err(trc::AuthEvent::Failed
+                        .into_err()
+                        .details("The account isn't provisioned: its domain is managed by SCIM")
+                        .ctx(trc::Key::AccountName, account.email));
+                }
 
                 let mut aliases = Vec::with_capacity(account.email_aliases.len());
                 for alias in account.email_aliases {
@@ -175,6 +194,10 @@ impl Server {
                 }
                 let mut member_group_ids = Vec::new();
                 for email in account.groups.unwrap_or_default() {
+                    // inbuxa: SCIM-58: no group comes from a claim on a SCIM domain
+                    if self.is_scim_address(&email).await? {
+                        continue;
+                    }
                     member_group_ids.push(
                         self.synchronize_group(directory::Group {
                             email,
@@ -255,6 +278,11 @@ impl Server {
                             .ctx(trc::Key::AccountId, account_id)
                     })?;
 
+                // inbuxa: SCIM-58: SCIM is authoritative; sign-in changes nothing
+                if domain.allows_scim() {
+                    return Ok(account_id);
+                }
+
                 let mut updated_account = Account::from(current_account.clone())
                     .into_group()
                     .ok_or_else(|| {
@@ -322,6 +350,13 @@ impl Server {
                 }
             }
             None => {
+                // inbuxa: SCIM-58: groups on this domain come from SCIM only
+                if domain.allows_scim() {
+                    return Err(trc::AuthEvent::Error
+                        .into_err()
+                        .details("The group isn't provisioned: its domain is managed by SCIM")
+                        .ctx(trc::Key::AccountName, group.email));
+                }
 
                 let mut aliases = Vec::with_capacity(group.email_aliases.len());
                 for alias in group.email_aliases {
@@ -376,6 +411,17 @@ impl Server {
                 }
             }
         }
+    }
+
+    /// inbuxa: SCIM-58: whether an address is on a domain SCIM manages.
+    async fn is_scim_address(&self, address: &str) -> trc::Result<bool> {
+        Ok(match address.rsplit_once('@') {
+            Some((_, domain)) => self
+                .domain(domain)
+                .await?
+                .is_some_and(|domain| domain.allows_scim()),
+            None => false,
+        })
     }
 
     async fn validate_address<'x>(

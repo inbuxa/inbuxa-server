@@ -1390,3 +1390,127 @@ async fn tenants(test: &TestServer, scim: &ScimTest) {
     }
     admin.registry_create_object(Action::InvalidateCaches).await;
 }
+
+/// SCIM-58 to SCIM-60, through just-in-time sync itself (acceptance test
+/// 5 does the same over OIDC once per-domain directories exist).
+async fn authority(test: &TestServer, scim: &ScimTest, closed_id: Id) {
+    let admin = test.account("admin");
+    let sync = |email: &str, name: &str, groups: Vec<String>| directory::Account {
+        email: email.to_string(),
+        email_aliases: vec![],
+        secret: None,
+        groups: Some(groups),
+        description: Some(name.to_string()),
+    };
+
+    // An unprovisioned person on a SCIM domain: refused, nothing created
+    assert!(
+        test.server
+            .synchronize_account(sync(&format!("jit@{SCIM_DOMAIN}"), "JIT", vec![]))
+            .await
+            .is_err(),
+        "SCIM-58"
+    );
+    scim.client
+        .get(&query(
+            "/Users",
+            &format!("userName eq \"jit@{SCIM_DOMAIN}\""),
+        ))
+        .await
+        .assert_status(200);
+    assert_eq!(
+        scim.client
+            .get(&query(
+                "/Users",
+                &format!("userName eq \"jit@{SCIM_DOMAIN}\"")
+            ))
+            .await
+            .total_results(),
+        0,
+        "SCIM-58: no account"
+    );
+
+    // A provisioned one: sign-in changes nothing, creates no group
+    let id = scim
+        .client
+        .post(
+            "/Users",
+            json!({"schemas": [SCHEMA_USER], "userName": format!("synced@{SCIM_DOMAIN}"), "displayName": "From SCIM"}),
+        )
+        .await
+        .assert_status(201)
+        .id();
+    let before = scim.client.get(&format!("/Users/{id}")).await;
+    for _ in 0..2 {
+        test.server
+            .synchronize_account(sync(
+                &format!("synced@{SCIM_DOMAIN}"),
+                "From the directory",
+                vec![format!("claimed@{SCIM_DOMAIN}")],
+            ))
+            .await
+            .unwrap();
+    }
+    let after = scim.client.get(&format!("/Users/{id}")).await;
+    assert_eq!(after.json["displayName"], json!("From SCIM"), "SCIM-58");
+    assert_eq!(after.etag(), before.etag(), "SCIM-58: version unchanged");
+    assert_eq!(
+        scim.client
+            .get(&query("/Groups", "displayName eq \"claimed\""))
+            .await
+            .total_results(),
+        0,
+        "SCIM-58: no group from the claim"
+    );
+
+    // SCIM-59: without the flag, sync works as it always has
+    let made = test
+        .server
+        .synchronize_account(sync(&format!("jit@{CLOSED}"), "JIT", vec![]))
+        .await
+        .unwrap();
+    admin
+        .registry_destroy(ObjectType::Account, [Id::from(made.id)])
+        .await;
+
+    // SCIM-60: turning the flag off hands the account back to sync
+    admin
+        .registry_update_object(
+            ObjectType::Domain,
+            scim.domain_id,
+            json!({ Property::AllowScimProvisioning: false }),
+        )
+        .await;
+    test.server
+        .synchronize_account(sync(
+            &format!("synced@{SCIM_DOMAIN}"),
+            "From the directory",
+            vec![],
+        ))
+        .await
+        .unwrap();
+    let structs::Account::User(user) = admin
+        .registry_get::<structs::Account>(Id::from_str(&id).unwrap())
+        .await
+    else {
+        panic!()
+    };
+    assert_eq!(
+        user.description.as_deref(),
+        Some("From the directory"),
+        "SCIM-60"
+    );
+    scim.client
+        .get(&format!("/Users/{id}"))
+        .await
+        .assert_error(404, None);
+    admin
+        .registry_update_object(
+            ObjectType::Domain,
+            scim.domain_id,
+            json!({ Property::AllowScimProvisioning: true }),
+        )
+        .await;
+    scim.destroy(&format!("/Users/{id}")).await;
+    let _ = closed_id;
+}
