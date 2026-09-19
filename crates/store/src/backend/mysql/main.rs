@@ -51,18 +51,16 @@ impl MysqlStore {
             PoolOpts::default().with_constraints(PoolConstraints::new(pool_min, pool_max).unwrap()),
         );
 
-        let mut replicas = vec![];
+        // inbuxa: ST-2: replicas aren't used yet (the scale-out decision), so
+        // each one is reported rather than silently ignored
         for replica in config.read_replicas {
-            replicas.push(Store::MySQL(Arc::new(MysqlStore {
-                conn_pool: Pool::new(
-                    opts.clone()
-                        .ip_or_hostname(replica.host)
-                        .user(replica.auth_username)
-                        .pass(replica.auth_secret.secret().await?.map(|v| v.into_owned()))
-                        .db_name(Some(replica.database))
-                        .tcp_port(replica.port as u16),
+            trc::event!(
+                Store(trc::StoreEvent::MysqlError),
+                Details = format!(
+                    "Read replica {}:{} {} isn't used yet: every operation goes to the primary",
+                    replica.host, replica.port, replica.database
                 ),
-            })))
+            );
         }
 
         let primary = Store::MySQL(Arc::new(MysqlStore {

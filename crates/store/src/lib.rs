@@ -171,6 +171,8 @@ pub enum BlobStore {
     S3(Arc<backend::s3::S3Store>),
     #[cfg(feature = "azure")]
     Azure(Arc<backend::azure::AzureStore>),
+    // inbuxa: ST-16 to ST-22
+    Sharded(Arc<backend::scaleout::ShardedBlobStore>),
 }
 
 #[derive(Clone)]
@@ -187,6 +189,8 @@ pub enum InMemoryStore {
     Redis(Arc<backend::redis::RedisStore>),
     Http(Arc<HttpStore>),
     Static(Arc<StaticMemoryStore>),
+    // inbuxa: ST-23 to ST-29
+    Sharded(Arc<backend::scaleout::ShardedInMemoryStore>),
 }
 
 #[derive(Clone)]

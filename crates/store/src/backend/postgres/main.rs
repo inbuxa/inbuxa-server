@@ -57,27 +57,16 @@ impl PostgresStore {
         .map_err(|e| format!("Failed to create connection pool: {e}"))?;
         let ts_configs = discover_ts_configs(&primary_pool).await;
 
-        let mut replicas = vec![];
+        // inbuxa: ST-2: replicas aren't used yet (the scale-out decision), so
+        // each one is reported rather than silently ignored
         for replica in config.read_replicas {
-            let mut cfg = cfg.clone();
-            cfg.dbname = replica.database.into();
-            cfg.host = replica.host.into();
-            cfg.user = replica.auth_username;
-            cfg.password = replica.auth_secret.secret().await?.map(|v| v.into_owned());
-            cfg.port = (replica.port as u16).into();
-            cfg.options = replica.options;
-            replicas.push(Store::PostgreSQL(Arc::new(PostgresStore {
-                conn_pool: if config.use_tls {
-                    cfg.create_pool(
-                        Some(Runtime::Tokio1),
-                        MakeRustlsConnect::new(rustls_client_config(config.allow_invalid_certs)?),
-                    )
-                } else {
-                    cfg.create_pool(Some(Runtime::Tokio1), NoTls)
-                }
-                .map_err(|e| format!("Failed to create connection pool: {e}"))?,
-                ts_configs: ts_configs.clone(),
-            })));
+            trc::event!(
+                Store(trc::StoreEvent::PostgresqlError),
+                Details = format!(
+                    "Read replica {}:{} {} isn't used yet: every operation goes to the primary",
+                    replica.host, replica.port, replica.database
+                ),
+            );
         }
 
         let primary = Store::PostgreSQL(Arc::new(PostgresStore {

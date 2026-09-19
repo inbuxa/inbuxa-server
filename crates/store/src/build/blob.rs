@@ -39,6 +39,20 @@ impl BlobStore {
             structs::BlobStore::FileSystem(file_system_store) => {
                 FsStore::open(file_system_store).await
             }
+            // inbuxa: ST-16 to ST-22
+            structs::BlobStore::Sharded(sharded) => {
+                let mut warnings = Vec::new();
+                let result = crate::backend::scaleout::ShardedBlobStore::open(
+                    sharded,
+                    &bp.data_store,
+                    &mut warnings,
+                )
+                .await;
+                for warning in warnings {
+                    bp.build_warning(ObjectType::BlobStore.singleton(), warning);
+                }
+                result
+            }
             _ => Err("Binary was not compiled with the selected blob store backend".to_string()),
         };
 

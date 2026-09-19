@@ -26,6 +26,8 @@ pub mod rocksdb;
 pub mod s3;
 #[cfg(feature = "sqlite")]
 pub mod sqlite;
+// inbuxa: scale-out storage (sharded stores)
+pub mod scaleout;
 
 
 pub const MAX_TOKEN_LENGTH: usize = (u8::MAX >> 1) as usize;

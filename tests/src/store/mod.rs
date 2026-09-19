@@ -10,6 +10,7 @@ pub mod lookup;
 pub mod ops;
 pub mod query;
 pub mod registry;
+pub mod scaleout; // inbuxa: scale-out storage
 #[cfg(any(feature = "postgres", feature = "mysql"))]
 pub mod sql_timeout;
 

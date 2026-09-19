@@ -16,28 +16,7 @@ const NONE_MARKER: u8 = 0x00;
 impl BlobStore {
     pub async fn get_blob(&self, key: &[u8], range: Range<usize>) -> trc::Result<Option<Vec<u8>>> {
         let start_time = Instant::now();
-        let result = match &self {
-            BlobStore::Store(store) => match store {
-                #[cfg(feature = "sqlite")]
-                Store::SQLite(store) => store.get_blob(key, 0..usize::MAX).await,
-                #[cfg(feature = "foundation")]
-                Store::FoundationDb(store) => store.get_blob(key, 0..usize::MAX).await,
-                #[cfg(feature = "postgres")]
-                Store::PostgreSQL(store) => store.get_blob(key, 0..usize::MAX).await,
-                #[cfg(feature = "mysql")]
-                Store::MySQL(store) => store.get_blob(key, 0..usize::MAX).await,
-                #[cfg(feature = "rocks")]
-                Store::RocksDb(store) => store.get_blob(key, 0..usize::MAX).await,
-                Store::Ephemeral(store) => store.get_blob(key, 0..usize::MAX).await,
-                Store::None => Err(trc::StoreEvent::NotConfigured.into()),
-            },
-            BlobStore::Fs(store) => store.get_blob(key, 0..usize::MAX).await,
-            #[cfg(feature = "s3")]
-            BlobStore::S3(store) => store.get_blob(key, 0..usize::MAX).await,
-            #[cfg(feature = "azure")]
-            BlobStore::Azure(store) => store.get_blob(key, 0..usize::MAX).await,
-        }
-        .caused_by(trc::location!())?;
+        let result = self.raw_get(key).await.caused_by(trc::location!())?;
 
         trc::event!(
             Store(StoreEvent::BlobRead),
@@ -126,28 +105,7 @@ impl BlobStore {
         };
 
         let start_time = Instant::now();
-        let result = match &self {
-            BlobStore::Store(store) => match store {
-                #[cfg(feature = "sqlite")]
-                Store::SQLite(store) => store.put_blob(key, &data).await,
-                #[cfg(feature = "foundation")]
-                Store::FoundationDb(store) => store.put_blob(key, &data).await,
-                #[cfg(feature = "postgres")]
-                Store::PostgreSQL(store) => store.put_blob(key, &data).await,
-                #[cfg(feature = "mysql")]
-                Store::MySQL(store) => store.put_blob(key, &data).await,
-                #[cfg(feature = "rocks")]
-                Store::RocksDb(store) => store.put_blob(key, &data).await,
-                Store::Ephemeral(store) => store.put_blob(key, &data).await,
-                Store::None => Err(trc::StoreEvent::NotConfigured.into()),
-            },
-            BlobStore::Fs(store) => store.put_blob(key, &data).await,
-            #[cfg(feature = "s3")]
-            BlobStore::S3(store) => store.put_blob(key, &data).await,
-            #[cfg(feature = "azure")]
-            BlobStore::Azure(store) => store.put_blob(key, &data).await,
-        }
-        .caused_by(trc::location!());
+        let result = self.raw_put(key, &data).await.caused_by(trc::location!());
 
         trc::event!(
             Store(StoreEvent::BlobWrite),
@@ -161,7 +119,72 @@ impl BlobStore {
 
     pub async fn delete_blob(&self, key: &[u8]) -> trc::Result<bool> {
         let start_time = Instant::now();
-        let result = match &self {
+        let result = self.raw_delete(key).await.caused_by(trc::location!());
+
+        trc::event!(
+            Store(StoreEvent::BlobWrite),
+            Key = key,
+            Elapsed = start_time.elapsed(),
+        );
+
+        result
+    }
+
+    /// A stored blob as it is on the backend, compression marker included.
+    pub(crate) async fn raw_get(&self, key: &[u8]) -> trc::Result<Option<Vec<u8>>> {
+        match &self {
+            BlobStore::Store(store) => match store {
+                #[cfg(feature = "sqlite")]
+                Store::SQLite(store) => store.get_blob(key, 0..usize::MAX).await,
+                #[cfg(feature = "foundation")]
+                Store::FoundationDb(store) => store.get_blob(key, 0..usize::MAX).await,
+                #[cfg(feature = "postgres")]
+                Store::PostgreSQL(store) => store.get_blob(key, 0..usize::MAX).await,
+                #[cfg(feature = "mysql")]
+                Store::MySQL(store) => store.get_blob(key, 0..usize::MAX).await,
+                #[cfg(feature = "rocks")]
+                Store::RocksDb(store) => store.get_blob(key, 0..usize::MAX).await,
+                Store::Ephemeral(store) => store.get_blob(key, 0..usize::MAX).await,
+                Store::None => Err(trc::StoreEvent::NotConfigured.into()),
+            },
+            BlobStore::Fs(store) => store.get_blob(key, 0..usize::MAX).await,
+            #[cfg(feature = "s3")]
+            BlobStore::S3(store) => store.get_blob(key, 0..usize::MAX).await,
+            #[cfg(feature = "azure")]
+            BlobStore::Azure(store) => store.get_blob(key, 0..usize::MAX).await,
+            // inbuxa: ST-17
+            BlobStore::Sharded(store) => store.get(key).await,
+        }
+    }
+
+    pub(crate) async fn raw_put(&self, key: &[u8], data: &[u8]) -> trc::Result<()> {
+        match &self {
+            BlobStore::Store(store) => match store {
+                #[cfg(feature = "sqlite")]
+                Store::SQLite(store) => store.put_blob(key, data).await,
+                #[cfg(feature = "foundation")]
+                Store::FoundationDb(store) => store.put_blob(key, data).await,
+                #[cfg(feature = "postgres")]
+                Store::PostgreSQL(store) => store.put_blob(key, data).await,
+                #[cfg(feature = "mysql")]
+                Store::MySQL(store) => store.put_blob(key, data).await,
+                #[cfg(feature = "rocks")]
+                Store::RocksDb(store) => store.put_blob(key, data).await,
+                Store::Ephemeral(store) => store.put_blob(key, data).await,
+                Store::None => Err(trc::StoreEvent::NotConfigured.into()),
+            },
+            BlobStore::Fs(store) => store.put_blob(key, data).await,
+            #[cfg(feature = "s3")]
+            BlobStore::S3(store) => store.put_blob(key, data).await,
+            #[cfg(feature = "azure")]
+            BlobStore::Azure(store) => store.put_blob(key, data).await,
+            // inbuxa: ST-18
+            BlobStore::Sharded(store) => store.put(key, data).await,
+        }
+    }
+
+    pub(crate) async fn raw_delete(&self, key: &[u8]) -> trc::Result<bool> {
+        match &self {
             BlobStore::Store(store) => match store {
                 #[cfg(feature = "sqlite")]
                 Store::SQLite(store) => store.delete_blob(key).await,
@@ -181,15 +204,8 @@ impl BlobStore {
             BlobStore::S3(store) => store.delete_blob(key).await,
             #[cfg(feature = "azure")]
             BlobStore::Azure(store) => store.delete_blob(key).await,
+            // inbuxa: ST-18
+            BlobStore::Sharded(store) => store.delete(key).await,
         }
-        .caused_by(trc::location!());
-
-        trc::event!(
-            Store(StoreEvent::BlobWrite),
-            Key = key,
-            Elapsed = start_time.elapsed(),
-        );
-
-        result
     }
 }

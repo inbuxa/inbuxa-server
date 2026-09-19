@@ -49,6 +49,21 @@ impl LookupStores {
                 LookupStore::RedisCluster(redis_cluster_store) => {
                     crate::backend::redis::RedisStore::open_cluster(redis_cluster_store).await
                 }
+                // inbuxa: ST-28
+                LookupStore::Sharded(sharded) => {
+                    let mut warnings = Vec::new();
+                    let result = crate::backend::scaleout::ShardedInMemoryStore::open(
+                        sharded,
+                        store.namespace.as_str(),
+                        &bp.data_store,
+                        &mut warnings,
+                    )
+                    .await;
+                    for warning in warnings {
+                        bp.build_warning(id, warning);
+                    }
+                    result
+                }
                 _ => Err(
                     "Binary was not compiled with the selected lookup store backend".to_string(),
                 ),

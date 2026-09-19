@@ -26,6 +26,21 @@ impl InMemoryStore {
             structs::InMemoryStore::RedisSentinel(redis_sentinel_store) => {
                 crate::backend::redis::RedisStore::open_sentinel(redis_sentinel_store).await
             }
+            // inbuxa: ST-23 to ST-29
+            structs::InMemoryStore::Sharded(sharded) => {
+                let mut warnings = Vec::new();
+                let result = crate::backend::scaleout::ShardedInMemoryStore::open(
+                    sharded,
+                    "",
+                    &bp.data_store,
+                    &mut warnings,
+                )
+                .await;
+                for warning in warnings {
+                    bp.build_warning(ObjectType::InMemoryStore.singleton(), warning);
+                }
+                result
+            }
             _ => Err("Binary was not compiled with the selected in-memory backend".to_string()),
         };
 

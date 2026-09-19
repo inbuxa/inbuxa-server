@@ -45,6 +45,11 @@ impl InMemoryStore {
                 });
                 store.write(batch.build_all()).await.map(|_| ())
             }
+            // inbuxa: ST-23
+            InMemoryStore::Sharded(store) => {
+                let member = store.member(&kv.key);
+                Box::pin(member.key_set(kv)).await
+            }
             #[cfg(feature = "redis")]
             InMemoryStore::Redis(store) => store.key_set(&kv.key, &kv.value, kv.expires).await,
             InMemoryStore::Static(_) | InMemoryStore::Http(_) => {
@@ -90,6 +95,11 @@ impl InMemoryStore {
                     store.write(batch.build_all()).await.map(|_| 0)
                 }
             }
+            // inbuxa: ST-23
+            InMemoryStore::Sharded(store) => {
+                let member = store.member(&kv.key);
+                Box::pin(member.counter_incr(kv, return_value)).await
+            }
             #[cfg(feature = "redis")]
             InMemoryStore::Redis(store) => store.key_incr(&kv.key, kv.value, kv.expires).await,
             InMemoryStore::Static(_) | InMemoryStore::Http(_) => {
@@ -109,6 +119,11 @@ impl InMemoryStore {
                 });
                 store.write(batch.build_all()).await.map(|_| ())
             }
+            // inbuxa: ST-23
+            InMemoryStore::Sharded(store) => {
+                let key = key.into().into_bytes();
+                Box::pin(store.member(&key).key_delete(key.clone())).await
+            }
             #[cfg(feature = "redis")]
             InMemoryStore::Redis(store) => store.key_delete(key.into().as_bytes()).await,
             InMemoryStore::Static(_) | InMemoryStore::Http(_) => {
@@ -127,6 +142,11 @@ impl InMemoryStore {
                     op: ValueOp::Clear,
                 });
                 store.write(batch.build_all()).await.map(|_| ())
+            }
+            // inbuxa: ST-23
+            InMemoryStore::Sharded(store) => {
+                let key = key.into().into_bytes();
+                Box::pin(store.member(&key).counter_delete(key.clone())).await
             }
             #[cfg(feature = "redis")]
             InMemoryStore::Redis(store) => store.key_delete(key.into().as_bytes()).await,
@@ -167,6 +187,15 @@ impl InMemoryStore {
                     )
                     .await
             }
+            // inbuxa: ST-24: every member
+            InMemoryStore::Sharded(store) => {
+                for (index, member) in store.members.iter().enumerate() {
+                    Box::pin(member.key_delete_prefix(prefix))
+                        .await
+                        .map_err(|err| err.details(format!("Member {}", index + 1)))?;
+                }
+                Ok(())
+            }
             #[cfg(feature = "redis")]
             InMemoryStore::Redis(store) => store.key_delete_prefix(prefix).await,
             InMemoryStore::Static(_) | InMemoryStore::Http(_) => {
@@ -187,6 +216,11 @@ impl InMemoryStore {
                 )))
                 .await
                 .map(|value| value.and_then(|v| v.into())),
+            // inbuxa: ST-23
+            InMemoryStore::Sharded(store) => {
+                let key = key.into().into_bytes();
+                Box::pin(store.member(&key).key_get::<T>(key.clone())).await
+            }
             #[cfg(feature = "redis")]
             InMemoryStore::Redis(store) => store.key_get(key.into().as_bytes()).await,
             InMemoryStore::Static(store) => Ok(match store.as_ref() {
@@ -217,6 +251,11 @@ impl InMemoryStore {
                     )))
                     .await
             }
+            // inbuxa: ST-23
+            InMemoryStore::Sharded(store) => {
+                let key = key.into().into_bytes();
+                Box::pin(store.member(&key).counter_get(key.clone())).await
+            }
             #[cfg(feature = "redis")]
             InMemoryStore::Redis(store) => store.counter_get(key.into().as_bytes()).await,
             InMemoryStore::Static(_) | InMemoryStore::Http(_) => {
@@ -234,6 +273,11 @@ impl InMemoryStore {
                 )))
                 .await
                 .map(|value| matches!(value, Some(LookupValue::Value(Empty)))),
+            // inbuxa: ST-23
+            InMemoryStore::Sharded(store) => {
+                let key = key.into().into_bytes();
+                Box::pin(store.member(&key).key_exists(key.clone())).await
+            }
             #[cfg(feature = "redis")]
             InMemoryStore::Redis(store) => store.key_exists(key.into().as_bytes()).await,
             InMemoryStore::Static(store) => Ok(match store.as_ref() {
@@ -334,6 +378,15 @@ impl InMemoryStore {
                         .caused_by(trc::location!())),
                 }
             }
+            // inbuxa: ST-23: a lock and its release meet on one member
+            InMemoryStore::Sharded(store) => {
+                Box::pin(
+                    store
+                        .member(&KeyValue::<()>::build_key(prefix, key))
+                        .try_lock(prefix, key, duration),
+                )
+                .await
+            }
             #[cfg(feature = "redis")]
             InMemoryStore::Redis(store) => {
                 store
@@ -431,6 +484,14 @@ impl InMemoryStore {
                     }
                 }
             }
+            // inbuxa: ST-24: every member
+            InMemoryStore::Sharded(store) => {
+                for (index, member) in store.members.iter().enumerate() {
+                    Box::pin(member.purge_in_memory_store())
+                        .await
+                        .map_err(|err| err.details(format!("Member {}", index + 1)))?;
+                }
+            }
             #[cfg(feature = "redis")]
             InMemoryStore::Redis(_) => {}
             InMemoryStore::Static(_) | InMemoryStore::Http(_) => {}
@@ -450,6 +511,8 @@ impl InMemoryStore {
         match self {
             #[cfg(feature = "redis")]
             InMemoryStore::Redis(_) => true,
+            // inbuxa: ST-3: as its members are
+            InMemoryStore::Sharded(store) => store.members.iter().all(|m| m.is_redis()),
             InMemoryStore::Static(_) => false,
             _ => false,
         }
