@@ -151,7 +151,13 @@ impl ParseHttp for Server {
                             path.next().and_then(BlobId::from_base32),
                             path.next(),
                         ) {
-                            return match self.blob_download(&blob_id, &access_token).await? {
+                            // inbuxa: ST-6: a download may be served by a read replica
+                            let blob = store::backend::scaleout::replica::replica_read(
+                                access_token.all_ids().map(|account_id| (account_id, 0)),
+                                self.blob_download(&blob_id, &access_token),
+                            )
+                            .await?;
+                            return match blob {
                                 Some(blob) => Ok(DownloadResponse {
                                     filename: name.to_string(),
                                     content_type: req

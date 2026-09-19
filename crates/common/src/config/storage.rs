@@ -41,12 +41,19 @@ impl Storage {
             );
         }
 
+        let coordinator = Coordinator::build(bp, &memory).await.unwrap_or_default();
+        // inbuxa: ST-7: with more than one node, read replicas share
+        // high-water marks through the in-memory store
+        if !matches!(coordinator, Coordinator::None) {
+            bp.data_store.share_marks(&memory);
+        }
+
         Storage {
             registry: bp.registry.clone(),
             data: bp.data_store.clone(),
             blob: BlobStore::build(bp).await.unwrap_or_default(),
             search,
-            coordinator: Coordinator::build(bp, &memory).await.unwrap_or_default(),
+            coordinator,
             memory,
             tracing: Store::build_tracing(bp).await.unwrap_or_default(),
             metrics: Store::build_metrics(bp).await.unwrap_or_default(),

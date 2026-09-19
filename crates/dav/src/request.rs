@@ -74,10 +74,47 @@ pub(crate) trait DavRequestDispatcher: Sync + Send {
         method: DavMethod,
         body: Vec<u8>,
     ) -> impl Future<Output = crate::Result<HttpResponse>> + Send;
+
+    fn dispatch_dav_inner(
+        &self,
+        headers: &RequestHeaders<'_>,
+        access_token: AccessToken,
+        resource: DavResourceName,
+        method: DavMethod,
+        body: Vec<u8>,
+    ) -> impl Future<Output = crate::Result<HttpResponse>> + Send;
 }
 
 impl DavRequestDispatcher for Server {
+    // inbuxa: ST-6: GET, PROPFIND and REPORT may be served by a read replica
     async fn dispatch_dav_request(
+        &self,
+        headers: &RequestHeaders<'_>,
+        access_token: AccessToken,
+        resource: DavResourceName,
+        method: DavMethod,
+        body: Vec<u8>,
+    ) -> crate::Result<HttpResponse> {
+        if matches!(
+            method,
+            DavMethod::GET | DavMethod::HEAD | DavMethod::PROPFIND | DavMethod::REPORT
+        ) {
+            let accounts = access_token
+                .all_ids()
+                .map(|account_id| (account_id, 0))
+                .collect::<Vec<_>>();
+            store::backend::scaleout::replica::replica_read(
+                accounts,
+                self.dispatch_dav_inner(headers, access_token, resource, method, body),
+            )
+            .await
+        } else {
+            self.dispatch_dav_inner(headers, access_token, resource, method, body)
+                .await
+        }
+    }
+
+    async fn dispatch_dav_inner(
         &self,
         headers: &RequestHeaders<'_>,
         access_token: AccessToken,

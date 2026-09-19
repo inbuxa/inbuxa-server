@@ -26,7 +26,7 @@ pub struct MysqlStore {
 }
 
 #[inline(always)]
-fn into_error(err: impl Display) -> trc::Error {
+pub(crate) fn into_error(err: impl Display) -> trc::Error {
     trc::StoreEvent::MysqlError.reason(err)
 }
 

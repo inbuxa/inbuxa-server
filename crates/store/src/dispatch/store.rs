@@ -35,6 +35,23 @@ impl Store {
             #[cfg(feature = "rocks")]
             Self::RocksDb(store) => store.get_value(key).await,
             Self::Ephemeral(store) => store.get_value(key).await,
+            // inbuxa: ST-6 to ST-8, ST-12
+            Self::Replicated(store) => match store.read_target(key.subspace()).await {
+                Some(index) => {
+                    match crate::sql_backend!(&store.replicas[index].store, db => db.get_value::<U>(key.clone()).await) {
+                        Ok(Some(value)) => {
+                            store.served(index);
+                            Ok(Some(value))
+                        }
+                        Ok(None) => crate::sql_backend!(&store.primary, db => db.get_value(key).await),
+                        Err(err) => {
+                            store.failed(index, err);
+                            crate::sql_backend!(&store.primary, db => db.get_value(key).await)
+                        }
+                    }
+                }
+                None => crate::sql_backend!(&store.primary, db => db.get_value(key).await),
+            },
             Self::None => Err(trc::StoreEvent::NotConfigured.into()),
         }
         .caused_by(trc::location!())
@@ -53,6 +70,21 @@ impl Store {
             #[cfg(feature = "rocks")]
             Self::RocksDb(store) => store.key_exists(key).await,
             Self::Ephemeral(store) => store.key_exists(key).await,
+            // inbuxa: ST-6 to ST-8, ST-12
+            Self::Replicated(store) => match store.read_target(key.subspace()).await {
+                Some(index) => match crate::sql_backend!(&store.replicas[index].store, db => db.key_exists(key.clone()).await) {
+                    Ok(true) => {
+                        store.served(index);
+                        Ok(true)
+                    }
+                    Ok(false) => crate::sql_backend!(&store.primary, db => db.key_exists(key).await),
+                    Err(err) => {
+                        store.failed(index, err);
+                        crate::sql_backend!(&store.primary, db => db.key_exists(key).await)
+                    }
+                },
+                None => crate::sql_backend!(&store.primary, db => db.key_exists(key).await),
+            },
             Self::None => Err(trc::StoreEvent::NotConfigured.into()),
         }
         .caused_by(trc::location!())
@@ -76,6 +108,38 @@ impl Store {
             #[cfg(feature = "rocks")]
             Self::RocksDb(store) => store.iterate(params, cb).await,
             Self::Ephemeral(store) => store.iterate(params, cb).await,
+            // inbuxa: ST-6, ST-12: a failed replica iteration is repeated on
+            // the primary when nothing was handed to the callback yet
+            #[allow(unused_mut, unused_variables)]
+            Self::Replicated(store) => {
+                let mut cb = cb;
+                match store.read_target(params.begin.subspace()).await {
+                    Some(index) => {
+                        let mut called = false;
+                        let result = crate::sql_backend!(&store.replicas[index].store, db => db
+                            .iterate(params.clone(), |key, value| {
+                                called = true;
+                                cb(key, value)
+                            })
+                            .await);
+                        match result {
+                            Ok(()) => {
+                                store.served(index);
+                                Ok(())
+                            }
+                            Err(err) if !called => {
+                                store.failed(index, err);
+                                crate::sql_backend!(&store.primary, db => db.iterate(params, cb).await)
+                            }
+                            Err(err) => {
+                                store.failed(index, err.clone());
+                                Err(err)
+                            }
+                        }
+                    }
+                    None => crate::sql_backend!(&store.primary, db => db.iterate(params, cb).await),
+                }
+            }
             Self::None => Err(trc::StoreEvent::NotConfigured.into()),
         }
         .caused_by(trc::location!());
@@ -104,6 +168,25 @@ impl Store {
             #[cfg(feature = "rocks")]
             Self::RocksDb(store) => store.get_counter(key).await,
             Self::Ephemeral(store) => store.get_counter(key).await,
+            // inbuxa: ST-6, ST-12
+            Self::Replicated(store) => {
+                let key: ValueKey<ValueClass> = key.into();
+                match store.read_target(crate::Key::subspace(&key)).await {
+                    Some(index) => {
+                        match crate::sql_backend!(&store.replicas[index].store, db => db.get_counter(key.clone()).await) {
+                            Ok(value) => {
+                                store.served(index);
+                                Ok(value)
+                            }
+                            Err(err) => {
+                                store.failed(index, err);
+                                crate::sql_backend!(&store.primary, db => db.get_counter(key).await)
+                            }
+                        }
+                    }
+                    None => crate::sql_backend!(&store.primary, db => db.get_counter(key).await),
+                }
+            }
             Self::None => Err(trc::StoreEvent::NotConfigured.into()),
         }
         .caused_by(trc::location!())
@@ -123,6 +206,10 @@ impl Store {
             Self::PostgreSQL(store) => store.sql_query(query, &params).await,
             #[cfg(feature = "mysql")]
             Self::MySQL(store) => store.sql_query(query, &params).await,
+            // inbuxa: ST-5: operator-written statements always go to the primary
+            Self::Replicated(store) => {
+                crate::sql_backend!(&store.primary, db => db.sql_query(query, &params).await)
+            }
             _ => Err(trc::StoreEvent::NotSupported.into_err()),
         };
 
@@ -152,6 +239,15 @@ impl Store {
             #[cfg(feature = "rocks")]
             Self::RocksDb(store) => store.write(batch).await,
             Self::Ephemeral(store) => store.write(batch).await,
+            // inbuxa: ST-5, ST-7: writes go to the primary, and record marks
+            Self::Replicated(store) => {
+                crate::backend::scaleout::replica::note_scope_write();
+                let result = crate::sql_backend!(&store.primary, db => db.write(batch).await);
+                if let Ok(ids) = &result {
+                    store.note_write(ids).await;
+                }
+                result
+            }
             Self::None => Err(trc::StoreEvent::NotConfigured.into()),
         };
 
@@ -197,6 +293,7 @@ impl Store {
             #[cfg(feature = "rocks")]
             Self::RocksDb(store) => store.purge_store().await,
             Self::Ephemeral(store) => store.purge_store().await,
+            Self::Replicated(store) => crate::sql_backend!(&store.primary, db => db.purge_store().await),
             Self::None => Err(trc::StoreEvent::NotConfigured.into()),
         }
         .caused_by(trc::location!())
@@ -215,6 +312,9 @@ impl Store {
             #[cfg(feature = "rocks")]
             Self::RocksDb(store) => store.delete_range(from, to).await,
             Self::Ephemeral(store) => store.delete_range(from, to).await,
+            Self::Replicated(store) => {
+                crate::sql_backend!(&store.primary, db => db.delete_range(from, to).await)
+            }
             Self::None => Err(trc::StoreEvent::NotConfigured.into()),
         }
         .caused_by(trc::location!())
@@ -360,6 +460,9 @@ impl Store {
             Self::PostgreSQL(store) => store.create_storage_tables().await,
             #[cfg(feature = "mysql")]
             Self::MySQL(store) => store.create_storage_tables().await,
+            Self::Replicated(store) => {
+                crate::sql_backend!(&store.primary, db => db.create_storage_tables().await)
+            }
             _ => Ok(()),
         }
     }

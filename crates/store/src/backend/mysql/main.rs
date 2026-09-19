@@ -20,6 +20,8 @@ use mysql_async::{
 
 impl MysqlStore {
     pub async fn open(config: structs::MySqlStore) -> Result<Store, String> {
+        // inbuxa: ST-15: where the primary is, to tell a replica from it
+        let primary_location = (config.host.clone(), config.port as u16, config.database.clone());
         let mut opts = OptsBuilder::default()
             .ip_or_hostname(config.host)
             .user(config.auth_username)
@@ -51,24 +53,43 @@ impl MysqlStore {
             PoolOpts::default().with_constraints(PoolConstraints::new(pool_min, pool_max).unwrap()),
         );
 
-        // inbuxa: ST-2: replicas aren't used yet (the scale-out decision), so
-        // each one is reported rather than silently ignored
+        // inbuxa: ST-5 to ST-15: each replica inherits the primary's settings
+        // except where it is and how to sign in
+        let mut replicas = vec![];
         for replica in config.read_replicas {
-            trc::event!(
-                Store(trc::StoreEvent::MysqlError),
-                Details = format!(
-                    "Read replica {}:{} {} isn't used yet: every operation goes to the primary",
-                    replica.host, replica.port, replica.database
-                ),
-            );
+            replicas.push(crate::backend::scaleout::replica::Replica::new(
+                Store::MySQL(Arc::new(MysqlStore {
+                    conn_pool: Pool::new(
+                        opts.clone()
+                            .ip_or_hostname(replica.host.clone())
+                            .user(replica.auth_username)
+                            .pass(replica.auth_secret.secret().await?.map(|v| v.into_owned()))
+                            .db_name(Some(replica.database.clone()))
+                            .tcp_port(replica.port as u16),
+                    ),
+                })),
+                replica.host,
+                replica.port as u16,
+                replica.database,
+            ));
         }
 
         let primary = Store::MySQL(Arc::new(MysqlStore {
             conn_pool: Pool::new(opts),
         }));
 
-
-        Ok(primary)
+        // ST-1: no replicas, no change
+        if replicas.is_empty() {
+            return Ok(primary);
+        }
+        Ok(Store::Replicated(
+            crate::backend::scaleout::replica::ReplicatedStore::new(
+                primary,
+                primary_location,
+                replicas,
+                crate::backend::scaleout::replica::ReplicaKind::MySql,
+            ),
+        ))
     }
 
     pub(crate) async fn create_storage_tables(&self) -> trc::Result<()> {

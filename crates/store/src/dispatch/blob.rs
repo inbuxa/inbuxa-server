@@ -145,6 +145,33 @@ impl BlobStore {
                 #[cfg(feature = "rocks")]
                 Store::RocksDb(store) => store.get_blob(key, 0..usize::MAX).await,
                 Store::Ephemeral(store) => store.get_blob(key, 0..usize::MAX).await,
+                // inbuxa: ST-9: a replica, then the primary for what it lacks
+                Store::Replicated(store) => match store.read_target(crate::SUBSPACE_BLOBS).await {
+                    Some(index) => match crate::sql_backend!(
+                        &store.replicas[index].store,
+                        db => db.get_blob(key, 0..usize::MAX).await
+                    ) {
+                        Ok(Some(data)) => {
+                            store.served(index);
+                            Ok(Some(data))
+                        }
+                        Ok(None) => crate::sql_backend!(
+                            &store.primary,
+                            db => db.get_blob(key, 0..usize::MAX).await
+                        ),
+                        Err(err) => {
+                            store.failed(index, err);
+                            crate::sql_backend!(
+                                &store.primary,
+                                db => db.get_blob(key, 0..usize::MAX).await
+                            )
+                        }
+                    },
+                    None => crate::sql_backend!(
+                        &store.primary,
+                        db => db.get_blob(key, 0..usize::MAX).await
+                    ),
+                },
                 Store::None => Err(trc::StoreEvent::NotConfigured.into()),
             },
             BlobStore::Fs(store) => store.get_blob(key, 0..usize::MAX).await,
@@ -171,6 +198,9 @@ impl BlobStore {
                 #[cfg(feature = "rocks")]
                 Store::RocksDb(store) => store.put_blob(key, data).await,
                 Store::Ephemeral(store) => store.put_blob(key, data).await,
+                Store::Replicated(store) => {
+                    crate::sql_backend!(&store.primary, db => db.put_blob(key, data).await)
+                }
                 Store::None => Err(trc::StoreEvent::NotConfigured.into()),
             },
             BlobStore::Fs(store) => store.put_blob(key, data).await,
@@ -197,6 +227,9 @@ impl BlobStore {
                 #[cfg(feature = "rocks")]
                 Store::RocksDb(store) => store.delete_blob(key).await,
                 Store::Ephemeral(store) => store.delete_blob(key).await,
+                Store::Replicated(store) => {
+                    crate::sql_backend!(&store.primary, db => db.delete_blob(key).await)
+                }
                 Store::None => Err(trc::StoreEvent::NotConfigured.into()),
             },
             BlobStore::Fs(store) => store.delete_blob(key).await,

@@ -201,6 +201,25 @@ impl SearchStore {
         filters: &[SearchFilter],
         sort: &[SearchComparator],
     ) -> trc::Result<Vec<u32>> {
+        // inbuxa: ST-6, ST-12: a replica answers search queries in a read scope
+        if let SearchStore::Store(Store::Replicated(store)) = self {
+            return match store.read_target(crate::SUBSPACE_SEARCH_INDEX).await {
+                Some(replica) => match crate::sql_backend!(
+                    &store.replicas[replica].store,
+                    db => db.query(index, filters, sort).await
+                ) {
+                    Ok(ids) => {
+                        store.served(replica);
+                        Ok(ids)
+                    }
+                    Err(err) => {
+                        store.failed(replica, err);
+                        crate::sql_backend!(&store.primary, db => db.query(index, filters, sort).await)
+                    }
+                },
+                None => crate::sql_backend!(&store.primary, db => db.query(index, filters, sort).await),
+            };
+        }
         match self {
             SearchStore::Store(store) => match store {
                 #[cfg(feature = "postgres")]
@@ -215,6 +234,13 @@ impl SearchStore {
     }
 
     pub async fn query_global(&self, query: SearchQuery) -> trc::Result<Vec<u64>> {
+        // inbuxa: ST-5: global queries are maintenance, on the primary
+        if let SearchStore::Store(Store::Replicated(store)) = self {
+            return crate::sql_backend!(
+                &store.primary,
+                db => db.query(query.index, &query.filters, &query.comparators).await
+            );
+        }
         match self {
             SearchStore::Store(store) => match store {
                 #[cfg(feature = "postgres")]
@@ -245,6 +271,9 @@ impl SearchStore {
     }
 
     pub async fn index(&self, documents: Vec<IndexDocument>) -> trc::Result<()> {
+        if let SearchStore::Store(Store::Replicated(store)) = self {
+            return crate::sql_backend!(&store.primary, db => db.index(documents).await);
+        }
         match self {
             SearchStore::Store(store) => match store {
                 #[cfg(feature = "postgres")]
@@ -259,6 +288,9 @@ impl SearchStore {
     }
 
     pub async fn unindex(&self, query: SearchQuery) -> trc::Result<u64> {
+        if let SearchStore::Store(Store::Replicated(store)) = self {
+            return crate::sql_backend!(&store.primary, db => db.unindex(query).await);
+        }
         match self {
             SearchStore::Store(store) => match store {
                 #[cfg(feature = "postgres")]
@@ -279,6 +311,8 @@ impl SearchStore {
                 Store::PostgreSQL(_) => None,
                 #[cfg(feature = "mysql")]
                 Store::MySQL(_) => None,
+                // inbuxa: ST-3: as its primary
+                Store::Replicated(replicated) if replicated.primary.is_pg_or_mysql() => None,
                 store => Some(store),
             },
             _ => None,
@@ -289,6 +323,10 @@ impl SearchStore {
         match self {
             #[cfg(feature = "mysql")]
             SearchStore::Store(Store::MySQL(_)) => true,
+            #[cfg(feature = "mysql")]
+            SearchStore::Store(Store::Replicated(store)) => {
+                matches!(store.primary, Store::MySQL(_))
+            }
             _ => false,
         }
     }
@@ -297,6 +335,10 @@ impl SearchStore {
         match self {
             #[cfg(feature = "postgres")]
             SearchStore::Store(Store::PostgreSQL(_)) => true,
+            #[cfg(feature = "postgres")]
+            SearchStore::Store(Store::Replicated(store)) => {
+                matches!(store.primary, Store::PostgreSQL(_))
+            }
             _ => false,
         }
     }
@@ -316,6 +358,9 @@ impl SearchStore {
                 Store::PostgreSQL(store) => store.create_search_tables().await,
                 #[cfg(feature = "mysql")]
                 Store::MySQL(store) => store.create_search_tables().await,
+                Store::Replicated(store) => {
+                    crate::sql_backend!(&store.primary, db => db.create_search_tables().await)
+                }
                 _ => Ok(()),
             },
             SearchStore::ElasticSearch(store) => store.create_indexes().await,

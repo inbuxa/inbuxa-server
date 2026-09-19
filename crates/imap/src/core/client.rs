@@ -93,7 +93,25 @@ impl<T: SessionStream> Session<T> {
 
         let mut requests = requests.into_iter().peekable();
         while let Some(request) = requests.next() {
-            let result = match request.command {
+            // inbuxa: ST-6: commands that only read may be served by a read
+            // replica; any write they make still goes to the primary
+            let replica_accounts = match (&request.command, &self.state) {
+                (
+                    Command::List
+                    | Command::Lsub
+                    | Command::Status
+                    | Command::Search(_)
+                    | Command::Sort(_)
+                    | Command::Fetch(_),
+                    State::Authenticated { data } | State::Selected { data, .. },
+                ) => data
+                    .access_token
+                    .all_ids()
+                    .map(|account_id| (account_id, 0))
+                    .collect::<Vec<_>>(),
+                _ => Vec::new(),
+            };
+            let dispatch = async { match request.command {
                 Command::List | Command::Lsub => self
                     .handle_list(request)
                     .await
@@ -256,6 +274,11 @@ impl<T: SessionStream> Session<T> {
                     .handle_uidbatches(request)
                     .await
                     .map(|_| SessionResult::Continue),
+            } };
+            let result = if replica_accounts.is_empty() {
+                dispatch.await
+            } else {
+                store::backend::scaleout::replica::replica_read(replica_accounts, dispatch).await
             };
 
             match result {

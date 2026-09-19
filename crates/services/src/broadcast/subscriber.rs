@@ -105,6 +105,23 @@ pub fn spawn_broadcast_subscriber(inner: Arc<Inner>, mut shutdown_rx: watch::Rec
                                             );
                                             match event {
                                                 BroadcastEvent::PushNotification(notification) => {
+                                                    // inbuxa: ST-7: another node's change raises this
+                                                    // node's high-water mark for the account
+                                                    match &notification {
+                                                        common::ipc::PushNotification::StateChange(change) => inner
+                                                            .build_server()
+                                                            .core
+                                                            .storage
+                                                            .data
+                                                            .note_change(change.account_id, change.change_id),
+                                                        common::ipc::PushNotification::EmailPush(push) => inner
+                                                            .build_server()
+                                                            .core
+                                                            .storage
+                                                            .data
+                                                            .note_change(push.account_id, push.change_id),
+                                                        _ => {}
+                                                    }
                                                     if inner
                                                         .ipc
                                                         .push_tx

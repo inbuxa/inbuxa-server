@@ -32,6 +32,14 @@ static CHALLTESTSRV: OnceCell<ContainerAsync<GenericImage>> = OnceCell::const_ne
 static PEBBLE: OnceCell<ContainerAsync<GenericImage>> = OnceCell::const_new();
 static POWERDNS: OnceCell<ContainerAsync<GenericImage>> = OnceCell::const_new();
 static SCIM_TESTER: OnceCell<ContainerAsync<GenericImage>> = OnceCell::const_new();
+// inbuxa: scale-out storage (ST-5 to ST-15): a primary and a streaming replica
+static PG_PRIMARY: OnceCell<ContainerAsync<GenericImage>> = OnceCell::const_new();
+static PG_REPLICA: OnceCell<ContainerAsync<GenericImage>> = OnceCell::const_new();
+const PG_REPLICATION_NETWORK: &str = "inbuxa-test-pg-replication";
+pub const PG_PRIMARY_PORT: u16 = 5442;
+pub const PG_REPLICA_PORT: u16 = 5443;
+pub const PG_REPLICA_CONTAINER: &str = "inbuxa-test-pg-replica";
+pub const PG_PRIMARY_CONTAINER: &str = "inbuxa-test-pg-primary";
 
 const OPENLDAP_LDAPI_URL: &str = "ldapi://%2Fvar%2Frun%2Fslapd%2Fldapi/";
 
@@ -540,4 +548,92 @@ async fn wait_for_http(url: &str) {
         }
         tokio::time::sleep(Duration::from_millis(500)).await;
     }
+}
+
+/// inbuxa: a PostgreSQL primary on port 5442 with a hot-standby streaming
+/// replica on 5443, for the read-replica tests (ST-5 to ST-15).
+pub async fn ensure_postgres_replicated() {
+    PG_PRIMARY
+        .get_or_init(|| async {
+            GenericImage::new("postgres", "16-alpine")
+                .with_wait_for(WaitFor::message_on_stderr(
+                    "database system is ready to accept connections",
+                ))
+                .with_env_var("POSTGRES_USER", "stalwart")
+                .with_env_var("POSTGRES_PASSWORD", "stalwart")
+                .with_env_var("POSTGRES_DB", "stalwart")
+                .with_copy_to(
+                    "/docker-entrypoint-initdb.d/replication.sh",
+                    b"#!/bin/sh\necho 'host replication all all scram-sha-256' >> \"$PGDATA/pg_hba.conf\"\n"
+                        .to_vec(),
+                )
+                .with_cmd([
+                    "postgres",
+                    "-c",
+                    "wal_level=replica",
+                    "-c",
+                    "max_wal_senders=10",
+                    "-c",
+                    "hot_standby=on",
+                ])
+                .with_network(PG_REPLICATION_NETWORK)
+                .with_mapped_port(PG_PRIMARY_PORT, 5432.tcp())
+                .with_startup_timeout(READY_TIMEOUT)
+                .with_container_name(PG_PRIMARY_CONTAINER)
+                .with_reuse(ReuseDirective::Always)
+                .start()
+                .await
+                .expect("Failed to start the PostgreSQL primary")
+        })
+        .await;
+    wait_for_tcp(PG_PRIMARY_PORT).await;
+    PG_REPLICA
+        .get_or_init(|| async {
+            GenericImage::new("postgres", "16-alpine")
+                .with_wait_for(WaitFor::message_on_stderr(
+                    "database system is ready to accept read-only connections",
+                ))
+                .with_env_var("PGPASSWORD", "stalwart")
+                .with_cmd([
+                    "sh",
+                    "-c",
+                    concat!(
+                        "if [ ! -s /var/lib/postgresql/replica/PG_VERSION ]; then ",
+                        "until pg_basebackup -h inbuxa-test-pg-primary -U stalwart ",
+                        "-D /var/lib/postgresql/replica -R -X stream; do sleep 1; done; fi; ",
+                        "chown -R postgres:postgres /var/lib/postgresql/replica; ",
+                        "chmod 700 /var/lib/postgresql/replica; ",
+                        "exec su-exec postgres postgres -D /var/lib/postgresql/replica ",
+                        "-c hot_standby=on"
+                    ),
+                ])
+                .with_network(PG_REPLICATION_NETWORK)
+                .with_mapped_port(PG_REPLICA_PORT, 5432.tcp())
+                .with_startup_timeout(READY_TIMEOUT)
+                .with_container_name(PG_REPLICA_CONTAINER)
+                .with_reuse(ReuseDirective::Always)
+                .start()
+                .await
+                .expect("Failed to start the PostgreSQL replica")
+        })
+        .await;
+    wait_for_tcp(PG_REPLICA_PORT).await;
+}
+
+/// inbuxa: runs SQL on a test container, through `psql`.
+pub fn psql(container: &str, sql: &str) -> String {
+    let output = std::process::Command::new("docker")
+        .args(["exec", container, "psql", "-U", "stalwart", "-d", "stalwart", "-tAc", sql])
+        .output()
+        .expect("docker exec");
+    String::from_utf8_lossy(&output.stdout).trim().to_string()
+}
+
+/// inbuxa: stops or starts a test container.
+pub fn docker(action: &str, container: &str) {
+    let status = std::process::Command::new("docker")
+        .args([action, container])
+        .status()
+        .expect("docker");
+    assert!(status.success(), "docker {action} {container}");
 }

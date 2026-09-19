@@ -94,6 +94,10 @@ impl RequestHandler for Server {
             request.method_calls.len(),
         );
 
+        // inbuxa: ST-6: reads before the request's first write may go to a
+        // read replica
+        let mut has_written = false;
+
         for mut call in request.method_calls {
             // Resolve result and id references
             if let Err(error) = response.resolve_references(&mut call.method) {
@@ -126,15 +130,59 @@ impl RequestHandler for Server {
 
                 // Add response
                 let method_name = call.name.as_str();
-                match self
-                    .handle_method_call(
+
+                // inbuxa: ST-6, ST-7: a read before the first write may use a
+                // replica that has every change the client has seen
+                let eligible = !has_written
+                    && matches!(
                         call.method,
-                        call.name,
-                        access_token,
-                        &mut next_call,
-                        session,
+                        RequestMethod::Get(_)
+                            | RequestMethod::Query(_)
+                            | RequestMethod::Changes(_)
+                            | RequestMethod::QueryChanges(_)
+                    );
+                if matches!(
+                    call.method,
+                    RequestMethod::Set(_)
+                        | RequestMethod::Copy(_)
+                        | RequestMethod::ImportEmail(_)
+                        | RequestMethod::UploadBlob(_)
+                ) {
+                    has_written = true;
+                }
+                let presented = match &call.method {
+                    RequestMethod::Changes(changes) => match &changes.since_state {
+                        jmap_proto::types::state::State::Exact(change_id) => {
+                            Some((changes.account_id.document_id(), *change_id))
+                        }
+                        _ => None,
+                    },
+                    _ => None,
+                };
+                let method_call = self.handle_method_call(
+                    call.method,
+                    call.name,
+                    access_token,
+                    &mut next_call,
+                    session,
+                );
+                let result = if eligible {
+                    store::backend::scaleout::replica::replica_read(
+                        access_token.all_ids().map(|account_id| {
+                            (
+                                account_id,
+                                presented
+                                    .filter(|(id, _)| *id == account_id)
+                                    .map_or(0, |(_, change_id)| change_id),
+                            )
+                        }),
+                        method_call,
                     )
                     .await
+                } else {
+                    method_call.await
+                };
+                match result
                 {
                     Ok(mut method_response) => {
                         match &mut method_response {

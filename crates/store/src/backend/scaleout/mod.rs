@@ -12,6 +12,27 @@
 pub mod blob;
 pub mod layout;
 pub mod memory;
+pub mod replica;
+pub mod replica_health;
+
+/// Calls a PostgreSQL or MySQL backend directly. Replicated stores use it
+/// instead of going back through `Store`, whose futures would then contain
+/// themselves.
+#[macro_export]
+#[doc(hidden)]
+macro_rules! sql_backend {
+    ($store:expr, $backend:ident => $call:expr) => {
+        match $store {
+            #[cfg(feature = "postgres")]
+            $crate::Store::PostgreSQL($backend) => $call,
+            #[cfg(feature = "mysql")]
+            $crate::Store::MySQL($backend) => $call,
+            _ => Err(trc::StoreEvent::NotConfigured
+                .into_err()
+                .details("A replicated store's member isn't PostgreSQL or MySQL")),
+        }
+    };
+}
 
 pub use blob::ShardedBlobStore;
 pub use memory::ShardedInMemoryStore;

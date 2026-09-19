@@ -62,6 +62,35 @@ impl RegistryEnvStores for RegistryStore {
 }
 
 pub async fn build_data_store(typ: &str, path: &str) -> DataStore {
+    // inbuxa: scale-out storage: a primary with a streaming read replica
+    if typ == "PostgreSqlReplicated" {
+        crate::utils::containers::ensure_postgres_replicated().await;
+        let secret = || {
+            SecretKeyOptional::Value(SecretKeyValue {
+                secret: "stalwart".into(),
+            })
+        };
+        return DataStore::PostgreSql(PostgreSqlStore {
+            host: "localhost".into(),
+            port: crate::utils::containers::PG_PRIMARY_PORT as u64,
+            auth_username: "stalwart".to_string().into(),
+            auth_secret: secret(),
+            database: "stalwart".into(),
+            use_tls: false,
+            allow_invalid_certs: true,
+            read_replicas: registry::types::list::List::from_iter([
+                registry::schema::structs::PostgreSqlSettings {
+                    host: "localhost".into(),
+                    port: crate::utils::containers::PG_REPLICA_PORT as u64,
+                    database: "stalwart".into(),
+                    auth_username: "stalwart".to_string().into(),
+                    auth_secret: secret(),
+                    options: None,
+                },
+            ]),
+            ..Default::default()
+        });
+    }
     if typ == "MariaDb" {
         crate::utils::containers::ensure_mariadb().await;
         return DataStore::MySql(MySqlStore {

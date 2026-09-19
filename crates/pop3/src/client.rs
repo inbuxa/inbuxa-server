@@ -113,10 +113,21 @@ impl<T: SessionStream> Session<T> {
                         Command::List { msg } => {
                             self.handle_list(msg).await.map(|_| SessionResult::Continue)
                         }
-                        Command::Retr { msg } => self
-                            .handle_fetch(msg, None)
+                        Command::Retr { msg } => {
+                            // inbuxa: ST-6: may be served by a read replica
+                            let accounts = self
+                                .state
+                                .access_token()
+                                .all_ids()
+                                .map(|account_id| (account_id, 0))
+                                .collect::<Vec<_>>();
+                            store::backend::scaleout::replica::replica_read(
+                                accounts,
+                                self.handle_fetch(msg, None),
+                            )
                             .await
-                            .map(|_| SessionResult::Continue),
+                            .map(|_| SessionResult::Continue)
+                        }
                         Command::Dele { msg } => self
                             .handle_dele(vec![msg])
                             .await
@@ -125,10 +136,21 @@ impl<T: SessionStream> Session<T> {
                             .handle_dele(msgs)
                             .await
                             .map(|_| SessionResult::Continue),
-                        Command::Top { msg, n } => self
-                            .handle_fetch(msg, n.into())
+                        Command::Top { msg, n } => {
+                            // inbuxa: ST-6: may be served by a read replica
+                            let accounts = self
+                                .state
+                                .access_token()
+                                .all_ids()
+                                .map(|account_id| (account_id, 0))
+                                .collect::<Vec<_>>();
+                            store::backend::scaleout::replica::replica_read(
+                                accounts,
+                                self.handle_fetch(msg, n.into()),
+                            )
                             .await
-                            .map(|_| SessionResult::Continue),
+                            .map(|_| SessionResult::Continue)
+                        }
                         Command::Uidl { msg } => {
                             self.handle_uidl(msg).await.map(|_| SessionResult::Continue)
                         }

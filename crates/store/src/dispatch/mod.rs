@@ -26,6 +26,8 @@ impl Store {
             #[cfg(feature = "rocks")]
             Self::RocksDb(_) => "rocksdb",
             Self::Ephemeral(_) => "ephemeral",
+            // inbuxa: ST-3: as its primary
+            Self::Replicated(store) => store.primary.id(),
             Self::None => "none",
         }
     }

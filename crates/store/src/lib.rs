@@ -159,6 +159,8 @@ pub enum Store {
     #[cfg(feature = "rocks")]
     RocksDb(Arc<backend::rocksdb::RocksDbStore>),
     Ephemeral(Arc<EphemeralStore>),
+    // inbuxa: ST-5 to ST-15: a PostgreSQL or MySQL primary with read replicas
+    Replicated(Arc<backend::scaleout::replica::ReplicatedStore>),
     #[default]
     None,
 }
@@ -654,8 +656,8 @@ impl Store {
             #[cfg(feature = "rocks")]
             (Store::RocksDb(a), Store::RocksDb(b)) => Arc::ptr_eq(a, b),
             (Store::Ephemeral(a), Store::Ephemeral(b)) => Arc::ptr_eq(a, b),
-            #[cfg(all(feature = "enterprise", any(feature = "postgres", feature = "mysql")))]
-            (Store::SQLReadReplica(a), Store::SQLReadReplica(b)) => Arc::ptr_eq(a, b),
+            // inbuxa: ST-3
+            (Store::Replicated(a), Store::Replicated(b)) => Arc::ptr_eq(a, b),
             (Store::None, Store::None) => true,
             _ => false,
         }
@@ -664,6 +666,8 @@ impl Store {
     #[inline(always)]
     pub fn is_sql(&self) -> bool {
         match self {
+            // inbuxa: ST-3: as its primary
+            Store::Replicated(store) => store.primary.is_sql(),
             #[cfg(feature = "sqlite")]
             Store::SQLite(_) => true,
             #[cfg(feature = "postgres")]
@@ -677,6 +681,8 @@ impl Store {
     #[inline(always)]
     pub fn is_pg_or_mysql(&self) -> bool {
         match self {
+            // inbuxa: ST-3: as its primary
+            Store::Replicated(store) => store.primary.is_pg_or_mysql(),
             #[cfg(feature = "mysql")]
             Store::MySQL(_) => true,
             #[cfg(feature = "postgres")]
@@ -715,6 +721,7 @@ impl std::fmt::Debug for Store {
             #[cfg(feature = "rocks")]
             Self::RocksDb(_) => f.debug_tuple("RocksDb").finish(),
             Self::Ephemeral(_) => f.debug_tuple("Ephemeral").finish(),
+            Self::Replicated(store) => f.debug_tuple("Replicated").field(&store.primary).finish(),
 
             Self::None => f.debug_tuple("None").finish(),
         }

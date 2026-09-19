@@ -29,7 +29,7 @@ pub struct PostgresStore {
 }
 
 #[inline(always)]
-fn into_error(err: tokio_postgres::error::Error) -> trc::Error {
+pub(crate) fn into_error(err: tokio_postgres::error::Error) -> trc::Error {
     let mut local_err = trc::StoreEvent::PostgresqlError.reason(error_chain(&err));
     if let Some(db_err) = err.as_db_error() {
         local_err = local_err.code(db_err.code().code().to_string());
@@ -71,7 +71,7 @@ pub(crate) fn is_timeout_error(err: &tokio_postgres::Error) -> bool {
 }
 
 #[inline(always)]
-fn into_pool_error(err: deadpool_postgres::PoolError) -> trc::Error {
+pub(crate) fn into_pool_error(err: deadpool_postgres::PoolError) -> trc::Error {
     match err {
         deadpool_postgres::PoolError::Backend(err) => into_error(err),
         err => trc::StoreEvent::PostgresqlError.reason(error_chain(&err)),

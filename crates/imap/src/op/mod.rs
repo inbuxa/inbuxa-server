@@ -62,8 +62,8 @@ impl ToModSeq for u64 {
 macro_rules! spawn_op {
     ($data:expr, $($code:tt)*) => {
         {
-
-        tokio::spawn(async move {
+        // inbuxa: ST-6: the operation keeps its read scope
+        tokio::spawn(store::backend::scaleout::replica::carry(async move {
             let data = &($data);
 
             if let Err(err) = (async {
@@ -73,7 +73,7 @@ macro_rules! spawn_op {
             {
                 let _ = data.write_error(err).await;
             }
-        });
+        }));
 
         Ok(())}
     };
