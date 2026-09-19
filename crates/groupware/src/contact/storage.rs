@@ -234,6 +234,15 @@ impl DestroyArchive<Archive<&ArchivedContactCard>> {
                     )
                     .caused_by(trc::location!())?;
             } else {
+                // inbuxa: UD-1: noted for undelete
+                crate::inbuxa::note_card(
+                    batch,
+                    account_id,
+                    document_id,
+                    &card
+                        .deserialize::<ContactCard>()
+                        .caused_by(trc::location!())?,
+                )?;
                 // Delete card
                 batch
                     .with_document(document_id)
@@ -262,6 +271,16 @@ impl DestroyArchive<Archive<&ArchivedContactCard>> {
         document_id: u32,
         batch: &mut BatchBuilder,
     ) -> trc::Result<()> {
+        // inbuxa: UD-1: noted for undelete
+        crate::inbuxa::note_card(
+            batch,
+            account_id,
+            document_id,
+            &self
+                .0
+                .deserialize::<ContactCard>()
+                .caused_by(trc::location!())?,
+        )?;
         batch
             .with_account_id(account_id)
             .with_collection(Collection::ContactCard)

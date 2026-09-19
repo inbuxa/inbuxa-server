@@ -21,6 +21,7 @@ pub mod destroy_account;
 pub mod dkim;
 pub mod dns;
 pub mod imip;
+pub mod inbuxa_restore; // inbuxa: undelete
 pub mod index;
 pub mod lock;
 pub mod maintenance;

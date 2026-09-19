@@ -139,9 +139,32 @@ async fn restore_item(server: &Server, task: &TaskRestoreArchivedItem) -> trc::R
                 Err(err) => Err(err.caused_by(trc::location!())),
             }
         }
+        // inbuxa: UD-1, UD-8: the other kinds the fork archives
         ArchivedItemType::FileNode
         | ArchivedItemType::CalendarEvent
         | ArchivedItemType::ContactCard
-        | ArchivedItemType::SieveScript => Ok(TaskResult::permanent("Not implemented")),
+        | ArchivedItemType::SieveScript => {
+            let Some((item_id, item, extra)) = undelete::records::for_restore(
+                &server.core.storage.data,
+                server.registry(),
+                task.account_id.document_id(),
+                task.blob_id.hash.as_slice(),
+            )
+            .await?
+            else {
+                return Ok(TaskResult::Success(vec![]));
+            };
+            match crate::task_manager::inbuxa_restore::restore_other(
+                server, task, item_id, &item, extra,
+            )
+            .await?
+            {
+                None => Ok(TaskResult::Success(vec![])),
+                Some(reason) => {
+                    crate::task_manager::inbuxa_restore::not_restored(server, item_id, reason)
+                        .await
+                }
+            }
+        }
     }
 }

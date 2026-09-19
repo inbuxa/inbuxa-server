@@ -462,6 +462,15 @@ impl DestroyArchive<Archive<&ArchivedCalendarEvent>> {
         batch: &mut BatchBuilder,
     ) -> trc::Result<()> {
         let event = self.0;
+        // inbuxa: UD-1: noted for undelete
+        crate::inbuxa::note_event(
+            batch,
+            account_id,
+            document_id,
+            &event
+                .deserialize::<CalendarEvent>()
+                .caused_by(trc::location!())?,
+        )?;
         // Delete event
         batch
             .with_account_id(account_id)

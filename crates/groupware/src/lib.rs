@@ -16,6 +16,7 @@ pub mod cache;
 pub mod calendar;
 pub mod contact;
 pub mod file;
+pub mod inbuxa; // inbuxa: undelete notes
 pub mod scheduling;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

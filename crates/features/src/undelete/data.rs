@@ -137,6 +137,8 @@ pub enum Extra {
         parent_id: Option<u32>,
         name: String,
         media_type: Option<String>,
+        #[serde(default)]
+        size: u32,
     },
     CalendarEvent {
         calendar_ids: Vec<u32>,

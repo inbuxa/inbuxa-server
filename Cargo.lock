@@ -3032,6 +3032,7 @@ dependencies = [
  "icu_locale_core",
  "icu_plurals",
  "icu_provider",
+ "inbuxa-features",
  "indexmap 2.14.2",
  "nlp",
  "percent-encoding",

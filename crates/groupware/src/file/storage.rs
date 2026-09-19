@@ -82,6 +82,14 @@ impl DestroyArchive<Archive<&ArchivedFileNode>> {
         batch: &mut BatchBuilder,
         path: String,
     ) -> trc::Result<()> {
+        // inbuxa: UD-1: noted for undelete
+        crate::inbuxa::note_file(
+            batch,
+            account_id,
+            document_id,
+            &self.0.deserialize::<FileNode>().caused_by(trc::location!())?,
+        )?;
+
         // Prepare write batch
         batch
             .with_account_id(account_id)
@@ -143,6 +151,16 @@ impl DestroyArchive<Vec<u32>> {
                 ))
                 .await?
             {
+                // inbuxa: UD-1: noted for undelete
+                crate::inbuxa::note_file(
+                    batch,
+                    account_id,
+                    document_id,
+                    &node
+                        .deserialize::<FileNode>()
+                        .caused_by(trc::location!())?,
+                )?;
+
                 // Delete record
                 batch
                     .with_document(document_id)

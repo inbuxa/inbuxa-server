@@ -10,6 +10,7 @@ use email::{
     cache::MessageCacheFetch,
     message::metadata::{MESSAGE_RECEIVED_MASK, MessageMetadata},
 };
+use inbuxa_features::undelete;
 use types::blob_hash::BlobHash;
 use groupware::{cache::GroupwareCache, calendar::CalendarEvent, contact::ContactCard};
 use registry::{
@@ -210,6 +211,20 @@ impl SearchIndexTask for Server {
                         IndexDocumentType::Contacts => 2,
                         IndexDocumentType::File => 3,
                     };
+                    // inbuxa: UD-1: a noted file, event or contact is archived
+                    if let Some(kind) = match task.document_type {
+                        IndexDocumentType::Calendar => Some(undelete::groupware::Kind::CalendarEvent),
+                        IndexDocumentType::Contacts => Some(undelete::groupware::Kind::ContactCard),
+                        IndexDocumentType::File => Some(undelete::groupware::Kind::File),
+                        IndexDocumentType::Email => None,
+                    } && let Err(err) = archive_noted(self, kind, account_id, document_id).await
+                    {
+                        trc::error!(
+                            err.account_id(account_id)
+                                .document_id(document_id)
+                                .details("Failed to archive a deleted item")
+                        );
+                    }
 
                     document_deletions[idx]
                         .entry(account_id)
@@ -569,6 +584,40 @@ async fn build_contact_document(
 #[cfg(not(feature = "enterprise"))]
 async fn build_tracing_span_document(_: &Server, _: u64) -> trc::Result<Option<IndexDocument>> {
     Ok(None)
+}
+
+// inbuxa: UD-1, UD-4: archives a deleted file, event or contact noted at
+// deletion, when archiving is on; otherwise its note is dropped
+async fn archive_noted(
+    server: &Server,
+    kind: undelete::groupware::Kind,
+    account_id: u32,
+    document_id: u32,
+) -> trc::Result<()> {
+    let data = &server.core.storage.data;
+    let Some(note) = undelete::groupware::take(data, kind, account_id, document_id).await? else {
+        return Ok(());
+    };
+    let Some(retention) = undelete::settings::retention(server.registry()).await?.items else {
+        return Ok(());
+    };
+    let blob_hash = match (&note.content, &note.blob_hash) {
+        (Some(text), _) => {
+            server
+                .put_temporary_blob(account_id, text.as_bytes(), 600)
+                .await?
+                .0
+        }
+        (None, Some(hash)) => BlobHash::try_from_hash_slice(hash).map_err(|_| {
+            trc::StoreEvent::DataCorruption
+                .into_err()
+                .details("Invalid blob hash in undelete note")
+        })?,
+        (None, None) => return Ok(()),
+    };
+    undelete::groupware::archive(data, server.registry(), account_id, note, blob_hash, retention)
+        .await
+        .map(|_| ())
 }
 
 async fn delete_email_metadata(
