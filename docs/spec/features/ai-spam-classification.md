@@ -127,15 +127,21 @@ subspace. Its id is `singleton`, as for `x:` singletons. It's server-level:
 reading needs `sysSpamLlmGet` and changing needs `sysSpamLlmUpdate`, and a
 principal in a tenant can do neither (AI-27). Unset fields read as the
 defaults below. Changes take effect for the next message or call, with no
-reload.
+reload. **Decision** (2026-09-19), from calibration (see "Calibration"): the
+defaults target low-end CPU-only instances, since few deployments will have a
+GPU. `maxContentBytes` is 2048, not 16384: sending more text measured no
+better and is what pushes a 2-core model past `spamCallCeiling`.
+`spamMaxAdded` is 2.0, not 5.0: tested models pushed 20 to 26% of legitimate
+mail up by 2 to 3 points under INBUXA's tag scores, so the model's word alone
+adds at most 2.
 
 | Field | Default | Meaning |
 |---|---|---|
-| `spamMaxAdded` | `5.0` | Most an LLM tag can add to a message's score (AI-12) |
+| `spamMaxAdded` | `2.0` | Most an LLM tag can add to a message's score (AI-12) |
 | `spamMaxSubtracted` | `1.0` | Most an LLM tag can take off a message's score (AI-12) |
 | `spamCallCeiling` | `20s` | Longest the spam filter waits for the model, whatever the model's `timeout` (AI-9) |
 | `maxConcurrentCalls` | `4` | Model requests in flight at once, across both uses, per server node (AI-10) |
-| `maxContentBytes` | `16384` | Most message text sent per classification (AI-4) |
+| `maxContentBytes` | `2048` | Most message text sent per classification (AI-4) |
 | `failureBackoff` | `60s` | Pause after repeated failures (AI-11) |
 | `userCallsPerHour` | `60` | `llm_prompt` calls per account per hour from its own scripts (AI-24) |
 
@@ -406,7 +412,7 @@ read the last message rather than the first (AI-6).
    until `failureBackoff` ends, then one probe request (AI-11).
 10. `maxConcurrentCalls` 1, stub slow, two messages at once: one is
     classified, the other is delivered without a tag (AI-10).
-11. `LLM_UNSOLICITED_HIGH` scored 50: the message's score rises by 5.0.
+11. `LLM_UNSOLICITED_HIGH` scored 50: the message's score rises by 2.0.
     `LLM_LEGITIMATE_HIGH` scored −50: it falls by 1.0.
     `LLM_HARMFUL_HIGH` set to `Reject`: the message isn't rejected (AI-13).
 12. Stub's explanation contains CRLF, a fake header and non-ASCII text: one
@@ -501,6 +507,43 @@ last message.
   - Test 21's warning count is checked only when `registry.build-warning` is
     a metric of interest; the warning itself is always logged.
 
+## Calibration
+
+Measured 2026-09-19 against real local models, with
+`tests/src/system/ai_calibration.rs` (ignored): it sends exactly what the
+classifier sends and reads answers with the classifier's own parser. Mail:
+300 messages from the SpamAssassin public corpus (150 ham, 50 of them "hard
+ham" such as newsletters, and 150 spam from 2002 to 2005), the fork's default
+prompt, INBUXA's `LLM_*` scores (observed 2). Models ran under llama.cpp,
+quantized to Q4_K_M. Accuracy doesn't depend on hardware, so it was measured
+on a GPU; latency on CPU cores pinned to model a small VPS (Zen 5 cores,
+faster than most VPS vCPUs, so real instances will be slower).
+
+| Model (licence) | In format | Spam pushed ≥ +2 | Ham pushed ≥ +2 | 2 cores, p50 / p95 | 4 cores, p50 / p95 |
+|---|---|---|---|---|---|
+| Qwen2.5 7B (Apache-2.0) | 99% | 93% | 26% | 17.9 / 35 s | 9.7 / 18.5 s |
+| Llama 3.1 8B (Llama 3.1) | 100% | 96% | 23% | not measured | not measured |
+| Qwen2.5 3B (Qwen Research, non-commercial) | 100% | 63 to 66% | 21 to 25% | 8.1 / 15.2 s at 2 KiB | 4.6 / 8.0 s |
+| Qwen2.5 1.5B (Apache-2.0) | 80% | 20% | 13% | | |
+| Qwen2.5 0.5B (Apache-2.0) | 19% | 5% | 3% | | |
+| Phi-3.5 mini (MIT) | 33% | | | | |
+
+Findings:
+
+- **Text sent.** 2 KiB and 4 KiB scored the same as 16 KiB; 4 KiB pushed a
+  2-core 3B model past 20 s on 8% of messages, 2 KiB on none. Hence the 2048
+  default.
+- **False positives.** Ham is pushed up mostly as `Commercial`: marketing the
+  recipient signed up for, which content alone can't tell from spam. A prompt
+  redefining the categories made it worse on every model, so the default
+  prompt stays. Hence the 2.0 cap.
+- **Size.** Below 3B, models don't follow the one-line format reliably.
+  Phi-3.5 mini writes "High confidence" on a new line, which the parser
+  rightly doesn't accept.
+- **Licences.** Qwen2.5 3B, the best small model tested, is licensed for
+  non-commercial use only, so it can't be the recommendation for INBUXA's
+  customers.
+
 ## Observed
 
 Settled on 2026-09-18 against INBUXA's live Enterprise server (Stalwart
@@ -512,8 +555,9 @@ account. No upstream code was read.
 2. **`LLM_*` tags** (open question 2). Twelve entries, all `Score`, for every
    category and confidence: `HIGH` 3.0, `MEDIUM` 2.0, `LOW` 0.5 for
    `UNSOLICITED`, `COMMERCIAL` and `HARMFUL`, and −3.0, −2.0, −0.5 for
-   `LEGITIMATE`. AI-13's clamp (+5.0, −1.0) cuts only the `LEGITIMATE`
-   `HIGH` and `MEDIUM` scores.
+   `LEGITIMATE`. AI-13's clamp (+2.0 and −1.0, since calibration) cuts the
+   positive `HIGH` scores to 2.0 and the `LEGITIMATE` `HIGH` and `MEDIUM`
+   scores to −1.0.
 3. **`X-Spam-LLM`** (open question 3). Not observable: the classifier has
    never run on INBUXA.
 4. **`interactAi`** (open question 5). Ordinary accounts hold it: the test
