@@ -111,15 +111,17 @@ generator (milliseconds since an epoch in the high bits), so key order is time
 order. The trace search index is `SearchIndex::Tracing`, with fields
 `EventType`, `QueueId` and `Keywords`.
 
-**Existing data at cutover, Decision.** The *value* encoding of stored traces
-and samples lived in files the strip removed (`telemetry/tracers/store.rs`,
-`telemetry/metrics/store.rs`, `trc/src/serializers/binary.rs`), so this spec
-doesn't know it and doesn't try to match it. inbuxa-server writes its own
-encoding, which starts with a format byte of its own. Records it can't decode
-are skipped, never an error, and are removed by the normal age purge (MON-17),
-so INBUXA's old history ages out within 30 and 90 days. At cutover, run
-`reindexTelemetry` once so the search index holds only readable traces.
-Settings, alerts and every other registry object open unchanged.
+**Existing data at cutover, Decision** (revised 2026-09-19). The store's
+AGPL key layout files `x:Trace` and `x:Metric` registry items under these
+subspaces (`store/src/write/key.rs`), so a trace or sample is stored as that
+registry object, with the registry's own AGPL encoding (`ObjectInner`
+pickling). If INBUXA's history was written the same way, it reads back after
+cutover; this can't be confirmed without a copy of the data (compat test 26).
+Records that can't be decoded are skipped, never an error, and are removed by
+the normal age purge (MON-17), so anything unreadable ages out within 30 and
+90 days. At cutover, run `reindexTelemetry` once so the search index holds
+only readable traces. Settings, alerts and every other registry object open
+unchanged.
 
 ## Required behavior
 
@@ -148,8 +150,12 @@ Settings, alerts and every other registry object open unchanged.
     the last totals it wrote. The first sample after a start counts from the
     start. A counter that didn't move writes nothing.
   - **Gauge:** `count` is the reading at the tick.
-  - **Histogram:** `count` and `sum` are the increases since the previous
-    sample. A histogram that saw nothing writes nothing.
+  - **Histogram:** `count` and `sum` are the totals since the process
+    started, cumulative. **Decision** (2026-09-19): INBUXA Admin computes the
+    per-interval change between consecutive samples itself
+    (`features/dashboard/helpers.ts`, `deltaHistograms`), so increases would
+    be differenced twice. A histogram that hasn't changed since the node's
+    previous sample writes nothing.
   All samples of one tick share its `timestamp`. That's the shape ihasmail
   already reads from INBUXA: a counter holds what happened in the interval, a
   gauge the reading at its end.
@@ -238,9 +244,14 @@ Settings, alerts and every other registry object open unchanged.
 ### Live telemetry
 
 - **MON-20.** **Live tracing.** `GET /api/live/tracing` returns a
-  `text/event-stream`. Each frame is `event: event` and `data:` a JSON array
-  of events, in the format webhooks already send (`id`, `createdAt`, `type`,
-  `data`), the same framing the AGPL delivery tester uses. Query parameters:
+  `text/event-stream`. Each frame is `event: trace` and `data:` a JSON array
+  of events in the `x:TraceEvent` shape: `event`, `timestamp`, and
+  `keyValues`, a list of `key` and a typed `value` (`@type` as in
+  `TraceValue`). While idle it sends `event: ping` with
+  `data: {"interval": 30000}` every 30 seconds, as upstream does (observed
+  5). **Decision** (2026-09-19), replacing the webhook format first drafted
+  here: this is what INBUXA Admin reads
+  (`features/tracing/components/LiveTracingPage.tsx`). Query parameters:
   `filter` matches a value in any key; any `Key` name (for example
   `remoteIp`, `domain`, `queueId`) matches that key only; several combine with
   AND. **Decision**: keys are given in their camel-case `Key` names; the
@@ -251,16 +262,19 @@ Settings, alerts and every other registry object open unchanged.
 - **MON-22.** **Live metrics.** `GET /api/live/metrics` returns a
   `text/event-stream` of the current values of the metrics listed in
   `metrics` (comma-separated names; all selected metrics when absent), every
-  `interval` seconds (default 30, minimum 1). Each frame's data is a JSON
-  array of `{"id", "type", "value"}` for counters and gauges, and `{"id",
-  "type", "count", "sum"}` for histograms. **Decision** on the frame shape;
-  check it against INBUXA Admin (to observe, 9).
+  `interval` seconds (default 30, minimum 1). Each frame is `event: metrics`,
+  its data a JSON array of `{"@type": "Counter" | "Gauge", "metric",
+  "count"}` and `{"@type": "Histogram", "metric", "count", "sum"}`, holding
+  totals since the process started. **Decision** (2026-09-19): this is what
+  upstream sent on INBUXA (observed 5) and what INBUXA Admin reads
+  (`features/dashboard/stores/liveMetricsStore.ts`).
 - **MON-23.** **Tokens.** Browsers can't put headers on an event stream, so
   as with the delivery tester, `GET /api/token/tracing` and
   `/api/token/metrics` return a single-use token, valid 60 seconds, bound to
   the account and to grant type `live_tracing` or `live_metrics` (both already
-  defined). The stream accepts it as `?token=`, or a normal `Authorization`
-  header. Issuing the token needs `liveTracing` or `liveMetrics`, and on this
+  defined). The token is the response body as plain text, as upstream sends
+  it and INBUXA Admin reads it (observed 5). The stream accepts it as
+  `?token=`, or a normal `Authorization` header. Issuing the token needs `liveTracing` or `liveMetrics`, and on this
   fork a token with the `inbuxa:admin` scope (contract.md C-18).
 - **MON-24.** A live subscriber is lossy: a slow client loses events, never
   slows the server. At most 8 live streams run at once per node, and each ends
