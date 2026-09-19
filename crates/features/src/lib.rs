@@ -20,3 +20,4 @@
 
 pub mod masked_email;
 pub mod tenancy;
+pub mod undelete;

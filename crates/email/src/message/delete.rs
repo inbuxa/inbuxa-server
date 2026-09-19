@@ -67,6 +67,10 @@ impl EmailDeletion for Server {
         batch
             .with_account_id(account_id)
             .with_collection(Collection::Email);
+        // inbuxa: UD-1, UD-6a: the retention in force now
+        let retention = inbuxa_features::undelete::settings::retention(self.registry())
+            .await?
+            .items;
         self.archives(
             account_id,
             Collection::Email,
@@ -83,6 +87,20 @@ impl EmailDeletion for Server {
                     );
                 }
                 thread_ids.insert(metadata.inner.thread_id.to_native());
+                // inbuxa: UD-1, UD-4: a deleted message is noted for archiving
+                if let Some(retention) = retention {
+                    inbuxa_features::undelete::email::note(
+                        batch,
+                        retention,
+                        account_id,
+                        document_id,
+                        metadata.inner.size.to_native() as u64,
+                        metadata.inner.mailboxes.iter().map(|m| m.mailbox_id.to_native()).collect(),
+                        inbuxa_features::undelete::email::keywords_to_keep(
+                            metadata.inner.keywords.iter().map(|k| k.to_string()),
+                        ),
+                    )?;
+                }
                 batch
                     .with_document(document_id)
                     .custom(

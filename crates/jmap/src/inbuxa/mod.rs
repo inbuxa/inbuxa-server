@@ -7,5 +7,7 @@
 //! JMAP glue for INBUXA's rebuilt features. The features' rules live in
 //! `crates/features`; this module only speaks JMAP for them.
 
+pub mod access;
 pub mod fastmail;
 pub mod masked_email;
+pub mod undelete;

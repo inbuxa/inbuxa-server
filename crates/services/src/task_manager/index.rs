@@ -6,7 +6,11 @@
 
 use crate::task_manager::{Task, TaskDetails, TaskFailureType, TaskResult};
 use common::Server;
-use email::{cache::MessageCacheFetch, message::metadata::MessageMetadata};
+use email::{
+    cache::MessageCacheFetch,
+    message::metadata::{MESSAGE_RECEIVED_MASK, MessageMetadata},
+};
+use types::blob_hash::BlobHash;
 use groupware::{cache::GroupwareCache, calendar::CalendarEvent, contact::ContactCard};
 use registry::{
     schema::{
@@ -593,6 +597,22 @@ async fn delete_email_metadata(
                 .caused_by(trc::location!())?;
             metadata.unindex(batch);
 
+            // inbuxa: UD-1, UD-4: a message noted at deletion is archived
+            let root = metadata.contents.first().and_then(|c| c.parts.first());
+            inbuxa_features::undelete::email::archive(
+                &server.core.storage.data,
+                server.registry(),
+                account_id,
+                document_id,
+                inbuxa_features::undelete::email::Summary {
+                    blob_hash: BlobHash::from(&metadata.blob_hash),
+                    from: root.and_then(|part| part.from()),
+                    subject: root.and_then(|part| part.subject()),
+                    received_at: metadata.rcvd_attach.to_native() & MESSAGE_RECEIVED_MASK,
+                },
+            )
+            .await
+            .caused_by(trc::location!())?;
         }
         None => {
             trc::event!(

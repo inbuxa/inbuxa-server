@@ -371,8 +371,10 @@ impl MethodName {
                 "query" => MethodFunction::Query,
                 "changes" => MethodFunction::Changes,
             )?;
-            // inbuxa: only masked email has /changes (a fork addition)
-            if fnc == MethodFunction::Changes && obj != ObjectType::MaskedEmail {
+            // inbuxa: only masked email and undelete have /changes (fork additions)
+            if fnc == MethodFunction::Changes
+                && !matches!(obj, ObjectType::MaskedEmail | ObjectType::ArchivedItem)
+            {
                 return None;
             }
 

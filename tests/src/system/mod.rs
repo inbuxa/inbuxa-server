@@ -17,6 +17,7 @@ pub mod quota;
 pub mod security;
 pub mod task;
 pub mod tenant;
+pub mod undelete;
 
 use crate::utils::server::TestServerBuilder;
 use registry::schema::structs::{Expression, Imap, MtaStageAuth};
@@ -70,8 +71,7 @@ pub async fn system_tests() {
     delivery::test(&mut test).await;
     crypto::test(&mut test).await;
     antispam::test(&mut test).await;
-    #[cfg(feature = "pending-rebuild")] // inbuxa: pending-rebuild, see docs/spec/features/undelete.md
-    archiving::test(&mut test).await;
+    undelete::test(&mut test).await;
     task::test(&mut test).await;
 
     if test.is_reset() {

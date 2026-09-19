@@ -609,8 +609,12 @@ impl RequestHandler for Server {
             RequestMethod::Changes(mut req) => {
                 resolve_account_id(&mut req.account_id, method_name.obj, access_token)?;
 
-                // inbuxa: x:MaskedEmail/changes
-                if matches!(method_name.obj, MethodObject::Registry(_)) {
+                // inbuxa: x:MaskedEmail/changes and x:ArchivedItem/changes
+                if method_name.obj
+                    == MethodObject::Registry(registry::schema::prelude::ObjectType::ArchivedItem)
+                {
+                    crate::inbuxa::undelete::changes(self, access_token, *req).await?
+                } else if matches!(method_name.obj, MethodObject::Registry(_)) {
                     crate::inbuxa::masked_email::changes(self, access_token, *req).await?
                 } else {
                     self.changes(*req, method_name.obj, access_token)
@@ -750,7 +754,13 @@ async fn assert_registry_account(
     access_token: &AccessToken,
     account_id: Id,
 ) -> trc::Result<()> {
-    if obj == MethodObject::Registry(registry::schema::prelude::ObjectType::MaskedEmail) {
+    if matches!(
+        obj,
+        MethodObject::Registry(
+            registry::schema::prelude::ObjectType::MaskedEmail
+                | registry::schema::prelude::ObjectType::ArchivedItem
+        )
+    ) {
         crate::inbuxa::masked_email::assert_can_manage(
             server,
             access_token,

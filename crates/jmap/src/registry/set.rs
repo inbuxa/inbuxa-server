@@ -817,6 +817,11 @@ impl RegistrySet for Server {
 
             ObjectType::Task => task_set(set).await.map(|set| set.into_response()),
 
+            // inbuxa: undelete (UD-8, UD-12)
+            ObjectType::ArchivedItem => crate::inbuxa::undelete::set(set)
+                .await
+                .map(|set| set.into_response()),
+
             ObjectType::Action => Box::pin(action_set(set))
                 .await
                 .map(|set| set.into_response()),

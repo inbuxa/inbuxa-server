@@ -227,6 +227,14 @@ async fn store_maintenance(
                 .await
                 .caused_by(trc::location!())?;
 
+            // inbuxa: UD-13: archived items past their deadline go
+            inbuxa_features::undelete::records::remove_expired(
+                &server.core.storage.data,
+                server.registry(),
+            )
+            .await
+            .caused_by(trc::location!())?;
+
             trc::event!(
                 Store(StoreEvent::DataStorePurged),
                 Elapsed = started.elapsed()

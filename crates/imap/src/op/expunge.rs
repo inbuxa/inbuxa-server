@@ -223,6 +223,10 @@ impl<T: SessionStream> SessionData<T> {
 
         let mut fully_deleted = RoaringBitmap::new();
         let mut thread_ids = RoaringBitmap::new();
+        // inbuxa: UD-1, UD-6a: the retention in force now
+        let retention = inbuxa_features::undelete::settings::retention(self.server.registry())
+            .await?
+            .items;
         self.server
             .archives(
                 account_id,
@@ -245,6 +249,20 @@ impl<T: SessionStream> SessionData<T> {
                             // Delete message
                             fully_deleted.insert(document_id);
                             thread_ids.insert(metadata.inner.thread_id.to_native());
+                            // inbuxa: UD-1, UD-4: a deleted message is noted for archiving
+                            if let Some(retention) = retention {
+                                inbuxa_features::undelete::email::note(
+                                    batch,
+                                    retention,
+                                    account_id,
+                                    document_id,
+                                    metadata.inner.size.to_native() as u64,
+                                    metadata.inner.mailboxes.iter().map(|m| m.mailbox_id.to_native()).collect(),
+                                    inbuxa_features::undelete::email::keywords_to_keep(
+                                        metadata.inner.keywords.iter().map(|k| k.to_string()),
+                                    ),
+                                )?;
+                            }
                             batch
                                 .custom(
                                     ObjectIndexBuilder::<_, ()>::new()

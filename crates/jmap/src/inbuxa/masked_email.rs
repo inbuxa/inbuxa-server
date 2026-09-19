@@ -49,35 +49,7 @@ pub enum CreateRefusal {
     RateLimited,
 }
 
-/// ME-18, ME-19: who may manage an account's masks. The account itself (or
-/// a group it's in); at server level, a holder of `impersonate`; inside a
-/// tenant, a holder of `sysAccountUpdate`, for accounts in its own tenant
-/// only, `impersonate` or not.
-pub async fn assert_can_manage(
-    server: &Server,
-    access_token: &AccessToken,
-    account_id: u32,
-) -> trc::Result<()> {
-    if access_token.is_account_id(account_id) {
-        return Ok(());
-    }
-    let allowed = if let Some(tenant_id) = access_token.tenant_id() {
-        let target = server.account(account_id).await?;
-        target.id_tenant == Some(tenant_id)
-            && (access_token.has_permission(Permission::SysAccountUpdate)
-                || access_token.is_member(account_id))
-    } else {
-        access_token.is_member(account_id)
-    };
-    if allowed {
-        Ok(())
-    } else {
-        Err(trc::JmapEvent::Forbidden.into_err().details(format!(
-            "You can't manage masked addresses of account {}",
-            Id::from(account_id)
-        )))
-    }
-}
+pub use crate::inbuxa::access::assert_can_manage;
 
 /// The domains an account may have masks on, as (id, name): every domain
 /// and alias domain it's linked to, its primary domain first (ME-12).

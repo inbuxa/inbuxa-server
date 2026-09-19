@@ -90,6 +90,10 @@ impl MailboxDestroy for Server {
 
                 let mut deleted_ids = RoaringBitmap::new();
                 let mut thread_ids = RoaringBitmap::new();
+                // inbuxa: UD-1, UD-6a: the retention in force now
+                let retention = inbuxa_features::undelete::settings::retention(self.registry())
+                    .await?
+                    .items;
                 self.archives(
                     account_id,
                     Collection::Email,
@@ -118,6 +122,20 @@ impl MailboxDestroy for Server {
                             }
                             deleted_ids.insert(message_id);
                             thread_ids.insert(prev_message_data.inner.thread_id.to_native());
+                            // inbuxa: UD-1, UD-4: a deleted message is noted for archiving
+                            if let Some(retention) = retention {
+                                inbuxa_features::undelete::email::note(
+                                    &mut batch,
+                                    retention,
+                                    account_id,
+                                    message_id,
+                                    prev_message_data.inner.size.to_native() as u64,
+                                    prev_message_data.inner.mailboxes.iter().map(|m| m.mailbox_id.to_native()).collect(),
+                                    inbuxa_features::undelete::email::keywords_to_keep(
+                                        prev_message_data.inner.keywords.iter().map(|k| k.to_string()),
+                                    ),
+                                )?;
+                            }
                             batch
                                 .with_collection(Collection::Email)
                                 .with_document(message_id)

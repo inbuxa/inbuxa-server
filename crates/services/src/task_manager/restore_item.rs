@@ -6,12 +6,15 @@
 
 use common::{Server, auth::BuildAccessToken};
 use email::{
-    mailbox::INBOX_ID,
+    cache::{MessageCacheFetch, mailbox::MailboxCacheAccess},
+    mailbox::{INBOX_ID, TRASH_ID},
     message::ingest::{EmailIngest, IngestEmail, IngestSource},
 };
+use inbuxa_features::undelete;
+use types::keyword::Keyword;
 use mail_parser::MessageParser;
 use registry::schema::{enums::ArchivedItemType, structs::TaskRestoreArchivedItem};
-use store::write::{BatchBuilder, BlobLink, BlobOp};
+use store::write::BatchBuilder;
 use trc::AddContext;
 
 use crate::task_manager::TaskResult;
@@ -48,6 +51,40 @@ async fn restore_item(server: &Server, task: &TaskRestoreArchivedItem) -> trc::R
                 .await
                 .caused_by(trc::location!())?;
 
+            // inbuxa: UD-8, UD-11: the item, and where it goes back
+            let data = &server.core.storage.data;
+            let Some((item_id, item, extra)) = undelete::records::for_restore(
+                data,
+                server.registry(),
+                account_id,
+                task.blob_id.hash.as_slice(),
+            )
+            .await?
+            else {
+                return Ok(TaskResult::Success(vec![]));
+            };
+            let (mailbox_ids, keywords) = match extra {
+                Some(undelete::data::Extra::Email {
+                    mailboxes,
+                    keywords,
+                }) => {
+                    let cache = server
+                        .get_cached_messages(account_id)
+                        .await
+                        .caused_by(trc::location!())?;
+                    (
+                        undelete::email::restore_mailboxes(
+                            &mailboxes,
+                            |id| cache.has_mailbox_id(&id),
+                            INBOX_ID,
+                            TRASH_ID,
+                        ),
+                        keywords.iter().map(|k| Keyword::parse(k)).collect(),
+                    )
+                }
+                _ => (vec![INBOX_ID], vec![]),
+            };
+
             let Some(bytes) = server
                 .blob_store()
                 .get_blob(task.blob_id.hash.as_slice(), 0..usize::MAX)
@@ -62,8 +99,8 @@ async fn restore_item(server: &Server, task: &TaskRestoreArchivedItem) -> trc::R
                     message: MessageParser::new().parse(&bytes),
                     blob_hash: Some(&task.blob_id.hash),
                     access_token: &access_token.build(),
-                    mailbox_ids: vec![INBOX_ID],
-                    keywords: vec![],
+                    mailbox_ids,
+                    keywords,
                     received_at: (task.created_at.timestamp() as u64).into(),
                     source: IngestSource::Restore,
                     session_id: 0,
@@ -71,16 +108,21 @@ async fn restore_item(server: &Server, task: &TaskRestoreArchivedItem) -> trc::R
                 .await
             {
                 Ok(_) => {
-                    let mut batch = BatchBuilder::new();
-                    batch.with_account_id(account_id).clear(BlobOp::Link {
-                        hash: task.blob_id.hash.clone(),
-                        to: BlobLink::Temporary {
-                            until: task.archived_until.timestamp() as u64,
-                        },
-                    });
-                    server.store().write(batch.build_all()).await?;
-
+                    // inbuxa: UD-9: the archived record goes, and its copy is released
+                    undelete::records::remove(data, server.registry(), item_id, &item).await?;
                     Ok(TaskResult::Success(vec![]))
+                }
+                // inbuxa: UD-10: over quota, the item stays archived and the task says why
+                Err(err)
+                    if err.matches(trc::EventType::Limit(trc::LimitEvent::Quota))
+                        || err.matches(trc::EventType::Limit(trc::LimitEvent::TenantQuota)) =>
+                {
+                    let mut batch = BatchBuilder::new();
+                    undelete::data::clear_restore_requested(&mut batch, item_id);
+                    data.write(batch.build_all()).await?;
+                    Ok(TaskResult::permanent(
+                        "Not restored: the account or its tenant is over quota.".to_string(),
+                    ))
                 }
                 Err(mut err)
                     if err.matches(trc::EventType::MessageIngest(
