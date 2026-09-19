@@ -437,8 +437,9 @@ pub async fn scim_tests() {
     }
 }
 
-/// Acceptance test 5, deferred until per-domain directories (feature 9)
-/// are built: it binds an OIDC directory to one domain (SCIM-61 decision).
+/// Acceptance test 5: SCIM's authority over sign-in sync, with Keycloak as
+/// one domain's own directory (per-domain directories, feature 9).
+/// `cargo test -p tests scim_oidc_tests -- --ignored`.
 #[ignore]
 #[tokio::test(flavor = "multi_thread")]
 pub async fn scim_oidc_tests() {
