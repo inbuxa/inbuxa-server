@@ -343,6 +343,10 @@ Each requirement has an ID, and tests name the IDs they check.
 - **SCIM-28.** `groups` on a user is read-only. Each entry has `value` (the
   group's id), `display` (the group's display name) and `$ref`. A write to it
   is `400 mutability`. Membership is changed through the Group.
+  **Decision** (2026-09-19): in a `POST` or `PUT` body, a `groups` value that
+  equals the current membership (so `[]` on create, as Okta sends) isn't a
+  write: it's accepted and ignored. A value that would change membership is
+  `400 mutability`, and `PATCH` on `groups` always is.
 - **SCIM-29.** `externalId` is stored exactly as sent and never interpreted.
   It's matched case-exactly. An empty string is `400 invalidValue`, as the
   schema already requires. **Decision:** within one tenant (or the
