@@ -49,7 +49,12 @@ impl Directories {
                         ObjectType::Authentication.singleton(),
                         format!("Default directory with ID {} not found", directory_id),
                     );
-                    None
+                    // inbuxa: DIR-5: a missing default is unavailable, never the
+                    // internal directory
+                    Some(Arc::new(Directory::Unavailable(UnavailableDirectory::new(
+                        registry::schema::enums::DirectoryType::Ldap,
+                        format!("Default directory with ID {} not found", directory_id),
+                    ))))
                 }
             }
         } else {

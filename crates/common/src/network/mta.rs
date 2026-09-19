@@ -106,6 +106,17 @@ impl Server {
                 Cow::Borrowed(rcpt)
             };
             match directory.recipient(address.as_ref()).await? {
+                // inbuxa: DIR-6: an answer for another directory's domain is no answer
+                Recipient::Account(account)
+                    if self
+                        .assert_directory_serves(directory, &account.email)
+                        .await
+                        .is_err() => {}
+                Recipient::Group(group)
+                    if self
+                        .assert_directory_serves(directory, &group.email)
+                        .await
+                        .is_err() => {}
                 Recipient::Account(account) => {
                     Box::pin(self.synchronize_account(account)).await?;
                     return Ok(if is_subaddressed {

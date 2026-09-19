@@ -87,6 +87,7 @@ impl Server {
                 for alias in account.email_aliases {
                     if let Some((local, alias_domain)) = self.validate_alias(&alias).await?
                         && alias_domain.id_tenant == domain.id_tenant
+                        && self.same_directory(&domain, &alias).await?
                         && self
                             .rcpt_id_from_parts(local, alias_domain.id)
                             .await?
@@ -105,7 +106,9 @@ impl Server {
                     let mut member_group_ids = Vec::with_capacity(groups.len());
                     for email in groups {
                         // inbuxa: SCIM-58: no group comes from a claim on a SCIM domain
-                        if self.is_scim_address(&email).await? {
+                        if self.is_scim_address(&email).await?
+                            || !self.same_directory(&domain, &email).await?
+                        {
                             continue;
                         }
                         member_group_ids.push(
@@ -179,6 +182,7 @@ impl Server {
                 for alias in account.email_aliases {
                     if let Some((local, alias_domain)) = self.validate_alias(&alias).await?
                         && alias_domain.id_tenant == domain.id_tenant
+                        && self.same_directory(&domain, &alias).await?
                         && self
                             .rcpt_id_from_parts(local, alias_domain.id)
                             .await?
@@ -195,7 +199,9 @@ impl Server {
                 let mut member_group_ids = Vec::new();
                 for email in account.groups.unwrap_or_default() {
                     // inbuxa: SCIM-58: no group comes from a claim on a SCIM domain
-                    if self.is_scim_address(&email).await? {
+                    if self.is_scim_address(&email).await?
+                        || !self.same_directory(&domain, &email).await?
+                    {
                         continue;
                     }
                     member_group_ids.push(
@@ -228,6 +234,8 @@ impl Server {
                 }));
 
 
+                // inbuxa: DIR-15
+                self.check_tenant_limits(&account).await?;
                 match self
                     .registry()
                     .write(RegistryWrite::insert(&account))
@@ -303,6 +311,7 @@ impl Server {
                 for alias in group.email_aliases {
                     if let Some((local, alias_domain)) = self.validate_alias(&alias).await?
                         && alias_domain.id_tenant == domain.id_tenant
+                        && self.same_directory(&domain, &alias).await?
                         && self
                             .rcpt_id_from_parts(local, alias_domain.id)
                             .await?
@@ -362,6 +371,7 @@ impl Server {
                 for alias in group.email_aliases {
                     if let Some((local, alias_domain)) = self.validate_alias(&alias).await?
                         && alias_domain.id_tenant == domain.id_tenant
+                        && self.same_directory(&domain, &alias).await?
                         && self
                             .rcpt_id_from_parts(local, alias_domain.id)
                             .await?
@@ -388,6 +398,8 @@ impl Server {
                 }));
 
 
+                // inbuxa: DIR-15
+                self.check_tenant_limits(&account).await?;
                 match self
                     .registry()
                     .write(RegistryWrite::insert(&account))
@@ -410,6 +422,46 @@ impl Server {
                         .reason(failure)),
                 }
             }
+        }
+    }
+
+    /// inbuxa: DIR-6: whether an address is on a domain served by the same
+    /// directory as `domain`; a warning when it isn't.
+    async fn same_directory(&self, domain: &DomainCache, address: &str) -> trc::Result<bool> {
+        let Some((_, other)) = address.rsplit_once('@') else {
+            return Ok(true);
+        };
+        let Some(other) = self.domain(other).await? else {
+            return Ok(true);
+        };
+        let same = match (
+            self.get_directory_for_cached_domain(domain),
+            self.get_directory_for_cached_domain(&other),
+        ) {
+            (None, None) => true,
+            (Some(a), Some(b)) => Arc::ptr_eq(a, b),
+            _ => false,
+        };
+        if !same {
+            trc::event!(
+                Auth(trc::AuthEvent::Warning),
+                AccountName = address.to_string(),
+                Domain = other.name().to_string(),
+                Reason = "Dropped: the address is on a domain served by another directory",
+            );
+        }
+        Ok(same)
+    }
+
+    /// inbuxa: DIR-15, MT-3, MT-17: an object created from a directory
+    /// passes the same tenant checks as one created over JMAP.
+    async fn check_tenant_limits(&self, object: &Object) -> trc::Result<()> {
+        match inbuxa_features::tenancy::writes::check(self.registry(), None, None, object).await? {
+            Ok(_) => Ok(()),
+            Err(err) => Err(trc::AuthEvent::Failed
+                .into_err()
+                .details(err.description().unwrap_or("A tenant limit is reached").to_string())
+                .reason("The directory's account can't be created")),
         }
     }
 

@@ -184,7 +184,7 @@ impl Server {
                     };
 
                     is_alias_login = directory_account.email != auth_as_address;
-                    self.build_directory_token(directory_account, req.remote_ip)
+                    self.build_directory_token(directory, directory_account, req.remote_ip)
                         .await
                 } else if let Some(account_id) =
                     self.account_id_from_parts(auth_as_local, domain.id).await?
@@ -341,7 +341,38 @@ impl Server {
                 {
                     match directory.authenticate(&req.credentials).await {
                         Ok(result) => {
-                            return self.build_directory_token(result, req.remote_ip).await;
+                            // inbuxa: DIR-7: the token must be the named user's, or
+                            // the named address an alias it may sign in with
+                            let named = username
+                                .as_deref()
+                                .map(|name| UsernameParts::new(name).auth_as().address().to_lowercase());
+                            let is_alias = match &named {
+                                Some(named) if !named.eq_ignore_ascii_case(&result.email) => {
+                                    if !result
+                                        .email_aliases
+                                        .iter()
+                                        .any(|alias| alias.eq_ignore_ascii_case(named))
+                                    {
+                                        return Err(trc::AuthEvent::Failed
+                                            .into_err()
+                                            .ctx(trc::Key::AccountName, named.clone())
+                                            .details(result.email.clone())
+                                            .reason("The token belongs to a different user"));
+                                    }
+                                    true
+                                }
+                                _ => false,
+                            };
+                            let token = self
+                                .build_directory_token(directory, result, req.remote_ip)
+                                .await?;
+                            if is_alias && !token.has_permission(Permission::AuthenticateWithAlias) {
+                                return Err(trc::AuthEvent::Failed
+                                    .into_err()
+                                    .ctx(trc::Key::AccountId, token.account_id())
+                                    .reason("Authenticated using an email alias but account does not have AuthenticateAlias permission"));
+                            }
+                            return Ok(token);
                         }
                         Err(err) => {
                             external_error = Some(err);
@@ -382,6 +413,8 @@ impl Server {
             && let Some(directory) = self.get_directory_for_cached_domain(&domain_cache)
             && let Recipient::Account(account) = directory.recipient(address).await?
         {
+            // inbuxa: DIR-6
+            self.assert_directory_serves(directory, &account.email).await?;
             return Ok(Some(Box::pin(self.synchronize_account(account)).await?.id));
         }
 
@@ -503,29 +536,88 @@ impl Server {
 
     async fn build_directory_token(
         &self,
+        directory: &Arc<Directory>,
         account: directory::Account,
         remote_ip: IpAddr,
     ) -> trc::Result<AccessToken> {
+        // inbuxa: DIR-6
+        self.assert_directory_serves(directory, &account.email).await?;
         let account = Box::pin(self.synchronize_account(account)).await?;
         self.access_token_from_account(account.id, account.account)
             .await
             .and_then(|token| AccessToken::new(token, remote_ip))
     }
 
+    /// inbuxa: DIR-1, DIR-5: the directory a domain signs in against: its
+    /// own, else the server default, else the internal one (`None`). An
+    /// unknown domain gets the server default.
     pub async fn get_directory_for_domain(
         &self,
-        // inbuxa: unused until per-domain directories (Domain.directoryId) are rebuilt; see docs/spec/SPEC.md §4
-        _domain_name: &str,
+        domain_name: &str,
     ) -> trc::Result<Option<&Arc<Directory>>> {
-
-        Ok(self.get_default_directory())
+        Ok(match self.domain(domain_name).await? {
+            Some(domain) => self.get_directory_for_cached_domain(&domain),
+            None => self.get_default_directory(),
+        })
     }
 
-    // inbuxa: `_domain` is unused until per-domain directories (Domain.directoryId) are rebuilt
-    pub fn get_directory_for_cached_domain(&self, _domain: &DomainCache) -> Option<&Arc<Directory>> {
-
-        self.get_default_directory()
+    /// inbuxa: DIR-1, DIR-5: as above, for a domain already read. A
+    /// `directoryId` naming no directory the server built is unavailable,
+    /// never the internal directory.
+    pub fn get_directory_for_cached_domain(&self, domain: &DomainCache) -> Option<&Arc<Directory>> {
+        match domain.id_directory {
+            Some(directory_id) => Some(
+                self.core
+                    .storage
+                    .directories
+                    .get(&directory_id)
+                    .unwrap_or_else(|| {
+                        trc::event!(
+                            Auth(trc::AuthEvent::Warning),
+                            Domain = domain.name().to_string(),
+                            Id = directory_id,
+                            Reason = "The domain's directory doesn't exist; sign-in fails",
+                        );
+                        unavailable_directory()
+                    }),
+            ),
+            None => self.get_default_directory(),
+        }
     }
+
+    /// inbuxa: DIR-6: a directory speaks only for the domains it serves.
+    pub async fn assert_directory_serves(
+        &self,
+        directory: &Arc<Directory>,
+        address: &str,
+    ) -> trc::Result<()> {
+        let serves = match address.rsplit_once('@') {
+            Some((_, domain)) => self
+                .get_directory_for_domain(domain)
+                .await?
+                .is_some_and(|effective| Arc::ptr_eq(effective, directory)),
+            None => false,
+        };
+        if serves {
+            Ok(())
+        } else {
+            Err(trc::AuthEvent::Failed
+                .into_err()
+                .ctx(trc::Key::AccountName, address.to_string())
+                .reason("The directory returned an account on a domain it doesn't serve"))
+        }
+    }
+}
+
+/// inbuxa: DIR-5: what a dangling `directoryId` resolves to.
+pub fn unavailable_directory() -> &'static Arc<Directory> {
+    static UNAVAILABLE: std::sync::OnceLock<Arc<Directory>> = std::sync::OnceLock::new();
+    UNAVAILABLE.get_or_init(|| {
+        Arc::new(Directory::Unavailable(directory::UnavailableDirectory::new(
+            registry::schema::enums::DirectoryType::Ldap,
+            "The directory named by the domain doesn't exist",
+        )))
+    })
 }
 
 fn extract_jwt_domain(token: &str) -> Option<String> {
