@@ -10,7 +10,7 @@
 //! `mysql`.
 
 use crate::utils::{
-    containers::{MYSQL_GTID_PORTS, MYSQL_POS_PORTS, mysql_query},
+    containers::{MYSQL_POS_PORTS, mysql_query},
     server::TestServerBuilder,
 };
 use registry::schema::structs::{MySqlSettings, MySqlStore, SecretKeyOptional, SecretKeyValue};
