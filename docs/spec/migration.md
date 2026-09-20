@@ -83,6 +83,19 @@ The same checks as `cutover.md`, run by the tool rather than by hand:
 A failed check is a failed migration, and the tool rolls back rather than
 leaving a half-migrated server for the operator to reason about at 2am.
 
+## After a migration: the stock client
+
+A migration that passes its own verification has proved the fork works for
+the fork. Pointing an **unmodified public ihasmail** at the migrated server
+proves something else: that a client which knows nothing about INBUXA still
+works against it. It runs anywhere — JMAP and OAuth over the network — and
+needs only an OAuth client it may use.
+
+Each difference it turns up is either a regression against upstream's
+contract or a feature that now expects INBUXA's own front ends. The tool
+doesn't run this; it belongs in the release notes and the contract
+(SPEC.md §5.2). It is named here so the first migration doesn't skip it.
+
 ## Rollback
 
 A first-class path, not an appendix.

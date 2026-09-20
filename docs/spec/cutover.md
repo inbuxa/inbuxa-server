@@ -4,7 +4,9 @@ Status: draft, 2026-09-19. Nothing here has been rehearsed yet.
 
 SPEC.md §7 step 4. This run is also the first run of the migration tool
 INBUXA will ship (`migration.md`): what is done by hand here is what that
-tool automates, including its rollback. Steps 1 to 3 are met: the fork builds and its suites pass
+tool automates, including its rollback.
+
+Steps 1 to 3 are met: the fork builds and its suites pass
 (`container-tests.md`), and all eight compat tests pass against a copy of
 INBUXA's store (`compat-tests.md`). What is left is running it as the mail
 server.
@@ -142,6 +144,29 @@ read objects the fork's own features own. Whether it tolerates them has
 never been checked, and checking it is worth an hour beforehand rather than
 an argument at 2am. Until it is checked, treat the fork's store as
 forward-only.
+
+## After: stock ihasmail against the fork
+
+Once the migration is done, point an **unmodified public ihasmail**
+container at the new server — it can run on a laptop, since it talks JMAP
+and OAuth over the network (SPEC.md §5.3) — and work through what it can
+do. It needs an OAuth client it is allowed to use and a reachable URL for
+the server, nothing else.
+
+This is the one check that comes from outside the fork's own world. Public
+ihasmail is Stalwart-facing by design (SPEC.md §5) and knows nothing about
+INBUXA, so whatever it can no longer do is one of two things, and both are
+worth knowing:
+
+- a **regression**: the fork broke something upstream's clients rely on,
+  which the fork's own suites wouldn't catch because they test the fork;
+- a **gap by design**: a feature that now needs INBUXA's own front ends,
+  which belongs in the contract (SPEC.md §5.2) and in the release notes
+  rather than being discovered by a user.
+
+Write down which of the two each difference is. Do it after mail is
+flowing, not as a gate: it informs the contract, it doesn't block the
+cutover.
 
 ## The first week
 
