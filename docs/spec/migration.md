@@ -15,43 +15,63 @@ that run leaves behind, so the second operator doesn't repeat it by hand.
 
 ## What the operator is responsible for
 
-The tool moves a running mail server. Nobody should be in any doubt about
-that while it is happening, so it says so rather than relying on the licence
-to have said it. AGPL-3.0 §15 and §16 already disclaim warranty and
-liability, and nothing here narrows or replaces them; this is the same thing
-at the moment it matters, in words an operator can act on.
+The tool moves a running mail server. It says so before it starts, rather
+than leaving the licence to have said it in a file nobody opens. AGPL-3.0
+§15 and §16 already disclaim warranty and liability; nothing here narrows
+them, and nothing here replaces reading them.
 
-**Before it touches anything, the tool states plainly:**
+**What it does, plainly.** It stops the mail server, copies its data store,
+and starts a different server on the copy. Mail queues at the sending side
+meanwhile — delayed, not lost. The old install is left standing and is what
+the service returns to if anything fails.
 
-- It stops the mail server, copies its data store, and starts a different
-  server on the copy. Mail queues at the sending side while it runs; it is
-  not lost, but it is delayed.
-- **Backups, snapshots and recovery are the operator's.** The tool keeps the
-  source install intact and can roll back to it, and that is not a backup:
-  it is one copy, on one machine, of one moment. A disk that fails, a
-  filesystem that fills, or a `rm` in the wrong directory takes both copies
-  at once. Anyone without a backup they have actually restored from should
-  stop and get one.
-- It can fail in ways it cannot undo. The rollback returns the service; it
-  does not return mail the fork accepted before the rollback was called, and
-  the tool says how many messages that is rather than leaving it to be
-  discovered.
-- Nobody else is responsible for the outcome. Not the authors, not the
-  project.
+**What can actually go wrong.** A general warning helps nobody. These are
+the specific ways this goes badly, each already seen or measured:
 
-**What the tool does to earn that, rather than just asserting it:**
+- **The window is longer than anyone guessed**, because the store is bigger
+  or the disk slower than expected. This is the most common way a planned
+  hour becomes a bad night, and `--dry-run` turns it from a guess into a
+  number before the window opens.
+- **The source store is opened by the new server by mistake**, after which
+  the old build will not start on it again — not a difficulty, an
+  impossibility (`cutover.md`). The rollback is gone at that moment. The
+  tool never opens it, and sets it read-only, but a second pair of hands on
+  the same box can still do it.
+- **The rollback is called after mail has flowed**, and returns the service
+  without returning what arrived in the meantime. The tool reports how many
+  messages that is, so it is a decision rather than a discovery.
+- **Certificates stop renewing**, which says nothing for ninety days and
+  then takes the service down quietly. It is the one failure that outlives
+  the maintenance window by a quarter.
 
-- `--dry-run` first, on a copy, with the timings, and the real run refuses
-  to start until one has succeeded on that host. A disclaimer nobody read
-  is worth less than a rehearsal nobody could skip.
+**Backups are the operator's, and the source install is not one.** Keeping
+the old install is a service safety net, not a data one: it is a single
+copy, on the same machine, of a single moment. A failed disk, a full
+filesystem or a mistyped path takes it and the new store together. A backup
+means a copy somewhere else, that has been restored from at least once.
+Anyone who cannot say when they last restored one does not yet know whether
+they have a backup.
+
+**Who carries the outcome.** The operator does. The tool is careful, it is
+rehearsable, and it is still software running against a server it has never
+seen, holding data somebody else depends on.
+
+**What the tool does to deserve the trust it is asking for:**
+
+- `--dry-run` first, on a copy, with the timings — and the real run refuses
+  to start until one has succeeded on that host. A warning nobody read is
+  worth less than a rehearsal nobody could skip.
 - It never writes to what it migrates from, so the source stays a rollback.
-- Verification before mail flows, and automatic rollback when it fails.
-- The old install is kept until the operator retires it deliberately.
+- Verification before mail flows again, and automatic rollback when it
+  fails, because a server that half-works is worse than one that is back
+  where it started.
+- The old install is kept until the operator retires it deliberately, and
+  the tool asks before removing anything.
 - Every phase timed and reported, so "how long will this take" is answered
-  before the window rather than during it.
+  in the rehearsal rather than during the window.
 
-The confirmation the tool asks for names the host and the store path being
-moved. `--yes` skips the prompt, not the dry run.
+The confirmation names the host and the store path being moved. `--yes`
+skips the prompt, not the dry run.
 
 ## What "transparent" means here
 
