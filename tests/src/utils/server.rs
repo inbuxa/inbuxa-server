@@ -200,11 +200,23 @@ impl TestServerBuilder {
         if protocol == NetworkListenerProtocol::Http {
             self.http_listener_port = port;
         }
+        // inbuxa: with NO_INSERT the store is a copy of a real server's, and
+        // that server has listeners of its own. A production one called
+        // "jmap" or "imap" would collide with ours on the name, which is the
+        // registry's primary key, and every compat test would die here
+        // before it checked anything. Namespace ours out of its way.
+        // The copy must still be pristine: a second run over a copy the
+        // first one wrote to collides with `compat-` instead.
+        let name = if std::env::var("NO_INSERT").is_ok() {
+            format!("compat-{name}")
+        } else {
+            name.to_string()
+        };
         self.insert_object(NetworkListener {
             bind: Map::new(vec![
                 SocketAddr::from_str(&format!("0.0.0.0:{port}")).unwrap(),
             ]),
-            name: name.to_string(),
+            name,
             protocol,
             use_tls: true,
             tls_implicit,

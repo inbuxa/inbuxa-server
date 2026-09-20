@@ -32,3 +32,13 @@ tools/fork/record-compat.py --server https://mail.example.org \
     --admin 'admin@example.org:PASSWORD' --out ./compat \
     --tenant-admin 'tenant-admin@example.org:PASSWORD'
 ```
+
+## run-compat.sh
+
+Runs the `*_compat` tests against a copy of INBUXA's RocksDB store, making
+a fresh copy for each one. See `docs/spec/compat-tests.md`.
+
+```bash
+tools/fork/run-compat.sh --store /srv/inbuxa-copy/rocks.db \
+    --admin 'admin@example.org:PASSWORD' --recordings ~/compat
+```

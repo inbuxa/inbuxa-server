@@ -78,6 +78,35 @@ It was exercised on 2026-09-19 against the fork's own test server, which
 answers the same JMAP: it recorded 3 tenants with their members, 8 masked
 addresses and 3 archived items, in the shapes above.
 
+## Running them
+
+`tools/fork/run-compat.sh` copies the store for each test and runs it:
+
+```
+tools/fork/run-compat.sh --store /srv/inbuxa-copy/rocks.db \
+    --admin 'admin@example.org:PASSWORD' --recordings ~/compat
+```
+
+It takes `--only <test name>` for one, and `--keep` to leave each copy
+behind for a post-mortem. A test whose recording is missing is skipped by
+name rather than run against nothing.
+
+**The source copy has to be pristine.** Several of these write to the store
+they open — `monitoring_compat` purges the history it reads,
+`undelete_compat` restores what it finds — and the harness adds its own
+listeners on the way in, so a copy that a run has already touched is not a
+copy of INBUXA's data any more. The script copies from the source for each
+test and removes the copy afterwards, so the source stays clean; take it
+from a stopped server or a snapshot, never from under a running one.
+
+**Why `compat-` listeners appear in the copy.** The harness needs listeners
+on its own ports, and the registry keys listeners by name. A real server
+has its own, and a production listener called `jmap` or `imap` collided
+with the harness's, killing every compat test at startup with `Primary key
+conflict on property "name"` before it checked anything. Under `NO_INSERT`
+the harness now names its listeners `compat-jmap` and so on
+(`tests/src/utils/server.rs`), out of the way of whatever the copy holds.
+
 ## Running one
 
 ```
