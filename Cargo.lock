@@ -7533,7 +7533,7 @@ dependencies = [
  "aes-gcm 0.10.3",
  "anyhow",
  "argon2 0.5.3",
- "base64 0.21.7",
+ "base64 0.22.1",
  "block-padding 0.3.3",
  "blowfish 0.9.1",
  "buffered-reader",
