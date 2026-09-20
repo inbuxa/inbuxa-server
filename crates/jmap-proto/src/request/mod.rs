@@ -116,6 +116,7 @@ pub enum GetRequestMethod {
     MaskedEmail(Box<GetRequest<crate::object::fastmail_masked_email::FastmailMaskedEmail>>),
     DeletedAccount(Box<GetRequest<crate::object::inbuxa_deleted_account::DeletedAccount>>),
     AiLimits(Box<GetRequest<crate::object::inbuxa_ai_limits::AiLimits>>),
+    ProtocolPolicy(Box<GetRequest<crate::object::inbuxa_protocol_policy::ProtocolPolicy>>),
 }
 
 #[derive(Debug)]
@@ -139,6 +140,7 @@ pub enum SetRequestMethod<'x> {
     MaskedEmail(Box<SetRequest<'x, crate::object::fastmail_masked_email::FastmailMaskedEmail>>),
     DeletedAccount(Box<SetRequest<'x, crate::object::inbuxa_deleted_account::DeletedAccount>>),
     AiLimits(Box<SetRequest<'x, crate::object::inbuxa_ai_limits::AiLimits>>),
+    ProtocolPolicy(Box<SetRequest<'x, crate::object::inbuxa_protocol_policy::ProtocolPolicy>>),
 }
 
 #[derive(Debug)]

@@ -103,6 +103,7 @@ pub enum GetResponseMethod {
     MaskedEmail(GetResponse<crate::object::fastmail_masked_email::FastmailMaskedEmail>),
     DeletedAccount(GetResponse<crate::object::inbuxa_deleted_account::DeletedAccount>),
     AiLimits(GetResponse<crate::object::inbuxa_ai_limits::AiLimits>),
+    ProtocolPolicy(GetResponse<crate::object::inbuxa_protocol_policy::ProtocolPolicy>),
 }
 
 #[derive(Debug, serde::Serialize)]
@@ -127,6 +128,7 @@ pub enum SetResponseMethod {
     MaskedEmail(Box<SetResponse<crate::object::fastmail_masked_email::FastmailMaskedEmail>>),
     DeletedAccount(Box<SetResponse<crate::object::inbuxa_deleted_account::DeletedAccount>>),
     AiLimits(Box<SetResponse<crate::object::inbuxa_ai_limits::AiLimits>>),
+    ProtocolPolicy(Box<SetResponse<crate::object::inbuxa_protocol_policy::ProtocolPolicy>>),
 }
 
 #[derive(Debug, serde::Serialize)]
@@ -287,6 +289,22 @@ impl<'x> From<SetResponse<crate::object::fastmail_masked_email::FastmailMaskedEm
 }
 
 // inbuxa: AI call limits
+impl<'x> From<GetResponse<crate::object::inbuxa_protocol_policy::ProtocolPolicy>>
+    for ResponseMethod<'x>
+{
+    fn from(value: GetResponse<crate::object::inbuxa_protocol_policy::ProtocolPolicy>) -> Self {
+        ResponseMethod::Get(GetResponseMethod::ProtocolPolicy(value))
+    }
+}
+
+impl<'x> From<SetResponse<crate::object::inbuxa_protocol_policy::ProtocolPolicy>>
+    for ResponseMethod<'x>
+{
+    fn from(value: SetResponse<crate::object::inbuxa_protocol_policy::ProtocolPolicy>) -> Self {
+        ResponseMethod::Set(SetResponseMethod::ProtocolPolicy(Box::new(value)))
+    }
+}
+
 impl<'x> From<GetResponse<crate::object::inbuxa_ai_limits::AiLimits>> for ResponseMethod<'x> {
     fn from(value: GetResponse<crate::object::inbuxa_ai_limits::AiLimits>) -> Self {
         ResponseMethod::Get(GetResponseMethod::AiLimits(value))

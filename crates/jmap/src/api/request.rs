@@ -221,6 +221,9 @@ impl RequestHandler for Server {
                                     SetResponseMethod::AiLimits(set_response) => {
                                         set_response.update_created_ids(&mut response);
                                     }
+                                    SetResponseMethod::ProtocolPolicy(set_response) => {
+                                        set_response.update_created_ids(&mut response);
+                                    }
                                     SetResponseMethod::AddressBook(set_response) => {
                                         set_response.update_created_ids(&mut response);
                                     }
@@ -373,6 +376,13 @@ impl RequestHandler for Server {
                 GetRequestMethod::AiLimits(mut req) => {
                     resolve_account_id(&mut req.account_id, method_name.obj, access_token)?;
                     crate::inbuxa::ai_limits::get(self, access_token, *req)
+                        .await?
+                        .into()
+                }
+                // inbuxa: inbuxa:ProtocolPolicy/get (legacy protocols off)
+                GetRequestMethod::ProtocolPolicy(mut req) => {
+                    resolve_account_id(&mut req.account_id, method_name.obj, access_token)?;
+                    crate::inbuxa::protocol_policy::get(self, access_token, *req)
                         .await?
                         .into()
                 }
@@ -614,6 +624,13 @@ impl RequestHandler for Server {
                 SetRequestMethod::AiLimits(mut req) => {
                     resolve_account_id(&mut req.account_id, method_name.obj, access_token)?;
                     crate::inbuxa::ai_limits::set(self, access_token, *req)
+                        .await?
+                        .into()
+                }
+                // inbuxa: inbuxa:ProtocolPolicy/set (legacy protocols off)
+                SetRequestMethod::ProtocolPolicy(mut req) => {
+                    resolve_account_id(&mut req.account_id, method_name.obj, access_token)?;
+                    crate::inbuxa::protocol_policy::set(self, access_token, *req)
                         .await?
                         .into()
                 }

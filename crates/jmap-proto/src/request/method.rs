@@ -49,6 +49,7 @@ pub enum MethodObject {
     DeletedAccount,
     // inbuxa: AI call limits
     AiLimits,
+    ProtocolPolicy,
 }
 
 impl MethodObject {
@@ -75,6 +76,7 @@ impl MethodObject {
             MethodObject::MaskedEmail => Capability::FastmailMaskedEmail,
             MethodObject::DeletedAccount => Capability::Inbuxa,
             MethodObject::AiLimits => Capability::Inbuxa,
+            MethodObject::ProtocolPolicy => Capability::Inbuxa,
         }
     }
 }
@@ -252,6 +254,8 @@ impl MethodName {
             (MethodFunction::Set, MethodObject::DeletedAccount) => "inbuxa:DeletedAccount/set",
             (MethodFunction::Get, MethodObject::AiLimits) => "inbuxa:AiLimits/get",
             (MethodFunction::Set, MethodObject::AiLimits) => "inbuxa:AiLimits/set",
+            (MethodFunction::Get, MethodObject::ProtocolPolicy) => "inbuxa:ProtocolPolicy/get",
+            (MethodFunction::Set, MethodObject::ProtocolPolicy) => "inbuxa:ProtocolPolicy/set",
             (method, MethodObject::Registry(obj)) => {
                 return Cow::Owned(format!("x:{}/{}", obj.as_str(), method.as_str()));
             }
@@ -377,6 +381,8 @@ impl MethodName {
             "inbuxa:DeletedAccount/set" => (MethodObject::DeletedAccount, MethodFunction::Set),
             "inbuxa:AiLimits/get" => (MethodObject::AiLimits, MethodFunction::Get),
             "inbuxa:AiLimits/set" => (MethodObject::AiLimits, MethodFunction::Set),
+            "inbuxa:ProtocolPolicy/get" => (MethodObject::ProtocolPolicy, MethodFunction::Get),
+            "inbuxa:ProtocolPolicy/set" => (MethodObject::ProtocolPolicy, MethodFunction::Set),
 
         ).or_else(|| {
             let (obj, fnc) = s.strip_prefix("x:")?.split_once('/')?;
@@ -430,6 +436,7 @@ impl Display for MethodObject {
             MethodObject::MaskedEmail => "MaskedEmail",
             MethodObject::DeletedAccount => "inbuxa:DeletedAccount",
             MethodObject::AiLimits => "inbuxa:AiLimits",
+            MethodObject::ProtocolPolicy => "inbuxa:ProtocolPolicy",
             MethodObject::Registry(obj) => {
                 f.write_str("x:")?;
                 return f.write_str(obj.as_str());

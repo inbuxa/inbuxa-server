@@ -77,6 +77,9 @@ impl JmapAuthorization for AccessToken {
                 GetRequestMethod::DeletedAccount(_) => Permission::SysAccountGet,
                 // inbuxa: AI call limits, with the classifier's permissions
                 GetRequestMethod::AiLimits(_) => Permission::SysSpamLlmGet,
+                // inbuxa: legacy protocols off. It takes listeners away and
+                // puts them back, so it takes the listener's permissions
+                GetRequestMethod::ProtocolPolicy(_) => Permission::SysNetworkListenerGet,
                 GetRequestMethod::Principal(_) => Permission::JmapPrincipalGet,
                 GetRequestMethod::Quota(_) => Permission::JmapQuotaGet,
                 GetRequestMethod::Blob(_) => Permission::JmapBlobGet,
@@ -172,6 +175,14 @@ impl JmapAuthorization for AccessToken {
                         Permission::SysSpamLlmUpdate,
                         Permission::SysSpamLlmUpdate,
                         Permission::SysSpamLlmUpdate,
+                    ),
+                    // inbuxa: legacy protocols off, with the listener's
+                    SetRequestMethod::ProtocolPolicy(s) => validate_set(
+                        s,
+                        self,
+                        Permission::SysNetworkListenerUpdate,
+                        Permission::SysNetworkListenerUpdate,
+                        Permission::SysNetworkListenerUpdate,
                     ),
                     SetRequestMethod::VacationResponse(s) => validate_set(
                         s,
@@ -282,7 +293,8 @@ impl JmapAuthorization for AccessToken {
                 | MethodObject::SieveScript
                 | MethodObject::MaskedEmail
                 | MethodObject::DeletedAccount
-                | MethodObject::AiLimits => Permission::JmapEmailChanges,
+                | MethodObject::AiLimits
+                | MethodObject::ProtocolPolicy => Permission::JmapEmailChanges,
                 // inbuxa: x:MaskedEmail/changes reads what /get reads
                 MethodObject::Registry(object_type) => object_type.get_permission(),
             },
