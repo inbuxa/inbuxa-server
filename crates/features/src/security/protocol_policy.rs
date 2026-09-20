@@ -106,6 +106,29 @@ pub const LEGACY_PROTOCOLS: &[&str] = &["imap", "pop3", "manageSieve"];
 /// The port that always means inbound mail, and is never closed (LP-3).
 pub const INBOUND_SMTP_PORT: u16 = 25;
 
+/// Protocols the switch may never close, whatever is asked of it (LP-21).
+///
+/// `http` carries JMAP, so closing it would lock every account out of its mail
+/// and the operator out of INBUXA Admin. `smtp` is locked whole — inbound and
+/// submission alike — by John's decision of 2026-09-20; LP-3 already spared
+/// inbound, and this extends it to 465 and 587. `lmtp` is internal and was
+/// never a candidate.
+///
+/// Locking submission costs the feature nothing: the ports stay open and
+/// sign-in over them is still refused (LP-6), which is the case acceptance
+/// test 2 already describes.
+///
+/// The front ends read this list rather than carry their own copy, so
+/// unlocking later is a server change and no admin release.
+pub const LOCKED_PROTOCOLS: &[&str] = &["smtp", "lmtp", "http"];
+
+/// Whether this protocol is locked open (LP-21).
+pub fn is_locked(protocol: &str) -> bool {
+    LOCKED_PROTOCOLS
+        .iter()
+        .any(|locked| locked.eq_ignore_ascii_case(protocol))
+}
+
 impl ProtocolPolicy {
     /// Whether a listener of this protocol and these ports is one the switch
     /// closes. A listener bound to port 25 is inbound whatever its name, and
@@ -114,12 +137,31 @@ impl ProtocolPolicy {
         if !self.legacy_protocols.is_disabled() {
             return false;
         }
+        // The lock is checked first and answers for every caller, so no
+        // request phrasing can reach past it (LP-21).
+        if is_locked(protocol) {
+            return false;
+        }
         if LEGACY_PROTOCOLS.contains(&protocol) {
             return true;
         }
         protocol.eq_ignore_ascii_case("smtp")
             && self.close_submission
             && !ports.contains(&INBOUND_SMTP_PORT)
+    }
+
+    /// Applies the locks to what a client asked for, returning what was
+    /// overruled so the response can say so (LP-21).
+    ///
+    /// `closeSubmission` is recorded and ignored rather than refused: the
+    /// field is specified, and the lock is meant to be temporary.
+    pub fn apply_locks(&mut self) -> Vec<&'static str> {
+        let mut overruled = Vec::new();
+        if self.close_submission && is_locked("smtp") {
+            self.close_submission = false;
+            overruled.push("closeSubmission");
+        }
+        overruled
     }
 
     /// Whether creating a listener of this protocol is refused right now
@@ -238,19 +280,62 @@ mod tests {
         }
     }
 
-    /// The mail-app protocols close, and so does submission by default (LP-1).
+    /// The mail-app protocols close. Submission does not, while SMTP is
+    /// locked (LP-1, LP-21).
     #[test]
     fn disabled_closes_the_legacy_protocols() {
         let policy = disabled();
         assert!(policy.closes("imap", &[993]));
         assert!(policy.closes("pop3", &[995]));
         assert!(policy.closes("manageSieve", &[4190]));
-        assert!(policy.closes("smtp", &[465]));
-        assert!(policy.closes("smtp", &[587]));
+        assert!(!policy.closes("smtp", &[465]), "SMTP is locked (LP-21)");
+        assert!(!policy.closes("smtp", &[587]), "SMTP is locked (LP-21)");
+    }
+
+    /// SMTP and JMAP cannot be closed, however the question is put (LP-21).
+    #[test]
+    fn smtp_and_jmap_are_locked() {
+        assert!(is_locked("smtp"));
+        assert!(is_locked("SMTP"), "the lock ignores case");
+        assert!(is_locked("http"));
+        assert!(is_locked("lmtp"));
+        assert!(!is_locked("imap"));
+        assert!(!is_locked("pop3"));
+        assert!(!is_locked("manageSieve"));
+
+        // Even asked for directly, with closeSubmission set by hand.
+        let forced = ProtocolPolicy {
+            legacy_protocols: LegacyProtocols::Disabled,
+            close_submission: true,
+            ..Default::default()
+        };
+        for ports in [vec![465], vec![587], vec![25], vec![2525]] {
+            assert!(!forced.closes("smtp", &ports), "smtp {ports:?}");
+        }
+        assert!(!forced.closes("http", &[443]));
+    }
+
+    /// A client asking to close submission is overruled, not refused, and the
+    /// overrule is reported (LP-21, acceptance test 18).
+    #[test]
+    fn close_submission_is_overruled_and_reported() {
+        let mut policy = ProtocolPolicy {
+            legacy_protocols: LegacyProtocols::Disabled,
+            close_submission: true,
+            ..Default::default()
+        };
+
+        let overruled = policy.apply_locks();
+        assert_eq!(overruled, vec!["closeSubmission"]);
+        assert!(!policy.close_submission);
+
+        // Applying twice says nothing the second time.
+        assert!(policy.apply_locks().is_empty());
     }
 
     /// Port 25 is inbound whatever the listener is called, and never closes
-    /// (LP-3).
+    /// (LP-3). It is doubly safe now that SMTP is locked (LP-21), and this
+    /// test stands so LP-3 stays covered if the lock is ever lifted.
     #[test]
     fn port_25_is_never_closed() {
         let policy = disabled();
@@ -270,6 +355,7 @@ mod tests {
     }
 
     /// Without `closeSubmission`, 465 and 587 stay open (acceptance test 2).
+    /// The lock makes this the only behaviour for now (LP-21).
     #[test]
     fn submission_stays_open_when_asked() {
         let policy = ProtocolPolicy {

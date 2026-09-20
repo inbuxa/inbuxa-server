@@ -230,11 +230,6 @@ mod tests {
                 NetworkListenerProtocol::ManageSieve,
                 &["[::]:4190"][..],
             ),
-            (
-                "submissions",
-                NetworkListenerProtocol::Smtp,
-                &["[::]:465"][..],
-            ),
         ] {
             assert!(
                 closes(&policy, &listener(name, protocol, binds)),
@@ -244,6 +239,12 @@ mod tests {
 
         for (name, protocol, binds) in [
             ("smtp", NetworkListenerProtocol::Smtp, &["[::]:25"][..]),
+            // Locked whole, so submission stays too (LP-21).
+            (
+                "submissions",
+                NetworkListenerProtocol::Smtp,
+                &["[::]:465"][..],
+            ),
             ("https", NetworkListenerProtocol::Http, &["[::]:443"][..]),
             ("lmtp", NetworkListenerProtocol::Lmtp, &["[::]:11200"][..]),
         ] {
@@ -255,6 +256,7 @@ mod tests {
     }
 
     /// A submission listener that also binds 25 is inbound, and stays (LP-3).
+    /// Kept so LP-3 stays covered if the LP-21 lock is ever lifted.
     #[test]
     fn a_listener_that_also_binds_25_stays() {
         let policy = disabled();
