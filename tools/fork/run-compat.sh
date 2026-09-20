@@ -18,7 +18,7 @@
 set -u
 
 REPO=$(cd "$(dirname "$0")/../.." && pwd)
-STORE= ADMIN= RECORDINGS= ONLY= KEEP=no
+STORE= ADMIN= RECORDINGS= ONLY= KEEP=no LOG=
 while [ $# -gt 0 ]; do
     case $1 in
         --store) STORE=$2; shift 2 ;;
@@ -26,6 +26,7 @@ while [ $# -gt 0 ]; do
         --recordings) RECORDINGS=$2; shift 2 ;;   # where record-compat.py wrote its files
         --only) ONLY=$2; shift 2 ;;               # one test name, e.g. tenant_compat
         --keep) KEEP=yes; shift ;;                # leave each copy behind for a post-mortem
+        --log) LOG=$2; shift 2 ;;                 # the test server's own logging, e.g. --log error
         *) echo "run-compat: unknown argument $1" >&2; exit 2 ;;
     esac
 done
@@ -68,6 +69,7 @@ for entry in "${TESTS[@]}"; do
     cp -a "$STORE" "$dir/rocks.db" || { echo "run-compat: copying $STORE failed" >&2; exit 2; }
 
     echo "=== $name ($(date +%H:%M:%S)) ==="
+    [ -n "$LOG" ] && env_extra+=("LOG=$LOG")
     ( cd "$REPO" && env CARGO_TARGET_DIR=target TMPDIR="$BASE" RUST_MIN_STACK=8388608 \
         STORE=RocksDb NO_INSERT=1 INBUXA_COMPAT_ADMIN="$ADMIN" "${env_extra[@]}" \
         cargo test -p tests "$path" -- --exact --ignored --nocapture )
