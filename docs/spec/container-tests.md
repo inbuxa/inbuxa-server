@@ -122,32 +122,36 @@ them.
   all, and the client polls as RFC 8555 section 7.5.1 says to.
 
   The suite still doesn't pass here. Half of the reason first recorded on
-  this page is wrong: pebble does validate, and the authorizations do not
-  stay pending. Whether `ufw` is in the way is still open. Checked on
+  this page was wrong — pebble does validate, and the authorizations do not
+  stay pending — and half was right: `ufw` is in the way. Checked on
   2026-09-19:
 
-  - **TCP reaches the host.** From containers on `stalwart-test-acme`, on
-    two different images, `nc` to the host's gateway addresses connects on
-    port 22 and is refused *immediately* on every closed port tried (8899,
-    9, 14000). A `ufw` DROP would hang until the timeout instead. No
-    firewall rule was read or changed to establish this — `ufw status`
-    needs a privilege this session doesn't have.
+  - **`ufw` does drop it, and the rules say so.** `/etc/ufw/user.rules` is
+    world-readable, so this needed no privilege in the end.
+    `DEFAULT_INPUT_POLICY="DROP"`, and the allow-list is 22, 2056, 6667,
+    29900, 28910, 13139, 6500 and 2300-2400. **8899 is not on it.** So
+    while the suite is listening, pebble's connection is dropped, which is
+    what a live run showed: twelve probes from a container completed no
+    handshake, with or without `-alpn acme-tls/1`, while the same
+    `openssl` in the same container talks to pebble's own TLS port and
+    prints its certificate.
 
-    **But the network question is not settled, and the probes disagree.**
-    `openssl s_client` against the same closed 8899 hung for its full
-    timeout instead of reporting the refusal `nc` had just seen. Worse,
-    during a live run — when the suite certainly is listening on 8899, it
-    takes `with_default_listeners()` — twelve probes from a container
-    completed no handshake at all, with or without `-alpn acme-tls/1`,
-    while the same `openssl` connects to pebble's own TLS port from the
-    same container and prints its certificate.
+    The rule that should fix it, narrowed to the ACME bridge:
 
-    A listener that is up but unreachable from a container is what a `ufw`
-    DROP looks like; an instant refusal when nothing listens is not. Both
-    were observed, minutes apart. Settling it needs `sudo ufw status
-    verbose`, and a listener bound by hand on `0.0.0.0:8899` to probe
-    against — neither of which this session could do. Until then the
-    original `ufw` suspicion is neither confirmed nor dismissed.
+    ```
+    sudo ufw allow from 172.21.0.0/16 to any port 8899 proto tcp \
+        comment 'ACME tests'
+    ```
+
+    **Unexplained, and left that way:** `nc` from two container images was
+    refused *immediately* on closed ports 8899, 9 and 14000, where a DROP
+    should hang until the timeout. That reading is what sent an earlier
+    pass through this page in the wrong direction. The live-run
+    observation and the rules agree with each other, so they are what this
+    entry rests on; the `nc` behaviour is noted rather than explained.
+
+    **Not yet retested.** Nobody has added the rule and re-run
+    `automation_tests`, so "this fixes it" is a prediction.
   - **Pebble does validate.** Its log shows 20 validation attempts in the
     regression run, five for each of `autoconfig`, `autodiscover`,
     `mta-sts` and `ua-auto-config.tls.org`, and it then sets each

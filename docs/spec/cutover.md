@@ -15,11 +15,12 @@ has to do things nothing has yet asked of it:
 - hold INBUXA's ports (25, 465, 587, 143, 993, 110, 995, 443) under load,
   as an unprivileged user with `CAP_NET_BIND_SERVICE`;
 - keep certificates renewing. ACME renewal was found broken and fixed
-  (`309835b`), and the remaining test failure is unexplained
-  (`container-tests.md`, "What a plain regression leaves failing"). A
-  certificate that fails to renew is a 90-day fuse, not an outage on the
-  day, so it is the first thing to watch and the least likely to announce
-  itself;
+  (`309835b`), and the test that still fails here fails for a reason local
+  to this machine: `ufw` drops the port pebble validates against
+  (`container-tests.md`). That is not evidence the renewal works on the
+  host, only that the failure isn't the fork's. A certificate that fails to
+  renew is a 90-day fuse, not an outage on the day, so it is the first thing
+  to watch and the least likely to announce itself;
 - write to a store that the Enterprise build wrote until an hour earlier.
 
 The rehearsal below exists to turn those from assumptions into observations.
