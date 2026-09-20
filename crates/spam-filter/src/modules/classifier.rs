@@ -1136,7 +1136,7 @@ impl<'x> Tokens<'x> {
                 {
                     if word.len() > MAX_TOKEN_LENGTH {
                         self.insert(Token::Word {
-                            value: truncate_word(cured_word.as_str(), MAX_TOKEN_LENGTH)
+                            value: truncate_word(&cured_word, MAX_TOKEN_LENGTH)
                                 .to_string()
                                 .into(),
                         });
@@ -1282,7 +1282,6 @@ impl Token<'static> {
         } else if !is_ascii {
             let word: String = if let Ok(cured) = decancer::cure(s, decancer::Options::default()) {
                 cured
-                    .as_str()
                     .chars()
                     .filter(|ch| ch.is_alphabetic())
                     .take(MAX_TOKEN_LENGTH)
