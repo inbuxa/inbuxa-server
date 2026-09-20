@@ -13,6 +13,46 @@ Two ways in, and they are different workflows:
 INBUXA's own cutover is the first run of it (`cutover.md`). The tool is what
 that run leaves behind, so the second operator doesn't repeat it by hand.
 
+## What the operator is responsible for
+
+The tool moves a running mail server. Nobody should be in any doubt about
+that while it is happening, so it says so rather than relying on the licence
+to have said it. AGPL-3.0 §15 and §16 already disclaim warranty and
+liability, and nothing here narrows or replaces them; this is the same thing
+at the moment it matters, in words an operator can act on.
+
+**Before it touches anything, the tool states plainly:**
+
+- It stops the mail server, copies its data store, and starts a different
+  server on the copy. Mail queues at the sending side while it runs; it is
+  not lost, but it is delayed.
+- **Backups, snapshots and recovery are the operator's.** The tool keeps the
+  source install intact and can roll back to it, and that is not a backup:
+  it is one copy, on one machine, of one moment. A disk that fails, a
+  filesystem that fills, or a `rm` in the wrong directory takes both copies
+  at once. Anyone without a backup they have actually restored from should
+  stop and get one.
+- It can fail in ways it cannot undo. The rollback returns the service; it
+  does not return mail the fork accepted before the rollback was called, and
+  the tool says how many messages that is rather than leaving it to be
+  discovered.
+- Nobody else is responsible for the outcome. Not the authors, not the
+  project.
+
+**What the tool does to earn that, rather than just asserting it:**
+
+- `--dry-run` first, on a copy, with the timings, and the real run refuses
+  to start until one has succeeded on that host. A disclaimer nobody read
+  is worth less than a rehearsal nobody could skip.
+- It never writes to what it migrates from, so the source stays a rollback.
+- Verification before mail flows, and automatic rollback when it fails.
+- The old install is kept until the operator retires it deliberately.
+- Every phase timed and reported, so "how long will this take" is answered
+  before the window rather than during it.
+
+The confirmation the tool asks for names the host and the store path being
+moved. `--yes` skips the prompt, not the dry run.
+
 ## What "transparent" means here
 
 Everything that defines the server lives in its data store, so a migration
