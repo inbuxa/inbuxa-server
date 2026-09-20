@@ -18,10 +18,6 @@ masked email, undelete and others. INBUXA ships everything to everybody under
 the AGPL-3.0, rebuilding those features independently and without using any
 of Stalwart's Enterprise code.
 
-> **Status: in development, not released.** The fork builds, passes its unit
-> tests, and runs as a working mail server. The Enterprise features are being
-> specified and haven't been rebuilt yet. Don't run it in production.
-
 ## What's different from Stalwart
 
 - **Every feature, one edition.** No license key, no edition checks, no
