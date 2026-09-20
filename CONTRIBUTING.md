@@ -11,6 +11,25 @@ and it should be worth that.
 
 Small fixes — a bug, a typo, a test — need no ceremony. Send them.
 
+## How a change lands
+
+`main` is protected. It cannot be force-pushed or deleted, and a change
+reaches it through a pull request whose `build` check has passed. No approving
+review is required — this is a small project and a gate nobody can pass is not
+a gate — but the build is not optional.
+
+So the shape of a change is: a branch, a pull request, a green CI run, a merge.
+Branches are deleted on merge. Repository administrators can bypass the rule,
+which exists so the maintainer can correct the tree quickly, not so that the
+ordinary path can be skipped; use it for an emergency, not for convenience.
+
+Releases are cut weekly from `main` by `.github/workflows/release.yml`, on
+Monday morning UTC, and nothing is released on a quiet week. That is the reason
+the rule matters: whatever is on `main` when the run starts is what ships, so
+`main` is expected to be releasable at all times rather than at the end of a
+piece of work. A change that is not finished should be behind something that
+defaults to off, or it should not be on `main` yet.
+
 ## What this repository is
 
 INBUXA is a fork of Stalwart, taken under the AGPL-3.0-only half of its dual
