@@ -1,8 +1,9 @@
 # Cutting INBUXA over to the fork
 
-Status: draft, 2026-09-19. The sequence has been rehearsed once, on
-synthetic data ("The rehearsal", below). INBUXA's own data has not been
-through it.
+Status: 2026-09-20. **Done.** INBUXA was cut over to the fork on the morning
+of 20 September in a 78-second window ("The run", below). This page is no
+longer a plan; it is kept as the record of one, and as the source for the
+migration tool that automates it (`migration.md`).
 
 SPEC.md §7 step 4. This run is also the first run of the migration tool
 INBUXA will ship (`migration.md`): what is done by hand here is what that
@@ -333,6 +334,175 @@ Two things to carry into the day, neither of them a fault:
   and after alike. Compare each against itself on the day, or a faithful
   move will look like a loss.
 
+## The run, 2026-09-20
+
+INBUXA was cut over to the fork on the morning of 20 September. **The window
+was 78 seconds**, from the stop at 09:38:32 to the fork serving on all nine
+ports at 09:39:50. Mail queued at senders for that time and nothing was lost.
+Both front ends followed within the hour, and the rollback was never needed.
+
+| | | |
+|---|---|---|
+| Stop issued | 09:38:32 | |
+| Old server stopped and disabled | 09:38:~40 | |
+| Webmail stopped | 09:39:18 | |
+| Store copied, 2.2 G | 09:39:22 | **1.4 s** |
+| Chowned | 09:39:22 | |
+| Original made immutable | 09:39:43 | |
+| Fork started | 09:39:44 | |
+| Serving on nine ports | 09:39:50 | **78 s total** |
+
+2.2 G copied in 1.4 seconds, onto the same filesystem. The two-pass rsync of
+step 3 would have bought nothing here; it earns its place on a store large
+enough that copying dominates. Most of the 78 seconds was the operator
+reading output, which is the right thing for it to be spent on.
+
+### What step 0 was worth
+
+Reading `systemctl cat stalwart` before touching anything found four things
+the plan did not know, and one of them would have been a bad night.
+
+**The server runs in a network namespace.** The unit carries
+`NetworkNamespacePath=/run/netns/mail`, `Requires=mail-netns.service` and a
+bind mount of that namespace's `resolv.conf`, with its own comment: Stalwart
+owns 443 on the mail addresses while nginx keeps 443 on the web addresses. A
+unit written from `resources/systemd/inbuxa.service` as this document
+described would have started in the root namespace.
+
+That is two failures, not one. It would have collided with nginx on 443 —
+loud, and quickly understood. It would *also* have egressed from the host's
+main address rather than `157.180.98.170`, which is the address the provider
+granted port 25 on. Inbound would have looked healthy while outbound failed
+at every receiver, with no local symptom and, as it turned out, no logs to
+find it in. Verified after the fact: the namespace still holds the same two
+addresses, traffic from inside it egresses from them, and public DNS for
+`mail.inbuxa.com` resolves to the same pair. The mail addresses are
+unchanged by the migration because the fork joined the existing namespace
+rather than building one.
+
+The namespace script itself needed nothing: `/usr/local/sbin/mail-netns.sh`
+is pure networking — veth pair, addresses, routing, proxy NDP, sysctls — with
+no path, user or chown that belongs to Stalwart.
+
+**The hardening drop-in named the old tree.** `ProtectSystem=strict` with
+`ReadWritePaths=/opt/stalwart`. Carried over unchanged, the fork would have
+been sandboxed away from the store it had just been given.
+
+**A reboot costs more than the plan assumed.** Mail and the website are the
+same machine, which also carries Mastodon, ihasvpn, and a dozen other sites —
+some two dozen containers. Step 9's reboot was costed as "a few minutes at
+this scale"; it is an outage for everything hosted. It was still done,
+deliberately, because it is the only honest proof that the fork comes up on
+boot and the old unit does not.
+
+**A pre-existing oddity**, not ours and not fixed: the old unit is
+conditional on `/opt/stalwart/etc/config.toml` while it execs with
+`--config=…/config.json`. The `.toml` is a 3.5 K fossil from March. The
+fork's unit conditions on the file it actually uses.
+
+### What the copied store brought with it
+
+Three times over, in three different guises, the store carried configuration
+that pointed back at the old world. This is the pattern to look for on any
+migration, and it is worth a deliberate sweep rather than waiting to be bitten.
+
+**The logs stopped.** The registry's tracer still named `/opt/stalwart/logs`,
+which `ProtectSystem=strict` refuses, and the server tolerated the failure in
+silence: the unit's journal had only systemd's own line, the old log file
+stopped at the moment of the stop, and nothing new appeared anywhere. Not a
+blocker for mail — but it meant the first week's advice to watch the logs
+could not be followed, and nobody would have noticed.
+
+**Stalwart's own web interface was being served.** The registry's
+`Application` entries made the fork download `webui.zip` from
+`stalwartlabs/webui` and serve it at `/admin` and `/account`, so signing in
+at `mail.inbuxa.com` produced a Stalwart-branded interface. Not a regression
+— the old server did the same — but it breaks §2.4 and §5.3 both. Removed;
+the host now serves JMAP and OAuth only.
+
+**And the same mistake from the other direction.** The new webmail's
+environment was built by copying the old one's variable names. The fork has
+been de-Stalwarting its configuration and renamed `STALWART_URL` to
+`MAIL_SERVER_URL`, which defaults to `https://mail.example.com` when unset.
+It started cleanly, reported healthy, and pointed at a placeholder. Worth
+remembering that **a front end reporting healthy is not a front end talking
+to the right server**: the health check passed in both states.
+
+### What this document had wrong
+
+**`systemctl mask` does not work here.** Masking puts a `/dev/null` symlink
+where the unit file lives, and this unit lives in `/etc/systemd/system`, so
+it fails outright. `disable` alone is what we have and it is sufficient: the
+`WantedBy` symlink is gone, nothing `Requires` it, and `mail-netns.service`'s
+`Before=` is ordering only. It is also the better answer, since the rollback
+needs `systemctl enable --now stalwart` and hiding the unit file would have to
+be undone first.
+
+**There is no "let mail flow" gate.** This document separates starting the
+fork from letting mail flow, and treats the space between as the window where
+a rollback is free. There is no such space: the fork binds port 25 as it
+starts, so mail began arriving at 09:39:44. The free-rollback window closes at
+the start, not at the end of the checks. Either the sequence should say so, or
+the design needs an actual valve — starting with the mail listeners disabled
+and enabling them once the checks pass.
+
+**IMAP's INBOX is not JMAP's account**, so the two counts differ before and
+after alike; mail from unauthenticated senders is filed as spam. Compare each
+against itself, or a faithful move looks like a loss.
+
+### The bug this found
+
+INBUXA Admin, hosted off the mail server as §5.3 requires, signed in and then
+failed with "Failed to load the admin panel configuration". Every other
+endpoint worked from the same origin with the same token; only `/api/schema`
+failed, and a schema-driven interface cannot do without it.
+
+It was Chrome's cache, not CORS. Measured from the page: a normal fetch
+failed while `cache: "reload"`, `cache: "no-store"` and a cache-busted URL all
+returned 200. The server never sees the failing request, which is why the logs
+had nothing and why it read as a CORS fault for so long.
+
+The response was `public, max-age=31536000, immutable` although it is served
+behind authentication and its CORS headers vary by `Origin`, on a hash-named
+URL that never changes; and `Vary: Origin` was only emitted when an origin
+list existed, so anything cached before the front ends were configured carried
+neither CORS headers nor `Vary`. Both fixed in `7c4add8`.
+
+Nobody had met this before because the admin has always been served from the
+mail host at `/admin`, where it is same-origin and no CORS applies. **The
+first deployment that follows §5.3 meets it immediately** — which is exactly
+what a first cutover is for.
+
+### Method notes
+
+Three things cost real time and none of them were the mail server.
+
+- **Stale negative DNS.** A resolver asked for a name before its record
+  existed caches the NXDOMAIN for the zone's negative TTL — 1800 s here. It
+  appeared three times in three guises, including Chrome failing while Firefox
+  worked on the same machine, because Firefox resolves over its own DoH and
+  Chrome asks the OS. `dig @<authoritative-ns>` and `curl --resolve` settle it
+  in seconds.
+- **`grep` silently swallows binary output.** Piping `curl -i` of a gzipped
+  body through `grep` printed nothing, which reads exactly like "the server
+  returned no response" and produced a confident, false reproduction. Use
+  `curl -o /dev/null -D -`.
+- **`docker restart` does not re-read `--env-file`.** The container has to be
+  recreated. This cost time twice in one morning.
+
+### What the run did not settle
+
+The checks that decide a cutover are the ones only its users can make. At the
+time of writing the operator had signed in to both front ends and confirmed
+mail flowing; the second account, the mailbox comparison against
+`record-before.py`'s recording, and the printer were still outstanding. The
+printer is the one account that cannot report its own fault.
+
+ACME is untouched: the certificate renews itself around 28 October, since the
+default `R12` renews at the halfway point of a 90-day certificate rather than
+near its end. `/opt/stalwart` stays, stopped and read-only, until somebody
+deliberately retires it.
+
 ## Answered: the Enterprise build cannot read the fork's store
 
 This was open. It is now settled, and the answer is no.
@@ -378,14 +548,16 @@ Three consequences:
 
 ## Open
 
-- Whether ACME renewal works on the host, which the test suite has not been
-  able to settle (`container-tests.md`). Untouched by the rehearsal, which
-  runs with `requestTlsCertificate: false`.
+- Whether ACME renewal works on the host, which neither the test suite
+  (`container-tests.md`) nor the run has settled. The certificate renews
+  itself around **28 October**: the default `AcmeRenewBefore::R12` renews at
+  the halfway point of a 90-day certificate, not near its end, and no setting
+  brings that forward. Either wait for it, or prove the path on a throwaway
+  name whose DNS points at the mail addresses.
 - Whether the front ends need anything at cutover, or follow separately
   (SPEC.md §5). The rehearsal does not start them.
-- What the sequence does on the host rather than in containers: systemd,
-  `AmbientCapabilities`, and above all `systemctl disable stalwart`, which
-  has no analogue in the rehearsal and is the one step guarding against two
-  servers on one set of ports.
-- Whether INBUXA's own data survives the sequence, as opposed to opening
-  under it. That needs a snapshot and a repeat of "Before the day" step 2.
+- Whether ihasmail-inbuxa and INBUXA Admin behave under real use, rather
+  than at first sign-in. Both were verified as far as signing in and, for the
+  webmail, mail flowing.
+- The checks only users can make: the second account, the mailbox comparison
+  against the recording, and the printer.
