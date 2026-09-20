@@ -121,15 +121,36 @@ them.
   poll. That was a real renewal bug and is fixed; this run logged no 400 at
   all, and the client polls as RFC 8555 section 7.5.1 says to.
 
-  The suite still doesn't pass here: pebble never validates the TLS-ALPN
-  challenge, so the authorizations stay pending until the client gives up
-  and no certificate is issued — the failure is an `Option::unwrap()` on
-  the certificate that never arrived (`tests/src/automation/acme.rs:223`).
-  Validation needs pebble, in its container, to reach the test server's
-  `0.0.0.0:8899` across the docker bridge, and
-  `ufw` is active on this machine. That wasn't proved — standing up a
-  listener to test it needs a permission this session didn't have — so
-  before reading anything into an ACME failure, check that path first.
+  The suite still doesn't pass here, and the reason first recorded on this
+  page — that `ufw` blocks the docker bridge, so pebble never validates and
+  the authorizations stay pending — is wrong. Checked on 2026-09-19:
+
+  - **The bridge is open.** From a container on `stalwart-test-acme`, the
+    host answers on both gateway addresses: port 22 connects, and 8899
+    refuses *immediately* with nothing listening. A `ufw` DROP would hang
+    until the timeout instead. Nothing needed changing to establish this,
+    and no firewall rule was touched.
+  - **Pebble does validate.** Its log shows 20 validation attempts in the
+    regression run, five for each of `autoconfig`, `autodiscover`,
+    `mta-sts` and `ua-auto-config.tls.org`, and it then sets each
+    authorization `INVALID by completed challenge` and the order `INVALID`.
+    The challenges are answered and refused, not left pending.
+  - So no certificate is issued and the test ends on an `Option::unwrap()`
+    of the certificate that never arrived
+    (`tests/src/automation/acme.rs:223`). A second run with `LOG=error`
+    reproduced it exactly, in 84s.
+
+  What that leaves is the TLS-ALPN handshake itself. The responder is
+  upstream's and intact (`ACME_TLS_ALPN_NAME` in
+  `crates/common/src/network/acme/resolver.rs`), and `listen.rs` decides
+  per accepted connection whether to offer it, from
+  `has_acme_tls_providers()` — which reads `has_acme_tls_challenge`,
+  computed when the network config is parsed. **Unproved hypothesis:** the
+  test adds its TLS-ALPN provider after the server is up, so if nothing
+  recomputes that flag, the listener never offers `acme-tls/1` and every
+  challenge fails exactly as observed. Worth testing before anything else,
+  with an `openssl s_client -alpn acme-tls/1` against `:8899` while a
+  renewal is in flight.
 
 ## The last sweep
 
