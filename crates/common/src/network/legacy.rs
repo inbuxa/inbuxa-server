@@ -26,6 +26,7 @@ use inbuxa_features::security::{
     listeners,
     protocol_policy::{self, ProtocolPolicy, SavedListener},
 };
+use registry::types::{error::Error, id::ObjectId};
 use store::registry::bootstrap::Bootstrap;
 
 /// What turning the switch actually did.
@@ -162,7 +163,29 @@ impl Server {
             .parse_tcp_acceptors(&mut bootstrap, self.inner.clone())
             .await;
 
+        // Only the wanted listeners, so re-parsing does not bind a port some
+        // other listener already holds.
         let wanted: Vec<&str> = restored.iter().map(|l| l.id.as_str()).collect();
+        parsed
+            .servers
+            .retain(|listener| wanted.contains(&listener.id.as_str()));
+
+        // Bind, but do not drop privileges again. A port below 1024 fails
+        // here once privileges are gone; that listener is reported as needing
+        // a restart rather than quietly left dead.
+        let errors_before = bootstrap.errors.len();
+        parsed.bind(&mut bootstrap);
+        let unbindable: Vec<ObjectId> = bootstrap.errors[errors_before..]
+            .iter()
+            .filter_map(|error| match error {
+                Error::Build { object_id, .. } => Some(*object_id),
+                _ => None,
+            })
+            .collect();
+        parsed
+            .servers
+            .retain(|listener| !unbindable.contains(&listener.registry_id));
+
         let mut spawned = Vec::new();
 
         let mut acceptors = std::mem::take(&mut parsed.tcp_acceptors);

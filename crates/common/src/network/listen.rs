@@ -326,8 +326,14 @@ impl SocketOpts {
 }
 
 impl Listeners {
-    pub fn bind_and_drop_priv(&self, bp: &mut Bootstrap) {
-        // Bind as root
+    /// Binds every socket, reporting each failure against its listener.
+    ///
+    /// Split out of [`Listeners::bind_and_drop_priv`] so a listener can be
+    /// bound again at runtime, when the legacy-protocols switch puts one back
+    /// (LP-5), without dropping privileges a second time. A port below 1024
+    /// will fail here once privileges are gone, which is one of the cases
+    /// LP-5 expects and reports rather than hides.
+    pub fn bind(&self, bp: &mut Bootstrap) {
         for server in &self.servers {
             for listener in &server.listeners {
                 if let Err(err) = listener.socket.bind(listener.addr) {
@@ -338,6 +344,11 @@ impl Listeners {
                 }
             }
         }
+    }
+
+    pub fn bind_and_drop_priv(&self, bp: &mut Bootstrap) {
+        // Bind as root
+        self.bind(bp);
 
         // Drop privileges
         #[cfg(not(target_env = "msvc"))]
