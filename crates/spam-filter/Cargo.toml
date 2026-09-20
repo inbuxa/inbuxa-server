@@ -19,7 +19,7 @@ tokio = { version = "1.53", features = ["net", "macros"] }
 psl = "2"
 hyper = { version = "1.11.1", features = ["server", "http1", "http2"] }
 idna = "1.1"
-decancer = "3.3.3"
+decancer = "4.0.0"
 unicode-security = "0.1.2"
 infer = "0.22"
 hashify = "0.2"
