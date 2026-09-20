@@ -91,6 +91,23 @@ impl Account {
         self.secret = new_secret;
     }
 
+    /// inbuxa: the compat tests all act as `INBUXA_COMPAT_ADMIN` against a
+    /// copy of INBUXA's data (docs/spec/compat-tests.md). If those
+    /// credentials don't authenticate, every later call comes back 401 and
+    /// fails as "Missing list in response", which reads like the data is
+    /// wrong rather than the login. Check once, and say which it is.
+    pub async fn assert_authenticates(&self, env_var: &str) {
+        let session = self.jmap_session_object().await;
+        if session.0.pointer("/accounts").is_none() {
+            panic!(
+                "{env_var} did not authenticate as {}: {}\n\
+                 The copy has to hold that administrator, with that password.",
+                self.name(),
+                session.0
+            );
+        }
+    }
+
     pub fn id(&self) -> Id {
         self.id
     }

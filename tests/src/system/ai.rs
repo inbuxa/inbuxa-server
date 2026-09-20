@@ -644,6 +644,8 @@ pub async fn ai_compat() {
         "Compat admin",
         Id::from(u32::MAX),
     );
+
+    admin.assert_authenticates("INBUXA_COMPAT_ADMIN").await;
     let tags = admin
         .jmap_method_call("x:SpamTag/get", json!({"ids": null}))
         .await;

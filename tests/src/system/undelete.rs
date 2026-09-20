@@ -636,6 +636,8 @@ pub async fn undelete_compat() {
         Id::from(u32::MAX),
     );
 
+    admin.assert_authenticates("INBUXA_COMPAT_ADMIN").await;
+
     for recorded in &items {
         let id = recorded["id"].as_str().unwrap();
         let account = recorded["accountId"].as_str().unwrap();

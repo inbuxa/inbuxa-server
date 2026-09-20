@@ -1,6 +1,6 @@
 # Running the compat tests against a copy of INBUXA's data
 
-Status: 2026-09-19.
+Status: 2026-09-19 (dry run below; still unrun against INBUXA data).
 
 Each feature spec has one **(compat)** acceptance test: the check that
 INBUXA's own data opens in inbuxa-server and reads back as it did on the
@@ -20,11 +20,20 @@ tests are not an exception.
 ## What you need
 
 1. A copy of the data store, opened with the same `STORE` backend the copy
-   was taken from, and a `TMPDIR` pointing at it. `NO_INSERT=1` stops the
-   harness from resetting or seeding it.
-2. `INBUXA_COMPAT_ADMIN`, as `name:password`, for a server-level
+   was taken from. **`TMPDIR` is the copy's parent, not the copy.** The
+   harness opens `$TMPDIR/<test name>` (`tests/src/utils/temp_dir.rs`), so
+   the copy for `tenant_compat` has to sit at `$TMPDIR/tenant_compat`, the
+   one for `scim_compat` at `$TMPDIR/scim_compat`, and so on. Point `TMPDIR`
+   at the copy itself and the harness quietly creates an empty store beside
+   it and the test reports INBUXA's data as missing — a cutover blocker that
+   isn't one. Each test wants its own copy anyway: `monitoring_compat`
+   purges what it reads.
+2. `NO_INSERT=1`, which stops the harness resetting and seeding the store.
+   Every one of the eight refuses to run without it, before the store is
+   touched (verified, "The dry run" below).
+3. `INBUXA_COMPAT_ADMIN`, as `name:password`, for a server-level
    administrator in that copy.
-3. For `tenant_compat` only: `INBUXA_COMPAT_EXPECTED`, a JSON file recorded
+4. For `tenant_compat` only: `INBUXA_COMPAT_EXPECTED`, a JSON file recorded
    from the Enterprise server before the move:
 
    ```json
@@ -34,11 +43,18 @@ tests are not an exception.
                                   "domains": ["<id>"]}}
    }
    ```
+5. For `masked_email_compat` only: `INBUXA_COMPAT_MASKS`, recorded the same
+   way:
+   `[{"id": "...", "accountId": "...", "email": "...", "enabled": true}]`.
+6. For `undelete_compat` only: `INBUXA_COMPAT_ARCHIVED`, the
+   `x:ArchivedItem/get` results, each with its `id` and `accountId`:
+   `[{"id": "...", "accountId": "..."}]`.
 
 ## Running one
 
 ```
-NO_INSERT=1 STORE=<backend> TMPDIR=/path/to/copy \
+# the copy is at $TMPDIR/<test name>, e.g. /srv/compat/tenant_compat
+NO_INSERT=1 STORE=<backend> TMPDIR=/srv/compat \
 INBUXA_COMPAT_ADMIN='admin@example.org:<password>' \
 RUST_MIN_STACK=8388608 \
 cargo test -p tests --features <backends> <test name> -- --ignored --exact
@@ -59,6 +75,31 @@ Run them one at a time: each starts a server on fixed ports.
 | `system::monitoring::monitoring_compat` | 6, monitoring | Retention, stores and `indexTelemetry` as observed; old history in the stripped encoding is skipped, not an error, and is gone after one purge (**deletes history**) |
 | `scim::scim_compat` | 7, SCIM | No domain open to SCIM, and no account with an `externalId`, as observed |
 | `directory::per_domain::per_domain_directory_compat` | 9, per-domain directories | No directory, no server default, and no domain with its own directory: any domain with one is a cutover blocker |
+
+## The dry run
+
+None of the eight has ever run against INBUXA's data, so on 2026-09-19 all
+eight were run against an empty store with synthetic inputs, to prove the
+plumbing before the day the copy exists. What that established:
+
+- **`NO_INSERT` protects the copy.** A sentinel file was left in each store
+  directory. Every run kept it, and the run without `NO_INSERT` stopped at
+  "NO_INSERT must be set, or the copy of INBUXA's data is wiped" before the
+  harness deleted anything. The guard is ahead of the store in all eight.
+- **`TMPDIR` is the parent.** The store appeared at
+  `$TMPDIR/<test name>/rocks.db` in every run, which is where the finding in
+  "What you need" comes from.
+- **The documented JSON shapes parse.** The three files above, written
+  exactly as this page gives them, were read without complaint by
+  `tenant_compat`, `masked_email_compat` and `undelete_compat`.
+- **A bad administrator now says so.** Each test authenticates once before it
+  asserts anything, and fails with `INBUXA_COMPAT_ADMIN did not authenticate
+  as <name>` and the 401 body. Before that check the first call simply
+  panicked with "Missing list in response", which reads like INBUXA's data is
+  wrong when the login is what's wrong.
+
+What it can't establish is anything about INBUXA's data: every run ended at
+the authentication check, since an empty store holds no such administrator.
 
 ## What a failure means
 

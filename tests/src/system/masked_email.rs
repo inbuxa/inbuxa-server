@@ -449,6 +449,8 @@ pub async fn masked_email_compat() {
         Id::from(u32::MAX),
     );
 
+    admin.assert_authenticates("INBUXA_COMPAT_ADMIN").await;
+
     for mask in masks {
         let id = Id::from_str(mask["id"].as_str().unwrap()).unwrap();
         let account = mask["accountId"].as_str().unwrap();

@@ -494,6 +494,8 @@ pub async fn per_domain_directory_compat() {
         "Compat admin",
         Id::from(u32::MAX),
     );
+
+    admin.assert_authenticates("INBUXA_COMPAT_ADMIN").await;
     let domains = admin
         .jmap_method_call("x:Domain/get", json!({"ids": null}))
         .await;

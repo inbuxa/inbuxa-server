@@ -926,6 +926,8 @@ pub async fn tenant_compat() {
         Id::from(u32::MAX),
     );
 
+    admin.assert_authenticates("INBUXA_COMPAT_ADMIN").await;
+
     // Tenants, their quotas and their members read back unchanged
     for (id, tenant) in expected["tenants"].as_object().expect("tenants") {
         let id = Id::from_str(id).expect("tenant id");

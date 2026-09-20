@@ -520,6 +520,8 @@ pub async fn branding_compat() {
         Id::from(u32::MAX),
     );
 
+    admin.assert_authenticates("INBUXA_COMPAT_ADMIN").await;
+
     // Every domain's logo reads back and is served or skipped, never an error
     let domains = admin
         .jmap_method_call(

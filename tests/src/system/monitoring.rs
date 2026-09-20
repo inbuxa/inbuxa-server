@@ -410,6 +410,8 @@ pub async fn monitoring_compat() {
         Id::from(u32::MAX),
     );
 
+    admin.assert_authenticates("INBUXA_COMPAT_ADMIN").await;
+
     // Observed 1: 30 and 90 days, hourly, both stores Default, no alerts
     let retention = admin
         .jmap_method_call("x:DataRetention/get", json!({"ids": ["singleton"]}))
