@@ -37,7 +37,7 @@ jobs:
       # including one pushed by whoever compromises the account. Dependabot
       # updates both halves together -- do not "simplify" a pin back to a tag.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - uses: Swatinem/rust-cache@49a0bdc70d2e1b713ca9e2869b211fcce03d3c1c # v2.9.2
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
       - name: System dependencies
         # foundationdb and the search backends are off by default, but the
         # default feature set still links against the system's C libraries.
