@@ -281,6 +281,19 @@ async fn build_search_store(typ: SearchStoreType, _path: &str) -> SearchStore {
 }
 
 pub async fn wait_for_tasks(server: &Server, skip_not_due: bool, skip_permanent_failures: bool) {
+    // inbuxa: a compat run opens a copy of a real server's store, and its
+    // task queue comes too: ACME renewals due months from now, work that
+    // can never run on this machine. Waiting for that to drain never ends,
+    // so skip what isn't due and what has already failed for good, and give
+    // up after a minute rather than hang. Whatever the test was waiting for
+    // then fails on its own assertion, which says more than a spinner.
+    let compat = std::env::var("NO_INSERT").is_ok();
+    let (skip_not_due, skip_permanent_failures) = if compat {
+        (true, true)
+    } else {
+        (skip_not_due, skip_permanent_failures)
+    };
+    let give_up_at = std::time::Instant::now() + std::time::Duration::from_secs(60);
     let mut count = 0;
     loop {
         let mut has_index_tasks = None;
@@ -314,6 +327,12 @@ pub async fn wait_for_tasks(server: &Server, skip_not_due: bool, skip_permanent_
             count += 1;
             if count % 10 == 0 {
                 println!("Waiting for pending task {:?}...", task);
+            }
+            if compat && std::time::Instant::now() > give_up_at {
+                println!(
+                    "Gave up waiting after 60s; this task is the copy's, not this run's: {task:?}"
+                );
+                break;
             }
             tokio::time::sleep(std::time::Duration::from_millis(200)).await;
         } else {

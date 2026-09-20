@@ -109,6 +109,15 @@ fails on one of its own (`tests/src/utils/server.rs`). The copy is not
 edited to achieve this; its listeners are simply not what a compat run
 needs.
 
+**Why the copy's task queue is ignored.** A real server's pending tasks come
+with its store: ACME renewals due months from now, work that can never run
+on this machine. The harness waits for tasks to drain, so the first run
+against INBUXA's copy sat printing `Waiting for pending task
+AcmeRenewal(...)` until it was interrupted. Under `NO_INSERT` it now skips
+tasks that aren't due and ones that have failed for good, and gives up
+after a minute with the task printed, so the test fails on its own
+assertion instead of spinning.
+
 **Why `compat-` listeners appear in the copy.** The harness needs listeners
 on its own ports, and the registry keys listeners by name. A real server
 has its own, and a production listener called `jmap` or `imap` collided
