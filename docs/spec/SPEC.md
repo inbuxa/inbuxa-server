@@ -534,7 +534,10 @@ before anything that could prompt that notice happens.
 2. INBUXA's data opens in the fork on a copy: tenants, masked addresses,
    archived items, every account.
 3. Masked addresses already handed out still deliver; archived items still
-   restore.
+   restore. Moot as things stand: INBUXA has no masked addresses and
+   retention is off (2026-09-19), so steps 2 and 3 come down to the tenant,
+   the domains and the accounts. It applies again the moment either feature
+   is switched on (`compat-tests.md`).
 4. Cutover on the running host, with the Enterprise build kept for rollback.
 5. Only then: public repository and announcement, with the INBUXA fork of
    ihasmail released alongside. Public ihasmail stays Stalwart-facing (§5).

@@ -129,11 +129,37 @@ plumbing before the day the copy exists. What that established:
 What it can't establish is anything about INBUXA's data: every run ended at
 the authentication check, since an empty store holds no such administrator.
 
+## What was recorded, 2026-09-19
+
+`record-compat.py` ran against the live Enterprise server as a server-level
+administrator and saw 8 accounts, which is what the dashboard reports, so it
+reached all of them. It recorded:
+
+| File | Contents |
+|---|---|
+| `expected.json` | 1 tenant, with its quotas and members. `tenantAdmins` empty: no `--tenant-admin` was passed |
+| `masks.json` | nothing |
+| `archived.json` | nothing |
+
+The two empty files are right, not a short recording: INBUXA has no masked
+addresses and deleted-mail retention is off (John, 2026-09-19). So
+`masked_email_compat` and `undelete_compat` iterate over an empty list.
+**They pass without comparing anything, and a green run from either proves
+nothing about compatibility** — the same standing as `scim_compat` and
+`per_domain_directory_compat`, which assert INBUXA uses neither feature.
+
+That leaves one recording that carries weight, `expected.json`, and it is
+made. Should either feature be switched on before the cutover, record again:
+the files are a picture of the day they were taken.
+
 ## What a failure means
 
-- `tenant_compat`, `masked_email_compat`, `undelete_compat`,
-  `branding_compat`, `ai_compat`: the fork reads that data differently from
-  the Enterprise server. Treat as a cutover blocker and fix before moving.
+- `tenant_compat`, `branding_compat`, `ai_compat`: the fork reads that data
+  differently from the Enterprise server. Treat as a cutover blocker and fix
+  before moving.
+- `masked_email_compat` and `undelete_compat` would mean the same, but as of
+  2026-09-19 they have nothing to read: see "What was recorded" above. They
+  can only fail once INBUXA has masked addresses or retention on.
 - `monitoring_compat`: old telemetry that can't be decoded is expected and
   is skipped; a failure here means the settings differ from what was
   observed.
