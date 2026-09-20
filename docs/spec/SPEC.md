@@ -178,7 +178,13 @@ checks already are: 30 checks across 18 files at the commit above. That keeps
 each sync's conflicts few and predictable.
 
 The `enterprise` Cargo feature and every edition check are removed. There is
-one edition.
+one edition. Done for the code on 2026-09-19: the last 14 gates, all of them
+`#[cfg(not(feature = "enterprise"))]` on the path the fork always takes, came
+off across 11 files, and no `is_enterprise_edition()` check survived the
+import. The feature's *definitions* stay in the manifests, inert now that
+nothing turns them on and nothing reads them, because removing them would
+widen every sync's diff for no gain (§2.2). An import that changes a gated
+file brings its gates back in the merge; they come off again with it.
 
 One exception: scale-out storage lives in new AGPL files inside
 `crates/store` (`backend/scaleout/`), because the rebuilt-features crate

@@ -581,7 +581,6 @@ async fn build_contact_document(
 }
 
 
-#[cfg(not(feature = "enterprise"))]
 // inbuxa: MON-16: a trace's search document, when trace search is on:
 // its event types, queue ids, and addresses, their domains, hosts, IPs,
 // message ids and account names as keywords

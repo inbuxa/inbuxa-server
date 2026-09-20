@@ -345,7 +345,6 @@ pub(crate) async fn validate_role(
 }
 
 
-#[cfg(not(feature = "enterprise"))]
 pub async fn validate_tenant_quota(
     _server: &Server,
     _access_token: &AccessToken,
@@ -360,7 +359,6 @@ pub async fn schedule_account_destruction(
     account: &Account,
 ) -> trc::Result<()> {
 
-    #[cfg(not(feature = "enterprise"))]
     let status = TaskStatus::now();
 
     let (account_domain_id, account_name, account_type) = match account {

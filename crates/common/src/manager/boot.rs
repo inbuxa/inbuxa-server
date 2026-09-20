@@ -157,7 +157,6 @@ impl BootManager {
                 // Enable telemetry
 
 
-                #[cfg(not(feature = "enterprise"))]
                 telemetry.enable();
 
                 if bootstrap.registry.is_bootstrap_mode() {

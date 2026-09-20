@@ -35,7 +35,6 @@ impl AccountApiHandler for Server {
         &self,
         access_token: &AccessToken,
     ) -> trc::Result<HttpResponse> {
-        #[cfg(not(feature = "enterprise"))]
         let edition = "oss";
 
 

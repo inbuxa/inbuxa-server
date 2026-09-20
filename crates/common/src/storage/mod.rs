@@ -98,7 +98,6 @@ impl Server {
 
     // inbuxa: BT-9: the first logo mail can carry inline; none leaves the
     // built-in INBUXA logo
-    #[cfg(not(feature = "enterprise"))]
     pub async fn logo_resource(
         &self,
         domain: &str,

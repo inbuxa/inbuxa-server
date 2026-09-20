@@ -907,7 +907,6 @@ impl RegistrySet for Server {
                 set.fail_all_destroy("Telemetry objects cannot be deleted");
                 Ok(set.into_response())
             }
-            #[cfg(not(feature = "enterprise"))]
             #[allow(unreachable_patterns)] // inbuxa: ArchivedItem was the last one
             _ => {
                 set.fail_all_create("Enterprise objects cannot be created");

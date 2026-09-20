@@ -130,7 +130,6 @@ impl Server {
 
                             // Update tracers
 
-                            #[cfg(not(feature = "enterprise"))]
                             tracers.update();
 
                             // Reload queue settings
