@@ -1,0 +1,186 @@
+# Cut a release once a week, but only if there is something in it.
+#
+# It does nothing on a quiet week. A release with no commits in it is worse
+# than no release: it moves `:latest` to an identical build, spends a version
+# number, and mails everybody watching the repository about nothing.
+#
+# INBUXA's version is a string in crates/types/src/branding.rs, deliberately
+# not in Cargo.toml so that upstream's version bumps merge without conflicts.
+# So this writes it: the bump is committed to main, and the tag names that
+# commit. The tree a tag points at therefore reports the version the tag
+# claims, which a tag placed beside an unbumped macro cannot promise.
+name: Weekly release
+
+on:
+  schedule:
+    # Mondays, 10:07 UTC, and last of the three: INBUXA Admin and the webmail
+    # release ahead of the server they talk to. Staggered rather than
+    # simultaneous so three releases do not compete for runners, and so a bad
+    # Monday names one repository instead of three. GitHub runs scheduled jobs
+    # best-effort and can delay a run considerably, so the exact minute is not
+    # a promise; the odd minute keeps it off the crowded top of the hour.
+    #
+    # Note also that GitHub disables scheduled workflows in a repository with
+    # no activity for 60 days, which is worth checking for before assuming
+    # this file is broken.
+    - cron: "7 10 * * 1"
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Work out what would be released, then stop"
+        type: boolean
+        default: false
+
+# One at a time. Two overlapping runs would race to write the same version and
+# create the same tag, and the loser fails noisily for a reason that has
+# nothing to do with the code.
+concurrency:
+  group: weekly-release
+  cancel-in-progress: false
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    outputs:
+      should_release: ${{ steps.decide.outputs.should_release }}
+      version: ${{ steps.decide.outputs.version }}
+      tag: ${{ steps.decide.outputs.tag }}
+      previous: ${{ steps.decide.outputs.previous }}
+      count: ${{ steps.decide.outputs.count }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: main
+          fetch-depth: 0
+      - id: decide
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+
+          # The newest published release, or empty on a repository that has
+          # never had one -- in which case everything counts as new. Drafts are
+          # excluded: an unpublished draft is not a release anybody has, so
+          # counting from it would hide commits that have never shipped.
+          previous="$(gh release list --limit 1 --exclude-drafts --json tagName --jq '.[0].tagName // ""')"
+          # A tag named by a release is normally present after a full checkout,
+          # but a release can outlive its tag. Falling back to the whole
+          # history is the safe direction to be wrong in: it over-counts, which
+          # cuts a release that was due anyway, where under-counting would skip
+          # one that was.
+          if [ -n "$previous" ] && git rev-parse -q --verify "refs/tags/${previous}" >/dev/null; then
+            count="$(git rev-list --count "${previous}..HEAD")"
+          else
+            count="$(git rev-list --count HEAD)"
+          fi
+
+          # INBUXA's version is the date: YYYY.M.D, unpadded, as branding.rs
+          # documents. A second release on one day takes a `.N` suffix,
+          # counting from 2, which is why this asks the tags rather than
+          # assuming today is free.
+          today="$(date -u +%Y.%-m.%-d)"
+          version="$today"
+          n=2
+          while git rev-parse -q --verify "refs/tags/v${version}" >/dev/null; do
+            version="${today}.${n}"
+            n=$((n + 1))
+          done
+
+          should_release=true
+          reason=""
+          if [ "$count" -eq 0 ]; then
+            should_release=false
+            reason="no commits since ${previous}"
+          fi
+
+          {
+            echo "should_release=$should_release"
+            echo "version=$version"
+            echo "tag=v${version}"
+            echo "previous=$previous"
+            echo "count=$count"
+          } >> "$GITHUB_OUTPUT"
+
+          # Written to the run summary so a skipped week reads as a decision
+          # rather than as a workflow that quietly did nothing.
+          {
+            echo "### Weekly release"
+            echo
+            if [ "$should_release" = "true" ]; then
+              echo "Releasing **v${version}** — ${count} commit(s) since ${previous:-the beginning}."
+            else
+              echo "Nothing to release: ${reason}."
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  cut:
+    needs: check
+    if: needs.check.outputs.should_release == 'true' && !inputs.dry_run
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    outputs:
+      sha: ${{ steps.bump.outputs.sha }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: main
+          fetch-depth: 0
+      - id: bump
+        env:
+          VERSION: ${{ needs.check.outputs.version }}
+        run: |
+          set -euo pipefail
+
+          # Scoped to the macro body rather than replacing the first quoted
+          # string in the file, and asserted to have matched exactly once.
+          # branding.rs holds other string literals, and a bump that silently
+          # edited one of those -- or none -- would ship a build whose version
+          # disagrees with its tag.
+          python3 - <<'PY'
+          import os, re
+          path = "crates/types/src/branding.rs"
+          src = open(path, encoding="utf-8").read()
+          pattern = re.compile(r'(macro_rules! brand_version \{\s*\(\) => \{\s*")[^"]+(")')
+          out, n = pattern.subn(lambda m: m.group(1) + os.environ["VERSION"] + m.group(2), src, count=1)
+          assert n == 1, f"brand_version! not found in {path}"
+          open(path, "w", encoding="utf-8").write(out)
+          PY
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add crates/types/src/branding.rs
+          git commit -m "Version ${VERSION}"
+          git push origin HEAD:main
+
+          echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+      - env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          args=(--target "${{ steps.bump.outputs.sha }}"
+                --title "INBUXA ${{ needs.check.outputs.version }}"
+                --generate-notes)
+          # Bound the notes to what is actually new. Without a start tag the
+          # generator reaches back to whatever it decides is previous, which on
+          # a repository carrying upstream's tag shapes is not always the last
+          # release.
+          if [ -n "${{ needs.check.outputs.previous }}" ]; then
+            args+=(--notes-start-tag "${{ needs.check.outputs.previous }}")
+          fi
+          gh release create "${{ needs.check.outputs.tag }}" "${args[@]}"
+
+  # Called rather than left to the `release` trigger on purpose: see the note
+  # at the top of publish.yml. A release created with GITHUB_TOKEN raises no
+  # event, so without this the tag would exist and no image would follow it.
+  publish:
+    needs: [check, cut]
+    permissions:
+      contents: read
+      packages: write
+    uses: ./.github/workflows/publish.yml
+    with:
+      ref: ${{ needs.cut.outputs.sha }}
+      tag_latest: true
