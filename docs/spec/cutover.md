@@ -60,21 +60,48 @@ from (`compat-tests.md`).
 
 ## The sequence
 
-The install is native: `/opt/stalwart` with its data in `/opt/stalwart/data`
-and a `stalwart.service` unit. The fork ships `inbuxa.service` with the same
-shape, including `AmbientCapabilities=CAP_NET_BIND_SERVICE`, which is what
-lets an unprivileged process hold port 25.
+Side by side, not in place (John, 2026-09-19). The Enterprise install stays
+where it is, untouched, and the fork goes in beside it with a copy of the
+data. That makes the rollback a service swap rather than a restore, and it
+is the main reason to prefer this shape.
 
-1. Announce the window. Mail will queue at the sending side while the server
-   is down; nothing is lost, but delivery is delayed.
-2. `systemctl stop stalwart`.
-3. Snapshot `/opt/stalwart/data` — the whole directory, from the stopped
-   server. This is the rollback.
-4. Install the fork's binary and unit. Keep the Enterprise binary where a
-   rollback can reach it without a download.
-5. Start the fork. Watch the log before opening the ports to the world.
-6. Work through the checks below.
-7. Let mail flow.
+The install is native: `/opt/stalwart`, its data in `/opt/stalwart/data`,
+a `stalwart.service` unit, and ihasmail in a container beside it. The fork
+ships `inbuxa.service` with the same shape, including
+`AmbientCapabilities=CAP_NET_BIND_SERVICE`, which is what lets an
+unprivileged process hold port 25.
+
+1. Announce the window. Mail queues at the sending side while the server is
+   down; nothing is lost, but delivery is delayed.
+2. Stop `stalwart.service` and the ihasmail container. **Disable the unit
+   too**, so a reboot can't bring the Enterprise build back onto the ports
+   while the fork is serving. Two servers on one set of ports, each with its
+   own store, is the one failure this plan can produce that the in-place
+   swap can't.
+3. Copy `/opt/stalwart/data` to the fork's store path. A copy, not a move:
+   the original is the rollback. Budget the disk for two full copies, and
+   take it from the stopped server, never from under a running one.
+4. Install the fork at its own path with its own config, pointing at the
+   copied store. Most settings travel inside the store — they live in the
+   registry — so the config file is mainly the store path and the hostname.
+   New installs default to `/var/lib/inbuxa`; an existing install keeps
+   whatever its configuration names (SPEC.md §2.5), so this is a free
+   choice as long as the config and the unit agree.
+5. Start the fork. Read the log before opening the ports.
+6. Bring up INBUXA Admin and the new webmail. Both talk to the server over
+   JMAP and OAuth, and neither runs on the mail host's web interface
+   (SPEC.md §5.3); beside it in containers is fine.
+7. Work through the checks below.
+8. Let mail flow.
+
+### What the front ends need
+
+Their OAuth client registrations live in the store, so they travel with the
+copy. A front end that reuses the old client id and redirect URIs keeps
+working; one deployed under a new hostname, or registered afresh, needs its
+client set up and its redirect URIs to match, or sign-in fails in a way that
+looks like an account problem and isn't. Settle which of the two it is
+before the day, not during it.
 
 ## Before letting mail flow
 
@@ -86,20 +113,33 @@ lets an unprivileged process hold port 25.
 - The tenant's administrator can still see its own accounts and domains, and
   nobody else's.
 - The queue is draining, and the task queue has no new permanent failures.
+- **Every account still works**, which is the plan's own test: each one
+  signs in with the password it had, its mail is there, its aliases still
+  receive, and app passwords and OAuth sessions are accepted. Nothing in
+  the move touches credentials — they are in the store that was copied —
+  so a failure here means the copy or the front ends, not the accounts.
+- Nothing is listening on the old install's ports but the fork, and
+  `stalwart.service` is disabled.
 
 ## Rollback
 
-Restoring the snapshot from step 3 and starting the Enterprise build returns
-the server to exactly where it was, and loses every message accepted since.
-That is clean while the window is short and nothing has been accepted.
+The Enterprise install and its data are untouched, so rolling back is: stop
+the fork, re-enable and start `stalwart.service`, bring the old ihasmail
+container back. Minutes, and no restore.
 
-**Rolling back after the fork has been serving is not a snapshot restore.**
-The fork writes objects its own features own — SCIM's event ids and the
-rebuilt features' records — into a store the Enterprise build would then
-read. Whether it tolerates them has never been tested, and testing it is
-worth an hour before the day rather than an argument at 2am. Until it is
-tested, treat the cutover as forward-only once mail has been accepted, and
-make the decision to roll back early rather than late.
+What it costs is everything the fork accepted while it served: the two
+stores diverge from the moment the fork starts. Mail delivered to the fork's
+store is not in the Enterprise one, and rolling back leaves it behind. So
+the decision to roll back is worth making early and deliberately, and the
+window between "started" and "letting mail flow" is where a rollback is
+free.
+
+**Rolling the data back is a different thing, and untested.** Pointing the
+Enterprise build at the store the fork has been writing to would ask it to
+read objects the fork's own features own. Whether it tolerates them has
+never been checked, and checking it is worth an hour beforehand rather than
+an argument at 2am. Until it is checked, treat the fork's store as
+forward-only.
 
 ## The first week
 
@@ -112,8 +152,9 @@ make the decision to roll back early rather than late.
 
 ## Open
 
-- Whether the Enterprise build can read a store the fork has written, which
-  decides whether rollback stays available after mail has been accepted.
+- Whether the Enterprise build can read a store the fork has written. With
+  the side-by-side plan this only matters if the fork's store has to be
+  carried back, since the rollback path is the old store, untouched.
 - Whether ACME renewal works on the host, which the test suite has not been
   able to settle (`container-tests.md`).
 - Whether the front ends need anything at cutover, or follow separately
