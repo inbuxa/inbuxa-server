@@ -53,6 +53,33 @@ def fail(msg, code=2):
     sys.exit(code)
 
 
+# The permission each call needs, so a refusal says what to grant rather
+# than only that something was refused.
+PERMISSION = {
+    'x:Tenant/get': 'sysTenantGet',
+    'x:Account/query': 'sysAccountQuery',
+    'x:Domain/query': 'sysDomainQuery',
+    'x:MaskedEmail/get': 'sysMaskedEmailGet',
+    'x:ArchivedItem/get': 'sysArchivedItemGet',
+}
+
+
+class Refused(Exception):
+    """The server allowed the sign-in but not the call."""
+
+    def __init__(self, who, method, error):
+        self.who = who
+        self.method = method
+        self.error = error
+        super().__init__(str(self))
+
+    def __str__(self):
+        needed = PERMISSION.get(self.method)
+        detail = self.error.get('description') or json.dumps(self.error)[:120]
+        return (f'{self.who} may not {self.method}: {detail}'
+                + (f' (needs {needed})' if needed else ''))
+
+
 class Client:
     """One signed-in identity on the Enterprise server."""
 
@@ -112,7 +139,7 @@ class Client:
                  f'{json.dumps(response)[:200]}', code=1)
         name, result, _ = calls[0]
         if name == 'error':
-            fail(f'{method} refused: {json.dumps(result)[:200]}', code=1)
+            raise Refused(self.name, method, result)
         return result
 
     def get(self, object_type, account_id=None, ids=None):
@@ -241,34 +268,62 @@ def main():
              f'{args.server.rstrip("/")}/jmap/session', code=1)
 
     os.makedirs(args.out, exist_ok=True)
-    account_ids = admin.query_ids('Account')
+    try:
+        account_ids = admin.query_ids('Account')
+    except Refused as refused:
+        fail(f'{refused}\nWithout the accounts nothing else can be recorded.', code=1)
     if not account_ids:
         fail(f'{admin.name} sees no accounts: either the wrong server, or an '
              f'administrator without the run of it', code=1)
 
-    expected = record_tenants(admin, tenant_admins)
-    masks = record_masks(admin, account_ids)
-    archived = record_archived(admin, account_ids)
+    # A section the server refuses costs that file, not the run: this passes
+    # over a live server that may not be up again soon, so record what this
+    # administrator is allowed to and say plainly what is missing.
+    missing = []
 
-    paths = [
-        ('INBUXA_COMPAT_EXPECTED', write(os.path.join(args.out, 'expected.json'),
-                                         expected, private=True),
-         f'{len(expected["tenants"])} tenants, '
-         f'{len(expected["tenantAdmins"])} tenant admins'),
-        ('INBUXA_COMPAT_MASKS', write(os.path.join(args.out, 'masks.json'), masks),
-         f'{len(masks)} masked addresses'),
-        ('INBUXA_COMPAT_ARCHIVED', write(os.path.join(args.out, 'archived.json'), archived),
-         f'{len(archived)} archived items'),
-    ]
+    def section(name, record):
+        try:
+            return record()
+        except Refused as refused:
+            missing.append((name, refused))
+            return None
+
+    expected = section('expected.json', lambda: record_tenants(admin, tenant_admins))
+    masks = section('masks.json', lambda: record_masks(admin, account_ids))
+    archived = section('archived.json', lambda: record_archived(admin, account_ids))
+
+    written = []
+    if expected is not None:
+        written.append(('INBUXA_COMPAT_EXPECTED',
+                        write(os.path.join(args.out, 'expected.json'), expected, private=True),
+                        f'{len(expected["tenants"])} tenants, '
+                        f'{len(expected["tenantAdmins"])} tenant admins'))
+    if masks is not None:
+        written.append(('INBUXA_COMPAT_MASKS',
+                        write(os.path.join(args.out, 'masks.json'), masks),
+                        f'{len(masks)} masked addresses'))
+    if archived is not None:
+        written.append(('INBUXA_COMPAT_ARCHIVED',
+                        write(os.path.join(args.out, 'archived.json'), archived),
+                        f'{len(archived)} archived items'))
+
     print(f'Recorded from {args.server} as {admin.name}, across {len(account_ids)} accounts:')
-    for variable, path, count in paths:
+    for variable, path, count in written:
         print(f'  {variable}={path}  ({count})')
-    if not tenant_admins and expected['tenants']:
+    if expected is not None and not tenant_admins and expected['tenants']:
         print('\nNo --tenant-admin was given, so tenantAdmins is empty and '
               "tenant_compat checks only the tenants themselves.\n"
               'Pass each tenant administrator to check what it can see.',
               file=sys.stderr)
-    print('\nexpected.json holds those passwords; it is written 0600.', file=sys.stderr)
+    if expected is not None:
+        print('\nexpected.json holds those passwords; it is written 0600.', file=sys.stderr)
+    if missing:
+        print('\nNot recorded, and its test cannot run without it:', file=sys.stderr)
+        for name, refused in missing:
+            print(f'  {name}: {refused}', file=sys.stderr)
+        print('Grant the permission and run again; what was written above stands.',
+              file=sys.stderr)
+        sys.exit(1)
 
 
 if __name__ == '__main__':
