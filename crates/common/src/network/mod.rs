@@ -36,6 +36,7 @@ pub mod autoconfig;
 pub mod control;
 pub mod dkim;
 pub mod dns;
+pub mod legacy;
 pub mod limiter;
 pub mod listen;
 pub mod mta;

@@ -23,10 +23,17 @@
 //! process stops answering; anything that still routes the port is the
 //! operator's to reconcile, and is deliberately left alone.
 
-use crate::config::server::ServerProtocol;
+use crate::config::server::{Listener, ServerProtocol};
+use crate::network::TcpAcceptor;
 use ahash::AHashMap;
 use parking_lot::RwLock;
+use std::sync::OnceLock;
 use tokio::sync::watch;
+
+/// How a listener is spawned. Only `main` knows how to build the session
+/// manager for a protocol, so it leaves this behind at startup and the policy
+/// uses it to put a listener back without a restart (LP-5).
+pub type SpawnListener = Box<dyn Fn(Listener, TcpAcceptor, watch::Receiver<bool>) + Send + Sync>;
 
 /// A listener that is currently accepting, and the switch that stops it.
 struct Running {
@@ -47,6 +54,7 @@ pub struct ListenerInfo {
 #[derive(Default)]
 pub struct ListenerControl {
     running: RwLock<AHashMap<String, Running>>,
+    spawner: OnceLock<SpawnListener>,
 }
 
 impl ListenerControl {
@@ -68,6 +76,33 @@ impl ListenerControl {
             },
         );
         shutdown_rx
+    }
+
+    /// Remembers how to spawn a listener, once, at startup. Later calls are
+    /// ignored, so nothing can swap the spawner out from under a running
+    /// server.
+    pub fn set_spawner(&self, spawner: SpawnListener) {
+        let _ = self.spawner.set(spawner);
+    }
+
+    /// Whether a spawner has been left behind. Without one, a listener can be
+    /// stopped but not started, and the caller has to say so rather than
+    /// promise a port that will not open until a restart.
+    pub fn can_spawn(&self) -> bool {
+        self.spawner.get().is_some()
+    }
+
+    /// Starts a listener and registers it, so it can be stopped again.
+    /// Returns false when no spawner was left behind.
+    pub fn spawn(&self, listener: Listener, acceptor: TcpAcceptor) -> bool {
+        let Some(spawner) = self.spawner.get() else {
+            return false;
+        };
+
+        let ports = listener.listeners.iter().map(|l| l.addr.port()).collect();
+        let shutdown_rx = self.register(listener.id.clone(), listener.protocol, ports);
+        spawner(listener, acceptor, shutdown_rx);
+        true
     }
 
     /// Stops one listener by id. Returns what was stopped, or `None` when no

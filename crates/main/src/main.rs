@@ -9,14 +9,21 @@
 #![warn(clippy::cast_possible_wrap)]
 #![warn(clippy::cast_sign_loss)]
 
-use common::{BuildServer, config::server::ServerProtocol, manager::boot::BootManager};
+use common::{
+    BuildServer, Inner,
+    config::server::{Listener, ServerProtocol},
+    manager::boot::BootManager,
+    network::TcpAcceptor,
+};
 use http::HttpSessionManager;
 use imap::core::ImapSessionManager;
 use managesieve::core::ManageSieveSessionManager;
 use pop3::Pop3SessionManager;
 use services::{StartServices, broadcast::subscriber::spawn_broadcast_subscriber};
 use smtp::{StartQueueManager, core::SmtpSessionManager};
+use std::sync::Arc;
 use std::time::Duration;
+use tokio::sync::watch;
 use trc::Collector;
 use utils::wait_for_shutdown;
 
@@ -75,42 +82,23 @@ async fn main() -> std::io::Result<()> {
     // rest accepting (legacy-protocols LP-2). The registry lives in `Data` and
     // so outlives the listeners, which it must: it owns the sending ends.
     let listener_control = &init.inner.data.listener_control;
+    let spawn_inner = init.inner.clone();
     let (shutdown_tx, shutdown_rx) =
         init.servers
             .spawn_with_control(listener_control, |server, acceptor, shutdown_rx| {
-                match &server.protocol {
-                    ServerProtocol::Smtp | ServerProtocol::Lmtp => server.spawn(
-                        SmtpSessionManager::new(init.inner.clone()),
-                        init.inner.clone(),
-                        acceptor,
-                        shutdown_rx,
-                    ),
-                    ServerProtocol::Http => server.spawn(
-                        HttpSessionManager::new(init.inner.clone()),
-                        init.inner.clone(),
-                        acceptor,
-                        shutdown_rx,
-                    ),
-                    ServerProtocol::Imap => server.spawn(
-                        ImapSessionManager::new(init.inner.clone()),
-                        init.inner.clone(),
-                        acceptor,
-                        shutdown_rx,
-                    ),
-                    ServerProtocol::Pop3 => server.spawn(
-                        Pop3SessionManager::new(init.inner.clone()),
-                        init.inner.clone(),
-                        acceptor,
-                        shutdown_rx,
-                    ),
-                    ServerProtocol::ManageSieve => server.spawn(
-                        ManageSieveSessionManager::new(init.inner.clone()),
-                        init.inner.clone(),
-                        acceptor,
-                        shutdown_rx,
-                    ),
-                };
+                spawn_listener(&spawn_inner, server, acceptor, shutdown_rx);
             });
+
+    // Leave behind how to spawn a listener, so putting one back opens its port
+    // without a restart (LP-5). Only this file knows the session manager for a
+    // protocol, so only this file can say.
+    let spawn_inner = init.inner.clone();
+    init.inner
+        .data
+        .listener_control
+        .set_spawner(Box::new(move |server, acceptor, shutdown_rx| {
+            spawn_listener(&spawn_inner, server, acceptor, shutdown_rx);
+        }));
 
     // Start broadcast subscriber
     let inner = init.inner.clone();
@@ -131,4 +119,48 @@ async fn main() -> std::io::Result<()> {
     tokio::time::sleep(Duration::from_secs(1)).await;
 
     Ok(())
+}
+
+/// Starts one listener under the session manager its protocol calls for.
+///
+/// Used twice: once for every listener at startup, and again whenever the
+/// legacy-protocols switch puts a listener back (LP-5).
+fn spawn_listener(
+    inner: &Arc<Inner>,
+    server: Listener,
+    acceptor: TcpAcceptor,
+    shutdown_rx: watch::Receiver<bool>,
+) {
+    match &server.protocol {
+        ServerProtocol::Smtp | ServerProtocol::Lmtp => server.spawn(
+            SmtpSessionManager::new(inner.clone()),
+            inner.clone(),
+            acceptor,
+            shutdown_rx,
+        ),
+        ServerProtocol::Http => server.spawn(
+            HttpSessionManager::new(inner.clone()),
+            inner.clone(),
+            acceptor,
+            shutdown_rx,
+        ),
+        ServerProtocol::Imap => server.spawn(
+            ImapSessionManager::new(inner.clone()),
+            inner.clone(),
+            acceptor,
+            shutdown_rx,
+        ),
+        ServerProtocol::Pop3 => server.spawn(
+            Pop3SessionManager::new(inner.clone()),
+            inner.clone(),
+            acceptor,
+            shutdown_rx,
+        ),
+        ServerProtocol::ManageSieve => server.spawn(
+            ManageSieveSessionManager::new(inner.clone()),
+            inner.clone(),
+            acceptor,
+            shutdown_rx,
+        ),
+    }
 }
