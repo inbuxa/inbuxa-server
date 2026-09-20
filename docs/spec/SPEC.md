@@ -295,10 +295,10 @@ is written.
 | 3 | Undelete | Deleted mail held for a set period and restorable | Existing archived items must stay restorable. Built 2026-09-18 in `crates/features`; status in `features/undelete.md`. |
 | 4 | Branding and templates | Operator logo, and the text of calendar alarm and invitation emails | INBUXA's branding is the default. Built 2026-09-18 in `crates/features`; status in `features/branding-and-templates.md`. |
 | 5 | AI spam classification | An optional model's opinion as one spam signal, and a Sieve function that asks a model | Local and auditable model only: no hosted API by default. Built 2026-09-19 in `crates/features`; status in `features/ai-spam-classification.md`. |
-| 6 | Monitoring history, live tracing, alerts | Stored metrics and traces, a live trace view, and threshold alerts | ihasmail's dashboard shows them. Spec: `features/monitoring.md`. |
-| 7 | SCIM 2.0 provisioning | Accounts and groups managed by an identity provider | From RFC 7643 and RFC 7644. The largest piece. Spec: `features/scim.md`. |
-| 8 | Scale-out storage | SQL read replicas; sharded blob and in-memory stores | For large installs only. Spec: `features/scale-out-storage.md`. |
-| 9 | Per-domain directories | A domain signs in against its own LDAP, SQL or OIDC directory | Added 2026-09-18. Signing in through an OIDC provider as the server's directory is already AGPL; only the per-domain choice is Enterprise. Spec: `features/per-domain-directories.md`. |
+| 6 | Monitoring history, live tracing, alerts | Stored metrics and traces, a live trace view, and threshold alerts | ihasmail's dashboard shows them. Built 2026-09-19 in `crates/common/src/telemetry` and `crates/jmap/src/inbuxa/telemetry.rs`; status in `features/monitoring.md`. |
+| 7 | SCIM 2.0 provisioning | Accounts and groups managed by an identity provider | From RFC 7643 and RFC 7644. The largest piece. Built 2026-09-19 in `crates/scim` and `crates/scim-proto`; status in `features/scim.md`. |
+| 8 | Scale-out storage | SQL read replicas; sharded blob and in-memory stores | For large installs only. Built 2026-09-19 in `crates/store/src/backend/scaleout`; status in `features/scale-out-storage.md`. |
+| 9 | Per-domain directories | A domain signs in against its own LDAP, SQL or OIDC directory | Added 2026-09-18. Signing in through an OIDC provider as the server's directory is already AGPL; only the per-domain choice is Enterprise. Built 2026-09-19 in `crates/common/src/auth` and `crates/directory`; status in `features/per-domain-directories.md`. |
 | — | Seat limits, license keys | Nothing: there's no license | Removed, not rebuilt. |
 
 ## 5. The web front ends
