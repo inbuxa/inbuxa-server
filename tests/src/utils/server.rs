@@ -83,6 +83,9 @@ pub struct TestServer {
 pub struct TestServerBuilder {
     bootstrap: Bootstrap,
     temp_dir: TempDir,
+    // inbuxa: the listeners this builder added, so a compat run can tell
+    // them from the ones that came with a copy of someone else's store.
+    own_listeners: Vec<Id>,
     http_listener_port: u16,
     reset: bool,
     logging_enabled: bool,
@@ -126,6 +129,7 @@ impl TestServerBuilder {
             )
             .await,
             http_listener_port: 8899,
+            own_listeners: Vec::new(),
             temp_dir,
             reset,
             logging_enabled: false,
@@ -212,17 +216,19 @@ impl TestServerBuilder {
         } else {
             name.to_string()
         };
-        self.insert_object(NetworkListener {
-            bind: Map::new(vec![
-                SocketAddr::from_str(&format!("0.0.0.0:{port}")).unwrap(),
-            ]),
-            name,
-            protocol,
-            use_tls: true,
-            tls_implicit,
-            ..Default::default()
-        })
-        .await;
+        let id = self
+            .insert_object(NetworkListener {
+                bind: Map::new(vec![
+                    SocketAddr::from_str(&format!("0.0.0.0:{port}")).unwrap(),
+                ]),
+                name,
+                protocol,
+                use_tls: true,
+                tls_implicit,
+                ..Default::default()
+            })
+            .await;
+        self.own_listeners.push(id);
         self
     }
 
@@ -389,6 +395,24 @@ impl TestServerBuilder {
         servers
             .parse_tcp_acceptors(&mut self.bootstrap, inner.clone())
             .await;
+
+        // inbuxa: a compat run opens a copy of a real server's store, which
+        // carries that server's listeners: 25, 443, 993 and the rest. Nothing
+        // here runs as root, so every one of them fails to bind and the run
+        // dies before it reads any data. Those are the copy's, not ours, and
+        // the tests reach the server over the compat- listeners added above,
+        // so drop their errors and keep every other one — including a bind
+        // that fails on a listener this builder added.
+        if std::env::var("NO_INSERT").is_ok() {
+            let own = &self.own_listeners;
+            self.bootstrap.errors.retain(|error| match error {
+                registry::types::error::Error::Build { object_id, .. } => {
+                    object_id.object() != ObjectType::NetworkListener
+                        || own.contains(&object_id.id())
+                }
+                _ => true,
+            });
+        }
 
         // Start services
         self.bootstrap.assert_no_errors();
