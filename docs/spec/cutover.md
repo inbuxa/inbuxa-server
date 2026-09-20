@@ -87,6 +87,15 @@ unprivileged process hold port 25.
 3. Copy `/opt/stalwart/data` to the fork's store path. A copy, not a move:
    the original is the rollback. Budget the disk for two full copies, and
    take it from the stopped server, never from under a running one.
+
+   **Then make the original read-only, before the fork exists on this host**
+   (`chmod -R a-w`, or `chattr +i` on the directory, or keep it on a
+   read-only bind mount). Until this moment the running server's own RocksDB
+   lock was what stopped anything else opening that store; stopping it takes
+   that away exactly when a store path is about to be typed. A read-only
+   original refuses the fork harmlessly and still starts under the
+   Enterprise build — measured, `tools/fork/cutover-rehearsal/probe_guard.py`.
+   Undo it only if you are rolling back.
 4. Install the fork at its own path with its own config, pointing at the
    copied store. Most settings travel inside the store — they live in the
    registry — so the config file is mainly the store path and the hostname.
@@ -233,6 +242,19 @@ The fork adds one RocksDB column family for masked email
 database with `create_missing_column_families(true)`, so it creates `_` on
 first open. Upstream has no descriptor for it, and RocksDB will not open a
 database holding a column family it was not told about.
+
+The mistake is worth guarding mechanically rather than carefully, because
+the guard that exists today is removed by step 2. Three states, measured
+(`probe_guard.py`):
+
+| The original store is | The fork | The rollback |
+|---|---|---|
+| held by the running server | refused by RocksDB's lock | intact |
+| stopped, read-only | refused while rotating its own log | intact |
+| stopped, writable | **opens, and adds `_`** | **gone** |
+
+So the window of exposure opens the moment `stalwart.service` stops and
+closes when the original is made read-only. Keep it short.
 
 Three consequences:
 
