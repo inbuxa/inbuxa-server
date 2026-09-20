@@ -21,5 +21,6 @@
 pub mod ai;
 pub mod branding;
 pub mod masked_email;
+pub mod security;
 pub mod tenancy;
 pub mod undelete;
