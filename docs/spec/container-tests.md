@@ -125,11 +125,18 @@ them.
   page — that `ufw` blocks the docker bridge, so pebble never validates and
   the authorizations stay pending — is wrong. Checked on 2026-09-19:
 
-  - **The bridge is open.** From a container on `stalwart-test-acme`, the
-    host answers on both gateway addresses: port 22 connects, and 8899
-    refuses *immediately* with nothing listening. A `ufw` DROP would hang
-    until the timeout instead. Nothing needed changing to establish this,
-    and no firewall rule was touched.
+  - **TCP reaches the host.** From containers on `stalwart-test-acme`, on
+    two different images, `nc` to the host's gateway addresses connects on
+    port 22 and is refused *immediately* on every closed port tried (8899,
+    9, 14000). A `ufw` DROP would hang until the timeout instead. No
+    firewall rule was read or changed to establish this — `ufw status`
+    needs a privilege this session doesn't have.
+
+    One thing this doesn't explain: `openssl s_client` against the same
+    closed 8899 hung for its full timeout rather than reporting the refusal
+    `nc` saw a second earlier. The probe, not the path, is the likely
+    culprit, but it is unexplained, so treat "the bridge is open" as what
+    `nc` shows rather than as settled.
   - **Pebble does validate.** Its log shows 20 validation attempts in the
     regression run, five for each of `autoconfig`, `autodiscover`,
     `mta-sts` and `ua-auto-config.tls.org`, and it then sets each
@@ -148,9 +155,11 @@ them.
   computed when the network config is parsed. **Unproved hypothesis:** the
   test adds its TLS-ALPN provider after the server is up, so if nothing
   recomputes that flag, the listener never offers `acme-tls/1` and every
-  challenge fails exactly as observed. Worth testing before anything else,
-  with an `openssl s_client -alpn acme-tls/1` against `:8899` while a
-  renewal is in flight.
+  challenge fails exactly as observed. Worth testing before anything else.
+  An `openssl s_client -alpn acme-tls/1` against `:8899` during a renewal
+  was tried and proved nothing: the same probe hangs against a port with
+  nothing behind it, so its silence says nothing about ALPN. A probe that
+  first shows a handshake against a known-good endpoint is needed.
 
 ## The last sweep
 
