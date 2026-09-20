@@ -96,12 +96,17 @@ unprivileged process hold port 25.
    original refuses the fork harmlessly and still starts under the
    Enterprise build — measured, `tools/fork/cutover-rehearsal/probe_guard.py`.
    Undo it only if you are rolling back.
-4. Install the fork at its own path with its own config, pointing at the
-   copied store. Most settings travel inside the store — they live in the
-   registry — so the config file is mainly the store path and the hostname.
-   New installs default to `/var/lib/inbuxa`; an existing install keeps
-   whatever its configuration names (SPEC.md §2.5), so this is a free
-   choice as long as the config and the unit agree.
+4. Install the fork at its own path, with **its own copy** of the config —
+   not a reference to the old one. Most settings travel inside the store —
+   they live in the registry — so the config file is mainly the store path
+   and the hostname.
+
+   The store path is **not** a free choice, because `/opt/stalwart` is to be
+   removed once the migration is confirmed ("Retiring the old install",
+   below). Nothing the fork runs on may live under it: the store goes to the
+   fork's own path (`/var/lib/inbuxa` for a new install), the config beside
+   it, and neither may name a path inside `/opt/stalwart`. Check that before
+   starting, not after deleting.
 5. Start the fork. Read the log before opening the ports.
 6. Bring up INBUXA Admin and the new webmail. Both talk to the server over
    JMAP and OAuth, and neither runs on the mail host's web interface
@@ -155,6 +160,41 @@ read objects the fork's own features own. Whether it tolerates them has
 never been checked, and checking it is worth an hour beforehand rather than
 an argument at 2am. Until it is checked, treat the fork's store as
 forward-only.
+
+## Retiring the old install
+
+`/opt/stalwart` goes away once the migration is confirmed (John,
+2026-09-19). It holds the old binary, its config and its data, and nothing
+else the fork needs: ACME account keys and issued certificates live in the
+registry, inside the store, so they came across with the copy
+(`crates/common/src/network/acme/`). Removing the directory strands nothing.
+
+What it does end is the rollback, permanently, so it is worth being exact
+about when.
+
+**The rollback stops being a rollback long before this.** From the moment
+mail flows, going back to the old store means losing everything that
+arrived since. After a day, `/opt/stalwart` is not something anyone would
+actually switch to — it is a cold copy of the pre-cutover state. The
+decision is therefore not "when do we stop being able to roll back", which
+answers itself within hours, but "when do we stop keeping a copy of what
+was there before".
+
+**The gate.** Keep it until the fork has renewed a certificate. That is the
+one thing in "The first week" that fails quietly and late, and the only
+check whose failure would send anyone back. Waiting for it naturally means
+waiting most of 90 days; forcing a renewal instead closes the gate in a
+day, and is worth doing for that reason alone.
+
+**Archive before removing.** A compressed copy of the pre-cutover store,
+kept off the host, costs little and answers "what did this look like
+before" for as long as anyone asks. Deleting the directory is fine; being
+left with no copy of the pre-migration state is a different thing, and not
+what is being asked for here.
+
+Only then: remove the unit file, `/opt/stalwart`, and the old ihasmail
+container and image. Until then the unit stays installed and disabled, and
+the store stays read-only (step 3).
 
 ## After: stock ihasmail against the fork
 
