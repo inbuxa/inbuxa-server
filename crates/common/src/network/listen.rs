@@ -26,6 +26,8 @@ use tokio_rustls::server::TlsStream;
 use trc::{EventType, HttpEvent, ImapEvent, ManageSieveEvent, Pop3Event, SmtpEvent};
 use utils::UnwrapFailure;
 
+use super::control::ListenerControl;
+
 impl Listener {
     pub fn spawn(
         self,
@@ -367,6 +369,38 @@ impl Listeners {
                 .unwrap_or(TcpAcceptor::Plain);
 
             spawn(server, acceptor, shutdown_rx.clone());
+        }
+        (shutdown_tx, shutdown_rx)
+    }
+
+    /// As [`Listeners::spawn`], but each listener gets its own shutdown
+    /// channel, registered in `control` under the listener's id, so one can be
+    /// stopped without touching the others (legacy-protocols LP-2).
+    ///
+    /// The returned sender no longer reaches the listeners: whole-server
+    /// shutdown must also call [`ListenerControl::stop_all`]. `control` has to
+    /// outlive the listeners, because it owns the sending ends — dropping it
+    /// would stop every listener at once.
+    pub fn spawn_with_control(
+        mut self,
+        control: &ListenerControl,
+        spawn: impl Fn(Listener, TcpAcceptor, watch::Receiver<bool>),
+    ) -> (watch::Sender<bool>, watch::Receiver<bool>) {
+        let (shutdown_tx, shutdown_rx) = watch::channel(false);
+        for server in self.servers {
+            let acceptor = self
+                .tcp_acceptors
+                .remove(&server.id)
+                .unwrap_or(TcpAcceptor::Plain);
+
+            let ports = server
+                .listeners
+                .iter()
+                .map(|listener| listener.addr.port())
+                .collect();
+            let listener_rx = control.register(server.id.clone(), server.protocol, ports);
+
+            spawn(server, acceptor, listener_rx);
         }
         (shutdown_tx, shutdown_rx)
     }

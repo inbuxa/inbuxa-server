@@ -70,42 +70,50 @@ async fn main() -> std::io::Result<()> {
     }
 
     // Spawn servers
-    let (shutdown_tx, shutdown_rx) = init.servers.spawn(|server, acceptor, shutdown_rx| {
-        match &server.protocol {
-            ServerProtocol::Smtp | ServerProtocol::Lmtp => server.spawn(
-                SmtpSessionManager::new(init.inner.clone()),
-                init.inner.clone(),
-                acceptor,
-                shutdown_rx,
-            ),
-            ServerProtocol::Http => server.spawn(
-                HttpSessionManager::new(init.inner.clone()),
-                init.inner.clone(),
-                acceptor,
-                shutdown_rx,
-            ),
-            ServerProtocol::Imap => server.spawn(
-                ImapSessionManager::new(init.inner.clone()),
-                init.inner.clone(),
-                acceptor,
-                shutdown_rx,
-            ),
-            ServerProtocol::Pop3 => server.spawn(
-                Pop3SessionManager::new(init.inner.clone()),
-                init.inner.clone(),
-                acceptor,
-                shutdown_rx,
-            ),
-            ServerProtocol::ManageSieve => server.spawn(
-                ManageSieveSessionManager::new(init.inner.clone()),
-                init.inner.clone(),
-                acceptor,
-                shutdown_rx,
-            ),
-        };
-    });
+    // Each listener gets its own shutdown channel, registered under its id, so
+    // the legacy-protocols switch can close one protocol's ports and leave the
+    // rest accepting (legacy-protocols LP-2). The registry lives in `Data` and
+    // so outlives the listeners, which it must: it owns the sending ends.
+    let listener_control = &init.inner.data.listener_control;
+    let (shutdown_tx, shutdown_rx) =
+        init.servers
+            .spawn_with_control(listener_control, |server, acceptor, shutdown_rx| {
+                match &server.protocol {
+                    ServerProtocol::Smtp | ServerProtocol::Lmtp => server.spawn(
+                        SmtpSessionManager::new(init.inner.clone()),
+                        init.inner.clone(),
+                        acceptor,
+                        shutdown_rx,
+                    ),
+                    ServerProtocol::Http => server.spawn(
+                        HttpSessionManager::new(init.inner.clone()),
+                        init.inner.clone(),
+                        acceptor,
+                        shutdown_rx,
+                    ),
+                    ServerProtocol::Imap => server.spawn(
+                        ImapSessionManager::new(init.inner.clone()),
+                        init.inner.clone(),
+                        acceptor,
+                        shutdown_rx,
+                    ),
+                    ServerProtocol::Pop3 => server.spawn(
+                        Pop3SessionManager::new(init.inner.clone()),
+                        init.inner.clone(),
+                        acceptor,
+                        shutdown_rx,
+                    ),
+                    ServerProtocol::ManageSieve => server.spawn(
+                        ManageSieveSessionManager::new(init.inner.clone()),
+                        init.inner.clone(),
+                        acceptor,
+                        shutdown_rx,
+                    ),
+                };
+            });
 
     // Start broadcast subscriber
+    let inner = init.inner.clone();
     spawn_broadcast_subscriber(init.inner, shutdown_rx);
 
     // Wait for shutdown signal
@@ -114,8 +122,10 @@ async fn main() -> std::io::Result<()> {
     // Shutdown collector
     Collector::shutdown();
 
-    // Stop services
+    // Stop services, then the listeners: the shutdown sender no longer reaches
+    // them, since each holds its own channel (LP-2).
     let _ = shutdown_tx.send(true);
+    inner.data.listener_control.stop_all();
 
     // Wait for services to finish
     tokio::time::sleep(Duration::from_secs(1)).await;

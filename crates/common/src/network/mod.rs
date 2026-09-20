@@ -33,6 +33,7 @@ use utils::snowflake::SnowflakeIdGenerator;
 pub mod acme;
 pub mod asn;
 pub mod autoconfig;
+pub mod control;
 pub mod dkim;
 pub mod dns;
 pub mod limiter;

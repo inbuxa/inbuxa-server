@@ -150,6 +150,10 @@ pub struct Data {
     pub blocked_ips: RwLock<BlockedIps>,
     pub lookup_stores: ArcSwap<AHashMap<Box<str>, InMemoryStore>>,
 
+    // inbuxa: the running listeners and their shutdown switches, so one
+    // protocol's ports can close while the rest keep accepting (LP-2)
+    pub listener_control: crate::network::control::ListenerControl,
+
     pub asn_geo_data: AsnGeoLookupData,
 
     pub jmap_id_gen: SnowflakeIdGenerator,

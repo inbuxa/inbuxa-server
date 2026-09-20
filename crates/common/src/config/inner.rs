@@ -67,6 +67,7 @@ impl Data {
 
         Data {
             spam_classifier: ArcSwap::from_pointee(SpamClassifier::default()),
+            listener_control: Default::default(),
             tls_certificates: ArcSwap::from_pointee(certificates),
             tls_self_signed_cert: build_self_signed_cert(
                 subject_names
@@ -222,6 +223,7 @@ impl Default for Data {
     fn default() -> Self {
         Self {
             spam_classifier: Default::default(),
+            listener_control: Default::default(),
             tls_certificates: Default::default(),
             tls_self_signed_cert: Default::default(),
             blocked_ips: Default::default(),
