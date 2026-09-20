@@ -78,8 +78,27 @@ class Client:
                 fail(f'{self.name} did not authenticate: {detail}', code=1)
             fail(f'{self.name}: HTTP {error.code} from {url}: {detail}', code=1)
         except urllib.error.URLError as error:
-            fail(f'cannot reach {url}: {error.reason}. '
-                 f'A self-signed certificate needs --insecure.', code=1)
+            self._unreachable(error)
+
+    def authenticates(self):
+        """Whether these credentials are accepted, without failing the run."""
+        request = urllib.request.Request(
+            f'{self.server}/jmap/session',
+            headers={'Authorization': f'Basic {self.auth}'})
+        try:
+            with urllib.request.urlopen(request, context=self.ctx, timeout=30) as response:
+                return response.status == 200
+        except urllib.error.HTTPError as error:
+            if error.code in (401, 403):
+                return False
+            fail(f'{self.name}: HTTP {error.code} from the session endpoint', code=1)
+        except urllib.error.URLError as error:
+            self._unreachable(error)
+
+    def _unreachable(self, error):
+        hint = ('. A self-signed certificate needs --insecure'
+                if isinstance(error.reason, ssl.SSLError) else '')
+        fail(f'cannot reach {self.server}: {error.reason}{hint}', code=1)
 
     def call(self, method, arguments):
         """One JMAP method call; returns its response object."""
@@ -204,13 +223,22 @@ def main():
     args = parser.parse_args()
 
     admin = Client(args.server, args.admin, args.insecure)
-    session = admin._post(f'{args.server.rstrip("/")}/jmap', {'using': USING, 'methodCalls': []})
-    if 'methodResponses' not in session:
-        fail(f'{admin.name} signed in but the server returned no JMAP session', code=1)
-
     tenant_admins = [(Client(args.server, credentials, args.insecure),
                       credentials.split(':', 1)[1])
                      for credentials in args.tenant_admin]
+
+    # Every identity first, before any work: a recording that stops on the
+    # last tenant administrator has wasted a pass over every account, and
+    # this runs against a server that may not be up for long.
+    refused = [client.name for client in [admin] + [c for c, _ in tenant_admins]
+               if not client.authenticates()]
+    if refused:
+        fail('these did not authenticate: ' + ', '.join(refused) + '.\n'
+             'Basic authentication wants the account\'s name, which may not be\n'
+             'its email address, and an account with two-factor or OAuth-only\n'
+             'sign-in needs an app password instead of its own. Check one with:\n'
+             "  curl -s -o /dev/null -w '%{http_code}\\n' -u 'NAME:PASSWORD' "
+             f'{args.server.rstrip("/")}/jmap/session', code=1)
 
     os.makedirs(args.out, exist_ok=True)
     account_ids = admin.query_ids('Account')
