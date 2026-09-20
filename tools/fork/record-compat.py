@@ -74,8 +74,18 @@ class Refused(Exception):
         super().__init__(str(self))
 
     def __str__(self):
-        needed = PERMISSION.get(self.method)
         detail = self.error.get('description') or json.dumps(self.error)[:120]
+        # "not an owner of account X" is reach, not a permission: the
+        # identity can see its own account and no further, and no permission
+        # granted to it changes that. Saying "needs sysMaskedEmailGet" there
+        # sends you to grant something that won't help.
+        if 'owner' in detail.lower():
+            return (f'{self.who} may not {self.method}: {detail}. '
+                    f'That is reach, not a permission: this identity can only '
+                    f'read its own account. Recording every account needs the '
+                    f'administrator that has the run of the server; a tenant '
+                    f'administrator belongs in --tenant-admin instead.')
+        needed = PERMISSION.get(self.method)
         return (f'{self.who} may not {self.method}: {detail}'
                 + (f' (needs {needed})' if needed else ''))
 
