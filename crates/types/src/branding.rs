@@ -71,12 +71,12 @@ pub fn env_var(name: &str) -> Result<String, std::env::VarError> {
 #[macro_export]
 macro_rules! brand_version {
     () => {
-        "2026.9.18"
+        "2026.9.20"
     };
 }
 
 /// The version with the Stalwart release it's built on, e.g.
-/// `2026.9.18 (Stalwart 0.16.22)`. The base comes from Cargo, which follows
+/// `2026.9.20 (Stalwart 0.16.22)`. The base comes from Cargo, which follows
 /// upstream, so it's always the base actually compiled in. It matters because
 /// Stalwart's data upgrades are one-way. Once INBUXA stops tracking upstream,
 /// this becomes just the version.

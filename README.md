@@ -11,7 +11,7 @@
 **INBUXA** is a mail and collaboration server: JMAP, IMAP, POP3, SMTP,
 CalDAV, CardDAV and WebDAV, in one Rust binary, with ihasmail as its web front
 end. It is a fork of [Stalwart](https://github.com/stalwartlabs/stalwart).
-Project site: [inbuxa.org](https://inbuxa.org) (not up yet).
+Project site: [inbuxa.org](https://inbuxa.org). Documentation: [docs.inbuxa.org](https://docs.inbuxa.org).
 
 Stalwart ships some features only in a paid Enterprise Edition: multi-tenancy,
 masked email, undelete and others. INBUXA ships everything to everybody under
