@@ -195,6 +195,34 @@ store is forward-only. The rollback is the old store or nothing.
 
 ## Retiring the old install
 
+**Done, 2026-09-20.** `/opt/stalwart` and its unit were removed the same day
+as the cutover, at the operator's decision and before the gate proposed
+below. The section is kept because it describes the shape of the decision,
+and because the migration tool has to offer it.
+
+What was done, in order: the fork was confirmed to hold nothing open under
+the old tree and to name it in neither its config nor its unit; the whole of
+`/opt/stalwart` was archived and the archive verified off-host by checksum;
+then the tree, `stalwart.service` and its drop-in were removed. The
+`stalwart` user was **left alone** — `redis-server` runs as it, which
+`pgrep -u stalwart` had already shown.
+
+Two things worth carrying into `migration.md`:
+
+- **The unit is not inside the tree.** `/opt/stalwart` does not contain
+  `/etc/systemd/system/stalwart.service` or its drop-in, so an archive of the
+  tree alone is not a restorable rollback. Both were saved separately beside
+  the tarball. A tool that archives before retiring has to take them too.
+- **Retiring changes what a rollback is.** Up to that moment it was a service
+  swap against a store still on disk: stop one unit, start the other, minutes
+  and no restore. Afterwards it is an untar, a chown, a unit to reinstate and
+  a webmail image that no longer exists locally. Still possible, materially
+  slower, and no longer the thing the Rollback section describes.
+
+The rest of this section is what was decided beforehand, and stands as the
+recommendation for anyone else.
+
+
 **The new stack depends on nothing in the old one.** That is the point of
 the shape, not a side effect of it: `/opt/stalwart` is a reference, and
 everything the fork needs — the store, the config, anything else found along
