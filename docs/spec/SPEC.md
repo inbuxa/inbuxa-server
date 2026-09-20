@@ -132,7 +132,10 @@ repository. Instead:
   default: the OIDC-directory, tenant and archiving suites; the four
   telemetry suites (alerts, metrics, tracing, webhooks); and the LLM parts of
   the spam-filter suite. Each gate carries an `inbuxa: pending-rebuild` comment
-  and comes off when its feature is rebuilt.
+  and comes off when its feature is rebuilt. All nine features were rebuilt by
+  2026-09-19, so every gate came off and the feature itself was removed from
+  `tests/Cargo.toml` that day. A spec that still describes a suite as gated is
+  describing the state at its own date.
 - Those gated suites are shared, AGPL test code that exercises Enterprise
   behavior. That makes them a clean source for the feature specs, and ready-made
   acceptance tests for the rebuilds.

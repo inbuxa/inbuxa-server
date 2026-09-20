@@ -4,10 +4,9 @@ version = "0.16.22"
 edition = "2024"
 
 [features]
-# Tests for Enterprise features the fork hasn't rebuilt yet. Off by default, so
-# the crate compiles without them. Each gate is marked `inbuxa: pending-rebuild`,
-# and comes off when its feature's rebuild lands.
-pending-rebuild = []
+# `pending-rebuild` held the shared tests of features the fork hadn't rebuilt
+# yet. All nine are built and every gate is off, so the feature went on
+# 2026-09-19 (docs/spec/SPEC.md §2.2b).
 #default = ["sqlite", "postgres", "mysql", "rocks", "s3", "redis", "nats", "azure", "foundationdb"]
 #default = ["sqlite", "postgres", "mysql", "rocks", "s3", "redis", "foundationdb"]
 default = ["rocks", "sqlite"]
