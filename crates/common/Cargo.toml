@@ -54,7 +54,7 @@ sha2 = "0.11"
 md5 = "0.8.1"
 whatlang = "0.18"
 idna = "1.1"
-decancer = "3.3.3"
+decancer = "4.0.0"
 unicode-security = "0.1.2"
 infer = "0.22"
 bincode = { version = "2.0.1", features = ["serde"] }

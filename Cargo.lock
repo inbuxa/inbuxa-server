@@ -1987,11 +1987,10 @@ dependencies = [
 
 [[package]]
 name = "decancer"
-version = "3.3.3"
+version = "4.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a9244323129647178bf41ac861a2cdb9d9c81b9b09d3d0d1de9cd302b33b8a1d"
+checksum = "453589e364ce786381e7bcbf0d659088ff7e4d3e77f948dd1cf861344acf7a86"
 dependencies = [
- "lazy_static",
  "regex",
 ]
 
