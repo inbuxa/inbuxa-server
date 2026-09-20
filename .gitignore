@@ -1,4 +1,7 @@
 /target
+# Release binaries built by hand: ~100 MB each, and a public repository is
+# the wrong place for them.
+/artifact
 *.failed
 *_failed
 run.sh

@@ -1,0 +1,51 @@
+# What CI can check without a mail server's worth of infrastructure.
+#
+# The build, and that every test target compiles. It deliberately does not
+# *run* the test suites: the unit tests only build with the integration crate
+# in the graph, because that is what switches on the `test_mode` features they
+# rely on (docs/spec/SPEC.md 2.2b), and the integration suites need a `STORE`,
+# fixed ports, and in most cases a container apiece (docs/spec/
+# container-tests.md). Running them here would mean either a green tick that
+# skipped everything, or a red one that means "the runner has no Redis".
+#
+# So this catches what it can honestly catch -- code that does not compile,
+# including test code -- and the suites are run by hand, one at a time, as
+# that page describes. If that changes, it changes because someone made the
+# suites runnable unattended, not because CI started ignoring failures.
+name: CI
+on:
+  push:
+    branches: [main]
+  pull_request:
+  # Lets CI be run by hand against any ref, including one that predates a CI
+  # change, without pushing an empty commit to move it.
+  workflow_dispatch:
+
+# A second push to a branch cancels the run still going for the first: the
+# older run's answer is about code nobody is looking at any more.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      # Every `uses:` here is pinned to a full commit SHA, with the release it
+      # belongs to in the trailing comment. A tag is a mutable pointer, so
+      # trusting `@v7` is trusting every future version of that action,
+      # including one pushed by whoever compromises the account. Dependabot
+      # updates both halves together -- do not "simplify" a pin back to a tag.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: Swatinem/rust-cache@49a0bdc70d2e1b713ca9e2869b211fcce03d3c1c # v2.9.2
+      - name: System dependencies
+        # foundationdb and the search backends are off by default, but the
+        # default feature set still links against the system's C libraries.
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends clang
+      - name: Build the server
+        run: cargo build -p inbuxa --locked
+      - name: Compile every test target
+        # `--no-run` is the point: it builds the unit tests and the integration
+        # crate together, which is the combination that resolves the test
+        # features, and stops short of running anything that wants a store.
+        run: cargo test --workspace --locked --no-run
