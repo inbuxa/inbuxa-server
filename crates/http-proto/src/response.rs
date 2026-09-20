@@ -180,6 +180,22 @@ impl HttpResponse {
         self
     }
 
+    /// inbuxa: the same, for a response that required authentication.
+    ///
+    /// `public` lets any cache keep the body and hand it to anyone, and
+    /// `immutable` means a browser will not revalidate it for a year. On a
+    /// response whose headers depend on the request's `Origin`, that is a trap:
+    /// an entry stored while the origin was not yet an allowed front end has no
+    /// CORS headers and no `Vary`, and is then replayed from cache to a caller
+    /// that would have been allowed, which fails as an opaque network error
+    /// with nothing on the server to show for it.
+    pub fn with_private_immutable_cache(mut self) -> Self {
+        self.builder = self
+            .builder
+            .header(header::CACHE_CONTROL, "private, max-age=31536000, immutable");
+        self
+    }
+
     pub fn with_location<V>(mut self, location: V) -> Self
     where
         V: TryInto<HeaderValue>,

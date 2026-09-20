@@ -812,13 +812,20 @@ async fn handle_session<T: SessionStream>(inner: Arc<Inner>, session: SessionDat
                     // (contract C-14). Responses that already set their own
                     // CORS headers, such as public discovery metadata, keep
                     // them (C-15).
+                    // inbuxa: Vary goes on every response, not only when an
+                    // origin list exists. A response cached while the list was
+                    // empty -- before the front ends were configured -- would
+                    // otherwise carry neither CORS headers nor Vary, and a
+                    // cache would replay it to an origin that should have been
+                    // allowed. With `immutable` on some of these, that is a
+                    // year of an opaque failure the server never sees.
                     let cors_origins = &server.core.network.http.cors_origins;
+                    response.headers_mut().append(
+                        hyper::header::VARY,
+                        hyper::header::HeaderValue::from_static("Origin"),
+                    );
                     if !cors_origins.is_empty() {
                         let headers = response.headers_mut();
-                        headers.append(
-                            hyper::header::VARY,
-                            hyper::header::HeaderValue::from_static("Origin"),
-                        );
                         if let Some(origin) = origin.filter(|origin| {
                             cors_origins.contains(origin)
                                 && !headers.contains_key(hyper::header::ACCESS_CONTROL_ALLOW_ORIGIN)

@@ -117,9 +117,13 @@ impl ManagementApi for Server {
                     include_str!("../../../../resources/schema/schema.json.sha256");
 
                 if path.get(1).is_some_and(|hash| hash == &SCHEMA_HASH) {
+                    // inbuxa: private, not public. This is behind
+                    // authenticate_headers and its CORS headers vary by
+                    // Origin, so a shared or origin-agnostic cache entry is
+                    // wrong -- and, being immutable, wrong for a year.
                     Ok(Resource::new("application/json", SCHEMA_JSON.to_vec())
                         .into_http_response()
-                        .with_immutable_cache()
+                        .with_private_immutable_cache()
                         .with_header(CONTENT_ENCODING, "gzip"))
                 } else {
                     Ok(HttpResponse::redirect(format!("/api/schema/{SCHEMA_HASH}")))
