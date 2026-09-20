@@ -10,4 +10,5 @@
 //! ships. The legacy-protocols switch is INBUXA's own design, specified in
 //! `legacy-protocols.md`.
 
+pub mod listeners;
 pub mod protocol_policy;
