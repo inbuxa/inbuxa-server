@@ -201,6 +201,25 @@ depends on `store` and can't be called from it (`features/scale-out-storage.md`)
   capability `urn:stalwart:jmap` and the `x:` object names. They're
   interoperability, not branding, and renaming them breaks every existing
   client. Anything the fork adds uses its own namespace (open: which one).
+- **Version and build metadata are exempt from the first bullet** (added
+  2026-09-19). `inbuxa --version`, the startup banner and events,
+  OpenTelemetry's `service.version`, the JMAP `implementation` string, release
+  notes and the strip report all name the Stalwart base, as §2.6 requires.
+  That is a factual statement about what was compiled, not a name the product
+  calls itself, and the two bullets don't conflict: the first governs
+  identity, this one governs provenance. A reader who takes "no Stalwart in
+  UI text" literally would strip exactly the string §2.6 exists to keep.
+- **Public material names it once, as fact, with the mark attributed** (added
+  2026-09-19). Where the name appears outside the product — the site, release
+  announcements, documentation — it carries the attribution: Stalwart is a
+  trademark of Stalwart Labs LLC, and INBUXA is not affiliated with or
+  endorsed by them. The fork relationship is stated in the provenance or
+  license section, and the migration path names the server it migrates from,
+  because an operator searching for it has to find it. The base *version*
+  belongs with the operator-facing material above — not in taglines, page
+  titles, hero copy or social previews, where it reads as a source identifier
+  rather than a fact. No comparison, favorable or otherwise: what INBUXA
+  offers is stated on its own terms.
 
 ### 2.5 Packaging
 
@@ -254,9 +273,18 @@ Decided 2026-09-18.
   next date), but as its own milestone: a merge dry run, a strip-report
   comparison against 0.16, and an upgrade test on a copy of real data, because
   it will almost certainly bring a one-way store migration.
-- **Diverging from upstream** is expected eventually, though not soon. When it
-  happens, the base drops out of the version string and nothing else about
-  versioning changes.
+- **Diverging from upstream** is expected eventually, though not soon. The
+  trigger is named, so nobody has to judge the moment (added 2026-09-19):
+  **the first release that is not a rebase on an upstream tag.** While a
+  release still starts from `stalwartlabs/stalwart` at a named version, the
+  base is a fact about how that release was built and stays in the string.
+  The release that no longer does — because merging upstream has stopped
+  being how the fork is built — drops the parenthetical from `--version`, the
+  banner, `service.version` and the JMAP `implementation` string in that same
+  release, and its release notes say why. Nothing else about versioning
+  changes. The reason the base was there does not expire with it: whichever
+  store format a release converts to is stated in the upgrade documentation,
+  which is where an operator about to convert their data is already looking.
 
 ## 3. Clean room
 
@@ -564,7 +592,6 @@ the tenant administrators' own view is not yet recorded
 - Whether the installer stays its own repository or joins the fork's.
 - Governance: solo, or set up for outside contributors from the start
   (contributing guide, sign-off on contributions).
-- Whether the fork follows upstream's version numbers or has its own.
 - The Enterprise License text (`LICENSES/LicenseRef-SEL.txt`) stays while
   upstream files still name it in their headers (`AGPL-3.0-only OR
   LicenseRef-SEL`, 1,112 files at v0.16.22). Deferred (John, 2026-09-18) until
