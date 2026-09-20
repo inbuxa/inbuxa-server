@@ -110,7 +110,19 @@ store is copied, never moved, never opened for writing.
 2. **Stop**: the mail server, then the webmail container. The unit is
    disabled as well as stopped, so a reboot can't put two servers on one set
    of ports with two diverging stores.
-3. **Copy** the store to the fork's path.
+3. **Copy** the store to the fork's path, in two passes where the
+   filesystem has no snapshot to offer (`cutover.md`): a first pass with
+   the server still running, deliberately inconsistent, which moves the
+   bulk outside the window; then, inside the window and after the process
+   has fully exited, a delta pass that makes the copy consistent. A RocksDB
+   store is mostly immutable SST files, so the delta is small and the
+   window is the delta, not the store. The tool times both and reports the
+   second as the downtime.
+
+   Then hand the copy to the user the fork runs as, and make the original
+   unwritable before the fork starts: until the old server stopped, its own
+   store lock was the only thing preventing a second process from opening
+   it.
 4. **Configure**: the fork's config and unit, pointing at the copy.
 5. **Start** the fork, and wait for it to answer.
 6. **Front ends**: INBUXA Admin and the webmail, against the same store's
@@ -119,8 +131,10 @@ store is copied, never moved, never opened for writing.
 8. **Report**.
 
 **Downtime is phases 2 to 7**, and it is the number worth advertising — not
-the total, which preflight and the copy dominate and which nobody
-experiences. The report gives both, per phase, and writes them as JSON
+the total, which preflight and the first copy pass dominate and which
+nobody experiences. The first pass happens with the server still serving,
+which is what keeps the window proportional to the delta rather than to the
+store. The report gives both, per phase, and writes them as JSON
 beside the human-readable summary so a release note can quote them
 honestly. A migration of a small server should be minutes; the number that
 gets published should be one this tool measured, on a stated store size and
