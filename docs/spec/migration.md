@@ -1,0 +1,126 @@
+# Migrating a Stalwart install to INBUXA
+
+Status: draft, 2026-09-19. Decided in outline (John, 2026-09-19); nothing
+built.
+
+Two ways in, and they are different workflows:
+
+- **Fresh installation.** ihasmail-oneshot's `deploy`: a new stack, new
+  domain, nothing to preserve (SPEC.md §6.1).
+- **Migration.** An existing Stalwart server becomes an INBUXA one, keeping
+  everything. This page is that one.
+
+INBUXA's own cutover is the first run of it (`cutover.md`). The tool is what
+that run leaves behind, so the second operator doesn't repeat it by hand.
+
+## What "transparent" means here
+
+Everything that defines the server lives in its data store, so a migration
+that copies the store carries it all: accounts and their passwords, app
+passwords, OAuth clients and live sessions, aliases and mailing lists,
+tenants, domains, DNS records and the DNS provider settings, certificates
+and ACME state, Sieve scripts, the queue, and the mail itself.
+
+Nothing is re-entered and nothing is re-issued. Users are not asked to
+change a password, re-authorize a client, or re-point a DNS record. That is
+the promise the tool makes, and the verification below is what checks it
+rather than assuming it.
+
+The store format is upstream's and unchanged (SPEC.md §2.6), which is what
+makes this a copy rather than a conversion. A migration that also crosses an
+upstream version is that upgrade first, then this.
+
+## Shape
+
+Side by side. The existing install is stopped but left standing, the fork
+goes in at its own path with a copy of the data, and the old install is what
+a rollback returns to. `stalwart-migrator` upgrades in place and says
+plainly that it cannot undo one; this tool can, because it never writes to
+what it migrates from.
+
+It reads the source install and writes only to the new one. The source's
+store is copied, never moved, never opened for writing.
+
+## Phases, each timed
+
+1. **Preflight**, with nothing stopped yet: the source's version and store
+   backend, disk for a second copy of the store, the target path empty, the
+   ports the fork will want, the front ends' plan, and a snapshot the
+   operator confirms exists. Anything wrong here costs no downtime.
+2. **Stop**: the mail server, then the webmail container. The unit is
+   disabled as well as stopped, so a reboot can't put two servers on one set
+   of ports with two diverging stores.
+3. **Copy** the store to the fork's path.
+4. **Configure**: the fork's config and unit, pointing at the copy.
+5. **Start** the fork, and wait for it to answer.
+6. **Front ends**: INBUXA Admin and the webmail, against the same store's
+   OAuth clients.
+7. **Verify** (below). This is the gate, not a formality.
+8. **Report**.
+
+**Downtime is phases 2 to 7**, and it is the number worth advertising — not
+the total, which preflight and the copy dominate and which nobody
+experiences. The report gives both, per phase, and writes them as JSON
+beside the human-readable summary so a release note can quote them
+honestly. A migration of a small server should be minutes; the number that
+gets published should be one this tool measured, on a stated store size and
+account count, not an estimate.
+
+## Verification, before mail flows again
+
+The same checks as `cutover.md`, run by the tool rather than by hand:
+
+- the fork answers on every listener the source had, with the certificate
+  the source was serving;
+- an account signs in over IMAP, JMAP and both front ends, with the
+  credential it already had;
+- a message arrives from outside and one leaves;
+- aliases still receive; a tenant administrator sees its own accounts and
+  domains and no others;
+- the queue drains and the task queue gains no permanent failures;
+- nothing but the fork is listening on those ports.
+
+A failed check is a failed migration, and the tool rolls back rather than
+leaving a half-migrated server for the operator to reason about at 2am.
+
+## Rollback
+
+A first-class path, not an appendix.
+
+- **Automatic** when verification fails, unless the operator asked for the
+  tool to stop and wait instead. A server that half-works is worse than one
+  that is back where it started.
+- **On demand** afterwards, for as long as the old install is still there:
+  `rollback` stops the fork, re-enables and starts the original unit, and
+  brings the old webmail container back.
+- **What it costs**: everything the fork accepted while it served. The two
+  stores diverge from the moment the fork starts, so a rollback after mail
+  has flowed leaves that mail in the fork's store. The tool says how many
+  messages that is rather than letting the operator find out.
+- **What it never does**: point the old server at the store the fork has
+  been writing. That has never been tested and is not a recovery path
+  (`cutover.md`).
+- The old install is kept until the operator retires it deliberately. The
+  tool does not delete the thing its rollback depends on.
+
+## Rehearsal
+
+`--dry-run` does everything but the stop: copies the store to a scratch
+path, brings the fork up against it on alternate ports, runs what it can of
+the verification, reports the timings, and removes the copy. It answers "how
+long will this take, and will it work" without touching the running server,
+and it is what the operator should run first.
+
+## Open
+
+- Where it lives: a command in ihasmail-oneshot, a sibling to
+  `stalwart-migrator`, or the fork's own binary (SPEC.md §8's open question
+  about the installer's repository).
+- Whether it handles container installs as well as native ones, which
+  changes "stop the unit" into "stop the stack".
+- Whether it migrates a Community-edition install too. Nothing about the
+  copy is Enterprise-specific, and a Community server has fewer objects
+  rather than different ones, so this is likely a documentation question
+  rather than a code one.
+- What it does when the source is mid-upgrade, or its store format is older
+  than the fork's base.

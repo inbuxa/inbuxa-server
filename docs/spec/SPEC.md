@@ -437,6 +437,11 @@ Where each of the web interface's jobs goes:
 
 ### 6.1 The installer
 
+Two workflows, and they differ (John, 2026-09-19): a **fresh installation**,
+below, and a **migration** of an existing Stalwart server, which keeps its
+accounts, passwords, DNS records and certificates and is specified in
+`migration.md`. INBUXA's own cutover is the migration tool's first run.
+
 ihasmail-oneshot is the starting point: a Go binary using only the standard
 library, which drives `docker compose`. Its commands and options carry over.
 

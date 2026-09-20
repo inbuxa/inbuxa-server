@@ -2,7 +2,9 @@
 
 Status: draft, 2026-09-19. Nothing here has been rehearsed yet.
 
-SPEC.md §7 step 4. Steps 1 to 3 are met: the fork builds and its suites pass
+SPEC.md §7 step 4. This run is also the first run of the migration tool
+INBUXA will ship (`migration.md`): what is done by hand here is what that
+tool automates, including its rollback. Steps 1 to 3 are met: the fork builds and its suites pass
 (`container-tests.md`), and all eight compat tests pass against a copy of
 INBUXA's store (`compat-tests.md`). What is left is running it as the mail
 server.
