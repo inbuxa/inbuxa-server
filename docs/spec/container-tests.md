@@ -121,9 +121,10 @@ them.
   poll. That was a real renewal bug and is fixed; this run logged no 400 at
   all, and the client polls as RFC 8555 section 7.5.1 says to.
 
-  The suite still doesn't pass here, and the reason first recorded on this
-  page — that `ufw` blocks the docker bridge, so pebble never validates and
-  the authorizations stay pending — is wrong. Checked on 2026-09-19:
+  The suite still doesn't pass here. Half of the reason first recorded on
+  this page is wrong: pebble does validate, and the authorizations do not
+  stay pending. Whether `ufw` is in the way is still open. Checked on
+  2026-09-19:
 
   - **TCP reaches the host.** From containers on `stalwart-test-acme`, on
     two different images, `nc` to the host's gateway addresses connects on
@@ -132,11 +133,21 @@ them.
     firewall rule was read or changed to establish this — `ufw status`
     needs a privilege this session doesn't have.
 
-    One thing this doesn't explain: `openssl s_client` against the same
-    closed 8899 hung for its full timeout rather than reporting the refusal
-    `nc` saw a second earlier. The probe, not the path, is the likely
-    culprit, but it is unexplained, so treat "the bridge is open" as what
-    `nc` shows rather than as settled.
+    **But the network question is not settled, and the probes disagree.**
+    `openssl s_client` against the same closed 8899 hung for its full
+    timeout instead of reporting the refusal `nc` had just seen. Worse,
+    during a live run — when the suite certainly is listening on 8899, it
+    takes `with_default_listeners()` — twelve probes from a container
+    completed no handshake at all, with or without `-alpn acme-tls/1`,
+    while the same `openssl` connects to pebble's own TLS port from the
+    same container and prints its certificate.
+
+    A listener that is up but unreachable from a container is what a `ufw`
+    DROP looks like; an instant refusal when nothing listens is not. Both
+    were observed, minutes apart. Settling it needs `sudo ufw status
+    verbose`, and a listener bound by hand on `0.0.0.0:8899` to probe
+    against — neither of which this session could do. Until then the
+    original `ufw` suspicion is neither confirmed nor dismissed.
   - **Pebble does validate.** Its log shows 20 validation attempts in the
     regression run, five for each of `autoconfig`, `autodiscover`,
     `mta-sts` and `ua-auto-config.tls.org`, and it then sets each
