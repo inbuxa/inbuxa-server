@@ -50,6 +50,34 @@ tests are not an exception.
    `x:ArchivedItem/get` results, each with its `id` and `accountId`:
    `[{"id": "...", "accountId": "..."}]`.
 
+## Recording the three files
+
+`tools/fork/record-compat.py` writes all three, and has to run while the
+Enterprise server is still up — after the cutover there is nothing left to
+record from, and SPEC.md §7 gives that 45 days from the notice.
+
+```
+tools/fork/record-compat.py --server https://mail.example.org \
+    --admin 'admin@example.org:PASSWORD' --out ./compat \
+    --tenant-admin 'tenant-admin@example.org:PASSWORD'
+```
+
+It **only reads**: it issues `/get` and `/query` and refuses to send
+anything else, so it is safe against the live server that the hand-off
+brief otherwise bars touching. It is the one thing that has to run there
+rather than on a copy.
+
+Pass `--tenant-admin` once for each tenant administrator whose view should
+be checked: the script signs in as each and records the accounts and
+domains that administrator can see, which is what `tenant_compat` compares
+against. Without any, `tenantAdmins` is empty and the test checks only the
+tenants themselves. `expected.json` holds those passwords and is written
+`0600`. `--insecure` skips certificate verification.
+
+It was exercised on 2026-09-19 against the fork's own test server, which
+answers the same JMAP: it recorded 3 tenants with their members, 8 masked
+addresses and 3 archived items, in the shapes above.
+
 ## Running one
 
 ```

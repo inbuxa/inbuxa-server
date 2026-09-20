@@ -20,3 +20,15 @@ licenses. Files marked **new** need their notice added to `THIRD-PARTY.md`
 at the repository root before the import is merged.
 
 It needs Python 3.12+ (for `tarfile`'s `data` filter) and git.
+
+## record-compat.py
+
+Records what the `*_compat` tests compare against, from the Enterprise
+server, while it is still running. Read-only: `/get` and `/query` only.
+See `docs/spec/compat-tests.md`.
+
+```bash
+tools/fork/record-compat.py --server https://mail.example.org \
+    --admin 'admin@example.org:PASSWORD' --out ./compat \
+    --tenant-admin 'tenant-admin@example.org:PASSWORD'
+```
