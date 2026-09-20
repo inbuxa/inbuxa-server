@@ -192,6 +192,14 @@ the verification, reports the timings, and removes the copy. It answers "how
 long will this take, and will it work" without touching the running server,
 and it is what the operator should run first.
 
+## What the operator inherits
+
+INBUXA is AGPL, and a migrated server is one its users reach over a network,
+so from its first day its operator owes those users an offer of the
+Corresponding Source (AGPL section 13). The tool should say so once, at the
+end of a successful migration, rather than leaving an obligation to be
+discovered. It is satisfied by a link, and INBUXA's own is published.
+
 ## Open
 
 - Where it lives: a command in ihasmail-oneshot, a sibling to

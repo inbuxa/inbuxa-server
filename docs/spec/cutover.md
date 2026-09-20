@@ -272,6 +272,20 @@ Write down which of the two each difference is. Do it after mail is
 flowing, not as a gate: it informs the contract, it doesn't block the
 cutover.
 
+## Source, and AGPL section 13
+
+The fork is a modified AGPL program, so everyone who interacts with it over
+a network has to be offered its Corresponding Source. That obligation starts
+when the fork begins serving, which is the cutover, not the announcement.
+
+Settled (John, 2026-09-19): the source is released after the cutover and the
+links go live then. In between, the only people the server serves are the
+operator's household, so the set of users owed an offer and the set of
+people holding the repository are the same set. A migration by anyone else
+inherits the obligation on their own first day, which is worth saying in the
+migration tool's output rather than leaving them to find it
+(`migration.md`).
+
 ## The first week
 
 - **Certificate renewal.** The one thing that fails quietly and late. Watch
