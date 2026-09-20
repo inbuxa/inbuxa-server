@@ -109,6 +109,11 @@ unprivileged process hold port 25.
    Time both passes during the rehearsal. The second one is the number that
    matters: it is the window.
 
+   **Then chown it.** `rsync -a` preserves ownership, so the copy arrives
+   owned by the old service user while `inbuxa.service` runs as `User=inbuxa`
+   — the fork will not be able to write its own store. `chown -R
+   inbuxa:inbuxa` the copied tree before starting anything.
+
    **Then make the original read-only, before the fork exists on this host**
    (`chmod -R a-w`, or `chattr +i` on the directory, or keep it on a
    read-only bind mount). Until this moment the running server's own RocksDB
@@ -165,8 +170,15 @@ before the day, not during it.
 ## Rollback
 
 The Enterprise install and its data are untouched, so rolling back is: stop
-the fork, re-enable and start `stalwart.service`, bring the old ihasmail
-container back. Minutes, and no restore.
+the fork, **make the original store writable again**, re-enable and start
+`stalwart.service`, bring the old ihasmail container back. Minutes, and no
+restore.
+
+The writable step is easy to forget and the guard of step 3 is what makes it
+necessary: the same read-only flag that stops the fork opening the original
+by mistake also stops the Enterprise build starting on it. Undo it first, or
+the rollback fails at the worst possible moment with what looks like a
+permissions problem and isn't.
 
 What it costs is everything the fork accepted while it served: the two
 stores diverge from the moment the fork starts. Mail delivered to the fork's
@@ -175,47 +187,67 @@ the decision to roll back is worth making early and deliberately, and the
 window between "started" and "letting mail flow" is where a rollback is
 free.
 
-**Rolling the data back is a different thing, and untested.** Pointing the
-Enterprise build at the store the fork has been writing to would ask it to
-read objects the fork's own features own. Whether it tolerates them has
-never been checked, and checking it is worth an hour beforehand rather than
-an argument at 2am. Until it is checked, treat the fork's store as
-forward-only.
+**Rolling the data back is a different thing, and impossible.** Pointing the
+Enterprise build at the store the fork has been writing to does not work and
+cannot be made to: it refuses to start on it at all (below). The fork's
+store is forward-only. The rollback is the old store or nothing.
 
 ## Retiring the old install
 
-`/opt/stalwart` goes away once the migration is confirmed (John,
-2026-09-19). It holds the old binary, its config and its data, and nothing
-else the fork needs: ACME account keys and issued certificates live in the
-registry, inside the store, so they came across with the copy
-(`crates/common/src/network/acme/`). Removing the directory strands nothing.
+**The new stack depends on nothing in the old one.** That is the point of
+the shape, not a side effect of it: `/opt/stalwart` is a reference, and
+everything the fork needs — the store, the config, anything else found along
+the way — is copied to new paths under its own tree. When the old directory
+goes, nothing should notice.
 
-What it does end is the rollback, permanently, so it is worth being exact
-about when.
+Nothing in the fork works against that. `inbuxa.service` substitutes its own
+prefix and no path in the tree names `/opt/stalwart`; certificates and ACME
+account keys live in the registry inside the store. The dependency, if one
+appears, will have been created by hand during the move — a store path left
+where it was, a config that still names the old tree, a webmail container
+with a volume under it.
 
-**The rollback stops being a rollback long before this.** From the moment
-mail flows, going back to the old store means losing everything that
-arrived since. After a day, `/opt/stalwart` is not something anyone would
-actually switch to — it is a cold copy of the pre-cutover state. The
-decision is therefore not "when do we stop being able to roll back", which
-answers itself within hours, but "when do we stop keeping a copy of what
-was there before".
+So prove it rather than assert it, and prove it reversibly:
 
-**The gate.** Keep it until the fork has renewed a certificate. That is the
-one thing in "The first week" that fails quietly and late, and the only
-check whose failure would send anyone back. Waiting for it naturally means
-waiting most of 90 days; forcing a renewal instead closes the gate in a
-day, and is worth doing for that reason alone.
+- Nothing open: `lsof +D /opt/stalwart` against the running fork returns
+  nothing, and neither does its config or unit mention the path.
+- **Then rename it.** `mv /opt/stalwart /opt/stalwart.retired` and leave it
+  a day under real traffic. If anything depended on it, that is when it
+  says so, and the fix is one `mv` back. Deleting proves the same thing and
+  cannot be undone; renaming is the same test with a way out.
 
-**Archive before removing.** A compressed copy of the pre-cutover store,
-kept off the host, costs little and answers "what did this look like
-before" for as long as anyone asks. Deleting the directory is fine; being
-left with no copy of the pre-migration state is a different thing, and not
-what is being asked for here.
 
-Only then: remove the unit file, `/opt/stalwart`, and the old ihasmail
-container and image. Until then the unit stays installed and disabled, and
-the store stays read-only (step 3).
+The old install is **kept, shut down**, not removed (John, 2026-09-19). Its
+unit stays installed and disabled and its store stays read-only, so it costs
+a stopped service and the disk its data sits on, and nothing else. If a
+rollback is ever wanted it is started again (see Rollback).
+
+When it stops being worth keeping, that is the operator's call and the tool
+**asks** rather than decides: keep it, or delete it. The tool never removes
+the thing its own rollback depends on without being told to
+(`migration.md`).
+
+**Budget for two full copies indefinitely, not temporarily.** Step 3's
+second copy is not reclaimed on a schedule; it is reclaimed when somebody
+answers the prompt, which may be never.
+
+Deleting it, when that is the answer, strands nothing else the fork needs:
+ACME account keys and issued certificates live in the registry, inside the
+store, so they came across with the copy
+(`crates/common/src/network/acme/`). `/opt/stalwart` holds the old binary,
+its config and its data, and that is all.
+
+**When to ask.** Not on a timer. The signal worth waiting for is the fork
+renewing a certificate, which is the one item in "The first week" that fails
+quietly and late and the only failure that would genuinely send anyone back.
+Waiting for it to happen naturally means most of 90 days; forcing a renewal
+closes the question in a day, and is worth doing for that reason alone.
+
+**Archive before deleting**, if deleting is the answer. A compressed copy of
+the pre-cutover store, kept off the host, costs little and answers "what did
+this look like before" for as long as anyone asks. Losing the last copy of
+the pre-migration state is a different decision from reclaiming a directory,
+and worth making separately.
 
 ## After: stock ihasmail against the fork
 

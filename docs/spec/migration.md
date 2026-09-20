@@ -111,10 +111,18 @@ A first-class path, not an appendix.
   has flowed leaves that mail in the fork's store. The tool says how many
   messages that is rather than letting the operator find out.
 - **What it never does**: point the old server at the store the fork has
-  been writing. That has never been tested and is not a recovery path
+  been writing. That is not a recovery path and cannot be made into one —
+  the old build refuses to open a store the fork has touched at all
   (`cutover.md`).
+- **What it undoes first**: the read-only flag on the original store. The
+  guard that stops the fork opening it by mistake also stops the old build
+  starting on it.
 - The old install is kept until the operator retires it deliberately. The
-  tool does not delete the thing its rollback depends on.
+  tool does not delete the thing its rollback depends on, and when the
+  operator is done with it the tool **asks** — keep, or delete — rather
+  than deciding. Nothing the fork runs on may be inside it by then, which
+  `verify` checks: no open file under the old tree, and no path in the
+  fork's config or unit naming it.
 
 ## Rehearsal
 
