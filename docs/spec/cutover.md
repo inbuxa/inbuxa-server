@@ -1,6 +1,8 @@
 # Cutting INBUXA over to the fork
 
-Status: draft, 2026-09-19. Nothing here has been rehearsed yet.
+Status: draft, 2026-09-19. The sequence has been rehearsed once, on
+synthetic data ("The rehearsal", below). INBUXA's own data has not been
+through it.
 
 SPEC.md §7 step 4. This run is also the first run of the migration tool
 INBUXA will ship (`migration.md`): what is done by hand here is what that
@@ -177,12 +179,84 @@ cutover.
 - **The logs**, for the `STALWART_*` fallback warnings, which name settings
   worth renaming while nobody is under pressure.
 
+## The rehearsal, 2026-09-19
+
+`tools/fork/cutover-rehearsal/` runs this document against data it makes up:
+upstream 0.16.22 in a container as the install running today, the fork beside
+it, both unprivileged with `CAP_NET_BIND_SERVICE`. It rehearses the sequence,
+not the data — the data is `compat-tests.md`. **27 of 27 checks passed, and
+the rollback took 1.5 seconds.**
+
+What it turned from assumption into observation:
+
+- The fork opens and serves a store the previous build wrote. Every account
+  signed in with the password it had, over JMAP and over IMAP; mail read
+  back as the same set; an alias still delivered.
+- A tenant administrator saw exactly its own accounts and domains and still
+  could not read listeners — across the copy, unchanged. That is the shape
+  of the check `tenant_compat` could not make, `tenantAdmins` being empty on
+  the real run. It is not INBUXA's tenant, but the mechanism holds.
+- Ports 25, 465 and 993 were bound by an unprivileged process.
+- The `STALWART_*` fallback warnings of SPEC.md §2.5 fire, naming each
+  setting to rename. A third warning is worth knowing about in advance:
+  with the server configured and not in recovery mode,
+  `INBUXA_RECOVERY_ADMIN` is **ignored**, and the log says to remove it.
+- The rollback restored the exact pre-cutover state and left behind only
+  what the fork had accepted — the documented cost, measured rather than
+  asserted.
+
+Two things to carry into the day, neither of them a fault:
+
+- **Set the fixture up right or the tenant check is vacuous.**
+  `memberTenantId` does not come down from the domain, and is refused on
+  create (`invalidForeignKey`); it has to be set afterwards. An account
+  without one is server-wide, so a tenant "admin" without one is a server
+  administrator and sees everything.
+- **IMAP's INBOX is not JMAP's account.** Mail from an unauthenticated
+  sender is filed as spam, so INBOX counts and message counts differ, before
+  and after alike. Compare each against itself on the day, or a faithful
+  move will look like a loss.
+
+## Answered: the Enterprise build cannot read the fork's store
+
+This was open. It is now settled, and the answer is no.
+
+Pointed at a store the fork had opened, upstream 0.16.22 refuses to start:
+
+```
+⚠️ Startup failed: Failed to open database:
+   Error { message: "Invalid argument: Column families not opened: _" }
+```
+
+The fork adds one RocksDB column family for masked email
+(`SUBSPACE_INBUXA: u8 = b'_'`, `crates/store/src/lib.rs`) and opens the
+database with `create_missing_column_families(true)`, so it creates `_` on
+first open. Upstream has no descriptor for it, and RocksDB will not open a
+database holding a column family it was not told about.
+
+Three consequences:
+
+- The failure is a hard one, at startup, exit code 1, **before any data is
+  read**. That is the good version: it is loud and immediate, not a slow
+  corruption.
+- **"A copy, not a move" is load-bearing, and more so than step 3 says.**
+  One open by the fork is enough: the store gains `_` and upstream can never
+  open it again. Pointing the fork at the original even once — to "just
+  check" — destroys the rollback path. The copy is the only thing that keeps
+  the Enterprise install able to start.
+- The side-by-side plan is not merely preferable, it is the only shape with
+  a rollback at all. An in-place swap would have no way back.
+
 ## Open
 
-- Whether the Enterprise build can read a store the fork has written. With
-  the side-by-side plan this only matters if the fork's store has to be
-  carried back, since the rollback path is the old store, untouched.
 - Whether ACME renewal works on the host, which the test suite has not been
-  able to settle (`container-tests.md`).
+  able to settle (`container-tests.md`). Untouched by the rehearsal, which
+  runs with `requestTlsCertificate: false`.
 - Whether the front ends need anything at cutover, or follow separately
-  (SPEC.md §5).
+  (SPEC.md §5). The rehearsal does not start them.
+- What the sequence does on the host rather than in containers: systemd,
+  `AmbientCapabilities`, and above all `systemctl disable stalwart`, which
+  has no analogue in the rehearsal and is the one step guarding against two
+  servers on one set of ports.
+- Whether INBUXA's own data survives the sequence, as opposed to opening
+  under it. That needs a snapshot and a repeat of "Before the day" step 2.
