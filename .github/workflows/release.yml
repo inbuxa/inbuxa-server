@@ -121,8 +121,9 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: write
+      pull-requests: write
     outputs:
-      sha: ${{ steps.bump.outputs.sha }}
+      sha: ${{ steps.land.outputs.sha }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -131,6 +132,7 @@ jobs:
       - id: bump
         env:
           VERSION: ${{ needs.check.outputs.version }}
+          BRANCH: release/v${{ needs.check.outputs.version }}
         run: |
           set -euo pipefail
 
@@ -153,14 +155,72 @@ jobs:
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add crates/types/src/branding.rs
           git commit -m "Version ${VERSION}"
-          git push origin HEAD:main
+          git push origin "HEAD:refs/heads/${BRANCH}"
 
-          echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+      # main is protected: it takes a pull request with a green build, and
+      # GITHUB_TOKEN is not among the bypass actors. So the bump lands the way
+      # every other change does. The alternative was to hand the release a
+      # credential that outranks the rule, which is a worse thing to own than
+      # a slower Monday.
+      - id: land
+        env:
+          VERSION: ${{ needs.check.outputs.version }}
+          BRANCH: release/v${{ needs.check.outputs.version }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+
+          url="$(gh pr create --base main --head "${BRANCH}" \
+            --title "Version ${VERSION}" \
+            --body "Weekly release. Bumps \`brand_version!\` to ${VERSION} so the tag names a tree that reports the version the tag claims.")"
+          # The number, not the branch: the branch is deleted on merge, and a
+          # deleted branch no longer resolves to its pull request.
+          pr="${url##*/}"
+          echo "Opened #${pr}"
+
+          # The build is what the rule actually requires, and it is also the
+          # thing worth waiting for: a release cut from a tree that does not
+          # compile is the failure this whole arrangement exists to prevent.
+          # A full build of this tree is long, so the deadline is generous.
+          deadline=$(( SECONDS + 3600 ))
+          while :; do
+            state="$(gh pr view "${pr}" --json statusCheckRollup \
+              --jq '[.statusCheckRollup[]? | .conclusion // "PENDING"] | join(",")')"
+            case "${state}" in
+              *FAILURE*|*CANCELLED*|*TIMED_OUT*)
+                echo "::error::CI failed on ${BRANCH} (${state}); no release cut. PR #${pr} is left open."
+                exit 1 ;;
+              *SUCCESS*) break ;;
+            esac
+            if [ "${SECONDS}" -ge "${deadline}" ]; then
+              echo "::error::timed out waiting for CI on ${BRANCH}. PR #${pr} is left open."
+              exit 1
+            fi
+            sleep 30
+          done
+
+          gh pr merge "${pr}" --rebase --delete-branch
+
+          # A rebase merge rewrites the commit, so the sha to tag is the one
+          # GitHub recorded for the merge, not the tip that was pushed. It can
+          # take a moment to appear.
+          sha=""
+          for _ in $(seq 1 30); do
+            sha="$(gh pr view "${pr}" --json mergeCommit --jq '.mergeCommit.oid // ""')"
+            [ -n "${sha}" ] && break
+            sleep 5
+          done
+          if [ -z "${sha}" ]; then
+            echo "::error::#${pr} merged but GitHub reported no merge commit; nothing safe to tag."
+            exit 1
+          fi
+
+          echo "sha=${sha}" >> "$GITHUB_OUTPUT"
       - env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
-          args=(--target "${{ steps.bump.outputs.sha }}"
+          args=(--target "${{ steps.land.outputs.sha }}"
                 --title "INBUXA ${{ needs.check.outputs.version }}"
                 --generate-notes)
           # Bound the notes to what is actually new. Without a start tag the
