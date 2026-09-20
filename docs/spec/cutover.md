@@ -88,6 +88,27 @@ unprivileged process hold port 25.
    the original is the rollback. Budget the disk for two full copies, and
    take it from the stopped server, never from under a running one.
 
+   **Copy it in two passes, or the window is the whole store.** The host is
+   ext4, so there is no filesystem snapshot to take and the naive sequence
+   makes every byte part of the downtime. Instead:
+
+   ```sh
+   rsync -aH --delete /opt/stalwart/data/ /var/lib/inbuxa/    # server up
+   systemctl stop stalwart && systemctl disable stalwart      # the window opens
+   rsync -aH --delete /opt/stalwart/data/ /var/lib/inbuxa/    # only the delta
+   ```
+
+   The first pass is deliberately inconsistent and that is fine: it exists
+   only to move the bulk while mail is still flowing. The second pass, after
+   the server has fully exited, is what makes the copy consistent, and it
+   moves very little — a RocksDB store is mostly immutable SST files, so
+   what changes between the passes is the WAL, the MANIFEST and whatever
+   compaction has just written. Wait for the process to exit, not just for
+   `systemctl stop` to return.
+
+   Time both passes during the rehearsal. The second one is the number that
+   matters: it is the window.
+
    **Then make the original read-only, before the fork exists on this host**
    (`chmod -R a-w`, or `chattr +i` on the directory, or keep it on a
    read-only bind mount). Until this moment the running server's own RocksDB
