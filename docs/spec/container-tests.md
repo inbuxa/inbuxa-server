@@ -90,9 +90,19 @@ STORE=RocksDb cargo test -p tests -- --exact automation::automation_tests
 
 ## What a plain regression leaves failing
 
-`STORE=RocksDb cargo test -p tests -- --test-threads=1` was 86 passed, 4
-failed, 27 ignored on 2026-09-19. None of the four was a fork regression,
-and three are the invocation or the environment rather than the code:
+`STORE=RocksDb cargo test -p tests -- --test-threads=1` was 87 passed, 3
+failed, 23 ignored in 17m 26s on 2026-09-19, the run after the ACME fix.
+That is every one of the 113 tests a default build holds; the five the
+`postgres`, `mysql` and `redis` features add are all in the table above and
+all `#[ignore]`d. None of the three failures is a fork regression: each is
+the invocation or the environment rather than the code.
+
+An earlier run the same day was recorded here as 86 passed, 4 failed, 27
+ignored. That totals 117, which no feature set of this tree produces — 113
+by default, 118 with all three backends — and no commit since has added or
+removed a test. So the two aren't the same build and shouldn't be read as a
+trend; the numbers above are the reference, with the command that produced
+them.
 
 - `smtp::inbound::antispam::antispam` fails every time. Its rules URL
   defaults to `file:///Users/me/code/spam-filter/spam-filter-rules.json.gz`,
@@ -102,18 +112,21 @@ and three are the invocation or the environment rather than the code:
 - `cluster::broadcast::cluster_tests` needs `COORDINATOR=Redis` (or `Nats`)
   and a store the nodes can share: it passes on `STORE=PostgreSql`, and
   can't work on RocksDb, where each node gets its own.
-- `smtp::outbound::lmtp::lmtp_delivery` counted three DSNs where it wanted
-  four, and passes on its own: queue timing under a loaded sequential run.
-- `automation::automation_tests` failed against pebble with
+- `smtp::outbound::lmtp::lmtp_delivery` once counted three DSNs where it
+  wanted four, and passed in this run: queue timing under a loaded
+  sequential run, not a fault to chase.
+- `automation::automation_tests` had failed against pebble with
   `400 malformed: "Cannot update challenge with status processing, only
   status pending"`, because the client re-posted the challenge on every
-  poll. That was a real renewal bug and is fixed; the 400s are gone and the
-  client polls as RFC 8555 section 7.5.1 says to.
+  poll. That was a real renewal bug and is fixed; this run logged no 400 at
+  all, and the client polls as RFC 8555 section 7.5.1 says to.
 
   The suite still doesn't pass here: pebble never validates the TLS-ALPN
   challenge, so the authorizations stay pending until the client gives up
-  and no certificate is issued. Validation needs pebble, in its container,
-  to reach the test server's `0.0.0.0:8899` across the docker bridge, and
+  and no certificate is issued — the failure is an `Option::unwrap()` on
+  the certificate that never arrived (`tests/src/automation/acme.rs:223`).
+  Validation needs pebble, in its container, to reach the test server's
+  `0.0.0.0:8899` across the docker bridge, and
   `ufw` is active on this machine. That wasn't proved — standing up a
   listener to test it needs a permission this session didn't have — so
   before reading anything into an ACME failure, check that path first.
