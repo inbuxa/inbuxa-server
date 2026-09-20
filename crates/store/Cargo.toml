@@ -9,7 +9,7 @@ types = { path = "../types" }
 nlp = { path = "../nlp" }
 trc = { path = "../trc" }
 registry = { path = "../registry" }
-rocksdb = { version = "0.24", optional = true, features = ["multi-threaded-cf"] }
+rocksdb = { version = "0.25", optional = true, features = ["multi-threaded-cf"] }
 foundationdb = { version = "0.11", features = ["embedded-fdb-include", "fdb-7_4"], optional = true }
 rusqlite = { version = "0.40", features = ["bundled"], optional = true }
 rust-s3 = { version = "0.37", default-features = false, features = ["tokio-rustls-tls"], optional = true }
