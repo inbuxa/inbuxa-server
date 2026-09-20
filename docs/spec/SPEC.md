@@ -539,6 +539,12 @@ before anything that could prompt that notice happens.
    the domains and the accounts. It applies again the moment either feature
    is switched on (`compat-tests.md`).
 4. Cutover on the running host, with the Enterprise build kept for rollback.
+
+Steps 1 to 3 are met as of 2026-09-19: the fork builds and its suites pass
+(`container-tests.md`), and all eight compat tests pass against a copy of
+INBUXA's store, with the caveat that two of them have nothing to read and
+the tenant administrators' own view is not yet recorded
+(`compat-tests.md`). What remains is step 4.
 5. Only then: public repository and announcement, with the INBUXA fork of
    ihasmail released alongside. Public ihasmail stays Stalwart-facing (§5).
 

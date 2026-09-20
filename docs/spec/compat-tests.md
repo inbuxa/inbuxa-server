@@ -1,6 +1,7 @@
 # Running the compat tests against a copy of INBUXA's data
 
-Status: 2026-09-19 (dry run below; still unrun against INBUXA data).
+Status: 2026-09-19. All eight run against a copy of INBUXA's data; see
+"The first run".
 
 Each feature spec has one **(compat)** acceptance test: the check that
 INBUXA's own data opens in inbuxa-server and reads back as it did on the
@@ -199,6 +200,33 @@ nothing about compatibility** — the same standing as `scim_compat` and
 That leaves one recording that carries weight, `expected.json`, and it is
 made. Should either feature be switched on before the cutover, record again:
 the files are a picture of the day they were taken.
+
+## The first run, 2026-09-19
+
+All eight ran against a copy of INBUXA's RocksDB store, taken from the
+stopped server, with `run-compat.sh` and `john@linuxexperts.net` as the
+administrator. **All eight pass.** SPEC.md §7's cutover steps 2 and 3 are
+met: INBUXA's data opens in the fork and reads back as it did.
+
+What each one actually proved, which is not the same as eight green lines:
+
+| Test | What the pass means |
+|---|---|
+| `tenant_compat` | The tenant, its quotas and its members read back unchanged. `tenantAdmins` was empty, so **what each tenant administrator can see is still unchecked** |
+| `branding_compat` | Every domain's logo answered, and the stored templates read back |
+| `ai_compat` | The twelve `LLM_*` tags are there with the scores observed: real, not vacuous |
+| `monitoring_compat` | Retention and stores read back; old history in the stripped encoding was skipped rather than erroring, and went after one purge |
+| `scim_compat`, `per_domain_directory_compat` | Confirm INBUXA still uses neither feature |
+| `masked_email_compat`, `undelete_compat` | **Nothing.** No masked addresses, retention off: they iterate an empty list |
+
+So six of the eight carry weight today, and one of those six is only
+half-checked until a tenant administrator's view is recorded
+(`--tenant-admin`, "Recording the three files").
+
+Three things had to be fixed before any of this ran, each of which failed
+every test identically and none of which was about the data: the copy's
+listener names, its privileged ports, and its pending tasks. They are
+described below, because the next import's copy will bring the same three.
 
 ## What a failure means
 
