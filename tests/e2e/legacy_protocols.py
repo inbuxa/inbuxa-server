@@ -1,0 +1,251 @@
+#!/usr/bin/env python3
+"""Local end-to-end check of the legacy-protocols switch.
+
+Run it with `python3 tests/e2e/legacy_protocols.py` after
+`cargo build -p inbuxa`. Needs Docker. Working state goes under target/e2e.
+
+Boots the debug binary, turns the switch off, and checks that the IMAP and
+POP3 ports really stop accepting while SMTP, submission and JMAP keep going.
+Then turns it back on and checks the ports come back.
+
+This is the part unit tests cannot reach: whether a socket actually closes on
+a running server (LP-2), and whether a listener put back actually binds again
+(LP-5). Acceptance tests 15, 17 and 18.
+
+Passwords are generated into files under target/e2e and never printed.
+Everything is removed afterwards unless KEEP=1.
+"""
+import base64, json, os, secrets, shutil, socket, ssl, subprocess, sys, time, urllib.request, urllib.error
+
+ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+DIR = f"{ROOT}/target/e2e"
+NAME = "inbuxa-legacy"
+HTTP = "http://127.0.0.1:18080"
+# port -> how to tell a live server from Docker's proxy. Publishing a port
+# makes the host side accept connections whether or not anything is listening
+# inside the container, so a bare connect proves nothing: each port has to be
+# made to speak.
+PORTS = {"imap": 18993, "pop3": 18995, "submissions": 18465, "smtp": 18025}
+TLS_PORTS = {18993, 18995, 18465}
+INBUXA = "urn:inbuxa:jmap"
+failures = []
+
+
+def check(cond, what):
+    print(("ok   " if cond else "FAIL ") + what)
+    if not cond:
+        failures.append(what)
+
+
+def secret_file(name, value=None):
+    path = f"{DIR}/secrets/{name}"
+    if value is None:
+        value = secrets.token_urlsafe(24)
+    with open(path, "w") as f:
+        f.write(value)
+    os.chmod(path, 0o600)
+    return value
+
+
+def docker(*args, check_rc=True):
+    return subprocess.run(["docker", *args], capture_output=True, text=True, check=check_rc)
+
+
+def start(env_file=None):
+    args = ["run", "-d", "--name", NAME, "--user", f"{os.getuid()}:{os.getgid()}",
+            "--entrypoint", "/usr/local/bin/inbuxa",
+            "-v", f"{ROOT}/target/debug/inbuxa:/usr/local/bin/inbuxa:ro",
+            "-v", f"{DIR}/etc-legacy:/etc/inbuxa", "-v", f"{DIR}/data-legacy:/var/lib/inbuxa",
+            "-p", "127.0.0.1:18080:8080",
+            "-p", f"127.0.0.1:{PORTS['submissions']}:465",
+            "-p", f"127.0.0.1:{PORTS['imap']}:993",
+            "-p", f"127.0.0.1:{PORTS['pop3']}:995",
+            "-p", f"127.0.0.1:{PORTS['smtp']}:25"]
+    if env_file:
+        args += ["--env-file", env_file]
+    args += ["stalwartlabs/stalwart:v0.16.22", "--config", "/etc/inbuxa/config.json"]
+    docker(*args)
+    for _ in range(120):
+        try:
+            urllib.request.urlopen(f"{HTTP}/.well-known/jmap", timeout=2)
+        except urllib.error.HTTPError:
+            return
+        except Exception:
+            time.sleep(1)
+            continue
+        return
+    sys.exit("server didn't come up: " + docker("logs", "--tail", "40", NAME, check_rc=False).stderr)
+
+
+def stop():
+    docker("rm", "-f", NAME, check_rc=False)
+
+
+def jmap(user, password, calls, using=("urn:ietf:params:jmap:core", "urn:stalwart:jmap", INBUXA)):
+    body = json.dumps({"using": list(using), "methodCalls": calls}).encode()
+    req = urllib.request.Request(f"{HTTP}/jmap/", data=body, method="POST")
+    req.add_header("Content-Type", "application/json")
+    req.add_header("Authorization", "Basic " + base64.b64encode(f"{user}:{password}".encode()).decode())
+    with urllib.request.urlopen(req, timeout=30) as resp:
+        return json.load(resp)["methodResponses"]
+
+
+def one(user, password, method, args):
+    return jmap(user, password, [[method, args, "0"]])[0]
+
+
+def session(user, password):
+    req = urllib.request.Request(f"{HTTP}/jmap/session")
+    req.add_header("Authorization", "Basic " + base64.b64encode(f"{user}:{password}".encode()).decode())
+    with urllib.request.urlopen(req, timeout=30) as resp:
+        return json.load(resp)
+
+
+def accepts(port, timeout=5):
+    """Whether a server is really answering on this port.
+
+    Docker's published port accepts and then closes when nothing is listening
+    in the container, so connecting is not enough. A TLS port must complete a
+    handshake; a plain one must send its greeting.
+    """
+    try:
+        with socket.create_connection(("127.0.0.1", port), timeout=timeout) as raw:
+            if port in TLS_PORTS:
+                ctx = ssl.create_default_context()
+                ctx.check_hostname = False
+                ctx.verify_mode = ssl.CERT_NONE
+                with ctx.wrap_socket(raw):
+                    return True
+            raw.settimeout(timeout)
+            return bool(raw.recv(1))
+    except (OSError, ssl.SSLError):
+        return False
+
+
+def settle(port, want, tries=30):
+    """Wait for a port to reach the wanted state, so the check is not a race."""
+    for _ in range(tries):
+        if accepts(port) == want:
+            return True
+        time.sleep(0.5)
+    return False
+
+
+def main():
+    stop()
+    # Start from nothing. A half-bootstrapped data directory left by an
+    # earlier run is no longer in bootstrap mode, and the recovery admin
+    # stops authenticating the moment a real admin exists.
+    for sub in ("etc-legacy", "data-legacy"):
+        shutil.rmtree(f"{DIR}/{sub}", ignore_errors=True)
+    for sub in ("etc-legacy", "data-legacy", "secrets"):
+        os.makedirs(f"{DIR}/{sub}", exist_ok=True)
+    os.chmod(f"{DIR}/secrets", 0o700)
+    stop()
+
+    # First boot, with a recovery admin from an env file.
+    recovery = secret_file("legacy-recovery")
+    env_file = f"{DIR}/secrets/legacy-env"
+    with open(env_file, "w") as f:
+        f.write(f"INBUXA_RECOVERY_ADMIN=admin:{recovery}\n")
+    os.chmod(env_file, 0o600)
+    start(env_file)
+
+    got = one("admin", recovery, "x:Bootstrap/get", {"ids": None})
+    singleton = got[1]["list"][0]["id"]
+    res = one("admin", recovery, "x:Bootstrap/set", {"update": {singleton: {
+        "serverHostname": "mail.legacy.test", "defaultDomain": "legacy.test",
+        "requestTlsCertificate": False}}})
+    updated = res[1].get("updated", {}).get(singleton)
+    check(bool(updated), "bootstrap completed")
+    if not updated:
+        sys.exit(json.dumps(res))
+    admin, admin_pw = updated["username"], secret_file("legacy-admin", updated["secret"])
+
+    stop()
+    start()
+
+    sess = session(admin, admin_pw)
+    account = sess["primaryAccounts"].get(INBUXA) or list(sess["accounts"])[0]
+    policy_get = {"accountId": account, "ids": None}
+    policy_set = lambda update: {"accountId": account, "update": {"singleton": update}}
+
+    # The ports we expect a default install to be accepting on.
+    check(accepts(PORTS["imap"]), "IMAP accepts before the switch")
+    check(accepts(PORTS["pop3"]), "POP3 accepts before the switch")
+    check(accepts(PORTS["submissions"]), "submission accepts before the switch")
+    check(accepts(PORTS["smtp"]), "inbound SMTP accepts before the switch")
+
+    # What the screen reads: the locked set and what would close (LP-16, LP-21).
+    got = one(admin, admin_pw, "inbuxa:ProtocolPolicy/get", policy_get)
+    if got[0] != "inbuxa:ProtocolPolicy/get":
+        sys.exit("ProtocolPolicy/get failed: " + json.dumps(got))
+    policy = got[1]["list"][0]
+    check(policy["legacyProtocols"] == "enabled", "switch starts enabled")
+    check(set(policy["lockedProtocols"]) >= {"smtp", "http"},
+          "SMTP and JMAP report as locked (LP-21)")
+    would = {l["id"] for l in policy["wouldClose"]}
+    print("     wouldClose:", sorted(would))
+    check(would, "wouldClose names the listeners that would close (LP-16)")
+
+    # Turn it off, and ask for submission to close too: the lock must overrule.
+    res = one(admin, admin_pw, "inbuxa:ProtocolPolicy/set",
+              policy_set({"legacyProtocols": "disabled", "closeSubmission": True}))
+    if not res[1].get("updated"):
+        sys.exit("ProtocolPolicy/set failed: " + json.dumps(res))
+    overruled = res[1]["updated"].get("singleton")
+    check(overruled is not None and overruled.get("closeSubmission") is False,
+          "closeSubmission overruled to false and reported (LP-21, test 18)")
+
+    # The ports themselves (LP-1, LP-2, LP-3, test 15).
+    check(settle(PORTS["imap"], False), "IMAP stopped accepting")
+    check(settle(PORTS["pop3"], False), "POP3 stopped accepting")
+    check(accepts(PORTS["smtp"]), "inbound SMTP still accepts (LP-3)")
+    check(accepts(PORTS["submissions"]), "submission still accepts, being locked (LP-21)")
+
+    # JMAP still works, which is the whole point of locking it.
+    got = one(admin, admin_pw, "inbuxa:ProtocolPolicy/get", policy_get)
+    check(got[0] == "inbuxa:ProtocolPolicy/get", "JMAP still works while the switch is off")
+    policy = got[1]["list"][0]
+    check(policy["legacyProtocols"] == "disabled", "switch reads back disabled")
+    saved = {l["id"] for l in policy["savedListeners"]}
+    print("     savedListeners:", sorted(saved))
+    check(saved, "the closed listeners were saved (LP-1)")
+
+    # A restart must not reopen them: the objects are gone, not just the sockets.
+    stop()
+    start()
+    check(settle(PORTS["imap"], False), "IMAP still closed after a restart")
+    check(accepts(PORTS["smtp"]), "inbound SMTP still accepts after a restart")
+
+    # Turn it back on: the listeners come back and bind again (LP-5).
+    res = one(admin, admin_pw, "inbuxa:ProtocolPolicy/set",
+              policy_set({"legacyProtocols": "enabled"}))
+    if "updated" not in res[1]:
+        sys.exit("ProtocolPolicy/set back on failed: " + json.dumps(res))
+    check(settle(PORTS["imap"], True), "IMAP accepts again without a restart (LP-5)")
+    check(settle(PORTS["pop3"], True), "POP3 accepts again without a restart (LP-5)")
+
+    got = one(admin, admin_pw, "inbuxa:ProtocolPolicy/get", policy_get)
+    policy = got[1]["list"][0]
+    check(policy["legacyProtocols"] == "enabled", "switch reads back enabled")
+    check(not policy["savedListeners"], "savedListeners is empty again (LP-5)")
+
+    print()
+    if failures:
+        print(f"{len(failures)} FAILED:")
+        for f in failures:
+            print("  - " + f)
+    else:
+        print("all checks passed")
+    return 1 if failures else 0
+
+
+if __name__ == "__main__":
+    rc = 1
+    try:
+        rc = main()
+    finally:
+        if not os.environ.get("KEEP"):
+            stop()
+    sys.exit(rc)
