@@ -2,12 +2,14 @@
  * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
+ *
+ * Modified by Coffey Labs in 2026 for INBUXA.
  */
 
 use crate::core::{Session, SessionData, State};
 use common::{
     auth::AuthRequest,
-    network::{SessionStream, limiter::LimiterResult},
+    network::{SessionStream, legacy::LegacyProtocol, limiter::LimiterResult},
 };
 use directory::Credentials;
 use imap_proto::{
@@ -67,6 +69,12 @@ impl<T: SessionStream> Session<T> {
     }
 
     pub async fn authenticate(&mut self, credentials: Credentials, tag: String) -> trc::Result<()> {
+        // inbuxa: legacy-protocols LP-6, before the password is looked at
+        self.server
+            .refuse_legacy_sign_in(LegacyProtocol::Imap, &credentials)
+            .await
+            .map_err(|err| err.code(ResponseCode::Alert).id(tag.clone()))?;
+
         // Authenticate
         let access_token = self
             .server

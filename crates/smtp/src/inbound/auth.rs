@@ -2,10 +2,15 @@
  * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
+ *
+ * Modified by Coffey Labs in 2026 for INBUXA.
  */
 
 use crate::core::Session;
-use common::{auth::AuthRequest, network::SessionStream};
+use common::{
+    auth::AuthRequest,
+    network::{SessionStream, legacy::LegacyProtocol},
+};
 use directory::Credentials;
 use mail_parser::decoders::base64::base64_decode;
 use registry::schema::enums::Permission;
@@ -108,6 +113,26 @@ impl<T: SessionStream> Session<T> {
     }
 
     pub async fn authenticate(&mut self, credentials: Credentials) -> Result<bool, ()> {
+        // inbuxa: legacy-protocols LP-6. Refused before the password is looked
+        // at, and not counted as an authentication error (LP-11). Only mail
+        // apps authenticate, so this never touches inbound delivery (LP-3).
+        if let Err(err) = self
+            .server
+            .refuse_legacy_sign_in(LegacyProtocol::Submission, &credentials)
+            .await
+        {
+            let refused = err.matches(trc::EventType::Auth(AuthEvent::LegacyProtocolRefused));
+            trc::error!(err.span_id(self.data.session_id));
+            if refused {
+                self.write(LegacyProtocol::Submission.refusal().as_bytes())
+                    .await?;
+            } else {
+                self.write(b"454 4.7.0 Temporary authentication failure\r\n")
+                    .await?;
+            }
+            return Ok(false);
+        }
+
         // Authenticate
         let result = self
             .server
