@@ -13,7 +13,12 @@
 //! [`Server::set_protocol_policy`], which applies the locks (LP-21), removes
 //! or restores the listener objects (LP-1, LP-5) and closes or opens their
 //! sockets (LP-2). What comes back is what actually happened.
+//!
+//! [`validate_listener`] is the registry's side of it: while the switch is
+//! off, no listener it would close may be created, or made by an update
+//! (LP-4).
 
+use crate::registry::mapping::{ObjectResponse, RegistrySetResponse, ValidationResult};
 use common::{Server, auth::AccessToken, network::legacy::PolicyChange};
 use inbuxa_features::security::{
     listeners,
@@ -31,6 +36,7 @@ use jmap_proto::{
     request::IntoValid,
 };
 use jmap_tools::{Key, Map, Value};
+use registry::schema::{prelude::Property, structs::NetworkListener};
 use types::id::Id;
 
 type PValue = Value<'static, P, ProtocolPolicyValue>;
@@ -307,4 +313,120 @@ pub async fn set(
         }
     }
     Ok(response)
+}
+
+/// LP-4: while legacy protocols are off, a listener the switch would close
+/// may not be created, nor may an update make one. Otherwise a listener could
+/// quietly reopen a port the switch is meant to keep closed.
+///
+/// The rule is the switch's own ([`listeners::closes`]), so a locked protocol
+/// or the inbound port is never refused here, and what the switch would close
+/// is exactly what can't be added. Putting saved listeners back (LP-5) goes
+/// through the registry directly, not through `/set`, so it isn't affected.
+pub(crate) async fn validate_listener(
+    set: &RegistrySetResponse<'_>,
+    listener: &NetworkListener,
+) -> ValidationResult {
+    let policy = set.server.protocol_policy().await?;
+    Ok(match listener_refusal(&policy, listener) {
+        Some((property, why)) => Err(SetError::invalid_properties()
+            .with_property(property)
+            .with_description(why)),
+        None => Ok(ObjectResponse::default()),
+    })
+}
+
+/// Why this listener can't exist under this policy, naming the policy and the
+/// property to change, or `None` when it can.
+fn listener_refusal(policy: &Policy, listener: &NetworkListener) -> Option<(Property, String)> {
+    if !listeners::closes(policy, listener) {
+        return None;
+    }
+    let protocol = listeners::protocol_name(listener.protocol);
+    // A submission listener closes because of its port, not its protocol
+    // (LP-3), so the port is what would have to change.
+    let property = if protocol == "smtp" {
+        Property::Bind
+    } else {
+        Property::Protocol
+    };
+    Some((
+        property,
+        format!(
+            "Legacy mail protocols are off (inbuxa:ProtocolPolicy), and this {protocol} \
+             listener would reopen a port the switch keeps closed. Turn legacy protocols \
+             back on first."
+        ),
+    ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use registry::{
+        schema::{enums::NetworkListenerProtocol, prelude::SocketAddr},
+        types::map::Map,
+    };
+    use std::str::FromStr;
+
+    fn listener(protocol: NetworkListenerProtocol, bind: &str) -> NetworkListener {
+        NetworkListener {
+            name: "new".to_string(),
+            protocol,
+            bind: Map::new(vec![SocketAddr::from_str(bind).unwrap()]),
+            ..Default::default()
+        }
+    }
+
+    fn off() -> Policy {
+        let mut policy = Policy {
+            legacy_protocols: LegacyProtocols::Disabled,
+            ..Default::default()
+        };
+        policy.apply_locks();
+        policy
+    }
+
+    #[test]
+    fn on_refuses_nothing() {
+        let on = Policy::default();
+        for protocol in [
+            NetworkListenerProtocol::Imap,
+            NetworkListenerProtocol::Pop3,
+            NetworkListenerProtocol::ManageSieve,
+        ] {
+            assert!(listener_refusal(&on, &listener(protocol, "[::]:1993")).is_none());
+        }
+    }
+
+    #[test]
+    fn off_refuses_every_legacy_protocol_naming_the_policy() {
+        for protocol in [
+            NetworkListenerProtocol::Imap,
+            NetworkListenerProtocol::Pop3,
+            NetworkListenerProtocol::ManageSieve,
+        ] {
+            let (property, why) =
+                listener_refusal(&off(), &listener(protocol, "[::]:1993")).expect("refused");
+            assert_eq!(property, Property::Protocol);
+            assert!(why.contains("inbuxa:ProtocolPolicy"), "{why}");
+        }
+    }
+
+    #[test]
+    fn off_still_allows_what_the_switch_never_closes() {
+        // Locked (LP-21) and inbound (LP-3): the switch doesn't close them,
+        // so there is nothing for a new one to reopen.
+        for (protocol, bind) in [
+            (NetworkListenerProtocol::Smtp, "[::]:25"),
+            (NetworkListenerProtocol::Smtp, "[::]:587"),
+            (NetworkListenerProtocol::Http, "[::]:443"),
+            (NetworkListenerProtocol::Lmtp, "[::]:24"),
+        ] {
+            assert!(
+                listener_refusal(&off(), &listener(protocol, bind)).is_none(),
+                "{protocol:?} on {bind}"
+            );
+        }
+    }
 }
