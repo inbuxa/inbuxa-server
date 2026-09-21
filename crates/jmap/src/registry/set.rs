@@ -502,6 +502,11 @@ impl RegistrySet for Server {
                             )
                             .await?
                         }
+                        // inbuxa: legacy-protocols LP-4
+                        ObjectInner::NetworkListener(listener) => {
+                            crate::inbuxa::protocol_policy::validate_listener(&set, listener)
+                                .await?
+                        }
                         // inbuxa: ME-12 to ME-17
                         ObjectInner::MaskedEmail(mask) => {
                             let old = match &modification {

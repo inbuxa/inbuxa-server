@@ -13,10 +13,11 @@ a running server (LP-2), and whether a listener put back actually binds again
 (LP-5). Acceptance tests 15, 17 and 18.
 
 It also checks the second lock (LP-6): while the switch is off, sign-in over
-submission -- locked open -- and over an IMAP listener that exists by mistake
-is refused with the spec's words, with the right password and with a wrong
-one, and refusals never add up to a disconnect (LP-11). And that a normal
-IMAP sign-in works with the switch on, before and after.
+submission -- locked open -- is refused with the spec's words, with the right
+password and with a wrong one, and refusals never add up to a disconnect
+(LP-11). And that a normal IMAP sign-in works with the switch on, before and
+after. And that while it is off, no listener the switch would close can be
+created, or made by an update (LP-4, test 4).
 
 Passwords are generated into files under target/e2e and never printed.
 Everything is removed afterwards unless KEEP=1.
@@ -31,10 +32,8 @@ HTTP = "http://127.0.0.1:18080"
 # makes the host side accept connections whether or not anything is listening
 # inside the container, so a bare connect proves nothing: each port has to be
 # made to speak.
-PORTS = {"imap": 18993, "pop3": 18995, "submissions": 18465, "smtp": 18025, "mistake": 18994}
-TLS_PORTS = {18993, 18995, 18465, 18994}
-IMAP_REFUSAL = ("NO [ALERT] This server allows only INBUXA webmail and JMAP apps. "
-                "This mail app can't sign in.")
+PORTS = {"imap": 18993, "pop3": 18995, "submissions": 18465, "smtp": 18025}
+TLS_PORTS = {18993, 18995, 18465}
 SMTP_REFUSAL = ("535 5.7.0 This server allows only INBUXA webmail and JMAP apps. "
                 "This mail app can't send.")
 INBUXA = "urn:inbuxa:jmap"
@@ -70,8 +69,7 @@ def start(env_file=None):
             "-p", f"127.0.0.1:{PORTS['submissions']}:465",
             "-p", f"127.0.0.1:{PORTS['imap']}:993",
             "-p", f"127.0.0.1:{PORTS['pop3']}:995",
-            "-p", f"127.0.0.1:{PORTS['smtp']}:25",
-            "-p", f"127.0.0.1:{PORTS['mistake']}:1993"]
+            "-p", f"127.0.0.1:{PORTS['smtp']}:25"]
     if env_file:
         args += ["--env-file", env_file]
     args += ["stalwartlabs/stalwart:v0.16.22", "--config", "/etc/inbuxa/config.json"]
@@ -297,29 +295,38 @@ def main():
     if not all(r == SMTP_REFUSAL for r in replies):
         print("     replies:", replies)
 
-    # An IMAP listener that exists by mistake: created while the switch is off
-    # (LP-4 will refuse this later), and live after the restart below.
+    # No listener the switch would close can be added while it is off (LP-4,
+    # test 4), and the refusal names the policy.
     res = one(admin, admin_pw, "x:NetworkListener/set", {"create": {"m": {
-        "name": "imap-mistake", "protocol": "imap", "bind": {"0.0.0.0:1993": True},
+        "name": "imap-new", "protocol": "imap", "bind": {"0.0.0.0:1993": True},
         "tlsImplicit": True}}})
-    mistake = (res[1].get("created") or {}).get("m", {}).get("id")
-    check(mistake is not None, "an IMAP listener can still be created by mistake")
+    refused = (res[1].get("notCreated") or {}).get("m") or {}
+    check(refused.get("type") == "invalidProperties"
+          and "protocol" in (refused.get("properties") or [])
+          and "inbuxa:ProtocolPolicy" in (refused.get("description") or ""),
+          "creating an IMAP listener is refused, naming the policy (LP-4)")
+    if not refused:
+        print("     reply:", json.dumps(res[1])[:300])
+
+    # What the switch never closes can still be added; turning it into a
+    # listener the switch would close is refused like creating one.
+    res = one(admin, admin_pw, "x:NetworkListener/set", {"create": {"s": {
+        "name": "submission-extra", "protocol": "smtp", "bind": {"0.0.0.0:2587": True}}}})
+    extra = (res[1].get("created") or {}).get("s", {}).get("id")
+    check(extra is not None, "an SMTP listener can still be created, being locked (LP-4, LP-21)")
+    if extra:
+        res = one(admin, admin_pw, "x:NetworkListener/set",
+                  {"update": {extra: {"protocol": "imap"}}})
+        refused = (res[1].get("notUpdated") or {}).get(extra) or {}
+        check(refused.get("type") == "invalidProperties",
+              "turning it into an IMAP listener is refused (LP-4)")
+        one(admin, admin_pw, "x:NetworkListener/set", {"destroy": [extra]})
 
     # A restart must not reopen them: the objects are gone, not just the sockets.
     stop()
     start()
     check(settle(PORTS["imap"], False), "IMAP still closed after a restart")
     check(accepts(PORTS["smtp"]), "inbound SMTP still accepts after a restart")
-
-    if mistake:
-        check(settle(PORTS["mistake"], True), "the mistaken IMAP listener is up")
-        check(imap_login(PORTS["mistake"], admin, admin_pw) == IMAP_REFUSAL,
-              "the mistaken listener refuses the right password (LP-6)")
-        check(imap_login(PORTS["mistake"], admin, "wrong") == IMAP_REFUSAL,
-              "and a wrong one, the same way (LP-11)")
-        check(imap_login(PORTS["mistake"], "nobody@legacy.test", "x") == IMAP_REFUSAL,
-              "and an account that doesn't exist (LP-11)")
-        one(admin, admin_pw, "x:NetworkListener/set", {"destroy": [mistake]})
 
     # Turn it back on: the listeners come back and bind again (LP-5).
     res = one(admin, admin_pw, "inbuxa:ProtocolPolicy/set",
