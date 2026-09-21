@@ -20,6 +20,8 @@ after. And that while it is off, no listener the switch would close can be
 created, or made by an update (LP-4, test 4), and nothing advertises what is
 closed: autoconfig, autodiscover and PACC offer no IMAP, POP3 or submission,
 and the suggested zone marks their SRV names not offered (LP-7, test 5).
+Every change of the switch, and every refused sign-in, is an event in the
+server's log (LP-8, test 14; LP-6).
 
 Passwords are generated into files under target/e2e and never printed.
 Everything is removed afterwards unless KEEP=1.
@@ -225,6 +227,13 @@ def advertised(admin, admin_pw):
     }
 
 
+def events(name):
+    """The server's log lines for one event, from its stdout tracer. The log
+    is the container's, so it starts afresh at every restart."""
+    out = docker("logs", NAME, check_rc=False)
+    return [l for l in (out.stdout + out.stderr).splitlines() if f"({name})" in l]
+
+
 def settle(port, want, tries=30):
     """Wait for a port to reach the wanted state, so the check is not a race."""
     for _ in range(tries):
@@ -265,6 +274,15 @@ def main():
         sys.exit(json.dumps(res))
     admin, admin_pw = updated["username"], secret_file("legacy-admin", updated["secret"])
 
+    stop()
+    start()
+
+    # A tracer to stdout, so the events can be read back from the container's
+    # log. It takes effect from the next start.
+    res = one(admin, admin_pw, "x:Tracer/set", {"create": {"t": {
+        "@type": "Stdout", "level": "info", "buffered": False, "ansi": False}}})
+    if not (res[1].get("created") or {}).get("t"):
+        sys.exit("tracer create failed: " + json.dumps(res))
     stop()
     start()
 
@@ -380,6 +398,25 @@ def main():
               "turning it into an IMAP listener is refused (LP-4)")
         one(admin, admin_pw, "x:NetworkListener/set", {"destroy": [extra]})
 
+    # The change was reported (LP-8, test 14), with who made it and what closed.
+    changed = events("security.legacy-protocols-changed")
+    check(len(changed) == 1 and 'value = "disabled"' in changed[0]
+          and 'policy = "server"' in changed[0] and 'details = "closed"' in changed[0]
+          and '"imaps"' in changed[0] and "accountId = " in changed[0],
+          "turning it off is one event: scope, new value, who, listeners closed (LP-8)")
+    if len(changed) != 1:
+        print("     events:", changed)
+    # Asking for what already holds is not a change.
+    one(admin, admin_pw, "inbuxa:ProtocolPolicy/set", policy_set({"legacyProtocols": "disabled"}))
+    check(len(events("security.legacy-protocols-changed")) == 1,
+          "setting it off again when it is off raises no event (LP-8)")
+    # Every refused sign-in is an event too, and none is a failed sign-in.
+    refused = events("auth.legacy-protocol-refused")
+    check(len(refused) == 7 and all('source = "submission"' in l for l in refused),
+          "each refused sign-in is an auth.legacy-protocol-refused event (LP-6)")
+    check(not events("auth.failed") and not events("auth.too-many-attempts"),
+          "and none is logged as a failed sign-in (LP-11)")
+
     # A restart must not reopen them: the objects are gone, not just the sockets.
     stop()
     start()
@@ -398,6 +435,10 @@ def main():
     policy = got[1]["list"][0]
     check(policy["legacyProtocols"] == "enabled", "switch reads back enabled")
     check(not policy["savedListeners"], "savedListeners is empty again (LP-5)")
+    changed = events("security.legacy-protocols-changed")
+    check(len(changed) == 1 and 'value = "enabled"' in changed[0]
+          and 'details = "reopened"' in changed[0] and '"imaps"' in changed[0],
+          "turning it back on is one event, naming the listeners reopened (LP-8)")
 
     after = advertised(admin, admin_pw)
     check(after["autoconfig"] == before["autoconfig"] and after["srv"] == before["srv"],

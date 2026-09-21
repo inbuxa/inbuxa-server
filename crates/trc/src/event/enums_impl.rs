@@ -446,6 +446,8 @@ impl EventType {
             b"security.ip-allow-expired" => EventType::Security(SecurityEvent::IpAllowExpired),
             b"security.ip-unauthorized" => EventType::Security(SecurityEvent::IpUnauthorized),
             b"security.unauthorized" => EventType::Security(SecurityEvent::Unauthorized),
+            // inbuxa: legacy-protocols LP-8
+            b"security.legacy-protocols-changed" => EventType::Security(SecurityEvent::LegacyProtocolsChanged),
             b"server.startup" => EventType::Server(ServerEvent::Startup),
             b"server.shutdown" => EventType::Server(ServerEvent::Shutdown),
             b"server.startup-error" => EventType::Server(ServerEvent::StartupError),
@@ -1211,6 +1213,10 @@ impl EventType {
             EventType::Security(SecurityEvent::IpAllowExpired) => "security.ip-allow-expired",
             EventType::Security(SecurityEvent::IpUnauthorized) => "security.ip-unauthorized",
             EventType::Security(SecurityEvent::Unauthorized) => "security.unauthorized",
+            // inbuxa: legacy-protocols LP-8
+            EventType::Security(SecurityEvent::LegacyProtocolsChanged) => {
+                "security.legacy-protocols-changed"
+            }
             EventType::Server(ServerEvent::Startup) => "server.startup",
             EventType::Server(ServerEvent::Shutdown) => "server.shutdown",
             EventType::Server(ServerEvent::StartupError) => "server.startup-error",
@@ -1883,6 +1889,8 @@ impl EventType {
             EventType::Security(SecurityEvent::IpAllowExpired) => 594,
             EventType::Security(SecurityEvent::IpUnauthorized) => 279,
             EventType::Security(SecurityEvent::Unauthorized) => 552,
+            // inbuxa: legacy-protocols LP-8
+            EventType::Security(SecurityEvent::LegacyProtocolsChanged) => 643,
             EventType::Server(ServerEvent::Startup) => 393,
             EventType::Server(ServerEvent::Shutdown) => 392,
             EventType::Server(ServerEvent::StartupError) => 394,
@@ -2571,6 +2579,8 @@ impl EventType {
             594 => Some(EventType::Security(SecurityEvent::IpAllowExpired)),
             279 => Some(EventType::Security(SecurityEvent::IpUnauthorized)),
             552 => Some(EventType::Security(SecurityEvent::Unauthorized)),
+            // inbuxa: legacy-protocols LP-8
+            643 => Some(EventType::Security(SecurityEvent::LegacyProtocolsChanged)),
             393 => Some(EventType::Server(ServerEvent::Startup)),
             392 => Some(EventType::Server(ServerEvent::Shutdown)),
             394 => Some(EventType::Server(ServerEvent::StartupError)),
@@ -2990,6 +3000,8 @@ impl EventType {
             EventType::Security(SecurityEvent::IpAllowExpired) => Level::Info,
             EventType::Security(SecurityEvent::IpUnauthorized) => Level::Info,
             EventType::Security(SecurityEvent::Unauthorized) => Level::Info,
+            // inbuxa: legacy-protocols LP-8
+            EventType::Security(SecurityEvent::LegacyProtocolsChanged) => Level::Info,
             EventType::Server(ServerEvent::Startup) => Level::Info,
             EventType::Server(ServerEvent::Shutdown) => Level::Info,
             EventType::Server(ServerEvent::Licensing) => Level::Info,
@@ -3198,7 +3210,9 @@ impl EventType {
             EventType::Auth(AuthEvent::TooManyAttempts) => "Too many authentication attempts",
             EventType::Auth(AuthEvent::ClientRegistration) => "OAuth Client registration",
             // inbuxa: legacy-protocols LP-6
-            EventType::Auth(AuthEvent::LegacyProtocolRefused) => "Legacy mail protocol sign-in refused",
+            EventType::Auth(AuthEvent::LegacyProtocolRefused) => {
+                "Legacy mail protocol sign-in refused"
+            }
             EventType::Auth(AuthEvent::Error) => "Authentication error",
             EventType::Auth(AuthEvent::Warning) => "Authentication warning",
             EventType::Auth(AuthEvent::CredentialExpired) => "Credential expired",
@@ -3711,6 +3725,10 @@ impl EventType {
             EventType::Security(SecurityEvent::IpAllowExpired) => "IP allow expired",
             EventType::Security(SecurityEvent::IpUnauthorized) => "Unauthorized IP address",
             EventType::Security(SecurityEvent::Unauthorized) => "Unauthorized access",
+            // inbuxa: legacy-protocols LP-8
+            EventType::Security(SecurityEvent::LegacyProtocolsChanged) => {
+                "Legacy mail protocols switch changed"
+            }
             EventType::Server(ServerEvent::Startup) => "Starting INBUXA Server",
             EventType::Server(ServerEvent::Shutdown) => "Shutting down INBUXA Server",
             EventType::Server(ServerEvent::StartupError) => "Server startup error",
@@ -3964,7 +3982,9 @@ impl EventType {
             EventType::Auth(AuthEvent::TooManyAttempts) => "Too many authentication attempts",
             EventType::Auth(AuthEvent::ClientRegistration) => "Authentication error",
             // inbuxa: legacy-protocols LP-6
-            EventType::Auth(AuthEvent::LegacyProtocolRefused) => "This server allows only INBUXA webmail and JMAP apps",
+            EventType::Auth(AuthEvent::LegacyProtocolRefused) => {
+                "This server allows only INBUXA webmail and JMAP apps"
+            }
             EventType::Auth(AuthEvent::Error) => "Authentication error",
             EventType::Auth(AuthEvent::CredentialExpired) => "Credential expired",
             EventType::Imap(ImapEvent::ConnectionStart) => "IMAP error",
@@ -4102,6 +4122,10 @@ impl EventType {
             EventType::Security(SecurityEvent::IpAllowExpired) => "Insufficient permissions",
             EventType::Security(SecurityEvent::IpUnauthorized) => "Unauthorized IP address",
             EventType::Security(SecurityEvent::Unauthorized) => "Insufficient permissions",
+            // inbuxa: legacy-protocols LP-8
+            EventType::Security(SecurityEvent::LegacyProtocolsChanged) => {
+                "Legacy mail protocols switch changed"
+            }
             EventType::Smtp(SmtpEvent::ConnectionStart) => "SMTP error",
             EventType::Smtp(SmtpEvent::ConnectionEnd) => "SMTP error",
             EventType::Smtp(SmtpEvent::Error) => "SMTP error",
@@ -4663,6 +4687,8 @@ impl EventType {
             EventType::Security(SecurityEvent::IpAllowExpired),
             EventType::Security(SecurityEvent::IpUnauthorized),
             EventType::Security(SecurityEvent::Unauthorized),
+            // inbuxa: legacy-protocols LP-8
+            EventType::Security(SecurityEvent::LegacyProtocolsChanged),
             EventType::Server(ServerEvent::Startup),
             EventType::Server(ServerEvent::Shutdown),
             EventType::Server(ServerEvent::StartupError),

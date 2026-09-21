@@ -107,6 +107,37 @@ impl Server {
 
         protocol_policy::set(&self.core.storage.data, &policy).await?;
 
+        // LP-8. Raised here rather than by the JMAP method, so whatever turns
+        // the switch is reported. A /set that changed nothing -- the switch
+        // already where it was asked to be, nothing to close or reopen -- is
+        // not a change.
+        if previous.legacy_protocols != policy.legacy_protocols || !change.is_empty() {
+            let (moved, direction) = if policy.legacy_protocols.is_disabled() {
+                (&change.closed, "closed")
+            } else {
+                (&change.reopened, "reopened")
+            };
+            trc::event!(
+                Security(trc::SecurityEvent::LegacyProtocolsChanged),
+                Policy = "server",
+                Value = if policy.legacy_protocols.is_disabled() {
+                    "disabled"
+                } else {
+                    "enabled"
+                },
+                AccountId = policy.changed_by.clone(),
+                Details = direction,
+                ListenerId = listener_names(moved.iter().map(|l| l.id.clone())),
+                // Only when a listener could not be put back (LP-5).
+                Reason = (!change.failed.is_empty()).then(|| listener_names(
+                    change
+                        .failed
+                        .iter()
+                        .map(|(l, why)| format!("{}: {why}", l.id))
+                )),
+            );
+        }
+
         Ok(change)
     }
 
@@ -218,6 +249,12 @@ impl Server {
             .filter(|id| !spawned.contains(id))
             .collect())
     }
+}
+
+/// Names for an event field: the listeners a change closed, reopened or
+/// failed to reopen (LP-8).
+fn listener_names<T: Into<trc::Value>>(names: impl Iterator<Item = T>) -> trc::Value {
+    trc::Value::Array(names.map(Into::into).collect())
 }
 
 /// A protocol a mail app signs in over, which the switch refuses (LP-6).
