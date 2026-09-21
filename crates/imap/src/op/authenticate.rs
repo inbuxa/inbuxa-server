@@ -100,9 +100,10 @@ impl<T: SessionStream> Session<T> {
             })
             .and_then(|token| token.assert_has_permission(Permission::ImapAuthenticate))?;
 
-        // inbuxa: legacy-protocols LP-10, for a bearer token that named no account
+        // inbuxa: legacy-protocols LP-10 for a bearer token that named no
+        // account, and LP-15: the sign-in is recorded for the impact panel
         self.server
-            .refuse_legacy_session(LegacyProtocol::Imap, &access_token)
+            .admit_legacy_session(LegacyProtocol::Imap, &access_token)
             .await
             .map_err(|err| err.code(ResponseCode::Alert).id(tag.clone()))?;
 

@@ -30,7 +30,9 @@ leaves every other domain alone, and stops client configuration offering
 legacy servers for those domains. It reaches only its own tenant's switch,
 and can't turn it back on while the server has legacy protocols off
 (acceptance tests 6 to 10, 14). Throughout, the JMAP session tells each
-account which way its switches point (test 13).
+account which way its switches point (test 13), and the impact panel's
+list names who signed in over what: every account at server scope, only the
+tenant's own at tenant scope, rewritten at most once an hour (LP-15).
 
 Passwords are generated into files under target/e2e and never printed.
 Everything is removed afterwards unless KEEP=1.
@@ -292,6 +294,14 @@ def tenant_checks(admin, admin_pw, account):
 
     check(session_flag(tu, user_pw) == "enabled",
           "the session says enabled for the tenant's user while both switches are on (test 13)")
+    imap_login(PORTS["imap"], tu, user_pw)
+    got = tget()
+    recent = got[1]["list"][0].get("recentLegacyUse", [])
+    names = {(r["name"], r["protocol"]) for r in recent}
+    check((tu, "imap") in names and not any(n == admin for n, _ in names),
+          "the tenant's panel lists its own user's IMAP sign-in and nobody outside it (LP-15, MT-1)")
+    if (tu, "imap") not in names:
+        print("     recent:", recent)
 
     # Before: the tenant's user signs in, and its domain is offered IMAP.
     check(imap_login(PORTS["imap"], tu, user_pw).startswith("OK"),
@@ -459,6 +469,22 @@ def main():
           "IMAP sign-in works with the switch on")
     check(smtp_auths(PORTS["submissions"], admin, [admin_pw])[0].startswith("235"),
           "submission sign-in works with the switch on")
+
+    # The impact panel (LP-15): the sign-ins above are on it, once each.
+    got = one(admin, admin_pw, "inbuxa:ProtocolPolicy/get",
+              {"accountId": account, "ids": None, "properties": ["recentLegacyUse"]})
+    recent = got[1]["list"][0].get("recentLegacyUse", [])
+    mine = {r["protocol"]: r for r in recent if r["name"] == admin}
+    check(set(mine) == {"imap", "submission"} and all(r["lastUsedAt"] > 0 for r in mine.values()),
+          "the panel lists the admin's IMAP and submission sign-ins, and when (LP-15)")
+    if set(mine) != {"imap", "submission"}:
+        print("     recent:", recent)
+    imap_login(PORTS["imap"], admin, admin_pw)
+    got = one(admin, admin_pw, "inbuxa:ProtocolPolicy/get",
+              {"accountId": account, "ids": None, "properties": ["recentLegacyUse"]})
+    again = {r["protocol"]: r for r in got[1]["list"][0].get("recentLegacyUse", []) if r["name"] == admin}
+    check(again.get("imap", {}).get("lastUsedAt") == mine.get("imap", {}).get("lastUsedAt"),
+          "a second sign-in within the hour isn't written again (LP-15)")
 
     # What the screen reads: the locked set and what would close (LP-16, LP-21).
     got = one(admin, admin_pw, "inbuxa:ProtocolPolicy/get", policy_get)

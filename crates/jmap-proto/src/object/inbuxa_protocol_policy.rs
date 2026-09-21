@@ -37,6 +37,9 @@ pub enum ProtocolPolicyProperty {
     /// Server-set: exactly which listeners turning the switch would close,
     /// by name and port, for the confirmation (LP-16).
     WouldClose,
+    /// Server-set: who signed in over a legacy protocol in the last 30
+    /// days, and when, for the impact panel (LP-15).
+    RecentLegacyUse,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -57,6 +60,7 @@ impl Property for ProtocolPolicyProperty {
             ProtocolPolicyProperty::SavedListeners => "savedListeners",
             ProtocolPolicyProperty::ChangedAt => "changedAt",
             ProtocolPolicyProperty::ChangedBy => "changedBy",
+            ProtocolPolicyProperty::RecentLegacyUse => "recentLegacyUse",
             ProtocolPolicyProperty::LockedProtocols => "lockedProtocols",
             ProtocolPolicyProperty::WouldClose => "wouldClose",
         }
@@ -73,6 +77,7 @@ impl ProtocolPolicyProperty {
             b"savedListeners" => ProtocolPolicyProperty::SavedListeners,
             b"changedAt" => ProtocolPolicyProperty::ChangedAt,
             b"changedBy" => ProtocolPolicyProperty::ChangedBy,
+            b"recentLegacyUse" => ProtocolPolicyProperty::RecentLegacyUse,
             b"lockedProtocols" => ProtocolPolicyProperty::LockedProtocols,
             b"wouldClose" => ProtocolPolicyProperty::WouldClose,
         )
@@ -88,6 +93,7 @@ impl ProtocolPolicyProperty {
             ProtocolPolicyProperty::SavedListeners
                 | ProtocolPolicyProperty::ChangedAt
                 | ProtocolPolicyProperty::ChangedBy
+                | ProtocolPolicyProperty::RecentLegacyUse
                 | ProtocolPolicyProperty::LockedProtocols
                 | ProtocolPolicyProperty::WouldClose
         )

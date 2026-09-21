@@ -33,6 +33,7 @@
 use crate::{Server, auth::AccessToken, config::server::Listeners, network::TcpAcceptor};
 use directory::Credentials;
 use inbuxa_features::security::{
+    legacy_use::{self, LegacyUse},
     listeners,
     protocol_policy::{self, ProtocolPolicy, SavedListener},
     tenant_protocol_policy,
@@ -280,6 +281,16 @@ impl LegacyProtocol {
         }
     }
 
+    /// The same protocol, as the impact panel's record names it (LP-15).
+    pub fn as_use(&self) -> LegacyUse {
+        match self {
+            LegacyProtocol::Imap => LegacyUse::Imap,
+            LegacyProtocol::Pop3 => LegacyUse::Pop3,
+            LegacyProtocol::ManageSieve => LegacyUse::ManageSieve,
+            LegacyProtocol::Submission => LegacyUse::Submission,
+        }
+    }
+
     /// What the mail app is told (LP-12). Each protocol's own framing --
     /// IMAP's `[ALERT]`, ManageSieve's quoting -- is added by its session;
     /// POP3 carries `[AUTH]` in the text, since its errors have no separate
@@ -338,6 +349,17 @@ impl LegacyProtocol {
     }
 }
 
+/// One account's last sign-in over one legacy protocol, as the impact panel
+/// shows it (LP-15).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RecentUse {
+    pub account_id: u32,
+    pub name: String,
+    pub protocol: &'static str,
+    /// Seconds since the epoch.
+    pub at: u64,
+}
+
 /// Whose switch refused a sign-in: the server's (LP-6) or a tenant's (LP-10).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RefusalScope {
@@ -386,11 +408,16 @@ impl Server {
         Ok(())
     }
 
-    /// The same, once the account is known (LP-10). A bearer token needn't
-    /// name an account, so a sign-in with one can't be judged by its domain
-    /// beforehand; this judges it by the tenant the token turned out to
-    /// belong to. For a password sign-in it has already been decided.
-    pub async fn refuse_legacy_session(
+    /// Once the account is known: refuses it if its tenant has legacy
+    /// protocols off, and otherwise records the sign-in for the impact panel.
+    ///
+    /// The refusal is LP-10 again for a bearer token, which needn't name an
+    /// account and so can't be judged by its domain beforehand; for a
+    /// password sign-in it has already been decided. The record is LP-15's:
+    /// one timestamp per account and protocol, at most hourly. A record that
+    /// can't be written is logged and the sign-in goes ahead -- a panel is
+    /// not worth locking anyone out over.
+    pub async fn admit_legacy_session(
         &self,
         protocol: LegacyProtocol,
         access_token: &AccessToken,
@@ -400,7 +427,40 @@ impl Server {
         {
             return Err(protocol.refused(RefusalScope::Tenant(tenant_id), None));
         }
+        if let Err(err) = legacy_use::record(
+            &self.core.storage.data,
+            access_token.account_id(),
+            protocol.as_use(),
+            store::write::now(),
+        )
+        .await
+        {
+            trc::error!(err.details("Failed to record a legacy sign-in (LP-15)."));
+        }
         Ok(())
+    }
+
+    /// Who signed in over a legacy protocol in the last 30 days, most recent
+    /// first, for the impact panel (LP-15): everyone at server scope, or one
+    /// tenant's accounts. Accounts that no longer exist are left out.
+    pub async fn recent_legacy_use(&self, tenant_id: Option<u32>) -> trc::Result<Vec<RecentUse>> {
+        let mut recent = Vec::new();
+        for entry in legacy_use::recent(&self.core.storage.data, store::write::now()).await? {
+            let Some(account) = self.try_account(entry.account_id).await? else {
+                continue;
+            };
+            if tenant_id.is_some() && account.id_tenant != tenant_id {
+                continue;
+            }
+            recent.push(RecentUse {
+                account_id: entry.account_id,
+                name: account.name.to_string(),
+                protocol: entry.protocol.as_str(),
+                at: entry.at,
+            });
+        }
+        recent.sort_by(|a, b| b.at.cmp(&a.at).then_with(|| a.name.cmp(&b.name)));
+        Ok(recent)
     }
 
     /// Whether legacy protocols are off for this account: the stricter of the

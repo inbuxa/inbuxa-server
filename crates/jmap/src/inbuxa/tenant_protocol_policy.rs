@@ -17,7 +17,8 @@
 //! A tenant's switch closes no port (LP-13) -- sign-in and client
 //! configuration read it (LP-10, LP-14a).
 
-use common::{Server, auth::AccessToken};
+use crate::inbuxa::protocol_policy::recent_value;
+use common::{Server, auth::AccessToken, network::legacy::RecentUse};
 use inbuxa_features::{
     security::{
         protocol_policy::LegacyProtocols,
@@ -47,6 +48,7 @@ const ALL: &[P] = &[
     P::LegacyProtocols,
     P::ChangedAt,
     P::ChangedBy,
+    P::RecentLegacyUse,
 ];
 
 /// The tenants this principal may reach: its own inside a tenant (MT-1),
@@ -58,7 +60,7 @@ async fn reachable(server: &Server, access_token: &AccessToken) -> trc::Result<V
     }
 }
 
-fn to_value(tenant_id: u32, policy: &Policy, properties: &[P]) -> PValue {
+fn to_value(tenant_id: u32, policy: &Policy, recent: &[RecentUse], properties: &[P]) -> PValue {
     let mut out = Map::with_capacity(properties.len());
     for property in properties {
         let value = match property {
@@ -81,6 +83,9 @@ fn to_value(tenant_id: u32, policy: &Policy, properties: &[P]) -> PValue {
                 .as_ref()
                 .map(|by| Value::Str(by.clone().into()))
                 .unwrap_or(Value::Null),
+            P::RecentLegacyUse => {
+                recent_value(recent, |id| TenantProtocolPolicyValue::Id(Id::from(id)))
+            }
         };
         out.insert_unchecked(Key::Property(property.clone()), value);
     }
@@ -111,9 +116,15 @@ pub async fn get(
         let tenant_id = id.document_id();
         if reachable.contains(&tenant_id) {
             let policy = tenant_protocol_policy::get(&server.core.storage.data, tenant_id).await?;
+            // The tenant's own people only (LP-15, MT-1).
+            let recent = if properties.contains(&P::RecentLegacyUse) {
+                server.recent_legacy_use(Some(tenant_id)).await?
+            } else {
+                Vec::new()
+            };
             response
                 .list
-                .push(to_value(tenant_id, &policy, &properties));
+                .push(to_value(tenant_id, &policy, &recent, &properties));
         } else {
             response.push_not_found(id);
         }

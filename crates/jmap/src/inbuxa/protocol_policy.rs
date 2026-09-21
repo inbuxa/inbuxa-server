@@ -19,7 +19,11 @@
 //! (LP-4).
 
 use crate::registry::mapping::{ObjectResponse, RegistrySetResponse, ValidationResult};
-use common::{Server, auth::AccessToken, network::legacy::PolicyChange};
+use common::{
+    Server,
+    auth::AccessToken,
+    network::legacy::{PolicyChange, RecentUse},
+};
 use inbuxa_features::security::{
     listeners,
     protocol_policy::{LOCKED_PROTOCOLS, LegacyProtocols, ProtocolPolicy as Policy, SavedListener},
@@ -50,6 +54,7 @@ const ALL: &[P] = &[
     P::ChangedBy,
     P::LockedProtocols,
     P::WouldClose,
+    P::RecentLegacyUse,
 ];
 
 fn assert_server_level(access_token: &AccessToken) -> trc::Result<()> {
@@ -86,7 +91,12 @@ fn listener_value(listener: &SavedListener) -> PValue {
     Value::Object(out)
 }
 
-fn to_value(policy: &Policy, would_close: &[SavedListener], properties: &[P]) -> PValue {
+fn to_value(
+    policy: &Policy,
+    would_close: &[SavedListener],
+    recent: &[RecentUse],
+    properties: &[P],
+) -> PValue {
     let mut out = Map::with_capacity(properties.len());
     for property in properties {
         let value = match property {
@@ -127,10 +137,43 @@ fn to_value(policy: &Policy, would_close: &[SavedListener], properties: &[P]) ->
             // port, so the confirmation can say so before anything happens
             // (LP-16).
             P::WouldClose => Value::Array(would_close.iter().map(listener_value).collect()),
+            // Who would notice, before anything changes (LP-15).
+            P::RecentLegacyUse => recent_value(recent, |id| ProtocolPolicyValue::Id(Id::from(id))),
         };
         out.insert_unchecked(Key::Property(property.clone()), value);
     }
     Value::Object(out)
+}
+
+/// The impact panel's list (LP-15): who, over what, and when, in
+/// milliseconds as `changedAt` is. Shared with the tenant's switch.
+pub(crate) fn recent_value<Pr, V>(
+    recent: &[RecentUse],
+    id: impl Fn(u32) -> V,
+) -> Value<'static, Pr, V>
+where
+    Pr: jmap_tools::Property,
+    V: jmap_tools::Element<Property = Pr>,
+{
+    Value::Array(
+        recent
+            .iter()
+            .map(|entry| {
+                let mut out = Map::with_capacity(4);
+                out.insert_unchecked(
+                    Key::Borrowed("accountId"),
+                    Value::Element(id(entry.account_id)),
+                );
+                out.insert_unchecked(Key::Borrowed("name"), Value::Str(entry.name.clone().into()));
+                out.insert_unchecked(Key::Borrowed("protocol"), Value::Str(entry.protocol.into()));
+                out.insert_unchecked(
+                    Key::Borrowed("lastUsedAt"),
+                    Value::Number((entry.at * 1000).into()),
+                );
+                Value::Object(out)
+            })
+            .collect(),
+    )
 }
 
 /// The listeners turning the switch on would close, whatever it is now.
@@ -164,17 +207,22 @@ pub async fn get(
     } else {
         Vec::new()
     };
+    let recent = if properties.contains(&P::RecentLegacyUse) {
+        server.recent_legacy_use(None).await?
+    } else {
+        Vec::new()
+    };
 
     match ids {
         None => response
             .list
-            .push(to_value(&policy, &would_close, &properties)),
+            .push(to_value(&policy, &would_close, &recent, &properties)),
         Some(ids) => {
             for id in ids {
                 if id.is_singleton() {
                     response
                         .list
-                        .push(to_value(&policy, &would_close, &properties));
+                        .push(to_value(&policy, &would_close, &recent, &properties));
                 } else {
                     response.push_not_found(id);
                 }

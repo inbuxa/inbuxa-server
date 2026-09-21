@@ -28,6 +28,9 @@ pub enum TenantProtocolPolicyProperty {
     LegacyProtocols,
     ChangedAt,
     ChangedBy,
+    /// Server-set: who signed in over a legacy protocol in the last 30
+    /// days, and when, for the impact panel (LP-15).
+    RecentLegacyUse,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -47,6 +50,7 @@ impl Property for TenantProtocolPolicyProperty {
             TenantProtocolPolicyProperty::LegacyProtocols => "legacyProtocols",
             TenantProtocolPolicyProperty::ChangedAt => "changedAt",
             TenantProtocolPolicyProperty::ChangedBy => "changedBy",
+            TenantProtocolPolicyProperty::RecentLegacyUse => "recentLegacyUse",
         }
         .into()
     }
@@ -60,6 +64,7 @@ impl TenantProtocolPolicyProperty {
             b"legacyProtocols" => TenantProtocolPolicyProperty::LegacyProtocols,
             b"changedAt" => TenantProtocolPolicyProperty::ChangedAt,
             b"changedBy" => TenantProtocolPolicyProperty::ChangedBy,
+            b"recentLegacyUse" => TenantProtocolPolicyProperty::RecentLegacyUse,
         )
     }
 }
@@ -73,6 +78,7 @@ impl TenantProtocolPolicyProperty {
             TenantProtocolPolicyProperty::TenantId
                 | TenantProtocolPolicyProperty::ChangedAt
                 | TenantProtocolPolicyProperty::ChangedBy
+                | TenantProtocolPolicyProperty::RecentLegacyUse
         )
     }
 }

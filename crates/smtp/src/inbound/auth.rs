@@ -136,11 +136,12 @@ impl<T: SessionStream> Session<T> {
             .and_then(|access_token| access_token.assert_has_permission(Permission::EmailSend));
 
         // inbuxa: legacy-protocols LP-10, for a bearer token that named no
-        // account and so couldn't be judged by its domain beforehand.
+        // account and so couldn't be judged by its domain beforehand; and
+        // LP-15, the sign-in is recorded for the impact panel.
         if let Ok(access_token) = &result
             && let Err(err) = self
                 .server
-                .refuse_legacy_session(LegacyProtocol::Submission, access_token)
+                .admit_legacy_session(LegacyProtocol::Submission, access_token)
                 .await
         {
             return self.legacy_refusal(err).await;
