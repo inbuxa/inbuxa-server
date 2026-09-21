@@ -2,9 +2,11 @@
  * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
+ *
+ * Modified by Coffey Labs in 2026 for INBUXA.
  */
 
-use crate::{Server, manager::application::Resource};
+use crate::{Server, manager::application::Resource, network::legacy::is_legacy_service};
 use quick_xml::Reader;
 use quick_xml::XmlVersion;
 use quick_xml::events::Event;
@@ -55,7 +57,12 @@ impl Server {
         let _ = writeln!(&mut config, "\t\t<Account>");
         let _ = writeln!(&mut config, "\t\t\t<AccountType>email</AccountType>");
         let _ = writeln!(&mut config, "\t\t\t<Action>settings</Action>");
+        // inbuxa: legacy-protocols LP-7
+        let legacy_off = self.legacy_protocols_off().await?;
         for (protocol, service) in &self.core.network.info.services {
+            if legacy_off && is_legacy_service(protocol) {
+                continue;
+            }
             let (protocol, ports) = match protocol {
                 ServiceProtocol::Imap => ("IMAP", [143, 993]),
                 ServiceProtocol::Pop3 => ("POP3", [110, 995]),

@@ -47,6 +47,9 @@ pub struct Network {
 #[derive(Clone)]
 pub struct NetworkInfo {
     pub pacc: Pacc,
+    /// inbuxa: the same document without IMAP, POP3, SMTP and ManageSieve,
+    /// served while legacy protocols are off (legacy-protocols LP-7).
+    pub pacc_jmap_only: Pacc,
     pub mxs: Vec<MailExchanger>,
     pub services: VecMap<ServiceProtocol, Service>,
 }
@@ -320,11 +323,26 @@ impl Network {
             }
         }
 
-        let (prefix, suffix) = serde_json::to_string(&pacc)
-            .unwrap_or_default()
-            .rsplit_once(SPLIT_HERE)
-            .map(|(prefix, suffix)| (prefix.to_string(), suffix.to_string()))
-            .unwrap();
+        let split = |pacc: &Configuration| {
+            serde_json::to_string(pacc)
+                .unwrap_or_default()
+                .rsplit_once(SPLIT_HERE)
+                .map(|(prefix, suffix)| Pacc {
+                    prefix: prefix.to_string(),
+                    suffix: suffix.to_string(),
+                })
+                .unwrap()
+        };
+        // inbuxa: legacy-protocols LP-7
+        let pacc_jmap_only = {
+            let mut pacc = pacc.clone();
+            pacc.protocols.imap = None;
+            pacc.protocols.pop3 = None;
+            pacc.protocols.smtp = None;
+            pacc.protocols.managesieve = None;
+            split(&pacc)
+        };
+        let pacc = split(&pacc);
         let mut network = Network {
             node_id: bp.node_id() as u64,
             server_name: default_hostname.to_string(),
@@ -339,7 +357,8 @@ impl Network {
             info: NetworkInfo {
                 mxs: system.mail_exchangers.into_iter().collect(),
                 services: system.services,
-                pacc: Pacc { prefix, suffix },
+                pacc,
+                pacc_jmap_only,
             },
         };
 

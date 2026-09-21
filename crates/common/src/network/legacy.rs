@@ -21,6 +21,10 @@
 //! a legacy protocol is refused before any password is looked at, so a
 //! listener that exists by mistake still lets nobody in.
 //!
+//! And nothing advertises what is closed (LP-7): client configuration and
+//! the suggested DNS records leave the legacy services out, or mark them as
+//! not offered, while the switch is off.
+//!
 //! Nothing here touches the host's firewall, NAT port-forwards or any proxy
 //! (LP-20). The server stops answering; what still routes the port is the
 //! operator's to reconcile.
@@ -31,6 +35,7 @@ use inbuxa_features::security::{
     listeners,
     protocol_policy::{self, ProtocolPolicy, SavedListener},
 };
+use registry::schema::enums::ServiceProtocol;
 use registry::types::{error::Error, id::ObjectId};
 use store::registry::bootstrap::Bootstrap;
 
@@ -302,6 +307,27 @@ impl Server {
     }
 }
 
+/// The services mail apps sign in to, which the switch turns off: nothing may
+/// offer them while it is (LP-7). SMTP here is submission -- mail apps
+/// sending -- since inbound mail is never a configured service.
+pub fn is_legacy_service(protocol: &ServiceProtocol) -> bool {
+    matches!(
+        protocol,
+        ServiceProtocol::Imap
+            | ServiceProtocol::Pop3
+            | ServiceProtocol::Smtp
+            | ServiceProtocol::Managesieve
+    )
+}
+
+impl Server {
+    /// Whether the server-wide switch is off, for the answers that must stop
+    /// offering legacy services (LP-7). Read per answer, as sign-in reads it.
+    pub async fn legacy_protocols_off(&self) -> trc::Result<bool> {
+        Ok(self.protocol_policy().await?.legacy_protocols.is_disabled())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -347,6 +373,26 @@ mod tests {
         assert_eq!(err.value_as_str(trc::Key::Domain), Some("example.org"));
         assert_eq!(err.value_as_str(trc::Key::Source), Some("imap"));
         assert_eq!(err.value_as_str(trc::Key::AccountName), None);
+    }
+
+    #[test]
+    fn only_the_services_mail_apps_sign_in_to_are_legacy() {
+        for protocol in [
+            ServiceProtocol::Imap,
+            ServiceProtocol::Pop3,
+            ServiceProtocol::Smtp,
+            ServiceProtocol::Managesieve,
+        ] {
+            assert!(is_legacy_service(&protocol), "{protocol:?}");
+        }
+        for protocol in [
+            ServiceProtocol::Jmap,
+            ServiceProtocol::Caldav,
+            ServiceProtocol::Carddav,
+            ServiceProtocol::Webdav,
+        ] {
+            assert!(!is_legacy_service(&protocol), "{protocol:?}");
+        }
     }
 
     #[test]

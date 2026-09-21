@@ -2,9 +2,11 @@
  * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
+ *
+ * Modified by Coffey Labs in 2026 for INBUXA.
  */
 
-use crate::{Server, manager::application::Resource};
+use crate::{Server, manager::application::Resource, network::legacy::is_legacy_service};
 use registry::schema::enums::ServiceProtocol;
 use std::fmt::Write;
 use utils::url_params::UrlParams;
@@ -28,6 +30,9 @@ impl Server {
             ("%EMAILADDRESS%", default_host.as_str())
         };
 
+        // inbuxa: legacy-protocols LP-7
+        let legacy_off = self.legacy_protocols_off().await?;
+
         // Build XML response
         let mut config = String::with_capacity(1024);
         config.push_str("<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n");
@@ -40,6 +45,9 @@ impl Server {
             "\t\t<displayShortName>{domain}</displayShortName>"
         );
         for (protocol, service) in &self.core.network.info.services {
+            if legacy_off && is_legacy_service(protocol) {
+                continue;
+            }
             let (protocol, tag, ports) = match protocol {
                 ServiceProtocol::Smtp => ("smtp", "outgoingServer", [587, 465]),
                 ServiceProtocol::Imap => ("imap", "incomingServer", [143, 993]),

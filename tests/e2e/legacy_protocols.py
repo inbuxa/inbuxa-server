@@ -17,7 +17,9 @@ submission -- locked open -- is refused with the spec's words, with the right
 password and with a wrong one, and refusals never add up to a disconnect
 (LP-11). And that a normal IMAP sign-in works with the switch on, before and
 after. And that while it is off, no listener the switch would close can be
-created, or made by an update (LP-4, test 4).
+created, or made by an update (LP-4, test 4), and nothing advertises what is
+closed: autoconfig, autodiscover and PACC offer no IMAP, POP3 or submission,
+and the suggested zone marks their SRV names not offered (LP-7, test 5).
 
 Passwords are generated into files under target/e2e and never printed.
 Everything is removed afterwards unless KEEP=1.
@@ -189,6 +191,40 @@ def smtp_auths(port, user, passwords):
     return replies
 
 
+def advertised(admin, admin_pw):
+    """What each client-configuration answer and the suggested zone offer."""
+    with urllib.request.urlopen(f"{HTTP}/mail/config-v1.1.xml?emailaddress=a@legacy.test",
+                                timeout=30) as resp:
+        autoconfig = resp.read().decode()
+    body = ('<?xml version="1.0" encoding="utf-8"?><Autodiscover xmlns="http://schemas.'
+            'microsoft.com/exchange/autodiscover/outlook/requestschema/2006"><Request>'
+            '<EMailAddress>a@legacy.test</EMailAddress><AcceptableResponseSchema>http://'
+            'schemas.microsoft.com/exchange/autodiscover/outlook/responseschema/2006a'
+            '</AcceptableResponseSchema></Request></Autodiscover>').encode()
+    req = urllib.request.Request(f"{HTTP}/autodiscover/autodiscover.xml", data=body, method="POST")
+    req.add_header("Content-Type", "text/xml")
+    with urllib.request.urlopen(req, timeout=30) as resp:
+        autodiscover = resp.read().decode()
+    with urllib.request.urlopen(f"{HTTP}/.well-known/user-agent-configuration.json",
+                                timeout=30) as resp:
+        pacc = json.load(resp).get("protocols", {})
+    got = one(admin, admin_pw, "x:Domain/get", {"ids": None, "properties": ["name", "dnsZoneFile"]})
+    zone = next((d.get("dnsZoneFile") or "" for d in got[1].get("list", [])
+                 if d.get("name") == "legacy.test"), "")
+    srv = {}
+    for line in zone.splitlines():
+        fields = line.split()
+        if "SRV" in fields and fields[0].startswith("_"):
+            srv[fields[0].split(".")[0] + "." + fields[0].split(".")[1]] = fields[-1]
+    return {
+        "autoconfig": {t for t in ("imap", "pop3", "smtp") if f'type="{t}"' in autoconfig},
+        "autodiscover": {t for t in ("IMAP", "POP3", "SMTP") if f"<Type>{t}</Type>" in autodiscover},
+        "pacc": {t for t in ("imap", "pop3", "smtp", "managesieve") if t in pacc},
+        "jmap": "jmap" in pacc,
+        "srv": srv,
+    }
+
+
 def settle(port, want, tries=30):
     """Wait for a port to reach the wanted state, so the check is not a race."""
     for _ in range(tries):
@@ -243,6 +279,15 @@ def main():
     check(accepts(PORTS["submissions"]), "submission accepts before the switch")
     check(accepts(PORTS["smtp"]), "inbound SMTP accepts before the switch")
 
+    # What is advertised with the switch on -- the control for LP-7.
+    before = advertised(admin, admin_pw)
+    print("     advertised before:", {k: sorted(v) if isinstance(v, set) else v
+                                      for k, v in before.items() if k != "srv"})
+    check(before["autoconfig"] and before["autodiscover"],
+          "autoconfig and autodiscover offer mail apps a server with the switch on")
+    check(before["srv"].get("_imaps._tcp", ".") != ".",
+          "the suggested zone offers IMAP with the switch on")
+
     # A normal sign-in works with the switch on -- the control for LP-6.
     check(imap_login(PORTS["imap"], admin, admin_pw).startswith("OK"),
           "IMAP sign-in works with the switch on")
@@ -295,6 +340,19 @@ def main():
     if not all(r == SMTP_REFUSAL for r in replies):
         print("     replies:", replies)
 
+    # Nothing advertises what is closed (LP-7, test 5).
+    during = advertised(admin, admin_pw)
+    check(not during["autoconfig"], "autoconfig offers no IMAP, POP3 or submission (LP-7)")
+    check(not during["autodiscover"], "autodiscover offers no IMAP, POP3 or submission (LP-7)")
+    check(not during["pacc"] and during["jmap"], "PACC offers JMAP and nothing legacy (LP-7)")
+    names = ("_imap._tcp", "_imaps._tcp", "_pop3._tcp", "_pop3s._tcp",
+             "_submission._tcp", "_submissions._tcp")
+    offered = {n: t for n, t in during["srv"].items() if n in names and t != "."}
+    check(not offered and "_imaps._tcp" in during["srv"],
+          "the suggested zone marks the legacy SRV names not offered, target . (LP-7)")
+    if offered or "_imaps._tcp" not in during["srv"]:
+        print("     srv:", during["srv"])
+
     # No listener the switch would close can be added while it is off (LP-4,
     # test 4), and the refusal names the policy.
     res = one(admin, admin_pw, "x:NetworkListener/set", {"create": {"m": {
@@ -340,6 +398,10 @@ def main():
     policy = got[1]["list"][0]
     check(policy["legacyProtocols"] == "enabled", "switch reads back enabled")
     check(not policy["savedListeners"], "savedListeners is empty again (LP-5)")
+
+    after = advertised(admin, admin_pw)
+    check(after["autoconfig"] == before["autoconfig"] and after["srv"] == before["srv"],
+          "autoconfig and the suggested zone offer them again once back on")
 
     # And sign-in works again, with no restart.
     check(imap_login(PORTS["imap"], admin, admin_pw).startswith("OK"),
