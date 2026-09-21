@@ -9,6 +9,7 @@ run.sh
 !.gitignore
 !.gitattributes
 !.github
+!.gitlab-ci.yml
 CLAUDE.md
 
 # The cutover rehearsal writes its fixture and state here.
