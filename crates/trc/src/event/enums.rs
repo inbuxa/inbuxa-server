@@ -8,8 +8,9 @@
 
 // This file is auto-generated. Do not edit directly.
 
-// inbuxa: 637 to 641 are the fork's SCIM events (SCIM-54)
-pub const TOTAL_EVENT_COUNT: usize = 642;
+// inbuxa: 637 to 641 are the fork's SCIM events (SCIM-54); 642 is
+// auth.legacy-protocol-refused (legacy-protocols LP-6)
+pub const TOTAL_EVENT_COUNT: usize = 643;
 pub const TOTAL_METRIC_COUNT: usize = 369;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -116,6 +117,8 @@ pub enum AuthEvent {
     Error = 34,
     Warning = 595,
     CredentialExpired = 276,
+    // inbuxa: legacy-protocols LP-6
+    LegacyProtocolRefused = 642,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]

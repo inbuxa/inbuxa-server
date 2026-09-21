@@ -56,6 +56,8 @@ impl EventType {
             b"auth.mfa-required" => EventType::Auth(AuthEvent::MfaRequired),
             b"auth.too-many-attempts" => EventType::Auth(AuthEvent::TooManyAttempts),
             b"auth.client-registration" => EventType::Auth(AuthEvent::ClientRegistration),
+            // inbuxa: legacy-protocols LP-6
+            b"auth.legacy-protocol-refused" => EventType::Auth(AuthEvent::LegacyProtocolRefused),
             b"auth.error" => EventType::Auth(AuthEvent::Error),
             b"auth.warning" => EventType::Auth(AuthEvent::Warning),
             b"auth.credential-expired" => EventType::Auth(AuthEvent::CredentialExpired),
@@ -705,6 +707,8 @@ impl EventType {
             EventType::Auth(AuthEvent::MfaRequired) => "auth.mfa-required",
             EventType::Auth(AuthEvent::TooManyAttempts) => "auth.too-many-attempts",
             EventType::Auth(AuthEvent::ClientRegistration) => "auth.client-registration",
+            // inbuxa: legacy-protocols LP-6
+            EventType::Auth(AuthEvent::LegacyProtocolRefused) => "auth.legacy-protocol-refused",
             EventType::Auth(AuthEvent::Error) => "auth.error",
             EventType::Auth(AuthEvent::Warning) => "auth.warning",
             EventType::Auth(AuthEvent::CredentialExpired) => "auth.credential-expired",
@@ -1489,6 +1493,8 @@ impl EventType {
             EventType::Auth(AuthEvent::MfaRequired) => 36,
             EventType::Auth(AuthEvent::TooManyAttempts) => 38,
             EventType::Auth(AuthEvent::ClientRegistration) => 555,
+            // inbuxa: legacy-protocols LP-6
+            EventType::Auth(AuthEvent::LegacyProtocolRefused) => 642,
             EventType::Auth(AuthEvent::Error) => 34,
             EventType::Auth(AuthEvent::Warning) => 595,
             EventType::Auth(AuthEvent::CredentialExpired) => 276,
@@ -2137,6 +2143,8 @@ impl EventType {
             36 => Some(EventType::Auth(AuthEvent::MfaRequired)),
             38 => Some(EventType::Auth(AuthEvent::TooManyAttempts)),
             555 => Some(EventType::Auth(AuthEvent::ClientRegistration)),
+            // inbuxa: legacy-protocols LP-6
+            642 => Some(EventType::Auth(AuthEvent::LegacyProtocolRefused)),
             34 => Some(EventType::Auth(AuthEvent::Error)),
             595 => Some(EventType::Auth(AuthEvent::Warning)),
             276 => Some(EventType::Auth(AuthEvent::CredentialExpired)),
@@ -2848,6 +2856,8 @@ impl EventType {
             EventType::Acme(AcmeEvent::TlsAlpnReceived) => Level::Info,
             EventType::Auth(AuthEvent::Success) => Level::Info,
             EventType::Auth(AuthEvent::ClientRegistration) => Level::Info,
+            // inbuxa: legacy-protocols LP-6
+            EventType::Auth(AuthEvent::LegacyProtocolRefused) => Level::Info,
             EventType::Calendar(CalendarEvent::AlarmSent) => Level::Info,
             EventType::Calendar(CalendarEvent::ItipMessageSent) => Level::Info,
             EventType::Calendar(CalendarEvent::ItipMessageReceived) => Level::Info,
@@ -3187,6 +3197,8 @@ impl EventType {
             EventType::Auth(AuthEvent::MfaRequired) => "Missing MFA token for authentication",
             EventType::Auth(AuthEvent::TooManyAttempts) => "Too many authentication attempts",
             EventType::Auth(AuthEvent::ClientRegistration) => "OAuth Client registration",
+            // inbuxa: legacy-protocols LP-6
+            EventType::Auth(AuthEvent::LegacyProtocolRefused) => "Legacy mail protocol sign-in refused",
             EventType::Auth(AuthEvent::Error) => "Authentication error",
             EventType::Auth(AuthEvent::Warning) => "Authentication warning",
             EventType::Auth(AuthEvent::CredentialExpired) => "Credential expired",
@@ -3951,6 +3963,8 @@ impl EventType {
             }
             EventType::Auth(AuthEvent::TooManyAttempts) => "Too many authentication attempts",
             EventType::Auth(AuthEvent::ClientRegistration) => "Authentication error",
+            // inbuxa: legacy-protocols LP-6
+            EventType::Auth(AuthEvent::LegacyProtocolRefused) => "This server allows only INBUXA webmail and JMAP apps",
             EventType::Auth(AuthEvent::Error) => "Authentication error",
             EventType::Auth(AuthEvent::CredentialExpired) => "Credential expired",
             EventType::Imap(ImapEvent::ConnectionStart) => "IMAP error",
@@ -4259,6 +4273,8 @@ impl EventType {
             EventType::Auth(AuthEvent::MfaRequired),
             EventType::Auth(AuthEvent::TooManyAttempts),
             EventType::Auth(AuthEvent::ClientRegistration),
+            // inbuxa: legacy-protocols LP-6
+            EventType::Auth(AuthEvent::LegacyProtocolRefused),
             EventType::Auth(AuthEvent::Error),
             EventType::Auth(AuthEvent::Warning),
             EventType::Auth(AuthEvent::CredentialExpired),
