@@ -93,6 +93,17 @@ pub async fn set(data: &Store, tenant_id: u32, policy: &TenantProtocolPolicy) ->
         .map(|_| ())
 }
 
+/// Forgets a tenant's switch, when the tenant is deleted. Otherwise a tenant
+/// that came to have the same id would start with the old one's switch.
+pub async fn remove(data: &Store, tenant_id: u32) -> trc::Result<()> {
+    let mut batch = BatchBuilder::new();
+    batch.clear(key(tenant_id));
+    data.write(batch.build_all())
+        .await
+        .caused_by(trc::location!())
+        .map(|_| ())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

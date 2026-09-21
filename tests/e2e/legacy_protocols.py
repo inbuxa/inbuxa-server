@@ -380,6 +380,24 @@ def tenant_checks(admin, admin_pw, account):
           "and its user signs in over IMAP again")
     check(session_flag(tu, user_pw) == "enabled", "and its session says enabled again (test 13)")
 
+    # A deleted tenant's switch goes with it, so a tenant that later gets the
+    # same id doesn't start with legacy protocols off.
+    sget = lambda ids: one(admin, admin_pw, "inbuxa:TenantProtocolPolicy/get",
+                           {"accountId": account, "ids": ids})
+    one(admin, admin_pw, "inbuxa:TenantProtocolPolicy/set",
+        {"accountId": account, "update": {t2: {"legacyProtocols": "disabled"}}})
+    check(sget([t2])[1]["list"][0]["legacyProtocols"] == "disabled",
+          "a server admin turns another tenant's switch off")
+    res = one(admin, admin_pw, "x:Tenant/set", {"destroy": [t2]})
+    check(t2 in (res[1].get("destroyed") or []), "that tenant can be deleted")
+    t3 = created(one(admin, admin_pw, "x:Tenant/set", {"create": {"t": {"name": "legacy-t3"}}}),
+                 "t", "third tenant")
+    if t3 == t2:
+        check(sget([t3])[1]["list"][0]["legacyProtocols"] == "enabled",
+              "a new tenant with the deleted one's id starts with legacy protocols on")
+    else:
+        print(f"     (the registry gave the new tenant a fresh id, {t3} not {t2}: reuse not observable)")
+
 
 def session_flag(user, password):
     """legacyProtocols from the account's urn:inbuxa:jmap capability."""

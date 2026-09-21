@@ -851,6 +851,14 @@ impl RegistrySet for Server {
                                 if let ObjectInner::MaskedEmail(mask) = &object.inner {
                                     crate::inbuxa::masked_email::destroyed(self, id, mask).await?;
                                 }
+                                // inbuxa: legacy-protocols, a tenant's switch goes with it
+                                if matches!(object.inner, ObjectInner::Tenant(_)) {
+                                    inbuxa_features::security::tenant_protocol_policy::remove(
+                                        &self.core.storage.data,
+                                        id.document_id(),
+                                    )
+                                    .await?;
+                                }
                                 cache_invalidator.process_delete(id, &object);
                                 set.response.destroyed.push(id);
                             }
