@@ -29,7 +29,8 @@ address or made-up, right password or wrong -- in the organization's words,
 leaves every other domain alone, and stops client configuration offering
 legacy servers for those domains. It reaches only its own tenant's switch,
 and can't turn it back on while the server has legacy protocols off
-(acceptance tests 6 to 10, 14).
+(acceptance tests 6 to 10, 14). Throughout, the JMAP session tells each
+account which way its switches point (test 13).
 
 Passwords are generated into files under target/e2e and never printed.
 Everything is removed afterwards unless KEEP=1.
@@ -289,6 +290,9 @@ def tenant_checks(admin, admin_pw, account):
     tset = lambda value: one(ta, tadmin_pw, "inbuxa:TenantProtocolPolicy/set",
                              {"accountId": tacct, "update": {t: {"legacyProtocols": value}}})
 
+    check(session_flag(tu, user_pw) == "enabled",
+          "the session says enabled for the tenant's user while both switches are on (test 13)")
+
     # Before: the tenant's user signs in, and its domain is offered IMAP.
     check(imap_login(PORTS["imap"], tu, user_pw).startswith("OK"),
           "a tenant's user signs in over IMAP with the tenant's switch on")
@@ -312,6 +316,11 @@ def tenant_checks(admin, admin_pw, account):
     check(events_matching("security.legacy-protocols-changed", 'policy = "tenant"',
                           'value = "disabled"'),
           "and it is an event, scope tenant (LP-14, test 14)")
+
+    check(session_flag(tu, user_pw) == "disabled",
+          "the session says disabled for the tenant's user once its tenant turns it off (test 13)")
+    check(session_flag(admin, admin_pw) == "enabled",
+          "and still enabled for an account outside the tenant (test 13)")
 
     # Refused on the tenant's domain, every way in the same words (tests 6-8).
     imap_no = ("NO [ALERT] Your organization allows only INBUXA webmail and JMAP apps. "
@@ -343,6 +352,8 @@ def tenant_checks(admin, admin_pw, account):
     # Server off means off for everyone: the tenant can't turn it back on (test 9).
     one(admin, admin_pw, "inbuxa:ProtocolPolicy/set",
         {"accountId": account, "update": {"singleton": {"legacyProtocols": "disabled"}}})
+    check(session_flag(admin, admin_pw) == "disabled",
+          "with the server off, the session says disabled for everyone (test 13)")
     res = tset("enabled")
     refused = (res[1].get("notUpdated") or {}).get(t) or {}
     check(refused.get("type") == "forbidden"
@@ -357,6 +368,14 @@ def tenant_checks(admin, admin_pw, account):
     check(t in (res[1].get("updated") or {}), "with the server on, the tenant turns them back on")
     check(imap_login(PORTS["imap"], tu, user_pw).startswith("OK"),
           "and its user signs in over IMAP again")
+    check(session_flag(tu, user_pw) == "enabled", "and its session says enabled again (test 13)")
+
+
+def session_flag(user, password):
+    """legacyProtocols from the account's urn:inbuxa:jmap capability."""
+    sess = session(user, password)
+    acct = sess["primaryAccounts"].get(INBUXA) or list(sess["accounts"])[0]
+    return sess["accounts"][acct]["accountCapabilities"].get(INBUXA, {}).get("legacyProtocols")
 
 
 def events_matching(name, *parts):

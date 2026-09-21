@@ -142,6 +142,11 @@ pub struct InbuxaAccountCapabilities {
     /// The logo that applies to the principal (MT-22): a URL or a data URL.
     #[serde(rename(serialize = "logo"))]
     pub logo: Option<String>,
+    /// Whether legacy mail protocols are `enabled` or `disabled` for the
+    /// principal: the stricter of the server's switch and its tenant's
+    /// (legacy-protocols spec, Interfaces; LP-19).
+    #[serde(rename(serialize = "legacyProtocols"))]
+    pub legacy_protocols: &'static str,
 }
 
 #[derive(Debug, Clone, serde::Serialize)]

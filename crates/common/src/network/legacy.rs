@@ -403,6 +403,23 @@ impl Server {
         Ok(())
     }
 
+    /// Whether legacy protocols are off for this account: the stricter of the
+    /// server's switch and its tenant's. What the JMAP session tells the
+    /// account's apps (legacy-protocols spec, Interfaces), so the webmail can
+    /// say why a mail app won't connect (LP-19).
+    pub async fn legacy_protocols_off_for_account(
+        &self,
+        access_token: &AccessToken,
+    ) -> trc::Result<bool> {
+        if self.protocol_policy().await?.legacy_protocols.is_disabled() {
+            return Ok(true);
+        }
+        match access_token.tenant_id() {
+            Some(tenant_id) => self.tenant_legacy_protocols_off(tenant_id).await,
+            None => Ok(false),
+        }
+    }
+
     /// Whether a tenant has turned legacy protocols off for itself (LP-10).
     pub async fn tenant_legacy_protocols_off(&self, tenant_id: u32) -> trc::Result<bool> {
         Ok(
