@@ -17,11 +17,16 @@
 //! back on the next restart. Opening puts the object back first and then
 //! spawns, for the same reason in reverse.
 //!
+//! Sign-in is the second lock (LP-6): while the switch is off, a sign-in over
+//! a legacy protocol is refused before any password is looked at, so a
+//! listener that exists by mistake still lets nobody in.
+//!
 //! Nothing here touches the host's firewall, NAT port-forwards or any proxy
 //! (LP-20). The server stops answering; what still routes the port is the
 //! operator's to reconcile.
 
 use crate::{Server, config::server::Listeners, network::TcpAcceptor};
+use directory::Credentials;
 use inbuxa_features::security::{
     listeners,
     protocol_policy::{self, ProtocolPolicy, SavedListener},
@@ -207,5 +212,152 @@ impl Server {
             .map(|listener| listener.id.clone())
             .filter(|id| !spawned.contains(id))
             .collect())
+    }
+}
+
+/// A protocol a mail app signs in over, which the switch refuses (LP-6).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LegacyProtocol {
+    Imap,
+    Pop3,
+    ManageSieve,
+    /// SMTP AUTH, on any SMTP listener: only mail apps authenticate, so
+    /// inbound delivery is untouched (LP-3).
+    Submission,
+}
+
+impl LegacyProtocol {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            LegacyProtocol::Imap => "imap",
+            LegacyProtocol::Pop3 => "pop3",
+            LegacyProtocol::ManageSieve => "manageSieve",
+            LegacyProtocol::Submission => "submission",
+        }
+    }
+
+    /// What the mail app is told, at server scope (LP-12, LP-6). Each
+    /// protocol's own framing — IMAP's `[ALERT]`, ManageSieve's quoting —
+    /// is added by its session; POP3 carries `[AUTH]` in the text, since its
+    /// errors have no separate code, and SMTP is the whole reply line.
+    pub fn refusal(&self) -> &'static str {
+        match self {
+            LegacyProtocol::Imap => {
+                "This server allows only INBUXA webmail and JMAP apps. This mail app can't sign in."
+            }
+            LegacyProtocol::Pop3 => {
+                "[AUTH] This server allows only INBUXA webmail and JMAP apps. This mail app can't sign in."
+            }
+            LegacyProtocol::ManageSieve => "This server allows only INBUXA webmail and JMAP apps.",
+            LegacyProtocol::Submission => {
+                "535 5.7.0 This server allows only INBUXA webmail and JMAP apps. This mail app can't send.\r\n"
+            }
+        }
+    }
+
+    /// The refusal as an error: `auth.legacy-protocol-refused`, not
+    /// `auth.failed`, so it never counts against the account or feeds the
+    /// auto-ban (LP-11). It names the protocol and the domain, never the
+    /// account; the session it is raised in adds the remote IP.
+    pub fn refused(&self, credentials: &Credentials) -> trc::Error {
+        trc::AuthEvent::LegacyProtocolRefused
+            .into_err()
+            .details(self.refusal())
+            .ctx(trc::Key::Source, self.as_str())
+            .ctx(trc::Key::Policy, "server")
+            .ctx_opt(trc::Key::Domain, domain_of(credentials))
+    }
+}
+
+/// The domain a sign-in is for, from the name it gives, if it gives one.
+fn domain_of(credentials: &Credentials) -> Option<String> {
+    let username = match credentials {
+        Credentials::Basic { username, .. } => Some(username.as_str()),
+        Credentials::Bearer { username, .. } => username.as_deref(),
+    }?;
+    username
+        .rsplit_once('@')
+        .map(|(_, domain)| domain.trim().to_lowercase())
+        .filter(|domain| !domain.is_empty())
+}
+
+impl Server {
+    /// Refuses a sign-in over a legacy protocol while the server-wide switch
+    /// is off (LP-6). Called before the credentials are checked, so the
+    /// answer is the same for a right password, a wrong one and an account
+    /// that doesn't exist (LP-11).
+    ///
+    /// Read from the store on each sign-in rather than cached, so every node
+    /// of a cluster answers the same the moment the switch turns.
+    pub async fn refuse_legacy_sign_in(
+        &self,
+        protocol: LegacyProtocol,
+        credentials: &Credentials,
+    ) -> trc::Result<()> {
+        if self.protocol_policy().await?.legacy_protocols.is_disabled() {
+            Err(protocol.refused(credentials))
+        } else {
+            Ok(())
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn basic(username: &str) -> Credentials {
+        Credentials::Basic {
+            username: username.to_string(),
+            secret: "wrong or right, it is never read".to_string(),
+            mfa_token: None,
+        }
+    }
+
+    #[test]
+    fn refusals_read_as_the_spec_writes_them() {
+        // LP-12, with "Your organization" read as "This server" (LP-6).
+        assert_eq!(
+            LegacyProtocol::Imap.refusal(),
+            "This server allows only INBUXA webmail and JMAP apps. This mail app can't sign in."
+        );
+        assert!(
+            LegacyProtocol::Pop3
+                .refusal()
+                .starts_with("[AUTH] This server allows")
+        );
+        assert_eq!(
+            LegacyProtocol::ManageSieve.refusal(),
+            "This server allows only INBUXA webmail and JMAP apps."
+        );
+        assert_eq!(
+            LegacyProtocol::Submission.refusal(),
+            "535 5.7.0 This server allows only INBUXA webmail and JMAP apps. This mail app can't send.\r\n"
+        );
+    }
+
+    #[test]
+    fn a_refusal_is_not_a_failed_sign_in() {
+        let err = LegacyProtocol::Imap.refused(&basic("maria@Example.org"));
+        assert!(err.matches(trc::EventType::Auth(trc::AuthEvent::LegacyProtocolRefused)));
+        assert!(!err.matches(trc::EventType::Auth(trc::AuthEvent::Failed)));
+        // The session stays open: the mail app is told, not thrown off.
+        assert!(!err.must_disconnect());
+        assert!(err.should_write_err());
+        assert_eq!(err.value_as_str(trc::Key::Domain), Some("example.org"));
+        assert_eq!(err.value_as_str(trc::Key::Source), Some("imap"));
+        assert_eq!(err.value_as_str(trc::Key::AccountName), None);
+    }
+
+    #[test]
+    fn the_domain_comes_from_the_name_given() {
+        assert_eq!(domain_of(&basic("a@b.test")), Some("b.test".to_string()));
+        assert_eq!(domain_of(&basic("no-domain")), None);
+        assert_eq!(domain_of(&basic("trailing@")), None);
+        let bearer = Credentials::Bearer {
+            username: None,
+            token: "t".to_string(),
+        };
+        assert_eq!(domain_of(&bearer), None);
     }
 }

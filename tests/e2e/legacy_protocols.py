@@ -12,6 +12,12 @@ This is the part unit tests cannot reach: whether a socket actually closes on
 a running server (LP-2), and whether a listener put back actually binds again
 (LP-5). Acceptance tests 15, 17 and 18.
 
+It also checks the second lock (LP-6): while the switch is off, sign-in over
+submission -- locked open -- and over an IMAP listener that exists by mistake
+is refused with the spec's words, with the right password and with a wrong
+one, and refusals never add up to a disconnect (LP-11). And that a normal
+IMAP sign-in works with the switch on, before and after.
+
 Passwords are generated into files under target/e2e and never printed.
 Everything is removed afterwards unless KEEP=1.
 """
@@ -25,8 +31,12 @@ HTTP = "http://127.0.0.1:18080"
 # makes the host side accept connections whether or not anything is listening
 # inside the container, so a bare connect proves nothing: each port has to be
 # made to speak.
-PORTS = {"imap": 18993, "pop3": 18995, "submissions": 18465, "smtp": 18025}
-TLS_PORTS = {18993, 18995, 18465}
+PORTS = {"imap": 18993, "pop3": 18995, "submissions": 18465, "smtp": 18025, "mistake": 18994}
+TLS_PORTS = {18993, 18995, 18465, 18994}
+IMAP_REFUSAL = ("NO [ALERT] This server allows only INBUXA webmail and JMAP apps. "
+                "This mail app can't sign in.")
+SMTP_REFUSAL = ("535 5.7.0 This server allows only INBUXA webmail and JMAP apps. "
+                "This mail app can't send.")
 INBUXA = "urn:inbuxa:jmap"
 failures = []
 
@@ -60,7 +70,8 @@ def start(env_file=None):
             "-p", f"127.0.0.1:{PORTS['submissions']}:465",
             "-p", f"127.0.0.1:{PORTS['imap']}:993",
             "-p", f"127.0.0.1:{PORTS['pop3']}:995",
-            "-p", f"127.0.0.1:{PORTS['smtp']}:25"]
+            "-p", f"127.0.0.1:{PORTS['smtp']}:25",
+            "-p", f"127.0.0.1:{PORTS['mistake']}:1993"]
     if env_file:
         args += ["--env-file", env_file]
     args += ["stalwartlabs/stalwart:v0.16.22", "--config", "/etc/inbuxa/config.json"]
@@ -122,6 +133,64 @@ def accepts(port, timeout=5):
         return False
 
 
+def tls(port, timeout=10):
+    ctx = ssl.create_default_context()
+    ctx.check_hostname = False
+    ctx.verify_mode = ssl.CERT_NONE
+    return ctx.wrap_socket(socket.create_connection(("127.0.0.1", port), timeout=timeout))
+
+
+def lines(sock):
+    """Yields reply lines, CRLF stripped."""
+    buf = b""
+    while True:
+        while b"\r\n" not in buf:
+            chunk = sock.recv(4096)
+            if not chunk:
+                return
+            buf += chunk
+        line, buf = buf.split(b"\r\n", 1)
+        yield line.decode(errors="replace")
+
+
+def imap_login(port, user, password):
+    """The tagged reply to LOGIN, over implicit TLS."""
+    with tls(port) as sock:
+        read = lines(sock)
+        next(read)  # greeting
+        quote = lambda v: '"' + v.replace("\\", "\\\\").replace('"', '\\"') + '"'
+        sock.sendall(f"a1 LOGIN {quote(user)} {quote(password)}\r\n".encode())
+        for line in read:
+            if line.startswith("a1 "):
+                return line[3:]
+    return ""
+
+
+def smtp_auths(port, user, passwords):
+    """The reply to AUTH PLAIN for each password in turn, on one connection.
+    A reply of "" means the server hung up."""
+    # Every connection reaches the server from Docker's gateway, one IP, and
+    # the stock inbound throttle takes five a second from it. The port checks
+    # just before can use those up, so wait the second out.
+    time.sleep(1.1)
+    replies = []
+    with tls(port) as sock:
+        read = lines(sock)
+        next(read)  # greeting
+        sock.sendall(b"EHLO e2e.test\r\n")
+        for line in read:
+            if line[3:4] == " ":
+                break
+        for password in passwords:
+            token = base64.b64encode(f"\0{user}\0{password}".encode()).decode()
+            try:
+                sock.sendall(f"AUTH PLAIN {token}\r\n".encode())
+                replies.append(next(read, ""))
+            except OSError:
+                replies.append("")
+    return replies
+
+
 def settle(port, want, tries=30):
     """Wait for a port to reach the wanted state, so the check is not a race."""
     for _ in range(tries):
@@ -176,6 +245,12 @@ def main():
     check(accepts(PORTS["submissions"]), "submission accepts before the switch")
     check(accepts(PORTS["smtp"]), "inbound SMTP accepts before the switch")
 
+    # A normal sign-in works with the switch on -- the control for LP-6.
+    check(imap_login(PORTS["imap"], admin, admin_pw).startswith("OK"),
+          "IMAP sign-in works with the switch on")
+    check(smtp_auths(PORTS["submissions"], admin, [admin_pw])[0].startswith("235"),
+          "submission sign-in works with the switch on")
+
     # What the screen reads: the locked set and what would close (LP-16, LP-21).
     got = one(admin, admin_pw, "inbuxa:ProtocolPolicy/get", policy_get)
     if got[0] != "inbuxa:ProtocolPolicy/get":
@@ -212,11 +287,39 @@ def main():
     print("     savedListeners:", sorted(saved))
     check(saved, "the closed listeners were saved (LP-1)")
 
+    # The second lock (LP-6). Submission stays open, being locked, so sign-in
+    # over it is refused instead -- right password or wrong, the same words,
+    # and never enough of them to be thrown off (LP-11, test 2, test 18).
+    replies = smtp_auths(PORTS["submissions"], admin, [admin_pw] + ["wrong"] * 6)
+    check(replies[0] == SMTP_REFUSAL, "submission refuses the right password (LP-6)")
+    check(all(r == SMTP_REFUSAL for r in replies[1:]),
+          "submission refuses wrong passwords the same way, and doesn't hang up (LP-11)")
+    if not all(r == SMTP_REFUSAL for r in replies):
+        print("     replies:", replies)
+
+    # An IMAP listener that exists by mistake: created while the switch is off
+    # (LP-4 will refuse this later), and live after the restart below.
+    res = one(admin, admin_pw, "x:NetworkListener/set", {"create": {"m": {
+        "name": "imap-mistake", "protocol": "imap", "bind": {"0.0.0.0:1993": True},
+        "tlsImplicit": True}}})
+    mistake = (res[1].get("created") or {}).get("m", {}).get("id")
+    check(mistake is not None, "an IMAP listener can still be created by mistake")
+
     # A restart must not reopen them: the objects are gone, not just the sockets.
     stop()
     start()
     check(settle(PORTS["imap"], False), "IMAP still closed after a restart")
     check(accepts(PORTS["smtp"]), "inbound SMTP still accepts after a restart")
+
+    if mistake:
+        check(settle(PORTS["mistake"], True), "the mistaken IMAP listener is up")
+        check(imap_login(PORTS["mistake"], admin, admin_pw) == IMAP_REFUSAL,
+              "the mistaken listener refuses the right password (LP-6)")
+        check(imap_login(PORTS["mistake"], admin, "wrong") == IMAP_REFUSAL,
+              "and a wrong one, the same way (LP-11)")
+        check(imap_login(PORTS["mistake"], "nobody@legacy.test", "x") == IMAP_REFUSAL,
+              "and an account that doesn't exist (LP-11)")
+        one(admin, admin_pw, "x:NetworkListener/set", {"destroy": [mistake]})
 
     # Turn it back on: the listeners come back and bind again (LP-5).
     res = one(admin, admin_pw, "inbuxa:ProtocolPolicy/set",
@@ -230,6 +333,12 @@ def main():
     policy = got[1]["list"][0]
     check(policy["legacyProtocols"] == "enabled", "switch reads back enabled")
     check(not policy["savedListeners"], "savedListeners is empty again (LP-5)")
+
+    # And sign-in works again, with no restart.
+    check(imap_login(PORTS["imap"], admin, admin_pw).startswith("OK"),
+          "IMAP sign-in works again once the switch is back on")
+    check(smtp_auths(PORTS["submissions"], admin, [admin_pw])[0].startswith("235"),
+          "submission sign-in works again once the switch is back on")
 
     print()
     if failures:
