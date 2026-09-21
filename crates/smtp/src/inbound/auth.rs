@@ -121,16 +121,7 @@ impl<T: SessionStream> Session<T> {
             .refuse_legacy_sign_in(LegacyProtocol::Submission, &credentials)
             .await
         {
-            let refused = err.matches(trc::EventType::Auth(AuthEvent::LegacyProtocolRefused));
-            trc::error!(err.span_id(self.data.session_id));
-            if refused {
-                self.write(LegacyProtocol::Submission.refusal().as_bytes())
-                    .await?;
-            } else {
-                self.write(b"454 4.7.0 Temporary authentication failure\r\n")
-                    .await?;
-            }
-            return Ok(false);
+            return self.legacy_refusal(err).await;
         }
 
         // Authenticate
@@ -143,6 +134,17 @@ impl<T: SessionStream> Session<T> {
             ))
             .await
             .and_then(|access_token| access_token.assert_has_permission(Permission::EmailSend));
+
+        // inbuxa: legacy-protocols LP-10, for a bearer token that named no
+        // account and so couldn't be judged by its domain beforehand.
+        if let Ok(access_token) = &result
+            && let Err(err) = self
+                .server
+                .refuse_legacy_session(LegacyProtocol::Submission, access_token)
+                .await
+        {
+            return self.legacy_refusal(err).await;
+        }
 
         let result = match result {
             Ok(access_token) => self.server.account_info(access_token.account_id()).await,
@@ -204,6 +206,26 @@ impl<T: SessionStream> Session<T> {
         self.write(b"454 4.7.0 Temporary authentication failure\r\n")
             .await?;
 
+        Ok(false)
+    }
+
+    /// inbuxa: legacy-protocols LP-6, LP-10. A refusal is written with the
+    /// words the error carries, which know whose switch refused; anything
+    /// else that went wrong deciding is a temporary failure. Neither counts
+    /// as an authentication error (LP-11).
+    async fn legacy_refusal(&mut self, err: trc::Error) -> Result<bool, ()> {
+        let reply = err
+            .matches(trc::EventType::Auth(AuthEvent::LegacyProtocolRefused))
+            .then(|| err.value_as_str(trc::Key::Details).map(str::to_string))
+            .flatten();
+        trc::error!(err.span_id(self.data.session_id));
+        match reply {
+            Some(reply) => self.write(reply.as_bytes()).await?,
+            None => {
+                self.write(b"454 4.7.0 Temporary authentication failure\r\n")
+                    .await?
+            }
+        }
         Ok(false)
     }
 

@@ -23,17 +23,19 @@
 //!
 //! And nothing advertises what is closed (LP-7): client configuration and
 //! the suggested DNS records leave the legacy services out, or mark them as
-//! not offered, while the switch is off.
+//! not offered, while the switch is off -- the server's, or for a tenant's
+//! domains, the tenant's (LP-14a).
 //!
 //! Nothing here touches the host's firewall, NAT port-forwards or any proxy
 //! (LP-20). The server stops answering; what still routes the port is the
 //! operator's to reconcile.
 
-use crate::{Server, config::server::Listeners, network::TcpAcceptor};
+use crate::{Server, auth::AccessToken, config::server::Listeners, network::TcpAcceptor};
 use directory::Credentials;
 use inbuxa_features::security::{
     listeners,
     protocol_policy::{self, ProtocolPolicy, SavedListener},
+    tenant_protocol_policy,
 };
 use registry::schema::enums::ServiceProtocol;
 use registry::types::{error::Error, id::ObjectId};
@@ -278,37 +280,69 @@ impl LegacyProtocol {
         }
     }
 
-    /// What the mail app is told, at server scope (LP-12, LP-6). Each
-    /// protocol's own framing — IMAP's `[ALERT]`, ManageSieve's quoting —
-    /// is added by its session; POP3 carries `[AUTH]` in the text, since its
-    /// errors have no separate code, and SMTP is the whole reply line.
-    pub fn refusal(&self) -> &'static str {
-        match self {
-            LegacyProtocol::Imap => {
+    /// What the mail app is told (LP-12). Each protocol's own framing --
+    /// IMAP's `[ALERT]`, ManageSieve's quoting -- is added by its session;
+    /// POP3 carries `[AUTH]` in the text, since its errors have no separate
+    /// code, and SMTP is the whole reply line. At server scope "Your
+    /// organization" reads "This server" (LP-6).
+    pub fn refusal(&self, scope: RefusalScope) -> &'static str {
+        match (scope, self) {
+            (RefusalScope::Server, LegacyProtocol::Imap) => {
                 "This server allows only INBUXA webmail and JMAP apps. This mail app can't sign in."
             }
-            LegacyProtocol::Pop3 => {
+            (RefusalScope::Server, LegacyProtocol::Pop3) => {
                 "[AUTH] This server allows only INBUXA webmail and JMAP apps. This mail app can't sign in."
             }
-            LegacyProtocol::ManageSieve => "This server allows only INBUXA webmail and JMAP apps.",
-            LegacyProtocol::Submission => {
+            (RefusalScope::Server, LegacyProtocol::ManageSieve) => {
+                "This server allows only INBUXA webmail and JMAP apps."
+            }
+            (RefusalScope::Server, LegacyProtocol::Submission) => {
                 "535 5.7.0 This server allows only INBUXA webmail and JMAP apps. This mail app can't send.\r\n"
+            }
+            (RefusalScope::Tenant(_), LegacyProtocol::Imap) => {
+                "Your organization allows only INBUXA webmail and JMAP apps. This mail app can't sign in."
+            }
+            (RefusalScope::Tenant(_), LegacyProtocol::Pop3) => {
+                "[AUTH] Your organization allows only INBUXA webmail and JMAP apps. This mail app can't sign in."
+            }
+            (RefusalScope::Tenant(_), LegacyProtocol::ManageSieve) => {
+                "Your organization allows only INBUXA webmail and JMAP apps."
+            }
+            (RefusalScope::Tenant(_), LegacyProtocol::Submission) => {
+                "535 5.7.0 Your organization allows only INBUXA webmail and JMAP apps. This mail app can't send.\r\n"
             }
         }
     }
 
     /// The refusal as an error: `auth.legacy-protocol-refused`, not
     /// `auth.failed`, so it never counts against the account or feeds the
-    /// auto-ban (LP-11). It names the protocol and the domain, never the
-    /// account; the session it is raised in adds the remote IP.
-    pub fn refused(&self, credentials: &Credentials) -> trc::Error {
+    /// auto-ban (LP-11). It names the protocol, the scope and the domain,
+    /// never the account; the session adds the remote IP.
+    ///
+    /// Not the tenant's id: `Id` is what IMAP answers a command's tag from,
+    /// so an error carrying one is sent under the wrong tag and the mail app
+    /// waits for a reply that never comes. The domain names the tenant.
+    pub fn refused(&self, scope: RefusalScope, domain: Option<String>) -> trc::Error {
         trc::AuthEvent::LegacyProtocolRefused
             .into_err()
-            .details(self.refusal())
+            .details(self.refusal(scope))
             .ctx(trc::Key::Source, self.as_str())
-            .ctx(trc::Key::Policy, "server")
-            .ctx_opt(trc::Key::Domain, domain_of(credentials))
+            .ctx(
+                trc::Key::Policy,
+                match scope {
+                    RefusalScope::Server => "server",
+                    RefusalScope::Tenant(_) => "tenant",
+                },
+            )
+            .ctx_opt(trc::Key::Domain, domain)
     }
+}
+
+/// Whose switch refused a sign-in: the server's (LP-6) or a tenant's (LP-10).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RefusalScope {
+    Server,
+    Tenant(u32),
 }
 
 /// The domain a sign-in is for, from the name it gives, if it gives one.
@@ -325,22 +359,58 @@ fn domain_of(credentials: &Credentials) -> Option<String> {
 
 impl Server {
     /// Refuses a sign-in over a legacy protocol while the server-wide switch
-    /// is off (LP-6). Called before the credentials are checked, so the
-    /// answer is the same for a right password, a wrong one and an account
-    /// that doesn't exist (LP-11).
+    /// is off (LP-6), or while the switch of the tenant that owns the named
+    /// domain is (LP-10). Called before the credentials are checked, so the
+    /// answer is the same for a right password, a wrong one and an address
+    /// that doesn't exist (LP-11): a tenant's domain answers for every address
+    /// on it.
     ///
     /// Read from the store on each sign-in rather than cached, so every node
-    /// of a cluster answers the same the moment the switch turns.
+    /// of a cluster answers the same the moment a switch turns.
     pub async fn refuse_legacy_sign_in(
         &self,
         protocol: LegacyProtocol,
         credentials: &Credentials,
     ) -> trc::Result<()> {
+        let domain = domain_of(credentials);
         if self.protocol_policy().await?.legacy_protocols.is_disabled() {
-            Err(protocol.refused(credentials))
-        } else {
-            Ok(())
+            return Err(protocol.refused(RefusalScope::Server, domain));
         }
+        if let Some(name) = &domain
+            && let Some(domain) = self.domain(name).await?
+            && let Some(tenant_id) = domain.id_tenant
+            && self.tenant_legacy_protocols_off(tenant_id).await?
+        {
+            return Err(protocol.refused(RefusalScope::Tenant(tenant_id), Some(name.clone())));
+        }
+        Ok(())
+    }
+
+    /// The same, once the account is known (LP-10). A bearer token needn't
+    /// name an account, so a sign-in with one can't be judged by its domain
+    /// beforehand; this judges it by the tenant the token turned out to
+    /// belong to. For a password sign-in it has already been decided.
+    pub async fn refuse_legacy_session(
+        &self,
+        protocol: LegacyProtocol,
+        access_token: &AccessToken,
+    ) -> trc::Result<()> {
+        if let Some(tenant_id) = access_token.tenant_id()
+            && self.tenant_legacy_protocols_off(tenant_id).await?
+        {
+            return Err(protocol.refused(RefusalScope::Tenant(tenant_id), None));
+        }
+        Ok(())
+    }
+
+    /// Whether a tenant has turned legacy protocols off for itself (LP-10).
+    pub async fn tenant_legacy_protocols_off(&self, tenant_id: u32) -> trc::Result<bool> {
+        Ok(
+            tenant_protocol_policy::get(&self.core.storage.data, tenant_id)
+                .await?
+                .legacy_protocols
+                .is_disabled(),
+        )
     }
 }
 
@@ -358,10 +428,21 @@ pub fn is_legacy_service(protocol: &ServiceProtocol) -> bool {
 }
 
 impl Server {
-    /// Whether the server-wide switch is off, for the answers that must stop
-    /// offering legacy services (LP-7). Read per answer, as sign-in reads it.
-    pub async fn legacy_protocols_off(&self) -> trc::Result<bool> {
-        Ok(self.protocol_policy().await?.legacy_protocols.is_disabled())
+    /// Whether legacy services are off for this domain, for the answers that
+    /// must stop offering them: off for the whole server (LP-7), or for the
+    /// tenant the domain belongs to (LP-14a). Read per answer, as sign-in
+    /// reads it. A name that is no domain here answers for the server alone.
+    pub async fn legacy_protocols_off_for(&self, domain_name: &str) -> trc::Result<bool> {
+        if self.protocol_policy().await?.legacy_protocols.is_disabled() {
+            return Ok(true);
+        }
+        match self.domain(domain_name).await? {
+            Some(domain) => match domain.id_tenant {
+                Some(tenant_id) => self.tenant_legacy_protocols_off(tenant_id).await,
+                None => Ok(false),
+            },
+            None => Ok(false),
+        }
     }
 }
 
@@ -380,28 +461,57 @@ mod tests {
     #[test]
     fn refusals_read_as_the_spec_writes_them() {
         // LP-12, with "Your organization" read as "This server" (LP-6).
+        let server = RefusalScope::Server;
         assert_eq!(
-            LegacyProtocol::Imap.refusal(),
+            LegacyProtocol::Imap.refusal(server),
             "This server allows only INBUXA webmail and JMAP apps. This mail app can't sign in."
         );
         assert!(
             LegacyProtocol::Pop3
-                .refusal()
+                .refusal(server)
                 .starts_with("[AUTH] This server allows")
         );
         assert_eq!(
-            LegacyProtocol::ManageSieve.refusal(),
+            LegacyProtocol::ManageSieve.refusal(server),
             "This server allows only INBUXA webmail and JMAP apps."
         );
         assert_eq!(
-            LegacyProtocol::Submission.refusal(),
+            LegacyProtocol::Submission.refusal(server),
             "535 5.7.0 This server allows only INBUXA webmail and JMAP apps. This mail app can't send.\r\n"
         );
     }
 
     #[test]
+    fn a_tenant_refusal_speaks_for_the_organization() {
+        // LP-12, exactly as the spec writes them.
+        let tenant = RefusalScope::Tenant(7);
+        assert_eq!(
+            LegacyProtocol::Imap.refusal(tenant),
+            "Your organization allows only INBUXA webmail and JMAP apps. This mail app can't sign in."
+        );
+        assert_eq!(
+            LegacyProtocol::Pop3.refusal(tenant),
+            "[AUTH] Your organization allows only INBUXA webmail and JMAP apps. This mail app can't sign in."
+        );
+        assert_eq!(
+            LegacyProtocol::ManageSieve.refusal(tenant),
+            "Your organization allows only INBUXA webmail and JMAP apps."
+        );
+        assert_eq!(
+            LegacyProtocol::Submission.refusal(tenant),
+            "535 5.7.0 Your organization allows only INBUXA webmail and JMAP apps. This mail app can't send.\r\n"
+        );
+        let err = LegacyProtocol::Imap.refused(tenant, Some("example.org".into()));
+        assert_eq!(err.value_as_str(trc::Key::Policy), Some("tenant"));
+        // IMAP answers the command's tag from Id; the refusal must leave it be.
+        assert!(err.value(trc::Key::Id).is_none());
+        assert!(err.matches(trc::EventType::Auth(trc::AuthEvent::LegacyProtocolRefused)));
+    }
+
+    #[test]
     fn a_refusal_is_not_a_failed_sign_in() {
-        let err = LegacyProtocol::Imap.refused(&basic("maria@Example.org"));
+        let err = LegacyProtocol::Imap
+            .refused(RefusalScope::Server, domain_of(&basic("maria@Example.org")));
         assert!(err.matches(trc::EventType::Auth(trc::AuthEvent::LegacyProtocolRefused)));
         assert!(!err.matches(trc::EventType::Auth(trc::AuthEvent::Failed)));
         // The session stays open: the mail app is told, not thrown off.

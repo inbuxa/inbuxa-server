@@ -12,3 +12,4 @@
 
 pub mod listeners;
 pub mod protocol_policy;
+pub mod tenant_protocol_policy;

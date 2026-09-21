@@ -57,8 +57,11 @@ impl Server {
         let _ = writeln!(&mut config, "\t\t<Account>");
         let _ = writeln!(&mut config, "\t\t\t<AccountType>email</AccountType>");
         let _ = writeln!(&mut config, "\t\t\t<Action>settings</Action>");
-        // inbuxa: legacy-protocols LP-7
-        let legacy_off = self.legacy_protocols_off().await?;
+        // inbuxa: legacy-protocols LP-7, LP-14a
+        let legacy_off = match emailaddress.rsplit_once('@') {
+            Some((_, domain)) => self.legacy_protocols_off_for(domain).await?,
+            None => self.legacy_protocols_off_for("").await?,
+        };
         for (protocol, service) in &self.core.network.info.services {
             if legacy_off && is_legacy_service(protocol) {
                 continue;

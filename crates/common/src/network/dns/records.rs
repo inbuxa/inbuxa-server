@@ -39,9 +39,9 @@ impl Server {
         let mut records = Vec::new();
         let network = &self.core.network;
         let default_host = network.server_name.as_str();
-        // inbuxa: legacy-protocols LP-7
-        let legacy_off = self.legacy_protocols_off().await?;
         let domain_name = domain.name.as_str();
+        // inbuxa: legacy-protocols LP-7, LP-14a
+        let legacy_off = self.legacy_protocols_off_for(domain_name).await?;
         let domain_name_suffix = format!(".{domain_name}");
 
         for record_type in record_types {
@@ -417,8 +417,8 @@ impl Server {
     }
 
     pub async fn get_pacc_for_domain(&self, domain_name: &str) -> trc::Result<String> {
-        // inbuxa: legacy-protocols LP-7
-        let pacc = if self.legacy_protocols_off().await? {
+        // inbuxa: legacy-protocols LP-7, LP-14a
+        let pacc = if self.legacy_protocols_off_for(domain_name).await? {
             &self.core.network.info.pacc_jmap_only
         } else {
             &self.core.network.info.pacc

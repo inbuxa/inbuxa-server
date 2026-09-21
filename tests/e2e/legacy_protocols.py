@@ -23,6 +23,14 @@ and the suggested zone marks their SRV names not offered (LP-7, test 5).
 Every change of the switch, and every refused sign-in, is an event in the
 server's log (LP-8, test 14; LP-6).
 
+Then a tenant's own switch (LP-9 to LP-14a): a tenant administrator turns it
+off for its tenant, which refuses sign-in on the tenant's domains -- real
+address or made-up, right password or wrong -- in the organization's words,
+leaves every other domain alone, and stops client configuration offering
+legacy servers for those domains. It reaches only its own tenant's switch,
+and can't turn it back on while the server has legacy protocols off
+(acceptance tests 6 to 10, 14).
+
 Passwords are generated into files under target/e2e and never printed.
 Everything is removed afterwards unless KEEP=1.
 """
@@ -234,6 +242,127 @@ def events(name):
     return [l for l in (out.stdout + out.stderr).splitlines() if f"({name})" in l]
 
 
+def pop3_login(port, user, password):
+    """The reply to PASS, over implicit TLS."""
+    with tls(port) as sock:
+        read = lines(sock)
+        next(read)  # greeting
+        sock.sendall(f"USER {user}\r\n".encode())
+        next(read)
+        sock.sendall(f"PASS {password}\r\n".encode())
+        return next(read, "")
+
+
+def created(res, key, what):
+    obj = (res[1].get("created") or {}).get(key)
+    if not obj:
+        sys.exit(f"creating {what} failed: " + json.dumps(res[1])[:600])
+    return obj["id"]
+
+
+def tenant_checks(admin, admin_pw, account):
+    """LP-9 to LP-14a, on a tenant with its own domain, user and admin."""
+    t = created(one(admin, admin_pw, "x:Tenant/set", {"create": {"t": {"name": "legacy-t"}}}),
+                "t", "tenant")
+    t2 = created(one(admin, admin_pw, "x:Tenant/set", {"create": {"t": {"name": "legacy-t2"}}}),
+                 "t", "second tenant")
+    domain = created(one(admin, admin_pw, "x:Domain/set", {"create": {"d": {
+        "name": "t.legacy.test", "isEnabled": True, "memberTenantId": t,
+        "certificateManagement": {"@type": "Manual"}, "dnsManagement": {"@type": "Manual"},
+        "dkimManagement": {"@type": "Manual"}}}}), "d", "tenant domain")
+    user_pw = secret_file("legacy-tenant-user")
+    tadmin_pw = secret_file("legacy-tenant-admin")
+    def user(name, password, extra=None):
+        body = {"@type": "User", "name": name, "domainId": domain,
+                "credentials": {"0": {"@type": "Password", "secret": password}}}
+        body.update(extra or {})
+        return created(one(admin, admin_pw, "x:Account/set", {"create": {"a": body}}),
+                       "a", f"account {name}")
+    user("u", user_pw)
+    user("tadmin", tadmin_pw, {"roles": {"@type": "Admin"}})
+    tu, ta = "u@t.legacy.test", "tadmin@t.legacy.test"
+
+    tsess = session(ta, tadmin_pw)
+    tacct = tsess["primaryAccounts"].get(INBUXA) or list(tsess["accounts"])[0]
+    tget = lambda ids=None: one(ta, tadmin_pw, "inbuxa:TenantProtocolPolicy/get",
+                                {"accountId": tacct, "ids": ids})
+    tset = lambda value: one(ta, tadmin_pw, "inbuxa:TenantProtocolPolicy/set",
+                             {"accountId": tacct, "update": {t: {"legacyProtocols": value}}})
+
+    # Before: the tenant's user signs in, and its domain is offered IMAP.
+    check(imap_login(PORTS["imap"], tu, user_pw).startswith("OK"),
+          "a tenant's user signs in over IMAP with the tenant's switch on")
+    got = tget()
+    mine = [p["id"] for p in got[1].get("list", [])]
+    check(got[0] == "inbuxa:TenantProtocolPolicy/get" and mine == [t],
+          "a tenant admin's /get answers with its own tenant's switch only (test 10)")
+    if mine != [t]:
+        print("     reply:", json.dumps(got)[:400])
+    got = tget([t2])
+    check(got[1].get("notFound") == [t2], "another tenant's switch is not found (test 10, MT-1)")
+    res = one(ta, tadmin_pw, "inbuxa:TenantProtocolPolicy/set",
+              {"accountId": tacct, "update": {t2: {"legacyProtocols": "disabled"}}})
+    check(t2 in (res[1].get("notUpdated") or {}), "nor can it be changed (test 10)")
+
+    # The tenant admin turns it off for its tenant (LP-9).
+    res = tset("disabled")
+    check(t in (res[1].get("updated") or {}), "a tenant admin turns legacy protocols off (LP-9)")
+    if t not in (res[1].get("updated") or {}):
+        print("     reply:", json.dumps(res)[:400])
+    check(events_matching("security.legacy-protocols-changed", 'policy = "tenant"',
+                          'value = "disabled"'),
+          "and it is an event, scope tenant (LP-14, test 14)")
+
+    # Refused on the tenant's domain, every way in the same words (tests 6-8).
+    imap_no = ("NO [ALERT] Your organization allows only INBUXA webmail and JMAP apps. "
+               "This mail app can't sign in.")
+    check(imap_login(PORTS["imap"], tu, user_pw) == imap_no,
+          "the tenant's user is refused over IMAP with the right password (test 6)")
+    check(imap_login(PORTS["imap"], tu, "wrong") == imap_no, "and with a wrong one (test 6)")
+    check(imap_login(PORTS["imap"], "nobody@t.legacy.test", "x") == imap_no,
+          "and a made-up address on the domain gets the same (test 7)")
+    check(pop3_login(PORTS["pop3"], tu, user_pw) ==
+          "-ERR [AUTH] Your organization allows only INBUXA webmail and JMAP apps. "
+          "This mail app can't sign in.", "POP3 refuses in its own form (test 8)")
+    check(smtp_auths(PORTS["submissions"], tu, [user_pw])[0] ==
+          "535 5.7.0 Your organization allows only INBUXA webmail and JMAP apps. "
+          "This mail app can't send.", "submission refuses in its own form (test 8)")
+    check(imap_login(PORTS["imap"], admin, admin_pw).startswith("OK"),
+          "an account on another domain signs in over IMAP normally (test 6)")
+    check(session(tu, user_pw).get("accounts"), "the tenant's user still has JMAP (test 8)")
+    check(not events("auth.failed"), "no refusal counted as a failed sign-in (LP-11)")
+
+    # Client configuration for the tenant's domain only (LP-14a).
+    with urllib.request.urlopen(f"{HTTP}/mail/config-v1.1.xml?emailaddress={tu}", timeout=30) as r:
+        tenant_cfg = r.read().decode()
+    with urllib.request.urlopen(f"{HTTP}/mail/config-v1.1.xml?emailaddress={admin}", timeout=30) as r:
+        other_cfg = r.read().decode()
+    check('type="imap"' not in tenant_cfg and 'type="imap"' in other_cfg,
+          "autoconfig offers no IMAP for the tenant's domain, and still does elsewhere (LP-14a)")
+
+    # Server off means off for everyone: the tenant can't turn it back on (test 9).
+    one(admin, admin_pw, "inbuxa:ProtocolPolicy/set",
+        {"accountId": account, "update": {"singleton": {"legacyProtocols": "disabled"}}})
+    res = tset("enabled")
+    refused = (res[1].get("notUpdated") or {}).get(t) or {}
+    check(refused.get("type") == "forbidden"
+          and "inbuxa:ProtocolPolicy" in (refused.get("description") or ""),
+          "with the server off, the tenant can't turn them back on (LP-9, test 9)")
+    one(admin, admin_pw, "inbuxa:ProtocolPolicy/set",
+        {"accountId": account, "update": {"singleton": {"legacyProtocols": "enabled"}}})
+    check(settle(PORTS["imap"], True), "IMAP is back after the server switch returns")
+
+    # And back on, the tenant's user signs in again.
+    res = tset("enabled")
+    check(t in (res[1].get("updated") or {}), "with the server on, the tenant turns them back on")
+    check(imap_login(PORTS["imap"], tu, user_pw).startswith("OK"),
+          "and its user signs in over IMAP again")
+
+
+def events_matching(name, *parts):
+    return any(all(p in line for p in parts) for line in events(name))
+
+
 def settle(port, want, tries=30):
     """Wait for a port to reach the wanted state, so the check is not a race."""
     for _ in range(tries):
@@ -443,6 +572,9 @@ def main():
     after = advertised(admin, admin_pw)
     check(after["autoconfig"] == before["autoconfig"] and after["srv"] == before["srv"],
           "autoconfig and the suggested zone offer them again once back on")
+
+    # A tenant's own switch (LP-9 to LP-14a).
+    tenant_checks(admin, admin_pw, account)
 
     # And sign-in works again, with no restart.
     check(imap_login(PORTS["imap"], admin, admin_pw).startswith("OK"),

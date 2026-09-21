@@ -30,8 +30,8 @@ impl Server {
             ("%EMAILADDRESS%", default_host.as_str())
         };
 
-        // inbuxa: legacy-protocols LP-7
-        let legacy_off = self.legacy_protocols_off().await?;
+        // inbuxa: legacy-protocols LP-7, LP-14a
+        let legacy_off = self.legacy_protocols_off_for(domain).await?;
 
         // Build XML response
         let mut config = String::with_capacity(1024);

@@ -10,6 +10,7 @@
 pub mod access;
 pub mod ai_limits;
 pub mod protocol_policy;
+pub mod tenant_protocol_policy;
 pub mod deleted_account;
 pub mod fastmail;
 pub mod masked_email;
