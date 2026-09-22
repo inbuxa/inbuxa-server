@@ -1,0 +1,135 @@
+# Weekly release, ported from .github/workflows/release.yml when the project
+# moved to the self-hosted Gitea (2026-09-22): cut a release once a week, but
+# only if there is something in it. A release with nothing in it moves
+# :latest to an identical build, spends a version number, and notifies
+# everybody about nothing.
+#
+# The version is the date, YYYY.M.D unpadded, with a .N suffix from 2 for a
+# second release on one day. It lives in crates/types/src/branding.rs
+# (brand_version!), deliberately not in Cargo.toml so upstream's version bumps
+# merge without conflicts. The bump is committed to main and the tag names that
+# commit, so the tree a tag points at reports the version the tag claims --
+# publish.yml refuses a tag that doesn't.
+#
+# Mondays 10:07 UTC, last of the three INBUXA releases: Admin and the webmail
+# release ahead of the server they talk to. Run it by hand with
+# workflow_dispatch; dry_run defaults to true.
+#
+# NOT LIVE YET: this only ever dry-runs unless the Actions variable
+# RELEASE_LIVE is '1' (repo or org). Going live also needs a repo secret
+# RELEASE_TOKEN (jcoffey-dev, write:repository, allowed to push to main):
+#   * a tag Gitea creates for the job's own token raises no event, and the
+#     tag must start publish.yml;
+#   * the bump is committed through the contents API. Gitea has no "only if
+#     the branch is still at X" guard, so the job checks main's head right
+#     before writing and refuses if it moved since the commit it counted from;
+#     run it again. (The API does refuse if the file itself changed, via its
+#     blob sha.)
+name: weekly-release
+
+on:
+  schedule:
+    - cron: '7 10 * * 1'
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: Show the decision and stop
+        type: boolean
+        default: true
+
+# One at a time: two overlapping runs would race to write the same version and
+# create the same tag.
+concurrency:
+  group: weekly-release
+  cancel-in-progress: false
+
+jobs:
+  weekly-release:
+    runs-on: light
+    container:
+      image: python:3.13-slim@sha256:8d9d0b8bcf6506481eae4907c18f5e3e7902e629f5f6d684f9e7c32e85e3ddf0 # 3.13-slim
+    env:
+      READ_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      RELEASE_TOKEN: ${{ secrets.RELEASE_TOKEN }}
+      # Live only with RELEASE_LIVE=1 AND either the schedule or a manual run
+      # with dry_run unticked.
+      DRY_RUN: ${{ (vars.RELEASE_LIVE == '1' && (github.event_name == 'schedule' || inputs.dry_run == false || inputs.dry_run == 'false')) && '0' || '1' }}
+      RELEASE_LIVE: ${{ vars.RELEASE_LIVE }}
+      REPO: ${{ github.repository }}
+    steps:
+      - uses: coffey-labs/actions/checkout@fab0c4d45e0162963965f1555df27b7bed5e20ec
+        with:
+          fetch-depth: 0
+      - shell: bash
+        run: |
+          python3 - <<'PY'
+          import base64, datetime, json, os, re, subprocess, sys, urllib.request
+
+          api = f"{os.environ['CI_SERVER_INTERNAL']}/api/v1/repos/{os.environ['REPO']}"
+          def call(method, path, token, body=None):
+              req = urllib.request.Request(api + path, method=method,
+                  data=json.dumps(body).encode() if body is not None else None,
+                  headers={"Authorization": f"token {token}", "Content-Type": "application/json"})
+              with urllib.request.urlopen(req) as r:
+                  return json.load(r)
+          def git(*a):
+              return subprocess.run(["git", *a], check=True, capture_output=True, text=True).stdout.strip()
+          def has_tag(t):
+              # show-ref matches an exact ref; rev-parse --verify on this git
+              # can read some tag names as describe output and "find" a tag
+              # that isn't there.
+              return subprocess.run(["git", "show-ref", "--verify", "--quiet", f"refs/tags/{t}"]).returncode == 0
+
+          sha = git("rev-parse", "HEAD")
+          # The newest published release, or empty on a project that has never
+          # had one -- in which case everything counts as new. A release can
+          # outlive its tag; falling back to the whole history over-counts,
+          # which cuts a release that was due anyway.
+          rels = call("GET", "/releases?draft=false&pre-release=false&limit=1", os.environ["READ_TOKEN"])
+          previous = rels[0]["tag_name"] if rels else ""
+          rng = f"{previous}..HEAD" if previous and has_tag(previous) else "HEAD"
+          count = int(git("rev-list", "--count", rng))
+          if count == 0:
+              print(f"Nothing to release: no commits since {previous}."); sys.exit(0)
+
+          d = datetime.datetime.now(datetime.timezone.utc)
+          today = f"{d.year}.{d.month}.{d.day}"
+          version, n = today, 2
+          while has_tag(f"v{version}"):
+              version, n = f"{today}.{n}", n + 1
+          tag = f"v{version}"
+          print(f"Releasing {tag} -- {count} commit(s) since {previous or 'the beginning'}, from {sha}.")
+          if os.environ["DRY_RUN"] == "1":
+              print(f"Dry run (RELEASE_LIVE='{os.environ.get('RELEASE_LIVE', '')}'): stopping here."); sys.exit(0)
+
+          token = os.environ.get("RELEASE_TOKEN", "")
+          if not token:
+              print("RELEASE_TOKEN secret is not set on this repository", file=sys.stderr); sys.exit(1)
+
+          # Scoped to the macro body rather than replacing the first quoted
+          # string in the file, and asserted to have matched exactly once:
+          # branding.rs holds other string literals.
+          path = "crates/types/src/branding.rs"
+          src = open(path, encoding="utf-8").read()
+          out, hits = re.subn(r'(macro_rules! brand_version \{\s*\(\) => \{\s*")[^"]+(")',
+                              lambda m: m.group(1) + version + m.group(2), src, count=1)
+          assert hits == 1, f"brand_version! not found in {path}"
+
+          head = call("GET", "/branches/main", token)["commit"]["id"]
+          if head != sha:
+              print(f"main moved from {sha} to {head} since this run counted; run it again.", file=sys.stderr); sys.exit(1)
+          blob = call("GET", f"/contents/{path}?ref={sha}", token)["sha"]
+          bump = call("PUT", f"/contents/{path}", token, {
+              "branch": "main", "message": f"Version {version}", "sha": blob,
+              "content": base64.b64encode(out.encode()).decode()})["commit"]["sha"]
+          print(f"committed the bump as {bump}")
+
+          # Notes bounded to what is new: one line per change on main's
+          # first-parent history. Creating the release creates the tag, which
+          # is an ordinary push, so publish.yml builds and pushes the image.
+          notes = git("log", "--first-parent", "--format=- %s", rng)
+          rel = call("POST", "/releases", token, {
+              "tag_name": tag, "target_commitish": bump, "name": f"INBUXA {version}",
+              "body": f"{count} commit(s) since {previous or 'the beginning'}.\n\n{notes}"})
+          print(f"created release {rel['tag_name']}")
+          PY
