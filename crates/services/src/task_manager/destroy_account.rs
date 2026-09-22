@@ -6,7 +6,7 @@
  * Modified by Coffey Labs in 2026 for INBUXA.
  */
 
-use crate::task_manager::TaskResult;
+use crate::task_manager::{TaskResult, deferred_retry_time};
 use common::Server;
 use email::{message::metadata::MessageMetadata, sieve::SieveScript};
 use groupware::file::FileNode;
@@ -41,7 +41,7 @@ impl DestroyAccountTask for Server {
         match destroy_account(self, task).await {
             Ok(result) => result,
             Err(err) => {
-                let result = TaskResult::temporary(err.to_string());
+                let result = TaskResult::deferred(deferred_retry_time(&err), err.to_string());
                 trc::error!(
                     err.account_id(task.account_id.document_id())
                         .details("Failed to destroy account")

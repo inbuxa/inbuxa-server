@@ -1150,6 +1150,36 @@ impl DnsUpdater {
         Ok(())
     }
 
+    pub async fn delete_rrset(
+        &self,
+        origin: &str,
+        name: &str,
+        record_type: DnsRecordType,
+    ) -> Result<(), String> {
+        if let Err(err) = self
+            .updater
+            .set_rrset(
+                name,
+                record_type,
+                self.ttl.as_secs() as u32,
+                Vec::new(),
+                origin,
+            )
+            .await
+        {
+            trc::event!(
+                Dns(DnsEvent::RecordDeletionFailed),
+                Hostname = name.to_string(),
+                Details = origin.to_string(),
+                Type = record_type.as_str(),
+                Reason = err.to_string(),
+            );
+            return Err(format!("Failed to delete DNS RRSet: {}", err));
+        }
+
+        Ok(())
+    }
+
     pub async fn add_to_rrset(
         &self,
         origin: &str,

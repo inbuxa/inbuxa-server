@@ -390,6 +390,16 @@ impl<T: SessionStream> SessionData<T> {
                 .await
                 .imap_ctx(&arguments.tag, trc::location!())?;
             let mut dest_cache = None;
+            let train_spam = if dest_mailbox_id == JUNK_ID {
+                Some(true)
+            } else if src_mailbox.id.mailbox_id == JUNK_ID && dest_mailbox_id != TRASH_ID {
+                Some(false)
+            } else {
+                None
+            };
+            let mut train_batch = BatchBuilder::new();
+            let mut did_train = false;
+            train_batch.with_account_id(src_account_id);
             for (id, imap_id) in ids {
                 match self
                     .server
@@ -515,9 +525,31 @@ impl<T: SessionStream> SessionData<T> {
                     }
                 };
 
+                if let Some(is_spam) = train_spam {
+                    self.server
+                        .add_account_spam_sample(
+                            &mut train_batch,
+                            src_account_id,
+                            id,
+                            is_spam,
+                            self.session_id,
+                        )
+                        .await
+                        .imap_ctx(&arguments.tag, trc::location!())?;
+                    train_batch.commit_point();
+                    did_train = true;
+                }
+
                 if is_move {
                     destroy_ids.insert(id);
                 }
+            }
+
+            if did_train {
+                self.server
+                    .commit_batch(train_batch)
+                    .await
+                    .imap_ctx(&arguments.tag, trc::location!())?;
             }
 
             // Untag or delete emails

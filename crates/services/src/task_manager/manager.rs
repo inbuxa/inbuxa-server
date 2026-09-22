@@ -621,6 +621,7 @@ pub fn perpetual_retry_time(typ: TaskType, attempt: u64) -> Option<u64> {
             | TaskType::DkimManagement
             | TaskType::IndexDocument
             | TaskType::UnindexDocument
+            | TaskType::DestroyAccount
     )
     .then(|| {
         now().saturating_add(

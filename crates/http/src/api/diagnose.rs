@@ -230,14 +230,7 @@ async fn delivery_diagnose(
 
     // Lookup MX
     let now = Instant::now();
-    let mxs = match server
-        .core
-        .smtp
-        .resolvers
-        .dns
-        .mx_lookup(&domain, Some(&server.inner.cache.dns_mx))
-        .await
-    {
+    let mxs = match server.mx_lookup(domain.as_str()).await {
         Ok(mxs) => mxs,
         Err(err) => {
             tx.send(DeliveryStage::MxLookupError {
@@ -419,7 +412,7 @@ async fn delivery_diagnose(
                 })
                 .await?;
 
-                None
+                continue 'outer;
             }
             Ok(TlsaResult::Missing) => {
                 tx.send(DeliveryStage::TlsaNotFound {
@@ -440,14 +433,17 @@ async fn delivery_diagnose(
                         reason: "No TLSA records found for MX".to_string(),
                     })
                     .await?;
+
+                    None
                 } else {
                     tx.send(DeliveryStage::TlsaLookupError {
                         elapsed: now.elapsed_ms(),
                         reason: err.to_string(),
                     })
                     .await?;
+
+                    continue 'outer;
                 }
-                None
             }
         };
 
