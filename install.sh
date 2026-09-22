@@ -21,6 +21,6 @@ echo >&2
 echo "A server started with no configuration comes up in bootstrap mode;" >&2
 echo "INBUXA Admin's setup wizard completes first boot over JMAP." >&2
 echo >&2
-echo "Releases:  https://github.com/inbuxa/inbuxa-server/releases" >&2
+echo "Releases:  https://git.coffeylabs.org/inbuxa/inbuxa-server/releases" >&2
 echo "Docs:      https://docs.inbuxa.org/install/fresh/" >&2
 exit 1
