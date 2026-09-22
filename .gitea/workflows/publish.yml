@@ -1,0 +1,138 @@
+# Publish the container image, ported from .github/workflows/publish.yml when
+# the project moved to the self-hosted Gitea (2026-09-22). Starts on a v* tag,
+# whether a person pushed it or weekly-release.yml created it through the
+# releases API.
+#
+# The image is multi-arch (linux/amd64, linux/arm64) as before, but built in
+# one buildx run on host1 instead of one native runner per architecture: the
+# Dockerfile's builder stage runs on the build platform and cross-compiles
+# with an aarch64 linker, so only the small final stage (apt, setcap) goes
+# through QEMU for arm64. No digest-joining job is needed.
+#
+# Two guards before anything is pushed:
+#   * the tag must be v<brand_version!>. The version is a string in
+#     crates/types/src/branding.rs, not Cargo.toml, and the image is tagged
+#     with it, so a tag beside an unbumped macro would publish an image that
+#     reports a different version from its tag.
+#   * the tag must be on main, so an image never describes code that was never
+#     reviewed onto the default branch.
+#
+# :latest moves with every published tag: tags are cut by the weekly release
+# (or by hand for a real release); there are no prerelease tags here.
+#
+# The push logs in with PACKAGE_TOKEN (jcoffey-dev, write:package): the job's
+# own token is refused by the container registry.
+name: publish
+
+on:
+  push:
+    tags: ['v*']
+
+jobs:
+  version:
+    runs-on: light
+    container:
+      image: python:3.13-slim@sha256:8d9d0b8bcf6506481eae4907c18f5e3e7902e629f5f6d684f9e7c32e85e3ddf0 # 3.13-slim
+    outputs:
+      version: ${{ steps.v.outputs.version }}
+    steps:
+      # Full history: the ancestry check cannot be answered from a shallow
+      # clone. The checkout also fetches every branch as origin/*.
+      - uses: coffey-labs/actions/checkout@fab0c4d45e0162963965f1555df27b7bed5e20ec
+        with:
+          fetch-depth: 0
+      - id: v
+        shell: bash
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          # Scoped to the macro body: branding.rs holds other string literals,
+          # and tagging an image from one of those would be worse than failing.
+          V="$(awk '/macro_rules! brand_version /,/^}/' crates/types/src/branding.rs \
+               | grep -om1 '"[0-9][^"]*"' | tr -d '"')"
+          [ -n "$V" ] || { echo "could not read brand_version! from branding.rs" >&2; exit 1; }
+          if [ "$TAG" != "v$V" ]; then
+            echo "Tag $TAG names a commit whose brand_version! says $V." >&2
+            echo "Refusing to publish an image that would report the wrong version." >&2
+            exit 1
+          fi
+          git merge-base --is-ancestor "$(git rev-parse "${TAG}^{commit}")" origin/main \
+            || { echo "$TAG is not on main" >&2; exit 1; }
+          echo "version=$V" >> "$GITHUB_OUTPUT"
+          echo "version $V"
+
+  publish:
+    needs: [version]
+    runs-on: docker
+    container:
+      image: docker:28-cli@sha256:625d9431a9f54c5a2bc90f24f0e1c3d55b1349fd857dd85035f98c2c9acbdd4d # 28-cli
+      volumes:
+        - /var/run/docker.sock:/var/run/docker.sock
+    env:
+      DOCKER_BUILDKIT: "1"
+      REGISTRY: ${{ vars.REGISTRY }}
+      IMAGE: ${{ vars.REGISTRY }}/${{ github.repository }}
+      VERSION: ${{ needs.version.outputs.version }}
+      PACKAGE_TOKEN: ${{ secrets.PACKAGE_TOKEN }}
+    steps:
+      - uses: coffey-labs/actions/checkout@fab0c4d45e0162963965f1555df27b7bed5e20ec
+      - run: |
+          test -n "$REGISTRY" && test -n "$VERSION"
+          test -n "$PACKAGE_TOKEN" || { echo "PACKAGE_TOKEN secret is not set on this repository" >&2; exit 1; }
+          echo "$PACKAGE_TOKEN" | docker login -u jcoffey-dev --password-stdin "$REGISTRY"
+          docker run --privileged --rm tonistiigi/binfmt --install arm64
+          docker buildx create --use --name gitea-builder --driver docker-container || docker buildx use gitea-builder
+      # Attestations off, as before: they add manifests of their own to the
+      # index, and the index should hold the two images and nothing else.
+      - run: |
+          docker buildx build \
+            --platform linux/amd64,linux/arm64 \
+            --provenance=false --sbom=false \
+            --tag "$IMAGE:$VERSION" \
+            --tag "$IMAGE:latest" \
+            --push .
+          docker buildx imagetools inspect "$IMAGE:$VERSION"
+      # Gitea keeps a container package on its owner; linking it shows it on
+      # the repository's Packages tab. Idempotent.
+      - run: |
+          apk add --no-cache -q curl
+          curl -fsS -o /dev/null -X POST -H "Authorization: token $PACKAGE_TOKEN" \
+            "$CI_SERVER_INTERNAL/api/v1/packages/${GITHUB_REPOSITORY%%/*}/container/${GITHUB_REPOSITORY#*/}/-/link/${GITHUB_REPOSITORY#*/}" \
+            || echo "package already linked (or link refused); not fatal"
+      - if: always()
+        run: docker logout "$REGISTRY" || true
+
+  # The weekly release creates its Release (and so the tag) first; a tag
+  # pushed by hand has none. Either way the tag ends up with exactly one
+  # Release, created after the image exists so its pull instructions work.
+  release:
+    needs: [version, publish]
+    runs-on: light
+    container:
+      image: python:3.13-slim@sha256:8d9d0b8bcf6506481eae4907c18f5e3e7902e629f5f6d684f9e7c32e85e3ddf0 # 3.13-slim
+    steps:
+      - shell: bash
+        env:
+          TAG: ${{ github.ref_name }}
+          VERSION: ${{ needs.version.outputs.version }}
+          TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          REGISTRY: ${{ vars.REGISTRY }}
+        run: |
+          python3 - <<'PY'
+          import json, os, urllib.request, urllib.error
+          api = f"{os.environ['CI_SERVER_INTERNAL']}/api/v1/repos/{os.environ['REPO']}"
+          h = {"Authorization": f"token {os.environ['TOKEN']}", "Content-Type": "application/json"}
+          tag, version = os.environ["TAG"], os.environ["VERSION"]
+          try:
+              urllib.request.urlopen(urllib.request.Request(f"{api}/releases/tags/{tag}", headers=h))
+              print(f"{tag} already has a release"); raise SystemExit
+          except urllib.error.HTTPError as e:
+              if e.code != 404: raise
+          image = f"{os.environ['REGISTRY']}/{os.environ['REPO']}:{version}"
+          body = f"Container image: `{image}` (linux/amd64, linux/arm64); also `:latest`."
+          data = json.dumps({"tag_name": tag, "name": f"INBUXA {version}", "body": body}).encode()
+          r = json.load(urllib.request.urlopen(urllib.request.Request(f"{api}/releases", data=data, headers=h)))
+          print(f"created release {r['tag_name']}")
+          PY

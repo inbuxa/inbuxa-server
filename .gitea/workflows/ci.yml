@@ -1,0 +1,62 @@
+# CI on the self-hosted Gitea, ported from .gitlab-ci.yml during the move off
+# GitLab (2026-09-22). Gitea reads .gitea/workflows and ignores .github/ once
+# this directory exists; .github/workflows stays as it was for GitHub.
+#
+# Every job runs in an image pinned by digest (tag in the trailing comment),
+# and the only action used is coffey-labs/actions/checkout pinned by SHA. The
+# instance resolves short `uses:` against itself, never GitHub, so nothing
+# unreviewed can be pulled in.
+#
+# Not ported, as on GitLab: publish.yml and release.yml still need doing.
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    # Either runner (host1 or host2): the build needs no docker socket.
+    runs-on: light
+    container:
+      image: rust:1-bookworm@sha256:93ce27a88655056a51dbdd8f5f2d7ddc071c7b0070fb288a37b5a285fc83971e # 1-bookworm
+      # A named volume per host that outlives the job: Cargo's registry/git
+      # cache and the target dir. Without it every run recompiled RocksDB and
+      # the rest of the dependency tree from scratch. Each runner allows this
+      # one volume in its valid_volumes; each host keeps its own copy.
+      volumes:
+        - inbuxa-server-cargo:/cache
+    env:
+      CARGO_HOME: /cache/cargo-home
+      CARGO_TARGET_DIR: /cache/target
+      # Dependencies are reused whole; incremental data for the workspace
+      # crates would only bloat a shared target dir.
+      CARGO_INCREMENTAL: "0"
+    steps:
+      - uses: coffey-labs/actions/checkout@fab0c4d45e0162963965f1555df27b7bed5e20ec
+      # Cargo sizes its parallelism from the host's core count, not the job's
+      # CPU cap (2 on host2, 4 on host1); a C++ build of RocksDB at 8-way
+      # parallelism inside 6 GB gets OOM-killed. Match jobs to the cap.
+      - run: |
+          jobs=$(awk '$1 != "max" { printf "%d", $1 / $2 }' /sys/fs/cgroup/cpu.max 2>/dev/null)
+          echo "CARGO_BUILD_JOBS=${jobs:-$(nproc)}" >> "$GITHUB_ENV"
+          echo "cargo jobs: ${jobs:-$(nproc)}; cache: $(du -sh /cache 2>/dev/null | cut -f1)"
+      - run: apt-get update -qq && apt-get install -y -qq --no-install-recommends clang >/dev/null
+      - run: cargo build -p inbuxa --locked
+      # --no-run: the workflow compiled every test target without running them,
+      # which catches a test that no longer builds without paying for the suite.
+      - run: cargo test --workspace --locked --no-run
+      # Keep the cache from growing without bound: past 60 GB the target dir
+      # is dropped and the next build starts cold. The download cache stays.
+      # Two builds (dev + test profiles) already fill ~22 GB, so the limit
+      # has to sit well above that or it would wipe a warm cache every run.
+      - if: always()
+        run: |
+          used=$(du -s --block-size=1G /cache/target 2>/dev/null | cut -f1)
+          echo "target dir: ${used:-0} GB"
+          if [ "${used:-0}" -gt 60 ]; then rm -rf /cache/target && echo "over 60 GB: target dir cleared"; fi
