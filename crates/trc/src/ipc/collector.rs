@@ -80,7 +80,7 @@ const SPAN_MAX_HOLD: u64 = 60 * 60 * 24; // 1 day
 pub(crate) static COLLECTOR_THREAD: LazyLock<Arc<CollectorThread>> = LazyLock::new(|| {
     Arc::new(
         Builder::new()
-            .name("stalwart-collector".to_string())
+            .name("inbuxa-collector".to_string())
             .spawn(move || {
                 Collector::default().collect();
             })

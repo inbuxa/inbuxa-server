@@ -1,0 +1,59 @@
+# String literals allowed to keep the upstream project's name.
+# Read by tools/fork/name-check.py. One per line: path<TAB>literal as a JSON
+# string, as `name-check.py --list` prints it. Each group says why it stays;
+# add a line only under a reason, or with a new one.
+
+# Key-derivation contexts. Renaming them invalidates every sealed OAuth token
+# and client id already issued.
+crates/common/src/auth/oauth/client_id.rs	"stalwart-oauth-client-id-sw1"
+crates/common/src/auth/oauth/token.rs	"stalwart-oauth-token-sw1"
+
+# Keys and prefixes of data already in the store.
+crates/common/src/manager/application.rs	"STALWART_APP_"
+crates/common/src/manager/mod.rs	"STALWART_SPAM_CLASSIFIER_MODEL.lz4"
+crates/common/src/manager/mod.rs	"STALWART_SPAM_TRAIN_DATA.lz4"
+
+# The web interface's OAuth client id, which existing installs and the admin
+# front end already use. The id itself, and the tests that check it.
+crates/common/src/manager/first_party.rs	"stalwart-webui"
+crates/common/src/manager/application.rs	"stalwart-webui"
+crates/common/src/manager/application.rs	"<meta name=\\\"oauth-client-id\\\" content=\\\"stalwart-webui\\\" />"
+
+# Wire-protocol identifiers clients already hold or negotiate: WebDAV lock and
+# sync tokens, the JMAP capability, Sieve extensions.
+crates/dav/src/common/lock.rs	"urn:stalwart:davsync:"
+crates/dav/src/common/uri.rs	"urn:stalwart:"
+crates/dav/src/common/uri.rs	"urn:stalwart:davlock:{id:x}"
+crates/dav/src/common/uri.rs	"urn:stalwart:davsync:"
+crates/dav/src/common/uri.rs	"urn:stalwart:davsync:{id:x}"
+crates/dav/src/common/uri.rs	"urn:stalwart:davsync:{id:x}:{seq:x}"
+crates/jmap-proto/src/request/capability.rs	"urn:stalwart:jmap"
+crates/registry/src/schema/enums_impl.rs	"vnd.stalwart.expressions"
+crates/registry/src/schema/enums_impl.rs	"vnd.stalwart.while"
+
+# Moving an existing upstream installation over: its environment variables,
+# and upstream's upgrade guide for the store conversion.
+crates/types/src/branding.rs	"STALWART_{name}"
+crates/types/src/branding.rs	"Warning: STALWART_{name} is deprecated; set INBUXA_{name} instead."
+crates/store/src/build/registry.rs	"⚠️  INBUXA_RECOVERY_ADMIN (or STALWART_RECOVERY_ADMIN) is set, but the"
+crates/jmap/src/registry/mapping/bootstrap.rs	"https://github.com/stalwartlabs/stalwart/blob/main/UPGRADING/v0_16.md"
+crates/migration/src/lib.rs	"https://github.com/stalwartlabs/stalwart/blob/main/UPGRADING/v0_16.md"
+
+# Upstream's published spam-filter rules, fetched at runtime.
+crates/registry/src/schema/structs_impl.rs	"https://github.com/stalwartlabs/spam-filter/releases/latest/download/spam-filter-rules.json.gz"
+
+# Test fixtures: web-push contact address parsing.
+crates/common/src/network/webpush.rs	"  hello@stalw.art  "
+crates/common/src/network/webpush.rs	"MAILTO:hello@stalw.art"
+crates/common/src/network/webpush.rs	"hello@stalw.art"
+crates/common/src/network/webpush.rs	"http://stalw.art"
+crates/common/src/network/webpush.rs	"https://stalw.art/contact"
+crates/common/src/network/webpush.rs	"mailto:hello@stalw.art"
+crates/common/src/network/webpush.rs	"stalw.art"
+
+# OPEN, not yet decided (2026-09-22): operator-visible defaults. The log file
+# prefix (TracerLog, and the bootstrap's tracer) names files stalwart.* in
+# /var/log/inbuxa/, and the SQL stores default their database and user to
+# "stalwart". Changing the SQL defaults would break an install relying on them.
+crates/jmap/src/registry/mapping/bootstrap.rs	"stalwart"
+crates/registry/src/schema/structs_impl.rs	"stalwart"
