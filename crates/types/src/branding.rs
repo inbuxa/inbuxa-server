@@ -71,7 +71,7 @@ pub fn env_var(name: &str) -> Result<String, std::env::VarError> {
 #[macro_export]
 macro_rules! brand_version {
     () => {
-        "2026.9.22"
+        "2026.9.23"
     };
 }
 
