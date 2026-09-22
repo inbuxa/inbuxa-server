@@ -82,7 +82,11 @@ macro_rules! brand_version {
 /// this becomes just the version.
 #[macro_export]
 macro_rules! brand_version_full {
+    // The upstream crate version, without naming the upstream project: this
+    // string is user-visible (--version, the startup banner, the console,
+    // telemetry and the JMAP session's "implementation" field), and the name
+    // belongs only in copyright notices and the lineage line.
     () => {
-        concat!($crate::brand_version!(), " (Stalwart ", env!("CARGO_PKG_VERSION"), ")")
+        concat!($crate::brand_version!(), " (upstream ", env!("CARGO_PKG_VERSION"), ")")
     };
 }
