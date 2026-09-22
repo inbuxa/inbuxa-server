@@ -20,6 +20,16 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  # The upstream name in a new string literal, typically brought in by an
+  # upstream merge. Seconds, and needs no toolchain. tools/fork/name-check.py.
+  name-check:
+    runs-on: light
+    container:
+      image: python:3.13-slim@sha256:8d9d0b8bcf6506481eae4907c18f5e3e7902e629f5f6d684f9e7c32e85e3ddf0 # 3.13-slim
+    steps:
+      - uses: coffey-labs/actions/checkout@fab0c4d45e0162963965f1555df27b7bed5e20ec
+      - run: python3 tools/fork/name-check.py
+
   build:
     # Either runner (host1 or host2): the build needs no docker socket.
     runs-on: light

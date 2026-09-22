@@ -211,7 +211,7 @@ impl<T: SessionStream> Session<T> {
                             Request::Help { .. } => {
                                 trc::event!(Smtp(SmtpEvent::Help), SpanId = self.data.session_id,);
 
-                                self.write(b"250 2.0.0 Help can be found at https://stalw.art\r\n")
+                                self.write(concat!("250 2.0.0 Help can be found at ", types::brand_url!(), "\r\n").as_bytes())
                                     .await?;
                             }
                             Request::Helo { host } => {

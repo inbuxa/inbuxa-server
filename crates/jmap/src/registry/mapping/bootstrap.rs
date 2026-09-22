@@ -657,7 +657,7 @@ fn map_dns_server(dns_server: &DnsServerBootstrap) -> Option<registry::schema::s
 // FreeBSD keeps variable application data under /var/db (hier(7))
 // rather than FHS /var/lib.
 const DEFAULT_DATA_PATH: &str = if cfg!(target_os = "freebsd") {
-    "/var/db/stalwart/"
+    "/var/db/inbuxa/"
 } else {
     "/var/lib/inbuxa/"
 };

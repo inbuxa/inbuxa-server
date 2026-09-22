@@ -21,6 +21,22 @@ at the repository root before the import is merged.
 
 It needs Python 3.12+ (for `tarfile`'s `data` filter) and git.
 
+## name-check.py
+
+Fails when the upstream project's name appears in a Rust string literal that
+`name-allowlist.txt` doesn't list. CI runs it on every push and pull request,
+so an upstream merge can't bring the name back into what users and operators
+see. Comments, copyright headers and test directories aren't checked.
+
+```bash
+tools/fork/name-check.py          # exit 1 on anything new
+tools/fork/name-check.py --list   # every finding, in allowlist format
+```
+
+Rename what it reports. If a string has to stay, such as a key-derivation
+context or a wire-protocol identifier, add its `--list` line to the allowlist
+under the reason it stays.
+
 ## record-compat.py
 
 Records what the `*_compat` tests compare against, from the Enterprise
