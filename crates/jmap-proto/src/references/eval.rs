@@ -64,6 +64,9 @@ impl Response<'_> {
                         GetResponseMethod::ProtocolPolicy(response) => {
                             response.eval_jptr(path, &mut results)
                         }
+                        GetResponseMethod::TenantProtocolPolicy(response) => {
+                            response.eval_jptr(path, &mut results)
+                        }
                         GetResponseMethod::Principal(response) => {
                             response.eval_jptr(path, &mut results)
                         }

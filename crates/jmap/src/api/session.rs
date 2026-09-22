@@ -66,9 +66,18 @@ impl SessionHandler for Server {
             Capability::Inbuxa,
             Capabilities::Empty(EmptyCapabilities::default()),
         );
+        // inbuxa: legacy-protocols, Interfaces: whichever switch is stricter
+        let legacy_protocols = if self.legacy_protocols_off_for_account(access_token).await? {
+            "disabled"
+        } else {
+            "enabled"
+        };
         account.account_capabilities.append(
             Capability::Inbuxa,
-            Capabilities::Inbuxa(InbuxaAccountCapabilities { logo }),
+            Capabilities::Inbuxa(InbuxaAccountCapabilities {
+                logo,
+                legacy_protocols,
+            }),
         );
         // inbuxa: Fastmail's Masked Email API, for accounts that may hold masks
         if access_token.has_permission(Permission::SysMaskedEmailGet) {

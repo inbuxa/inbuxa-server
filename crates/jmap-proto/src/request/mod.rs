@@ -117,6 +117,9 @@ pub enum GetRequestMethod {
     DeletedAccount(Box<GetRequest<crate::object::inbuxa_deleted_account::DeletedAccount>>),
     AiLimits(Box<GetRequest<crate::object::inbuxa_ai_limits::AiLimits>>),
     ProtocolPolicy(Box<GetRequest<crate::object::inbuxa_protocol_policy::ProtocolPolicy>>),
+    TenantProtocolPolicy(
+        Box<GetRequest<crate::object::inbuxa_tenant_protocol_policy::TenantProtocolPolicy>>,
+    ),
 }
 
 #[derive(Debug)]
@@ -141,6 +144,9 @@ pub enum SetRequestMethod<'x> {
     DeletedAccount(Box<SetRequest<'x, crate::object::inbuxa_deleted_account::DeletedAccount>>),
     AiLimits(Box<SetRequest<'x, crate::object::inbuxa_ai_limits::AiLimits>>),
     ProtocolPolicy(Box<SetRequest<'x, crate::object::inbuxa_protocol_policy::ProtocolPolicy>>),
+    TenantProtocolPolicy(
+        Box<SetRequest<'x, crate::object::inbuxa_tenant_protocol_policy::TenantProtocolPolicy>>,
+    ),
 }
 
 #[derive(Debug)]

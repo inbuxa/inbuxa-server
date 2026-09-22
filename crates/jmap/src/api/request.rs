@@ -224,6 +224,9 @@ impl RequestHandler for Server {
                                     SetResponseMethod::ProtocolPolicy(set_response) => {
                                         set_response.update_created_ids(&mut response);
                                     }
+                                    SetResponseMethod::TenantProtocolPolicy(set_response) => {
+                                        set_response.update_created_ids(&mut response);
+                                    }
                                     SetResponseMethod::AddressBook(set_response) => {
                                         set_response.update_created_ids(&mut response);
                                     }
@@ -383,6 +386,13 @@ impl RequestHandler for Server {
                 GetRequestMethod::ProtocolPolicy(mut req) => {
                     resolve_account_id(&mut req.account_id, method_name.obj, access_token)?;
                     crate::inbuxa::protocol_policy::get(self, access_token, *req)
+                        .await?
+                        .into()
+                }
+                // inbuxa: inbuxa:TenantProtocolPolicy/get (legacy protocols off, per tenant)
+                GetRequestMethod::TenantProtocolPolicy(mut req) => {
+                    resolve_account_id(&mut req.account_id, method_name.obj, access_token)?;
+                    crate::inbuxa::tenant_protocol_policy::get(self, access_token, *req)
                         .await?
                         .into()
                 }
@@ -631,6 +641,13 @@ impl RequestHandler for Server {
                 SetRequestMethod::ProtocolPolicy(mut req) => {
                     resolve_account_id(&mut req.account_id, method_name.obj, access_token)?;
                     crate::inbuxa::protocol_policy::set(self, access_token, *req)
+                        .await?
+                        .into()
+                }
+                // inbuxa: inbuxa:TenantProtocolPolicy/set (legacy protocols off, per tenant)
+                SetRequestMethod::TenantProtocolPolicy(mut req) => {
+                    resolve_account_id(&mut req.account_id, method_name.obj, access_token)?;
+                    crate::inbuxa::tenant_protocol_policy::set(self, access_token, *req)
                         .await?
                         .into()
                 }

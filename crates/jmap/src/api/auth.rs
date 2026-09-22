@@ -80,6 +80,10 @@ impl JmapAuthorization for AccessToken {
                 // inbuxa: legacy protocols off. It takes listeners away and
                 // puts them back, so it takes the listener's permissions
                 GetRequestMethod::ProtocolPolicy(_) => Permission::SysNetworkListenerGet,
+                // inbuxa: legacy protocols off, per tenant. It governs
+                // sign-in on the tenant's domains, so it takes the domain's
+                // permissions, which a tenant administrator already holds.
+                GetRequestMethod::TenantProtocolPolicy(_) => Permission::SysDomainGet,
                 GetRequestMethod::Principal(_) => Permission::JmapPrincipalGet,
                 GetRequestMethod::Quota(_) => Permission::JmapQuotaGet,
                 GetRequestMethod::Blob(_) => Permission::JmapBlobGet,
@@ -183,6 +187,14 @@ impl JmapAuthorization for AccessToken {
                         Permission::SysNetworkListenerUpdate,
                         Permission::SysNetworkListenerUpdate,
                         Permission::SysNetworkListenerUpdate,
+                    ),
+                    // inbuxa: legacy protocols off, per tenant, with the domain's
+                    SetRequestMethod::TenantProtocolPolicy(s) => validate_set(
+                        s,
+                        self,
+                        Permission::SysDomainUpdate,
+                        Permission::SysDomainUpdate,
+                        Permission::SysDomainUpdate,
                     ),
                     SetRequestMethod::VacationResponse(s) => validate_set(
                         s,
@@ -294,7 +306,8 @@ impl JmapAuthorization for AccessToken {
                 | MethodObject::MaskedEmail
                 | MethodObject::DeletedAccount
                 | MethodObject::AiLimits
-                | MethodObject::ProtocolPolicy => Permission::JmapEmailChanges,
+                | MethodObject::ProtocolPolicy
+                | MethodObject::TenantProtocolPolicy => Permission::JmapEmailChanges,
                 // inbuxa: x:MaskedEmail/changes reads what /get reads
                 MethodObject::Registry(object_type) => object_type.get_permission(),
             },

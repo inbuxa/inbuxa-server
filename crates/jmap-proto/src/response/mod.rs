@@ -104,6 +104,9 @@ pub enum GetResponseMethod {
     DeletedAccount(GetResponse<crate::object::inbuxa_deleted_account::DeletedAccount>),
     AiLimits(GetResponse<crate::object::inbuxa_ai_limits::AiLimits>),
     ProtocolPolicy(GetResponse<crate::object::inbuxa_protocol_policy::ProtocolPolicy>),
+    TenantProtocolPolicy(
+        GetResponse<crate::object::inbuxa_tenant_protocol_policy::TenantProtocolPolicy>,
+    ),
 }
 
 #[derive(Debug, serde::Serialize)]
@@ -129,6 +132,9 @@ pub enum SetResponseMethod {
     DeletedAccount(Box<SetResponse<crate::object::inbuxa_deleted_account::DeletedAccount>>),
     AiLimits(Box<SetResponse<crate::object::inbuxa_ai_limits::AiLimits>>),
     ProtocolPolicy(Box<SetResponse<crate::object::inbuxa_protocol_policy::ProtocolPolicy>>),
+    TenantProtocolPolicy(
+        Box<SetResponse<crate::object::inbuxa_tenant_protocol_policy::TenantProtocolPolicy>>,
+    ),
 }
 
 #[derive(Debug, serde::Serialize)]
@@ -302,6 +308,26 @@ impl<'x> From<SetResponse<crate::object::inbuxa_protocol_policy::ProtocolPolicy>
 {
     fn from(value: SetResponse<crate::object::inbuxa_protocol_policy::ProtocolPolicy>) -> Self {
         ResponseMethod::Set(SetResponseMethod::ProtocolPolicy(Box::new(value)))
+    }
+}
+
+impl<'x> From<GetResponse<crate::object::inbuxa_tenant_protocol_policy::TenantProtocolPolicy>>
+    for ResponseMethod<'x>
+{
+    fn from(
+        value: GetResponse<crate::object::inbuxa_tenant_protocol_policy::TenantProtocolPolicy>,
+    ) -> Self {
+        ResponseMethod::Get(GetResponseMethod::TenantProtocolPolicy(value))
+    }
+}
+
+impl<'x> From<SetResponse<crate::object::inbuxa_tenant_protocol_policy::TenantProtocolPolicy>>
+    for ResponseMethod<'x>
+{
+    fn from(
+        value: SetResponse<crate::object::inbuxa_tenant_protocol_policy::TenantProtocolPolicy>,
+    ) -> Self {
+        ResponseMethod::Set(SetResponseMethod::TenantProtocolPolicy(Box::new(value)))
     }
 }
 

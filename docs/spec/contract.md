@@ -68,6 +68,12 @@ Each has an ID, and tests name the IDs they check.
   In `accountCapabilities`, the signed-in principal's own account carries
   `urn:inbuxa:jmap` with `logo`: the logo that applies to it (multi-tenancy
   MT-22), a string (URL or data URL) or `null`. Added 2026-09-18.
+
+  It also carries `legacyProtocols`: `enabled` or `disabled`, whether IMAP,
+  POP3, ManageSieve and SMTP submission are off for the principal -- the
+  stricter of the server's switch and its tenant's (legacy-protocols spec,
+  Interfaces). A front end uses it to say why a mail app can't connect
+  (LP-19). Added 2026-09-21.
 - **C-2.** Each front end states the contract versions it supports and checks
   `contract` after signing in. Outside its range it stops, with a message
   naming both versions. For ihasmail-inbuxa this replaces public ihasmail's

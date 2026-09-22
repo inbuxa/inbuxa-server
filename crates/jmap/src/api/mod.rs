@@ -2,6 +2,8 @@
  * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
+ *
+ * Modified by Coffey Labs in 2026 for INBUXA.
  */
 
 use crate::blob::UploadResponse;
@@ -186,7 +188,10 @@ impl ToRequestError for trc::Error {
                 trc::SecurityEvent::Unauthorized | trc::SecurityEvent::IpUnauthorized => {
                     RequestError::forbidden()
                 }
-                trc::SecurityEvent::IpBlockExpired | trc::SecurityEvent::IpAllowExpired => {
+                // inbuxa: legacy-protocols LP-8 is an event, never an error
+                trc::SecurityEvent::IpBlockExpired
+                | trc::SecurityEvent::IpAllowExpired
+                | trc::SecurityEvent::LegacyProtocolsChanged => {
                     RequestError::internal_server_error()
                 }
             },

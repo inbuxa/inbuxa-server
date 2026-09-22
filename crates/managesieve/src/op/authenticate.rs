@@ -101,6 +101,12 @@ impl<T: SessionStream> Session<T> {
             })
             .and_then(|token| token.assert_has_permission(Permission::SieveAuthenticate))?;
 
+        // inbuxa: legacy-protocols LP-10 for a bearer token that named no
+        // account, and LP-15: the sign-in is recorded for the impact panel
+        self.server
+            .admit_legacy_session(LegacyProtocol::ManageSieve, &access_token)
+            .await?;
+
         // Enforce concurrency limits
         let in_flight = match access_token.is_imap_request_allowed() {
             LimiterResult::Allowed(in_flight) => Some(in_flight),

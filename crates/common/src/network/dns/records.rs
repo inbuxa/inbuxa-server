@@ -2,9 +2,15 @@
  * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
+ *
+ * Modified by Coffey Labs in 2026 for INBUXA.
  */
 
-use crate::{Server, config::network::Pacc, network::dkim::generate_dkim_dns_record};
+use crate::{
+    Server,
+    config::network::Pacc,
+    network::{dkim::generate_dkim_dns_record, legacy::is_legacy_service},
+};
 use ahash::{AHashMap, AHashSet};
 use base64::{Engine, engine::general_purpose};
 use dns_update::{
@@ -34,6 +40,8 @@ impl Server {
         let network = &self.core.network;
         let default_host = network.server_name.as_str();
         let domain_name = domain.name.as_str();
+        // inbuxa: legacy-protocols LP-7, LP-14a
+        let legacy_off = self.legacy_protocols_off_for(domain_name).await?;
         let domain_name_suffix = format!(".{domain_name}");
 
         for record_type in record_types {
@@ -193,6 +201,25 @@ impl Server {
                             ServiceProtocol::Smtp => [("submission", 587), ("submissions", 465)],
                         };
 
+                        // inbuxa: legacy-protocols LP-7. While they are off, every
+                        // name says "not offered" -- target "." (RFC 6186 section
+                        // 3.4) -- rather than vanishing, so a client that looks
+                        // is told, and an old record left in the zone is replaced.
+                        if legacy_off && is_legacy_service(protocol) {
+                            for (service_name, _) in services {
+                                records.push(NamedDnsRecord {
+                                    name: format!("_{service_name}._tcp.{domain_name}."),
+                                    record: DnsRecord::SRV(SRVRecord {
+                                        target: ".".to_string(),
+                                        priority: 0,
+                                        weight: 0,
+                                        port: 0,
+                                    }),
+                                });
+                            }
+                            continue;
+                        }
+
                         for (is_tls, (service_name, port)) in services.into_iter().enumerate() {
                             if is_tls == 1 || service.cleartext {
                                 records.push(NamedDnsRecord {
@@ -277,6 +304,14 @@ impl Server {
                     for (protocol, service) in &network.info.services {
                         let hostname = service.hostname.as_deref().unwrap_or(default_host);
                         if hostname.ends_with(&domain_name_suffix) || hostname == domain_name {
+                            // inbuxa: legacy-protocols LP-7. No TLS pin for a port
+                            // the switch has closed. Submission's port stays open
+                            // (the SMTP lock), so its record stays.
+                            if legacy_off
+                                && matches!(protocol, ServiceProtocol::Imap | ServiceProtocol::Pop3)
+                            {
+                                continue;
+                            }
                             let port = match protocol {
                                 ServiceProtocol::Imap => 993,
                                 ServiceProtocol::Pop3 => 995,
@@ -382,6 +417,12 @@ impl Server {
     }
 
     pub async fn get_pacc_for_domain(&self, domain_name: &str) -> trc::Result<String> {
+        // inbuxa: legacy-protocols LP-7, LP-14a
+        let pacc = if self.legacy_protocols_off_for(domain_name).await? {
+            &self.core.network.info.pacc_jmap_only
+        } else {
+            &self.core.network.info.pacc
+        };
         self.get_directory_for_domain(domain_name)
             .await
             .caused_by(trc::location!())
@@ -390,15 +431,9 @@ impl Server {
                     .and_then(|directory| {
                         directory
                             .oidc_discovery_document()
-                            .map(|doc| self.core.network.info.pacc.build(&doc.url))
+                            .map(|doc| pacc.build(&doc.url))
                     })
-                    .unwrap_or_else(|| {
-                        self.core
-                            .network
-                            .info
-                            .pacc
-                            .build(&self.core.network.http.url_https)
-                    })
+                    .unwrap_or_else(|| pacc.build(&self.core.network.http.url_https))
             })
     }
 }

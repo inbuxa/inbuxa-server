@@ -50,6 +50,7 @@ pub enum MethodObject {
     // inbuxa: AI call limits
     AiLimits,
     ProtocolPolicy,
+    TenantProtocolPolicy,
 }
 
 impl MethodObject {
@@ -77,6 +78,7 @@ impl MethodObject {
             MethodObject::DeletedAccount => Capability::Inbuxa,
             MethodObject::AiLimits => Capability::Inbuxa,
             MethodObject::ProtocolPolicy => Capability::Inbuxa,
+            MethodObject::TenantProtocolPolicy => Capability::Inbuxa,
         }
     }
 }
@@ -256,6 +258,12 @@ impl MethodName {
             (MethodFunction::Set, MethodObject::AiLimits) => "inbuxa:AiLimits/set",
             (MethodFunction::Get, MethodObject::ProtocolPolicy) => "inbuxa:ProtocolPolicy/get",
             (MethodFunction::Set, MethodObject::ProtocolPolicy) => "inbuxa:ProtocolPolicy/set",
+            (MethodFunction::Get, MethodObject::TenantProtocolPolicy) => {
+                "inbuxa:TenantProtocolPolicy/get"
+            }
+            (MethodFunction::Set, MethodObject::TenantProtocolPolicy) => {
+                "inbuxa:TenantProtocolPolicy/set"
+            }
             (method, MethodObject::Registry(obj)) => {
                 return Cow::Owned(format!("x:{}/{}", obj.as_str(), method.as_str()));
             }
@@ -383,6 +391,8 @@ impl MethodName {
             "inbuxa:AiLimits/set" => (MethodObject::AiLimits, MethodFunction::Set),
             "inbuxa:ProtocolPolicy/get" => (MethodObject::ProtocolPolicy, MethodFunction::Get),
             "inbuxa:ProtocolPolicy/set" => (MethodObject::ProtocolPolicy, MethodFunction::Set),
+            "inbuxa:TenantProtocolPolicy/get" => (MethodObject::TenantProtocolPolicy, MethodFunction::Get),
+            "inbuxa:TenantProtocolPolicy/set" => (MethodObject::TenantProtocolPolicy, MethodFunction::Set),
 
         ).or_else(|| {
             let (obj, fnc) = s.strip_prefix("x:")?.split_once('/')?;
@@ -437,6 +447,7 @@ impl Display for MethodObject {
             MethodObject::DeletedAccount => "inbuxa:DeletedAccount",
             MethodObject::AiLimits => "inbuxa:AiLimits",
             MethodObject::ProtocolPolicy => "inbuxa:ProtocolPolicy",
+            MethodObject::TenantProtocolPolicy => "inbuxa:TenantProtocolPolicy",
             MethodObject::Registry(obj) => {
                 f.write_str("x:")?;
                 return f.write_str(obj.as_str());
