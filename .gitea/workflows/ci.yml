@@ -21,22 +21,40 @@ concurrency:
 
 jobs:
   build:
-    runs-on: docker
+    # Either runner (host1 or host2): the build needs no docker socket.
+    runs-on: light
     container:
       image: rust:1-bookworm@sha256:93ce27a88655056a51dbdd8f5f2d7ddc071c7b0070fb288a37b5a285fc83971e # 1-bookworm
-    # Both kept inside the workspace (a per-job volume on the project disk),
-    # deliberately not on /tmp, which on this host is a tmpfs that a Rust
-    # build of this size has filled before. There is no cache between runs
-    # here -- the runner's cache server is off -- so every build is cold.
+      # A named volume per host that outlives the job: Cargo's registry/git
+      # cache and the target dir. Without it every run recompiled RocksDB and
+      # the rest of the dependency tree from scratch. Each runner allows this
+      # one volume in its valid_volumes; each host keeps its own copy.
+      volumes:
+        - inbuxa-server-cargo:/cache
     env:
+      CARGO_HOME: /cache/cargo-home
+      CARGO_TARGET_DIR: /cache/target
+      # Dependencies are reused whole; incremental data for the workspace
+      # crates would only bloat a shared target dir.
       CARGO_INCREMENTAL: "0"
     steps:
       - uses: coffey-labs/actions/checkout@fab0c4d45e0162963965f1555df27b7bed5e20ec
+      # Cargo sizes its parallelism from the host's core count, not the job's
+      # CPU cap (2 on host2, 4 on host1); a C++ build of RocksDB at 8-way
+      # parallelism inside 6 GB gets OOM-killed. Match jobs to the cap.
       - run: |
-          echo "CARGO_HOME=$GITHUB_WORKSPACE/.cargo" >> "$GITHUB_ENV"
-          echo "CARGO_TARGET_DIR=$GITHUB_WORKSPACE/target" >> "$GITHUB_ENV"
+          jobs=$(awk '$1 != "max" { printf "%d", $1 / $2 }' /sys/fs/cgroup/cpu.max 2>/dev/null)
+          echo "CARGO_BUILD_JOBS=${jobs:-$(nproc)}" >> "$GITHUB_ENV"
+          echo "cargo jobs: ${jobs:-$(nproc)}; cache: $(du -sh /cache 2>/dev/null | cut -f1)"
       - run: apt-get update -qq && apt-get install -y -qq --no-install-recommends clang >/dev/null
       - run: cargo build -p inbuxa --locked
       # --no-run: the workflow compiled every test target without running them,
       # which catches a test that no longer builds without paying for the suite.
       - run: cargo test --workspace --locked --no-run
+      # Keep the cache from growing without bound: past 25 GB the target dir
+      # is dropped and the next build starts cold. The download cache stays.
+      - if: always()
+        run: |
+          used=$(du -s --block-size=1G /cache/target 2>/dev/null | cut -f1)
+          echo "target dir: ${used:-0} GB"
+          if [ "${used:-0}" -gt 25 ]; then rm -rf /cache/target && echo "over 25 GB: target dir cleared"; fi
