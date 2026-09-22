@@ -51,10 +51,12 @@ jobs:
       # --no-run: the workflow compiled every test target without running them,
       # which catches a test that no longer builds without paying for the suite.
       - run: cargo test --workspace --locked --no-run
-      # Keep the cache from growing without bound: past 25 GB the target dir
+      # Keep the cache from growing without bound: past 60 GB the target dir
       # is dropped and the next build starts cold. The download cache stays.
+      # Two builds (dev + test profiles) already fill ~22 GB, so the limit
+      # has to sit well above that or it would wipe a warm cache every run.
       - if: always()
         run: |
           used=$(du -s --block-size=1G /cache/target 2>/dev/null | cut -f1)
           echo "target dir: ${used:-0} GB"
-          if [ "${used:-0}" -gt 25 ]; then rm -rf /cache/target && echo "over 25 GB: target dir cleared"; fi
+          if [ "${used:-0}" -gt 60 ]; then rm -rf /cache/target && echo "over 60 GB: target dir cleared"; fi
