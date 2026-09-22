@@ -133,6 +133,41 @@ pub async fn test(test: &TestServer) {
     let samples = account.spam_training_samples().await;
     assert_eq!(samples.iter().filter(|x| !x.1.is_spam).count(), 11);
     assert_eq!(samples.iter().filter(|x| x.1.is_spam).count(), 10);
+
+    let support_id = test.account("support@example.com").id();
+    let jane = test.account("jane.smith@example.com");
+    let jane_id = jane.id();
+    let mut imap_jane = jane.imap_client().await;
+    let samples_for = |account_id, is_spam: bool| {
+        let admin = &admin;
+        async move {
+            admin
+                .spam_training_samples()
+                .await
+                .into_iter()
+                .filter(|(_, sample)| {
+                    sample.account_id == Some(account_id) && sample.is_spam == is_spam
+                })
+                .count()
+        }
+    };
+
+    imap_jane
+        .append("Shared Folders/support@example.com/Drafts", SPAM[1])
+        .await;
+    assert_eq!(samples_for(support_id, true).await, 0);
+
+    imap_jane
+        .send_ok("SELECT \"Shared Folders/support@example.com/Drafts\"")
+        .await;
+    imap_jane.send_ok("MOVE * \"Junk Mail\"").await;
+    assert_eq!(samples_for(support_id, true).await, 1);
+
+    imap_jane.send_ok("SELECT \"Junk Mail\"").await;
+    imap_jane
+        .send_ok("MOVE * \"Shared Folders/support@example.com/Drafts\"")
+        .await;
+    assert_eq!(samples_for(jane_id, false).await, 1);
 }
 
 pub async fn spam_classifier_model(server: &Server) -> SpamTrainer {

@@ -441,7 +441,7 @@ impl<T: SessionStream> Session<T> {
             if !rc.analysis.forward {
                 self.data
                     .rcpt_to
-                    .retain(|rcpt| !rc.analysis.is_report_address(rcpt.report_address()));
+                    .retain(|rcpt| !rc.analysis.is_report_address(rcpt.orig_address()));
             }
 
             if self.data.rcpt_to.is_empty() {

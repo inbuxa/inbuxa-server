@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
  */
 
-use crate::task_manager::{Task, TaskDetails, TaskFailureType, TaskResult};
+use crate::task_manager::{Task, TaskDetails, TaskFailureType, TaskResult, deferred_retry_time};
 use common::Server;
 use email::{cache::MessageCacheFetch, message::metadata::MessageMetadata};
 use groupware::{cache::GroupwareCache, calendar::CalendarEvent, contact::ContactCard};
@@ -255,7 +255,7 @@ impl SearchIndexTask for Server {
             );
             for r in results.iter_mut() {
                 if r.task_type == TaskType::Insert && r.result.is_success() {
-                    r.result = search_store_failure(retry_at, "Failed to index documents");
+                    r.result = TaskResult::deferred(retry_at, "Failed to index documents");
                 }
             }
             return results;
@@ -312,7 +312,7 @@ impl SearchIndexTask for Server {
                 for r in results.iter_mut() {
                     if r.task_type == TaskType::Delete && r.result.is_success() {
                         r.result =
-                            search_store_failure(retry_at, "Failed to delete documents from index");
+                            TaskResult::deferred(retry_at, "Failed to delete documents from index");
                     }
                 }
                 return results;
@@ -424,22 +424,6 @@ pub(crate) async fn reindex_account(server: &Server, account_id: u32) -> trc::Re
     server.notify_task_queue();
 
     Ok(())
-}
-
-fn deferred_retry_time(err: &trc::Error) -> Option<u64> {
-    err.value(trc::Key::NextRetry)
-        .and_then(|value| value.to_uint())
-}
-
-fn search_store_failure(retry_at: Option<u64>, message: &'static str) -> TaskResult {
-    match retry_at {
-        Some(retry_at) => TaskResult::Failure {
-            typ: TaskFailureType::Retry(retry_at),
-            message: message.into(),
-            max_attempts: None,
-        },
-        None => TaskResult::temporary(message),
-    }
 }
 
 fn attempt_number(status: &TaskStatus) -> u64 {

@@ -96,7 +96,38 @@ impl AcmeRequestBuilder {
         reuse_key_pem: Option<String>,
         dns_parameters: Option<AcmeDnsParameters>,
     ) -> AcmeResult<PemCert> {
-        let mut params = CertificateParams::new(domains.clone()).map_err(|err| {
+        let mut published = BTreeSet::new();
+        let result = self
+            .run_order(
+                server,
+                &domains,
+                reuse_key_pem,
+                dns_parameters.as_ref(),
+                &mut published,
+            )
+            .await;
+
+        if let Some(dns_parameters) = &dns_parameters {
+            for (zone, challenge_name) in published {
+                let _ = dns_parameters
+                    .updater
+                    .delete_rrset(&zone, &challenge_name, dns_update::DnsRecordType::TXT)
+                    .await;
+            }
+        }
+
+        result
+    }
+
+    async fn run_order(
+        &self,
+        server: &Server,
+        domains: &[String],
+        reuse_key_pem: Option<String>,
+        dns_parameters: Option<&AcmeDnsParameters>,
+        published: &mut BTreeSet<(String, String)>,
+    ) -> AcmeResult<PemCert> {
+        let mut params = CertificateParams::new(domains.to_vec()).map_err(|err| {
             AcmeError::Crypto(format!("Failed to create certificate params: {}", err))
         })?;
         params.distinguished_name = DistinguishedName::new();
@@ -108,7 +139,7 @@ impl AcmeRequestBuilder {
                 AcmeError::Crypto(format!("Failed to generate key pair: {}", err))
             })?,
         };
-        let response = self.new_order(domains.clone()).await?;
+        let response = self.new_order(domains.to_vec()).await?;
         let order_url = response.location;
         let mut order = response.body;
         let mut retry_after = None;
@@ -117,7 +148,7 @@ impl AcmeRequestBuilder {
             Acme(AcmeEvent::OrderStart),
             Url = self.directory.new_order.to_string(),
             Details = order_url.to_string(),
-            Hostname = domains.as_slice(),
+            Hostname = domains,
             Type = self.challenge.as_str(),
         );
 
@@ -126,19 +157,20 @@ impl AcmeRequestBuilder {
                 OrderStatus::Pending => {
                     if matches!(self.challenge, ChallengeType::Dns01) {
                         for url in &order.authorizations {
-                            self.authorize(server, url, dns_parameters.as_ref()).await?;
+                            self.authorize(server, url, dns_parameters, Some(published))
+                                .await?;
                         }
                     } else {
                         let auth_futures = order
                             .authorizations
                             .iter()
-                            .map(|url| self.authorize(server, url, dns_parameters.as_ref()));
+                            .map(|url| self.authorize(server, url, dns_parameters, None));
                         try_join_all(auth_futures).await?;
                     }
                     trc::event!(
                         Acme(AcmeEvent::AuthCompleted),
                         Url = self.directory.new_order.to_string(),
-                        Hostname = domains.as_slice(),
+                        Hostname = domains,
                     );
                     let response = self.order(&order_url).await?;
                     order = response.body;
@@ -149,7 +181,7 @@ impl AcmeRequestBuilder {
                         trc::event!(
                             Acme(AcmeEvent::OrderProcessing),
                             Url = self.directory.new_order.to_string(),
-                            Hostname = domains.as_slice(),
+                            Hostname = domains,
                             Total = i,
                         );
 
@@ -177,7 +209,7 @@ impl AcmeRequestBuilder {
                     trc::event!(
                         Acme(AcmeEvent::OrderReady),
                         Url = self.directory.new_order.to_string(),
-                        Hostname = domains.as_slice(),
+                        Hostname = domains,
                     );
 
                     let csr = params.serialize_request(&key_pair).map_err(|err| {
@@ -190,10 +222,10 @@ impl AcmeRequestBuilder {
                     trc::event!(
                         Acme(AcmeEvent::OrderValid),
                         Url = self.directory.new_order.to_string(),
-                        Hostname = domains.as_slice(),
+                        Hostname = domains,
                     );
 
-                    let certificate = self.select_certificate(&domains, certificate).await?;
+                    let certificate = self.select_certificate(domains, certificate).await?;
 
                     return Ok(PemCert {
                         certificate,
@@ -211,7 +243,7 @@ impl AcmeRequestBuilder {
                         Acme(AcmeEvent::OrderInvalid),
                         Url = self.directory.new_order.to_string(),
                         Details = order_url.to_string(),
-                        Hostname = domains.as_slice(),
+                        Hostname = domains,
                         Reason = reason.clone(),
                     );
 
@@ -226,6 +258,7 @@ impl AcmeRequestBuilder {
         server: &Server,
         url: &String,
         dns_parameters: Option<&AcmeDnsParameters>,
+        published: Option<&mut BTreeSet<(String, String)>>,
     ) -> AcmeResult<()> {
         let response = self
             .auth(url)
@@ -287,7 +320,12 @@ impl AcmeRequestBuilder {
                             .await?;
                     }
                     ChallengeType::Dns01 => {
-                        let dns_parameters = dns_parameters.unwrap();
+                        let Some(dns_parameters) = dns_parameters else {
+                            return Err(AcmeError::Invalid(
+                                "DNS-01 challenge requested but a DNS provider was not configured"
+                                    .to_string(),
+                            ));
+                        };
                         let domain = domain.strip_prefix("*.").unwrap_or(&domain);
 
                         let zone = dns_parameters
@@ -308,6 +346,11 @@ impl AcmeRequestBuilder {
                             )
                             .await
                             .map_err(AcmeError::Dns)?;
+
+                        if let Some(published) = published {
+                            published.insert((zone.to_string(), challenge_name.clone()));
+                        }
+
                         dns_parameters
                             .updater
                             .wait_for_txt_propagation(&challenge_name, zone, &proof)
