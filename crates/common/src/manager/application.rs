@@ -522,7 +522,7 @@ mod tests {
     }
 
     async fn fixture(name: &str, client_id: Option<&str>) -> (WebApplications, TempDir) {
-        let dir = TempDir::new(std::env::temp_dir().join(format!("stalwart-app-{name}")));
+        let dir = TempDir::new(std::env::temp_dir().join(format!("inbuxa-app-{name}")));
         dir.clean().await.unwrap();
         tokio::fs::write(dir.path.join("index.html"), INDEX)
             .await

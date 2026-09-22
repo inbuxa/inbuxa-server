@@ -583,10 +583,10 @@ impl Metrics {
     pub async fn parse(bp: &mut Bootstrap) -> Self {
         let metrics = bp.setting_infallible::<structs::Metrics>().await;
         let resource = Resource::builder()
-            .with_service_name("stalwart")
+            .with_service_name("inbuxa")
             .with_attribute(KeyValue::new(SERVICE_VERSION, types::brand_version_full!()))
             .build();
-        let instrumentation = InstrumentationScope::builder("stalwart")
+        let instrumentation = InstrumentationScope::builder("inbuxa")
             .with_version(types::brand_version_full!())
             .build();
 
