@@ -38,7 +38,6 @@ use store::{
     write::{AlignedBytes, Archive, QueueClass, ValueClass},
 };
 use trc::{AddContext, SpamEvent};
-use types::id::Id;
 use utils::DomainPart;
 
 impl Server {
