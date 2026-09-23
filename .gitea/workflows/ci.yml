@@ -35,6 +35,11 @@ jobs:
       - run: python3 tools/fork/name-check.py
       - if: always()
         run: python3 tools/fork/notice-check.py
+      # Cargo can patch a dependency to a directory in this repository, and
+      # the image builds from a context .dockerignore prunes to almost
+      # nothing. CI never sees the difference; a release does.
+      - if: always()
+        run: python3 tools/fork/context-check.py
 
   build:
     # Either runner (host1 or host2): the build needs no docker socket.
