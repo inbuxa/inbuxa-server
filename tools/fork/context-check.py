@@ -14,6 +14,12 @@ simply there -- and the release build failed on
 
 after a tag had already been pushed. This is seconds, and it runs beside the
 other fork checks rather than waiting for a release to find out.
+
+Being in the context isn't enough on its own: the Dockerfile cooks the
+dependencies (`cargo chef cook`) before it copies the tree in, from a recipe
+that carries only the workspace's manifests. So each patched path must also be
+copied into that stage before the cook step, or the same error comes back
+there -- as it did for 2026.9.24.2, the first tag after the context fix.
 """
 
 import re
@@ -49,6 +55,26 @@ def allowed(dockerignore: Path) -> set[str]:
     return keep
 
 
+def copied_before_cook(dockerfile: Path) -> list[str] | None:
+    """Sources COPY'd into the stage that runs `cargo chef cook`, before it.
+
+    None when no stage cooks. A `COPY . .` covers everything.
+    """
+    stage: list[str] = []
+    for line in dockerfile.read_text().splitlines():
+        stripped = line.strip()
+        if re.match(r"(?i)^FROM\s", stripped):
+            stage = []
+            continue
+        if "cargo chef cook" in stripped:
+            return stage
+        m = re.match(r"(?i)^COPY\s+(?!--from)(.+)$", stripped)
+        if m:
+            parts = m.group(1).split()
+            stage.extend(p.strip("./").split("/")[0] or "." for p in parts[:-1])
+    return None
+
+
 def main() -> int:
     paths = patched_paths(root / "Cargo.toml")
     if not paths:
@@ -72,9 +98,21 @@ def main() -> int:
                 f"  Add `!{top}` to .dockerignore.",
                 file=sys.stderr,
             )
+    copied = copied_before_cook(root / "Dockerfile")
+    if copied is not None and "." not in copied:
+        for p in paths:
+            top = p.strip("/").split("/")[0]
+            if top not in copied:
+                print(
+                    f"Cargo.toml patches {p}, but the Dockerfile doesn't copy {top!r} into the\n"
+                    f"  stage that runs `cargo chef cook` before that step, so cooking the\n"
+                    f"  dependencies fails on it. Add `COPY {top}/ {top}/` before the cook.",
+                    file=sys.stderr,
+                )
+                bad.append((p, top))
     if bad:
         return 1
-    print(f"build context includes every patched path: {', '.join(paths)}")
+    print(f"build context and cook stage include every patched path: {', '.join(paths)}")
     return 0
 
 

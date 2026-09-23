@@ -19,6 +19,10 @@ RUN export DEBIAN_FRONTEND=noninteractive && \
     g++-x86-64-linux-gnu binutils-x86-64-linux-gnu
 RUN rustup target add "$(cat /target.txt)"
 COPY --from=planner /recipe.json /recipe.json
+# inbuxa: [patch.crates-io] points sieve-rs at vendor/, and the recipe only
+# carries the workspace's own manifests, so cooking the dependencies needs the
+# vendored crate itself (the context allows it since #27; this puts it here).
+COPY vendor/ vendor/
 RUN RUSTFLAGS="$(cat /flags.txt)" cargo chef cook --target "$(cat /target.txt)" --release --no-default-features --features "sqlite postgres mysql rocks s3 redis azure nats" --recipe-path /recipe.json
 COPY . .
 RUN RUSTFLAGS="$(cat /flags.txt)" cargo build --target "$(cat /target.txt)" --release -p inbuxa --no-default-features --features "sqlite postgres mysql rocks s3 redis azure nats"
