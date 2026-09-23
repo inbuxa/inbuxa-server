@@ -9,15 +9,22 @@
 use super::backup::MAGIC_MARKER;
 use crate::{Core, DATABASE_SCHEMA_VERSION};
 use lz4_flex::frame::FrameDecoder;
-use registry::schema::enums::CompressionAlgo;
+use registry::{
+    schema::{
+        enums::{CompressionAlgo, TaskStoreMaintenanceType},
+        structs::{Task, TaskStatus, TaskStoreMaintenance},
+    },
+    types::EnumImpl,
+};
 use std::{
     fs::File,
     io::{BufReader, ErrorKind, Read},
     path::{Path, PathBuf},
 };
 use store::{
-    BlobStore, IterateParams, SUBSPACE_BLOBS, SUBSPACE_COUNTER, SUBSPACE_INDEXES, SUBSPACE_QUOTA,
-    SUBSPACE_REGISTRY_PK, Store, U32_LEN,
+    BlobStore, IterateParams, SUBSPACE_BLOBS, SUBSPACE_COUNTER, SUBSPACE_INDEXES,
+    SUBSPACE_PROPERTY, SUBSPACE_QUOTA, SUBSPACE_REGISTRY_PK, SUBSPACE_TELEMETRY_SPAN, Store,
+    U32_LEN,
     write::{
         AnyClass, AnyKey, BatchBuilder, ValueClass,
         key::{DeserializeBigEndian, is_node_id_key},
@@ -27,7 +34,9 @@ use types::{collection::Collection, field::Field};
 use utils::{UnwrapFailure, failed};
 
 impl Core {
-    pub async fn restore(&self, src: PathBuf) {
+    /// Imports an export into an empty store and returns the subspaces it
+    /// wrote. inbuxa: the caller hands them to [`Core::queue_reindex`].
+    pub async fn restore(&self, src: PathBuf) -> Vec<u8> {
         // Backup the core
         let paths = if src.is_dir() {
             let mut paths = Vec::new();
@@ -64,6 +73,13 @@ impl Core {
             std::process::exit(1);
         }
 
+        let mut imported = paths
+            .iter()
+            .map(|path| KeyValueReader::new(path).subspace)
+            .collect::<Vec<_>>();
+        imported.sort_unstable();
+        imported.dedup();
+
         let mut tasks = Vec::new();
         for path in paths {
             let storage = self.storage.clone();
@@ -76,6 +92,54 @@ impl Core {
         for task in tasks {
             task.await.failed("Failed to wait for task");
         }
+
+        imported
+    }
+
+    /// inbuxa: an export never carries the full-text index. It is built by
+    /// and for one search backend (the SQL stores index into their own
+    /// tables, the key-value stores into a subspace, external engines keep it
+    /// themselves), so it would be wrong or unreadable after a move to
+    /// another one. Instead, an import queues the same reindex tasks an
+    /// administrator can queue by hand (`reindexAccounts` and
+    /// `reindexTelemetry` store maintenance), and the server rebuilds the
+    /// index for whatever search store it is configured with once it starts.
+    pub async fn queue_reindex(&self, imported: &[u8]) -> Vec<TaskStoreMaintenanceType> {
+        let mut queued = Vec::new();
+        if imported.contains(&SUBSPACE_PROPERTY) {
+            queued.push(TaskStoreMaintenanceType::ReindexAccounts);
+        }
+        if imported.contains(&SUBSPACE_TELEMETRY_SPAN) {
+            queued.push(TaskStoreMaintenanceType::ReindexTelemetry);
+        }
+        if queued.is_empty() {
+            return queued;
+        }
+
+        let mut batch = BatchBuilder::new();
+        for maintenance_type in &queued {
+            batch.schedule_task(Task::StoreMaintenance(TaskStoreMaintenance {
+                maintenance_type: *maintenance_type,
+                status: TaskStatus::now(),
+                shard_index: None,
+            }));
+        }
+        self.storage
+            .data
+            .write(batch.build_all())
+            .await
+            .failed("Failed to queue the reindex tasks");
+
+        println!(
+            "Queued {} to rebuild the search index; it runs when the server starts.",
+            queued
+                .iter()
+                .map(|t| t.as_str())
+                .collect::<Vec<_>>()
+                .join(" and ")
+        );
+
+        queued
     }
 }
 
@@ -125,17 +189,22 @@ async fn restore_file(store: Store, blob_store: BlobStore, path: &Path) {
         }
         SUBSPACE_COUNTER | SUBSPACE_QUOTA => {
             while let Some((key, value)) = reader.next() {
-                batch.add(
-                    ValueClass::Any(AnyClass {
-                        subspace: reader.subspace,
-                        key,
-                    }),
-                    u64::from_le_bytes(
-                        value
-                            .try_into()
-                            .expect("Failed to deserialize counter/quota"),
-                    ) as i64,
-                );
+                let class = ValueClass::Any(AnyClass {
+                    subspace: reader.subspace,
+                    key,
+                });
+                let value = u64::from_le_bytes(
+                    value
+                        .try_into()
+                        .expect("Failed to deserialize counter/quota"),
+                ) as i64;
+                // inbuxa: the SQL stores add a negative amount with an UPDATE,
+                // which does nothing to a row that isn't there yet, so a
+                // negative counter vanished on import. Create the row first.
+                if value < 0 {
+                    batch.add(class.clone(), 0);
+                }
+                batch.add(class, value);
                 if batch.is_large_batch() {
                     store
                         .write(batch.build_all())
