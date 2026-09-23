@@ -54,6 +54,13 @@ Options:
   -o, --console                    Open the store console
   -h, --help                       Print help
   -V, --version                    Print version
+
+An export holds everything in the data and blob stores except short-lived
+in-memory state (rate limits, locks, greylisting) and the full-text search
+index, which belongs to one search backend. An import into an empty store
+queues the index to be rebuilt when the server next starts. EXPORT_TYPES
+limits an export to some of: data, registry, blob, changelog, queue, report,
+telemetry, tasks.
 "#
 );
 
@@ -256,10 +263,10 @@ impl BootManager {
                 telemetry.enable();
 
                 // Parse settings and restore
-                Box::pin(Core::parse(&mut bootstrap, storage))
-                    .await
-                    .restore(path)
-                    .await;
+                let core = Box::pin(Core::parse(&mut bootstrap, storage)).await;
+                let imported = core.restore(path).await;
+                // inbuxa: the search index isn't exported; rebuild it
+                core.queue_reindex(&imported).await;
                 std::process::exit(0);
             }
             StoreOp::Console => {

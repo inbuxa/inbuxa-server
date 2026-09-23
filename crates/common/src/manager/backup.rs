@@ -23,6 +23,13 @@ use utils::{UnwrapFailure, codec::leb128::Leb128_};
 
 pub(super) const MAGIC_MARKER: u8 = 123;
 
+// inbuxa: blobs kept under a fixed name instead of a content hash. Nothing
+// links to them, so the export names them outright.
+const NAMED_BLOBS: &[&[u8]] = &[
+    crate::manager::SPAM_CLASSIFIER_KEY,
+    crate::manager::SPAM_TRAINER_KEY,
+];
+
 #[derive(Debug, Clone, Copy, Hash, PartialEq, Eq)]
 pub(super) enum Family {
     Data = 0,
@@ -143,15 +150,21 @@ impl Core {
                     .await
                     .failed("Failed to iterate over data store");
 
-                for hash in blobs {
+                // inbuxa: the trained spam classifier and its trainer state are
+                // blobs stored under fixed names with no blob link, so the walk
+                // over links above never reaches them.
+                let named = NAMED_BLOBS.iter().map(|key| key.to_vec());
+                for key in blobs
+                    .into_iter()
+                    .map(|hash| hash.as_slice().to_vec())
+                    .chain(named)
+                {
                     if let Some(blob) = blob_store
-                        .get_blob(hash.as_slice(), 0..usize::MAX)
+                        .get_blob(&key, 0..usize::MAX)
                         .await
                         .failed("Failed to get blob")
                     {
-                        writer
-                            .send((hash.as_slice().to_vec(), blob))
-                            .failed("Failed to send key");
+                        writer.send((key, blob)).failed("Failed to send key");
                     }
                 }
             }),
@@ -323,7 +336,13 @@ impl Family {
                 SUBSPACE_REGISTRY_IDX,
                 SUBSPACE_REGISTRY_PK,
                 SUBSPACE_DIRECTORY,
-                store::SUBSPACE_INBUXA, // inbuxa: masked email
+                // inbuxa: registry objects the upstream list left out, so an
+                // export dropped them: archived items (undelete) and spam
+                // training samples. Their indexes and id counters already
+                // travel in this family and in `data`, so they ride along.
+                SUBSPACE_DELETED_ITEMS,
+                SUBSPACE_SPAM_SAMPLES,
+                store::SUBSPACE_INBUXA, // inbuxa: the fork's own data (masked email, undelete, policies)
             ],
             Family::Changelog => &[SUBSPACE_LOGS],
             Family::Queue => &[SUBSPACE_QUEUE_MESSAGE, SUBSPACE_QUEUE_EVENT],
