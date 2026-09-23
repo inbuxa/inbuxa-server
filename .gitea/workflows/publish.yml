@@ -131,8 +131,95 @@ jobs:
           except urllib.error.HTTPError as e:
               if e.code != 404: raise
           image = f"{os.environ['REGISTRY']}/{os.environ['REPO']}:{version}"
-          body = f"Container image: `{image}` (linux/amd64, linux/arm64); also `:latest`."
+          body = (f"Container image: `{image}` (linux/amd64, linux/arm64); also `:latest`.\n\n"
+                  "Binaries for a host install are attached: `inbuxa-linux-amd64.tar.gz` and "
+                  "`inbuxa-linux-arm64.tar.gz`, with `SHA256SUMS`. Each is the binary out of this "
+                  "release's image for that architecture, so it is the same build. The image "
+                  "grants it `cap_net_bind_service`; a host install has to grant that itself "
+                  "(`setcap`, or `AmbientCapabilities` in the unit) to bind port 25.")
           data = json.dumps({"tag_name": tag, "name": f"INBUXA {version}", "body": body}).encode()
           r = json.load(urllib.request.urlopen(urllib.request.Request(f"{api}/releases", data=data, headers=h)))
           print(f"created release {r['tag_name']}")
           PY
+
+  # The binaries for a host install, taken out of the image that was just
+  # pushed rather than compiled again.
+  #
+  # Building them separately would mean a second Rust build per architecture
+  # -- the slowest thing this pipeline does -- and would leave two artifacts
+  # that are supposed to be the same build but only probably are. Extracting
+  # them makes that identity a fact: the binary in the tarball is the file
+  # the image runs.
+  #
+  # `docker create` does not start anything, so pulling an arm64 image on an
+  # amd64 runner and copying a file out of it needs no emulation.
+  binaries:
+    needs: [version, publish, release]
+    runs-on: docker
+    container:
+      image: docker:28-cli@sha256:625d9431a9f54c5a2bc90f24f0e1c3d55b1349fd857dd85035f98c2c9acbdd4d # 28-cli
+      volumes:
+        - /var/run/docker.sock:/var/run/docker.sock
+    env:
+      REGISTRY: ${{ vars.REGISTRY }}
+      IMAGE: ${{ vars.REGISTRY }}/${{ github.repository }}
+      VERSION: ${{ needs.version.outputs.version }}
+      TAG: ${{ github.ref_name }}
+      REPO: ${{ github.repository }}
+      PACKAGE_TOKEN: ${{ secrets.PACKAGE_TOKEN }}
+      TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    steps:
+      - name: take the binaries out of the image
+        run: |
+          set -euo pipefail
+          echo "$PACKAGE_TOKEN" | docker login -u jcoffey-dev --password-stdin "$REGISTRY"
+          mkdir -p /out && cd /out
+          for arch in amd64 arm64; do
+            docker pull -q --platform "linux/$arch" "$IMAGE:$VERSION"
+            id="$(docker create --platform "linux/$arch" "$IMAGE:$VERSION")"
+            docker cp "$id:/usr/local/bin/inbuxa" "inbuxa"
+            docker rm -f "$id" >/dev/null
+            chmod 0755 inbuxa
+            tar -czf "inbuxa-linux-$arch.tar.gz" inbuxa
+            rm inbuxa
+          done
+          sha256sum inbuxa-linux-*.tar.gz > SHA256SUMS
+          cat SHA256SUMS
+      - name: attach them to the release
+        run: |
+          set -euo pipefail
+          apk add --no-cache -q python3
+          python3 - <<'PY'
+          import json, os, urllib.request, urllib.error, uuid, pathlib
+          api = f"{os.environ['CI_SERVER_INTERNAL']}/api/v1/repos/{os.environ['REPO']}"
+          tok = {"Authorization": f"token {os.environ['TOKEN']}"}
+          tag = os.environ["TAG"]
+
+          def get(path):
+              return json.load(urllib.request.urlopen(urllib.request.Request(api + path, headers=tok)))
+
+          rel = get(f"/releases/tags/{tag}")
+          assets = {a["name"]: a["id"] for a in get(f"/releases/{rel['id']}/assets")}
+
+          for path in ["/out/inbuxa-linux-amd64.tar.gz", "/out/inbuxa-linux-arm64.tar.gz", "/out/SHA256SUMS"]:
+              name = os.path.basename(path)
+              # A re-run of a tag replaces its assets rather than leaving two
+              # files with the same name and different contents.
+              if name in assets:
+                  urllib.request.urlopen(urllib.request.Request(
+                      f"{api}/releases/{rel['id']}/assets/{assets[name]}", headers=tok, method="DELETE"))
+              boundary = uuid.uuid4().hex
+              body = b"".join([
+                  f"--{boundary}\r\nContent-Disposition: form-data; name=\"attachment\"; filename=\"{name}\"\r\n".encode(),
+                  b"Content-Type: application/octet-stream\r\n\r\n",
+                  pathlib.Path(path).read_bytes(),
+                  f"\r\n--{boundary}--\r\n".encode(),
+              ])
+              req = urllib.request.Request(
+                  f"{api}/releases/{rel['id']}/assets?name={name}", data=body, method="POST",
+                  headers={**tok, "Content-Type": f"multipart/form-data; boundary={boundary}"})
+              urllib.request.urlopen(req)
+              print("attached", name)
+          PY
+      - if: always()
+        run: docker logout "$REGISTRY" || true
