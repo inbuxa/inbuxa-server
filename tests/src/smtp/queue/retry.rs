@@ -2,6 +2,8 @@
  * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
+ *
+ * Modified by Coffey Labs in 2026 for INBUXA.
  */
 
 use crate::{
@@ -11,7 +13,7 @@ use crate::{
     },
     utils::server::TestServerBuilder,
 };
-use ahash::AHashSet;
+use ahash::{AHashMap, AHashSet};
 use common::{
     config::smtp::queue::QueueName,
     ipc::{QueueEvent, QueueEventStatus},
@@ -180,7 +182,15 @@ async fn queue_retry() {
     let attempt = local.expect_message_for_queue_then_deliver("default").await;
     let mut dsn = Vec::new();
     let mut retries = Vec::new();
+    // inbuxa: when each attempt started, by test clock. The server sets the
+    // next retry from its clock when the attempt defers, which is at or after
+    // this and under a second later, so due - started is the interval or one
+    // more. Measuring from when the loop next sees the message instead made
+    // the result shrink by however long saving and reporting took, and it
+    // failed whenever that crossed a second boundary (under load, often).
+    let mut started = AHashMap::new();
     in_fight.insert(attempt.queue_id);
+    started.insert(attempt.queue_id, now());
     attempt.try_deliver(local.server.clone());
 
     loop {
@@ -226,15 +236,22 @@ async fn queue_retry() {
                     .await;
                 dsn.push(message);
             } else {
-                retries.push(event.due.saturating_sub(now));
+                retries.push(event.due.saturating_sub(started[&event.queue_id]));
                 in_fight.insert(event.queue_id);
+                started.insert(event.queue_id, store::write::now());
                 event.try_deliver(local.server.clone());
                 tokio::time::sleep(Duration::from_millis(100)).await;
             }
         }
     }
     local.assert_queue_is_empty().await;
-    assert_eq!(retries, vec![1, 2, 3]);
+    assert_eq!(retries.len(), 3, "retries: {retries:?}");
+    for (retry, interval) in retries.iter().zip([1, 2, 3]) {
+        assert!(
+            (interval..=interval + 1).contains(retry),
+            "retry after {retry}s where the schedule says {interval}s: {retries:?}"
+        );
+    }
     assert_eq!(dsn.len(), 4);
     let mut dsn = dsn.into_iter();
 
