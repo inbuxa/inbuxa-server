@@ -27,7 +27,7 @@ impl RegistryStore {
                 // variable, so it's ignored there, and loudly.
                 if !inner.env_recovery_mode && inner.env_recovery_admin.take().is_some() {
                     eprintln!();
-                    eprintln!("⚠️  INBUXA_RECOVERY_ADMIN (or STALWART_RECOVERY_ADMIN) is set, but the");
+                    eprintln!("⚠️  INBUXA_RECOVERY_ADMIN is set, but the");
                     eprintln!("   server is configured and not in recovery mode, so it is ignored.");
                     eprintln!("   Remove it from the environment. To use it for recovery, also set");
                     eprintln!("   INBUXA_RECOVERY_MODE=1.");

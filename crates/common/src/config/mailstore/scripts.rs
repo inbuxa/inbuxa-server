@@ -143,7 +143,9 @@ impl Scripting {
             .with_cpu_limit(trusted.max_cpu_cycles as usize)
             .with_max_nested_includes(trusted.max_nested_includes as usize)
             .with_max_received_headers(trusted.max_received_headers as usize)
-            .with_default_duplicate_expiry(trusted.duplicate_expiry.into_inner().as_secs());
+            .with_default_duplicate_expiry(trusted.duplicate_expiry.into_inner().as_secs())
+            // inbuxa: without it, `environment "name"` answers sieve-rs's default
+            .with_env_variable("name", types::brand_server!());
         trusted_runtime.set_local_hostname(local_hostname.clone());
         untrusted_runtime.set_local_hostname(local_hostname);
 
@@ -276,6 +278,26 @@ impl Clone for Scripting {
             untrusted_scripts: self.untrusted_scripts.clone(),
             trusted_compiler: self.trusted_compiler.clone(),
             http_client: self.http_client.clone(),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use sieve::compiler::grammar::Capability;
+
+    // inbuxa: sieve-rs is vendored (vendor/sieve-rs) to carry the fork's
+    // name in its Sieve extensions. If Cargo.lock moves sieve-rs past the
+    // vendored version, Cargo drops the patch with only a warning and
+    // upstream's spelling comes back; this fails instead.
+    #[test]
+    fn sieve_extensions_carry_the_fork_name() {
+        for (capability, name) in [
+            (Capability::While, "vnd.inbuxa.while"),
+            (Capability::Expressions, "vnd.inbuxa.expressions"),
+        ] {
+            assert_eq!(capability.to_string(), name);
+            assert_eq!(Capability::parse(name), capability);
         }
     }
 }

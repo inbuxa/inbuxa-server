@@ -105,7 +105,7 @@ def stop():
     docker("rm", "-f", NAME, check_rc=False)
 
 
-def jmap(user, password, calls, using=("urn:ietf:params:jmap:core", "urn:stalwart:jmap", INBUXA)):
+def jmap(user, password, calls, using=("urn:ietf:params:jmap:core", "urn:inbuxa:jmap:registry", INBUXA)):
     body = json.dumps({"using": list(using), "methodCalls": calls}).encode()
     req = urllib.request.Request(f"{HTTP}/jmap/", data=body, method="POST")
     req.add_header("Content-Type", "application/json")

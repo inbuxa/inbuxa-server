@@ -91,7 +91,7 @@ pub enum Capability {
     FileNode = 1 << 15,
     #[serde(rename(serialize = "urn:ietf:params:jmap:mail:share"))]
     MailShare = 1 << 16,
-    #[serde(rename(serialize = "urn:stalwart:jmap"))]
+    #[serde(rename(serialize = "urn:inbuxa:jmap:registry"))]
     Stalwart = 1 << 17,
     #[serde(rename(serialize = "urn:ietf:params:jmap:webpush-vapid"))]
     WebPushVapid = 1 << 18,
@@ -353,7 +353,7 @@ impl Capability {
             Capability::PrincipalsAvailability => "urn:ietf:params:jmap:principals:availability",
             Capability::FileNode => "urn:ietf:params:jmap:filenode",
             Capability::MailShare => "urn:ietf:params:jmap:mail:share",
-            Capability::Stalwart => "urn:stalwart:jmap",
+            Capability::Stalwart => "urn:inbuxa:jmap:registry",
             Capability::WebPushVapid => "urn:ietf:params:jmap:webpush-vapid",
             Capability::EmailPush => "urn:ietf:params:jmap:emailpush",
             Capability::Inbuxa => "urn:inbuxa:jmap",
@@ -501,7 +501,7 @@ impl Capability {
             "urn:ietf:params:jmap:contacts:parse" => Capability::ContactsParse,
             "urn:ietf:params:jmap:calendars:parse" => Capability::CalendarsParse,
             "urn:ietf:params:jmap:mail:share" => Capability::MailShare,
-            "urn:stalwart:jmap" => Capability::Stalwart,
+            "urn:inbuxa:jmap:registry" => Capability::Stalwart,
             "urn:ietf:params:jmap:webpush-vapid" => Capability::WebPushVapid,
             "urn:ietf:params:jmap:emailpush" => Capability::EmailPush,
             "urn:inbuxa:jmap" => Capability::Inbuxa,

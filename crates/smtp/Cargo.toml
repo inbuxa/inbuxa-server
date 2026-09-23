@@ -1,9 +1,8 @@
 [package]
 name = "smtp"
-description = "Stalwart SMTP Server"
+description = "inbuxa SMTP server"
 authors = [ "Stalwart Labs LLC <hello@stalw.art>"]
-repository = "https://github.com/stalwartlabs/smtp-server"
-homepage = "https://stalw.art/smtp"
+homepage = "https://inbuxa.org"
 keywords = ["smtp", "email", "mail", "server"]
 categories = ["email"]
 license = "AGPL-3.0-only OR LicenseRef-SEL"

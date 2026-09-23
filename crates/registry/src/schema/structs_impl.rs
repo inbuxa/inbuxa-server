@@ -29622,8 +29622,8 @@ impl Default for MySqlSettings {
         Self {
             host: Default::default(),
             port: 3306u64,
-            database: "stalwart".to_string(),
-            auth_username: Some("stalwart".to_string()),
+            database: "inbuxa".to_string(),
+            auth_username: Some("inbuxa".to_string()),
             auth_secret: Default::default(),
         }
     }
@@ -29780,8 +29780,8 @@ impl Default for MySqlStore {
             read_replicas: Default::default(),
             host: Default::default(),
             port: 3306u64,
-            database: "stalwart".to_string(),
-            auth_username: Some("stalwart".to_string()),
+            database: "inbuxa".to_string(),
+            auth_username: Some("inbuxa".to_string()),
             auth_secret: Default::default(),
         }
     }
@@ -29942,7 +29942,7 @@ impl Default for NatsCoordinator {
             no_echo: true,
             use_tls: false,
             auth_secret: Default::default(),
-            auth_username: Some("stalwart".to_string()),
+            auth_username: Some("inbuxa".to_string()),
             credentials: Default::default(),
         }
     }
@@ -31125,8 +31125,8 @@ impl Default for PostgreSqlSettings {
         Self {
             host: Default::default(),
             port: 5432u64,
-            database: "stalwart".to_string(),
-            auth_username: Some("stalwart".to_string()),
+            database: "inbuxa".to_string(),
+            auth_username: Some("inbuxa".to_string()),
             auth_secret: Default::default(),
             options: Default::default(),
         }
@@ -31270,8 +31270,8 @@ impl Default for PostgreSqlStore {
             read_replicas: Default::default(),
             host: Default::default(),
             port: 5432u64,
-            database: "stalwart".to_string(),
-            auth_username: Some("stalwart".to_string()),
+            database: "inbuxa".to_string(),
+            auth_username: Some("inbuxa".to_string()),
             auth_secret: Default::default(),
             options: Default::default(),
         }
@@ -32576,7 +32576,7 @@ impl Default for RedisClusterStore {
         Self {
             urls: Map::new(vec!["redis://127.0.0.1".to_string()]),
             timeout: Duration::from_millis(10000),
-            auth_username: Some("stalwart".to_string()),
+            auth_username: Some("inbuxa".to_string()),
             auth_secret: Default::default(),
             max_retry_wait: Default::default(),
             min_retry_wait: Default::default(),
@@ -32743,7 +32743,7 @@ impl Default for RedisSentinelStore {
             urls: Map::new(vec!["redis://127.0.0.1:26379".to_string()]),
             service_name: "mymaster".to_string(),
             timeout: Duration::from_millis(10000),
-            auth_username: Some("stalwart".to_string()),
+            auth_username: Some("inbuxa".to_string()),
             auth_secret: Default::default(),
             sentinel_username: Default::default(),
             sentinel_secret: Default::default(),
@@ -46308,7 +46308,7 @@ impl Default for TracerLog {
     fn default() -> Self {
         Self {
             path: Default::default(),
-            prefix: "stalwart".to_string(),
+            prefix: "inbuxa".to_string(),
             rotate: LogRotateFrequency::Daily,
             ansi: true,
             multiline: false,

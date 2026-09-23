@@ -2,6 +2,8 @@
  * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
+ *
+ * Modified by Coffey Labs in 2026 for INBUXA.
  */
 
 use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
@@ -313,16 +315,16 @@ B4yDfR2rGOd2H6Kv3fQNHPj9Nu5Tks8QYMLzrX8ONCNoFnNUQl9S0r0QS6phVqD0
     #[test]
     fn contact_is_normalized_to_a_uri() {
         for (input, expected) in [
-            ("hello@stalw.art", Some("mailto:hello@stalw.art")),
-            ("  hello@stalw.art  ", Some("mailto:hello@stalw.art")),
-            ("mailto:hello@stalw.art", Some("mailto:hello@stalw.art")),
-            ("MAILTO:hello@stalw.art", Some("MAILTO:hello@stalw.art")),
+            ("hello@example.org", Some("mailto:hello@example.org")),
+            ("  hello@example.org  ", Some("mailto:hello@example.org")),
+            ("mailto:hello@example.org", Some("mailto:hello@example.org")),
+            ("MAILTO:hello@example.org", Some("MAILTO:hello@example.org")),
             (
-                "https://stalw.art/contact",
-                Some("https://stalw.art/contact"),
+                "https://example.org/contact",
+                Some("https://example.org/contact"),
             ),
-            ("stalw.art", None),
-            ("http://stalw.art", None),
+            ("example.org", None),
+            ("http://example.org", None),
             ("tel:+123456789", None),
             ("", None),
         ] {

@@ -106,8 +106,9 @@ Each has an ID, and tests name the IDs they check.
     ihasmail-inbuxa server, authorization code with PKCE S256, redirect URI
     `{webmailUrl}/api/auth/callback`.
   INBUXA Admin's `<meta name="oauth-client-id">` is set to `inbuxa-admin`.
-  Until then it keeps upstream's `stalwart-webui`, which only works while
-  registration isn't required.
+  Served by the server itself it uses the web interface's client,
+  `inbuxa-webui` (upstream's `stalwart-webui` until 2026-09-22, retired on
+  start since).
 
   **Built (interim), 2026-09-18.** C-5's defaults are in the server, and
   `crates/common/src/manager/first_party.rs` registers the clients on every
@@ -116,7 +117,7 @@ Each has an ID, and tests name the IDs they check.
   `INBUXA_WEBMAIL_CLIENT_SECRET` (the webmail client is registered only when
   both of its variables are set). A web interface the server serves itself
   (none on a new install since SPEC.md §5.3; possible on one upgraded from
-  Stalwart) is registered too, as its application's OAuth client id or `stalwart-webui`, at the
+  Stalwart) is registered too, as its application's OAuth client id or `inbuxa-webui`, at the
   server's public URL. A missing client is created. An existing one gains any
   redirect URI it lacks, and the webmail client gets the configured secret.
   Nothing an operator added is removed. Bootstrap and recovery mode skip this:

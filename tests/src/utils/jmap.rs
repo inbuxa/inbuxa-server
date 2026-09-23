@@ -2,6 +2,8 @@
  * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
+ *
+ * Modified by Coffey Labs in 2026 for INBUXA.
  */
 
 use crate::utils::account::Account;
@@ -408,7 +410,7 @@ impl Account {
             "urn:ietf:params:jmap:principals:availability",
             "urn:ietf:params:jmap:filenode",
             "urn:ietf:params:jmap:mail:share",
-            "urn:stalwart:jmap"
+            "urn:inbuxa:jmap:registry"
           ],
           "methodCalls": calls
         });

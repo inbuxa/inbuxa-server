@@ -30,6 +30,8 @@ pub mod imap;
 #[cfg(test)]
 pub mod jmap;
 #[cfg(test)]
+pub mod renamed_identifiers; // inbuxa: SPEC.md §2.4
+#[cfg(test)]
 pub mod scim;
 #[cfg(test)]
 pub mod smtp;

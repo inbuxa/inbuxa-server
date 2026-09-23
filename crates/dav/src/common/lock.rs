@@ -2,6 +2,8 @@
  * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
+ *
+ * Modified by Coffey Labs in 2026 for INBUXA.
  */
 
 use super::ETag;
@@ -490,7 +492,7 @@ impl LockRequestHandler for Server {
                 for cond in &if_.list {
                     match cond {
                         Condition::StateToken { token, .. } => {
-                            if token.starts_with("urn:stalwart:davsync:") {
+                            if token.starts_with("urn:inbuxa:davsync:") {
                                 needs_sync_token = true;
                             } else {
                                 needs_lock_token = true;

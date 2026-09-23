@@ -1,5 +1,7 @@
 [workspace]
 resolver = "2"
+# Vendored crates are patched in below, not built as members.
+exclude = ["vendor"]
 members = [
     "crates/main",
     "crates/types",
@@ -78,3 +80,10 @@ incremental = false
 debug-assertions = false
 overflow-checks = false
 rpath = false
+
+# inbuxa: sieve-rs spells upstream's name into its Sieve extension names
+# (vnd.stalwart.*), which scripts `require` and ManageSieve advertises.
+# vendor/sieve-rs is the published 0.7.3 with those renamed; see its
+# VENDORED.md. Re-vendor when the version in Cargo.lock moves.
+[patch.crates-io]
+sieve-rs = { path = "vendor/sieve-rs" }

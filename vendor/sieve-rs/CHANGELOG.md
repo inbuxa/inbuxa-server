@@ -1,0 +1,62 @@
+sieve-rs 0.7.3
+================================
+- Bump `mail-builder` dependency to 0.5.
+
+sieve-rs 0.7.2
+================================
+- Fix: `replace` action adds additional `From` header.
+
+sieve-rs 0.7.1
+================================
+- Bump `fancy-regex` dependency to 0.17.0.
+- Fixed `rkyv` serialization lifetimes for rustc 1.93.0.
+
+sieve-rs 0.7.0
+================================
+- Added `rkyv` support.
+- Bump `mail-parser` dependency to 0.11.0.
+- Fix: Allow redirect to sender (#11).
+
+sieve-rs 0.6.0
+================================
+- Replaced `phf` with `hashify`.
+- Bump `mail-parser` dependency to 0.10.0.
+
+sieve-rs 0.5.3
+================================
+- Fixed `register_match_var` function.
+
+sieve-rs 0.5.2
+================================
+- Fixed `set_global_variable` function.
+
+sieve-rs 0.5.1
+================================
+- Case insensitive envelope tests (#6).
+- Set envelope variables internally (#10).
+
+sieve-rs 0.5.0
+================================
+- Removed context.
+
+sieve-rs 0.4.0
+================================
+- Support for expressions.
+
+sieve-rs 0.3.1
+================================
+- Bump `mail-builder` dependency to 0.3.0.
+
+sieve-rs 0.3.0
+================================
+- Updated ``execute`` grammar.
+- Upgraded to latest mail-parser.
+- Envelope accessible from environment variables.
+
+sieve-rs 0.2.0
+================================
+- Improved event loop.
+
+sieve-rs 0.1.0
+================================
+- Initial release.

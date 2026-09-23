@@ -49,6 +49,7 @@ email = { path = "../crates/email", features = ["test_mode"] }
 spam-filter = { path = "../crates/spam-filter", features = ["test_mode"] }
 trc = { path = "../crates/trc", features = [] }
 managesieve = { path = "../crates/managesieve", features = ["test_mode"] }
+migration = { path = "../crates/migration" }
 smtp-proto = { version = "0.2" }
 mail-auth = { version = "0.13", features = ["test"] }
 mail-parser = { version = "0.11", features = ["full_encoding", "rkyv"] } 

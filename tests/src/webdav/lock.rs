@@ -2,6 +2,8 @@
  * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
+ *
+ * Modified by Coffey Labs in 2026 for INBUXA.
  */
 
 use crate::utils::{server::TestServer, webdav::GenerateTestDavResource};
@@ -45,7 +47,7 @@ pub async fn test(test: &TestServer) {
 
         // Test 2: Refreshing a lock token with an invalid a lock token should fail
         client
-            .lock_refresh(&path, "urn:stalwart:davlock:1234", "infinity", "Second-456")
+            .lock_refresh(&path, "urn:inbuxa:davlock:1234", "infinity", "Second-456")
             .await
             .with_status(StatusCode::PRECONDITION_FAILED);
 
@@ -148,7 +150,7 @@ pub async fn test(test: &TestServer) {
 
         // Test 10: Unlock with and without a lock token
         client
-            .unlock(&path, "urn:stalwart:davlock:1234")
+            .unlock(&path, "urn:inbuxa:davlock:1234")
             .await
             .with_status(StatusCode::CONFLICT)
             .with_value("D:error.D:lock-token-matches-request-uri", "");

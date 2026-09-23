@@ -291,7 +291,7 @@ adds at most 2.
 ### The Sieve function `llm_prompt`
 
 - **AI-20.** `llm_prompt(model, prompt, temperature)`, available with
-  `require "vnd.stalwart.expressions"`. `model` names an `x:AiModel` by its
+  `require "vnd.inbuxa.expressions"`. `model` names an `x:AiModel` by its
   `name`, or failing that by its id. `prompt` is sent as is. `temperature` is
   clamped to 0.0–1.0. A value that isn't a number uses the model's own
   `temperature`. **Decision** on name first, see open question 4.

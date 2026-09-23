@@ -208,7 +208,7 @@ pub(crate) async fn bootstrap_set(
                         .with_description(concat!(
                             "The selected data store contains information from an older version. ",
                             "Please follow the upgrade instructions at ",
-                            "https://github.com/stalwartlabs/stalwart/blob/main/UPGRADING/v0_16.md"
+                            "https://docs.inbuxa.org/install/migrating/"
                         )),
                 );
                 break;
@@ -679,7 +679,7 @@ fn build_default_bootstrap(server: &Server) -> Bootstrap {
         directory: DirectoryBootstrap::Internal,
         tracer: Tracer::Log(TracerLog {
             path: "/var/log/inbuxa/".to_string(),
-            prefix: "stalwart".to_string(),
+            prefix: "inbuxa".to_string(),
             ansi: true,
             enable: true,
             ..Default::default()
