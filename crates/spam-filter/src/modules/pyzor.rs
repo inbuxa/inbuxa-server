@@ -2,6 +2,8 @@
  * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
+ *
+ * Modified by Coffey Labs in 2026 for INBUXA.
  */
 
 use common::config::mailstore::spamfilter::PyzorConfig;
@@ -43,35 +45,14 @@ pub(crate) async fn pyzor_check(
     // Hash message
     let request = message.pyzor_check_message();
 
+    // Send message to address. inbuxa: in tests, a fixed table answers
+    // instead of a public server (test_response).
+    #[cfg(not(feature = "test_mode"))]
+    let response = pyzor_send_message(config.address, config.timeout, &request).await;
     #[cfg(feature = "test_mode")]
-    {
-        if request.contains("b5b476f0b5ba6e1c038361d3ded5818dd39c90a2") {
-            return Ok(PyzorResponse {
-                code: 200,
-                count: 1000,
-                wl_count: 0,
-            }
-            .into());
-        } else if request.contains("d67d4b8bfc3860449e3418bb6017e2612f3e2a99") {
-            return Ok(PyzorResponse {
-                code: 200,
-                count: 60,
-                wl_count: 10,
-            }
-            .into());
-        } else if request.contains("81763547012b75e57a20d18ce0b93014208cdfdb") {
-            return Ok(PyzorResponse {
-                code: 200,
-                count: 50,
-                wl_count: 20,
-            }
-            .into());
-        }
-    }
+    let response = std::io::Result::Ok(test_response(&request));
 
-    // Send message to address
-    pyzor_send_message(config.address, config.timeout, &request)
-        .await
+    response
         .map(Into::into)
         .map_err(|err| {
             trc::SpamEvent::PyzorError
@@ -82,6 +63,32 @@ pub(crate) async fn pyzor_check(
         })
 }
 
+/// inbuxa: the answers tests get, by digest, instead of a public server's,
+/// whose counts change and which a test may not be able to reach. Upstream
+/// answered the first three here and sent every other digest to the network.
+#[cfg(feature = "test_mode")]
+fn test_response(request: &str) -> PyzorResponse {
+    let (count, wl_count) = if request.contains("b5b476f0b5ba6e1c038361d3ded5818dd39c90a2")
+        // The digest of an empty body, as an HTML-only message with no text
+        // to hash produces; public servers report it widely.
+        || request.contains("da39a3ee5e6b4b0d3255bfef95601890afd80709")
+    {
+        (1000, 0)
+    } else if request.contains("d67d4b8bfc3860449e3418bb6017e2612f3e2a99") {
+        (60, 10)
+    } else if request.contains("81763547012b75e57a20d18ce0b93014208cdfdb") {
+        (50, 20)
+    } else {
+        (0, 0)
+    };
+    PyzorResponse {
+        code: 200,
+        count,
+        wl_count,
+    }
+}
+
+#[cfg_attr(feature = "test_mode", allow(dead_code))]
 async fn pyzor_send_message(
     addr: SocketAddr,
     timeout: Duration,

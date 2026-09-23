@@ -81,9 +81,18 @@ async fn antispam() {
     admin
         .registry_create_object(SpamSettings {
             score_spam: Float::new(5.0),
+            // inbuxa: the rules carry the scores the expectations are written
+            // against, so they're pinned (spam-filter v3.0.2, beside the test
+            // cases) rather than read from a developer's own checkout, which
+            // left every score at zero. SPAM_RULES_URL still overrides.
             spam_filter_rules_url: std::env::var("SPAM_RULES_URL")
                 .unwrap_or_else(|_| {
-                    "file:///Users/me/code/spam-filter/spam-filter-rules.json.gz".to_string()
+                    concat!(
+                        "file://",
+                        env!("CARGO_MANIFEST_DIR"),
+                        "/resources/smtp/antispam/spam-filter-rules.json.gz"
+                    )
+                    .to_string()
                 })
                 .into(),
             ..Default::default()
@@ -156,7 +165,7 @@ async fn antispam() {
         }))
         .await;
     // inbuxa: a rules file that can't be read is retried later; don't wait
-    // for that retry (the path above is a developer's own checkout)
+    // for that retry (SPAM_RULES_URL may name one that isn't there)
     test.wait_for_tasks_skip_not_due().await;
     admin.reload_settings().await;
     admin.reload_lookup_stores().await;
