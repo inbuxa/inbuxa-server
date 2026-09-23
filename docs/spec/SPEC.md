@@ -212,14 +212,29 @@ depends on `store` and can't be called from it (`features/scale-out-storage.md`)
 - Factual statements are allowed and required: "a fork of Stalwart",
   "compatible with Stalwart 0.16 data". Upstream copyright notices stay on
   every file they cover.
-- Protocol identifiers stay as upstream has them, for example the JMAP
-  capability `urn:stalwart:jmap` and the `x:` object names. They're
-  interoperability, not branding, and renaming them breaks every existing
-  client. Anything the fork adds uses its own namespace (open: which one).
-- **Version and build metadata are exempt from the first bullet** (added
-  2026-09-19). `inbuxa --version`, the startup banner and events,
-  OpenTelemetry's `service.version`, the JMAP `implementation` string, release
-  notes and the strip report all name the Stalwart base, as §2.6 requires.
+- **Identifiers people meet carry the fork's name** (changed 2026-09-22;
+  this bullet used to keep upstream's). Upstream's JMAP capability for the
+  registry (`x:`) objects is `urn:inbuxa:jmap:registry`, beside the fork's
+  own `urn:inbuxa:jmap` (contract C-1); WebDAV lock and sync tokens are
+  `urn:inbuxa:dav*`, the Sieve extensions are `vnd.inbuxa.while` and `vnd.inbuxa.expressions`, the
+  web interface's OAuth client is `inbuxa-webui`, the spam filter's blobs are
+  `INBUXA_SPAM_*`, and the SQL stores and log files default to `inbuxa`.
+  There are no aliases: the old names stop working, so front ends move with
+  the server, Sieve scripts that `require` the old extensions are edited,
+  DAV clients resync once, and anyone signed in to the web interface signs in
+  again. Pre-rename data is carried over where it would otherwise be lost
+  (the spam model, the web interface's client). The `x:` object names are
+  unchanged, having no name in them. `tools/fork/renames.py` holds the list,
+  and the strip applies it to every import (§2.2).
+- **Identifiers nobody sees keep upstream's spelling:** the OAuth
+  key-derivation contexts, whose renaming would invalidate every issued token
+  and client id, and the application blob prefix, which is hashed before use.
+  `tools/fork/name-allowlist.txt` lists them with their reasons.
+- **Version and build metadata give the base without the name** (added
+  2026-09-19, narrowed 2026-09-22). `inbuxa --version`, the startup banner and
+  events, OpenTelemetry's `service.version` and the JMAP `implementation`
+  string say `2026.9.23 (upstream 0.16.23)`, as §2.6 requires; release notes
+  and the strip report may name the Stalwart base.
   That is a factual statement about what was compiled, not a name the product
   calls itself, and the two bullets don't conflict: the first governs
   identity, this one governs provenance. A reader who takes "no Stalwart in
@@ -243,15 +258,18 @@ Done 2026-09-18:
 - The package and binary are `inbuxa` (`cargo build -p inbuxa`). The binary's
   help, banner and every protocol greeting say INBUXA (the branding module,
   `types::brand!()`).
-- Settings come from `INBUXA_*` environment variables. Each still falls back
-  to its `STALWART_*` name, with a startup warning to rename it
-  (`types::branding::env_var`). That covers all nine the server reads:
-  `HOSTNAME`, `RECOVERY_MODE`, `RECOVERY_ADMIN`, `RECOVERY_MODE_PORT`,
-  `RECOVERY_MODE_LOG_LEVEL`, `ROLE`, `PUSH_SHARD`, `PUBLIC_URL`, `HTTPS_PORT`.
-- **Not renamed, on purpose:** `STALWART_APP_` and the two `STALWART_SPAM_...`
-  names. They look like environment variables, but they're keys inside the
-  data store, so renaming them would orphan existing installed apps and
-  spam-classifier models.
+- Settings come from `INBUXA_*` environment variables
+  (`types::branding::env_var`): `HOSTNAME`, `RECOVERY_MODE`, `RECOVERY_ADMIN`,
+  `RECOVERY_MODE_PORT`, `RECOVERY_MODE_LOG_LEVEL`, `ROLE`, `PUSH_SHARD`,
+  `PUBLIC_URL`, `HTTPS_PORT`, and the front-end variables of contract C-6.
+  Until 2026-09-22 each fell back to its `STALWART_*` name with a warning.
+  Now a `STALWART_*` name that's set where its `INBUXA_*` one isn't stops the
+  server at startup, naming the variable to rename, so an install moved over
+  from upstream never runs on settings it silently dropped.
+- The spam filter's blobs moved from `STALWART_SPAM_*` to `INBUXA_SPAM_*` on
+  2026-09-22; every start moves any left under the old keys
+  (`migration::try_migrate`), so no trained model is orphaned.
+  `STALWART_APP_` stays: it's hashed into a blob key and never seen.
 - New installs default to `/var/lib/inbuxa` for data and `/var/log/inbuxa` for
   logs. Existing installs keep the paths their configuration names, so no data
   moves.
@@ -421,8 +439,8 @@ Versioned, and advertised in the JMAP session so either side can check it.
   address or network, so an admin credential is useless from anywhere else.
 - **Push.** Unchanged: JMAP push with VAPID, as ihasmail uses today.
 - **INBUXA Admin's client.** INBUXA Admin signs in by OAuth (authorization
-  code with PKCE) as upstream's `webui` does, as client `stalwart-webui` for
-  now. The fork registers a first-party `inbuxa-admin` client with the
+  code with PKCE) as upstream's `webui` does, as client `inbuxa-webui`
+  (upstream's `stalwart-webui` until 2026-09-22) when the server serves it. The fork registers a first-party `inbuxa-admin` client with the
   admin's own redirect URIs, and the admin switches to it (its
   `<meta name="oauth-client-id">`).
 - **Cross-origin access.** Verified 2026-09-18 against a separate

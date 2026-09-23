@@ -47,22 +47,32 @@ macro_rules! brand_url {
 }
 
 /// Reads one of the server's environment variables by its unprefixed name,
-/// such as `RECOVERY_ADMIN`.
+/// such as `RECOVERY_ADMIN`, from `INBUXA_<name>`.
 ///
-/// `INBUXA_<name>` wins. `STALWART_<name>` is still read when the new name
-/// isn't set, so an existing Stalwart install moves over without editing its
-/// environment, and a warning says which variable to rename.
+/// The upstream prefix isn't read (SPEC §2.4). An install moved over from
+/// upstream that still sets it stops here with the variable to rename, rather
+/// than starting on defaults the operator didn't choose.
 pub fn env_var(name: &str) -> Result<String, std::env::VarError> {
-    match std::env::var(format!("INBUXA_{name}")) {
-        Err(std::env::VarError::NotPresent) => {
-            let legacy = std::env::var(format!("STALWART_{name}"));
-            if legacy.is_ok() {
-                eprintln!("Warning: STALWART_{name} is deprecated; set INBUXA_{name} instead.");
-            }
-            legacy
-        }
-        found => found,
+    let found = std::env::var(format!("INBUXA_{name}"));
+    if matches!(found, Err(std::env::VarError::NotPresent))
+        && let Some(legacy) = legacy_setting(name, |var| std::env::var_os(var).is_some())
+    {
+        eprintln!(
+            "Error: {legacy} is set, but inbuxa reads INBUXA_{name}. Rename it and start again \
+             (https://docs.inbuxa.org/install/migrating/)."
+        );
+        std::process::exit(1);
     }
+    found
+}
+
+/// The environment prefix upstream reads. Only ever used to refuse it.
+const LEGACY_ENV_PREFIX: &str = "STALWART";
+
+/// The upstream-prefixed variable for `name`, if it's set.
+fn legacy_setting(name: &str, is_set: impl Fn(&str) -> bool) -> Option<String> {
+    let legacy = format!("{LEGACY_ENV_PREFIX}_{name}");
+    is_set(&legacy).then_some(legacy)
 }
 
 /// INBUXA's own version, dated like the rest of its family: `YYYY.M.D`, with
@@ -89,4 +99,17 @@ macro_rules! brand_version_full {
     () => {
         concat!($crate::brand_version!(), " (upstream ", env!("CARGO_PKG_VERSION"), ")")
     };
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{LEGACY_ENV_PREFIX, legacy_setting};
+
+    #[test]
+    fn an_upstream_setting_is_named_for_renaming() {
+        let old = format!("{LEGACY_ENV_PREFIX}_RECOVERY_ADMIN");
+        let set = |var: &str| var == old;
+        assert_eq!(legacy_setting("RECOVERY_ADMIN", set), Some(old.clone()));
+        assert_eq!(legacy_setting("HOSTNAME", set), None);
+    }
 }

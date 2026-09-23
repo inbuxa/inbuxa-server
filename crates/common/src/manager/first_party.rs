@@ -10,7 +10,7 @@
 //! that ship with it are registered for it, on every start:
 //!
 //! - the web interface the server serves itself (`Application`, `/admin` and
-//!   `/account`), as its OAuth client id, `stalwart-webui` unless the
+//!   `/account`), as its OAuth client id, `inbuxa-webui` unless the
 //!   application names another;
 //! - INBUXA Admin hosted elsewhere, as `inbuxa-admin`, when `INBUXA_ADMIN_URL`
 //!   is set;
@@ -29,7 +29,7 @@ use directory::core::secret::{hash_secret, verify_secret_hash};
 use registry::{
     schema::{
         enums::{PasswordHashAlgorithm, ServiceProtocol},
-        prelude::{ObjectType, Property, UTCDateTime},
+        prelude::{Object, ObjectInner, ObjectType, Property, UTCDateTime},
         structs::{Application, OAuthClient, SystemSettings},
     },
     types::map::Map,
@@ -40,9 +40,12 @@ use store::registry::{
 };
 
 /// The client id the upstream web interface uses when its application names none.
-pub const WEB_INTERFACE_CLIENT_ID: &str = "stalwart-webui";
+pub const WEB_INTERFACE_CLIENT_ID: &str = "inbuxa-webui";
 pub const ADMIN_CLIENT_ID: &str = "inbuxa-admin";
 pub const WEBMAIL_CLIENT_ID: &str = "ihasmail-inbuxa";
+/// The web interface's client id before the fork renamed it (SPEC §2.4).
+/// Only ever read to retire it.
+const LEGACY_WEB_INTERFACE_CLIENT_ID: &str = "stalwart-webui";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FirstPartyClient {
@@ -187,6 +190,7 @@ fn env(name: &str) -> Option<String> {
 }
 
 pub(crate) async fn ensure_first_party_clients(bp: &mut Bootstrap) -> trc::Result<()> {
+    retire_legacy_web_interface_client(bp).await?;
     let system = bp.setting_infallible::<SystemSettings>().await;
     let base_url = base_url(bp, &system);
     let applications = bp
@@ -213,6 +217,56 @@ pub(crate) async fn ensure_first_party_clients(bp: &mut Bootstrap) -> trc::Resul
     Ok(())
 }
 
+/// An install from before the rename, upstream's or this fork's, has the web
+/// interface registered as `stalwart-webui`, and may
+/// have an application naming it. The application is moved to the current id
+/// and the old client removed, so the old id stops working rather than
+/// living on as an alias; anyone signed in to the web interface signs in
+/// again. Runs on every start and does nothing once both are gone.
+async fn retire_legacy_web_interface_client(bp: &mut Bootstrap) -> trc::Result<()> {
+    for app in bp.list_infallible::<Application>().await {
+        if app.object.oauth_client_id.as_deref() != Some(LEGACY_WEB_INTERFACE_CLIENT_ID) {
+            continue;
+        }
+        let mut updated = app.object.clone();
+        updated.oauth_client_id = Some(WEB_INTERFACE_CLIENT_ID.to_string());
+        // The old object carries its revision: the write asserts on it.
+        let current = Object::with_revision(ObjectInner::from(app.object), app.revision);
+        let result = bp
+            .registry
+            .write(RegistryWrite::update(app.id.id(), &updated.into(), &current))
+            .await?;
+        if !matches!(result, RegistryWriteResult::Success(_)) {
+            return Err(trc::StoreEvent::UnexpectedError
+                .into_err()
+                .details("Failed to move an application to the renamed web interface client.")
+                .reason(result.to_string())
+                .caused_by(trc::location!()));
+        }
+    }
+
+    if let Some(object_id) = bp
+        .registry
+        .primary_key(
+            ObjectType::OAuthClient.into(),
+            Property::ClientId,
+            LEGACY_WEB_INTERFACE_CLIENT_ID.as_bytes().to_vec(),
+        )
+        .await?
+    {
+        let result = bp.registry.write(RegistryWrite::delete(object_id)).await?;
+        if !matches!(result, RegistryWriteResult::Success(_)) {
+            return Err(trc::StoreEvent::UnexpectedError
+                .into_err()
+                .details("Failed to remove the web interface's pre-rename OAuth client.")
+                .reason(result.to_string())
+                .caused_by(trc::location!()));
+        }
+    }
+
+    Ok(())
+}
+
 async fn ensure_client(bp: &mut Bootstrap, client: FirstPartyClient) -> trc::Result<()> {
     let existing = match bp
         .registry
@@ -223,15 +277,18 @@ async fn ensure_client(bp: &mut Bootstrap, client: FirstPartyClient) -> trc::Res
         )
         .await?
     {
+        // inbuxa: read as an Object, keeping the revision the update below
+        // asserts on (a bare OAuthClient converts back with revision 0, which
+        // never matches, so any update failed start-up).
         Some(object_id) => bp
             .registry
-            .object::<OAuthClient>(object_id.id())
+            .get(object_id)
             .await?
-            .map(|object| (object_id.id(), object)),
+            .map(|object| (object_id.id(), object.revision, OAuthClient::from(object))),
         None => None,
     };
 
-    let result = if let Some((id, current)) = existing {
+    let result = if let Some((id, revision, current)) = existing {
         let mut updated = current.clone();
         for uri in &client.redirect_uris {
             if !updated.redirect_uris.contains(uri) {
@@ -255,8 +312,9 @@ async fn ensure_client(bp: &mut Bootstrap, client: FirstPartyClient) -> trc::Res
         if updated == current {
             return Ok(());
         }
+        let current = Object::with_revision(ObjectInner::from(current), revision);
         bp.registry
-            .write(RegistryWrite::update(id, &updated.into(), &current.into()))
+            .write(RegistryWrite::update(id, &updated.into(), &current))
             .await?
     } else {
         let secret = match &client.secret {

@@ -374,7 +374,7 @@ unchanged.
 
 ## Interfaces
 
-- **JMAP, existing names, unchanged.** Over `urn:stalwart:jmap`:
+- **JMAP, existing names, unchanged.** Over `urn:inbuxa:jmap:registry`:
   - `x:Alert/get`, `/query`, `/set`, and the `x:TracingStore`,
     `x:MetricsStore`, `x:DataRetention`, `x:Search` singletons.
   - `x:Trace/get` and `/query`. Filters: `text`, `timestamp` (comparison names

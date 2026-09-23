@@ -514,12 +514,12 @@ mod tests {
 
     #[test]
     fn index_is_rewritten_with_the_prefix_and_client_id() {
-        let meta = oauth_client_id_meta("stalwart-webui");
+        let meta = oauth_client_id_meta("inbuxa-webui");
         let html = String::from_utf8(rewrite_index(INDEX, "admin", Some(&meta))).unwrap();
 
         assert!(html.contains("<base href=\"/admin/\" />"), "{html}");
         assert!(
-            html.contains("<meta name=\"oauth-client-id\" content=\"stalwart-webui\" />"),
+            html.contains("<meta name=\"oauth-client-id\" content=\"inbuxa-webui\" />"),
             "{html}"
         );
         assert!(html.contains("<title>Portal</title>"), "{html}");
@@ -541,7 +541,7 @@ mod tests {
     #[test]
     fn index_without_a_placeholder_is_left_alone() {
         let bundle = "<head>\n  <base href=\"/\" />\n</head>";
-        let meta = oauth_client_id_meta("stalwart-webui");
+        let meta = oauth_client_id_meta("inbuxa-webui");
         let html = String::from_utf8(rewrite_index(bundle, "admin", Some(&meta))).unwrap();
 
         assert_eq!(html, "<head>\n  <base href=\"/admin/\" />\n</head>");

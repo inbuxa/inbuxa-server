@@ -210,7 +210,7 @@ accepted, which is the fact `enabled` reports.
 
 ### Upstream's, unchanged
 
-`x:MaskedEmail/get`, `/query`, `/set` under `urn:stalwart:jmap`, standard RFC
+`x:MaskedEmail/get`, `/query`, `/set` under `urn:inbuxa:jmap:registry`, standard RFC
 8620 shapes, the record above. Upstream's `/query` accepts only an
 `accountId` filter, and it has no `/changes` (observed 6).
 

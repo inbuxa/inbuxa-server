@@ -1,8 +1,8 @@
 openapi: 3.0.3
 info:
-  title: Stalwart Management API
+  title: inbuxa Management API
   description: |
-    REST Management API for Stalwart server. These endpoints are helpers
+    REST Management API for the inbuxa server. These endpoints are helpers
     that complement the JMAP API — most of the server's configuration and data
     is managed via JMAP (see `POST /jmap/`). The endpoints documented here cover
     interactive login, account introspection, configuration schema retrieval and
@@ -12,11 +12,11 @@ info:
     name: AGPL-3.0-only OR LicenseRef-SEL
 servers:
   - url: https://{host}
-    description: Stalwart server
+    description: inbuxa server
     variables:
       host:
         default: mail.example.com
-        description: The hostname of Stalwart server
+        description: The hostname of the inbuxa server
 security:
   - bearerAuth: []
   - basicAuth: []
@@ -154,7 +154,7 @@ paths:
       operationId: getSchema
       summary: Return the configuration schema at a specific hash
       description: |
-        Returns the JSON Schema describing the full Stalwart configuration tree.
+        Returns the JSON Schema describing the full inbuxa configuration tree.
         The response is always gzip-encoded (`Content-Encoding: gzip`) and served
         with an immutable cache policy — the schema for a given hash never
         changes. If the hash does not match the server's current schema, the
@@ -183,7 +183,7 @@ paths:
             application/json:
               schema:
                 type: object
-                description: JSON Schema document describing Stalwart config
+                description: JSON Schema document describing inbuxa config
                 additionalProperties: true
         '302':
           description: Redirect to the current schema URL when the hash is stale
@@ -395,7 +395,7 @@ components:
         WWW-Authenticate:
           schema:
             type: string
-            example: Bearer realm="Stalwart Server"
+            example: Bearer realm="INBUXA Server"
       content:
         application/problem+json:
           schema:

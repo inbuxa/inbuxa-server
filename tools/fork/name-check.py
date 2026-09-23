@@ -13,7 +13,8 @@ names, descriptions -- carries INBUXA's. Merging an upstream release brings
 new strings in with the name, and the merge itself can't tell, so this runs
 in CI on every push and pull request.
 
-Scope: string literals in `crates/**/*.rs`, test directories excluded.
+Scope: string literals in `crates/**/*.rs` and `vendor/**/*.rs`, test
+directories excluded.
 Comments are skipped, so copyright headers and doc comments never match.
 Some literals have to keep the name -- key-derivation contexts, wire-protocol
 identifiers, defaults that read an upstream installation -- and those are
@@ -79,8 +80,14 @@ def literals(src):
 
 def findings():
     found = set()
-    crates = os.path.join(ROOT, 'crates')
-    for dirpath, dirnames, filenames in os.walk(crates):
+    for top in ('crates', 'vendor'):
+        found |= findings_under(os.path.join(ROOT, top))
+    return found
+
+
+def findings_under(top):
+    found = set()
+    for dirpath, dirnames, filenames in os.walk(top):
         dirnames[:] = sorted(d for d in dirnames if d not in SKIP_DIRS)
         for f in sorted(filenames):
             if not f.endswith('.rs'):

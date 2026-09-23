@@ -1,4 +1,4 @@
-require ["variables", "envelope", "reject", "vnd.stalwart.expressions"];
+require ["variables", "envelope", "reject", "vnd.inbuxa.expressions"];
 
 if envelope :localpart :is "from" "spammer" {
     reject "450 4.1.1 Invalid address";

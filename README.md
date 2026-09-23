@@ -46,7 +46,8 @@ docker build -t inbuxa .                 # or the container image
 ```
 
 Settings are read from `INBUXA_*` environment variables. An existing Stalwart
-install's `STALWART_*` variables still work, with a warning to rename them.
+install's `STALWART_*` variables aren't read: the server stops at startup and
+names each one to rename.
 New installs keep their data in `/var/lib/inbuxa` and logs in
 `/var/log/inbuxa`. Existing installs keep the paths their configuration
 already names, so none of their data moves.

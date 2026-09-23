@@ -250,9 +250,10 @@ pub async fn test(test: &TestServer) {
               "webWriteUrlTemplate": null
             },
             "urn:ietf:params:jmap:mail:share": {},
-            "urn:stalwart:jmap": {},
-            // inbuxa: MT-22, the logo that applies to the account
-            "urn:inbuxa:jmap": { "logo": null },
+            "urn:inbuxa:jmap:registry": {},
+            // inbuxa: MT-22, the logo that applies to the account, and
+            // LP-19, whether the legacy protocols are open to it
+            "urn:inbuxa:jmap": { "logo": null, "legacyProtocols": "enabled" },
             "https://www.fastmail.com/dev/maskedemail": {}
           }
         }
@@ -274,7 +275,7 @@ pub async fn test(test: &TestServer) {
         "urn:ietf:params:jmap:principals:availability": john_id,
         "urn:ietf:params:jmap:filenode": john_id,
         "urn:ietf:params:jmap:mail:share": john_id,
-        "urn:stalwart:jmap": john_id,
+        "urn:inbuxa:jmap:registry": john_id,
         "https://www.fastmail.com/dev/maskedemail": john_id
       },
       "username": "jdoe@example.com",

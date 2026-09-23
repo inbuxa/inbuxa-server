@@ -2,6 +2,8 @@
  * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
+ *
+ * Modified by Coffey Labs in 2026 for INBUXA.
  */
 
 #![warn(clippy::large_futures)]
@@ -19,6 +21,10 @@ pub mod destroy;
 pub mod v016;
 
 pub async fn try_migrate(server: &Server) -> trc::Result<()> {
+    // inbuxa: before the version check, which returns early on a current
+    // store, and before migrate_v0_16, which reads the renamed key.
+    rename_spam_blobs(server).await?;
+
     match server
         .store()
         .get_value::<u32>(AnyKey {
@@ -36,14 +42,14 @@ pub async fn try_migrate(server: &Server) -> trc::Result<()> {
         Some(0..=4) => {
             abort(concat!(
                 "You must first upgrade to version 0.15, please read ",
-                "https://github.com/stalwartlabs/stalwart/blob/main/UPGRADING/v0_16.md"
+                "https://docs.inbuxa.org/install/migrating/"
             ));
         }
         Some(5) => {
             if !server.registry().is_recovery_mode() {
                 abort(concat!(
                     "Upgrading to version 0.16 is a multi-step process, please read ",
-                    "https://github.com/stalwartlabs/stalwart/blob/main/UPGRADING/v0_16.md"
+                    "https://docs.inbuxa.org/install/migrating/"
                 ));
             }
         }
@@ -61,7 +67,7 @@ pub async fn try_migrate(server: &Server) -> trc::Result<()> {
             } else {
                 abort(concat!(
                     "You must first upgrade to version 0.15, please read ",
-                    "https://github.com/stalwartlabs/stalwart/blob/main/UPGRADING/v0_16.md"
+                    "https://docs.inbuxa.org/install/migrating/"
                 ));
             }
         }
@@ -133,4 +139,48 @@ async fn is_new_install(server: &Server) -> trc::Result<bool> {
     }
 
     Ok(true)
+}
+
+/// inbuxa: the spam filter's trainer and model blobs, under the names they
+/// had before the fork renamed them (SPEC §2.4), paired with the current ones.
+const RENAMED_SPAM_BLOBS: [(&[u8], &[u8]); 2] = [
+    (b"STALWART_SPAM_TRAIN_DATA.lz4", common::manager::SPAM_TRAINER_KEY),
+    (
+        b"STALWART_SPAM_CLASSIFIER_MODEL.lz4",
+        common::manager::SPAM_CLASSIFIER_KEY,
+    ),
+];
+
+/// Moves each spam blob from its pre-rename key to the current one, so a
+/// trained model survives the rename. A blob already under the current key
+/// wins and the old one is just removed; with neither, nothing happens.
+async fn rename_spam_blobs(server: &Server) -> trc::Result<()> {
+    let blobs = server.blob_store();
+    for (old, new) in RENAMED_SPAM_BLOBS {
+        let Some(data) = blobs
+            .get_blob(old, 0..usize::MAX)
+            .await
+            .caused_by(trc::location!())?
+        else {
+            continue;
+        };
+        if blobs
+            .get_blob(new, 0..usize::MAX)
+            .await
+            .caused_by(trc::location!())?
+            .is_none()
+        {
+            blobs
+                .put_blob(new, &data, server.core.email.compression)
+                .await
+                .caused_by(trc::location!())?;
+        }
+        blobs.delete_blob(old).await.caused_by(trc::location!())?;
+        trc::event!(
+            Server(trc::ServerEvent::Startup),
+            Details = "Moved a spam filter blob to its renamed key",
+            Key = new,
+        );
+    }
+    Ok(())
 }

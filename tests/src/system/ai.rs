@@ -479,7 +479,7 @@ pub async fn test(test: &mut TestServer) {
         .await;
     stub.set(Mode::Echo);
     user.activate_script(concat!(
-        "require [\"vnd.stalwart.expressions\", \"editheader\", \"variables\"];\n",
+        "require [\"vnd.inbuxa.expressions\", \"editheader\", \"variables\"];\n",
         "let \"a\" \"llm_prompt('echo-test', 'hello world', 0.5)\";\n",
         "let \"b\" \"llm_prompt('no-such-model', 'x', 0.5)\";\n",
         "addheader \"X-Llm-Echo\" \"${a}\";\n",

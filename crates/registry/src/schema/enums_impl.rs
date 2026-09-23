@@ -2,6 +2,8 @@
  * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
+ *
+ * Modified by Coffey Labs in 2026 for INBUXA.
  */
 
 // This file is auto-generated. Do not edit directly.
@@ -10372,8 +10374,8 @@ impl EnumImpl for SieveCapability {
             b"spamtest" => SieveCapability::Spamtest,
             b"spamtestplus" => SieveCapability::Spamtestplus,
             b"virustest" => SieveCapability::Virustest,
-            b"vnd.stalwart.while" => SieveCapability::VndStalwartWhile,
-            b"vnd.stalwart.expressions" => SieveCapability::VndStalwartExpressions,
+            b"vnd.inbuxa.while" => SieveCapability::VndStalwartWhile,
+            b"vnd.inbuxa.expressions" => SieveCapability::VndStalwartExpressions,
         }
     }
 
@@ -10426,8 +10428,8 @@ impl EnumImpl for SieveCapability {
             SieveCapability::Spamtest => "spamtest",
             SieveCapability::Spamtestplus => "spamtestplus",
             SieveCapability::Virustest => "virustest",
-            SieveCapability::VndStalwartWhile => "vnd.stalwart.while",
-            SieveCapability::VndStalwartExpressions => "vnd.stalwart.expressions",
+            SieveCapability::VndStalwartWhile => "vnd.inbuxa.while",
+            SieveCapability::VndStalwartExpressions => "vnd.inbuxa.expressions",
         }
     }
 
