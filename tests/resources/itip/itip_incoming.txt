@@ -64,7 +64,7 @@ summary.location: Text("Conference Room A")
 summary.summary: Text("Review Accounts")
 BEGIN:VCALENDAR
 METHOD:REQUEST
-PRODID:-//INBUXA//INBUXA Server//EN
+PRODID:-//inbuxa//inbuxa Server//EN
 VERSION:2.0
 BEGIN:VEVENT
 LOCATION:Conference Room A
@@ -114,7 +114,7 @@ summary.location: Text("Conference Room A")
 summary.summary: Text("Review Accounts")
 BEGIN:VCALENDAR
 METHOD:REQUEST
-PRODID:-//INBUXA//INBUXA Server//EN
+PRODID:-//inbuxa//inbuxa Server//EN
 VERSION:2.0
 BEGIN:VEVENT
 LOCATION:Conference Room A

@@ -8,13 +8,13 @@
 
 ---
 
-**INBUXA** is a mail and collaboration server: JMAP, IMAP, POP3, SMTP,
+**inbuxa** is a mail and collaboration server: JMAP, IMAP, POP3, SMTP,
 CalDAV, CardDAV and WebDAV, in one Rust binary, with ihasmail as its web front
 end. It is a fork of [Stalwart](https://github.com/stalwartlabs/stalwart).
 Project site: [inbuxa.org](https://inbuxa.org). Documentation: [docs.inbuxa.org](https://docs.inbuxa.org).
 
 Stalwart ships some features only in a paid Enterprise Edition: multi-tenancy,
-masked email, undelete and others. INBUXA ships everything to everybody under
+masked email, undelete and others. **inbuxa** ships everything to everybody under
 the AGPL-3.0, rebuilding those features independently and without using any
 of Stalwart's Enterprise code.
 
@@ -54,18 +54,18 @@ already names, so none of their data moves.
 
 ## License and credits
 
-INBUXA is free software under the [GNU Affero General Public License,
+**inbuxa** is free software under the [GNU Affero General Public License,
 version 3](./LICENSES/AGPL-3.0-only.txt).
 
 It is a fork of Stalwart, copyright © Stalwart Labs LLC, **modified by
 Coffey Labs in 2026**. Upstream's copyright notices are kept on every file
 they cover, and every upstream file this fork changed says so in its header,
 under the notice it came with. Stalwart's files are dual-licensed
-AGPL-3.0-only or Stalwart's Enterprise License, and INBUXA takes them under
+AGPL-3.0-only or Stalwart's Enterprise License, and **inbuxa** takes them under
 the AGPL-3.0 only. A few of those files also carry code from other projects
 under MIT or BSD licenses, which stays under those licenses;
 [THIRD-PARTY.md](./THIRD-PARTY.md) lists it with its notices. "Stalwart" is
-Stalwart Labs' name. INBUXA isn't affiliated with or endorsed by Stalwart
+Stalwart Labs' name. **inbuxa** isn't affiliated with or endorsed by Stalwart
 Labs.
 
-The INBUXA mark reuses ihasmail's cat-and-envelope artwork.
+The **inbuxa** mark reuses ihasmail's cat-and-envelope artwork.

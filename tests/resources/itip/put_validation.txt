@@ -146,7 +146,7 @@ summary.dtstart: Time(ItipTime { start: 867787200, tz_id: 32768 })
 summary.summary: Text("Conference")
 BEGIN:VCALENDAR
 METHOD:REQUEST
-PRODID:-//INBUXA//INBUXA Server//EN
+PRODID:-//inbuxa//inbuxa Server//EN
 VERSION:2.0
 BEGIN:VEVENT
 STATUS:CONFIRMED
@@ -402,7 +402,7 @@ summary.dtstart: Time(ItipTime { start: 867787200, tz_id: 32768 })
 summary.summary: Text("Conference")
 BEGIN:VCALENDAR
 METHOD:REQUEST
-PRODID:-//INBUXA//INBUXA Server//EN
+PRODID:-//inbuxa//inbuxa Server//EN
 VERSION:2.0
 BEGIN:VEVENT
 STATUS:CONFIRMED
@@ -450,7 +450,7 @@ summary.dtstart: Time(ItipTime { start: 867787200, tz_id: 32768 })
 summary.summary: Text("Conference")
 BEGIN:VCALENDAR
 METHOD:REQUEST
-PRODID:-//INBUXA//INBUXA Server//EN
+PRODID:-//inbuxa//inbuxa Server//EN
 VERSION:2.0
 BEGIN:VEVENT
 STATUS:CONFIRMED

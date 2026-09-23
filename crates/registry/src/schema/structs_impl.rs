@@ -732,7 +732,7 @@ impl Pickle for AddressBook {
 impl Default for AddressBook {
     fn default() -> Self {
         Self {
-            default_display_name: Some("INBUXA Address Book".to_string()),
+            default_display_name: Some("inbuxa Address Book".to_string()),
             default_href_name: Some("default".to_string()),
             max_v_card_size: 524288u64,
             max_address_books: Some(250u64),
@@ -4597,7 +4597,7 @@ impl Pickle for Calendar {
 impl Default for Calendar {
     fn default() -> Self {
         Self {
-            default_display_name: Some("INBUXA Calendar".to_string()),
+            default_display_name: Some("inbuxa Calendar".to_string()),
             default_href_name: Some("default".to_string()),
             max_attendees: 20u64,
             max_recurrence_expansions: 3000u64,
@@ -4734,7 +4734,7 @@ impl Default for CalendarAlarm {
             allow_external_rcpts: false,
             enable: true,
             from_email: Default::default(),
-            from_name: "INBUXA Calendar".to_string(),
+            from_name: "inbuxa Calendar".to_string(),
             min_trigger_interval: Duration::from_millis(3600000),
             template: Default::default(),
         }
@@ -28310,7 +28310,7 @@ impl MtaStageConnect {
         ExpressionContext {
             expr: &self.smtp_greeting,
             default: Some(Expression {
-                else_: "system('hostname') + ' INBUXA ESMTP at your service'".to_string(),
+                else_: "system('hostname') + ' inbuxa ESMTP at your service'".to_string(),
                 ..Default::default()
             }),
             property: Property::SmtpGreeting,
@@ -28374,7 +28374,7 @@ impl Default for MtaStageConnect {
     fn default() -> Self {
         Self {
             smtp_greeting: Expression {
-                else_: "system('hostname') + ' INBUXA ESMTP at your service'".to_string(),
+                else_: "system('hostname') + ' inbuxa ESMTP at your service'".to_string(),
                 ..Default::default()
             },
             hostname: Expression {

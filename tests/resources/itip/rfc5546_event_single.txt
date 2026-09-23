@@ -32,7 +32,7 @@ summary.dtstart: Time(ItipTime { start: 867787200, tz_id: 32768 })
 summary.summary: Text("Conference")
 BEGIN:VCALENDAR
 METHOD:REQUEST
-PRODID:-//INBUXA//INBUXA Server//EN
+PRODID:-//inbuxa//inbuxa Server//EN
 VERSION:2.0
 BEGIN:VEVENT
 STATUS:CONFIRMED
@@ -61,7 +61,7 @@ END:VCALENDAR
 # Make sure B receives the request
 > get b@example.com calsrv.example.com-873970198738777@example.com
 BEGIN:VCALENDAR
-PRODID:-//INBUXA//INBUXA Server//EN
+PRODID:-//inbuxa//inbuxa Server//EN
 VERSION:2.0
 BEGIN:VEVENT
 STATUS:CONFIRMED
@@ -88,7 +88,7 @@ END:VCALENDAR
 > put b@example.com calsrv.example.com-873970198738777@example.com
 BEGIN:VCALENDAR
 VERSION:2.0
-PRODID:-//INBUXA//INBUXA Server//EN
+PRODID:-//inbuxa//inbuxa Server//EN
 BEGIN:VEVENT
 DTSTAMP:19970701T200000Z
 SEQUENCE:1
@@ -119,7 +119,7 @@ summary.dtstart: Time(ItipTime { start: 867787200, tz_id: 32768 })
 summary.summary: Text("Conference")
 BEGIN:VCALENDAR
 METHOD:REPLY
-PRODID:-//INBUXA//INBUXA Server//EN
+PRODID:-//inbuxa//inbuxa Server//EN
 VERSION:2.0
 BEGIN:VEVENT
 SUMMARY:Conference
@@ -198,7 +198,7 @@ summary.summary: Text("Phone Conference")
 ~summary.summary: Text("Conference")
 BEGIN:VCALENDAR
 METHOD:REQUEST
-PRODID:-//INBUXA//INBUXA Server//EN
+PRODID:-//inbuxa//inbuxa Server//EN
 VERSION:2.0
 BEGIN:VEVENT
 STATUS:CONFIRMED
@@ -228,7 +228,7 @@ END:VCALENDAR
 # Make sure C receives the request
 > get c@example.com calsrv.example.com-873970198738777@example.com
 BEGIN:VCALENDAR
-PRODID:-//INBUXA//INBUXA Server//EN
+PRODID:-//inbuxa//inbuxa Server//EN
 VERSION:2.0
 BEGIN:VEVENT
 STATUS:CONFIRMED
@@ -256,7 +256,7 @@ END:VCALENDAR
 > put c@example.com calsrv.example.com-873970198738777@example.com
 BEGIN:VCALENDAR
 VERSION:2.0
-PRODID:-//INBUXA//INBUXA Server//EN
+PRODID:-//inbuxa//inbuxa Server//EN
 BEGIN:VEVENT
 DTSTAMP:19970701T180000Z
 UID:calsrv.example.com-873970198738777@example.com
@@ -287,7 +287,7 @@ summary.dtstart: Time(ItipTime { start: 867780000, tz_id: 32768 })
 summary.summary: Text("Phone Conference")
 BEGIN:VCALENDAR
 METHOD:REPLY
-PRODID:-//INBUXA//INBUXA Server//EN
+PRODID:-//inbuxa//inbuxa Server//EN
 VERSION:2.0
 BEGIN:VEVENT
 SUMMARY:Phone Conference
@@ -313,7 +313,7 @@ summary.dtstart: Time(ItipTime { start: 867780000, tz_id: 32768 })
 summary.summary: Text("Phone Conference")
 BEGIN:VCALENDAR
 METHOD:REQUEST
-PRODID:-//INBUXA//INBUXA Server//EN
+PRODID:-//inbuxa//inbuxa Server//EN
 VERSION:2.0
 BEGIN:VEVENT
 STATUS:CONFIRMED
@@ -343,7 +343,7 @@ END:VCALENDAR
 # Make sure E receives the request
 > get e@example.com calsrv.example.com-873970198738777@example.com
 BEGIN:VCALENDAR
-PRODID:-//INBUXA//INBUXA Server//EN
+PRODID:-//inbuxa//inbuxa Server//EN
 VERSION:2.0
 BEGIN:VEVENT
 STATUS:CONFIRMED
@@ -398,7 +398,7 @@ END:VCALENDAR
 > put e@example.com calsrv.example.com-873970198738777@example.com
 BEGIN:VCALENDAR
 VERSION:2.0
-PRODID:-//INBUXA//INBUXA Server//EN
+PRODID:-//inbuxa//inbuxa Server//EN
 BEGIN:VEVENT
 DTSTAMP:19970701T180000Z
 SEQUENCE:2
@@ -430,7 +430,7 @@ summary.dtstart: Time(ItipTime { start: 867780000, tz_id: 32768 })
 summary.summary: Text("Phone Conference")
 BEGIN:VCALENDAR
 METHOD:REPLY
-PRODID:-//INBUXA//INBUXA Server//EN
+PRODID:-//inbuxa//inbuxa Server//EN
 VERSION:2.0
 BEGIN:VEVENT
 SUMMARY:Phone Conference
@@ -479,7 +479,7 @@ END:VCALENDAR
 # Make sure C receives the reply
 > get c@example.com calsrv.example.com-873970198738777@example.com
 BEGIN:VCALENDAR
-PRODID:-//INBUXA//INBUXA Server//EN
+PRODID:-//inbuxa//inbuxa Server//EN
 VERSION:2.0
 BEGIN:VEVENT
 STATUS:CONFIRMED
@@ -508,7 +508,7 @@ END:VCALENDAR
 > put e@example.com calsrv.example.com-873970198738777@example.com
 BEGIN:VCALENDAR
 VERSION:2.0
-PRODID:-//INBUXA//INBUXA Server//EN
+PRODID:-//inbuxa//inbuxa Server//EN
 BEGIN:VEVENT
 DTSTAMP:19970701T180000Z
 SEQUENCE:2
@@ -540,7 +540,7 @@ summary.dtstart: Time(ItipTime { start: 867780000, tz_id: 32768 })
 summary.summary: Text("Phone Conference")
 BEGIN:VCALENDAR
 METHOD:REPLY
-PRODID:-//INBUXA//INBUXA Server//EN
+PRODID:-//inbuxa//inbuxa Server//EN
 VERSION:2.0
 BEGIN:VEVENT
 SUMMARY:Phone Conference
@@ -564,7 +564,7 @@ END:VCALENDAR
 # Make sure C receives the reply
 > get c@example.com calsrv.example.com-873970198738777@example.com
 BEGIN:VCALENDAR
-PRODID:-//INBUXA//INBUXA Server//EN
+PRODID:-//inbuxa//inbuxa Server//EN
 VERSION:2.0
 BEGIN:VEVENT
 STATUS:CONFIRMED
@@ -650,7 +650,7 @@ summary.summary: Text("Phone Conference")
 ~summary.attendee: Participants([ItipParticipant { email: "a@example.com", name: None, is_organizer: true }, ItipParticipant { email: "b@example.com", name: None, is_organizer: false }, ItipParticipant { email: "c@example.com", name: None, is_organizer: false }, ItipParticipant { email: "conf@example.com", name: None, is_organizer: false }, ItipParticipant { email: "d@example.com", name: Some("Hal"), is_organizer: false }, ItipParticipant { email: "e@example.com", name: None, is_organizer: false }])
 BEGIN:VCALENDAR
 METHOD:REQUEST
-PRODID:-//INBUXA//INBUXA Server//EN
+PRODID:-//inbuxa//inbuxa Server//EN
 VERSION:2.0
 BEGIN:VEVENT
 STATUS:CONFIRMED
@@ -681,7 +681,7 @@ summary.dtstart: Time(ItipTime { start: 867780000, tz_id: 32768 })
 summary.summary: Text("Phone Conference")
 BEGIN:VCALENDAR
 METHOD:CANCEL
-PRODID:-//INBUXA//INBUXA Server//EN
+PRODID:-//inbuxa//inbuxa Server//EN
 VERSION:2.0
 BEGIN:VEVENT
 STATUS:CANCELLED
@@ -702,7 +702,7 @@ END:VCALENDAR
 # Make sure B receives the cancelation
 > get b@example.com calsrv.example.com-873970198738777@example.com
 BEGIN:VCALENDAR
-PRODID:-//INBUXA//INBUXA Server//EN
+PRODID:-//inbuxa//inbuxa Server//EN
 VERSION:2.0
 BEGIN:VEVENT
 STATUS:CANCELLED
@@ -727,7 +727,7 @@ summary.dtstart: Time(ItipTime { start: 867780000, tz_id: 32768 })
 summary.summary: Text("Phone Conference")
 BEGIN:VCALENDAR
 METHOD:CANCEL
-PRODID:-//INBUXA//INBUXA Server//EN
+PRODID:-//inbuxa//inbuxa Server//EN
 VERSION:2.0
 BEGIN:VEVENT
 STATUS:CANCELLED

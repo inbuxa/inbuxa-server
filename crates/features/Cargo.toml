@@ -1,6 +1,6 @@
 [package]
 name = "inbuxa-features"
-description = "INBUXA's rebuilt features: behavior Stalwart ships only in its Enterprise Edition, rebuilt clean-room"
+description = "inbuxa's rebuilt features: behavior Stalwart ships only in its Enterprise Edition, rebuilt clean-room"
 license = "AGPL-3.0-only"
 version = "0.16.22"
 edition = "2024"

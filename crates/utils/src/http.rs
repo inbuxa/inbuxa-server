@@ -147,7 +147,7 @@ pub fn build_http_client(
     allow_invalid_certs: bool,
 ) -> Result<Client, String> {
     let mut headers = build_http_headers(raw_headers, username, password, token, content_type)?;
-    headers.insert(USER_AGENT, "INBUXA/1.0.0".parse().unwrap()); // types::brand!(); utils does not depend on types
+    headers.insert(USER_AGENT, "inbuxa/1.0.0".parse().unwrap()); // types::brand!(); utils does not depend on types
 
     match http_client_builder(allow_invalid_certs)
         .connect_timeout(timeout)
