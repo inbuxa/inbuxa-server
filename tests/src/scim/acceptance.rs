@@ -106,7 +106,7 @@ async fn discovery(scim: &ScimTest) {
     );
     assert!(
         !config.body.contains("stalw"),
-        "SCIM-4: documentation is INBUXA's own"
+        "SCIM-4: documentation is inbuxa's own"
     );
 
     let types = anonymous.get("/ResourceTypes").await;

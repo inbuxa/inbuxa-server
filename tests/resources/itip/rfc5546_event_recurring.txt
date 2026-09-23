@@ -37,7 +37,7 @@ summary.rrule: Rrule(ICalendarRecurrenceRule { freq: Monthly, until: Some(Partia
 summary.summary: Text("IETF Calendaring Working Group Meeting")
 BEGIN:VCALENDAR
 METHOD:REQUEST
-PRODID:-//INBUXA//INBUXA Server//EN
+PRODID:-//inbuxa//inbuxa Server//EN
 VERSION:2.0
 BEGIN:VEVENT
 CLASS:PUBLIC
@@ -117,7 +117,7 @@ summary.rrule: Rrule(ICalendarRecurrenceRule { freq: Monthly, until: Some(Partia
 summary.summary: Text("IETF Calendaring Working Group Meeting")
 BEGIN:VCALENDAR
 METHOD:REQUEST
-PRODID:-//INBUXA//INBUXA Server//EN
+PRODID:-//inbuxa//inbuxa Server//EN
 VERSION:2.0
 BEGIN:VEVENT
 CLASS:PUBLIC
@@ -207,7 +207,7 @@ summary.rrule: Rrule(ICalendarRecurrenceRule { freq: Monthly, until: Some(Partia
 summary.summary: Text("IETF Calendaring Working Group Meeting")
 BEGIN:VCALENDAR
 METHOD:CANCEL
-PRODID:-//INBUXA//INBUXA Server//EN
+PRODID:-//inbuxa//inbuxa Server//EN
 VERSION:2.0
 BEGIN:VEVENT
 STATUS:CANCELLED
@@ -226,7 +226,7 @@ END:VCALENDAR
 # Make sure B has the cancelled event
 > get b@example.com guid-1@example.com
 BEGIN:VCALENDAR
-PRODID:-//INBUXA//INBUXA Server//EN
+PRODID:-//inbuxa//inbuxa Server//EN
 VERSION:2.0
 BEGIN:VEVENT
 CLASS:PUBLIC
@@ -358,7 +358,7 @@ summary.rrule: Rrule(ICalendarRecurrenceRule { freq: Monthly, until: Some(Partia
 summary.summary: Text("IETF Calendaring Working Group Meeting")
 BEGIN:VCALENDAR
 METHOD:REQUEST
-PRODID:-//INBUXA//INBUXA Server//EN
+PRODID:-//inbuxa//inbuxa Server//EN
 VERSION:2.0
 BEGIN:VEVENT
 CLASS:PUBLIC
@@ -386,7 +386,7 @@ END:VCALENDAR
 # Make sure B has the complete event including all updates
 > get b@example.com guid-1@example.com
 BEGIN:VCALENDAR
-PRODID:-//INBUXA//INBUXA Server//EN
+PRODID:-//inbuxa//inbuxa Server//EN
 VERSION:2.0
 BEGIN:VEVENT
 CLASS:PUBLIC
@@ -538,7 +538,7 @@ summary.rrule: Rrule(ICalendarRecurrenceRule { freq: Monthly, until: Some(Partia
 summary.summary: Text("IETF Calendaring Working Group Meeting")
 BEGIN:VCALENDAR
 METHOD:CANCEL
-PRODID:-//INBUXA//INBUXA Server//EN
+PRODID:-//inbuxa//inbuxa Server//EN
 VERSION:2.0
 BEGIN:VEVENT
 DESCRIPTION:IETF-C&S Conference Call
@@ -564,7 +564,7 @@ END:VCALENDAR
 # Make sure all instances in B were deleted
 > get b@example.com guid-1@example.com
 BEGIN:VCALENDAR
-PRODID:-//INBUXA//INBUXA Server//EN
+PRODID:-//inbuxa//inbuxa Server//EN
 VERSION:2.0
 BEGIN:VEVENT
 CLASS:PUBLIC
@@ -677,7 +677,7 @@ summary.rrule: Rrule(ICalendarRecurrenceRule { freq: Weekly, until: None, count:
 summary.summary: Text("Review Accounts")
 BEGIN:VCALENDAR
 METHOD:REQUEST
-PRODID:-//INBUXA//INBUXA Server//EN
+PRODID:-//inbuxa//inbuxa Server//EN
 VERSION:2.0
 BEGIN:VEVENT
 LOCATION:The White Room
@@ -742,7 +742,7 @@ summary.summary: Text("Review Accounts")
 ~summary.rrule: Rrule(ICalendarRecurrenceRule { freq: Weekly, until: None, count: None, interval: None, bysecond: [], byminute: [], byhour: [], byday: [ICalendarDay { ordwk: None, weekday: Tuesday }], bymonthday: [], byyearday: [], byweekno: [], bymonth: [], bysetpos: [], wkst: Some(Sunday), rscale: None, skip: None })
 BEGIN:VCALENDAR
 METHOD:REQUEST
-PRODID:-//INBUXA//INBUXA Server//EN
+PRODID:-//inbuxa//inbuxa Server//EN
 VERSION:2.0
 BEGIN:VEVENT
 LOCATION:The White Room
@@ -770,7 +770,7 @@ summary.rrule: Rrule(ICalendarRecurrenceRule { freq: Weekly, until: None, count:
 summary.summary: Text("Review Accounts")
 BEGIN:VCALENDAR
 METHOD:CANCEL
-PRODID:-//INBUXA//INBUXA Server//EN
+PRODID:-//inbuxa//inbuxa Server//EN
 VERSION:2.0
 BEGIN:VEVENT
 LOCATION:The Red Room
@@ -791,7 +791,7 @@ END:VCALENDAR
 # Make sure B has the updated event
 > get b@example.com 123456789@example.com
 BEGIN:VCALENDAR
-PRODID:-//INBUXA//INBUXA Server//EN
+PRODID:-//inbuxa//inbuxa Server//EN
 VERSION:2.0
 BEGIN:VEVENT
 LOCATION:The White Room
@@ -812,7 +812,7 @@ END:VCALENDAR
 # Make sure C has the updated event
 > get c@example.com 123456789@example.com
 BEGIN:VCALENDAR
-PRODID:-//INBUXA//INBUXA Server//EN
+PRODID:-//inbuxa//inbuxa Server//EN
 VERSION:2.0
 BEGIN:VEVENT
 LOCATION:The Red Room
@@ -853,7 +853,7 @@ summary.rrule: Rrule(ICalendarRecurrenceRule { freq: Weekly, until: None, count:
 summary.summary: Text("Review Accounts")
 BEGIN:VCALENDAR
 METHOD:REPLY
-PRODID:-//INBUXA//INBUXA Server//EN
+PRODID:-//inbuxa//inbuxa Server//EN
 VERSION:2.0
 BEGIN:VEVENT
 SUMMARY:Review Accounts
@@ -919,7 +919,7 @@ summary.rrule: Rrule(ICalendarRecurrenceRule { freq: Weekly, until: None, count:
 summary.summary: Text("Weekly Sync")
 BEGIN:VCALENDAR
 METHOD:REQUEST
-PRODID:-//INBUXA//INBUXA Server//EN
+PRODID:-//inbuxa//inbuxa Server//EN
 VERSION:2.0
 BEGIN:VEVENT
 SUMMARY:Weekly Sync
@@ -967,7 +967,7 @@ summary.rrule: Rrule(ICalendarRecurrenceRule { freq: Weekly, until: None, count:
 summary.summary: Text("Weekly Sync")
 BEGIN:VCALENDAR
 METHOD:REPLY
-PRODID:-//INBUXA//INBUXA Server//EN
+PRODID:-//inbuxa//inbuxa Server//EN
 VERSION:2.0
 BEGIN:VEVENT
 SUMMARY:Weekly Sync

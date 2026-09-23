@@ -299,28 +299,28 @@ impl LegacyProtocol {
     pub fn refusal(&self, scope: RefusalScope) -> &'static str {
         match (scope, self) {
             (RefusalScope::Server, LegacyProtocol::Imap) => {
-                "This server allows only INBUXA webmail and JMAP apps. This mail app can't sign in."
+                "This server allows only inbuxa webmail and JMAP apps. This mail app can't sign in."
             }
             (RefusalScope::Server, LegacyProtocol::Pop3) => {
-                "[AUTH] This server allows only INBUXA webmail and JMAP apps. This mail app can't sign in."
+                "[AUTH] This server allows only inbuxa webmail and JMAP apps. This mail app can't sign in."
             }
             (RefusalScope::Server, LegacyProtocol::ManageSieve) => {
-                "This server allows only INBUXA webmail and JMAP apps."
+                "This server allows only inbuxa webmail and JMAP apps."
             }
             (RefusalScope::Server, LegacyProtocol::Submission) => {
-                "535 5.7.0 This server allows only INBUXA webmail and JMAP apps. This mail app can't send.\r\n"
+                "535 5.7.0 This server allows only inbuxa webmail and JMAP apps. This mail app can't send.\r\n"
             }
             (RefusalScope::Tenant(_), LegacyProtocol::Imap) => {
-                "Your organization allows only INBUXA webmail and JMAP apps. This mail app can't sign in."
+                "Your organization allows only inbuxa webmail and JMAP apps. This mail app can't sign in."
             }
             (RefusalScope::Tenant(_), LegacyProtocol::Pop3) => {
-                "[AUTH] Your organization allows only INBUXA webmail and JMAP apps. This mail app can't sign in."
+                "[AUTH] Your organization allows only inbuxa webmail and JMAP apps. This mail app can't sign in."
             }
             (RefusalScope::Tenant(_), LegacyProtocol::ManageSieve) => {
-                "Your organization allows only INBUXA webmail and JMAP apps."
+                "Your organization allows only inbuxa webmail and JMAP apps."
             }
             (RefusalScope::Tenant(_), LegacyProtocol::Submission) => {
-                "535 5.7.0 Your organization allows only INBUXA webmail and JMAP apps. This mail app can't send.\r\n"
+                "535 5.7.0 Your organization allows only inbuxa webmail and JMAP apps. This mail app can't send.\r\n"
             }
         }
     }
@@ -541,7 +541,7 @@ mod tests {
         let server = RefusalScope::Server;
         assert_eq!(
             LegacyProtocol::Imap.refusal(server),
-            "This server allows only INBUXA webmail and JMAP apps. This mail app can't sign in."
+            "This server allows only inbuxa webmail and JMAP apps. This mail app can't sign in."
         );
         assert!(
             LegacyProtocol::Pop3
@@ -550,11 +550,11 @@ mod tests {
         );
         assert_eq!(
             LegacyProtocol::ManageSieve.refusal(server),
-            "This server allows only INBUXA webmail and JMAP apps."
+            "This server allows only inbuxa webmail and JMAP apps."
         );
         assert_eq!(
             LegacyProtocol::Submission.refusal(server),
-            "535 5.7.0 This server allows only INBUXA webmail and JMAP apps. This mail app can't send.\r\n"
+            "535 5.7.0 This server allows only inbuxa webmail and JMAP apps. This mail app can't send.\r\n"
         );
     }
 
@@ -564,19 +564,19 @@ mod tests {
         let tenant = RefusalScope::Tenant(7);
         assert_eq!(
             LegacyProtocol::Imap.refusal(tenant),
-            "Your organization allows only INBUXA webmail and JMAP apps. This mail app can't sign in."
+            "Your organization allows only inbuxa webmail and JMAP apps. This mail app can't sign in."
         );
         assert_eq!(
             LegacyProtocol::Pop3.refusal(tenant),
-            "[AUTH] Your organization allows only INBUXA webmail and JMAP apps. This mail app can't sign in."
+            "[AUTH] Your organization allows only inbuxa webmail and JMAP apps. This mail app can't sign in."
         );
         assert_eq!(
             LegacyProtocol::ManageSieve.refusal(tenant),
-            "Your organization allows only INBUXA webmail and JMAP apps."
+            "Your organization allows only inbuxa webmail and JMAP apps."
         );
         assert_eq!(
             LegacyProtocol::Submission.refusal(tenant),
-            "535 5.7.0 Your organization allows only INBUXA webmail and JMAP apps. This mail app can't send.\r\n"
+            "535 5.7.0 Your organization allows only inbuxa webmail and JMAP apps. This mail app can't send.\r\n"
         );
         let err = LegacyProtocol::Imap.refused(tenant, Some("example.org".into()));
         assert_eq!(err.value_as_str(trc::Key::Policy), Some("tenant"));

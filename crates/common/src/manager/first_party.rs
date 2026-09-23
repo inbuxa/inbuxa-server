@@ -105,7 +105,7 @@ pub fn first_party_clients(
     if let Some(url) = admin_url.map(|url| url.trim().trim_end_matches('/')).filter(|url| !url.is_empty()) {
         clients.push(FirstPartyClient {
             client_id: ADMIN_CLIENT_ID.to_string(),
-            description: "INBUXA Admin".to_string(),
+            description: "inbuxa Admin".to_string(),
             redirect_uris: vec![format!("{url}/oauth/callback")],
             secret: None,
         });
@@ -356,7 +356,7 @@ mod tests {
 
     fn web_interface() -> Application {
         Application {
-            description: "INBUXA Web Interface".to_string(),
+            description: "inbuxa Web Interface".to_string(),
             enabled: true,
             url_prefix: Map::new(vec!["/admin".into(), "/account".into()]),
             ..Default::default()
@@ -370,7 +370,7 @@ mod tests {
             clients,
             vec![FirstPartyClient {
                 client_id: WEB_INTERFACE_CLIENT_ID.to_string(),
-                description: "INBUXA Web Interface (served by this server)".to_string(),
+                description: "inbuxa Web Interface (served by this server)".to_string(),
                 redirect_uris: vec![
                     "https://mail.example.org/admin/oauth/callback".to_string(),
                     "https://mail.example.org/account/oauth/callback".to_string(),

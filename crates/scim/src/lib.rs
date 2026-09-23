@@ -205,7 +205,7 @@ impl ScimResponse {
         if error.status == 401 {
             response.headers.push((
                 "WWW-Authenticate",
-                "Bearer realm=\"INBUXA SCIM\"".to_string(),
+                "Bearer realm=\"inbuxa SCIM\"".to_string(),
             ));
         }
         response

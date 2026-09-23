@@ -3729,8 +3729,8 @@ impl EventType {
             EventType::Security(SecurityEvent::LegacyProtocolsChanged) => {
                 "Legacy mail protocols switch changed"
             }
-            EventType::Server(ServerEvent::Startup) => "Starting INBUXA Server",
-            EventType::Server(ServerEvent::Shutdown) => "Shutting down INBUXA Server",
+            EventType::Server(ServerEvent::Startup) => "Starting inbuxa Server",
+            EventType::Server(ServerEvent::Shutdown) => "Shutting down inbuxa Server",
             EventType::Server(ServerEvent::StartupError) => "Server startup error",
             EventType::Server(ServerEvent::ThreadError) => "Server thread error",
             EventType::Server(ServerEvent::Licensing) => "Server licensing event",
@@ -3983,7 +3983,7 @@ impl EventType {
             EventType::Auth(AuthEvent::ClientRegistration) => "Authentication error",
             // inbuxa: legacy-protocols LP-6
             EventType::Auth(AuthEvent::LegacyProtocolRefused) => {
-                "This server allows only INBUXA webmail and JMAP apps"
+                "This server allows only inbuxa webmail and JMAP apps"
             }
             EventType::Auth(AuthEvent::Error) => "Authentication error",
             EventType::Auth(AuthEvent::CredentialExpired) => "Credential expired",

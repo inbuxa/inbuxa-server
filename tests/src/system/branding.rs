@@ -503,7 +503,7 @@ pub async fn branding_compat() {
     let admin = std::env::var("INBUXA_COMPAT_ADMIN").expect("INBUXA_COMPAT_ADMIN");
     assert!(
         std::env::var("NO_INSERT").is_ok(),
-        "NO_INSERT must be set, or the copy of INBUXA's data is wiped"
+        "NO_INSERT must be set, or the copy of inbuxa's data is wiped"
     );
     let test = TestServerBuilder::new("branding_compat")
         .await

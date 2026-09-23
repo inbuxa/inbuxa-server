@@ -49,7 +49,7 @@ HTTP = "http://127.0.0.1:18080"
 # made to speak.
 PORTS = {"imap": 18993, "pop3": 18995, "submissions": 18465, "smtp": 18025}
 TLS_PORTS = {18993, 18995, 18465}
-SMTP_REFUSAL = ("535 5.7.0 This server allows only INBUXA webmail and JMAP apps. "
+SMTP_REFUSAL = ("535 5.7.0 This server allows only inbuxa webmail and JMAP apps. "
                 "This mail app can't send.")
 INBUXA = "urn:inbuxa:jmap"
 failures = []
@@ -333,7 +333,7 @@ def tenant_checks(admin, admin_pw, account):
           "and still enabled for an account outside the tenant (test 13)")
 
     # Refused on the tenant's domain, every way in the same words (tests 6-8).
-    imap_no = ("NO [ALERT] Your organization allows only INBUXA webmail and JMAP apps. "
+    imap_no = ("NO [ALERT] Your organization allows only inbuxa webmail and JMAP apps. "
                "This mail app can't sign in.")
     check(imap_login(PORTS["imap"], tu, user_pw) == imap_no,
           "the tenant's user is refused over IMAP with the right password (test 6)")
@@ -341,10 +341,10 @@ def tenant_checks(admin, admin_pw, account):
     check(imap_login(PORTS["imap"], "nobody@t.legacy.test", "x") == imap_no,
           "and a made-up address on the domain gets the same (test 7)")
     check(pop3_login(PORTS["pop3"], tu, user_pw) ==
-          "-ERR [AUTH] Your organization allows only INBUXA webmail and JMAP apps. "
+          "-ERR [AUTH] Your organization allows only inbuxa webmail and JMAP apps. "
           "This mail app can't sign in.", "POP3 refuses in its own form (test 8)")
     check(smtp_auths(PORTS["submissions"], tu, [user_pw])[0] ==
-          "535 5.7.0 Your organization allows only INBUXA webmail and JMAP apps. "
+          "535 5.7.0 Your organization allows only inbuxa webmail and JMAP apps. "
           "This mail app can't send.", "submission refuses in its own form (test 8)")
     check(imap_login(PORTS["imap"], admin, admin_pw).startswith("OK"),
           "an account on another domain signs in over IMAP normally (test 6)")

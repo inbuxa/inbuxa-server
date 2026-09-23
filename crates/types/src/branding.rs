@@ -18,7 +18,7 @@
 #[macro_export]
 macro_rules! brand {
     () => {
-        "INBUXA"
+        "inbuxa"
     };
 }
 

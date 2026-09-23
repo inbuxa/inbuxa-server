@@ -47,7 +47,7 @@ pub async fn test(imap: &mut ImapConnection, _imap_check: &mut ImapConnection) {
     imap.send("ID").await;
     imap.assert_read(Type::Tagged, ResponseType::Ok)
         .await
-        .assert_contains("* ID (\"name\" \"INBUXA\" \"version\" ");
+        .assert_contains("* ID (\"name\" \"inbuxa\" \"version\" ");
 
     // Login should be disabled
     imap.send("LOGIN jdoe@example.com secret").await;

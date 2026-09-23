@@ -6,7 +6,7 @@
         <key>Label</key>
         <string>inbuxa.mail</string>
         <key>ServiceDescription</key>
-        <string>INBUXA</string>
+        <string>inbuxa</string>
         <key>ProgramArguments</key>
         <array>
             <string>__PATH__/bin/inbuxa</string>

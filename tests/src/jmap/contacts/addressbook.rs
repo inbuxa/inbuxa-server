@@ -38,7 +38,7 @@ pub async fn test(test: &TestServer) {
     assert_eq!(
         list[0],
         json!({
-            "name": "INBUXA Address Book (jdoe@example.com)",
+            "name": "inbuxa Address Book (jdoe@example.com)",
             "description": (),
             "sortOrder": 0,
             "isSubscribed": true,
@@ -148,7 +148,7 @@ pub async fn test(test: &TestServer) {
                 "id": addressbook_id,
             }),
             json!({
-                "name": "INBUXA Address Book (jdoe@example.com)",
+                "name": "inbuxa Address Book (jdoe@example.com)",
                 "description": (),
                 "sortOrder": 0,
                 "isSubscribed": true,

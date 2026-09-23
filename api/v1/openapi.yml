@@ -395,7 +395,7 @@ components:
         WWW-Authenticate:
           schema:
             type: string
-            example: Bearer realm="INBUXA Server"
+            example: Bearer realm="inbuxa Server"
       content:
         application/problem+json:
           schema:
