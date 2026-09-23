@@ -91,7 +91,22 @@ The wrapper is `tools/fork/strip.py`. Beyond `ossify.py` it:
   was ported or adapted from elsewhere. Any file `THIRD-PARTY.md` doesn't
   cover yet is flagged as new. It's reported, not a failure: the notice goes
   into `THIRD-PARTY.md` in the merge that brings the release in, since the
-  fork redistributes that code and its license requires the notice.
+  fork redistributes that code and its license requires the notice;
+- renames the upstream name where it's an identifier clients, users or
+  operators meet (wire-protocol names, the web interface's client id, store
+  keys; §2.4), with the same substitutions `main`
+  carries, so those lines arrive purged and never conflict (added
+  2026-09-22);
+- compiles the stripped tree. A dual-licensed file that only serves an
+  Enterprise feature survives the strip but can't build without it:
+  v0.16.23's `tests/src/directory/issuer.rs` was the first. The build check
+  fails the run on it, and the merge into `main` drops or reworks it (added
+  2026-09-22).
+
+Two checks in CI cover what a merge can bring in without a conflict:
+`tools/fork/name-check.py` (the upstream name in a new string literal) and
+`tools/fork/notice-check.py` (a changed upstream file without its AGPL 5(a)
+notice).
 
 ### 2.2a Snapshots, not a git fork
 

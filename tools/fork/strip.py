@@ -33,6 +33,15 @@ What it does, in order (docs/spec/SPEC.md §2.2):
    comments mark it (another copyright holder or license, or "ported from"
    and the like), and names any file THIRD-PARTY.md doesn't cover yet. That's
    a report, not a failure: the notice goes in THIRD-PARTY.md with the merge.
+8. Renames the upstream name where it's an identifier clients, users or
+   operators meet (renames.py beside this script), so a re-import arrives
+   purged and merges without conflicts on those lines. Copyright notices
+   and prose are never touched.
+9. Compiles the result (`cargo check --workspace --all-targets`). A file
+   that survived the strip but calls code that didn't -- a dual-licensed test
+   of an Enterprise feature, say -- fails here, on the `upstream` branch,
+   instead of in the merge. Imports the strip left unused are reported, not
+   failed. `--no-build-check` skips it.
 
 Only license markers and Cargo manifests are read for meaning. The code inside
 an Enterprise file or snippet is never printed, reported or kept, which is what
@@ -51,6 +60,9 @@ import sys
 import tarfile
 import tempfile
 from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from renames import apply as rename_upstream_names  # noqa: E402
 
 SEL = 'LicenseRef-SEL'
 AGPL = 'AGPL-3.0-only'
@@ -375,6 +387,50 @@ def remaining_hooks(tree):
     return dict(sorted(gates.items())), dict(sorted(checks.items()))
 
 
+BUILD_KNOWN = Path(__file__).resolve().parent / 'build-check-known.txt'
+
+
+def known_build_failures():
+    """Files expected not to compile in a stripped tree (build-check-known.txt)."""
+    if not BUILD_KNOWN.is_file():
+        return set()
+    return {l.strip() for l in BUILD_KNOWN.read_text(encoding='utf-8').split('\n')
+            if l.strip() and not l.lstrip().startswith('#')}
+
+
+def build_check(tree, target_dir):
+    """
+    `cargo check` the stripped tree. Returns (errors, unused): each error is
+    {file, line, message} from a compiler diagnostic, grouped by the file it
+    points at; unused lists the imports reported unused.
+
+    Only compiler diagnostics are read, and they point at the shared code
+    that failed, never at the removed code.
+    """
+    cmd = ['cargo', 'check', '--workspace', '--all-targets', '--locked', '--message-format=json',
+           '--target-dir', str(target_dir)]
+    r = subprocess.run(cmd, cwd=tree, capture_output=True, text=True)
+    errors, unused = [], []
+    for line in r.stdout.splitlines():
+        try:
+            msg = json.loads(line)
+        except ValueError:
+            continue
+        if msg.get('reason') != 'compiler-message':
+            continue
+        d = msg['message']
+        span = next((s for s in d.get('spans', []) if s.get('is_primary')), None)
+        where = {'file': span['file_name'], 'line': span['line_start']} if span else {'file': '?', 'line': 0}
+        if d.get('level') == 'error':
+            errors.append({**where, 'message': d.get('message', '')})
+        elif (d.get('code') or {}).get('code') == 'unused_imports':
+            unused.append({**where, 'message': d.get('message', '')})
+    if r.returncode != 0 and not errors:
+        errors.append({'file': '?', 'line': 0, 'message': (r.stderr.strip().splitlines() or ['cargo check failed'])[-1]})
+    dedup = lambda items: [dict(t) for t in sorted({tuple(sorted(i.items())) for i in items}, key=lambda t: (dict(t)['file'], dict(t)['line']))]
+    return dedup(errors), dedup(unused)
+
+
 def write_report(out_dir, report):
     (out_dir / 'STRIP-REPORT.json').write_text(json.dumps(report, indent=2) + '\n', encoding='utf-8')
     r = report
@@ -390,6 +446,13 @@ def write_report(out_dir, report):
         f'in {len(r["feature_gates"])} files; {sum(r["edition_checks"].values())} `is_enterprise_edition()` checks '
         f'in {len(r["edition_checks"])} files',
         f'- Third-party code: {len(r["third_party"])} files, **{len(r["third_party_unlisted"])}** not in THIRD-PARTY.md',
+        f'- Renamed identifiers: {sum(sum(f.values()) for f in r["renames"].values())} in '
+        f'{len({p for f in r["renames"].values() for p in f})} files',
+        '- Build check: ' + ('skipped' if r['build'] is None else
+                             f'**{"clean" if not r["build"]["errors"] else f"{len(r["build"]["errors"])} errors"}**, '
+                             f'{len(r["build"]["expected"])} expected errors in '
+                             f'{len({e["file"] for e in r["build"]["expected"]})} rebuilt-feature tests, '
+                             f'{len(r["build"]["unused"])} imports left unused'),
     ]
     if r['schema']:
         md.append(f'- Upstream schema flags {len(r["schema"]["objects"])} objects and {len(r["schema"]["fields"])} fields as Enterprise')
@@ -406,6 +469,19 @@ def write_report(out_dir, report):
     for f, found in r['third_party'].items():
         md.append(f'- `{f}`{" **new**" if f in r["third_party_unlisted"] else ""}')
         md += [f'  - {h["line"]}: {h["text"]}' for h in found]
+    md += ['', '## Renamed identifiers', '']
+    for sub, files in r['renames'].items():
+        md.append(f'- `{sub}`: ' + ', '.join(f'`{f}` ({n})' for f, n in files.items()))
+    if r['build'] is not None:
+        md += ['', '## Build check', '',
+               'Errors mean shared code calls something the strip removed: usually a dual-licensed file that only '
+               'serves an Enterprise feature. Drop or rework it in the merge into `main`, never on `upstream`.', '']
+        md += [f'- error `{e["file"]}:{e["line"]}`: {e["message"]}' for e in r['build']['errors']]
+        md += [f'- unused `{u["file"]}:{u["line"]}`: {u["message"]}' for u in r['build']['unused']]
+        md += ['', 'Expected: upstream\'s tests of features the fork rebuilt on `main` '
+               '(tools/fork/build-check-known.txt).', '']
+        md += [f'- `{e["file"]}:{e["line"]}`: {e["message"]}' for e in r['build']['expected']]
+        md += [f'- `{f}` now compiles: take it off the known list' for f in r['build']['known_clean']]
     if r['problems']:
         md += ['', '## Problems', ''] + [f'- {p}' for p in r['problems']]
     (out_dir / 'STRIP-REPORT.md').write_text('\n'.join(md) + '\n', encoding='utf-8')
@@ -416,6 +492,10 @@ def main():
     ap.add_argument('--upstream', required=True, type=Path, help='a git clone of upstream Stalwart')
     ap.add_argument('--ref', required=True, help='tag, branch or commit to snapshot, e.g. v0.16.22')
     ap.add_argument('--out', required=True, type=Path, help='new directory; the tree goes in OUT/tree')
+    ap.add_argument('--target-dir', type=Path, default=Path(__file__).resolve().parents[2] / 'target' / 'strip-check',
+                    help="cargo's target dir for the build check (default: this repo's target/strip-check, "
+                         'which keeps the dependency build warm between imports)')
+    ap.add_argument('--no-build-check', action='store_true', help='skip compiling the stripped tree')
     args = ap.parse_args()
 
     if args.out.exists():
@@ -428,7 +508,7 @@ def main():
         write_report(args.out, {'ref': args.ref, 'commit': commit, 'removed_files': [], 'removed_snippets': {},
                                 'cargo_edits': [], 'dangling_mods': [], 'problems': malformed, 'feature_gates': {}, 'edition_checks': {},
                                 'schema': None, 'third_party': {}, 'third_party_unlisted': [],
-                                'ossify_log': ''})
+                                'renames': {}, 'build': None, 'ossify_log': ''})
         print('\n'.join(malformed), file=sys.stderr)
         fail('malformed snippet markers; nothing stripped', code=1)
 
@@ -436,10 +516,21 @@ def main():
     log = run_ossify(tree, rust_roots(tree))
     edits = deactivate_enterprise(tree) + deactivate_enterprise_in_scripts(tree)
     dangling = remove_dangling_mods(tree)
+    renames = rename_upstream_names(tree)
     problems = verify(tree)
     gates, checks = remaining_hooks(tree)
     others = third_party(tree)
     new_others = unlisted(others)
+    build = None
+    if not args.no_build_check and not problems:
+        print('strip: compiling the stripped tree (cargo check)...', file=sys.stderr)
+        errors, unused = build_check(tree, args.target_dir)
+        known = known_build_failures()
+        expected = [e for e in errors if e['file'] in known]
+        errors = [e for e in errors if e['file'] not in known]
+        build = {'errors': errors, 'expected': expected, 'unused': unused,
+                 'known_clean': sorted(known - {e['file'] for e in expected})}
+        problems += [f'{e["file"]}:{e["line"]}: does not compile: {e["message"]}' for e in errors]
 
     report = {
         'ref': args.ref, 'commit': commit,
@@ -447,7 +538,7 @@ def main():
         'cargo_edits': edits, 'dangling_mods': dangling, 'problems': problems,
         'feature_gates': gates, 'edition_checks': checks,
         'schema': schema_flags(tree), 'third_party': others, 'third_party_unlisted': new_others,
-        'ossify_log': log,
+        'renames': renames, 'build': build, 'ossify_log': log,
     }
     write_report(args.out, report)
     print(f'{args.ref} ({commit[:12]}): removed {len(removed_files)} files and '

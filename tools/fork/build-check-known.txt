@@ -1,0 +1,18 @@
+# Files in a stripped upstream tree that are expected not to compile, read by
+# tools/fork/strip.py's build check. Each is upstream's shared test of a
+# feature upstream builds only in Enterprise and the fork rebuilt clean-room
+# on `main` (docs/spec/SPEC.md §2.2b, §4), so the stripped tree alone lacks
+# what they call. Errors here are reported as expected; an error in any other
+# file fails the strip. One path per line.
+
+# OIDC directories: `main` has its own tests/src/directory/oidc.rs.
+tests/src/directory/mod.rs
+# Tenants and archiving.
+tests/src/system/mod.rs
+# The LLM spam-filter classifier.
+tests/src/smtp/inbound/antispam.rs
+# Telemetry: alerts, stored metrics and traces, webhooks.
+tests/src/telemetry/alerts.rs
+tests/src/telemetry/metrics.rs
+tests/src/telemetry/tracing.rs
+tests/src/telemetry/webhooks.rs
