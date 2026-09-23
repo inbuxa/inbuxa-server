@@ -4,6 +4,14 @@
  * SPDX-License-Identifier: AGPL-3.0-only
  */
 
+// The release profile computes the layout of this crate's async fn bodies in
+// one go, and the deepest of them -- writable_domain, which awaits through
+// the directory, the store and the JMAP registry -- takes rustc past its
+// default query depth. The dev profile does not get that far, so the failure
+// only appears in a release build: CI was green and the tag that started a
+// release was not.
+#![recursion_limit = "256"]
+
 //! SCIM 2.0 provisioning (`docs/spec/features/scim.md`). inbuxa-server is the
 //! service provider: an identity provider pushes users and groups to
 //! `/scim/v2`, and each request becomes the same `x:Account` reads and

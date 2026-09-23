@@ -67,6 +67,16 @@ jobs:
       # --no-run: the workflow compiled every test target without running them,
       # which catches a test that no longer builds without paying for the suite.
       - run: cargo test --workspace --locked --no-run
+      # The release profile, on main only. It is the profile the image is
+      # built with, and it fails in ways the dev profile does not: v2026.9.24
+      # was tagged on a commit whose CI was green and whose release build
+      # could not compile the scim crate at all. A few minutes per merge is
+      # cheaper than finding that out from a tag, which throws away a
+      # multi-architecture build and leaves a version half-cut.
+      #
+      # Pull requests stay on the dev profile, where the wait is worth less.
+      - if: github.event_name == 'push'
+        run: cargo build -p inbuxa --locked --release
       # Keep the cache from growing without bound: past 60 GB the target dir
       # is dropped and the next build starts cold. The download cache stays.
       # Two builds (dev + test profiles) already fill ~22 GB, so the limit
