@@ -46,6 +46,10 @@ TEXT_RENAMES = [
     # that must match their containers and identity provider (database users,
     # passwords, an OIDC audience), and name their databases explicitly.
     ('"stalwart".to_string()', '"inbuxa".to_string()', ('crates',)),
+    # The spam filter rules ship with the server (common::manager::spam_rules);
+    # upstream's default of fetching its latest from GitHub becomes unset.
+    ('spam_filter_rules_url: Some("https://github.com/stalwartlabs/spam-filter/releases/latest/download/spam-filter-rules.json.gz".to_string()),',
+     'spam_filter_rules_url: None,', ('crates',)),
 ]
 ROOTS = ('crates', 'tests', 'resources')
 SKIP_SUFFIXES = {'.md', '.txt'}
@@ -58,6 +62,10 @@ SCHEMA_HASH = Path('resources/schema/schema.json.sha256')
 SCHEMA_RENAMES = [
     ('"stalwart"', '"inbuxa"'),
     ('vnd.stalwart', 'vnd.inbuxa'),
+    # The bundled spam rules: no default URL, and say what empty means.
+    ('"spamFilterRulesUrl":"https://github.com/stalwartlabs/spam-filter/releases/latest/download/spam-filter-rules.json.gz",', ''),
+    ('"URL to download spam filter rules from"',
+     '"URL to download spam filter rules from. Empty uses the rules bundled with the server."'),
 ]
 
 

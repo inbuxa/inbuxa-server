@@ -12,6 +12,9 @@
 # An issue is opened once per release: an existing one with the same title,
 # open or closed, stops a second.
 #
+# It also watches spam-filter, whose rules the server bundles
+# (resources/spam-filter/), and opens an issue for a newer release.
+#
 # Daily 06:17 UTC; run it by hand with workflow_dispatch.
 name: upstream-watch
 
@@ -64,7 +67,7 @@ jobs:
                           and key(r["tag_name"]) > key(base)),
                          key=lambda r: key(r["tag_name"]))
           if not newer:
-              print(f"Up to date: {base} is the newest upstream release."); sys.exit(0)
+              print(f"Up to date: {base} is the newest upstream release.")
 
           # Titles and bodies stay free of the upstream project's name, as the
           # rest of the fork's user-visible text does.
@@ -85,4 +88,35 @@ jobs:
                       "add any new third-party notices to `THIRD-PARTY.md`, then merge `upstream` into `main`.")
               issue = call("POST", f"{api}/issues", {"title": title, "body": body})
               print(f"{tag}: opened #{issue['number']}.")
+
+          # The spam filter rules bundled with the server (resources/spam-filter/):
+          # an issue when spam-filter publishes a newer release than the one
+          # BUNDLED_SPAM_RULES_VERSION names on main.
+          src = call("GET", f"{api}/contents/crates/common/src/manager/spam_rules.rs?ref=main")
+          import base64
+          text = base64.b64decode(src["content"]).decode()
+          m = re.search(r'BUNDLED_SPAM_RULES_VERSION: &str = "(\d+\.\d+\.\d+)"', text)
+          if not m:
+              print("Can't read BUNDLED_SPAM_RULES_VERSION from spam_rules.rs", file=sys.stderr); sys.exit(1)
+          bundled = "v" + m.group(1)
+          rels = call("GET", "https://api.github.com/repos/stalwartlabs/spam-filter/releases?per_page=30", token=None)
+          newer = sorted((r for r in rels
+                          if not r["draft"] and not r["prerelease"] and SEMVER.match(r["tag_name"])
+                          and key(r["tag_name"]) > key(bundled)),
+                         key=lambda r: key(r["tag_name"]))
+          if not newer:
+              print(f"Up to date: the bundled spam rules are {bundled}, the newest release."); sys.exit(0)
+          latest = newer[-1]
+          tag = latest["tag_name"]
+          title = f"Update the bundled spam rules to {tag}"
+          existing = {i["title"] for i in call("GET", f"{api}/issues?state=all&type=issues&q=bundled+spam+rules&limit=50")}
+          if title in existing:
+              print(f"spam rules {tag}: issue already exists."); sys.exit(0)
+          body = (f"spam-filter published {tag} on {latest['published_at'][:10]}. "
+                  f"The server bundles {bundled}.\n\n"
+                  "Update it as resources/spam-filter/README.md describes: take the rules file "
+                  f"from the {tag} release (by tag, not `latest`), set BUNDLED_SPAM_RULES_VERSION, "
+                  "and run the antispam test.")
+          issue = call("POST", f"{api}/issues", {"title": title, "body": body})
+          print(f"spam rules {tag}: opened #{issue['number']}.")
           PY
