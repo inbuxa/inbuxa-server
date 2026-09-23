@@ -68,6 +68,10 @@ use std::{
     time::{Duration, Instant},
 };
 
+// inbuxa: its HTTP listener (19048) is shared with the dkim2 and report
+// tests, which are serial; without this it ran beside them and each got the
+// other's server.
+#[serial_test::serial]
 #[tokio::test(flavor = "multi_thread")]
 async fn antispam() {
     let mut test = TestServerBuilder::new("smtp_antispam_test")
