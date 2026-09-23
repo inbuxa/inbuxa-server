@@ -6,36 +6,37 @@
 
 use super::{RedisPool, RedisStore, into_error};
 use crate::{Deserialize, write::now};
-use redis::AsyncCommands;
+use deadpool::managed::{Manager, Object, Pool};
+use redis::{AsyncCommands, RedisError, RedisResult, RetryMethod, Script};
+use std::sync::LazyLock;
+
+static INCR_EXPIRE: LazyLock<Script> = LazyLock::new(|| {
+    Script::new(
+        "redis.call('INCRBY', KEYS[1], ARGV[1])
+         redis.call('EXPIRE', KEYS[1], ARGV[2])
+         return redis.call('GET', KEYS[1])",
+    )
+});
 
 impl RedisStore {
     pub async fn key_set(&self, key: &[u8], value: &[u8], expires: Option<u64>) -> trc::Result<()> {
         match &self.pool {
             RedisPool::Single(pool) => {
-                self.key_set_(
-                    pool.get().await.map_err(into_error)?.as_mut(),
-                    key,
-                    value,
-                    expires,
-                )
+                with_conn(pool, async |conn| {
+                    Self::key_set_(conn, key, value, expires).await
+                })
                 .await
             }
             RedisPool::Cluster(pool) => {
-                self.key_set_(
-                    pool.get().await.map_err(into_error)?.as_mut(),
-                    key,
-                    value,
-                    expires,
-                )
+                with_conn(pool, async |conn| {
+                    Self::key_set_(conn, key, value, expires).await
+                })
                 .await
             }
             RedisPool::Sentinel(pool) => {
-                self.key_set_(
-                    pool.get().await.map_err(into_error)?.as_mut(),
-                    key,
-                    value,
-                    expires,
-                )
+                with_conn(pool, async |conn| {
+                    Self::key_set_(conn, key, value, expires).await
+                })
                 .await
             }
         }
@@ -44,30 +45,21 @@ impl RedisStore {
     pub async fn key_incr(&self, key: &[u8], value: i64, expires: Option<u64>) -> trc::Result<i64> {
         match &self.pool {
             RedisPool::Single(pool) => {
-                self.key_incr_(
-                    pool.get().await.map_err(into_error)?.as_mut(),
-                    key,
-                    value,
-                    expires,
-                )
+                with_conn(pool, async |conn| {
+                    Self::key_incr_(conn, key, value, expires).await
+                })
                 .await
             }
             RedisPool::Cluster(pool) => {
-                self.key_incr_(
-                    pool.get().await.map_err(into_error)?.as_mut(),
-                    key,
-                    value,
-                    expires,
-                )
+                with_conn(pool, async |conn| {
+                    Self::key_incr_(conn, key, value, expires).await
+                })
                 .await
             }
             RedisPool::Sentinel(pool) => {
-                self.key_incr_(
-                    pool.get().await.map_err(into_error)?.as_mut(),
-                    key,
-                    value,
-                    expires,
-                )
+                with_conn(pool, async |conn| {
+                    Self::key_incr_(conn, key, value, expires).await
+                })
                 .await
             }
         }
@@ -76,16 +68,13 @@ impl RedisStore {
     pub async fn try_lock(&self, key: &[u8], expires: u64) -> trc::Result<bool> {
         match &self.pool {
             RedisPool::Single(pool) => {
-                self.try_lock_(pool.get().await.map_err(into_error)?.as_mut(), key, expires)
-                    .await
+                with_conn(pool, async |conn| Self::try_lock_(conn, key, expires).await).await
             }
             RedisPool::Cluster(pool) => {
-                self.try_lock_(pool.get().await.map_err(into_error)?.as_mut(), key, expires)
-                    .await
+                with_conn(pool, async |conn| Self::try_lock_(conn, key, expires).await).await
             }
             RedisPool::Sentinel(pool) => {
-                self.try_lock_(pool.get().await.map_err(into_error)?.as_mut(), key, expires)
-                    .await
+                with_conn(pool, async |conn| Self::try_lock_(conn, key, expires).await).await
             }
         }
     }
@@ -93,16 +82,13 @@ impl RedisStore {
     pub async fn key_delete(&self, key: &[u8]) -> trc::Result<()> {
         match &self.pool {
             RedisPool::Single(pool) => {
-                self.key_delete_(pool.get().await.map_err(into_error)?.as_mut(), key)
-                    .await
+                with_conn(pool, async |conn| Self::key_delete_(conn, key).await).await
             }
             RedisPool::Cluster(pool) => {
-                self.key_delete_(pool.get().await.map_err(into_error)?.as_mut(), key)
-                    .await
+                with_conn(pool, async |conn| Self::key_delete_(conn, key).await).await
             }
             RedisPool::Sentinel(pool) => {
-                self.key_delete_(pool.get().await.map_err(into_error)?.as_mut(), key)
-                    .await
+                with_conn(pool, async |conn| Self::key_delete_(conn, key).await).await
             }
         }
     }
@@ -110,16 +96,22 @@ impl RedisStore {
     pub async fn key_delete_prefix(&self, prefix: &[u8]) -> trc::Result<()> {
         match &self.pool {
             RedisPool::Single(pool) => {
-                self.key_delete_prefix_(pool.get().await.map_err(into_error)?.as_mut(), prefix)
-                    .await
+                with_conn(pool, async |conn| {
+                    Self::key_delete_prefix_(conn, prefix).await
+                })
+                .await
             }
             RedisPool::Cluster(pool) => {
-                self.key_delete_prefix_(pool.get().await.map_err(into_error)?.as_mut(), prefix)
-                    .await
+                with_conn(pool, async |conn| {
+                    Self::key_delete_prefix_(conn, prefix).await
+                })
+                .await
             }
             RedisPool::Sentinel(pool) => {
-                self.key_delete_prefix_(pool.get().await.map_err(into_error)?.as_mut(), prefix)
-                    .await
+                with_conn(pool, async |conn| {
+                    Self::key_delete_prefix_(conn, prefix).await
+                })
+                .await
             }
         }
     }
@@ -128,35 +120,31 @@ impl RedisStore {
         &self,
         key: &[u8],
     ) -> trc::Result<Option<T>> {
-        match &self.pool {
+        let value = match &self.pool {
             RedisPool::Single(pool) => {
-                self.key_get_(pool.get().await.map_err(into_error)?.as_mut(), key)
-                    .await
+                with_conn(pool, async |conn| Self::key_get_(conn, key).await).await
             }
             RedisPool::Cluster(pool) => {
-                self.key_get_(pool.get().await.map_err(into_error)?.as_mut(), key)
-                    .await
+                with_conn(pool, async |conn| Self::key_get_(conn, key).await).await
             }
             RedisPool::Sentinel(pool) => {
-                self.key_get_(pool.get().await.map_err(into_error)?.as_mut(), key)
-                    .await
+                with_conn(pool, async |conn| Self::key_get_(conn, key).await).await
             }
-        }
+        }?;
+
+        value.map(T::deserialize_owned).transpose()
     }
 
     pub async fn counter_get(&self, key: &[u8]) -> trc::Result<i64> {
         match &self.pool {
             RedisPool::Single(pool) => {
-                self.counter_get_(pool.get().await.map_err(into_error)?.as_mut(), key)
-                    .await
+                with_conn(pool, async |conn| Self::counter_get_(conn, key).await).await
             }
             RedisPool::Cluster(pool) => {
-                self.counter_get_(pool.get().await.map_err(into_error)?.as_mut(), key)
-                    .await
+                with_conn(pool, async |conn| Self::counter_get_(conn, key).await).await
             }
             RedisPool::Sentinel(pool) => {
-                self.counter_get_(pool.get().await.map_err(into_error)?.as_mut(), key)
-                    .await
+                with_conn(pool, async |conn| Self::counter_get_(conn, key).await).await
             }
         }
     }
@@ -164,92 +152,69 @@ impl RedisStore {
     pub async fn key_exists(&self, key: &[u8]) -> trc::Result<bool> {
         match &self.pool {
             RedisPool::Single(pool) => {
-                self.key_exists_(pool.get().await.map_err(into_error)?.as_mut(), key)
-                    .await
+                with_conn(pool, async |conn| Self::key_exists_(conn, key).await).await
             }
             RedisPool::Cluster(pool) => {
-                self.key_exists_(pool.get().await.map_err(into_error)?.as_mut(), key)
-                    .await
+                with_conn(pool, async |conn| Self::key_exists_(conn, key).await).await
             }
             RedisPool::Sentinel(pool) => {
-                self.key_exists_(pool.get().await.map_err(into_error)?.as_mut(), key)
-                    .await
+                with_conn(pool, async |conn| Self::key_exists_(conn, key).await).await
             }
         }
     }
 
-    async fn key_get_<T: Deserialize + std::fmt::Debug + 'static>(
-        &self,
-        conn: &mut impl AsyncCommands,
-        key: &[u8],
-    ) -> trc::Result<Option<T>> {
-        if let Some(value) = redis::cmd("GET")
-            .arg(key)
-            .query_async::<Option<Vec<u8>>>(conn)
-            .await
-            .map_err(into_error)?
-        {
-            T::deserialize_owned(value).map(Some)
-        } else {
-            Ok(None)
-        }
+    async fn key_get_(conn: &mut impl AsyncCommands, key: &[u8]) -> RedisResult<Option<Vec<u8>>> {
+        redis::cmd("GET").arg(key).query_async(conn).await
     }
 
-    async fn counter_get_(&self, conn: &mut impl AsyncCommands, key: &[u8]) -> trc::Result<i64> {
+    async fn counter_get_(conn: &mut impl AsyncCommands, key: &[u8]) -> RedisResult<i64> {
         redis::cmd("GET")
             .arg(key)
             .query_async::<Option<i64>>(conn)
             .await
-            .map(|x| x.unwrap_or(0))
-            .map_err(into_error)
+            .map(|value| value.unwrap_or(0))
     }
 
-    async fn key_exists_(&self, conn: &mut impl AsyncCommands, key: &[u8]) -> trc::Result<bool> {
-        conn.exists(key).await.map_err(into_error)
+    async fn key_exists_(conn: &mut impl AsyncCommands, key: &[u8]) -> RedisResult<bool> {
+        conn.exists(key).await
     }
 
     async fn key_set_(
-        &self,
         conn: &mut impl AsyncCommands,
         key: &[u8],
         value: &[u8],
         expires: Option<u64>,
-    ) -> trc::Result<()> {
+    ) -> RedisResult<()> {
         if let Some(expires) = expires {
-            conn.set_ex(key, value, expires).await.map_err(into_error)
+            conn.set_ex(key, value, expires).await
         } else {
-            conn.set(key, value).await.map_err(into_error)
+            conn.set(key, value).await
         }
     }
 
     async fn key_incr_(
-        &self,
         conn: &mut impl AsyncCommands,
         key: &[u8],
         value: i64,
         expires: Option<u64>,
-    ) -> trc::Result<i64> {
+    ) -> RedisResult<i64> {
         if let Some(expires) = expires {
-            redis::pipe()
-                .atomic()
-                .incr(key, value)
-                .expire(key, expires as i64)
-                .ignore()
-                .query_async::<Vec<i64>>(conn)
+            INCR_EXPIRE
+                .key(key)
+                .arg(value)
+                .arg(expires as i64)
+                .invoke_async(conn)
                 .await
-                .map_err(into_error)
-                .map(|v| v.first().copied().unwrap_or(0))
         } else {
-            conn.incr(key, value).await.map_err(into_error)
+            conn.incr(key, value).await
         }
     }
 
     async fn try_lock_(
-        &self,
         conn: &mut impl AsyncCommands,
         key: &[u8],
         expires: u64,
-    ) -> trc::Result<bool> {
+    ) -> RedisResult<bool> {
         redis::cmd("SET")
             .arg(key)
             .arg(now() + expires)
@@ -259,18 +224,13 @@ impl RedisStore {
             .query_async::<Option<String>>(conn)
             .await
             .map(|reply| reply.is_some())
-            .map_err(into_error)
     }
 
-    async fn key_delete_(&self, conn: &mut impl AsyncCommands, key: &[u8]) -> trc::Result<()> {
-        conn.del(key).await.map_err(into_error)
+    async fn key_delete_(conn: &mut impl AsyncCommands, key: &[u8]) -> RedisResult<()> {
+        conn.del(key).await
     }
 
-    async fn key_delete_prefix_(
-        &self,
-        conn: &mut impl AsyncCommands,
-        prefix: &[u8],
-    ) -> trc::Result<()> {
+    async fn key_delete_prefix_(conn: &mut impl AsyncCommands, prefix: &[u8]) -> RedisResult<()> {
         let mut pattern = Vec::with_capacity(prefix.len() + 1);
         pattern.extend_from_slice(prefix);
         pattern.push(b'*');
@@ -284,11 +244,10 @@ impl RedisStore {
                 .arg("COUNT")
                 .arg(100)
                 .query_async(conn)
-                .await
-                .map_err(into_error)?;
+                .await?;
 
             if !keys.is_empty() {
-                conn.del::<_, ()>(&keys).await.map_err(into_error)?;
+                conn.del::<_, ()>(&keys).await?;
             }
 
             if new_cursor != 0 {
@@ -298,4 +257,35 @@ impl RedisStore {
             }
         }
     }
+}
+
+async fn with_conn<M, T>(
+    pool: &Pool<M>,
+    operation: impl AsyncFnOnce(&mut M::Type) -> RedisResult<T>,
+) -> trc::Result<T>
+where
+    M: Manager<Error = trc::Error>,
+{
+    let mut conn = pool.get().await.map_err(into_error)?;
+
+    match operation(conn.as_mut()).await {
+        Ok(value) => Ok(value),
+        Err(err) => {
+            if is_stale_connection(&err) {
+                drop(Object::take(conn));
+            }
+            Err(into_error(err))
+        }
+    }
+}
+
+fn is_stale_connection(err: &RedisError) -> bool {
+    matches!(
+        err.retry_method(),
+        RetryMethod::Reconnect
+            | RetryMethod::ReconnectFromInitialConnections
+            | RetryMethod::RefreshSlotsAndRetry
+            | RetryMethod::MovedRedirect
+            | RetryMethod::AskRedirect
+    )
 }

@@ -15,8 +15,8 @@ use crate::outbound::lookup::{DnsLookup, SourceIp};
 use crate::outbound::mta_sts::lookup::MtaStsLookup;
 use crate::outbound::mta_sts::verify::VerifyPolicy;
 use crate::outbound::{client::StartTlsResult, dane::verify::TlsaVerify};
-use crate::queue::dsn::SendDsn;
-use crate::queue::spool::SmtpSpool;
+use crate::queue::dsn::{DsnStatus, SendDsn};
+use crate::queue::spool::{DSN_RETRY, SmtpSpool};
 use crate::queue::throttle::IsAllowed;
 use crate::queue::{
     Error, FROM_REPORT, HostResponse, MessageWrapper, Metadata, QueueEnvelope, QueuedMessage,
@@ -155,7 +155,7 @@ impl QueuedMessage {
         let span_id = message.span_id;
 
         // Send any due Delivery Status Notifications
-        server.send_dsn(&mut message).await;
+        let dsn_status = server.send_dsn(&mut message).await;
 
         match has_pending_delivery {
             PendingDelivery::Yes(true)
@@ -163,21 +163,27 @@ impl QueuedMessage {
                     .message
                     .next_delivery_event(self.queue_name.into())
                     .is_some_and(|due| due <= now()) => {}
-            PendingDelivery::No => {
+            PendingDelivery::No if dsn_status == DsnStatus::Completed => {
                 trc::event!(
                     Delivery(DeliveryEvent::Completed),
                     SpanId = span_id,
                     Elapsed = trc::Value::Duration((now() - message.message.created) * 1000)
                 );
 
-                // All message recipients expired, do not re-queue. (DSN has been already sent)
+                // All message recipients expired, do not re-queue.
                 message.remove(&server, self.due.into()).await;
 
                 return QueueEventStatus::Completed;
             }
+            PendingDelivery::No => {
+                message
+                    .save_changes(&server, self.due.into(), Some(now() + DSN_RETRY))
+                    .await;
+                return QueueEventStatus::Deferred;
+            }
             _ => {
                 // Re-queue the message if its not yet due for delivery
-                message.save_changes(&server, self.due.into()).await;
+                message.save_changes(&server, self.due.into(), None).await;
                 return QueueEventStatus::Deferred;
             }
         }
@@ -208,7 +214,7 @@ impl QueuedMessage {
                     }
                 }
 
-                message.save_changes(&server, self.due.into()).await;
+                message.save_changes(&server, self.due.into(), None).await;
 
                 return QueueEventStatus::Deferred;
             }
@@ -1485,7 +1491,7 @@ impl QueuedMessage {
         }
 
         // Send Delivery Status Notifications
-        server.send_dsn(&mut message).await;
+        let dsn_status = server.send_dsn(&mut message).await;
 
         // Notify queue manager
         if message.message.next_event(None).is_some() {
@@ -1501,7 +1507,13 @@ impl QueuedMessage {
             );
 
             // Save changes to disk
-            message.save_changes(&server, self.due.into()).await;
+            message.save_changes(&server, self.due.into(), None).await;
+
+            QueueEventStatus::Deferred
+        } else if dsn_status == DsnStatus::Deferred {
+            message
+                .save_changes(&server, self.due.into(), Some(now() + DSN_RETRY))
+                .await;
 
             QueueEventStatus::Deferred
         } else {

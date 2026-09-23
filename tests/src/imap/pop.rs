@@ -122,18 +122,32 @@ pub async fn test(test: &TestServer) {
     pop3.assert_read(ResponseType::Err).await;
 
     // TOP
-    pop3.send("TOP 1 4").await;
+    pop3.send("TOP 1 0").await;
     pop3.assert_read(ResponseType::Multiline)
         .await
-        .assert_contains("+OK 203 octets")
         .assert_contains("Subject: TPS Report 0")
+        .assert_contains("X-Spam-Status: No")
         .assert_not_contains("I'm going to need those TPS 0 reports ASAP.");
-    pop3.send("TOP 3 4").await;
+    pop3.send("TOP 1 1").await;
+    pop3.assert_read(ResponseType::Multiline)
+        .await
+        .assert_contains("Subject: TPS Report 0")
+        .assert_contains("I'm going to need those TPS 0 reports ASAP.")
+        .assert_not_contains("So, if you could do that, that'd be great.");
+    pop3.send("TOP 3 0").await;
+    pop3.assert_read(ResponseType::Multiline)
+        .await
+        .assert_contains("Subject: TPS Report 2")
+        .assert_not_contains("I'm going to need those TPS 2 reports ASAP.");
+    pop3.send("TOP 3 100").await;
     pop3.assert_read(ResponseType::Multiline)
         .await
         .assert_contains("+OK 203 octets")
         .assert_contains("Subject: TPS Report 2")
-        .assert_not_contains("I'm going to need those TPS 2 reports ASAP.");
+        .assert_contains("I'm going to need those TPS 2 reports ASAP.")
+        .assert_contains("So, if you could do that, that'd be great.");
+    pop3.send("TOP 4 1").await;
+    pop3.assert_read(ResponseType::Err).await;
 
     // DELE + RSET + QUIT (should not delete messages)
     pop3.send("DELE 1").await;
