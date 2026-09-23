@@ -1,10 +1,16 @@
-// Ignore everything
+# Ignore everything
 *
 
-// Allow what is needed
+# Allow what is needed
 !crates
 !tests
 !resources
+
+# The patched dependency Cargo.toml's [patch.crates-io] points at. Without
+# it the build context has no vendor/, and `cargo chef cook` fails on
+# "failed to load source for dependency sieve-rs" -- which CI cannot see,
+# because CI builds from a checkout and only the image build has a context.
+!vendor
 
 !Cargo.lock
 !Cargo.toml
