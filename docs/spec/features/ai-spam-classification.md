@@ -102,7 +102,10 @@ Permissions: `sysSpamLlmGet`, `sysSpamLlmUpdate`.
 - **Tags and scores.** The classifier's tags are ordinary spam tags, scored
   by `x:SpamTag` entries like every other tag: `Score` (a number), `Discard`
   or `Reject`. The documented defaults are `LLM_UNSOLICITED_HIGH` 3.0 and
-  `LLM_LEGITIMATE_HIGH` −3.0. A tag with no entry scores 0.
+  `LLM_LEGITIMATE_HIGH` −3.0. A tag with no entry scores 0. The server ships
+  those entries in its bundled spam rules (`resources/spam-filter/`), loaded
+  on first boot and again when the bundled version changes, so an install
+  that predates them gains them on upgrade (added 2026-09-23).
 - **`interactAi`** permission ("Interact with AI models"): lets an account's
   own Sieve scripts call `llm_prompt`. This repository's default roles give it
   to users, tenant administrators and superusers

@@ -24,7 +24,7 @@ carry their own license files.
 | `crates/common/src/network/acme/directory.rs`, `crates/common/src/network/acme/jose.rs`, `crates/common/src/network/acme/order.rs` | [rustls-acme](https://github.com/FlorianUekermann/rustls-acme) (MIT or Apache-2.0) | Copyright (c) Florian Uekermann |
 | `crates/types/src/id.rs` | [crockford](https://github.com/archer884/crockford) (MIT or Apache-2.0) | Copyright (c) 2017 J/A <archer884@gmail.com> |
 | `crates/nlp/src/tokenizers/types.rs` | test cases from [linkify](https://github.com/robinst/linkify) (MIT or Apache-2.0) | Copyright (c) 2017 Robin Stocker |
-| `tests/resources/smtp/antispam/spam-filter-rules.json.gz` | the published rules of [spam-filter](https://github.com/stalwartlabs/spam-filter) v3.0.2, unmodified, for the spam filter's tests (MIT or Apache-2.0) | Copyright (C) 2024, Stalwart Labs LLC |
+| `resources/spam-filter/spam-filter-rules.json.gz` | the published rules of [spam-filter](https://github.com/stalwartlabs/spam-filter) v3.0.2, unmodified, built into the server as its default spam rules (MIT or Apache-2.0) | Copyright (C) 2024, Stalwart Labs LLC |
 
 Each notice above applies with this permission notice:
 

@@ -23,6 +23,6 @@ crates/migration/src/lib.rs	"STALWART_SPAM_CLASSIFIER_MODEL.lz4"
 crates/migration/src/lib.rs	"STALWART_SPAM_TRAIN_DATA.lz4"
 crates/types/src/branding.rs	"STALWART"
 
-# OPEN, not yet decided (2026-09-22): upstream's published spam-filter rules,
-# which the server downloads at runtime from this address.
-crates/registry/src/schema/structs_impl.rs	"https://github.com/stalwartlabs/spam-filter/releases/latest/download/spam-filter-rules.json.gz"
+# Upstream's old default rules source, read only to treat it as unset: the
+# server uses the rules bundled with it (resources/spam-filter/).
+crates/common/src/manager/spam_rules.rs	"https://github.com/stalwartlabs/spam-filter/releases/latest/download/spam-filter-rules.json.gz"

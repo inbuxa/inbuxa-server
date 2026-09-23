@@ -243,7 +243,8 @@ impl SpamFilterConfig {
                 spam_threshold: spam.score_spam.into_inner() as f32,
             },
             grey_list_expiry: spam.greylist_for.map(|d| d.into_inner().as_secs()),
-            spam_rules_url: spam.spam_filter_rules_url,
+            // inbuxa: unset, empty or upstream's old default means the bundled rules
+            spam_rules_url: crate::manager::spam_rules::rules_url(spam.spam_filter_rules_url),
             url_client: utils::http::http_client_builder(true)
                 .pool_max_idle_per_host(0)
                 .redirect(reqwest::redirect::Policy::none())

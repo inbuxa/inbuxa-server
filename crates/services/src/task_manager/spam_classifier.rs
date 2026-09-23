@@ -2,13 +2,15 @@
  * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
+ *
+ * Modified by Coffey Labs in 2026 for INBUXA.
  */
 
 use crate::task_manager::{TaskFailureType, TaskResult};
 use common::{
     Server,
     ipc::{BroadcastEvent, RegistryChange},
-    manager::{SPAM_CLASSIFIER_KEY, SPAM_TRAINER_KEY, fetch_resource},
+    manager::{SPAM_CLASSIFIER_KEY, SPAM_TRAINER_KEY, fetch_resource, spam_rules},
 };
 use registry::{
     schema::{
@@ -106,6 +108,7 @@ struct RuleUpdateResult {
 
 async fn update_spam_rules(server: &Server) -> trc::Result<TaskResult> {
     let started = Instant::now();
+    let bundled = server.core.spam.spam_rules_url.is_none();
     let rules = match fetch_spam_rules(server).await {
         Ok(rules) => rules,
         Err(err) => {
@@ -289,29 +292,36 @@ async fn update_spam_rules(server: &Server) -> trc::Result<TaskResult> {
         Elapsed = started.elapsed(),
     );
 
+    // inbuxa: so the next start knows these bundled rules are in
+    if bundled {
+        spam_rules::set_applied_version(server.store(), spam_rules::BUNDLED_SPAM_RULES_VERSION)
+            .await?;
+    }
+
     Ok(TaskResult::Success(vec![]))
 }
 
 async fn fetch_spam_rules(server: &Server) -> Result<Rules, RuleUpdateError> {
-    let Some(rules_url) = server.core.spam.spam_rules_url.as_ref() else {
-        return Err(RuleUpdateError {
-            typ: TaskFailureType::Permanent,
-            reason: "Spam rules resource URL not configured".to_string(),
-        });
-    };
-    let rules_json: AHashMap<String, Vec<serde_json::Value>> =
-        fetch_resource(rules_url, None, Duration::from_secs(60), 1024 * 500)
+    // inbuxa: no URL means the rules bundled with the server
+    let bytes = match server.core.spam.spam_rules_url.as_ref() {
+        Some(rules_url) => fetch_resource(rules_url, None, Duration::from_secs(60), 1024 * 500)
             .await
             .map_err(|reason| RuleUpdateError {
                 typ: TaskFailureType::Temporary,
                 reason,
+            }),
+        None => spam_rules::bundled_rules().map_err(|reason| RuleUpdateError {
+            typ: TaskFailureType::Permanent,
+            reason,
+        }),
+    };
+    let rules_json: AHashMap<String, Vec<serde_json::Value>> =
+        bytes.and_then(|bytes| {
+            serde_json::from_slice(&bytes).map_err(|err| RuleUpdateError {
+                typ: TaskFailureType::Permanent,
+                reason: format!("Failed to parse spam rules JSON: {err}"),
             })
-            .and_then(|bytes| {
-                serde_json::from_slice(&bytes).map_err(|err| RuleUpdateError {
-                    typ: TaskFailureType::Permanent,
-                    reason: format!("Failed to parse spam rules JSON: {err}"),
-                })
-            })?;
+        })?;
 
     let mut rules = Rules::default();
     for (object_type, values) in rules_json {

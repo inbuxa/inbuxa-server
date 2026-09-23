@@ -530,13 +530,22 @@ async fn insert_safe_defaults(bp: &mut Bootstrap) -> trc::Result<()> {
         use store::write::BatchBuilder;
         use types::id::Id;
 
-        if bp.registry.count_object(ObjectType::SpamRule).await? == 0
-            && bp
-                .registry
+        // inbuxa: rules are always to hand, since a copy ships with the server
+        // (spam_rules). They load on first boot, and again when the bundled
+        // version differs from the one last loaded, which only adds what's
+        // missing: new tags and rules, never a changed score.
+        let rules_url = super::spam_rules::rules_url(
+            bp.registry
                 .object::<SpamSettings>(Id::singleton())
                 .await?
-                .is_none_or(|spam| spam.spam_filter_rules_url.is_some())
-        {
+                .and_then(|spam| spam.spam_filter_rules_url),
+        );
+        let bundled_is_new = rules_url.is_none()
+            && super::spam_rules::applied_version(&bp.data_store)
+                .await?
+                .as_deref()
+                != Some(super::spam_rules::BUNDLED_SPAM_RULES_VERSION);
+        if bp.registry.count_object(ObjectType::SpamRule).await? == 0 || bundled_is_new {
             let mut batch = BatchBuilder::new();
             batch.schedule_task(Task::SpamFilterMaintenance(TaskSpamFilterMaintenance {
                 maintenance_type: TaskSpamFilterMaintenanceType::UpdateRules,
