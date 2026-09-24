@@ -24,6 +24,7 @@ use crate::task_manager::{
     TaskJob, TaskManagerIpc, TaskResult,
 };
 use common::BuildServer;
+use common::config::network::ClusterRoles;
 use common::config::server::{DEFAULT_TLS_TIMEOUT, ServerProtocol};
 use common::network::limiter::ConcurrencyLimiter;
 use common::network::{ServerInstance, TcpAcceptor};
@@ -58,10 +59,12 @@ pub fn spawn_task_manager(inner: Arc<Inner>) {
         let server = inner.build_server();
         let roles = &server.core.network.roles;
 
+        // inbuxa: outbound_mta too, which now governs report tasks
         if !roles.account_maintenance
             && !roles.store_maintenance
             && !roles.search_indexing
             && !roles.spam_training
+            && !roles.outbound_mta
             && !roles.task_manager
         {
             return;
@@ -289,26 +292,7 @@ impl TaskQueueManager for Server {
                                     .caused_by(trc::location!())
                                     .ctx(trc::Key::Value, value)
                             })?;
-                            let enabled = match task_type {
-                                TaskType::IndexDocument
-                                | TaskType::UnindexDocument
-                                | TaskType::IndexTrace => roles.search_indexing,
-                                TaskType::AccountMaintenance
-                                | TaskType::TenantMaintenance
-                                | TaskType::DestroyAccount => roles.account_maintenance,
-                                TaskType::StoreMaintenance => roles.store_maintenance,
-                                TaskType::SpamFilterMaintenance => roles.spam_training,
-                                TaskType::CalendarAlarmEmail
-                                | TaskType::CalendarAlarmNotification
-                                | TaskType::CalendarItipMessage
-                                | TaskType::MergeThreads
-                                | TaskType::DmarcReport
-                                | TaskType::TlsReport
-                                | TaskType::RestoreArchivedItem
-                                | TaskType::AcmeRenewal
-                                | TaskType::DkimManagement
-                                | TaskType::DnsManagement => true,
-                            };
+                            let enabled = task_enabled(roles, task_type);
 
                             if !enabled {
                                 trc::event!(
@@ -434,6 +418,48 @@ impl TaskQueueManager for Server {
             .map(|locked| locked.expires.saturating_duration_since(now))
             .min()
             .map_or(sleep_for, |recheck| sleep_for.min(recheck.max(Duration::from_secs(1))))
+    }
+}
+
+/// inbuxa: whether this node's cluster role lets it run a task type. Upstream
+/// checked the dedicated roles (search indexing, account and store
+/// maintenance, spam training) and let every node with a task manager run
+/// the rest, whatever its taskQueueProcessing setting. Every task type now
+/// answers to one ClusterTaskType:
+///
+/// - IndexDocument, UnindexDocument, IndexTrace: searchIndexing
+/// - AccountMaintenance, TenantMaintenance, DestroyAccount: accountMaintenance
+/// - StoreMaintenance: storeMaintenance
+/// - SpamFilterMaintenance: spamClassifierTraining
+/// - DmarcReport, TlsReport: outboundMta. They build and send reports to
+///   other domains (TLS reports can go straight to an HTTPS endpoint), which
+///   is the outbound MTA's business.
+/// - CalendarAlarmEmail, CalendarAlarmNotification, CalendarItipMessage,
+///   MergeThreads, RestoreArchivedItem, AcmeRenewal, DkimManagement,
+///   DnsManagement: taskQueueProcessing, the role for queue tasks with no
+///   role of their own.
+///
+/// A node that may not run a task leaves it unclaimed, so a node that may
+/// picks it up.
+pub fn task_enabled(roles: &ClusterRoles, task_type: TaskType) -> bool {
+    match task_type {
+        TaskType::IndexDocument | TaskType::UnindexDocument | TaskType::IndexTrace => {
+            roles.search_indexing
+        }
+        TaskType::AccountMaintenance | TaskType::TenantMaintenance | TaskType::DestroyAccount => {
+            roles.account_maintenance
+        }
+        TaskType::StoreMaintenance => roles.store_maintenance,
+        TaskType::SpamFilterMaintenance => roles.spam_training,
+        TaskType::DmarcReport | TaskType::TlsReport => roles.outbound_mta,
+        TaskType::CalendarAlarmEmail
+        | TaskType::CalendarAlarmNotification
+        | TaskType::CalendarItipMessage
+        | TaskType::MergeThreads
+        | TaskType::RestoreArchivedItem
+        | TaskType::AcmeRenewal
+        | TaskType::DkimManagement
+        | TaskType::DnsManagement => roles.task_manager,
     }
 }
 
