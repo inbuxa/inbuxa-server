@@ -10,8 +10,9 @@
 
 // inbuxa: 637 to 641 are the fork's SCIM events (SCIM-54); 642 is
 // auth.legacy-protocol-refused (legacy-protocols LP-6); 643 is
-// security.legacy-protocols-changed (LP-8)
-pub const TOTAL_EVENT_COUNT: usize = 644;
+// security.legacy-protocols-changed (LP-8); 644 to 646 are the cluster
+// coordinator's connection events
+pub const TOTAL_EVENT_COUNT: usize = 647;
 pub const TOTAL_METRIC_COUNT: usize = 369;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -150,6 +151,10 @@ pub enum ClusterEvent {
     MessageSkipped = 47,
     MessageInvalid = 49,
     NodeIdRenewed = 275,
+    // inbuxa: the coordinator's connection
+    CoordinatorConnected = 644,
+    CoordinatorDisconnected = 645,
+    CoordinatorError = 646,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]

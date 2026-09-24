@@ -81,6 +81,10 @@ impl EventType {
             b"cluster.message-skipped" => EventType::Cluster(ClusterEvent::MessageSkipped),
             b"cluster.message-invalid" => EventType::Cluster(ClusterEvent::MessageInvalid),
             b"cluster.node-id-renewed" => EventType::Cluster(ClusterEvent::NodeIdRenewed),
+            // inbuxa: coordinator connection
+            b"cluster.coordinator-connected" => EventType::Cluster(ClusterEvent::CoordinatorConnected),
+            b"cluster.coordinator-disconnected" => EventType::Cluster(ClusterEvent::CoordinatorDisconnected),
+            b"cluster.coordinator-error" => EventType::Cluster(ClusterEvent::CoordinatorError),
             b"dane.authentication-success" => EventType::Dane(DaneEvent::AuthenticationSuccess),
             b"dane.authentication-failure" => EventType::Dane(DaneEvent::AuthenticationFailure),
             b"dane.no-certificates-found" => EventType::Dane(DaneEvent::NoCertificatesFound),
@@ -742,6 +746,14 @@ impl EventType {
             EventType::Cluster(ClusterEvent::MessageSkipped) => "cluster.message-skipped",
             EventType::Cluster(ClusterEvent::MessageInvalid) => "cluster.message-invalid",
             EventType::Cluster(ClusterEvent::NodeIdRenewed) => "cluster.node-id-renewed",
+            // inbuxa: coordinator connection
+            EventType::Cluster(ClusterEvent::CoordinatorConnected) => {
+                "cluster.coordinator-connected"
+            }
+            EventType::Cluster(ClusterEvent::CoordinatorDisconnected) => {
+                "cluster.coordinator-disconnected"
+            }
+            EventType::Cluster(ClusterEvent::CoordinatorError) => "cluster.coordinator-error",
             EventType::Dane(DaneEvent::AuthenticationSuccess) => "dane.authentication-success",
             EventType::Dane(DaneEvent::AuthenticationFailure) => "dane.authentication-failure",
             EventType::Dane(DaneEvent::NoCertificatesFound) => "dane.no-certificates-found",
@@ -1524,6 +1536,10 @@ impl EventType {
             EventType::Cluster(ClusterEvent::MessageSkipped) => 47,
             EventType::Cluster(ClusterEvent::MessageInvalid) => 49,
             EventType::Cluster(ClusterEvent::NodeIdRenewed) => 275,
+            // inbuxa: coordinator connection
+            EventType::Cluster(ClusterEvent::CoordinatorConnected) => 644,
+            EventType::Cluster(ClusterEvent::CoordinatorDisconnected) => 645,
+            EventType::Cluster(ClusterEvent::CoordinatorError) => 646,
             EventType::Dane(DaneEvent::AuthenticationSuccess) => 67,
             EventType::Dane(DaneEvent::AuthenticationFailure) => 66,
             EventType::Dane(DaneEvent::NoCertificatesFound) => 69,
@@ -2176,6 +2192,10 @@ impl EventType {
             47 => Some(EventType::Cluster(ClusterEvent::MessageSkipped)),
             49 => Some(EventType::Cluster(ClusterEvent::MessageInvalid)),
             275 => Some(EventType::Cluster(ClusterEvent::NodeIdRenewed)),
+            // inbuxa: coordinator connection
+            644 => Some(EventType::Cluster(ClusterEvent::CoordinatorConnected)),
+            645 => Some(EventType::Cluster(ClusterEvent::CoordinatorDisconnected)),
+            646 => Some(EventType::Cluster(ClusterEvent::CoordinatorError)),
             67 => Some(EventType::Dane(DaneEvent::AuthenticationSuccess)),
             66 => Some(EventType::Dane(DaneEvent::AuthenticationFailure)),
             69 => Some(EventType::Dane(DaneEvent::NoCertificatesFound)),
@@ -3114,6 +3134,10 @@ impl EventType {
             EventType::Auth(AuthEvent::TooManyAttempts) => Level::Warn,
             EventType::Calendar(CalendarEvent::AlarmFailed) => Level::Warn,
             EventType::Cluster(ClusterEvent::SubscriberDisconnected) => Level::Warn,
+            // inbuxa: coordinator connection
+            EventType::Cluster(ClusterEvent::CoordinatorConnected) => Level::Info,
+            EventType::Cluster(ClusterEvent::CoordinatorDisconnected) => Level::Warn,
+            EventType::Cluster(ClusterEvent::CoordinatorError) => Level::Warn,
             EventType::Delivery(DeliveryEvent::MissingOutboundHostname) => Level::Warn,
             EventType::Delivery(DeliveryEvent::ConcurrencyLimitExceeded) => Level::Warn,
             EventType::Delivery(DeliveryEvent::RateLimitExceeded) => Level::Warn,
@@ -3244,6 +3268,10 @@ impl EventType {
             EventType::Cluster(ClusterEvent::MessageSkipped) => "PubSub message skipped",
             EventType::Cluster(ClusterEvent::MessageInvalid) => "Invalid PubSub message",
             EventType::Cluster(ClusterEvent::NodeIdRenewed) => "Node ID renewed",
+            // inbuxa: coordinator connection
+            EventType::Cluster(ClusterEvent::CoordinatorConnected) => "Coordinator connected",
+            EventType::Cluster(ClusterEvent::CoordinatorDisconnected) => "Coordinator unavailable",
+            EventType::Cluster(ClusterEvent::CoordinatorError) => "Coordinator error",
             EventType::Dane(DaneEvent::AuthenticationSuccess) => "DANE authentication successful",
             EventType::Dane(DaneEvent::AuthenticationFailure) => "DANE authentication failed",
             EventType::Dane(DaneEvent::NoCertificatesFound) => "No certificates found for DANE",
@@ -4322,6 +4350,10 @@ impl EventType {
             EventType::Cluster(ClusterEvent::MessageSkipped),
             EventType::Cluster(ClusterEvent::MessageInvalid),
             EventType::Cluster(ClusterEvent::NodeIdRenewed),
+            // inbuxa: coordinator connection
+            EventType::Cluster(ClusterEvent::CoordinatorConnected),
+            EventType::Cluster(ClusterEvent::CoordinatorDisconnected),
+            EventType::Cluster(ClusterEvent::CoordinatorError),
             EventType::Dane(DaneEvent::AuthenticationSuccess),
             EventType::Dane(DaneEvent::AuthenticationFailure),
             EventType::Dane(DaneEvent::NoCertificatesFound),
