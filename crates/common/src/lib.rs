@@ -279,6 +279,8 @@ pub struct HttpAuthCache {
 pub struct Ipc {
     pub push_tx: mpsc::Sender<PushEvent>,
     pub task_tx: Arc<Notify>,
+    // inbuxa: task locks held by this node, released on a graceful stop
+    pub task_locks: Arc<crate::ipc::TaskLocks>,
     pub queue_tx: mpsc::Sender<QueueEvent>,
     pub report_tx: mpsc::Sender<ReportingEvent>,
     pub broadcast_tx: Option<mpsc::Sender<BroadcastEvent>>,

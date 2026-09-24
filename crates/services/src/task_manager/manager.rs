@@ -2,6 +2,8 @@
  * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
+ *
+ * Modified by Coffey Labs in 2026 for INBUXA.
  */
 
 use crate::task_manager::acme::AcmeTask;
@@ -18,7 +20,7 @@ use crate::task_manager::report::{self, SubmitReportTask};
 use crate::task_manager::restore_item::RestoreItemTask;
 use crate::task_manager::spam_classifier::SpamFilterMaintenanceTask;
 use crate::task_manager::{
-    DEFAULT_LOCK_EXPIRY, Locked, QUEUE_REFRESH_INTERVAL, TaskDetails, TaskFailureType, TaskInfo,
+    CLAIM_RECHECK_INTERVAL, Locked, QUEUE_REFRESH_INTERVAL, TaskDetails, TaskFailureType, TaskInfo,
     TaskJob, TaskManagerIpc, TaskResult,
 };
 use common::BuildServer;
@@ -124,72 +126,47 @@ pub fn spawn_task_manager(inner: Arc<Inner>) {
                     let server = inner.build_server();
                     let batch_size = server.core.email.index_batch_size;
                     let mut batch = Vec::with_capacity(batch_size);
-                    match server
-                        .store()
-                        .get_value::<Task>(ValueKey::from(ValueClass::TaskQueue(
-                            TaskQueueClass::Task { id: job.id },
-                        )))
-                        .await
-                    {
-                        Ok(Some(task)) => {
-                            batch.push(TaskDetails { task, info: job });
-                        }
-                        Ok(None) => {
-                            trc::event!(
-                                TaskManager(TaskManagerEvent::TaskIgnored),
-                                Id = job.id,
-                                Reason = "Task not found in store, likely already processed.",
-                            );
-                        }
-                        Err(err) => {
-                            trc::error!(
-                                err.id(job.id)
-                                    .details("Failed to retrieve task details.")
-                                    .caused_by(trc::location!())
-                            );
-                        }
+                    if let Some(task) = fetch_task(&server, job).await {
+                        batch.push(task);
                     }
 
                     while batch.len() < batch_size {
                         match rx.try_recv() {
                             Ok(job) => {
-                                match server
-                                    .store()
-                                    .get_value::<Task>(ValueKey::from(ValueClass::TaskQueue(
-                                        TaskQueueClass::Task { id: job.id },
-                                    )))
-                                    .await
-                                {
-                                    Ok(Some(task)) => {
-                                        batch.push(TaskDetails { task, info: job });
-                                    }
-                                    Ok(None) => {
-                                        trc::event!(
-                                            TaskManager(TaskManagerEvent::TaskIgnored),
-                                            Id = job.id,
-                                            Reason = "Task not found in store, likely already processed.",
-                                        );
-                                    }
-                                    Err(err) => {
-                                        trc::error!(
-                                            err.id(job.id)
-                                                .details("Failed to retrieve task details.")
-                                                .caused_by(trc::location!())
-                                        );
-                                    }
+                                if let Some(task) = fetch_task(&server, job).await {
+                                    batch.push(task);
                                 }
                             }
                             Err(_) => break,
                         }
                     }
 
-                    // Dispatch
+                    // Dispatch. inbuxa: on a task of its own, so a panic
+                    // releases the batch's locks and leaves this worker
+                    // running; a dead worker would keep claiming tasks it
+                    // can never run
                     let mut refresh_queue = false;
-                    let results = server.index(&batch).await.into_iter().map(|r| {
-                        refresh_queue |= r.result.is_retry();
-                        r.result
-                    });
-                    update_tasks(&server, &mut batch, results).await;
+                    let ids = batch.iter().map(|task| task.info.id).collect::<Vec<_>>();
+                    let run = {
+                        let server = server.clone();
+                        tokio::spawn(async move {
+                            let results = server.index(&batch).await;
+                            (batch, results)
+                        })
+                    };
+                    match run.await {
+                        Ok((mut batch, results)) => {
+                            let results = results.into_iter().map(|r| {
+                                refresh_queue |= r.result.is_retry();
+                                r.result
+                            });
+                            update_tasks(&server, &mut batch, results).await;
+                        }
+                        Err(err) => {
+                            worker_failed(&server, &ids, err).await;
+                            refresh_queue = true;
+                        }
+                    }
 
                     if refresh_queue || rx.is_empty() {
                         server.notify_task_queue();
@@ -203,83 +180,31 @@ pub fn spawn_task_manager(inner: Arc<Inner>) {
                     let server = inner.build_server();
                     let mut refresh_queue = false;
 
-                    match server
-                        .store()
-                        .get_value::<Task>(ValueKey::from(ValueClass::TaskQueue(
-                            TaskQueueClass::Task { id: job.id },
-                        )))
-                        .await
-                    {
-                        Ok(Some(task)) => {
-                            let result = match &task {
-                                Task::CalendarAlarmEmail(task) => {
-                                    server.send_email_alarm(task, server_instance.clone()).await
-                                }
-                                Task::CalendarAlarmNotification(task) => {
-                                    server.send_display_alarm(task).await
-                                }
-                                Task::CalendarItipMessage(task) => {
-                                    server.send_imip(task, server_instance.clone()).await
-                                }
-                                Task::MergeThreads(task) => server.merge_threads(task).await,
-                                Task::DmarcReport(task) => {
-                                    server
-                                        .submit_report(report::ReportId::Dmarc(task.report_id.id()))
-                                        .await
-                                }
-                                Task::TlsReport(task) => {
-                                    server
-                                        .submit_report(report::ReportId::Tls(task.report_id.id()))
-                                        .await
-                                }
-                                Task::RestoreArchivedItem(task) => server.restore_item(task).await,
-                                Task::DestroyAccount(task) => server.destroy_account(task).await,
-                                Task::AccountMaintenance(task) => {
-                                    server.account_maintenance(task).await
-                                }
-                                Task::TenantMaintenance(task) => {
-                                    server.tenant_maintenance(task).await
-                                }
-                                Task::StoreMaintenance(task) => {
-                                    server.store_maintenance(task).await
-                                }
-                                Task::SpamFilterMaintenance(task) => {
-                                    Box::pin(server.spam_filter_maintenance(task)).await
-                                }
-                                Task::AcmeRenewal(task) => server.acme_management(task).await,
-                                Task::DkimManagement(task_dkim_rotation) => {
-                                    server.dkim_management(task_dkim_rotation).await
-                                }
-                                Task::DnsManagement(task_dns_management) => {
-                                    server.dns_management(task_dns_management).await
-                                }
-                                Task::IndexDocument(_)
-                                | Task::UnindexDocument(_)
-                                | Task::IndexTrace(_) => unreachable!(),
-                            };
+                    if let Some(TaskDetails { task, info }) = fetch_task(&server, job).await {
+                        // inbuxa: on a task of its own, as above
+                        let run = {
+                            let server = server.clone();
+                            let server_instance = server_instance.clone();
+                            tokio::spawn(async move {
+                                let result = run_task(&server, &task, server_instance).await;
+                                (task, result)
+                            })
+                        };
+                        match run.await {
+                            Ok((task, result)) => {
+                                refresh_queue = result.is_retry();
 
-                            refresh_queue = result.is_retry();
-
-                            update_tasks(
-                                &server,
-                                &mut [TaskDetails { task, info: job }],
-                                vec![result],
-                            )
-                            .await;
-                        }
-                        Ok(None) => {
-                            trc::event!(
-                                TaskManager(TaskManagerEvent::TaskIgnored),
-                                Id = job.id,
-                                Reason = "Task not found in store, likely already processed.",
-                            );
-                        }
-                        Err(err) => {
-                            trc::error!(
-                                err.id(job.id)
-                                    .details("Failed to retrieve task details.")
-                                    .caused_by(trc::location!())
-                            );
+                                update_tasks(
+                                    &server,
+                                    &mut [TaskDetails { task, info }],
+                                    vec![result],
+                                )
+                                .await;
+                            }
+                            Err(err) => {
+                                worker_failed(&server, &[info.id], err).await;
+                                refresh_queue = true;
+                            }
                         }
                     }
 
@@ -318,6 +243,13 @@ pub(crate) trait TaskQueueManager: Sync + Send {
 
 impl TaskQueueManager for Server {
     async fn process_tasks(&self, ipc: &mut TaskManagerIpc) -> Duration {
+        // inbuxa: a node that is stopping has released its locks and claims
+        // nothing new
+        let task_locks = &self.inner.ipc.task_locks;
+        if task_locks.is_stopping() {
+            return Duration::from_secs(QUEUE_REFRESH_INTERVAL);
+        }
+        let lock_expiry = task_locks.expiry();
         let now_timestamp = now();
         let from_key = ValueKey::<ValueClass> {
             account_id: 0,
@@ -393,9 +325,7 @@ impl TaskQueueManager for Server {
                                     let locked = entry.get_mut();
                                     if locked.expires <= now || locked.due < task_due {
                                         locked.expires = Instant::now()
-                                            + std::time::Duration::from_secs(
-                                                DEFAULT_LOCK_EXPIRY + 1,
-                                            );
+                                            + std::time::Duration::from_secs(lock_expiry + 1);
                                         locked.due = task_due;
                                         tasks.push((
                                             TaskJob {
@@ -411,9 +341,7 @@ impl TaskQueueManager for Server {
                                 Entry::Vacant(entry) => {
                                     entry.insert(Locked {
                                         expires: Instant::now()
-                                            + std::time::Duration::from_secs(
-                                                DEFAULT_LOCK_EXPIRY + 1,
-                                            ),
+                                            + std::time::Duration::from_secs(lock_expiry + 1),
                                         due: task_due,
                                         revision: ipc.revision,
                                     });
@@ -464,12 +392,26 @@ impl TaskQueueManager for Server {
             let tx = &ipc.txs[task_type_idx as usize];
 
             if tx.capacity() > 0 {
-                if self.try_lock_task(task_job.id).await && tx.send(task_job).await.is_err() {
+                let id = task_job.id;
+                if !self.try_lock_task(id).await {
+                    // inbuxa: another node holds the task. Look again after a
+                    // short while rather than a full lock lifetime from now:
+                    // the holder may have claimed it after this scan began,
+                    // or run on a clock ahead of this one, and waiting the
+                    // whole lifetime again would leave the task stuck for
+                    // another hour past its lock if that holder died
+                    if let Some(locked) = ipc.locked.get_mut(&id) {
+                        locked.expires =
+                            Instant::now() + Duration::from_secs(claim_recheck_interval(lock_expiry));
+                    }
+                } else if tx.send(task_job).await.is_err() {
                     trc::event!(
                         Server(trc::ServerEvent::ThreadError),
                         Details = "Error sending task.",
                         CausedBy = trc::location!()
                     );
+                    // inbuxa: nothing will run it here, so don't hold it
+                    self.remove_index_lock(id).await;
                 }
             } else {
                 // If the channel is full, release the lock so it can be picked up in the next iteration
@@ -481,9 +423,117 @@ impl TaskQueueManager for Server {
         let now = Instant::now();
         ipc.locked
             .retain(|_, locked| locked.expires > now && locked.revision == ipc.revision);
-        Duration::from_secs(next_event.map_or(QUEUE_REFRESH_INTERVAL, |timestamp| {
+        let sleep_for = Duration::from_secs(next_event.map_or(QUEUE_REFRESH_INTERVAL, |timestamp| {
             timestamp.saturating_sub(store::write::now())
-        }))
+        }));
+
+        // inbuxa: wake up when a claim held elsewhere is due to be tried
+        // again, rather than only on the next task or refresh
+        ipc.locked
+            .values()
+            .map(|locked| locked.expires.saturating_duration_since(now))
+            .min()
+            .map_or(sleep_for, |recheck| sleep_for.min(recheck.max(Duration::from_secs(1))))
+    }
+}
+
+async fn run_task(
+    server: &Server,
+    task: &Task,
+    server_instance: Arc<ServerInstance>,
+) -> TaskResult {
+    match task {
+        Task::CalendarAlarmEmail(task) => {
+            server.send_email_alarm(task, server_instance.clone()).await
+        }
+        Task::CalendarAlarmNotification(task) => {
+            server.send_display_alarm(task).await
+        }
+        Task::CalendarItipMessage(task) => {
+            server.send_imip(task, server_instance.clone()).await
+        }
+        Task::MergeThreads(task) => server.merge_threads(task).await,
+        Task::DmarcReport(task) => {
+            server
+                .submit_report(report::ReportId::Dmarc(task.report_id.id()))
+                .await
+        }
+        Task::TlsReport(task) => {
+            server
+                .submit_report(report::ReportId::Tls(task.report_id.id()))
+                .await
+        }
+        Task::RestoreArchivedItem(task) => server.restore_item(task).await,
+        Task::DestroyAccount(task) => server.destroy_account(task).await,
+        Task::AccountMaintenance(task) => {
+            server.account_maintenance(task).await
+        }
+        Task::TenantMaintenance(task) => {
+            server.tenant_maintenance(task).await
+        }
+        Task::StoreMaintenance(task) => {
+            server.store_maintenance(task).await
+        }
+        Task::SpamFilterMaintenance(task) => {
+            Box::pin(server.spam_filter_maintenance(task)).await
+        }
+        Task::AcmeRenewal(task) => server.acme_management(task).await,
+        Task::DkimManagement(task_dkim_rotation) => {
+            server.dkim_management(task_dkim_rotation).await
+        }
+        Task::DnsManagement(task_dns_management) => {
+            server.dns_management(task_dns_management).await
+        }
+        Task::IndexDocument(_)
+        | Task::UnindexDocument(_)
+        | Task::IndexTrace(_) => unreachable!(),
+    }
+}
+
+/// Reads a claimed task. When it is gone or can't be read, the claim is
+/// released: inbuxa: holding it would block the task, everywhere, until
+/// the lock expired.
+async fn fetch_task(server: &Server, job: TaskJob) -> Option<TaskDetails> {
+    match server
+        .store()
+        .get_value::<Task>(ValueKey::from(ValueClass::TaskQueue(TaskQueueClass::Task {
+            id: job.id,
+        })))
+        .await
+    {
+        Ok(Some(task)) => Some(TaskDetails { task, info: job }),
+        Ok(None) => {
+            trc::event!(
+                TaskManager(TaskManagerEvent::TaskIgnored),
+                Id = job.id,
+                Reason = "Task not found in store, likely already processed.",
+            );
+            server.remove_index_lock(job.id).await;
+            None
+        }
+        Err(err) => {
+            trc::error!(
+                err.id(job.id)
+                    .details("Failed to retrieve task details.")
+                    .caused_by(trc::location!())
+            );
+            server.remove_index_lock(job.id).await;
+            None
+        }
+    }
+}
+
+/// inbuxa: a task panicked: its locks are released so it runs again, here or
+/// on another node, and the worker carries on.
+async fn worker_failed(server: &Server, ids: &[u64], err: tokio::task::JoinError) {
+    trc::event!(
+        Server(trc::ServerEvent::ThreadError),
+        Details = "Task worker failed",
+        Reason = err.to_string(),
+        CausedBy = trc::location!()
+    );
+    for id in ids {
+        server.remove_index_lock(*id).await;
     }
 }
 
@@ -612,6 +662,13 @@ async fn update_tasks(
     for task in tasks {
         server.remove_index_lock(task.info.id).await;
     }
+}
+
+/// inbuxa: how long to wait before trying again to claim a task another node
+/// holds: a twelfth of the lock lifetime, so five minutes for the one-hour
+/// lock, never more than that and never under a second.
+pub(crate) fn claim_recheck_interval(lock_expiry: u64) -> u64 {
+    (lock_expiry / 12).clamp(1, CLAIM_RECHECK_INTERVAL)
 }
 
 pub fn perpetual_retry_time(typ: TaskType, attempt: u64) -> Option<u64> {

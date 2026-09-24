@@ -35,7 +35,9 @@ pub mod scheduler;
 pub mod spam_classifier;
 
 const QUEUE_REFRESH_INTERVAL: u64 = 60 * 5; // 5 minutes
-const DEFAULT_LOCK_EXPIRY: u64 = 60 * 60; // 1 hour
+// inbuxa: the lock lifetime (one hour) lives in common::ipc::TaskLocks, per
+// server, so a graceful stop can release the locks and the tests can shorten it
+const CLAIM_RECHECK_INTERVAL: u64 = 60 * 5; // 5 minutes
 
 pub(crate) struct TaskManagerIpc {
     txs: [mpsc::Sender<TaskJob>; TaskType::COUNT],
