@@ -2,12 +2,17 @@
  * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
+ *
+ * Modified by Coffey Labs in 2026 for INBUXA.
  */
 
 use crate::{
-    backend::postgres::{
-        DELETE_CHUNK_SIZE, MIN_DELETE_CHUNK_SIZE, PostgresStore, PsqlSearchField, into_error,
-        into_pool_error, is_timeout_error,
+    backend::{
+        MAX_TOKEN_LENGTH,
+        postgres::{
+            DELETE_CHUNK_SIZE, MIN_DELETE_CHUNK_SIZE, PostgresStore, PsqlSearchField, into_error,
+            into_pool_error, is_timeout_error,
+        },
     },
     search::{
         IndexDocument, SearchComparator, SearchDocumentId, SearchFilter, SearchOperator,
@@ -15,7 +20,7 @@ use crate::{
     },
     write::SearchIndex,
 };
-use nlp::language::Language;
+use nlp::{language::Language, tokenizers::space::SpaceTokenizer};
 use std::fmt::Write;
 use tokio_postgres::{
     IsolationLevel,
@@ -43,6 +48,19 @@ impl PostgresStore {
             let primary_keys = index.primary_keys();
             let all_fields = index.all_fields();
             let fields = document.fields;
+            // inbuxa: keyword text (addresses, contact fields, ...) is split into
+            // words before it reaches the text parser, see keyword_terms().
+            let keywords = primary_keys
+                .iter()
+                .chain(all_fields)
+                .map(|field| match fields.get(field) {
+                    Some(SearchValue::Text {
+                        value,
+                        language: Language::None,
+                    }) if field.is_text() => Some(keyword_terms(value)),
+                    _ => None,
+                })
+                .collect::<Vec<_>>();
             let mut values = Vec::with_capacity(fields.len() + 2);
             let mut query = format!("INSERT INTO {} (", index.psql_table());
 
@@ -74,7 +92,20 @@ impl PostgresStore {
                         (0, PG_UNSTEMMED_LANG)
                     };
 
-                    if field.is_text() {
+                    if let Some(keywords) = &keywords[i] {
+                        let _ = write!(&mut query, "to_tsvector('{language}',{value_ref})");
+                        values.push(keywords as &(dyn ToSql + Sync));
+                        if field.sort_column().is_some() {
+                            let value_ref = format!("${}", values.len() + 1);
+                            if text_len > 255 {
+                                let _ = write!(&mut query, ",left({value_ref},255)");
+                            } else {
+                                let _ = write!(&mut query, ",{value_ref}");
+                            }
+                            values.push(value as &(dyn ToSql + Sync));
+                        }
+                        continue;
+                    } else if field.is_text() {
                         let _ = write!(&mut query, "to_tsvector('{language}',{value_ref})");
                     } else if text_len > 512 {
                         query.push_str("left(");
@@ -134,6 +165,7 @@ impl PostgresStore {
     ) -> trc::Result<Vec<R>> {
         let mut query = format!("SELECT {} FROM {}", R::field().column(), index.psql_table());
         let params = self.build_filter(&mut query, filters);
+        let params = params.iter().map(SqlParam::as_sql).collect::<Vec<_>>();
         if !sort.is_empty() {
             build_sort(&mut query, sort);
         }
@@ -155,6 +187,7 @@ impl PostgresStore {
         let table = filter.index.psql_table();
         let mut where_clause = String::new();
         let params = self.build_filter(&mut where_clause, &filter.filters);
+        let params = params.iter().map(SqlParam::as_sql).collect::<Vec<_>>();
         let conn = self.conn_pool.get().await.map_err(into_pool_error)?;
         let s = conn
             .prepare_cached(&format!("DELETE FROM {table}{where_clause}"))
@@ -196,7 +229,7 @@ impl PostgresStore {
         &self,
         query: &mut String,
         filters: &'x [SearchFilter],
-    ) -> Vec<&'x (dyn ToSql + Sync)> {
+    ) -> Vec<SqlParam<'x>> {
         if filters.is_empty() {
             return Vec::new();
         }
@@ -237,6 +270,10 @@ impl PostgresStore {
 
                         if matches!(language, Language::None) {
                             let _ = write!(query, "@@ {method}('{config}', ${value_pos})");
+                            if let SearchValue::Text { value, .. } = value {
+                                values.push(SqlParam::Owned(keyword_terms(value)));
+                                continue;
+                            }
                         } else {
                             let _ = write!(query, "@@ ({method}('{config}', ${value_pos})");
                             for fallback in [PG_FALLBACK_LANG, PG_UNSTEMMED_LANG] {
@@ -247,18 +284,18 @@ impl PostgresStore {
                             }
                             query.push(')');
                         }
-                        values.push(value as &(dyn ToSql + Sync));
+                        values.push(SqlParam::Ref(value));
                     } else if let SearchValue::KeyValues(kv) = value {
                         query.push_str(field.column());
                         query.push(' ');
 
                         let (key, value) = kv.iter().next().unwrap();
-                        values.push(key as &(dyn ToSql + Sync));
+                        values.push(SqlParam::Ref(key));
 
                         if !value.is_empty() {
                             let _ = write!(query, "->> ${value_pos} ");
                             op.write_pqsql(query, values.len() + 1);
-                            values.push(value as &(dyn ToSql + Sync));
+                            values.push(SqlParam::Ref(value));
                         } else {
                             let _ = write!(query, " ? ${value_pos}");
                         }
@@ -267,7 +304,7 @@ impl PostgresStore {
                         query.push(' ');
 
                         op.write_pqsql(query, value_pos);
-                        values.push(value as &(dyn ToSql + Sync));
+                        values.push(SqlParam::Ref(value));
                     }
                 }
                 SearchFilter::And | SearchFilter::Or => {
@@ -318,6 +355,38 @@ impl PostgresStore {
         }
 
         values
+    }
+}
+
+// inbuxa: PostgreSQL's text parser keeps "user@example.com" (and host names,
+// URLs, file paths, ...) as a single token, so a search for "user" or
+// "example.com" never matched an address. Keyword text is split into words the
+// same way the built-in index splits it (SpaceTokenizer: lowercase runs of
+// alphanumerics) on both the indexing and the query side, so a full address,
+// its local part, its domain and the display-name words all match, as they do
+// on the other backends.
+pub(crate) fn keyword_terms(value: &str) -> String {
+    let mut terms = String::with_capacity(value.len());
+    for token in SpaceTokenizer::new(value, MAX_TOKEN_LENGTH) {
+        if !terms.is_empty() {
+            terms.push(' ');
+        }
+        terms.push_str(&token);
+    }
+    terms
+}
+
+pub(super) enum SqlParam<'x> {
+    Ref(&'x (dyn ToSql + Sync)),
+    Owned(String),
+}
+
+impl SqlParam<'_> {
+    fn as_sql(&self) -> &(dyn ToSql + Sync) {
+        match self {
+            SqlParam::Ref(value) => *value,
+            SqlParam::Owned(value) => value,
+        }
     }
 }
 

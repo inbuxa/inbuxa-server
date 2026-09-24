@@ -128,6 +128,11 @@ pub async fn test(test: &TestServer) {
     println!("Running trace document tests...");
     test_trace_documents(store.clone()).await;
 
+    // inbuxa: address fields match by full address, local part, domain and
+    // display name on every backend
+    println!("Running address search tests...");
+    test_address_search(store.clone()).await;
+
     // Large document insert test
     println!("Running large document insert tests...");
     let mut large_text = String::with_capacity(20 * 1024 * 1024);
@@ -971,4 +976,156 @@ async fn test_trace_documents(store: SearchStore) {
             .await
             .unwrap();
     }
+}
+
+// inbuxa: the message indexer passes each display name and each address of
+// From/To/Cc/Bcc as keyword text (Language::None). The built-in index splits
+// that text into words, so an address is found by its full form, its local
+// part, its domain or a display-name word; PostgreSQL kept the whole address
+// as one token and MySQL dropped stopwords such as "com" and words under three
+// characters. The expected results below are the built-in (RocksDB/SQLite)
+// results and must be the same on every backend.
+async fn test_address_search(store: SearchStore) {
+    const ACCOUNT_ID: u32 = 7;
+    let messages: [[&[(&str, &str)]; 4]; 5] = [
+        // From, To, Cc, Bcc
+        [
+            &[("Amazon.com", "noreply@amazon.com")],
+            &[("Jane Doe", "jane.doe@example.org")],
+            &[],
+            &[],
+        ],
+        [
+            &[("", "shipment-tracking@amazon.com")],
+            &[("", "jo@io.de")],
+            &[("Jane Doe", "jane.doe@example.org")],
+            &[],
+        ],
+        [
+            &[("GitHub", "noreply@github.com")],
+            &[("Jo Li", "jo@io.de")],
+            &[],
+            &[("Audit", "audit@example.org")],
+        ],
+        [
+            &[("Jane Doe", "jane.doe@example.org")],
+            &[("Amazon Web Services", "aws-marketing@amazon.com")],
+            &[("Bob", "bob@example.net")],
+            &[("", "noreply@amazon.com")],
+        ],
+        [
+            &[("Newsletter", "news@www.example.com")],
+            &[("", "undisclosed@example.org")],
+            &[],
+            &[],
+        ],
+    ];
+    let fields = [
+        EmailSearchField::From,
+        EmailSearchField::To,
+        EmailSearchField::Cc,
+        EmailSearchField::Bcc,
+    ];
+
+    let mut documents = Vec::new();
+    let mut mask = RoaringBitmap::new();
+    for (document_id, message) in messages.iter().enumerate() {
+        let mut document = IndexDocument::new(SearchIndex::Email)
+            .with_account_id(ACCOUNT_ID)
+            .with_document_id(document_id as u32);
+        for (field, addresses) in fields.iter().zip(message.iter()) {
+            for (name, address) in addresses.iter() {
+                if !name.is_empty() {
+                    document.index_text(field.clone(), name, Language::None);
+                }
+                document.index_text(field.clone(), address, Language::None);
+            }
+        }
+        document.index_unsigned(EmailSearchField::ReceivedAt, document_id as u64);
+        documents.push(document);
+        mask.insert(document_id as u32);
+    }
+    store.index(documents).await.unwrap();
+    if let SearchStore::ElasticSearch(store) = &store {
+        store.refresh_index(SearchIndex::Email).await.unwrap();
+    }
+
+    for (field, text, expected) in [
+        // full address
+        (EmailSearchField::From, "noreply@amazon.com", vec![0u32]),
+        (EmailSearchField::To, "jane.doe@example.org", vec![0]),
+        (EmailSearchField::Cc, "jane.doe@example.org", vec![1]),
+        (EmailSearchField::Bcc, "noreply@amazon.com", vec![3]),
+        (EmailSearchField::To, "jo@io.de", vec![1, 2]),
+        // local part
+        (EmailSearchField::From, "noreply", vec![0, 2]),
+        (EmailSearchField::To, "jo", vec![1, 2]),
+        (EmailSearchField::Cc, "bob", vec![3]),
+        (EmailSearchField::Bcc, "audit", vec![2]),
+        // domain
+        (EmailSearchField::From, "amazon.com", vec![0, 1]),
+        (EmailSearchField::From, "amazon", vec![0, 1]),
+        (EmailSearchField::To, "example.org", vec![0, 4]),
+        (EmailSearchField::To, "io.de", vec![1, 2]),
+        (EmailSearchField::Cc, "example.net", vec![3]),
+        (EmailSearchField::Bcc, "example.org", vec![2]),
+        (EmailSearchField::From, "www.example.com", vec![4]),
+        (EmailSearchField::From, "com", vec![0, 1, 2, 4]),
+        // display name
+        (EmailSearchField::From, "Jane", vec![3]),
+        (EmailSearchField::From, "jane doe", vec![3]),
+        (EmailSearchField::To, "Web Services", vec![3]),
+        (EmailSearchField::To, "Li", vec![2]),
+        (EmailSearchField::Cc, "Doe", vec![1]),
+        (EmailSearchField::Bcc, "Audit", vec![2]),
+        // hyphenated local part
+        (EmailSearchField::From, "shipment-tracking", vec![1]),
+        (EmailSearchField::From, "tracking", vec![1]),
+        // no match
+        (EmailSearchField::From, "amazon.org", vec![]),
+        (EmailSearchField::To, "noreply", vec![]),
+        (EmailSearchField::Bcc, "jane", vec![]),
+    ] {
+        let ids = store
+            .query_account(
+                SearchQuery::new(SearchIndex::Email)
+                    .with_filters(vec![
+                        SearchFilter::eq(SearchField::AccountId, ACCOUNT_ID),
+                        SearchFilter::has_keyword(field.clone(), text),
+                    ])
+                    .with_comparator(SearchComparator::ascending(EmailSearchField::ReceivedAt))
+                    .with_mask(mask.clone()),
+            )
+            .await
+            .unwrap();
+        assert_eq!(ids, expected, "{field:?} {text:?}");
+    }
+
+    // TEXT-style search across all address fields
+    let ids = store
+        .query_account(
+            SearchQuery::new(SearchIndex::Email)
+                .with_filters(vec![
+                    SearchFilter::eq(SearchField::AccountId, ACCOUNT_ID),
+                    SearchFilter::Or,
+                    SearchFilter::has_keyword(EmailSearchField::From, "example.org"),
+                    SearchFilter::has_keyword(EmailSearchField::To, "example.org"),
+                    SearchFilter::has_keyword(EmailSearchField::Cc, "example.org"),
+                    SearchFilter::has_keyword(EmailSearchField::Bcc, "example.org"),
+                    SearchFilter::End,
+                ])
+                .with_comparator(SearchComparator::ascending(EmailSearchField::ReceivedAt))
+                .with_mask(mask.clone()),
+        )
+        .await
+        .unwrap();
+    assert_eq!(ids, vec![0, 1, 2, 3, 4]);
+
+    store
+        .unindex(
+            SearchQuery::new(SearchIndex::Email)
+                .with_filter(SearchFilter::eq(SearchField::AccountId, ACCOUNT_ID)),
+        )
+        .await
+        .unwrap();
 }
