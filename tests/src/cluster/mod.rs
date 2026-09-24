@@ -10,3 +10,4 @@ pub mod broadcast;
 #[cfg(feature = "nats")]
 pub mod coordinator; // inbuxa: coordinator reconnects
 pub mod stress;
+pub mod task_roles; // inbuxa: task types follow cluster roles
