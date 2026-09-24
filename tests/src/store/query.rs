@@ -122,6 +122,10 @@ pub async fn test(test: &TestServer) {
     println!("Running global id filtering tests...");
     test_global(store.clone()).await;
 
+    // inbuxa: trace documents as the index task builds them
+    println!("Running trace document tests...");
+    test_trace_documents(store.clone()).await;
+
     // Large document insert test
     println!("Running large document insert tests...");
     let mut large_text = String::with_capacity(20 * 1024 * 1024);
@@ -808,4 +812,161 @@ async fn test_global(store: SearchStore) {
             .collect::<AHashSet<_>>(),
         AHashSet::from_iter([3, 4, 5])
     );
+}
+
+// inbuxa: MON-16: documents built by the index task from stored traces go
+// into every search backend (the SQL backends type etyp and qid as BIGINT)
+// and are found again by queue id and keyword.
+async fn test_trace_documents(store: SearchStore) {
+    use registry::schema::{
+        enums::SearchTracingField,
+        structs::{
+            Trace, TraceEvent, TraceKeyValue, TraceValue, TraceValueString,
+            TraceValueUnsignedInt,
+        },
+    };
+    use services::task_manager::index::trace_search_document;
+    use trc::{DeliveryEvent, EventType, Key, SmtpEvent};
+
+    let kv_u = |key: Key, value: u64| TraceKeyValue {
+        key,
+        value: TraceValue::UnsignedInt(TraceValueUnsignedInt { value }),
+    };
+    let kv_s = |key: Key, value: &str| TraceKeyValue {
+        key,
+        value: TraceValue::String(TraceValueString {
+            value: value.to_string(),
+        }),
+    };
+    let event = |event: EventType, key_values: Vec<TraceKeyValue>| TraceEvent {
+        event,
+        key_values: key_values.into(),
+        ..Default::default()
+    };
+    let fields = [
+        SearchTracingField::EventType,
+        SearchTracingField::QueueId,
+        SearchTracingField::Keywords,
+    ];
+
+    // An SMTP session that queued two messages, and a delivery attempt
+    let session = Trace {
+        events: vec![
+            event(
+                EventType::Smtp(SmtpEvent::ConnectionStart),
+                vec![kv_s(Key::RemoteIp, "192.0.2.7")],
+            ),
+            event(
+                EventType::Smtp(SmtpEvent::MailFrom),
+                vec![kv_s(Key::From, "Sender@Example.org")],
+            ),
+            event(
+                EventType::Smtp(SmtpEvent::RcptTo),
+                vec![kv_u(Key::QueueId, 9_000_000_001), kv_s(Key::To, "rcpt@example.net")],
+            ),
+            event(
+                EventType::Smtp(SmtpEvent::RcptTo),
+                vec![kv_u(Key::QueueId, 9_000_000_002)],
+            ),
+        ]
+        .into(),
+    };
+    let delivery = Trace {
+        events: vec![event(
+            EventType::Delivery(DeliveryEvent::AttemptStart),
+            vec![kv_u(Key::QueueId, 9_000_000_003), kv_s(Key::Hostname, "relay.example.net")],
+        )]
+        .into(),
+    };
+    let documents = vec![
+        trace_search_document(100, &session, &fields),
+        trace_search_document(101, &delivery, &fields),
+    ];
+    assert!(
+        documents
+            .iter()
+            .all(|d| d.has_field(&SearchField::Tracing(TracingSearchField::QueueId))
+                && d.has_field(&SearchField::Tracing(TracingSearchField::EventType))),
+        "trace documents carry a queue id and an event type"
+    );
+    store.index(documents).await.unwrap();
+    if let SearchStore::ElasticSearch(store) = &store {
+        store.refresh_index(SearchIndex::Tracing).await.unwrap();
+    }
+
+    let query = |filters: Vec<SearchFilter>| {
+        let store = store.clone();
+        async move {
+            store
+                .query_global(
+                    SearchQuery::new(SearchIndex::Tracing)
+                        .with_filter(SearchFilter::ge(SearchField::Id, 100u64))
+                        .with_filters(filters),
+                )
+                .await
+                .unwrap()
+                .into_iter()
+                .collect::<AHashSet<_>>()
+        }
+    };
+    // By queue id, the way x:Trace/query asks: the queue id column, or any
+    // queue id in the keywords
+    let by_queue_id = |queue_id: u64| {
+        vec![
+            SearchFilter::Or,
+            SearchFilter::eq(TracingSearchField::QueueId, queue_id),
+            SearchFilter::has_text(
+                TracingSearchField::Keywords,
+                queue_id.to_string(),
+                Language::None,
+            ),
+            SearchFilter::End,
+        ]
+    };
+    assert_eq!(query(by_queue_id(9_000_000_001)).await, AHashSet::from_iter([100]));
+    assert_eq!(query(by_queue_id(9_000_000_002)).await, AHashSet::from_iter([100]));
+    assert_eq!(query(by_queue_id(9_000_000_003)).await, AHashSet::from_iter([101]));
+    assert_eq!(query(by_queue_id(9_000_000_004)).await, AHashSet::new());
+    assert_eq!(
+        query(vec![SearchFilter::eq(TracingSearchField::QueueId, 9_000_000_003u64)]).await,
+        AHashSet::from_iter([101])
+    );
+    // By opening event type
+    assert_eq!(
+        query(vec![SearchFilter::eq(
+            TracingSearchField::EventType,
+            EventType::Delivery(DeliveryEvent::AttemptStart).to_id() as u64,
+        )])
+        .await,
+        AHashSet::from_iter([101])
+    );
+    // By keyword: an address, lowercased, and its domain
+    assert_eq!(
+        query(vec![SearchFilter::has_text(
+            TracingSearchField::Keywords,
+            "example.org",
+            Language::None,
+        )])
+        .await,
+        AHashSet::from_iter([100])
+    );
+    assert_eq!(
+        query(vec![SearchFilter::has_text(
+            TracingSearchField::Keywords,
+            "relay.example.net",
+            Language::None,
+        )])
+        .await,
+        AHashSet::from_iter([101])
+    );
+
+    for id in [100u64, 101] {
+        store
+            .unindex(
+                SearchQuery::new(SearchIndex::Tracing)
+                    .with_filter(SearchFilter::eq(SearchField::Id, id)),
+            )
+            .await
+            .unwrap();
+    }
 }

@@ -427,9 +427,24 @@ pub(crate) async fn trace_query(
             }
             None => false,
         },
-        Property::QueueId => match value.as_str() {
+        // The queue id column is an integer on every search backend, and
+        // holds a trace's first queue id; the keywords carry all of them
+        Property::QueueId => match value
+            .as_str()
+            .and_then(|v| v.trim().parse::<u64>().ok())
+            .or_else(|| value.as_u64())
+        {
             Some(queue_id) => {
-                search.push(SearchFilter::eq(TracingSearchField::QueueId, queue_id.to_string()));
+                search.extend([
+                    SearchFilter::Or,
+                    SearchFilter::eq(TracingSearchField::QueueId, queue_id),
+                    SearchFilter::has_text(
+                        TracingSearchField::Keywords,
+                        queue_id.to_string(),
+                        nlp::language::Language::None,
+                    ),
+                    SearchFilter::End,
+                ]);
                 true
             }
             None => false,
