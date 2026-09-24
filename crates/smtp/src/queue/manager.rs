@@ -2,6 +2,8 @@
  * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
+ *
+ * Modified by Coffey Labs in 2026 for INBUXA.
  */
 
 use super::{Message, QueueId, Status, spool::SmtpSpool};
@@ -39,6 +41,9 @@ pub struct Queue {
     pub urgent_refresh: bool,
     pub last_scan: Instant,
     pub last_full_scan: Instant,
+    /// inbuxa: whether this node's role included outboundMta when last
+    /// checked (None before the first check)
+    pub role_enabled: Option<bool>,
 }
 
 #[derive(Debug)]
@@ -67,6 +72,9 @@ impl SpawnQueue for mpsc::Receiver<QueueEvent> {
 const BACK_PRESSURE_WARN_INTERVAL: Duration = Duration::from_secs(60);
 const MIN_SCAN_INTERVAL: Duration = Duration::from_millis(100);
 const FULL_SCAN_INTERVAL: Duration = Duration::from_secs(QUEUE_REFRESH / 2);
+/// inbuxa: how often a node without the outbound MTA role looks at its role
+/// again when nothing else wakes it (a settings reload does)
+const ROLE_RECHECK_INTERVAL: Duration = Duration::from_secs(30);
 
 impl Queue {
     pub fn new(core: Arc<Inner>, rx: mpsc::Receiver<QueueEvent>) -> Self {
@@ -87,6 +95,7 @@ impl Queue {
             urgent_refresh: false,
             last_scan: now.checked_sub(MIN_SCAN_INTERVAL).unwrap_or(now),
             last_full_scan: now,
+            role_enabled: None,
         }
     }
 
@@ -120,6 +129,27 @@ impl Queue {
 
             if self.is_paused {
                 self.next_refresh = Instant::now() + Duration::from_secs(86400);
+                continue;
+            }
+
+            // inbuxa: follow the node's role live. Without outboundMta the
+            // queue claims nothing new; deliveries already running finish
+            // and report back as usual, releasing their locks. When the role
+            // comes back, the whole queue is scanned at once.
+            let role_enabled = self.core.shared_core.load().network.roles.outbound_mta;
+            if self.role_enabled.replace(role_enabled) == Some(false) && role_enabled {
+                trc::event!(
+                    Queue(trc::QueueEvent::Started),
+                    Details = "This node's cluster role now includes outboundMta",
+                );
+                self.scan_from = 0;
+                self.pending_refresh = true;
+                self.urgent_refresh = true;
+            }
+            if !role_enabled {
+                self.pending_refresh = false;
+                self.urgent_refresh = false;
+                self.next_refresh = Instant::now() + ROLE_RECHECK_INTERVAL;
                 continue;
             }
 
