@@ -2,6 +2,8 @@
  * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
+ *
+ * Modified by Coffey Labs in 2026 for INBUXA.
  */
 
 use crate::utils::server::TestServer;
@@ -40,15 +42,23 @@ pub mod vrfy;
 const EVENT_TIMEOUT: Duration = Duration::from_secs(5);
 
 impl TestServer {
+    // inbuxa: registry writes reload the settings, and each reload sends the
+    // queue a ReloadSettings; read_event, try_read_event and assert_no_events
+    // pass over those (expect_reload_settings still waits for one)
     pub async fn read_event(&mut self) -> QueueEvent {
-        if let Some(event) = self.queue_events.pop_front() {
-            return event;
+        while let Some(event) = self.queue_events.pop_front() {
+            if !event.is_reload_settings() {
+                return event;
+            }
         }
 
-        match tokio::time::timeout(EVENT_TIMEOUT, self.queue_rx.recv()).await {
-            Ok(Some(event)) => event,
-            Ok(None) => panic!("Channel closed."),
-            Err(_) => panic!("No queue event received."),
+        loop {
+            match tokio::time::timeout(EVENT_TIMEOUT, self.queue_rx.recv()).await {
+                Ok(Some(event)) if event.is_reload_settings() => (),
+                Ok(Some(event)) => return event,
+                Ok(None) => panic!("Channel closed."),
+                Err(_) => panic!("No queue event received."),
+            }
         }
     }
 
@@ -78,26 +88,39 @@ impl TestServer {
     }
 
     pub async fn try_read_event(&mut self) -> Option<QueueEvent> {
-        if let Some(event) = self.queue_events.pop_front() {
-            return Some(event);
+        while let Some(event) = self.queue_events.pop_front() {
+            if !event.is_reload_settings() {
+                return Some(event);
+            }
         }
 
-        match tokio::time::timeout(EVENT_TIMEOUT, self.queue_rx.recv()).await {
-            Ok(Some(event)) => Some(event),
-            Ok(None) => panic!("Channel closed."),
-            Err(_) => None,
+        loop {
+            match tokio::time::timeout(EVENT_TIMEOUT, self.queue_rx.recv()).await {
+                Ok(Some(event)) if event.is_reload_settings() => (),
+                Ok(Some(event)) => return Some(event),
+                Ok(None) => panic!("Channel closed."),
+                Err(_) => return None,
+            }
         }
     }
 
     pub fn assert_no_events(&mut self) {
-        if let Some(event) = self.queue_events.pop_front() {
+        if let Some(event) = self
+            .queue_events
+            .iter()
+            .find(|event| !event.is_reload_settings())
+        {
             panic!("Expected empty queue but got {event:?}");
         }
+        self.queue_events.clear();
 
-        match self.queue_rx.try_recv() {
-            Err(TryRecvError::Empty) => (),
-            Ok(event) => panic!("Expected empty queue but got {event:?}"),
-            Err(err) => panic!("Queue error: {err:?}"),
+        loop {
+            match self.queue_rx.try_recv() {
+                Ok(event) if event.is_reload_settings() => (),
+                Err(TryRecvError::Empty) => break,
+                Ok(event) => panic!("Expected empty queue but got {event:?}"),
+                Err(err) => panic!("Queue error: {err:?}"),
+            }
         }
     }
 

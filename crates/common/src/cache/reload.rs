@@ -13,7 +13,7 @@ use crate::{
         storage::Storage,
         telemetry::Telemetry,
     },
-    ipc::{QueueEvent, RegistryChange},
+    ipc::{BroadcastEvent, QueueEvent, RegistryChange},
     network::security::{BlockedIps, IpWithTtl},
 };
 use ahash::AHashMap;
@@ -231,4 +231,202 @@ fn error_object(error: &Error) -> Option<ObjectId> {
         | Error::NotFound { object_id } => Some(*object_id),
         Error::Internal { object_id, .. } => *object_id,
     }
+}
+
+// inbuxa: upstream applied a registry write to the running settings only on
+// an explicit x:Action ReloadSettings (Directory and Authentication aside), so
+// a new MtaDeliverySchedule, say, stayed unknown ("Queue strategy not found")
+// until someone reloaded. Writes to objects the settings are built from now
+// reload them, here and across the cluster, as ReloadSettings does.
+
+/// Coalesces the full reloads that registry writes trigger: a write waits for
+/// a reload that started after it was stored, and joins one if it can, so a
+/// burst of writes costs a reload or two rather than one each.
+#[derive(Default)]
+pub struct SettingsReloadGate {
+    requested: std::sync::atomic::AtomicU64,
+    state: tokio::sync::Mutex<SettingsReloadState>,
+}
+
+#[derive(Default)]
+struct SettingsReloadState {
+    completed: u64,
+    refused: Option<String>,
+}
+
+/// The reload a write to `object` calls for: the object to reload, or None
+/// when the running settings don't hold that object (accounts, domains and
+/// other data read as needed, stores, which take a restart, and objects with
+/// reload actions of their own, such as applications).
+pub fn write_reload_target(object: ObjectType) -> Option<ObjectType> {
+    match object {
+        ObjectType::Certificate => Some(ObjectType::Certificate),
+        ObjectType::MemoryLookupKey
+        | ObjectType::MemoryLookupKeyValue
+        | ObjectType::HttpLookup
+        | ObjectType::StoreLookup => Some(ObjectType::StoreLookup),
+        ObjectType::BlockedIp | ObjectType::AllowedIp => Some(ObjectType::BlockedIp),
+        ObjectType::AcmeProvider
+        | ObjectType::AddressBook
+        | ObjectType::AiModel
+        | ObjectType::Asn
+        | ObjectType::Authentication
+        | ObjectType::Cache
+        | ObjectType::Calendar
+        | ObjectType::CalendarAlarm
+        | ObjectType::CalendarScheduling
+        | ObjectType::ClusterRole
+        | ObjectType::DataRetention
+        | ObjectType::Directory
+        | ObjectType::DkimReportSettings
+        | ObjectType::DmarcReportSettings
+        | ObjectType::DnsResolver
+        | ObjectType::DsnReportSettings
+        | ObjectType::Email
+        | ObjectType::EventTracingLevel
+        | ObjectType::FileStorage
+        | ObjectType::Http
+        | ObjectType::HttpForm
+        | ObjectType::Imap
+        | ObjectType::Jmap
+        | ObjectType::Metrics
+        | ObjectType::MtaConnectionStrategy
+        | ObjectType::MtaDeliverySchedule
+        | ObjectType::MtaExtensions
+        | ObjectType::MtaHook
+        | ObjectType::MtaInboundSession
+        | ObjectType::MtaInboundThrottle
+        | ObjectType::MtaMilter
+        | ObjectType::MtaOutboundStrategy
+        | ObjectType::MtaOutboundThrottle
+        | ObjectType::MtaQueueQuota
+        | ObjectType::MtaRoute
+        | ObjectType::MtaStageAuth
+        | ObjectType::MtaStageConnect
+        | ObjectType::MtaStageData
+        | ObjectType::MtaStageEhlo
+        | ObjectType::MtaStageMail
+        | ObjectType::MtaStageRcpt
+        | ObjectType::MtaSts
+        | ObjectType::MtaTlsStrategy
+        | ObjectType::MtaVirtualQueue
+        | ObjectType::NetworkListener
+        | ObjectType::OidcProvider
+        | ObjectType::ReportSettings
+        | ObjectType::Search
+        | ObjectType::Security
+        | ObjectType::SenderAuth
+        | ObjectType::Sharing
+        | ObjectType::SieveSystemInterpreter
+        | ObjectType::SieveSystemScript
+        | ObjectType::SieveUserInterpreter
+        | ObjectType::SieveUserScript
+        | ObjectType::SpamClassifier
+        | ObjectType::SpamDnsblServer
+        | ObjectType::SpamDnsblSettings
+        | ObjectType::SpamFileExtension
+        | ObjectType::SpamPyzor
+        | ObjectType::SpamRule
+        | ObjectType::SpamSettings
+        | ObjectType::SpamTag
+        | ObjectType::SpfReportSettings
+        | ObjectType::SystemSettings
+        | ObjectType::TaskManager
+        | ObjectType::TlsReportSettings
+        | ObjectType::Tracer
+        | ObjectType::WebDav
+        | ObjectType::WebHook => Some(object),
+        _ => None,
+    }
+}
+
+impl Server {
+    /// Applies a stored registry write to `object` to the running settings,
+    /// and on success tells the other nodes to do the same. Returns None when
+    /// the write needs no reload, Some(Ok(())) when it was applied, and
+    /// Some(Err(reason)) when the reload was refused (the write stays stored;
+    /// ReloadSettings reports the same errors).
+    pub async fn reload_after_write(&self, object: ObjectType) -> Option<Result<(), String>> {
+        let target = write_reload_target(object)?;
+        let change = RegistryChange::Reload(target);
+
+        if matches!(
+            target,
+            ObjectType::Certificate | ObjectType::StoreLookup | ObjectType::BlockedIp
+        ) {
+            // Cheap, and limited to their own objects
+            let result = self.reload_and_broadcast(change).await;
+            return Some(result);
+        }
+
+        let gate = &self.inner.data.settings_reload;
+        let ticket = gate
+            .requested
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+            + 1;
+        let mut state = gate.state.lock().await;
+        if state.completed >= ticket {
+            // A reload that started after this write was stored has run
+            return Some(state.refused.clone().map_or(Ok(()), Err));
+        }
+        let covers = gate.requested.load(std::sync::atomic::Ordering::SeqCst);
+        let result = self.reload_and_broadcast(change).await;
+        state.completed = covers;
+        state.refused = result.clone().err();
+        Some(result)
+    }
+
+    async fn reload_and_broadcast(&self, change: RegistryChange) -> Result<(), String> {
+        match Box::pin(self.reload_registry(change)).await {
+            Ok(reload) if !reload.has_errors() => {
+                reload.log();
+                self.cluster_broadcast(BroadcastEvent::RegistryChange(change))
+                    .await;
+                Ok(())
+            }
+            Ok(reload) => {
+                reload.log();
+                let reason = describe_reload_errors(&reload.errors);
+                trc::event!(
+                    Registry(trc::RegistryEvent::BuildWarning),
+                    Details = "Settings didn't reload after a registry write",
+                    Reason = reason.clone(),
+                );
+                Err(reason)
+            }
+            Err(err) => {
+                let reason = err.to_string();
+                trc::error!(err.details("Failed to reload settings after a registry write"));
+                Err(reason)
+            }
+        }
+    }
+}
+
+/// inbuxa: a refused reload's errors in a sentence: the first one, naming its
+/// object, and how many more there are.
+pub fn describe_reload_errors(errors: &[Error]) -> String {
+    let mut description = match errors.first() {
+        Some(Error::Build { object_id, message }) => format!("{object_id}: {message}"),
+        Some(Error::Validation { object_id, errors }) => format!(
+            "{object_id}: {}",
+            errors
+                .iter()
+                .map(|err| err.to_string())
+                .collect::<Vec<_>>()
+                .join("; ")
+        ),
+        Some(Error::Internal {
+            object_id: Some(object_id),
+            error,
+        }) => format!("{object_id}: {error}"),
+        Some(Error::Internal { error, .. }) => error.to_string(),
+        Some(Error::NotFound { object_id }) => format!("{object_id} was not found"),
+        None => String::new(),
+    };
+    let more = errors.len().saturating_sub(1);
+    if more > 0 {
+        description.push_str(&format!(" ({more} more in the server log.)"));
+    }
+    description
 }

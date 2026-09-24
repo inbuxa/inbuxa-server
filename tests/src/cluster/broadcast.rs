@@ -2,6 +2,8 @@
  * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
+ *
+ * Modified by Coffey Labs in 2026 for INBUXA.
  */
 
 use crate::{
@@ -11,6 +13,7 @@ use crate::{
         server::TestServerBuilder,
     },
 };
+use common::BuildServer;
 use imap_proto::ResponseType;
 use registry::{
     schema::{
@@ -18,7 +21,8 @@ use registry::{
         prelude::{ObjectType, Property, SocketAddr},
         structs::{
             ClusterListenerGroup, ClusterListenerGroupProperties, ClusterRole, ClusterTaskGroup,
-            Coordinator, Imap, NatsCoordinator, NetworkListener, RedisStore,
+            Coordinator, Imap, MtaDeliverySchedule, MtaVirtualQueue, NatsCoordinator,
+            NetworkListener, RedisStore,
         },
     },
     types::map::Map,
@@ -208,6 +212,45 @@ pub async fn cluster_tests() {
             .as_deref(),
         Some("John Doe")
     );
+
+    // inbuxa: a settings write applies on every node, no ReloadSettings
+    let queue_id = admin
+        .registry_create_object(MtaVirtualQueue {
+            name: "clusterq".into(),
+            threads_per_node: 1,
+            description: None,
+        })
+        .await;
+    admin
+        .registry_create_object(MtaDeliverySchedule {
+            name: "cluster-autoreload".into(),
+            queue_id,
+            ..Default::default()
+        })
+        .await;
+    for (node_id, test) in servers.iter().enumerate() {
+        let started = std::time::Instant::now();
+        while !test
+            .server
+            .inner
+            .build_server()
+            .core
+            .smtp
+            .queue
+            .queue_strategy
+            .contains_key("cluster-autoreload")
+        {
+            assert!(
+                started.elapsed() < std::time::Duration::from_secs(5),
+                "node {node_id} didn't pick up the new delivery schedule"
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+        println!(
+            "Node {node_id} has the new delivery schedule after {} ms",
+            started.elapsed().as_millis()
+        );
+    }
 
     // Run IMAP idle tests across nodes
     let mut node1_client = imap_client("jdoe@example.com", "this is john's secret", 1).await;

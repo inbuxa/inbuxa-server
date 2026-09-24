@@ -2,6 +2,8 @@
  * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
+ *
+ * Modified by Coffey Labs in 2026 for INBUXA.
  */
 
 use super::ahash_is_empty;
@@ -71,6 +73,23 @@ pub struct SetResponse<T: JmapObject> {
     #[serde(rename = "notDestroyed")]
     #[serde(skip_serializing_if = "VecMap::is_empty")]
     pub not_destroyed: VecMap<MaybeInvalid<Id>, SetError<T::Property>>,
+
+    // inbuxa: on a registry write that changes the running settings, whether
+    // the server applied it
+    #[serde(rename = "x:settingsReload")]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub settings_reload: Option<SettingsReload>,
+}
+
+/// inbuxa: the settings reload that followed a registry write.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct SettingsReload {
+    /// The running settings (here and, through the cluster, on every node)
+    /// include the write.
+    pub applied: bool,
+    /// Why they don't, when they don't.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
 }
 
 impl<'de, T: JmapObject> DeserializeArguments<'de> for SetRequest<'de, T> {
@@ -199,6 +218,7 @@ impl<T: JmapObject> SetResponse<T> {
                 not_created: VecMap::new(),
                 not_updated: VecMap::new(),
                 not_destroyed: VecMap::new(),
+                settings_reload: None,
             })
         } else {
             Err(trc::JmapEvent::RequestTooLarge.into_err())

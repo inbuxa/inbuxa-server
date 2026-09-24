@@ -38,7 +38,7 @@ use directory::core::secret::{hash_secret, is_password_hash};
 use http_proto::HttpSessionData;
 use jmap_proto::{
     error::set::{SetError, SetErrorType},
-    method::set::{SetRequest, SetResponse},
+    method::set::{SetRequest, SetResponse, SettingsReload},
     object::registry::Registry,
     references::resolve::ResolveCreatedReference,
     request::{IntoValid, MaybeInvalid},
@@ -931,34 +931,28 @@ impl RegistrySet for Server {
             }
         };
 
-        // inbuxa: DIR-17: a directory or the server default applies on the
-        // next request, here and on every node
-        if matches!(
-            object_type,
-            ObjectType::Directory | ObjectType::Authentication
-        ) && let Ok(response) = &result
+        // inbuxa: a write to an object the running settings are built from
+        // applies at once, here and on every node (DIR-17 did this for
+        // directories and the server default; now it covers every such object)
+        let mut result = result;
+        if let Ok(response) = &mut result
             && (!response.created.is_empty()
                 || !response.updated.is_empty()
                 || !response.destroyed.is_empty())
+            && let Some(reload) = self.reload_after_write(object_type).await
         {
-            let change = common::ipc::RegistryChange::Reload(ObjectType::Directory);
-            match Box::pin(self.reload_registry(change)).await {
-                Ok(reload) if !reload.has_errors() => {
-                    self.cluster_broadcast(common::ipc::BroadcastEvent::RegistryChange(change))
-                        .await;
-                }
-                Ok(reload) => {
-                    // inbuxa: name what stopped it
-                    reload.log();
-                    trc::event!(
-                        Registry(trc::RegistryEvent::BuildWarning),
-                        Details = "Settings didn't reload after a directory change",
-                    )
-                }
-                Err(err) => {
-                    trc::error!(err.details("Failed to reload directories"));
-                }
-            }
+            response.settings_reload = Some(match reload {
+                Ok(()) => SettingsReload {
+                    applied: true,
+                    description: None,
+                },
+                Err(reason) => SettingsReload {
+                    applied: false,
+                    description: Some(format!(
+                        "Saved, but the running settings were not reloaded. {reason}"
+                    )),
+                },
+            });
         }
         result
     }

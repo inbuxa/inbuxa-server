@@ -161,6 +161,8 @@ pub struct Data {
     pub span_id_gen: SnowflakeIdGenerator,
     pub registry_id_gen: SnowflakeIdGenerator,
     pub queue_status: AtomicBool,
+    // inbuxa: coalesces the settings reloads registry writes trigger
+    pub settings_reload: cache::reload::SettingsReloadGate,
 
     pub applications: WebApplications,
     pub logos: Mutex<AHashMap<Box<str>, LogoCache>>,
