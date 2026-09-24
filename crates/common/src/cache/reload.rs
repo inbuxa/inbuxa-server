@@ -257,7 +257,8 @@ struct SettingsReloadState {
 /// The reload a write to `object` calls for: the object to reload, or None
 /// when the running settings don't hold that object (accounts, domains and
 /// other data read as needed, stores, which take a restart, and objects with
-/// reload actions of their own, such as applications).
+/// reload actions of their own, such as applications). Blocked IPs have a
+/// reload of their own; allowed IPs take the full one.
 pub fn write_reload_target(object: ObjectType) -> Option<ObjectType> {
     match object {
         ObjectType::Certificate => Some(ObjectType::Certificate),
@@ -265,8 +266,12 @@ pub fn write_reload_target(object: ObjectType) -> Option<ObjectType> {
         | ObjectType::MemoryLookupKeyValue
         | ObjectType::HttpLookup
         | ObjectType::StoreLookup => Some(ObjectType::StoreLookup),
-        ObjectType::BlockedIp | ObjectType::AllowedIp => Some(ObjectType::BlockedIp),
-        ObjectType::AcmeProvider
+        ObjectType::BlockedIp => Some(ObjectType::BlockedIp),
+        // Allowed IPs are part of the core's security settings
+        // (Security::parse), which only a full reload rebuilds; the blocked-IP
+        // reload doesn't touch them
+        ObjectType::AllowedIp
+        | ObjectType::AcmeProvider
         | ObjectType::AddressBook
         | ObjectType::AiModel
         | ObjectType::Asn
