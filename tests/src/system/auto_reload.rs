@@ -12,13 +12,16 @@ use crate::utils::{
     server::{TestServer, TestServerBuilder},
 };
 use common::BuildServer;
-use registry::schema::{
-    enums::TracingLevel,
-    prelude::ObjectType,
-    structs::{
-        CertificateManagement, DkimManagement, DnsManagement, Domain, Expression,
-        MtaDeliverySchedule, MtaStageAuth, MtaVirtualQueue, Tracer, TracerStdout,
+use registry::{
+    schema::{
+        enums::TracingLevel,
+        prelude::ObjectType,
+        structs::{
+            AllowedIp, CertificateManagement, DkimManagement, DnsManagement, Domain, Expression,
+            MtaDeliverySchedule, MtaStageAuth, MtaVirtualQueue, Tracer, TracerStdout,
+        },
     },
+    types::ipmask::IpAddrOrMask,
 };
 use serde_json::Value;
 
@@ -152,6 +155,30 @@ async fn test_write_applies(test: &TestServer) {
         .await;
     assert_applied(&response);
 
+    // An allowed IP is live as soon as it is saved, and gone once
+    // destroyed. It lives in the core's security settings, which the
+    // blocked-IP reload it used to get doesn't rebuild.
+    let ip: std::net::IpAddr = "198.51.100.7".parse().unwrap();
+    assert!(!is_allowed(test, ip));
+    let response = admin
+        .registry_create([AllowedIp {
+            address: IpAddrOrMask::from_ip(ip),
+            reason: Some("autoreload".into()),
+            ..Default::default()
+        }])
+        .await;
+    assert_applied(&response);
+    assert!(
+        is_allowed(test, ip),
+        "allowed IP not in the running settings"
+    );
+    let allowed_id = response.created_id(0);
+    let response = admin
+        .registry_destroy(ObjectType::AllowedIp, [allowed_id])
+        .await;
+    assert_applied(&response);
+    assert!(!is_allowed(test, ip), "destroyed allowed IP still live");
+
     // Data that isn't part of the running settings doesn't reload them
     let response = admin
         .registry_create([Domain {
@@ -186,4 +213,8 @@ fn has_schedule(test: &TestServer, name: &str) -> bool {
         .queue
         .queue_strategy
         .contains_key(name)
+}
+
+fn is_allowed(test: &TestServer, ip: std::net::IpAddr) -> bool {
+    test.server.inner.build_server().is_ip_allowed(ip)
 }
