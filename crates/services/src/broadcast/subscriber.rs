@@ -26,7 +26,7 @@ pub fn spawn_broadcast_subscriber(inner: Arc<Inner>, mut shutdown_rx: watch::Rec
     };
 
     tokio::spawn(async move {
-        let mut retry_count = 0;
+        let mut retry_count: u32 = 0;
 
         trc::event!(Cluster(ClusterEvent::SubscriberStart));
 
@@ -53,7 +53,7 @@ pub fn spawn_broadcast_subscriber(inner: Arc<Inner>, mut shutdown_rx: watch::Rec
                     );
 
                     match tokio::time::timeout(
-                        Duration::from_secs(1 << retry_count.max(6)),
+                        subscribe_retry_delay(retry_count),
                         shutdown_rx.changed(),
                     )
                     .await
@@ -62,7 +62,7 @@ pub fn spawn_broadcast_subscriber(inner: Arc<Inner>, mut shutdown_rx: watch::Rec
                             break;
                         }
                         Err(_) => {
-                            retry_count += 1;
+                            retry_count = retry_count.saturating_add(1);
                             continue;
                         }
                     }
@@ -234,6 +234,11 @@ pub fn spawn_broadcast_subscriber(inner: Arc<Inner>, mut shutdown_rx: watch::Rec
     });
 }
 
+/// Delay before the next subscribe attempt: 1 s, 2 s, 4 s ... capped at 64 s.
+fn subscribe_retry_delay(retry_count: u32) -> Duration {
+    Duration::from_secs(1u64 << retry_count.min(6))
+}
+
 fn log_event(event: &BroadcastEvent) -> trc::Value {
     match event {
         BroadcastEvent::PushNotification(notification) => match notification {
@@ -294,5 +299,21 @@ fn log_event(event: &BroadcastEvent) -> trc::Value {
             }
         }
         BroadcastEvent::QueueRefresh => "QueueRefresh".into(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::subscribe_retry_delay;
+    use std::time::Duration;
+
+    #[test]
+    fn subscribe_retry_backoff_grows_then_caps() {
+        let schedule: Vec<u64> = (0..10)
+            .map(|n| subscribe_retry_delay(n).as_secs())
+            .collect();
+        assert_eq!(schedule, vec![1, 2, 4, 8, 16, 32, 64, 64, 64, 64]);
+        // No shift overflow at the top of the range.
+        assert_eq!(subscribe_retry_delay(u32::MAX), Duration::from_secs(64));
     }
 }
