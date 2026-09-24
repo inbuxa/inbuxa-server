@@ -82,3 +82,42 @@ pub async fn release_task_locks(server: &Server) -> usize {
     }
     ids.len()
 }
+
+/// inbuxa: renews the lease on every task this node is running, so it stays
+/// claimed for as long as it runs while a node that dies loses its claims
+/// within one lock lifetime. Returns how many leases were renewed and how
+/// many were found lost (expired, perhaps taken by another node).
+pub async fn renew_task_locks(server: &Server) -> (usize, usize) {
+    let locks = &server.inner.ipc.task_locks;
+    let expiry = locks.expiry();
+    let (mut renewed, mut lost) = (0, 0);
+    for id in locks.held_ids() {
+        match server
+            .in_memory_store()
+            .renew_lock(KV_LOCK_TASK, &id.to_be_bytes(), expiry)
+            .await
+        {
+            Ok(true) => renewed += 1,
+            Ok(false) => {
+                // Still held here as far as this node knows; the task
+                // finishes and its lock is removed as usual
+                if locks.is_held(id) {
+                    lost += 1;
+                    trc::event!(
+                        TaskManager(TaskManagerEvent::TaskLocked),
+                        Id = id,
+                        Details = "Task lock expired while the task was running",
+                    );
+                }
+            }
+            Err(err) => {
+                trc::error!(
+                    err.details("Failed to renew task lock")
+                        .ctx(trc::Key::Id, id)
+                        .caused_by(trc::location!())
+                );
+            }
+        }
+    }
+    (renewed, lost)
+}

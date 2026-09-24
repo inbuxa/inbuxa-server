@@ -345,8 +345,13 @@ pub struct TaskLocks {
 }
 
 impl TaskLocks {
-    /// How long a task lock lasts, in seconds, unless it is released first.
-    pub const DEFAULT_EXPIRY: u64 = 60 * 60;
+    /// How long a task lock lasts, in seconds, unless it is released first
+    /// or renewed. inbuxa: upstream held a lock for an hour, so a killed
+    /// node's tasks waited that long; the lock is now a five-minute lease
+    /// that the task manager renews every third of it while the task runs
+    /// (renew_task_locks), so a dead node's tasks run elsewhere within
+    /// minutes.
+    pub const DEFAULT_EXPIRY: u64 = 5 * 60;
 
     pub fn is_stopping(&self) -> bool {
         self.stopping.load(Ordering::Acquire)
@@ -368,6 +373,16 @@ impl TaskLocks {
 
     pub fn held(&self) -> usize {
         self.held.lock().len()
+    }
+
+    /// inbuxa: the tasks this node holds, to renew their locks.
+    pub fn held_ids(&self) -> Vec<u64> {
+        self.held.lock().iter().copied().collect()
+    }
+
+    /// inbuxa: whether this node holds (and is running) the task.
+    pub fn is_held(&self, id: u64) -> bool {
+        self.held.lock().contains(&id)
     }
 
     pub fn expiry(&self) -> u64 {

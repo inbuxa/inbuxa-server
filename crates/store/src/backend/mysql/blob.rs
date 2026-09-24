@@ -2,6 +2,8 @@
  * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
+ *
+ * Modified by Coffey Labs in 2026 for INBUXA.
  */
 
 use std::ops::Range;
@@ -16,7 +18,7 @@ impl MysqlStore {
         key: &[u8],
         range: Range<usize>,
     ) -> trc::Result<Option<Vec<u8>>> {
-        let mut conn = self.conn_pool.get_conn().await.map_err(into_error)?;
+        let mut conn = self.conn().await?;
         let s = conn
             .prep("SELECT v FROM t WHERE k = ?")
             .await
@@ -39,7 +41,7 @@ impl MysqlStore {
     }
 
     pub(crate) async fn put_blob(&self, key: &[u8], data: &[u8]) -> trc::Result<()> {
-        let mut conn = self.conn_pool.get_conn().await.map_err(into_error)?;
+        let mut conn = self.conn().await?;
         let s = conn
             .prep("INSERT INTO t (k, v) VALUES (?, ?) ON DUPLICATE KEY UPDATE v = VALUES(v)")
             .await
@@ -51,7 +53,7 @@ impl MysqlStore {
     }
 
     pub(crate) async fn delete_blob(&self, key: &[u8]) -> trc::Result<bool> {
-        let mut conn = self.conn_pool.get_conn().await.map_err(into_error)?;
+        let mut conn = self.conn().await?;
         let s = conn
             .prep("DELETE FROM t WHERE k = ?")
             .await

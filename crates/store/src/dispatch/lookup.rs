@@ -401,6 +401,57 @@ impl InMemoryStore {
         }
     }
 
+    /// inbuxa: extends a lock this node holds to `duration` seconds from now.
+    /// Returns false when the lock is gone or has expired: it may have been
+    /// taken by someone else since, so it is left alone.
+    pub async fn renew_lock(&self, prefix: u8, key: &[u8], duration: u64) -> trc::Result<bool> {
+        match self {
+            InMemoryStore::Store(store) => {
+                let key = KeyValue::<()>::build_key(prefix, key);
+                let key = ValueClass::InMemory(InMemoryClass::Key(key));
+                let Some(lock_expiry) = store
+                    .get_value::<u64>(ValueKey::from(key.clone()))
+                    .await
+                    .caused_by(trc::location!())?
+                else {
+                    return Ok(false);
+                };
+                let now = now();
+                if lock_expiry <= now {
+                    return Ok(false);
+                }
+
+                let mut batch = BatchBuilder::new();
+                batch.assert_value(key.clone(), AssertValue::U64(lock_expiry));
+                batch.set(key, (now + duration).serialize());
+                match store.write(batch.build_all()).await {
+                    Ok(_) => Ok(true),
+                    Err(err) if err.is_assertion_failure() => Ok(false),
+                    Err(err) => Err(err
+                        .details("Failed to renew lock.")
+                        .caused_by(trc::location!())),
+                }
+            }
+            InMemoryStore::Sharded(store) => {
+                Box::pin(
+                    store
+                        .member(&KeyValue::<()>::build_key(prefix, key))
+                        .renew_lock(prefix, key, duration),
+                )
+                .await
+            }
+            #[cfg(feature = "redis")]
+            InMemoryStore::Redis(store) => {
+                store
+                    .renew_lock(&KeyValue::<()>::build_key(prefix, key), duration)
+                    .await
+            }
+            InMemoryStore::Static(_) | InMemoryStore::Http(_) => {
+                Err(trc::StoreEvent::NotSupported.into_err())
+            }
+        }
+    }
+
     pub async fn remove_lock(&self, prefix: u8, key: &[u8]) -> trc::Result<()> {
         self.key_delete(KeyValue::<()>::build_key(prefix, key))
             .await
