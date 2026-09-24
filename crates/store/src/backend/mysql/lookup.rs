@@ -10,7 +10,7 @@ use mysql_async::{Params, Row, prelude::Queryable};
 
 use crate::{IntoRows, QueryResult, QueryType, Value};
 
-use super::{MysqlStore, into_error};
+use super::{MysqlStore, bounded, into_error};
 
 impl MysqlStore {
     pub(crate) async fn sql_query<T: QueryResult>(
@@ -19,27 +19,32 @@ impl MysqlStore {
         params: &[Value<'_>],
     ) -> trc::Result<T> {
         let mut conn = self.conn().await?;
-        let s = conn.prep(query).await.map_err(into_error)?;
-        let params = Params::Positional(params.iter().map(Into::into).collect());
+        let limit = self.timeouts.query;
+        let result = tokio::time::timeout(limit, async {
+            let s = conn.prep(query).await.map_err(into_error)?;
+            let params = Params::Positional(params.iter().map(Into::into).collect());
 
-        match T::query_type() {
-            QueryType::Execute => conn.exec_drop(s, params).await.map_or_else(
-                |e| Err(into_error(e)),
-                |_| Ok(T::from_exec(conn.affected_rows() as usize)),
-            ),
-            QueryType::Exists => conn
-                .exec_first::<Row, _, _>(s, params)
-                .await
-                .map_or_else(|e| Err(into_error(e)), |r| Ok(T::from_exists(r.is_some()))),
-            QueryType::QueryOne => conn
-                .exec_first::<Row, _, _>(s, params)
-                .await
-                .map_or_else(|e| Err(into_error(e)), |r| Ok(T::from_query_one(r))),
-            QueryType::QueryAll => conn
-                .exec::<Row, _, _>(s, params)
-                .await
-                .map_or_else(|e| Err(into_error(e)), |r| Ok(T::from_query_all(r))),
-        }
+            match T::query_type() {
+                QueryType::Execute => conn.exec_drop(s, params).await.map_or_else(
+                    |e| Err(into_error(e)),
+                    |_| Ok(T::from_exec(conn.affected_rows() as usize)),
+                ),
+                QueryType::Exists => conn
+                    .exec_first::<Row, _, _>(s, params)
+                    .await
+                    .map_or_else(|e| Err(into_error(e)), |r| Ok(T::from_exists(r.is_some()))),
+                QueryType::QueryOne => conn
+                    .exec_first::<Row, _, _>(s, params)
+                    .await
+                    .map_or_else(|e| Err(into_error(e)), |r| Ok(T::from_query_one(r))),
+                QueryType::QueryAll => conn
+                    .exec::<Row, _, _>(s, params)
+                    .await
+                    .map_or_else(|e| Err(into_error(e)), |r| Ok(T::from_query_all(r))),
+            }
+        })
+        .await;
+        bounded(conn, result, limit)
     }
 }
 

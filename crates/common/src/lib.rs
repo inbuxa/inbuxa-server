@@ -163,6 +163,8 @@ pub struct Data {
     pub queue_status: AtomicBool,
     // inbuxa: coalesces the settings reloads registry writes trigger
     pub settings_reload: cache::reload::SettingsReloadGate,
+    // inbuxa: the readiness probe's cached answer
+    pub store_health: storage::ready::StoreHealth,
 
     pub applications: WebApplications,
     pub logos: Mutex<AHashMap<Box<str>, LogoCache>>,

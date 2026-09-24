@@ -553,8 +553,10 @@ impl ParseHttp for Server {
                         return Ok(JsonProblemResponse(StatusCode::OK).into_http_response());
                     }
                     "ready" => {
+                        // inbuxa: ready only while the data store answers
+                        // (a cached, time-limited read); liveness stays 200
                         return Ok(JsonProblemResponse({
-                            if !self.core.storage.data.is_none() {
+                            if self.is_data_store_ready().await {
                                 StatusCode::OK
                             } else {
                                 StatusCode::SERVICE_UNAVAILABLE

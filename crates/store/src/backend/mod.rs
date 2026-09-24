@@ -30,6 +30,9 @@ pub mod s3;
 pub mod sqlite;
 // inbuxa: scale-out storage (sharded stores)
 pub mod scaleout;
+// inbuxa: client-side SQL query limits
+#[cfg(any(feature = "postgres", feature = "mysql"))]
+pub mod query_timeout;
 
 
 pub const MAX_TOKEN_LENGTH: usize = (u8::MAX >> 1) as usize;
