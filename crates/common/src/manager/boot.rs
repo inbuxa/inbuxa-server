@@ -297,6 +297,7 @@ pub fn build_ipc(has_pubsub: bool) -> (Ipc, IpcReceivers) {
             report_tx,
             broadcast_tx: has_pubsub.then_some(broadcast_tx),
             task_tx: Arc::new(Notify::new()),
+            task_locks: Arc::new(crate::ipc::TaskLocks::default()),
             train_task_controller: Arc::new(TrainTaskController::default()),
         },
         IpcReceivers {

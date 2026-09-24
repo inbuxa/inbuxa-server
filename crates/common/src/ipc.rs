@@ -335,3 +335,57 @@ impl EmailPush {
         }
     }
 }
+
+/// inbuxa: the task locks this node holds, so a graceful stop can hand them
+/// back instead of leaving the tasks blocked until the locks expire.
+pub struct TaskLocks {
+    held: parking_lot::Mutex<ahash::AHashSet<u64>>,
+    stopping: AtomicBool,
+    expiry: std::sync::atomic::AtomicU64,
+}
+
+impl TaskLocks {
+    /// How long a task lock lasts, in seconds, unless it is released first.
+    pub const DEFAULT_EXPIRY: u64 = 60 * 60;
+
+    pub fn is_stopping(&self) -> bool {
+        self.stopping.load(Ordering::Acquire)
+    }
+
+    /// Stops new claims and returns the ids of every lock still held.
+    pub fn stop(&self) -> Vec<u64> {
+        self.stopping.store(true, Ordering::Release);
+        self.held.lock().drain().collect()
+    }
+
+    pub fn insert(&self, id: u64) {
+        self.held.lock().insert(id);
+    }
+
+    pub fn remove(&self, id: u64) {
+        self.held.lock().remove(&id);
+    }
+
+    pub fn held(&self) -> usize {
+        self.held.lock().len()
+    }
+
+    pub fn expiry(&self) -> u64 {
+        self.expiry.load(Ordering::Relaxed)
+    }
+
+    /// Changes the lock lifetime; the tests shorten it.
+    pub fn set_expiry(&self, seconds: u64) {
+        self.expiry.store(seconds.max(1), Ordering::Relaxed);
+    }
+}
+
+impl Default for TaskLocks {
+    fn default() -> Self {
+        Self {
+            held: Default::default(),
+            stopping: AtomicBool::new(false),
+            expiry: std::sync::atomic::AtomicU64::new(Self::DEFAULT_EXPIRY),
+        }
+    }
+}

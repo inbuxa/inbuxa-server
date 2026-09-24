@@ -21,6 +21,7 @@ pub mod replica_cluster; // inbuxa: read replicas across nodes
 pub mod scaleout; // inbuxa: scale-out storage
 #[cfg(any(feature = "postgres", feature = "mysql"))]
 pub mod sql_timeout;
+pub mod task_locks; // inbuxa: task locks across nodes
 
 use crate::utils::server::TestServerBuilder;
 use std::io::Read;

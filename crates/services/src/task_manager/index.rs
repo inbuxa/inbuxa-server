@@ -91,7 +91,15 @@ impl SearchIndexTask for Server {
                             build_contact_document(self, account_id, document_id).await
                         }
                         IndexDocumentType::File => {
-                            // File indexing not implemented yet
+                            // File indexing not implemented yet. inbuxa: still
+                            // one result per task: update_tasks pairs them by
+                            // position, and a missing one shifts every result
+                            // after it onto the wrong task
+                            results.push(IndexTaskResult {
+                                task_type: TaskType::Insert,
+                                index: task.document_type,
+                                result: TaskResult::Ignored,
+                            });
                             continue;
                         }
                     };

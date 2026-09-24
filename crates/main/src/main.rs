@@ -109,6 +109,10 @@ async fn main() -> std::io::Result<()> {
     // Wait for shutdown signal
     wait_for_shutdown().await;
 
+    // inbuxa: hand back the task locks this node holds, so other nodes can
+    // run those tasks now rather than when the locks expire
+    services::task_manager::lock::release_task_locks(&inner.build_server()).await;
+
     // Shutdown collector
     Collector::shutdown();
 

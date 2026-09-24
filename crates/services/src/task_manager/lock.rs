@@ -2,6 +2,8 @@
  * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
+ *
+ * Modified by Coffey Labs in 2026 for INBUXA.
  */
 
 use crate::task_manager::*;
@@ -13,13 +15,21 @@ pub trait TaskLockManager: Sync + Send {
 
 impl TaskLockManager for Server {
     async fn try_lock_task(&self, id: u64) -> bool {
+        // inbuxa: a node that is stopping claims nothing new
+        let locks = &self.inner.ipc.task_locks;
+        if locks.is_stopping() {
+            return false;
+        }
+
         match self
             .in_memory_store()
-            .try_lock(KV_LOCK_TASK, &id.to_be_bytes(), DEFAULT_LOCK_EXPIRY)
+            .try_lock(KV_LOCK_TASK, &id.to_be_bytes(), locks.expiry())
             .await
         {
             Ok(result) => {
-                if !result {
+                if result {
+                    locks.insert(id);
+                } else {
                     trc::event!(
                         TaskManager(TaskManagerEvent::TaskLocked),
                         Id = id,
@@ -48,5 +58,27 @@ impl TaskLockManager for Server {
                     .caused_by(trc::location!())
             );
         }
+        self.inner.ipc.task_locks.remove(id);
     }
+}
+
+/// inbuxa: on a graceful stop, stops claiming tasks and releases every task
+/// lock this node holds, so the rest of the cluster can pick the tasks up at
+/// once instead of after the lock expires. Returns how many were released.
+pub async fn release_task_locks(server: &Server) -> usize {
+    let ids = server.inner.ipc.task_locks.stop();
+    for id in &ids {
+        if let Err(err) = server
+            .in_memory_store()
+            .remove_lock(KV_LOCK_TASK, &id.to_be_bytes())
+            .await
+        {
+            trc::error!(
+                err.details("Failed to release task lock on shutdown")
+                    .ctx(trc::Key::Id, *id)
+                    .caused_by(trc::location!())
+            );
+        }
+    }
+    ids.len()
 }
