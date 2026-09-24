@@ -3,11 +3,28 @@
 # whether a person pushed it or weekly-release.yml created it through the
 # releases API.
 #
-# The image is multi-arch (linux/amd64, linux/arm64) as before, but built in
-# one buildx run on host1 instead of one native runner per architecture: the
-# Dockerfile's builder stage runs on the build platform and cross-compiles
-# with an aarch64 linker, so only the small final stage (apt, setcap) goes
-# through QEMU for arm64. No digest-joining job is needed.
+# The image is multi-arch (linux/amd64, linux/arm64), built by two jobs on
+# the image-build runner rather than one buildx run for both. The Dockerfile's
+# builder stage runs on the build platform and cross-compiles with an aarch64
+# linker, so only the small final stage (apt, setcap) goes through QEMU for
+# arm64 -- but two release builds (LTO, one codegen unit) side by side on one
+# machine each take twice as long. Production runs amd64, so amd64 goes first
+# and on its own:
+#   * publish-amd64 pushes :<version>-amd64 and :<version>, a plain amd64
+#     image, as soon as its build is done. A deploy can start from it.
+#   * publish-arm64 then builds arm64, pushes :<version>-arm64, and replaces
+#     :<version> with the two-platform index. :latest moves only here, so it
+#     never names an image without arm64.
+#
+# Both jobs use one BuildKit builder, `gitea-builder`, whose container
+# (buildx_buildkit_gitea-builder0) and state volume stay on the runner's host
+# between jobs: a job container's `buildx create` finds the existing container
+# and reuses it and its cache. The dependency build (`cargo chef cook`) is
+# keyed on the recipe, which only a dependency change alters, so a release
+# normally compiles just the workspace. Removing that container or its volume
+# costs the next release a cold build, nothing more. The planner and dependency
+# layers for the build platform are shared, so arm64 also reuses what amd64
+# just did where it can.
 #
 # Two guards before anything is pushed:
 #   * the tag must be v<brand_version!>. The version is a string in
@@ -62,7 +79,7 @@ jobs:
           echo "version=$V" >> "$GITHUB_OUTPUT"
           echo "version $V"
 
-  publish:
+  publish-amd64:
     needs: [version]
     runs-on: docker
     container:
@@ -81,16 +98,15 @@ jobs:
           test -n "$REGISTRY" && test -n "$VERSION"
           test -n "$PACKAGE_TOKEN" || { echo "PACKAGE_TOKEN secret is not set on this repository" >&2; exit 1; }
           echo "$PACKAGE_TOKEN" | docker login -u jcoffey-dev --password-stdin "$REGISTRY"
-          docker run --privileged --rm tonistiigi/binfmt --install arm64
           docker buildx create --use --name gitea-builder --driver docker-container || docker buildx use gitea-builder
-      # Attestations off, as before: they add manifests of their own to the
-      # index, and the index should hold the two images and nothing else.
+      # Attestations off, as before: they add manifests of their own, and the
+      # index should hold the two images and nothing else.
       - run: |
           docker buildx build \
-            --platform linux/amd64,linux/arm64 \
+            --platform linux/amd64 \
             --provenance=false --sbom=false \
+            --tag "$IMAGE:$VERSION-amd64" \
             --tag "$IMAGE:$VERSION" \
-            --tag "$IMAGE:latest" \
             --push .
           docker buildx imagetools inspect "$IMAGE:$VERSION"
       # Gitea keeps a container package on its owner; linking it shows it on
@@ -103,11 +119,47 @@ jobs:
       - if: always()
         run: docker logout "$REGISTRY" || true
 
+  publish-arm64:
+    needs: [version, publish-amd64]
+    runs-on: docker
+    container:
+      image: docker:28-cli@sha256:625d9431a9f54c5a2bc90f24f0e1c3d55b1349fd857dd85035f98c2c9acbdd4d # 28-cli
+      volumes:
+        - /var/run/docker.sock:/var/run/docker.sock
+    env:
+      DOCKER_BUILDKIT: "1"
+      REGISTRY: ${{ vars.REGISTRY }}
+      IMAGE: ${{ vars.REGISTRY }}/${{ github.repository }}
+      VERSION: ${{ needs.version.outputs.version }}
+      PACKAGE_TOKEN: ${{ secrets.PACKAGE_TOKEN }}
+    steps:
+      - uses: coffey-labs/actions/checkout@fab0c4d45e0162963965f1555df27b7bed5e20ec
+      - run: |
+          echo "$PACKAGE_TOKEN" | docker login -u jcoffey-dev --password-stdin "$REGISTRY"
+          docker run --privileged --rm tonistiigi/binfmt --install arm64
+          docker buildx create --use --name gitea-builder --driver docker-container || docker buildx use gitea-builder
+      # The index is built from the two per-architecture tags rather than from
+      # :<version>, which by now is the amd64 image and would be read as such.
+      - run: |
+          docker buildx build \
+            --platform linux/arm64 \
+            --provenance=false --sbom=false \
+            --tag "$IMAGE:$VERSION-arm64" \
+            --push .
+          docker buildx imagetools create \
+            --tag "$IMAGE:$VERSION" \
+            --tag "$IMAGE:latest" \
+            "$IMAGE:$VERSION-amd64" "$IMAGE:$VERSION-arm64"
+          docker buildx imagetools inspect "$IMAGE:$VERSION"
+      - if: always()
+        run: docker logout "$REGISTRY" || true
+
   # The weekly release creates its Release (and so the tag) first; a tag
   # pushed by hand has none. Either way the tag ends up with exactly one
-  # Release, created after the image exists so its pull instructions work.
+  # Release, created once the amd64 image exists so its pull instructions
+  # work; arm64 and the binaries follow.
   release:
-    needs: [version, publish]
+    needs: [version, publish-amd64]
     runs-on: light
     container:
       image: python:3.13-slim@sha256:8d9d0b8bcf6506481eae4907c18f5e3e7902e629f5f6d684f9e7c32e85e3ddf0 # 3.13-slim
@@ -131,7 +183,9 @@ jobs:
           except urllib.error.HTTPError as e:
               if e.code != 404: raise
           image = f"{os.environ['REGISTRY']}/{os.environ['REPO']}:{version}"
-          body = (f"Container image: `{image}` (linux/amd64, linux/arm64); also `:latest`.\n\n"
+          body = (f"Container image: `{image}` (linux/amd64, linux/arm64); also `:latest`. "
+                  "amd64 is published first; arm64 is added to the same tag when its build "
+                  "finishes, and `:latest` moves then.\n\n"
                   "Binaries for a host install are attached: `inbuxa-linux-amd64.tar.gz` and "
                   "`inbuxa-linux-arm64.tar.gz`, with `SHA256SUMS`. Each is the binary out of this "
                   "release's image for that architecture, so it is the same build. The image "
@@ -154,7 +208,7 @@ jobs:
   # `docker create` does not start anything, so pulling an arm64 image on an
   # amd64 runner and copying a file out of it needs no emulation.
   binaries:
-    needs: [version, publish, release]
+    needs: [version, publish-arm64, release]
     runs-on: docker
     container:
       image: docker:28-cli@sha256:625d9431a9f54c5a2bc90f24f0e1c3d55b1349fd857dd85035f98c2c9acbdd4d # 28-cli
