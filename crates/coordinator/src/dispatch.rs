@@ -2,6 +2,8 @@
  * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
+ *
+ * Modified by Coffey Labs in 2026 for INBUXA.
  */
 
 use crate::{Coordinator, Msg, PubSubStream};
@@ -42,6 +44,17 @@ impl Coordinator {
 
     pub fn is_none(&self) -> bool {
         matches!(self, Coordinator::None)
+    }
+
+    /// inbuxa: whether the coordinator is connected right now, for the
+    /// backends that track it (NATS); `None` for the others and when no
+    /// coordinator is configured.
+    pub fn is_connected(&self) -> Option<bool> {
+        match self {
+            #[cfg(feature = "nats")]
+            Coordinator::Nats(store) => Some(store.is_connected()),
+            _ => None,
+        }
     }
 }
 

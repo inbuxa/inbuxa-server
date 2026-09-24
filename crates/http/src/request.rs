@@ -562,6 +562,27 @@ impl ParseHttp for Server {
                         })
                         .into_http_response());
                     }
+                    // inbuxa: the cluster coordinator's connection, for
+                    // monitoring. It stays out of live and ready on purpose:
+                    // a node without its coordinator still serves mail, and
+                    // failing those would have an orchestrator restart, or
+                    // take out of service, every node at once when the
+                    // coordinator goes down
+                    "cluster" => {
+                        let coordinator = &self.core.storage.coordinator;
+                        let (status, state) = match coordinator.is_connected() {
+                            Some(true) => (StatusCode::OK, "connected"),
+                            Some(false) => (StatusCode::SERVICE_UNAVAILABLE, "disconnected"),
+                            None if coordinator.is_none() => (StatusCode::OK, "none"),
+                            None => (StatusCode::OK, "unknown"),
+                        };
+                        return Ok(http_proto::JsonResponse::with_status(
+                            status,
+                            serde_json::json!({ "coordinator": state }),
+                        )
+                        .no_cache()
+                        .into_http_response());
+                    }
                     _ => (),
                 }
             }
