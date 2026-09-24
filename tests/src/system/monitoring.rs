@@ -148,6 +148,73 @@ pub async fn test(test: &mut TestServer) {
         "test 9: to"
     );
 
+    // MON-16: the queueId filter finds the traces that name a queue id (the
+    // session that queued the message and its delivery attempt) through the
+    // search index, given as a string or a number (the index column is an
+    // integer)
+    fn queue_ids(value: &Value, out: &mut Vec<u64>) {
+        match value {
+            Value::Object(map) => {
+                if map.get("key").and_then(|k| k.as_str()) == Some("queueId")
+                    && let Some(id) = map
+                        .get("value")
+                        .and_then(|v| v.get("value").unwrap_or(v).as_u64())
+                {
+                    out.push(id);
+                }
+                map.values().for_each(|v| queue_ids(v, out));
+            }
+            Value::Array(list) => list.iter().for_each(|v| queue_ids(v, out)),
+            _ => {}
+        }
+    }
+    let with_ids = traces
+        .iter()
+        .map(|t| {
+            let mut ids = Vec::new();
+            queue_ids(t, &mut ids);
+            (t["id"].as_str().unwrap().to_string(), ids)
+        })
+        .collect::<Vec<_>>();
+    let queue_id = with_ids
+        .iter()
+        .find_map(|(_, ids)| ids.first().copied())
+        .expect("MON-16: a trace with a queue id");
+    let mut expected = with_ids
+        .iter()
+        .filter(|(_, ids)| ids.contains(&queue_id))
+        .map(|(id, _)| id.clone())
+        .collect::<Vec<_>>();
+    expected.sort();
+    for filter in [json!(queue_id.to_string()), json!(queue_id)] {
+        let response = admin
+            .jmap_method_call("x:Trace/query", json!({"filter": {"queueId": filter}}))
+            .await;
+        let mut found = response
+            .0
+            .pointer("/methodResponses/0/1/ids")
+            .and_then(|ids| ids.as_array())
+            .map(|ids| {
+                ids.iter()
+                    .filter_map(|id| id.as_str().map(str::to_string))
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        found.sort();
+        assert_eq!(found, expected, "MON-16: queueId {filter}: {response:?}");
+    }
+    let response = admin
+        .jmap_method_call(
+            "x:Trace/query",
+            json!({"filter": {"queueId": (queue_id ^ 0x5a5a_5a5a).to_string()}}),
+        )
+        .await;
+    assert_eq!(
+        response.0.pointer("/methodResponses/0/1/ids"),
+        Some(&json!([])),
+        "MON-16: an unknown queue id"
+    );
+
     // Acceptance test 24: destroy removes a trace; create is refused
     let trace_id = traces[0]["id"].as_str().unwrap().to_string();
     let response = admin

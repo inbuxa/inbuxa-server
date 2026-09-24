@@ -567,20 +567,14 @@ async fn build_contact_document(
 }
 
 
-// inbuxa: MON-16: a trace's search document, when trace search is on:
-// its event types, queue ids, and addresses, their domains, hosts, IPs,
-// message ids and account names as keywords
+// inbuxa: MON-16: a trace's search document, when trace search is on
 async fn build_tracing_span_document(
     server: &Server,
     span_id: u64,
 ) -> trc::Result<Option<IndexDocument>> {
     use common::telemetry::tracers::store::MaybeTrace;
-    use registry::schema::{enums::SearchTracingField, structs::Search};
-    use store::{
-        search::TracingSearchField,
-        write::{TelemetryClass, ValueClass},
-    };
-    use trc::Key;
+    use registry::schema::structs::Search;
+    use store::write::{TelemetryClass, ValueClass};
 
     let settings = server
         .registry()
@@ -590,7 +584,6 @@ async fn build_tracing_span_document(
     if !settings.index_telemetry {
         return Ok(None);
     }
-    let wants = |field: SearchTracingField| settings.index_tracing_fields.iter().any(|f| *f == field);
     let Some(MaybeTrace(Some(trace))) = server
         .tracing_store()
         .get_value::<MaybeTrace>(ValueKey::from(ValueClass::Telemetry(TelemetryClass::Span(
@@ -601,23 +594,67 @@ async fn build_tracing_span_document(
         return Ok(None);
     };
 
+    Ok(Some(trace_search_document(
+        span_id,
+        &trace,
+        &settings
+            .index_tracing_fields
+            .iter()
+            .copied()
+            .collect::<Vec<_>>(),
+    )))
+}
+
+/// inbuxa: MON-16: the search document for a stored trace.
+///
+/// The event type and queue id columns are integers on every search backend
+/// (BIGINT on PostgreSQL and MySQL, long on Elasticsearch), and each holds a
+/// single value per trace: the event type is the trace's opening event, the
+/// one `x:Trace/query` filters on, and the queue id is the first queue id the
+/// trace mentions. Every queue id also goes into the keywords, so a session
+/// that queued several messages is found by any of them.
+pub fn trace_search_document(
+    span_id: u64,
+    trace: &registry::schema::structs::Trace,
+    fields: &[registry::schema::enums::SearchTracingField],
+) -> IndexDocument {
+    use registry::schema::{enums::SearchTracingField, structs::TraceValue};
+    use store::search::TracingSearchField;
+    use trc::Key;
+
+    let wants = |field: SearchTracingField| fields.contains(&field);
     let mut document = IndexDocument::new(SearchIndex::Tracing).with_id(span_id);
+    if wants(SearchTracingField::EventType)
+        && let Some(first) = trace.events.iter().next()
+    {
+        document.index_unsigned(TracingSearchField::EventType, first.event.to_id() as u64);
+    }
+
     let mut seen = store::ahash::AHashSet::new();
+    let mut queue_id_indexed = false;
     for event in trace.events.iter() {
-        if wants(SearchTracingField::EventType) && seen.insert(event.event.as_str().to_string()) {
-            document.index_keyword(TracingSearchField::EventType, event.event.as_str());
-        }
         for kv in event.key_values.iter() {
             let text = match &kv.value {
-                registry::schema::structs::TraceValue::String(v) => v.value.clone(),
-                registry::schema::structs::TraceValue::UnsignedInt(v) => v.value.to_string(),
-                registry::schema::structs::TraceValue::IpAddr(v) => v.value.to_string(),
+                TraceValue::String(v) => v.value.clone(),
+                TraceValue::UnsignedInt(v) => v.value.to_string(),
+                TraceValue::IpAddr(v) => v.value.to_string(),
                 _ => continue,
             };
             match kv.key {
-                Key::QueueId if wants(SearchTracingField::QueueId) => {
-                    if seen.insert(format!("q:{text}")) {
-                        document.index_keyword(TracingSearchField::QueueId, &text);
+                Key::QueueId => {
+                    let Ok(queue_id) = text.parse::<u64>() else {
+                        continue;
+                    };
+                    if wants(SearchTracingField::QueueId) && !queue_id_indexed {
+                        document.index_unsigned(TracingSearchField::QueueId, queue_id);
+                        queue_id_indexed = true;
+                    }
+                    if wants(SearchTracingField::Keywords) && seen.insert(format!("k:{text}")) {
+                        document.index_text(
+                            TracingSearchField::Keywords,
+                            &text,
+                            nlp::language::Language::None,
+                        );
                     }
                 }
                 Key::From
@@ -648,7 +685,7 @@ async fn build_tracing_span_document(
             }
         }
     }
-    Ok(Some(document))
+    document
 }
 
 // inbuxa: UD-1, UD-4: archives a deleted file, event or contact noted at

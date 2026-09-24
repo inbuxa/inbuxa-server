@@ -212,10 +212,15 @@ unchanged.
 - **MON-16.** With `indexTelemetry` on, storing a trace schedules an
   `IndexTrace` task. The task builds one document for `SearchIndex::Tracing`
   with the fields named in `indexTracingFields`:
-  - `eventType`: every event type in the trace;
-  - `queueId`: every `queueId` value;
+  - `eventType`: the trace's opening event, as its numeric id;
+  - `queueId`: the first `queueId` value, as an integer;
   - `keywords`: every address in `from` and `to`, each address's domain, every
-    `domain`, `hostname`, `remoteIp`, `messageId` and `accountName` value.
+    `domain`, `hostname`, `remoteIp`, `messageId` and `accountName` value,
+    and every `queueId` value.
+  The event type and queue id are single integer columns on every search
+  backend (BIGINT on PostgreSQL and MySQL), so the `queueId` filter matches
+  the column or any queue id in the keywords, and a session that queued
+  several messages is found by each of them.
   So searching `example.org` finds every trace to or from that domain, as the
   upstream suite expects. With `indexTelemetry` off nothing is indexed, and
   the `text` and `queueId` filters are refused (see "Interfaces").
