@@ -265,12 +265,21 @@ async fn create_search_tables<T: SearchableField + PsqlSearchField + 'static>(
     for field in T::all_fields() {
         if field.is_text() || field.is_json() {
             let column_name = field.column();
+            // inbuxa: with GIN's default fastupdate=on, new entries wait in
+            // an unindexed pending list that every search scans in full
+            // until a VACUUM (or 4 MB of backlog) merges it. On a mailbox
+            // taking steady mail that list never drains and searches slow
+            // from milliseconds to hundreds of them. Pay the index update
+            // at insert time instead.
+            let index_name = format!("gin_{table_name}_{column_name}");
             let create_index_query = format!(
-                "CREATE INDEX IF NOT EXISTS gin_{table_name}_{column_name} ON {table_name} USING GIN({column_name})",
+                "CREATE INDEX IF NOT EXISTS {index_name} ON {table_name} USING GIN({column_name}) WITH (fastupdate = off)",
             );
             conn.execute(&create_index_query, &[])
                 .await
                 .map_err(into_error)?;
+            // Indexes made before this change keep fastupdate=on
+            disable_gin_fastupdate(conn, &index_name).await;
         }
 
         if field.is_indexed() {
@@ -285,6 +294,69 @@ async fn create_search_tables<T: SearchableField + PsqlSearchField + 'static>(
     }
 
     Ok(())
+}
+
+/// inbuxa: turns fastupdate off on a GIN index made with the default and
+/// merges the pending list it has built up. Idempotent: an index that already
+/// has the option is left alone, so this costs one catalog read per index at
+/// startup. A failure is logged and startup goes on, since search still works,
+/// only slower.
+async fn disable_gin_fastupdate(conn: &Object, index_name: &str) {
+    if let Err(err) = try_disable_gin_fastupdate(conn, index_name).await {
+        trc::event!(
+            Store(trc::StoreEvent::PostgresqlError),
+            Details = format!("Failed to turn off fastupdate on search index {index_name}"),
+            Reason = err.to_string(),
+        );
+    }
+}
+
+async fn try_disable_gin_fastupdate(conn: &Object, index_name: &str) -> trc::Result<()> {
+    let options = conn
+        .query_opt(
+            "SELECT COALESCE(reloptions, '{}')::text[] FROM pg_class WHERE oid = to_regclass($1)",
+            &[&index_name],
+        )
+        .await
+        .map_err(into_error)?
+        .map(|row| row.try_get::<_, Vec<String>>(0))
+        .transpose()
+        .map_err(into_error)?;
+    let Some(options) = options else {
+        return Ok(());
+    };
+    if gin_fastupdate_is_off(&options) {
+        return Ok(());
+    }
+    // SET (fastupdate) takes a SHARE UPDATE EXCLUSIVE lock, which doesn't
+    // block reads or writes. Turning it off stops new entries going to the
+    // pending list but doesn't flush the entries already there.
+    conn.execute(
+        &format!("ALTER INDEX {index_name} SET (fastupdate = off)"),
+        &[],
+    )
+    .await
+    .map_err(into_error)?;
+    conn.query_one(
+        "SELECT gin_clean_pending_list($1::text::regclass)",
+        &[&index_name],
+    )
+    .await
+    .map_err(into_error)?;
+    Ok(())
+}
+
+/// Whether a relation's reloptions turn GIN's fastupdate off.
+fn gin_fastupdate_is_off(options: &[String]) -> bool {
+    options.iter().any(|option| {
+        option.split_once('=').is_some_and(|(name, value)| {
+            name.trim().eq_ignore_ascii_case("fastupdate")
+                && matches!(
+                    value.trim().to_ascii_lowercase().as_str(),
+                    "off" | "false" | "no" | "0" | "f" | "n"
+                )
+        })
+    })
 }
 
 async fn discover_ts_configs(pool: &Pool) -> AHashSet<&'static str> {
