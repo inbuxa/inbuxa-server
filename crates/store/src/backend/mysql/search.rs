@@ -2,6 +2,8 @@
  * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
+ *
+ * Modified by Coffey Labs in 2026 for INBUXA.
  */
 
 use crate::{
@@ -19,7 +21,7 @@ use crate::{
     write::SearchIndex,
 };
 use mysql_async::{IsolationLevel, TxOpts, Value, prelude::Queryable};
-use nlp::tokenizers::word::WordTokenizer;
+use nlp::{language::Language, tokenizers::word::WordTokenizer};
 use std::fmt::Write;
 
 impl MysqlStore {
@@ -146,6 +148,20 @@ impl MysqlStore {
     }
 }
 
+// inbuxa: InnoDB's default full-text stopword list
+// (INFORMATION_SCHEMA.INNODB_FT_DEFAULT_STOPWORD) and innodb_ft_min_token_size
+// default; words outside these are not in a FULLTEXT index.
+const FT_STOPWORDS: &[&str] = &[
+    "a", "about", "an", "are", "as", "at", "be", "by", "com", "de", "en", "for", "from", "how",
+    "i", "in", "is", "it", "la", "of", "on", "or", "that", "the", "this", "to", "was", "what",
+    "when", "where", "who", "will", "with", "und", "www",
+];
+const FT_MIN_TOKEN_SIZE: usize = 3;
+
+fn is_ft_indexed(word: &str) -> bool {
+    word.chars().count() >= FT_MIN_TOKEN_SIZE && !FT_STOPWORDS.contains(&word)
+}
+
 fn build_filter(query: &mut String, filters: &[SearchFilter]) -> Vec<Value> {
     if filters.is_empty() {
         return Vec::new();
@@ -171,30 +187,77 @@ fn build_filter(query: &mut String, filters: &[SearchFilter]) -> Vec<Value> {
 
                 if field.is_text() && matches!(op, SearchOperator::Equal | SearchOperator::Contains)
                 {
-                    let (value, mode) = match (value, op) {
-                        (SearchValue::Text { value, .. }, SearchOperator::Equal) => {
-                            (Value::Bytes(format!("{value:?}").into_bytes()), "BOOLEAN")
-                        }
-                        (SearchValue::Text { value, .. }, ..) => {
+                    let (value, mode, unindexed) = match (value, op) {
+                        (SearchValue::Text { value, .. }, SearchOperator::Equal) => (
+                            Value::Bytes(format!("{value:?}").into_bytes()),
+                            "BOOLEAN",
+                            Vec::new(),
+                        ),
+                        (SearchValue::Text { value, language }, ..) => {
                             let mut text_query = String::with_capacity(value.len() + 1);
+                            let mut unindexed = Vec::new();
 
                             for item in WordTokenizer::new(value, MAX_TOKEN_LENGTH) {
-                                if !text_query.is_empty() {
-                                    text_query.push(' ');
+                                // inbuxa: InnoDB never indexes stopwords ("com",
+                                // "de", "www", ...) or words under
+                                // innodb_ft_min_token_size, and a required
+                                // (+word) term it has not indexed matches no row,
+                                // so "example.com" or "jo@example.org" found
+                                // nothing. Such words are matched with a
+                                // word-boundary REGEXP instead.
+                                if is_ft_indexed(&item.word) {
+                                    if !text_query.is_empty() {
+                                        text_query.push(' ');
+                                    }
+                                    text_query.push('+');
+                                    text_query.push_str(&item.word);
+                                } else {
+                                    unindexed.push(item.word);
                                 }
-                                text_query.push('+');
-                                text_query.push_str(&item.word);
                             }
 
-                            (Value::Bytes(text_query.into_bytes()), "BOOLEAN")
+                            // For language text (bodies, subjects) the unindexed
+                            // words are noise words and only checked when nothing
+                            // else is left to match; keyword text (addresses,
+                            // contact fields) checks every word, as the other
+                            // backends do.
+                            if !text_query.is_empty() && !matches!(language, Language::None) {
+                                unindexed.clear();
+                            }
+
+                            (Value::Bytes(text_query.into_bytes()), "BOOLEAN", unindexed)
                         }
                         _ => {
                             debug_assert!(false, "Invalid search value for text field");
                             continue;
                         }
                     };
-                    let _ = write!(query, "MATCH({}) AGAINST(? IN {mode} MODE)", field.column());
-                    values.push(value);
+                    if unindexed.is_empty() {
+                        let _ =
+                            write!(query, "MATCH({}) AGAINST(? IN {mode} MODE)", field.column());
+                        values.push(value);
+                    } else {
+                        query.push('(');
+                        let is_empty = matches!(&value, Value::Bytes(v) if v.is_empty());
+                        if !is_empty {
+                            let _ = write!(
+                                query,
+                                "MATCH({}) AGAINST(? IN {mode} MODE) AND ",
+                                field.column()
+                            );
+                            values.push(value);
+                        }
+                        for (i, word) in unindexed.iter().enumerate() {
+                            if i > 0 {
+                                query.push_str(" AND ");
+                            }
+                            let _ = write!(query, "{} REGEXP ?", field.column());
+                            values.push(Value::Bytes(
+                                format!("(^|[^[:alnum:]]){word}([^[:alnum:]]|$)").into_bytes(),
+                            ));
+                        }
+                        query.push(')');
+                    }
                 } else if let SearchValue::KeyValues(kv) = value {
                     let (key, value) = kv.iter().next().unwrap();
 
