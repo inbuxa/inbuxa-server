@@ -240,6 +240,9 @@ impl BootManager {
                     .parse_tcp_acceptors(&mut bootstrap, inner.clone())
                     .await;
 
+                // inbuxa: a reload isn't refused over objects that failed here
+                inner.build_server().record_build_errors(&bootstrap.errors);
+
                 BootManager {
                     inner,
                     bootstrap,

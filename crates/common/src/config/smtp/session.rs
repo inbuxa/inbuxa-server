@@ -2,6 +2,8 @@
  * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
+ *
+ * Modified by Coffey Labs in 2026 for INBUXA.
  */
 
 use self::resolver::Policy;
@@ -22,7 +24,7 @@ use registry::schema::{
 };
 use smtp_proto::*;
 use std::{
-    net::{SocketAddr, ToSocketAddrs},
+    net::{IpAddr, SocketAddr},
     str::FromStr,
     time::Duration,
 };
@@ -384,19 +386,16 @@ impl SessionConfig {
                     Some(Milter {
                         enable: bp.compile_expr(id, &milter.ctx_enable()),
                         id,
-                        addrs: format!("{}:{}", milter.hostname, milter.port)
-                            .to_socket_addrs()
-                            .map_err(|err| {
-                                bp.build_error(
-                                    id,
-                                    format!(
-                                        "Unable to resolve milter hostname {}: {}",
-                                        milter.hostname, err
-                                    ),
-                                )
-                            })
-                            .ok()?
-                            .collect(),
+                        // inbuxa: upstream resolved the hostname here (a
+                        // blocking lookup) and made a failure a build error,
+                        // which refused the whole settings reload. An IP
+                        // address is kept as is; a name is resolved on each
+                        // connection (MilterClient::connect).
+                        addrs: milter
+                            .hostname
+                            .parse::<IpAddr>()
+                            .map(|ip| vec![SocketAddr::new(ip, milter.port as u16)])
+                            .unwrap_or_default(),
                         hostname: milter.hostname,
                         port: milter.port as u16,
                         timeout_connect: milter.timeout_connect.into_inner(),

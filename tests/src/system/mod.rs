@@ -20,6 +20,7 @@ pub mod monitoring;
 pub mod oidc;
 pub mod purge;
 pub mod quota;
+pub mod reload; // inbuxa: reloads and build errors
 pub mod security;
 pub mod task;
 pub mod tenant;

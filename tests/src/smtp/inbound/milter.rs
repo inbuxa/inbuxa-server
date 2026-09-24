@@ -2,6 +2,8 @@
  * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
+ *
+ * Modified by Coffey Labs in 2026 for INBUXA.
  */
 
 use crate::{
@@ -75,7 +77,7 @@ async fn milter_session() {
                 else_: "true".into(),
                 ..Default::default()
             },
-            hostname: "127.0.0.1".into(),
+            hostname: "localhost".into(), // inbuxa: resolved when the session connects
             port: 9332,
             use_tls: false,
             stages: Map::new(vec![MtaStage::Data]),

@@ -16,7 +16,6 @@ use mail_auth::common::resolver::ToReverseName;
 use nlp::classifier::model::{CcfhClassifier, FhClassifier};
 use registry::schema::{
     enums::{ExpressionVariable, ModelSize},
-    prelude::ObjectType,
     structs::{
         self, SpamDnsblServer, SpamDnsblSettings, SpamFileExtension, SpamPyzor, SpamRule,
         SpamSettings, SpamTag,
@@ -25,10 +24,10 @@ use registry::schema::{
 use sieve::SpamStatus;
 use std::{
     net::{IpAddr, SocketAddr},
-    time::Duration,
+    sync::Arc,
+    time::{Duration, Instant},
 };
 use store::registry::{RegistryObject, bootstrap::Bootstrap};
-use tokio::net::lookup_host;
 use utils::{cache::CacheItemWeight, glob::GlobMap};
 
 #[derive(rkyv::Archive, rkyv::Deserialize, rkyv::Serialize, Debug, Default)]
@@ -157,7 +156,11 @@ pub struct FtrlParameters {
 
 #[derive(Debug, Clone)]
 pub struct PyzorConfig {
-    pub address: SocketAddr,
+    // inbuxa: the server is resolved when a message is checked, not while the
+    // settings are built (see PyzorConfig::address)
+    pub host: String,
+    pub port: u16,
+    pub resolved: Arc<parking_lot::Mutex<Option<(SocketAddr, Instant)>>>,
     pub timeout: Duration,
     pub min_count: u64,
     pub min_wl_count: u64,
@@ -474,37 +477,50 @@ impl PyzorConfig {
             return None;
         }
 
-        let port = pyzor.port;
-        let host = pyzor.host;
-        let address = match lookup_host(format!("{host}:{port}"))
-            .await
-            .map(|mut a| a.next())
-        {
-            Ok(Some(address)) => address,
-            Ok(None) => {
-                bp.build_error(
-                    ObjectType::SpamPyzor.singleton(),
-                    "Invalid address: No addresses found.",
-                );
-                return None;
-            }
-            Err(err) => {
-                bp.build_error(
-                    ObjectType::SpamPyzor.singleton(),
-                    format!("Invalid address: {}", err),
-                );
-                return None;
-            }
-        };
-
+        // inbuxa: upstream resolved the host here and reported a failed lookup
+        // as a build error, so a DNS hiccup on one node refused every settings
+        // reload on it (and, from the node that ran ReloadSettings, across the
+        // cluster). The lookup now happens when a message is checked; a
+        // failure there is logged as a Pyzor error for that message.
         PyzorConfig {
-            address,
+            host: pyzor.host,
+            port: pyzor.port as u16,
+            resolved: Default::default(),
             timeout: pyzor.timeout.into_inner(),
             min_count: pyzor.block_count,
             min_wl_count: pyzor.allow_count,
             ratio: pyzor.ratio.into_inner(),
         }
         .into()
+    }
+}
+
+// inbuxa: how long a resolved Pyzor address is reused
+const PYZOR_RESOLVE_TTL: Duration = Duration::from_secs(300);
+
+impl PyzorConfig {
+    /// The server's address: the host itself when it is an IP address,
+    /// otherwise the first address it resolves to, reused for five minutes.
+    pub async fn address(&self) -> std::io::Result<SocketAddr> {
+        if let Ok(ip) = self.host.parse::<IpAddr>() {
+            return Ok(SocketAddr::new(ip, self.port));
+        }
+        if let Some((address, resolved_at)) = *self.resolved.lock()
+            && resolved_at.elapsed() < PYZOR_RESOLVE_TTL
+        {
+            return Ok(address);
+        }
+        let address = tokio::net::lookup_host((self.host.as_str(), self.port))
+            .await?
+            .next()
+            .ok_or_else(|| {
+                std::io::Error::new(
+                    std::io::ErrorKind::NotFound,
+                    format!("{} has no addresses", self.host),
+                )
+            })?;
+        *self.resolved.lock() = Some((address, Instant::now()));
+        Ok(address)
     }
 }
 

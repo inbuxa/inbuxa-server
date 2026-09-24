@@ -48,19 +48,24 @@ pub(crate) async fn pyzor_check(
     // Send message to address. inbuxa: in tests, a fixed table answers
     // instead of a public server (test_response).
     #[cfg(not(feature = "test_mode"))]
-    let response = pyzor_send_message(config.address, config.timeout, &request).await;
+    let response = match tokio::time::timeout(config.timeout, config.address()).await {
+        Ok(Ok(address)) => pyzor_send_message(address, config.timeout, &request).await,
+        Ok(Err(err)) => Err(err),
+        Err(_) => Err(std::io::Error::new(
+            std::io::ErrorKind::TimedOut,
+            "Timed out resolving the Pyzor server",
+        )),
+    };
     #[cfg(feature = "test_mode")]
     let response = std::io::Result::Ok(test_response(&request));
 
-    response
-        .map(Into::into)
-        .map_err(|err| {
-            trc::SpamEvent::PyzorError
-                .into_err()
-                .ctx(trc::Key::Url, config.address.to_string())
-                .reason(err)
-                .details("Pyzor failed")
-        })
+    response.map(Into::into).map_err(|err| {
+        trc::SpamEvent::PyzorError
+            .into_err()
+            .ctx(trc::Key::Url, format!("{}:{}", config.host, config.port))
+            .reason(err)
+            .details("Pyzor failed")
+    })
 }
 
 /// inbuxa: the answers tests get, by digest, instead of a public server's,
