@@ -2,6 +2,8 @@
  * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
+ *
+ * Modified by Coffey Labs in 2026 for INBUXA.
  */
 
 use super::{MysqlStore, into_error, is_timeout_error};
@@ -14,7 +16,7 @@ impl MysqlStore {
     where
         U: Deserialize + 'static,
     {
-        let mut conn = self.conn_pool.get_conn().await.map_err(into_error)?;
+        let mut conn = self.conn().await?;
         let s = conn
             .prep(format!(
                 "SELECT v FROM {} WHERE k = ?",
@@ -36,7 +38,7 @@ impl MysqlStore {
     }
 
     pub(crate) async fn key_exists(&self, key: impl Key) -> trc::Result<bool> {
-        let mut conn = self.conn_pool.get_conn().await.map_err(into_error)?;
+        let mut conn = self.conn().await?;
         let s = conn
             .prep(format!(
                 "SELECT 1 FROM {} WHERE k = ?",
@@ -56,7 +58,7 @@ impl MysqlStore {
         params: IterateParams<T>,
         mut cb: impl for<'x> FnMut(&'x [u8], &'x [u8]) -> trc::Result<bool> + Sync + Send,
     ) -> trc::Result<()> {
-        let mut conn = self.conn_pool.get_conn().await.map_err(into_error)?;
+        let mut conn = self.conn().await?;
         let table = char::from(params.begin.subspace());
         let begin = params.begin.serialize(0);
         let end = params.end.serialize(0);
@@ -155,7 +157,7 @@ impl MysqlStore {
         let key = key.into();
         let table = char::from(key.subspace());
         let key = key.serialize(0);
-        let mut conn = self.conn_pool.get_conn().await.map_err(into_error)?;
+        let mut conn = self.conn().await?;
         let s = conn
             .prep(format!("SELECT v FROM {table} WHERE k = ?"))
             .await

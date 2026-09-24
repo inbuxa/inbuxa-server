@@ -26,7 +26,7 @@ use std::fmt::Write;
 
 impl MysqlStore {
     pub async fn index(&self, documents: Vec<IndexDocument>) -> trc::Result<()> {
-        let mut conn = self.conn_pool.get_conn().await.map_err(into_error)?;
+        let mut conn = self.conn().await?;
         let mut tx_opts = TxOpts::default();
         tx_opts
             .with_consistent_snapshot(false)
@@ -96,7 +96,7 @@ impl MysqlStore {
             build_sort(&mut query, sort);
         }
 
-        let mut conn = self.conn_pool.get_conn().await.map_err(into_error)?;
+        let mut conn = self.conn().await?;
         let s = conn.prep(query).await.map_err(into_error)?;
 
         conn.exec::<i64, _, _>(s, params)
@@ -110,7 +110,7 @@ impl MysqlStore {
         let mut query = format!("DELETE FROM {table} ");
         let params = build_filter(&mut query, &filter.filters);
 
-        let mut conn = self.conn_pool.get_conn().await.map_err(into_error)?;
+        let mut conn = self.conn().await?;
         let s = conn.prep(&query).await.map_err(into_error)?;
 
         match conn.exec_drop(s, params.clone()).await {

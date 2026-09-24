@@ -32,6 +32,9 @@ impl MysqlStore {
             .max_allowed_packet(config.max_allowed_packet.map(|v| v as usize))
             .wait_timeout(config.timeout.map(|t| t.as_secs() as usize))
             .client_found_rows(true)
+            // inbuxa: notice a server that went away without closing the
+            // connection in minutes, not the system default of two hours
+            .tcp_keepalive(Some(super::POOL_KEEPALIVE_IDLE))
             .tcp_port(config.port as u16);
 
         if config.use_tls {
@@ -95,7 +98,7 @@ impl MysqlStore {
     }
 
     pub(crate) async fn create_storage_tables(&self) -> trc::Result<()> {
-        let mut conn = self.conn_pool.get_conn().await.map_err(into_error)?;
+        let mut conn = self.conn().await?;
 
         for table in [
             SUBSPACE_ACL,
@@ -169,7 +172,7 @@ impl MysqlStore {
     }
 
     pub(crate) async fn create_search_tables(&self) -> trc::Result<()> {
-        let mut conn = self.conn_pool.get_conn().await.map_err(into_error)?;
+        let mut conn = self.conn().await?;
 
         create_search_tables::<EmailSearchField>(&mut conn).await?;
         create_search_tables::<CalendarSearchField>(&mut conn).await?;

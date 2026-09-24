@@ -2,6 +2,8 @@
  * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
+ *
+ * Modified by Coffey Labs in 2026 for INBUXA.
  */
 
 use super::{RedisPool, RedisStore, into_error};
@@ -75,6 +77,30 @@ impl RedisStore {
             }
             RedisPool::Sentinel(pool) => {
                 with_conn(pool, async |conn| Self::try_lock_(conn, key, expires).await).await
+            }
+        }
+    }
+
+    // inbuxa: see InMemoryStore::renew_lock
+    pub async fn renew_lock(&self, key: &[u8], expires: u64) -> trc::Result<bool> {
+        match &self.pool {
+            RedisPool::Single(pool) => {
+                with_conn(pool, async |conn| {
+                    Self::renew_lock_(conn, key, expires).await
+                })
+                .await
+            }
+            RedisPool::Cluster(pool) => {
+                with_conn(pool, async |conn| {
+                    Self::renew_lock_(conn, key, expires).await
+                })
+                .await
+            }
+            RedisPool::Sentinel(pool) => {
+                with_conn(pool, async |conn| {
+                    Self::renew_lock_(conn, key, expires).await
+                })
+                .await
             }
         }
     }
@@ -219,6 +245,22 @@ impl RedisStore {
             .arg(key)
             .arg(now() + expires)
             .arg("NX")
+            .arg("EX")
+            .arg(expires as i64)
+            .query_async::<Option<String>>(conn)
+            .await
+            .map(|reply| reply.is_some())
+    }
+
+    async fn renew_lock_(
+        conn: &mut impl AsyncCommands,
+        key: &[u8],
+        expires: u64,
+    ) -> RedisResult<bool> {
+        redis::cmd("SET")
+            .arg(key)
+            .arg(now() + expires)
+            .arg("XX")
             .arg("EX")
             .arg(expires as i64)
             .query_async::<Option<String>>(conn)

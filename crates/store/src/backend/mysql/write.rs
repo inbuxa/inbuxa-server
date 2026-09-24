@@ -2,6 +2,8 @@
  * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
+ *
+ * Modified by Coffey Labs in 2026 for INBUXA.
  */
 
 use super::{DELETE_CHUNK_SIZE, MIN_DELETE_CHUNK_SIZE, MysqlStore, into_error, is_timeout_error};
@@ -29,7 +31,7 @@ impl MysqlStore {
     pub(crate) async fn write(&self, mut batch: Batch<'_>) -> trc::Result<AssignedIds> {
         let start = Instant::now();
         let mut retry_count = 0;
-        let mut conn = self.conn_pool.get_conn().await.map_err(into_error)?;
+        let mut conn = self.conn().await?;
 
         loop {
             let err = match self.write_trx(&mut conn, &mut batch).await {
@@ -382,7 +384,7 @@ impl MysqlStore {
     }
 
     pub(crate) async fn purge_store(&self) -> trc::Result<()> {
-        let mut conn = self.conn_pool.get_conn().await.map_err(into_error)?;
+        let mut conn = self.conn().await?;
         for subspace in [SUBSPACE_QUOTA, SUBSPACE_COUNTER, SUBSPACE_IN_MEMORY_COUNTER] {
             purge_table(&mut conn, char::from(subspace)).await?;
         }
@@ -391,7 +393,7 @@ impl MysqlStore {
     }
 
     pub(crate) async fn delete_range(&self, from: impl Key, to: impl Key) -> trc::Result<()> {
-        let mut conn = self.conn_pool.get_conn().await.map_err(into_error)?;
+        let mut conn = self.conn().await?;
         let table = char::from(from.subspace());
         let mut from = from.serialize(0);
         let to = to.serialize(0);

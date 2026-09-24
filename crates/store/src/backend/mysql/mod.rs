@@ -27,6 +27,33 @@ pub struct MysqlStore {
     pub(crate) conn_pool: Pool,
 }
 
+/// inbuxa: how long a request waits for a pooled connection (including
+/// opening one). mysql_async's pool has no wait timeout, so upstream waited
+/// forever when the server stopped answering.
+pub(crate) const POOL_WAIT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+/// inbuxa: idle time before TCP keepalive probes start.
+pub(crate) const POOL_KEEPALIVE_IDLE: std::time::Duration = std::time::Duration::from_secs(60);
+
+impl MysqlStore {
+    /// inbuxa: a pooled connection, or an error once POOL_WAIT_TIMEOUT has
+    /// passed without one.
+    pub(crate) async fn conn(&self) -> trc::Result<mysql_async::Conn> {
+        pool_conn(&self.conn_pool, POOL_WAIT_TIMEOUT).await
+    }
+}
+
+pub(crate) async fn pool_conn(
+    pool: &Pool,
+    wait: std::time::Duration,
+) -> trc::Result<mysql_async::Conn> {
+    match tokio::time::timeout(wait, pool.get_conn()).await {
+        Ok(result) => result.map_err(into_error),
+        Err(_) => Err(trc::StoreEvent::MysqlError
+            .reason("Timed out waiting for a database connection")
+            .details(format!("No connection within {} s", wait.as_secs()))),
+    }
+}
+
 #[inline(always)]
 pub(crate) fn into_error(err: impl Display) -> trc::Error {
     trc::StoreEvent::MysqlError.reason(err)

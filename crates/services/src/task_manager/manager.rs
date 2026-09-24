@@ -13,7 +13,7 @@ use crate::task_manager::dkim::DkimManagementTask;
 use crate::task_manager::dns::DnsManagementTask;
 use crate::task_manager::imip::SendImipTask;
 use crate::task_manager::index::SearchIndexTask;
-use crate::task_manager::lock::TaskLockManager;
+use crate::task_manager::lock::{TaskLockManager, renew_task_locks};
 use crate::task_manager::maintenance::MaintenanceTask;
 use crate::task_manager::merge_threads::MergeThreadsTask;
 use crate::task_manager::report::{self, SubmitReportTask};
@@ -74,6 +74,28 @@ pub fn spawn_task_manager(inner: Arc<Inner>) {
     };
 
     trc::event!(TaskManager(TaskManagerEvent::ManagerStarted));
+
+    // inbuxa: keep the leases of running tasks alive, every third of a lock
+    // lifetime, until the node stops
+    {
+        let inner = inner.clone();
+        tokio::spawn(async move {
+            let mut renewed_at = Instant::now();
+            loop {
+                tokio::time::sleep(Duration::from_secs(1)).await;
+                let locks = &inner.ipc.task_locks;
+                if locks.is_stopping() {
+                    break;
+                }
+                if renewed_at.elapsed() >= Duration::from_secs((locks.expiry() / 3).max(1)) {
+                    renewed_at = Instant::now();
+                    if locks.held() > 0 {
+                        renew_task_locks(&inner.build_server()).await;
+                    }
+                }
+            }
+        });
+    }
 
     // Create dummy server instance for alarms
     let server_instance = Arc::new(ServerInstance {
@@ -292,6 +314,12 @@ impl TaskQueueManager for Server {
                                     .caused_by(trc::location!())
                                     .ctx(trc::Key::Value, value)
                             })?;
+                            // inbuxa: running here under a lease this node
+                            // renews; don't hand it to a worker again
+                            if task_locks.is_held(task_id) {
+                                return Ok(true);
+                            }
+
                             let enabled = task_enabled(roles, task_type);
 
                             if !enabled {

@@ -22,10 +22,33 @@ use crate::{
 use ::registry::schema::{enums::PostgreSqlRecyclingMethod, structs};
 use ahash::AHashSet;
 use deadpool_postgres::{
-    Config, ManagerConfig, Object, Pool, PoolConfig, RecyclingMethod, Runtime,
+    Config, ManagerConfig, Object, Pool, PoolConfig, RecyclingMethod, Runtime, Timeouts,
 };
+use std::time::Duration;
 use tokio_postgres::NoTls;
 use utils::tls::rustls_client_config;
+
+/// inbuxa: how long a request waits for a pooled connection.
+pub(crate) const POOL_WAIT_TIMEOUT: Duration = Duration::from_secs(30);
+/// inbuxa: how long opening a connection may take when the store sets no
+/// timeout of its own.
+pub(crate) const POOL_CREATE_TIMEOUT: Duration = Duration::from_secs(15);
+/// inbuxa: how long checking a pooled connection before reuse may take.
+pub(crate) const POOL_RECYCLE_TIMEOUT: Duration = Duration::from_secs(10);
+/// inbuxa: idle time before TCP keepalive probes start.
+pub(crate) const POOL_KEEPALIVE_IDLE: Duration = Duration::from_secs(60);
+
+/// inbuxa: the pool's timeouts. Opening a connection is bounded by the
+/// store's own timeout when it has one; waiting for one covers at least that
+/// long, so a slow connect isn't cut short by the wait.
+pub(crate) fn pool_timeouts(connect_timeout: Option<Duration>) -> Timeouts {
+    let create = connect_timeout.unwrap_or(POOL_CREATE_TIMEOUT);
+    Timeouts {
+        wait: POOL_WAIT_TIMEOUT.max(create).into(),
+        create: create.into(),
+        recycle: POOL_RECYCLE_TIMEOUT.into(),
+    }
+}
 
 impl PostgresStore {
     pub async fn open(config: structs::PostgreSqlStore) -> Result<Store, String> {
@@ -46,9 +69,20 @@ impl PostgresStore {
                 PostgreSqlRecyclingMethod::Clean => RecyclingMethod::Clean,
             },
         });
-        if let Some(max_conn) = config.pool_max_connections {
-            cfg.pool = PoolConfig::new(max_conn as usize).into();
-        }
+        // inbuxa: upstream set no pool timeouts, so a request waited for a
+        // free connection, or for one to be made or recycled, for as long as
+        // it took: forever when the server stopped answering. A worker now
+        // gets an error instead and the task or request is retried.
+        let mut pool = config
+            .pool_max_connections
+            .map(|max_conn| PoolConfig::new(max_conn as usize))
+            .unwrap_or_default();
+        pool.timeouts = pool_timeouts(cfg.connect_timeout);
+        cfg.pool = pool.into();
+        // Notice a server that went away without closing the connection in
+        // minutes rather than the system default of two hours
+        cfg.keepalives = true.into();
+        cfg.keepalives_idle = POOL_KEEPALIVE_IDLE.into();
 
         let primary_pool = if config.use_tls {
             cfg.create_pool(

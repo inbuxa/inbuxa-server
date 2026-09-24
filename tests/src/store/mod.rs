@@ -10,6 +10,8 @@ pub mod blob;
 pub mod import_export;
 pub mod lookup;
 pub mod ops;
+#[cfg(any(feature = "postgres", feature = "mysql"))]
+pub mod pool_timeout; // inbuxa: SQL pools give up instead of hanging
 pub mod query;
 pub mod registry;
 #[cfg(feature = "postgres")]

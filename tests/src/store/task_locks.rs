@@ -79,7 +79,33 @@ pub async fn task_lock_tests() {
         "ran before the other node's locks expired: {elapsed:?}"
     );
 
-    // 3. A graceful stop releases the locks this node holds: another node
+    // 3. A task that runs longer than a lock lifetime keeps its claim: the
+    // task manager renews the lease while this node holds it, and the claim
+    // ends when the task does. (Before, a lock simply lasted an hour.)
+    let [id] = new_task_ids(1)[..] else {
+        unreachable!()
+    };
+    assert!(server.try_lock_task(id).await, "claim {id}");
+    tokio::time::sleep(Duration::from_secs(LOCK_EXPIRY + LOCK_EXPIRY / 2)).await;
+    assert!(
+        !foreign_lock(&server, id, LOCK_EXPIRY).await,
+        "lease lapsed while the task ran"
+    );
+    server.remove_index_lock(id).await;
+    assert!(
+        foreign_lock(&server, id, LOCK_EXPIRY).await,
+        "released when the task ended"
+    );
+    let _ = server
+        .in_memory_store()
+        .remove_lock(KV_LOCK_TASK, &id.to_be_bytes())
+        .await;
+    assert!(
+        common::ipc::TaskLocks::DEFAULT_EXPIRY <= 5 * 60,
+        "a dead node's tasks wait no more than a few minutes"
+    );
+
+    // 4. A graceful stop releases the locks this node holds: another node
     // can claim those tasks at once, and this one claims nothing more
     let ids = new_task_ids(3);
     for id in &ids {
