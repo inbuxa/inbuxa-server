@@ -96,6 +96,7 @@ impl Data {
             applications,
             logos: Default::default(),
             smtp_connectors: TlsConnectors::try_new().failed("Failed to build TLS connectors"),
+            build_errors: Default::default(),
             asn_geo_data: Default::default(),
         }
     }
@@ -237,6 +238,7 @@ impl Default for Data {
             applications: WebApplications::new(),
             logos: Default::default(),
             smtp_connectors: TlsConnectors::try_new().unwrap(),
+            build_errors: Default::default(),
             asn_geo_data: Default::default(),
             lookup_stores: Default::default(),
         }

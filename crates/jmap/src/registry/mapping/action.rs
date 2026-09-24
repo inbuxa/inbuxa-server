@@ -2,6 +2,8 @@
  * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
+ *
+ * Modified by Coffey Labs in 2026 for INBUXA.
  */
 
 use crate::registry::mapping::{RegistrySetResponse, map_bootstrap_error};
@@ -99,7 +101,7 @@ pub(crate) async fn action_set(
                 } else {
                     set.response
                         .not_created
-                        .append(id, map_bootstrap_error(result.errors));
+                        .append(id, reload_refused(result.errors));
                 }
             }
             Action::InvalidateCaches => {
@@ -572,4 +574,35 @@ async fn dmarc_troubleshoot(
     request.elapsed = now.elapsed().into();
 
     Some(request)
+}
+
+/// inbuxa: a refused reload names the object that stopped it and says the
+/// settings weren't applied; upstream passed on the first error's bare message
+/// ("Invalid address: ..."), which read like a problem with the request.
+fn reload_refused(errors: Vec<registry::types::error::Error>) -> SetError<Property> {
+    use registry::types::error::Error;
+    let more = errors.len().saturating_sub(1);
+    let mut description = match errors.first() {
+        Some(Error::Build { object_id, message }) => format!("{object_id}: {message}"),
+        Some(Error::Validation { object_id, errors }) => format!(
+            "{object_id}: {}",
+            errors
+                .iter()
+                .map(|err| err.to_string())
+                .collect::<Vec<_>>()
+                .join("; ")
+        ),
+        Some(Error::Internal {
+            object_id: Some(object_id),
+            error,
+        }) => format!("{object_id}: {error}"),
+        Some(Error::Internal { error, .. }) => error.to_string(),
+        Some(Error::NotFound { object_id }) => format!("{object_id} was not found"),
+        None => String::new(),
+    };
+    description.insert_str(0, "Settings were not reloaded. ");
+    if more > 0 {
+        description.push_str(&format!(" ({more} more in the server log.)"));
+    }
+    map_bootstrap_error(errors).with_description(description)
 }

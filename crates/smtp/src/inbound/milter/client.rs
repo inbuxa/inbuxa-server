@@ -2,6 +2,8 @@
  * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
+ *
+ * Modified by Coffey Labs in 2026 for INBUXA.
  */
 
 use common::config::smtp::session::Milter;
@@ -25,7 +27,19 @@ impl MilterClient<TcpStream> {
     pub async fn connect(config: &Milter, session_id: u64) -> Result<Self> {
         tokio::time::timeout(config.timeout_command, async {
             let mut last_err = Error::Disconnected;
-            for addr in &config.addrs {
+            // inbuxa: a hostname is resolved here, per connection, rather
+            // than while the settings are built
+            let resolved;
+            let addrs = if config.addrs.is_empty() {
+                resolved = tokio::net::lookup_host((config.hostname.as_str(), config.port))
+                    .await
+                    .map_err(Error::Io)?
+                    .collect::<Vec<_>>();
+                &resolved
+            } else {
+                &config.addrs
+            };
+            for addr in addrs {
                 match TcpStream::connect(addr).await {
                     Ok(stream) => {
                         return Ok(MilterClient {

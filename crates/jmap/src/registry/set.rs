@@ -947,10 +947,14 @@ impl RegistrySet for Server {
                     self.cluster_broadcast(common::ipc::BroadcastEvent::RegistryChange(change))
                         .await;
                 }
-                Ok(_) => trc::event!(
-                    Registry(trc::RegistryEvent::BuildWarning),
-                    Details = "Settings didn't reload after a directory change",
-                ),
+                Ok(reload) => {
+                    // inbuxa: name what stopped it
+                    reload.log();
+                    trc::event!(
+                        Registry(trc::RegistryEvent::BuildWarning),
+                        Details = "Settings didn't reload after a directory change",
+                    )
+                }
                 Err(err) => {
                     trc::error!(err.details("Failed to reload directories"));
                 }

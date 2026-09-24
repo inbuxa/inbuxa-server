@@ -166,6 +166,10 @@ pub struct Data {
     pub logos: Mutex<AHashMap<Box<str>, LogoCache>>,
 
     pub smtp_connectors: TlsConnectors,
+
+    // inbuxa: the objects that failed to build when the running settings
+    // were built, at boot or by the last applied reload (see reload_registry)
+    pub build_errors: Mutex<AHashSet<registry::types::id::ObjectId>>,
 }
 
 #[derive(Clone)]
