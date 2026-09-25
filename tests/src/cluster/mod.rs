@@ -7,6 +7,7 @@
  */
 
 pub mod broadcast;
+pub mod front_reports; // inbuxa: every node records DMARC and TLS results
 pub mod live_roles; // inbuxa: role edits apply without a restart
 #[cfg(feature = "nats")]
 pub mod coordinator; // inbuxa: coordinator reconnects

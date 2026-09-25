@@ -2,6 +2,8 @@
  * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
+ *
+ * Modified by Coffey Labs in 2026 for INBUXA.
  */
 
 use common::config::smtp::report::AggregateFrequency;
@@ -15,6 +17,7 @@ pub mod inbound;
 pub mod index;
 pub mod scheduler;
 pub mod send;
+pub mod shared; // inbuxa: reports written by every node
 pub mod spf;
 pub mod tls;
 

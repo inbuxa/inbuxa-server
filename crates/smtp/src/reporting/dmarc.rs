@@ -2,9 +2,12 @@
  * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
+ *
+ * Modified by Coffey Labs in 2026 for INBUXA.
  */
 
 use super::AggregateTimestamp;
+use super::shared::{MAX_WRITE_RETRIES, Revisioned, write_retry_pause};
 use crate::{
     core::Session,
     queue::RecipientDomain,
@@ -349,29 +352,43 @@ impl DmarcReporting for Server {
         let object_id = ObjectType::DmarcInternalReport.to_id();
         let key = ValueClass::Registry(RegistryClass::Item { object_id, item_id });
 
-        let Some(report) = self
-            .store()
-            .get_value::<DmarcInternalReport>(ValueKey::from(key.clone()))
-            .await
-            .caused_by(trc::location!())?
-        else {
-            return Ok(());
-        };
+        // Delete report. inbuxa: only the version read here, so a record
+        // another node appends meanwhile is sent with it rather than lost
+        let mut attempt = 0;
+        let report = loop {
+            let Some(Revisioned {
+                revision,
+                value: report,
+            }) = self
+                .store()
+                .get_value::<Revisioned<DmarcInternalReport>>(ValueKey::from(key.clone()))
+                .await
+                .caused_by(trc::location!())?
+            else {
+                return Ok(());
+            };
 
-        // Delete report
-        let mut batch = BatchBuilder::new();
-        batch.clear(key).clear(RegistryClass::PrimaryKey {
-            object_id: object_id.into(),
-            index_id: Property::Domain.to_id(),
-            key: KeySerializer::new(report.domain.len() + U64_LEN)
-                .write(&report.domain)
-                .write(report.policy_identifier)
-                .finalize(),
-        });
-        self.store()
-            .write(batch.build_all())
-            .await
-            .caused_by(trc::location!())?;
+            let mut batch = BatchBuilder::new();
+            batch
+                .assert_value(key.clone(), AssertValue::Hash(revision))
+                .clear(key.clone())
+                .clear(RegistryClass::PrimaryKey {
+                    object_id: object_id.into(),
+                    index_id: Property::Domain.to_id(),
+                    key: KeySerializer::new(report.domain.len() + U64_LEN)
+                        .write(&report.domain)
+                        .write(report.policy_identifier)
+                        .finalize(),
+                });
+            match self.store().write(batch.build_all()).await {
+                Ok(_) => break report,
+                Err(err) if err.is_assertion_failure() && attempt < MAX_WRITE_RETRIES => {
+                    attempt += 1;
+                    write_retry_pause(attempt).await;
+                }
+                Err(err) => return Err(err.caused_by(trc::location!())),
+            }
+        };
 
         let span_id = self.inner.data.span_id_gen.generate();
         let event_from = report.report.date_range_begin.timestamp() as u64;
@@ -676,8 +693,11 @@ impl DmarcReporting for Server {
                     break;
                 }
                 Err(err) => {
-                    if err.is_assertion_failure() && rety_count < 3 {
+                    // inbuxa: another node appended first; try again
+                    // after a short pause
+                    if err.is_assertion_failure() && rety_count < MAX_WRITE_RETRIES {
                         rety_count += 1;
+                        write_retry_pause(rety_count).await;
                         continue;
                     }
                     trc::error!(
