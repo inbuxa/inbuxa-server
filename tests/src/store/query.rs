@@ -133,6 +133,11 @@ pub async fn test(test: &TestServer) {
     println!("Running address search tests...");
     test_address_search(store.clone()).await;
 
+    // inbuxa: words inside URLs, host names and file names in body text
+    // are found on every backend
+    println!("Running URL word search tests...");
+    test_url_word_search(store.clone()).await;
+
     // Large document insert test
     println!("Running large document insert tests...");
     let mut large_text = String::with_capacity(20 * 1024 * 1024);
@@ -1120,6 +1125,82 @@ async fn test_address_search(store: SearchStore) {
         .await
         .unwrap();
     assert_eq!(ids, vec![0, 1, 2, 3, 4]);
+
+    store
+        .unindex(
+            SearchQuery::new(SearchIndex::Email)
+                .with_filter(SearchFilter::eq(SearchField::AccountId, ACCOUNT_ID)),
+        )
+        .await
+        .unwrap();
+}
+
+async fn test_url_word_search(store: SearchStore) {
+    const ACCOUNT_ID: u32 = 8;
+    let bodies = [
+        "Track your parcel here: https://x.example/shipping-support/ and reply.",
+        "Reset it at https://mail.example.com/login/?password=reset&user=jane now.",
+        "Attached is invoice-2024.pdf for your records.",
+        "Shipping was fast, thanks again.",
+        "Nothing to see at www.example.org/about-us, really.",
+    ];
+
+    let mut documents = Vec::new();
+    let mut mask = RoaringBitmap::new();
+    for (document_id, body) in bodies.iter().enumerate() {
+        let mut document = IndexDocument::new(SearchIndex::Email)
+            .with_account_id(ACCOUNT_ID)
+            .with_document_id(document_id as u32);
+        document.index_text(EmailSearchField::Body, body, Language::English);
+        document.index_unsigned(EmailSearchField::ReceivedAt, document_id as u64);
+        documents.push(document);
+        mask.insert(document_id as u32);
+    }
+    store.index(documents).await.unwrap();
+    if let SearchStore::ElasticSearch(store) = &store {
+        store.refresh_index(SearchIndex::Email).await.unwrap();
+    }
+
+    for (text, expected) in [
+        // only inside a URL path, a query string or a file name
+        ("shipping", vec![0u32, 3]),
+        ("support", vec![0]),
+        ("password", vec![1]),
+        ("login", vec![1]),
+        ("jane", vec![1]),
+        ("invoice", vec![2]),
+        ("pdf", vec![2]),
+        ("2024", vec![2]),
+        // host names
+        ("example", vec![0, 1, 4]),
+        ("mail", vec![1]),
+        // written as they appear
+        ("https://x.example/shipping-support/", vec![0]),
+        ("shipping-support", vec![0]),
+        ("invoice-2024.pdf", vec![2]),
+        ("mail.example.com", vec![1]),
+        // plain words are unaffected
+        ("parcel", vec![0]),
+        ("records", vec![2]),
+        ("thanks", vec![3]),
+        // no match
+        ("billing", vec![]),
+        ("example.net", vec![]),
+    ] {
+        let ids = store
+            .query_account(
+                SearchQuery::new(SearchIndex::Email)
+                    .with_filters(vec![
+                        SearchFilter::eq(SearchField::AccountId, ACCOUNT_ID),
+                        SearchFilter::has_english_text(EmailSearchField::Body, text),
+                    ])
+                    .with_comparator(SearchComparator::ascending(EmailSearchField::ReceivedAt))
+                    .with_mask(mask.clone()),
+            )
+            .await
+            .unwrap();
+        assert_eq!(ids, expected, "Body {text:?}");
+    }
 
     store
         .unindex(
