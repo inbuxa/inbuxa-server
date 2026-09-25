@@ -2,6 +2,8 @@
  * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
+ *
+ * Modified by Coffey Labs in 2026 for INBUXA.
  */
 
 use std::sync::Arc;
@@ -105,6 +107,9 @@ impl SubscriberBuilder {
         self
     }
 
+    /// Registers the subscriber with the collector. inbuxa: one registered
+    /// under the id of a running subscriber replaces it, handing over at an
+    /// event boundary; the old one's channel then closes.
     pub fn register(self) -> (mpsc::Sender<EventBatch>, mpsc::Receiver<EventBatch>) {
         let (tx, rx) = mpsc::channel(8192);
 

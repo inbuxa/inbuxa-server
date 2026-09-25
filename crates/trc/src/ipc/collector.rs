@@ -245,9 +245,27 @@ impl Collector {
                 Update::RegisterReceiver { receiver } => {
                     self.receivers.push(receiver);
                 }
-                Update::RegisterSubscriber { subscriber } => {
-                    ACTIVE_SUBSCRIBERS.lock().push(subscriber.id.clone());
-                    self.subscribers.push(subscriber);
+                Update::RegisterSubscriber { mut subscriber } => {
+                    // inbuxa: a subscriber registered under the id of a
+                    // running one replaces it (a tracer whose settings
+                    // changed). Every event collected so far went to the old
+                    // one, every later event goes to the new one: the old
+                    // one's batch is sent first (anything its full channel
+                    // can't take moves over, rather than being dropped), and
+                    // dropping it closes its channel, so its task writes
+                    // what is queued and ends.
+                    if let Some(old) = self.subscribers.iter_mut().find(|s| s.id == subscriber.id) {
+                        let _ = old.send_batch();
+                        if !old.batch.is_empty() {
+                            let mut batch = std::mem::take(&mut old.batch);
+                            batch.append(&mut subscriber.batch);
+                            subscriber.batch = batch;
+                        }
+                        *old = subscriber;
+                    } else {
+                        ACTIVE_SUBSCRIBERS.lock().push(subscriber.id.clone());
+                        self.subscribers.push(subscriber);
+                    }
                 }
                 Update::UnregisterSubscriber { id } => {
                     ACTIVE_SUBSCRIBERS.lock().retain(|s| s != &id);

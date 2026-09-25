@@ -47,6 +47,10 @@ pub(crate) fn spawn_otel_tracer(builder: SubscriberBuilder, mut otel: OtelTracer
         let mut pending_spans = Vec::new();
 
         let mut active_spans = AHashMap::new();
+        let mut closing = false;
+        let started = std::time::SystemTime::now()
+            .duration_since(std::time::SystemTime::UNIX_EPOCH)
+            .map_or(0, |d| d.as_secs());
 
         loop {
             // Wait for the next event or timeout
@@ -75,12 +79,26 @@ pub(crate) fn spawn_otel_tracer(builder: SubscriberBuilder, mut otel: OtelTracer
                                     events.iter().chain(std::iter::once(&event)),
                                     &instrumentation,
                                 ));
+                            } else if span.inner.timestamp < started {
+                                // inbuxa: a span that was open when this
+                                // tracer replaced another one (its settings
+                                // changed) is exported with its end event
+                                // rather than dropped
+                                pending_spans.push(build_span_data(
+                                    span,
+                                    &event,
+                                    std::iter::once(&event),
+                                    &instrumentation,
+                                ));
                             }
                         }
                     }
                 }
                 Ok(None) => {
-                    break;
+                    // inbuxa: the tracer was removed or replaced; export
+                    // what is pending now rather than drop it
+                    closing = true;
+                    next_delivery = Instant::now();
                 }
                 Err(_) => (),
             }
@@ -130,6 +148,9 @@ pub(crate) fn spawn_otel_tracer(builder: SubscriberBuilder, mut otel: OtelTracer
                         next_retry = Some(this_retry);
                     }
                 }
+            }
+            if closing {
+                break;
             }
             wakeup_time = next_retry.unwrap_or(LONG_1Y_SLUMBER);
         }

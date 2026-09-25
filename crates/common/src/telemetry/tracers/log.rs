@@ -2,6 +2,8 @@
  * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
+ *
+ * Modified by Coffey Labs in 2026 for INBUXA.
  */
 
 use std::{path::PathBuf, time::SystemTime};
@@ -15,9 +17,27 @@ use tokio::{
 };
 use trc::{TelemetryEvent, ipc::subscriber::SubscriberBuilder, serializers::text::FmtWriter};
 
+// inbuxa: when a Log tracer is started over on the same files (its rotation
+// or format changed), the new one waits for the old one to write what it
+// has queued, so their lines don't interleave. Keyed by path and prefix;
+// each entry is the last tracer's "done" signal, sent when it ends.
+type LogFileOwners = ahash::AHashMap<(String, String), tokio::sync::oneshot::Receiver<()>>;
+static LOG_FILE_OWNERS: parking_lot::Mutex<Option<LogFileOwners>> = parking_lot::Mutex::new(None);
+
 pub(crate) fn spawn_log_tracer(builder: SubscriberBuilder, settings: LogTracer) {
+    let (done_tx, done_rx) = tokio::sync::oneshot::channel::<()>();
+    let previous = LOG_FILE_OWNERS
+        .lock()
+        .get_or_insert_with(Default::default)
+        .insert((settings.path.clone(), settings.prefix.clone()), done_rx);
     let (_, mut rx) = builder.register();
     tokio::spawn(async move {
+        // Dropped when this tracer ends, however it ends
+        let _done = done_tx;
+        if let Some(previous) = previous {
+            let _ = previous.await;
+        }
+
         if let Some(writer) = settings.build_writer().await {
             let mut buf = FmtWriter::new(writer)
                 .with_ansi(settings.ansi)

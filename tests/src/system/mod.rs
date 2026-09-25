@@ -24,6 +24,7 @@ pub mod quota;
 pub mod reload; // inbuxa: reloads and build errors
 pub mod security;
 pub mod task;
+pub mod tracer_reload; // inbuxa: tracers start over when their settings change
 pub mod tenant;
 pub mod undelete;
 
