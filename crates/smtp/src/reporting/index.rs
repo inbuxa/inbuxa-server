@@ -2,6 +2,8 @@
  * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
+ *
+ * Modified by Coffey Labs in 2026 for INBUXA.
  */
 
 use registry::{
@@ -40,35 +42,49 @@ pub trait InternalReportIndex: ObjectImpl {
 
     fn primary_key(&self) -> ValueClass;
 
+    /// Moves the report's delivery, and its queued task, to `at`.
+    ///
+    /// inbuxa: the new queue row carries the task's type, as
+    /// `schedule_task_with_id` writes it, and the task row gets the new due
+    /// too. `queued` is the task as stored: its due, not the report's
+    /// `deliverAt`, is the queue row that exists (they differ once the task
+    /// has been retried).
     fn reschedule_ops(
         &mut self,
         batch: &mut BatchBuilder,
         item_id: u64,
         revision: u64,
         at: UTCDateTime,
+        queued: Option<&Task>,
     ) {
         let current_deliver_at = self.deliver_at();
+        let current_due = current_deliver_at.timestamp() as u64;
+        let queued_due = queued.map_or(current_due, |task| task.due_timestamp());
+        let new_due = at.timestamp() as u64;
 
-        if current_deliver_at != at {
+        if current_deliver_at != at || queued_due != new_due {
             let object = Self::OBJECT;
             let object_id = object.to_id();
             let key = ValueClass::Registry(RegistryClass::Item { object_id, item_id });
 
             self.set_deliver_at(at);
 
-            batch
-                .assert_value(key.clone(), AssertValue::Hash(revision))
-                .clear(ValueClass::TaskQueue(TaskQueueClass::Due {
+            batch.assert_value(key.clone(), AssertValue::Hash(revision));
+            if queued_due != new_due {
+                batch.clear(ValueClass::TaskQueue(TaskQueueClass::Due {
                     id: item_id,
-                    due: current_deliver_at.timestamp() as u64,
-                }))
-                .set(
-                    ValueClass::TaskQueue(TaskQueueClass::Due {
-                        id: item_id,
-                        due: at.timestamp() as u64,
-                    }),
-                    object_id.serialize(),
-                )
+                    due: queued_due,
+                }));
+            }
+            // A row an earlier reschedule left at the report's deliverAt
+            if current_due != new_due && current_due != queued_due {
+                batch.clear(ValueClass::TaskQueue(TaskQueueClass::Due {
+                    id: item_id,
+                    due: current_due,
+                }));
+            }
+            batch
+                .schedule_task_with_id(item_id, self.task(item_id))
                 .set(key, self.to_pickled_vec());
         }
     }

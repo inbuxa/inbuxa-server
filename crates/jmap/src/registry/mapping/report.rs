@@ -2,6 +2,8 @@
  * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
+ *
+ * Modified by Coffey Labs in 2026 for INBUXA.
  */
 
 use crate::{
@@ -15,22 +17,42 @@ use jmap_proto::{error::set::SetError, types::state::State};
 use jmap_tools::{Key, Value};
 use registry::{
     jmap::IntoValue,
-    schema::prelude::{Object, ObjectInner, ObjectType, Property},
+    schema::{
+        prelude::{Object, ObjectInner, ObjectType, Property},
+        structs::Task,
+    },
     types::{EnumImpl, datetime::UTCDateTime},
 };
+use services::task_manager::lock::TaskLockManager;
 use smtp::reporting::index::{ExternalReportIndex, InternalReportIndex};
 use std::str::FromStr;
 use store::{
     U64_LEN, ValueKey,
     registry::{RegistryFilter, RegistryFilterValue, RegistryQuery},
-    write::{BatchBuilder, RegistryClass, ValueClass, key::KeySerializer},
+    write::{BatchBuilder, RegistryClass, TaskQueueClass, ValueClass, key::KeySerializer},
 };
 use trc::AddContext;
 use types::id::Id;
 
 pub(crate) async fn report_set(
-    mut set: RegistrySetResponse<'_>,
+    set: RegistrySetResponse<'_>,
 ) -> trc::Result<RegistrySetResponse<'_>> {
+    // inbuxa: task locks taken to reschedule reports are released however
+    // the request ends; a held lock is renewed, so a leaked one would keep
+    // the report's task from ever running
+    let server = set.server;
+    let mut locked_tasks = Vec::new();
+    let result = report_set_locked(set, &mut locked_tasks).await;
+    for task_id in locked_tasks {
+        server.remove_index_lock(task_id).await;
+    }
+    result
+}
+
+async fn report_set_locked<'x>(
+    mut set: RegistrySetResponse<'x>,
+    locked_tasks: &mut Vec<u64>,
+) -> trc::Result<RegistrySetResponse<'x>> {
     let object_id = set.object_type.to_id();
 
     // Reports cannot be created
@@ -89,12 +111,45 @@ pub(crate) async fn report_set(
                 .get_value::<Object>(ValueKey::from(key.clone()))
                 .await?
             {
+                // inbuxa: the report's task shares its id. Hold the task
+                // while its queue rows move, as x:Task/set does, and move the
+                // row the task is actually queued under
+                if !set.server.try_lock_task(item_id).await {
+                    set.response.not_updated.append(
+                        id,
+                        SetError::forbidden().with_description(
+                            "The report is being sent and cannot be rescheduled".to_string(),
+                        ),
+                    );
+                    continue;
+                }
+                locked_tasks.push(item_id);
+                let queued = set
+                    .server
+                    .store()
+                    .get_value::<Task>(ValueKey::from(ValueClass::TaskQueue(
+                        TaskQueueClass::Task { id: item_id },
+                    )))
+                    .await?;
+
                 match &mut report_obj.inner {
                     ObjectInner::DmarcInternalReport(report) => {
-                        report.reschedule_ops(&mut batch, item_id, report_obj.revision, deliver_at);
+                        report.reschedule_ops(
+                            &mut batch,
+                            item_id,
+                            report_obj.revision,
+                            deliver_at,
+                            queued.as_ref(),
+                        );
                     }
                     ObjectInner::TlsInternalReport(report) => {
-                        report.reschedule_ops(&mut batch, item_id, report_obj.revision, deliver_at);
+                        report.reschedule_ops(
+                            &mut batch,
+                            item_id,
+                            report_obj.revision,
+                            deliver_at,
+                            queued.as_ref(),
+                        );
                     }
                     _ => {}
                 }
@@ -156,6 +211,9 @@ pub(crate) async fn report_set(
             .write(batch.build_all())
             .await
             .caused_by(trc::location!())?;
+        // inbuxa: a rescheduled report may now be due sooner than the task
+        // manager's next scan
+        set.server.notify_task_queue();
     }
 
     Ok(set)
