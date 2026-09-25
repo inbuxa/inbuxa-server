@@ -44,7 +44,14 @@ impl StartQueueManager for BootManager {
 impl SpawnQueueManager for IpcReceivers {
     fn spawn_queue_manager(&mut self, inner: Arc<Inner>) {
         let core = inner.shared_core.load();
-        if !core.storage.registry.is_recovery_mode() && core.network.roles.outbound_mta {
+        // inbuxa: upstream started these only when the node's role included
+        // outboundMta at boot, so turning the role on later did nothing and
+        // turning it off left them delivering until a restart. They now run
+        // on every node and follow the role live (see Queue::start and the
+        // report scheduler). This also drains the queue channel on nodes
+        // without the role, where every queued message's refresh used to sit
+        // in a channel nobody read until it filled and queueing blocked.
+        if !core.storage.registry.is_recovery_mode() {
             // Spawn queue manager
             self.queue_rx.take().unwrap().spawn(inner.clone());
 

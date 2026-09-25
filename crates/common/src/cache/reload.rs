@@ -155,6 +155,12 @@ impl Server {
                             .await
                             .ok();
 
+                        // inbuxa: the task manager reads the node's role on
+                        // every scan; scan now, so a role that gained task
+                        // types starts claiming them without waiting out the
+                        // refresh interval
+                        self.inner.ipc.task_tx.notify_one();
+
                         self.record_build_errors(&bootstrap.errors);
 
                         return Ok(ReloadResult {

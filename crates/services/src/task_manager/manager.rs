@@ -55,23 +55,12 @@ const PERPETUAL_RETRY_MIN_DELAY: u64 = 3600;
 const PERPETUAL_RETRY_MAX_DELAY: u64 = 21600;
 
 pub fn spawn_task_manager(inner: Arc<Inner>) {
-    let is_clustered = {
-        let server = inner.build_server();
-        let roles = &server.core.network.roles;
-
-        // inbuxa: outbound_mta too, which now governs report tasks
-        if !roles.account_maintenance
-            && !roles.store_maintenance
-            && !roles.search_indexing
-            && !roles.spam_training
-            && !roles.outbound_mta
-            && !roles.task_manager
-        {
-            return;
-        }
-
-        server.core.storage.coordinator.is_enabled()
-    };
+    // inbuxa: upstream didn't start the task manager on a node whose role
+    // had no task types at boot, so adding one later did nothing until a
+    // restart. It now always runs and reads the role on every scan and
+    // before every job (task_enabled), so a role change applies at the next
+    // settings reload.
+    let is_clustered = inner.build_server().core.storage.coordinator.is_enabled();
 
     trc::event!(TaskManager(TaskManagerEvent::ManagerStarted));
 
@@ -151,19 +140,22 @@ pub fn spawn_task_manager(inner: Arc<Inner>) {
                     let server = inner.build_server();
                     let batch_size = server.core.email.index_batch_size;
                     let mut batch = Vec::with_capacity(batch_size);
-                    if let Some(task) = fetch_task(&server, job).await {
+                    if let Some(task) = fetch_enabled_task(&server, job).await {
                         batch.push(task);
                     }
 
                     while batch.len() < batch_size {
                         match rx.try_recv() {
                             Ok(job) => {
-                                if let Some(task) = fetch_task(&server, job).await {
+                                if let Some(task) = fetch_enabled_task(&server, job).await {
                                     batch.push(task);
                                 }
                             }
                             Err(_) => break,
                         }
+                    }
+                    if batch.is_empty() {
+                        continue;
                     }
 
                     // Dispatch. inbuxa: on a task of its own, so a panic
@@ -205,7 +197,8 @@ pub fn spawn_task_manager(inner: Arc<Inner>) {
                     let server = inner.build_server();
                     let mut refresh_queue = false;
 
-                    if let Some(TaskDetails { task, info }) = fetch_task(&server, job).await {
+                    if let Some(TaskDetails { task, info }) = fetch_enabled_task(&server, job).await
+                    {
                         // inbuxa: on a task of its own, as above
                         let run = {
                             let server = server.clone();
@@ -274,6 +267,17 @@ impl TaskQueueManager for Server {
         if task_locks.is_stopping() {
             return Duration::from_secs(QUEUE_REFRESH_INTERVAL);
         }
+        // inbuxa: with no task type enabled by this node's role there is
+        // nothing to claim; a settings reload wakes the manager when that
+        // changes
+        let roles = &self.core.network.roles;
+        if !(0..TaskType::COUNT as u16)
+            .filter_map(TaskType::from_id)
+            .any(|task_type| task_enabled(roles, task_type))
+        {
+            ipc.locked.clear();
+            return Duration::from_secs(QUEUE_REFRESH_INTERVAL);
+        }
         let lock_expiry = task_locks.expiry();
         let now_timestamp = now();
         let from_key = ValueKey::<ValueClass> {
@@ -296,7 +300,6 @@ impl TaskQueueManager for Server {
         let mut tasks = Vec::new();
         let now = Instant::now();
         let mut next_event = None;
-        let roles = &self.core.network.roles;
         ipc.revision += 1;
         let _ = self
             .store()
@@ -541,6 +544,25 @@ async fn run_task(
         Task::IndexDocument(_)
         | Task::UnindexDocument(_)
         | Task::IndexTrace(_) => unreachable!(),
+    }
+}
+
+/// inbuxa: reads a claimed task when this node's role still allows its type.
+/// The role may have changed since the task was claimed (a settings reload in
+/// between); the claim is then handed back at once for a node that may run
+/// it, rather than held until the lease runs out.
+async fn fetch_enabled_task(server: &Server, job: TaskJob) -> Option<TaskDetails> {
+    if task_enabled(&server.core.network.roles, job.typ) {
+        fetch_task(server, job).await
+    } else {
+        trc::event!(
+            TaskManager(TaskManagerEvent::TaskIgnored),
+            Id = job.id,
+            Details = job.typ.as_str(),
+            Reason = "Task type was disabled by cluster roles after it was claimed.",
+        );
+        server.remove_index_lock(job.id).await;
+        None
     }
 }
 
