@@ -2,6 +2,8 @@
  * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
+ *
+ * Modified by Coffey Labs in 2026 for INBUXA.
  */
 
 use crate::task_manager::acme::AcmeTask;
@@ -27,6 +29,7 @@ use common::network::limiter::ConcurrencyLimiter;
 use common::network::{ServerInstance, TcpAcceptor};
 use common::{Inner, Server};
 use registry::schema::enums::TaskType;
+use registry::schema::prelude::ObjectType;
 use registry::schema::structs::{
     Task, TaskManager, TaskRetryStrategy, TaskStatus, TaskStatusFailed, TaskStatusRetry,
 };
@@ -337,6 +340,7 @@ impl TaskQueueManager for Server {
 
         // Retrieve tasks pending to be processed
         let mut tasks = Vec::new();
+        let mut unreadable = Vec::new();
         let now = Instant::now();
         let mut next_event = None;
         let roles = &self.core.network.roles;
@@ -351,12 +355,21 @@ impl TaskQueueManager for Server {
                         let task_id = key.deserialize_be_u64(U64_LEN)?;
 
                         if task_due <= now_timestamp {
-                            let task_type_idx = value.deserialize_be_u16(0)?;
-                            let task_type = TaskType::from_id(task_type_idx).ok_or_else(|| {
-                                trc::StoreEvent::DataCorruption
-                                    .caused_by(trc::location!())
-                                    .ctx(trc::Key::Value, value)
-                            })?;
+                            // inbuxa: a row whose task type can't be read is
+                            // set aside, not allowed to end the scan: every
+                            // task due after it would wait behind it
+                            let Some((task_type_idx, task_type)) = value
+                                .deserialize_be_u16(0)
+                                .ok()
+                                .and_then(|idx| TaskType::from_id(idx).map(|typ| (idx, typ)))
+                            else {
+                                unreadable.push(UnreadableDueRow {
+                                    due: task_due,
+                                    id: task_id,
+                                    value: value.to_vec(),
+                                });
+                                return Ok(true);
+                            };
                             let enabled = match task_type {
                                 TaskType::IndexDocument
                                 | TaskType::UnindexDocument
@@ -445,6 +458,11 @@ impl TaskQueueManager for Server {
                         .details("Failed to iterate over task queue.")
                 );
             });
+
+        if !unreadable.is_empty() && repair_due_rows(self, unreadable).await {
+            // Look again at once for the rows that were rewritten
+            self.notify_task_queue();
+        }
 
         if !tasks.is_empty() {
             trc::event!(
@@ -684,5 +702,116 @@ impl TaskResult {
                     ..
                 }
         )
+    }
+}
+
+/// inbuxa: a task queue row whose task type could not be read.
+struct UnreadableDueRow {
+    due: u64,
+    id: u64,
+    value: Vec<u8>,
+}
+
+/// inbuxa: logs each unreadable queue row and repairs it from the task it
+/// schedules. The task row says what the task is, so the queue row is
+/// rewritten with that task's type; a row with no task behind it is removed.
+///
+/// Rescheduling an internal DMARC or TLS report wrote the report's object
+/// type into the queue row instead of the task type. Such a row is the time
+/// an administrator chose, so the task is moved to it as the reschedule
+/// meant to do: the task row takes that due, and a queue row left at the
+/// task's previous due is removed. Returns whether any row was repaired.
+async fn repair_due_rows(server: &Server, rows: Vec<UnreadableDueRow>) -> bool {
+    let mut repaired = false;
+    for row in rows {
+        let UnreadableDueRow { due, id, value } = row;
+        trc::error!(
+            trc::StoreEvent::DataCorruption
+                .into_err()
+                .id(id)
+                .ctx(trc::Key::Due, trc::Value::Timestamp(due))
+                .ctx(
+                    trc::Key::Key,
+                    [due.to_be_bytes(), id.to_be_bytes()].concat()
+                )
+                .ctx(trc::Key::Value, value.clone())
+                .details("Unreadable task queue row skipped")
+                .caused_by(trc::location!())
+        );
+
+        let task_key = ValueClass::TaskQueue(TaskQueueClass::Task { id });
+        let due_key = ValueClass::TaskQueue(TaskQueueClass::Due { id, due });
+        let task = match server
+            .store()
+            .get_value::<Task>(ValueKey::from(task_key.clone()))
+            .await
+        {
+            Ok(task) => task,
+            Err(err) => {
+                trc::error!(
+                    err.id(id)
+                        .details("Failed to read the task of an unreadable queue row.")
+                        .caused_by(trc::location!())
+                );
+                continue;
+            }
+        };
+
+        let mut batch = BatchBuilder::new();
+        let action = if let Some(mut task) = task {
+            let task_type = task.object_type();
+            batch.assert_value(task_key.clone(), AssertValue::Some);
+            if rescheduled_report_type(&value) == Some(task_type) {
+                let old_due = task.due_timestamp();
+                if old_due != due {
+                    batch.clear(ValueClass::TaskQueue(TaskQueueClass::Due {
+                        id,
+                        due: old_due,
+                    }));
+                }
+                task.set_status(TaskStatus::at(due as i64));
+            }
+            batch
+                .set(due_key, task_type.to_id().serialize())
+                .set(task_key, task.to_pickled_vec());
+            "Rewrote the queue row from its task."
+        } else {
+            batch.clear(due_key);
+            "Removed a queue row with no task."
+        };
+
+        match server.store().write(batch.build_all()).await {
+            Ok(_) => {
+                repaired = true;
+                trc::event!(
+                    TaskManager(TaskManagerEvent::TaskIgnored),
+                    Id = id,
+                    Due = trc::Value::Timestamp(due),
+                    Reason = action,
+                );
+            }
+            Err(err) if err.matches(trc::EventType::Store(trc::StoreEvent::AssertValueFailed)) => {
+                // The task went away meanwhile; the next scan looks again
+            }
+            Err(err) => {
+                trc::error!(
+                    err.id(id)
+                        .details("Failed to repair an unreadable queue row.")
+                        .caused_by(trc::location!())
+                );
+            }
+        }
+    }
+    repaired
+}
+
+/// inbuxa: the task type a report reschedule meant, when a queue row holds
+/// an internal report's object type (the value that reschedule wrote).
+fn rescheduled_report_type(value: &[u8]) -> Option<TaskType> {
+    let id = u16::from_be_bytes(value.get(..2)?.try_into().ok()?);
+    match ObjectType::from_id(id)? {
+        ObjectType::DmarcInternalReport => Some(TaskType::DmarcReport),
+        ObjectType::TlsInternalReport => Some(TaskType::TlsReport),
+        _ => None,
     }
 }
