@@ -31,8 +31,11 @@
 #     crates/types/src/branding.rs, not Cargo.toml, and the image is tagged
 #     with it, so a tag beside an unbumped macro would publish an image that
 #     reports a different version from its tag.
-#   * the tag must be on main, so an image never describes code that was never
-#     reviewed onto the default branch.
+#   * the tag must be on main or on a release/* branch, so an image never
+#     describes code that was never reviewed onto one of them. A release/*
+#     branch carries a hotfix: it starts at an earlier release tag, takes
+#     fixes through pull requests into it, and is tagged there, so production
+#     can get a fix without everything that has landed on main since.
 #
 # :latest moves with every published tag: tags are cut by the weekly release
 # (or by hand for a real release); there are no prerelease tags here.
@@ -74,8 +77,13 @@ jobs:
             echo "Refusing to publish an image that would report the wrong version." >&2
             exit 1
           fi
-          git merge-base --is-ancestor "$(git rev-parse "${TAG}^{commit}")" origin/main \
-            || { echo "$TAG is not on main" >&2; exit 1; }
+          commit="$(git rev-parse "${TAG}^{commit}")"
+          on=""
+          for ref in origin/main $(git for-each-ref --format='%(refname:short)' 'refs/remotes/origin/release/*'); do
+            if git merge-base --is-ancestor "$commit" "$ref"; then on="$ref"; break; fi
+          done
+          [ -n "$on" ] || { echo "$TAG is not on main or a release/* branch" >&2; exit 1; }
+          echo "$TAG is on $on"
           echo "version=$V" >> "$GITHUB_OUTPUT"
           echo "version $V"
 
