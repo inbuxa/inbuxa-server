@@ -463,15 +463,10 @@ pub(crate) async fn task_query(
                 .set_values(typ.is_some()),
             |key, value| {
                 if let Some(typ) = typ {
-                    let task_type =
-                        TaskType::from_id(value.deserialize_be_u16(0)?).ok_or_else(|| {
-                            trc::StoreEvent::DataCorruption
-                                .into_err()
-                                .ctx(trc::Key::Key, key.to_vec())
-                                .ctx(trc::Key::Value, value.to_vec())
-                                .caused_by(trc::location!())
-                        })?;
-                    if task_type != typ {
+                    // inbuxa: a row whose type can't be read matches no type
+                    // filter; the task manager logs and repairs it
+                    let task_type = value.deserialize_be_u16(0).ok().and_then(TaskType::from_id);
+                    if task_type != Some(typ) {
                         return Ok(true);
                     }
                 }
