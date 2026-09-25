@@ -7,7 +7,7 @@
  */
 
 use crate::{
-    Core, Server,
+    BuildServer, Core, Server,
     config::{
         server::{Listeners, tls::parse_certificates},
         storage::Storage,
@@ -245,20 +245,72 @@ fn error_object(error: &Error) -> Option<ObjectId> {
 // until someone reloaded. Writes to objects the settings are built from now
 // reload them, here and across the cluster, as ReloadSettings does.
 
-/// Coalesces the full reloads that registry writes trigger: a write waits for
-/// a reload that started after it was stored, and joins one if it can, so a
-/// burst of writes costs a reload or two rather than one each.
-#[derive(Default)]
+/// Coalesces the full reloads that registry writes trigger. A write waits
+/// for more writes before a reload starts (see [`WRITE_QUIET`]), then
+/// takes the result of the first reload that started after it was stored,
+/// so a burst of writes, or a request with many objects, costs one reload
+/// or two rather than one each.
 pub struct SettingsReloadGate {
     requested: std::sync::atomic::AtomicU64,
-    state: tokio::sync::Mutex<SettingsReloadState>,
+    reloads: std::sync::atomic::AtomicU64,
+    state: parking_lot::Mutex<SettingsReloadState>,
+    completed: tokio::sync::watch::Sender<u64>,
 }
 
 #[derive(Default)]
 struct SettingsReloadState {
-    completed: u64,
-    refused: Option<String>,
+    /// A reload is waiting for writes to settle, or running.
+    scheduled: bool,
+    /// When the oldest write not yet covered by a reload was stored, and
+    /// the newest.
+    first_write: Option<std::time::Instant>,
+    last_write: Option<std::time::Instant>,
+    /// Recent reloads, oldest first: the last write each covered, and why
+    /// it was refused, if it was.
+    results: std::collections::VecDeque<(u64, Option<String>)>,
 }
+
+impl Default for SettingsReloadGate {
+    fn default() -> Self {
+        Self {
+            requested: Default::default(),
+            reloads: Default::default(),
+            state: Default::default(),
+            completed: tokio::sync::watch::Sender::new(0),
+        }
+    }
+}
+
+impl SettingsReloadGate {
+    /// How many full reloads registry writes have run.
+    pub fn reloads(&self) -> u64 {
+        self.reloads.load(std::sync::atomic::Ordering::Relaxed)
+    }
+}
+
+impl SettingsReloadState {
+    /// The result of the reload that covered write `ticket`, once it ran.
+    fn result_for(&self, ticket: u64) -> Option<Result<(), String>> {
+        self.results
+            .iter()
+            .find(|(covers, _)| *covers >= ticket)
+            .map(|(_, refused)| refused.clone().map_or(Ok(()), Err))
+    }
+}
+
+/// How long a full reload waits after the last registry write for another.
+/// Parallel requests reach the server tens of milliseconds apart (in a
+/// cluster rehearsal, ten x:<Object>/set requests sent at once arrived about
+/// 33 ms apart and each got a reload of its own), so the window is a little
+/// over twice that. A single write pays it once, on top of the reload.
+pub const WRITE_QUIET: std::time::Duration = std::time::Duration::from_millis(75);
+
+/// The longest a full reload waits after the first write it covers, so a
+/// steady stream of writes still reloads at least this often.
+pub const WRITE_MAX_WAIT: std::time::Duration = std::time::Duration::from_millis(250);
+
+/// How many past reload results a waiting write can look up.
+const RELOAD_RESULTS: usize = 64;
 
 /// The reload a write to `object` calls for: the object to reload, or None
 /// when the running settings don't hold that object (accounts, domains and
@@ -370,21 +422,85 @@ impl Server {
             return Some(result);
         }
 
+        // inbuxa: #39 joined only writes that queued behind a running
+        // reload; requests that arrive tens of milliseconds apart never
+        // overlapped one, so each got a reload of its own. The reload now
+        // waits until writes settle (WRITE_QUIET after the last one, at
+        // most WRITE_MAX_WAIT after the first) and covers them all. It runs
+        // in a task of its own, so a request that goes away doesn't take
+        // it with it; each write then takes the result of the reload that
+        // started after it was stored.
         let gate = &self.inner.data.settings_reload;
         let ticket = gate
             .requested
             .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
             + 1;
-        let mut state = gate.state.lock().await;
-        if state.completed >= ticket {
-            // A reload that started after this write was stored has run
-            return Some(state.refused.clone().map_or(Ok(()), Err));
+        let now = std::time::Instant::now();
+        {
+            let mut state = gate.state.lock();
+            state.first_write.get_or_insert(now);
+            state.last_write = Some(now);
         }
-        let covers = gate.requested.load(std::sync::atomic::Ordering::SeqCst);
-        let result = self.reload_and_broadcast(change).await;
-        state.completed = covers;
-        state.refused = result.clone().err();
-        Some(result)
+
+        loop {
+            let mut completed = {
+                let mut state = gate.state.lock();
+                if let Some(result) = state.result_for(ticket) {
+                    return Some(result);
+                }
+                if !state.scheduled {
+                    state.scheduled = true;
+                    let server = self.clone();
+                    tokio::spawn(async move {
+                        server.run_write_reload(change).await;
+                    });
+                }
+                gate.completed.subscribe()
+            };
+            if completed.changed().await.is_err() {
+                return Some(Err("The settings reload was interrupted".to_string()));
+            }
+        }
+    }
+
+    /// Waits for registry writes to settle, then reloads the settings once
+    /// for all the writes stored so far.
+    async fn run_write_reload(&self, change: RegistryChange) {
+        let gate = &self.inner.data.settings_reload;
+        loop {
+            let deadline = {
+                let state = gate.state.lock();
+                let now = std::time::Instant::now();
+                let first = state.first_write.unwrap_or(now);
+                let last = state.last_write.unwrap_or(now);
+                (last + WRITE_QUIET).min(first + WRITE_MAX_WAIT)
+            };
+            if deadline <= std::time::Instant::now() {
+                break;
+            }
+            tokio::time::sleep_until(deadline.into()).await;
+        }
+
+        // Writes stored from here on wait for the next reload
+        let covers = {
+            let mut state = gate.state.lock();
+            state.first_write = None;
+            state.last_write = None;
+            gate.requested.load(std::sync::atomic::Ordering::SeqCst)
+        };
+        gate.reloads
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let result = self.inner.build_server().reload_and_broadcast(change).await;
+
+        {
+            let mut state = gate.state.lock();
+            if state.results.len() == RELOAD_RESULTS {
+                state.results.pop_front();
+            }
+            state.results.push_back((covers, result.err()));
+            state.scheduled = false;
+        }
+        gate.completed.send_replace(covers);
     }
 
     async fn reload_and_broadcast(&self, change: RegistryChange) -> Result<(), String> {
