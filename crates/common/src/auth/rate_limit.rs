@@ -2,6 +2,8 @@
  * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
+ *
+ * Modified by Coffey Labs in 2026 for INBUXA.
  */
 
 use crate::auth::AccessToken;
@@ -18,6 +20,16 @@ impl Server {
         access_token: &AccessToken,
         addr: IpAddr,
     ) -> trc::Result<Option<InFlight>> {
+        // inbuxa: an account with unlimited requests passes both limits
+        // below anyway, so don't count its requests. The count is a write to
+        // one counter per account in the in-memory store, and concurrent
+        // requests from one account queue on that key (a row lock on SQL,
+        // conflict retries on RocksDB): in a cluster rehearsal ten parallel
+        // admin writes were accepted one after another, about 33 ms apart.
+        if access_token.has_permission(Permission::UnlimitedRequests) {
+            return Ok(None);
+        }
+
         let rate_reset = if let Some(rate) = &self.core.network.http.rate_authenticated {
             if self.is_ip_allowed(addr) {
                 None

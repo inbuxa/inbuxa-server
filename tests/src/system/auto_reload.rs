@@ -116,12 +116,64 @@ async fn test_write_applies(test: &TestServer) {
     for name in &names {
         assert!(has_schedule(test, name), "{name} missing");
     }
+    // A burst of separate requests shares a reload or two: each arrives
+    // tens of milliseconds after the last, so none overlaps a running
+    // reload, and the reload waits for writes to settle instead
+    let reloads = test.server.inner.data.settings_reload.reloads();
+    let started = std::time::Instant::now();
+    let burst = (0..10)
+        .map(|i| format!("autoreload-burst-{i}"))
+        .collect::<Vec<_>>();
+    let mut writes = Vec::new();
+    for name in &burst {
+        writes.push(admin.registry_create([MtaDeliverySchedule {
+            name: name.clone(),
+            queue_id,
+            ..Default::default()
+        }]));
+    }
+    for response in futures::future::join_all(writes).await {
+        assert_applied(&response);
+        schedule_ids.push(response.created_id(0));
+    }
+    let burst_reloads = test.server.inner.data.settings_reload.reloads() - reloads;
+    println!(
+        "10 concurrent writes: {burst_reloads} reload(s), {} ms",
+        started.elapsed().as_millis()
+    );
+    assert!(
+        (1..=2).contains(&burst_reloads),
+        "{burst_reloads} reloads for 10 concurrent writes"
+    );
+    for name in &burst {
+        assert!(has_schedule(test, name), "{name} missing");
+    }
+
+    // A single write still reloads promptly
+    let reloads = test.server.inner.data.settings_reload.reloads();
+    let started = std::time::Instant::now();
+    let response = admin
+        .registry_create([MtaDeliverySchedule {
+            name: "autoreload-single".into(),
+            queue_id,
+            ..Default::default()
+        }])
+        .await;
+    assert_applied(&response);
+    schedule_ids.push(response.created_id(0));
+    println!("1 write: {} ms", started.elapsed().as_millis());
+    assert_eq!(
+        test.server.inner.data.settings_reload.reloads() - reloads,
+        1
+    );
+    assert!(has_schedule(test, "autoreload-single"));
+
     // Several objects in one request: one reload
     let response = admin
         .registry_destroy(ObjectType::MtaDeliverySchedule, schedule_ids.iter())
         .await;
     assert_applied(&response);
-    for name in &names {
+    for name in names.iter().chain(&burst) {
         assert!(!has_schedule(test, name), "{name} still present");
     }
 
