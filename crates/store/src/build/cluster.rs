@@ -2,6 +2,8 @@
  * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
+ *
+ * Modified by Coffey Labs in 2026 for INBUXA.
  */
 
 use crate::{
@@ -23,6 +25,14 @@ use utils::snowflake::MAX_NODE_ID;
 
 const STALE_NODE_TIMEOUT: u64 = 60 * 60; // 1 hour
 const DEAD_NODE_TIMEOUT: u64 = 60 * 60 * 24; // 24 hours
+
+// INBUXA: every node renews its lease once a minute, so the lease doubles as
+// a heartbeat. A node not heard from in three minutes is reported Stale, which
+// is what Cluster Health on the dashboard counts. Taking over a lease still
+// needs the full hour of silence, so a node that is slow rather than gone
+// never loses its id to another host.
+const HEARTBEAT_INTERVAL: u64 = 60; // 1 minute
+const UNRESPONSIVE_NODE_TIMEOUT: u64 = 3 * HEARTBEAT_INTERVAL;
 const MAX_LEASE_RETRIES: u32 = 5;
 
 struct NodeSlot {
@@ -96,7 +106,7 @@ impl RegistryStore {
     }
 
     pub fn refresh_node_id_interval(&self) -> Duration {
-        Duration::from_secs(STALE_NODE_TIMEOUT / 2)
+        Duration::from_secs(HEARTBEAT_INTERVAL)
     }
 
     pub async fn cluster_node_list(&self) -> trc::Result<Vec<ClusterNode>> {
@@ -289,6 +299,10 @@ impl NodeSlot {
         self.elapsed > DEAD_NODE_TIMEOUT
     }
 
+    fn is_responsive(&self) -> bool {
+        self.elapsed <= UNRESPONSIVE_NODE_TIMEOUT
+    }
+
     fn is_assignable(&self) -> bool {
         self.node_id <= MAX_NODE_ID
     }
@@ -296,10 +310,10 @@ impl NodeSlot {
     fn status(&self) -> ClusterNodeStatus {
         if self.is_dead() {
             ClusterNodeStatus::Inactive
-        } else if self.is_stale() {
-            ClusterNodeStatus::Stale
-        } else {
+        } else if self.is_responsive() {
             ClusterNodeStatus::Active
+        } else {
+            ClusterNodeStatus::Stale
         }
     }
 }
@@ -312,5 +326,44 @@ impl From<NodeSlot> for ClusterNode {
             node_id: slot.node_id as u64,
             hostname: slot.hostname,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn slot(elapsed: u64) -> NodeSlot {
+        NodeSlot {
+            node_id: 1,
+            hostname: "mx2.example.org".into(),
+            last_renewal: 0,
+            elapsed,
+            hash: 0,
+        }
+    }
+
+    #[test]
+    fn status_follows_the_heartbeat() {
+        assert_eq!(slot(0).status(), ClusterNodeStatus::Active);
+        assert_eq!(slot(UNRESPONSIVE_NODE_TIMEOUT).status(), ClusterNodeStatus::Active);
+        assert_eq!(slot(UNRESPONSIVE_NODE_TIMEOUT + 1).status(), ClusterNodeStatus::Stale);
+        assert_eq!(slot(DEAD_NODE_TIMEOUT).status(), ClusterNodeStatus::Stale);
+        assert_eq!(slot(DEAD_NODE_TIMEOUT + 1).status(), ClusterNodeStatus::Inactive);
+    }
+
+    #[test]
+    fn a_silent_node_keeps_its_id_for_an_hour() {
+        // Reported Stale after three minutes, but not free to take over.
+        let quiet = slot(UNRESPONSIVE_NODE_TIMEOUT + 1);
+        assert_eq!(quiet.status(), ClusterNodeStatus::Stale);
+        assert!(!quiet.is_stale());
+        assert!(slot(STALE_NODE_TIMEOUT + 1).is_stale());
+    }
+
+    #[test]
+    fn several_renewals_fit_before_a_node_looks_unresponsive() {
+        assert!(UNRESPONSIVE_NODE_TIMEOUT >= 3 * HEARTBEAT_INTERVAL);
+        assert!(HEARTBEAT_INTERVAL * 2 < STALE_NODE_TIMEOUT);
     }
 }
