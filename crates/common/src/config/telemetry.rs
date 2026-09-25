@@ -31,6 +31,10 @@ pub struct TelemetrySubscriber {
     pub interests: Interests,
     pub typ: TelemetrySubscriberType,
     pub lossy: bool,
+    /// inbuxa: a hash of the settings the running tracer is built from
+    /// (everything but its events, level and lossiness, which change in
+    /// place), so a reload can tell which tracers to start over.
+    pub settings: u64,
 }
 
 #[allow(clippy::large_enum_variant)]
@@ -167,6 +171,7 @@ impl Tracers {
             for tracer in bp.list_infallible::<Tracer>().await {
                 let id = tracer.id;
                 let tracer = tracer.object;
+                let settings = tracer_settings(&tracer);
                 let level;
                 let lossy;
                 let events;
@@ -379,6 +384,7 @@ impl Tracers {
                     interests: Default::default(),
                     lossy,
                     typ,
+                    settings,
                 };
 
                 // Parse disabled events
@@ -426,6 +432,7 @@ impl Tracers {
             for hook in bp.list_infallible::<WebHook>().await {
                 let id = hook.id;
                 let hook = hook.object;
+                let settings = webhook_settings(&hook);
 
                 if !hook.enable {
                     continue;
@@ -448,6 +455,7 @@ impl Tracers {
                     id: format!("w_{}", id.id()),
                     interests: Default::default(),
                     lossy: hook.lossy,
+                    settings,
                     typ: TelemetrySubscriberType::Webhook(WebhookTracer {
                         url: hook.url,
                         timeout: hook.timeout.into_inner(),
@@ -516,6 +524,8 @@ impl Tracers {
                         data: storage.data.clone(),
                     }),
                     lossy: true,
+                    // Stores take a restart
+                    settings: 0,
                 });
             }
 
@@ -541,6 +551,7 @@ impl Tracers {
                         buffered: true,
                     }),
                     lossy: false,
+                    settings: 0,
                 });
             }
         } else {
@@ -568,6 +579,7 @@ impl Tracers {
                     buffered: true,
                 }),
                 lossy: false,
+                settings: 0,
             });
         }
 
@@ -699,6 +711,42 @@ impl Metrics {
                 }),
         }
     }
+}
+
+// inbuxa: what a tracer is built from, less what changes in place
+macro_rules! in_place_reset {
+    ($tracer:expr) => {{
+        $tracer.enable = true;
+        $tracer.level = Default::default();
+        $tracer.lossy = false;
+        $tracer.events = Default::default();
+        $tracer.events_policy = Default::default();
+    }};
+}
+
+fn settings_hash(settings: &impl std::fmt::Debug) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    format!("{settings:?}").hash(&mut hasher);
+    hasher.finish()
+}
+
+fn tracer_settings(tracer: &Tracer) -> u64 {
+    let mut tracer = tracer.clone();
+    match &mut tracer {
+        Tracer::Log(tracer) => in_place_reset!(tracer),
+        Tracer::Stdout(tracer) => in_place_reset!(tracer),
+        Tracer::Journal(tracer) => in_place_reset!(tracer),
+        Tracer::OtelHttp(tracer) => in_place_reset!(tracer),
+        Tracer::OtelGrpc(tracer) => in_place_reset!(tracer),
+    }
+    settings_hash(&tracer)
+}
+
+fn webhook_settings(hook: &WebHook) -> u64 {
+    let mut hook = hook.clone();
+    in_place_reset!(hook);
+    settings_hash(&hook)
 }
 
 fn apply_events(

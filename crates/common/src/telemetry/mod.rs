@@ -14,15 +14,26 @@ pub mod webhooks;
 use tracers::log::spawn_log_tracer;
 use tracers::otel::spawn_otel_tracer;
 use tracers::stdout::spawn_console_tracer;
+use ahash::AHashMap;
+use parking_lot::Mutex;
 use trc::{Collector, ipc::subscriber::SubscriberBuilder};
 use webhooks::spawn_webhook_tracer;
 
 use crate::config::telemetry::{Telemetry, TelemetrySubscriberType};
 
+/// inbuxa: the tracers this server started, by subscriber id, with the
+/// settings each was built from. Live-tracing streams and other subscribers
+/// registered elsewhere aren't listed, so a reload leaves them running.
+static RUNNING_TRACERS: Mutex<Option<AHashMap<String, u64>>> = Mutex::new(None);
+
 impl Telemetry {
     pub fn enable(self) {
+        let mut running = RUNNING_TRACERS.lock();
+        let running = running.get_or_insert_with(AHashMap::new);
+
         // Spawn tracers
         for tracer in self.tracers.subscribers {
+            running.insert(tracer.id.clone(), tracer.settings);
             tracer.typ.spawn(
                 SubscriberBuilder::new(tracer.id)
                     .with_interests(tracer.interests)
@@ -37,25 +48,39 @@ impl Telemetry {
         Collector::reload();
     }
 
+    // inbuxa: upstream only refreshed the events, level and lossiness of a
+    // tracer that was already running, so a Log tracer moved to another
+    // path (or any tracer whose own settings changed) kept going as it was
+    // built until a restart, while the reload reported the change applied.
+    // A tracer whose settings changed is now started over: the new one is
+    // registered under the same id and the collector swaps it in at an
+    // event boundary, so no event is lost or written twice (see
+    // Update::RegisterSubscriber); the old one writes what it has queued
+    // and stops.
     pub fn update(self) {
+        let mut running = RUNNING_TRACERS.lock();
+        let running = running.get_or_insert_with(AHashMap::new);
+
         // Remove tracers that are no longer active
-        let active_subscribers = Collector::get_subscribers();
-        for subscribed_id in &active_subscribers {
-            if !self
+        running.retain(|id, _| {
+            let keep = self
                 .tracers
                 .subscribers
                 .iter()
-                .any(|tracer| tracer.id == *subscribed_id)
-            {
-                Collector::remove_subscriber(subscribed_id.clone());
+                .any(|tracer| tracer.id == *id);
+            if !keep {
+                Collector::remove_subscriber(id.clone());
             }
-        }
+            keep
+        });
 
-        // Activate new tracers or update existing ones
+        // Start new tracers, start over those whose settings changed and
+        // update the rest in place
         for tracer in self.tracers.subscribers {
-            if active_subscribers.contains(&tracer.id) {
+            if running.get(&tracer.id) == Some(&tracer.settings) {
                 Collector::update_subscriber(tracer.id, tracer.interests, tracer.lossy);
             } else {
+                running.insert(tracer.id.clone(), tracer.settings);
                 tracer.typ.spawn(
                     SubscriberBuilder::new(tracer.id)
                         .with_interests(tracer.interests)

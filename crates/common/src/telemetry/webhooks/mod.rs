@@ -2,6 +2,8 @@
  * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
+ *
+ * Modified by Coffey Labs in 2026 for INBUXA.
  */
 
 use crate::{LONG_1Y_SLUMBER, config::telemetry::WebhookTracer};
@@ -25,6 +27,11 @@ use trc::{
 
 pub(crate) fn spawn_webhook_tracer(builder: SubscriberBuilder, settings: WebhookTracer) {
     let (tx, mut rx) = builder.register();
+    // inbuxa: failed deliveries come back through a weak sender, so the
+    // channel closes when the collector drops this webhook (removed, or
+    // replaced after a settings change) and the task ends; upstream held a
+    // sender here and the task outlived its subscription
+    let tx = tx.downgrade();
     tokio::spawn(async move {
         let settings = Arc::new(settings);
         let mut wakeup_time = LONG_1Y_SLUMBER;
@@ -58,6 +65,15 @@ pub(crate) fn spawn_webhook_tracer(builder: SubscriberBuilder, settings: Webhook
                     }
                 }
                 Ok(None) => {
+                    // inbuxa: deliver what is pending rather than drop it
+                    if !pending_events.is_empty() {
+                        spawn_webhook_handler(
+                            settings.clone(),
+                            in_flight.clone(),
+                            std::mem::take(&mut pending_events),
+                            tx.clone(),
+                        );
+                    }
                     break;
                 }
                 Err(_) => (),
@@ -102,7 +118,7 @@ fn spawn_webhook_handler(
     settings: Arc<WebhookTracer>,
     in_flight: Arc<AtomicBool>,
     events: EventBatch,
-    webhook_tx: mpsc::Sender<EventBatch>,
+    webhook_tx: mpsc::WeakSender<EventBatch>,
 ) {
     tokio::spawn(async move {
         in_flight.store(true, Ordering::Relaxed);
@@ -113,7 +129,11 @@ fn spawn_webhook_handler(
         if let Err(err) = post_webhook_events(&settings, &wrapper).await {
             trc::event!(Telemetry(TelemetryEvent::WebhookError), Details = err);
 
-            if webhook_tx.send(wrapper.events.into_inner()).await.is_err() {
+            let sent = match webhook_tx.upgrade() {
+                Some(webhook_tx) => webhook_tx.send(wrapper.events.into_inner()).await.is_ok(),
+                None => false,
+            };
+            if !sent {
                 trc::event!(
                     Server(ServerEvent::ThreadError),
                     Details = "Failed to send failed webhook events back to main thread",
