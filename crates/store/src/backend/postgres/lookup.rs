@@ -2,6 +2,8 @@
  * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
+ *
+ * Modified by Coffey Labs in 2026 for INBUXA.
  */
 
 use crate::{QueryResult, QueryType, backend::postgres::into_pool_error};
@@ -12,7 +14,7 @@ use tokio_postgres::types::{FromSql, ToSql, Type};
 
 use crate::IntoRows;
 
-use super::{PostgresStore, into_error};
+use super::{PostgresStore, bounded, into_error};
 
 impl PostgresStore {
     pub(crate) async fn sql_query<T: QueryResult>(
@@ -21,33 +23,38 @@ impl PostgresStore {
         params_: &[crate::Value<'_>],
     ) -> trc::Result<T> {
         let conn = self.conn_pool.get().await.map_err(into_pool_error)?;
-        let s = conn.prepare_cached(query).await.map_err(into_error)?;
-        let params = params_
-            .iter()
-            .map(|v| v as &(dyn tokio_postgres::types::ToSql + Sync))
-            .collect::<Vec<_>>();
+        let limit = self.timeouts.query;
+        let result = tokio::time::timeout(limit, async {
+            let s = conn.prepare_cached(query).await.map_err(into_error)?;
+            let params = params_
+                .iter()
+                .map(|v| v as &(dyn tokio_postgres::types::ToSql + Sync))
+                .collect::<Vec<_>>();
 
-        match T::query_type() {
-            QueryType::Execute => conn
-                .execute(&s, params.as_slice())
-                .await
-                .map_or_else(|e| Err(into_error(e)), |r| Ok(T::from_exec(r as usize))),
-            QueryType::Exists => {
-                let rows = conn.query_raw(&s, params).await.map_err(into_error)?;
-                pin_mut!(rows);
-                rows.try_next()
+            match T::query_type() {
+                QueryType::Execute => conn
+                    .execute(&s, params.as_slice())
                     .await
-                    .map_or_else(|e| Err(into_error(e)), |r| Ok(T::from_exists(r.is_some())))
+                    .map_or_else(|e| Err(into_error(e)), |r| Ok(T::from_exec(r as usize))),
+                QueryType::Exists => {
+                    let rows = conn.query_raw(&s, params).await.map_err(into_error)?;
+                    pin_mut!(rows);
+                    rows.try_next()
+                        .await
+                        .map_or_else(|e| Err(into_error(e)), |r| Ok(T::from_exists(r.is_some())))
+                }
+                QueryType::QueryOne => conn
+                    .query_opt(&s, params.as_slice())
+                    .await
+                    .map_or_else(|e| Err(into_error(e)), |r| Ok(T::from_query_one(r))),
+                QueryType::QueryAll => conn
+                    .query(&s, params.as_slice())
+                    .await
+                    .map_or_else(|e| Err(into_error(e)), |r| Ok(T::from_query_all(r))),
             }
-            QueryType::QueryOne => conn
-                .query_opt(&s, params.as_slice())
-                .await
-                .map_or_else(|e| Err(into_error(e)), |r| Ok(T::from_query_one(r))),
-            QueryType::QueryAll => conn
-                .query(&s, params.as_slice())
-                .await
-                .map_or_else(|e| Err(into_error(e)), |r| Ok(T::from_query_all(r))),
-        }
+        })
+        .await;
+        bounded(conn, result, limit)
     }
 }
 

@@ -2,9 +2,11 @@
  * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
+ *
+ * Modified by Coffey Labs in 2026 for INBUXA.
  */
 
-use super::{PostgresStore, into_error, is_timeout_error};
+use super::{PostgresStore, bounded, into_error, is_timeout_error};
 use crate::{
     IndexKey, Key, LogKey, SUBSPACE_COUNTER, SUBSPACE_IN_MEMORY_COUNTER, SUBSPACE_QUOTA,
     SUBSPACE_REGISTRY_IDX,
@@ -30,48 +32,53 @@ enum CommitError {
 impl PostgresStore {
     pub(crate) async fn write(&self, mut batch: Batch<'_>) -> trc::Result<AssignedIds> {
         let mut conn = self.conn_pool.get().await.map_err(into_pool_error)?;
-        let start = Instant::now();
-        let mut retry_count = 0;
+        let limit = self.timeouts.query;
+        let result = tokio::time::timeout(limit, async {
+            let start = Instant::now();
+            let mut retry_count = 0;
 
-        loop {
-            match self.write_trx(&mut conn, &mut batch).await {
-                Ok(result) => {
-                    return Ok(result);
-                }
-                Err(err) => {
-                    match err {
-                        CommitError::Postgres(err) => match err.code() {
-                            Some(
-                                &SqlState::T_R_SERIALIZATION_FAILURE
-                                | &SqlState::T_R_DEADLOCK_DETECTED,
-                            ) if retry_count < MAX_COMMIT_ATTEMPTS
-                                && start.elapsed() < MAX_COMMIT_TIME => {}
-                            Some(&SqlState::UNIQUE_VIOLATION) => {
-                                return Err(trc::StoreEvent::AssertValueFailed
-                                    .into_err()
-                                    .reason("Unique violation")
-                                    .caused_by(trc::location!()));
-                            }
-                            _ => return Err(into_error(err)),
-                        },
-                        CommitError::Internal(err) => return Err(err),
-                        /*CommitError::Retry => {
-                            if retry_count > MAX_COMMIT_ATTEMPTS
-                                || start.elapsed() > MAX_COMMIT_TIME
-                            {
-                                return Err(trc::StoreEvent::AssertValueFailed
-                                    .into_err()
-                                    .caused_by(trc::location!()));
-                            }
-                        }*/
+            loop {
+                match self.write_trx(&mut conn, &mut batch).await {
+                    Ok(result) => {
+                        return Ok(result);
                     }
+                    Err(err) => {
+                        match err {
+                            CommitError::Postgres(err) => match err.code() {
+                                Some(
+                                    &SqlState::T_R_SERIALIZATION_FAILURE
+                                    | &SqlState::T_R_DEADLOCK_DETECTED,
+                                ) if retry_count < MAX_COMMIT_ATTEMPTS
+                                    && start.elapsed() < MAX_COMMIT_TIME => {}
+                                Some(&SqlState::UNIQUE_VIOLATION) => {
+                                    return Err(trc::StoreEvent::AssertValueFailed
+                                        .into_err()
+                                        .reason("Unique violation")
+                                        .caused_by(trc::location!()));
+                                }
+                                _ => return Err(into_error(err)),
+                            },
+                            CommitError::Internal(err) => return Err(err),
+                            /*CommitError::Retry => {
+                                if retry_count > MAX_COMMIT_ATTEMPTS
+                                    || start.elapsed() > MAX_COMMIT_TIME
+                                {
+                                    return Err(trc::StoreEvent::AssertValueFailed
+                                        .into_err()
+                                        .caused_by(trc::location!()));
+                                }
+                            }*/
+                        }
 
-                    let backoff = rand::rng().random_range(50..=300);
-                    tokio::time::sleep(Duration::from_millis(backoff)).await;
-                    retry_count += 1;
+                        let backoff = rand::rng().random_range(50..=300);
+                        tokio::time::sleep(Duration::from_millis(backoff)).await;
+                        retry_count += 1;
+                    }
                 }
             }
-        }
+        })
+        .await;
+        bounded(conn, result, limit)
     }
 
     async fn write_trx(
@@ -393,72 +400,81 @@ impl PostgresStore {
 
     pub(crate) async fn purge_store(&self) -> trc::Result<()> {
         let conn = self.conn_pool.get().await.map_err(into_pool_error)?;
+        let limit = self.timeouts.maintenance;
+        let result = tokio::time::timeout(limit, async {
+            for subspace in [SUBSPACE_QUOTA, SUBSPACE_COUNTER, SUBSPACE_IN_MEMORY_COUNTER] {
+                purge_table(&conn, char::from(subspace)).await?;
+            }
 
-        for subspace in [SUBSPACE_QUOTA, SUBSPACE_COUNTER, SUBSPACE_IN_MEMORY_COUNTER] {
-            purge_table(&conn, char::from(subspace)).await?;
-        }
-
-        Ok(())
+            Ok(())
+        })
+        .await;
+        bounded(conn, result, limit)
     }
 
     pub(crate) async fn delete_range(&self, from: impl Key, to: impl Key) -> trc::Result<()> {
         let conn = self.conn_pool.get().await.map_err(into_pool_error)?;
-        let table = char::from(from.subspace());
-        let mut from = from.serialize(0);
-        let to = to.serialize(0);
+        let limit = self.timeouts.maintenance;
+        let result = tokio::time::timeout(limit, async {
+            let table = char::from(from.subspace());
+            let mut from = from.serialize(0);
+            let to = to.serialize(0);
 
-        let delete = conn
-            .prepare_cached(&format!("DELETE FROM {table} WHERE k >= $1 AND k < $2"))
-            .await
-            .map_err(into_error)?;
-
-        match conn.execute(&delete, &[&from, &to]).await {
-            Ok(_) => return Ok(()),
-            Err(err) if is_timeout_error(&err) => (),
-            Err(err) => return Err(into_error(err)),
-        }
-
-        let mut chunk_size = DELETE_CHUNK_SIZE;
-
-        loop {
-            let boundary = conn
-                .prepare_cached(&format!(
-                    "SELECT k FROM {table} WHERE k >= $1 AND k < $2 ORDER BY k ASC LIMIT 1 OFFSET {chunk_size}"
-                ))
+            let delete = conn
+                .prepare_cached(&format!("DELETE FROM {table} WHERE k >= $1 AND k < $2"))
                 .await
                 .map_err(into_error)?;
 
+            match conn.execute(&delete, &[&from, &to]).await {
+                Ok(_) => return Ok(()),
+                Err(err) if is_timeout_error(&err) => (),
+                Err(err) => return Err(into_error(err)),
+            }
+
+            let mut chunk_size = DELETE_CHUNK_SIZE;
+
             loop {
-                let next = match conn.query_opt(&boundary, &[&from, &to]).await {
-                    Ok(next) => match next {
-                        Some(row) => Some(row.try_get::<_, Vec<u8>>(0).map_err(into_error)?),
-                        None => None,
-                    },
-                    Err(err) if is_timeout_error(&err) && chunk_size > MIN_DELETE_CHUNK_SIZE => {
-                        chunk_size = (chunk_size / 2).max(MIN_DELETE_CHUNK_SIZE);
-                        break;
-                    }
-                    Err(err) => return Err(into_error(err)),
-                };
-
-                match conn
-                    .execute(&delete, &[&from, next.as_ref().unwrap_or(&to)])
+                let boundary = conn
+                    .prepare_cached(&format!(
+                        "SELECT k FROM {table} WHERE k >= $1 AND k < $2 ORDER BY k ASC LIMIT 1 OFFSET {chunk_size}"
+                    ))
                     .await
-                {
-                    Ok(_) => (),
-                    Err(err) if is_timeout_error(&err) && chunk_size > MIN_DELETE_CHUNK_SIZE => {
-                        chunk_size = (chunk_size / 2).max(MIN_DELETE_CHUNK_SIZE);
-                        break;
-                    }
-                    Err(err) => return Err(into_error(err)),
-                }
+                    .map_err(into_error)?;
 
-                match next {
-                    Some(next) => from = next,
-                    None => return Ok(()),
+                loop {
+                    let next = match conn.query_opt(&boundary, &[&from, &to]).await {
+                        Ok(next) => match next {
+                            Some(row) => Some(row.try_get::<_, Vec<u8>>(0).map_err(into_error)?),
+                            None => None,
+                        },
+                        Err(err) if is_timeout_error(&err) && chunk_size > MIN_DELETE_CHUNK_SIZE => {
+                            chunk_size = (chunk_size / 2).max(MIN_DELETE_CHUNK_SIZE);
+                            break;
+                        }
+                        Err(err) => return Err(into_error(err)),
+                    };
+
+                    match conn
+                        .execute(&delete, &[&from, next.as_ref().unwrap_or(&to)])
+                        .await
+                    {
+                        Ok(_) => (),
+                        Err(err) if is_timeout_error(&err) && chunk_size > MIN_DELETE_CHUNK_SIZE => {
+                            chunk_size = (chunk_size / 2).max(MIN_DELETE_CHUNK_SIZE);
+                            break;
+                        }
+                        Err(err) => return Err(into_error(err)),
+                    }
+
+                    match next {
+                        Some(next) => from = next,
+                        None => return Ok(()),
+                    }
                 }
             }
-        }
+        })
+        .await;
+        bounded(conn, result, limit)
     }
 }
 

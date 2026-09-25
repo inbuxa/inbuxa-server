@@ -10,8 +10,8 @@ use crate::{
     backend::{
         MAX_TOKEN_LENGTH,
         mysql::{
-            DELETE_CHUNK_SIZE, MIN_DELETE_CHUNK_SIZE, MysqlSearchField, MysqlStore, into_error,
-            is_timeout_error,
+            DELETE_CHUNK_SIZE, MIN_DELETE_CHUNK_SIZE, MysqlSearchField, MysqlStore, bounded,
+            into_error, is_timeout_error,
         },
     },
     search::{
@@ -27,57 +27,62 @@ use std::fmt::Write;
 impl MysqlStore {
     pub async fn index(&self, documents: Vec<IndexDocument>) -> trc::Result<()> {
         let mut conn = self.conn().await?;
-        let mut tx_opts = TxOpts::default();
-        tx_opts
-            .with_consistent_snapshot(false)
-            .with_isolation_level(IsolationLevel::ReadCommitted);
-        let mut trx = conn.start_transaction(tx_opts).await.map_err(into_error)?;
+        let limit = self.timeouts.query;
+        let result = tokio::time::timeout(limit, async {
+            let mut tx_opts = TxOpts::default();
+            tx_opts
+                .with_consistent_snapshot(false)
+                .with_isolation_level(IsolationLevel::ReadCommitted);
+            let mut trx = conn.start_transaction(tx_opts).await.map_err(into_error)?;
 
-        for document in documents {
-            let index = document.index;
-            let primary_keys = index.primary_keys();
-            let all_fields = index.all_fields();
-            let mut fields = document.fields;
-            let mut values = Vec::with_capacity(fields.len() + 2);
-            let mut query = format!("INSERT INTO {} (", index.mysql_table());
+            for document in documents {
+                let index = document.index;
+                let primary_keys = index.primary_keys();
+                let all_fields = index.all_fields();
+                let mut fields = document.fields;
+                let mut values = Vec::with_capacity(fields.len() + 2);
+                let mut query = format!("INSERT INTO {} (", index.mysql_table());
 
-            for (i, field) in primary_keys.iter().chain(all_fields).enumerate() {
-                if i > 0 {
-                    query.push(',');
+                for (i, field) in primary_keys.iter().chain(all_fields).enumerate() {
+                    if i > 0 {
+                        query.push(',');
+                    }
+                    query.push_str(field.column());
                 }
-                query.push_str(field.column());
+
+                query.push_str(") VALUES (");
+
+                for (i, field) in primary_keys.iter().chain(all_fields).enumerate() {
+                    if i > 0 {
+                        query.push(',');
+                    }
+
+                    if let Some(value) = fields.remove(field) {
+                        query.push('?');
+                        values.push(value);
+                    } else {
+                        query.push_str("NULL");
+                    }
+                }
+
+                query.push_str(") ON DUPLICATE KEY UPDATE ");
+                for (i, field) in all_fields.iter().enumerate() {
+                    if i > 0 {
+                        query.push(',');
+                    }
+                    let column = field.column();
+                    let _ = write!(&mut query, "{column} = VALUES({column})");
+                }
+
+                let s = trx.prep(&query).await.map_err(into_error)?;
+
+                trx.exec_drop(&s, values).await.map_err(into_error)?;
             }
 
-            query.push_str(") VALUES (");
-
-            for (i, field) in primary_keys.iter().chain(all_fields).enumerate() {
-                if i > 0 {
-                    query.push(',');
-                }
-
-                if let Some(value) = fields.remove(field) {
-                    query.push('?');
-                    values.push(value);
-                } else {
-                    query.push_str("NULL");
-                }
-            }
-
-            query.push_str(") ON DUPLICATE KEY UPDATE ");
-            for (i, field) in all_fields.iter().enumerate() {
-                if i > 0 {
-                    query.push(',');
-                }
-                let column = field.column();
-                let _ = write!(&mut query, "{column} = VALUES({column})");
-            }
-
-            let s = trx.prep(&query).await.map_err(into_error)?;
-
-            trx.exec_drop(&s, values).await.map_err(into_error)?;
-        }
-
-        trx.commit().await.map_err(into_error)
+            trx.commit().await.map_err(into_error)
+        })
+        .await;
+        bounded(conn, result, limit)
     }
 
     pub async fn query<R: SearchDocumentId>(
@@ -97,12 +102,17 @@ impl MysqlStore {
         }
 
         let mut conn = self.conn().await?;
-        let s = conn.prep(query).await.map_err(into_error)?;
+        let limit = self.timeouts.query;
+        let result = tokio::time::timeout(limit, async {
+            let s = conn.prep(query).await.map_err(into_error)?;
 
-        conn.exec::<i64, _, _>(s, params)
-            .await
-            .map(|r| r.into_iter().map(|r| R::from_u64(r as u64)).collect())
-            .map_err(into_error)
+            conn.exec::<i64, _, _>(s, params)
+                .await
+                .map(|r| r.into_iter().map(|r| R::from_u64(r as u64)).collect())
+                .map_err(into_error)
+        })
+        .await;
+        bounded(conn, result, limit)
     }
 
     pub async fn unindex(&self, filter: SearchQuery) -> trc::Result<u64> {
@@ -111,40 +121,47 @@ impl MysqlStore {
         let params = build_filter(&mut query, &filter.filters);
 
         let mut conn = self.conn().await?;
-        let s = conn.prep(&query).await.map_err(into_error)?;
+        let limit = self.timeouts.maintenance;
+        let result = tokio::time::timeout(limit, async {
+            let s = conn.prep(&query).await.map_err(into_error)?;
 
-        match conn.exec_drop(s, params.clone()).await {
-            Ok(_) => return Ok(conn.affected_rows()),
-            Err(err) if is_timeout_error(&err) => (),
-            Err(err) => return Err(into_error(err)),
-        }
+            match conn.exec_drop(s, params.clone()).await {
+                Ok(_) => return Ok(conn.affected_rows()),
+                Err(err) if is_timeout_error(&err) => (),
+                Err(err) => return Err(into_error(err)),
+            }
 
-        let mut chunk_size = DELETE_CHUNK_SIZE;
-        let mut deleted = 0;
-
-        loop {
-            let s = conn
-                .prep(format!("{query} LIMIT {chunk_size}"))
-                .await
-                .map_err(into_error)?;
+            let mut chunk_size = DELETE_CHUNK_SIZE;
+            let mut deleted = 0;
 
             loop {
-                match conn.exec_drop(&s, params.clone()).await {
-                    Ok(_) => {
-                        let affected = conn.affected_rows();
-                        if affected == 0 {
-                            return Ok(deleted);
+                let s = conn
+                    .prep(format!("{query} LIMIT {chunk_size}"))
+                    .await
+                    .map_err(into_error)?;
+
+                loop {
+                    match conn.exec_drop(&s, params.clone()).await {
+                        Ok(_) => {
+                            let affected = conn.affected_rows();
+                            if affected == 0 {
+                                return Ok(deleted);
+                            }
+                            deleted += affected;
                         }
-                        deleted += affected;
+                        Err(err)
+                            if is_timeout_error(&err) && chunk_size > MIN_DELETE_CHUNK_SIZE =>
+                        {
+                            chunk_size = (chunk_size / 2).max(MIN_DELETE_CHUNK_SIZE);
+                            break;
+                        }
+                        Err(err) => return Err(into_error(err)),
                     }
-                    Err(err) if is_timeout_error(&err) && chunk_size > MIN_DELETE_CHUNK_SIZE => {
-                        chunk_size = (chunk_size / 2).max(MIN_DELETE_CHUNK_SIZE);
-                        break;
-                    }
-                    Err(err) => return Err(into_error(err)),
                 }
             }
-        }
+        })
+        .await;
+        bounded(conn, result, limit)
     }
 }
 

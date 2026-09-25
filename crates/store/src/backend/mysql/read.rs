@@ -6,7 +6,7 @@
  * Modified by Coffey Labs in 2026 for INBUXA.
  */
 
-use super::{MysqlStore, into_error, is_timeout_error};
+use super::{MysqlStore, bounded, discard, into_error, is_timeout_error, query_timeout_error};
 use crate::{Deserialize, IterateParams, Key, ValueKey, write::ValueClass};
 use futures::TryStreamExt;
 use mysql_async::{Row, prelude::Queryable};
@@ -17,40 +17,50 @@ impl MysqlStore {
         U: Deserialize + 'static,
     {
         let mut conn = self.conn().await?;
-        let s = conn
-            .prep(format!(
-                "SELECT v FROM {} WHERE k = ?",
-                char::from(key.subspace())
-            ))
-            .await
-            .map_err(into_error)?;
-        let key = key.serialize(0);
-        conn.exec_first::<Vec<u8>, _, _>(&s, (&key,))
-            .await
-            .map_err(into_error)
-            .and_then(|r| {
-                if let Some(r) = r {
-                    Ok(Some(U::deserialize_owned_with_key(&key, r)?))
-                } else {
-                    Ok(None)
-                }
-            })
+        let limit = self.timeouts.query;
+        let result = tokio::time::timeout(limit, async {
+            let s = conn
+                .prep(format!(
+                    "SELECT v FROM {} WHERE k = ?",
+                    char::from(key.subspace())
+                ))
+                .await
+                .map_err(into_error)?;
+            let key = key.serialize(0);
+            conn.exec_first::<Vec<u8>, _, _>(&s, (&key,))
+                .await
+                .map_err(into_error)
+                .and_then(|r| {
+                    if let Some(r) = r {
+                        Ok(Some(U::deserialize_owned_with_key(&key, r)?))
+                    } else {
+                        Ok(None)
+                    }
+                })
+        })
+        .await;
+        bounded(conn, result, limit)
     }
 
     pub(crate) async fn key_exists(&self, key: impl Key) -> trc::Result<bool> {
         let mut conn = self.conn().await?;
-        let s = conn
-            .prep(format!(
-                "SELECT 1 FROM {} WHERE k = ?",
-                char::from(key.subspace())
-            ))
-            .await
-            .map_err(into_error)?;
-        let key = key.serialize(0);
-        conn.exec_first::<u8, _, _>(&s, (&key,))
-            .await
-            .map_err(into_error)
-            .map(|r| r.is_some())
+        let limit = self.timeouts.query;
+        let result = tokio::time::timeout(limit, async {
+            let s = conn
+                .prep(format!(
+                    "SELECT 1 FROM {} WHERE k = ?",
+                    char::from(key.subspace())
+                ))
+                .await
+                .map_err(into_error)?;
+            let key = key.serialize(0);
+            conn.exec_first::<u8, _, _>(&s, (&key,))
+                .await
+                .map_err(into_error)
+                .map(|r| r.is_some())
+        })
+        .await;
+        bounded(conn, result, limit)
     }
 
     pub(crate) async fn iterate<T: Key>(
@@ -64,28 +74,36 @@ impl MysqlStore {
         let end = params.end.serialize(0);
         let keys = if params.values { "k, v" } else { "k" };
 
-        let s = conn
-            .prep(&match (params.first, params.ascending) {
-                (true, true) => {
-                    format!(
-                        "SELECT {keys} FROM {table} WHERE k >= ? AND k <= ? ORDER BY k ASC LIMIT 1"
-                    )
-                }
-                (true, false) => {
-                    format!(
-                        "SELECT {keys} FROM {table} WHERE k >= ? AND k <= ? ORDER BY k DESC LIMIT 1"
-                    )
-                }
-                (false, true) => {
-                    format!("SELECT {keys} FROM {table} WHERE k >= ? AND k <= ? ORDER BY k ASC")
-                }
-                (false, false) => {
-                    format!("SELECT {keys} FROM {table} WHERE k >= ? AND k <= ? ORDER BY k DESC")
-                }
-            })
-            .await
-            .map_err(into_error)?;
+        // inbuxa: a scan may run for hours, so the query limit bounds each
+        // wait for the database (preparing, the query starting, the next
+        // row) rather than the scan. A wait that runs out closes the
+        // connection.
+        let limit = self.timeouts.query;
+        let query = match (params.first, params.ascending) {
+            (true, true) => {
+                format!("SELECT {keys} FROM {table} WHERE k >= ? AND k <= ? ORDER BY k ASC LIMIT 1")
+            }
+            (true, false) => {
+                format!(
+                    "SELECT {keys} FROM {table} WHERE k >= ? AND k <= ? ORDER BY k DESC LIMIT 1"
+                )
+            }
+            (false, true) => {
+                format!("SELECT {keys} FROM {table} WHERE k >= ? AND k <= ? ORDER BY k ASC")
+            }
+            (false, false) => {
+                format!("SELECT {keys} FROM {table} WHERE k >= ? AND k <= ? ORDER BY k DESC")
+            }
+        };
+        let s = match tokio::time::timeout(limit, conn.prep(&query)).await {
+            Ok(s) => s.map_err(into_error)?,
+            Err(_) => {
+                discard(conn);
+                return Err(query_timeout_error(limit));
+            }
+        };
         let mut from = begin;
+        let mut stalled = false;
         let mut to = end;
         let mut resume_key = None;
 
@@ -94,13 +112,26 @@ impl MysqlStore {
             let mut timed_out = false;
 
             {
-                let mut rows = conn
-                    .exec_stream::<Row, _, _>(&s, (from.clone(), to.clone()))
-                    .await
-                    .map_err(into_error)?;
+                let mut rows = match tokio::time::timeout(
+                    limit,
+                    conn.exec_stream::<Row, _, _>(&s, (from.clone(), to.clone())),
+                )
+                .await
+                {
+                    Ok(rows) => rows.map_err(into_error)?,
+                    // Leaves the scan loop for the timeout below
+                    Err(_) => break,
+                };
 
                 loop {
-                    match rows.try_next().await {
+                    let next = match tokio::time::timeout(limit, rows.try_next()).await {
+                        Ok(next) => next,
+                        Err(_) => {
+                            stalled = true;
+                            break;
+                        }
+                    };
+                    match next {
                         Ok(Some(mut row)) => {
                             let value = if params.values {
                                 row.take_opt::<Vec<u8>, _>(1)
@@ -136,6 +167,10 @@ impl MysqlStore {
                 }
             }
 
+            if stalled {
+                break;
+            }
+
             match last_key {
                 Some(last_key) if timed_out => {
                     if params.ascending {
@@ -148,6 +183,9 @@ impl MysqlStore {
                 _ => return Ok(()),
             }
         }
+
+        discard(conn);
+        Err(query_timeout_error(limit))
     }
 
     pub(crate) async fn get_counter(
@@ -158,14 +196,19 @@ impl MysqlStore {
         let table = char::from(key.subspace());
         let key = key.serialize(0);
         let mut conn = self.conn().await?;
-        let s = conn
-            .prep(format!("SELECT v FROM {table} WHERE k = ?"))
-            .await
-            .map_err(into_error)?;
-        match conn.exec_first::<i64, _, _>(&s, (key,)).await {
-            Ok(Some(num)) => Ok(num),
-            Ok(None) => Ok(0),
-            Err(e) => Err(into_error(e)),
-        }
+        let limit = self.timeouts.query;
+        let result = tokio::time::timeout(limit, async {
+            let s = conn
+                .prep(format!("SELECT v FROM {table} WHERE k = ?"))
+                .await
+                .map_err(into_error)?;
+            match conn.exec_first::<i64, _, _>(&s, (key,)).await {
+                Ok(Some(num)) => Ok(num),
+                Ok(None) => Ok(0),
+                Err(e) => Err(into_error(e)),
+            }
+        })
+        .await;
+        bounded(conn, result, limit)
     }
 }

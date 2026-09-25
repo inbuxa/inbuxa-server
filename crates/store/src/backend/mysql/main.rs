@@ -6,7 +6,7 @@
  * Modified by Coffey Labs in 2026 for INBUXA.
  */
 
-use super::{MysqlStore, into_error};
+use super::{MysqlStore, bounded, into_error};
 use crate::{
     backend::mysql::MysqlSearchField,
     search::{
@@ -72,6 +72,7 @@ impl MysqlStore {
                             .db_name(Some(replica.database.clone()))
                             .tcp_port(replica.port as u16),
                     ),
+                    timeouts: Default::default(),
                 })),
                 replica.host,
                 replica.port as u16,
@@ -81,6 +82,7 @@ impl MysqlStore {
 
         let primary = Store::MySQL(Arc::new(MysqlStore {
             conn_pool: Pool::new(opts),
+            timeouts: Default::default(),
         }));
 
         // ST-1: no replicas, no change
@@ -99,88 +101,96 @@ impl MysqlStore {
 
     pub(crate) async fn create_storage_tables(&self) -> trc::Result<()> {
         let mut conn = self.conn().await?;
+        let limit = self.timeouts.maintenance;
+        let result = tokio::time::timeout(limit, async {
+            for table in [
+                SUBSPACE_ACL,
+                SUBSPACE_TASK_QUEUE,
+                SUBSPACE_DELETED_ITEMS,
+                SUBSPACE_SPAM_SAMPLES,
+                crate::SUBSPACE_INBUXA, // inbuxa: masked email
+                SUBSPACE_BLOB_LINK,
+                SUBSPACE_IN_MEMORY_VALUE,
+                SUBSPACE_PROPERTY,
+                SUBSPACE_REGISTRY,
+                SUBSPACE_REGISTRY_PK,
+                SUBSPACE_DIRECTORY,
+                SUBSPACE_QUEUE_MESSAGE,
+                SUBSPACE_QUEUE_EVENT,
+                SUBSPACE_REPORT_OUT,
+                SUBSPACE_REPORT_IN,
+                SUBSPACE_LOGS,
+                SUBSPACE_TELEMETRY_SPAN,
+                SUBSPACE_TELEMETRY_METRIC,
+            ] {
+                let table = char::from(table);
+                conn.query_drop(format!(
+                    "CREATE TABLE IF NOT EXISTS {table} (
+                        k VARBINARY(255) NOT NULL,
+                        v MEDIUMBLOB NOT NULL,
+                        PRIMARY KEY (k)
+                    ) ENGINE=InnoDB"
+                ))
+                .await
+                .map_err(into_error)?;
+            }
 
-        for table in [
-            SUBSPACE_ACL,
-            SUBSPACE_TASK_QUEUE,
-            SUBSPACE_DELETED_ITEMS,
-            SUBSPACE_SPAM_SAMPLES,
-            crate::SUBSPACE_INBUXA, // inbuxa: masked email
-            SUBSPACE_BLOB_LINK,
-            SUBSPACE_IN_MEMORY_VALUE,
-            SUBSPACE_PROPERTY,
-            SUBSPACE_REGISTRY,
-            SUBSPACE_REGISTRY_PK,
-            SUBSPACE_DIRECTORY,
-            SUBSPACE_QUEUE_MESSAGE,
-            SUBSPACE_QUEUE_EVENT,
-            SUBSPACE_REPORT_OUT,
-            SUBSPACE_REPORT_IN,
-            SUBSPACE_LOGS,
-            SUBSPACE_TELEMETRY_SPAN,
-            SUBSPACE_TELEMETRY_METRIC,
-        ] {
-            let table = char::from(table);
-            conn.query_drop(format!(
-                "CREATE TABLE IF NOT EXISTS {table} (
-                    k VARBINARY(255) NOT NULL,
-                    v MEDIUMBLOB NOT NULL,
-                    PRIMARY KEY (k)
-                ) ENGINE=InnoDB"
-            ))
-            .await
-            .map_err(into_error)?;
-        }
-
-        conn.query_drop(format!(
-            "CREATE TABLE IF NOT EXISTS {} (
-                k VARBINARY(255) NOT NULL,
-                v LONGBLOB NOT NULL,
-                PRIMARY KEY (k)
-            ) ENGINE=InnoDB",
-            char::from(SUBSPACE_BLOBS),
-        ))
-        .await
-        .map_err(into_error)?;
-
-        for table in [SUBSPACE_INDEXES, SUBSPACE_REGISTRY_IDX] {
-            let table = char::from(table);
-            conn.query_drop(format!(
-                "CREATE TABLE IF NOT EXISTS {table} (
-                    k BLOB,
-                    PRIMARY KEY (k(400))
-                ) ENGINE=InnoDB"
-            ))
-            .await
-            .map_err(into_error)?;
-        }
-
-        for table in [SUBSPACE_COUNTER, SUBSPACE_QUOTA, SUBSPACE_IN_MEMORY_COUNTER] {
             conn.query_drop(format!(
                 "CREATE TABLE IF NOT EXISTS {} (
-                k VARBINARY(255) NOT NULL,
-                v BIGINT NOT NULL DEFAULT 0,
-                PRIMARY KEY (k)
-            ) ENGINE=InnoDB",
-                char::from(table)
+                    k VARBINARY(255) NOT NULL,
+                    v LONGBLOB NOT NULL,
+                    PRIMARY KEY (k)
+                ) ENGINE=InnoDB",
+                char::from(SUBSPACE_BLOBS),
             ))
             .await
             .map_err(into_error)?;
-        }
 
-        Ok(())
+            for table in [SUBSPACE_INDEXES, SUBSPACE_REGISTRY_IDX] {
+                let table = char::from(table);
+                conn.query_drop(format!(
+                    "CREATE TABLE IF NOT EXISTS {table} (
+                        k BLOB,
+                        PRIMARY KEY (k(400))
+                    ) ENGINE=InnoDB"
+                ))
+                .await
+                .map_err(into_error)?;
+            }
+
+            for table in [SUBSPACE_COUNTER, SUBSPACE_QUOTA, SUBSPACE_IN_MEMORY_COUNTER] {
+                conn.query_drop(format!(
+                    "CREATE TABLE IF NOT EXISTS {} (
+                    k VARBINARY(255) NOT NULL,
+                    v BIGINT NOT NULL DEFAULT 0,
+                    PRIMARY KEY (k)
+                ) ENGINE=InnoDB",
+                    char::from(table)
+                ))
+                .await
+                .map_err(into_error)?;
+            }
+
+            Ok(())
+        })
+        .await;
+        bounded(conn, result, limit)
     }
 
     pub(crate) async fn create_search_tables(&self) -> trc::Result<()> {
         let mut conn = self.conn().await?;
+        let limit = self.timeouts.maintenance;
+        let result = tokio::time::timeout(limit, async {
+            create_search_tables::<EmailSearchField>(&mut conn).await?;
+            create_search_tables::<CalendarSearchField>(&mut conn).await?;
+            create_search_tables::<ContactSearchField>(&mut conn).await?;
+            //create_search_tables::<FileSearchField>(&mut conn).await?;
+            create_search_tables::<TracingSearchField>(&mut conn).await?;
 
-        create_search_tables::<EmailSearchField>(&mut conn).await?;
-        create_search_tables::<CalendarSearchField>(&mut conn).await?;
-        create_search_tables::<ContactSearchField>(&mut conn).await?;
-        //create_search_tables::<FileSearchField>(&mut conn).await?;
-        create_search_tables::<TracingSearchField>(&mut conn).await?;
-
-        Ok(())
+            Ok(())
+        })
+        .await;
+        bounded(conn, result, limit)
     }
 }
 

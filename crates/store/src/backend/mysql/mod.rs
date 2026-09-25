@@ -6,6 +6,7 @@
  * Modified by Coffey Labs in 2026 for INBUXA.
  */
 
+use crate::backend::query_timeout::QueryTimeouts;
 use crate::{
     search::{
         CalendarSearchField, ContactSearchField, EmailSearchField, FileSearchField, SearchField,
@@ -14,7 +15,7 @@ use crate::{
     write::SearchIndex,
 };
 use mysql_async::Pool;
-use std::fmt::Display;
+use std::{fmt::Display, time::Duration};
 
 pub mod blob;
 pub mod lookup;
@@ -25,6 +26,8 @@ pub mod write;
 
 pub struct MysqlStore {
     pub(crate) conn_pool: Pool,
+    /// inbuxa: client-side query limits (see backend::query_timeout)
+    pub(crate) timeouts: QueryTimeouts,
 }
 
 /// inbuxa: how long a request waits for a pooled connection (including
@@ -52,6 +55,43 @@ pub(crate) async fn pool_conn(
             .reason("Timed out waiting for a database connection")
             .details(format!("No connection within {} s", wait.as_secs()))),
     }
+}
+
+/// inbuxa: the error for an operation that ran past its time limit.
+pub(crate) fn query_timeout_error(limit: Duration) -> trc::Error {
+    trc::StoreEvent::MysqlError
+        .reason("Query timed out")
+        .details(format!(
+            "No answer from the database within {} s",
+            limit.as_secs()
+        ))
+}
+
+/// inbuxa: ends an operation run on `conn` under `limit`. When it ran out,
+/// the connection is closed rather than returned to the pool: a query may
+/// still be in flight on it, or a transaction open. Conn::disconnect marks
+/// the connection closed before it sends anything, so even when the server
+/// doesn't answer and the attempt is dropped, the pool discards it instead
+/// of waiting to clean it up.
+pub(crate) fn bounded<T>(
+    conn: mysql_async::Conn,
+    result: Result<trc::Result<T>, tokio::time::error::Elapsed>,
+    limit: Duration,
+) -> trc::Result<T> {
+    match result {
+        Ok(result) => result,
+        Err(_) => {
+            discard(conn);
+            Err(query_timeout_error(limit))
+        }
+    }
+}
+
+/// inbuxa: closes a connection whose state is unknown (see bounded).
+pub(crate) fn discard(conn: mysql_async::Conn) {
+    tokio::spawn(async move {
+        let _ = tokio::time::timeout(Duration::from_secs(1), conn.disconnect()).await;
+    });
 }
 
 #[inline(always)]

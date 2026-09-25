@@ -10,8 +10,8 @@ use crate::{
     backend::{
         MAX_TOKEN_LENGTH,
         postgres::{
-            DELETE_CHUNK_SIZE, MIN_DELETE_CHUNK_SIZE, PostgresStore, PsqlSearchField, into_error,
-            into_pool_error, is_timeout_error,
+            DELETE_CHUNK_SIZE, MIN_DELETE_CHUNK_SIZE, PostgresStore, PsqlSearchField, bounded,
+            into_error, into_pool_error, is_timeout_error,
         },
     },
     search::{
@@ -36,125 +36,130 @@ impl PostgresStore {
 
     pub async fn index(&self, documents: Vec<IndexDocument>) -> trc::Result<()> {
         let mut conn = self.conn_pool.get().await.map_err(into_pool_error)?;
-        let trx = conn
-            .build_transaction()
-            .isolation_level(IsolationLevel::ReadCommitted)
-            .start()
-            .await
-            .map_err(into_error)?;
+        let limit = self.timeouts.query;
+        let result = tokio::time::timeout(limit, async {
+            let trx = conn
+                .build_transaction()
+                .isolation_level(IsolationLevel::ReadCommitted)
+                .start()
+                .await
+                .map_err(into_error)?;
 
-        for document in documents {
-            let index = document.index;
-            let primary_keys = index.primary_keys();
-            let all_fields = index.all_fields();
-            let fields = document.fields;
-            // inbuxa: keyword text (addresses, contact fields, ...) is split into
-            // words before it reaches the text parser, see keyword_terms().
-            let keywords = primary_keys
-                .iter()
-                .chain(all_fields)
-                .map(|field| match fields.get(field) {
-                    Some(SearchValue::Text {
-                        value,
-                        language: Language::None,
-                    }) if field.is_text() => Some(keyword_terms(value)),
-                    _ => None,
-                })
-                .collect::<Vec<_>>();
-            let mut values = Vec::with_capacity(fields.len() + 2);
-            let mut query = format!("INSERT INTO {} (", index.psql_table());
+            for document in documents {
+                let index = document.index;
+                let primary_keys = index.primary_keys();
+                let all_fields = index.all_fields();
+                let fields = document.fields;
+                // inbuxa: keyword text (addresses, contact fields, ...) is split into
+                // words before it reaches the text parser, see keyword_terms().
+                let keywords = primary_keys
+                    .iter()
+                    .chain(all_fields)
+                    .map(|field| match fields.get(field) {
+                        Some(SearchValue::Text {
+                            value,
+                            language: Language::None,
+                        }) if field.is_text() => Some(keyword_terms(value)),
+                        _ => None,
+                    })
+                    .collect::<Vec<_>>();
+                let mut values = Vec::with_capacity(fields.len() + 2);
+                let mut query = format!("INSERT INTO {} (", index.psql_table());
 
-            for (i, field) in primary_keys.iter().chain(all_fields).enumerate() {
-                if i > 0 {
-                    query.push(',');
-                }
-                query.push_str(field.column());
+                for (i, field) in primary_keys.iter().chain(all_fields).enumerate() {
+                    if i > 0 {
+                        query.push(',');
+                    }
+                    query.push_str(field.column());
 
-                if let Some(sort_column) = field.sort_column() {
-                    query.push(',');
-                    query.push_str(sort_column);
-                }
-            }
-
-            query.push_str(") VALUES (");
-
-            for (i, field) in primary_keys.iter().chain(all_fields).enumerate() {
-                if i > 0 {
-                    query.push(',');
+                    if let Some(sort_column) = field.sort_column() {
+                        query.push(',');
+                        query.push_str(sort_column);
+                    }
                 }
 
-                if let Some(value) = fields.get(field) {
-                    let value_ref = format!("${}", values.len() + 1);
-                    let (text_len, language) = if let SearchValue::Text { value, language } = value
-                    {
-                        (value.len(), self.ts_config(language))
-                    } else {
-                        (0, PG_UNSTEMMED_LANG)
-                    };
+                query.push_str(") VALUES (");
 
-                    if let Some(keywords) = &keywords[i] {
-                        let _ = write!(&mut query, "to_tsvector('{language}',{value_ref})");
-                        values.push(keywords as &(dyn ToSql + Sync));
-                        if field.sort_column().is_some() {
-                            let value_ref = format!("${}", values.len() + 1);
-                            if text_len > 255 {
-                                let _ = write!(&mut query, ",left({value_ref},255)");
+                for (i, field) in primary_keys.iter().chain(all_fields).enumerate() {
+                    if i > 0 {
+                        query.push(',');
+                    }
+
+                    if let Some(value) = fields.get(field) {
+                        let value_ref = format!("${}", values.len() + 1);
+                        let (text_len, language) =
+                            if let SearchValue::Text { value, language } = value {
+                                (value.len(), self.ts_config(language))
                             } else {
-                                let _ = write!(&mut query, ",{value_ref}");
+                                (0, PG_UNSTEMMED_LANG)
+                            };
+
+                        if let Some(keywords) = &keywords[i] {
+                            let _ = write!(&mut query, "to_tsvector('{language}',{value_ref})");
+                            values.push(keywords as &(dyn ToSql + Sync));
+                            if field.sort_column().is_some() {
+                                let value_ref = format!("${}", values.len() + 1);
+                                if text_len > 255 {
+                                    let _ = write!(&mut query, ",left({value_ref},255)");
+                                } else {
+                                    let _ = write!(&mut query, ",{value_ref}");
+                                }
+                                values.push(value as &(dyn ToSql + Sync));
                             }
-                            values.push(value as &(dyn ToSql + Sync));
-                        }
-                        continue;
-                    } else if field.is_text() {
-                        let _ = write!(&mut query, "to_tsvector('{language}',{value_ref})");
-                    } else if text_len > 512 {
-                        query.push_str("left(");
-                        query.push_str(&value_ref);
-                        query.push_str(",512)");
-                    } else {
-                        query.push_str(&value_ref);
-                    }
-
-                    if field.sort_column().is_some() {
-                        if text_len > 255 {
-                            query.push_str(",left(");
+                            continue;
+                        } else if field.is_text() {
+                            let _ = write!(&mut query, "to_tsvector('{language}',{value_ref})");
+                        } else if text_len > 512 {
+                            query.push_str("left(");
                             query.push_str(&value_ref);
-                            query.push_str(",255)");
+                            query.push_str(",512)");
                         } else {
-                            query.push(',');
                             query.push_str(&value_ref);
                         }
+
+                        if field.sort_column().is_some() {
+                            if text_len > 255 {
+                                query.push_str(",left(");
+                                query.push_str(&value_ref);
+                                query.push_str(",255)");
+                            } else {
+                                query.push(',');
+                                query.push_str(&value_ref);
+                            }
+                        }
+
+                        values.push(value as &(dyn ToSql + Sync));
+                    } else {
+                        query.push_str("NULL");
+                        if field.sort_column().is_some() {
+                            query.push_str(",NULL");
+                        }
                     }
+                }
 
-                    values.push(value as &(dyn ToSql + Sync));
-                } else {
-                    query.push_str("NULL");
-                    if field.sort_column().is_some() {
-                        query.push_str(",NULL");
+                query.push_str(") ON CONFLICT (");
+                for (i, pkey) in primary_keys.iter().enumerate() {
+                    if i > 0 {
+                        query.push(',');
                     }
+                    query.push_str(pkey.column());
                 }
+                query.push_str(") DO UPDATE SET ");
+                for (i, field) in all_fields.iter().enumerate() {
+                    if i > 0 {
+                        query.push(',');
+                    }
+                    let column = field.column();
+                    let _ = write!(&mut query, "{column} = EXCLUDED.{column}");
+                }
+
+                trx.execute(&query, &values).await.map_err(into_error)?;
             }
 
-            query.push_str(") ON CONFLICT (");
-            for (i, pkey) in primary_keys.iter().enumerate() {
-                if i > 0 {
-                    query.push(',');
-                }
-                query.push_str(pkey.column());
-            }
-            query.push_str(") DO UPDATE SET ");
-            for (i, field) in all_fields.iter().enumerate() {
-                if i > 0 {
-                    query.push(',');
-                }
-                let column = field.column();
-                let _ = write!(&mut query, "{column} = EXCLUDED.{column}");
-            }
-
-            trx.execute(&query, &values).await.map_err(into_error)?;
-        }
-
-        trx.commit().await.map_err(into_error)
+            trx.commit().await.map_err(into_error)
+        })
+        .await;
+        bounded(conn, result, limit)
     }
 
     pub async fn query<R: SearchDocumentId>(
@@ -170,16 +175,21 @@ impl PostgresStore {
             build_sort(&mut query, sort);
         }
         let conn = self.conn_pool.get().await.map_err(into_pool_error)?;
-        let s = conn.prepare_cached(&query).await.map_err(into_error)?;
+        let limit = self.timeouts.query;
+        let result = tokio::time::timeout(limit, async {
+            let s = conn.prepare_cached(&query).await.map_err(into_error)?;
 
-        conn.query(&s, params.as_slice())
-            .await
-            .and_then(|rows| {
-                rows.into_iter()
-                    .map(|row| row.try_get::<_, DocId>(0).map(|v| R::from_u64(v.0)))
-                    .collect::<Result<Vec<R>, _>>()
-            })
-            .map_err(into_error)
+            conn.query(&s, params.as_slice())
+                .await
+                .and_then(|rows| {
+                    rows.into_iter()
+                        .map(|row| row.try_get::<_, DocId>(0).map(|v| R::from_u64(v.0)))
+                        .collect::<Result<Vec<R>, _>>()
+                })
+                .map_err(into_error)
+        })
+        .await;
+        bounded(conn, result, limit)
     }
 
     pub async fn unindex(&self, filter: SearchQuery) -> trc::Result<u64> {
@@ -189,40 +199,45 @@ impl PostgresStore {
         let params = self.build_filter(&mut where_clause, &filter.filters);
         let params = params.iter().map(SqlParam::as_sql).collect::<Vec<_>>();
         let conn = self.conn_pool.get().await.map_err(into_pool_error)?;
-        let s = conn
-            .prepare_cached(&format!("DELETE FROM {table}{where_clause}"))
-            .await
-            .map_err(into_error)?;
-
-        match conn.execute(&s, params.as_slice()).await {
-            Ok(deleted) => return Ok(deleted),
-            Err(err) if is_timeout_error(&err) => (),
-            Err(err) => return Err(into_error(err)),
-        }
-
-        let mut chunk_size = DELETE_CHUNK_SIZE;
-        let mut deleted = 0;
-
-        loop {
+        let limit = self.timeouts.maintenance;
+        let result = tokio::time::timeout(limit, async {
             let s = conn
-                .prepare_cached(&format!(
-                    "DELETE FROM {table} WHERE ctid IN (SELECT ctid FROM {table}{where_clause} LIMIT {chunk_size})"
-                ))
+                .prepare_cached(&format!("DELETE FROM {table}{where_clause}"))
                 .await
                 .map_err(into_error)?;
 
+            match conn.execute(&s, params.as_slice()).await {
+                Ok(deleted) => return Ok(deleted),
+                Err(err) if is_timeout_error(&err) => (),
+                Err(err) => return Err(into_error(err)),
+            }
+
+            let mut chunk_size = DELETE_CHUNK_SIZE;
+            let mut deleted = 0;
+
             loop {
-                match conn.execute(&s, params.as_slice()).await {
-                    Ok(0) => return Ok(deleted),
-                    Ok(affected) => deleted += affected,
-                    Err(err) if is_timeout_error(&err) && chunk_size > MIN_DELETE_CHUNK_SIZE => {
-                        chunk_size = (chunk_size / 2).max(MIN_DELETE_CHUNK_SIZE);
-                        break;
+                let s = conn
+                    .prepare_cached(&format!(
+                        "DELETE FROM {table} WHERE ctid IN (SELECT ctid FROM {table}{where_clause} LIMIT {chunk_size})"
+                    ))
+                    .await
+                    .map_err(into_error)?;
+
+                loop {
+                    match conn.execute(&s, params.as_slice()).await {
+                        Ok(0) => return Ok(deleted),
+                        Ok(affected) => deleted += affected,
+                        Err(err) if is_timeout_error(&err) && chunk_size > MIN_DELETE_CHUNK_SIZE => {
+                            chunk_size = (chunk_size / 2).max(MIN_DELETE_CHUNK_SIZE);
+                            break;
+                        }
+                        Err(err) => return Err(into_error(err)),
                     }
-                    Err(err) => return Err(into_error(err)),
                 }
             }
-        }
+        })
+        .await;
+        bounded(conn, result, limit)
     }
 
     fn build_filter<'x>(

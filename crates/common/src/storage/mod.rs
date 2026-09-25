@@ -26,6 +26,7 @@ pub mod document;
 pub mod encryption;
 pub mod index;
 pub mod quota;
+pub mod ready; // inbuxa: readiness follows the data store
 pub mod state;
 pub mod transaction;
 

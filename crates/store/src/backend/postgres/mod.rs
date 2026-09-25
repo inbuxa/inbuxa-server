@@ -6,6 +6,7 @@
  * Modified by Coffey Labs in 2026 for INBUXA.
  */
 
+use crate::backend::query_timeout::QueryTimeouts;
 use crate::{
     search::{
         CalendarSearchField, ContactSearchField, EmailSearchField, FileSearchField, SearchField,
@@ -14,7 +15,8 @@ use crate::{
     write::SearchIndex,
 };
 use ahash::AHashSet;
-use deadpool_postgres::Pool;
+use deadpool_postgres::{Object, Pool};
+use std::time::Duration;
 use tokio_postgres::error::SqlState;
 
 pub mod blob;
@@ -28,6 +30,8 @@ pub mod write;
 pub struct PostgresStore {
     pub(crate) conn_pool: Pool,
     pub(crate) ts_configs: AHashSet<&'static str>,
+    /// inbuxa: client-side query limits (see backend::query_timeout)
+    pub(crate) timeouts: QueryTimeouts,
 }
 
 #[inline(always)]
@@ -70,6 +74,34 @@ pub(crate) fn is_timeout_error(err: &tokio_postgres::Error) -> bool {
             || *code == SqlState::IDLE_IN_TRANSACTION_SESSION_TIMEOUT
             || *code == SqlState::LOCK_NOT_AVAILABLE
     })
+}
+
+/// inbuxa: the error for an operation that ran past its time limit.
+pub(crate) fn query_timeout_error(limit: Duration) -> trc::Error {
+    trc::StoreEvent::PostgresqlError
+        .reason("Query timed out")
+        .details(format!(
+            "No answer from the database within {} s",
+            limit.as_secs()
+        ))
+}
+
+/// inbuxa: ends an operation run on `conn` under `limit`. When it ran out,
+/// the connection is taken out of the pool and closed: a query may still be
+/// in flight on it, or a transaction open, so it can't be handed to the
+/// next caller.
+pub(crate) fn bounded<T>(
+    conn: Object,
+    result: Result<trc::Result<T>, tokio::time::error::Elapsed>,
+    limit: Duration,
+) -> trc::Result<T> {
+    match result {
+        Ok(result) => result,
+        Err(_) => {
+            drop(Object::take(conn));
+            Err(query_timeout_error(limit))
+        }
+    }
 }
 
 #[inline(always)]

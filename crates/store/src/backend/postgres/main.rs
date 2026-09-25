@@ -6,7 +6,7 @@
  * Modified by Coffey Labs in 2026 for INBUXA.
  */
 
-use super::{PostgresStore, into_error};
+use super::{PostgresStore, bounded, into_error};
 use crate::{
     backend::postgres::{
         PsqlSearchField, into_pool_error,
@@ -119,6 +119,7 @@ impl PostgresStore {
                 Store::PostgreSQL(Arc::new(PostgresStore {
                     conn_pool: pool,
                     ts_configs: ts_configs.clone(),
+                    timeouts: Default::default(),
                 })),
                 replica.host,
                 replica.port as u16,
@@ -129,6 +130,7 @@ impl PostgresStore {
         let primary = Store::PostgreSQL(Arc::new(PostgresStore {
             conn_pool: primary_pool,
             ts_configs,
+            timeouts: Default::default(),
         }));
 
         // ST-1: no replicas, no change
@@ -147,84 +149,92 @@ impl PostgresStore {
 
     pub(crate) async fn create_storage_tables(&self) -> trc::Result<()> {
         let conn = self.conn_pool.get().await.map_err(into_pool_error)?;
+        let limit = self.timeouts.maintenance;
+        let result = tokio::time::timeout(limit, async {
+            for table in [
+                SUBSPACE_ACL,
+                SUBSPACE_TASK_QUEUE,
+                SUBSPACE_DELETED_ITEMS,
+                SUBSPACE_SPAM_SAMPLES,
+                crate::SUBSPACE_INBUXA, // inbuxa: masked email
+                SUBSPACE_BLOB_LINK,
+                SUBSPACE_IN_MEMORY_VALUE,
+                SUBSPACE_PROPERTY,
+                SUBSPACE_REGISTRY,
+                SUBSPACE_REGISTRY_PK,
+                SUBSPACE_QUEUE_MESSAGE,
+                SUBSPACE_QUEUE_EVENT,
+                SUBSPACE_REPORT_OUT,
+                SUBSPACE_REPORT_IN,
+                SUBSPACE_LOGS,
+                SUBSPACE_BLOBS,
+                SUBSPACE_DIRECTORY,
+                SUBSPACE_TELEMETRY_SPAN,
+                SUBSPACE_TELEMETRY_METRIC,
+            ] {
+                let table = char::from(table);
+                conn.execute(
+                    &format!(
+                        "CREATE TABLE IF NOT EXISTS {table} (
+                            k BYTEA PRIMARY KEY,
+                            v BYTEA NOT NULL
+                        )"
+                    ),
+                    &[],
+                )
+                .await
+                .map_err(into_error)?;
+            }
 
-        for table in [
-            SUBSPACE_ACL,
-            SUBSPACE_TASK_QUEUE,
-            SUBSPACE_DELETED_ITEMS,
-            SUBSPACE_SPAM_SAMPLES,
-            crate::SUBSPACE_INBUXA, // inbuxa: masked email
-            SUBSPACE_BLOB_LINK,
-            SUBSPACE_IN_MEMORY_VALUE,
-            SUBSPACE_PROPERTY,
-            SUBSPACE_REGISTRY,
-            SUBSPACE_REGISTRY_PK,
-            SUBSPACE_QUEUE_MESSAGE,
-            SUBSPACE_QUEUE_EVENT,
-            SUBSPACE_REPORT_OUT,
-            SUBSPACE_REPORT_IN,
-            SUBSPACE_LOGS,
-            SUBSPACE_BLOBS,
-            SUBSPACE_DIRECTORY,
-            SUBSPACE_TELEMETRY_SPAN,
-            SUBSPACE_TELEMETRY_METRIC,
-        ] {
-            let table = char::from(table);
-            conn.execute(
-                &format!(
-                    "CREATE TABLE IF NOT EXISTS {table} (
+            for table in [SUBSPACE_INDEXES, SUBSPACE_REGISTRY_IDX] {
+                let table = char::from(table);
+                conn.execute(
+                    &format!(
+                        "CREATE TABLE IF NOT EXISTS {table} (
+                            k BYTEA PRIMARY KEY
+                        )"
+                    ),
+                    &[],
+                )
+                .await
+                .map_err(into_error)?;
+            }
+
+            for table in [SUBSPACE_COUNTER, SUBSPACE_QUOTA, SUBSPACE_IN_MEMORY_COUNTER] {
+                conn.execute(
+                    &format!(
+                        "CREATE TABLE IF NOT EXISTS {} (
                         k BYTEA PRIMARY KEY,
-                        v BYTEA NOT NULL
-                    )"
-                ),
-                &[],
-            )
-            .await
-            .map_err(into_error)?;
-        }
+                        v BIGINT NOT NULL DEFAULT 0
+                    )",
+                        char::from(table)
+                    ),
+                    &[],
+                )
+                .await
+                .map_err(into_error)?;
+            }
 
-        for table in [SUBSPACE_INDEXES, SUBSPACE_REGISTRY_IDX] {
-            let table = char::from(table);
-            conn.execute(
-                &format!(
-                    "CREATE TABLE IF NOT EXISTS {table} (
-                        k BYTEA PRIMARY KEY
-                    )"
-                ),
-                &[],
-            )
-            .await
-            .map_err(into_error)?;
-        }
-
-        for table in [SUBSPACE_COUNTER, SUBSPACE_QUOTA, SUBSPACE_IN_MEMORY_COUNTER] {
-            conn.execute(
-                &format!(
-                    "CREATE TABLE IF NOT EXISTS {} (
-                    k BYTEA PRIMARY KEY,
-                    v BIGINT NOT NULL DEFAULT 0
-                )",
-                    char::from(table)
-                ),
-                &[],
-            )
-            .await
-            .map_err(into_error)?;
-        }
-
-        Ok(())
+            Ok(())
+        })
+        .await;
+        bounded(conn, result, limit)
     }
 
     pub(crate) async fn create_search_tables(&self) -> trc::Result<()> {
         let conn = self.conn_pool.get().await.map_err(into_pool_error)?;
+        let limit = self.timeouts.maintenance;
+        let result = tokio::time::timeout(limit, async {
+            create_search_tables::<EmailSearchField>(&conn).await?;
+            create_search_tables::<CalendarSearchField>(&conn).await?;
+            create_search_tables::<ContactSearchField>(&conn).await?;
+            //create_search_tables::<FileSearchField>(&conn).await?;
+            create_search_tables::<TracingSearchField>(&conn).await?;
 
-        create_search_tables::<EmailSearchField>(&conn).await?;
-        create_search_tables::<CalendarSearchField>(&conn).await?;
-        create_search_tables::<ContactSearchField>(&conn).await?;
-        //create_search_tables::<FileSearchField>(&conn).await?;
-        create_search_tables::<TracingSearchField>(&conn).await?;
-
-        Ok(())
+            Ok(())
+        })
+        .await;
+        bounded(conn, result, limit)
     }
 }
 
