@@ -2,9 +2,12 @@
  * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
+ *
+ * Modified by Coffey Labs in 2026 for INBUXA.
  */
 
 use super::AggregateTimestamp;
+use super::shared::{MAX_WRITE_RETRIES, Revisioned, write_retry_pause};
 use crate::{
     queue::RecipientDomain,
     reporting::{index::InternalReportIndex, send::MtaReportSend},
@@ -70,28 +73,40 @@ impl TlsReporting for Server {
         let object_id = ObjectType::TlsInternalReport.to_id();
         let key = ValueClass::Registry(RegistryClass::Item { object_id, item_id });
 
-        let Some(report) = self
-            .store()
-            .get_value::<TlsInternalReport>(ValueKey::from(key.clone()))
-            .await
-            .caused_by(trc::location!())?
-        else {
-            return Ok(());
-        };
+        // Delete report. inbuxa: only the version read here, so a result
+        // another node appends meanwhile is sent with it rather than lost
+        let mut attempt = 0;
+        let report = loop {
+            let Some(Revisioned {
+                revision,
+                value: report,
+            }) = self
+                .store()
+                .get_value::<Revisioned<TlsInternalReport>>(ValueKey::from(key.clone()))
+                .await
+                .caused_by(trc::location!())?
+            else {
+                return Ok(());
+            };
 
-        // Delete report
-        let mut batch = BatchBuilder::new();
-        batch.clear(key).clear(RegistryClass::PrimaryKey {
-            object_id: object_id.into(),
-            index_id: Property::Domain.to_id(),
-            key: report.domain.as_bytes().to_vec(),
-        });
-        self.core
-            .storage
-            .data
-            .write(batch.build_all())
-            .await
-            .caused_by(trc::location!())?;
+            let mut batch = BatchBuilder::new();
+            batch
+                .assert_value(key.clone(), AssertValue::Hash(revision))
+                .clear(key.clone())
+                .clear(RegistryClass::PrimaryKey {
+                    object_id: object_id.into(),
+                    index_id: Property::Domain.to_id(),
+                    key: report.domain.as_bytes().to_vec(),
+                });
+            match self.core.storage.data.write(batch.build_all()).await {
+                Ok(_) => break report,
+                Err(err) if err.is_assertion_failure() && attempt < MAX_WRITE_RETRIES => {
+                    attempt += 1;
+                    write_retry_pause(attempt).await;
+                }
+                Err(err) => return Err(err.caused_by(trc::location!())),
+            }
+        };
 
         let domain_name = report.domain.as_str();
         let event_from = report.report.date_range_start.timestamp() as u64;
@@ -477,8 +492,11 @@ impl TlsReporting for Server {
                     break;
                 }
                 Err(err) => {
-                    if err.is_assertion_failure() && rety_count < 3 {
+                    // inbuxa: another node appended first; try again
+                    // after a short pause
+                    if err.is_assertion_failure() && rety_count < MAX_WRITE_RETRIES {
                         rety_count += 1;
+                        write_retry_pause(rety_count).await;
                         continue;
                     }
                     trc::error!(

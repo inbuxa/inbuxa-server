@@ -47,8 +47,10 @@ impl SpawnQueueManager for IpcReceivers {
         // inbuxa: upstream started these only when the node's role included
         // outboundMta at boot, so turning the role on later did nothing and
         // turning it off left them delivering until a restart. They now run
-        // on every node and follow the role live (see Queue::start and the
-        // report scheduler). This also drains the queue channel on nodes
+        // on every node: the queue follows the role live (see Queue::start),
+        // and the report scheduler records DMARC and TLS results on every
+        // node, whatever its role (see reporting/scheduler.rs). This also
+        // drains the queue channel on nodes
         // without the role, where every queued message's refresh used to sit
         // in a channel nobody read until it filled and queueing blocked.
         if !core.storage.registry.is_recovery_mode() {

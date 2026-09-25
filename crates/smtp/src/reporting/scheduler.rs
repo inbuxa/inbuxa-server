@@ -20,14 +20,17 @@ impl SpawnReport for mpsc::Receiver<ReportingEvent> {
         tokio::spawn(async move {
             while let Some(event) = self.recv().await {
                 let server = inner.build_server();
-                // inbuxa: reports are the outbound MTA's business, as at
-                // boot, but the role is read per event so a change applies
-                // without a restart. Events that arrive while the role is
-                // off are dropped, as they were on a node started without it
-                if !matches!(event, ReportingEvent::Stop) && !server.core.network.roles.outbound_mta
-                {
-                    continue;
-                }
+                // inbuxa: every node records what it received, whatever its
+                // role. An aggregate report covers all of a domain's mail,
+                // whichever node took it, and recording is a store write
+                // that nodes already share: the report's primary key is
+                // versioned, so concurrent appends from several nodes retry
+                // rather than overwrite. Only building and sending the
+                // report (the DmarcReport and TlsReport tasks) belongs to
+                // the outbound MTA; the task manager keeps those to nodes
+                // with that role. Upstream ran this only on outbound MTA
+                // nodes, so mail received anywhere else never reached a
+                // report.
                 match event {
                     ReportingEvent::Dmarc(event) => server.schedule_dmarc(event).await,
                     ReportingEvent::Tls(event) => server.schedule_tls(event).await,
