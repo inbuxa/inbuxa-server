@@ -421,6 +421,15 @@ impl Listeners {
 
 impl TcpListener {
     pub fn listen(self) -> Result<tokio::net::TcpListener, String> {
+        // inbuxa: a socket whose bind failed is still unbound, and listen()
+        // on it makes the kernel pick a random port on every interface
+        if !self
+            .socket
+            .local_addr()
+            .is_ok_and(|bound| bound.port() != 0)
+        {
+            return Err(format!("Not listening on {}: it isn't bound", self.addr));
+        }
         self.socket
             .listen(self.backlog.unwrap_or(1024))
             .map_err(|err| format!("Failed to listen on {}: {}", self.addr, err))
@@ -483,5 +492,37 @@ impl ServerInstance {
                 Err(())
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::config::server::TcpListener;
+    use tokio::net::TcpSocket;
+
+    fn listener(socket: TcpSocket, addr: &str) -> TcpListener {
+        TcpListener {
+            socket,
+            addr: addr.parse().unwrap(),
+            backlog: None,
+            ttl: None,
+            nodelay: true,
+        }
+    }
+
+    #[tokio::test]
+    async fn an_unbound_socket_is_not_listened_on() {
+        // What a failed bind leaves behind: listening would pick a random port
+        let socket = TcpSocket::new_v4().unwrap();
+        let err = listener(socket, "0.0.0.0:25").listen().unwrap_err();
+        assert!(err.contains("isn't bound"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn a_bound_socket_listens_even_on_port_zero() {
+        let socket = TcpSocket::new_v4().unwrap();
+        socket.bind("127.0.0.1:0".parse().unwrap()).unwrap();
+        let bound = listener(socket, "127.0.0.1:0").listen().unwrap();
+        assert_ne!(bound.local_addr().unwrap().port(), 0);
     }
 }
