@@ -418,6 +418,7 @@ impl IntermediateChangesResponse {
             | MethodObject::MaskedEmail
             | MethodObject::DeletedAccount
             | MethodObject::AiLimits
+            | MethodObject::Explanation
             | MethodObject::ProtocolPolicy
             | MethodObject::TenantProtocolPolicy
             | MethodObject::Registry(_) => unreachable!(),

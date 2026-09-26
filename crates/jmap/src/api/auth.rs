@@ -180,6 +180,14 @@ impl JmapAuthorization for AccessToken {
                         Permission::SysSpamLlmUpdate,
                         Permission::SysSpamLlmUpdate,
                     ),
+                    // inbuxa: "Explain this" (EX-4)
+                    SetRequestMethod::Explanation(s) => validate_set(
+                        s,
+                        self,
+                        Permission::SysAiExplain,
+                        Permission::SysAiExplain,
+                        Permission::SysAiExplain,
+                    ),
                     // inbuxa: legacy protocols off, with the listener's
                     SetRequestMethod::ProtocolPolicy(s) => validate_set(
                         s,
@@ -306,6 +314,7 @@ impl JmapAuthorization for AccessToken {
                 | MethodObject::MaskedEmail
                 | MethodObject::DeletedAccount
                 | MethodObject::AiLimits
+                | MethodObject::Explanation
                 | MethodObject::ProtocolPolicy
                 | MethodObject::TenantProtocolPolicy => Permission::JmapEmailChanges,
                 // inbuxa: x:MaskedEmail/changes reads what /get reads

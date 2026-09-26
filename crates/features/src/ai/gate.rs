@@ -55,6 +55,9 @@ struct State {
     in_flight: usize,
     models: HashMap<u64, ModelState>,
     accounts: HashMap<u32, AccountState>,
+    /// Administrators asking for explanations, counted apart from their own
+    /// scripts' calls (EX-15).
+    explainers: HashMap<u32, AccountState>,
 }
 
 /// The node's gate.
@@ -69,6 +72,7 @@ pub struct Permit<'x> {
     gate: &'x Gate,
     model_id: u64,
     account_id: Option<u32>,
+    explain: bool,
     done: bool,
 }
 
@@ -95,6 +99,31 @@ impl Gate {
         account_id: Option<u32>,
         limits: Limits,
     ) -> Result<Permit<'_>, Refused> {
+        self.start(model_id, account_id, limits, None)
+    }
+
+    /// Starts an explanation for administrator `account_id` ("Explain
+    /// this", EX-14 to EX-16). Mail comes first: it takes a slot only when
+    /// one would stay free for the spam classifier, or when nothing else is
+    /// in flight. It counts toward `calls_per_hour`, apart from the
+    /// administrator's own scripts.
+    pub fn try_start_explain(
+        &self,
+        model_id: u64,
+        account_id: u32,
+        limits: Limits,
+        calls_per_hour: u32,
+    ) -> Result<Permit<'_>, Refused> {
+        self.start(model_id, Some(account_id), limits, Some(calls_per_hour))
+    }
+
+    fn start(
+        &self,
+        model_id: u64,
+        account_id: Option<u32>,
+        limits: Limits,
+        explain_per_hour: Option<u32>,
+    ) -> Result<Permit<'_>, Refused> {
         let now = Instant::now();
         let mut state = self.state.lock().unwrap();
         let model = state.models.entry(model_id).or_default();
@@ -112,11 +141,21 @@ impl Gate {
             }
             Err(why)
         };
-        if state.in_flight >= limits.max_concurrent.max(1) {
+        let max = limits.max_concurrent.max(1);
+        let full = match explain_per_hour {
+            // EX-14: leave a slot for mail, unless the node is idle
+            Some(_) => state.in_flight > 0 && state.in_flight + 1 >= max,
+            None => state.in_flight >= max,
+        };
+        if full {
             return refuse(&mut state, Refused::Busy);
         }
         if let Some(account_id) = account_id {
-            let account = state.accounts.entry(account_id).or_insert(AccountState {
+            let (accounts, per_hour) = match explain_per_hour {
+                Some(per_hour) => (&mut state.explainers, per_hour),
+                None => (&mut state.accounts, limits.account_calls_per_hour),
+            };
+            let account = accounts.entry(account_id).or_insert(AccountState {
                 window_start: now,
                 calls: 0,
                 busy: false,
@@ -128,7 +167,7 @@ impl Gate {
             if account.busy {
                 return refuse(&mut state, Refused::OneAtATime);
             }
-            if account.calls >= limits.account_calls_per_hour {
+            if account.calls >= per_hour {
                 return refuse(&mut state, Refused::HourlyLimit);
             }
             account.calls += 1;
@@ -139,6 +178,7 @@ impl Gate {
             gate: self,
             model_id,
             account_id,
+            explain: explain_per_hour.is_some(),
             done: false,
         })
     }
@@ -168,14 +208,19 @@ impl Permit<'_> {
             }
             (!was_paused && model.paused_until.is_some()).then_some(Transition::Paused)
         };
-        Self::release(&mut state, self.account_id);
+        Self::release(&mut state, self.account_id, self.explain);
         transition
     }
 
-    fn release(state: &mut State, account_id: Option<u32>) {
+    fn release(state: &mut State, account_id: Option<u32>, explain: bool) {
         state.in_flight = state.in_flight.saturating_sub(1);
+        let accounts = if explain {
+            &mut state.explainers
+        } else {
+            &mut state.accounts
+        };
         if let Some(account_id) = account_id
-            && let Some(account) = state.accounts.get_mut(&account_id)
+            && let Some(account) = accounts.get_mut(&account_id)
         {
             account.busy = false;
         }
@@ -189,7 +234,7 @@ impl Drop for Permit<'_> {
             if let Some(model) = state.models.get_mut(&self.model_id) {
                 model.probing = false;
             }
-            Self::release(&mut state, self.account_id);
+            Self::release(&mut state, self.account_id, self.explain);
         }
     }
 }
@@ -245,5 +290,38 @@ mod tests {
         // Other accounts and trusted scripts aren't affected
         assert!(gate.try_start(1, Some(10), limits).is_ok());
         assert!(gate.try_start(1, None, limits).is_ok());
+    }
+
+    #[test]
+    fn explanations_leave_a_slot_for_mail() {
+        let gate = Gate::default();
+        let limits = Limits { max_concurrent: 2, ..LIMITS };
+        // Idle: an explanation may start
+        let explain = gate.try_start_explain(1, 9, limits, 30).unwrap();
+        // Mail still gets the last slot
+        let mail = gate.try_start(1, None, limits).unwrap();
+        drop(explain);
+        // One classification in flight, two slots: explaining would use the last
+        assert_eq!(gate.try_start_explain(1, 9, limits, 30).err(), Some(Refused::Busy));
+        drop(mail);
+        // With one slot, an explanation runs only when the node is idle
+        let one = Limits { max_concurrent: 1, ..LIMITS };
+        let e = gate.try_start_explain(1, 9, one, 30).unwrap();
+        assert_eq!(gate.try_start(1, None, one).err(), Some(Refused::Busy));
+        drop(e);
+    }
+
+    #[test]
+    fn explanations_counted_apart() {
+        let gate = Gate::default();
+        let limits = Limits { max_concurrent: 8, account_calls_per_hour: 1, ..LIMITS };
+        for _ in 0..2 {
+            gate.try_start_explain(1, 9, limits, 2).unwrap().finish(true, limits.backoff);
+        }
+        assert_eq!(gate.try_start_explain(1, 9, limits, 2).err(), Some(Refused::HourlyLimit));
+        // The same administrator's scripts have their own count
+        let script = gate.try_start(1, Some(9), limits).unwrap();
+        assert_eq!(gate.in_flight(), 1);
+        drop(script);
     }
 }

@@ -586,7 +586,7 @@ fn tenant_sees_archived(domains: &AHashSet<String>, message: &ArchivedMessage) -
     )
 }
 
-fn map_message(message_in: &ArchivedMessage) -> QueuedMessage {
+pub(crate) fn map_message(message_in: &ArchivedMessage) -> QueuedMessage {
     let mut message_out = QueuedMessage {
         blob_id: BlobId::new(BlobHash::from(&message_in.blob_hash), Default::default()),
         created_at: UTCDateTime::from_timestamp(message_in.created.to_native() as i64),

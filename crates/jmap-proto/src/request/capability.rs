@@ -147,6 +147,11 @@ pub struct InbuxaAccountCapabilities {
     /// (legacy-protocols spec, Interfaces; LP-19).
     #[serde(rename(serialize = "legacyProtocols"))]
     pub legacy_protocols: &'static str,
+    /// Whether the principal may use "Explain this" now: it holds
+    /// `sysAiExplain`, is server-level, and a model resolves (ai-explain
+    /// spec, EX-1 to EX-4).
+    #[serde(rename(serialize = "aiExplain"))]
+    pub ai_explain: bool,
 }
 
 #[derive(Debug, Clone, serde::Serialize)]

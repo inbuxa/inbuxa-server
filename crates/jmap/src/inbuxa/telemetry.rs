@@ -298,7 +298,7 @@ async fn trace_floor(server: &common::Server) -> u64 {
     }
 }
 
-async fn read_trace(server: &common::Server, id: u64) -> trc::Result<Option<Trace>> {
+pub(crate) async fn read_trace(server: &common::Server, id: u64) -> trc::Result<Option<Trace>> {
     if id < trace_floor(server).await {
         return Ok(None);
     }

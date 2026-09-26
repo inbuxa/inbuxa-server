@@ -350,6 +350,13 @@ impl<'de> Visitor<'de> for CallVisitor {
                     return Err(de::Error::invalid_length(1, &self));
                 }
             },
+            (MethodFunction::Set, MethodObject::Explanation) => match seq.next_element() {
+                Ok(Some(value)) => RequestMethod::Set(SetRequestMethod::Explanation(value)),
+                Err(err) => RequestMethod::invalid(err),
+                Ok(None) => {
+                    return Err(de::Error::invalid_length(1, &self));
+                }
+            },
             (MethodFunction::Set, MethodObject::ProtocolPolicy) => match seq.next_element() {
                 Ok(Some(value)) => RequestMethod::Set(SetRequestMethod::ProtocolPolicy(value)),
                 Err(err) => RequestMethod::invalid(err),

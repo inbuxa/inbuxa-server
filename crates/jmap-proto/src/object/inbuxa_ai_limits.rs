@@ -26,6 +26,11 @@ pub enum AiLimitsProperty {
     MaxContentBytes,
     FailureBackoff,
     UserCallsPerHour,
+    // "Explain this" (ai-explain spec, EX-21)
+    ExplainEnabled,
+    ExplainModelId,
+    ExplainCallsPerHour,
+    ExplainCeiling,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -48,6 +53,10 @@ impl Property for AiLimitsProperty {
             AiLimitsProperty::MaxContentBytes => "maxContentBytes",
             AiLimitsProperty::FailureBackoff => "failureBackoff",
             AiLimitsProperty::UserCallsPerHour => "userCallsPerHour",
+            AiLimitsProperty::ExplainEnabled => "explainEnabled",
+            AiLimitsProperty::ExplainModelId => "explainModelId",
+            AiLimitsProperty::ExplainCallsPerHour => "explainCallsPerHour",
+            AiLimitsProperty::ExplainCeiling => "explainCeiling",
         }
         .into()
     }
@@ -64,6 +73,10 @@ impl AiLimitsProperty {
             b"maxContentBytes" => AiLimitsProperty::MaxContentBytes,
             b"failureBackoff" => AiLimitsProperty::FailureBackoff,
             b"userCallsPerHour" => AiLimitsProperty::UserCallsPerHour,
+            b"explainEnabled" => AiLimitsProperty::ExplainEnabled,
+            b"explainModelId" => AiLimitsProperty::ExplainModelId,
+            b"explainCallsPerHour" => AiLimitsProperty::ExplainCallsPerHour,
+            b"explainCeiling" => AiLimitsProperty::ExplainCeiling,
         )
     }
 }
@@ -81,7 +94,9 @@ impl Element for AiLimitsValue {
 
     fn try_parse<P>(key: &Key<'_, Self::Property>, value: &str) -> Option<Self> {
         match key {
-            Key::Property(AiLimitsProperty::Id) => Id::from_str(value).ok().map(AiLimitsValue::Id),
+            Key::Property(AiLimitsProperty::Id | AiLimitsProperty::ExplainModelId) => {
+                Id::from_str(value).ok().map(AiLimitsValue::Id)
+            }
             _ => None,
         }
     }

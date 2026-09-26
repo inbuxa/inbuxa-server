@@ -86,6 +86,17 @@ pub struct Call<'x> {
     pub temperature: f64,
     pub max_tokens: u32,
     pub timeout: Duration,
+    /// Set for "Explain this" (ai-explain spec, EX-10, EX-14, EX-15).
+    pub explain: Option<Explain<'x>>,
+}
+
+/// What an explanation call does differently: it leaves a slot for mail,
+/// counts against the administrator's explanations, and is logged without
+/// its answer.
+pub struct Explain<'x> {
+    pub calls_per_hour: u32,
+    /// The subject's type, the only thing about it that is logged.
+    pub subject: &'x str,
 }
 
 fn kind(model: &AiModel) -> Kind {
@@ -129,12 +140,50 @@ impl Server {
         by_id
     }
 
+    /// The model "Explain this" asks (ai-explain spec, EX-3): the one chosen
+    /// for explanations, else the spam classifier's, else the only model
+    /// there is. `None` when explanations are off or no model resolves.
+    pub async fn ai_explain_model(&self, limits: &AiLimits) -> Option<(Id, AiModel)> {
+        use registry::schema::structs::SpamLlm;
+        if !limits.explain_enabled {
+            return None;
+        }
+        if let Some(id) = limits.explain_model_id {
+            let id = Id::from(id);
+            return self.ai_model_by_id(id).await.map(|model| (id, model));
+        }
+        if let Ok(Some(SpamLlm::Enable(settings))) =
+            self.registry().object::<SpamLlm>(Id::singleton()).await
+            && let Some(model) = self.ai_model_by_id(settings.model_id).await
+        {
+            return Some((settings.model_id, model));
+        }
+        let ids = self
+            .registry()
+            .query::<Vec<Id>>(RegistryQuery::new(ObjectType::AiModel))
+            .await
+            .ok()?;
+        match ids.as_slice() {
+            [id] => self.ai_model_by_id(*id).await.map(|model| (*id, model)),
+            _ => None,
+        }
+    }
+
     /// Makes one call. The answer, or why there is none; either way the
     /// outcome is logged, with no message content and no secret (AI-5).
     pub async fn ai_call(&self, call: Call<'_>) -> Result<String, Failure> {
         let limits = self.ai_limits().await;
         let gate = Gate::global();
-        let permit = match gate.try_start(call.model_id.id(), call.account_id, limits.gate()) {
+        let attempt = match (&call.explain, call.account_id) {
+            (Some(explain), Some(account_id)) => gate.try_start_explain(
+                call.model_id.id(),
+                account_id,
+                limits.gate(),
+                explain.calls_per_hour,
+            ),
+            _ => gate.try_start(call.model_id.id(), call.account_id, limits.gate()),
+        };
+        let permit = match attempt {
             Ok(permit) => permit,
             Err(refused) => {
                 trc::event!(
@@ -170,13 +219,23 @@ impl Server {
             None => {}
         }
         match &result {
-            Ok(answer) => trc::event!(
-                Ai(AiEvent::LlmResponse),
-                Details = call.model.name.clone(),
-                AccountId = call.account_id,
-                Elapsed = started.elapsed(),
-                Result = request::cut(answer, 1024),
-            ),
+            Ok(answer) => match &call.explain {
+                // EX-10: an explanation's answer is never logged
+                Some(explain) => trc::event!(
+                    Ai(AiEvent::LlmResponse),
+                    Details = call.model.name.clone(),
+                    AccountId = call.account_id,
+                    Elapsed = started.elapsed(),
+                    Reason = format!("Explained a {}", explain.subject),
+                ),
+                None => trc::event!(
+                    Ai(AiEvent::LlmResponse),
+                    Details = call.model.name.clone(),
+                    AccountId = call.account_id,
+                    Elapsed = started.elapsed(),
+                    Result = request::cut(answer, 1024),
+                ),
+            },
             Err(failure) => trc::event!(
                 Ai(AiEvent::ApiError),
                 Details = call.model.name.clone(),
@@ -347,6 +406,7 @@ pub async fn sieve_prompt(
             temperature: temperature.unwrap_or_else(|| model.temperature.into_inner()),
             max_tokens: request::PROMPT_MAX_TOKENS,
             timeout,
+            explain: None,
         })
         .await
         .ok()?;

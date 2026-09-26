@@ -93,6 +93,9 @@ impl Response<'_> {
                 SetRequestMethod::AiLimits(request) => {
                     request.resolve_references(self, 1, false)?
                 }
+                SetRequestMethod::Explanation(request) => {
+                    request.resolve_references(self, 1, false)?
+                }
                 SetRequestMethod::ProtocolPolicy(request) => {
                     request.resolve_references(self, 1, false)?
                 }

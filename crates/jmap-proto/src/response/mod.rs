@@ -131,6 +131,7 @@ pub enum SetResponseMethod {
     MaskedEmail(Box<SetResponse<crate::object::fastmail_masked_email::FastmailMaskedEmail>>),
     DeletedAccount(Box<SetResponse<crate::object::inbuxa_deleted_account::DeletedAccount>>),
     AiLimits(Box<SetResponse<crate::object::inbuxa_ai_limits::AiLimits>>),
+    Explanation(Box<SetResponse<crate::object::inbuxa_explanation::Explanation>>),
     ProtocolPolicy(Box<SetResponse<crate::object::inbuxa_protocol_policy::ProtocolPolicy>>),
     TenantProtocolPolicy(
         Box<SetResponse<crate::object::inbuxa_tenant_protocol_policy::TenantProtocolPolicy>>,
@@ -340,6 +341,12 @@ impl<'x> From<GetResponse<crate::object::inbuxa_ai_limits::AiLimits>> for Respon
 impl<'x> From<SetResponse<crate::object::inbuxa_ai_limits::AiLimits>> for ResponseMethod<'x> {
     fn from(value: SetResponse<crate::object::inbuxa_ai_limits::AiLimits>) -> Self {
         ResponseMethod::Set(SetResponseMethod::AiLimits(Box::new(value)))
+    }
+}
+
+impl<'x> From<SetResponse<crate::object::inbuxa_explanation::Explanation>> for ResponseMethod<'x> {
+    fn from(value: SetResponse<crate::object::inbuxa_explanation::Explanation>) -> Self {
+        ResponseMethod::Set(SetResponseMethod::Explanation(Box::new(value)))
     }
 }
 
