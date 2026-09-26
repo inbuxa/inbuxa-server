@@ -88,6 +88,7 @@ pub fn body(
     user: &str,
     temperature: f64,
     max_tokens: u32,
+    stream: bool,
 ) -> Value {
     let temperature = temperature.clamp(0.0, 1.0);
     match kind {
@@ -102,7 +103,7 @@ pub fn body(
                 "messages": messages,
                 "temperature": temperature,
                 "max_tokens": max_tokens,
-                "stream": false,
+                "stream": stream,
             })
         }
         Kind::Text => {
@@ -115,7 +116,7 @@ pub fn body(
                 "prompt": prompt,
                 "temperature": temperature,
                 "max_tokens": max_tokens,
-                "stream": false,
+                "stream": stream,
             })
         }
     }
@@ -136,6 +137,48 @@ pub fn answer(kind: Kind, body: &[u8]) -> Option<String> {
     };
     let text = text.trim();
     (!text.is_empty()).then(|| text.to_string())
+}
+
+/// One line of a streamed answer (ai-explain spec, EX-23), as model servers
+/// send it: server-sent events, one `data:` line per piece.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum StreamLine {
+    /// The next piece of the answer.
+    Delta(String),
+    /// The answer is complete.
+    Done,
+    /// A comment, an empty line, or a piece with no text (a role, a finish
+    /// reason on its own).
+    Ignore,
+}
+
+/// Reads one line of a streamed answer: `choices[0].delta.content` for
+/// chat, `choices[0].text` for text, `[DONE]` at the end.
+pub fn stream_line(kind: Kind, line: &str) -> StreamLine {
+    let Some(data) = line.trim().strip_prefix("data:") else {
+        return StreamLine::Ignore;
+    };
+    let data = data.trim();
+    if data == "[DONE]" {
+        return StreamLine::Done;
+    }
+    let Ok(value) = serde_json::from_str::<Value>(data) else {
+        return StreamLine::Ignore;
+    };
+    let Some(choice) = value.get("choices").and_then(|c| c.get(0)) else {
+        return StreamLine::Ignore;
+    };
+    let text = match kind {
+        Kind::Chat => choice
+            .get("delta")
+            .and_then(|d| d.get("content"))
+            .and_then(Value::as_str),
+        Kind::Text => choice.get("text").and_then(Value::as_str),
+    };
+    match text {
+        Some(text) if !text.is_empty() => StreamLine::Delta(text.to_string()),
+        _ => StreamLine::Ignore,
+    }
 }
 
 /// Cuts an answer or prompt to `max_bytes` on a character boundary.
@@ -161,15 +204,15 @@ mod tests {
         assert!(text.contains("[truncated]"));
         assert_eq!(text.matches('é').count(), 25);
 
-        let chat = body(Kind::Chat, "m", Some("sys"), "usr", 1.5, 200);
+        let chat = body(Kind::Chat, "m", Some("sys"), "usr", 1.5, 200, false);
         assert_eq!(chat["messages"][0]["role"], "system");
         assert_eq!(chat["messages"][1]["content"], "usr");
         assert_eq!(chat["temperature"], 1.0);
         assert_eq!(chat["stream"], false);
         assert!(chat.get("user").is_none());
-        let text = body(Kind::Text, "m", Some("sys"), "usr", 0.5, 200);
+        let text = body(Kind::Text, "m", Some("sys"), "usr", 0.5, 200, false);
         assert_eq!(text["prompt"], "sys\n\nusr");
-        let sieve = body(Kind::Chat, "m", None, "hello", 0.5, 1000);
+        let sieve = body(Kind::Chat, "m", None, "hello", 0.5, 1000, false);
         assert_eq!(sieve["messages"].as_array().unwrap().len(), 1);
     }
 
@@ -185,5 +228,19 @@ mod tests {
         assert_eq!(answer(Kind::Chat, b"not json"), None);
         assert_eq!(answer(Kind::Chat, br#"{"choices":[]}"#), None);
         assert_eq!(answer(Kind::Chat, &vec![b' '; MAX_RESPONSE_BYTES + 1]), None);
+    }
+
+    #[test]
+    fn reads_streamed_answers() {
+        let chat = r#"data: {"choices":[{"index":0,"delta":{"content":"Hel"}}]}"#;
+        assert_eq!(stream_line(Kind::Chat, chat), StreamLine::Delta("Hel".into()));
+        let role = r#"data: {"choices":[{"index":0,"delta":{"role":"assistant"}}]}"#;
+        assert_eq!(stream_line(Kind::Chat, role), StreamLine::Ignore);
+        let text = r#"data: {"choices":[{"index":0,"text":"lo"}]}"#;
+        assert_eq!(stream_line(Kind::Text, text), StreamLine::Delta("lo".into()));
+        assert_eq!(stream_line(Kind::Chat, "data: [DONE]"), StreamLine::Done);
+        assert_eq!(stream_line(Kind::Chat, ": keep-alive"), StreamLine::Ignore);
+        assert_eq!(stream_line(Kind::Chat, ""), StreamLine::Ignore);
+        assert_eq!(stream_line(Kind::Chat, "data: {not json"), StreamLine::Ignore);
     }
 }

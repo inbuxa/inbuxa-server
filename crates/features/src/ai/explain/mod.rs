@@ -10,6 +10,7 @@
 //! EX-7), and how its answer is trimmed (EX-12). The server reads the data
 //! and makes the call.
 
+pub mod memory;
 pub mod prompts;
 pub mod schema;
 pub mod status;
@@ -17,11 +18,11 @@ pub mod status;
 use serde_json::Value;
 use std::collections::BTreeMap;
 
-/// The most an answer may generate (EX-12).
-pub const MAX_TOKENS: u32 = 400;
+/// The most an answer may generate (EX-12, as amended by EX-22).
+pub const MAX_TOKENS: u32 = 160;
 
-/// The longest answer returned, in characters (EX-12).
-pub const MAX_ANSWER_CHARS: usize = 1_200;
+/// The longest answer returned, in characters (EX-12, as amended by EX-22).
+pub const MAX_ANSWER_CHARS: usize = 700;
 
 /// The largest subject accepted, serialized (EX-8).
 pub const MAX_SUBJECT_BYTES: usize = 16 * 1024;
@@ -81,6 +82,18 @@ pub enum Kind {
     SpamVerdict,
     Event,
     Setting,
+}
+
+impl Kind {
+    /// A stable name, part of the key an answer is remembered by (EX-24).
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Kind::DeliveryFailure => "DeliveryFailure",
+            Kind::SpamVerdict => "SpamVerdict",
+            Kind::Event => "Event",
+            Kind::Setting => "Setting",
+        }
+    }
 }
 
 impl Subject {

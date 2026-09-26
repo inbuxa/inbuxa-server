@@ -7,7 +7,8 @@
 //! `inbuxa:Explanation/set`: "Explain this" (`inbuxa-drafts/specs/ai-explain.md`).
 //! The console names a subject; this reads the data behind it, builds the
 //! prompt from the fixed prompts in `inbuxa_features::ai::explain`, and asks
-//! this node's model. Nothing is stored.
+//! this node's model, unless the release prepared an answer or this node
+//! remembers one (EX-24, EX-26). Nothing is written to storage.
 
 use crate::registry::mapping::{log::read_log_entries, queued_message::map_message};
 use common::{
@@ -18,11 +19,14 @@ use common::{
 };
 use inbuxa_features::ai::{
     explain::{
-        self, DROPPED_KEYS, Facts, Subject, TagScore, prompts,
+        self, DROPPED_KEYS, Facts, Subject, TagScore,
+        memory::{self, Memory, Prepared, Remembered},
+        prompts,
         schema::{PropertyInfo, Schema},
         status,
     },
     gate::Refused,
+    limits::AiLimits,
 };
 use jmap_proto::{
     error::set::{SetError, SetErrorType},
@@ -35,13 +39,14 @@ use mail_auth::flate2::read::GzDecoder;
 use registry::{
     jmap::IntoValue,
     schema::{
-        enums::SpamClassifyResult,
+        enums::{Permission, SpamClassifyResult},
         prelude::{OBJ_SINGLETON, Object, ObjectType},
-        structs::{QueuedMessage, QueuedRecipient, RecipientStatus},
+        structs::{AiModel, QueuedMessage, QueuedRecipient, RecipientStatus},
     },
-    types::{EnumImpl, id::ObjectId},
+    types::{EnumImpl, datetime::UTCDateTime, id::ObjectId},
 };
 use smtp::queue::spool::SmtpSpool;
+use tokio::sync::mpsc::UnboundedSender;
 use std::{
     io::Read,
     str::FromStr,
@@ -105,17 +110,38 @@ fn invalid_subject(why: impl Into<String>) -> SetError<P> {
         .with_description(why.into())
 }
 
+/// The prepared answers this release ships (EX-26), read once.
+fn prepared() -> &'static Prepared {
+    static PREPARED: OnceLock<Prepared> = OnceLock::new();
+    static PREPARED_JSON: &[u8] =
+        include_bytes!("../../../../resources/explain/settings.json.gz");
+    PREPARED.get_or_init(|| {
+        let mut json = Vec::new();
+        match GzDecoder::new(PREPARED_JSON).read_to_end(&mut json) {
+            Ok(_) => Prepared::parse(&json),
+            Err(_) => Prepared::default(),
+        }
+    })
+}
+
+/// Who may ask (EX-4): server-level administrators holding `sysAiExplain`.
+/// JMAP checks the permission by method; the streaming route checks it here.
+pub fn assert_allowed(access_token: &AccessToken) -> trc::Result<()> {
+    if access_token.tenant_id().is_some() {
+        return Err(trc::JmapEvent::Forbidden
+            .into_err()
+            .details("Explanations are for server-level administrators."));
+    }
+    access_token.enforce_permission(Permission::SysAiExplain)
+}
+
 /// `inbuxa:Explanation/set`: create only (EX-4, EX-11).
 pub async fn set(
     server: &Server,
     access_token: &AccessToken,
     mut request: SetRequest<'_, Explanation>,
 ) -> trc::Result<SetResponse<Explanation>> {
-    if access_token.tenant_id().is_some() {
-        return Err(trc::JmapEvent::Forbidden
-            .into_err()
-            .details("Explanations are for server-level administrators."));
-    }
+    assert_allowed(access_token)?;
     let mut response = SetResponse::from_request(&request, server.core.jmap.set_max_objects)?;
     for (id, _) in request.unwrap_update().into_valid() {
         response.not_updated.append(
@@ -130,7 +156,16 @@ pub async fn set(
         );
     }
     for (client_id, value) in request.unwrap_create() {
-        match explain_one(server, access_token, value).await? {
+        let outcome = match subject_of(value) {
+            Ok(subject) => match question(server, access_token, &subject).await? {
+                Ok(question) => answer(server, access_token, question, None)
+                    .await
+                    .map(to_value),
+                Err(error) => Err(error),
+            },
+            Err(error) => Err(error),
+        };
+        match outcome {
             Ok(created) => {
                 response.created.insert(client_id, created);
             }
@@ -140,12 +175,8 @@ pub async fn set(
     Ok(response)
 }
 
-async fn explain_one(
-    server: &Server,
-    access_token: &AccessToken,
-    value: Value<'_, P, ExplanationValue>,
-) -> trc::Result<Result<EValue, SetError<P>>> {
-    // Only the subject goes in; everything else is the server's (EX-5)
+/// The subject of a create; everything else is the server's (EX-5).
+fn subject_of(value: Value<'_, P, ExplanationValue>) -> Result<serde_json::Value, SetError<P>> {
     let mut subject = None;
     for (key, value) in value.into_expanded_object() {
         match key {
@@ -153,16 +184,59 @@ async fn explain_one(
                 subject = serde_json::to_value(&value).ok();
             }
             key => {
-                return Ok(Err(SetError::invalid_properties()
+                return Err(SetError::invalid_properties()
                     .with_property(key.into_owned())
-                    .with_description("is set by the server")));
+                    .with_description("is set by the server"));
             }
         }
     }
-    let Some(subject) = subject else {
-        return Ok(Err(invalid_subject("subject is required")));
-    };
-    let subject = match explain::parse(&subject) {
+    subject.ok_or_else(|| invalid_subject("subject is required"))
+}
+
+/// A question, checked and read, ready to answer.
+pub struct Question {
+    subject: Subject,
+    facts: Facts,
+    model_id: Id,
+    model: AiModel,
+    limits: AiLimits,
+}
+
+/// Where an answer came from (EX-27).
+pub enum Source {
+    Model,
+    Remembered { answered_at: u64 },
+    Prepared { release: String },
+}
+
+impl Source {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Source::Model => "model",
+            Source::Remembered { .. } => "remembered",
+            Source::Prepared { .. } => "prepared",
+        }
+    }
+}
+
+/// An explanation, as the console gets it.
+pub struct Answer {
+    pub text: String,
+    pub model: String,
+    pub node: String,
+    pub elapsed_ms: u64,
+    pub grounded: Vec<&'static str>,
+    pub source: Source,
+}
+
+/// Every check before any answer (EX-1 to EX-9): the subject parses, a model
+/// resolves, and the data behind the subject is read. No model call yet.
+pub async fn question(
+    server: &Server,
+    access_token: &AccessToken,
+    subject: &serde_json::Value,
+) -> trc::Result<Result<Question, SetError<P>>> {
+    let subject = match explain::parse(subject) {
         Ok(subject) => subject,
         Err(invalid) => {
             return Ok(Err(invalid_subject(format!(
@@ -183,11 +257,70 @@ async fn explain_one(
         Ok(facts) => facts,
         Err(error) => return Ok(Err(error)),
     };
+    Ok(Ok(Question {
+        subject,
+        facts,
+        model_id,
+        model,
+        limits,
+    }))
+}
+
+/// Answers a checked question: from the release's prepared answers (EX-26),
+/// from this node's memory (EX-24), or from the model, streaming each piece
+/// to `stream` when it's set (EX-23).
+pub async fn answer(
+    server: &Server,
+    access_token: &AccessToken,
+    question: Question,
+    stream: Option<UnboundedSender<String>>,
+) -> Result<Answer, SetError<P>> {
+    let Question {
+        subject,
+        facts,
+        model_id,
+        model,
+        limits,
+    } = question;
+    let kind = subject.kind();
+    let node = server.registry().local_hostname().to_string();
+
+    // EX-26: a setting at its default, as this release prepared it
+    if kind == explain::Kind::Setting
+        && let Some(text) = prepared().answer(kind, &facts)
+    {
+        let prepared = prepared();
+        return Ok(Answer {
+            text: text.to_string(),
+            model: prepared.model.clone(),
+            node,
+            elapsed_ms: 0,
+            grounded: facts.grounded,
+            source: Source::Prepared {
+                release: prepared.release.clone(),
+            },
+        });
+    }
+
+    // EX-24, EX-25: the same question, answered before on this node
+    let key = memory::key(kind, &facts, &format!("{}@{}", model.name, model_id));
+    if let Some(remembered) = Memory::global().get(key) {
+        return Ok(Answer {
+            text: remembered.text,
+            model: remembered.model,
+            node: remembered.node,
+            elapsed_ms: 0,
+            grounded: remembered.grounded,
+            source: Source::Remembered {
+                answered_at: remembered.answered_at,
+            },
+        });
+    }
 
     let nonce = format!("{:016x}", rand::random::<u64>());
-    let (system, user) = prompts::messages(subject.kind(), &facts, &nonce);
+    let (system, user) = prompts::messages(kind, &facts, &nonce);
     let started = Instant::now();
-    let answer = server
+    let result = server
         .ai_call(Call {
             model_id,
             model: &model,
@@ -202,53 +335,100 @@ async fn explain_one(
                 calls_per_hour: limits.explain_calls_per_hour.min(u32::MAX as u64) as u32,
                 subject: subject.type_name(),
             }),
+            stream,
         })
         .await;
     let elapsed = started.elapsed();
-    let text = match answer {
+    let text = match result {
         Ok(answer) => explain::tidy_answer(&answer),
         Err(Failure::Refused(Refused::Busy | Refused::OneAtATime)) => {
-            return Ok(Err(server_fail("busy")));
+            return Err(server_fail("busy"));
         }
-        Err(Failure::Refused(Refused::Paused)) => return Ok(Err(server_fail("paused"))),
+        Err(Failure::Refused(Refused::Paused)) => return Err(server_fail("paused")),
         Err(Failure::Refused(Refused::HourlyLimit)) => {
-            return Ok(Err(SetError::new(SetErrorType::RateLimit).with_description(
+            return Err(SetError::new(SetErrorType::RateLimit).with_description(
                 "You've asked for as many explanations as this hour allows.",
-            )));
+            ));
         }
-        Err(Failure::Timeout) => return Ok(Err(server_fail("timeout"))),
-        Err(_) => return Ok(Err(server_fail("unavailable"))),
+        Err(Failure::Timeout) => return Err(server_fail("timeout")),
+        Err(_) => return Err(server_fail("unavailable")),
     };
     if text.is_empty() {
-        return Ok(Err(server_fail("unavailable")));
+        return Err(server_fail("unavailable"));
     }
 
-    let mut out = Map::with_capacity(6);
+    Memory::global().put(
+        key,
+        Remembered {
+            text: text.clone(),
+            model: model.name.clone(),
+            node: node.clone(),
+            answered_at: now(),
+            grounded: facts.grounded.clone(),
+        },
+    );
+    Ok(Answer {
+        text,
+        model: model.name.clone(),
+        node,
+        elapsed_ms: elapsed.as_millis() as u64,
+        grounded: facts.grounded,
+        source: Source::Model,
+    })
+}
+
+/// An answer as `inbuxa:Explanation`.
+pub fn to_value(answer: Answer) -> EValue {
+    let mut out = Map::with_capacity(9);
     out.insert_unchecked(
         Key::Property(P::Id),
         Value::Element(ExplanationValue::Id(Id::from(rand::random::<u32>() as u64))),
     );
-    out.insert_unchecked(Key::Property(P::Text), Value::Str(text.into()));
-    out.insert_unchecked(Key::Property(P::Model), Value::Str(model.name.clone().into()));
-    out.insert_unchecked(
-        Key::Property(P::Node),
-        Value::Str(server.registry().local_hostname().to_string().into()),
-    );
+    out.insert_unchecked(Key::Property(P::Text), Value::Str(answer.text.into()));
+    out.insert_unchecked(Key::Property(P::Model), Value::Str(answer.model.into()));
+    out.insert_unchecked(Key::Property(P::Node), Value::Str(answer.node.into()));
     out.insert_unchecked(
         Key::Property(P::ElapsedMs),
-        Value::Number((elapsed.as_millis() as u64).into()),
+        Value::Number(answer.elapsed_ms.into()),
     );
     out.insert_unchecked(
         Key::Property(P::Grounded),
         Value::Array(
-            facts
+            answer
                 .grounded
                 .iter()
                 .map(|tag| Value::Str((*tag).into()))
                 .collect(),
         ),
     );
-    Ok(Ok(Value::Object(out)))
+    out.insert_unchecked(
+        Key::Property(P::Source),
+        Value::Str(answer.source.as_str().into()),
+    );
+    match answer.source {
+        Source::Remembered { answered_at } => {
+            out.insert_unchecked(
+                Key::Property(P::AnsweredAt),
+                Value::Str(
+                    UTCDateTime::from_timestamp(answered_at as i64)
+                        .to_string()
+                        .into(),
+                ),
+            );
+        }
+        Source::Prepared { release } => {
+            out.insert_unchecked(Key::Property(P::PreparedFor), Value::Str(release.into()));
+        }
+        Source::Model => {}
+    }
+    Value::Object(out)
+}
+
+fn now() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
 }
 
 /// What the server knows about the subject (EX-5, EX-7, EX-9).
@@ -624,6 +804,207 @@ mod tests {
         // A recipient that hasn't failed, or isn't there
         assert!(delivery_facts(&mut Facts::default(), &message, "ok@example.com").is_err());
         assert!(delivery_facts(&mut Facts::default(), &message, "no@example.com").is_err());
+    }
+
+    /// The settings questions a release prepares answers for (EX-26): every
+    /// non-secret property of every settings object, at the object's own
+    /// default, built exactly as a live question is.
+    fn prepared_questions() -> Vec<(String, String, Facts)> {
+        let schema = schema().expect("the embedded schema reads");
+        let mut json = Vec::new();
+        GzDecoder::new(&include_bytes!("../../../../resources/schema/schema.json.gz")[..])
+            .read_to_end(&mut json)
+            .unwrap();
+        let raw: serde_json::Value = serde_json::from_slice(&json).unwrap();
+        let mut out = Vec::new();
+        let mut objects = raw["objects"]
+            .as_object()
+            .unwrap()
+            .keys()
+            .filter(|k| k.starts_with("x:") && !k.contains('/'))
+            .cloned()
+            .collect::<Vec<_>>();
+        objects.sort();
+        for object in objects {
+            let Some(object_type) = ObjectType::parse(&object[2..]) else {
+                continue;
+            };
+            if NOT_SETTINGS.contains(&object_type) {
+                continue;
+            }
+            // As a live question reads it: the object, serialized
+            let default = serde_json::to_value(Object::from(object_type).into_value())
+                .unwrap_or_default();
+            let Some(map) = default.as_object() else {
+                continue;
+            };
+            let mut properties = map.keys().cloned().collect::<Vec<_>>();
+            properties.sort();
+            for property in properties {
+                if property == "@type" || property == "id" {
+                    continue;
+                }
+                let Some(info) = schema.property(&object, &property) else {
+                    continue;
+                };
+                if info.secret {
+                    continue;
+                }
+                let mut facts = Facts::default();
+                push_setting(&mut facts, &object, &property, &info, &map[&property]);
+                out.push((object.clone(), property, facts));
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn prepared_questions_are_well_formed() {
+        let questions = prepared_questions();
+        assert!(questions.len() > 500, "found {}", questions.len());
+        assert!(questions.iter().any(|(o, p, _)| o == "x:Domain" && p == "dnsManagement"));
+        assert!(!questions.iter().any(|(o, p, _)| o == "x:AiModel" && p == "httpAuth"));
+    }
+
+    /// Writes `resources/explain/settings.json.gz` (EX-26). Run before a
+    /// release, against one or more model servers serving the recommended
+    /// model. Each server gets its own workers, all taking from one queue,
+    /// so a faster server simply answers more:
+    ///
+    ///   INBUXA_PREPARE_MODEL_URL=http://127.0.0.1:18182/v1/chat/completions,http://127.0.0.1:18183/v1/chat/completions \
+    ///   INBUXA_PREPARE_CONCURRENCY=8,2 \
+    ///   INBUXA_PREPARE_MODEL=qwen3-4b-instruct-2507 INBUXA_PREPARE_RELEASE=2026.9.27 \
+    ///   cargo test -p jmap --release --lib -- --ignored prepare_setting_explanations --nocapture
+    ///
+    /// Answers already in the file for the same key are kept, so a rerun only
+    /// asks about settings that changed.
+    #[test]
+    #[ignore]
+    fn prepare_setting_explanations() {
+        use inbuxa_features::ai::explain::memory::{key, key_hex};
+        use std::io::Write;
+        let urls = std::env::var("INBUXA_PREPARE_MODEL_URL").expect("INBUXA_PREPARE_MODEL_URL");
+        let urls = urls.split(',').map(str::trim).filter(|u| !u.is_empty()).map(String::from).collect::<Vec<_>>();
+        let model = std::env::var("INBUXA_PREPARE_MODEL").expect("INBUXA_PREPARE_MODEL");
+        let release = std::env::var("INBUXA_PREPARE_RELEASE").expect("INBUXA_PREPARE_RELEASE");
+        let concurrency = std::env::var("INBUXA_PREPARE_CONCURRENCY").unwrap_or_else(|_| "4".into());
+        let concurrency = concurrency
+            .split(',')
+            .map(|c| c.trim().parse::<usize>().unwrap_or(4).max(1))
+            .collect::<Vec<_>>();
+        let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../../resources/explain/settings.json.gz");
+
+        let mut answers = prepared().answers.clone();
+        let wanted = prepared_questions()
+            .into_iter()
+            .map(|(object, property, facts)| {
+                let k = key_hex(key(explain::Kind::Setting, &facts, ""));
+                (object, property, facts, k)
+            })
+            .collect::<Vec<_>>();
+        let todo = wanted
+            .iter()
+            .filter(|(_, _, _, k)| !answers.contains_key(k))
+            .cloned()
+            .collect::<Vec<_>>();
+        eprintln!("{} settings, {} to ask about", wanted.len(), todo.len());
+
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let client = reqwest::Client::new();
+        let started = Instant::now();
+        let queue = std::sync::Arc::new(std::sync::Mutex::new(
+            todo.into_iter().collect::<std::collections::VecDeque<_>>(),
+        ));
+        let results = runtime.block_on(async {
+            let mut set = tokio::task::JoinSet::new();
+            for (i, url) in urls.iter().enumerate() {
+                let workers = concurrency.get(i).or(concurrency.last()).copied().unwrap_or(4);
+                for _ in 0..workers {
+                    let (client, url, model, queue) =
+                        (client.clone(), url.clone(), model.clone(), queue.clone());
+                    set.spawn(async move {
+                        let mut out = Vec::new();
+                        loop {
+                            let next = queue.lock().unwrap().pop_front();
+                            let Some((object, property, facts, k)) = next else {
+                                break;
+                            };
+                            let nonce = format!("{:016x}", rand::random::<u64>());
+                            let (system, user) =
+                                prompts::messages(explain::Kind::Setting, &facts, &nonce);
+                            let body = inbuxa_features::ai::request::body(
+                                inbuxa_features::ai::request::Kind::Chat,
+                                &model,
+                                Some(&system),
+                                &user,
+                                0.2,
+                                explain::MAX_TOKENS,
+                                false,
+                            );
+                            let reply = match client
+                                .post(&url)
+                                .header("content-type", "application/json")
+                                .body(body.to_string())
+                                .send()
+                                .await
+                            {
+                                Ok(response) => response.bytes().await.ok(),
+                                Err(_) => None,
+                            };
+                            let text = reply.and_then(|reply| {
+                                inbuxa_features::ai::request::answer(
+                                    inbuxa_features::ai::request::Kind::Chat,
+                                    &reply,
+                                )
+                            });
+                            match text.map(|t| explain::tidy_answer(&t)) {
+                                Some(text) if !text.is_empty() => {
+                                    eprintln!("{object}.{property}: {} chars", text.len());
+                                    out.push((k, text));
+                                }
+                                _ => eprintln!("{object}.{property}: no answer"),
+                            }
+                        }
+                        out
+                    });
+                }
+            }
+            let mut out = Vec::new();
+            while let Some(result) = set.join_next().await {
+                if let Ok(pairs) = result {
+                    out.extend(pairs);
+                }
+            }
+            out
+        });
+        let asked = results.len();
+        answers.extend(results);
+        // Only answers for questions this release still has
+        let keep = wanted.iter().map(|(_, _, _, k)| k.clone()).collect::<std::collections::HashSet<_>>();
+        answers.retain(|k, _| keep.contains(k));
+        let mut sorted = answers.into_iter().collect::<Vec<_>>();
+        sorted.sort();
+        let json = serde_json::json!({
+            "release": release,
+            "model": model,
+            "promptVersion": prompts::PROMPT_VERSION,
+            "answers": sorted.into_iter().map(|(k, v)| (k, serde_json::Value::String(v))).collect::<serde_json::Map<_, _>>(),
+        });
+        let mut gz = mail_auth::flate2::write::GzEncoder::new(
+            std::fs::File::create(path).unwrap(),
+            mail_auth::flate2::Compression::best(),
+        );
+        gz.write_all(serde_json::to_string_pretty(&json).unwrap().as_bytes())
+            .unwrap();
+        gz.finish().unwrap();
+        eprintln!(
+            "asked {asked} in {:.0}s; wrote {} answers to {path}",
+            started.elapsed().as_secs_f64(),
+            json["answers"].as_object().map(|a| a.len()).unwrap_or(0)
+        );
     }
 
     #[test]

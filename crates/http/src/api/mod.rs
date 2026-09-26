@@ -103,6 +103,23 @@ impl ManagementApi for Server {
                     Err(trc::ResourceEvent::NotFound.into_err())
                 }
             }
+            // inbuxa: EX-23, "Explain this", streamed as the model writes
+            "explain" if is_post => {
+                let (in_flight, access_token) = self.authenticate_headers(req, session).await?;
+                jmap::inbuxa::explanation::assert_allowed(&access_token)?;
+                let subject = body
+                    .as_deref()
+                    .and_then(|body| serde_json::from_slice::<serde_json::Value>(body).ok())
+                    .and_then(|mut body| body.get_mut("subject").map(serde_json::Value::take))
+                    .ok_or_else(|| {
+                        trc::ResourceEvent::BadParameters
+                            .into_err()
+                            .details("Expected {\"subject\": …}")
+                    })?;
+                let question =
+                    jmap::inbuxa::explanation::question(self, &access_token, &subject).await?;
+                Ok(explain_stream(self.clone(), access_token, question, in_flight))
+            }
             "account" => {
                 // Authenticate request
                 let (_in_flight, access_token) = self.authenticate_headers(req, session).await?;
@@ -349,4 +366,67 @@ impl UnauthorizedResponse for HttpResponse {
         .with_content_type("application/problem+json")
         .with_text_body(serde_json::to_string(&RequestError::unauthorized()).unwrap_or_default())
     }
+}
+
+/// inbuxa: EX-23, the explanation as server-sent events: `delta` pieces as
+/// the model writes, then `done` with the whole explanation, or one `error`.
+/// The answer runs in its own task, so a client that goes away doesn't stop
+/// it: it finishes and is remembered (EX-24).
+fn explain_stream(
+    server: Server,
+    access_token: common::auth::AccessToken,
+    question: Result<
+        jmap::inbuxa::explanation::Question,
+        jmap_proto::error::set::SetError<
+            jmap_proto::object::inbuxa_explanation::ExplanationProperty,
+        >,
+    >,
+    in_flight: Option<common::network::limiter::InFlight>,
+) -> HttpResponse {
+    use hyper::body::{Bytes, Frame};
+    use jmap::inbuxa::explanation::{answer, to_value};
+
+    fn event(name: &str, data: &serde_json::Value) -> Frame<Bytes> {
+        Frame::data(Bytes::from(format!("event: {name}\ndata: {data}\n\n")))
+    }
+
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<String>();
+    let (done_tx, done_rx) = tokio::sync::oneshot::channel();
+    match question {
+        Ok(question) => {
+            tokio::spawn(async move {
+                let result = answer(&server, &access_token, question, Some(tx)).await;
+                let _ = done_tx.send(result);
+            });
+        }
+        Err(error) => {
+            drop(tx);
+            let _ = done_tx.send(Err(error));
+        }
+    }
+    HttpResponse::new(StatusCode::OK)
+        .with_content_type("text/event-stream")
+        .with_cache_control("no-store")
+        .with_stream_body(BoxBody::new(StreamBody::new(async_stream::stream! {
+            let _in_flight = in_flight;
+            while let Some(text) = rx.recv().await {
+                yield Ok(event("delta", &serde_json::json!({ "text": text })));
+            }
+            match done_rx.await {
+                Ok(Ok(answer)) => {
+                    let value = serde_json::to_value(to_value(answer)).unwrap_or_default();
+                    yield Ok(event("done", &value));
+                }
+                Ok(Err(error)) => {
+                    let value = serde_json::to_value(&error).unwrap_or_default();
+                    yield Ok(event("error", &value));
+                }
+                Err(_) => {
+                    yield Ok(event("error", &serde_json::json!({
+                        "type": "serverFail",
+                        "description": "unavailable",
+                    })));
+                }
+            }
+        })))
 }

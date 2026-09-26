@@ -88,6 +88,9 @@ pub struct Call<'x> {
     pub timeout: Duration,
     /// Set for "Explain this" (ai-explain spec, EX-10, EX-14, EX-15).
     pub explain: Option<Explain<'x>>,
+    /// inbuxa: EX-23, set to stream: each piece of the answer is sent here as
+    /// the model writes it. The call still returns the whole answer.
+    pub stream: Option<tokio::sync::mpsc::UnboundedSender<String>>,
 }
 
 /// What an explanation call does differently: it leaves a slot for mail,
@@ -103,6 +106,52 @@ fn kind(model: &AiModel) -> Kind {
     match model.model_type {
         AiModelType::Chat => Kind::Chat,
         AiModelType::Text => Kind::Text,
+    }
+}
+
+/// inbuxa: EX-23, reads a streamed answer, forwarding each piece. A listener
+/// that has gone away doesn't stop the read: the answer is still wanted, to
+/// be remembered (EX-24).
+async fn read_stream(
+    kind: Kind,
+    response: &mut reqwest::Response,
+    stream: &tokio::sync::mpsc::UnboundedSender<String>,
+) -> Result<String, Failure> {
+    let mut pending = Vec::new();
+    let mut answer = String::new();
+    while let Some(chunk) = response
+        .chunk()
+        .await
+        .map_err(|err| Failure::Http(err.without_url().to_string()))?
+    {
+        pending.extend_from_slice(&chunk);
+        while let Some(at) = pending.iter().position(|b| *b == b'\n') {
+            let line = pending.drain(..=at).collect::<Vec<_>>();
+            match request::stream_line(kind, &String::from_utf8_lossy(&line)) {
+                request::StreamLine::Delta(text) => {
+                    answer.push_str(&text);
+                    if answer.len() > MAX_RESPONSE_BYTES {
+                        return Err(Failure::BadAnswer);
+                    }
+                    let _ = stream.send(text);
+                }
+                request::StreamLine::Done => return finished(answer),
+                request::StreamLine::Ignore => {}
+            }
+        }
+        if pending.len() > MAX_RESPONSE_BYTES {
+            return Err(Failure::BadAnswer);
+        }
+    }
+    finished(answer)
+}
+
+fn finished(answer: String) -> Result<String, Failure> {
+    let answer = answer.trim();
+    if answer.is_empty() {
+        Err(Failure::BadAnswer)
+    } else {
+        Ok(answer.to_string())
     }
 }
 
@@ -261,6 +310,7 @@ impl Server {
             call.user,
             call.temperature,
             call.max_tokens,
+            call.stream.is_some(),
         );
         // Secrets are read now, from their source (AI-8)
         let headers = model
@@ -291,6 +341,9 @@ impl Server {
         let status = response.status().as_u16();
         if status != 200 {
             return Err(Failure::Status(status));
+        }
+        if let Some(stream) = &call.stream {
+            return read_stream(kind, &mut response, stream).await;
         }
         let mut bytes = Vec::new();
         while let Some(chunk) = response
@@ -407,6 +460,7 @@ pub async fn sieve_prompt(
             max_tokens: request::PROMPT_MAX_TOKENS,
             timeout,
             explain: None,
+            stream: None,
         })
         .await
         .ok()?;
