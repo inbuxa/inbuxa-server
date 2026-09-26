@@ -36,7 +36,7 @@ use registry::{
     jmap::IntoValue,
     schema::{
         enums::SpamClassifyResult,
-        prelude::ObjectType,
+        prelude::{OBJ_SINGLETON, Object, ObjectType},
         structs::{QueuedMessage, QueuedRecipient, RecipientStatus},
     },
     types::{EnumImpl, id::ObjectId},
@@ -431,8 +431,13 @@ a negative one toward legitimate mail. The result follows the total against the 
             let Ok(id) = Id::from_str(id) else {
                 return Ok(Err(not_found()));
             };
-            let Some(stored) = server.registry().get(ObjectId::new(object_type, id)).await? else {
-                return Ok(Err(not_found()));
+            // A singleton never saved holds its defaults, as its /get shows it
+            let stored = match server.registry().get(ObjectId::new(object_type, id)).await? {
+                Some(stored) => stored,
+                None if id.is_singleton() && object_type.flags() & OBJ_SINGLETON != 0 => {
+                    Object::from(object_type)
+                }
+                None => return Ok(Err(not_found())),
             };
             let stored = serde_json::to_value(stored.into_value()).unwrap_or_default();
             let current = stored.get(property.as_str()).cloned().unwrap_or(serde_json::Value::Null);

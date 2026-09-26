@@ -25,7 +25,7 @@ use registry::{
             Role,
         },
     },
-    types::EnumImpl,
+    types::{EnumImpl, id::ObjectId},
 };
 use serde_json::{Value, json};
 use std::time::Duration;
@@ -94,6 +94,29 @@ pub async fn test(test: &mut TestServer) {
     assert!(system.contains("Reference notes"), "{system}");
     assert!(user.contains("Current value: true"), "{user}");
     assert!(user.contains("-----BEGIN DETAILS "), "{user}");
+
+    // A singleton never saved is explained with its defaults, as /get shows it
+    let spam_settings = ObjectId::new(ObjectType::SpamSettings, Id::singleton());
+    assert!(
+        test.server
+            .registry()
+            .get(spam_settings)
+            .await
+            .unwrap()
+            .is_none(),
+        "x:SpamSettings is stored; pick a singleton the suite never saves"
+    );
+    stub.set(Mode::Answer("Mail scoring this much is spam.".into()));
+    let (created, failed) = admin
+        .explain(json!({"@type": "Setting", "object": "x:SpamSettings",
+            "id": "singleton", "property": "scoreSpam"}))
+        .await;
+    created.unwrap_or_else(|| panic!("unsaved singleton: {failed}"));
+    let (_, user) = messages(&stub.last().1);
+    assert!(
+        user.contains("Current value: 5"),
+        "unsaved singleton: {user}"
+    );
 
     // Acceptance test 7: a secret setting is refused, not masked (EX-9)
     let before = stub.count();
