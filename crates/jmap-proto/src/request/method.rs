@@ -49,6 +49,8 @@ pub enum MethodObject {
     DeletedAccount,
     // inbuxa: AI call limits
     AiLimits,
+    // inbuxa: "Explain this" with the local model
+    Explanation,
     ProtocolPolicy,
     TenantProtocolPolicy,
 }
@@ -77,6 +79,7 @@ impl MethodObject {
             MethodObject::MaskedEmail => Capability::FastmailMaskedEmail,
             MethodObject::DeletedAccount => Capability::Inbuxa,
             MethodObject::AiLimits => Capability::Inbuxa,
+            MethodObject::Explanation => Capability::Inbuxa,
             MethodObject::ProtocolPolicy => Capability::Inbuxa,
             MethodObject::TenantProtocolPolicy => Capability::Inbuxa,
         }
@@ -256,6 +259,7 @@ impl MethodName {
             (MethodFunction::Set, MethodObject::DeletedAccount) => "inbuxa:DeletedAccount/set",
             (MethodFunction::Get, MethodObject::AiLimits) => "inbuxa:AiLimits/get",
             (MethodFunction::Set, MethodObject::AiLimits) => "inbuxa:AiLimits/set",
+            (MethodFunction::Set, MethodObject::Explanation) => "inbuxa:Explanation/set",
             (MethodFunction::Get, MethodObject::ProtocolPolicy) => "inbuxa:ProtocolPolicy/get",
             (MethodFunction::Set, MethodObject::ProtocolPolicy) => "inbuxa:ProtocolPolicy/set",
             (MethodFunction::Get, MethodObject::TenantProtocolPolicy) => {
@@ -389,6 +393,7 @@ impl MethodName {
             "inbuxa:DeletedAccount/set" => (MethodObject::DeletedAccount, MethodFunction::Set),
             "inbuxa:AiLimits/get" => (MethodObject::AiLimits, MethodFunction::Get),
             "inbuxa:AiLimits/set" => (MethodObject::AiLimits, MethodFunction::Set),
+            "inbuxa:Explanation/set" => (MethodObject::Explanation, MethodFunction::Set),
             "inbuxa:ProtocolPolicy/get" => (MethodObject::ProtocolPolicy, MethodFunction::Get),
             "inbuxa:ProtocolPolicy/set" => (MethodObject::ProtocolPolicy, MethodFunction::Set),
             "inbuxa:TenantProtocolPolicy/get" => (MethodObject::TenantProtocolPolicy, MethodFunction::Get),
@@ -446,6 +451,7 @@ impl Display for MethodObject {
             MethodObject::MaskedEmail => "MaskedEmail",
             MethodObject::DeletedAccount => "inbuxa:DeletedAccount",
             MethodObject::AiLimits => "inbuxa:AiLimits",
+            MethodObject::Explanation => "inbuxa:Explanation",
             MethodObject::ProtocolPolicy => "inbuxa:ProtocolPolicy",
             MethodObject::TenantProtocolPolicy => "inbuxa:TenantProtocolPolicy",
             MethodObject::Registry(obj) => {

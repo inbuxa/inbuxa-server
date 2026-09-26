@@ -10,6 +10,7 @@
 //! and nothing is sent until an administrator configures a model (AI-1).
 
 pub mod answer;
+pub mod explain;
 pub mod gate;
 pub mod limits;
 pub mod locality;

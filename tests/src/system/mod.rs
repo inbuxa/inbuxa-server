@@ -10,6 +10,7 @@ pub mod antispam;
 pub mod authentication;
 pub mod ai;
 pub mod ai_calibration;
+pub mod ai_explain;
 pub mod authorization;
 pub mod auto_reload; // inbuxa: registry writes apply at once
 pub mod branding;

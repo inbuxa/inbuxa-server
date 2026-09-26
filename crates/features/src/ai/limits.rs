@@ -26,6 +26,12 @@ pub struct AiLimits {
     pub max_content_bytes: u64,
     pub failure_backoff: Duration,
     pub user_calls_per_hour: u64,
+    /// "Explain this" (`inbuxa-drafts/specs/ai-explain.md`, EX-2, EX-3,
+    /// EX-13, EX-15).
+    pub explain_enabled: bool,
+    pub explain_model_id: Option<u64>,
+    pub explain_calls_per_hour: u64,
+    pub explain_ceiling: Duration,
 }
 
 impl Default for AiLimits {
@@ -38,6 +44,10 @@ impl Default for AiLimits {
             max_content_bytes: 2_048,
             failure_backoff: Duration::from_millis(60_000),
             user_calls_per_hour: 60,
+            explain_enabled: true,
+            explain_model_id: None,
+            explain_calls_per_hour: 30,
+            explain_ceiling: Duration::from_millis(45_000),
         }
     }
 }
@@ -51,6 +61,10 @@ pub const PROPERTIES: &[&str] = &[
     "maxContentBytes",
     "failureBackoff",
     "userCallsPerHour",
+    "explainEnabled",
+    "explainModelId",
+    "explainCallsPerHour",
+    "explainCeiling",
 ];
 
 impl AiLimits {
@@ -86,6 +100,14 @@ impl AiLimits {
         }
         if self.failure_backoff.into_inner().as_secs() > 86_400 {
             return Err(("failureBackoff", "must be at most a day".into()));
+        }
+        if !(1..=10_000).contains(&self.explain_calls_per_hour) {
+            return Err(("explainCallsPerHour", "must be from 1 to 10000".into()));
+        }
+        if self.explain_ceiling.into_inner().as_secs() < 1
+            || self.explain_ceiling.into_inner().as_secs() > 600
+        {
+            return Err(("explainCeiling", "must be from 1 second to 10 minutes".into()));
         }
         Ok(())
     }
@@ -151,6 +173,9 @@ mod tests {
             assert!(json.get(property).is_some(), "{property}");
         }
         assert_eq!(json["spamCallCeiling"], 20_000);
+        assert_eq!(json["explainCeiling"], 45_000);
+        assert_eq!(partial.explain_calls_per_hour, 30);
+        assert!(partial.explain_enabled);
         let bad = AiLimits {
             max_concurrent_calls: 0,
             ..Default::default()

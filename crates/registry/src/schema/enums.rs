@@ -2,6 +2,8 @@
  * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
+ *
+ * Modified by Coffey Labs in 2026 for INBUXA.
  */
 
 // This file is auto-generated. Do not edit directly.
@@ -1726,6 +1728,8 @@ pub enum Permission {
     LiveMetrics = 217,
     LiveDeliveryTest = 218,
     ScimAccess = 660,
+    // inbuxa: "Explain this" (ai-explain spec)
+    SysAiExplain = 661,
     SysAccountGet = 219,
     SysAccountCreate = 220,
     SysAccountUpdate = 221,

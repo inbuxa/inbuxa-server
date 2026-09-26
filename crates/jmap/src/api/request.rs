@@ -221,6 +221,9 @@ impl RequestHandler for Server {
                                     SetResponseMethod::AiLimits(set_response) => {
                                         set_response.update_created_ids(&mut response);
                                     }
+                                    SetResponseMethod::Explanation(set_response) => {
+                                        set_response.update_created_ids(&mut response);
+                                    }
                                     SetResponseMethod::ProtocolPolicy(set_response) => {
                                         set_response.update_created_ids(&mut response);
                                     }
@@ -634,6 +637,13 @@ impl RequestHandler for Server {
                 SetRequestMethod::AiLimits(mut req) => {
                     resolve_account_id(&mut req.account_id, method_name.obj, access_token)?;
                     crate::inbuxa::ai_limits::set(self, access_token, *req)
+                        .await?
+                        .into()
+                }
+                // inbuxa: inbuxa:Explanation/set ("Explain this")
+                SetRequestMethod::Explanation(mut req) => {
+                    resolve_account_id(&mut req.account_id, method_name.obj, access_token)?;
+                    crate::inbuxa::explanation::set(self, access_token, *req)
                         .await?
                         .into()
                 }

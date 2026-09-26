@@ -22,6 +22,7 @@ pub mod email;
 pub mod email_submission;
 pub mod fastmail_masked_email; // inbuxa: masked email
 pub mod inbuxa_ai_limits; // inbuxa: AI spam classification
+pub mod inbuxa_explanation; // inbuxa: "Explain this" with the local model
 pub mod inbuxa_protocol_policy; // inbuxa: legacy protocols off
 pub mod inbuxa_tenant_protocol_policy; // inbuxa: legacy protocols off, per tenant
 pub mod inbuxa_deleted_account; // inbuxa: undelete

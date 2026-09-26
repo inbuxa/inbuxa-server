@@ -252,8 +252,9 @@ pub async fn test(test: &TestServer) {
             "urn:ietf:params:jmap:mail:share": {},
             "urn:inbuxa:jmap:registry": {},
             // inbuxa: MT-22, the logo that applies to the account, and
-            // LP-19, whether the legacy protocols are open to it
-            "urn:inbuxa:jmap": { "logo": null, "legacyProtocols": "enabled" },
+            // LP-19, whether the legacy protocols are open to it, and
+            // ai-explain EX-1, whether Explain can be offered
+            "urn:inbuxa:jmap": { "logo": null, "legacyProtocols": "enabled", "aiExplain": false },
             "https://www.fastmail.com/dev/maskedemail": {}
           }
         }

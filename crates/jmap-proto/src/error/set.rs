@@ -2,6 +2,8 @@
  * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
+ *
+ * Modified by Coffey Labs in 2026 for INBUXA.
  */
 
 use jmap_tools::{Key, Property};
@@ -122,6 +124,9 @@ pub enum SetErrorType {
     PrimaryKeyViolation,
     #[serde(rename = "validationFailed")]
     ValidationFailed,
+    // inbuxa: a create that couldn't run (ai-explain spec: busy, timeout, …)
+    #[serde(rename = "serverFail")]
+    ServerFail,
 }
 
 impl SetErrorType {
@@ -160,6 +165,7 @@ impl SetErrorType {
             SetErrorType::InvalidForeignKey => "invalidForeignKey",
             SetErrorType::PrimaryKeyViolation => "primaryKeyViolation",
             SetErrorType::ValidationFailed => "validationFailed",
+            SetErrorType::ServerFail => "serverFail",
         }
     }
 }

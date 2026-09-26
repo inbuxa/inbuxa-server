@@ -89,6 +89,7 @@ impl SpamFilterAnalyzeLlm for Server {
                 temperature: settings.temperature.into_inner(),
                 max_tokens: request::CLASSIFY_MAX_TOKENS,
                 timeout,
+                explain: None,
             })
             .await
         else {

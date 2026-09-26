@@ -72,11 +72,16 @@ impl SessionHandler for Server {
         } else {
             "enabled"
         };
+        // inbuxa: ai-explain, EX-1 to EX-4: whether Explain can be offered
+        let ai_explain = access_token.has_permission(Permission::SysAiExplain)
+            && access_token.tenant_id().is_none()
+            && self.ai_explain_model(&self.ai_limits().await).await.is_some();
         account.account_capabilities.append(
             Capability::Inbuxa,
             Capabilities::Inbuxa(InbuxaAccountCapabilities {
                 logo,
                 legacy_protocols,
+                ai_explain,
             }),
         );
         // inbuxa: Fastmail's Masked Email API, for accounts that may hold masks

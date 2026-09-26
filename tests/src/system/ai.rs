@@ -49,7 +49,7 @@ Category,Confidence,Reason.";
 
 /// How the stub answers.
 #[derive(Clone)]
-enum Mode {
+pub(super) enum Mode {
     Answer(String),
     Echo,
     Status(u16),
@@ -57,21 +57,21 @@ enum Mode {
     Redirect,
 }
 
-struct Stub {
+pub(super) struct Stub {
     mode: Mutex<Mode>,
     requests: Mutex<Vec<(ahash::AHashMap<String, String>, Value)>>,
 }
 
 impl Stub {
-    fn set(&self, mode: Mode) {
+    pub(super) fn set(&self, mode: Mode) {
         *self.mode.lock().unwrap() = mode;
     }
 
-    fn count(&self) -> usize {
+    pub(super) fn count(&self) -> usize {
         self.requests.lock().unwrap().len()
     }
 
-    fn last(&self) -> (ahash::AHashMap<String, String>, Value) {
+    pub(super) fn last(&self) -> (ahash::AHashMap<String, String>, Value) {
         self.requests.lock().unwrap().last().cloned().expect("a request")
     }
 }
@@ -95,6 +95,11 @@ fn completion(content: String) -> HttpResponse {
 }
 
 async fn spawn_stub(test: &TestServer) -> (Arc<Stub>, impl Sized) {
+    spawn_stub_on(test, PORT).await
+}
+
+/// A stub model on `port`, for the suites that share it.
+pub(super) async fn spawn_stub_on(test: &TestServer, port: u16) -> (Arc<Stub>, impl Sized) {
     let stub = Arc::new(Stub {
         mode: Mutex::new(Mode::Answer("Legitimate,Low,fine".into())),
         requests: Mutex::new(Vec::new()),
@@ -133,10 +138,10 @@ async fn spawn_stub(test: &TestServer) -> (Arc<Stub>, impl Sized) {
                     completion(answer)
                 }
                 Mode::Redirect => HttpResponse::new(StatusCode::FOUND)
-                    .with_header("location", format!("https://127.0.0.1:{}/other", PORT + 1)),
+                    .with_header("location", format!("https://127.0.0.1:{}/other", port + 1)),
             }
         }),
-        PORT,
+        port,
     )
     .await;
     (stub, guard)
@@ -765,7 +770,7 @@ impl Account {
         self.registry_update_setting(classifier, &[]).await;
     }
 
-    async fn set_limits(&self, patch: Value) {
+    pub(super) async fn set_limits(&self, patch: Value) {
         let response = self
             .jmap_request(
                 &["urn:ietf:params:jmap:core", "urn:inbuxa:jmap"],
@@ -806,7 +811,7 @@ impl Account {
         sieve.assert_read(ResponseType::Ok).await;
     }
 
-    async fn brand_new_tenant_admin(&self) -> (Account, Id, Id) {
+    pub(super) async fn brand_new_tenant_admin(&self) -> (Account, Id, Id) {
         let tenant = self
             .registry_create_object(registry::schema::structs::Tenant {
                 name: "ai-t".into(),

@@ -7072,6 +7072,7 @@ impl EnumImpl for Permission {
             b"liveMetrics" => Permission::LiveMetrics,
             b"liveDeliveryTest" => Permission::LiveDeliveryTest,
             b"scimAccess" => Permission::ScimAccess,
+            b"sysAiExplain" => Permission::SysAiExplain,
             b"sysAccountGet" => Permission::SysAccountGet,
             b"sysAccountCreate" => Permission::SysAccountCreate,
             b"sysAccountUpdate" => Permission::SysAccountUpdate,
@@ -7749,6 +7750,7 @@ impl EnumImpl for Permission {
             Permission::LiveMetrics => "liveMetrics",
             Permission::LiveDeliveryTest => "liveDeliveryTest",
             Permission::ScimAccess => "scimAccess",
+            Permission::SysAiExplain => "sysAiExplain",
             Permission::SysAccountGet => "sysAccountGet",
             Permission::SysAccountCreate => "sysAccountCreate",
             Permission::SysAccountUpdate => "sysAccountUpdate",
@@ -8419,6 +8421,7 @@ impl EnumImpl for Permission {
             217 => Some(Permission::LiveMetrics),
             218 => Some(Permission::LiveDeliveryTest),
             660 => Some(Permission::ScimAccess),
+            661 => Some(Permission::SysAiExplain),
             219 => Some(Permission::SysAccountGet),
             220 => Some(Permission::SysAccountCreate),
             221 => Some(Permission::SysAccountUpdate),
@@ -8863,7 +8866,7 @@ impl EnumImpl for Permission {
         }
     }
 
-    const COUNT: usize = 661;
+    const COUNT: usize = 662;
 }
 
 impl serde::Serialize for Permission {

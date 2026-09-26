@@ -34,6 +34,10 @@ const ALL: &[P] = &[
     P::MaxContentBytes,
     P::FailureBackoff,
     P::UserCallsPerHour,
+    P::ExplainEnabled,
+    P::ExplainModelId,
+    P::ExplainCallsPerHour,
+    P::ExplainCeiling,
 ];
 
 fn assert_server_level(access_token: &AccessToken) -> trc::Result<()> {
@@ -58,6 +62,13 @@ fn to_value(limits: &Limits, properties: &[P]) -> LValue {
             P::MaxContentBytes => Value::Number((limits.max_content_bytes).into()),
             P::FailureBackoff => Value::Number((limits.failure_backoff.into_inner().as_millis() as u64).into()),
             P::UserCallsPerHour => Value::Number((limits.user_calls_per_hour).into()),
+            P::ExplainEnabled => Value::Bool(limits.explain_enabled),
+            P::ExplainModelId => match limits.explain_model_id {
+                Some(id) => Value::Element(AiLimitsValue::Id(Id::from(id))),
+                None => Value::Null,
+            },
+            P::ExplainCallsPerHour => Value::Number((limits.explain_calls_per_hour).into()),
+            P::ExplainCeiling => Value::Number((limits.explain_ceiling.into_inner().as_millis() as u64).into()),
         };
         out.insert_unchecked(Key::Property(property.clone()), value);
     }
@@ -106,6 +117,15 @@ fn apply(limits: &mut Limits, property: &P, value: &Value<'_, P, AiLimitsValue>)
         P::MaxContentBytes => limits.max_content_bytes = whole()?,
         P::FailureBackoff => limits.failure_backoff = Duration::from_millis(whole()?),
         P::UserCallsPerHour => limits.user_calls_per_hour = whole()?,
+        P::ExplainEnabled => {
+            limits.explain_enabled = value.as_bool().ok_or_else(|| "must be true or false".to_string())?
+        }
+        P::ExplainModelId => match value {
+            Value::Element(AiLimitsValue::Id(id)) => limits.explain_model_id = Some(id.id()),
+            _ => return Err("must be the id of an x:AiModel".to_string()),
+        },
+        P::ExplainCallsPerHour => limits.explain_calls_per_hour = whole()?,
+        P::ExplainCeiling => limits.explain_ceiling = Duration::from_millis(whole()?),
         P::Id => return Err("is immutable".to_string()),
     }
     Ok(())
@@ -121,6 +141,10 @@ fn reset(limits: &mut Limits, property: &P, defaults: &Limits) -> Result<(), Str
         P::MaxContentBytes => limits.max_content_bytes = defaults.max_content_bytes,
         P::FailureBackoff => limits.failure_backoff = defaults.failure_backoff,
         P::UserCallsPerHour => limits.user_calls_per_hour = defaults.user_calls_per_hour,
+        P::ExplainEnabled => limits.explain_enabled = defaults.explain_enabled,
+        P::ExplainModelId => limits.explain_model_id = defaults.explain_model_id,
+        P::ExplainCallsPerHour => limits.explain_calls_per_hour = defaults.explain_calls_per_hour,
+        P::ExplainCeiling => limits.explain_ceiling = defaults.explain_ceiling,
         P::Id => return Err("is immutable".to_string()),
     }
     Ok(())

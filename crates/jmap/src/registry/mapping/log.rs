@@ -2,6 +2,8 @@
  * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
+ *
+ * Modified by Coffey Labs in 2026 for INBUXA.
  */
 
 use crate::{
@@ -207,7 +209,7 @@ fn read_log_offsets(
     Ok(entries)
 }
 
-fn read_log_entries(
+pub(crate) fn read_log_entries(
     path: impl AsRef<Path>,
     ids: Option<Vec<Id>>,
     limit: usize,
