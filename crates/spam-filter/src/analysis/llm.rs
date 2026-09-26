@@ -90,6 +90,7 @@ impl SpamFilterAnalyzeLlm for Server {
                 max_tokens: request::CLASSIFY_MAX_TOKENS,
                 timeout,
                 explain: None,
+                stream: None,
             })
             .await
         else {

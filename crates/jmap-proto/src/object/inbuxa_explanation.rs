@@ -26,6 +26,10 @@ pub enum ExplanationProperty {
     Node,
     ElapsedMs,
     Grounded,
+    // inbuxa: EX-27, where the answer came from
+    Source,
+    AnsweredAt,
+    PreparedFor,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -52,6 +56,9 @@ impl Property for ExplanationProperty {
             ExplanationProperty::Node => "node",
             ExplanationProperty::ElapsedMs => "elapsedMs",
             ExplanationProperty::Grounded => "grounded",
+            ExplanationProperty::Source => "source",
+            ExplanationProperty::AnsweredAt => "answeredAt",
+            ExplanationProperty::PreparedFor => "preparedFor",
         }
         .into()
     }
@@ -67,6 +74,9 @@ impl ExplanationProperty {
             b"node" => ExplanationProperty::Node,
             b"elapsedMs" => ExplanationProperty::ElapsedMs,
             b"grounded" => ExplanationProperty::Grounded,
+            b"source" => ExplanationProperty::Source,
+            b"answeredAt" => ExplanationProperty::AnsweredAt,
+            b"preparedFor" => ExplanationProperty::PreparedFor,
         )
     }
 }

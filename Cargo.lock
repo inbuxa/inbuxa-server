@@ -3969,6 +3969,7 @@ dependencies = [
  "trc",
  "types",
  "utils",
+ "xxhash-rust",
 ]
 
 [[package]]

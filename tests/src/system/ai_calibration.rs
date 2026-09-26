@@ -87,6 +87,7 @@ pub async fn ai_calibration() {
             &user,
             0.5,
             request::CLASSIFY_MAX_TOKENS,
+            false,
         );
 
         let started = Instant::now();
