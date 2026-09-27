@@ -2,6 +2,8 @@
  * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
+ *
+ * Modified by Coffey Labs in 2026 for INBUXA.
  */
 
 use common::ipc::{
@@ -139,6 +141,11 @@ impl BroadcastBatch<Vec<BroadcastEvent>> {
                 BroadcastEvent::QueueRefresh => {
                     serialized.push(12u8);
                 }
+                // inbuxa: AL-3
+                BroadcastEvent::EndSessions(account_id) => {
+                    serialized.push(13u8);
+                    let _ = serialized.write_leb128(*account_id);
+                }
             }
         }
         serialized
@@ -272,6 +279,11 @@ where
                 10 => Ok(Some(BroadcastEvent::MtaQueueStatus { is_running: true })),
                 11 => Ok(Some(BroadcastEvent::MtaQueueStatus { is_running: false })),
                 12 => Ok(Some(BroadcastEvent::QueueRefresh)),
+                // inbuxa: AL-3
+                13 => {
+                    let account_id = self.messages.next_leb128().ok_or(())?;
+                    Ok(Some(BroadcastEvent::EndSessions(account_id)))
+                }
                 _ => Err(()),
             }
         } else {

@@ -8,6 +8,7 @@
 //! `crates/features`; this module only speaks JMAP for them.
 
 pub mod access;
+pub mod account_lock;
 pub mod audit;
 pub mod audit_log;
 pub mod ai_limits;

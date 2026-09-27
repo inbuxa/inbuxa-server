@@ -239,10 +239,20 @@ impl TokenHandler for Server {
                     .validate_access_token(GrantType::RefreshToken.into(), refresh_token)
                     .await
                 {
+                    // inbuxa: AL-2: a locked account gets no new tokens
+                    Ok(token_info)
+                        if self
+                            .access_token(token_info.account_id)
+                            .await
+                            .is_ok_and(|token| token.is_locked()) =>
+                    {
+                        TokenResponse::error(ErrorType::InvalidGrant)
+                    }
                     Ok(token_info) => self
                         .issue_token(
                             token_info.account_id,
-                            "",
+                            // inbuxa: AU-5: the client travels in the refresh token
+                            token_info.claims.as_deref().unwrap_or_default(),
                             issuer,
                             None,
                             None,
@@ -342,7 +352,8 @@ impl TokenHandler for Server {
                     account_id,
                     account_name,
                     self.core.oauth.oauth_expiry_refresh_token,
-                    None,
+                    // inbuxa: AU-5: so a refreshed access token still names it
+                    Some(client_id),
                     credential_version.into(),
                 )
                 .await?

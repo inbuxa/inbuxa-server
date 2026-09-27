@@ -47,10 +47,12 @@ pub async fn collect_access<F: Future>(f: F) -> (F::Output, Vec<u32>) {
         .await
 }
 
-/// Notes an account a method call is about to reach (AU-1.6).
+/// Notes an account a method call is about to reach (AU-1.6): through
+/// impersonation, or as a locked account's delegate (AL-9).
 pub fn note_access(account_id: u32, access_token: &AccessToken) {
-    if !access_token.is_member_directly(account_id)
-        && access_token.has_permission(Permission::Impersonate)
+    if access_token.delegation(account_id).is_some()
+        || (!access_token.is_member_directly(account_id)
+            && access_token.has_permission(Permission::Impersonate))
     {
         let _ = REACHED.try_with(|reached| {
             let mut reached = reached.borrow_mut();
@@ -99,6 +101,7 @@ fn before_boxed<'a, T: JmapObject>(
     session: &'a HttpSessionData,
     object: &'a str,
     registry: Option<ObjectType>,
+    reason: Option<String>,
     request: &'a SetRequest<'_, T>,
 ) -> std::pin::Pin<Box<dyn Future<Output = trc::Result<Pending>> + Send + 'a>> {
     Box::pin(before(
@@ -107,6 +110,7 @@ fn before_boxed<'a, T: JmapObject>(
         session,
         object,
         registry,
+        reason,
         request,
     ))
 }
@@ -121,6 +125,7 @@ pub async fn recorded<'x, T, F, Fut>(
     session: &HttpSessionData,
     object: &str,
     registry: Option<ObjectType>,
+    reason: Option<String>,
     request: SetRequest<'x, T>,
     method: F,
 ) -> trc::Result<SetResponse<T>>
@@ -135,7 +140,8 @@ where
     // Every inner future is boxed where it's made, never held in this
     // frame: a debug build's stack can't take a copy of registry_set's
     // state on top of the request's own
-    let pending = before_boxed(server, access_token, session, object, registry, &request).await?;
+    let pending =
+        before_boxed(server, access_token, session, object, registry, reason, &request).await?;
     let result = scope::request(method(request)).await;
     after(server, pending, &result).await;
     result
@@ -147,6 +153,7 @@ async fn before<T: JmapObject>(
     session: &HttpSessionData,
     object: &str,
     registry: Option<ObjectType>,
+    reason: Option<String>,
     request: &SetRequest<'_, T>,
 ) -> trc::Result<Pending> {
     let actor = server.audit_actor(access_token).await;
@@ -236,7 +243,7 @@ async fn before<T: JmapObject>(
             target,
             changes,
             details: None,
-            reason: None,
+            reason: reason.clone(),
             outcome: Outcome::Pending,
         };
         match server.audit_append(&record).await {

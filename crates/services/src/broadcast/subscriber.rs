@@ -180,6 +180,15 @@ pub fn spawn_broadcast_subscriber(inner: Arc<Inner>, mut shutdown_rx: watch::Rec
                                                             .send(QueueEvent::Paused(!is_running))
                                                             .await;
                                                 }
+                                                // inbuxa: AL-3: sessions an account has
+                                                // open here end too
+                                                BroadcastEvent::EndSessions(account_id) => {
+                                                    let _ = inner
+                                                        .ipc
+                                                        .push_tx
+                                                        .send(PushEvent::Revoke { account_id })
+                                                        .await;
+                                                }
                                                 BroadcastEvent::QueueRefresh => {
                                                     if inner.shared_core.load().network.roles.outbound_mta {
                                                         let _ = inner
@@ -265,6 +274,9 @@ fn log_event(event: &BroadcastEvent) -> trc::Value {
         },
         BroadcastEvent::PushServerUpdate(account_id) => {
             trc::Value::Array(vec!["PushServerUpdate".into(), (*account_id).into()])
+        }
+        BroadcastEvent::EndSessions(account_id) => {
+            trc::Value::Array(vec!["EndSessions".into(), (*account_id).into()])
         }
         BroadcastEvent::RegistryChange(change) => match change {
             RegistryChange::Insert(id) => trc::Value::Array(vec![

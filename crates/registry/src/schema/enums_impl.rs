@@ -7076,6 +7076,10 @@ impl EnumImpl for Permission {
             b"sysAuditGet" => Permission::SysAuditGet,
             b"sysAuditExport" => Permission::SysAuditExport,
             b"sysAuditSettingsUpdate" => Permission::SysAuditSettingsUpdate,
+            b"sysAccountLockGet" => Permission::SysAccountLockGet,
+            b"sysAccountLockCreate" => Permission::SysAccountLockCreate,
+            b"sysAccountLockUpdate" => Permission::SysAccountLockUpdate,
+            b"sysAccountLockDestroy" => Permission::SysAccountLockDestroy,
             b"sysAccountGet" => Permission::SysAccountGet,
             b"sysAccountCreate" => Permission::SysAccountCreate,
             b"sysAccountUpdate" => Permission::SysAccountUpdate,
@@ -7757,6 +7761,10 @@ impl EnumImpl for Permission {
             Permission::SysAuditGet => "sysAuditGet",
             Permission::SysAuditExport => "sysAuditExport",
             Permission::SysAuditSettingsUpdate => "sysAuditSettingsUpdate",
+            Permission::SysAccountLockGet => "sysAccountLockGet",
+            Permission::SysAccountLockCreate => "sysAccountLockCreate",
+            Permission::SysAccountLockUpdate => "sysAccountLockUpdate",
+            Permission::SysAccountLockDestroy => "sysAccountLockDestroy",
             Permission::SysAccountGet => "sysAccountGet",
             Permission::SysAccountCreate => "sysAccountCreate",
             Permission::SysAccountUpdate => "sysAccountUpdate",
@@ -8431,6 +8439,10 @@ impl EnumImpl for Permission {
             662 => Some(Permission::SysAuditGet),
             663 => Some(Permission::SysAuditExport),
             664 => Some(Permission::SysAuditSettingsUpdate),
+            665 => Some(Permission::SysAccountLockGet),
+            666 => Some(Permission::SysAccountLockCreate),
+            667 => Some(Permission::SysAccountLockUpdate),
+            668 => Some(Permission::SysAccountLockDestroy),
             219 => Some(Permission::SysAccountGet),
             220 => Some(Permission::SysAccountCreate),
             221 => Some(Permission::SysAccountUpdate),
@@ -8875,7 +8887,7 @@ impl EnumImpl for Permission {
         }
     }
 
-    const COUNT: usize = 665;
+    const COUNT: usize = 669;
 }
 
 impl serde::Serialize for Permission {

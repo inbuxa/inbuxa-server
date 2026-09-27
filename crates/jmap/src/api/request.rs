@@ -143,15 +143,27 @@ impl RequestHandler for Server {
                             | RequestMethod::Changes(_)
                             | RequestMethod::QueryChanges(_)
                     );
-                if matches!(
+                let is_write = matches!(
                     call.method,
                     RequestMethod::Set(_)
                         | RequestMethod::Copy(_)
                         | RequestMethod::ImportEmail(_)
                         | RequestMethod::UploadBlob(_)
-                ) {
+                );
+                if is_write {
                     has_written = true;
                 }
+                // inbuxa: AL-7: what a delegate makes in a locked account
+                // may need the lock's grants
+                let makes_containers = is_write
+                    && matches!(
+                        call.name.obj,
+                        MethodObject::Mailbox
+                            | MethodObject::Calendar
+                            | MethodObject::AddressBook
+                            | MethodObject::FileNode
+                    );
+                let call_name = call.name.as_str().into_owned();
                 let presented = match &call.method {
                     RequestMethod::Changes(changes) => match &changes.since_state {
                         jmap_proto::types::state::State::Exact(change_id) => {
@@ -189,7 +201,28 @@ impl RequestHandler for Server {
                 };
                 let (result, reached) = result;
                 for account_id in reached {
-                    self.audit_foreign_access(access_token, account_id, false).await;
+                    // inbuxa: AL-9: a delegate's access, and what it
+                    // changes, are recorded; anyone else here impersonated
+                    if let Some(delegation) = access_token.delegation(account_id) {
+                        let access = delegation.access.as_str();
+                        self.audit_delegate(
+                            access_token,
+                            account_id,
+                            access,
+                            is_write.then_some(call_name.as_str()),
+                            result.as_ref().err(),
+                        )
+                        .await;
+                        if makes_containers
+                            && result.is_ok()
+                            && let Err(err) =
+                                email::inbuxa_lock::reconcile(self, account_id).await
+                        {
+                            trc::error!(err.details("Failed to grant a lock's delegates on new folders"));
+                        }
+                    } else {
+                        self.audit_foreign_access(access_token, account_id, false).await;
+                    }
                 }
                 match result
                 {
@@ -235,6 +268,9 @@ impl RequestHandler for Server {
                                         set_response.update_created_ids(&mut response);
                                     }
                                     SetResponseMethod::AuditVerification(set_response) => {
+                                        set_response.update_created_ids(&mut response);
+                                    }
+                                    SetResponseMethod::AccountLock(set_response) => {
                                         set_response.update_created_ids(&mut response);
                                     }
                                     SetResponseMethod::Explanation(set_response) => {
@@ -354,13 +390,15 @@ impl RequestHandler for Server {
                 }
                 GetRequestMethod::Identity(mut req) => {
                     resolve_account_id(&mut req.account_id, method_name.obj, access_token)?;
-                    access_token.assert_is_member(req.account_id)?;
+                    // inbuxa: AL-8: a delegate may send as a locked account
+                    access_token.assert_can_send(req.account_id)?;
 
                     self.identity_get(*req).await?.into()
                 }
                 GetRequestMethod::EmailSubmission(mut req) => {
                     resolve_account_id(&mut req.account_id, method_name.obj, access_token)?;
-                    access_token.assert_is_member(req.account_id)?;
+                    // inbuxa: AL-8: a delegate may send as a locked account
+                    access_token.assert_can_send(req.account_id)?;
 
                     self.email_submission_get(*req).await?.into()
                 }
@@ -398,6 +436,13 @@ impl RequestHandler for Server {
                 GetRequestMethod::AiLimits(mut req) => {
                     resolve_account_id(&mut req.account_id, method_name.obj, access_token)?;
                     crate::inbuxa::ai_limits::get(self, access_token, *req)
+                        .await?
+                        .into()
+                }
+                // inbuxa: account lock with delegation (AL-1)
+                GetRequestMethod::AccountLock(mut req) => {
+                    resolve_account_id(&mut req.account_id, method_name.obj, access_token)?;
+                    crate::inbuxa::account_lock::get(self, access_token, *req)
                         .await?
                         .into()
                 }
@@ -526,7 +571,8 @@ impl RequestHandler for Server {
                 }
                 QueryRequestMethod::EmailSubmission(mut req) => {
                     resolve_account_id(&mut req.account_id, method_name.obj, access_token)?;
-                    access_token.assert_is_member(req.account_id)?;
+                    // inbuxa: AL-8: a delegate may send as a locked account
+                    access_token.assert_can_send(req.account_id)?;
 
                     self.email_submission_query(*req).await?.into()
                 }
@@ -631,7 +677,8 @@ impl RequestHandler for Server {
                 }
                 SetRequestMethod::EmailSubmission(mut req) => {
                     resolve_account_id(&mut req.account_id, method_name.obj, access_token)?;
-                    access_token.assert_is_member(req.account_id)?;
+                    // inbuxa: AL-8: a delegate may send as a locked account
+                    access_token.assert_can_send(req.account_id)?;
 
                     self.email_submission_set(*req, &session.instance, next_call)
                         .await?
@@ -665,6 +712,7 @@ impl RequestHandler for Server {
                         session,
                         &method_name.obj.to_string(),
                         None,
+                        None,
                         *req,
                         |req| Box::pin(crate::inbuxa::fastmail::set(self, access_token, req)),
                     )
@@ -680,6 +728,7 @@ impl RequestHandler for Server {
                         access_token,
                         session,
                         &method_name.obj.to_string(),
+                        None,
                         None,
                         *req,
                         |req| Box::pin(crate::inbuxa::deleted_account::set(self, access_token, req)),
@@ -697,6 +746,7 @@ impl RequestHandler for Server {
                         session,
                         &method_name.obj.to_string(),
                         None,
+                        None,
                         *req,
                         |req| Box::pin(crate::inbuxa::ai_limits::set(self, access_token, req)),
                     )
@@ -712,8 +762,37 @@ impl RequestHandler for Server {
                         session,
                         &method_name.obj.to_string(),
                         None,
+                        None,
                         *req,
                         |req| Box::pin(crate::inbuxa::audit_log::settings_set(self, access_token, req)),
+                    )
+                    .await?
+                    .into()
+                }
+                // inbuxa: account lock with delegation, recorded with its
+                // reason (AL-1, AU-12)
+                SetRequestMethod::AccountLock(mut req) => {
+                    resolve_account_id(&mut req.account_id, method_name.obj, access_token)?;
+                    let reason = req.arguments.reason.clone().or_else(|| {
+                        req.create.as_ref().and_then(|create| {
+                            create.values().find_map(|value| {
+                                serde_json::to_value(value)
+                                    .ok()?
+                                    .get("reason")?
+                                    .as_str()
+                                    .map(str::to_string)
+                            })
+                        })
+                    });
+                    crate::inbuxa::audit::recorded(
+                        self,
+                        access_token,
+                        session,
+                        &method_name.obj.to_string(),
+                        None,
+                        reason,
+                        *req,
+                        |req| Box::pin(crate::inbuxa::account_lock::set(self, access_token, req)),
                     )
                     .await?
                     .into()
@@ -747,6 +826,7 @@ impl RequestHandler for Server {
                         session,
                         &method_name.obj.to_string(),
                         None,
+                        None,
                         *req,
                         |req| Box::pin(crate::inbuxa::protocol_policy::set(self, access_token, req)),
                     )
@@ -762,6 +842,7 @@ impl RequestHandler for Server {
                         access_token,
                         session,
                         &method_name.obj.to_string(),
+                        None,
                         None,
                         *req,
                         |req| Box::pin(crate::inbuxa::tenant_protocol_policy::set(self, access_token, req)),
@@ -840,6 +921,7 @@ impl RequestHandler for Server {
                         session,
                         &method_name.obj.to_string(),
                         Some(object_type),
+                        None,
                         *req,
                         |req| Box::pin(self.registry_set(object_type, req, access_token, session)),
                     )

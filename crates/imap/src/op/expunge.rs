@@ -45,14 +45,22 @@ impl<T: SessionStream> Session<T> {
         let (data, mailbox) = self.state.select_data();
 
         // Validate ACL
-        if !data
-            .check_mailbox_acl(
-                mailbox.id.account_id,
-                mailbox.id.mailbox_id,
-                Acl::RemoveItems,
-            )
+        // inbuxa: AL-6: a delegate below full may move mail, never delete it
+        let may_destroy = data
+            .refresh_access_token()
             .await
             .imap_ctx(&request.tag, trc::location!())?
+            .delegation(mailbox.id.account_id)
+            .is_none_or(|delegation| delegation.access.may_destroy());
+        if !may_destroy
+            || !data
+                .check_mailbox_acl(
+                    mailbox.id.account_id,
+                    mailbox.id.mailbox_id,
+                    Acl::RemoveItems,
+                )
+                .await
+                .imap_ctx(&request.tag, trc::location!())?
         {
             return Err(trc::ImapEvent::Error
                 .into_err()
@@ -143,6 +151,16 @@ impl<T: SessionStream> SessionData<T> {
     ) -> trc::Result<Option<u32>> {
         // Obtain message ids
         let account_id = mailbox.id.account_id;
+        // inbuxa: AL-6: nothing is deleted for a delegate below full (CLOSE
+        // expunges quietly, so it deletes nothing, quietly)
+        if self
+            .refresh_access_token()
+            .await?
+            .delegation(account_id)
+            .is_some_and(|delegation| !delegation.access.may_destroy())
+        {
+            return Ok(None);
+        }
         let mut deleted_ids = RoaringBitmap::from_iter(
             self.server
                 .get_cached_messages(account_id)

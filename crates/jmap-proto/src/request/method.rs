@@ -56,6 +56,8 @@ pub enum MethodObject {
     AuditSettings,
     AuditExport,
     AuditVerification,
+    // inbuxa: account lock with delegation
+    AccountLock,
     ProtocolPolicy,
     TenantProtocolPolicy,
 }
@@ -88,7 +90,8 @@ impl MethodObject {
             MethodObject::AuditEvent
             | MethodObject::AuditSettings
             | MethodObject::AuditExport
-            | MethodObject::AuditVerification => Capability::Inbuxa,
+            | MethodObject::AuditVerification
+            | MethodObject::AccountLock => Capability::Inbuxa,
             MethodObject::ProtocolPolicy => Capability::Inbuxa,
             MethodObject::TenantProtocolPolicy => Capability::Inbuxa,
         }
@@ -274,6 +277,8 @@ impl MethodName {
             (MethodFunction::Get, MethodObject::AuditSettings) => "inbuxa:AuditSettings/get",
             (MethodFunction::Set, MethodObject::AuditSettings) => "inbuxa:AuditSettings/set",
             (MethodFunction::Set, MethodObject::AuditExport) => "inbuxa:AuditExport/set",
+            (MethodFunction::Get, MethodObject::AccountLock) => "inbuxa:AccountLock/get",
+            (MethodFunction::Set, MethodObject::AccountLock) => "inbuxa:AccountLock/set",
             (MethodFunction::Set, MethodObject::AuditVerification) => {
                 "inbuxa:AuditVerification/set"
             }
@@ -416,6 +421,8 @@ impl MethodName {
             "inbuxa:AuditSettings/get" => (MethodObject::AuditSettings, MethodFunction::Get),
             "inbuxa:AuditSettings/set" => (MethodObject::AuditSettings, MethodFunction::Set),
             "inbuxa:AuditExport/set" => (MethodObject::AuditExport, MethodFunction::Set),
+            "inbuxa:AccountLock/get" => (MethodObject::AccountLock, MethodFunction::Get),
+            "inbuxa:AccountLock/set" => (MethodObject::AccountLock, MethodFunction::Set),
             "inbuxa:AuditVerification/set" => (MethodObject::AuditVerification, MethodFunction::Set),
             "inbuxa:ProtocolPolicy/get" => (MethodObject::ProtocolPolicy, MethodFunction::Get),
             "inbuxa:ProtocolPolicy/set" => (MethodObject::ProtocolPolicy, MethodFunction::Set),
@@ -479,6 +486,7 @@ impl Display for MethodObject {
             MethodObject::AuditSettings => "inbuxa:AuditSettings",
             MethodObject::AuditExport => "inbuxa:AuditExport",
             MethodObject::AuditVerification => "inbuxa:AuditVerification",
+            MethodObject::AccountLock => "inbuxa:AccountLock",
             MethodObject::ProtocolPolicy => "inbuxa:ProtocolPolicy",
             MethodObject::TenantProtocolPolicy => "inbuxa:TenantProtocolPolicy",
             MethodObject::Registry(obj) => {

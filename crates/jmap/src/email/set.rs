@@ -2,6 +2,8 @@
  * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
+ *
+ * Modified by Coffey Labs in 2026 for INBUXA.
  */
 
 use crate::{
@@ -1141,7 +1143,20 @@ impl EmailSet for Server {
         }
 
         // Process deletions
-        if !will_destroy.is_empty() {
+        // inbuxa: AL-6: a delegate below full may move mail, never delete it
+        if !will_destroy.is_empty()
+            && access_token
+                .delegation(account_id)
+                .is_some_and(|delegation| !delegation.access.may_destroy())
+        {
+            for destroy_id in will_destroy {
+                response.not_destroyed.append(
+                    destroy_id,
+                    SetError::forbidden()
+                        .with_description("A delegate at this level can move mail but not delete it."),
+                );
+            }
+        } else if !will_destroy.is_empty() {
             let email_ids = cache.email_document_ids();
             let can_destroy_message_ids = if access_token.is_shared(account_id) {
                 cache.shared_messages(access_token, Acl::RemoveItems).into()

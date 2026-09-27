@@ -21,6 +21,7 @@ pub mod contact;
 pub mod email;
 pub mod email_submission;
 pub mod fastmail_masked_email; // inbuxa: masked email
+pub mod inbuxa_account_lock; // inbuxa: account lock with delegation
 pub mod inbuxa_ai_limits; // inbuxa: AI spam classification
 pub mod inbuxa_audit; // inbuxa: the audit log
 pub mod inbuxa_explanation; // inbuxa: "Explain this" with the local model

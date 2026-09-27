@@ -1734,6 +1734,11 @@ pub enum Permission {
     SysAuditGet = 662,
     SysAuditExport = 663,
     SysAuditSettingsUpdate = 664,
+    // inbuxa: account lock with delegation (audit-hold-lock spec, AL-12)
+    SysAccountLockGet = 665,
+    SysAccountLockCreate = 666,
+    SysAccountLockUpdate = 667,
+    SysAccountLockDestroy = 668,
     SysAccountGet = 219,
     SysAccountCreate = 220,
     SysAccountUpdate = 221,

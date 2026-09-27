@@ -2,6 +2,8 @@
  * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
+ *
+ * Modified by Coffey Labs in 2026 for INBUXA.
  */
 
 use crate::{
@@ -140,6 +142,14 @@ impl<T: SessionStream> SessionData<T> {
             .commit_batch(batch)
             .await
             .imap_ctx(&arguments.tag, trc::location!())?;
+
+        // inbuxa: AL-7: a folder a delegate makes in a locked account gets
+        // the lock's grants, so the delegate can see it
+        if params.account_id != self.account_id
+            && let Err(err) = email::inbuxa_lock::reconcile(&self.server, params.account_id).await
+        {
+            trc::error!(err.details("Failed to grant a lock's delegates on a new folder"));
+        }
 
         trc::event!(
             Imap(trc::ImapEvent::CreateMailbox),

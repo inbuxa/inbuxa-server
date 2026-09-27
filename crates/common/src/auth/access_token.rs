@@ -43,6 +43,27 @@ impl Server {
         revision: u64,
         revision_account: u64,
     ) -> trc::Result<AccessTokenInner> {
+        // inbuxa: AL-2, AL-5: whether this account is locked, and which
+        // locked accounts are handed to it. The token is their cache: every
+        // change to a lock invalidates the tokens it touches.
+        let locked = inbuxa_features::lock::get(self.store(), account_id)
+            .await
+            .caused_by(trc::location!())?
+            .is_some();
+        let now_secs = now();
+        let delegations: Box<[super::Delegation]> =
+            inbuxa_features::lock::delegated_to(self.store(), account_id)
+                .await
+                .caused_by(trc::location!())?
+                .into_iter()
+                .filter(|(_, delegate)| delegate.is_current(now_secs))
+                .map(|(locked_id, delegate)| super::Delegation {
+                    account_id: locked_id,
+                    access: delegate.access,
+                    send_as: delegate.send_as,
+                    until: delegate.until,
+                })
+                .collect();
         match account {
             Account::User(account) => {
                 let tenant_id = account.member_tenant_id.map(|t| t.id() as u32);
@@ -202,6 +223,8 @@ impl Server {
                         .upload_max_concurrent
                         .map(ConcurrencyLimiter::new),
                     obj_size: 0,
+                    locked,
+                    delegations: delegations.clone(),
                     revision,
                     revision_account,
                     credential_version,
@@ -211,7 +234,15 @@ impl Server {
                     access_to: access_to.into_boxed_slice(),
                     scopes: []
                         .into_iter()
-                        .chain(credential_scopes)
+                        .chain(credential_scopes.into_iter().map(|mut scope| {
+                            // inbuxa: AL-2: no credential of a locked
+                            // account authenticates; receiving mail isn't
+                            // signing in, so EmailReceive stays
+                            if locked {
+                                scope.permissions.clear(Permission::Authenticate as usize);
+                            }
+                            scope
+                        }))
                         .collect::<Box<[AccessScope]>>(),
                 }
                 .update_size())
@@ -245,6 +276,8 @@ impl Server {
                         .upload_max_concurrent
                         .map(ConcurrencyLimiter::new),
                     obj_size: 0,
+                    locked,
+                    delegations: delegations.clone(),
                     revision,
                     revision_account,
                     credential_version: 0,
@@ -591,6 +624,8 @@ impl AccessToken {
                     revision: old_inner.revision,
                     credential_version: old_inner.credential_version,
                     obj_size: old_inner.obj_size,
+                    locked: old_inner.locked,
+                    delegations: old_inner.delegations.clone(),
                 };
 
                 access_token = AccessToken {
@@ -775,6 +810,30 @@ impl AccessToken {
         }
     }
 
+    /// inbuxa: AL-2: the account is locked.
+    pub fn is_locked(&self) -> bool {
+        self.inner.locked
+    }
+
+    /// inbuxa: AL-5: this account's delegation into a locked account, if it
+    /// has one that hasn't ended.
+    pub fn delegation(&self, account_id: u32) -> Option<&super::Delegation> {
+        let now = now();
+        self.inner
+            .delegations
+            .iter()
+            .find(|d| d.account_id == account_id && d.until.is_none_or(|until| until > now))
+    }
+
+    /// inbuxa: AL-5: every current delegation this account holds.
+    pub fn delegations(&self) -> impl Iterator<Item = &super::Delegation> {
+        let now = now();
+        self.inner
+            .delegations
+            .iter()
+            .filter(move |d| d.until.is_none_or(|until| until > now))
+    }
+
     /// inbuxa: how this session signed in (AU-5).
     pub fn origin(&self) -> Option<&inbuxa_features::audit::Via> {
         self.origin.as_deref()
@@ -828,6 +887,8 @@ impl AccessToken {
                 revision_account: Default::default(),
                 credential_version: Default::default(),
                 obj_size: Default::default(),
+                locked: false,
+                delegations: Default::default(),
             }),
         }
     }
@@ -838,6 +899,11 @@ impl AccessToken {
 }
 
 impl AccessTokenInner {
+    /// inbuxa: AL-2: the account is locked.
+    pub fn is_locked(&self) -> bool {
+        self.locked
+    }
+
     /// inbuxa: SCIM-27: the account's own effective permission, from its
     /// roles, its own settings and its tenant, before a credential narrows it
     pub fn account_has_permission(&self, permission: Permission) -> bool {
@@ -881,6 +947,8 @@ impl AccessTokenInner {
             revision_account: Default::default(),
             credential_version: Default::default(),
             obj_size: Default::default(),
+            locked: false,
+            delegations: Default::default(),
         }
     }
 

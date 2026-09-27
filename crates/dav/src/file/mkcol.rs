@@ -2,6 +2,8 @@
  * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
+ *
+ * Modified by Coffey Labs in 2026 for INBUXA.
  */
 
 use super::proppatch::FilePropPatchRequestHandler;
@@ -130,6 +132,14 @@ impl FileMkColRequestHandler for Server {
             .caused_by(trc::location!())?;
         let etag = batch.etag();
         self.commit_batch(batch).await.caused_by(trc::location!())?;
+
+        // inbuxa: AL-7: a folder a delegate makes in a locked account gets
+        // the lock's grants
+        if account_id != access_token.account_id()
+            && let Err(err) = groupware::inbuxa_lock::reconcile_dav(self, account_id).await
+        {
+            trc::error!(err.details("Failed to grant a lock's delegates on a new folder"));
+        }
 
         if let Some(prop_stat) = return_prop_stat {
             Ok(HttpResponse::new(StatusCode::CREATED)

@@ -11,6 +11,7 @@ pub mod authentication;
 pub mod ai;
 pub mod ai_calibration;
 pub mod ai_explain;
+pub mod account_lock; // inbuxa: account lock with delegation
 pub mod audit; // inbuxa: the audit log
 pub mod authorization;
 pub mod auto_reload; // inbuxa: registry writes apply at once
