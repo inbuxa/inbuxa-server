@@ -2,6 +2,8 @@
  * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
+ *
+ * Modified by Coffey Labs in 2026 for INBUXA.
  */
 
 use crate::{
@@ -73,7 +75,42 @@ pub enum RegistryWrite<'x> {
 }
 
 impl RegistryStore {
+    /// inbuxa: installs the audit log's hook (AU-1.10). Only the first one
+    /// installed is kept.
+    pub fn set_write_hook(&self, hook: std::sync::Arc<dyn super::hook::RegistryWriteHook>) {
+        let _ = self.0.write_hook.set(hook);
+    }
+
     pub async fn write(&self, write: RegistryWrite<'_>) -> trc::Result<RegistryWriteResult> {
+        // inbuxa: AU-1.10: the hook hears of every write that succeeded
+        let Some(hook) = self.0.write_hook.get() else {
+            return self.write_unhooked(write).await;
+        };
+        let (object_type, id, before, after) = match &write {
+            RegistryWrite::Insert { object, id } => (object.object_type(), *id, None, Some(*object)),
+            RegistryWrite::Update {
+                object,
+                id,
+                old_object,
+            } => (object.object_type(), Some(*id), Some(*old_object), Some(*object)),
+            RegistryWrite::Delete {
+                object_id, object, ..
+            } => (object_id.object(), Some(object_id.id()), *object, None),
+        };
+        let result = self.write_unhooked(write).await?;
+        if let RegistryWriteResult::Success(written) = &result {
+            hook.written(super::hook::RegistryChange {
+                object_type,
+                id: id.unwrap_or(*written),
+                before,
+                after,
+            })
+            .await;
+        }
+        Ok(result)
+    }
+
+    async fn write_unhooked(&self, write: RegistryWrite<'_>) -> trc::Result<RegistryWriteResult> {
         let mut set_index = IndexBuilder::default();
         let mut clear_index = IndexBuilder::default();
 

@@ -2,6 +2,8 @@
  * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
+ *
+ * Modified by Coffey Labs in 2026 for INBUXA.
  */
 
 use common::{Server, auth::AccessToken};
@@ -115,6 +117,9 @@ impl BlobDownload for Server {
                             document_id,
                         } => {
                             if access_token.is_member(*account_id) {
+                                // inbuxa: AU-1.6: another account's blob
+                                self.audit_foreign_access(access_token, *account_id, true)
+                                    .await;
                                 true
                             } else {
                                 match Collection::from(*collection) {

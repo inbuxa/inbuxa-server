@@ -77,7 +77,8 @@ async fn spam_filter_maintenance(
             }
         }
         TaskSpamFilterMaintenanceType::UpdateRules => {
-            return update_spam_rules(server).await;
+            // inbuxa: AU-1.10: one summary record, not one per rule
+            return inbuxa_features::audit::scope::quiet(update_spam_rules(server)).await;
         }
     }
 
@@ -273,6 +274,37 @@ async fn update_spam_rules(server: &Server) -> trc::Result<TaskResult> {
             .cluster_broadcast(BroadcastEvent::RegistryChange(RegistryChange::Reload(
                 ObjectType::MemoryLookupKey,
             )))
+            .await;
+    }
+
+    // inbuxa: AU-1.10: what the update added, as one audit record
+    let added = stats
+        .iter()
+        .filter(|(_, result)| result.success > 0)
+        .map(|(object_type, result)| format!("{} {}", result.success, object_type.as_str()))
+        .collect::<Vec<_>>();
+    if !added.is_empty() {
+        let mut added = added;
+        added.sort();
+        server
+            .audit_note(inbuxa_features::audit::Record {
+                at: std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map_or(0, |d| d.as_millis() as u64),
+                actor: inbuxa_features::audit::Actor::system("SpamFilterMaintenance"),
+                via: None,
+                remote_ip: None,
+                action: inbuxa_features::audit::Action::Update,
+                target: inbuxa_features::audit::Target {
+                    kind: "x:SpamRule".into(),
+                    name: Some("Spam filter rules".into()),
+                    ..Default::default()
+                },
+                changes: vec![],
+                details: Some(format!("Rules update added {}", added.join(", "))),
+                reason: None,
+                outcome: inbuxa_features::audit::Outcome::success(),
+            })
             .await;
     }
 

@@ -51,6 +51,11 @@ pub enum MethodObject {
     AiLimits,
     // inbuxa: "Explain this" with the local model
     Explanation,
+    // inbuxa: the audit log
+    AuditEvent,
+    AuditSettings,
+    AuditExport,
+    AuditVerification,
     ProtocolPolicy,
     TenantProtocolPolicy,
 }
@@ -80,6 +85,10 @@ impl MethodObject {
             MethodObject::DeletedAccount => Capability::Inbuxa,
             MethodObject::AiLimits => Capability::Inbuxa,
             MethodObject::Explanation => Capability::Inbuxa,
+            MethodObject::AuditEvent
+            | MethodObject::AuditSettings
+            | MethodObject::AuditExport
+            | MethodObject::AuditVerification => Capability::Inbuxa,
             MethodObject::ProtocolPolicy => Capability::Inbuxa,
             MethodObject::TenantProtocolPolicy => Capability::Inbuxa,
         }
@@ -260,6 +269,14 @@ impl MethodName {
             (MethodFunction::Get, MethodObject::AiLimits) => "inbuxa:AiLimits/get",
             (MethodFunction::Set, MethodObject::AiLimits) => "inbuxa:AiLimits/set",
             (MethodFunction::Set, MethodObject::Explanation) => "inbuxa:Explanation/set",
+            (MethodFunction::Get, MethodObject::AuditEvent) => "inbuxa:AuditEvent/get",
+            (MethodFunction::Query, MethodObject::AuditEvent) => "inbuxa:AuditEvent/query",
+            (MethodFunction::Get, MethodObject::AuditSettings) => "inbuxa:AuditSettings/get",
+            (MethodFunction::Set, MethodObject::AuditSettings) => "inbuxa:AuditSettings/set",
+            (MethodFunction::Set, MethodObject::AuditExport) => "inbuxa:AuditExport/set",
+            (MethodFunction::Set, MethodObject::AuditVerification) => {
+                "inbuxa:AuditVerification/set"
+            }
             (MethodFunction::Get, MethodObject::ProtocolPolicy) => "inbuxa:ProtocolPolicy/get",
             (MethodFunction::Set, MethodObject::ProtocolPolicy) => "inbuxa:ProtocolPolicy/set",
             (MethodFunction::Get, MethodObject::TenantProtocolPolicy) => {
@@ -394,6 +411,12 @@ impl MethodName {
             "inbuxa:AiLimits/get" => (MethodObject::AiLimits, MethodFunction::Get),
             "inbuxa:AiLimits/set" => (MethodObject::AiLimits, MethodFunction::Set),
             "inbuxa:Explanation/set" => (MethodObject::Explanation, MethodFunction::Set),
+            "inbuxa:AuditEvent/get" => (MethodObject::AuditEvent, MethodFunction::Get),
+            "inbuxa:AuditEvent/query" => (MethodObject::AuditEvent, MethodFunction::Query),
+            "inbuxa:AuditSettings/get" => (MethodObject::AuditSettings, MethodFunction::Get),
+            "inbuxa:AuditSettings/set" => (MethodObject::AuditSettings, MethodFunction::Set),
+            "inbuxa:AuditExport/set" => (MethodObject::AuditExport, MethodFunction::Set),
+            "inbuxa:AuditVerification/set" => (MethodObject::AuditVerification, MethodFunction::Set),
             "inbuxa:ProtocolPolicy/get" => (MethodObject::ProtocolPolicy, MethodFunction::Get),
             "inbuxa:ProtocolPolicy/set" => (MethodObject::ProtocolPolicy, MethodFunction::Set),
             "inbuxa:TenantProtocolPolicy/get" => (MethodObject::TenantProtocolPolicy, MethodFunction::Get),
@@ -452,6 +475,10 @@ impl Display for MethodObject {
             MethodObject::DeletedAccount => "inbuxa:DeletedAccount",
             MethodObject::AiLimits => "inbuxa:AiLimits",
             MethodObject::Explanation => "inbuxa:Explanation",
+            MethodObject::AuditEvent => "inbuxa:AuditEvent",
+            MethodObject::AuditSettings => "inbuxa:AuditSettings",
+            MethodObject::AuditExport => "inbuxa:AuditExport",
+            MethodObject::AuditVerification => "inbuxa:AuditVerification",
             MethodObject::ProtocolPolicy => "inbuxa:ProtocolPolicy",
             MethodObject::TenantProtocolPolicy => "inbuxa:TenantProtocolPolicy",
             MethodObject::Registry(obj) => {

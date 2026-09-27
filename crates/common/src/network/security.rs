@@ -2,6 +2,8 @@
  * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
+ *
+ * Modified by Coffey Labs in 2026 for INBUXA.
  */
 
 use crate::{
@@ -335,9 +337,10 @@ impl Server {
             .insert(IpWithTtl::new(ip, expires_at.unwrap_or(u64::MAX)));
 
         // Write blocked IP to config
-        let RegistryWriteResult::Success(id) = self
-            .registry()
-            .write(RegistryWrite::insert(
+        // inbuxa: AU-1.10: recorded as the server's automatic ban
+        let RegistryWriteResult::Success(id) = inbuxa_features::audit::scope::system(
+            "auto-ban",
+            self.registry().write(RegistryWrite::insert(
                 &BlockedIp {
                     address: IpAddrOrMask::from_ip(ip),
                     created_at: UTCDateTime::from_timestamp(now as i64),
@@ -345,8 +348,9 @@ impl Server {
                     reason,
                 }
                 .into(),
-            ))
-            .await
+            )),
+        )
+        .await
             .caused_by(trc::location!())?
         else {
             return Ok(());

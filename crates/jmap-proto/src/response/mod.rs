@@ -103,6 +103,8 @@ pub enum GetResponseMethod {
     MaskedEmail(GetResponse<crate::object::fastmail_masked_email::FastmailMaskedEmail>),
     DeletedAccount(GetResponse<crate::object::inbuxa_deleted_account::DeletedAccount>),
     AiLimits(GetResponse<crate::object::inbuxa_ai_limits::AiLimits>),
+    AuditEvent(GetResponse<crate::object::inbuxa_audit::AuditEvent>),
+    AuditSettings(GetResponse<crate::object::inbuxa_audit::AuditSettings>),
     ProtocolPolicy(GetResponse<crate::object::inbuxa_protocol_policy::ProtocolPolicy>),
     TenantProtocolPolicy(
         GetResponse<crate::object::inbuxa_tenant_protocol_policy::TenantProtocolPolicy>,
@@ -131,6 +133,9 @@ pub enum SetResponseMethod {
     MaskedEmail(Box<SetResponse<crate::object::fastmail_masked_email::FastmailMaskedEmail>>),
     DeletedAccount(Box<SetResponse<crate::object::inbuxa_deleted_account::DeletedAccount>>),
     AiLimits(Box<SetResponse<crate::object::inbuxa_ai_limits::AiLimits>>),
+    AuditSettings(Box<SetResponse<crate::object::inbuxa_audit::AuditSettings>>),
+    AuditExport(Box<SetResponse<crate::object::inbuxa_audit::AuditExport>>),
+    AuditVerification(Box<SetResponse<crate::object::inbuxa_audit::AuditVerification>>),
     Explanation(Box<SetResponse<crate::object::inbuxa_explanation::Explanation>>),
     ProtocolPolicy(Box<SetResponse<crate::object::inbuxa_protocol_policy::ProtocolPolicy>>),
     TenantProtocolPolicy(
@@ -712,5 +717,36 @@ impl From<SetResponse<CalendarEventNotification>> for ResponseMethod<'_> {
         ResponseMethod::Set(SetResponseMethod::CalendarEventNotification(Box::new(
             value,
         )))
+    }
+}
+
+// inbuxa: the audit log
+impl<'x> From<GetResponse<crate::object::inbuxa_audit::AuditEvent>> for ResponseMethod<'x> {
+    fn from(value: GetResponse<crate::object::inbuxa_audit::AuditEvent>) -> Self {
+        ResponseMethod::Get(GetResponseMethod::AuditEvent(value))
+    }
+}
+
+impl<'x> From<GetResponse<crate::object::inbuxa_audit::AuditSettings>> for ResponseMethod<'x> {
+    fn from(value: GetResponse<crate::object::inbuxa_audit::AuditSettings>) -> Self {
+        ResponseMethod::Get(GetResponseMethod::AuditSettings(value))
+    }
+}
+
+impl<'x> From<SetResponse<crate::object::inbuxa_audit::AuditSettings>> for ResponseMethod<'x> {
+    fn from(value: SetResponse<crate::object::inbuxa_audit::AuditSettings>) -> Self {
+        ResponseMethod::Set(SetResponseMethod::AuditSettings(Box::new(value)))
+    }
+}
+
+impl<'x> From<SetResponse<crate::object::inbuxa_audit::AuditExport>> for ResponseMethod<'x> {
+    fn from(value: SetResponse<crate::object::inbuxa_audit::AuditExport>) -> Self {
+        ResponseMethod::Set(SetResponseMethod::AuditExport(Box::new(value)))
+    }
+}
+
+impl<'x> From<SetResponse<crate::object::inbuxa_audit::AuditVerification>> for ResponseMethod<'x> {
+    fn from(value: SetResponse<crate::object::inbuxa_audit::AuditVerification>) -> Self {
+        ResponseMethod::Set(SetResponseMethod::AuditVerification(Box::new(value)))
     }
 }

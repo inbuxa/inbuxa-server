@@ -29,11 +29,31 @@ use trc::AddContext;
 use types::id::Id;
 
 /// Granted to the default administrator roles: "Explain this"
-/// (ai-explain spec, EX-4: superuser by default).
-const ADMIN_GRANTS: &[Permission] = &[Permission::SysAiExplain];
+/// (ai-explain spec, EX-4: superuser by default), and the audit log
+/// (audit-hold-lock spec, AU-9).
+const ADMIN_GRANTS: &[Permission] = &[
+    Permission::SysAiExplain,
+    Permission::SysAuditGet,
+    Permission::SysAuditExport,
+    Permission::SysAuditSettingsUpdate,
+];
 
-fn granted_key(permission: Permission) -> ValueClass {
+/// Granted to the default tenant administrator roles: reading and exporting
+/// the tenant's audit log (AU-9).
+const TENANT_GRANTS: &[Permission] = &[Permission::SysAuditGet, Permission::SysAuditExport];
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Audience {
+    Admin,
+    Tenant,
+}
+
+fn granted_key(permission: Permission, audience: Audience) -> ValueClass {
     let mut key = b"Pg".to_vec();
+    // Admin grants keep the key they were first recorded under
+    if audience == Audience::Tenant {
+        key.extend_from_slice(b"tenant:");
+    }
     key.extend_from_slice(permission.as_str().as_bytes());
     ValueClass::Any(AnyClass {
         subspace: SUBSPACE_INBUXA,
@@ -42,11 +62,16 @@ fn granted_key(permission: Permission) -> ValueClass {
 }
 
 pub(crate) async fn grant_new_admin_permissions(bp: &mut Bootstrap) -> trc::Result<()> {
+    grant(bp, Audience::Admin, ADMIN_GRANTS).await?;
+    grant(bp, Audience::Tenant, TENANT_GRANTS).await
+}
+
+async fn grant(bp: &mut Bootstrap, audience: Audience, grants: &[Permission]) -> trc::Result<()> {
     let mut pending = Vec::new();
-    for permission in ADMIN_GRANTS {
+    for permission in grants {
         if bp
             .data_store
-            .get_value::<String>(ValueKey::from(granted_key(*permission)))
+            .get_value::<String>(ValueKey::from(granted_key(*permission, audience)))
             .await
             .caused_by(trc::location!())?
             .is_none()
@@ -58,21 +83,33 @@ pub(crate) async fn grant_new_admin_permissions(bp: &mut Bootstrap) -> trc::Resu
         return Ok(());
     }
     // An administrator's default roles include the plain User role, which
-    // every user also holds; only roles that are administrators' alone get it
+    // every user also holds; only roles that are the audience's alone get it
     let admin_roles: Vec<Id> = bp
         .registry
         .object::<Authentication>(Id::singleton())
         .await?
         .map(|auth| {
-            let shared = [
-                auth.default_user_role_ids.as_slice(),
-                auth.default_group_role_ids.as_slice(),
-                auth.default_tenant_role_ids.as_slice(),
-            ]
-            .concat();
-            auth.default_admin_role_ids
-                .as_slice()
-                .iter()
+            let (own, shared) = match audience {
+                Audience::Admin => (
+                    auth.default_admin_role_ids.as_slice(),
+                    [
+                        auth.default_user_role_ids.as_slice(),
+                        auth.default_group_role_ids.as_slice(),
+                        auth.default_tenant_role_ids.as_slice(),
+                    ]
+                    .concat(),
+                ),
+                Audience::Tenant => (
+                    auth.default_tenant_role_ids.as_slice(),
+                    [
+                        auth.default_user_role_ids.as_slice(),
+                        auth.default_group_role_ids.as_slice(),
+                        auth.default_admin_role_ids.as_slice(),
+                    ]
+                    .concat(),
+                ),
+            };
+            own.iter()
                 .filter(|id| !shared.contains(id))
                 .copied()
                 .collect()
@@ -114,7 +151,7 @@ pub(crate) async fn grant_new_admin_permissions(bp: &mut Bootstrap) -> trc::Resu
     }
     let mut batch = BatchBuilder::new();
     for permission in pending {
-        batch.set(granted_key(permission), b"granted".to_vec());
+        batch.set(granted_key(permission, audience), b"granted".to_vec());
     }
     bp.data_store
         .write(batch.build_all())

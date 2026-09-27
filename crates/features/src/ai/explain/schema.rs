@@ -9,10 +9,26 @@
 //! it holds a secret anywhere inside it.
 
 use serde_json::Value;
-use std::collections::HashSet;
+use std::{collections::HashSet, io::Read, sync::OnceLock};
 
 /// The registry schema, as the console downloads it.
 pub struct Schema(Value);
+
+/// The schema built into the server, read once. Also used by the audit log,
+/// to know which properties hold secrets (AU-4).
+pub fn embedded() -> Option<&'static Schema> {
+    static SCHEMA: OnceLock<Option<Schema>> = OnceLock::new();
+    static SCHEMA_JSON: &[u8] = include_bytes!("../../../../../resources/schema/schema.json.gz");
+    SCHEMA
+        .get_or_init(|| {
+            let mut json = Vec::new();
+            flate2::read::GzDecoder::new(SCHEMA_JSON)
+                .read_to_end(&mut json)
+                .ok()?;
+            serde_json::from_slice(&json).ok().map(Schema::new)
+        })
+        .as_ref()
+}
 
 /// What the schema says about one property of one object.
 #[derive(Debug, Clone, PartialEq)]

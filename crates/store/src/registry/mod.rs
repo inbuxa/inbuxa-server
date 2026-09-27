@@ -2,6 +2,8 @@
  * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
+ *
+ * Modified by Coffey Labs in 2026 for INBUXA.
  */
 
 pub mod bootstrap;
@@ -9,6 +11,10 @@ pub mod get;
 pub mod local;
 pub mod query;
 pub mod write;
+
+// inbuxa: the audit log's view of registry writes (audit-hold-lock spec,
+// AU-1.10)
+pub mod hook;
 
 use crate::{
     Deserialize, SerializeInfallible, U16_LEN, U32_LEN, U64_LEN,

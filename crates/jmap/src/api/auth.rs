@@ -77,6 +77,10 @@ impl JmapAuthorization for AccessToken {
                 GetRequestMethod::DeletedAccount(_) => Permission::SysAccountGet,
                 // inbuxa: AI call limits, with the classifier's permissions
                 GetRequestMethod::AiLimits(_) => Permission::SysSpamLlmGet,
+                // inbuxa: the audit log (AU-9)
+                GetRequestMethod::AuditEvent(_) | GetRequestMethod::AuditSettings(_) => {
+                    Permission::SysAuditGet
+                }
                 // inbuxa: legacy protocols off. It takes listeners away and
                 // puts them back, so it takes the listener's permissions
                 GetRequestMethod::ProtocolPolicy(_) => Permission::SysNetworkListenerGet,
@@ -179,6 +183,28 @@ impl JmapAuthorization for AccessToken {
                         Permission::SysSpamLlmUpdate,
                         Permission::SysSpamLlmUpdate,
                         Permission::SysSpamLlmUpdate,
+                    ),
+                    // inbuxa: the audit log (AU-7, AU-9, AU-11)
+                    SetRequestMethod::AuditSettings(s) => validate_set(
+                        s,
+                        self,
+                        Permission::SysAuditSettingsUpdate,
+                        Permission::SysAuditSettingsUpdate,
+                        Permission::SysAuditSettingsUpdate,
+                    ),
+                    SetRequestMethod::AuditExport(s) => validate_set(
+                        s,
+                        self,
+                        Permission::SysAuditExport,
+                        Permission::SysAuditExport,
+                        Permission::SysAuditExport,
+                    ),
+                    SetRequestMethod::AuditVerification(s) => validate_set(
+                        s,
+                        self,
+                        Permission::SysAuditGet,
+                        Permission::SysAuditGet,
+                        Permission::SysAuditGet,
                     ),
                     // inbuxa: "Explain this" (EX-4)
                     SetRequestMethod::Explanation(s) => validate_set(
@@ -315,6 +341,10 @@ impl JmapAuthorization for AccessToken {
                 | MethodObject::DeletedAccount
                 | MethodObject::AiLimits
                 | MethodObject::Explanation
+                | MethodObject::AuditEvent
+                | MethodObject::AuditSettings
+                | MethodObject::AuditExport
+                | MethodObject::AuditVerification
                 | MethodObject::ProtocolPolicy
                 | MethodObject::TenantProtocolPolicy => Permission::JmapEmailChanges,
                 // inbuxa: x:MaskedEmail/changes reads what /get reads
@@ -371,6 +401,8 @@ impl JmapAuthorization for AccessToken {
                     Permission::JmapCalendarEventNotificationQuery
                 }
                 QueryRequestMethod::ShareNotification(_) => Permission::JmapShareNotificationQuery,
+                // inbuxa: the audit log (AU-9)
+                QueryRequestMethod::AuditEvent(_) => Permission::SysAuditGet,
                 QueryRequestMethod::Registry(_) => {
                     let MethodObject::Registry(object_type) = object else {
                         unreachable!()

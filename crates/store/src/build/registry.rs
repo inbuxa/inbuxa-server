@@ -172,6 +172,7 @@ impl RegistryStore {
                 env_hostname: hostname,
                 env_public_url: None,
                 id_generator: utils::snowflake::SnowflakeIdGenerator::new(),
+                write_hook: Default::default(),
             },
             true,
         )

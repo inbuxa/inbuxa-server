@@ -2,6 +2,8 @@
  * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
+ *
+ * Modified by Coffey Labs in 2026 for INBUXA.
  */
 
 use super::{
@@ -327,7 +329,8 @@ impl TokenHandler for Server {
                     account_id,
                     account_name,
                     self.core.oauth.oauth_expiry_token,
-                    None,
+                    // inbuxa: AU-5: the token names the client it was issued to
+                    Some(client_id),
                     credential_version.into(),
                 )
                 .await?,

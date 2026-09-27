@@ -26,6 +26,7 @@ use registry::schema::{
 use serde::Deserialize;
 use std::{borrow::Cow, net::IpAddr, sync::Arc};
 use store::write::now;
+use inbuxa_features::audit::Via;
 use trc::AddContext;
 
 pub struct UsernameParts {
@@ -45,8 +46,17 @@ impl Server {
             .await
             .and_then(|token| token.assert_has_permission(Permission::Authenticate))
         {
-            Ok(token) => Ok(token),
+            Ok(token) => {
+                // inbuxa: AU-1.4, AU-1.5
+                self.audit_sign_in(req, &token).await;
+                Ok(token)
+            }
             Err(err) => {
+                // inbuxa: AU-1.4
+                if matches!(err.as_ref(), trc::EventType::Auth(trc::AuthEvent::Failed)) {
+                    self.audit_sign_in_failed(req).await;
+                }
+
                 // Random delay to mitigate user enumeration attacks
                 #[cfg(not(feature = "test_mode"))]
                 {
@@ -106,6 +116,13 @@ impl Server {
                                 self.access_token(account_id)
                                     .await
                                     .and_then(|token| AccessToken::new(token, req.remote_ip))
+                                    // inbuxa: AU-1.5, AU-5
+                                    .map(|token| {
+                                        token.with_origin(Via::Master {
+                                            account_id: None,
+                                            name: fallback_user.to_string(),
+                                        })
+                                    })
                             } else {
                                 Err(trc::AuthEvent::Failed
                                     .into_err()
@@ -119,7 +136,8 @@ impl Server {
                                 SpanId = req.session_id,
                             );
 
-                            Ok(AccessToken::new_admin())
+                            // inbuxa: AU-1.5, AU-5
+                            Ok(AccessToken::new_admin().with_origin(Via::Recovery))
                         }
                     } else {
                         Err(trc::AuthEvent::Failed
@@ -163,6 +181,12 @@ impl Server {
                             req.session_id,
                         )
                         .await
+                        // inbuxa: AU-5
+                        .map(|token| {
+                            token.with_origin(Via::AppPassword {
+                                id: app_pass.credential_id,
+                            })
+                        })
                     } else {
                         Err(trc::AuthEvent::Failed
                             .into_err()
@@ -262,6 +286,7 @@ impl Server {
 
                 // Validate master user access
                 if username.is_master() {
+                    let master_id = token.account_id(); // inbuxa: AU-5
                     token.assert_has_permissions(&[
                         Permission::Impersonate,
                         Permission::Authenticate,
@@ -282,6 +307,13 @@ impl Server {
                         self.access_token(account_id)
                             .await
                             .map(AccessToken::new_maybe_invalid)
+                            // inbuxa: AU-1.5, AU-5: the master stays known
+                            .map(|impersonated| {
+                                impersonated.with_origin(Via::Master {
+                                    account_id: Some(master_id),
+                                    name: master_address.to_string(),
+                                })
+                            })
                     } else {
                         Err(trc::AuthEvent::Failed
                             .into_err()
@@ -297,7 +329,12 @@ impl Server {
                         SpanId = req.session_id,
                     );
 
-                    Ok(token)
+                    // inbuxa: AU-5 (a directory's token already says so)
+                    Ok(if token.origin().is_none() {
+                        token.with_origin(Via::Password)
+                    } else {
+                        token
+                    })
                 }
             }
             Credentials::Bearer { username, token } => {
@@ -311,7 +348,9 @@ impl Server {
                             req.remote_ip,
                             req.session_id,
                         )
-                        .await;
+                        .await
+                        // inbuxa: AU-5
+                        .map(|token| token.with_origin(Via::ApiKey { id: key.credential_id }));
                 }
 
                 #[cfg(feature = "dev_mode")]
@@ -368,7 +407,8 @@ impl Server {
                                     .ctx(trc::Key::AccountId, token.account_id())
                                     .reason("Authenticated using an email alias but account does not have AuthenticateAlias permission"));
                             }
-                            return Ok(token);
+                            // inbuxa: AU-5
+                            return Ok(token.with_origin(Via::Directory));
                         }
                         Err(err) => {
                             external_error = Some(err);
@@ -384,7 +424,20 @@ impl Server {
                     Ok(token_info) => self
                         .access_token(token_info.account_id)
                         .await
-                        .and_then(|token| AccessToken::new(token, req.remote_ip)),
+                        .and_then(|token| AccessToken::new(token, req.remote_ip))
+                        // inbuxa: AU-5
+                        .map(|token| {
+                            token.with_origin(Via::OAuth {
+                                client: token_info
+                                    .claims
+                                    .as_deref()
+                                    .filter(|claims| !claims.is_empty())
+                                    .unwrap_or("unknown")
+                                    .chars()
+                                    .take(200)
+                                    .collect(),
+                            })
+                        }),
                     Err(err) => {
                         if let Some(external_error) = external_error {
                             Err(external_error)

@@ -32,6 +32,19 @@ impl Server {
         &self,
         account: directory::Account,
     ) -> trc::Result<AccountWithId> {
+        // inbuxa: AU-1.10: what a directory (LDAP, AD, SQL, OIDC) changed
+        // is recorded as its sync, not as the server acting on its own
+        inbuxa_features::audit::scope::system(
+            "directory-sync",
+            self.synchronize_account_unscoped(account),
+        )
+        .await
+    }
+
+    async fn synchronize_account_unscoped(
+        &self,
+        account: directory::Account,
+    ) -> trc::Result<AccountWithId> {
         let (local, domain) = self.validate_address(&account.email).await?;
 
         match self
@@ -267,6 +280,15 @@ impl Server {
     }
 
     pub async fn synchronize_group(&self, group: directory::Group) -> trc::Result<u32> {
+        // inbuxa: AU-1.10, as for accounts
+        inbuxa_features::audit::scope::system(
+            "directory-sync",
+            self.synchronize_group_unscoped(group),
+        )
+        .await
+    }
+
+    async fn synchronize_group_unscoped(&self, group: directory::Group) -> trc::Result<u32> {
         let (local, domain) = self.validate_address(&group.email).await?;
 
         match self

@@ -212,6 +212,8 @@ pub struct RegistryStoreInner {
     pub(crate) env_hostname: String,
     pub(crate) env_public_url: Option<String>,
     pub(crate) id_generator: SnowflakeIdGenerator,
+    // inbuxa: AU-1.10, shared by every clone of this registry
+    pub(crate) write_hook: registry::hook::RegistryHookSlot,
 }
 
 #[cfg(feature = "sqlite")]

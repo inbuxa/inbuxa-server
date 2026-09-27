@@ -67,6 +67,7 @@ use utils::{
 
 pub mod auth;
 pub mod cache;
+pub mod audit; // inbuxa: the audit log (audit-hold-lock spec, AU)
 pub mod config;
 pub mod expr;
 pub mod i18n;
@@ -174,6 +175,9 @@ pub struct Data {
     // inbuxa: the objects that failed to build when the running settings
     // were built, at boot or by the last applied reload (see reload_registry)
     pub build_errors: Mutex<AHashSet<registry::types::id::ObjectId>>,
+
+    // inbuxa: the audit log's chain heads and recent-access marks (AU)
+    pub audit: inbuxa_features::audit::AuditLog,
 }
 
 #[derive(Clone)]
@@ -282,6 +286,8 @@ pub struct HttpAuthCache {
     pub revision: u64,
     pub credential_id: Option<u32>,
     pub expires: Instant,
+    // inbuxa: how the cached credentials signed in (AU-5)
+    pub origin: Option<Arc<inbuxa_features::audit::Via>>,
 }
 
 pub struct Ipc {

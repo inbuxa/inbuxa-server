@@ -551,6 +551,49 @@ impl<'de> Visitor<'de> for CallVisitor {
                     return Err(de::Error::invalid_length(1, &self));
                 }
             },
+            // inbuxa: the audit log
+            (MethodFunction::Get, MethodObject::AuditEvent) => match seq.next_element() {
+                Ok(Some(value)) => RequestMethod::Get(GetRequestMethod::AuditEvent(value)),
+                Err(err) => RequestMethod::invalid(err),
+                Ok(None) => {
+                    return Err(de::Error::invalid_length(1, &self));
+                }
+            },
+            (MethodFunction::Query, MethodObject::AuditEvent) => match seq.next_element() {
+                Ok(Some(value)) => RequestMethod::Query(QueryRequestMethod::AuditEvent(value)),
+                Err(err) => RequestMethod::invalid(err),
+                Ok(None) => {
+                    return Err(de::Error::invalid_length(1, &self));
+                }
+            },
+            (MethodFunction::Get, MethodObject::AuditSettings) => match seq.next_element() {
+                Ok(Some(value)) => RequestMethod::Get(GetRequestMethod::AuditSettings(value)),
+                Err(err) => RequestMethod::invalid(err),
+                Ok(None) => {
+                    return Err(de::Error::invalid_length(1, &self));
+                }
+            },
+            (MethodFunction::Set, MethodObject::AuditSettings) => match seq.next_element() {
+                Ok(Some(value)) => RequestMethod::Set(SetRequestMethod::AuditSettings(value)),
+                Err(err) => RequestMethod::invalid(err),
+                Ok(None) => {
+                    return Err(de::Error::invalid_length(1, &self));
+                }
+            },
+            (MethodFunction::Set, MethodObject::AuditExport) => match seq.next_element() {
+                Ok(Some(value)) => RequestMethod::Set(SetRequestMethod::AuditExport(value)),
+                Err(err) => RequestMethod::invalid(err),
+                Ok(None) => {
+                    return Err(de::Error::invalid_length(1, &self));
+                }
+            },
+            (MethodFunction::Set, MethodObject::AuditVerification) => match seq.next_element() {
+                Ok(Some(value)) => RequestMethod::Set(SetRequestMethod::AuditVerification(value)),
+                Err(err) => RequestMethod::invalid(err),
+                Ok(None) => {
+                    return Err(de::Error::invalid_length(1, &self));
+                }
+            },
             (MethodFunction::Query, MethodObject::Registry(_)) => match seq.next_element() {
                 Ok(Some(value)) => RequestMethod::Query(QueryRequestMethod::Registry(value)),
                 Err(err) => RequestMethod::invalid(err),

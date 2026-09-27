@@ -116,6 +116,8 @@ pub enum GetRequestMethod {
     MaskedEmail(Box<GetRequest<crate::object::fastmail_masked_email::FastmailMaskedEmail>>),
     DeletedAccount(Box<GetRequest<crate::object::inbuxa_deleted_account::DeletedAccount>>),
     AiLimits(Box<GetRequest<crate::object::inbuxa_ai_limits::AiLimits>>),
+    AuditEvent(Box<GetRequest<crate::object::inbuxa_audit::AuditEvent>>),
+    AuditSettings(Box<GetRequest<crate::object::inbuxa_audit::AuditSettings>>),
     ProtocolPolicy(Box<GetRequest<crate::object::inbuxa_protocol_policy::ProtocolPolicy>>),
     TenantProtocolPolicy(
         Box<GetRequest<crate::object::inbuxa_tenant_protocol_policy::TenantProtocolPolicy>>,
@@ -144,6 +146,9 @@ pub enum SetRequestMethod<'x> {
     DeletedAccount(Box<SetRequest<'x, crate::object::inbuxa_deleted_account::DeletedAccount>>),
     AiLimits(Box<SetRequest<'x, crate::object::inbuxa_ai_limits::AiLimits>>),
     Explanation(Box<SetRequest<'x, crate::object::inbuxa_explanation::Explanation>>),
+    AuditSettings(Box<SetRequest<'x, crate::object::inbuxa_audit::AuditSettings>>),
+    AuditExport(Box<SetRequest<'x, crate::object::inbuxa_audit::AuditExport>>),
+    AuditVerification(Box<SetRequest<'x, crate::object::inbuxa_audit::AuditVerification>>),
     ProtocolPolicy(Box<SetRequest<'x, crate::object::inbuxa_protocol_policy::ProtocolPolicy>>),
     TenantProtocolPolicy(
         Box<SetRequest<'x, crate::object::inbuxa_tenant_protocol_policy::TenantProtocolPolicy>>,
@@ -175,6 +180,7 @@ pub enum QueryRequestMethod {
     CalendarEventNotification(Box<QueryRequest<CalendarEventNotification>>),
     ShareNotification(Box<QueryRequest<ShareNotification>>),
     Registry(Box<QueryRequest<Registry>>),
+    AuditEvent(Box<QueryRequest<crate::object::inbuxa_audit::AuditEvent>>),
 }
 
 #[derive(Debug)]

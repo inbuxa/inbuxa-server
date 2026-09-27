@@ -269,6 +269,12 @@ impl Default for DefaultPermissions {
                     default.superuser.push(permission);
                     default.tenant.push(permission);
                 }
+                // inbuxa: AU-9: a tenant administrator reads and exports
+                // its tenant's audit log; retention stays the server's
+                Permission::SysAuditGet | Permission::SysAuditExport => {
+                    default.superuser.push(permission);
+                    default.tenant.push(permission);
+                }
                 permission => {
                     let name = permission.as_str();
                     if name.starts_with("jmap")

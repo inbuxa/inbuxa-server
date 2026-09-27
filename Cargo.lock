@@ -3960,10 +3960,12 @@ version = "0.16.22"
 dependencies = [
  "ahash",
  "base64 0.23.1",
+ "flate2",
  "jmap_proto",
  "registry",
  "serde",
  "serde_json",
+ "sha2 0.11.0",
  "store",
  "tokio",
  "trc",

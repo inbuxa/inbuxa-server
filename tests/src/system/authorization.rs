@@ -2,6 +2,8 @@
  * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
+ *
+ * Modified by Coffey Labs in 2026 for INBUXA.
  */
 
 use crate::utils::{jmap::JmapUtils, server::TestServer};
@@ -183,13 +185,14 @@ pub async fn test(test: &mut TestServer) {
             permission
         );
 
+        // inbuxa: the fork's own permissions (sysAuditGet) guard fork
+        // methods, not registry objects; the audit suite checks those
         if let Some(name) = permission
             .as_str()
             .strip_prefix("sys")
             .and_then(|perm| perm.strip_suffix("Get"))
+            && let Some(object_type) = ObjectType::parse(name)
         {
-            let object_type = ObjectType::parse(name).unwrap();
-
             assert_eq!(
                 user.registry_get_many(object_type, Vec::<&str>::new())
                     .await

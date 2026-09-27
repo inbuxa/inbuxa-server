@@ -89,15 +89,7 @@ const NOT_SETTINGS: &[ObjectType] = &[
 
 /// The registry schema the console downloads, read once.
 fn schema() -> Option<&'static Schema> {
-    static SCHEMA: OnceLock<Option<Schema>> = OnceLock::new();
-    static SCHEMA_JSON: &[u8] = include_bytes!("../../../../resources/schema/schema.json.gz");
-    SCHEMA
-        .get_or_init(|| {
-            let mut json = Vec::new();
-            GzDecoder::new(SCHEMA_JSON).read_to_end(&mut json).ok()?;
-            serde_json::from_slice(&json).ok().map(Schema::new)
-        })
-        .as_ref()
+    inbuxa_features::ai::explain::schema::embedded()
 }
 
 fn server_fail(why: &'static str) -> SetError<P> {
