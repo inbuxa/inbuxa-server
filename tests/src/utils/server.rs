@@ -398,6 +398,9 @@ impl TestServerBuilder {
             .parse_tcp_acceptors(&mut self.bootstrap, inner.clone())
             .await;
 
+        // inbuxa: AU-1.10, as boot does
+        inner.build_server().install_audit_hook();
+
         // inbuxa: a compat run opens a copy of a real server's store, which
         // carries that server's listeners: 25, 443, 993 and the rest. Nothing
         // here runs as root, so every one of them fails to bind and the run

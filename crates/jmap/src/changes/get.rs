@@ -419,6 +419,10 @@ impl IntermediateChangesResponse {
             | MethodObject::DeletedAccount
             | MethodObject::AiLimits
             | MethodObject::Explanation
+            | MethodObject::AuditEvent
+            | MethodObject::AuditSettings
+            | MethodObject::AuditExport
+            | MethodObject::AuditVerification
             | MethodObject::ProtocolPolicy
             | MethodObject::TenantProtocolPolicy
             | MethodObject::Registry(_) => unreachable!(),

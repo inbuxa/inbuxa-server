@@ -452,6 +452,9 @@ impl EventType {
             b"security.unauthorized" => EventType::Security(SecurityEvent::Unauthorized),
             // inbuxa: legacy-protocols LP-8
             b"security.legacy-protocols-changed" => EventType::Security(SecurityEvent::LegacyProtocolsChanged),
+            // inbuxa: the audit log (AU-3, AU-8)
+            b"security.audit-recorded" => EventType::Security(SecurityEvent::AuditRecorded),
+            b"security.audit-write-failed" => EventType::Security(SecurityEvent::AuditWriteFailed),
             b"server.startup" => EventType::Server(ServerEvent::Startup),
             b"server.shutdown" => EventType::Server(ServerEvent::Shutdown),
             b"server.startup-error" => EventType::Server(ServerEvent::StartupError),
@@ -1229,6 +1232,9 @@ impl EventType {
             EventType::Security(SecurityEvent::LegacyProtocolsChanged) => {
                 "security.legacy-protocols-changed"
             }
+            // inbuxa: the audit log (AU-3, AU-8)
+            EventType::Security(SecurityEvent::AuditRecorded) => "security.audit-recorded",
+            EventType::Security(SecurityEvent::AuditWriteFailed) => "security.audit-write-failed",
             EventType::Server(ServerEvent::Startup) => "server.startup",
             EventType::Server(ServerEvent::Shutdown) => "server.shutdown",
             EventType::Server(ServerEvent::StartupError) => "server.startup-error",
@@ -1907,6 +1913,9 @@ impl EventType {
             EventType::Security(SecurityEvent::Unauthorized) => 552,
             // inbuxa: legacy-protocols LP-8
             EventType::Security(SecurityEvent::LegacyProtocolsChanged) => 643,
+            // inbuxa: the audit log (AU-3, AU-8)
+            EventType::Security(SecurityEvent::AuditRecorded) => 647,
+            EventType::Security(SecurityEvent::AuditWriteFailed) => 648,
             EventType::Server(ServerEvent::Startup) => 393,
             EventType::Server(ServerEvent::Shutdown) => 392,
             EventType::Server(ServerEvent::StartupError) => 394,
@@ -2601,6 +2610,9 @@ impl EventType {
             552 => Some(EventType::Security(SecurityEvent::Unauthorized)),
             // inbuxa: legacy-protocols LP-8
             643 => Some(EventType::Security(SecurityEvent::LegacyProtocolsChanged)),
+            // inbuxa: the audit log (AU-3, AU-8)
+            647 => Some(EventType::Security(SecurityEvent::AuditRecorded)),
+            648 => Some(EventType::Security(SecurityEvent::AuditWriteFailed)),
             393 => Some(EventType::Server(ServerEvent::Startup)),
             392 => Some(EventType::Server(ServerEvent::Shutdown)),
             394 => Some(EventType::Server(ServerEvent::StartupError)),
@@ -3022,6 +3034,9 @@ impl EventType {
             EventType::Security(SecurityEvent::Unauthorized) => Level::Info,
             // inbuxa: legacy-protocols LP-8
             EventType::Security(SecurityEvent::LegacyProtocolsChanged) => Level::Info,
+            // inbuxa: the audit log (AU-3, AU-8)
+            EventType::Security(SecurityEvent::AuditRecorded) => Level::Info,
+            EventType::Security(SecurityEvent::AuditWriteFailed) => Level::Error,
             EventType::Server(ServerEvent::Startup) => Level::Info,
             EventType::Server(ServerEvent::Shutdown) => Level::Info,
             EventType::Server(ServerEvent::Licensing) => Level::Info,
@@ -3757,6 +3772,9 @@ impl EventType {
             EventType::Security(SecurityEvent::LegacyProtocolsChanged) => {
                 "Legacy mail protocols switch changed"
             }
+            // inbuxa: the audit log (AU-3, AU-8)
+            EventType::Security(SecurityEvent::AuditRecorded) => "Audit record written",
+            EventType::Security(SecurityEvent::AuditWriteFailed) => "Audit record not written",
             EventType::Server(ServerEvent::Startup) => "Starting inbuxa Server",
             EventType::Server(ServerEvent::Shutdown) => "Shutting down inbuxa Server",
             EventType::Server(ServerEvent::StartupError) => "Server startup error",
@@ -4153,6 +4171,13 @@ impl EventType {
             // inbuxa: legacy-protocols LP-8
             EventType::Security(SecurityEvent::LegacyProtocolsChanged) => {
                 "Legacy mail protocols switch changed"
+            }
+            // inbuxa: the audit log (AU-3, AU-8)
+            EventType::Security(SecurityEvent::AuditRecorded) => {
+                "An administrator's action or a sign-in was written to the audit log"
+            }
+            EventType::Security(SecurityEvent::AuditWriteFailed) => {
+                "The audit log couldn't be written, so the change was refused"
             }
             EventType::Smtp(SmtpEvent::ConnectionStart) => "SMTP error",
             EventType::Smtp(SmtpEvent::ConnectionEnd) => "SMTP error",
@@ -4721,6 +4746,9 @@ impl EventType {
             EventType::Security(SecurityEvent::Unauthorized),
             // inbuxa: legacy-protocols LP-8
             EventType::Security(SecurityEvent::LegacyProtocolsChanged),
+            // inbuxa: the audit log (AU-3, AU-8)
+            EventType::Security(SecurityEvent::AuditRecorded),
+            EventType::Security(SecurityEvent::AuditWriteFailed),
             EventType::Server(ServerEvent::Startup),
             EventType::Server(ServerEvent::Shutdown),
             EventType::Server(ServerEvent::StartupError),

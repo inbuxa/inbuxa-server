@@ -188,10 +188,13 @@ impl ToRequestError for trc::Error {
                 trc::SecurityEvent::Unauthorized | trc::SecurityEvent::IpUnauthorized => {
                     RequestError::forbidden()
                 }
-                // inbuxa: legacy-protocols LP-8 is an event, never an error
+                // inbuxa: legacy-protocols LP-8 is an event, never an error;
+                // a failed audit write refuses the change (AU-3)
                 trc::SecurityEvent::IpBlockExpired
                 | trc::SecurityEvent::IpAllowExpired
-                | trc::SecurityEvent::LegacyProtocolsChanged => {
+                | trc::SecurityEvent::LegacyProtocolsChanged
+                | trc::SecurityEvent::AuditRecorded
+                | trc::SecurityEvent::AuditWriteFailed => {
                     RequestError::internal_server_error()
                 }
             },

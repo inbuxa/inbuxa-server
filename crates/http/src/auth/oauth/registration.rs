@@ -2,6 +2,8 @@
  * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
+ *
+ * Modified by Coffey Labs in 2026 for INBUXA.
  */
 
 use super::ErrorType;
@@ -164,9 +166,10 @@ impl ClientRegistrationHandler for Server {
         .await
         .caused_by(trc::location!())?;
 
-        let result = self
-            .registry()
-            .write(RegistryWrite::insert(
+        // inbuxa: AU-1.10: a client registering itself
+        let result = inbuxa_features::audit::scope::system(
+            "oauth-registration",
+            self.registry().write(RegistryWrite::insert(
                 &OAuthClient {
                     client_id: client_id.clone(),
                     description: request.client_name.clone(),
@@ -179,9 +182,10 @@ impl ClientRegistrationHandler for Server {
                     ..Default::default()
                 }
                 .into(),
-            ))
-            .await
-            .caused_by(trc::location!())?;
+            )),
+        )
+        .await
+        .caused_by(trc::location!())?;
 
         if !matches!(result, RegistryWriteResult::Success(_)) {
             return Err(trc::StoreEvent::UnexpectedError

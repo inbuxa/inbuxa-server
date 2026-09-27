@@ -263,6 +263,12 @@ async fn store_maintenance(
                 }
             }
 
+            // inbuxa: AU-7: audit records past their retention go; a
+            // failure leaves them for the next run
+            if let Err(err) = server.audit_purge().await {
+                trc::error!(err.details("Failed to purge audit records"));
+            }
+
             trc::event!(
                 Store(StoreEvent::DataStorePurged),
                 Elapsed = started.elapsed()

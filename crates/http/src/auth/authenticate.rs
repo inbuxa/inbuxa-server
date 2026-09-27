@@ -2,6 +2,8 @@
  * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
+ *
+ * Modified by Coffey Labs in 2026 for INBUXA.
  */
 
 use common::auth::AccessToken;
@@ -36,7 +38,9 @@ impl Authenticator for Server {
                         self.access_token(http_cache.account_id).await?,
                         http_cache.credential_id,
                         session.remote_ip,
-                    )?;
+                    )?
+                    // inbuxa: AU-5
+                    .with_origin_arc(http_cache.origin.clone());
 
                     if access_token.revision() == http_cache.revision {
                         // Enforce authenticated rate limit
@@ -99,6 +103,7 @@ impl Authenticator for Server {
                     credential_id: access_token.credential_id(),
                     expires: Instant::now()
                         + Duration::from_secs(self.core.oauth.oauth_expiry_token),
+                    origin: access_token.origin_arc(),
                 },
             );
 

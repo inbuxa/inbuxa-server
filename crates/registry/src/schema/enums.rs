@@ -1730,6 +1730,10 @@ pub enum Permission {
     ScimAccess = 660,
     // inbuxa: "Explain this" (ai-explain spec)
     SysAiExplain = 661,
+    // inbuxa: the audit log (audit-hold-lock spec, AU-9)
+    SysAuditGet = 662,
+    SysAuditExport = 663,
+    SysAuditSettingsUpdate = 664,
     SysAccountGet = 219,
     SysAccountCreate = 220,
     SysAccountUpdate = 221,

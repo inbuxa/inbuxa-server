@@ -515,6 +515,16 @@ async fn run_task(
     task: &Task,
     server_instance: Arc<ServerInstance>,
 ) -> TaskResult {
+    // inbuxa: AU-1.10: registry writes a task makes are the server's own
+    inbuxa_features::audit::scope::system(task.name(), run_task_unscoped(server, task, server_instance))
+        .await
+}
+
+async fn run_task_unscoped(
+    server: &Server,
+    task: &Task,
+    server_instance: Arc<ServerInstance>,
+) -> TaskResult {
     match task {
         Task::CalendarAlarmEmail(task) => {
             server.send_email_alarm(task, server_instance.clone()).await

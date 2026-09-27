@@ -161,13 +161,16 @@ impl RequestHandler for Server {
                     },
                     _ => None,
                 };
-                let method_call = self.handle_method_call(
-                    call.method,
-                    call.name,
-                    access_token,
-                    &mut next_call,
-                    session,
-                );
+                // inbuxa: AU-1.6: which accounts it reached by impersonation
+                let method_call = crate::inbuxa::audit::collect_access(Box::pin(
+                    self.handle_method_call(
+                        call.method,
+                        call.name,
+                        access_token,
+                        &mut next_call,
+                        session,
+                    ),
+                ));
                 let result = if eligible {
                     store::backend::scaleout::replica::replica_read(
                         access_token.all_ids().map(|account_id| {
@@ -184,6 +187,10 @@ impl RequestHandler for Server {
                 } else {
                     method_call.await
                 };
+                let (result, reached) = result;
+                for account_id in reached {
+                    self.audit_foreign_access(access_token, account_id, false).await;
+                }
                 match result
                 {
                     Ok(mut method_response) => {
@@ -219,6 +226,15 @@ impl RequestHandler for Server {
                                         set_response.update_created_ids(&mut response);
                                     }
                                     SetResponseMethod::AiLimits(set_response) => {
+                                        set_response.update_created_ids(&mut response);
+                                    }
+                                    SetResponseMethod::AuditSettings(set_response) => {
+                                        set_response.update_created_ids(&mut response);
+                                    }
+                                    SetResponseMethod::AuditExport(set_response) => {
+                                        set_response.update_created_ids(&mut response);
+                                    }
+                                    SetResponseMethod::AuditVerification(set_response) => {
                                         set_response.update_created_ids(&mut response);
                                     }
                                     SetResponseMethod::Explanation(set_response) => {
@@ -382,6 +398,19 @@ impl RequestHandler for Server {
                 GetRequestMethod::AiLimits(mut req) => {
                     resolve_account_id(&mut req.account_id, method_name.obj, access_token)?;
                     crate::inbuxa::ai_limits::get(self, access_token, *req)
+                        .await?
+                        .into()
+                }
+                // inbuxa: the audit log (AU-9)
+                GetRequestMethod::AuditEvent(mut req) => {
+                    resolve_account_id(&mut req.account_id, method_name.obj, access_token)?;
+                    crate::inbuxa::audit_log::event_get(self, access_token, *req)
+                        .await?
+                        .into()
+                }
+                GetRequestMethod::AuditSettings(mut req) => {
+                    resolve_account_id(&mut req.account_id, method_name.obj, access_token)?;
+                    crate::inbuxa::audit_log::settings_get(self, *req)
                         .await?
                         .into()
                 }
@@ -560,6 +589,13 @@ impl RequestHandler for Server {
 
                     self.share_notification_query(*req).await?.into()
                 }
+                // inbuxa: the audit log (AU-9)
+                QueryRequestMethod::AuditEvent(mut req) => {
+                    resolve_account_id(&mut req.account_id, method_name.obj, access_token)?;
+                    crate::inbuxa::audit_log::event_query(self, access_token, *req)
+                        .await?
+                        .into()
+                }
                 QueryRequestMethod::Registry(mut req) => {
                     resolve_account_id(&mut req.account_id, method_name.obj, access_token)?;
                     assert_registry_account(self, method_name.obj, access_token, req.account_id)
@@ -622,21 +658,75 @@ impl RequestHandler for Server {
                 // inbuxa: Fastmail's MaskedEmail/set
                 SetRequestMethod::MaskedEmail(mut req) => {
                     resolve_account_id(&mut req.account_id, method_name.obj, access_token)?;
-                    crate::inbuxa::fastmail::set(self, access_token, *req)
-                        .await?
-                        .into()
+                    // inbuxa: AU-1.2, AU-3
+                    crate::inbuxa::audit::recorded(
+                        self,
+                        access_token,
+                        session,
+                        &method_name.obj.to_string(),
+                        None,
+                        *req,
+                        |req| Box::pin(crate::inbuxa::fastmail::set(self, access_token, req)),
+                    )
+                    .await?
+                    .into()
                 }
                 // inbuxa: inbuxa:DeletedAccount/set (UD-17)
                 SetRequestMethod::DeletedAccount(mut req) => {
                     resolve_account_id(&mut req.account_id, method_name.obj, access_token)?;
-                    crate::inbuxa::deleted_account::set(self, access_token, *req)
-                        .await?
-                        .into()
+                    // inbuxa: AU-1.2, AU-3
+                    crate::inbuxa::audit::recorded(
+                        self,
+                        access_token,
+                        session,
+                        &method_name.obj.to_string(),
+                        None,
+                        *req,
+                        |req| Box::pin(crate::inbuxa::deleted_account::set(self, access_token, req)),
+                    )
+                    .await?
+                    .into()
                 }
                 // inbuxa: inbuxa:AiLimits/set
                 SetRequestMethod::AiLimits(mut req) => {
                     resolve_account_id(&mut req.account_id, method_name.obj, access_token)?;
-                    crate::inbuxa::ai_limits::set(self, access_token, *req)
+                    // inbuxa: AU-1.2, AU-3
+                    crate::inbuxa::audit::recorded(
+                        self,
+                        access_token,
+                        session,
+                        &method_name.obj.to_string(),
+                        None,
+                        *req,
+                        |req| Box::pin(crate::inbuxa::ai_limits::set(self, access_token, req)),
+                    )
+                    .await?
+                    .into()
+                }
+                // inbuxa: the audit log (AU-7, AU-11, AU-6)
+                SetRequestMethod::AuditSettings(mut req) => {
+                    resolve_account_id(&mut req.account_id, method_name.obj, access_token)?;
+                    crate::inbuxa::audit::recorded(
+                        self,
+                        access_token,
+                        session,
+                        &method_name.obj.to_string(),
+                        None,
+                        *req,
+                        |req| Box::pin(crate::inbuxa::audit_log::settings_set(self, access_token, req)),
+                    )
+                    .await?
+                    .into()
+                }
+                SetRequestMethod::AuditExport(mut req) => {
+                    resolve_account_id(&mut req.account_id, method_name.obj, access_token)?;
+                    crate::inbuxa::audit_log::export_set(self, access_token, session, *req)
+                        .await?
+                        .into()
+                }
+                SetRequestMethod::AuditVerification(mut req) => {
+                    resolve_account_id(&mut req.account_id, method_name.obj, access_token)?;
+                    crate::inbuxa::audit_log::verification_set(self, access_token, session, *req)
                         .await?
                         .into()
                 }
@@ -650,16 +740,34 @@ impl RequestHandler for Server {
                 // inbuxa: inbuxa:ProtocolPolicy/set (legacy protocols off)
                 SetRequestMethod::ProtocolPolicy(mut req) => {
                     resolve_account_id(&mut req.account_id, method_name.obj, access_token)?;
-                    crate::inbuxa::protocol_policy::set(self, access_token, *req)
-                        .await?
-                        .into()
+                    // inbuxa: AU-1.2, AU-3
+                    crate::inbuxa::audit::recorded(
+                        self,
+                        access_token,
+                        session,
+                        &method_name.obj.to_string(),
+                        None,
+                        *req,
+                        |req| Box::pin(crate::inbuxa::protocol_policy::set(self, access_token, req)),
+                    )
+                    .await?
+                    .into()
                 }
                 // inbuxa: inbuxa:TenantProtocolPolicy/set (legacy protocols off, per tenant)
                 SetRequestMethod::TenantProtocolPolicy(mut req) => {
                     resolve_account_id(&mut req.account_id, method_name.obj, access_token)?;
-                    crate::inbuxa::tenant_protocol_policy::set(self, access_token, *req)
-                        .await?
-                        .into()
+                    // inbuxa: AU-1.2, AU-3
+                    crate::inbuxa::audit::recorded(
+                        self,
+                        access_token,
+                        session,
+                        &method_name.obj.to_string(),
+                        None,
+                        *req,
+                        |req| Box::pin(crate::inbuxa::tenant_protocol_policy::set(self, access_token, req)),
+                    )
+                    .await?
+                    .into()
                 }
                 SetRequestMethod::AddressBook(mut req) => {
                     resolve_account_id(&mut req.account_id, method_name.obj, access_token)?;
@@ -724,12 +832,17 @@ impl RequestHandler for Server {
                     assert_registry_account(self, method_name.obj, access_token, req.account_id)
                         .await?;
 
-                    Box::pin(self.registry_set(
-                        method_name.obj.unwrap_registry(),
-                        *req,
+                    // inbuxa: AU-1.1, AU-3: recorded before and after
+                    let object_type = method_name.obj.unwrap_registry();
+                    crate::inbuxa::audit::recorded(
+                        self,
                         access_token,
                         session,
-                    ))
+                        &method_name.obj.to_string(),
+                        Some(object_type),
+                        *req,
+                        |req| Box::pin(self.registry_set(object_type, req, access_token, session)),
+                    )
                     .await?
                     .into()
                 }
@@ -906,6 +1019,8 @@ pub(crate) fn resolve_account_id(
     access_token: &AccessToken,
 ) -> trc::Result<()> {
     if account_id.id() < INVALID_ACCOUNT_ID {
+        // inbuxa: AU-1.6
+        crate::inbuxa::audit::note_access(account_id.document_id(), access_token);
         Ok(())
     } else if matches!(
         obj,

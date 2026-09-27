@@ -132,6 +132,8 @@ pub struct PermissionsGroup {
 pub struct AccessToken {
     scope_idx: usize,
     inner: Arc<AccessTokenInner>,
+    // inbuxa: how this session signed in, for the audit log (AU-5)
+    origin: Option<Arc<inbuxa_features::audit::Via>>,
 }
 
 #[derive(Debug, Default, Clone)]
@@ -298,6 +300,7 @@ impl BuildAccessToken for Arc<AccessTokenInner> {
     fn build(self) -> AccessToken {
         AccessToken {
             scope_idx: 0,
+            origin: None,
             inner: self,
         }
     }

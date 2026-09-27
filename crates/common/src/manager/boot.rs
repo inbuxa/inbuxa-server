@@ -243,6 +243,10 @@ impl BootManager {
                 // inbuxa: a reload isn't refused over objects that failed here
                 inner.build_server().record_build_errors(&bootstrap.errors);
 
+                // inbuxa: AU-1.10: the server's own registry writes are
+                // recorded from here on, after boot's defaults
+                inner.build_server().install_audit_hook();
+
                 BootManager {
                     inner,
                     bootstrap,

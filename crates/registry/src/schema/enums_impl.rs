@@ -7073,6 +7073,9 @@ impl EnumImpl for Permission {
             b"liveDeliveryTest" => Permission::LiveDeliveryTest,
             b"scimAccess" => Permission::ScimAccess,
             b"sysAiExplain" => Permission::SysAiExplain,
+            b"sysAuditGet" => Permission::SysAuditGet,
+            b"sysAuditExport" => Permission::SysAuditExport,
+            b"sysAuditSettingsUpdate" => Permission::SysAuditSettingsUpdate,
             b"sysAccountGet" => Permission::SysAccountGet,
             b"sysAccountCreate" => Permission::SysAccountCreate,
             b"sysAccountUpdate" => Permission::SysAccountUpdate,
@@ -7751,6 +7754,9 @@ impl EnumImpl for Permission {
             Permission::LiveDeliveryTest => "liveDeliveryTest",
             Permission::ScimAccess => "scimAccess",
             Permission::SysAiExplain => "sysAiExplain",
+            Permission::SysAuditGet => "sysAuditGet",
+            Permission::SysAuditExport => "sysAuditExport",
+            Permission::SysAuditSettingsUpdate => "sysAuditSettingsUpdate",
             Permission::SysAccountGet => "sysAccountGet",
             Permission::SysAccountCreate => "sysAccountCreate",
             Permission::SysAccountUpdate => "sysAccountUpdate",
@@ -8422,6 +8428,9 @@ impl EnumImpl for Permission {
             218 => Some(Permission::LiveDeliveryTest),
             660 => Some(Permission::ScimAccess),
             661 => Some(Permission::SysAiExplain),
+            662 => Some(Permission::SysAuditGet),
+            663 => Some(Permission::SysAuditExport),
+            664 => Some(Permission::SysAuditSettingsUpdate),
             219 => Some(Permission::SysAccountGet),
             220 => Some(Permission::SysAccountCreate),
             221 => Some(Permission::SysAccountUpdate),
@@ -8866,7 +8875,7 @@ impl EnumImpl for Permission {
         }
     }
 
-    const COUNT: usize = 662;
+    const COUNT: usize = 665;
 }
 
 impl serde::Serialize for Permission {

@@ -376,6 +376,7 @@ impl AccessToken {
     pub fn new(inner: Arc<AccessTokenInner>, remote_ip: IpAddr) -> trc::Result<Self> {
         AccessToken {
             scope_idx: 0,
+            origin: None,
             inner,
         }
         .assert_is_valid(remote_ip)
@@ -384,6 +385,7 @@ impl AccessToken {
     pub fn new_maybe_invalid(inner: Arc<AccessTokenInner>) -> Self {
         AccessToken {
             scope_idx: 0,
+            origin: None,
             inner,
         }
     }
@@ -404,7 +406,11 @@ impl AccessToken {
                     .ctx(trc::Key::Id, credential_id)
                     .reason("Credential expired or removed.")
             })
-            .map(|scope_idx| AccessToken { scope_idx, inner })
+            .map(|scope_idx| AccessToken {
+                scope_idx,
+                inner,
+                origin: None,
+            })
             .and_then(|token| token.assert_is_valid(remote_ip))
     }
 
@@ -418,6 +424,7 @@ impl AccessToken {
         } else {
             AccessToken {
                 scope_idx: 0,
+                origin: None,
                 inner,
             }
             .assert_is_valid(remote_ip)
@@ -479,6 +486,15 @@ impl AccessToken {
         self.inner.account_id == account_id
             || self.inner.member_of.contains(&account_id)
             || self.has_permission(Permission::Impersonate)
+    }
+
+    /// inbuxa: AU-1.6: whether the account is reachable without
+    /// impersonation: its own, a group's it belongs to, or one shared with
+    /// it.
+    pub fn is_member_directly(&self, account_id: u32) -> bool {
+        self.inner.account_id == account_id
+            || self.inner.member_of.contains(&account_id)
+            || self.inner.access_to.iter().any(|a| a.account_id == account_id)
     }
 
     pub fn is_account_id(&self, account_id: u32) -> bool {
@@ -579,6 +595,7 @@ impl AccessToken {
 
                 access_token = AccessToken {
                     scope_idx: access_token.scope_idx,
+                    origin: access_token.origin.clone(),
                     inner: Arc::new(inner),
                 };
             }
@@ -758,9 +775,31 @@ impl AccessToken {
         }
     }
 
+    /// inbuxa: how this session signed in (AU-5).
+    pub fn origin(&self) -> Option<&inbuxa_features::audit::Via> {
+        self.origin.as_deref()
+    }
+
+    /// inbuxa: records how this session signed in (AU-5).
+    pub fn with_origin(mut self, origin: inbuxa_features::audit::Via) -> Self {
+        self.origin = Some(Arc::new(origin));
+        self
+    }
+
+    pub fn origin_arc(&self) -> Option<Arc<inbuxa_features::audit::Via>> {
+        self.origin.clone()
+    }
+
+    /// inbuxa: restores how a cached session signed in (AU-5).
+    pub fn with_origin_arc(mut self, origin: Option<Arc<inbuxa_features::audit::Via>>) -> Self {
+        self.origin = origin;
+        self
+    }
+
     pub fn new_admin() -> AccessToken {
         AccessToken {
             scope_idx: 0,
+            origin: None,
             inner: Arc::new(AccessTokenInner::new_admin()),
         }
     }
@@ -775,6 +814,7 @@ impl AccessToken {
         }
         AccessToken {
             scope_idx: 0,
+            origin: None,
             inner: Arc::new(AccessTokenInner {
                 account_id,
                 tenant_id: Default::default(),
