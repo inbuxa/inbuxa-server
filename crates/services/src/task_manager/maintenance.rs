@@ -263,6 +263,12 @@ async fn store_maintenance(
                 }
             }
 
+            // inbuxa: AL-7: locks' grants reach folders the server made on
+            // its own (a Sieve fileinto :create)
+            if let Err(err) = email::inbuxa_lock::reconcile_all(server).await {
+                trc::error!(err.details("Failed to re-apply account locks"));
+            }
+
             // inbuxa: AU-7: audit records past their retention go; a
             // failure leaves them for the next run
             if let Err(err) = server.audit_purge().await {

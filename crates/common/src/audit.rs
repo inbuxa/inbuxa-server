@@ -35,6 +35,7 @@ const KIND_ACCOUNT_ACCESS: u8 = 0;
 const KIND_BLOB_ACCESS: u8 = 1;
 const KIND_SIGN_IN: u8 = 2;
 const KIND_SIGN_IN_FAILED: u8 = 3;
+const KIND_DELEGATE_ACCESS: u8 = 4;
 
 /// The permissions that make an account an administrator for AU-1.4: every
 /// `sys*` permission a plain user doesn't get by default, and impersonation.
@@ -367,6 +368,80 @@ impl Server {
             log: AuditLog::new(),
             node: self.audit_node(),
         }));
+    }
+
+    /// AL-9: a delegate reaching a locked account: its access once an hour,
+    /// and every change it makes there, one record per method call.
+    pub async fn audit_delegate(
+        &self,
+        token: &AccessToken,
+        locked_id: u32,
+        access: &str,
+        write: Option<&str>,
+        error: Option<&trc::Error>,
+    ) {
+        let first = self.audit().first_access_this_hour(
+            token.account_id(),
+            locked_id,
+            KIND_DELEGATE_ACCESS,
+            now(),
+        );
+        if !first && write.is_none() {
+            return;
+        }
+        let actor = self.audit_actor(token).await;
+        let target = Target {
+            kind: "account".into(),
+            id: Some(Id::from(locked_id).to_string()),
+            name: Some(self.audit_account_name(locked_id).await),
+            account_id: Some(locked_id),
+            tenant_id: self
+                .account(locked_id)
+                .await
+                .ok()
+                .and_then(|account| account.id_tenant),
+        };
+        let mut records = Vec::new();
+        if first {
+            records.push(Record {
+                at: ms(),
+                actor: actor.clone(),
+                via: token.origin().cloned(),
+                remote_ip: None,
+                action: Action::AccountAccess,
+                target: target.clone(),
+                changes: vec![],
+                details: Some(format!("As a delegate ({access})")),
+                reason: None,
+                outcome: Outcome::success(),
+            });
+        }
+        if let Some(method) = write {
+            records.push(Record {
+                at: ms(),
+                actor,
+                via: token.origin().cloned(),
+                remote_ip: None,
+                action: Action::Update,
+                target,
+                changes: vec![],
+                details: Some(format!("{method} as a delegate ({access})")),
+                reason: None,
+                outcome: match error {
+                    None => Outcome::success(),
+                    Some(err) => Outcome::refused(
+                        "error",
+                        err.value_as_str(trc::Key::Details).map(str::to_string),
+                    ),
+                },
+            });
+        }
+        for record in records {
+            if !self.audit_note(record).await && first {
+                self.audit()
+                    .forget_access(token.account_id(), locked_id, KIND_DELEGATE_ACCESS);
+            }
+        }
     }
 
     /// AU-7: removes entries past the retention period.

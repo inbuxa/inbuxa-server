@@ -133,7 +133,29 @@ pub enum Capabilities {
     FileNode(FileNodeCapabilities),
     WebPush(WebPushCapabilities),
     Inbuxa(InbuxaAccountCapabilities),
+    // inbuxa: AL-7
+    InbuxaDelegated(InbuxaDelegatedCapabilities),
     Empty(EmptyCapabilities),
+}
+
+/// inbuxa: `urn:inbuxa:jmap` on a locked account delegated to the signed-in
+/// principal (audit-hold-lock spec, AL-7), so a client can tell it from an
+/// ordinary share without guessing from `isReadOnly`.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct InbuxaDelegatedCapabilities {
+    pub delegation: DelegationInfo,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct DelegationInfo {
+    /// Always true: only locked accounts are delegated.
+    pub locked: bool,
+    /// `read`, `organize` or `full`.
+    pub access: &'static str,
+    #[serde(rename(serialize = "sendAs"))]
+    pub send_as: bool,
+    /// When the delegation ends, if it does (UTC).
+    pub until: Option<String>,
 }
 
 /// inbuxa: `urn:inbuxa:jmap` on the signed-in principal's own account.

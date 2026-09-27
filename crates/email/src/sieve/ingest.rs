@@ -287,6 +287,18 @@ impl SieveScriptIngest for Server {
                         do_discard = true;
                         input = true.into();
                     }
+                    // inbuxa: AL-4: a locked account answers no sender, so a
+                    // rejection is kept instead; sieve has already cleared
+                    // the implicit keep, so it is filed here
+                    Event::Reject { .. } if access_token.is_locked() => {
+                        if let Some(message) = messages.get_mut(0)
+                            && !message.file_into.contains(&INBOX_ID)
+                        {
+                            message.file_into.push(INBOX_ID);
+                        }
+                        do_deliver = true;
+                        input = true.into();
+                    }
                     Event::Reject { reason, .. } => {
                         reject_reason = reason.into();
                         do_discard = true;
@@ -386,6 +398,17 @@ impl SieveScriptIngest for Server {
                                 SpanId = session_id
                             );
                         }
+                        input = true.into();
+                    }
+                    // inbuxa: AL-4: a locked account sends nothing on its
+                    // own: no redirect, vacation reply or notification. An
+                    // unsent redirect leaves the message to be kept.
+                    Event::SendMessage { .. } if access_token.is_locked() => {
+                        trc::event!(
+                            Sieve(SieveEvent::ActionReject),
+                            Details = "Account is locked: nothing is sent",
+                            SpanId = session_id
+                        );
                         input = true.into();
                     }
                     Event::SendMessage {

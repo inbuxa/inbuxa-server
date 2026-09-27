@@ -86,6 +86,8 @@ pub enum BroadcastEvent {
     CacheInvalidateNegative,
     MtaQueueStatus { is_running: bool },
     QueueRefresh,
+    // inbuxa: AL-3: end an account's open sessions on every node
+    EndSessions(u32),
 }
 
 #[derive(Debug, Clone, Copy)]

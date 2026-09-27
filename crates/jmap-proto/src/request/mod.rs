@@ -118,6 +118,7 @@ pub enum GetRequestMethod {
     AiLimits(Box<GetRequest<crate::object::inbuxa_ai_limits::AiLimits>>),
     AuditEvent(Box<GetRequest<crate::object::inbuxa_audit::AuditEvent>>),
     AuditSettings(Box<GetRequest<crate::object::inbuxa_audit::AuditSettings>>),
+    AccountLock(Box<GetRequest<crate::object::inbuxa_account_lock::AccountLock>>),
     ProtocolPolicy(Box<GetRequest<crate::object::inbuxa_protocol_policy::ProtocolPolicy>>),
     TenantProtocolPolicy(
         Box<GetRequest<crate::object::inbuxa_tenant_protocol_policy::TenantProtocolPolicy>>,
@@ -149,6 +150,7 @@ pub enum SetRequestMethod<'x> {
     AuditSettings(Box<SetRequest<'x, crate::object::inbuxa_audit::AuditSettings>>),
     AuditExport(Box<SetRequest<'x, crate::object::inbuxa_audit::AuditExport>>),
     AuditVerification(Box<SetRequest<'x, crate::object::inbuxa_audit::AuditVerification>>),
+    AccountLock(Box<SetRequest<'x, crate::object::inbuxa_account_lock::AccountLock>>),
     ProtocolPolicy(Box<SetRequest<'x, crate::object::inbuxa_protocol_policy::ProtocolPolicy>>),
     TenantProtocolPolicy(
         Box<SetRequest<'x, crate::object::inbuxa_tenant_protocol_policy::TenantProtocolPolicy>>,

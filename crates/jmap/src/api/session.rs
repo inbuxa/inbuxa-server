@@ -8,7 +8,7 @@
 
 use common::{Server, auth::AccessToken};
 use jmap_proto::request::capability::{
-    Account, Capabilities, Capability, EmptyCapabilities, InbuxaAccountCapabilities, Session,
+    Account, Capabilities, Capability, EmptyCapabilities, InbuxaAccountCapabilities, InbuxaDelegatedCapabilities, DelegationInfo, Session,
 };
 use registry::schema::enums::Permission;
 use std::future::Future;
@@ -116,11 +116,16 @@ impl SessionHandler for Server {
                 continue;
             };
 
+            // inbuxa: AL-6, AL-7: a delegated locked account says so, and is
+            // read-only at the read level
+            let delegation = access_token.delegation(account_id).cloned();
             let account_id = Id::from(account_id);
             let mut account = Account {
                 name: account.name().to_string(),
                 is_personal: false,
-                is_read_only: false,
+                is_read_only: delegation
+                    .as_ref()
+                    .is_some_and(|d| d.access == inbuxa_features::lock::Access::Read),
                 account_capabilities: VecMap::with_capacity(account_capabilities.len()),
             };
             for capability in access_token.account_capabilities() {
@@ -130,6 +135,22 @@ impl SessionHandler for Server {
                         .get(&capability)
                         .map(|v| v.to_account_capabilities(account_id.into(), is_owner))
                         .unwrap_or_else(|| Capabilities::Empty(EmptyCapabilities::default())),
+                );
+            }
+            if let Some(delegation) = delegation {
+                account.account_capabilities.append(
+                    Capability::Inbuxa,
+                    Capabilities::InbuxaDelegated(InbuxaDelegatedCapabilities {
+                        delegation: DelegationInfo {
+                            locked: true,
+                            access: delegation.access.as_str(),
+                            send_as: delegation.send_as,
+                            until: delegation.until.map(|until| {
+                                jmap_proto::types::date::UTCDate::from_timestamp(until as i64)
+                                    .to_string()
+                            }),
+                        },
+                    }),
                 );
             }
             session.accounts.append(account_id, account);

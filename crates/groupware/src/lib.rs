@@ -23,6 +23,7 @@ pub mod calendar;
 pub mod contact;
 pub mod file;
 pub mod inbuxa; // inbuxa: undelete notes
+pub mod inbuxa_lock; // inbuxa: account lock grants
 pub mod scheduling;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

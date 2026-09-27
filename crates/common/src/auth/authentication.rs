@@ -44,6 +44,19 @@ impl Server {
     pub async fn authenticate(&self, req: &AuthRequest) -> trc::Result<AccessToken> {
         match Box::pin(self.route_auth_request(req))
             .await
+            // inbuxa: AL-2: a locked account fails as a wrong password does,
+            // so the right password learns nothing; master and recovery
+            // sign-ins as it fail the same way
+            .and_then(|token| {
+                if token.is_locked() {
+                    Err(trc::AuthEvent::Failed
+                        .into_err()
+                        .ctx(trc::Key::AccountId, token.account_id())
+                        .reason("Account is locked"))
+                } else {
+                    Ok(token)
+                }
+            })
             .and_then(|token| token.assert_has_permission(Permission::Authenticate))
         {
             Ok(token) => {

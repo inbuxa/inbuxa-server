@@ -105,6 +105,7 @@ pub enum GetResponseMethod {
     AiLimits(GetResponse<crate::object::inbuxa_ai_limits::AiLimits>),
     AuditEvent(GetResponse<crate::object::inbuxa_audit::AuditEvent>),
     AuditSettings(GetResponse<crate::object::inbuxa_audit::AuditSettings>),
+    AccountLock(GetResponse<crate::object::inbuxa_account_lock::AccountLock>),
     ProtocolPolicy(GetResponse<crate::object::inbuxa_protocol_policy::ProtocolPolicy>),
     TenantProtocolPolicy(
         GetResponse<crate::object::inbuxa_tenant_protocol_policy::TenantProtocolPolicy>,
@@ -136,6 +137,7 @@ pub enum SetResponseMethod {
     AuditSettings(Box<SetResponse<crate::object::inbuxa_audit::AuditSettings>>),
     AuditExport(Box<SetResponse<crate::object::inbuxa_audit::AuditExport>>),
     AuditVerification(Box<SetResponse<crate::object::inbuxa_audit::AuditVerification>>),
+    AccountLock(Box<SetResponse<crate::object::inbuxa_account_lock::AccountLock>>),
     Explanation(Box<SetResponse<crate::object::inbuxa_explanation::Explanation>>),
     ProtocolPolicy(Box<SetResponse<crate::object::inbuxa_protocol_policy::ProtocolPolicy>>),
     TenantProtocolPolicy(
@@ -748,5 +750,18 @@ impl<'x> From<SetResponse<crate::object::inbuxa_audit::AuditExport>> for Respons
 impl<'x> From<SetResponse<crate::object::inbuxa_audit::AuditVerification>> for ResponseMethod<'x> {
     fn from(value: SetResponse<crate::object::inbuxa_audit::AuditVerification>) -> Self {
         ResponseMethod::Set(SetResponseMethod::AuditVerification(Box::new(value)))
+    }
+}
+
+// inbuxa: account lock with delegation
+impl<'x> From<GetResponse<crate::object::inbuxa_account_lock::AccountLock>> for ResponseMethod<'x> {
+    fn from(value: GetResponse<crate::object::inbuxa_account_lock::AccountLock>) -> Self {
+        ResponseMethod::Get(GetResponseMethod::AccountLock(value))
+    }
+}
+
+impl<'x> From<SetResponse<crate::object::inbuxa_account_lock::AccountLock>> for ResponseMethod<'x> {
+    fn from(value: SetResponse<crate::object::inbuxa_account_lock::AccountLock>) -> Self {
+        ResponseMethod::Set(SetResponseMethod::AccountLock(Box::new(value)))
     }
 }

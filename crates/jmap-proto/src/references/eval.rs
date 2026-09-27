@@ -67,6 +67,9 @@ impl Response<'_> {
                         GetResponseMethod::AuditSettings(response) => {
                             response.eval_jptr(path, &mut results)
                         }
+                        GetResponseMethod::AccountLock(response) => {
+                            response.eval_jptr(path, &mut results)
+                        }
                         GetResponseMethod::ProtocolPolicy(response) => {
                             response.eval_jptr(path, &mut results)
                         }

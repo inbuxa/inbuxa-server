@@ -551,6 +551,21 @@ impl<'de> Visitor<'de> for CallVisitor {
                     return Err(de::Error::invalid_length(1, &self));
                 }
             },
+            // inbuxa: account lock with delegation
+            (MethodFunction::Get, MethodObject::AccountLock) => match seq.next_element() {
+                Ok(Some(value)) => RequestMethod::Get(GetRequestMethod::AccountLock(value)),
+                Err(err) => RequestMethod::invalid(err),
+                Ok(None) => {
+                    return Err(de::Error::invalid_length(1, &self));
+                }
+            },
+            (MethodFunction::Set, MethodObject::AccountLock) => match seq.next_element() {
+                Ok(Some(value)) => RequestMethod::Set(SetRequestMethod::AccountLock(value)),
+                Err(err) => RequestMethod::invalid(err),
+                Ok(None) => {
+                    return Err(de::Error::invalid_length(1, &self));
+                }
+            },
             // inbuxa: the audit log
             (MethodFunction::Get, MethodObject::AuditEvent) => match seq.next_element() {
                 Ok(Some(value)) => RequestMethod::Get(GetRequestMethod::AuditEvent(value)),

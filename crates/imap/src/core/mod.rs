@@ -2,6 +2,8 @@
  * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
+ *
+ * Modified by Coffey Labs in 2026 for INBUXA.
  */
 
 use ahash::AHashMap;
@@ -198,6 +200,13 @@ impl<T: SessionStream> SessionData<T> {
             .access_token(self.account_id)
             .await
             .and_then(|inner| {
+                // inbuxa: AL-3: a session opened before its account was
+                // locked is refused from its next command
+                if inner.is_locked() {
+                    return Err(trc::AuthEvent::Failed
+                        .into_err()
+                        .details("Account is locked"));
+                }
                 AccessToken::renew(inner, self.access_token.credential_id(), self.remote_addr)
             })
             .caused_by(trc::location!())

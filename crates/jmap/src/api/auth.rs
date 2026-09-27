@@ -21,6 +21,8 @@ use types::{collection::Collection, id::Id};
 
 pub trait JmapAuthorization {
     fn assert_is_member(&self, account_id: Id) -> trc::Result<&Self>;
+    /// inbuxa: AL-8: the account's own, or a delegate allowed to send as it.
+    fn assert_can_send(&self, account_id: Id) -> trc::Result<&Self>;
     fn assert_has_jmap_permission(
         &self,
         request: &RequestMethod,
@@ -31,6 +33,17 @@ pub trait JmapAuthorization {
 }
 
 impl JmapAuthorization for AccessToken {
+    fn assert_can_send(&self, account_id: Id) -> trc::Result<&Self> {
+        if self
+            .delegation(account_id.document_id())
+            .is_some_and(|delegation| delegation.send_as)
+        {
+            Ok(self)
+        } else {
+            self.assert_is_member(account_id)
+        }
+    }
+
     fn assert_is_member(&self, account_id: Id) -> trc::Result<&Self> {
         if self.is_member(account_id.document_id()) {
             Ok(self)
@@ -81,6 +94,8 @@ impl JmapAuthorization for AccessToken {
                 GetRequestMethod::AuditEvent(_) | GetRequestMethod::AuditSettings(_) => {
                     Permission::SysAuditGet
                 }
+                // inbuxa: account lock (AL-12)
+                GetRequestMethod::AccountLock(_) => Permission::SysAccountLockGet,
                 // inbuxa: legacy protocols off. It takes listeners away and
                 // puts them back, so it takes the listener's permissions
                 GetRequestMethod::ProtocolPolicy(_) => Permission::SysNetworkListenerGet,
@@ -198,6 +213,14 @@ impl JmapAuthorization for AccessToken {
                         Permission::SysAuditExport,
                         Permission::SysAuditExport,
                         Permission::SysAuditExport,
+                    ),
+                    // inbuxa: account lock (AL-12)
+                    SetRequestMethod::AccountLock(s) => validate_set(
+                        s,
+                        self,
+                        Permission::SysAccountLockCreate,
+                        Permission::SysAccountLockUpdate,
+                        Permission::SysAccountLockDestroy,
                     ),
                     SetRequestMethod::AuditVerification(s) => validate_set(
                         s,
@@ -345,6 +368,7 @@ impl JmapAuthorization for AccessToken {
                 | MethodObject::AuditSettings
                 | MethodObject::AuditExport
                 | MethodObject::AuditVerification
+                | MethodObject::AccountLock
                 | MethodObject::ProtocolPolicy
                 | MethodObject::TenantProtocolPolicy => Permission::JmapEmailChanges,
                 // inbuxa: x:MaskedEmail/changes reads what /get reads

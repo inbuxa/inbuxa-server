@@ -36,11 +36,23 @@ const ADMIN_GRANTS: &[Permission] = &[
     Permission::SysAuditGet,
     Permission::SysAuditExport,
     Permission::SysAuditSettingsUpdate,
+    Permission::SysAccountLockGet,
+    Permission::SysAccountLockCreate,
+    Permission::SysAccountLockUpdate,
+    Permission::SysAccountLockDestroy,
 ];
 
 /// Granted to the default tenant administrator roles: reading and exporting
-/// the tenant's audit log (AU-9).
-const TENANT_GRANTS: &[Permission] = &[Permission::SysAuditGet, Permission::SysAuditExport];
+/// the tenant's audit log (AU-9), and locking and delegating its accounts
+/// (AL-12).
+const TENANT_GRANTS: &[Permission] = &[
+    Permission::SysAuditGet,
+    Permission::SysAuditExport,
+    Permission::SysAccountLockGet,
+    Permission::SysAccountLockCreate,
+    Permission::SysAccountLockUpdate,
+    Permission::SysAccountLockDestroy,
+];
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Audience {

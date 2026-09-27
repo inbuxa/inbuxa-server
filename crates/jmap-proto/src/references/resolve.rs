@@ -48,6 +48,7 @@ impl Response<'_> {
                 GetRequestMethod::AiLimits(request) => request.resolve_references(self)?,
                 GetRequestMethod::AuditEvent(request) => request.resolve_references(self)?,
                 GetRequestMethod::AuditSettings(request) => request.resolve_references(self)?,
+                GetRequestMethod::AccountLock(request) => request.resolve_references(self)?,
                 GetRequestMethod::ProtocolPolicy(request) => request.resolve_references(self)?,
                 GetRequestMethod::TenantProtocolPolicy(request) => {
                     request.resolve_references(self)?
@@ -105,6 +106,9 @@ impl Response<'_> {
                     request.resolve_references(self, 1, false)?
                 }
                 SetRequestMethod::AuditVerification(request) => {
+                    request.resolve_references(self, 1, false)?
+                }
+                SetRequestMethod::AccountLock(request) => {
                     request.resolve_references(self, 1, false)?
                 }
                 SetRequestMethod::ProtocolPolicy(request) => {

@@ -150,6 +150,21 @@ pub struct AccessTokenInner {
     pub(crate) revision: u64,
     pub(crate) credential_version: u64,
     pub(crate) obj_size: u64,
+    // inbuxa: AL-2: the account is locked; it may not authenticate
+    pub(crate) locked: bool,
+    // inbuxa: AL-5: locked accounts handed to this one
+    pub(crate) delegations: Box<[Delegation]>,
+}
+
+/// inbuxa: a locked account this one may open, and how (AL-5, AL-6).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Delegation {
+    /// The locked account.
+    pub account_id: u32,
+    pub access: inbuxa_features::lock::Access,
+    pub send_as: bool,
+    /// Seconds since the epoch.
+    pub until: Option<u64>,
 }
 
 #[derive(Debug, Default, Hash, Clone)]
