@@ -313,6 +313,39 @@ pub async fn test(test: &mut TestServer) {
         "AL-4: the rejected message wasn't kept: {kept}"
     );
 
+    // AL-5: a delegation ends at its `until`, not at the next daily sweep
+    let soon = store::write::now() + 3;
+    let response = admin
+        .lock_set(json!({"reason": "Handover ends shortly",
+            "update": {owner_id.as_str(): {"delegates": [
+            {"accountId": delegate.id_string(), "access": "organize",
+             "until": chrono::DateTime::from_timestamp(soon as i64, 0).unwrap().to_rfc3339_opts(chrono::SecondsFormat::Secs, true)}]}}}))
+        .await;
+    assert!(
+        response["updated"].get(owner_id.as_str()).is_some(),
+        "AL-5: {response}"
+    );
+    let (_, before) = delegate
+        .call("Mailbox/get", json!({"accountId": owner_id, "ids": null}))
+        .await;
+    assert!(
+        before["list"].as_array().is_some_and(|l| !l.is_empty()),
+        "AL-5: the delegate lost the account before its end: {before}"
+    );
+    tokio::time::sleep(Duration::from_secs(6)).await;
+    let session = delegate.jmap_session_object().await.0;
+    assert!(
+        session["accounts"].get(owner_id.as_str()).is_none(),
+        "AL-5: the delegation outlived its end in the session: {session}"
+    );
+    let (_, after) = delegate
+        .call("Mailbox/get", json!({"accountId": owner_id, "ids": null}))
+        .await;
+    assert!(
+        after["list"].as_array().is_none_or(|l| l.is_empty()),
+        "AL-5: the delegate still reaches the folders after its end: {after}"
+    );
+
     // AL-10: unlocking needs a reason, then restores everything
     let response = admin
         .lock_set(json!({"destroy": [owner_id]}))

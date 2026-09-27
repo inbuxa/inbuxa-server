@@ -23,6 +23,8 @@ use std::sync::Arc;
 use crate::task_manager::{manager::spawn_task_manager, scheduler::spawn_task_scheduler};
 
 pub mod broadcast;
+// inbuxa: AL-5, delegations end at their date
+pub mod inbuxa_lock_expiry;
 pub mod state_manager;
 pub mod task_manager;
 
@@ -64,6 +66,9 @@ impl SpawnServices for IpcReceivers {
 
             // Spawn task manager
             spawn_task_manager(inner.clone());
+
+            // inbuxa: AL-5, end delegations at their `until`
+            inbuxa_lock_expiry::spawn_lock_expiry(inner.clone());
 
             // Spawn task scheduler
             spawn_task_scheduler(inner);

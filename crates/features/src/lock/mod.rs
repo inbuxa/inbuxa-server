@@ -27,6 +27,32 @@ use store::{
     write::{AnyClass, BatchBuilder, ValueClass},
 };
 use trc::AddContext;
+
+/// Rung when a lock is written, so this node's expiry timer re-reads the
+/// `until` dates (AL-5): a delegation ends at its time, not at a sweep.
+pub static UNTIL_CHANGED: tokio::sync::Notify = tokio::sync::Notify::const_new();
+
+/// The soonest `until` still ahead of `now`, across every lock.
+pub fn next_until(locks: &[Lock], now: u64) -> Option<u64> {
+    locks
+        .iter()
+        .flat_map(|lock| &lock.delegates)
+        .filter_map(|delegate| delegate.until)
+        .filter(|until| *until > now)
+        .min()
+}
+
+/// Locks with a delegation that ended in `(after, now]`.
+pub fn ended_between(locks: &[Lock], after: u64, now: u64) -> impl Iterator<Item = u32> + '_ {
+    locks
+        .iter()
+        .filter(move |lock| {
+            lock.delegates
+                .iter()
+                .any(|d| d.until.is_some_and(|until| until > after && until <= now))
+        })
+        .map(|lock| lock.account_id)
+}
 use types::{
     acl::{Acl, AclGrant},
     collection::Collection,
@@ -240,10 +266,19 @@ pub fn merge_grants(
             if is_current(new, delegate.account_id) {
                 continue;
             }
-            let before = noted(old, delegate.account_id)
+            let note = noted(old, delegate.account_id);
+            let before = note
+                .as_ref()
                 .map(|r| Bitmap::from(r.rights))
                 .unwrap_or_default();
             set(&mut acls, delegate.account_id, before);
+            // Still listed but past its `until`: keep the note, so running
+            // this again puts back the same share instead of removing it
+            if let Some(note) = note
+                && new.is_some_and(|new| new.delegate(delegate.account_id).is_some())
+            {
+                replaced.push(note);
+            }
         }
     }
 
@@ -415,8 +450,9 @@ pub async fn set(data: &Store, lock: &Lock, previous: Option<&Lock>) -> trc::Res
     batch.set(class(KIND_LOCK, &[lock.account_id]), Json(lock).serialize()?);
     data.write(batch.build_all())
         .await
-        .caused_by(trc::location!())
-        .map(|_| ())
+        .caused_by(trc::location!())?;
+    UNTIL_CHANGED.notify_one();
+    Ok(())
 }
 
 /// Removes a lock and its delegate index.
@@ -530,6 +566,57 @@ mod tests {
         let after = merge_grants(&acls, Collection::Mailbox, 5, false, Some(&locked), Some(&fewer), 0, &mut kept).unwrap();
         assert!(after.contains(&AclGrant { account_id: 2, grants: earlier }));
         assert!(after.contains(&AclGrant { account_id: 3, grants: read }));
+    }
+
+    #[test]
+    fn an_expired_delegation_gives_back_its_share_every_time() {
+        let earlier: Bitmap<Acl> = Bitmap::from_iter([Acl::Read]);
+        let note = Replaced {
+            collection: Collection::Mailbox as u8,
+            document_id: 5,
+            delegate: 2,
+            rights: u64::from(earlier),
+        };
+        let mut ending = delegate(2, Access::Full);
+        ending.until = Some(200);
+        let lock = lock_with(vec![ending], vec![note.clone()]);
+        let during = vec![AclGrant {
+            account_id: 2,
+            grants: Access::Full.grants(Collection::Mailbox, false),
+        }];
+
+        // At its `until`, the share it had before comes back, and the note stays
+        let mut replaced = Vec::new();
+        let after = merge_grants(&during, Collection::Mailbox, 5, false, Some(&lock), Some(&lock), 300, &mut replaced)
+            .unwrap();
+        assert_eq!(after, vec![AclGrant { account_id: 2, grants: earlier }]);
+        assert_eq!(replaced, vec![note.clone()]);
+
+        // The next sweep changes nothing, rather than removing that share
+        let swept = Lock { replaced: replaced.clone(), ..lock };
+        let mut again = Vec::new();
+        assert!(
+            merge_grants(&after, Collection::Mailbox, 5, false, Some(&swept), Some(&swept), 400, &mut again).is_none()
+        );
+        assert_eq!(again, vec![note]);
+    }
+
+    #[test]
+    fn the_timer_finds_the_next_end() {
+        let ends_at = |account_id, until| {
+            let mut d = delegate(account_id, Access::Read);
+            d.until = until;
+            d
+        };
+        let a = Lock { account_id: 10, ..lock_with(vec![ends_at(2, Some(500)), ends_at(3, None)], vec![]) };
+        let b = Lock { account_id: 11, ..lock_with(vec![ends_at(4, Some(300))], vec![]) };
+        let locks = vec![a, b];
+        assert_eq!(next_until(&locks, 100), Some(300));
+        assert_eq!(next_until(&locks, 300), Some(500));
+        assert_eq!(next_until(&locks, 500), None);
+        assert_eq!(ended_between(&locks, 100, 300).collect::<Vec<_>>(), vec![11]);
+        assert_eq!(ended_between(&locks, 300, 600).collect::<Vec<_>>(), vec![10]);
+        assert!(ended_between(&locks, 600, 900).next().is_none());
     }
 
     #[test]
