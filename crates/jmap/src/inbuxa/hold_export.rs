@@ -9,6 +9,9 @@
 //! calendars, contacts and files, and the deleted items the hold keeps, each
 //! with its SHA-256 in `manifest.csv`, and the manifest's own hash beside
 //! it. The hold's date range applies as it does to what's kept (LH-3).
+//! Anything the hold covers that can't be read goes in `exceptions.csv`
+//! with the reason, never silently left out; the file is always there, so an
+//! empty one says nothing was missed.
 
 use common::{Server, hold::kept_member};
 use email::{
@@ -52,6 +55,21 @@ struct Entry {
     sha256: String,
 }
 
+/// One line of `exceptions.csv`: an item the hold covers that couldn't be
+/// read, where it would have gone and why.
+struct Missing {
+    path: String,
+    account: String,
+    kind: &'static str,
+    folder: String,
+    date: Option<i64>,
+    archived: bool,
+    reason: &'static str,
+}
+
+const NO_BLOB: &str = "content not found in the blob store";
+const NO_RECORD: &str = "stored record not found";
+
 fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
@@ -82,6 +100,7 @@ fn date_text(at: Option<i64>) -> String {
 struct Builder {
     zip: ZipWriter<Cursor<Vec<u8>>>,
     entries: Vec<Entry>,
+    missing: Vec<Missing>,
     written: u64,
 }
 
@@ -90,6 +109,7 @@ impl Builder {
         Builder {
             zip: ZipWriter::new(Cursor::new(Vec::new())),
             entries: Vec::new(),
+            missing: Vec::new(),
             written: 0,
         }
     }
@@ -144,8 +164,31 @@ impl Builder {
         Ok(())
     }
 
-    /// Closes the ZIP with its manifest and the manifest's hash. Returns the
-    /// bytes and how many items went in.
+    /// Records an item the hold covers that couldn't be read.
+    #[allow(clippy::too_many_arguments)]
+    fn missing(
+        &mut self,
+        path: String,
+        account: &str,
+        kind: &'static str,
+        folder: &str,
+        date: Option<i64>,
+        archived: bool,
+        reason: &'static str,
+    ) {
+        self.missing.push(Missing {
+            path,
+            account: account.to_string(),
+            kind,
+            folder: folder.to_string(),
+            date,
+            archived,
+            reason,
+        });
+    }
+
+    /// Closes the ZIP with its manifest, the exceptions and both hashes.
+    /// Returns the bytes and how many items went in.
     fn finish(mut self) -> trc::Result<(Vec<u8>, usize)> {
         let mut manifest = String::from("path,account,kind,folder,date,archived,size,sha256\n");
         for e in &self.entries {
@@ -161,7 +204,21 @@ impl Builder {
                 e.sha256
             ));
         }
+        let mut exceptions = String::from("path,account,kind,folder,date,archived,reason\n");
+        for m in &self.missing {
+            exceptions.push_str(&format!(
+                "{},{},{},{},{},{},{}\n",
+                csv(&m.path),
+                csv(&m.account),
+                m.kind,
+                csv(&m.folder),
+                date_text(m.date),
+                m.archived,
+                csv(m.reason)
+            ));
+        }
         let manifest_hash = hex(&Sha256::digest(manifest.as_bytes()));
+        let exceptions_hash = hex(&Sha256::digest(exceptions.as_bytes()));
         let options = SimpleFileOptions::default().compression_method(CompressionMethod::Deflated);
         let fail = |err: zip::result::ZipError| {
             trc::StoreEvent::UnexpectedError
@@ -171,9 +228,11 @@ impl Builder {
         };
         self.zip.start_file("manifest.csv", options).map_err(fail)?;
         self.zip.write_all(manifest.as_bytes()).map_err(|e| fail(e.into()))?;
+        self.zip.start_file("exceptions.csv", options).map_err(fail)?;
+        self.zip.write_all(exceptions.as_bytes()).map_err(|e| fail(e.into()))?;
         self.zip.start_file("manifest.sha256", options).map_err(fail)?;
         self.zip
-            .write_all(format!("{manifest_hash}  manifest.csv\n").as_bytes())
+            .write_all(format!("{manifest_hash}  manifest.csv\n{exceptions_hash}  exceptions.csv\n").as_bytes())
             .map_err(|e| fail(e.into()))?;
         let items = self.entries.len();
         let bytes = self.zip.finish().map_err(fail)?.into_inner();
@@ -234,6 +293,19 @@ pub async fn build(server: &Server, hold: &Hold, asked: &[u32]) -> trc::Result<(
                 .await
                 .caused_by(trc::location!())?;
             for message in cache.emails.items.iter() {
+                let mail_path = |folder: &str| {
+                    format!(
+                        "{base}mail/{}/{}.eml",
+                        folder.split('/').map(segment).collect::<Vec<_>>().join("/"),
+                        Id::from(message.document_id)
+                    )
+                };
+                let folder = message
+                    .mailboxes
+                    .first()
+                    .and_then(|m| cache.mailboxes.items.iter().find(|b| b.document_id == m.mailbox_id))
+                    .map(|b| b.path.clone())
+                    .unwrap_or_default();
                 let Some(metadata_) = data
                     .get_value::<Archive<AlignedBytes>>(ValueKey::property(
                         account_id,
@@ -243,6 +315,8 @@ pub async fn build(server: &Server, hold: &Hold, asked: &[u32]) -> trc::Result<(
                     ))
                     .await?
                 else {
+                    // No date to check against the hold's range, so it's listed
+                    out.missing(mail_path(&folder), &address, "email", &folder, None, false, NO_RECORD);
                     continue;
                 };
                 let metadata = metadata_
@@ -252,20 +326,20 @@ pub async fn build(server: &Server, hold: &Hold, asked: &[u32]) -> trc::Result<(
                 if !keeping.covers(Some(received)) {
                     continue;
                 }
-                let folder = message
-                    .mailboxes
-                    .first()
-                    .and_then(|m| cache.mailboxes.items.iter().find(|b| b.document_id == m.mailbox_id))
-                    .map(|b| b.path.clone())
-                    .unwrap_or_default();
                 let hash = types::blob_hash::BlobHash::from(&metadata.blob_hash);
-                if let Some(bytes) = blob(server, hash.as_slice()).await? {
-                    let path = format!(
-                        "{base}mail/{}/{}.eml",
-                        folder.split('/').map(segment).collect::<Vec<_>>().join("/"),
-                        Id::from(message.document_id)
-                    );
-                    out.add(path, &bytes, &address, "email", &folder, Some(received as i64), false)?;
+                match blob(server, hash.as_slice()).await? {
+                    Some(bytes) => {
+                        out.add(mail_path(&folder), &bytes, &address, "email", &folder, Some(received as i64), false)?
+                    }
+                    None => out.missing(
+                        mail_path(&folder),
+                        &address,
+                        "email",
+                        &folder,
+                        Some(received as i64),
+                        false,
+                        NO_BLOB,
+                    ),
                 }
             }
 
@@ -315,6 +389,7 @@ pub async fn build(server: &Server, hold: &Hold, asked: &[u32]) -> trc::Result<(
                                 ))
                                 .await?
                             else {
+                                out.missing(zip_path(Some(".ics")), &address, kind, folder, Some(*start), false, NO_RECORD);
                                 continue;
                             };
                             let event = event_.unarchive::<CalendarEvent>().caused_by(trc::location!())?;
@@ -330,6 +405,7 @@ pub async fn build(server: &Server, hold: &Hold, asked: &[u32]) -> trc::Result<(
                                 ))
                                 .await?
                             else {
+                                out.missing(zip_path(Some(".vcf")), &address, kind, folder, None, false, NO_RECORD);
                                 continue;
                             };
                             let card = card_.unarchive::<ContactCard>().caused_by(trc::location!())?;
@@ -346,15 +422,18 @@ pub async fn build(server: &Server, hold: &Hold, asked: &[u32]) -> trc::Result<(
                                 ))
                                 .await?
                             else {
+                                out.missing(zip_path(None), &address, kind, folder, None, false, NO_RECORD);
                                 continue;
                             };
                             let file = file_.unarchive::<FileNode>().caused_by(trc::location!())?;
                             let Some(props) = file.file.as_ref() else {
+                                out.missing(zip_path(None), &address, kind, folder, None, false, NO_RECORD);
                                 continue;
                             };
                             let hash = types::blob_hash::BlobHash::from(&props.blob_hash);
-                            if let Some(bytes) = blob(server, hash.as_slice()).await? {
-                                out.add(zip_path(None), &bytes, &address, kind, folder, None, false)?;
+                            match blob(server, hash.as_slice()).await? {
+                                Some(bytes) => out.add(zip_path(None), &bytes, &address, kind, folder, None, false)?,
+                                None => out.missing(zip_path(None), &address, kind, folder, None, false, NO_BLOB),
                             }
                         }
                         _ => {}
@@ -388,8 +467,10 @@ pub async fn build(server: &Server, hold: &Hold, asked: &[u32]) -> trc::Result<(
                 ArchivedItem::SieveScript(s) => format!("{}{ext}", segment(&s.name)),
                 _ => format!("{id}{ext}"),
             };
-            if let Some(bytes) = blob(server, item.blob_id().hash.as_slice()).await? {
-                out.add(format!("{base}archived/{kind}/{name}"), &bytes, &address, kind, "", date, true)?;
+            let path = format!("{base}archived/{kind}/{name}");
+            match blob(server, item.blob_id().hash.as_slice()).await? {
+                Some(bytes) => out.add(path, &bytes, &address, kind, "", date, true)?,
+                None => out.missing(path, &address, kind, "", date, true, NO_BLOB),
             }
         }
     }
@@ -425,5 +506,30 @@ mod tests {
         let mut hash = String::new();
         std::io::Read::read_to_string(&mut zip.by_name("manifest.sha256").unwrap(), &mut hash).unwrap();
         assert!(hash.starts_with(&hex(&Sha256::digest(manifest.as_bytes()))));
+        // Nothing missed, and the file says so
+        let mut exceptions = String::new();
+        std::io::Read::read_to_string(&mut zip.by_name("exceptions.csv").unwrap(), &mut exceptions).unwrap();
+        assert_eq!(exceptions, "path,account,kind,folder,date,archived,reason\n");
+    }
+
+    #[test]
+    fn what_cant_be_read_is_listed_not_dropped() {
+        let mut b = Builder::new();
+        b.add("a@example.com/mail/INBOX/1.eml".into(), b"Subject: x\r\n\r\ny", "a@example.com", "email", "INBOX", Some(0), false)
+            .unwrap();
+        b.missing("a@example.com/mail/INBOX/2.eml".into(), "a@example.com", "email", "INBOX", Some(0), false, NO_BLOB);
+        let (bytes, items) = b.finish().unwrap();
+        assert_eq!(items, 1, "a missing item isn't counted as collected");
+        let mut zip = zip::ZipArchive::new(Cursor::new(bytes)).unwrap();
+        assert!(zip.by_name("a@example.com/mail/INBOX/2.eml").is_err());
+        let mut exceptions = String::new();
+        std::io::Read::read_to_string(&mut zip.by_name("exceptions.csv").unwrap(), &mut exceptions).unwrap();
+        assert!(
+            exceptions.contains("a@example.com/mail/INBOX/2.eml,a@example.com,email,INBOX,") && exceptions.contains(NO_BLOB),
+            "{exceptions}"
+        );
+        let mut hash = String::new();
+        std::io::Read::read_to_string(&mut zip.by_name("manifest.sha256").unwrap(), &mut hash).unwrap();
+        assert!(hash.contains(&format!("{}  exceptions.csv", hex(&Sha256::digest(exceptions.as_bytes())))));
     }
 }

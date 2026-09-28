@@ -494,7 +494,7 @@ pub async fn test(test: &mut TestServer) {
     assert!(
         names
             .iter()
-            .all(|n| n.starts_with("frozen@example.com/") || n.starts_with("manifest.")),
+            .all(|n| n.starts_with("frozen@example.com/") || n.starts_with("manifest.") || n == "exceptions.csv"),
         "LH-12: an account the hold doesn't cover was exported: {names:?}"
     );
     let mut manifest = String::new();
@@ -508,6 +508,12 @@ pub async fn test(test: &mut TestServer) {
         .collect();
     assert!(hash.starts_with(&expected), "LH-12: the manifest's hash doesn't match");
     assert!(manifest.contains(",true,"), "LH-12: nothing marked archived: {manifest}");
+    let mut exceptions = String::new();
+    std::io::Read::read_to_string(&mut zip.by_name("exceptions.csv").unwrap(), &mut exceptions).unwrap();
+    assert_eq!(
+        exceptions, "path,account,kind,folder,date,archived,reason\n",
+        "LH-12: items the hold covers couldn't be read"
+    );
     // LH-13: only sysLegalHoldExport starts one
     let (_, response) = frozen
         .hold_call(
