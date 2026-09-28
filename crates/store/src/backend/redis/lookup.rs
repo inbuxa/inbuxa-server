@@ -7,16 +7,7 @@
 use super::{RedisPool, RedisStore, into_error};
 use crate::{Deserialize, write::now};
 use deadpool::managed::{Manager, Object, Pool};
-use redis::{AsyncCommands, RedisError, RedisResult, RetryMethod, Script};
-use std::sync::LazyLock;
-
-static INCR_EXPIRE: LazyLock<Script> = LazyLock::new(|| {
-    Script::new(
-        "redis.call('INCRBY', KEYS[1], ARGV[1])
-         redis.call('EXPIRE', KEYS[1], ARGV[2])
-         return redis.call('GET', KEYS[1])",
-    )
-});
+use redis::{AsyncCommands, RedisError, RedisResult, RetryMethod};
 
 impl RedisStore {
     pub async fn key_set(&self, key: &[u8], value: &[u8], expires: Option<u64>) -> trc::Result<()> {
@@ -46,19 +37,19 @@ impl RedisStore {
         match &self.pool {
             RedisPool::Single(pool) => {
                 with_conn(pool, async |conn| {
-                    Self::key_incr_(conn, key, value, expires).await
+                    self.key_incr_(conn, key, value, expires).await
                 })
                 .await
             }
             RedisPool::Cluster(pool) => {
                 with_conn(pool, async |conn| {
-                    Self::key_incr_(conn, key, value, expires).await
+                    self.key_incr_(conn, key, value, expires).await
                 })
                 .await
             }
             RedisPool::Sentinel(pool) => {
                 with_conn(pool, async |conn| {
-                    Self::key_incr_(conn, key, value, expires).await
+                    self.key_incr_(conn, key, value, expires).await
                 })
                 .await
             }
@@ -193,13 +184,14 @@ impl RedisStore {
     }
 
     async fn key_incr_(
+        &self,
         conn: &mut impl AsyncCommands,
         key: &[u8],
         value: i64,
         expires: Option<u64>,
     ) -> RedisResult<i64> {
         if let Some(expires) = expires {
-            INCR_EXPIRE
+            self.incr_expire
                 .key(key)
                 .arg(value)
                 .arg(expires as i64)

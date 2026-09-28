@@ -62,6 +62,10 @@ impl SpawnQueue for mpsc::Receiver<QueueEvent> {
             Queue::new(core, self).start().await;
         });
     }
+
+    fn discard(mut self) {
+        tokio::spawn(async move { while self.recv().await.is_some() {} });
+    }
 }
 
 const BACK_PRESSURE_WARN_INTERVAL: Duration = Duration::from_secs(60);
@@ -480,6 +484,7 @@ impl Recipient {
 
 pub trait SpawnQueue {
     fn spawn(self, core: Arc<Inner>);
+    fn discard(self);
 }
 
 impl QueueStats {

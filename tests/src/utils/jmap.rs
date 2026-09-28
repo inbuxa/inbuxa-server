@@ -408,7 +408,7 @@ impl Account {
             "urn:ietf:params:jmap:principals:availability",
             "urn:ietf:params:jmap:filenode",
             "urn:ietf:params:jmap:mail:share",
-            "urn:stalwart:jmap"
+            "urn:inbuxa:jmap:registry"
           ],
           "methodCalls": calls
         });

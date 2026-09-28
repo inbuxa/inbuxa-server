@@ -8,7 +8,7 @@ import urllib.error
 import urllib.request
 
 CORE = "urn:ietf:params:jmap:core"
-STALWART = "urn:stalwart:jmap"
+STALWART = "urn:inbuxa:jmap:registry"
 USING = [CORE, STALWART]
 
 DEFAULT_BASE_URL = "https://127.0.0.1"

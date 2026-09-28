@@ -20,8 +20,8 @@ pub mod console;
 pub mod defaults;
 pub mod restore;
 
-pub const SPAM_TRAINER_KEY: &[u8] = "STALWART_SPAM_TRAIN_DATA.lz4".as_bytes();
-pub const SPAM_CLASSIFIER_KEY: &[u8] = "STALWART_SPAM_CLASSIFIER_MODEL.lz4".as_bytes();
+pub const SPAM_TRAINER_KEY: &[u8] = "INBUXA_SPAM_TRAIN_DATA.lz4".as_bytes();
+pub const SPAM_CLASSIFIER_KEY: &[u8] = "INBUXA_SPAM_CLASSIFIER_MODEL.lz4".as_bytes();
 
 pub async fn fetch_resource(
     url: &str,

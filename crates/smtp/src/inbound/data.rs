@@ -694,7 +694,12 @@ impl<T: SessionStream> Session<T> {
                         .map(|a| a.as_str())
                         .unwrap_or_default(),
                 )
-                .with_message(parsed_message);
+                .with_message(
+                    edited_message
+                        .as_deref()
+                        .and_then(|message| MessageParser::new().parse(message))
+                        .unwrap_or(parsed_message),
+                );
 
             let modifications = match self.run_script(script_id, script.clone(), params).await {
                 ScriptResult::Accept { modifications } => modifications,

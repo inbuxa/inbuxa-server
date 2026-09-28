@@ -1,4 +1,4 @@
-require ["fileinto", "mailbox", "mailboxid", "special-use", "ihave", "imap4flags", "vnd.stalwart.expressions"];
+require ["fileinto", "mailbox", "mailboxid", "special-use", "ihave", "imap4flags", "vnd.inbuxa.expressions"];
 
 # SpecialUse extension tests
 if not specialuse_exists ["inbox", "trash"] {
