@@ -1,7 +1,10 @@
 /*
  * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
+ * SPDX-FileCopyrightText: 2026 Coffey Labs
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
+ *
+ * Modified by Coffey Labs in 2026 for INBUXA.
  */
 
 use crate::utils::server::TestServer;
@@ -286,6 +289,30 @@ pub async fn test(test: &TestServer) {
         not_valid_before + length / 2,
         task.due_timestamp() as i64
     );
+
+    // inbuxa: renewing while a valid certificate already covers the names
+    // (say, one stored by hand before the domain went automatic) schedules
+    // the renewal for when it falls due. It used to end the task for good.
+    let rescheduled = test
+        .server
+        .acme_renew(tls_domain_id)
+        .await
+        .ok()
+        .expect("a renewal that isn't due yet to be rescheduled, not to fail");
+    assert!(
+        matches!(
+            rescheduled.as_slice(),
+            [Task::AcmeRenewal(TaskDomainManagement { domain_id, .. })] if *domain_id == tls_domain_id
+        ),
+        "Expected one rescheduled ACME renewal, found: {:?}",
+        rescheduled
+    );
+    assert_eq!(
+        rescheduled[0].due_timestamp() as i64,
+        not_valid_before + length / 2,
+        "The rescheduled renewal should fall due when the certificate does"
+    );
+
     account.registry_destroy_all(ObjectType::Certificate).await;
     account.registry_destroy_all(ObjectType::Task).await;
 
