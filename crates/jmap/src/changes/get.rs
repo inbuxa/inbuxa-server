@@ -425,6 +425,7 @@ impl IntermediateChangesResponse {
             | MethodObject::AuditVerification
             | MethodObject::AccountLock
             | MethodObject::LegalHold
+            | MethodObject::HoldExport
             | MethodObject::ProtocolPolicy
             | MethodObject::TenantProtocolPolicy
             | MethodObject::Registry(_) => unreachable!(),

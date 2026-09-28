@@ -50,6 +50,7 @@ impl Response<'_> {
                 GetRequestMethod::AuditSettings(request) => request.resolve_references(self)?,
                 GetRequestMethod::AccountLock(request) => request.resolve_references(self)?,
                 GetRequestMethod::LegalHold(request) => request.resolve_references(self)?,
+                GetRequestMethod::HoldExport(request) => request.resolve_references(self)?,
                 GetRequestMethod::ProtocolPolicy(request) => request.resolve_references(self)?,
                 GetRequestMethod::TenantProtocolPolicy(request) => {
                     request.resolve_references(self)?
@@ -113,6 +114,9 @@ impl Response<'_> {
                     request.resolve_references(self, 1, false)?
                 }
                 SetRequestMethod::LegalHold(request) => {
+                    request.resolve_references(self, 1, false)?
+                }
+                SetRequestMethod::HoldExport(request) => {
                     request.resolve_references(self, 1, false)?
                 }
                 SetRequestMethod::ProtocolPolicy(request) => {

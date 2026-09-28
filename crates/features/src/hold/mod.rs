@@ -108,6 +108,45 @@ impl Keeping {
 const FEATURE: u8 = b'H';
 const KIND_HOLD: u8 = b'h';
 const KIND_ORIGINAL: u8 = b'o';
+const KIND_EXPORT: u8 = b'e';
+
+/// How far a hold export has got (LH-12).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, SerdeSerialize, SerdeDeserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum ExportStatus {
+    Running,
+    Ready,
+    Failed,
+}
+
+/// A collection of what a hold keeps, as a ZIP (LH-12).
+#[derive(Debug, Clone, PartialEq, Eq, SerdeSerialize, SerdeDeserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Export {
+    pub id: u32,
+    pub hold_id: u32,
+    /// The accounts asked for; empty for every account the hold covers.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub accounts: Vec<u32>,
+    pub reason: String,
+    pub created_at: u64,
+    pub created_by: String,
+    /// Whose blob the ZIP is, so only they download it.
+    pub created_by_id: u32,
+    pub status: ExportStatus,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub finished_at: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub blob_id: Option<String>,
+    #[serde(default)]
+    pub size: u64,
+    #[serde(default)]
+    pub items: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sha256: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
 
 /// How many times creating a hold retries when another node took its id.
 const CREATE_ATTEMPTS: usize = 5;
@@ -396,6 +435,70 @@ pub async fn set_original_deadline(data: &Store, item_id: u64, until: Option<u64
         Some(until) => batch.set(original_class(item_id), until.to_be_bytes().to_vec()),
         None => batch.clear(original_class(item_id)),
     };
+    data.write(batch.build_all())
+        .await
+        .caused_by(trc::location!())
+        .map(|_| ())
+}
+
+fn export_class(id: u32) -> ValueClass {
+    let mut key = Vec::with_capacity(6);
+    key.push(FEATURE);
+    key.push(KIND_EXPORT);
+    key.extend_from_slice(&id.to_be_bytes());
+    ValueClass::Any(AnyClass {
+        subspace: SUBSPACE_INBUXA,
+        key,
+    })
+}
+
+/// Every hold export, oldest first.
+pub async fn exports(data: &Store) -> trc::Result<Vec<Export>> {
+    let mut exports = Vec::new();
+    data.iterate(
+        IterateParams::new(ValueKey::from(export_class(0)), ValueKey::from(export_class(u32::MAX))),
+        |_, value| {
+            if let Ok(Json(export)) = Json::<Export>::deserialize(value) {
+                exports.push(export);
+            }
+            Ok(true)
+        },
+    )
+    .await
+    .caused_by(trc::location!())?;
+    Ok(exports)
+}
+
+/// Writes a new export under the next free id, which it returns.
+pub async fn create_export(data: &Store, export: &Export) -> trc::Result<u32> {
+    let mut attempt = 0;
+    loop {
+        attempt += 1;
+        let id = exports(data).await?.iter().map(|e| e.id).max().unwrap_or(0) + 1;
+        let stored = Export {
+            id,
+            ..export.clone()
+        };
+        let mut batch = BatchBuilder::new();
+        batch.assert_value(export_class(id), AssertValue::None);
+        batch.set(export_class(id), Json(&stored).serialize()?);
+        match data.write(batch.build_all()).await {
+            Ok(_) => return Ok(id),
+            Err(err)
+                if attempt < CREATE_ATTEMPTS
+                    && matches!(
+                        err.as_ref(),
+                        trc::EventType::Store(trc::StoreEvent::AssertValueFailed)
+                    ) => {}
+            Err(err) => return Err(err.caused_by(trc::location!())),
+        }
+    }
+}
+
+/// Saves an export's progress.
+pub async fn update_export(data: &Store, export: &Export) -> trc::Result<()> {
+    let mut batch = BatchBuilder::new();
+    batch.set(export_class(export.id), Json(export).serialize()?);
     data.write(batch.build_all())
         .await
         .caused_by(trc::location!())

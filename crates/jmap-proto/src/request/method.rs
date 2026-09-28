@@ -60,6 +60,7 @@ pub enum MethodObject {
     AccountLock,
     // inbuxa: legal hold
     LegalHold,
+    HoldExport,
     ProtocolPolicy,
     TenantProtocolPolicy,
 }
@@ -94,7 +95,8 @@ impl MethodObject {
             | MethodObject::AuditExport
             | MethodObject::AuditVerification
             | MethodObject::AccountLock
-            | MethodObject::LegalHold => Capability::Inbuxa,
+            | MethodObject::LegalHold
+            | MethodObject::HoldExport => Capability::Inbuxa,
             MethodObject::ProtocolPolicy => Capability::Inbuxa,
             MethodObject::TenantProtocolPolicy => Capability::Inbuxa,
         }
@@ -284,6 +286,8 @@ impl MethodName {
             (MethodFunction::Set, MethodObject::AccountLock) => "inbuxa:AccountLock/set",
             (MethodFunction::Get, MethodObject::LegalHold) => "inbuxa:LegalHold/get",
             (MethodFunction::Set, MethodObject::LegalHold) => "inbuxa:LegalHold/set",
+            (MethodFunction::Get, MethodObject::HoldExport) => "inbuxa:HoldExport/get",
+            (MethodFunction::Set, MethodObject::HoldExport) => "inbuxa:HoldExport/set",
             (MethodFunction::Set, MethodObject::AuditVerification) => {
                 "inbuxa:AuditVerification/set"
             }
@@ -430,6 +434,8 @@ impl MethodName {
             "inbuxa:AccountLock/set" => (MethodObject::AccountLock, MethodFunction::Set),
             "inbuxa:LegalHold/get" => (MethodObject::LegalHold, MethodFunction::Get),
             "inbuxa:LegalHold/set" => (MethodObject::LegalHold, MethodFunction::Set),
+            "inbuxa:HoldExport/get" => (MethodObject::HoldExport, MethodFunction::Get),
+            "inbuxa:HoldExport/set" => (MethodObject::HoldExport, MethodFunction::Set),
             "inbuxa:AuditVerification/set" => (MethodObject::AuditVerification, MethodFunction::Set),
             "inbuxa:ProtocolPolicy/get" => (MethodObject::ProtocolPolicy, MethodFunction::Get),
             "inbuxa:ProtocolPolicy/set" => (MethodObject::ProtocolPolicy, MethodFunction::Set),
@@ -495,6 +501,7 @@ impl Display for MethodObject {
             MethodObject::AuditVerification => "inbuxa:AuditVerification",
             MethodObject::AccountLock => "inbuxa:AccountLock",
             MethodObject::LegalHold => "inbuxa:LegalHold",
+            MethodObject::HoldExport => "inbuxa:HoldExport",
             MethodObject::ProtocolPolicy => "inbuxa:ProtocolPolicy",
             MethodObject::TenantProtocolPolicy => "inbuxa:TenantProtocolPolicy",
             MethodObject::Registry(obj) => {

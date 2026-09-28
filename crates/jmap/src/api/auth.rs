@@ -97,6 +97,7 @@ impl JmapAuthorization for AccessToken {
                 // inbuxa: account lock (AL-12)
                 GetRequestMethod::AccountLock(_) => Permission::SysAccountLockGet,
                 GetRequestMethod::LegalHold(_) => Permission::SysLegalHoldGet,
+                GetRequestMethod::HoldExport(_) => Permission::SysLegalHoldExport,
                 // inbuxa: legacy protocols off. It takes listeners away and
                 // puts them back, so it takes the listener's permissions
                 GetRequestMethod::ProtocolPolicy(_) => Permission::SysNetworkListenerGet,
@@ -231,6 +232,14 @@ impl JmapAuthorization for AccessToken {
                         Permission::SysLegalHoldCreate,
                         Permission::SysLegalHoldUpdate,
                         Permission::SysLegalHoldUpdate,
+                    ),
+                    // inbuxa: LH-12, exporting held data
+                    SetRequestMethod::HoldExport(s) => validate_set(
+                        s,
+                        self,
+                        Permission::SysLegalHoldExport,
+                        Permission::SysLegalHoldExport,
+                        Permission::SysLegalHoldExport,
                     ),
                     SetRequestMethod::AuditVerification(s) => validate_set(
                         s,
@@ -380,6 +389,7 @@ impl JmapAuthorization for AccessToken {
                 | MethodObject::AuditVerification
                 | MethodObject::AccountLock
                 | MethodObject::LegalHold
+                | MethodObject::HoldExport
                 | MethodObject::ProtocolPolicy
                 | MethodObject::TenantProtocolPolicy => Permission::JmapEmailChanges,
                 // inbuxa: x:MaskedEmail/changes reads what /get reads

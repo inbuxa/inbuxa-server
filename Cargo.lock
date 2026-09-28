@@ -4258,6 +4258,7 @@ dependencies = [
  "tungstenite 0.30.0",
  "types",
  "utils",
+ "zip",
 ]
 
 [[package]]
@@ -8624,6 +8625,7 @@ dependencies = [
  "types",
  "utils",
  "x509-parser",
+ "zip",
 ]
 
 [[package]]

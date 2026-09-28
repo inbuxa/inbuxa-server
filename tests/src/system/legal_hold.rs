@@ -436,6 +436,90 @@ pub async fn test(test: &mut TestServer) {
     names.sort_unstable();
     assert_eq!(names, vec!["Matter 7001", "Matter 7002"], "LH-14: {response}");
 
+    // LH-12: collect what the hold keeps, as a ZIP with its manifest
+    import(&frozen_client, "Still in the inbox", None).await;
+    let (_, response) = admin
+        .hold_call(
+            "inbuxa:HoldExport/set",
+            json!({"create": {"x": {"holdId": first, "accountIds": [frozen.id_string()]}}}),
+        )
+        .await;
+    assert_eq!(
+        response["notCreated"]["x"]["type"], "invalidProperties",
+        "AU-12: an export without a reason: {response}"
+    );
+    let (_, response) = admin
+        .hold_call(
+            "inbuxa:HoldExport/set",
+            json!({"reason": "Production to opposing counsel",
+                "create": {"x": {"holdId": first,
+                    "accountIds": [frozen.id_string(), admin.id_string()]}}}),
+        )
+        .await;
+    let export_id = response["created"]["x"]["id"]
+        .as_str()
+        .unwrap_or_else(|| panic!("LH-12: not started: {response}"))
+        .to_string();
+    let mut export = Value::Null;
+    for _ in 0..60 {
+        let (_, got) = admin
+            .hold_call("inbuxa:HoldExport/get", json!({"ids": [export_id]}))
+            .await;
+        export = got["list"][0].clone();
+        if export["status"] != "running" {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+    }
+    assert_eq!(export["status"], "ready", "LH-12: {export}");
+    let bytes = admin
+        .jmap_client()
+        .await
+        .download(export["blobId"].as_str().unwrap())
+        .await
+        .unwrap();
+    assert_eq!(export["size"].as_u64(), Some(bytes.len() as u64), "{export}");
+    let mut zip = zip::ZipArchive::new(std::io::Cursor::new(bytes)).unwrap();
+    let names = (0..zip.len())
+        .map(|i| zip.by_index(i).unwrap().name().to_string())
+        .collect::<Vec<_>>();
+    assert!(
+        names.iter().any(|n| n.starts_with("frozen@example.com/mail/") && n.ends_with(".eml")),
+        "LH-12: live mail missing: {names:?}"
+    );
+    assert!(
+        names.iter().any(|n| n.starts_with("frozen@example.com/archived/email/")),
+        "LH-12: the kept deleted mail is missing: {names:?}"
+    );
+    assert!(
+        names
+            .iter()
+            .all(|n| n.starts_with("frozen@example.com/") || n.starts_with("manifest.")),
+        "LH-12: an account the hold doesn't cover was exported: {names:?}"
+    );
+    let mut manifest = String::new();
+    std::io::Read::read_to_string(&mut zip.by_name("manifest.csv").unwrap(), &mut manifest).unwrap();
+    let mut hash = String::new();
+    std::io::Read::read_to_string(&mut zip.by_name("manifest.sha256").unwrap(), &mut hash).unwrap();
+    use sha2::Digest;
+    let expected: String = sha2::Sha256::digest(manifest.as_bytes())
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect();
+    assert!(hash.starts_with(&expected), "LH-12: the manifest's hash doesn't match");
+    assert!(manifest.contains(",true,"), "LH-12: nothing marked archived: {manifest}");
+    // LH-13: only sysLegalHoldExport starts one
+    let (_, response) = frozen
+        .hold_call(
+            "inbuxa:HoldExport/set",
+            json!({"reason": "Mine", "create": {"x": {"holdId": first}}}),
+        )
+        .await;
+    assert!(
+        response.to_string().contains("forbidden") && response["created"].is_null(),
+        "LH-13: a user exported a hold: {response}"
+    );
+
     let (_, response) = frozen
         .hold_call("x:ArchivedItem/set", json!({"destroy": [item_id]}))
         .await;
@@ -470,6 +554,16 @@ pub async fn test(test: &mut TestServer) {
         .await;
     let item = archived(frozen.archived_items().await);
     assert!(!is_held(&item), "LH-10: the last release left it held: {item}");
+    let (_, response) = admin
+        .hold_call(
+            "inbuxa:HoldExport/set",
+            json!({"reason": "Too late", "create": {"x": {"holdId": first}}}),
+        )
+        .await;
+    assert_eq!(
+        response["notCreated"]["x"]["type"], "invalidProperties",
+        "LH-12: a released hold was exported: {response}"
+    );
     let until = item["archivedUntil"].as_str().unwrap_or_default().to_string();
     let grace = chrono::Utc::now() + chrono::Duration::days(29);
     assert!(
@@ -574,6 +668,22 @@ pub async fn test(test: &mut TestServer) {
     for reason in ["Counsel's letter", "Counsel widened the matter", "Matter settled"] {
         assert!(reasons.contains(&reason), "AU-12: {reason:?} not recorded: {reasons:?}");
     }
+    // AU-1.9: an export is recorded with its reason
+    let (_, query) = admin
+        .hold_call(
+            "inbuxa:AuditEvent/query",
+            json!({"filter": {"targetKind": "inbuxa:HoldExport"}}),
+        )
+        .await;
+    let (_, exports) = admin
+        .hold_call("inbuxa:AuditEvent/get", json!({"ids": query["ids"].clone()}))
+        .await;
+    assert!(
+        exports["list"]
+            .as_array()
+            .is_some_and(|l| l.iter().any(|r| r["reason"] == "Production to opposing counsel")),
+        "AU-1.9: the export isn't recorded: {exports}"
+    );
     // A release is recorded under the hold's name, from before to after
     let list = records["list"].as_array().cloned().unwrap_or_default();
     let release = list
