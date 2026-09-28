@@ -151,7 +151,7 @@ These live in inbuxa's own key space (`SUBSPACE_INBUXA`) unless noted.
 | OAuth codes and tokens | credential | holder | `x:OidcProvider.*Expiry` | tokens are sealed and stateless (not stored); codes in the in-memory store with TTL | in-memory store | tenant | `http/src/auth/oauth/auth.rs`, `token.rs` | codes 10 min |
 | Rate-limit state | network, identifier (login names) | holder, correspondent | `x:Http.rateLimit*`, `x:Imap.maxRequestRate`, `x:Security.*BanRate` | the rate's period | in-memory store | server | `common/src/auth/rate_limit.rs`, `network/security.rs` | on |
 | Greylist | identifier (sender/recipient pairs, plain) | correspondent, holder | `x:SpamSettings.greylistFor` | that period | in-memory store | server | `smtp/src/inbound/rcpt.rs` | **off** |
-| Automatic IP bans (`x:BlockedIp`) | network | correspondent, holder | `x:Security.authBanRate`, `abuseBanRate`, `loiterBanRate`, `scanBanRate` (on); `*BanPeriod` (**no default**) | **unbounded: a ban with no period never expires, and no purge of expired bans was found**; each ban is also an audit record | data store (registry) | server | `common/src/network/security.rs` `block_ip` | **collected, permanent** |
+| Automatic IP bans (`x:BlockedIp`) | network | correspondent, holder | `x:Security.authBanRate`, `abuseBanRate`, `loiterBanRate`, `scanBanRate` (on); `*BanPeriod` (**no default**) | **unbounded: a ban with no period never expires**; an expired ban's record goes when settings next load; each ban is also an audit record | data store (registry) | server | `common/src/network/security.rs` `block_ip` | **collected, permanent** |
 | Allowed IPs | network | administrator's choice | manual; `expiresAt` | optional | data store | server | registry | none |
 
 ### 2.6 Spam filter and AI
@@ -197,8 +197,10 @@ not a judgment; what to do about each is John's call.
 2. **Log files are never deleted.** Daily rotation opens a new file; nothing
    removes old ones, and no logrotate configuration ships. At the default
    level every in-session line carries the client IP.
-3. **Automatic IP bans are permanent.** No `*BanPeriod` has a default, and no
-   purge of expired `x:BlockedIp` records was found.
+3. **Automatic IP bans are permanent.** No `*BanPeriod` has a default, so a
+   ban never expires. (Corrected 2026-09-28: a ban that does expire stops
+   blocking, and its record is deleted when settings are next loaded, in
+   `BlockedIps::parse`; the investigation missed that path.)
 4. **Some records outlive the account.** Deleting an account doesn't clear
    inbuxa's own key space: legacy-protocol last use, account locks, masked
    address records and audit records stay (audit records by design).
@@ -393,6 +395,17 @@ default; fails on a stale entry.
 **Changes for new installs only.** Settled (5): all seven are built, in
 Phase 3; existing servers keep their settings. D7 is also covered by the bug
 fix for finding 1 (Settled 6).
+
+**As built (2026-09-28).** D2, D3, D4, D6 are written on first boot of a new
+install only (no roles yet), each singleton read and written back whole
+(`manager/defaults.rs`, `new_install_privacy_defaults`); expired bans are
+also purged daily (`purge_expired_blocked_ips`). D7 changes the default for
+webhooks created from now on; stored webhooks keep theirs (the registry
+stores every field). **Held:** D1, because `x:TracerLog` is also stored
+inside `x:Bootstrap` with fields after it, so adding a field changes that
+object's stored format; a fork-owned setting is proposed instead, for John
+to decide. D5, because the spam-rules loader it touches is being reworked
+by the v0.16.24 import.
 
 | # | Change | Trade-off |
 |---|---|---|
