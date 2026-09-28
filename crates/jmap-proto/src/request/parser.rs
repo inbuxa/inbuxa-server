@@ -169,6 +169,13 @@ impl<'de> Visitor<'de> for CallVisitor {
                     return Err(de::Error::invalid_length(1, &self));
                 }
             },
+            (MethodFunction::Get, MethodObject::LogSettings) => match seq.next_element() {
+                Ok(Some(value)) => RequestMethod::Get(GetRequestMethod::LogSettings(value)),
+                Err(err) => RequestMethod::invalid(err),
+                Ok(None) => {
+                    return Err(de::Error::invalid_length(1, &self));
+                }
+            },
             (MethodFunction::Get, MethodObject::ProtocolPolicy) => match seq.next_element() {
                 Ok(Some(value)) => RequestMethod::Get(GetRequestMethod::ProtocolPolicy(value)),
                 Err(err) => RequestMethod::invalid(err),
@@ -345,6 +352,13 @@ impl<'de> Visitor<'de> for CallVisitor {
             },
             (MethodFunction::Set, MethodObject::AiLimits) => match seq.next_element() {
                 Ok(Some(value)) => RequestMethod::Set(SetRequestMethod::AiLimits(value)),
+                Err(err) => RequestMethod::invalid(err),
+                Ok(None) => {
+                    return Err(de::Error::invalid_length(1, &self));
+                }
+            },
+            (MethodFunction::Set, MethodObject::LogSettings) => match seq.next_element() {
+                Ok(Some(value)) => RequestMethod::Set(SetRequestMethod::LogSettings(value)),
                 Err(err) => RequestMethod::invalid(err),
                 Ok(None) => {
                     return Err(de::Error::invalid_length(1, &self));

@@ -418,6 +418,7 @@ impl IntermediateChangesResponse {
             | MethodObject::MaskedEmail
             | MethodObject::DeletedAccount
             | MethodObject::AiLimits
+            | MethodObject::LogSettings
             | MethodObject::Explanation
             | MethodObject::AuditEvent
             | MethodObject::AuditSettings

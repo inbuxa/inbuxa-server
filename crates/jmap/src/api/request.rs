@@ -261,6 +261,9 @@ impl RequestHandler for Server {
                                     SetResponseMethod::AiLimits(set_response) => {
                                         set_response.update_created_ids(&mut response);
                                     }
+                                    SetResponseMethod::LogSettings(set_response) => {
+                                        set_response.update_created_ids(&mut response);
+                                    }
                                     SetResponseMethod::AuditSettings(set_response) => {
                                         set_response.update_created_ids(&mut response);
                                     }
@@ -442,6 +445,13 @@ impl RequestHandler for Server {
                 GetRequestMethod::AiLimits(mut req) => {
                     resolve_account_id(&mut req.account_id, method_name.obj, access_token)?;
                     crate::inbuxa::ai_limits::get(self, access_token, *req)
+                        .await?
+                        .into()
+                }
+                // inbuxa: inbuxa:LogSettings/get
+                GetRequestMethod::LogSettings(mut req) => {
+                    resolve_account_id(&mut req.account_id, method_name.obj, access_token)?;
+                    crate::inbuxa::log_settings::get(self, access_token, *req)
                         .await?
                         .into()
                 }
@@ -765,6 +775,23 @@ impl RequestHandler for Server {
                         None,
                         *req,
                         |req| Box::pin(crate::inbuxa::ai_limits::set(self, access_token, req)),
+                    )
+                    .await?
+                    .into()
+                }
+                // inbuxa: inbuxa:LogSettings/set
+                SetRequestMethod::LogSettings(mut req) => {
+                    resolve_account_id(&mut req.account_id, method_name.obj, access_token)?;
+                    // inbuxa: AU-1.2, AU-3
+                    crate::inbuxa::audit::recorded(
+                        self,
+                        access_token,
+                        session,
+                        &method_name.obj.to_string(),
+                        None,
+                        None,
+                        *req,
+                        |req| Box::pin(crate::inbuxa::log_settings::set(self, access_token, req)),
                     )
                     .await?
                     .into()

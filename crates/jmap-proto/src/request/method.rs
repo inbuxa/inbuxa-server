@@ -49,6 +49,7 @@ pub enum MethodObject {
     DeletedAccount,
     // inbuxa: AI call limits
     AiLimits,
+    LogSettings,
     // inbuxa: "Explain this" with the local model
     Explanation,
     // inbuxa: the audit log
@@ -89,6 +90,7 @@ impl MethodObject {
             MethodObject::MaskedEmail => Capability::FastmailMaskedEmail,
             MethodObject::DeletedAccount => Capability::Inbuxa,
             MethodObject::AiLimits => Capability::Inbuxa,
+            MethodObject::LogSettings => Capability::Inbuxa,
             MethodObject::Explanation => Capability::Inbuxa,
             MethodObject::AuditEvent
             | MethodObject::AuditSettings
@@ -276,6 +278,8 @@ impl MethodName {
             (MethodFunction::Set, MethodObject::DeletedAccount) => "inbuxa:DeletedAccount/set",
             (MethodFunction::Get, MethodObject::AiLimits) => "inbuxa:AiLimits/get",
             (MethodFunction::Set, MethodObject::AiLimits) => "inbuxa:AiLimits/set",
+            (MethodFunction::Get, MethodObject::LogSettings) => "inbuxa:LogSettings/get",
+            (MethodFunction::Set, MethodObject::LogSettings) => "inbuxa:LogSettings/set",
             (MethodFunction::Set, MethodObject::Explanation) => "inbuxa:Explanation/set",
             (MethodFunction::Get, MethodObject::AuditEvent) => "inbuxa:AuditEvent/get",
             (MethodFunction::Query, MethodObject::AuditEvent) => "inbuxa:AuditEvent/query",
@@ -424,6 +428,8 @@ impl MethodName {
             "inbuxa:DeletedAccount/set" => (MethodObject::DeletedAccount, MethodFunction::Set),
             "inbuxa:AiLimits/get" => (MethodObject::AiLimits, MethodFunction::Get),
             "inbuxa:AiLimits/set" => (MethodObject::AiLimits, MethodFunction::Set),
+            "inbuxa:LogSettings/get" => (MethodObject::LogSettings, MethodFunction::Get),
+            "inbuxa:LogSettings/set" => (MethodObject::LogSettings, MethodFunction::Set),
             "inbuxa:Explanation/set" => (MethodObject::Explanation, MethodFunction::Set),
             "inbuxa:AuditEvent/get" => (MethodObject::AuditEvent, MethodFunction::Get),
             "inbuxa:AuditEvent/query" => (MethodObject::AuditEvent, MethodFunction::Query),
@@ -494,6 +500,7 @@ impl Display for MethodObject {
             MethodObject::MaskedEmail => "MaskedEmail",
             MethodObject::DeletedAccount => "inbuxa:DeletedAccount",
             MethodObject::AiLimits => "inbuxa:AiLimits",
+            MethodObject::LogSettings => "inbuxa:LogSettings",
             MethodObject::Explanation => "inbuxa:Explanation",
             MethodObject::AuditEvent => "inbuxa:AuditEvent",
             MethodObject::AuditSettings => "inbuxa:AuditSettings",

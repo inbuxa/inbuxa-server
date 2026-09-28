@@ -25,6 +25,7 @@ use crate::task_manager::{manager::spawn_task_manager, scheduler::spawn_task_sch
 pub mod broadcast;
 // inbuxa: AL-5, delegations end at their date
 pub mod inbuxa_lock_expiry;
+pub mod inbuxa_log_retention; // inbuxa: personal-data catalog, D1
 pub mod state_manager;
 pub mod task_manager;
 
@@ -69,6 +70,9 @@ impl SpawnServices for IpcReceivers {
 
             // inbuxa: AL-5, end delegations at their `until`
             inbuxa_lock_expiry::spawn_lock_expiry(inner.clone());
+
+            // inbuxa: personal-data catalog, D1: old log files go, per node
+            inbuxa_log_retention::spawn_log_retention(inner.clone());
 
             // Spawn task scheduler
             spawn_task_scheduler(inner);

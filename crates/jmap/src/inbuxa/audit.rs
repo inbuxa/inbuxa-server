@@ -387,6 +387,10 @@ async fn fork_current(server: &Server, object: &str, id: &MaybeInvalid<Id>) -> O
             .await
             .ok()
             .map(|settings| serde_json::json!({"keepForDays": settings.keep_for_secs / 86_400})),
+        "inbuxa:LogSettings" => security::log_files::get(data)
+            .await
+            .ok()
+            .and_then(|settings| serde_json::to_value(settings).ok()),
         "inbuxa:AiLimits" => limits::get(data)
             .await
             .ok()

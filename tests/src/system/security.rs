@@ -236,6 +236,61 @@ pub async fn test(test: &mut TestServer) {
         "the expired ban's record is gone"
     );
 
+    // inbuxa: personal-data catalog, D1: how long rotated log files are kept.
+    // Unset keeps every file; a value is days; zero is refused; null goes back
+    let using = &["urn:ietf:params:jmap:core", "urn:inbuxa:jmap"];
+    let account = admin.id_string().to_string();
+    let log_get = || {
+        admin.jmap_request(
+            using,
+            json!([["inbuxa:LogSettings/get", {"accountId": account, "ids": null}, "0"]]),
+        )
+    };
+    let log_set = |keep: serde_json::Value| {
+        admin.jmap_request(
+            using,
+            json!([["inbuxa:LogSettings/set", {"accountId": account,
+                "update": {"singleton": {"keepForDays": keep}}}, "0"]]),
+        )
+    };
+    let got = log_get().await;
+    assert_eq!(
+        got.0.pointer("/methodResponses/0/1/list/0/keepForDays"),
+        Some(&serde_json::Value::Null),
+        "a server that never set it keeps every file: {}",
+        got.0
+    );
+    let set = log_set(json!(14)).await;
+    assert!(set.0.pointer("/methodResponses/0/1/updated/singleton").is_some(), "{}", set.0);
+    let got = log_get().await;
+    assert_eq!(got.0.pointer("/methodResponses/0/1/list/0/keepForDays"), Some(&json!(14)));
+    let refused = log_set(json!(0)).await;
+    assert_eq!(
+        refused.0.pointer("/methodResponses/0/1/notUpdated/singleton/type"),
+        Some(&json!("invalidProperties")),
+        "{}",
+        refused.0
+    );
+    log_set(serde_json::Value::Null).await;
+    let got = log_get().await;
+    assert_eq!(
+        got.0.pointer("/methodResponses/0/1/list/0/keepForDays"),
+        Some(&serde_json::Value::Null)
+    );
+    // Each change is in the audit log, before and after
+    let query = admin
+        .jmap_request(
+            using,
+            json!([["inbuxa:AuditEvent/query", {"accountId": account,
+                "filter": {"targetKind": "inbuxa:LogSettings"}}, "0"]]),
+        )
+        .await;
+    assert!(
+        query.0.pointer("/methodResponses/0/1/ids").and_then(|ids| ids.as_array()).is_some_and(|ids| ids.len() >= 2),
+        "log settings changes aren't recorded: {}",
+        query.0
+    );
+
     // Make sure the IP remains unblocked after reload
     admin.registry_create_object(Action::ReloadBlockedIps).await;
     validate_password_with_ip(

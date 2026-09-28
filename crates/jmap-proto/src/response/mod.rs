@@ -103,6 +103,7 @@ pub enum GetResponseMethod {
     MaskedEmail(GetResponse<crate::object::fastmail_masked_email::FastmailMaskedEmail>),
     DeletedAccount(GetResponse<crate::object::inbuxa_deleted_account::DeletedAccount>),
     AiLimits(GetResponse<crate::object::inbuxa_ai_limits::AiLimits>),
+    LogSettings(GetResponse<crate::object::inbuxa_log_settings::LogSettings>),
     AuditEvent(GetResponse<crate::object::inbuxa_audit::AuditEvent>),
     AuditSettings(GetResponse<crate::object::inbuxa_audit::AuditSettings>),
     AccountLock(GetResponse<crate::object::inbuxa_account_lock::AccountLock>),
@@ -136,6 +137,7 @@ pub enum SetResponseMethod {
     MaskedEmail(Box<SetResponse<crate::object::fastmail_masked_email::FastmailMaskedEmail>>),
     DeletedAccount(Box<SetResponse<crate::object::inbuxa_deleted_account::DeletedAccount>>),
     AiLimits(Box<SetResponse<crate::object::inbuxa_ai_limits::AiLimits>>),
+    LogSettings(Box<SetResponse<crate::object::inbuxa_log_settings::LogSettings>>),
     AuditSettings(Box<SetResponse<crate::object::inbuxa_audit::AuditSettings>>),
     AuditExport(Box<SetResponse<crate::object::inbuxa_audit::AuditExport>>),
     AuditVerification(Box<SetResponse<crate::object::inbuxa_audit::AuditVerification>>),
@@ -349,9 +351,21 @@ impl<'x> From<GetResponse<crate::object::inbuxa_ai_limits::AiLimits>> for Respon
     }
 }
 
+impl<'x> From<GetResponse<crate::object::inbuxa_log_settings::LogSettings>> for ResponseMethod<'x> {
+    fn from(value: GetResponse<crate::object::inbuxa_log_settings::LogSettings>) -> Self {
+        ResponseMethod::Get(GetResponseMethod::LogSettings(value))
+    }
+}
+
 impl<'x> From<SetResponse<crate::object::inbuxa_ai_limits::AiLimits>> for ResponseMethod<'x> {
     fn from(value: SetResponse<crate::object::inbuxa_ai_limits::AiLimits>) -> Self {
         ResponseMethod::Set(SetResponseMethod::AiLimits(Box::new(value)))
+    }
+}
+
+impl<'x> From<SetResponse<crate::object::inbuxa_log_settings::LogSettings>> for ResponseMethod<'x> {
+    fn from(value: SetResponse<crate::object::inbuxa_log_settings::LogSettings>) -> Self {
+        ResponseMethod::Set(SetResponseMethod::LogSettings(Box::new(value)))
     }
 }
 

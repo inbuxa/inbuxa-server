@@ -161,6 +161,10 @@ recentLegacyUse = ["identifier", "metadata"]
 file = "inbuxa_ai_limits.rs"
 default = "none"
 
+[object."inbuxa:LogSettings"]
+file = "inbuxa_log_settings.rs"
+default = "none"
+
 # ---------------------------------------------------------------------------
 # Sources that are no object. Settings are `<object>.<property>`: a schema
 # field object, or one of inbuxa's own.
@@ -202,11 +206,12 @@ categories = ["network", "identifier", "metadata"]
 whose = ["correspondent", "holder", "administrator"]
 where = ["log-file"]
 scope = "server"
-retention = "unbounded"
+# Unset, every file is kept; a new install keeps 30 days
+retention = { setting = "inbuxa:LogSettings.keepForDays" }
 enabled_by = ["x:TracerLog.enable"]
 captures = ["x:TracerLog.level", "x:TracerLog.events", "x:EventTracingLevel.level"]
 leaves_host = false
-written_by = ["crates/common/src/telemetry/tracers/log.rs"]
+written_by = ["crates/common/src/telemetry/tracers/log.rs", "crates/services/src/inbuxa_log_retention.rs"]
 
 [source."console-and-journal"]
 categories = ["network", "identifier", "metadata"]
