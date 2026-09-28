@@ -215,6 +215,57 @@ pub async fn test(test: &mut TestServer) {
         .await;
     assert_eq!(name, "error", "LH-13: a tenant administrator placed a hold: {response}");
 
+    // Test 7, LH-2: a hold on a domain reaches an account created there
+    // later, and keeps it by name when it moves to another domain
+    let held_domain = admin
+        .registry_create_object(Domain {
+            name: "held.example.net".to_string(),
+            is_enabled: true,
+            certificate_management: CertificateManagement::Manual,
+            dns_management: DnsManagement::Manual,
+            dkim_management: DkimManagement::Manual,
+            ..Default::default()
+        })
+        .await;
+    let elsewhere = admin
+        .registry_create_object(Domain {
+            name: "elsewhere.example.net".to_string(),
+            is_enabled: true,
+            certificate_management: CertificateManagement::Manual,
+            dns_management: DnsManagement::Manual,
+            dkim_management: DkimManagement::Manual,
+            ..Default::default()
+        })
+        .await;
+    let response = admin
+        .hold_set(json!({"reason": "Whole division", "create": {"d": {
+            "name": "Matter 5120", "scope": {"domains": [held_domain.to_string()]}}}}))
+        .await;
+    let domain_hold = response["created"]["d"]["id"]
+        .as_str()
+        .unwrap_or_else(|| panic!("LH-1 domain hold: {response}"))
+        .to_string();
+    let mover = admin
+        .create_user_account("mover@held.example.net", "mover-secret-8812", "Mover", &[], vec![])
+        .await;
+    assert_eq!(
+        admin.hold_get(&domain_hold).await["scope"]["accounts"],
+        json!([]),
+        "LH-2: covered through the domain, not named yet"
+    );
+    admin
+        .registry_update_object(
+            ObjectType::Account,
+            mover.id(),
+            json!({Property::DomainId: elsewhere.to_string()}),
+        )
+        .await;
+    assert_eq!(
+        admin.hold_get(&domain_hold).await["scope"]["accounts"],
+        json!([mover.id_string()]),
+        "test 7, LH-2: the moved account escaped the hold"
+    );
+
     // LH-10: release needs a reason, and a released hold stays, read-only
     let response = admin
         .hold_set(json!({"update": {hold_id.as_str(): {"released": true}}}))

@@ -18,6 +18,7 @@
 //!
 //! Numbers are big-endian. There are few holds, so they're read whole.
 
+use registry::schema::{prelude::ObjectInner, structs::Account};
 use serde::{Deserialize as SerdeDeserialize, Serialize as SerdeSerialize};
 use store::{
     Deserialize, IterateParams, SUBSPACE_INBUXA, Serialize, Store, ValueKey,
@@ -80,6 +81,48 @@ impl Scope {
             list.sort_unstable();
             list.dedup();
         }
+    }
+}
+
+/// What decides whether a hold's scope reaches an account: the domains of
+/// its addresses, its groups and its tenant (LH-2).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Member {
+    pub account: u32,
+    pub domains: Vec<u32>,
+    pub groups: Vec<u32>,
+    pub tenant: Option<u32>,
+}
+
+impl Member {
+    /// A person's account as the registry stores it; `None` for a group,
+    /// whose own data is held through its members.
+    pub fn of(account_id: u32, object: &ObjectInner) -> Option<Member> {
+        let ObjectInner::Account(Account::User(user)) = object else {
+            return None;
+        };
+        let mut domains = vec![user.domain_id.document_id()];
+        domains.extend(user.aliases.iter().map(|alias| alias.domain_id.document_id()));
+        domains.sort_unstable();
+        domains.dedup();
+        Some(Member {
+            account: account_id,
+            domains,
+            groups: user.member_group_ids.iter().map(|id| id.document_id()).collect(),
+            tenant: user.member_tenant_id.map(|id| id.document_id()),
+        })
+    }
+}
+
+impl Scope {
+    /// Whether this scope reaches `member`, directly or through its domains,
+    /// groups or tenant, as they are now (LH-2).
+    pub fn covers(&self, member: &Member) -> bool {
+        self.server
+            || self.accounts.contains(&member.account)
+            || member.domains.iter().any(|d| self.domains.contains(d))
+            || member.groups.iter().any(|g| self.groups.contains(g))
+            || member.tenant.is_some_and(|t| self.tenants.contains(&t))
     }
 }
 
@@ -300,6 +343,33 @@ pub async fn create(data: &Store, hold: &Hold) -> trc::Result<u32> {
     }
 }
 
+/// The active holds that reach `member` (LH-2, LH-11).
+pub async fn covering(data: &Store, member: &Member) -> trc::Result<Vec<Hold>> {
+    Ok(active(data)
+        .await?
+        .into_iter()
+        .filter(|hold| hold.scope.covers(member))
+        .collect())
+}
+
+/// LH-2: an account a hold reached through its domain, group or tenant stays
+/// held when it leaves them: it is added to the hold by name. Called for
+/// every change to an account, so no move escapes a hold.
+pub async fn keep_moved(data: &Store, before: &Member, after: &Member) -> trc::Result<()> {
+    if before == after {
+        return Ok(());
+    }
+    for mut hold in active(data).await? {
+        if hold.scope.covers(before) && !hold.scope.covers(after) {
+            hold.scope.accounts.push(after.account);
+            hold.scope.accounts.sort_unstable();
+            hold.scope.accounts.dedup();
+            update(data, &hold).await?;
+        }
+    }
+    Ok(())
+}
+
 /// Replaces a hold that `check_update` allowed.
 pub async fn update(data: &Store, hold: &Hold) -> trc::Result<()> {
     let mut batch = BatchBuilder::new();
@@ -417,6 +487,28 @@ mod tests {
         assert!(!ranged.covers_date(99) && !ranged.covers_date(201));
         let open_ended = hold(accounts(&[2]), Some(100), None);
         assert!(open_ended.covers_date(u64::MAX), "no `to` also catches mail still to come");
+    }
+
+    #[test]
+    fn a_scope_reaches_members_through_domain_group_and_tenant() {
+        let member = Member {
+            account: 9,
+            domains: vec![3, 4],
+            groups: vec![20],
+            tenant: Some(7),
+        };
+        let reaches = |scope: Scope| scope.covers(&member);
+        assert!(reaches(accounts(&[9])));
+        assert!(reaches(Scope { domains: vec![4], ..Default::default() }), "an alias's domain counts");
+        assert!(reaches(Scope { groups: vec![20], ..Default::default() }));
+        assert!(reaches(Scope { tenants: vec![7], ..Default::default() }));
+        assert!(reaches(Scope { server: true, ..Default::default() }));
+        assert!(!reaches(Scope { domains: vec![5], tenants: vec![8], ..Default::default() }));
+
+        // LH-2: leaving the held domain would free it, so the hold must name it
+        let held = hold(Scope { domains: vec![3], ..Default::default() }, None, None);
+        let moved = Member { domains: vec![6], ..member.clone() };
+        assert!(held.scope.covers(&member) && !held.scope.covers(&moved));
     }
 
     #[test]
