@@ -169,6 +169,11 @@ pub struct InbuxaAccountCapabilities {
     /// (legacy-protocols spec, Interfaces; LP-19).
     #[serde(rename(serialize = "legacyProtocols"))]
     pub legacy_protocols: &'static str,
+    /// The legacy protocols still allowed for the principal, each the
+    /// stricter of the two switches: `imap`, `pop3`, `manageSieve`,
+    /// `submission` (legacy-protocols spec, one switch per protocol).
+    #[serde(rename(serialize = "legacyAllowed"))]
+    pub legacy_allowed: Vec<&'static str>,
     /// Whether the principal may use "Explain this" now: it holds
     /// `sysAiExplain`, is server-level, and a model resolves (ai-explain
     /// spec, EX-1 to EX-4).

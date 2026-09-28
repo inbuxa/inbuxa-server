@@ -24,8 +24,13 @@ pub enum TenantProtocolPolicyProperty {
     Id,
     /// Server-set: the tenant this is the switch of.
     TenantId,
-    /// The switch: `enabled` or `disabled`.
+    /// The kill-all: `enabled` or `disabled`; reads `disabled` when all
+    /// three protocols are off, and sets all three.
     LegacyProtocols,
+    /// Each protocol's own switch: `enabled` or `disabled`.
+    Imap,
+    Pop3,
+    ManageSieve,
     ChangedAt,
     ChangedBy,
     /// Server-set: who signed in over a legacy protocol in the last 30
@@ -48,6 +53,9 @@ impl Property for TenantProtocolPolicyProperty {
             TenantProtocolPolicyProperty::Id => "id",
             TenantProtocolPolicyProperty::TenantId => "tenantId",
             TenantProtocolPolicyProperty::LegacyProtocols => "legacyProtocols",
+            TenantProtocolPolicyProperty::Imap => "imap",
+            TenantProtocolPolicyProperty::Pop3 => "pop3",
+            TenantProtocolPolicyProperty::ManageSieve => "manageSieve",
             TenantProtocolPolicyProperty::ChangedAt => "changedAt",
             TenantProtocolPolicyProperty::ChangedBy => "changedBy",
             TenantProtocolPolicyProperty::RecentLegacyUse => "recentLegacyUse",
@@ -62,6 +70,9 @@ impl TenantProtocolPolicyProperty {
             b"id" => TenantProtocolPolicyProperty::Id,
             b"tenantId" => TenantProtocolPolicyProperty::TenantId,
             b"legacyProtocols" => TenantProtocolPolicyProperty::LegacyProtocols,
+            b"imap" => TenantProtocolPolicyProperty::Imap,
+            b"pop3" => TenantProtocolPolicyProperty::Pop3,
+            b"manageSieve" => TenantProtocolPolicyProperty::ManageSieve,
             b"changedAt" => TenantProtocolPolicyProperty::ChangedAt,
             b"changedBy" => TenantProtocolPolicyProperty::ChangedBy,
             b"recentLegacyUse" => TenantProtocolPolicyProperty::RecentLegacyUse,

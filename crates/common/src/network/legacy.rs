@@ -35,8 +35,8 @@ use directory::Credentials;
 use inbuxa_features::security::{
     legacy_use::{self, LegacyUse},
     listeners,
-    protocol_policy::{self, ProtocolPolicy, SavedListener},
-    tenant_protocol_policy,
+    protocol_policy::{self, ProtocolPolicy, SUBMISSION, SWITCHED, SavedListener, Switches},
+    tenant_protocol_policy::{self, OffBy, TenantProtocolPolicy},
 };
 use registry::schema::enums::ServiceProtocol;
 use registry::types::{error::Error, id::ObjectId};
@@ -97,40 +97,48 @@ impl Server {
         // this, and a /set that omitted it must not lose the listeners still
         // waiting to come back.
         let previous = self.protocol_policy().await?;
-        policy.saved_listeners = previous.saved_listeners;
+        policy.saved_listeners = previous.saved_listeners.clone();
         policy.changed_at = Some(store::write::now() * 1000);
         policy.changed_by = changed_by;
+        policy.normalize();
 
-        if policy.legacy_protocols.is_disabled() {
-            self.close_legacy_listeners(&mut policy, &mut change).await?;
-        } else {
-            self.reopen_legacy_listeners(&mut policy, &mut change)
-                .await?;
-        }
+        // Each protocol on its own switch: close what is off now, and put
+        // back what was saved for a protocol that is on again. Either may
+        // happen in one change, when one protocol goes off as another comes
+        // back.
+        self.close_legacy_listeners(&mut policy, &mut change)
+            .await?;
+        self.reopen_legacy_listeners(&mut policy, &mut change)
+            .await?;
 
         protocol_policy::set(&self.core.storage.data, &policy).await?;
 
         // LP-8. Raised here rather than by the JMAP method, so whatever turns
-        // the switch is reported. A /set that changed nothing -- the switch
+        // a switch is reported. A /set that changed nothing -- every switch
         // already where it was asked to be, nothing to close or reopen -- is
         // not a change.
-        if previous.legacy_protocols != policy.legacy_protocols || !change.is_empty() {
-            let (moved, direction) = if policy.legacy_protocols.is_disabled() {
-                (&change.closed, "closed")
-            } else {
-                (&change.reopened, "reopened")
-            };
+        let mut before = previous;
+        before.normalize();
+        if before.off() != policy.off() || !change.is_empty() {
+            // The closed first, then the reopened; `Details` says which.
+            let moved = change
+                .closed
+                .iter()
+                .chain(change.reopened.iter())
+                .map(|l| l.id.clone());
             trc::event!(
                 Security(trc::SecurityEvent::LegacyProtocolsChanged),
                 Policy = "server",
-                Value = if policy.legacy_protocols.is_disabled() {
-                    "disabled"
-                } else {
-                    "enabled"
-                },
+                Value = switches_value(&policy),
                 AccountId = policy.changed_by.clone(),
-                Details = direction,
-                ListenerId = listener_names(moved.iter().map(|l| l.id.clone())),
+                Details = if change.closed.is_empty() {
+                    "reopened"
+                } else if change.reopened.is_empty() {
+                    "closed"
+                } else {
+                    "closed and reopened"
+                },
+                ListenerId = listener_names(moved),
                 // Only when a listener could not be put back (LP-5).
                 Reason = (!change.failed.is_empty()).then(|| listener_names(
                     change
@@ -165,21 +173,27 @@ impl Server {
         Ok(())
     }
 
-    /// Puts back every saved listener and starts it again (LP-5).
+    /// Puts back every saved listener whose protocol is on again, and starts
+    /// it (LP-5). The rest stay saved.
     async fn reopen_legacy_listeners(
         &self,
         policy: &mut ProtocolPolicy,
         change: &mut PolicyChange,
     ) -> trc::Result<()> {
-        if policy.saved_listeners.is_empty() {
+        let (wanted, still_closed): (Vec<_>, Vec<_>) = std::mem::take(&mut policy.saved_listeners)
+            .into_iter()
+            .partition(|saved| !policy.closes(&saved.protocol, &saved.ports));
+        policy.saved_listeners = still_closed;
+        if wanted.is_empty() {
             return Ok(());
         }
 
-        let saved = std::mem::take(&mut policy.saved_listeners);
-        let (restored, failed) = listeners::reopen(self.registry(), &saved).await?;
+        let (restored, failed) = listeners::reopen(self.registry(), &wanted).await?;
 
         // A listener that could not be put back stays saved for another try.
-        policy.saved_listeners = failed.iter().map(|(listener, _)| listener.clone()).collect();
+        policy
+            .saved_listeners
+            .extend(failed.iter().map(|(listener, _)| listener.clone()));
         change.failed = failed;
 
         if !restored.is_empty() {
@@ -251,6 +265,17 @@ impl Server {
             .map(|listener| listener.id.clone())
             .filter(|id| !spawned.contains(id))
             .collect())
+    }
+}
+
+/// The switches as an event value: `disabled` or `enabled` when all three
+/// agree, otherwise which are off, such as `pop3 disabled` (LP-8).
+pub fn switches_value(policy: &impl Switches) -> String {
+    let off = policy.off();
+    match off.len() {
+        0 => "enabled".to_string(),
+        n if n == SWITCHED.len() => "disabled".to_string(),
+        _ => format!("{} disabled", off.join(", ")),
     }
 }
 
@@ -395,15 +420,18 @@ impl Server {
         credentials: &Credentials,
     ) -> trc::Result<()> {
         let domain = domain_of(credentials);
-        if self.protocol_policy().await?.legacy_protocols.is_disabled() {
+        let server = self.protocol_policy().await?;
+        if server.is_off(protocol.as_str()) {
             return Err(protocol.refused(RefusalScope::Server, domain));
         }
         if let Some(name) = &domain
             && let Some(domain) = self.domain(name).await?
             && let Some(tenant_id) = domain.id_tenant
-            && self.tenant_legacy_protocols_off(tenant_id).await?
         {
-            return Err(protocol.refused(RefusalScope::Tenant(tenant_id), Some(name.clone())));
+            let tenant = self.tenant_protocol_policy(tenant_id).await?;
+            if tenant_protocol_policy::off_by(&server, Some(&tenant), protocol.as_str()).is_some() {
+                return Err(protocol.refused(RefusalScope::Tenant(tenant_id), Some(name.clone())));
+            }
         }
         Ok(())
     }
@@ -422,10 +450,16 @@ impl Server {
         protocol: LegacyProtocol,
         access_token: &AccessToken,
     ) -> trc::Result<()> {
-        if let Some(tenant_id) = access_token.tenant_id()
-            && self.tenant_legacy_protocols_off(tenant_id).await?
-        {
-            return Err(protocol.refused(RefusalScope::Tenant(tenant_id), None));
+        if let Some(tenant_id) = access_token.tenant_id() {
+            let server = self.protocol_policy().await?;
+            let tenant = self.tenant_protocol_policy(tenant_id).await?;
+            match tenant_protocol_policy::off_by(&server, Some(&tenant), protocol.as_str()) {
+                Some(OffBy::Server) => return Err(protocol.refused(RefusalScope::Server, None)),
+                Some(OffBy::Tenant) => {
+                    return Err(protocol.refused(RefusalScope::Tenant(tenant_id), None));
+                }
+                None => {}
+            }
         }
         if let Err(err) = legacy_use::record(
             &self.core.storage.data,
@@ -463,31 +497,96 @@ impl Server {
         Ok(recent)
     }
 
-    /// Whether legacy protocols are off for this account: the stricter of the
-    /// server's switch and its tenant's. What the JMAP session tells the
+    /// Which legacy protocols are off for this account: each the stricter of
+    /// the server's switch and its tenant's. What the JMAP session tells the
     /// account's apps (legacy-protocols spec, Interfaces), so the webmail can
     /// say why a mail app won't connect (LP-19).
-    pub async fn legacy_protocols_off_for_account(
+    pub async fn legacy_off_for_account(
         &self,
         access_token: &AccessToken,
-    ) -> trc::Result<bool> {
-        if self.protocol_policy().await?.legacy_protocols.is_disabled() {
-            return Ok(true);
-        }
-        match access_token.tenant_id() {
-            Some(tenant_id) => self.tenant_legacy_protocols_off(tenant_id).await,
-            None => Ok(false),
+    ) -> trc::Result<LegacyOff> {
+        let server = self.protocol_policy().await?;
+        let tenant = match access_token.tenant_id() {
+            Some(tenant_id) => Some(self.tenant_protocol_policy(tenant_id).await?),
+            None => None,
+        };
+        Ok(LegacyOff::of(&server, tenant.as_ref()))
+    }
+
+    /// A tenant's switches, or all on when it has never set them (LP-10).
+    pub async fn tenant_protocol_policy(
+        &self,
+        tenant_id: u32,
+    ) -> trc::Result<TenantProtocolPolicy> {
+        tenant_protocol_policy::get(&self.core.storage.data, tenant_id).await
+    }
+}
+
+/// Which legacy protocols are off, for one account or one domain: the server's
+/// switches and the tenant's together. Submission is off only when all three
+/// are.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct LegacyOff {
+    pub imap: bool,
+    pub pop3: bool,
+    pub manage_sieve: bool,
+    pub submission: bool,
+}
+
+impl LegacyOff {
+    pub fn of(server: &ProtocolPolicy, tenant: Option<&TenantProtocolPolicy>) -> Self {
+        let off = |protocol| tenant_protocol_policy::off_by(server, tenant, protocol).is_some();
+        LegacyOff {
+            imap: off("imap"),
+            pop3: off("pop3"),
+            manage_sieve: off("manageSieve"),
+            submission: off(SUBMISSION),
         }
     }
 
-    /// Whether a tenant has turned legacy protocols off for itself (LP-10).
-    pub async fn tenant_legacy_protocols_off(&self, tenant_id: u32) -> trc::Result<bool> {
-        Ok(
-            tenant_protocol_policy::get(&self.core.storage.data, tenant_id)
-                .await?
-                .legacy_protocols
-                .is_disabled(),
-        )
+    /// Whether this configured service must not be offered (LP-7). SMTP here
+    /// is submission; inbound mail is never a configured service.
+    pub fn service(&self, protocol: &ServiceProtocol) -> bool {
+        match protocol {
+            ServiceProtocol::Imap => self.imap,
+            ServiceProtocol::Pop3 => self.pop3,
+            ServiceProtocol::Managesieve => self.manage_sieve,
+            ServiceProtocol::Smtp => self.submission,
+            _ => false,
+        }
+    }
+
+    /// Whether anything is off.
+    pub fn any(&self) -> bool {
+        self.imap || self.pop3 || self.manage_sieve || self.submission
+    }
+
+    /// Whether everything is off: the kill-all's effect.
+    pub fn all(&self) -> bool {
+        self.imap && self.pop3 && self.manage_sieve && self.submission
+    }
+
+    /// An index for answers prepared once per combination (the PACC
+    /// document): one bit per protocol.
+    pub fn index(&self) -> usize {
+        (self.imap as usize)
+            | (self.pop3 as usize) << 1
+            | (self.manage_sieve as usize) << 2
+            | (self.submission as usize) << 3
+    }
+
+    /// The protocols that are still allowed, by JMAP name, for the session.
+    pub fn allowed(&self) -> Vec<&'static str> {
+        [
+            ("imap", self.imap),
+            ("pop3", self.pop3),
+            ("manageSieve", self.manage_sieve),
+            (SUBMISSION, self.submission),
+        ]
+        .into_iter()
+        .filter(|(_, off)| !off)
+        .map(|(name, _)| name)
+        .collect()
     }
 }
 
@@ -505,21 +604,20 @@ pub fn is_legacy_service(protocol: &ServiceProtocol) -> bool {
 }
 
 impl Server {
-    /// Whether legacy services are off for this domain, for the answers that
+    /// Which legacy services are off for this domain, for the answers that
     /// must stop offering them: off for the whole server (LP-7), or for the
     /// tenant the domain belongs to (LP-14a). Read per answer, as sign-in
     /// reads it. A name that is no domain here answers for the server alone.
-    pub async fn legacy_protocols_off_for(&self, domain_name: &str) -> trc::Result<bool> {
-        if self.protocol_policy().await?.legacy_protocols.is_disabled() {
-            return Ok(true);
-        }
-        match self.domain(domain_name).await? {
+    pub async fn legacy_off_for(&self, domain_name: &str) -> trc::Result<LegacyOff> {
+        let server = self.protocol_policy().await?;
+        let tenant = match self.domain(domain_name).await? {
             Some(domain) => match domain.id_tenant {
-                Some(tenant_id) => self.tenant_legacy_protocols_off(tenant_id).await,
-                None => Ok(false),
+                Some(tenant_id) => Some(self.tenant_protocol_policy(tenant_id).await?),
+                None => None,
             },
-            None => Ok(false),
-        }
+            None => None,
+        };
+        Ok(LegacyOff::of(&server, tenant.as_ref()))
     }
 }
 
@@ -617,6 +715,36 @@ mod tests {
         ] {
             assert!(!is_legacy_service(&protocol), "{protocol:?}");
         }
+    }
+
+    #[test]
+    fn what_is_off_for_one_account_or_domain() {
+        use inbuxa_features::security::protocol_policy::LegacyProtocols;
+        let mut server = ProtocolPolicy::default();
+        server.set("pop3", LegacyProtocols::Disabled);
+        let mut tenant = TenantProtocolPolicy::default();
+        tenant.set("manageSieve", LegacyProtocols::Disabled);
+
+        let off = LegacyOff::of(&server, Some(&tenant));
+        assert!(off.pop3 && off.manage_sieve && !off.imap && !off.submission);
+        assert!(off.service(&ServiceProtocol::Pop3));
+        assert!(!off.service(&ServiceProtocol::Imap));
+        assert!(
+            !off.service(&ServiceProtocol::Smtp),
+            "sending is still offered"
+        );
+        assert!(!off.service(&ServiceProtocol::Jmap));
+        assert_eq!(off.allowed(), vec!["imap", "submission"]);
+        assert!(off.any() && !off.all());
+
+        let off = LegacyOff::of(&server, None);
+        assert_eq!(off.index(), 0b0010);
+
+        server.set_all(LegacyProtocols::Disabled);
+        let off = LegacyOff::of(&server, None);
+        assert!(off.all());
+        assert_eq!(off.index(), 0b1111);
+        assert!(off.allowed().is_empty());
     }
 
     #[test]

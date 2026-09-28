@@ -6,7 +6,7 @@
  * Modified by Coffey Labs in 2026 for INBUXA.
  */
 
-use crate::{Server, manager::application::Resource, network::legacy::is_legacy_service};
+use crate::{Server, manager::application::Resource};
 use quick_xml::Reader;
 use quick_xml::XmlVersion;
 use quick_xml::events::Event;
@@ -59,11 +59,11 @@ impl Server {
         let _ = writeln!(&mut config, "\t\t\t<Action>settings</Action>");
         // inbuxa: legacy-protocols LP-7, LP-14a
         let legacy_off = match emailaddress.rsplit_once('@') {
-            Some((_, domain)) => self.legacy_protocols_off_for(domain).await?,
-            None => self.legacy_protocols_off_for("").await?,
+            Some((_, domain)) => self.legacy_off_for(domain).await?,
+            None => self.legacy_off_for("").await?,
         };
         for (protocol, service) in &self.core.network.info.services {
-            if legacy_off && is_legacy_service(protocol) {
+            if legacy_off.service(protocol) {
                 continue;
             }
             let (protocol, ports) = match protocol {
