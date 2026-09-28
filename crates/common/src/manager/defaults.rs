@@ -482,6 +482,8 @@ async fn insert_safe_defaults(bp: &mut Bootstrap) -> trc::Result<()> {
 
     // inbuxa: administrator roles stored before a permission existed get it once
     super::granted_permissions::grant_new_admin_permissions(bp).await?;
+    // inbuxa: personal-data catalog: the compliance roles, once per server
+    super::compliance_roles::ensure_compliance_roles(&bp.registry, &bp.data_store).await?;
 
     if bp
         .registry

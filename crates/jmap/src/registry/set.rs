@@ -747,6 +747,16 @@ impl RegistrySet for Server {
                             if let ObjectInner::MaskedEmail(mask) = &new_object.inner {
                                 crate::inbuxa::masked_email::created(self, id, mask).await?;
                             }
+                            // inbuxa: personal-data catalog: a new tenant gets its
+                            // Compliance Officer role
+                            if matches!(new_object.inner, ObjectInner::Tenant(_)) {
+                                common::manager::compliance_roles::tenant_created(
+                                    self.registry(),
+                                    &self.core.storage.data,
+                                    id,
+                                )
+                                .await?;
+                            }
                             response.object.insert(Property::Id, RegistryValue::Id(id));
                             set.response
                                 .created
@@ -800,6 +810,15 @@ impl RegistrySet for Server {
                                     && object.inner.account_id() != Some(Id::from(set.account_id))))
                         })
                     {
+                        // inbuxa: personal-data catalog: a tenant's compliance
+                        // role, while nobody holds it, goes first
+                        let role_released = matches!(object.inner, ObjectInner::Tenant(_))
+                            && common::manager::compliance_roles::tenant_deleting(
+                                self.registry(),
+                                &self.core.storage.data,
+                                id,
+                            )
+                            .await?;
                         match self
                             .registry()
                             .write(RegistryWrite::Delete {
@@ -863,6 +882,15 @@ impl RegistrySet for Server {
                                 set.response.destroyed.push(id);
                             }
                             err => {
+                                // inbuxa: refused for another reason: the role comes back
+                                if role_released {
+                                    common::manager::compliance_roles::tenant_kept(
+                                        self.registry(),
+                                        &self.core.storage.data,
+                                        id,
+                                    )
+                                    .await?;
+                                }
                                 set.response.not_destroyed.append(id, map_write_error(err));
                             }
                         }

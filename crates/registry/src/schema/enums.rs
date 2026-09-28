@@ -1746,6 +1746,8 @@ pub enum Permission {
     SysLegalHoldCreate = 670,
     SysLegalHoldUpdate = 671,
     SysLegalHoldExport = 672,
+    // inbuxa: personal-data catalog, the data inventory and compliance overview
+    SysComplianceGet = 673,
     SysAccountGet = 219,
     SysAccountCreate = 220,
     SysAccountUpdate = 221,

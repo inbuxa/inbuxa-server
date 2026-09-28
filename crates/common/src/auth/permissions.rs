@@ -290,6 +290,12 @@ impl Default for DefaultPermissions {
                     default.superuser.push(permission);
                     default.tenant.push(permission);
                 }
+                // inbuxa: personal-data catalog: the data inventory, the
+                // server's or, inside a tenant, the tenant's slice
+                Permission::SysComplianceGet => {
+                    default.superuser.push(permission);
+                    default.tenant.push(permission);
+                }
                 // inbuxa: AL-12: tenant administrators lock and delegate
                 // within their tenant
                 Permission::SysAccountLockGet

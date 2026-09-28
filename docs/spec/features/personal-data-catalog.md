@@ -526,6 +526,17 @@ it (Settled 3). It has no hold permissions, since legal holds are
 server-only by the tenant ceiling (LH-13), and it sees the tenant's slice of
 the inventory only (§6).
 
+**As built (2026-09-28).** A tenant's accounts can hold only roles of
+their own tenant (MT-3), so the tenant role can't be one server-level role:
+each tenant gets its own "Compliance Officer" role, made once for every
+tenant a server has and whenever a tenant is created; while nobody holds
+it, it is removed with its tenant so it doesn't block the delete. For the
+same reason (a tenant's accounts can't hold the server-level User role),
+both roles carry a user's own permissions as well, and are given in place
+of the default user role. Creations are recorded under `P` `c`, so a role
+an administrator deletes stays deleted
+(`crates/common/src/manager/compliance_roles.rs`).
+
 ### Reaching existing servers
 
 New permissions get ids 673 onward and `COUNT` grows (`enums.rs`,
