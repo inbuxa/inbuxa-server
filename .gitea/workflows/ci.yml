@@ -44,6 +44,10 @@ jobs:
       # schema has, and name nothing that is gone.
       - if: always()
         run: python3 tools/fork/privacy-check.py
+      # The admin reads each expression field's allowed values and variables
+      # from the schema; they're generated from the registry and must match it.
+      - if: always()
+        run: python3 tools/fork/expr-schema.py --check
       - if: always()
         run: python3 -m unittest discover -s tools/fork/tests
 
