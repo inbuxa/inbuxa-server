@@ -139,6 +139,27 @@ impl Element for LegalHoldValue {
     }
 }
 
+/// The get call's own argument: only the active holds covering an account,
+/// through any route (LH-2), for the console's Held badge (LH-14).
+#[derive(Debug, Clone, Default)]
+pub struct LegalHoldGetArguments {
+    pub covering_account: Option<Id>,
+}
+
+impl<'de> DeserializeArguments<'de> for LegalHoldGetArguments {
+    fn deserialize_argument<A>(&mut self, key: &str, map: &mut A) -> Result<(), A::Error>
+    where
+        A: serde::de::MapAccess<'de>,
+    {
+        if key == "coveringAccount" {
+            self.covering_account = map.next_value()?;
+        } else {
+            let _ = map.next_value::<serde::de::IgnoredAny>()?;
+        }
+        Ok(())
+    }
+}
+
 /// The set call's own arguments: why (AU-12).
 #[derive(Debug, Clone, Default)]
 pub struct LegalHoldSetArguments {
@@ -170,7 +191,7 @@ impl JmapObject for LegalHold {
 
     type Comparator = ();
 
-    type GetArguments = ();
+    type GetArguments = LegalHoldGetArguments;
 
     type SetArguments<'de> = LegalHoldSetArguments;
 

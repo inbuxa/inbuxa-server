@@ -131,6 +131,25 @@ pub async fn get(
     } else {
         Default::default()
     };
+    // LH-14: the holds on one account, whether it's live or deleted and kept
+    if let Some(account) = request.arguments.covering_account.take() {
+        let account_id = account.document_id();
+        let covering = match server.member_of(account_id).await {
+            Some(member) => hold::covering(data, &member).await?,
+            None => match inbuxa_features::undelete::data::kept_account(data, account_id).await? {
+                Some(kept) => {
+                    hold::covering(data, &common::hold::kept_member(account_id, &kept)).await?
+                }
+                None => Vec::new(),
+            },
+        };
+        for current in covering {
+            response
+                .list
+                .push(to_value(&current, &properties, summaries.get(&current.id)));
+        }
+        return Ok(response);
+    }
     match ids {
         None => {
             for current in hold::all(data).await? {

@@ -422,6 +422,19 @@ pub async fn test(test: &mut TestServer) {
     assert_eq!(summary["accountsCovered"], 1, "LH-9: {response}");
     assert_eq!(summary["itemsHeld"], 1, "LH-9: {response}");
     assert!(summary["sizeHeld"].as_u64().is_some_and(|s| s > 0), "LH-9: {response}");
+    // LH-14: the holds on one account, for the console's Held badge
+    let (_, response) = admin
+        .hold_call(
+            "inbuxa:LegalHold/get",
+            json!({"coveringAccount": frozen.id_string(), "properties": ["name"]}),
+        )
+        .await;
+    let mut names = response["list"]
+        .as_array()
+        .map(|l| l.iter().filter_map(|h| h["name"].as_str()).collect::<Vec<_>>())
+        .unwrap_or_default();
+    names.sort_unstable();
+    assert_eq!(names, vec!["Matter 7001", "Matter 7002"], "LH-14: {response}");
 
     let (_, response) = frozen
         .hold_call("x:ArchivedItem/set", json!({"destroy": [item_id]}))
