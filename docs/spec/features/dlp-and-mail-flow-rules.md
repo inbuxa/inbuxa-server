@@ -1,8 +1,7 @@
 # Feature spec: data loss prevention and mail flow rules
 
-Status: **questions answered 2026-09-28** (see [Settled](#settled)); the
-detector catalog in §2.3 was widened by answer 6 and is up for approval with
-the rest. Phase 1 of DLP and the rule builder, specced together because they
+Status: **approved 2026-09-28**, with the answers under [Settled](#settled)
+and the detector catalog in §2.3. Phase 1 of DLP and the rule builder, specced together because they
 need the same conditions, the same place in the mail path and the same record
 of what matched. Not a rebuild of an upstream feature, so it has no line in
 SPEC.md §4's table.
