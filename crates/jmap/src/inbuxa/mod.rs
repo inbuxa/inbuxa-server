@@ -17,6 +17,7 @@ pub mod audit_log;
 pub mod ai_limits;
 pub mod log_settings;
 pub mod data_inventory;
+pub mod directory_test;
 pub mod explanation;
 pub mod protocol_policy;
 pub mod tenant_protocol_policy;
