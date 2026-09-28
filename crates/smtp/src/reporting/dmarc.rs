@@ -26,7 +26,10 @@ use mail_auth::{
     common::verify::VerifySignature,
     dkim2::Dkim2Output,
     dmarc::{self},
-    report::{AuthFailureType, IdentityAlignment, PolicyPublished, Record, SPFDomainScope},
+    report::{
+        ActionDisposition, AuthFailureType, IdentityAlignment, PolicyPublished, Record, Report,
+        SPFDomainScope,
+    },
 };
 use registry::{
     schema::{
@@ -459,7 +462,7 @@ impl DmarcReporting for Server {
             .await
             .unwrap_or_else(|| "MAILER-DAEMON@localhost".to_compact_string());
         let mut message = Vec::with_capacity(2048);
-        let _ = mail_auth::report::Report::from(report.report).write_rfc5322(
+        let _ = with_compatible_dispositions(Report::from(report.report)).write_rfc5322(
             &self
                 .eval_if(
                     &self.core.smtp.report.submitter,
@@ -708,5 +711,57 @@ impl DmarcReporting for Server {
                 }
             }
         }
+    }
+}
+
+// inbuxa: RFC 9990 added "pass" to the evaluated disposition for mail that
+// passed DMARC under an enforcing policy. Cloudflare's report intake rejects
+// the whole report with "555 5.7.1 invalid_report_schema" when it sees that
+// value, and older parsers built on the RFC 7489 schema do the same. "none"
+// (no action taken) is valid under both and says the same thing, so reports
+// go out with that instead.
+fn with_compatible_dispositions(mut report: Report) -> Report {
+    for record in &mut report.record {
+        let disposition = &mut record.row.policy_evaluated.disposition;
+        if *disposition == ActionDisposition::Pass {
+            *disposition = ActionDisposition::None;
+        }
+    }
+    report
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use mail_auth::report::DmarcResult;
+
+    fn record(disposition: ActionDisposition) -> Record {
+        Record::new()
+            .with_source_ip("192.0.2.1".parse().unwrap())
+            .with_count(1)
+            .with_action_disposition(disposition)
+            .with_dmarc_dkim_result(DmarcResult::Pass)
+            .with_dmarc_spf_result(DmarcResult::Fail)
+            .with_header_from("example.org")
+    }
+
+    #[test]
+    fn pass_disposition_is_reported_as_none() {
+        let xml = with_compatible_dispositions(
+            Report::new()
+                .with_domain("example.org")
+                .with_record(record(ActionDisposition::Pass))
+                .with_record(record(ActionDisposition::Quarantine))
+                .with_record(record(ActionDisposition::Reject)),
+        )
+        .to_xml();
+
+        assert!(!xml.contains("<disposition>pass</disposition>"), "{xml}");
+        assert!(xml.contains("<disposition>none</disposition>"), "{xml}");
+        assert!(
+            xml.contains("<disposition>quarantine</disposition>"),
+            "{xml}"
+        );
+        assert!(xml.contains("<disposition>reject</disposition>"), "{xml}");
     }
 }

@@ -2,6 +2,8 @@
  * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
+ *
+ * Modified by Coffey Labs in 2026 for INBUXA.
  */
 
 use crate::{
@@ -174,7 +176,8 @@ async fn report_dmarc() {
         let source_ip = record.source_ip().unwrap();
         if source_ip == "192.168.1.2".parse::<IpAddr>().unwrap() {
             assert_eq!(record.count(), 2);
-            assert_eq!(record.action_disposition(), ActionDisposition::Pass);
+            // inbuxa: "pass" goes out as "none" for RFC 7489 parsers
+            assert_eq!(record.action_disposition(), ActionDisposition::None);
             assert_eq!(record.envelope_from(), "hello@example.org");
             assert_eq!(record.header_from(), "bye@example.org");
             assert_eq!(record.envelope_to().unwrap(), "other@example.org");
