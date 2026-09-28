@@ -107,6 +107,7 @@ impl Keeping {
 
 const FEATURE: u8 = b'H';
 const KIND_HOLD: u8 = b'h';
+const KIND_ORIGINAL: u8 = b'o';
 
 /// How many times creating a hold retries when another node took its id.
 const CREATE_ATTEMPTS: usize = 5;
@@ -365,6 +366,40 @@ fn class(id: u32) -> ValueClass {
 
 fn key(id: u32) -> ValueKey<ValueClass> {
     ValueKey::from(class(id))
+}
+
+fn original_class(item_id: u64) -> ValueClass {
+    let mut key = Vec::with_capacity(10);
+    key.push(FEATURE);
+    key.push(KIND_ORIGINAL);
+    key.extend_from_slice(&item_id.to_be_bytes());
+    ValueClass::Any(AnyClass {
+        subspace: SUBSPACE_INBUXA,
+        key,
+    })
+}
+
+/// LH-10: an archived item's deadline from before a hold froze it, so a
+/// release can give it back (or a later one). None for an item held from
+/// its deletion, which never had one.
+pub async fn original_deadline(data: &Store, item_id: u64) -> trc::Result<Option<u64>> {
+    data.get_value::<u64>(ValueKey::from(original_class(item_id)))
+        .await
+        .caused_by(trc::location!())
+}
+
+/// Notes (`Some`) or forgets (`None`) an item's deadline from before it
+/// was frozen.
+pub async fn set_original_deadline(data: &Store, item_id: u64, until: Option<u64>) -> trc::Result<()> {
+    let mut batch = BatchBuilder::new();
+    match until {
+        Some(until) => batch.set(original_class(item_id), until.to_be_bytes().to_vec()),
+        None => batch.clear(original_class(item_id)),
+    };
+    data.write(batch.build_all())
+        .await
+        .caused_by(trc::location!())
+        .map(|_| ())
 }
 
 /// One hold, released or not.

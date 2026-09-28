@@ -298,6 +298,33 @@ pub(crate) async fn set(mut set: RegistrySetResponse<'_>) -> trc::Result<Registr
 
     for id in std::mem::take(&mut set.destroy) {
         match undelete::records::get(data, registry, account_id, id).await? {
+            // inbuxa: LH-7: a held item can't be destroyed; restoring it
+            // still can. The hold is named only to those who may see holds.
+            Some(item)
+                if inbuxa_features::hold::is_held_until(
+                    item.archived_until().timestamp().max(0) as u64,
+                ) =>
+            {
+                let mut why = "A legal hold applies to this item, so it can't be deleted.".to_string();
+                if set
+                    .access_token
+                    .has_permission(registry::schema::enums::Permission::SysLegalHoldGet)
+                {
+                    let names = set
+                        .server
+                        .holds_on(account_id)
+                        .await?
+                        .into_iter()
+                        .map(|hold| hold.name)
+                        .collect::<Vec<_>>();
+                    if !names.is_empty() {
+                        why = format!("Held by {}, so it can't be deleted.", names.join(", "));
+                    }
+                }
+                set.response
+                    .not_destroyed
+                    .append(id, SetError::forbidden().with_description(why));
+            }
             Some(item) => {
                 undelete::records::remove(data, registry, id, &item).await?;
                 set.response.destroyed.push(id);

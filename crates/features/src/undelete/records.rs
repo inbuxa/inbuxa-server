@@ -89,6 +89,54 @@ pub async fn insert(
     Ok(id)
 }
 
+/// Moves an archived item's deadline, and its kept copy's with it: frozen
+/// by a hold (LH-6) or given a real one on release (LH-10). Returns the
+/// item as it now is.
+pub async fn set_deadline(
+    data: &Store,
+    registry: &RegistryStore,
+    id: Id,
+    item: &ArchivedItem,
+    until: u64,
+) -> trc::Result<ArchivedItem> {
+    let account_id = item.account_id().document_id();
+    let blob_hash = item.blob_id().hash.clone();
+    let before = item.archived_until().timestamp() as u64;
+    let mut updated = item.clone();
+    updated.set_archived_until(registry::types::datetime::UTCDateTime::from_timestamp(until as i64));
+
+    // The new link first, so the kept copy is never unlinked in between
+    let mut batch = BatchBuilder::new();
+    batch
+        .with_account_id(account_id)
+        .set(
+            BlobOp::Link {
+                hash: blob_hash.clone(),
+                to: BlobLink::Temporary { until },
+            },
+            vec![],
+        );
+    if before != until {
+        batch.clear(BlobOp::Link {
+            hash: blob_hash,
+            to: BlobLink::Temporary { until: before },
+        });
+    }
+    data::log_change(&mut batch, account_id, registry.assign_id(), id, Change::Updated);
+    data.write(batch.build_all())
+        .await
+        .caused_by(trc::location!())?;
+
+    let mut batch = BatchBuilder::new();
+    batch.set(item_class(id.id()), updated.to_pickled_vec());
+    registry
+        .store()
+        .write(batch.build_all())
+        .await
+        .caused_by(trc::location!())?;
+    Ok(updated)
+}
+
 /// Removes an archived item and releases its kept copy: on restore (UD-9),
 /// on destroy (UD-12) and past its deadline (UD-13).
 pub async fn remove(
@@ -184,15 +232,38 @@ pub async fn get(
     }
 }
 
+/// Every archived item on the server, account by account. Items are
+/// indexed by account only, so the registry's query without a filter,
+/// which reads its all-ids index, finds none of them.
+pub async fn all(data: &Store, registry: &RegistryStore) -> trc::Result<Vec<Id>> {
+    let mut accounts = registry
+        .query::<Vec<Id>>(RegistryQuery::new(ObjectType::Account))
+        .await
+        .caused_by(trc::location!())?
+        .into_iter()
+        .map(|id| id.document_id())
+        .collect::<Vec<_>>();
+    // Deleted accounts still kept have archived items too
+    accounts.extend(data::kept_accounts(data).await?.into_iter().map(|(id, _)| id));
+    accounts.sort_unstable();
+    accounts.dedup();
+    let mut items = Vec::new();
+    for account_id in accounts {
+        items.extend(
+            registry
+                .query::<Vec<Id>>(RegistryQuery::new(ObjectType::ArchivedItem).with_account(account_id))
+                .await
+                .caused_by(trc::location!())?,
+        );
+    }
+    Ok(items)
+}
+
 /// Removes every expired archived item on the server (UD-13), for the
 /// scheduled clean-up.
 pub async fn remove_expired(data: &Store, registry: &RegistryStore) -> trc::Result<usize> {
     let mut removed = 0;
-    for id in registry
-        .query::<Vec<Id>>(RegistryQuery::new(ObjectType::ArchivedItem))
-        .await
-        .caused_by(trc::location!())?
-    {
+    for id in all(data, registry).await? {
         if let Some(item) = registry.object::<ArchivedItem>(id).await?
             && is_expired(&item)
         {

@@ -405,6 +405,11 @@ pub async fn set(
         response.updated.append(id, None);
     }
 
+    // LH-6, LH-10, LH-11: the archive follows what's now held
+    if !response.created.is_empty() || !response.updated.is_empty() {
+        server.settle_archive().await?;
+    }
+
     for id in request.unwrap_destroy().into_valid() {
         response.not_destroyed.append(
             id,

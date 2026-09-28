@@ -33,7 +33,9 @@ const USING: &[&str] = &[
 
 impl Account {
     async fn hold_call(&self, method: &str, mut arguments: Value) -> (String, Value) {
-        arguments["accountId"] = self.id_string().into();
+        if arguments.get("accountId").is_none() {
+            arguments["accountId"] = self.id_string().into();
+        }
         let response = self.jmap_request(USING, json!([[method, arguments, "0"]])).await;
         let call = response
             .0
@@ -362,6 +364,90 @@ pub async fn test(test: &mut TestServer) {
     assert!(
         kept.iter().any(|i| i["name"] == "Kept Contact" && is_held(i)),
         "LH-3: a contact wasn't kept whole: {kept:?}"
+    );
+
+    // LH-6: placing a hold freezes what's already archived; LH-7: frozen
+    // items can't be destroyed; LH-11: releasing one hold of two frees
+    // nothing; LH-10: releasing the last gives a real deadline back
+    admin
+        .registry_update_setting(
+            DataRetention {
+                archive_deleted_items_for: Some(registry::schema::prelude::Duration(
+                    std::time::Duration::from_secs(30 * 86_400),
+                )),
+                ..Default::default()
+            },
+            &[Property::ArchiveDeletedItemsFor],
+        )
+        .await;
+    let frozen = admin
+        .create_user_account("frozen@example.com", "frozen-secret-9031", "Frozen", &[], vec![])
+        .await;
+    let frozen_client = frozen.jmap_client().await;
+    let doomed = import(&frozen_client, "Deleted before the hold", None).await;
+    frozen_client.email_destroy(&doomed).await.unwrap();
+    test.wait_for_tasks().await;
+    let archived = |items: Vec<Value>| {
+        items
+            .into_iter()
+            .find(|i| i["subject"] == "Deleted before the hold")
+            .unwrap_or_else(|| panic!("not archived"))
+    };
+    let item = archived(frozen.archived_items().await);
+    assert!(!is_held(&item), "undelete's 30 days first: {item}");
+    let item_id = item["id"].as_str().unwrap().to_string();
+
+    let response = admin
+        .hold_set(json!({"reason": "First matter", "create": {
+            "a": {"name": "Matter 7001", "scope": {"accounts": [frozen.id_string()]}},
+            "b": {"name": "Matter 7002", "scope": {"accounts": [frozen.id_string()]}}}}))
+        .await;
+    let first = response["created"]["a"]["id"].as_str().unwrap().to_string();
+    let second = response["created"]["b"]["id"].as_str().unwrap().to_string();
+    assert!(
+        is_held(&archived(frozen.archived_items().await)),
+        "test 6, LH-6: the archived item wasn't frozen"
+    );
+
+    let (_, response) = frozen
+        .hold_call("x:ArchivedItem/set", json!({"destroy": [item_id]}))
+        .await;
+    assert_eq!(
+        response["notDestroyed"][item_id.as_str()]["type"], "forbidden",
+        "test 6, LH-7: the owner destroyed a held item: {response}"
+    );
+    assert!(
+        !response.to_string().contains("Matter 70"),
+        "LH-7: the hold was named to someone who can't see holds: {response}"
+    );
+    let (_, response) = admin
+        .hold_call(
+            "x:ArchivedItem/set",
+            json!({"accountId": frozen.id_string(), "destroy": [item_id]}),
+        )
+        .await;
+    assert!(
+        response.to_string().contains("Matter 7001"),
+        "LH-7: the administrator isn't told which hold: {response}"
+    );
+
+    admin
+        .hold_set(json!({"reason": "First settled", "update": {first.as_str(): {"released": true}}}))
+        .await;
+    assert!(
+        is_held(&archived(frozen.archived_items().await)),
+        "test 9, LH-11: releasing one hold of two freed the item"
+    );
+    admin
+        .hold_set(json!({"reason": "Second settled", "update": {second.as_str(): {"released": true}}}))
+        .await;
+    let item = archived(frozen.archived_items().await);
+    assert!(!is_held(&item), "LH-10: the last release left it held: {item}");
+    let until = item["archivedUntil"].as_str().unwrap_or_default().to_string();
+    let grace = chrono::Utc::now() + chrono::Duration::days(29);
+    assert!(
+        until > grace.format("%Y-%m-%dT%H:%M:%S").to_string(),
+        "test 8, LH-10: under 30 days of grace after release: {until}"
     );
 
     // LH-10: release needs a reason, and a released hold stays, read-only

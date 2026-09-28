@@ -470,8 +470,15 @@ mod tests {
             size: 3,
             mailboxes: vec![1],
             keywords: vec![],
+            held_ranges: vec![(Some(10), None)],
+            otherwise_until: Some(20),
         };
         let bytes = Json(&note).serialize().unwrap();
         assert_eq!(Json::<EmailNote>::deserialize(&bytes).unwrap().0, note);
+
+        // A note written before legal holds still reads, as not held
+        let old = br#"{"archived_at":1,"archived_until":2,"size":3,"mailboxes":[1],"keywords":[]}"#;
+        let read = Json::<EmailNote>::deserialize(old).unwrap().0;
+        assert!(read.held_ranges.is_empty() && read.otherwise_until.is_none());
     }
 }

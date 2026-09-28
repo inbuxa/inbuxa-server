@@ -449,7 +449,16 @@ impl Server {
     pub async fn audit_purge(&self) -> trc::Result<usize> {
         let settings = log::settings(self.store()).await?;
         let cutoff = ms().saturating_sub(settings.keep_for_secs.saturating_mul(1000));
-        log::purge(self.store(), cutoff, |_| false).await
+        // LH-6, AU-7: a record about a held account stays while it's held.
+        // Worked out before the purge, which can't wait on lookups.
+        let held = self.held_accounts().await?;
+        log::purge(self.store(), cutoff, |record| {
+            record
+                .target
+                .account_id
+                .is_some_and(|account_id| held.contains(&account_id))
+        })
+        .await
     }
 }
 
