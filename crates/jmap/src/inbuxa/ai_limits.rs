@@ -206,6 +206,8 @@ pub async fn set(
             Some(error) => response.not_updated.append(id, error),
             None => {
                 limits::set(data, &limits).await?;
+                // inbuxa: personal-data catalog: the inventory's history
+                server.inventory_snapshot_after("inbuxa:AiLimits").await;
                 response.updated.append(id, None);
             }
         }

@@ -117,6 +117,8 @@ pub enum GetRequestMethod {
     DeletedAccount(Box<GetRequest<crate::object::inbuxa_deleted_account::DeletedAccount>>),
     AiLimits(Box<GetRequest<crate::object::inbuxa_ai_limits::AiLimits>>),
     LogSettings(Box<GetRequest<crate::object::inbuxa_log_settings::LogSettings>>),
+    DataInventory(Box<GetRequest<crate::object::inbuxa_data_inventory::DataInventory>>),
+    InventorySnapshot(Box<GetRequest<crate::object::inbuxa_inventory_snapshot::InventorySnapshot>>),
     AuditEvent(Box<GetRequest<crate::object::inbuxa_audit::AuditEvent>>),
     AuditSettings(Box<GetRequest<crate::object::inbuxa_audit::AuditSettings>>),
     AccountLock(Box<GetRequest<crate::object::inbuxa_account_lock::AccountLock>>),

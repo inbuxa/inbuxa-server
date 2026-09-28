@@ -455,6 +455,20 @@ impl RequestHandler for Server {
                         .await?
                         .into()
                 }
+                // inbuxa: inbuxa:DataInventory/get
+                GetRequestMethod::DataInventory(mut req) => {
+                    resolve_account_id(&mut req.account_id, method_name.obj, access_token)?;
+                    crate::inbuxa::data_inventory::inventory_get(self, access_token, *req)
+                        .await?
+                        .into()
+                }
+                // inbuxa: inbuxa:InventorySnapshot/get
+                GetRequestMethod::InventorySnapshot(mut req) => {
+                    resolve_account_id(&mut req.account_id, method_name.obj, access_token)?;
+                    crate::inbuxa::data_inventory::snapshot_get(self, access_token, *req)
+                        .await?
+                        .into()
+                }
                 // inbuxa: account lock with delegation (AL-1)
                 GetRequestMethod::AccountLock(mut req) => {
                     resolve_account_id(&mut req.account_id, method_name.obj, access_token)?;

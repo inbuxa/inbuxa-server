@@ -24,6 +24,7 @@ pub mod branding;
 pub mod hold;
 pub mod lock;
 pub mod masked_email;
+pub mod privacy;
 pub mod security;
 pub mod tenancy;
 pub mod undelete;

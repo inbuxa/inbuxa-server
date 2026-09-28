@@ -392,6 +392,8 @@ pub async fn settings_set(
             Some(error) => response.not_updated.append(id, error),
             None => {
                 log::set_settings(server.store(), &settings).await?;
+                // Audit retention is also the inventory's (personal-data catalog)
+                server.inventory_snapshot_after("inbuxa:AuditSettings").await;
                 response.updated.append(id, None);
             }
         }

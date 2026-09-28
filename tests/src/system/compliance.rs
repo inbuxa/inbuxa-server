@@ -185,6 +185,95 @@ pub async fn test(test: &mut TestServer) {
     let (name, response) = call(&t_officer, "inbuxa:LegalHold/get", json!({"ids": null})).await;
     assert_eq!(name, "error", "LH-13: the tenant officer read holds: {response}");
 
+    // The data inventory (§6): the officer reads it, facts not verdicts
+    let (name, response) = call(&officer, "inbuxa:DataInventory/get", json!({"ids": null})).await;
+    assert_eq!(name, "inbuxa:DataInventory/get", "{response}");
+    let inventory = response["list"][0].clone();
+    let ids: Vec<&str> = inventory["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|i| i["id"].as_str())
+        .collect();
+    assert!(ids.contains(&"x:UserAccount") && ids.contains(&"log-file"), "{ids:?}");
+    assert!(inventory["summary"]["collected"].as_u64().unwrap_or(0) > 0);
+    assert!(!inventory.to_string().to_lowercase().contains("complian"), "facts only");
+
+    // Somebody without the permission is refused
+    let plain = admin
+        .create_user_account("plain@example.com", "plain-secret-1182", "Plain", &[], vec![])
+        .await;
+    let (name, _) = call(&plain, "inbuxa:DataInventory/get", json!({"ids": null})).await;
+    assert_eq!(name, "error", "a user without sysComplianceGet read the inventory");
+
+    // A tenant's officer sees the tenant's slice, and no processors
+    let (_, response) = call(&t_officer, "inbuxa:DataInventory/get", json!({"ids": null})).await;
+    let slice = &response["list"][0];
+    assert!(
+        slice["items"].as_array().is_some_and(|items| !items.is_empty()
+            && items.iter().all(|i| i["scope"] == "tenant")),
+        "{slice}"
+    );
+    assert_eq!(slice["processors"], json!([]));
+
+    // A webhook to another host makes it a candidate processor, and the
+    // change is in the inventory's history
+    let (_, response) = call(
+        &admin,
+        "x:WebHook/set",
+        json!({"create": {"w": {"url": "https://hooks.example.net/in", "enable": true}}}),
+    )
+    .await;
+    assert!(response["created"].get("w").is_some(), "{response}");
+    let (_, response) = call(&officer, "inbuxa:DataInventory/get", json!({"ids": null})).await;
+    let inventory = &response["list"][0];
+    assert!(
+        inventory["processors"]
+            .as_array()
+            .is_some_and(|p| p.iter().any(|p| p["host"] == "hooks.example.net")),
+        "{inventory}"
+    );
+    let webhooks = inventory["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|i| i["id"] == "webhooks")
+        .unwrap();
+    assert_eq!(webhooks["collected"], json!(true));
+    assert_eq!(webhooks["leavesHost"], json!(true));
+    let (_, response) = call(
+        &officer,
+        "inbuxa:InventorySnapshot/get",
+        json!({"ids": null, "properties": ["id", "takenAt", "trigger", "summary"]}),
+    )
+    .await;
+    let snapshots = response["list"].as_array().cloned().unwrap_or_default();
+    assert!(
+        snapshots
+            .iter()
+            .any(|s| s["trigger"]["kind"] == "settingChanged" && s["trigger"]["setting"] == "x:WebHook"),
+        "the webhook's snapshot: {snapshots:?}"
+    );
+    assert!(snapshots.iter().all(|s| s.get("inventory").is_none()), "left out when not asked");
+
+    // A retention change reads through
+    let (_, response) = call(
+        &admin,
+        "x:DataRetention/set",
+        json!({"update": {"singleton": {"holdTracesFor": 604800000}}}),
+    )
+    .await;
+    assert!(response["updated"].get("singleton").is_some(), "{response}");
+    let (_, response) = call(&officer, "inbuxa:DataInventory/get", json!({"ids": null})).await;
+    let trace = response["list"][0]["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|i| i["id"] == "x:Trace")
+        .cloned()
+        .unwrap();
+    assert_eq!(trace["retention"]["days"], json!(7), "{trace}");
+
     // A tenant can still be deleted: its unused role goes with it
     let spare = admin
         .registry_create_object(Tenant {

@@ -64,6 +64,12 @@ impl Response<'_> {
                         GetResponseMethod::LogSettings(response) => {
                             response.eval_jptr(path, &mut results)
                         }
+                        GetResponseMethod::DataInventory(response) => {
+                            response.eval_jptr(path, &mut results)
+                        }
+                        GetResponseMethod::InventorySnapshot(response) => {
+                            response.eval_jptr(path, &mut results)
+                        }
                         GetResponseMethod::AuditEvent(response) => {
                             response.eval_jptr(path, &mut results)
                         }

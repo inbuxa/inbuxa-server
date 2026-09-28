@@ -47,6 +47,8 @@ impl Response<'_> {
                 GetRequestMethod::DeletedAccount(request) => request.resolve_references(self)?,
                 GetRequestMethod::AiLimits(request) => request.resolve_references(self)?,
                 GetRequestMethod::LogSettings(request) => request.resolve_references(self)?,
+                GetRequestMethod::DataInventory(request) => request.resolve_references(self)?,
+                GetRequestMethod::InventorySnapshot(request) => request.resolve_references(self)?,
                 GetRequestMethod::AuditEvent(request) => request.resolve_references(self)?,
                 GetRequestMethod::AuditSettings(request) => request.resolve_references(self)?,
                 GetRequestMethod::AccountLock(request) => request.resolve_references(self)?,

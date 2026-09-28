@@ -104,6 +104,8 @@ pub enum GetResponseMethod {
     DeletedAccount(GetResponse<crate::object::inbuxa_deleted_account::DeletedAccount>),
     AiLimits(GetResponse<crate::object::inbuxa_ai_limits::AiLimits>),
     LogSettings(GetResponse<crate::object::inbuxa_log_settings::LogSettings>),
+    DataInventory(GetResponse<crate::object::inbuxa_data_inventory::DataInventory>),
+    InventorySnapshot(GetResponse<crate::object::inbuxa_inventory_snapshot::InventorySnapshot>),
     AuditEvent(GetResponse<crate::object::inbuxa_audit::AuditEvent>),
     AuditSettings(GetResponse<crate::object::inbuxa_audit::AuditSettings>),
     AccountLock(GetResponse<crate::object::inbuxa_account_lock::AccountLock>),
@@ -354,6 +356,18 @@ impl<'x> From<GetResponse<crate::object::inbuxa_ai_limits::AiLimits>> for Respon
 impl<'x> From<GetResponse<crate::object::inbuxa_log_settings::LogSettings>> for ResponseMethod<'x> {
     fn from(value: GetResponse<crate::object::inbuxa_log_settings::LogSettings>) -> Self {
         ResponseMethod::Get(GetResponseMethod::LogSettings(value))
+    }
+}
+
+impl<'x> From<GetResponse<crate::object::inbuxa_data_inventory::DataInventory>> for ResponseMethod<'x> {
+    fn from(value: GetResponse<crate::object::inbuxa_data_inventory::DataInventory>) -> Self {
+        ResponseMethod::Get(GetResponseMethod::DataInventory(value))
+    }
+}
+
+impl<'x> From<GetResponse<crate::object::inbuxa_inventory_snapshot::InventorySnapshot>> for ResponseMethod<'x> {
+    fn from(value: GetResponse<crate::object::inbuxa_inventory_snapshot::InventorySnapshot>) -> Self {
+        ResponseMethod::Get(GetResponseMethod::InventorySnapshot(value))
     }
 }
 
