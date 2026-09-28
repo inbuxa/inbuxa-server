@@ -112,3 +112,18 @@ a fresh copy for each one. See `docs/spec/compat-tests.md`.
 tools/fork/run-compat.sh --store /srv/inbuxa-copy/rocks.db \
     --admin 'admin@example.org:PASSWORD' --recordings ~/compat
 ```
+
+## expr-schema.py
+
+Writes each expression field's allowed constants and variables, read from the
+generated registry code, into the schema the server serves INBUXA Admin
+(`resources/schema/schema.json.gz` and its checksum). The admin uses them to
+offer plain choices instead of a free-text box.
+
+```bash
+tools/fork/expr-schema.py          # update the schema
+tools/fork/expr-schema.py --check  # exit 1 if it's out of date (CI)
+```
+
+Re-run it after anything that regenerates the registry, an upstream import
+included.
