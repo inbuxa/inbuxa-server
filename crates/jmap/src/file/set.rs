@@ -149,9 +149,15 @@ impl FileNodeSet for Server {
                 };
 
             // Validate hierarchy
-            if let Err(err) =
-                validate_file_node_hierarchy(None, &file_node, is_shared, &cache, &created_folders)
-            {
+            // inbuxa: AL-7: a writing delegate may add at the top of a
+            // locked account, which may hold no folders at all
+            if let Err(err) = validate_file_node_hierarchy(
+                None,
+                &file_node,
+                is_shared && !access_token.delegate_may_write(account_id),
+                &cache,
+                &created_folders,
+            ) {
                 response.not_created.append(id, err);
                 continue 'create;
             }

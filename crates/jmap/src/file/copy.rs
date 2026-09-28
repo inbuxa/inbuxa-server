@@ -226,9 +226,14 @@ impl FileNodeCopy for Server {
                     }
                 };
 
-            if let Err(err) =
-                validate_file_node_hierarchy(None, &file_node, is_shared, &cache, &created_folders)
-            {
+            // inbuxa: AL-7: a writing delegate may add at the top
+            if let Err(err) = validate_file_node_hierarchy(
+                None,
+                &file_node,
+                is_shared && !access_token.delegate_may_write(account_id),
+                &cache,
+                &created_folders,
+            ) {
                 response.not_created.append(id, err);
                 continue 'create;
             }
@@ -362,7 +367,7 @@ impl FileNodeCopy for Server {
                     );
                     continue 'create;
                 }
-            } else if is_shared {
+            } else if is_shared && !access_token.delegate_may_write(account_id) {
                 response.not_created.append(
                     id,
                     SetError::forbidden()

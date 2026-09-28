@@ -143,6 +143,29 @@ impl Server {
                         }
                     }
                 }
+                // inbuxa: AL-7: a delegate reaches the whole locked account,
+                // mail, calendars, contacts and files, even a kind it holds
+                // none of yet, so an empty one reads as empty rather than
+                // refused. What it may see or change there is still each
+                // container's grant.
+                for delegation in delegations.iter() {
+                    let whole: Bitmap<Collection> = Bitmap::from_iter([
+                        Collection::Mailbox,
+                        Collection::Email,
+                        Collection::Calendar,
+                        Collection::CalendarEvent,
+                        Collection::AddressBook,
+                        Collection::ContactCard,
+                        Collection::FileNode,
+                    ]);
+                    match access_to.iter_mut().find(|a| a.account_id == delegation.account_id) {
+                        Some(entry) => entry.collections.union(&whole),
+                        None => access_to.push(AccessTo {
+                            account_id: delegation.account_id,
+                            collections: whole,
+                        }),
+                    }
+                }
 
                 let now = now();
                 let mut credential_version = 0;
@@ -817,6 +840,13 @@ impl AccessToken {
 
     /// inbuxa: AL-5: this account's delegation into a locked account, if it
     /// has one that hasn't ended.
+    /// inbuxa: AL-6, AL-7: a delegate at organize or full, who may add to
+    /// the locked account as its owner could, top-level folders included.
+    pub fn delegate_may_write(&self, account_id: u32) -> bool {
+        self.delegation(account_id)
+            .is_some_and(|d| d.access != inbuxa_features::lock::Access::Read)
+    }
+
     pub fn delegation(&self, account_id: u32) -> Option<&super::Delegation> {
         let now = now();
         self.inner
