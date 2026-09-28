@@ -193,6 +193,15 @@ pub async fn test(test: &mut TestServer) {
         assert_eq!(name, method, "AL-7: {method} refused to the delegate: {response}");
     }
 
+    // AL-6: reading adds nothing, not even at the top of empty Files
+    let (_, response) = delegate
+        .call(
+            "FileNode/set",
+            json!({"accountId": owner_id, "create": {"f": {"name": "Notes", "parentId": null}}}),
+        )
+        .await;
+    assert!(response["created"].get("f").is_none(), "AL-6: a read delegate added a file: {response}");
+
     // The delegate reads the mail that arrived
     let (_, found) = delegate
         .call(
@@ -234,6 +243,27 @@ pub async fn test(test: &mut TestServer) {
     assert!(
         response["updated"].get(owner_id.as_str()).is_some(),
         "AL-5: {response}"
+    );
+
+    // AL-7: organize adds at the top of the locked account's Files, which
+    // held none, and sees what it made
+    let (_, response) = delegate
+        .call(
+            "FileNode/set",
+            json!({"accountId": owner_id, "create": {"f": {"name": "Handover notes", "parentId": null}}}),
+        )
+        .await;
+    let folder_id = response["created"]["f"]["id"]
+        .as_str()
+        .unwrap_or_else(|| panic!("AL-7: organize couldn't add to empty Files: {response}"))
+        .to_string();
+    let (_, response) = delegate
+        .call("FileNode/get", json!({"accountId": owner_id, "ids": [folder_id]}))
+        .await;
+    assert_eq!(
+        response["list"].as_array().map(Vec::len),
+        Some(1),
+        "AL-7: the delegate can't see the folder it made: {response}"
     );
 
     // Test 12, AL-6, AL-7: organize makes folders it can see, moves mail,

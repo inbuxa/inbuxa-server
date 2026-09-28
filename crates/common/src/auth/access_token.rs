@@ -840,6 +840,13 @@ impl AccessToken {
 
     /// inbuxa: AL-5: this account's delegation into a locked account, if it
     /// has one that hasn't ended.
+    /// inbuxa: AL-6, AL-7: a delegate at organize or full, who may add to
+    /// the locked account as its owner could, top-level folders included.
+    pub fn delegate_may_write(&self, account_id: u32) -> bool {
+        self.delegation(account_id)
+            .is_some_and(|d| d.access != inbuxa_features::lock::Access::Read)
+    }
+
     pub fn delegation(&self, account_id: u32) -> Option<&super::Delegation> {
         let now = now();
         self.inner
