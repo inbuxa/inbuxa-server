@@ -1,10 +1,11 @@
 # Feature spec: data loss prevention and mail flow rules
 
-Status: **draft for approval.** Phase 1 of DLP and the rule builder, specced
-together because they need the same conditions, the same place in the mail
-path and the same record of what matched. Not a rebuild of an upstream
-feature, so it has no line in SPEC.md §4's table. Open questions are under
-[For John](#for-john); nothing is built until they're answered.
+Status: **questions answered 2026-09-28** (see [Settled](#settled)); the
+detector catalog in §2.3 was widened by answer 6 and is up for approval with
+the rest. Phase 1 of DLP and the rule builder, specced together because they
+need the same conditions, the same place in the mail path and the same record
+of what matched. Not a rebuild of an upstream feature, so it has no line in
+SPEC.md §4's table.
 
 ## Provenance
 
@@ -18,6 +19,7 @@ Written for the record SPEC.md §3 rule 3 asks for. Sources, and nothing else:
 | `inbuxa-drafts/queue/dlp.md`, `rule-builder.md` | Own | What John asked for and settled |
 | The personal-data catalog spec and the audit-hold-lock spec | Own | Roles, the audit log, legal holds, the catalog check |
 | RFC 5321, RFC 3463 (enhanced status codes), RFC 8620/8621 (JMAP) | Public | Refusal codes and the submission error shape |
+| The issuing authorities' published formats and check-digit rules for each identifier in §2.3 (ISO 13616, ISO/IEC 7812, ISO 7064, and each national scheme's own publication) | Public | The detector rules; each is implemented from its publication and tested against its published examples |
 
 No Enterprise-only file or snippet was used, and no third-party DLP product
 was consulted for design: the detectors are public checksum and format rules
@@ -104,7 +106,7 @@ touch it):
 | `exceptions` | Any matching one skips the rule |
 | `actions` | What happens (list below) |
 | `stopProcessing` | Later rules don't run for this message |
-| `tenantId` | Server-level (none) or one tenant's; see [For John](#for-john) Q3 |
+| `tenantId` | Always none in this version: rules are server-level (settled answer 3); a **Tenant** condition narrows a rule to tenants |
 | `createdBy`, `updatedAt` | |
 
 Every create, update and delete is audited with its before and after, like
@@ -118,8 +120,9 @@ Shared by both kinds:
 | Condition | Matches when |
 |---|---|
 | Sender | the sender is one of the chosen accounts, or in a chosen group, domain or tenant |
+| Tenant | the sender is in one of the chosen tenants |
 | Recipient | any recipient is one of the chosen addresses, domains, groups |
-| **Recipient outside** | any recipient isn't at a domain this server hosts (or, with a tenant rule, isn't in the tenant) |
+| **Recipient outside** | any recipient isn't at a domain this server hosts |
 | Subject or body contains | any of a list of words or phrases (whole words, case-insensitive) |
 | Subject or body matches | a regular expression (the `regex` crate: linear time, no backtracking) |
 | Header | a header exists, or its value contains or matches |
@@ -127,21 +130,94 @@ Shared by both kinds:
 | **Can't be inspected** | an attachment is encrypted or password-protected (ZIP, PDF, Office), or bigger than the inspection limit |
 | Message size | over a limit |
 
-DLP adds **detectors**, each with a minimum count (for example "5 or more card
-numbers"):
+DLP adds **detectors**. Each counts what it finds, and a rule sets a minimum
+(for example "5 or more card numbers"). A detector is one of two strengths:
 
-| Detector | Rule |
-|---|---|
-| Payment card number | 13–19 digits, spaces or dashes allowed, a known issuer prefix, passes Luhn |
-| IBAN | country code, check digits and length for that country, passes ISO 13616 mod 97 |
-| US Social Security number | `AAA-GG-SSSS` or nine digits beside words like "SSN"; never area 000, 666 or 9xx, group 00, serial 0000 |
-| Word list | a list the organization maintains (project names, "confidential"), counted |
-| Pattern | the organization's own regular expression, counted |
+- **Checked**: the identifier has a published check digit or checksum, so a
+  random number rarely passes. Found on its own.
+- **Needs a word**: the format is too common to trust alone (nine digits, a
+  date). Counted only with a corroborating word nearby, within 50 characters
+  either side, in the languages where the identifier is used ("passport",
+  "Reisepass", "pasaporte"...).
+
+The catalog (settled answer 6: the recognized, protected identifiers, not a
+chosen few). Each row is one table entry and one check function in
+`crates/features/src/mailflow/detectors/`:
+
+| Region | Detector | Strength | Rule |
+|---|---|---|---|
+| Any | Payment card number | Checked | 13–19 digits, spaces or dashes allowed, a known issuer prefix (ISO/IEC 7812), Luhn |
+| Any | IBAN | Checked | country code, length for that country, ISO 13616 mod 97 |
+| Any | SWIFT/BIC | Needs a word | 8 or 11 characters, a valid country code in positions 5–6 |
+| Any | Email addresses, in bulk | Checked | a count of distinct addresses (a customer list leaving), not one address |
+| Any | Phone numbers, in bulk | Needs a word | a count of distinct numbers in international or national form |
+| Any | Date of birth | Needs a word | a date beside "born", "DOB", "date of birth" and their translations |
+| Any | Passport number | Needs a word | the formats of the issuing countries in this table |
+| Any | Private key | Checked | a PEM or OpenSSH private-key block |
+| Any | Cloud and service credentials | Checked | the published prefixes and lengths: AWS access key IDs, GitHub tokens, Slack tokens, Stripe live secret keys, Google API keys |
+| US | Social Security number | Checked | `AAA-GG-SSSS`, or nine digits with a word; never area 000, 666 or 9xx, group 00, serial 0000 |
+| US | ITIN | Checked | 9XX-GG-SSSS with the IRS's group ranges |
+| US | EIN | Needs a word | a valid IRS prefix and seven digits |
+| US | Bank routing number (ABA) | Checked | nine digits, a valid Federal Reserve prefix, the 3-7-1 checksum |
+| US | Driver's license | Needs a word | each state's published format |
+| US | Medicare Beneficiary Identifier | Checked | CMS's 11-character pattern and excluded letters |
+| US | National Provider Identifier | Checked | ten digits, Luhn over the `80840` prefix |
+| US | DEA registration number | Checked | two letters, seven digits, DEA's check digit |
+| UK | National Insurance number | Checked | two letters (HMRC's excluded prefixes), six digits, A–D |
+| UK | NHS number | Checked | ten digits, mod 11 |
+| UK | Unique Taxpayer Reference | Needs a word | ten digits |
+| Canada | Social Insurance Number | Checked | nine digits, Luhn |
+| Australia | Tax File Number | Checked | weighted mod 11 |
+| Australia | Medicare number | Checked | ten digits, weighted check digit |
+| EU | Germany: tax ID (Steuer-ID) | Checked | eleven digits, ISO 7064 MOD 11,10 |
+| EU | Germany: ID card number | Checked | nine characters, the 7-3-1 check digit |
+| EU | France: social security number (NIR) | Checked | fifteen characters, mod 97 key |
+| EU | Spain: DNI and NIE | Checked | eight digits and the mod 23 letter |
+| EU | Italy: codice fiscale | Checked | sixteen characters, the check letter |
+| EU | Netherlands: BSN | Checked | nine digits, the eleven test |
+| EU | Belgium: national number | Checked | eleven digits, mod 97 |
+| EU | Poland: PESEL | Checked | eleven digits, weighted check digit |
+| EU | Sweden: personnummer | Checked | a date, three digits and a Luhn check digit |
+| EU | Denmark: CPR number | Needs a word | a valid date and four digits |
+| EU | Finland: personal identity code | Checked | a date, a century sign, three digits, the mod 31 character |
+| EU | Ireland: PPS number | Checked | seven digits, one or two letters, mod 23 |
+| EU | Portugal: NIF | Checked | nine digits, mod 11 |
+| EU | Austria: social insurance number | Checked | ten digits, weighted check digit |
+| Europe | Norway: national identity number | Checked | eleven digits, two mod 11 check digits |
+| Europe | Switzerland: AHV number | Checked | `756`, then ten digits, EAN-13 check |
+| Asia | India: Aadhaar | Checked | twelve digits, Verhoeff |
+| Asia | India: PAN | Needs a word | five letters, four digits, a letter |
+| Asia | China: resident ID | Checked | eighteen characters, ISO 7064 MOD 11-2 |
+| Asia | Japan: My Number | Checked | twelve digits, weighted check digit |
+| Asia | Singapore: NRIC and FIN | Checked | a letter, seven digits, the check letter |
+| Asia | South Korea: resident registration number | Needs a word | thirteen digits with a valid date |
+| Americas | Brazil: CPF and CNPJ | Checked | two mod 11 check digits |
+| Americas | Mexico: CURP | Checked | eighteen characters, the check digit |
+| Africa | South Africa: ID number | Checked | thirteen digits with a valid date, Luhn |
+| Any | Word list | — | a list the organization maintains, counted |
+| Any | Pattern | — | the organization's own regular expression, counted |
+
+Some protected data has no number to find: health conditions, religion,
+union membership, sexual orientation, criminal records. No detector claims to
+recognize those; a **word list** is how an organization covers its own terms
+for them, and the console offers editable starting lists (medical terms,
+diagnosis codes as ICD-10 patterns) rather than presenting them as detection.
+
+**Templates**, so a policy doesn't pick forty detectors one at a time. Each
+is a named set, editable once added, and named for what it finds, never for a
+law: *Payment cards and bank accounts*, *US personal identifiers*, *UK
+personal identifiers*, *EU national identifiers*, *Health identifiers* (the NHS number, the US Medicare Beneficiary
+Identifier, NPI and DEA numbers, the Australian Medicare number), *Credentials and keys*, *Contact lists*.
+
+The catalog grows by table entry: a new identifier is one row, one check
+function and its published examples as tests.
 
 What the detectors read: the subject, every text and HTML part (as text),
 and attachments whose detected type is text (`text/*`, CSV, JSON, XML).
-Office and PDF files are read only if Q2 says so; until then they count as
-**can't be inspected** so a policy can still act on them. Inspection stops at
+Office documents (DOCX, XLSX, PPTX, ODT, ODS, ODP) are read too (settled
+answer 2): they're ZIP files of XML, unpacked and read in-house with limits on
+unpacked size and entry count. PDF files count as **can't be inspected** in
+this version, so a policy can still act on them. Inspection stops at
 a limit per message (proposed 10 MB of text), and what's past it counts as
 can't be inspected too.
 
@@ -176,7 +252,7 @@ that warned; if a block or hold rule also matches, that still applies.
 **Mail apps (SMTP).** They show whatever text the server returns, so the
 refusal says how to override: `550 5.7.1 <notice>. To send anyway, start the
 subject with [override: your reason]`. On the next attempt the engine strips
-the tag before DKIM signing, and records the reason. See Q1.
+the tag before DKIM signing, and records the reason (settled answer 1).
 
 A block's refusal uses the same error path with `inbuxa:dlpBlocked` in the
 webmail.
@@ -202,8 +278,8 @@ A reviewer, under **Management › Compliance › Held mail**:
 - **rejects** it with a reason: it's removed from the queue and the sender
   gets a notice with the reviewer's note, not their name.
 
-Unreviewed mail is rejected after a set time (Q5), with a notice to the
-sender. Emails › Queue shows held mail as held and refuses **Retry** on it, so
+Unreviewed mail is rejected back to the sender after **7 days**, with a
+notice (settled answer 5); the number is a setting. Emails › Queue shows held mail as held and refuses **Retry** on it, so
 nobody can deliver it around the review. The sender can't unsend it either
 once it's held (the webmail says so).
 
@@ -232,9 +308,11 @@ New permissions (ids from 674):
 | `sysDlpReviewGet` | See held mail and open it |
 | `sysDlpReviewUpdate` | Release or reject held mail |
 
-Proposed defaults: **Administrator** has all; **Compliance Officer**
-(server-level) has `sysDlpPolicyGet`, `sysDlpReviewGet`, `sysDlpReviewUpdate`;
-tenant roles per Q3. See Q4 on who edits DLP rules.
+**Administrator** has all. **Compliance Officer** (server-level) has
+`sysDlpPolicyGet`, `sysDlpReviewGet` and `sysDlpReviewUpdate`: officers see
+the rules and review held mail, administrators edit (settled answer 4), so
+"officers change no setting" stays true. Tenant roles get none: rules and the
+review queue are server-level (settled answer 3).
 
 ### 2.9 Privacy catalog
 
@@ -292,8 +370,10 @@ message queued by a node without the engine (held message format unchanged).
 ## 6. Phases
 
 1. This spec, approved.
-2. Engine, conditions, detectors, transport actions; DLP block and warn over
-   SMTP and JMAP; audit records; catalog entries.
+2. Engine, conditions, the detector framework and the catalog in §2.3,
+   Office text extraction, transport actions; DLP block and warn over SMTP and
+   JMAP; audit records; catalog entries. The detector catalog may land in
+   more than one PR (by region), each with its published test vectors.
 3. Hold for review: review records, release, reject, expiry, queue guard.
 4. Console: DLP rules, held mail, mail flow rules.
 5. Webmail dialogs; docs; a row in `inbuxa-drafts/divergence-log.md`.
@@ -309,25 +389,20 @@ Each phase is its own PR with tests; releases as John decides.
 - Detectors find formats, not meaning: a card number in a harmless test
   message matches; a number written in words doesn't.
 
-## For John
+## Settled
 
-1. **Override from mail apps.** Recommended: the `[override: reason]` subject
-   tag, stripped before sending. Alternatives: no override outside the
-   webmail (mail apps get warn rules as blocks), or a header only a few apps
-   can set.
-2. **Office and PDF attachments.** Recommended: read DOCX, XLSX, PPTX and ODF
-   in this version (ZIP plus XML, done in-house, no new service), PDF later.
-   Alternative: all of them count as can't be inspected until a later spec.
-3. **Tenants.** Recommended: server-level rules only in this version, with a
-   tenant condition, so a service provider sets policy for everyone.
-   Alternative: tenant administrators write rules for their own tenant too
-   (more to build: a tenant ceiling on actions, a tenant's review queue).
-4. **Who edits DLP rules.** Recommended: administrators edit, compliance
-   officers see rules and review held mail, keeping "officers change no
-   setting" true. Alternative: officers edit DLP rules too.
-5. **Unreviewed held mail.** Recommended: rejected back to the sender after 7
-   days, with a notice. Alternatives: a different number, or held until
-   someone decides.
-6. **Detectors in the first version.** Recommended: the five above. Others
-   (UK NI number, EU national IDs, passport numbers) are a table entry each
-   later; name any that must be there from the start.
+John, 2026-09-28, all six as recommended, with 6 widened:
+
+1. **Override from mail apps**: the `[override: reason]` subject tag, stripped
+   before sending (§2.5).
+2. **Office and PDF**: Office documents are read in this version; PDF counts
+   as can't be inspected (§2.3).
+3. **Tenants**: server-level rules only, with a Tenant condition (§2.2, §2.8).
+4. **Who edits DLP rules**: administrators; compliance officers see the rules
+   and review held mail (§2.8).
+5. **Unreviewed held mail**: rejected back to the sender after 7 days, with a
+   notice (§2.6).
+6. **Detectors**: the five proposed "and any other recognized and protected
+   PII", which §2.3 turns into a catalog of identifiers with published formats
+   and checks, plus templates. Data with no number to find (health,
+   religion...) is covered by word lists, not claimed as detection.
