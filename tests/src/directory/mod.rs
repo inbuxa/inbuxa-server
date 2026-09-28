@@ -16,6 +16,9 @@ pub mod per_domain; // inbuxa: per-domain directories
 pub mod sql;
 pub mod synchronization;
 pub mod unavailable;
+// inbuxa: upstream's issuer.rs (since v0.16.23) is left out. It tests routing a
+// token that names no address by its issuer, which upstream ships in
+// Enterprise; here such a token gets the server's default directory (DIR-2).
 
 #[tokio::test(flavor = "multi_thread")]
 pub async fn directory_tests() {

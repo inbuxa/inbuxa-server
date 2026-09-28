@@ -3023,6 +3023,7 @@ impl EnumImpl for DnsServerBootstrapType {
             b"Vultr" => DnsServerBootstrapType::Vultr,
             b"WebSupport" => DnsServerBootstrapType::WebSupport,
             b"YandexCloud" => DnsServerBootstrapType::YandexCloud,
+            b"PowerDns" => DnsServerBootstrapType::PowerDns,
         }
         .copied()
     }
@@ -3100,6 +3101,7 @@ impl EnumImpl for DnsServerBootstrapType {
             DnsServerBootstrapType::Vultr => "Vultr",
             DnsServerBootstrapType::WebSupport => "WebSupport",
             DnsServerBootstrapType::YandexCloud => "YandexCloud",
+            DnsServerBootstrapType::PowerDns => "PowerDns",
         }
     }
 
@@ -3180,11 +3182,12 @@ impl EnumImpl for DnsServerBootstrapType {
             68 => Some(DnsServerBootstrapType::Vultr),
             69 => Some(DnsServerBootstrapType::WebSupport),
             70 => Some(DnsServerBootstrapType::YandexCloud),
+            71 => Some(DnsServerBootstrapType::PowerDns),
             _ => None,
         }
     }
 
-    const COUNT: usize = 71;
+    const COUNT: usize = 72;
 }
 
 impl serde::Serialize for DnsServerBootstrapType {
@@ -3281,6 +3284,7 @@ impl EnumImpl for DnsServerType {
             b"Vultr" => DnsServerType::Vultr,
             b"WebSupport" => DnsServerType::WebSupport,
             b"YandexCloud" => DnsServerType::YandexCloud,
+            b"PowerDns" => DnsServerType::PowerDns,
         }
         .copied()
     }
@@ -3357,6 +3361,7 @@ impl EnumImpl for DnsServerType {
             DnsServerType::Vultr => "Vultr",
             DnsServerType::WebSupport => "WebSupport",
             DnsServerType::YandexCloud => "YandexCloud",
+            DnsServerType::PowerDns => "PowerDns",
         }
     }
 
@@ -3436,11 +3441,12 @@ impl EnumImpl for DnsServerType {
             67 => Some(DnsServerType::Vultr),
             68 => Some(DnsServerType::WebSupport),
             69 => Some(DnsServerType::YandexCloud),
+            70 => Some(DnsServerType::PowerDns),
             _ => None,
         }
     }
 
-    const COUNT: usize = 70;
+    const COUNT: usize = 71;
 }
 
 impl serde::Serialize for DnsServerType {

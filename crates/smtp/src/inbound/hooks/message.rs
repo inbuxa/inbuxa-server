@@ -132,7 +132,7 @@ impl<T: SessionStream> Session<T> {
                                 name: "X-Quarantine".into(),
                                 value: "true".into(),
                             });
-                            FilterResponse::accept()
+                            continue;
                         }
                     };
 

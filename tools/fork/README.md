@@ -57,8 +57,12 @@ under the reason it stays.
 
 Fails when an upstream file the fork changed doesn't carry the AGPL 5(a)
 notice, `Modified by Coffey Labs in <year> for INBUXA.`, under upstream's
-license line. "Changed" means it differs from the `upstream` branch, so the
-list comes from the diff, not from memory. CI runs it beside the name check.
+license line. "Changed" means it differs from the newest `upstream` snapshot
+in the checked-out history (found by its "Import upstream v…" subject, so CI
+needs a full clone), so the list comes from the diff, not from memory. A
+branch merging a new release is checked against that release, and other
+branches aren't affected when the `upstream` branch moves. CI runs it beside
+the name check.
 
 ```bash
 tools/fork/notice-check.py          # exit 1 on a missing notice
