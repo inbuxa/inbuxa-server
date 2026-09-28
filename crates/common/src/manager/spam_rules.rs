@@ -118,6 +118,78 @@ pub async fn set_applied_version(data: &Store, version: &str) -> trc::Result<()>
         .map(|_| ())
 }
 
+/// The blocklists a new install starts with switched off (personal-data
+/// catalog spec, default D5, settled 2026-09-28): the one that is sent a
+/// hash of every email address it's asked about.
+pub const NEW_INSTALL_OFF: &[&str] = &["STWT_MSBL_EBL_EMAIL"];
+
+fn new_install_key() -> ValueClass {
+    ValueClass::Any(AnyClass {
+        subspace: SUBSPACE_INBUXA,
+        key: b"Sn".to_vec(),
+    })
+}
+
+/// Notes, on a new install's first boot, that [`NEW_INSTALL_OFF`] is to be
+/// switched off once the rules are in: they load later, from a task.
+pub async fn mark_new_install(data: &Store) -> trc::Result<()> {
+    let mut batch = BatchBuilder::new();
+    batch.set(new_install_key(), b"D5".to_vec());
+    data.write(batch.build_all())
+        .await
+        .caused_by(trc::location!())
+        .map(|_| ())
+}
+
+/// After rules load: on a new install, switches [`NEW_INSTALL_OFF`] off and
+/// forgets the note, so it happens once. Returns whether anything changed.
+/// An existing server has no note, and keeps every blocklist as it is.
+pub async fn apply_new_install(
+    registry: &store::RegistryStore,
+    data: &Store,
+) -> trc::Result<bool> {
+    use registry::schema::{prelude::Object, structs::SpamDnsblServer};
+    use store::registry::write::RegistryWrite;
+
+    if data
+        .get_value::<String>(ValueKey::from(new_install_key()))
+        .await
+        .caused_by(trc::location!())?
+        .is_none()
+    {
+        return Ok(false);
+    }
+    let mut changed = false;
+    for server in registry.list::<SpamDnsblServer>().await? {
+        let mut updated = server.object.clone();
+        let SpamDnsblServer::Email(email) = &mut updated else {
+            continue;
+        };
+        if !NEW_INSTALL_OFF.contains(&email.name.as_str()) || !email.enable {
+            continue;
+        }
+        email.enable = false;
+        let old = Object {
+            inner: server.object.into(),
+            revision: server.revision,
+        };
+        let new = Object {
+            inner: updated.into(),
+            revision: server.revision,
+        };
+        registry
+            .write(RegistryWrite::update(types::id::Id::from(server.id.id()), &new, &old))
+            .await?;
+        changed = true;
+    }
+    let mut batch = BatchBuilder::new();
+    batch.clear(new_install_key());
+    data.write(batch.build_all())
+        .await
+        .caused_by(trc::location!())?;
+    Ok(changed)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

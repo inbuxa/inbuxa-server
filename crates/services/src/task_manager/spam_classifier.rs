@@ -316,6 +316,15 @@ async fn update_spam_rules(server: &Server) -> trc::Result<TaskResult> {
             spam_rules::set_applied_version(server.store(), spam_rules::BUNDLED_SPAM_RULES_APPLIED)
                 .await?;
         }
+        // inbuxa: personal-data catalog, D5: a new install's first rules
+        // leave the hashed-address blocklist off
+        if spam_rules::apply_new_install(server.registry(), server.store()).await?
+            && let Err(err) = reload_and_broadcast(server, ObjectType::SpamDnsblServer).await
+        {
+            return Ok(TaskResult::permanent(format!(
+                "Spam rules were stored but not activated ({err}); run Reload settings"
+            )));
+        }
         Ok(TaskResult::Success(vec![]))
     }
 }

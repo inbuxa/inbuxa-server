@@ -407,7 +407,11 @@ retention is (not a field on `x:TracerLog`, which is also stored inside
 `x:Bootstrap` with fields after it, so a new field would change that
 object's stored format); new installs 30 days, existing servers keep every
 file as today. D5 is built after the v0.16.24 import lands, on its reworked
-spam-rules loader, which keeps each blocklist's on/off state.
+spam-rules loader, which keeps each blocklist's on/off state. D5 built after the import: a new install's first boot leaves a note
+(`S` `n`), and the rules update, once the bundled rules are in, switches
+`STWT_MSBL_EBL_EMAIL` off and forgets the note; the loader keeps that
+switch through later updates. An existing server has no note and keeps
+every blocklist as it is.
 
 | # | Change | Trade-off |
 |---|---|---|
