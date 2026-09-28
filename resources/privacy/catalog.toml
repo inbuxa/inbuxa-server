@@ -1,0 +1,2090 @@
+# SPDX-FileCopyrightText: 2026 Coffey Labs
+# SPDX-License-Identifier: AGPL-3.0-only
+#
+# The personal-data catalog (docs/spec/features/personal-data-catalog.md).
+#
+# Every place the server can store or send personal data, as possibilities:
+# what a particular server holds depends on its settings, and the server
+# evaluates this file against them. Facts only; nothing here judges.
+#
+# Three kinds of entry:
+#   [object."x:Name"]      a registry object from resources/schema/schema.json.gz
+#   [object."inbuxa:Name"] one of inbuxa's own JMAP objects (crates/jmap-proto)
+#   [source."name"]        anything that is no object: files, exporters, lookups
+#
+# An object's `default = "none"` covers every property not listed under its
+# `.properties`. A property the schema types as an address, an IP or a secret
+# is always listed. tools/fork/privacy-check.py enforces both, and that every
+# object and setting named here exists.
+
+[vocabulary]
+categories = ["identifier", "contact", "network", "content", "metadata", "credential"]
+whose = ["holder", "correspondent", "administrator"]
+where = ["data-store", "blob-store", "search-store", "in-memory-store", "memory", "log-file", "external"]
+scope = ["tenant", "server"]
+retention = ["unbounded", "object-life", "receiver"]
+
+# ---------------------------------------------------------------------------
+# inbuxa's own objects. `file` names the jmap-proto source whose property
+# names the check reads.
+
+[object."inbuxa:AuditEvent"]
+file = "inbuxa_audit.rs"
+default = "none"
+whose = ["administrator", "holder", "correspondent"]
+where = ["data-store"]
+scope = "tenant"
+retention = { setting = "inbuxa:AuditSettings.keepForDays" }
+[object."inbuxa:AuditEvent".properties]
+actor = ["identifier"]
+via = ["identifier"]
+remoteIp = ["network"]
+target = ["identifier"]
+changes = ["content"]
+details = ["content"]
+reason = ["content"]
+at = ["metadata"]
+
+[object."inbuxa:AuditExport"]
+file = "inbuxa_audit.rs"
+default = "none"
+whose = ["administrator", "holder", "correspondent"]
+where = ["blob-store"]
+scope = "tenant"
+retention = { setting = "x:Jmap.uploadTtl" }
+[object."inbuxa:AuditExport".properties]
+blobId = ["identifier", "network", "content"]
+filter = ["identifier"]
+
+[object."inbuxa:AuditSettings"]
+file = "inbuxa_audit.rs"
+default = "none"
+
+[object."inbuxa:AuditVerification"]
+file = "inbuxa_audit.rs"
+default = "none"
+
+[object."inbuxa:AccountLock"]
+file = "inbuxa_account_lock.rs"
+default = "none"
+whose = ["holder", "administrator"]
+where = ["data-store"]
+scope = "tenant"
+retention = "unbounded"
+[object."inbuxa:AccountLock".properties]
+accountId = ["identifier"]
+name = ["identifier"]
+reason = ["content"]
+lockedAt = ["metadata"]
+lockedBy = ["identifier"]
+delegates = ["identifier"]
+
+[object."inbuxa:LegalHold"]
+file = "inbuxa_legal_hold.rs"
+default = "none"
+whose = ["administrator", "holder"]
+where = ["data-store"]
+scope = "server"
+retention = "unbounded"
+[object."inbuxa:LegalHold".properties]
+name = ["content"]
+reference = ["content"]
+description = ["content"]
+scope = ["identifier"]
+reason = ["content"]
+placedBy = ["identifier"]
+releasedBy = ["identifier"]
+releaseReason = ["content"]
+
+[object."inbuxa:HoldExport"]
+file = "inbuxa_hold_export.rs"
+default = "none"
+whose = ["holder", "correspondent", "administrator"]
+where = ["data-store", "blob-store"]
+scope = "server"
+retention = "unbounded"
+[object."inbuxa:HoldExport".properties]
+accountIds = ["identifier"]
+reason = ["content"]
+createdBy = ["identifier"]
+blobId = ["content", "identifier", "contact", "metadata"]
+
+[object."inbuxa:DeletedAccount"]
+file = "inbuxa_deleted_account.rs"
+default = "none"
+whose = ["holder"]
+where = ["data-store"]
+scope = "tenant"
+retention = { setting = "x:DataRetention.archiveDeletedAccountsFor" }
+[object."inbuxa:DeletedAccount".properties]
+name = ["identifier"]
+addresses = ["identifier"]
+password = ["credential"]
+deletedAt = ["metadata"]
+keptUntil = ["metadata"]
+
+[object."inbuxa:Explanation"]
+file = "inbuxa_explanation.rs"
+default = "none"
+whose = ["correspondent", "holder"]
+where = ["memory", "external"]
+scope = "server"
+retention = "receiver"
+[object."inbuxa:Explanation".properties]
+subject = ["identifier", "network", "metadata"]
+text = ["identifier", "network", "metadata"]
+preparedFor = ["identifier"]
+
+[object."inbuxa:ProtocolPolicy"]
+file = "inbuxa_protocol_policy.rs"
+default = "none"
+whose = ["administrator", "holder"]
+where = ["data-store"]
+scope = "server"
+retention = "unbounded"
+[object."inbuxa:ProtocolPolicy".properties]
+changedBy = ["identifier"]
+recentLegacyUse = ["identifier", "metadata"]
+
+[object."inbuxa:TenantProtocolPolicy"]
+file = "inbuxa_tenant_protocol_policy.rs"
+default = "none"
+whose = ["administrator", "holder"]
+where = ["data-store"]
+scope = "tenant"
+retention = "unbounded"
+[object."inbuxa:TenantProtocolPolicy".properties]
+changedBy = ["identifier"]
+recentLegacyUse = ["identifier", "metadata"]
+
+[object."inbuxa:AiLimits"]
+file = "inbuxa_ai_limits.rs"
+default = "none"
+
+# ---------------------------------------------------------------------------
+# Sources that are no object. Settings are `<object>.<property>`: a schema
+# field object, or one of inbuxa's own.
+
+[source."mail-and-groupware"]
+categories = ["content", "identifier", "contact", "metadata"]
+whose = ["holder", "correspondent"]
+where = ["data-store", "blob-store"]
+scope = "tenant"
+retention = "unbounded"
+captures = ["x:DataRetention.expungeTrashAfter", "x:DataRetention.expungeSubmissionsAfter"]
+leaves_host = false
+written_by = ["crates/email/src/message/ingest.rs", "crates/groupware/src/calendar/storage.rs", "crates/groupware/src/contact/storage.rs", "crates/groupware/src/file/storage.rs"]
+
+[source."full-text-index"]
+categories = ["content", "identifier", "contact", "metadata"]
+whose = ["holder", "correspondent"]
+where = ["search-store"]
+scope = "tenant"
+retention = "object-life"
+enabled_by = ["x:Search.indexEmail", "x:Search.indexCalendar", "x:Search.indexContacts"]
+captures = ["x:Search.indexEmailFields", "x:Search.indexCalendarFields", "x:Search.indexContactFields"]
+leaves_host = false
+written_by = ["crates/services/src/task_manager/index.rs"]
+
+[source."trace-index"]
+categories = ["network", "identifier", "metadata"]
+whose = ["correspondent", "holder"]
+where = ["search-store"]
+scope = "server"
+retention = { setting = "x:DataRetention.holdTracesFor" }
+enabled_by = ["x:Search.indexTelemetry"]
+captures = ["x:Search.indexTracingFields"]
+leaves_host = false
+written_by = ["crates/services/src/task_manager/index.rs"]
+
+[source."log-file"]
+categories = ["network", "identifier", "metadata"]
+whose = ["correspondent", "holder", "administrator"]
+where = ["log-file"]
+scope = "server"
+retention = "unbounded"
+enabled_by = ["x:TracerLog.enable"]
+captures = ["x:TracerLog.level", "x:TracerLog.events", "x:EventTracingLevel.level"]
+leaves_host = false
+written_by = ["crates/common/src/telemetry/tracers/log.rs"]
+
+[source."console-and-journal"]
+categories = ["network", "identifier", "metadata"]
+whose = ["correspondent", "holder", "administrator"]
+where = ["log-file"]
+scope = "server"
+retention = "receiver"
+enabled_by = ["x:TracerStdout.enable"]
+captures = ["x:TracerStdout.level"]
+leaves_host = false
+written_by = ["crates/common/src/telemetry/tracers/stdout.rs", "crates/common/src/telemetry/tracers/journald.rs"]
+
+[source."otel-tracer"]
+categories = ["network", "identifier", "metadata"]
+whose = ["correspondent", "holder", "administrator"]
+where = ["external"]
+scope = "server"
+retention = "receiver"
+enabled_by = ["x:TracerOtelHttp.enable", "x:TracerOtelGrpc.enable"]
+captures = ["x:TracerOtelHttp.level", "x:TracerOtelGrpc.level"]
+leaves_host = true
+written_by = ["crates/common/src/telemetry/tracers/otel.rs"]
+
+[source."webhooks"]
+categories = ["network", "identifier", "metadata", "content"]
+whose = ["correspondent", "holder", "administrator"]
+where = ["external"]
+scope = "server"
+retention = "receiver"
+enabled_by = ["x:WebHook.enable"]
+captures = ["x:WebHook.level", "x:WebHook.events", "x:WebHook.eventsPolicy"]
+leaves_host = true
+written_by = ["crates/common/src/telemetry/webhooks/mod.rs"]
+
+[source."spam-trainer-state"]
+categories = ["metadata"]
+whose = ["correspondent", "holder"]
+where = ["blob-store"]
+scope = "server"
+retention = "unbounded"
+enabled_by = ["x:SpamClassifier.model"]
+leaves_host = false
+written_by = ["crates/spam-filter/src/modules/classifier.rs"]
+
+[source."spam-llm"]
+categories = ["content"]
+whose = ["correspondent"]
+where = ["external"]
+scope = "server"
+retention = "receiver"
+enabled_by = ["x:SpamLlmProperties.modelId"]
+captures = ["inbuxa:AiLimits.maxContentBytes"]
+leaves_host = true
+written_by = ["crates/spam-filter/src/analysis/llm.rs", "crates/common/src/enterprise/llm.rs"]
+
+[source."explain-cache"]
+categories = ["identifier", "network", "metadata"]
+whose = ["correspondent", "holder"]
+where = ["memory"]
+scope = "server"
+retention = "unbounded"
+enabled_by = ["inbuxa:AiLimits.explainEnabled"]
+leaves_host = false
+written_by = ["crates/features/src/ai/explain/memory.rs"]
+
+[source."spam-dnsbl"]
+categories = ["network", "identifier", "metadata"]
+whose = ["correspondent"]
+where = ["external"]
+scope = "server"
+retention = "receiver"
+enabled_by = ["x:SpamDnsblServerIp.enable", "x:SpamDnsblServerDomain.enable", "x:SpamDnsblServerEmail.enable", "x:SpamDnsblServerUrl.enable"]
+leaves_host = true
+written_by = ["crates/spam-filter/src/modules/dnsbl.rs"]
+
+[source."spam-pyzor"]
+categories = ["content"]
+whose = ["correspondent"]
+where = ["external"]
+scope = "server"
+retention = "receiver"
+enabled_by = ["x:SpamPyzor.enable"]
+leaves_host = true
+written_by = ["crates/spam-filter/src/modules/pyzor.rs"]
+
+[source."spam-url-redirects"]
+categories = ["network"]
+whose = ["correspondent", "holder"]
+where = ["external"]
+scope = "server"
+retention = "receiver"
+leaves_host = true
+written_by = ["crates/spam-filter/src/analysis/url.rs"]
+
+[source."mta-milter-and-hooks"]
+categories = ["network", "identifier", "content"]
+whose = ["holder", "correspondent"]
+where = ["external"]
+scope = "server"
+retention = "receiver"
+enabled_by = ["x:MtaMilter.enable", "x:MtaHook.enable"]
+leaves_host = true
+written_by = ["crates/smtp/src/inbound/hooks/mod.rs"]
+
+[source."relay"]
+categories = ["content", "identifier", "metadata"]
+whose = ["holder", "correspondent"]
+where = ["external"]
+scope = "server"
+retention = "receiver"
+leaves_host = true
+written_by = ["crates/smtp/src/outbound/delivery.rs"]
+
+[source."push-subscriptions"]
+categories = ["network", "credential", "content"]
+whose = ["holder"]
+where = ["data-store", "external"]
+scope = "tenant"
+retention = "object-life"
+captures = ["x:Jmap.maxSubscriptions"]
+leaves_host = true
+written_by = ["crates/jmap/src/push/set.rs", "crates/services/src/state_manager/http.rs"]
+
+[source."rate-limit-and-greylist"]
+categories = ["network", "identifier"]
+whose = ["holder", "correspondent"]
+where = ["in-memory-store"]
+scope = "server"
+retention = "object-life"
+enabled_by = ["x:SpamSettings.greylistFor"]
+leaves_host = false
+written_by = ["crates/common/src/auth/rate_limit.rs", "crates/smtp/src/inbound/rcpt.rs"]
+
+[source."legacy-last-use"]
+categories = ["metadata"]
+whose = ["holder"]
+where = ["data-store"]
+scope = "tenant"
+retention = "unbounded"
+leaves_host = false
+written_by = ["crates/features/src/security/legacy_use.rs"]
+
+[source."masked-address-records"]
+categories = ["identifier", "metadata"]
+whose = ["holder"]
+where = ["data-store"]
+scope = "tenant"
+retention = "unbounded"
+captures = ["x:Email.maxMaskedAddresses"]
+leaves_host = false
+written_by = ["crates/features/src/masked_email/data.rs"]
+
+[source."outbound-reports"]
+categories = ["network", "identifier", "content"]
+whose = ["correspondent"]
+where = ["external"]
+scope = "server"
+retention = "receiver"
+captures = ["x:DmarcReportSettings.aggregateSendFrequency", "x:DmarcReportSettings.failureSendFrequency", "x:TlsReportSettings.sendFrequency"]
+leaves_host = true
+written_by = ["crates/smtp/src/reporting/dmarc.rs", "crates/smtp/src/reporting/tls.rs"]
+
+# ---------------------------------------------------------------------------
+# Registry objects, one per schema field object.
+
+[object."AddressBook"]
+default = "none"
+whose = ["holder"]
+where = ["data-store"]
+scope = "tenant"
+retention = "object-life"
+[object."AddressBook".properties]
+description = ["content"]
+name = ["content"]
+shareWith = ["identifier"]
+
+[object."AddressBookRights"]
+default = "none"
+
+[object."Calendar"]
+default = "none"
+whose = ["holder"]
+where = ["data-store"]
+scope = "tenant"
+retention = "object-life"
+[object."Calendar".properties]
+description = ["content"]
+name = ["content"]
+shareWith = ["identifier"]
+timeZone = ["metadata"]
+
+[object."CalendarRights"]
+default = "none"
+
+[object."Mailbox"]
+default = "none"
+whose = ["holder"]
+where = ["data-store"]
+scope = "tenant"
+retention = "object-life"
+[object."Mailbox".properties]
+name = ["content"]
+shareWith = ["identifier"]
+
+[object."MailboxRights"]
+default = "none"
+
+[object."Principal"]
+default = "none"
+whose = ["holder"]
+where = ["data-store"]
+scope = "tenant"
+retention = "object-life"
+[object."Principal".properties]
+description = ["content"]
+email = ["identifier"]
+name = ["identifier"]
+timeZone = ["metadata"]
+
+[object."SieveScript"]
+default = "none"
+whose = ["holder"]
+where = ["data-store", "blob-store"]
+scope = "tenant"
+retention = "object-life"
+[object."SieveScript".properties]
+blobId = ["content"]
+name = ["content"]
+
+[object."VacationResponse"]
+default = "none"
+whose = ["holder"]
+where = ["data-store"]
+scope = "tenant"
+retention = "object-life"
+[object."VacationResponse".properties]
+fromDate = ["metadata"]
+htmlBody = ["content"]
+subject = ["content"]
+textBody = ["content"]
+toDate = ["metadata"]
+
+[object."x:AccountPassword"]
+default = "none"
+whose = ["holder"]
+where = ["data-store"]
+scope = "tenant"
+retention = "object-life"
+[object."x:AccountPassword".properties]
+currentSecret = ["credential"]
+otpAuth = ["credential"]
+secret = ["credential"]
+
+[object."x:AccountSettings"]
+default = "none"
+whose = ["holder"]
+where = ["data-store"]
+scope = "tenant"
+retention = "object-life"
+[object."x:AccountSettings".properties]
+description = ["content"]
+locale = ["metadata"]
+timeZone = ["metadata"]
+
+[object."x:AcmeProvider"]
+default = "none"
+whose = ["administrator"]
+where = ["data-store"]
+scope = "server"
+retention = "object-life"
+[object."x:AcmeProvider".properties]
+accountKey = ["credential"]
+contact = ["contact"]
+eabHmacKey = ["credential"]
+eabKeyId = ["credential"]
+
+[object."x:AddressBook"]
+default = "none"
+
+[object."x:AiModel"]
+default = "none"
+[object."x:AiModel".properties]
+httpAuth = ["credential"]
+
+[object."x:Alert"]
+default = "none"
+
+[object."x:AlertEmailProperties"]
+default = "none"
+whose = ["administrator"]
+where = ["data-store"]
+scope = "server"
+retention = "object-life"
+[object."x:AlertEmailProperties".properties]
+fromAddress = ["contact"]
+fromName = ["contact"]
+to = ["contact"]
+
+[object."x:AlertEventProperties"]
+default = "none"
+
+[object."x:AllowedIp"]
+default = "none"
+whose = ["administrator"]
+where = ["data-store"]
+scope = "server"
+retention = { setting = "x:AllowedIp.expiresAt" }
+[object."x:AllowedIp".properties]
+address = ["network"]
+createdAt = ["metadata"]
+expiresAt = ["metadata"]
+reason = ["content"]
+
+[object."x:ApiKey"]
+default = "none"
+whose = ["holder"]
+where = ["data-store"]
+scope = "tenant"
+retention = "object-life"
+[object."x:ApiKey".properties]
+allowedIps = ["network"]
+createdAt = ["metadata"]
+description = ["content"]
+expiresAt = ["metadata"]
+secret = ["credential"]
+
+[object."x:AppPassword"]
+default = "none"
+whose = ["holder"]
+where = ["data-store"]
+scope = "tenant"
+retention = "object-life"
+[object."x:AppPassword".properties]
+allowedIps = ["network"]
+createdAt = ["metadata"]
+description = ["content"]
+expiresAt = ["metadata"]
+secret = ["credential"]
+
+[object."x:Application"]
+default = "none"
+
+[object."x:ArchivedCalendarEvent"]
+default = "none"
+whose = ["holder", "correspondent"]
+where = ["data-store", "blob-store"]
+scope = "tenant"
+retention = { setting = "x:DataRetention.archiveDeletedItemsFor" }
+[object."x:ArchivedCalendarEvent".properties]
+archivedAt = ["metadata"]
+archivedUntil = ["metadata"]
+blobId = ["content"]
+createdAt = ["metadata"]
+startTime = ["metadata"]
+title = ["content"]
+
+[object."x:ArchivedContactCard"]
+default = "none"
+whose = ["holder", "correspondent"]
+where = ["data-store", "blob-store"]
+scope = "tenant"
+retention = { setting = "x:DataRetention.archiveDeletedItemsFor" }
+[object."x:ArchivedContactCard".properties]
+archivedAt = ["metadata"]
+archivedUntil = ["metadata"]
+blobId = ["contact"]
+createdAt = ["metadata"]
+name = ["contact"]
+
+[object."x:ArchivedEmail"]
+default = "none"
+whose = ["holder", "correspondent"]
+where = ["data-store", "blob-store"]
+scope = "tenant"
+retention = { setting = "x:DataRetention.archiveDeletedItemsFor" }
+[object."x:ArchivedEmail".properties]
+archivedAt = ["metadata"]
+archivedUntil = ["metadata"]
+blobId = ["content"]
+from = ["identifier"]
+receivedAt = ["metadata"]
+size = ["metadata"]
+subject = ["content"]
+
+[object."x:ArchivedFileNode"]
+default = "none"
+whose = ["holder"]
+where = ["data-store", "blob-store"]
+scope = "tenant"
+retention = { setting = "x:DataRetention.archiveDeletedItemsFor" }
+[object."x:ArchivedFileNode".properties]
+archivedAt = ["metadata"]
+archivedUntil = ["metadata"]
+blobId = ["content"]
+createdAt = ["metadata"]
+name = ["content"]
+
+[object."x:ArchivedSieveScript"]
+default = "none"
+whose = ["holder"]
+where = ["data-store", "blob-store"]
+scope = "tenant"
+retention = { setting = "x:DataRetention.archiveDeletedItemsFor" }
+[object."x:ArchivedSieveScript".properties]
+archivedAt = ["metadata"]
+archivedUntil = ["metadata"]
+blobId = ["content"]
+content = ["content"]
+createdAt = ["metadata"]
+name = ["content"]
+
+[object."x:ArfExternalReport"]
+default = "none"
+whose = ["correspondent"]
+where = ["data-store"]
+scope = "tenant"
+retention = { setting = "x:DataRetention.holdMtaReportsFor" }
+[object."x:ArfExternalReport".properties]
+from = ["identifier"]
+receivedAt = ["metadata"]
+subject = ["content"]
+to = ["identifier"]
+
+[object."x:ArfFeedbackReport"]
+default = "none"
+whose = ["correspondent"]
+where = ["data-store"]
+scope = "tenant"
+retention = { setting = "x:DataRetention.holdMtaReportsFor" }
+[object."x:ArfFeedbackReport".properties]
+arrivalDate = ["metadata"]
+dkimIdentity = ["identifier"]
+headers = ["content"]
+message = ["content"]
+originalEnvelopeId = ["metadata"]
+originalMailFrom = ["identifier"]
+originalRcptTo = ["identifier"]
+reportedDomains = ["identifier"]
+reportedUris = ["content"]
+sourceIp = ["network"]
+sourcePort = ["network"]
+userAgent = ["network"]
+
+[object."x:AsnDns"]
+default = "none"
+
+[object."x:AsnResource"]
+default = "none"
+[object."x:AsnResource".properties]
+httpAuth = ["credential"]
+
+[object."x:Authentication"]
+default = "none"
+
+[object."x:AzureStore"]
+default = "none"
+[object."x:AzureStore".properties]
+accessKey = ["credential"]
+sasToken = ["credential"]
+
+[object."x:BlockedIp"]
+default = "none"
+whose = ["correspondent", "holder"]
+where = ["data-store"]
+scope = "server"
+retention = "unbounded"
+[object."x:BlockedIp".properties]
+address = ["network"]
+createdAt = ["metadata"]
+expiresAt = ["metadata"]
+reason = ["content"]
+
+[object."x:Bootstrap"]
+default = "none"
+whose = ["administrator"]
+where = ["data-store"]
+scope = "server"
+retention = "object-life"
+[object."x:Bootstrap".properties]
+defaultDomain = ["identifier"]
+secret = ["credential"]
+username = ["identifier"]
+
+[object."x:Cache"]
+default = "none"
+
+[object."x:Calendar"]
+default = "none"
+
+[object."x:CalendarAlarm"]
+default = "none"
+whose = ["administrator"]
+where = ["data-store"]
+scope = "server"
+retention = "object-life"
+[object."x:CalendarAlarm".properties]
+fromEmail = ["contact"]
+fromName = ["contact"]
+
+[object."x:CalendarScheduling"]
+default = "none"
+
+[object."x:Certificate"]
+default = "none"
+[object."x:Certificate".properties]
+privateKey = ["credential"]
+
+[object."x:CertificateManagementProperties"]
+default = "none"
+
+[object."x:ClusterListenerGroupProperties"]
+default = "none"
+
+[object."x:ClusterNode"]
+default = "none"
+
+[object."x:ClusterRole"]
+default = "none"
+
+[object."x:ClusterTaskGroupProperties"]
+default = "none"
+
+[object."x:CredentialPermissionsList"]
+default = "none"
+
+[object."x:CronDaily"]
+default = "none"
+
+[object."x:CronHourly"]
+default = "none"
+
+[object."x:CronWeekly"]
+default = "none"
+
+[object."x:CustomRoles"]
+default = "none"
+
+[object."x:DataRetention"]
+default = "none"
+
+[object."x:DeliveryError"]
+default = "none"
+
+[object."x:Dkim1Signature"]
+default = "none"
+[object."x:Dkim1Signature".properties]
+privateKey = ["credential"]
+
+[object."x:Dkim2Signature"]
+default = "none"
+[object."x:Dkim2Signature".properties]
+privateKey = ["credential"]
+
+[object."x:DkimManagementProperties"]
+default = "none"
+
+[object."x:DkimReportSettings"]
+default = "none"
+
+[object."x:DmarcDkimResult"]
+default = "none"
+
+[object."x:DmarcExtension"]
+default = "none"
+
+[object."x:DmarcExternalReport"]
+default = "none"
+whose = ["correspondent"]
+where = ["data-store"]
+scope = "tenant"
+retention = { setting = "x:DataRetention.holdMtaReportsFor" }
+[object."x:DmarcExternalReport".properties]
+from = ["identifier"]
+receivedAt = ["metadata"]
+subject = ["content"]
+to = ["identifier"]
+
+[object."x:DmarcInternalReport"]
+default = "none"
+whose = ["correspondent"]
+where = ["data-store"]
+scope = "server"
+retention = "receiver"
+[object."x:DmarcInternalReport".properties]
+domain = ["identifier"]
+rua = ["identifier"]
+
+[object."x:DmarcPolicyOverrideReason"]
+default = "none"
+
+[object."x:DmarcReport"]
+default = "none"
+whose = ["correspondent"]
+where = ["data-store"]
+scope = "tenant"
+retention = { setting = "x:DataRetention.holdMtaReportsFor" }
+[object."x:DmarcReport".properties]
+email = ["contact"]
+extraContactInfo = ["contact"]
+orgName = ["identifier"]
+
+[object."x:DmarcReportRecord"]
+default = "none"
+whose = ["correspondent"]
+where = ["data-store"]
+scope = "tenant"
+retention = { setting = "x:DataRetention.holdMtaReportsFor" }
+[object."x:DmarcReportRecord".properties]
+count = ["metadata"]
+envelopeFrom = ["identifier"]
+envelopeTo = ["identifier"]
+headerFrom = ["identifier"]
+sourceIp = ["network"]
+
+[object."x:DmarcReportSettings"]
+default = "none"
+
+[object."x:DmarcSpfResult"]
+default = "none"
+
+[object."x:DmarcTroubleshoot"]
+default = "none"
+whose = ["correspondent"]
+where = ["memory"]
+scope = "server"
+retention = "unbounded"
+[object."x:DmarcTroubleshoot".properties]
+ehloDomain = ["network"]
+ipRevPtr = ["network"]
+mailFrom = ["identifier"]
+message = ["content"]
+remoteIp = ["network"]
+to = ["identifier"]
+
+[object."x:DmarcTroubleshootDetails"]
+default = "none"
+
+[object."x:DnsCustomResolver"]
+default = "none"
+[object."x:DnsCustomResolver".properties]
+address = ["network"]
+
+[object."x:DnsManagementProperties"]
+default = "none"
+
+[object."x:DnsResolverCommon"]
+default = "none"
+
+[object."x:DnsResolverCustom"]
+default = "none"
+
+[object."x:DnsResolverTls"]
+default = "none"
+
+[object."x:DnsServerAlidns"]
+default = "none"
+[object."x:DnsServerAlidns".properties]
+secretKey = ["credential"]
+securityToken = ["credential"]
+
+[object."x:DnsServerAutodns"]
+default = "none"
+[object."x:DnsServerAutodns".properties]
+password = ["credential"]
+
+[object."x:DnsServerAzureDns"]
+default = "none"
+[object."x:DnsServerAzureDns".properties]
+clientSecret = ["credential"]
+
+[object."x:DnsServerBaiduCloud"]
+default = "none"
+[object."x:DnsServerBaiduCloud".properties]
+secretKey = ["credential"]
+
+[object."x:DnsServerBluecatV2"]
+default = "none"
+[object."x:DnsServerBluecatV2".properties]
+password = ["credential"]
+
+[object."x:DnsServerClouDns"]
+default = "none"
+[object."x:DnsServerClouDns".properties]
+password = ["credential"]
+
+[object."x:DnsServerCloud"]
+default = "none"
+[object."x:DnsServerCloud".properties]
+secret = ["credential"]
+
+[object."x:DnsServerCloudflare"]
+default = "none"
+[object."x:DnsServerCloudflare".properties]
+secret = ["credential"]
+
+[object."x:DnsServerConstellix"]
+default = "none"
+[object."x:DnsServerConstellix".properties]
+secretKey = ["credential"]
+
+[object."x:DnsServerCpanel"]
+default = "none"
+[object."x:DnsServerCpanel".properties]
+token = ["credential"]
+
+[object."x:DnsServerDnsMadeEasy"]
+default = "none"
+[object."x:DnsServerDnsMadeEasy".properties]
+secret = ["credential"]
+
+[object."x:DnsServerDnsimple"]
+default = "none"
+[object."x:DnsServerDnsimple".properties]
+authToken = ["credential"]
+secret = ["credential"]
+
+[object."x:DnsServerDomeneshop"]
+default = "none"
+[object."x:DnsServerDomeneshop".properties]
+secret = ["credential"]
+
+[object."x:DnsServerEasyDns"]
+default = "none"
+[object."x:DnsServerEasyDns".properties]
+key = ["credential"]
+
+[object."x:DnsServerEdgeDns"]
+default = "none"
+[object."x:DnsServerEdgeDns".properties]
+accessToken = ["credential"]
+clientSecret = ["credential"]
+
+[object."x:DnsServerExoscale"]
+default = "none"
+[object."x:DnsServerExoscale".properties]
+secret = ["credential"]
+
+[object."x:DnsServerGlesys"]
+default = "none"
+[object."x:DnsServerGlesys".properties]
+apiKey = ["credential"]
+
+[object."x:DnsServerGodaddy"]
+default = "none"
+[object."x:DnsServerGodaddy".properties]
+secret = ["credential"]
+
+[object."x:DnsServerGoogleCloudDns"]
+default = "none"
+[object."x:DnsServerGoogleCloudDns".properties]
+serviceAccountJson = ["credential"]
+
+[object."x:DnsServerHuaweiCloud"]
+default = "none"
+[object."x:DnsServerHuaweiCloud".properties]
+secretKey = ["credential"]
+
+[object."x:DnsServerHurricane"]
+default = "none"
+
+[object."x:DnsServerIbmCloud"]
+default = "none"
+[object."x:DnsServerIbmCloud".properties]
+apiKey = ["credential"]
+
+[object."x:DnsServerInfoblox"]
+default = "none"
+[object."x:DnsServerInfoblox".properties]
+password = ["credential"]
+
+[object."x:DnsServerInwx"]
+default = "none"
+[object."x:DnsServerInwx".properties]
+password = ["credential"]
+sharedSecret = ["credential"]
+
+[object."x:DnsServerJoker"]
+default = "none"
+
+[object."x:DnsServerLightsail"]
+default = "none"
+[object."x:DnsServerLightsail".properties]
+secretAccessKey = ["credential"]
+sessionToken = ["credential"]
+
+[object."x:DnsServerLuaDns"]
+default = "none"
+[object."x:DnsServerLuaDns".properties]
+authToken = ["credential"]
+
+[object."x:DnsServerMythicBeasts"]
+default = "none"
+[object."x:DnsServerMythicBeasts".properties]
+password = ["credential"]
+
+[object."x:DnsServerNameDotCom"]
+default = "none"
+[object."x:DnsServerNameDotCom".properties]
+authToken = ["credential"]
+
+[object."x:DnsServerNamecheap"]
+default = "none"
+[object."x:DnsServerNamecheap".properties]
+apiKey = ["credential"]
+
+[object."x:DnsServerNetcup"]
+default = "none"
+[object."x:DnsServerNetcup".properties]
+password = ["credential"]
+
+[object."x:DnsServerNifcloud"]
+default = "none"
+[object."x:DnsServerNifcloud".properties]
+secretKey = ["credential"]
+
+[object."x:DnsServerOracleCloud"]
+default = "none"
+[object."x:DnsServerOracleCloud".properties]
+privateKeyPassword = ["credential"]
+privateKeyPem = ["credential"]
+
+[object."x:DnsServerOvh"]
+default = "none"
+[object."x:DnsServerOvh".properties]
+applicationSecret = ["credential"]
+consumerKey = ["credential"]
+
+[object."x:DnsServerPlesk"]
+default = "none"
+[object."x:DnsServerPlesk".properties]
+apiKey = ["credential"]
+
+[object."x:DnsServerPorkbun"]
+default = "none"
+[object."x:DnsServerPorkbun".properties]
+secret = ["credential"]
+secretApiKey = ["credential"]
+
+[object."x:DnsServerRoute53"]
+default = "none"
+[object."x:DnsServerRoute53".properties]
+secretAccessKey = ["credential"]
+sessionToken = ["credential"]
+
+[object."x:DnsServerSpaceship"]
+default = "none"
+[object."x:DnsServerSpaceship".properties]
+secret = ["credential"]
+
+[object."x:DnsServerTencentCloud"]
+default = "none"
+[object."x:DnsServerTencentCloud".properties]
+secretKey = ["credential"]
+sessionToken = ["credential"]
+
+[object."x:DnsServerTransip"]
+default = "none"
+[object."x:DnsServerTransip".properties]
+privateKeyPem = ["credential"]
+
+[object."x:DnsServerTsig"]
+default = "none"
+[object."x:DnsServerTsig".properties]
+host = ["network"]
+key = ["credential"]
+
+[object."x:DnsServerUltraDns"]
+default = "none"
+[object."x:DnsServerUltraDns".properties]
+password = ["credential"]
+
+[object."x:DnsServerVercel"]
+default = "none"
+[object."x:DnsServerVercel".properties]
+authToken = ["credential"]
+
+[object."x:DnsServerVolcengine"]
+default = "none"
+[object."x:DnsServerVolcengine".properties]
+secretKey = ["credential"]
+
+[object."x:DnsServerWebSupport"]
+default = "none"
+[object."x:DnsServerWebSupport".properties]
+secret = ["credential"]
+
+[object."x:DnsServerYandexCloud"]
+default = "none"
+[object."x:DnsServerYandexCloud".properties]
+apiKey = ["credential"]
+
+[object."x:Domain"]
+default = "none"
+whose = ["holder"]
+where = ["data-store"]
+scope = "tenant"
+retention = "object-life"
+[object."x:Domain".properties]
+catchAllAddress = ["identifier"]
+createdAt = ["metadata"]
+description = ["content"]
+
+[object."x:DsnReportSettings"]
+default = "none"
+
+[object."x:ElasticSearchStore"]
+default = "none"
+[object."x:ElasticSearchStore".properties]
+httpAuth = ["credential"]
+
+[object."x:Email"]
+default = "none"
+
+[object."x:EmailAlias"]
+default = "none"
+whose = ["holder"]
+where = ["data-store"]
+scope = "tenant"
+retention = "object-life"
+[object."x:EmailAlias".properties]
+description = ["content"]
+name = ["identifier"]
+
+[object."x:EmailFolder"]
+default = "none"
+
+[object."x:EncryptionSettings"]
+default = "none"
+
+[object."x:Enterprise"]
+default = "none"
+[object."x:Enterprise".properties]
+apiKey = ["credential"]
+licenseKey = ["credential"]
+
+[object."x:EventTracingLevel"]
+default = "none"
+
+[object."x:Expression"]
+default = "none"
+
+[object."x:ExpressionMatch"]
+default = "none"
+
+[object."x:FileStorage"]
+default = "none"
+
+[object."x:FileSystemStore"]
+default = "none"
+
+[object."x:FoundationDbStore"]
+default = "none"
+
+[object."x:FtrlParameters"]
+default = "none"
+
+[object."x:GroupAccount"]
+default = "none"
+whose = ["holder"]
+where = ["data-store"]
+scope = "tenant"
+retention = "object-life"
+[object."x:GroupAccount".properties]
+aliases = ["identifier"]
+createdAt = ["metadata"]
+description = ["content"]
+emailAddress = ["identifier"]
+externalId = ["identifier"]
+locale = ["metadata"]
+name = ["identifier"]
+timeZone = ["metadata"]
+usedDiskQuota = ["metadata"]
+
+[object."x:Http"]
+default = "none"
+
+[object."x:HttpAuthBasic"]
+default = "none"
+[object."x:HttpAuthBasic".properties]
+secret = ["credential"]
+
+[object."x:HttpAuthBearer"]
+default = "none"
+[object."x:HttpAuthBearer".properties]
+bearerToken = ["credential"]
+
+[object."x:HttpForm"]
+default = "none"
+whose = ["administrator", "correspondent"]
+where = ["data-store"]
+scope = "server"
+retention = "object-life"
+[object."x:HttpForm".properties]
+defaultFromAddress = ["contact"]
+defaultName = ["contact"]
+deliverTo = ["contact"]
+
+[object."x:HttpLookup"]
+default = "none"
+
+[object."x:HttpLookupCsv"]
+default = "none"
+
+[object."x:HurricaneCredential"]
+default = "none"
+[object."x:HurricaneCredential".properties]
+secret = ["credential"]
+
+[object."x:Imap"]
+default = "none"
+
+[object."x:Jmap"]
+default = "none"
+[object."x:Jmap".properties]
+webPushKey = ["credential"]
+
+[object."x:JokerAuthApiKey"]
+default = "none"
+[object."x:JokerAuthApiKey".properties]
+apiKey = ["credential"]
+
+[object."x:JokerAuthUsernamePassword"]
+default = "none"
+[object."x:JokerAuthUsernamePassword".properties]
+password = ["credential"]
+
+[object."x:KafkaCoordinator"]
+default = "none"
+
+[object."x:LdapDirectory"]
+default = "none"
+[object."x:LdapDirectory".properties]
+bindSecret = ["credential"]
+
+[object."x:Log"]
+default = "none"
+whose = ["correspondent", "holder", "administrator"]
+where = ["log-file"]
+scope = "server"
+retention = "unbounded"
+[object."x:Log".properties]
+details = ["network", "identifier", "metadata"]
+timestamp = ["metadata"]
+
+[object."x:MailExchanger"]
+default = "none"
+
+[object."x:MailingList"]
+default = "none"
+whose = ["holder", "correspondent"]
+where = ["data-store"]
+scope = "tenant"
+retention = "object-life"
+[object."x:MailingList".properties]
+aliases = ["identifier"]
+description = ["content"]
+emailAddress = ["identifier"]
+name = ["identifier"]
+recipients = ["identifier"]
+
+[object."x:MaskedEmail"]
+default = "none"
+whose = ["holder"]
+where = ["data-store"]
+scope = "tenant"
+retention = "object-life"
+[object."x:MaskedEmail".properties]
+createdAt = ["metadata"]
+createdBy = ["identifier"]
+description = ["content"]
+email = ["identifier"]
+emailDomain = ["identifier"]
+emailPrefix = ["identifier"]
+expiresAt = ["metadata"]
+forDomain = ["content"]
+url = ["content"]
+
+[object."x:MeilisearchStore"]
+default = "none"
+[object."x:MeilisearchStore".properties]
+httpAuth = ["credential"]
+
+[object."x:MemoryLookupKey"]
+default = "none"
+whose = ["correspondent"]
+where = ["data-store"]
+scope = "server"
+retention = "object-life"
+[object."x:MemoryLookupKey".properties]
+key = ["identifier"]
+
+[object."x:MemoryLookupKeyValue"]
+default = "none"
+whose = ["correspondent"]
+where = ["data-store"]
+scope = "server"
+retention = "object-life"
+[object."x:MemoryLookupKeyValue".properties]
+key = ["identifier"]
+value = ["identifier"]
+
+[object."x:MetricCount"]
+default = "none"
+
+[object."x:MetricSum"]
+default = "none"
+
+[object."x:Metrics"]
+default = "none"
+
+[object."x:MetricsOtelGrpc"]
+default = "none"
+
+[object."x:MetricsOtelHttp"]
+default = "none"
+[object."x:MetricsOtelHttp".properties]
+httpAuth = ["credential"]
+
+[object."x:MetricsPrometheusProperties"]
+default = "none"
+[object."x:MetricsPrometheusProperties".properties]
+authSecret = ["credential"]
+
+[object."x:MtaConnectionIpHost"]
+default = "none"
+[object."x:MtaConnectionIpHost".properties]
+sourceIp = ["network"]
+
+[object."x:MtaConnectionStrategy"]
+default = "none"
+
+[object."x:MtaDeliveryExpirationAttempts"]
+default = "none"
+
+[object."x:MtaDeliveryExpirationTtl"]
+default = "none"
+
+[object."x:MtaDeliverySchedule"]
+default = "none"
+
+[object."x:MtaDeliveryScheduleInterval"]
+default = "none"
+
+[object."x:MtaDeliveryScheduleIntervals"]
+default = "none"
+
+[object."x:MtaExtensions"]
+default = "none"
+
+[object."x:MtaHook"]
+default = "none"
+[object."x:MtaHook".properties]
+httpAuth = ["credential"]
+
+[object."x:MtaInboundSession"]
+default = "none"
+
+[object."x:MtaInboundThrottle"]
+default = "none"
+
+[object."x:MtaMilter"]
+default = "none"
+
+[object."x:MtaOutboundStrategy"]
+default = "none"
+
+[object."x:MtaOutboundThrottle"]
+default = "none"
+
+[object."x:MtaQueueQuota"]
+default = "none"
+
+[object."x:MtaRouteCommon"]
+default = "none"
+
+[object."x:MtaRouteMx"]
+default = "none"
+
+[object."x:MtaRouteRelay"]
+default = "none"
+[object."x:MtaRouteRelay".properties]
+authSecret = ["credential"]
+
+[object."x:MtaStageAuth"]
+default = "none"
+
+[object."x:MtaStageConnect"]
+default = "none"
+
+[object."x:MtaStageData"]
+default = "none"
+
+[object."x:MtaStageEhlo"]
+default = "none"
+
+[object."x:MtaStageMail"]
+default = "none"
+
+[object."x:MtaStageRcpt"]
+default = "none"
+
+[object."x:MtaSts"]
+default = "none"
+
+[object."x:MtaTlsStrategy"]
+default = "none"
+
+[object."x:MtaVirtualQueue"]
+default = "none"
+
+[object."x:MySqlSettings"]
+default = "none"
+[object."x:MySqlSettings".properties]
+authSecret = ["credential"]
+
+[object."x:MySqlStore"]
+default = "none"
+[object."x:MySqlStore".properties]
+authSecret = ["credential"]
+
+[object."x:NatsCoordinator"]
+default = "none"
+[object."x:NatsCoordinator".properties]
+authSecret = ["credential"]
+credentials = ["credential"]
+
+[object."x:NetworkListener"]
+default = "none"
+[object."x:NetworkListener".properties]
+overrideProxyTrustedNetworks = ["network"]
+
+[object."x:OAuthClient"]
+default = "none"
+whose = ["administrator"]
+where = ["data-store"]
+scope = "tenant"
+retention = { setting = "x:OAuthClient.expiresAt" }
+[object."x:OAuthClient".properties]
+contacts = ["contact"]
+createdAt = ["metadata"]
+description = ["content"]
+expiresAt = ["metadata"]
+redirectUris = ["identifier"]
+secret = ["credential"]
+
+[object."x:OidcDirectory"]
+default = "none"
+
+[object."x:OidcProvider"]
+default = "none"
+[object."x:OidcProvider".properties]
+encryptionKey = ["credential"]
+signatureKey = ["credential"]
+
+[object."x:OtpAuth"]
+default = "none"
+whose = ["holder"]
+where = ["data-store"]
+scope = "tenant"
+retention = "object-life"
+[object."x:OtpAuth".properties]
+otpCode = ["credential"]
+otpUrl = ["credential"]
+
+[object."x:PasswordCredential"]
+default = "none"
+whose = ["holder"]
+where = ["data-store"]
+scope = "tenant"
+retention = "object-life"
+[object."x:PasswordCredential".properties]
+allowedIps = ["network"]
+expiresAt = ["metadata"]
+otpAuth = ["credential"]
+secret = ["credential"]
+
+[object."x:PermissionsList"]
+default = "none"
+
+[object."x:PostgreSqlSettings"]
+default = "none"
+[object."x:PostgreSqlSettings".properties]
+authSecret = ["credential"]
+
+[object."x:PostgreSqlStore"]
+default = "none"
+[object."x:PostgreSqlStore".properties]
+authSecret = ["credential"]
+
+[object."x:PublicKey"]
+default = "none"
+whose = ["holder"]
+where = ["data-store"]
+scope = "tenant"
+retention = "object-life"
+[object."x:PublicKey".properties]
+createdAt = ["metadata"]
+description = ["content"]
+emailAddresses = ["identifier"]
+expiresAt = ["metadata"]
+key = ["credential"]
+
+[object."x:PublicStringValue"]
+default = "none"
+
+[object."x:PublicTextValue"]
+default = "none"
+
+[object."x:QueueExpiryAttempts"]
+default = "none"
+
+[object."x:QueueExpiryTtl"]
+default = "none"
+
+[object."x:QueuedMessage"]
+default = "none"
+whose = ["holder", "correspondent"]
+where = ["data-store", "blob-store"]
+scope = "server"
+retention = { setting = "x:MtaDeliveryExpirationTtl.expire" }
+[object."x:QueuedMessage".properties]
+blobId = ["content"]
+createdAt = ["metadata"]
+envId = ["metadata"]
+receivedFromIp = ["network"]
+recipients = ["identifier"]
+returnPath = ["identifier"]
+size = ["metadata"]
+
+[object."x:QueuedRecipient"]
+default = "none"
+whose = ["correspondent"]
+where = ["data-store"]
+scope = "server"
+retention = { setting = "x:MtaDeliveryExpirationTtl.expire" }
+[object."x:QueuedRecipient".properties]
+orcpt = ["identifier"]
+status = ["metadata"]
+
+[object."x:Rate"]
+default = "none"
+
+[object."x:RedisClusterStore"]
+default = "none"
+[object."x:RedisClusterStore".properties]
+authSecret = ["credential"]
+
+[object."x:RedisSentinelStore"]
+default = "none"
+[object."x:RedisSentinelStore".properties]
+authSecret = ["credential"]
+sentinelSecret = ["credential"]
+
+[object."x:RedisStore"]
+default = "none"
+
+[object."x:ReportSettings"]
+default = "none"
+
+[object."x:RocksDbStore"]
+default = "none"
+
+[object."x:Role"]
+default = "none"
+
+[object."x:S3Store"]
+default = "none"
+[object."x:S3Store".properties]
+secretKey = ["credential"]
+securityToken = ["credential"]
+sessionToken = ["credential"]
+
+[object."x:S3StoreCustomRegion"]
+default = "none"
+
+[object."x:Search"]
+default = "none"
+
+[object."x:SecondaryCredential"]
+default = "none"
+whose = ["holder"]
+where = ["data-store"]
+scope = "tenant"
+retention = "object-life"
+[object."x:SecondaryCredential".properties]
+allowedIps = ["network"]
+createdAt = ["metadata"]
+description = ["content"]
+expiresAt = ["metadata"]
+secret = ["credential"]
+
+[object."x:SecretKeyEnvironmentVariable"]
+default = "none"
+
+[object."x:SecretKeyFile"]
+default = "none"
+
+[object."x:SecretKeyValue"]
+default = "none"
+[object."x:SecretKeyValue".properties]
+secret = ["credential"]
+
+[object."x:SecretTextValue"]
+default = "none"
+[object."x:SecretTextValue".properties]
+secret = ["credential"]
+
+[object."x:Security"]
+default = "none"
+
+[object."x:SenderAuth"]
+default = "none"
+
+[object."x:ServerResponse"]
+default = "none"
+
+[object."x:Service"]
+default = "none"
+
+[object."x:ShardedBlobStore"]
+default = "none"
+
+[object."x:ShardedInMemoryStore"]
+default = "none"
+
+[object."x:Sharing"]
+default = "none"
+
+[object."x:SieveSystemInterpreter"]
+default = "none"
+
+[object."x:SieveSystemScript"]
+default = "none"
+
+[object."x:SieveUserInterpreter"]
+default = "none"
+
+[object."x:SieveUserScript"]
+default = "none"
+whose = ["holder"]
+where = ["data-store", "blob-store"]
+scope = "tenant"
+retention = "object-life"
+[object."x:SieveUserScript".properties]
+contents = ["content"]
+description = ["content"]
+name = ["content"]
+
+[object."x:SpamClassifier"]
+default = "none"
+
+[object."x:SpamClassifierFtrlCcfh"]
+default = "none"
+
+[object."x:SpamClassifierFtrlFh"]
+default = "none"
+
+[object."x:SpamClassify"]
+default = "none"
+whose = ["correspondent"]
+where = ["memory"]
+scope = "server"
+retention = "unbounded"
+[object."x:SpamClassify".properties]
+authenticatedAs = ["identifier"]
+ehloDomain = ["network"]
+envFrom = ["identifier"]
+envRcptTo = ["identifier"]
+message = ["content"]
+remoteIp = ["network"]
+
+[object."x:SpamClassifyTag"]
+default = "none"
+
+[object."x:SpamDnsblServerAny"]
+default = "none"
+
+[object."x:SpamDnsblServerBody"]
+default = "none"
+
+[object."x:SpamDnsblServerDomain"]
+default = "none"
+
+[object."x:SpamDnsblServerEmail"]
+default = "none"
+
+[object."x:SpamDnsblServerHeader"]
+default = "none"
+
+[object."x:SpamDnsblServerIp"]
+default = "none"
+
+[object."x:SpamDnsblServerUrl"]
+default = "none"
+
+[object."x:SpamDnsblSettings"]
+default = "none"
+
+[object."x:SpamFileExtension"]
+default = "none"
+
+[object."x:SpamLlmProperties"]
+default = "none"
+
+[object."x:SpamPyzor"]
+default = "none"
+
+[object."x:SpamRuleAny"]
+default = "none"
+
+[object."x:SpamRuleBody"]
+default = "none"
+
+[object."x:SpamRuleDomain"]
+default = "none"
+
+[object."x:SpamRuleEmail"]
+default = "none"
+
+[object."x:SpamRuleHeader"]
+default = "none"
+
+[object."x:SpamRuleIp"]
+default = "none"
+
+[object."x:SpamRuleUrl"]
+default = "none"
+
+[object."x:SpamSettings"]
+default = "none"
+
+[object."x:SpamTagAction"]
+default = "none"
+
+[object."x:SpamTagScore"]
+default = "none"
+
+[object."x:SpamTrainingSample"]
+default = "none"
+whose = ["correspondent", "holder"]
+where = ["data-store", "blob-store"]
+scope = "tenant"
+retention = { setting = "x:SpamClassifier.holdSamplesFor" }
+[object."x:SpamTrainingSample".properties]
+blobId = ["content"]
+expiresAt = ["metadata"]
+from = ["identifier"]
+subject = ["content"]
+
+[object."x:SpfReportSettings"]
+default = "none"
+
+[object."x:SqlDirectory"]
+default = "none"
+
+[object."x:SqliteStore"]
+default = "none"
+
+[object."x:StoreLookup"]
+default = "none"
+
+[object."x:SubAddressingCustom"]
+default = "none"
+
+[object."x:SystemSettings"]
+default = "none"
+[object."x:SystemSettings".properties]
+proxyTrustedNetworks = ["network"]
+
+[object."x:TaskAccountMaintenance"]
+default = "none"
+
+[object."x:TaskCalendarAlarmEmail"]
+default = "none"
+
+[object."x:TaskCalendarAlarmNotification"]
+default = "none"
+
+[object."x:TaskCalendarItipContents"]
+default = "none"
+whose = ["holder", "correspondent"]
+where = ["data-store"]
+scope = "tenant"
+retention = "unbounded"
+[object."x:TaskCalendarItipContents".properties]
+from = ["identifier"]
+iCalendarData = ["content"]
+summary = ["content"]
+to = ["identifier"]
+
+[object."x:TaskCalendarItipMessage"]
+default = "none"
+
+[object."x:TaskDestroyAccount"]
+default = "none"
+whose = ["holder"]
+where = ["data-store"]
+scope = "tenant"
+retention = "unbounded"
+[object."x:TaskDestroyAccount".properties]
+accountName = ["identifier"]
+
+[object."x:TaskDmarcReport"]
+default = "none"
+
+[object."x:TaskDnsManagement"]
+default = "none"
+
+[object."x:TaskDomainManagement"]
+default = "none"
+
+[object."x:TaskIndexDocument"]
+default = "none"
+
+[object."x:TaskIndexTrace"]
+default = "none"
+
+[object."x:TaskManager"]
+default = "none"
+
+[object."x:TaskMergeThreads"]
+default = "none"
+whose = ["holder"]
+where = ["data-store"]
+scope = "tenant"
+retention = "unbounded"
+[object."x:TaskMergeThreads".properties]
+messageIds = ["metadata"]
+threadName = ["content"]
+
+[object."x:TaskRestoreArchivedItem"]
+default = "none"
+
+[object."x:TaskRetryStrategyBackoff"]
+default = "none"
+
+[object."x:TaskRetryStrategyFixed"]
+default = "none"
+
+[object."x:TaskSpamFilterMaintenance"]
+default = "none"
+
+[object."x:TaskStatusFailed"]
+default = "none"
+whose = ["holder"]
+where = ["data-store"]
+scope = "tenant"
+retention = "unbounded"
+[object."x:TaskStatusFailed".properties]
+failureReason = ["content"]
+
+[object."x:TaskStatusPending"]
+default = "none"
+
+[object."x:TaskStatusRetry"]
+default = "none"
+whose = ["holder"]
+where = ["data-store"]
+scope = "tenant"
+retention = "unbounded"
+[object."x:TaskStatusRetry".properties]
+failureReason = ["content"]
+
+[object."x:TaskStoreMaintenance"]
+default = "none"
+
+[object."x:TaskTenantMaintenance"]
+default = "none"
+
+[object."x:TaskTlsReport"]
+default = "none"
+
+[object."x:Tenant"]
+default = "none"
+whose = ["holder"]
+where = ["data-store"]
+scope = "tenant"
+retention = "object-life"
+[object."x:Tenant".properties]
+createdAt = ["metadata"]
+name = ["identifier"]
+usedDiskQuota = ["metadata"]
+
+[object."x:TlsExternalReport"]
+default = "none"
+whose = ["correspondent"]
+where = ["data-store"]
+scope = "tenant"
+retention = { setting = "x:DataRetention.holdMtaReportsFor" }
+[object."x:TlsExternalReport".properties]
+from = ["identifier"]
+receivedAt = ["metadata"]
+subject = ["content"]
+to = ["identifier"]
+
+[object."x:TlsFailureDetails"]
+default = "none"
+whose = ["correspondent"]
+where = ["data-store"]
+scope = "tenant"
+retention = { setting = "x:DataRetention.holdMtaReportsFor" }
+[object."x:TlsFailureDetails".properties]
+receivingIp = ["network"]
+receivingMxHelo = ["network"]
+receivingMxHostname = ["network"]
+sendingMtaIp = ["network"]
+
+[object."x:TlsInternalReport"]
+default = "none"
+whose = ["correspondent"]
+where = ["data-store"]
+scope = "server"
+retention = "receiver"
+[object."x:TlsInternalReport".properties]
+domain = ["identifier"]
+httpRua = ["identifier"]
+mailRua = ["identifier"]
+
+[object."x:TlsReport"]
+default = "none"
+whose = ["correspondent"]
+where = ["data-store"]
+scope = "tenant"
+retention = { setting = "x:DataRetention.holdMtaReportsFor" }
+[object."x:TlsReport".properties]
+contactInfo = ["contact"]
+organizationName = ["identifier"]
+
+[object."x:TlsReportPolicy"]
+default = "none"
+
+[object."x:TlsReportSettings"]
+default = "none"
+
+[object."x:Trace"]
+default = "none"
+whose = ["correspondent", "holder"]
+where = ["data-store", "search-store"]
+scope = "server"
+retention = { setting = "x:DataRetention.holdTracesFor" }
+[object."x:Trace".properties]
+events = ["network", "identifier", "metadata"]
+from = ["identifier"]
+size = ["metadata"]
+timestamp = ["metadata"]
+to = ["identifier"]
+
+[object."x:TraceEvent"]
+default = "none"
+whose = ["correspondent", "holder"]
+where = ["data-store"]
+scope = "server"
+retention = { setting = "x:DataRetention.holdTracesFor" }
+[object."x:TraceEvent".properties]
+keyValues = ["network", "identifier", "metadata"]
+timestamp = ["metadata"]
+
+[object."x:TraceKeyValue"]
+default = "none"
+whose = ["correspondent", "holder"]
+where = ["data-store"]
+scope = "server"
+retention = { setting = "x:DataRetention.holdTracesFor" }
+[object."x:TraceKeyValue".properties]
+value = ["network", "identifier", "metadata"]
+
+[object."x:TraceValueBoolean"]
+default = "none"
+
+[object."x:TraceValueDuration"]
+default = "none"
+
+[object."x:TraceValueEvent"]
+default = "none"
+
+[object."x:TraceValueFloat"]
+default = "none"
+
+[object."x:TraceValueInteger"]
+default = "none"
+
+[object."x:TraceValueIpAddr"]
+default = "none"
+whose = ["correspondent", "holder"]
+where = ["data-store"]
+scope = "server"
+retention = { setting = "x:DataRetention.holdTracesFor" }
+[object."x:TraceValueIpAddr".properties]
+value = ["network"]
+
+[object."x:TraceValueList"]
+default = "none"
+
+[object."x:TraceValueString"]
+default = "none"
+whose = ["correspondent", "holder"]
+where = ["data-store"]
+scope = "server"
+retention = { setting = "x:DataRetention.holdTracesFor" }
+[object."x:TraceValueString".properties]
+value = ["identifier", "metadata"]
+
+[object."x:TraceValueUTCDateTime"]
+default = "none"
+
+[object."x:TraceValueUnsignedInt"]
+default = "none"
+
+[object."x:TracerCommon"]
+default = "none"
+
+[object."x:TracerLog"]
+default = "none"
+whose = ["correspondent", "holder", "administrator"]
+where = ["log-file"]
+scope = "server"
+retention = "unbounded"
+[object."x:TracerLog".properties]
+path = ["metadata"]
+
+[object."x:TracerOtelGrpc"]
+default = "none"
+whose = ["correspondent", "holder", "administrator"]
+where = ["external"]
+scope = "server"
+retention = "receiver"
+[object."x:TracerOtelGrpc".properties]
+endpoint = ["network"]
+httpAuth = ["credential"]
+httpHeaders = ["credential"]
+
+[object."x:TracerOtelHttp"]
+default = "none"
+whose = ["correspondent", "holder", "administrator"]
+where = ["external"]
+scope = "server"
+retention = "receiver"
+[object."x:TracerOtelHttp".properties]
+endpoint = ["network"]
+httpAuth = ["credential"]
+httpHeaders = ["credential"]
+
+[object."x:TracerStdout"]
+default = "none"
+
+[object."x:UserAccount"]
+default = "none"
+whose = ["holder"]
+where = ["data-store"]
+scope = "tenant"
+retention = "object-life"
+[object."x:UserAccount".properties]
+aliases = ["identifier"]
+createdAt = ["metadata"]
+credentials = ["credential", "network"]
+description = ["content"]
+emailAddress = ["identifier"]
+externalId = ["identifier"]
+locale = ["metadata"]
+memberGroupIds = ["identifier"]
+name = ["identifier"]
+timeZone = ["metadata"]
+usedDiskQuota = ["metadata"]
+
+[object."x:WebDav"]
+default = "none"
+
+[object."x:WebHook"]
+default = "none"
+whose = ["correspondent", "holder", "administrator"]
+where = ["external"]
+scope = "server"
+retention = "receiver"
+[object."x:WebHook".properties]
+httpAuth = ["credential"]
+httpHeaders = ["credential"]
+signatureKey = ["credential"]
+url = ["network"]
+
+[object."x:ZenohCoordinator"]
+default = "none"

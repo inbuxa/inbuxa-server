@@ -40,6 +40,12 @@ jobs:
       # nothing. CI never sees the difference; a release does.
       - if: always()
         run: python3 tools/fork/context-check.py
+      # The personal-data catalog must classify every object and field the
+      # schema has, and name nothing that is gone.
+      - if: always()
+        run: python3 tools/fork/privacy-check.py
+      - if: always()
+        run: python3 -m unittest discover -s tools/fork/tests
 
   build:
     # Either runner (host1 or host2): the build needs no docker socket.
