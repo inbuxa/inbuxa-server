@@ -8,6 +8,17 @@
 //! (legacy-protocols spec, data model and LP-1 to LP-8). Stored as JSON under
 //! `P` + `p` in the fork's subspace; unset fields read as the defaults.
 //!
+//! Each mail-app protocol has its own switch (legacy-protocols spec,
+//! "Revisit: one switch per protocol"): IMAP, POP3 and ManageSieve.
+//! `legacyProtocols` is the kill-all: setting it sets all three, and it reads
+//! `disabled` exactly when all three are off. A policy stored before the
+//! per-protocol switches has only `legacyProtocols`, and reads as all three
+//! at that value.
+//!
+//! SMTP submission has no switch of its own here: sign-in over it is refused
+//! only when all three are off, as it was by the single switch (LP-6), so
+//! turning off one protocol never stops a mail app sending.
+//!
 //! This module is the fact, not the act. It holds what the operator chose and
 //! which listeners were taken away to honour it. Closing sockets belongs to
 //! `common`, which owns the listener registry, and removing the listener
@@ -59,12 +70,30 @@ pub struct SavedListener {
     pub object: serde_json::Value,
 }
 
-/// The server-wide switch.
+/// The protocols with a switch of their own, as the schema and JMAP spell
+/// them.
+pub const SWITCHED: &[&str] = &["imap", "pop3", "manageSieve"];
+
+/// The name sign-in uses for SMTP AUTH, which follows the kill-all.
+pub const SUBMISSION: &str = "submission";
+
+/// The server-wide switches.
 #[derive(Debug, Clone, PartialEq, SerdeSerialize, SerdeDeserialize)]
 #[serde(rename_all = "camelCase", default)]
 pub struct ProtocolPolicy {
-    /// The switch itself.
+    /// The kill-all: `disabled` exactly when all three protocols are off,
+    /// once [`ProtocolPolicy::normalize`] has run. In a policy stored before
+    /// the per-protocol switches, it is the value of all three.
     pub legacy_protocols: LegacyProtocols,
+    /// IMAP's switch. Unset reads as `legacy_protocols`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub imap: Option<LegacyProtocols>,
+    /// POP3's switch. Unset reads as `legacy_protocols`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pop3: Option<LegacyProtocols>,
+    /// ManageSieve's switch. Unset reads as `legacy_protocols`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub manage_sieve: Option<LegacyProtocols>,
     /// With `disabled`, also close SMTP submission (LP-3). The inbound
     /// listener on port 25 is never closed, whatever this says.
     pub close_submission: bool,
@@ -80,6 +109,9 @@ impl Default for ProtocolPolicy {
     fn default() -> Self {
         ProtocolPolicy {
             legacy_protocols: LegacyProtocols::Enabled,
+            imap: None,
+            pop3: None,
+            manage_sieve: None,
             close_submission: true,
             saved_listeners: Vec::new(),
             changed_at: None,
@@ -91,6 +123,9 @@ impl Default for ProtocolPolicy {
 /// The properties `inbuxa:ProtocolPolicy` has, as they appear over JMAP.
 pub const PROPERTIES: &[&str] = &[
     "legacyProtocols",
+    "imap",
+    "pop3",
+    "manageSieve",
     "closeSubmission",
     "savedListeners",
     "changedAt",
@@ -129,23 +164,137 @@ pub fn is_locked(protocol: &str) -> bool {
         .any(|locked| locked.eq_ignore_ascii_case(protocol))
 }
 
-impl ProtocolPolicy {
-    /// Whether a listener of this protocol and these ports is one the switch
-    /// closes. A listener bound to port 25 is inbound whatever its name, and
-    /// any other SMTP listener counts as submission (LP-3).
-    pub fn closes(&self, protocol: &str, ports: &[u16]) -> bool {
-        if !self.legacy_protocols.is_disabled() {
-            return false;
+/// The switch fields, by protocol name.
+pub trait Switches {
+    /// The kill-all, which an unset per-protocol switch reads as.
+    fn all(&self) -> LegacyProtocols;
+    fn slot(&self, protocol: &str) -> Option<&Option<LegacyProtocols>>;
+    fn slot_mut(&mut self, protocol: &str) -> Option<&mut Option<LegacyProtocols>>;
+    fn set_all_field(&mut self, value: LegacyProtocols);
+
+    /// One protocol's switch. `submission` follows the kill-all: it is off
+    /// only when all three are. Anything else has no switch and is on.
+    fn switch(&self, protocol: &str) -> LegacyProtocols {
+        if protocol == SUBMISSION {
+            return if self.all_off() {
+                LegacyProtocols::Disabled
+            } else {
+                LegacyProtocols::Enabled
+            };
         }
+        match self.slot(protocol) {
+            Some(value) => value.unwrap_or(self.all()),
+            None => LegacyProtocols::Enabled,
+        }
+    }
+
+    /// Whether this protocol is off.
+    fn is_off(&self, protocol: &str) -> bool {
+        self.switch(protocol).is_disabled()
+    }
+
+    /// Whether all three protocols are off.
+    fn all_off(&self) -> bool {
+        SWITCHED.iter().all(|protocol| {
+            self.slot(protocol)
+                .and_then(|value| *value)
+                .unwrap_or(self.all())
+                .is_disabled()
+        })
+    }
+
+    /// Sets one protocol's switch; false if it has none.
+    fn set(&mut self, protocol: &str, value: LegacyProtocols) -> bool {
+        match self.slot_mut(protocol) {
+            Some(slot) => {
+                *slot = Some(value);
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// The kill-all: all three at once.
+    fn set_all(&mut self, value: LegacyProtocols) {
+        for protocol in SWITCHED {
+            self.set(protocol, value);
+        }
+        self.set_all_field(value);
+    }
+
+    /// Writes out every switch and derives the kill-all from them, so what is
+    /// stored and shown never depends on how it was reached.
+    fn normalize(&mut self) {
+        let values: Vec<_> = SWITCHED.iter().map(|p| self.switch(p)).collect();
+        for (protocol, value) in SWITCHED.iter().zip(values) {
+            self.set(protocol, value);
+        }
+        let all = if self.all_off() {
+            LegacyProtocols::Disabled
+        } else {
+            LegacyProtocols::Enabled
+        };
+        self.set_all_field(all);
+    }
+
+    /// The protocols that are off.
+    fn off(&self) -> Vec<&'static str> {
+        SWITCHED
+            .iter()
+            .copied()
+            .filter(|p| self.is_off(p))
+            .collect()
+    }
+}
+
+macro_rules! switches {
+    ($t:ty) => {
+        impl Switches for $t {
+            fn all(&self) -> LegacyProtocols {
+                self.legacy_protocols
+            }
+            fn slot(&self, protocol: &str) -> Option<&Option<LegacyProtocols>> {
+                match protocol {
+                    "imap" => Some(&self.imap),
+                    "pop3" => Some(&self.pop3),
+                    "manageSieve" => Some(&self.manage_sieve),
+                    _ => None,
+                }
+            }
+            fn slot_mut(&mut self, protocol: &str) -> Option<&mut Option<LegacyProtocols>> {
+                match protocol {
+                    "imap" => Some(&mut self.imap),
+                    "pop3" => Some(&mut self.pop3),
+                    "manageSieve" => Some(&mut self.manage_sieve),
+                    _ => None,
+                }
+            }
+            fn set_all_field(&mut self, value: LegacyProtocols) {
+                self.legacy_protocols = value;
+            }
+        }
+    };
+}
+pub(crate) use switches;
+
+switches!(ProtocolPolicy);
+
+impl ProtocolPolicy {
+    /// Whether a listener of this protocol and these ports is one the
+    /// switches close. A listener bound to port 25 is inbound whatever its
+    /// name, and any other SMTP listener counts as submission (LP-3), closed
+    /// only with all three off and `closeSubmission`.
+    pub fn closes(&self, protocol: &str, ports: &[u16]) -> bool {
         // The lock is checked first and answers for every caller, so no
         // request phrasing can reach past it (LP-21).
         if is_locked(protocol) {
             return false;
         }
         if LEGACY_PROTOCOLS.contains(&protocol) {
-            return true;
+            return self.is_off(protocol);
         }
         protocol.eq_ignore_ascii_case("smtp")
+            && self.all_off()
             && self.close_submission
             && !ports.contains(&INBOUND_SMTP_PORT)
     }
@@ -258,7 +407,10 @@ mod tests {
             "an unset closeSubmission reads as the default, true"
         );
 
-        let json = serde_json::to_value(&policy).unwrap();
+        // As shown: normalized, every switch written out.
+        let mut shown = policy.clone();
+        shown.normalize();
+        let json = serde_json::to_value(&shown).unwrap();
         for property in PROPERTIES {
             assert!(json.get(property).is_some(), "{property}");
         }
@@ -408,6 +560,72 @@ mod tests {
             round_tripped.saved_listeners[0].object["somethingThisCodeHasNeverHeardOf"],
             7
         );
+    }
+
+    /// A policy stored before the per-protocol switches reads as all three
+    /// at its one value.
+    #[test]
+    fn an_old_policy_reads_as_all_three() {
+        let old: ProtocolPolicy =
+            serde_json::from_str(r#"{"legacyProtocols": "disabled"}"#).unwrap();
+        for p in SWITCHED {
+            assert!(old.is_off(p), "{p}");
+        }
+        assert!(old.all_off() && old.is_off(SUBMISSION));
+        let old: ProtocolPolicy =
+            serde_json::from_str(r#"{"legacyProtocols": "enabled"}"#).unwrap();
+        assert!(old.off().is_empty() && !old.is_off(SUBMISSION));
+    }
+
+    /// One protocol off closes only its listeners, and leaves sending alone.
+    #[test]
+    fn one_protocol_off() {
+        let mut policy = ProtocolPolicy::default();
+        policy.set("pop3", LegacyProtocols::Disabled);
+        policy.normalize();
+        assert!(policy.closes("pop3", &[995]));
+        assert!(!policy.closes("imap", &[993]));
+        assert!(!policy.closes("manageSieve", &[4190]));
+        assert!(!policy.is_off(SUBMISSION), "sending goes on");
+        assert_eq!(policy.legacy_protocols, LegacyProtocols::Enabled);
+        assert_eq!(policy.off(), vec!["pop3"]);
+        let json = serde_json::to_value(&policy).unwrap();
+        assert_eq!(json["pop3"], "disabled");
+        assert_eq!(json["imap"], "enabled");
+    }
+
+    /// Turning the three off one at a time is the kill-all, and the kill-all
+    /// back on turns all three on.
+    #[test]
+    fn the_kill_all_is_all_three() {
+        let mut policy = ProtocolPolicy::default();
+        for p in SWITCHED {
+            policy.set(p, LegacyProtocols::Disabled);
+        }
+        policy.normalize();
+        assert!(policy.legacy_protocols.is_disabled());
+        assert!(policy.is_off(SUBMISSION));
+
+        policy.set_all(LegacyProtocols::Enabled);
+        policy.normalize();
+        assert!(policy.off().is_empty());
+        assert!(!policy.legacy_protocols.is_disabled());
+
+        // The kill-all then one back on: no longer all off.
+        policy.set_all(LegacyProtocols::Disabled);
+        policy.set("imap", LegacyProtocols::Enabled);
+        policy.normalize();
+        assert!(!policy.legacy_protocols.is_disabled());
+        assert_eq!(policy.off(), vec!["pop3", "manageSieve"]);
+    }
+
+    /// Protocols without a switch are never off.
+    #[test]
+    fn unswitched_protocols_are_on() {
+        let policy = disabled();
+        for p in ["smtp", "http", "lmtp", "jmap"] {
+            assert!(!policy.is_off(p), "{p}");
+        }
     }
 
     /// A saved listener with no id is refused, naming the property.

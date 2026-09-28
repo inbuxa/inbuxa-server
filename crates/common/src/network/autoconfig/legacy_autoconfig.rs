@@ -6,7 +6,7 @@
  * Modified by Coffey Labs in 2026 for INBUXA.
  */
 
-use crate::{Server, manager::application::Resource, network::legacy::is_legacy_service};
+use crate::{Server, manager::application::Resource};
 use registry::schema::enums::ServiceProtocol;
 use std::fmt::Write;
 use utils::url_params::UrlParams;
@@ -31,7 +31,7 @@ impl Server {
         };
 
         // inbuxa: legacy-protocols LP-7, LP-14a
-        let legacy_off = self.legacy_protocols_off_for(domain).await?;
+        let legacy_off = self.legacy_off_for(domain).await?;
 
         // Build XML response
         let mut config = String::with_capacity(1024);
@@ -45,7 +45,7 @@ impl Server {
             "\t\t<displayShortName>{domain}</displayShortName>"
         );
         for (protocol, service) in &self.core.network.info.services {
-            if legacy_off && is_legacy_service(protocol) {
+            if legacy_off.service(protocol) {
                 continue;
             }
             let (protocol, tag, ports) = match protocol {

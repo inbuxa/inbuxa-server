@@ -6,11 +6,7 @@
  * Modified by Coffey Labs in 2026 for INBUXA.
  */
 
-use crate::{
-    Server,
-    config::network::Pacc,
-    network::{dkim::generate_dkim_dns_record, legacy::is_legacy_service},
-};
+use crate::{Server, config::network::Pacc, network::dkim::generate_dkim_dns_record};
 use ahash::{AHashMap, AHashSet};
 use base64::{Engine, engine::general_purpose};
 use dns_update::{
@@ -41,7 +37,7 @@ impl Server {
         let default_host = network.server_name.as_str();
         let domain_name = domain.name.as_str();
         // inbuxa: legacy-protocols LP-7, LP-14a
-        let legacy_off = self.legacy_protocols_off_for(domain_name).await?;
+        let legacy_off = self.legacy_off_for(domain_name).await?;
         let domain_name_suffix = format!(".{domain_name}");
 
         for record_type in record_types {
@@ -205,7 +201,7 @@ impl Server {
                         // name says "not offered" -- target "." (RFC 6186 section
                         // 3.4) -- rather than vanishing, so a client that looks
                         // is told, and an old record left in the zone is replaced.
-                        if legacy_off && is_legacy_service(protocol) {
+                        if legacy_off.service(protocol) {
                             for (service_name, _) in services {
                                 records.push(NamedDnsRecord {
                                     name: format!("_{service_name}._tcp.{domain_name}."),
@@ -307,8 +303,8 @@ impl Server {
                             // inbuxa: legacy-protocols LP-7. No TLS pin for a port
                             // the switch has closed. Submission's port stays open
                             // (the SMTP lock), so its record stays.
-                            if legacy_off
-                                && matches!(protocol, ServiceProtocol::Imap | ServiceProtocol::Pop3)
+                            if matches!(protocol, ServiceProtocol::Imap | ServiceProtocol::Pop3)
+                                && legacy_off.service(protocol)
                             {
                                 continue;
                             }
@@ -418,11 +414,8 @@ impl Server {
 
     pub async fn get_pacc_for_domain(&self, domain_name: &str) -> trc::Result<String> {
         // inbuxa: legacy-protocols LP-7, LP-14a
-        let pacc = if self.legacy_protocols_off_for(domain_name).await? {
-            &self.core.network.info.pacc_jmap_only
-        } else {
-            &self.core.network.info.pacc
-        };
+        let off = self.legacy_off_for(domain_name).await?;
+        let pacc = &self.core.network.info.pacc[off.index()];
         self.get_directory_for_domain(domain_name)
             .await
             .caused_by(trc::location!())

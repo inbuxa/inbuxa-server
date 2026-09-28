@@ -376,7 +376,11 @@ async fn full_name(server: &Server, object: &str, value: &Value, name: Option<St
 }
 
 async fn fork_current(server: &Server, object: &str, id: &MaybeInvalid<Id>) -> Option<Value> {
-    use inbuxa_features::{ai::limits, audit::log, security};
+    use inbuxa_features::{
+        ai::limits,
+        audit::log,
+        security::{self, protocol_policy::Switches},
+    };
     let data = server.store();
     match object {
         "inbuxa:AuditSettings" => log::settings(data)
@@ -387,10 +391,17 @@ async fn fork_current(server: &Server, object: &str, id: &MaybeInvalid<Id>) -> O
             .await
             .ok()
             .and_then(|limits| serde_json::to_value(limits).ok()),
-        "inbuxa:ProtocolPolicy" => security::protocol_policy::get(data)
-            .await
-            .ok()
-            .and_then(|policy| serde_json::to_value(policy).ok()),
+        // Normalized, so every switch reads before and after, even from a
+        // policy stored before the per-protocol switches
+        "inbuxa:ProtocolPolicy" => {
+            security::protocol_policy::get(data)
+                .await
+                .ok()
+                .and_then(|mut policy| {
+                    policy.normalize();
+                    serde_json::to_value(policy).ok()
+                })
+        }
         // LH-1: a hold as the API shows it, so a change reads before/after
         "inbuxa:LegalHold" => match id {
             MaybeInvalid::Value(id) => {
@@ -424,7 +435,10 @@ async fn fork_current(server: &Server, object: &str, id: &MaybeInvalid<Id>) -> O
                 security::tenant_protocol_policy::get(data, id.document_id())
                     .await
                     .ok()
-                    .and_then(|policy| serde_json::to_value(policy).ok())
+                    .and_then(|mut policy| {
+                        policy.normalize();
+                        serde_json::to_value(policy).ok()
+                    })
             }
             MaybeInvalid::Invalid(_) => None,
         },

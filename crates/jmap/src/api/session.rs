@@ -66,12 +66,16 @@ impl SessionHandler for Server {
             Capability::Inbuxa,
             Capabilities::Empty(EmptyCapabilities::default()),
         );
-        // inbuxa: legacy-protocols, Interfaces: whichever switch is stricter
-        let legacy_protocols = if self.legacy_protocols_off_for_account(access_token).await? {
+        // inbuxa: legacy-protocols, Interfaces: whichever switch is stricter,
+        // per protocol. `legacyProtocols` stays for older webmail builds:
+        // `disabled` only when every protocol is off.
+        let legacy_off = self.legacy_off_for_account(access_token).await?;
+        let legacy_protocols = if legacy_off.all() {
             "disabled"
         } else {
             "enabled"
         };
+        let legacy_allowed = legacy_off.allowed();
         // inbuxa: ai-explain, EX-1 to EX-4: whether Explain can be offered
         let ai_explain = access_token.has_permission(Permission::SysAiExplain)
             && access_token.tenant_id().is_none()
@@ -81,6 +85,7 @@ impl SessionHandler for Server {
             Capabilities::Inbuxa(InbuxaAccountCapabilities {
                 logo,
                 legacy_protocols,
+                legacy_allowed,
                 ai_explain,
             }),
         );

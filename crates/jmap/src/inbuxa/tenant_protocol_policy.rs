@@ -12,16 +12,22 @@
 //! with no ids answers with it, and any other id is `notFound`. At server
 //! level, `/get` with no ids answers with every tenant's.
 //!
-//! Turning it off never needs the server's leave; turning it back on is
-//! refused with `forbidden` while the server has legacy protocols off (LP-9).
+//! Each of IMAP, POP3 and ManageSieve has its own switch, and
+//! `legacyProtocols` is the kill-all, as on the server's policy. Turning one
+//! off never needs the server's leave; turning one back on is refused with
+//! `forbidden` while the server has that protocol off (LP-9).
 //! A tenant's switch closes no port (LP-13) -- sign-in and client
 //! configuration read it (LP-10, LP-14a).
 
-use crate::inbuxa::protocol_policy::recent_value;
-use common::{Server, auth::AccessToken, network::legacy::RecentUse};
+use crate::inbuxa::protocol_policy::{parse_switch, recent_value, switch_str};
+use common::{
+    Server,
+    auth::AccessToken,
+    network::legacy::{RecentUse, switches_value},
+};
 use inbuxa_features::{
     security::{
-        protocol_policy::LegacyProtocols,
+        protocol_policy::{LegacyProtocols, SWITCHED, Switches},
         tenant_protocol_policy::{self, TenantProtocolPolicy as Policy, refusal},
     },
     tenancy::quota::all_tenants,
@@ -46,6 +52,9 @@ const ALL: &[P] = &[
     P::Id,
     P::TenantId,
     P::LegacyProtocols,
+    P::Imap,
+    P::Pop3,
+    P::ManageSieve,
     P::ChangedAt,
     P::ChangedBy,
     P::RecentLegacyUse,
@@ -60,19 +69,29 @@ async fn reachable(server: &Server, access_token: &AccessToken) -> trc::Result<V
     }
 }
 
+/// The JMAP name of a per-protocol switch property.
+fn switch_name(property: &P) -> Option<&'static str> {
+    match property {
+        P::Imap => Some("imap"),
+        P::Pop3 => Some("pop3"),
+        P::ManageSieve => Some("manageSieve"),
+        _ => None,
+    }
+}
+
 fn to_value(tenant_id: u32, policy: &Policy, recent: &[RecentUse], properties: &[P]) -> PValue {
+    let mut policy = policy.clone();
+    policy.normalize();
+    let policy = &policy;
     let mut out = Map::with_capacity(properties.len());
     for property in properties {
         let value = match property {
             P::Id | P::TenantId => {
                 Value::Element(TenantProtocolPolicyValue::Id(Id::from(tenant_id)))
             }
-            P::LegacyProtocols => Value::Str(
-                match policy.legacy_protocols {
-                    LegacyProtocols::Enabled => "enabled",
-                    LegacyProtocols::Disabled => "disabled",
-                }
-                .into(),
+            P::LegacyProtocols => Value::Str(switch_str(policy.legacy_protocols).into()),
+            P::Imap | P::Pop3 | P::ManageSieve => Value::Str(
+                switch_str(policy.switch(switch_name(property).unwrap_or_default())).into(),
             ),
             P::ChangedAt => policy
                 .changed_at
@@ -165,29 +184,41 @@ pub async fn set(
         let data = &server.core.storage.data;
         let previous = tenant_protocol_policy::get(data, tenant_id).await?;
         let mut policy = previous.clone();
+        policy.normalize();
         let mut error = None;
-        for (key, value) in value.into_expanded_object() {
+        // What this request sets to `enabled`, for LP-9.
+        let mut turned_on: Vec<&'static str> = Vec::new();
+        // The kill-all first, so a protocol named beside it overrides it.
+        let mut entries: Vec<_> = value.into_expanded_object().collect();
+        entries.sort_by_key(|(key, _)| !matches!(key, Key::Property(P::LegacyProtocols)));
+        for (key, value) in entries {
+            // `null` puts a switch back to its default, on.
+            let parsed = match value {
+                Value::Null => Ok(LegacyProtocols::Enabled),
+                value => parse_switch(value.as_str().as_deref()),
+            };
             let result = match &key {
-                Key::Property(P::LegacyProtocols) => match value {
-                    Value::Null => {
-                        policy.legacy_protocols = LegacyProtocols::Enabled;
-                        Ok(())
+                Key::Property(P::LegacyProtocols) => parsed.map(|value| {
+                    policy.set_all(value);
+                    if !value.is_disabled() {
+                        turned_on.extend(SWITCHED.iter().copied());
+                    } else {
+                        turned_on.clear();
                     }
-                    value => match value.as_str().as_deref() {
-                        Some("enabled") => {
-                            policy.legacy_protocols = LegacyProtocols::Enabled;
-                            Ok(())
+                }),
+                Key::Property(property @ (P::Imap | P::Pop3 | P::ManageSieve)) => {
+                    parsed.map(|value| {
+                        let name = switch_name(property).unwrap_or_default();
+                        policy.set(name, value);
+                        turned_on.retain(|p| *p != name);
+                        if !value.is_disabled() {
+                            turned_on.push(name);
                         }
-                        Some("disabled") => {
-                            policy.legacy_protocols = LegacyProtocols::Disabled;
-                            Ok(())
-                        }
-                        _ => Err(r#"must be "enabled" or "disabled""#),
-                    },
-                },
-                Key::Property(P::Id) => Err("is immutable"),
-                Key::Property(_) => Err("is set by the server"),
-                _ => Err("is not a property of inbuxa:TenantProtocolPolicy"),
+                    })
+                }
+                Key::Property(P::Id) => Err("is immutable".to_string()),
+                Key::Property(_) => Err("is set by the server".to_string()),
+                _ => Err("is not a property of inbuxa:TenantProtocolPolicy".to_string()),
             };
             if let Err(why) = result {
                 error = Some(
@@ -203,15 +234,18 @@ pub async fn set(
             continue;
         }
 
-        // LP-9: server off means off for everyone.
-        if let Some(why) = refusal(&server.protocol_policy().await?, policy.legacy_protocols) {
+        // LP-9: server off means off for everyone, protocol by protocol.
+        if let Some(why) = refusal(&server.protocol_policy().await?, &turned_on) {
             response
                 .not_updated
                 .append(id, SetError::forbidden().with_description(why));
             continue;
         }
 
-        if policy.legacy_protocols != previous.legacy_protocols {
+        policy.normalize();
+        let mut before = previous;
+        before.normalize();
+        if policy.off() != before.off() {
             policy.changed_at = Some(store::write::now() * 1000);
             policy.changed_by = Some(Id::from(access_token.account_id()).to_string());
             tenant_protocol_policy::set(data, tenant_id, &policy).await?;
@@ -221,11 +255,7 @@ pub async fn set(
                 Security(trc::SecurityEvent::LegacyProtocolsChanged),
                 Policy = "tenant",
                 Id = tenant_id,
-                Value = if policy.legacy_protocols.is_disabled() {
-                    "disabled"
-                } else {
-                    "enabled"
-                },
+                Value = switches_value(&policy),
                 AccountId = policy.changed_by.clone(),
             );
         }

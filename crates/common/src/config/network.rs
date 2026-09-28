@@ -46,10 +46,10 @@ pub struct Network {
 
 #[derive(Clone)]
 pub struct NetworkInfo {
-    pub pacc: Pacc,
-    /// inbuxa: the same document without IMAP, POP3, SMTP and ManageSieve,
-    /// served while legacy protocols are off (legacy-protocols LP-7).
-    pub pacc_jmap_only: Pacc,
+    /// inbuxa: the document once per combination of legacy protocols off,
+    /// indexed by `LegacyOff::index` (legacy-protocols LP-7, one switch per
+    /// protocol); index 0 is the full document.
+    pub pacc: Vec<Pacc>,
     pub mxs: Vec<MailExchanger>,
     pub services: VecMap<ServiceProtocol, Service>,
 }
@@ -333,16 +333,27 @@ impl Network {
                 })
                 .unwrap()
         };
-        // inbuxa: legacy-protocols LP-7
-        let pacc_jmap_only = {
-            let mut pacc = pacc.clone();
-            pacc.protocols.imap = None;
-            pacc.protocols.pop3 = None;
-            pacc.protocols.smtp = None;
-            pacc.protocols.managesieve = None;
-            split(&pacc)
-        };
-        let pacc = split(&pacc);
+        // inbuxa: legacy-protocols LP-7, one document per combination of
+        // protocols off, bits as `LegacyOff::index`: IMAP, POP3, ManageSieve,
+        // submission.
+        let pacc = (0..16usize)
+            .map(|off| {
+                let mut pacc = pacc.clone();
+                if off & 1 != 0 {
+                    pacc.protocols.imap = None;
+                }
+                if off & 2 != 0 {
+                    pacc.protocols.pop3 = None;
+                }
+                if off & 4 != 0 {
+                    pacc.protocols.managesieve = None;
+                }
+                if off & 8 != 0 {
+                    pacc.protocols.smtp = None;
+                }
+                split(&pacc)
+            })
+            .collect();
         let mut network = Network {
             node_id: bp.node_id() as u64,
             server_name: default_hostname.to_string(),
@@ -358,7 +369,6 @@ impl Network {
                 mxs: system.mail_exchangers.into_iter().collect(),
                 services: system.services,
                 pacc,
-                pacc_jmap_only,
             },
         };
 

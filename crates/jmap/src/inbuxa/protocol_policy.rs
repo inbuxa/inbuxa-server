@@ -26,7 +26,9 @@ use common::{
 };
 use inbuxa_features::security::{
     listeners,
-    protocol_policy::{LOCKED_PROTOCOLS, LegacyProtocols, ProtocolPolicy as Policy, SavedListener},
+    protocol_policy::{
+        LOCKED_PROTOCOLS, LegacyProtocols, ProtocolPolicy as Policy, SavedListener, Switches,
+    },
 };
 use jmap_proto::{
     error::set::SetError,
@@ -48,6 +50,9 @@ type PValue = Value<'static, P, ProtocolPolicyValue>;
 const ALL: &[P] = &[
     P::Id,
     P::LegacyProtocols,
+    P::Imap,
+    P::Pop3,
+    P::ManageSieve,
     P::CloseSubmission,
     P::SavedListeners,
     P::ChangedAt,
@@ -91,22 +96,49 @@ fn listener_value(listener: &SavedListener) -> PValue {
     Value::Object(out)
 }
 
+/// A switch as JMAP spells it.
+pub(crate) fn switch_str(value: LegacyProtocols) -> &'static str {
+    match value {
+        LegacyProtocols::Enabled => "enabled",
+        LegacyProtocols::Disabled => "disabled",
+    }
+}
+
+/// A switch from JMAP.
+pub(crate) fn parse_switch(value: Option<&str>) -> Result<LegacyProtocols, String> {
+    match value {
+        Some("enabled") => Ok(LegacyProtocols::Enabled),
+        Some("disabled") => Ok(LegacyProtocols::Disabled),
+        _ => Err(r#"must be "enabled" or "disabled""#.to_string()),
+    }
+}
+
+/// The JMAP name of a per-protocol switch property.
+pub(crate) fn switch_name(property: &P) -> Option<&'static str> {
+    match property {
+        P::Imap => Some("imap"),
+        P::Pop3 => Some("pop3"),
+        P::ManageSieve => Some("manageSieve"),
+        _ => None,
+    }
+}
+
 fn to_value(
     policy: &Policy,
     would_close: &[SavedListener],
     recent: &[RecentUse],
     properties: &[P],
 ) -> PValue {
+    let mut policy = policy.clone();
+    policy.normalize();
+    let policy = &policy;
     let mut out = Map::with_capacity(properties.len());
     for property in properties {
         let value = match property {
             P::Id => Value::Element(ProtocolPolicyValue::Id(Id::singleton())),
-            P::LegacyProtocols => Value::Str(
-                match policy.legacy_protocols {
-                    LegacyProtocols::Enabled => "enabled",
-                    LegacyProtocols::Disabled => "disabled",
-                }
-                .into(),
+            P::LegacyProtocols => Value::Str(switch_str(policy.legacy_protocols).into()),
+            P::Imap | P::Pop3 | P::ManageSieve => Value::Str(
+                switch_str(policy.switch(switch_name(property).unwrap_or_default())).into(),
             ),
             P::CloseSubmission => Value::Bool(policy.close_submission),
             P::SavedListeners => Value::Array(
@@ -176,10 +208,11 @@ where
     )
 }
 
-/// The listeners turning the switch on would close, whatever it is now.
+/// The listeners turning every protocol off would close, whatever the switches
+/// are now; each names its protocol, so the console shows one protocol's.
 async fn would_close(server: &Server, policy: &Policy) -> trc::Result<Vec<SavedListener>> {
     let mut hypothetical = policy.clone();
-    hypothetical.legacy_protocols = LegacyProtocols::Disabled;
+    hypothetical.set_all(LegacyProtocols::Disabled);
     hypothetical.apply_locks();
     listeners::would_close(server.registry(), &hypothetical).await
 }
@@ -238,12 +271,12 @@ fn apply(
     value: &Value<'_, P, ProtocolPolicyValue>,
 ) -> Result<(), String> {
     match property {
-        P::LegacyProtocols => {
-            policy.legacy_protocols = match value.as_str().as_deref() {
-                Some("enabled") => LegacyProtocols::Enabled,
-                Some("disabled") => LegacyProtocols::Disabled,
-                _ => return Err(r#"must be "enabled" or "disabled""#.to_string()),
-            }
+        // The kill-all sets all three; a protocol named in the same /set is
+        // applied after it (see `set`), so it wins.
+        P::LegacyProtocols => policy.set_all(parse_switch(value.as_str().as_deref())?),
+        P::Imap | P::Pop3 | P::ManageSieve => {
+            let value = parse_switch(value.as_str().as_deref())?;
+            policy.set(switch_name(property).unwrap_or_default(), value);
         }
         P::CloseSubmission => {
             policy.close_submission = value
@@ -262,7 +295,13 @@ fn apply(
 /// Puts a property back to its default (a `null` in `/set`).
 fn reset(policy: &mut Policy, property: &P, defaults: &Policy) -> Result<(), String> {
     match property {
-        P::LegacyProtocols => policy.legacy_protocols = defaults.legacy_protocols,
+        P::LegacyProtocols => policy.set_all(defaults.legacy_protocols),
+        P::Imap | P::Pop3 | P::ManageSieve => {
+            policy.set(
+                switch_name(property).unwrap_or_default(),
+                LegacyProtocols::Enabled,
+            );
+        }
         P::CloseSubmission => policy.close_submission = defaults.close_submission,
         P::Id => return Err("is immutable".to_string()),
         other if other.is_server_set() => return Err("is set by the server".to_string()),
@@ -312,10 +351,14 @@ pub async fn set(
         }
 
         let mut policy = server.protocol_policy().await?;
+        policy.normalize();
         let defaults = Policy::default();
         let mut error = None;
 
-        for (key, value) in value.into_expanded_object() {
+        // The kill-all first, so a protocol named beside it overrides it.
+        let mut entries: Vec<_> = value.into_expanded_object().collect();
+        entries.sort_by_key(|(key, _)| !matches!(key, Key::Property(P::LegacyProtocols)));
+        for (key, value) in entries {
             let Key::Property(property) = &key else {
                 error = Some(SetError::invalid_properties().with_property(key.into_owned()));
                 break;
@@ -393,19 +436,28 @@ fn listener_refusal(policy: &Policy, listener: &NetworkListener) -> Option<(Prop
     let protocol = listeners::protocol_name(listener.protocol);
     // A submission listener closes because of its port, not its protocol
     // (LP-3), so the port is what would have to change.
-    let property = if protocol == "smtp" {
-        Property::Bind
+    let (property, what) = if protocol == "smtp" {
+        (Property::Bind, "Legacy mail protocols are".to_string())
     } else {
-        Property::Protocol
+        (Property::Protocol, format!("{} is", display_name(protocol)))
     };
     Some((
         property,
         format!(
-            "Legacy mail protocols are off (inbuxa:ProtocolPolicy), and this {protocol} \
-             listener would reopen a port the switch keeps closed. Turn legacy protocols \
-             back on first."
+            "{what} off (inbuxa:ProtocolPolicy), and this {protocol} listener would reopen \
+             a port the switch keeps closed. Turn it back on first."
         ),
     ))
+}
+
+/// A protocol's name as people read it.
+fn display_name(protocol: &str) -> &str {
+    match protocol {
+        "imap" => "IMAP",
+        "pop3" => "POP3",
+        "manageSieve" => "ManageSieve",
+        other => other,
+    }
 }
 
 #[cfg(test)]
@@ -459,6 +511,36 @@ mod tests {
             assert_eq!(property, Property::Protocol);
             assert!(why.contains("inbuxa:ProtocolPolicy"), "{why}");
         }
+    }
+
+    #[test]
+    fn one_protocol_off_refuses_only_its_listeners() {
+        let mut policy = Policy::default();
+        policy.set("pop3", LegacyProtocols::Disabled);
+        policy.normalize();
+        let (property, why) = listener_refusal(
+            &policy,
+            &listener(NetworkListenerProtocol::Pop3, "[::]:995"),
+        )
+        .expect("refused");
+        assert_eq!(property, Property::Protocol);
+        assert!(why.starts_with("POP3 is off"), "{why}");
+        assert!(
+            listener_refusal(
+                &policy,
+                &listener(NetworkListenerProtocol::Imap, "[::]:993")
+            )
+            .is_none()
+        );
+    }
+
+    #[test]
+    fn a_switch_reads_and_parses_as_jmap_spells_it() {
+        assert_eq!(switch_str(LegacyProtocols::Disabled), "disabled");
+        assert_eq!(parse_switch(Some("enabled")), Ok(LegacyProtocols::Enabled));
+        assert!(parse_switch(Some("off")).is_err());
+        assert_eq!(switch_name(&P::ManageSieve), Some("manageSieve"));
+        assert_eq!(switch_name(&P::CloseSubmission), None);
     }
 
     #[test]

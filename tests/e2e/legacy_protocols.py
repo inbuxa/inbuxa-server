@@ -34,6 +34,12 @@ account which way its switches point (test 13), and the impact panel's
 list names who signed in over what: every account at server scope, only the
 tenant's own at tenant scope, rewritten at most once an hour (LP-15).
 
+Then one switch per protocol: POP3 alone off closes only POP3's port and
+refuses only POP3 sign-in, sending and IMAP go on, and only POP3 stops being
+advertised; one /set can close one protocol and reopen another. And a
+tenant turning POP3 off for itself, and not able to turn IMAP back on while
+the server has IMAP off.
+
 Passwords are generated into files under target/e2e and never printed.
 Everything is removed afterwards unless KEEP=1.
 """
@@ -380,6 +386,37 @@ def tenant_checks(admin, admin_pw, account):
           "and its user signs in over IMAP again")
     check(session_flag(tu, user_pw) == "enabled", "and its session says enabled again (test 13)")
 
+    # One protocol at a time, for a tenant.
+    tone = lambda update: one(ta, tadmin_pw, "inbuxa:TenantProtocolPolicy/set",
+                              {"accountId": tacct, "update": {t: update}})
+    res = tone({"pop3": "disabled"})
+    check(t in (res[1].get("updated") or {}), "a tenant admin turns POP3 alone off")
+    check(pop3_login(PORTS["pop3"], tu, user_pw) ==
+          "-ERR [AUTH] Your organization allows only inbuxa webmail and JMAP apps. "
+          "This mail app can't sign in.", "the tenant's user is refused over POP3")
+    check(imap_login(PORTS["imap"], tu, user_pw).startswith("OK"),
+          "and still signs in over IMAP")
+    check(smtp_auths(PORTS["submissions"], tu, [user_pw])[0].startswith("235"),
+          "and still sends")
+    check(pop3_login(PORTS["pop3"], admin, admin_pw).startswith("+OK"),
+          "an account outside the tenant still signs in over POP3")
+    check(session_allowed(tu, user_pw) == ["imap", "manageSieve", "submission"],
+          "the tenant user's session leaves POP3 out")
+    one(admin, admin_pw, "inbuxa:ProtocolPolicy/set",
+        {"accountId": account, "update": {"singleton": {"imap": "disabled"}}})
+    res = tone({"imap": "enabled"})
+    refused = (res[1].get("notUpdated") or {}).get(t) or {}
+    check(refused.get("type") == "forbidden"
+          and (refused.get("description") or "").startswith("IMAP is off"),
+          "with IMAP off server-wide, the tenant can't turn IMAP on, and is told which (LP-9)")
+    res = tone({"pop3": "enabled"})
+    check(t in (res[1].get("updated") or {}), "but it can turn its own POP3 back on")
+    check(session_allowed(tu, user_pw) == ["pop3", "manageSieve", "submission"],
+          "the session follows: IMAP off by the server, POP3 back")
+    one(admin, admin_pw, "inbuxa:ProtocolPolicy/set",
+        {"accountId": account, "update": {"singleton": {"imap": "enabled"}}})
+    check(settle(PORTS["imap"], True), "IMAP back after the server's switch returns")
+
     # A deleted tenant's switch goes with it, so a tenant that later gets the
     # same id doesn't start with legacy protocols off.
     sget = lambda ids: one(admin, admin_pw, "inbuxa:TenantProtocolPolicy/get",
@@ -404,6 +441,67 @@ def session_flag(user, password):
     sess = session(user, password)
     acct = sess["primaryAccounts"].get(INBUXA) or list(sess["accounts"])[0]
     return sess["accounts"][acct]["accountCapabilities"].get(INBUXA, {}).get("legacyProtocols")
+
+
+def session_allowed(user, password):
+    """legacyAllowed from the account's urn:inbuxa:jmap capability."""
+    sess = session(user, password)
+    acct = sess["primaryAccounts"].get(INBUXA) or list(sess["accounts"])[0]
+    return sess["accounts"][acct]["accountCapabilities"].get(INBUXA, {}).get("legacyAllowed")
+
+
+def per_protocol_checks(admin, admin_pw, account):
+    """One switch per protocol, server-wide."""
+    pset = lambda update: one(admin, admin_pw, "inbuxa:ProtocolPolicy/set",
+                              {"accountId": account, "update": {"singleton": update}})
+    pget = lambda: one(admin, admin_pw, "inbuxa:ProtocolPolicy/get",
+                       {"accountId": account, "ids": None})[1]["list"][0]
+    changes = len(events("security.legacy-protocols-changed"))
+
+    res = pset({"pop3": "disabled"})
+    check("singleton" in (res[1].get("updated") or {}), "POP3 alone can be turned off")
+    check(settle(PORTS["pop3"], False), "POP3 stopped accepting")
+    check(accepts(PORTS["imap"]), "IMAP still accepts with only POP3 off")
+    policy = pget()
+    check((policy["imap"], policy["pop3"], policy["manageSieve"], policy["legacyProtocols"])
+          == ("enabled", "disabled", "enabled", "enabled"),
+          "the switches read back: POP3 off, the rest on, the kill-all not set")
+    check(imap_login(PORTS["imap"], admin, admin_pw).startswith("OK"),
+          "IMAP sign-in works with only POP3 off")
+    check(smtp_auths(PORTS["submissions"], admin, [admin_pw])[0].startswith("235"),
+          "submission sign-in works: sending goes on while any protocol is allowed")
+    check(session_allowed(admin, admin_pw) == ["imap", "manageSieve", "submission"],
+          "the session lists what is still allowed")
+    check(session_flag(admin, admin_pw) == "enabled",
+          "and the old legacyProtocols flag still says enabled")
+    during = advertised(admin, admin_pw)
+    check(during["autoconfig"] == {"imap", "smtp"}, "autoconfig drops POP3 only")
+    check("pop3" not in during["pacc"] and {"imap", "smtp"} <= during["pacc"],
+          "PACC drops POP3 only")
+    check(during["srv"].get("_pop3s._tcp") == "." and during["srv"].get("_imaps._tcp") != ".",
+          "the zone marks POP3 not offered and still offers IMAP")
+    changed = events("security.legacy-protocols-changed")[changes:]
+    check(len(changed) == 1 and 'value = "pop3 disabled"' in changed[0]
+          and 'details = "closed"' in changed[0],
+          "turning POP3 off is one event naming it")
+    if len(changed) != 1:
+        print("     events:", changed)
+
+    # One /set can close one protocol and bring another back.
+    pset({"pop3": "enabled", "imap": "disabled"})
+    check(settle(PORTS["imap"], False), "IMAP closes in the same change")
+    check(settle(PORTS["pop3"], True), "that brings POP3 back")
+    check(pop3_login(PORTS["pop3"], admin, admin_pw).startswith("+OK"),
+          "POP3 sign-in works again")
+    changed = events("security.legacy-protocols-changed")[changes + 1:]
+    check(len(changed) == 1 and 'details = "closed and reopened"' in changed[0],
+          "and it is one event, closed and reopened")
+
+    pset({"imap": "enabled"})
+    check(settle(PORTS["imap"], True), "IMAP back on")
+    policy = pget()
+    check(not policy["savedListeners"] and policy["legacyProtocols"] == "enabled",
+          "nothing left saved once every protocol is on")
 
 
 def events_matching(name, *parts):
@@ -635,6 +733,9 @@ def main():
     after = advertised(admin, admin_pw)
     check(after["autoconfig"] == before["autoconfig"] and after["srv"] == before["srv"],
           "autoconfig and the suggested zone offer them again once back on")
+
+    # One switch per protocol.
+    per_protocol_checks(admin, admin_pw, account)
 
     # A tenant's own switch (LP-9 to LP-14a).
     tenant_checks(admin, admin_pw, account)

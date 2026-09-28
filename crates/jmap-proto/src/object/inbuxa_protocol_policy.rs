@@ -23,8 +23,13 @@ pub struct ProtocolPolicy;
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum ProtocolPolicyProperty {
     Id,
-    /// The switch: `enabled` or `disabled`.
+    /// The kill-all: `enabled` or `disabled`; reads `disabled` when all
+    /// three protocols are off, and sets all three.
     LegacyProtocols,
+    /// Each protocol's own switch: `enabled` or `disabled`.
+    Imap,
+    Pop3,
+    ManageSieve,
     /// Whether submission closes with it. Forced false while SMTP is locked.
     CloseSubmission,
     /// Server-set: the listeners taken away, for LP-5.
@@ -56,6 +61,9 @@ impl Property for ProtocolPolicyProperty {
         match self {
             ProtocolPolicyProperty::Id => "id",
             ProtocolPolicyProperty::LegacyProtocols => "legacyProtocols",
+            ProtocolPolicyProperty::Imap => "imap",
+            ProtocolPolicyProperty::Pop3 => "pop3",
+            ProtocolPolicyProperty::ManageSieve => "manageSieve",
             ProtocolPolicyProperty::CloseSubmission => "closeSubmission",
             ProtocolPolicyProperty::SavedListeners => "savedListeners",
             ProtocolPolicyProperty::ChangedAt => "changedAt",
@@ -73,6 +81,9 @@ impl ProtocolPolicyProperty {
         hashify::tiny_map!(value.as_bytes(),
             b"id" => ProtocolPolicyProperty::Id,
             b"legacyProtocols" => ProtocolPolicyProperty::LegacyProtocols,
+            b"imap" => ProtocolPolicyProperty::Imap,
+            b"pop3" => ProtocolPolicyProperty::Pop3,
+            b"manageSieve" => ProtocolPolicyProperty::ManageSieve,
             b"closeSubmission" => ProtocolPolicyProperty::CloseSubmission,
             b"savedListeners" => ProtocolPolicyProperty::SavedListeners,
             b"changedAt" => ProtocolPolicyProperty::ChangedAt,
