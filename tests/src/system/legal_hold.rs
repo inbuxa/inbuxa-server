@@ -574,6 +574,33 @@ pub async fn test(test: &mut TestServer) {
     for reason in ["Counsel's letter", "Counsel widened the matter", "Matter settled"] {
         assert!(reasons.contains(&reason), "AU-12: {reason:?} not recorded: {reasons:?}");
     }
+    // A release is recorded under the hold's name, from before to after
+    let list = records["list"].as_array().cloned().unwrap_or_default();
+    let release = list
+        .iter()
+        .find(|r| r["reason"] == "First settled")
+        .unwrap_or_else(|| panic!("the first release isn't recorded: {list:?}"));
+    assert_eq!(release["target"]["name"], "Matter 7001", "{release}");
+    assert!(
+        release["changes"]
+            .as_array()
+            .is_some_and(|c| c.iter().any(|c| c["field"] == "released" && c["before"] == false && c["after"] == true)),
+        "the release doesn't read before/after: {release}"
+    );
+
+    // Accounts are named by their full address, not the bare local part
+    let (_, query) = admin
+        .hold_call("inbuxa:AuditEvent/query", json!({"filter": {"targetKind": "x:Account"}}))
+        .await;
+    let (_, accounts) = admin
+        .hold_call("inbuxa:AuditEvent/get", json!({"ids": query["ids"].clone()}))
+        .await;
+    assert!(
+        accounts["list"]
+            .as_array()
+            .is_some_and(|l| l.iter().any(|r| r["target"]["name"] == "held@example.com")),
+        "an account isn't named by its address: {accounts}"
+    );
 }
 
 async fn import(

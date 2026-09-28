@@ -167,7 +167,8 @@ async fn before<T: JmapObject>(
 
     for (client_id, value) in request.create.iter().flat_map(|c| c.iter()) {
         let after = serde_json::to_value(value).unwrap_or_default();
-        let described = diff::describe(&after);
+        let mut described = diff::describe(&after);
+        described.name = full_name(server, object, &after, described.name).await;
         let changes = after
             .as_object()
             .map(|patch| diff::patch(object, None, patch))
@@ -192,7 +193,10 @@ async fn before<T: JmapObject>(
             None => fork_current(server, object, id).await,
         };
         let patch = serde_json::to_value(value).unwrap_or_default();
-        let described = before.as_ref().map(diff::describe).unwrap_or_default();
+        let mut described = before.as_ref().map(diff::describe).unwrap_or_default();
+        if let Some(before) = &before {
+            described.name = full_name(server, object, before, described.name).await;
+        }
         let changes = patch
             .as_object()
             .map(|patch| diff::patch(object, before.as_ref(), patch))
@@ -214,7 +218,10 @@ async fn before<T: JmapObject>(
     if let Some(MaybeResultReference::Value(destroy)) = &request.destroy {
         for id in destroy {
             let before = stored(server, registry, id).await;
-            let described = before.as_ref().map(diff::describe).unwrap_or_default();
+            let mut described = before.as_ref().map(diff::describe).unwrap_or_default();
+            if let Some(before) = &before {
+                described.name = full_name(server, object, before, described.name).await;
+            }
             records.push((
                 Item::Destroy(id.clone()),
                 Action::Destroy,
@@ -345,6 +352,29 @@ fn id_text(id: &MaybeInvalid<Id>) -> String {
 /// The fork's own settings as they are now, as JSON, so their changes are
 /// recorded with what they replaced. Their stored names are the JMAP
 /// property names.
+/// An account's or a mailing list's name is only its local part, and two
+/// domains' "leslie" would read alike: records name it by its full address.
+async fn full_name(server: &Server, object: &str, value: &Value, name: Option<String>) -> Option<String> {
+    let name = name?;
+    if !matches!(object, "x:Account" | "x:MailingList") || name.contains('@') {
+        return Some(name);
+    }
+    let domain = value
+        .get("domainId")
+        .and_then(Value::as_str)
+        .and_then(|id| <Id as std::str::FromStr>::from_str(id).ok());
+    match domain {
+        Some(domain) => match server.domain_by_id(domain.document_id()).await {
+            Ok(Some(domain)) => match domain.names.first() {
+                Some(domain) => Some(format!("{name}@{domain}")),
+                None => Some(name),
+            },
+            _ => Some(name),
+        },
+        None => Some(name),
+    }
+}
+
 async fn fork_current(server: &Server, object: &str, id: &MaybeInvalid<Id>) -> Option<Value> {
     use inbuxa_features::{ai::limits, audit::log, security};
     let data = server.store();
@@ -361,6 +391,34 @@ async fn fork_current(server: &Server, object: &str, id: &MaybeInvalid<Id>) -> O
             .await
             .ok()
             .and_then(|policy| serde_json::to_value(policy).ok()),
+        // LH-1: a hold as the API shows it, so a change reads before/after
+        "inbuxa:LegalHold" => match id {
+            MaybeInvalid::Value(id) => {
+                let hold = inbuxa_features::hold::get(data, u32::try_from(id.id()).ok()?)
+                    .await
+                    .ok()??;
+                let ids = |list: &[u32]| list.iter().map(|id| Id::from(*id).to_string()).collect::<Vec<_>>();
+                let date = |at: Option<u64>| {
+                    at.map(|at| jmap_proto::types::date::UTCDate::from_timestamp(at as i64).to_string())
+                };
+                Some(serde_json::json!({
+                    "name": hold.name,
+                    "reference": hold.reference,
+                    "description": hold.description,
+                    "scope": {
+                        "server": hold.scope.server,
+                        "accounts": ids(&hold.scope.accounts),
+                        "groups": ids(&hold.scope.groups),
+                        "domains": ids(&hold.scope.domains),
+                        "tenants": ids(&hold.scope.tenants),
+                    },
+                    "from": date(hold.from),
+                    "to": date(hold.to),
+                    "released": !hold.is_active(),
+                }))
+            }
+            MaybeInvalid::Invalid(_) => None,
+        },
         "inbuxa:TenantProtocolPolicy" => match id {
             MaybeInvalid::Value(id) => {
                 security::tenant_protocol_policy::get(data, id.document_id())
