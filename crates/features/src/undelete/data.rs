@@ -123,6 +123,14 @@ pub struct EmailNote {
     pub size: u64,
     pub mailboxes: Vec<u32>,
     pub keywords: Vec<String>,
+    /// LH-3: the ranges of the holds on the account when it was deleted.
+    /// Its received date is only known when it's archived, which decides
+    /// whether a hold keeps it after all.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub held_ranges: Vec<(Option<u64>, Option<u64>)>,
+    /// The undelete deadline for when no range covers it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub otherwise_until: Option<u64>,
 }
 
 /// What restore needs beyond the kept copy (UD-4, UD-8).
@@ -462,8 +470,15 @@ mod tests {
             size: 3,
             mailboxes: vec![1],
             keywords: vec![],
+            held_ranges: vec![(Some(10), None)],
+            otherwise_until: Some(20),
         };
         let bytes = Json(&note).serialize().unwrap();
         assert_eq!(Json::<EmailNote>::deserialize(&bytes).unwrap().0, note);
+
+        // A note written before legal holds still reads, as not held
+        let old = br#"{"archived_at":1,"archived_until":2,"size":3,"mailboxes":[1],"keywords":[]}"#;
+        let read = Json::<EmailNote>::deserialize(old).unwrap().0;
+        assert!(read.held_ranges.is_empty() && read.otherwise_until.is_none());
     }
 }

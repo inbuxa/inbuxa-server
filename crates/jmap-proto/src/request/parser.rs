@@ -566,6 +566,21 @@ impl<'de> Visitor<'de> for CallVisitor {
                     return Err(de::Error::invalid_length(1, &self));
                 }
             },
+            // inbuxa: legal hold
+            (MethodFunction::Get, MethodObject::LegalHold) => match seq.next_element() {
+                Ok(Some(value)) => RequestMethod::Get(GetRequestMethod::LegalHold(value)),
+                Err(err) => RequestMethod::invalid(err),
+                Ok(None) => {
+                    return Err(de::Error::invalid_length(1, &self));
+                }
+            },
+            (MethodFunction::Set, MethodObject::LegalHold) => match seq.next_element() {
+                Ok(Some(value)) => RequestMethod::Set(SetRequestMethod::LegalHold(value)),
+                Err(err) => RequestMethod::invalid(err),
+                Ok(None) => {
+                    return Err(de::Error::invalid_length(1, &self));
+                }
+            },
             // inbuxa: the audit log
             (MethodFunction::Get, MethodObject::AuditEvent) => match seq.next_element() {
                 Ok(Some(value)) => RequestMethod::Get(GetRequestMethod::AuditEvent(value)),

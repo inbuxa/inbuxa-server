@@ -14,6 +14,7 @@ use crate::{
     auth::{AccessToken, AuthRequest, permissions::DefaultPermissions},
 };
 use directory::Credentials;
+use inbuxa_features::hold::{self, Member};
 use inbuxa_features::audit::{
     Action, Actor, AuditLog, EntryId, Outcome, Record, Target, Via, diff, log, scope,
 };
@@ -448,7 +449,16 @@ impl Server {
     pub async fn audit_purge(&self) -> trc::Result<usize> {
         let settings = log::settings(self.store()).await?;
         let cutoff = ms().saturating_sub(settings.keep_for_secs.saturating_mul(1000));
-        log::purge(self.store(), cutoff, |_| false).await
+        // LH-6, AU-7: a record about a held account stays while it's held.
+        // Worked out before the purge, which can't wait on lookups.
+        let held = self.held_accounts().await?;
+        log::purge(self.store(), cutoff, |record| {
+            record
+                .target
+                .account_id
+                .is_some_and(|account_id| held.contains(&account_id))
+        })
+        .await
     }
 }
 
@@ -495,6 +505,20 @@ impl RegistryWriteHook for SystemWrites {
         change: RegistryChange<'a>,
     ) -> Pin<Box<dyn Future<Output = ()> + Send + 'a>> {
         Box::pin(async move {
+            // LH-2: every change to an account, whoever makes it: one that
+            // leaves a held domain, group or tenant stays held by name
+            if change.object_type == ObjectType::Account
+                && let (Some(before), Some(after)) = (change.before, change.after)
+                && let (Some(before), Some(after)) = (
+                    Member::of(change.id.document_id(), &before.inner),
+                    Member::of(change.id.document_id(), &after.inner),
+                )
+                && let Err(err) = hold::keep_moved(&self.data, &before, &after).await
+            {
+                trc::error!(err
+                    .account_id(after.account)
+                    .details("Failed to keep a moved account under its legal hold"));
+            }
             let subsystem = match scope::current() {
                 Some(scope::Scope::Request | scope::Scope::Quiet) => return,
                 Some(scope::Scope::System(subsystem)) => subsystem,

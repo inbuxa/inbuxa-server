@@ -24,6 +24,7 @@ pub mod fastmail_masked_email; // inbuxa: masked email
 pub mod inbuxa_account_lock; // inbuxa: account lock with delegation
 pub mod inbuxa_ai_limits; // inbuxa: AI spam classification
 pub mod inbuxa_audit; // inbuxa: the audit log
+pub mod inbuxa_legal_hold; // inbuxa: legal hold
 pub mod inbuxa_explanation; // inbuxa: "Explain this" with the local model
 pub mod inbuxa_protocol_policy; // inbuxa: legacy protocols off
 pub mod inbuxa_tenant_protocol_policy; // inbuxa: legacy protocols off, per tenant

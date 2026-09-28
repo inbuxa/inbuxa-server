@@ -273,6 +273,9 @@ impl RequestHandler for Server {
                                     SetResponseMethod::AccountLock(set_response) => {
                                         set_response.update_created_ids(&mut response);
                                     }
+                                    SetResponseMethod::LegalHold(set_response) => {
+                                        set_response.update_created_ids(&mut response);
+                                    }
                                     SetResponseMethod::Explanation(set_response) => {
                                         set_response.update_created_ids(&mut response);
                                     }
@@ -445,6 +448,11 @@ impl RequestHandler for Server {
                     crate::inbuxa::account_lock::get(self, access_token, *req)
                         .await?
                         .into()
+                }
+                // inbuxa: legal hold (LH-1)
+                GetRequestMethod::LegalHold(mut req) => {
+                    resolve_account_id(&mut req.account_id, method_name.obj, access_token)?;
+                    crate::inbuxa::legal_hold::get(self, *req).await?.into()
                 }
                 // inbuxa: the audit log (AU-9)
                 GetRequestMethod::AuditEvent(mut req) => {
@@ -793,6 +801,34 @@ impl RequestHandler for Server {
                         reason,
                         *req,
                         |req| Box::pin(crate::inbuxa::account_lock::set(self, access_token, req)),
+                    )
+                    .await?
+                    .into()
+                }
+                // inbuxa: legal hold (LH-1), each change recorded with its
+                // reason (AU-12)
+                SetRequestMethod::LegalHold(mut req) => {
+                    resolve_account_id(&mut req.account_id, method_name.obj, access_token)?;
+                    let reason = req.arguments.reason.clone().or_else(|| {
+                        req.create.as_ref().and_then(|create| {
+                            create.values().find_map(|value| {
+                                serde_json::to_value(value)
+                                    .ok()?
+                                    .get("reason")?
+                                    .as_str()
+                                    .map(str::to_string)
+                            })
+                        })
+                    });
+                    crate::inbuxa::audit::recorded(
+                        self,
+                        access_token,
+                        session,
+                        &method_name.obj.to_string(),
+                        None,
+                        reason,
+                        *req,
+                        |req| Box::pin(crate::inbuxa::legal_hold::set(self, access_token, req)),
                     )
                     .await?
                     .into()

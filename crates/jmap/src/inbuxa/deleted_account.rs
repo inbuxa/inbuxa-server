@@ -124,13 +124,29 @@ pub async fn reserved(
 /// of upstream's immediate destruction. Returns the other accounts whose
 /// access changed, or `None` when nothing is kept.
 pub async fn keep(server: &Server, id: Id, account: &Account) -> trc::Result<Option<Vec<u32>>> {
-    let Some(period) = retention(server.registry()).await?.accounts else {
-        return Ok(None);
-    };
     let account_id = id.document_id();
-    let deleted_at = now();
-    let kept_until = deleted_at + period;
     let inner = ObjectInner::Account(account.clone());
+    // inbuxa: LH-8: a held account's data stays, with no expiry, whether or
+    // not undelete keeps accounts; its holds name it from now on
+    let member = inbuxa_features::hold::Member::of(account_id, &inner);
+    let held = match &member {
+        Some(member) => {
+            !inbuxa_features::hold::covering(server.store(), member)
+                .await?
+                .is_empty()
+        }
+        None => false,
+    };
+    let period = retention(server.registry()).await?.accounts;
+    let deleted_at = now();
+    let kept_until = match (held, period) {
+        (true, _) => inbuxa_features::hold::HELD_UNTIL,
+        (false, Some(period)) => deleted_at + period,
+        (false, None) => return Ok(None),
+    };
+    if held && let Some(member) = &member {
+        inbuxa_features::hold::pin_account(server.store(), member).await?;
+    }
     let addresses = addresses_of(server, &inner)
         .await?
         .into_iter()
@@ -324,6 +340,18 @@ pub async fn set(
 
     for id in will_destroy {
         match data::kept_account(data, id.document_id()).await? {
+            // inbuxa: LH-8: a held account's data can't be destroyed
+            Some(kept)
+                if may_reach(access_token, &kept, Permission::SysAccountDestroy)
+                    && (inbuxa_features::hold::is_held_until(kept.kept_until)
+                        || server.is_kept_held(id.document_id(), &kept).await?) =>
+            {
+                response.not_destroyed.append(
+                    id,
+                    SetError::forbidden()
+                        .with_description("A legal hold applies to this account, so its data stays."),
+                );
+            }
             Some(kept) if may_reach(access_token, &kept, Permission::SysAccountDestroy) => {
                 destroy_now(server, id, &kept).await?;
                 response.destroyed.push(id);

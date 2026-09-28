@@ -1739,6 +1739,11 @@ pub enum Permission {
     SysAccountLockCreate = 666,
     SysAccountLockUpdate = 667,
     SysAccountLockDestroy = 668,
+    // inbuxa: legal hold (audit-hold-lock spec, LH-13)
+    SysLegalHoldGet = 669,
+    SysLegalHoldCreate = 670,
+    SysLegalHoldUpdate = 671,
+    SysLegalHoldExport = 672,
     SysAccountGet = 219,
     SysAccountCreate = 220,
     SysAccountUpdate = 221,

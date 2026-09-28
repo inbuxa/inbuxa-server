@@ -104,6 +104,16 @@ impl Server {
         ceiling(base, policy).apply(&mut permissions.enabled, &mut permissions.disabled);
         // inbuxa: MT-1, MT-15: impersonation would reach beyond the tenant
         permissions.disabled.set(Permission::Impersonate as usize);
+        // inbuxa: LH-13: only server-level administrators see or place
+        // holds, and a hold may concern the tenant's own administrator
+        for permission in [
+            Permission::SysLegalHoldGet,
+            Permission::SysLegalHoldCreate,
+            Permission::SysLegalHoldUpdate,
+            Permission::SysLegalHoldExport,
+        ] {
+            permissions.disabled.set(permission as usize);
+        }
 
         Ok(())
     }
@@ -254,6 +264,11 @@ impl Default for DefaultPermissions {
                     default.tenant.push(permission);
                 }
                 Permission::Impersonate
+                // inbuxa: LH-13: holds are the server administrator's alone
+                | Permission::SysLegalHoldGet
+                | Permission::SysLegalHoldCreate
+                | Permission::SysLegalHoldUpdate
+                | Permission::SysLegalHoldExport
                 | Permission::UnlimitedRequests
                 | Permission::UnlimitedUploads
                 | Permission::LiveMetrics

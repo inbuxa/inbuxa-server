@@ -229,11 +229,19 @@ impl SearchIndexTask for Server {
                         IndexDocumentType::Email => None,
                     } && let Err(err) = archive_noted(self, kind, account_id, document_id).await
                     {
+                        // inbuxa: LH-5: the note stays, so the retry archives
+                        // it; nothing a hold keeps is lost to a failure
                         trc::error!(
                             err.account_id(account_id)
                                 .document_id(document_id)
                                 .details("Failed to archive a deleted item")
                         );
+                        results.push(IndexTaskResult {
+                            task_type: TaskType::Delete,
+                            index: task.document_type,
+                            result: TaskResult::temporary("Failed to archive a deleted item"),
+                        });
+                        continue;
                     }
 
                     document_deletions[idx]
@@ -696,8 +704,9 @@ pub fn trace_search_document(
     document
 }
 
-// inbuxa: UD-1, UD-4: archives a deleted file, event or contact noted at
-// deletion, when archiving is on; otherwise its note is dropped
+// inbuxa: UD-1, UD-4, LH-4: archives a deleted file, event or contact noted
+// at deletion, when archiving is on or a hold covers it; otherwise its note is
+// dropped. The note goes only once the item is archived.
 async fn archive_noted(
     server: &Server,
     kind: undelete::groupware::Kind,
@@ -705,12 +714,22 @@ async fn archive_noted(
     document_id: u32,
 ) -> trc::Result<()> {
     let data = &server.core.storage.data;
-    let Some(note) = undelete::groupware::take(data, kind, account_id, document_id).await? else {
+    let Some(note) = undelete::groupware::peek(data, kind, account_id, document_id).await? else {
         return Ok(());
     };
-    let Some(retention) = undelete::settings::retention(server.registry()).await?.items else {
-        return Ok(());
+    // LH-3: events by their start; contacts and files whole
+    let keeping = server.keeping(account_id).await?;
+    let held = match kind {
+        undelete::groupware::Kind::CalendarEvent => {
+            keeping.covers_event(undelete::groupware::event_start(&note))
+        }
+        _ => keeping.covers(None),
     };
+    let now = store::write::now();
+    let Some(until) = keeping.until(now, held) else {
+        return undelete::groupware::clear(data, kind, account_id, document_id).await;
+    };
+    let retention = until.saturating_sub(now);
     let blob_hash = match (&note.content, &note.blob_hash) {
         (Some(text), _) => {
             server
@@ -723,11 +742,11 @@ async fn archive_noted(
                 .into_err()
                 .details("Invalid blob hash in undelete note")
         })?,
-        (None, None) => return Ok(()),
+        (None, None) => return undelete::groupware::clear(data, kind, account_id, document_id).await,
     };
     undelete::groupware::archive(data, server.registry(), account_id, note, blob_hash, retention)
-        .await
-        .map(|_| ())
+        .await?;
+    undelete::groupware::clear(data, kind, account_id, document_id).await
 }
 
 async fn delete_email_metadata(

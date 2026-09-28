@@ -55,6 +55,23 @@ impl DestroyAccountTask for Server {
 async fn destroy_account(server: &Server, task: &TaskDestroyAccount) -> trc::Result<TaskResult> {
     let account_id = task.account_id.document_id();
 
+    // inbuxa: LH-8, LH-10: a kept account waits for its time, and a held one
+    // for its release; "destroy now" clears the kept record first
+    if let Some(kept) =
+        inbuxa_features::undelete::data::kept_account(&server.core.storage.data, account_id).await?
+    {
+        let now = store::write::now();
+        let held = inbuxa_features::hold::is_held_until(kept.kept_until)
+            || server.is_kept_held(account_id, &kept).await?;
+        if held || kept.kept_until > now {
+            let retry = if held { now + 86_400 } else { kept.kept_until };
+            return Ok(TaskResult::deferred(
+                Some(retry),
+                "The account is still kept: a legal hold applies, or its time hasn't come.",
+            ));
+        }
+    }
+
     // Destroy public keys and masked emails
     for object in [ObjectType::PublicKey, ObjectType::MaskedEmail] {
         let mut batch = BatchBuilder::new();

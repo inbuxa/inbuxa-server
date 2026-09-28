@@ -106,6 +106,7 @@ pub enum GetResponseMethod {
     AuditEvent(GetResponse<crate::object::inbuxa_audit::AuditEvent>),
     AuditSettings(GetResponse<crate::object::inbuxa_audit::AuditSettings>),
     AccountLock(GetResponse<crate::object::inbuxa_account_lock::AccountLock>),
+    LegalHold(GetResponse<crate::object::inbuxa_legal_hold::LegalHold>),
     ProtocolPolicy(GetResponse<crate::object::inbuxa_protocol_policy::ProtocolPolicy>),
     TenantProtocolPolicy(
         GetResponse<crate::object::inbuxa_tenant_protocol_policy::TenantProtocolPolicy>,
@@ -138,6 +139,7 @@ pub enum SetResponseMethod {
     AuditExport(Box<SetResponse<crate::object::inbuxa_audit::AuditExport>>),
     AuditVerification(Box<SetResponse<crate::object::inbuxa_audit::AuditVerification>>),
     AccountLock(Box<SetResponse<crate::object::inbuxa_account_lock::AccountLock>>),
+    LegalHold(Box<SetResponse<crate::object::inbuxa_legal_hold::LegalHold>>),
     Explanation(Box<SetResponse<crate::object::inbuxa_explanation::Explanation>>),
     ProtocolPolicy(Box<SetResponse<crate::object::inbuxa_protocol_policy::ProtocolPolicy>>),
     TenantProtocolPolicy(
@@ -763,5 +765,18 @@ impl<'x> From<GetResponse<crate::object::inbuxa_account_lock::AccountLock>> for 
 impl<'x> From<SetResponse<crate::object::inbuxa_account_lock::AccountLock>> for ResponseMethod<'x> {
     fn from(value: SetResponse<crate::object::inbuxa_account_lock::AccountLock>) -> Self {
         ResponseMethod::Set(SetResponseMethod::AccountLock(Box::new(value)))
+    }
+}
+
+// inbuxa: legal hold
+impl<'x> From<GetResponse<crate::object::inbuxa_legal_hold::LegalHold>> for ResponseMethod<'x> {
+    fn from(value: GetResponse<crate::object::inbuxa_legal_hold::LegalHold>) -> Self {
+        ResponseMethod::Get(GetResponseMethod::LegalHold(value))
+    }
+}
+
+impl<'x> From<SetResponse<crate::object::inbuxa_legal_hold::LegalHold>> for ResponseMethod<'x> {
+    fn from(value: SetResponse<crate::object::inbuxa_legal_hold::LegalHold>) -> Self {
+        ResponseMethod::Set(SetResponseMethod::LegalHold(Box::new(value)))
     }
 }

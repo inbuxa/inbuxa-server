@@ -21,6 +21,7 @@
 pub mod ai;
 pub mod audit;
 pub mod branding;
+pub mod hold;
 pub mod lock;
 pub mod masked_email;
 pub mod security;
