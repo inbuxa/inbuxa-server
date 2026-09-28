@@ -10,7 +10,7 @@
 //! there are few holds.
 
 use crate::Server;
-use inbuxa_features::hold::{self, Hold, Member};
+use inbuxa_features::hold::{self, Hold, Keeping, Member};
 
 impl Server {
     /// The active holds covering `account_id`, through its own name, its
@@ -34,6 +34,15 @@ impl Server {
             tenant: account.id_tenant,
         };
         hold::covering(self.store(), &member).await
+    }
+
+    /// How `account_id`'s deleted items are kept: its holds' ranges and the
+    /// undelete period in force now (LH-4, UD-6a).
+    pub async fn keeping(&self, account_id: u32) -> trc::Result<Keeping> {
+        let retention = inbuxa_features::undelete::settings::retention(self.registry())
+            .await?
+            .items;
+        Ok(Keeping::new(retention, &self.holds_on(account_id).await?))
     }
 
     /// Whether any active hold covers `account_id` at all.

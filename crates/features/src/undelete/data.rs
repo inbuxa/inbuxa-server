@@ -123,6 +123,14 @@ pub struct EmailNote {
     pub size: u64,
     pub mailboxes: Vec<u32>,
     pub keywords: Vec<String>,
+    /// LH-3: the ranges of the holds on the account when it was deleted.
+    /// Its received date is only known when it's archived, which decides
+    /// whether a hold keeps it after all.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub held_ranges: Vec<(Option<u64>, Option<u64>)>,
+    /// The undelete deadline for when no range covers it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub otherwise_until: Option<u64>,
 }
 
 /// What restore needs beyond the kept copy (UD-4, UD-8).

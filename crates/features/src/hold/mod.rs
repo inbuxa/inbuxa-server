@@ -26,6 +26,85 @@ use store::{
 };
 use trc::AddContext;
 
+/// The deadline a held archived item carries: the last second of 9999. It
+/// never passes, so every expiry check keeps the item without knowing about
+/// holds (LH-4, LH-5); releasing a hold gives it a real deadline (LH-10).
+pub const HELD_UNTIL: u64 = 253_402_300_799;
+
+/// Whether an archived item's deadline marks it as held. Anything past the
+/// year 9000 counts, so a deadline computed from a hold a moment earlier or
+/// later still reads as held.
+pub fn is_held_until(until: u64) -> bool {
+    until >= 221_845_392_000
+}
+
+/// A day, in seconds: the slack either side of a range for an event's start,
+/// whose time zone isn't known here.
+const DAY: u64 = 86_400;
+
+/// How an account's deleted items are kept: its holds' ranges, and the
+/// undelete period for whatever no hold covers (LH-3, LH-4).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Keeping {
+    /// `archiveDeletedItemsFor`, in seconds, if undelete is on.
+    pub retention: Option<u64>,
+    /// Each active hold's range on this account; `(None, None)` is a whole
+    /// account. Empty when nothing holds it.
+    pub ranges: Vec<(Option<u64>, Option<u64>)>,
+}
+
+impl Keeping {
+    pub fn new(retention: Option<u64>, holds: &[Hold]) -> Keeping {
+        Keeping {
+            retention,
+            ranges: holds.iter().map(|h| (h.from, h.to)).collect(),
+        }
+    }
+
+    /// Whether any hold reaches the account at all.
+    pub fn is_held(&self) -> bool {
+        !self.ranges.is_empty()
+    }
+
+    /// Whether deleted items need noting: something may keep them.
+    pub fn keeps_anything(&self) -> bool {
+        self.is_held() || self.retention.is_some()
+    }
+
+    /// Whether a hold covers an item dated `date`. No date means the item is
+    /// held whole, whatever the range (LH-3).
+    pub fn covers(&self, date: Option<u64>) -> bool {
+        self.ranges.iter().any(|(from, to)| match date {
+            None => true,
+            Some(at) => {
+                from.is_none_or(|from| at >= from) && to.is_none_or(|to| at <= to)
+            }
+        })
+    }
+
+    /// Like `covers`, for an event's start: a day of slack either side, since
+    /// its time zone isn't known here.
+    pub fn covers_event(&self, start: Option<u64>) -> bool {
+        self.ranges.iter().any(|(from, to)| match start {
+            None => true,
+            Some(at) => {
+                from.is_none_or(|from| at + DAY >= from)
+                    && to.is_none_or(|to| at <= to.saturating_add(DAY))
+            }
+        })
+    }
+
+    /// Until when an item deleted at `now` is kept: held, the undelete
+    /// period, or not at all.
+    pub fn until(&self, now: u64, held: bool) -> Option<u64> {
+        if held {
+            Some(HELD_UNTIL)
+        } else {
+            self.retention.map(|retention| now + retention)
+        }
+    }
+}
+
 const FEATURE: u8 = b'H';
 const KIND_HOLD: u8 = b'h';
 
@@ -509,6 +588,27 @@ mod tests {
         let held = hold(Scope { domains: vec![3], ..Default::default() }, None, None);
         let moved = Member { domains: vec![6], ..member.clone() };
         assert!(held.scope.covers(&member) && !held.scope.covers(&moved));
+    }
+
+    #[test]
+    fn keeping_deleted_items() {
+        let whole = Keeping::new(None, &[hold(accounts(&[2]), None, None)]);
+        assert!(whole.covers(Some(5)) && whole.covers(None));
+        assert_eq!(whole.until(100, whole.covers(Some(5))), Some(HELD_UNTIL));
+        assert!(is_held_until(whole.until(100, true).unwrap()));
+
+        // LH-3: a range holds only what's inside it; outside, undelete's rules
+        let ranged = Keeping::new(Some(30), &[hold(accounts(&[2]), Some(1_000), Some(2_000))]);
+        assert!(ranged.covers(Some(1_500)) && !ranged.covers(Some(2_500)));
+        assert!(ranged.covers(None), "contacts, files and scripts are held whole");
+        assert_eq!(ranged.until(100, ranged.covers(Some(2_500))), Some(130));
+        assert!(ranged.covers_event(Some(2_000 + 3_600)), "a day of slack for an event");
+
+        // Neither held nor undelete: nothing is kept
+        let none = Keeping::new(None, &[]);
+        assert!(!none.keeps_anything());
+        assert_eq!(none.until(100, false), None);
+        assert!(!is_held_until(100 + 30 * 365 * 86_400));
     }
 
     #[test]

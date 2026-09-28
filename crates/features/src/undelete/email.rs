@@ -12,9 +12,12 @@
 //! is made if archiving is on, fixing the deadline then. When the data is
 //! finally removed, a noted message becomes an archived item.
 
-use crate::undelete::{
-    data::{self, EmailNote, Extra},
-    records,
+use crate::{
+    hold::Keeping,
+    undelete::{
+        data::{self, EmailNote, Extra},
+        records,
+    },
 };
 use registry::{
     schema::structs::{ArchivedEmail, ArchivedItem},
@@ -26,10 +29,12 @@ use store::{
 };
 use types::{blob::BlobId, blob_hash::BlobHash};
 
-/// Notes a deleted message, when archiving is on (`retention` seconds).
+/// Notes a deleted message, when anything keeps it: undelete, or a legal
+/// hold on the account (LH-4). A held note keeps it until it's archived,
+/// when its received date says whether the hold's range covers it.
 pub fn note(
     batch: &mut BatchBuilder,
-    retention: u64,
+    keeping: &Keeping,
     account_id: u32,
     document_id: u32,
     size: u64,
@@ -37,16 +42,23 @@ pub fn note(
     keywords: Vec<String>,
 ) -> trc::Result<()> {
     let archived_at = now();
+    // Held until the date is known; the undelete deadline otherwise
+    let otherwise_until = keeping.until(archived_at, false);
+    let Some(archived_until) = keeping.until(archived_at, keeping.is_held()) else {
+        return Ok(());
+    };
     data::note_email(
         batch,
         account_id,
         document_id,
         &EmailNote {
             archived_at,
-            archived_until: archived_at + retention,
+            archived_until,
             size,
             mailboxes,
             keywords,
+            held_ranges: keeping.ranges.clone(),
+            otherwise_until: if keeping.is_held() { otherwise_until } else { None },
         },
     )
 }
@@ -78,9 +90,27 @@ pub async fn archive(
     document_id: u32,
     summary: Summary<'_>,
 ) -> trc::Result<bool> {
-    let Some(note) = data::email_note(data, account_id, document_id).await? else {
+    let Some(mut note) = data::email_note(data, account_id, document_id).await? else {
         return Ok(false);
     };
+    // LH-3: a held note's range decides now that the date is known; outside
+    // it, undelete's deadline, or nothing kept at all
+    if !note.held_ranges.is_empty() {
+        let keeping = Keeping {
+            retention: None,
+            ranges: std::mem::take(&mut note.held_ranges),
+        };
+        if !keeping.covers(Some(summary.received_at)) {
+            match note.otherwise_until {
+                Some(until) => note.archived_until = until,
+                None => {
+                    let mut batch = BatchBuilder::new();
+                    data::clear_email_note(&mut batch, account_id, document_id);
+                    return data.write(batch.build_all()).await.map(|_| false);
+                }
+            }
+        }
+    }
     let item = ArchivedItem::Email(ArchivedEmail {
         from: summary.from.unwrap_or_default().to_string(),
         subject: summary.subject.unwrap_or_default().to_string(),

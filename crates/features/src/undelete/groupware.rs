@@ -97,6 +97,39 @@ pub async fn take(
     Ok(Some(note))
 }
 
+/// A note, left in place: for a held account it's cleared only once its item
+/// is archived, so a failure leaves it for the retry (LH-5).
+pub async fn peek(
+    data: &Store,
+    kind: Kind,
+    account_id: u32,
+    document_id: u32,
+) -> trc::Result<Option<Note>> {
+    Ok(data
+        .get_value::<Json<Note>>(ValueKey::from(note_class(kind, account_id, document_id)))
+        .await?
+        .map(|Json(note)| note))
+}
+
+/// Removes a note once its item is archived or needn't be.
+pub async fn clear(data: &Store, kind: Kind, account_id: u32, document_id: u32) -> trc::Result<()> {
+    let mut batch = BatchBuilder::new();
+    batch.clear(note_class(kind, account_id, document_id));
+    data.write(batch.build_all()).await.map(|_| ())
+}
+
+/// An event's start, for a hold's range (LH-3). None for a recurring event,
+/// which may have an occurrence anywhere, so a hold keeps it whole.
+pub fn event_start(note: &Note) -> Option<u64> {
+    let text = note.content.as_deref()?;
+    if property(text, "RRULE").is_some() || property(text, "RDATE").is_some() {
+        return None;
+    }
+    property(text, "DTSTART")
+        .and_then(|v| ical_time(&v))
+        .map(|t| t.max(0) as u64)
+}
+
 /// The value of the first line starting with `name` (as `NAME:` or
 /// `NAME;params:`) in iCalendar or vCard text, unfolded.
 fn property(text: &str, name: &str) -> Option<String> {

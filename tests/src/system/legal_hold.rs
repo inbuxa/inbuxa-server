@@ -14,11 +14,22 @@ use crate::utils::{
 };
 use registry::schema::{
     prelude::{ObjectType, Property},
-    structs::{CertificateManagement, DkimManagement, DnsManagement, Domain, Tenant, UserRoles},
+    structs::{
+        CertificateManagement, DataRetention, DkimManagement, DnsManagement, Domain, Tenant,
+        UserRoles,
+    },
 };
 use serde_json::{Value, json};
+use types::id::Id;
 
-const USING: &[&str] = &["urn:ietf:params:jmap:core", "urn:inbuxa:jmap"];
+const INBOX_ID: u32 = 0;
+
+const USING: &[&str] = &[
+    "urn:ietf:params:jmap:core",
+    "urn:ietf:params:jmap:mail",
+    "urn:ietf:params:jmap:contacts",
+    "urn:inbuxa:jmap",
+];
 
 impl Account {
     async fn hold_call(&self, method: &str, mut arguments: Value) -> (String, Value) {
@@ -36,6 +47,13 @@ impl Account {
         let (name, response) = self.hold_call("inbuxa:LegalHold/set", arguments).await;
         assert_eq!(name, "inbuxa:LegalHold/set", "{response}");
         response
+    }
+
+    async fn archived_items(&self) -> Vec<Value> {
+        let (_, response) = self
+            .hold_call("x:ArchivedItem/get", json!({"ids": null}))
+            .await;
+        response["list"].as_array().cloned().unwrap_or_default()
     }
 
     async fn hold_get(&self, id: &str) -> Value {
@@ -266,6 +284,86 @@ pub async fn test(test: &mut TestServer) {
         "test 7, LH-2: the moved account escaped the hold"
     );
 
+    // Test 6, LH-4: what a hold keeps, with undelete switched off, so only
+    // the hold can be keeping anything
+    admin
+        .registry_update_setting(
+            DataRetention {
+                archive_deleted_items_for: None,
+                ..Default::default()
+            },
+            &[Property::ArchiveDeletedItemsFor],
+        )
+        .await;
+    let held = admin
+        .create_user_account("held@example.com", "held-secret-4419", "Held", &[], vec![])
+        .await;
+    let ranged = admin
+        .create_user_account("ranged@example.com", "ranged-secret-5530", "Ranged", &[], vec![])
+        .await;
+    let response = admin
+        .hold_set(json!({"reason": "Preserve everything", "create": {
+            "w": {"name": "Matter 6001", "scope": {"accounts": [held.id_string()]}},
+            "r": {"name": "Matter 6002", "from": "2020-01-01T00:00:00Z", "to": "2020-12-31T23:59:59Z",
+                  "scope": {"accounts": [ranged.id_string()]}}}}))
+        .await;
+    assert!(response["created"]["w"]["id"].is_string(), "LH-1: {response}");
+    assert!(response["created"]["r"]["id"].is_string(), "LH-1: {response}");
+
+    let held_client = held.jmap_client().await;
+    let ranged_client = ranged.jmap_client().await;
+    let whole = import(&held_client, "Held whole", None).await;
+    held_client.email_destroy(&whole).await.unwrap();
+    // 2020-03-15: inside the range; now: outside it
+    let inside = import(&ranged_client, "Inside the range", Some(1_584_230_400)).await;
+    let outside = import(&ranged_client, "Outside the range", None).await;
+    ranged_client.email_destroy(&inside).await.unwrap();
+    ranged_client.email_destroy(&outside).await.unwrap();
+
+    // LH-3: a contact is held whole, whatever the range
+    let (_, books) = ranged
+        .hold_call("AddressBook/get", json!({"ids": null}))
+        .await;
+    let book = books["list"][0]["id"]
+        .as_str()
+        .unwrap_or_else(|| panic!("no address book: {books}"))
+        .to_string();
+    {
+        let (_, created) = ranged
+            .hold_call(
+                "ContactCard/set",
+                json!({"create": {"c": {"addressBookIds": {book: true},
+                    "name": {"full": "Kept Contact"}}}}),
+            )
+            .await;
+        let card = created["created"]["c"]["id"].as_str().unwrap_or_default().to_string();
+        let (_, destroyed) = ranged
+            .hold_call("ContactCard/set", json!({"destroy": [card]}))
+            .await;
+        assert!(destroyed["destroyed"][0].is_string(), "{destroyed}");
+    }
+    test.wait_for_tasks().await;
+
+    let is_held = |item: &Value| item["archivedUntil"].as_str().is_some_and(|u| u.starts_with("9999-"));
+    let kept = held.archived_items().await;
+    assert!(
+        kept.iter().any(|i| i["subject"] == "Held whole" && is_held(i)),
+        "test 6, LH-4: a held account's mail wasn't kept: {kept:?}"
+    );
+    let kept = ranged.archived_items().await;
+    assert!(
+        kept.iter().any(|i| i["subject"] == "Inside the range" && is_held(i)),
+        "LH-3: mail inside the range wasn't kept: {kept:?}"
+    );
+    assert!(
+        !kept.iter().any(|i| i["subject"] == "Outside the range"),
+        "LH-3: mail outside the range was kept, with undelete off: {kept:?}"
+    );
+    assert!(
+        kept.iter().any(|i| i["name"] == "Kept Contact" && is_held(i)),
+        "LH-3: a contact wasn't kept whole: {kept:?}"
+    );
+
     // LH-10: release needs a reason, and a released hold stays, read-only
     let response = admin
         .hold_set(json!({"update": {hold_id.as_str(): {"released": true}}}))
@@ -317,6 +415,23 @@ pub async fn test(test: &mut TestServer) {
     for reason in ["Counsel's letter", "Counsel widened the matter", "Matter settled"] {
         assert!(reasons.contains(&reason), "AU-12: {reason:?} not recorded: {reasons:?}");
     }
+}
+
+async fn import(
+    client: &jmap_client::client::Client,
+    subject: &str,
+    received_at: Option<i64>,
+) -> String {
+    client
+        .email_import(
+            format!("From: a@example.org\r\nSubject: {subject}\r\n\r\nBody.\r\n").into_bytes(),
+            [Id::from(INBOX_ID).to_string()],
+            None::<Vec<&str>>,
+            received_at,
+        )
+        .await
+        .unwrap()
+        .take_id()
 }
 
 /// Runs these tests alone: `cargo test -p tests legal_hold_tests -- --ignored`.

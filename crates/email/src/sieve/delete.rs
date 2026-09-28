@@ -44,12 +44,12 @@ impl SieveScriptDelete for Server {
             ))
             .await?
         {
-            // inbuxa: UD-1: a deleted script is kept, when archiving is on
-            if let Some(retention) =
-                inbuxa_features::undelete::settings::retention(self.registry())
-                    .await?
-                    .items
-            {
+            // inbuxa: UD-1, LH-4: a deleted script is kept, when archiving
+            // is on or a hold covers the account (whole: scripts have no date)
+            let keeping = self.keeping(account_id).await?;
+            let now = store::write::now();
+            if let Some(until) = keeping.until(now, keeping.is_held()) {
+                let retention = until.saturating_sub(now);
                 let script = obj_
                     .deserialize::<SieveScript>()
                     .caused_by(trc::location!())?;
