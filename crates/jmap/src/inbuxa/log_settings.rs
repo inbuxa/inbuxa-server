@@ -154,6 +154,7 @@ pub async fn set(
                 log_files::set(data, &settings).await?;
                 // This node purges now; the others within the hour
                 log_files::CHANGED.notify_one();
+                server.inventory_snapshot_after("inbuxa:LogSettings").await;
                 response.updated.append(id, None);
             }
         }

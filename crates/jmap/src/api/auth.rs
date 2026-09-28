@@ -92,6 +92,10 @@ impl JmapAuthorization for AccessToken {
                 GetRequestMethod::AiLimits(_) => Permission::SysSpamLlmGet,
                 // inbuxa: log file retention, with the tracers' permissions
                 GetRequestMethod::LogSettings(_) => Permission::SysTracerGet,
+                // inbuxa: personal-data catalog, the inventory and its history
+                GetRequestMethod::DataInventory(_) | GetRequestMethod::InventorySnapshot(_) => {
+                    Permission::SysComplianceGet
+                }
                 // inbuxa: the audit log (AU-9)
                 GetRequestMethod::AuditEvent(_) | GetRequestMethod::AuditSettings(_) => {
                     Permission::SysAuditGet
@@ -393,6 +397,8 @@ impl JmapAuthorization for AccessToken {
                 | MethodObject::DeletedAccount
                 | MethodObject::AiLimits
                 | MethodObject::LogSettings
+                | MethodObject::DataInventory
+                | MethodObject::InventorySnapshot
                 | MethodObject::Explanation
                 | MethodObject::AuditEvent
                 | MethodObject::AuditSettings

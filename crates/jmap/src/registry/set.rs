@@ -902,7 +902,20 @@ impl RegistrySet for Server {
                 // Finalize cache invalidation
                 self.invalidate_caches(cache_invalidator).await?;
 
-                Ok(set.into_response())
+                // inbuxa: personal-data catalog: what the server holds may
+                // have changed, so the inventory's history is brought up to date
+                let response = set.into_response();
+                if !response.created.is_empty()
+                    || !response.updated.is_empty()
+                    || !response.destroyed.is_empty()
+                {
+                    self.inventory_snapshot_after(&format!(
+                        "x:{}",
+                        registry::types::EnumImpl::as_str(&object_type)
+                    ))
+                        .await;
+                }
+                Ok(response)
             }
             ObjectType::ArfExternalReport
             | ObjectType::DmarcExternalReport

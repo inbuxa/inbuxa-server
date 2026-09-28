@@ -497,6 +497,26 @@ leaving the host, processors), and on `get` the full inventory as above.
 Kept for `inbuxa:AuditSettings.keepForDays`, so history is as long as the
 audit log's. Same permission and tenant scoping as the inventory.
 
+### As built (2026-09-28)
+
+- The catalog is embedded and parsed at start
+  (`crates/features/src/privacy/`, `toml` crate); the evaluation is a pure
+  function of the catalog and the live facts, which
+  `crates/common/src/privacy.rs` gathers: retention settings, what is
+  switched on (tracers, webhooks, the classifier and its AI model, Explain,
+  DNSBL, Pyzor, milters, hooks, relays, archiving, report keeping), and
+  stores or endpoints off the host. Loopback endpoints stay on the host;
+  any other configured endpoint counts as leaving it.
+- Objects with nothing personal aren't listed. An object's categories are
+  the union of its properties'.
+- `inbuxa:InventorySnapshot` has `get` only: `ids: null` lists every
+  snapshot kept, newest first, and `inventory` is sent only when asked for
+  in `properties` (the `query` above folds into this).
+- A snapshot is recorded only when the evaluated inventory differs from
+  the newest one (or there is none): after a registry write to an object
+  the inventory reads, after inbuxa's log, audit or AI settings change, and
+  on the daily clean-up. Snapshots past the audit log's retention go then.
+
 ## 7. The compliance role
 
 ### What it holds

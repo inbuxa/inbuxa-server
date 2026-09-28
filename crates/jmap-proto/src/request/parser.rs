@@ -176,6 +176,20 @@ impl<'de> Visitor<'de> for CallVisitor {
                     return Err(de::Error::invalid_length(1, &self));
                 }
             },
+            (MethodFunction::Get, MethodObject::DataInventory) => match seq.next_element() {
+                Ok(Some(value)) => RequestMethod::Get(GetRequestMethod::DataInventory(value)),
+                Err(err) => RequestMethod::invalid(err),
+                Ok(None) => {
+                    return Err(de::Error::invalid_length(1, &self));
+                }
+            },
+            (MethodFunction::Get, MethodObject::InventorySnapshot) => match seq.next_element() {
+                Ok(Some(value)) => RequestMethod::Get(GetRequestMethod::InventorySnapshot(value)),
+                Err(err) => RequestMethod::invalid(err),
+                Ok(None) => {
+                    return Err(de::Error::invalid_length(1, &self));
+                }
+            },
             (MethodFunction::Get, MethodObject::ProtocolPolicy) => match seq.next_element() {
                 Ok(Some(value)) => RequestMethod::Get(GetRequestMethod::ProtocolPolicy(value)),
                 Err(err) => RequestMethod::invalid(err),

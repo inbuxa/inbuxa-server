@@ -419,6 +419,8 @@ impl IntermediateChangesResponse {
             | MethodObject::DeletedAccount
             | MethodObject::AiLimits
             | MethodObject::LogSettings
+            | MethodObject::DataInventory
+            | MethodObject::InventorySnapshot
             | MethodObject::Explanation
             | MethodObject::AuditEvent
             | MethodObject::AuditSettings

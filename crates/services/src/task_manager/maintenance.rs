@@ -269,6 +269,18 @@ async fn store_maintenance(
                 trc::error!(err.details("Failed to re-apply account locks"));
             }
 
+            // inbuxa: personal-data catalog: the inventory's daily look for
+            // a change, and snapshots past the audit log's retention go
+            if let Err(err) = server
+                .inventory_snapshot(inbuxa_features::privacy::snapshot::Trigger::Daily)
+                .await
+            {
+                trc::error!(err.details("Failed to record an inventory snapshot"));
+            }
+            if let Err(err) = server.purge_inventory_snapshots().await {
+                trc::error!(err.details("Failed to purge inventory snapshots"));
+            }
+
             // inbuxa: personal-data catalog, D2: bans past their period go
             if let Err(err) = server.purge_expired_blocked_ips().await {
                 trc::error!(err.details("Failed to purge expired IP bans"));

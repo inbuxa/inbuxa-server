@@ -50,6 +50,8 @@ pub enum MethodObject {
     // inbuxa: AI call limits
     AiLimits,
     LogSettings,
+    DataInventory,
+    InventorySnapshot,
     // inbuxa: "Explain this" with the local model
     Explanation,
     // inbuxa: the audit log
@@ -91,6 +93,8 @@ impl MethodObject {
             MethodObject::DeletedAccount => Capability::Inbuxa,
             MethodObject::AiLimits => Capability::Inbuxa,
             MethodObject::LogSettings => Capability::Inbuxa,
+            MethodObject::DataInventory => Capability::Inbuxa,
+            MethodObject::InventorySnapshot => Capability::Inbuxa,
             MethodObject::Explanation => Capability::Inbuxa,
             MethodObject::AuditEvent
             | MethodObject::AuditSettings
@@ -279,6 +283,8 @@ impl MethodName {
             (MethodFunction::Get, MethodObject::AiLimits) => "inbuxa:AiLimits/get",
             (MethodFunction::Set, MethodObject::AiLimits) => "inbuxa:AiLimits/set",
             (MethodFunction::Get, MethodObject::LogSettings) => "inbuxa:LogSettings/get",
+            (MethodFunction::Get, MethodObject::DataInventory) => "inbuxa:DataInventory/get",
+            (MethodFunction::Get, MethodObject::InventorySnapshot) => "inbuxa:InventorySnapshot/get",
             (MethodFunction::Set, MethodObject::LogSettings) => "inbuxa:LogSettings/set",
             (MethodFunction::Set, MethodObject::Explanation) => "inbuxa:Explanation/set",
             (MethodFunction::Get, MethodObject::AuditEvent) => "inbuxa:AuditEvent/get",
@@ -429,6 +435,8 @@ impl MethodName {
             "inbuxa:AiLimits/get" => (MethodObject::AiLimits, MethodFunction::Get),
             "inbuxa:AiLimits/set" => (MethodObject::AiLimits, MethodFunction::Set),
             "inbuxa:LogSettings/get" => (MethodObject::LogSettings, MethodFunction::Get),
+            "inbuxa:DataInventory/get" => (MethodObject::DataInventory, MethodFunction::Get),
+            "inbuxa:InventorySnapshot/get" => (MethodObject::InventorySnapshot, MethodFunction::Get),
             "inbuxa:LogSettings/set" => (MethodObject::LogSettings, MethodFunction::Set),
             "inbuxa:Explanation/set" => (MethodObject::Explanation, MethodFunction::Set),
             "inbuxa:AuditEvent/get" => (MethodObject::AuditEvent, MethodFunction::Get),
@@ -501,6 +509,8 @@ impl Display for MethodObject {
             MethodObject::DeletedAccount => "inbuxa:DeletedAccount",
             MethodObject::AiLimits => "inbuxa:AiLimits",
             MethodObject::LogSettings => "inbuxa:LogSettings",
+            MethodObject::DataInventory => "inbuxa:DataInventory",
+            MethodObject::InventorySnapshot => "inbuxa:InventorySnapshot",
             MethodObject::Explanation => "inbuxa:Explanation",
             MethodObject::AuditEvent => "inbuxa:AuditEvent",
             MethodObject::AuditSettings => "inbuxa:AuditSettings",

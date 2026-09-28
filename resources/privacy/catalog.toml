@@ -165,6 +165,16 @@ default = "none"
 file = "inbuxa_log_settings.rs"
 default = "none"
 
+# The inventory itself: which kinds of data the server holds, where, and the
+# hosts that receive them. Facts about the server, not about people.
+[object."inbuxa:DataInventory"]
+file = "inbuxa_data_inventory.rs"
+default = "none"
+
+[object."inbuxa:InventorySnapshot"]
+file = "inbuxa_inventory_snapshot.rs"
+default = "none"
+
 # ---------------------------------------------------------------------------
 # Sources that are no object. Settings are `<object>.<property>`: a schema
 # field object, or one of inbuxa's own.

@@ -69,6 +69,7 @@ pub mod auth;
 pub mod cache;
 pub mod audit; // inbuxa: the audit log (audit-hold-lock spec, AU)
 pub mod hold; // inbuxa: legal holds (audit-hold-lock spec, LH)
+pub mod privacy; // inbuxa: the personal-data catalog, evaluated
 pub mod config;
 pub mod expr;
 pub mod i18n;
