@@ -120,6 +120,17 @@ impl ManagementApi for Server {
                     jmap::inbuxa::explanation::question(self, &access_token, &subject).await?;
                 Ok(explain_stream(self.clone(), access_token, question, in_flight))
             }
+            // inbuxa: try a saved directory before anything signs in through it
+            "directory" if is_post && path.get(1).copied() == Some("test") => {
+                let (_in_flight, access_token) = self.authenticate_headers(req, session).await?;
+                jmap::inbuxa::directory_test::assert_allowed(&access_token)?;
+                let request = body
+                    .as_deref()
+                    .and_then(|body| serde_json::from_slice::<serde_json::Value>(body).ok())
+                    .unwrap_or_default();
+                let answer = jmap::inbuxa::directory_test::test(self, &request).await?;
+                Ok(JsonResponse::new(answer).no_cache().into_http_response())
+            }
             "account" => {
                 // Authenticate request
                 let (_in_flight, access_token) = self.authenticate_headers(req, session).await?;
