@@ -483,8 +483,16 @@ impl Tracers {
                 };
 
                 // Parse webhook events
+                // inbuxa: personal-data catalog, finding 1: an include list is
+                // sent as named; otherwise a webhook honors its level as a
+                // tracer does, and never sends a protocol's raw input or
+                // output (whole messages)
+                let level = Level::from(hook.level);
+                let named = (hook.events_policy == EventPolicy::Include)
+                    .then(|| hook.events.iter().copied().collect::<AHashSet<_>>())
+                    .unwrap_or_default();
                 apply_events(hook.events, hook.events_policy, |event_type| {
-                    if event_type != EventType::Telemetry(TelemetryEvent::WebhookError) {
+                    if webhook_wants(event_type, level, &custom_levels, &named) {
                         tracer.interests.set(event_type);
                         global_interests.set(event_type);
                     }
@@ -743,6 +751,31 @@ fn tracer_settings(tracer: &Tracer) -> u64 {
     settings_hash(&tracer)
 }
 
+/// inbuxa: whether a webhook at `level` receives this event type. Its own
+/// error event never, or a failing webhook would report itself to itself.
+/// An event `named` in an include list always: naming it is the choice.
+/// Otherwise (the exclude policy, the default) only events at or above its
+/// level, as for a tracer, and never a protocol's raw input or output, which
+/// carries whole messages and credentials.
+fn webhook_wants(
+    event_type: EventType,
+    level: Level,
+    custom_levels: &AHashMap<EventType, Level>,
+    named: &AHashSet<EventType>,
+) -> bool {
+    if event_type == EventType::Telemetry(TelemetryEvent::WebhookError) {
+        return false;
+    }
+    if named.contains(&event_type) {
+        return true;
+    }
+    let event_level = custom_levels
+        .get(&event_type)
+        .copied()
+        .unwrap_or(event_type.level());
+    level.is_contained(event_level) && !event_type.is_raw_io()
+}
+
 fn webhook_settings(hook: &WebHook) -> u64 {
     let mut hook = hook.clone();
     in_place_reset!(hook);
@@ -802,5 +835,63 @@ impl std::fmt::Debug for OtelMetrics {
         f.debug_struct("OtelMetrics")
             .field("interval", &self.interval)
             .finish()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use trc::{AuthEvent, SmtpEvent};
+
+    fn wants(event: EventType, level: Level, named: &[EventType]) -> bool {
+        webhook_wants(
+            event,
+            level,
+            &AHashMap::new(),
+            &named.iter().copied().collect(),
+        )
+    }
+
+    #[test]
+    fn a_webhook_honors_its_level() {
+        let success = EventType::Auth(AuthEvent::Success);
+        assert!(wants(success, Level::Info, &[]));
+        assert!(!wants(success, Level::Error, &[]), "info is below error");
+    }
+
+    #[test]
+    fn raw_io_goes_out_only_when_named() {
+        let raw = EventType::Smtp(SmtpEvent::RawInput);
+        assert!(raw.is_raw_io());
+        // Not with the exclude policy, even at trace
+        assert!(!wants(raw, Level::Info, &[]));
+        assert!(!wants(raw, Level::Trace, &[]));
+        // Named in an include list, whatever the level
+        assert!(wants(raw, Level::Info, &[raw]));
+    }
+
+    #[test]
+    fn a_named_event_is_sent_whatever_its_level() {
+        let start = EventType::Smtp(SmtpEvent::ConnectionStart);
+        assert!(!Level::Info.is_contained(start.level()), "below info");
+        assert!(!wants(start, Level::Info, &[]));
+        assert!(wants(start, Level::Info, &[start]));
+    }
+
+    #[test]
+    fn a_custom_level_counts() {
+        let start = EventType::Smtp(SmtpEvent::ConnectionStart);
+        let custom = [(start, Level::Info)].into_iter().collect::<AHashMap<_, _>>();
+        assert!(webhook_wants(start, Level::Info, &custom, &AHashSet::new()));
+        // Raw I/O raised to info still needs naming
+        let raw = EventType::Smtp(SmtpEvent::RawInput);
+        let custom = [(raw, Level::Info)].into_iter().collect::<AHashMap<_, _>>();
+        assert!(!webhook_wants(raw, Level::Info, &custom, &AHashSet::new()));
+    }
+
+    #[test]
+    fn a_webhook_never_hears_its_own_errors() {
+        let own = EventType::Telemetry(TelemetryEvent::WebhookError);
+        assert!(!wants(own, Level::Trace, &[own]));
     }
 }
