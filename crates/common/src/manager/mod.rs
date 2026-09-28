@@ -18,6 +18,7 @@ use utils::HttpLimitResponse;
 pub mod application;
 pub mod backup;
 pub mod boot;
+pub mod compliance_roles; // inbuxa: personal-data catalog, the compliance roles
 pub mod console;
 pub mod defaults;
 pub mod first_party;
