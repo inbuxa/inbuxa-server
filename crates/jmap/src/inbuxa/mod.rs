@@ -9,6 +9,7 @@
 
 pub mod access;
 pub mod account_lock;
+pub mod legal_hold;
 pub mod audit;
 pub mod audit_log;
 pub mod ai_limits;

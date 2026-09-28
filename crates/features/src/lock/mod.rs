@@ -27,6 +27,11 @@ use store::{
     write::{AnyClass, BatchBuilder, ValueClass},
 };
 use trc::AddContext;
+use types::{
+    acl::{Acl, AclGrant},
+    collection::Collection,
+};
+use utils::map::bitmap::Bitmap;
 
 /// Rung when a lock is written, so this node's expiry timer re-reads the
 /// `until` dates (AL-5): a delegation ends at its time, not at a sweep.
@@ -53,11 +58,6 @@ pub fn ended_between(locks: &[Lock], after: u64, now: u64) -> impl Iterator<Item
         })
         .map(|lock| lock.account_id)
 }
-use types::{
-    acl::{Acl, AclGrant},
-    collection::Collection,
-};
-use utils::map::bitmap::Bitmap;
 
 const FEATURE: u8 = b'K';
 const KIND_LOCK: u8 = b'l';

@@ -70,6 +70,9 @@ impl Response<'_> {
                         GetResponseMethod::AccountLock(response) => {
                             response.eval_jptr(path, &mut results)
                         }
+                        GetResponseMethod::LegalHold(response) => {
+                            response.eval_jptr(path, &mut results)
+                        }
                         GetResponseMethod::ProtocolPolicy(response) => {
                             response.eval_jptr(path, &mut results)
                         }

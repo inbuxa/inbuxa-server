@@ -29,8 +29,8 @@ use trc::AddContext;
 use types::id::Id;
 
 /// Granted to the default administrator roles: "Explain this"
-/// (ai-explain spec, EX-4: superuser by default), and the audit log
-/// (audit-hold-lock spec, AU-9).
+/// (ai-explain spec, EX-4: superuser by default), the audit log, account
+/// locks and legal holds (audit-hold-lock spec, AU-9, AL-12, LH-13).
 const ADMIN_GRANTS: &[Permission] = &[
     Permission::SysAiExplain,
     Permission::SysAuditGet,
@@ -40,6 +40,10 @@ const ADMIN_GRANTS: &[Permission] = &[
     Permission::SysAccountLockCreate,
     Permission::SysAccountLockUpdate,
     Permission::SysAccountLockDestroy,
+    Permission::SysLegalHoldGet,
+    Permission::SysLegalHoldCreate,
+    Permission::SysLegalHoldUpdate,
+    Permission::SysLegalHoldExport,
 ];
 
 /// Granted to the default tenant administrator roles: reading and exporting
