@@ -411,6 +411,17 @@ pub async fn test(test: &mut TestServer) {
         is_held(&archived(frozen.archived_items().await)),
         "test 6, LH-6: the archived item wasn't frozen"
     );
+    // LH-9: what the hold keeps, for the console
+    let (_, response) = admin
+        .hold_call(
+            "inbuxa:LegalHold/get",
+            json!({"ids": [first], "properties": ["accountsCovered", "itemsHeld", "sizeHeld"]}),
+        )
+        .await;
+    let summary = &response["list"][0];
+    assert_eq!(summary["accountsCovered"], 1, "LH-9: {response}");
+    assert_eq!(summary["itemsHeld"], 1, "LH-9: {response}");
+    assert!(summary["sizeHeld"].as_u64().is_some_and(|s| s > 0), "LH-9: {response}");
 
     let (_, response) = frozen
         .hold_call("x:ArchivedItem/set", json!({"destroy": [item_id]}))

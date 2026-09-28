@@ -9,7 +9,7 @@
 //! this: the tenant ceiling strips the permissions from everyone in a
 //! tenant (LH-13). What a hold keeps is the undelete hooks' job.
 
-use common::{Server, auth::AccessToken};
+use common::{Server, auth::AccessToken, hold::HoldSummary};
 use inbuxa_features::hold::{self, Hold, Refusal, Release, Scope};
 use jmap_proto::{
     error::set::SetError,
@@ -67,7 +67,7 @@ fn ids(list: &[u32]) -> LValue {
     )
 }
 
-fn to_value(hold: &Hold, properties: &[P]) -> LValue {
+fn to_value(hold: &Hold, properties: &[P], summary: Option<&HoldSummary>) -> LValue {
     let mut out = Map::with_capacity(properties.len());
     for property in properties {
         let value = match property {
@@ -99,6 +99,9 @@ fn to_value(hold: &Hold, properties: &[P]) -> LValue {
                 .released
                 .as_ref()
                 .map_or(Value::Null, |r| Value::Str(r.reason.clone().into())),
+            P::AccountsCovered => Value::Number(summary.map_or(0, |s| s.accounts).into()),
+            P::ItemsHeld => Value::Number(summary.map_or(0, |s| s.items).into()),
+            P::SizeHeld => Value::Number(summary.map_or(0, |s| s.size).into()),
         };
         out.insert_unchecked(Key::Property(property.clone()), value);
     }
@@ -119,10 +122,21 @@ pub async fn get(
         not_found,
     };
     let data = server.store();
+    // LH-9: only when asked for, since it walks the archive
+    let summaries = if properties
+        .iter()
+        .any(|p| matches!(p, P::AccountsCovered | P::ItemsHeld | P::SizeHeld))
+    {
+        server.hold_summaries().await?
+    } else {
+        Default::default()
+    };
     match ids {
         None => {
             for current in hold::all(data).await? {
-                response.list.push(to_value(&current, &properties));
+                response
+                    .list
+                    .push(to_value(&current, &properties, summaries.get(&current.id)));
             }
         }
         Some(ids) => {
@@ -132,7 +146,11 @@ pub async fn get(
                     .map(|id| hold::get(data, id))
                 {
                     Some(found) => match found.await? {
-                        Some(current) => response.list.push(to_value(&current, &properties)),
+                        Some(current) => response.list.push(to_value(
+                            &current,
+                            &properties,
+                            summaries.get(&current.id),
+                        )),
                         None => response.push_not_found(id),
                     },
                     None => response.push_not_found(id),

@@ -41,6 +41,14 @@ pub struct Settled {
     pub accounts_released: usize,
 }
 
+/// What one hold keeps (LH-9).
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct HoldSummary {
+    pub accounts: u64,
+    pub items: u64,
+    pub size: u64,
+}
+
 /// A kept account as it was when deleted, for a hold's scope: its record
 /// still names its domain, groups and tenant.
 pub fn kept_member(account_id: u32, kept: &KeptAccount) -> Member {
@@ -54,6 +62,81 @@ pub fn kept_member(account_id: u32, kept: &KeptAccount) -> Member {
 }
 
 impl Server {
+    /// What decides whether a hold reaches a live account; None if it's gone.
+    pub async fn member_of(&self, account_id: u32) -> Option<Member> {
+        let account = self.account(account_id).await.ok()?;
+        let mut domains = account
+            .addresses
+            .iter()
+            .map(|address| address.domain_id)
+            .collect::<Vec<_>>();
+        domains.sort_unstable();
+        domains.dedup();
+        Some(Member {
+            account: account_id,
+            domains,
+            groups: account.id_member_of.iter().copied().collect(),
+            tenant: account.id_tenant,
+        })
+    }
+
+    /// LH-9, the console's "what's held": per active hold, the accounts it
+    /// covers now (deleted ones it keeps included), and the archived items
+    /// it keeps with their size. One pass over accounts and archive.
+    pub async fn hold_summaries(&self) -> trc::Result<AHashMap<u32, HoldSummary>> {
+        let data = self.store();
+        let registry = self.registry();
+        let holds = hold::active(data).await?;
+        let mut summaries: AHashMap<u32, HoldSummary> =
+            holds.iter().map(|h| (h.id, HoldSummary::default())).collect();
+        if holds.is_empty() {
+            return Ok(summaries);
+        }
+        let mut members: AHashMap<u32, Member> = AHashMap::new();
+        for id in registry
+            .query::<Vec<Id>>(RegistryQuery::new(ObjectType::Account))
+            .await
+            .caused_by(trc::location!())?
+        {
+            if let Some(member) = self.member_of(id.document_id()).await {
+                members.insert(id.document_id(), member);
+            }
+        }
+        for (account_id, kept) in undelete_data::kept_accounts(data).await? {
+            members.insert(account_id, kept_member(account_id, &kept));
+        }
+        for member in members.values() {
+            for hold in holds.iter().filter(|h| h.scope.covers(member)) {
+                summaries.entry(hold.id).or_default().accounts += 1;
+            }
+        }
+        for id in records::all(data, registry).await? {
+            let Some(item) = registry.object::<ArchivedItem>(id).await? else {
+                continue;
+            };
+            if !is_held_until(item.archived_until().timestamp().max(0) as u64) {
+                continue;
+            }
+            let Some(member) = members.get(&item.account_id().document_id()) else {
+                continue;
+            };
+            let size = match &item {
+                ArchivedItem::Email(email) => email.size,
+                ArchivedItem::FileNode(_) => match undelete_data::extra(data, id).await? {
+                    Some(inbuxa_features::undelete::data::Extra::FileNode { size, .. }) => size as u64,
+                    _ => 0,
+                },
+                _ => 0,
+            };
+            for hold in holds.iter().filter(|h| h.scope.covers(member)) {
+                let summary = summaries.entry(hold.id).or_default();
+                summary.items += 1;
+                summary.size += size;
+            }
+        }
+        Ok(summaries)
+    }
+
     /// The active holds covering `account_id`, through its own name, its
     /// addresses' domains, its groups or its tenant. Empty for an account
     /// that no longer exists: a deleted one is kept by LH-8's own check.

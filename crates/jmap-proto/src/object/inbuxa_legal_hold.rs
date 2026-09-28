@@ -45,6 +45,11 @@ pub enum LegalHoldProperty {
     ReleasedAt,
     ReleasedBy,
     ReleaseReason,
+    /// LH-9: accounts it covers now, deleted ones it keeps included.
+    AccountsCovered,
+    /// LH-9: archived items it keeps, and their size in bytes.
+    ItemsHeld,
+    SizeHeld,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -77,6 +82,9 @@ impl Property for LegalHoldProperty {
             LegalHoldProperty::ReleasedAt => "releasedAt",
             LegalHoldProperty::ReleasedBy => "releasedBy",
             LegalHoldProperty::ReleaseReason => "releaseReason",
+            LegalHoldProperty::AccountsCovered => "accountsCovered",
+            LegalHoldProperty::ItemsHeld => "itemsHeld",
+            LegalHoldProperty::SizeHeld => "sizeHeld",
         }
         .into()
     }
@@ -99,6 +107,9 @@ impl LegalHoldProperty {
             b"releasedAt" => LegalHoldProperty::ReleasedAt,
             b"releasedBy" => LegalHoldProperty::ReleasedBy,
             b"releaseReason" => LegalHoldProperty::ReleaseReason,
+            b"accountsCovered" => LegalHoldProperty::AccountsCovered,
+            b"itemsHeld" => LegalHoldProperty::ItemsHeld,
+            b"sizeHeld" => LegalHoldProperty::SizeHeld,
         )
     }
 }
