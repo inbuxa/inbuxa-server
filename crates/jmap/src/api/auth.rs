@@ -90,6 +90,8 @@ impl JmapAuthorization for AccessToken {
                 GetRequestMethod::DeletedAccount(_) => Permission::SysAccountGet,
                 // inbuxa: AI call limits, with the classifier's permissions
                 GetRequestMethod::AiLimits(_) => Permission::SysSpamLlmGet,
+                // inbuxa: log file retention, with the tracers' permissions
+                GetRequestMethod::LogSettings(_) => Permission::SysTracerGet,
                 // inbuxa: the audit log (AU-9)
                 GetRequestMethod::AuditEvent(_) | GetRequestMethod::AuditSettings(_) => {
                     Permission::SysAuditGet
@@ -200,6 +202,14 @@ impl JmapAuthorization for AccessToken {
                         Permission::SysSpamLlmUpdate,
                         Permission::SysSpamLlmUpdate,
                         Permission::SysSpamLlmUpdate,
+                    ),
+                    // inbuxa: log file retention, with the tracers' permissions
+                    SetRequestMethod::LogSettings(s) => validate_set(
+                        s,
+                        self,
+                        Permission::SysTracerUpdate,
+                        Permission::SysTracerUpdate,
+                        Permission::SysTracerUpdate,
                     ),
                     // inbuxa: the audit log (AU-7, AU-9, AU-11)
                     SetRequestMethod::AuditSettings(s) => validate_set(
@@ -382,6 +392,7 @@ impl JmapAuthorization for AccessToken {
                 | MethodObject::MaskedEmail
                 | MethodObject::DeletedAccount
                 | MethodObject::AiLimits
+                | MethodObject::LogSettings
                 | MethodObject::Explanation
                 | MethodObject::AuditEvent
                 | MethodObject::AuditSettings

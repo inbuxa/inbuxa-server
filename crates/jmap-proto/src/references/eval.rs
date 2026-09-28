@@ -61,6 +61,9 @@ impl Response<'_> {
                         GetResponseMethod::AiLimits(response) => {
                             response.eval_jptr(path, &mut results)
                         }
+                        GetResponseMethod::LogSettings(response) => {
+                            response.eval_jptr(path, &mut results)
+                        }
                         GetResponseMethod::AuditEvent(response) => {
                             response.eval_jptr(path, &mut results)
                         }

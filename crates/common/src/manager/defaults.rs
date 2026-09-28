@@ -408,6 +408,19 @@ async fn insert_safe_defaults(bp: &mut Bootstrap) -> trc::Result<()> {
         ] {
             bp.registry.write(RegistryWrite::insert(&object)).await?;
         }
+
+        // D1: rotated log files are kept 30 days (a fork-owned setting,
+        // since x:TracerLog is also stored inside x:Bootstrap)
+        use inbuxa_features::security::log_files;
+        if !log_files::is_set(&bp.data_store).await? {
+            log_files::set(
+                &bp.data_store,
+                &log_files::LogSettings {
+                    keep_for_days: Some(log_files::NEW_INSTALL_KEEP_DAYS),
+                },
+            )
+            .await?;
+        }
     }
 
     if bp.registry.count_object(ObjectType::Role).await? == 0 {

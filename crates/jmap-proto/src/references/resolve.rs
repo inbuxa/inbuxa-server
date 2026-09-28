@@ -46,6 +46,7 @@ impl Response<'_> {
                 GetRequestMethod::MaskedEmail(request) => request.resolve_references(self)?,
                 GetRequestMethod::DeletedAccount(request) => request.resolve_references(self)?,
                 GetRequestMethod::AiLimits(request) => request.resolve_references(self)?,
+                GetRequestMethod::LogSettings(request) => request.resolve_references(self)?,
                 GetRequestMethod::AuditEvent(request) => request.resolve_references(self)?,
                 GetRequestMethod::AuditSettings(request) => request.resolve_references(self)?,
                 GetRequestMethod::AccountLock(request) => request.resolve_references(self)?,
@@ -96,6 +97,9 @@ impl Response<'_> {
                     request.resolve_references(self, 1, false)?
                 }
                 SetRequestMethod::AiLimits(request) => {
+                    request.resolve_references(self, 1, false)?
+                }
+                SetRequestMethod::LogSettings(request) => {
                     request.resolve_references(self, 1, false)?
                 }
                 SetRequestMethod::Explanation(request) => {
