@@ -401,11 +401,13 @@ install only (no roles yet), each singleton read and written back whole
 (`manager/defaults.rs`, `new_install_privacy_defaults`); expired bans are
 also purged daily (`purge_expired_blocked_ips`). D7 changes the default for
 webhooks created from now on; stored webhooks keep theirs (the registry
-stores every field). **Held:** D1, because `x:TracerLog` is also stored
-inside `x:Bootstrap` with fields after it, so adding a field changes that
-object's stored format; a fork-owned setting is proposed instead, for John
-to decide. D5, because the spam-rules loader it touches is being reworked
-by the v0.16.24 import.
+stores every field). **Settled (John, 2026-09-28):** D1 becomes a
+fork-owned log-retention setting, kept in inbuxa's own storage as audit
+retention is (not a field on `x:TracerLog`, which is also stored inside
+`x:Bootstrap` with fields after it, so a new field would change that
+object's stored format); new installs 30 days, existing servers keep every
+file as today. D5 is built after the v0.16.24 import lands, on its reworked
+spam-rules loader, which keeps each blocklist's on/off state.
 
 | # | Change | Trade-off |
 |---|---|---|
