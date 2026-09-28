@@ -269,6 +269,11 @@ async fn store_maintenance(
                 trc::error!(err.details("Failed to re-apply account locks"));
             }
 
+            // inbuxa: personal-data catalog, D2: bans past their period go
+            if let Err(err) = server.purge_expired_blocked_ips().await {
+                trc::error!(err.details("Failed to purge expired IP bans"));
+            }
+
             // inbuxa: AU-7: audit records past their retention go; a
             // failure leaves them for the next run
             if let Err(err) = server.audit_purge().await {

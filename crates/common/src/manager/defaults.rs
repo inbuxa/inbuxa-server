@@ -14,7 +14,7 @@ use aws_lc_rs::{
 use registry::{
     schema::{
         enums::*,
-        prelude::{ObjectType, SocketAddr},
+        prelude::{Object, ObjectType, SocketAddr},
         structs::*,
     },
     types::{duration::Duration, error::Error, list::List, map::Map},
@@ -388,6 +388,28 @@ async fn insert_safe_defaults(bp: &mut Bootstrap) -> trc::Result<()> {
         }
     }
 
+    // inbuxa: personal-data catalog, defaults D2, D3, D4 and D6 (settled
+    // 2026-09-28): privacy-leaning values, for new installs only. A server
+    // with roles is not new, and keeps its settings whether saved or left at
+    // the default. Each singleton is read, changed and written back whole, so
+    // anything already in it stays.
+    #[cfg(not(feature = "test_mode"))]
+    if bp.registry.count_object(ObjectType::Role).await? == 0 {
+        let mut security = bp.setting_infallible::<Security>().await;
+        let mut classifier = bp.setting_infallible::<SpamClassifier>().await;
+        let mut pyzor = bp.setting_infallible::<SpamPyzor>().await;
+        let mut retention = bp.setting_infallible::<DataRetention>().await;
+        new_install_privacy_defaults(&mut security, &mut classifier, &mut pyzor, &mut retention);
+        for object in [
+            Object::from(security),
+            classifier.into(),
+            pyzor.into(),
+            retention.into(),
+        ] {
+            bp.registry.write(RegistryWrite::insert(&object)).await?;
+        }
+    }
+
     if bp.registry.count_object(ObjectType::Role).await? == 0 {
         let permissions = DefaultPermissions::default();
         let mut role_ids = Vec::with_capacity(4);
@@ -559,4 +581,82 @@ async fn insert_safe_defaults(bp: &mut Bootstrap) -> trc::Result<()> {
     }
 
     Ok(())
+}
+
+/// inbuxa: the new-install values of defaults D2, D3, D4 and D6 from the
+/// personal-data catalog spec. Automatic IP bans expire after 30 days instead
+/// of never; spam training samples are kept 90 days instead of 180; Pyzor,
+/// which sends a digest of each message's text to a public server, is off;
+/// delivery history is kept 14 days instead of 30.
+fn new_install_privacy_defaults(
+    security: &mut Security,
+    classifier: &mut SpamClassifier,
+    pyzor: &mut SpamPyzor,
+    retention: &mut DataRetention,
+) {
+    const DAY: u64 = 24 * 60 * 60 * 1000;
+    let ban_period = Some(Duration::from_millis(30 * DAY));
+    security.auth_ban_period = ban_period;
+    security.abuse_ban_period = ban_period;
+    security.loiter_ban_period = ban_period;
+    security.scan_ban_period = ban_period;
+    classifier.hold_samples_for = Duration::from_millis(90 * DAY);
+    pyzor.enable = false;
+    retention.hold_traces_for = Some(Duration::from_millis(14 * DAY));
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const DAY: u64 = 24 * 60 * 60 * 1000;
+
+    #[test]
+    fn new_installs_get_the_privacy_defaults() {
+        let (mut security, mut classifier, mut pyzor, mut retention) = (
+            Security::default(),
+            SpamClassifier::default(),
+            SpamPyzor::default(),
+            DataRetention::default(),
+        );
+        // What an install gets without them: bans that never lift, 180-day
+        // samples, Pyzor on, 30-day traces.
+        assert_eq!(security.auth_ban_period, None);
+        assert!(pyzor.enable);
+
+        new_install_privacy_defaults(&mut security, &mut classifier, &mut pyzor, &mut retention);
+
+        for period in [
+            security.auth_ban_period,
+            security.abuse_ban_period,
+            security.loiter_ban_period,
+            security.scan_ban_period,
+        ] {
+            assert_eq!(period.map(|p| p.into_inner().as_millis() as u64), Some(30 * DAY));
+        }
+        assert_eq!(classifier.hold_samples_for.into_inner().as_millis() as u64, 90 * DAY);
+        assert!(!pyzor.enable);
+        assert_eq!(
+            retention.hold_traces_for.map(|p| p.into_inner().as_millis() as u64),
+            Some(14 * DAY)
+        );
+    }
+
+    #[test]
+    fn everything_else_in_the_settings_stays() {
+        let mut retention = DataRetention {
+            archive_deleted_items_for: Some(Duration::from_millis(7 * DAY)),
+            ..Default::default()
+        };
+        let before = retention.clone();
+        new_install_privacy_defaults(
+            &mut Security::default(),
+            &mut SpamClassifier::default(),
+            &mut SpamPyzor::default(),
+            &mut retention,
+        );
+        assert_eq!(retention.archive_deleted_items_for, before.archive_deleted_items_for);
+        assert_eq!(retention.hold_metrics_for, before.hold_metrics_for);
+        assert_eq!(retention.expunge_trash_after, before.expunge_trash_after);
+    }
 }

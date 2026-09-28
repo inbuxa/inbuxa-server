@@ -72,6 +72,25 @@ tools/fork/notice-check.py --fix    # add it where it's missing
 Run `--fix` after resolving an upstream merge: a conflict resolved by taking
 upstream's side can drop a notice the file had.
 
+## privacy-check.py
+
+Fails when the personal-data catalog (`resources/privacy/catalog.toml`) and
+the code disagree: an object in the schema or one of inbuxa's own JMAP
+objects with no entry, a property the schema types as an address, an IP or
+a secret left to its object's default, or an entry naming an object,
+property, setting or code path that no longer exists. CI runs it beside the
+name check, with its tests (`python3 -m unittest discover -s tools/fork/tests`).
+See `docs/spec/features/personal-data-catalog.md`.
+
+```bash
+tools/fork/privacy-check.py              # exit 1 on any finding
+tools/fork/privacy-check.py --unlisted   # starting entries for what's missing
+```
+
+After an upstream import, the strip report lists what is new and unclassified
+under "Unclassified in the privacy catalog". `--unlisted` types each from the
+schema alone; read the field's description before trusting it.
+
 ## record-compat.py
 
 Records what the `*_compat` tests compare against, from the Enterprise
