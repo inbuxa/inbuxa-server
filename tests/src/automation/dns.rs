@@ -1,7 +1,10 @@
 /*
  * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
+ * SPDX-FileCopyrightText: 2026 Coffey Labs
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
+ *
+ * Modified by Coffey Labs in 2026 for INBUXA.
  */
 
 use crate::utils::server::TestServer;
@@ -58,7 +61,7 @@ _995._tcp.pop3.example.org. IN TLSA 2 1 1
 _dmarc.example.org. IN TXT "v=DMARC1; p=reject; rua=mailto:postmaster@example.org"
 _mta-sts.example.org. IN TXT "v=STSv1; id=12942536112359691423"
 _smtp._tls.example.org. IN TXT "v=TLSRPTv1; rua=mailto:postmaster@example.org"
-_ua-auto-config.example.org. IN TXT "v=UAAC1; a=sha256; d=9X2mMgWAc10oSPuRKZSFBwPXEQpnxkS7SXPO8PC7euM="
+_ua-auto-config.example.org. IN TXT "v=UAAC1; a=sha256; d=ZZ35kyyCO86LM5UUTecwutQ8B+0XdZ3wJnjoYXnH0Wk="
 _validation-persist.example.org. IN TXT "pebble.letsencrypt.org; accounturi=REDACTED"
 dummy-v1-ed25519._domainkey.example.org. IN TXT "v=DKIM1; k=ed25519; h=sha256; p=REDACTED"
 dummy-v1-rsa._domainkey.example.org. IN TXT "v=DKIM1; k=rsa; h=sha256; p=REDACTED"
