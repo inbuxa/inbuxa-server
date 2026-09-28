@@ -1,7 +1,7 @@
 # Feature spec: personal-data catalog, compliance role, and the Compliance section's first pages
 
-Status: draft, 2026-09-28. Phase 1 of the GDPR auditor foundation: the
-investigation and the design, for approval before anything is built. Not a
+Status: approved 2026-09-28, with the answers under [Settled](#settled).
+Phase 1 of the GDPR auditor foundation: the investigation and the design. Not a
 rebuild of an upstream feature, so it has no line in SPEC.md §4's table.
 
 ## Provenance
@@ -252,7 +252,7 @@ of truth. What the investigation found:
 
 So the source of truth for *what exists* is the schema (for registry objects)
 and `jmap-proto` (for inbuxa's own). Neither should carry the catalog:
-**Decision proposed:** the catalog is a sidecar, and the schema and generated
+**Decision (Settled 1):** the catalog is a sidecar, and the schema and generated
 code are read, never annotated, by it. The fork's existing hand edits to the
 schema (layout entries, permissions) continue as today for the Compliance
 pages and the new permissions, because the console's navigation comes from
@@ -390,8 +390,9 @@ default; fails on a stale entry.
 | AI classification, Explain | **off** (no model) | — |
 | Greylisting | **off** | — |
 
-**Proposed changes, new installs only**, each for John to decide. None is
-made by this spec.
+**Changes for new installs only.** Settled (5): all seven are built, in
+Phase 3; existing servers keep their settings. D7 is also covered by the bug
+fix for finding 1 (Settled 6).
 
 | # | Change | Trade-off |
 |---|---|---|
@@ -499,16 +500,16 @@ It holds **no** `*Create`/`*Update`/`*Destroy` on registry objects, no
 `sysAuditSettingsUpdate`, no `impersonate`, no `fetchAnyBlob`. It can't
 change a server setting.
 
-**Decision proposed on holds:** the officer *places and releases* holds,
-because that is the job; every placing, widening and release is already
-recorded with its reason, under the officer's own identity (AU-12), and a
-release can't be undone silently (LH-10). If John prefers holds to need a
-server administrator, drop Create/Update from the role.
+**Settled (2):** the officer *places and releases* holds, because that is
+the job; every placing, widening and release is already recorded with its
+reason, under the officer's own identity (AU-12), and a release can't be
+undone silently (LH-10).
 
-A **Tenant Compliance Officer** variant (inside a tenant: `sysComplianceGet`,
-`sysAuditGet`, `sysAuditExport`, `sysAccountLockGet`, reads) is proposed
-for later, since legal holds are server-only by the tenant ceiling (LH-13).
-Open question 3.
+A **Tenant Compliance Officer** (inside a tenant: `sysComplianceGet`,
+`sysAuditGet`, `sysAuditExport`, `sysAccountLockGet`, reads) is built with
+it (Settled 3). It has no hold permissions, since legal holds are
+server-only by the tenant ceiling (LH-13), and it sees the tenant's slice of
+the inventory only (§6).
 
 ### Reaching existing servers
 
@@ -535,9 +536,10 @@ top anything that weakens review: audit retention shortened, a tracer or the
 audit export webhook removed, a change to who holds the compliance or
 administrator roles, a hold released — each with who and when.
 
-What remains open: a server administrator can still shorten audit retention
-to 90 days (recorded, and now surfaced), and anyone with shell access can edit
-the store directly. Open question 4.
+**Settled (4):** a server administrator can still shorten audit retention to
+90 days; that is recorded and surfaced on the Overview, not gated on a second
+person, since a server may have only one. Anyone with shell access can edit
+the store directly; that is outside what the server can review.
 
 ## 8. The Compliance section in the console
 
@@ -561,7 +563,7 @@ Planned navigation, in order:
 | Records and documents | later spec | could be schema-driven if it becomes a registry object | — |
 | Jurisdiction packs | later spec | hand-built | — |
 
-**Decision proposed:** later pages are left out of the navigation until
+**Decision:** later pages are left out of the navigation until
 built, not shown disabled: a disabled entry reads as a feature that exists.
 
 **Overview** shows the latest snapshot's findings as facts ("Log files are
@@ -597,21 +599,22 @@ The rest checked out: tracing 30 days, metrics 90 days, the Explain cache (in
 memory, a day), audit retention (two years, minimum 90), undelete off by
 default.
 
-## Open questions for John
+## Settled
 
-1. **The catalog's home and the schema edits.** Sidecar `catalog.toml` as
-   proposed, with the Compliance pages and new permission added to the schema
-   by hand as the audit and hold work did — or something else?
-2. **Holds in the compliance role.** Can the officer place and release holds,
-   or only see and export them?
-3. **A tenant compliance role** now, or after data subject requests?
-4. **Audit retention floor.** Should shortening audit retention need a second
-   person, or is recording and surfacing it enough?
-5. **Defaults D1–D7.** Which, if any, for new installs?
-6. **Finding 1 (webhooks).** Fix now as a bug, separately from this work, or
-   wait for D7?
-7. **Snapshots:** kept as long as the audit log, as proposed, or their own
-   setting?
+John's answers, 2026-09-28, to the questions this spec asked:
+
+1. **The catalog is a sidecar**, `resources/privacy/catalog.toml`; the
+   Compliance pages and the new permission are hand-added to the schema as
+   the audit and hold work did.
+2. **The Compliance Officer places and releases legal holds.** It's their
+   role.
+3. **The Tenant Compliance Officer is built now**, with the server role
+   (Phase 3), not after data subject requests.
+4. **Shortening audit retention is recorded and surfaced**, not gated on a
+   second person: a server may have only one.
+5. **All seven defaults, D1–D7, for new installs.** Built in Phase 3.
+6. **Finding 1 is fixed now**, as a bug, separately from this work.
+7. **Snapshots are kept as long as the audit log** (`keepForDays`).
 
 ## Phases
 
@@ -619,9 +622,11 @@ default.
 2. **The catalog and its check:** `resources/privacy/catalog.toml`,
    `tools/fork/privacy-check.py` in `fork-checks`, the strip report section,
    and the tests in §5.
-3. **Server:** `sysComplianceGet` and the role (with the existing-server
-   step), `inbuxa:DataInventory`, `inbuxa:InventorySnapshot`, tests with
-   several configurations (defaults, a remote store, a hosted AI endpoint,
-   telemetry off), tenant scoping, refusal without the permission.
+3. **Server:** `sysComplianceGet`, the Compliance Officer and Tenant
+   Compliance Officer roles (with the existing-server step),
+   `inbuxa:DataInventory`, `inbuxa:InventorySnapshot`, and defaults D1–D7
+   for new installs; tests with several configurations (defaults, a remote
+   store, a hosted AI endpoint, telemetry off), tenant scoping, refusal
+   without the permission.
 4. **Console:** Overview and Data inventory, the navigation entries, a PR
    linking this spec.
