@@ -221,6 +221,21 @@ pub async fn test(test: &mut TestServer) {
     )
     .await;
 
+    // inbuxa: personal-data catalog, D2: the daily clean-up removes the
+    // expired ban's record, without waiting for settings to reload
+    test.server.purge_expired_blocked_ips().await.unwrap();
+    assert_eq!(
+        admin
+            .registry_query_ids(
+                ObjectType::BlockedIp,
+                [(Property::Address, "10.0.0.2")],
+                Vec::<&str>::new(),
+            )
+            .await,
+        Vec::<Id>::new(),
+        "the expired ban's record is gone"
+    );
+
     // Make sure the IP remains unblocked after reload
     admin.registry_create_object(Action::ReloadBlockedIps).await;
     validate_password_with_ip(

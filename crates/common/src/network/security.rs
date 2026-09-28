@@ -426,6 +426,37 @@ impl Server {
     }
 }
 
+impl Server {
+    /// inbuxa: personal-data catalog, D2: removes bans whose period is over.
+    /// They already stop blocking when they expire, and go when settings are
+    /// next loaded; the daily clean-up makes sure a server that seldom
+    /// reloads doesn't keep them.
+    pub async fn purge_expired_blocked_ips(&self) -> trc::Result<()> {
+        let now = now() as i64;
+        let mut expired = Vec::new();
+        for ip in self.registry().list::<BlockedIp>().await? {
+            if ip.object.expires_at.as_ref().is_some_and(|at| at.timestamp() <= now) {
+                let address = ip.object.address.clone();
+                let object = Object {
+                    inner: ip.object.into(),
+                    revision: ip.revision,
+                };
+                self.registry()
+                    .write(RegistryWrite::delete_object(ip.id, &object))
+                    .await?;
+                expired.push(trc::Value::from(address.into_inner().0));
+            }
+        }
+        if !expired.is_empty() {
+            trc::event!(
+                Security(trc::SecurityEvent::IpBlockExpired),
+                Details = expired
+            );
+        }
+        Ok(())
+    }
+}
+
 impl BlockedIps {
     pub async fn parse(bp: &mut Bootstrap) -> Self {
         let mut ips = Self::default();

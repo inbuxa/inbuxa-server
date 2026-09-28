@@ -47353,7 +47353,9 @@ impl Default for WebHook {
             level: TracingLevel::Info,
             lossy: false,
             events: Default::default(),
-            events_policy: EventPolicy::Exclude,
+            // inbuxa: personal-data catalog, D7: a new webhook sends nothing
+            // until its events are chosen
+            events_policy: EventPolicy::Include,
         }
     }
 }
