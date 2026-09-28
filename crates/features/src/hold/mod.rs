@@ -484,6 +484,19 @@ pub async fn keep_moved(data: &Store, before: &Member, after: &Member) -> trc::R
     Ok(())
 }
 
+/// LH-8: names `account_id` in every hold that reaches it, so a deleted
+/// account, no longer in any domain or tenant, stays held.
+pub async fn pin_account(data: &Store, member: &Member) -> trc::Result<()> {
+    for mut hold in covering(data, member).await? {
+        if !hold.scope.accounts.contains(&member.account) {
+            hold.scope.accounts.push(member.account);
+            hold.scope.accounts.sort_unstable();
+            update(data, &hold).await?;
+        }
+    }
+    Ok(())
+}
+
 /// Replaces a hold that `check_update` allowed.
 pub async fn update(data: &Store, hold: &Hold) -> trc::Result<()> {
     let mut batch = BatchBuilder::new();

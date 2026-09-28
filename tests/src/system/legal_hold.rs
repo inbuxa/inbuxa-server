@@ -309,7 +309,10 @@ pub async fn test(test: &mut TestServer) {
             "r": {"name": "Matter 6002", "from": "2020-01-01T00:00:00Z", "to": "2020-12-31T23:59:59Z",
                   "scope": {"accounts": [ranged.id_string()]}}}}))
         .await;
-    assert!(response["created"]["w"]["id"].is_string(), "LH-1: {response}");
+    let whole_hold = response["created"]["w"]["id"]
+        .as_str()
+        .unwrap_or_else(|| panic!("LH-1: {response}"))
+        .to_string();
     assert!(response["created"]["r"]["id"].is_string(), "LH-1: {response}");
 
     let held_client = held.jmap_client().await;
@@ -448,6 +451,52 @@ pub async fn test(test: &mut TestServer) {
     assert!(
         until > grace.format("%Y-%m-%dT%H:%M:%S").to_string(),
         "test 8, LH-10: under 30 days of grace after release: {until}"
+    );
+
+    // Test 8, LH-8: a held account destroyed as a login is kept, data and
+    // all, with no expiry, although undelete keeps no accounts here
+    let held_id = held.id_string().to_string();
+    admin.destroy_account(held).await;
+    let kept = |list: Value| {
+        list["list"]
+            .as_array()
+            .and_then(|l| l.iter().find(|a| a["id"] == held_id.as_str()).cloned())
+    };
+    let (_, list) = admin
+        .hold_call("inbuxa:DeletedAccount/get", json!({"ids": null}))
+        .await;
+    let entry = kept(list.clone()).unwrap_or_else(|| panic!("test 8, LH-8: not kept: {list}"));
+    assert!(
+        entry["keptUntil"].as_str().is_some_and(|u| u.starts_with("9999-")),
+        "test 8, LH-8: kept with an expiry: {entry}"
+    );
+    let (_, response) = admin
+        .hold_call("inbuxa:DeletedAccount/set", json!({"destroy": [held_id]}))
+        .await;
+    assert_eq!(
+        response["notDestroyed"][held_id.as_str()]["type"], "forbidden",
+        "test 8, LH-8: destroy-now wasn't refused: {response}"
+    );
+    // Its hold names it now, so no domain or tenant move can drop it
+    assert!(
+        admin.hold_get(&whole_hold).await["scope"]["accounts"]
+            .as_array()
+            .is_some_and(|a| a.iter().any(|id| id == held_id.as_str())),
+        "LH-8: the hold doesn't name the deleted account"
+    );
+    // Release: the data is destroyed 30 days later, not before
+    admin
+        .hold_set(json!({"reason": "Matter closed", "update": {whole_hold.as_str(): {"released": true}}}))
+        .await;
+    let (_, list) = admin
+        .hold_call("inbuxa:DeletedAccount/get", json!({"ids": null}))
+        .await;
+    let entry = kept(list.clone()).unwrap_or_else(|| panic!("test 8, LH-10: gone at release: {list}"));
+    let until = entry["keptUntil"].as_str().unwrap_or_default().to_string();
+    let grace = chrono::Utc::now() + chrono::Duration::days(29);
+    assert!(
+        !until.starts_with("9999-") && until > grace.format("%Y-%m-%dT%H:%M:%S").to_string(),
+        "test 8, LH-10: after release, not 30 days of grace: {until}"
     );
 
     // LH-10: release needs a reason, and a released hold stays, read-only

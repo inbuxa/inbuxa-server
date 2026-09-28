@@ -15,7 +15,14 @@ use inbuxa_features::{
     hold::{self, HELD_UNTIL, Hold, Keeping, Member, is_held_until},
     undelete::records,
 };
-use registry::schema::{prelude::ObjectType, structs::ArchivedItem};
+use inbuxa_features::undelete::data::{self as undelete_data, KeptAccount};
+use registry::{
+    pickle::PickledStream,
+    schema::{
+        prelude::{ObjectInner, ObjectType},
+        structs::ArchivedItem,
+    },
+};
 use store::{registry::RegistryQuery, write::now};
 use trc::AddContext;
 use types::id::Id;
@@ -29,6 +36,21 @@ const RELEASE_GRACE: u64 = 30 * 86_400;
 pub struct Settled {
     pub frozen: usize,
     pub released: usize,
+    /// Deleted accounts kept by a hold, or let go by a release (LH-8, LH-10).
+    pub accounts_frozen: usize,
+    pub accounts_released: usize,
+}
+
+/// A kept account as it was when deleted, for a hold's scope: its record
+/// still names its domain, groups and tenant.
+pub fn kept_member(account_id: u32, kept: &KeptAccount) -> Member {
+    PickledStream::new(&kept.record)
+        .and_then(|mut stream| ObjectInner::unpickle(ObjectType::Account, &mut stream))
+        .and_then(|inner| Member::of(account_id, &inner))
+        .unwrap_or(Member {
+            account: account_id,
+            ..Default::default()
+        })
 }
 
 impl Server {
@@ -114,7 +136,39 @@ impl Server {
                 settled.released += 1;
             }
         }
+
+        // LH-8, LH-10: deleted accounts kept by undelete follow the holds
+        // too. Their DestroyAccount task defers itself while they're kept.
+        let retention = inbuxa_features::undelete::settings::retention(registry)
+            .await?
+            .accounts;
+        for (account_id, mut kept) in undelete_data::kept_accounts(data).await? {
+            let covered = !hold::covering(data, &kept_member(account_id, &kept)).await?.is_empty();
+            let held = is_held_until(kept.kept_until);
+            let until = if covered && !held {
+                settled.accounts_frozen += 1;
+                HELD_UNTIL
+            } else if !covered && held {
+                settled.accounts_released += 1;
+                (kept.deleted_at + retention.unwrap_or(0)).max(now + RELEASE_GRACE)
+            } else {
+                continue;
+            };
+            kept.kept_until = until;
+            let mut batch = store::write::BatchBuilder::new();
+            undelete_data::set_kept_account(&mut batch, account_id, &kept)?;
+            data.write(batch.build_all())
+                .await
+                .caused_by(trc::location!())?;
+        }
         Ok(settled)
+    }
+
+    /// LH-8: whether a hold covers a deleted account undelete keeps.
+    pub async fn is_kept_held(&self, account_id: u32, kept: &KeptAccount) -> trc::Result<bool> {
+        Ok(!hold::covering(self.store(), &kept_member(account_id, kept))
+            .await?
+            .is_empty())
     }
 
     /// Every account an active hold covers now. Empty, without looking at
