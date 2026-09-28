@@ -1,7 +1,10 @@
 /*
  * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
+ * SPDX-FileCopyrightText: 2026 Coffey Labs
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
+ *
+ * Modified by Coffey Labs in 2026 for INBUXA.
  */
 
 use crate::{
@@ -72,11 +75,22 @@ impl Server {
             .acme_certificate_renewal_due(&domains, renew_before, now())
             .await?
         {
-            return Err(AcmeError::NotDue(format!(
-                "Certificate for domain {} is still valid; renewal is not due until {}",
-                domain.name,
-                UTCDateTime::from_timestamp(renew_at as i64)
-            )));
+            // INBUXA: a certificate already covering these names (one stored by
+            // hand before the domain was switched to automatic, say) isn't a
+            // failure: schedule the renewal for when it falls due. Returning
+            // NotDue here ended the task for good, and nothing renewed the
+            // certificate before it expired.
+            trc::event!(
+                Acme(trc::AcmeEvent::RenewBackoff),
+                Domain = domain.name.clone(),
+                Hostname = domains.as_slice(),
+                Details = "A valid certificate already covers these names",
+                NextRetry = trc::Value::Timestamp(renew_at),
+            );
+            return Ok(vec![Task::AcmeRenewal(TaskDomainManagement {
+                domain_id,
+                status: TaskStatus::at(renew_at as i64),
+            })]);
         }
 
         let dns_parameters = match &domain.dns_management {
