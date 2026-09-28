@@ -88,13 +88,31 @@ fn days(duration: Option<&Duration>) -> Days {
     }
 }
 
-/// An expression's text, if it is a plain constant (a zone, a switch).
-fn expression_text(value: &Value) -> Option<String> {
-    match value {
-        Value::String(s) => Some(s.clone()),
-        Value::Object(o) => o.get("else").and_then(|v| v.as_str()).map(str::to_string),
-        _ => None,
+/// The zones a DNSBL's zone expression can query: each quoted literal that
+/// starts with a dot, in any branch (`ip_reverse + '.zen.spamhaus.org'`).
+fn zone_hosts(value: &Value) -> Vec<String> {
+    let mut hosts = Vec::new();
+    let mut texts = Vec::new();
+    fn collect<'a>(value: &'a Value, texts: &mut Vec<&'a str>) {
+        match value {
+            Value::String(s) => texts.push(s),
+            Value::Array(items) => items.iter().for_each(|v| collect(v, texts)),
+            Value::Object(map) => map.values().for_each(|v| collect(v, texts)),
+            _ => {}
+        }
     }
+    collect(value, &mut texts);
+    for text in texts {
+        for literal in text.split('\'').skip(1).step_by(2) {
+            if let Some(zone) = literal.strip_prefix('.')
+                && zone.contains('.')
+                && !hosts.iter().any(|h| h == zone)
+            {
+                hosts.push(zone.to_string());
+            }
+        }
+    }
+    hosts
 }
 
 impl Server {
@@ -263,7 +281,7 @@ impl Server {
             let value = serde_json::to_value(&server.object).unwrap_or_default();
             if value.get("enable").and_then(Value::as_bool).unwrap_or(false) {
                 dnsbl_on = true;
-                if let Some(zone) = value.get("zone").and_then(expression_text) {
+                for zone in value.get("zone").map(zone_hosts).unwrap_or_default() {
                     endpoint(&mut facts, "spam-dnsbl", zone);
                 }
             }
@@ -395,6 +413,16 @@ mod tests {
             Some("https://es.example.net:9200".into())
         );
         assert_eq!(remote_host(&json!({"@type": "S3", "bucket": "mail"})), Some("S3".into()));
+    }
+
+    #[test]
+    fn zones_come_from_every_branch() {
+        let zone = json!({"else": "false", "match": {"0": {"if": "location == 'tcp'",
+            "then": "ip_reverse + '.rep.mailspike.net'"}}});
+        assert_eq!(zone_hosts(&zone), vec!["rep.mailspike.net"]);
+        let zone = json!({"else": "hash(email, 'sha1') + '.ebl.msbl.org'", "match": {}});
+        assert_eq!(zone_hosts(&zone), vec!["ebl.msbl.org"], "not 'sha1'");
+        assert!(zone_hosts(&json!({"else": "false"})).is_empty());
     }
 
     #[test]

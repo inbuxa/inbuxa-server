@@ -274,6 +274,45 @@ pub async fn test(test: &mut TestServer) {
         .unwrap();
     assert_eq!(trace["retention"]["days"], json!(7), "{trace}");
 
+    // D5: a new install's first rules leave the hashed-address blocklist
+    // off, once; an existing server (no note) keeps it as it is
+    let (_, response) = call(
+        &admin,
+        "x:SpamDnsblServer/set",
+        json!({"create": {"m": {"@type": "Email", "name": "STWT_MSBL_EBL_EMAIL", "enable": true,
+            "zone": {"else": "hash(email, 'sha1') + '.ebl.msbl.org'", "match": {}},
+            "tag": {"else": "'MSBL_EBL'", "match": {}}}}}),
+    )
+    .await;
+    let msbl = response["created"]["m"]["id"]
+        .as_str()
+        .unwrap_or_else(|| panic!("{response}"))
+        .to_string();
+    let registry = test.server.registry();
+    let store = test.server.store();
+    assert!(
+        !common::manager::spam_rules::apply_new_install(registry, store).await.unwrap(),
+        "no note, no change"
+    );
+    let enabled = |response: &Value| response["list"][0]["enable"].clone();
+    let (_, response) = call(&admin, "x:SpamDnsblServer/get", json!({"ids": [msbl]})).await;
+    assert_eq!(enabled(&response), json!(true));
+    let (_, response) = call(&officer, "inbuxa:DataInventory/get", json!({"ids": null})).await;
+    assert!(
+        response["list"][0]["processors"]
+            .as_array()
+            .is_some_and(|p| p.iter().any(|p| p["host"] == "ebl.msbl.org")),
+        "the zone, not the hash: {response}"
+    );
+    common::manager::spam_rules::mark_new_install(store).await.unwrap();
+    assert!(common::manager::spam_rules::apply_new_install(registry, store).await.unwrap());
+    let (_, response) = call(&admin, "x:SpamDnsblServer/get", json!({"ids": [msbl]})).await;
+    assert_eq!(enabled(&response), json!(false), "{response}");
+    assert!(
+        !common::manager::spam_rules::apply_new_install(registry, store).await.unwrap(),
+        "the note works once"
+    );
+
     // A tenant can still be deleted: its unused role goes with it
     let spare = admin
         .registry_create_object(Tenant {

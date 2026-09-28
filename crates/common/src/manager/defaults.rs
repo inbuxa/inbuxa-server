@@ -409,6 +409,10 @@ async fn insert_safe_defaults(bp: &mut Bootstrap) -> trc::Result<()> {
             bp.registry.write(RegistryWrite::insert(&object)).await?;
         }
 
+        // D5: the blocklist sent hashed email addresses starts off; the
+        // rules load later, from a task, which acts on this note
+        super::spam_rules::mark_new_install(&bp.data_store).await?;
+
         // D1: rotated log files are kept 30 days (a fork-owned setting,
         // since x:TracerLog is also stored inside x:Bootstrap)
         use inbuxa_features::security::log_files;
