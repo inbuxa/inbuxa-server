@@ -373,6 +373,39 @@ def schema_flags(tree):
     return {'objects': objects, 'fields': fields}
 
 
+def privacy_flags(tree):
+    """Objects and properties new in this import that the personal-data
+    catalog doesn't classify (docs/spec/features/personal-data-catalog.md).
+    Informational, like the Enterprise flags: privacy-check.py is what fails
+    CI once the import is merged."""
+    import importlib.util
+    import tomllib
+    here = Path(__file__).resolve().parent
+    catalog_path = here.parents[1] / 'resources' / 'privacy' / 'catalog.toml'
+    current_path = here.parents[1] / 'resources' / 'schema' / 'schema.json.gz'
+    path = tree / 'resources' / 'schema' / 'schema.json.gz'
+    if not (path.is_file() and catalog_path.is_file() and current_path.is_file()):
+        return None
+    spec = importlib.util.spec_from_file_location('privacy_check', here / 'privacy-check.py')
+    check = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(check)
+    catalog = tomllib.loads(catalog_path.read_text(encoding='utf-8')).get('object', {})
+    current = json.loads(gzip.decompress(current_path.read_bytes())).get('fields', {})
+    upstream = json.loads(gzip.decompress(path.read_bytes())).get('fields', {})
+    objects = sorted(name for name in upstream if name not in catalog)
+    fields = []
+    for name, spec_ in upstream.items():
+        if name not in catalog:
+            continue
+        listed = catalog[name].get('properties', {})
+        known = current.get(name, {}).get('properties', {})
+        for prop, p in spec_.get('properties', {}).items():
+            if prop not in known and prop not in listed:
+                typed = check.sensitive(p.get('type', {}))
+                fields.append(f'{name}.{prop}' + (f' ({typed})' if typed else ''))
+    return {'objects': objects, 'fields': sorted(fields)}
+
+
 def remaining_hooks(tree):
     gates, checks = {}, {}
     for path in tree.rglob('*.rs'):
@@ -456,6 +489,8 @@ def write_report(out_dir, report):
     ]
     if r['schema']:
         md.append(f'- Upstream schema flags {len(r["schema"]["objects"])} objects and {len(r["schema"]["fields"])} fields as Enterprise')
+    if r.get('privacy'):
+        md.append(f'- Unclassified in the privacy catalog: {len(r["privacy"]["objects"])} objects and {len(r["privacy"]["fields"])} new fields')
     md += ['', '## Removed files', ''] + [f'- `{f}`' for f in r['removed_files']]
     md += ['', '## Removed snippets', ''] + [f'- `{f}`: {n}' for f, n in r['removed_snippets'].items()]
     md += ['', '## Dangling module declarations removed', ''] + [f'- `{d["file"]}:{d["line"]}`: `mod {d["module"]}` ({" / ".join(d["lines"])})' for d in r['dangling_mods']]
@@ -463,6 +498,13 @@ def write_report(out_dir, report):
     if r['schema']:
         md += ['', '## Flagged Enterprise in upstream\'s schema', '', '**Objects:** ' + ', '.join(f'`{o}`' for o in r['schema']['objects']),
                '', '**Fields:** ' + ', '.join(f'`{f}`' for f in r['schema']['fields'])]
+    if r.get('privacy'):
+        md += ['', '## Unclassified in the privacy catalog', '',
+               'New in this import and not in `resources/privacy/catalog.toml`. `tools/fork/privacy-check.py` '
+               'fails CI on these once merged; `--unlisted` prints a starting entry. A type in brackets is what '
+               'the schema alone says the field holds.', '',
+               '**Objects:** ' + (', '.join(f'`{o}`' for o in r['privacy']['objects']) or 'none'),
+               '', '**Fields:** ' + (', '.join(f'`{f}`' for f in r['privacy']['fields']) or 'none')]
     md += ['', '## Third-party code', '',
            'Comments in the stripped tree that name another copyright holder, another license, or a source the '
            'code came from. Files marked **new** aren\'t in THIRD-PARTY.md yet.', '']
@@ -537,7 +579,7 @@ def main():
         'removed_files': removed_files, 'removed_snippets': removed_snippets,
         'cargo_edits': edits, 'dangling_mods': dangling, 'problems': problems,
         'feature_gates': gates, 'edition_checks': checks,
-        'schema': schema_flags(tree), 'third_party': others, 'third_party_unlisted': new_others,
+        'schema': schema_flags(tree), 'privacy': privacy_flags(tree), 'third_party': others, 'third_party_unlisted': new_others,
         'renames': renames, 'build': build, 'ossify_log': log,
     }
     write_report(args.out, report)
