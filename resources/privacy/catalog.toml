@@ -847,7 +847,7 @@ default = "none"
 whose = ["correspondent"]
 where = ["memory"]
 scope = "server"
-retention = "unbounded"
+retention = "object-life"
 [object."x:DmarcTroubleshoot".properties]
 ehloDomain = ["network"]
 ipRevPtr = ["network"]
@@ -1266,7 +1266,7 @@ default = "none"
 whose = ["correspondent", "holder", "administrator"]
 where = ["log-file"]
 scope = "server"
-retention = "unbounded"
+retention = { setting = "inbuxa:LogSettings.keepForDays" }
 [object."x:Log".properties]
 details = ["network", "identifier", "metadata"]
 timestamp = ["metadata"]
@@ -1689,7 +1689,7 @@ default = "none"
 whose = ["correspondent"]
 where = ["memory"]
 scope = "server"
-retention = "unbounded"
+retention = "object-life"
 [object."x:SpamClassify".properties]
 authenticatedAs = ["identifier"]
 ehloDomain = ["network"]
@@ -1810,7 +1810,7 @@ default = "none"
 whose = ["holder", "correspondent"]
 where = ["data-store"]
 scope = "tenant"
-retention = "unbounded"
+retention = "object-life"
 [object."x:TaskCalendarItipContents".properties]
 from = ["identifier"]
 iCalendarData = ["content"]
@@ -1825,7 +1825,7 @@ default = "none"
 whose = ["holder"]
 where = ["data-store"]
 scope = "tenant"
-retention = "unbounded"
+retention = "object-life"
 [object."x:TaskDestroyAccount".properties]
 accountName = ["identifier"]
 
@@ -1852,7 +1852,7 @@ default = "none"
 whose = ["holder"]
 where = ["data-store"]
 scope = "tenant"
-retention = "unbounded"
+retention = "object-life"
 [object."x:TaskMergeThreads".properties]
 messageIds = ["metadata"]
 threadName = ["content"]
@@ -1886,7 +1886,7 @@ default = "none"
 whose = ["holder"]
 where = ["data-store"]
 scope = "tenant"
-retention = "unbounded"
+retention = "object-life"
 [object."x:TaskStatusRetry".properties]
 failureReason = ["content"]
 
@@ -2040,30 +2040,23 @@ default = "none"
 
 [object."x:TracerLog"]
 default = "none"
-whose = ["correspondent", "holder", "administrator"]
-where = ["log-file"]
-scope = "server"
-retention = "unbounded"
+
 [object."x:TracerLog".properties]
 path = ["metadata"]
 
 [object."x:TracerOtelGrpc"]
+# Configuration: the "webhooks" and "otel-tracer" sources carry what it sends
 default = "none"
-whose = ["correspondent", "holder", "administrator"]
-where = ["external"]
-scope = "server"
-retention = "receiver"
+
 [object."x:TracerOtelGrpc".properties]
 endpoint = ["network"]
 httpAuth = ["credential"]
 httpHeaders = ["credential"]
 
 [object."x:TracerOtelHttp"]
+# Configuration: the "webhooks" and "otel-tracer" sources carry what it sends
 default = "none"
-whose = ["correspondent", "holder", "administrator"]
-where = ["external"]
-scope = "server"
-retention = "receiver"
+
 [object."x:TracerOtelHttp".properties]
 endpoint = ["network"]
 httpAuth = ["credential"]
@@ -2095,11 +2088,9 @@ usedDiskQuota = ["metadata"]
 default = "none"
 
 [object."x:WebHook"]
+# Configuration: the "webhooks" and "otel-tracer" sources carry what it sends
 default = "none"
-whose = ["correspondent", "holder", "administrator"]
-where = ["external"]
-scope = "server"
-retention = "receiver"
+
 [object."x:WebHook".properties]
 httpAuth = ["credential"]
 httpHeaders = ["credential"]
