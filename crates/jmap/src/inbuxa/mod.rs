@@ -10,6 +10,8 @@
 pub mod access;
 pub mod account_lock;
 pub mod legal_hold;
+pub mod hold_export;
+pub mod hold_export_api;
 pub mod audit;
 pub mod audit_log;
 pub mod ai_limits;

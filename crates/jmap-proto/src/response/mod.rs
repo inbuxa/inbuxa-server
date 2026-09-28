@@ -107,6 +107,7 @@ pub enum GetResponseMethod {
     AuditSettings(GetResponse<crate::object::inbuxa_audit::AuditSettings>),
     AccountLock(GetResponse<crate::object::inbuxa_account_lock::AccountLock>),
     LegalHold(GetResponse<crate::object::inbuxa_legal_hold::LegalHold>),
+    HoldExport(GetResponse<crate::object::inbuxa_hold_export::HoldExport>),
     ProtocolPolicy(GetResponse<crate::object::inbuxa_protocol_policy::ProtocolPolicy>),
     TenantProtocolPolicy(
         GetResponse<crate::object::inbuxa_tenant_protocol_policy::TenantProtocolPolicy>,
@@ -140,6 +141,7 @@ pub enum SetResponseMethod {
     AuditVerification(Box<SetResponse<crate::object::inbuxa_audit::AuditVerification>>),
     AccountLock(Box<SetResponse<crate::object::inbuxa_account_lock::AccountLock>>),
     LegalHold(Box<SetResponse<crate::object::inbuxa_legal_hold::LegalHold>>),
+    HoldExport(Box<SetResponse<crate::object::inbuxa_hold_export::HoldExport>>),
     Explanation(Box<SetResponse<crate::object::inbuxa_explanation::Explanation>>),
     ProtocolPolicy(Box<SetResponse<crate::object::inbuxa_protocol_policy::ProtocolPolicy>>),
     TenantProtocolPolicy(
@@ -778,5 +780,18 @@ impl<'x> From<GetResponse<crate::object::inbuxa_legal_hold::LegalHold>> for Resp
 impl<'x> From<SetResponse<crate::object::inbuxa_legal_hold::LegalHold>> for ResponseMethod<'x> {
     fn from(value: SetResponse<crate::object::inbuxa_legal_hold::LegalHold>) -> Self {
         ResponseMethod::Set(SetResponseMethod::LegalHold(Box::new(value)))
+    }
+}
+
+// inbuxa: legal hold exports
+impl<'x> From<GetResponse<crate::object::inbuxa_hold_export::HoldExport>> for ResponseMethod<'x> {
+    fn from(value: GetResponse<crate::object::inbuxa_hold_export::HoldExport>) -> Self {
+        ResponseMethod::Get(GetResponseMethod::HoldExport(value))
+    }
+}
+
+impl<'x> From<SetResponse<crate::object::inbuxa_hold_export::HoldExport>> for ResponseMethod<'x> {
+    fn from(value: SetResponse<crate::object::inbuxa_hold_export::HoldExport>) -> Self {
+        ResponseMethod::Set(SetResponseMethod::HoldExport(Box::new(value)))
     }
 }

@@ -120,6 +120,7 @@ pub enum GetRequestMethod {
     AuditSettings(Box<GetRequest<crate::object::inbuxa_audit::AuditSettings>>),
     AccountLock(Box<GetRequest<crate::object::inbuxa_account_lock::AccountLock>>),
     LegalHold(Box<GetRequest<crate::object::inbuxa_legal_hold::LegalHold>>),
+    HoldExport(Box<GetRequest<crate::object::inbuxa_hold_export::HoldExport>>),
     ProtocolPolicy(Box<GetRequest<crate::object::inbuxa_protocol_policy::ProtocolPolicy>>),
     TenantProtocolPolicy(
         Box<GetRequest<crate::object::inbuxa_tenant_protocol_policy::TenantProtocolPolicy>>,
@@ -153,6 +154,7 @@ pub enum SetRequestMethod<'x> {
     AuditVerification(Box<SetRequest<'x, crate::object::inbuxa_audit::AuditVerification>>),
     AccountLock(Box<SetRequest<'x, crate::object::inbuxa_account_lock::AccountLock>>),
     LegalHold(Box<SetRequest<'x, crate::object::inbuxa_legal_hold::LegalHold>>),
+    HoldExport(Box<SetRequest<'x, crate::object::inbuxa_hold_export::HoldExport>>),
     ProtocolPolicy(Box<SetRequest<'x, crate::object::inbuxa_protocol_policy::ProtocolPolicy>>),
     TenantProtocolPolicy(
         Box<SetRequest<'x, crate::object::inbuxa_tenant_protocol_policy::TenantProtocolPolicy>>,

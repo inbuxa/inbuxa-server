@@ -276,6 +276,9 @@ impl RequestHandler for Server {
                                     SetResponseMethod::LegalHold(set_response) => {
                                         set_response.update_created_ids(&mut response);
                                     }
+                                    SetResponseMethod::HoldExport(set_response) => {
+                                        set_response.update_created_ids(&mut response);
+                                    }
                                     SetResponseMethod::Explanation(set_response) => {
                                         set_response.update_created_ids(&mut response);
                                     }
@@ -450,6 +453,11 @@ impl RequestHandler for Server {
                         .into()
                 }
                 // inbuxa: legal hold (LH-1)
+                // inbuxa: legal hold exports (LH-12)
+                GetRequestMethod::HoldExport(mut req) => {
+                    resolve_account_id(&mut req.account_id, method_name.obj, access_token)?;
+                    crate::inbuxa::hold_export_api::get(self, *req).await?.into()
+                }
                 GetRequestMethod::LegalHold(mut req) => {
                     resolve_account_id(&mut req.account_id, method_name.obj, access_token)?;
                     crate::inbuxa::legal_hold::get(self, *req).await?.into()
@@ -807,6 +815,34 @@ impl RequestHandler for Server {
                 }
                 // inbuxa: legal hold (LH-1), each change recorded with its
                 // reason (AU-12)
+                // inbuxa: legal hold exports, recorded with their reason
+                // (AU-1.9, AU-12)
+                SetRequestMethod::HoldExport(mut req) => {
+                    resolve_account_id(&mut req.account_id, method_name.obj, access_token)?;
+                    let reason = req.arguments.reason.clone().or_else(|| {
+                        req.create.as_ref().and_then(|create| {
+                            create.values().find_map(|value| {
+                                serde_json::to_value(value)
+                                    .ok()?
+                                    .get("reason")?
+                                    .as_str()
+                                    .map(str::to_string)
+                            })
+                        })
+                    });
+                    crate::inbuxa::audit::recorded(
+                        self,
+                        access_token,
+                        session,
+                        &method_name.obj.to_string(),
+                        None,
+                        reason,
+                        *req,
+                        |req| Box::pin(crate::inbuxa::hold_export_api::set(self, access_token, req)),
+                    )
+                    .await?
+                    .into()
+                }
                 SetRequestMethod::LegalHold(mut req) => {
                     resolve_account_id(&mut req.account_id, method_name.obj, access_token)?;
                     let reason = req.arguments.reason.clone().or_else(|| {
