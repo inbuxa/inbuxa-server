@@ -11,7 +11,7 @@ use crate::{
         MAX_TOKEN_LENGTH,
         mysql::{
             DELETE_CHUNK_SIZE, MIN_DELETE_CHUNK_SIZE, MysqlSearchField, MysqlStore, bounded,
-            into_error, is_timeout_error,
+            into_error, is_chunk_too_large_error,
         },
     },
     search::{
@@ -123,14 +123,6 @@ impl MysqlStore {
         let mut conn = self.conn().await?;
         let limit = self.timeouts.maintenance;
         let result = tokio::time::timeout(limit, async {
-            let s = conn.prep(&query).await.map_err(into_error)?;
-
-            match conn.exec_drop(s, params.clone()).await {
-                Ok(_) => return Ok(conn.affected_rows()),
-                Err(err) if is_timeout_error(&err) => (),
-                Err(err) => return Err(into_error(err)),
-            }
-
             let mut chunk_size = DELETE_CHUNK_SIZE;
             let mut deleted = 0;
 
@@ -144,13 +136,14 @@ impl MysqlStore {
                     match conn.exec_drop(&s, params.clone()).await {
                         Ok(_) => {
                             let affected = conn.affected_rows();
-                            if affected == 0 {
+                            deleted += affected;
+                            if affected < chunk_size as u64 {
                                 return Ok(deleted);
                             }
-                            deleted += affected;
                         }
                         Err(err)
-                            if is_timeout_error(&err) && chunk_size > MIN_DELETE_CHUNK_SIZE =>
+                            if is_chunk_too_large_error(&err)
+                                && chunk_size > MIN_DELETE_CHUNK_SIZE =>
                         {
                             chunk_size = (chunk_size / 2).max(MIN_DELETE_CHUNK_SIZE);
                             break;

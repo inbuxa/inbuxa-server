@@ -7,7 +7,8 @@
  */
 
 use super::{
-    DELETE_CHUNK_SIZE, MIN_DELETE_CHUNK_SIZE, MysqlStore, bounded, into_error, is_timeout_error,
+    DELETE_CHUNK_SIZE, MIN_DELETE_CHUNK_SIZE, MysqlStore, bounded, into_error,
+    is_chunk_too_large_error,
 };
 use crate::{
     IndexKey, Key, LogKey, SUBSPACE_COUNTER, SUBSPACE_IN_MEMORY_COUNTER, SUBSPACE_QUOTA,
@@ -416,12 +417,6 @@ impl MysqlStore {
                 .await
                 .map_err(into_error)?;
 
-            match conn.exec_drop(&delete, (&from, &to)).await {
-                Ok(_) => return Ok(()),
-                Err(err) if is_timeout_error(&err) => (),
-                Err(err) => return Err(into_error(err)),
-            }
-
             let mut chunk_size = DELETE_CHUNK_SIZE;
 
             loop {
@@ -438,7 +433,10 @@ impl MysqlStore {
                         .await
                     {
                         Ok(next) => next,
-                        Err(err) if is_timeout_error(&err) && chunk_size > MIN_DELETE_CHUNK_SIZE => {
+                        Err(err)
+                            if is_chunk_too_large_error(&err)
+                                && chunk_size > MIN_DELETE_CHUNK_SIZE =>
+                        {
                             chunk_size = (chunk_size / 2).max(MIN_DELETE_CHUNK_SIZE);
                             break;
                         }
@@ -450,7 +448,10 @@ impl MysqlStore {
                         .await
                     {
                         Ok(_) => (),
-                        Err(err) if is_timeout_error(&err) && chunk_size > MIN_DELETE_CHUNK_SIZE => {
+                        Err(err)
+                            if is_chunk_too_large_error(&err)
+                                && chunk_size > MIN_DELETE_CHUNK_SIZE =>
+                        {
                             chunk_size = (chunk_size / 2).max(MIN_DELETE_CHUNK_SIZE);
                             break;
                         }
@@ -477,7 +478,7 @@ async fn purge_table(conn: &mut Conn, table: char) -> trc::Result<()> {
 
     match conn.exec_drop(&s, ()).await {
         Ok(_) => return Ok(()),
-        Err(err) if is_timeout_error(&err) => (),
+        Err(err) if is_chunk_too_large_error(&err) => (),
         Err(err) => return Err(into_error(err)),
     }
 
@@ -505,7 +506,9 @@ async fn purge_table(conn: &mut Conn, table: char) -> trc::Result<()> {
         loop {
             let next = match conn.exec_first::<Vec<u8>, _, _>(&boundary, (&from,)).await {
                 Ok(next) => next,
-                Err(err) if is_timeout_error(&err) && chunk_size > MIN_DELETE_CHUNK_SIZE => {
+                Err(err)
+                    if is_chunk_too_large_error(&err) && chunk_size > MIN_DELETE_CHUNK_SIZE =>
+                {
                     chunk_size = (chunk_size / 2).max(MIN_DELETE_CHUNK_SIZE);
                     break;
                 }
@@ -519,7 +522,9 @@ async fn purge_table(conn: &mut Conn, table: char) -> trc::Result<()> {
 
             match result {
                 Ok(_) => (),
-                Err(err) if is_timeout_error(&err) && chunk_size > MIN_DELETE_CHUNK_SIZE => {
+                Err(err)
+                    if is_chunk_too_large_error(&err) && chunk_size > MIN_DELETE_CHUNK_SIZE =>
+                {
                     chunk_size = (chunk_size / 2).max(MIN_DELETE_CHUNK_SIZE);
                     break;
                 }

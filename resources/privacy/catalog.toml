@@ -1050,6 +1050,11 @@ default = "none"
 secret = ["credential"]
 secretApiKey = ["credential"]
 
+[object."x:DnsServerPowerDns"]
+default = "none"
+[object."x:DnsServerPowerDns".properties]
+apiKey = ["credential"]
+
 [object."x:DnsServerRoute53"]
 default = "none"
 [object."x:DnsServerRoute53".properties]
