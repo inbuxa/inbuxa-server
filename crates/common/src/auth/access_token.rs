@@ -143,6 +143,29 @@ impl Server {
                         }
                     }
                 }
+                // inbuxa: AL-7: a delegate reaches the whole locked account,
+                // mail, calendars, contacts and files, even a kind it holds
+                // none of yet, so an empty one reads as empty rather than
+                // refused. What it may see or change there is still each
+                // container's grant.
+                for delegation in delegations.iter() {
+                    let whole: Bitmap<Collection> = Bitmap::from_iter([
+                        Collection::Mailbox,
+                        Collection::Email,
+                        Collection::Calendar,
+                        Collection::CalendarEvent,
+                        Collection::AddressBook,
+                        Collection::ContactCard,
+                        Collection::FileNode,
+                    ]);
+                    match access_to.iter_mut().find(|a| a.account_id == delegation.account_id) {
+                        Some(entry) => entry.collections.union(&whole),
+                        None => access_to.push(AccessTo {
+                            account_id: delegation.account_id,
+                            collections: whole,
+                        }),
+                    }
+                }
 
                 let now = now();
                 let mut credential_version = 0;

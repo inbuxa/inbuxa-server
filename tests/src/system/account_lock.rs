@@ -36,6 +36,9 @@ const USING: &[&str] = &[
     "urn:ietf:params:jmap:core",
     "urn:ietf:params:jmap:mail",
     "urn:ietf:params:jmap:submission",
+    "urn:ietf:params:jmap:calendars",
+    "urn:ietf:params:jmap:contacts",
+    "urn:ietf:params:jmap:filenode",
     "urn:inbuxa:jmap",
 ];
 
@@ -178,6 +181,17 @@ pub async fn test(test: &mut TestServer) {
     assert_eq!(delegation["locked"], true, "AL-7: {entry}");
     assert_eq!(delegation["access"], "read", "AL-7");
     assert_eq!(delegation["sendAs"], false, "AL-7");
+
+    // AL-7: the whole account, not only mail: even a kind the owner holds
+    // none of (no files here) reads as empty rather than refused
+    for (method, arguments) in [
+        ("FileNode/query", json!({"accountId": owner_id})),
+        ("Calendar/get", json!({"accountId": owner_id, "ids": null})),
+        ("AddressBook/get", json!({"accountId": owner_id, "ids": null})),
+    ] {
+        let (name, response) = delegate.call(method, arguments).await;
+        assert_eq!(name, method, "AL-7: {method} refused to the delegate: {response}");
+    }
 
     // The delegate reads the mail that arrived
     let (_, found) = delegate
