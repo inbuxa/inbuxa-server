@@ -36,6 +36,8 @@ pub mod rcpt;
 pub mod rewrite;
 pub mod scripts;
 pub mod sign;
+pub mod spam_rules;
+pub mod spam_rules_kept; // inbuxa: spam rules updates keep admin edits
 pub mod throttle;
 pub mod vrfy;
 

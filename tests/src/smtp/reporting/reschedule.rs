@@ -51,7 +51,7 @@ use utils::snowflake::SnowflakeIdGenerator;
 async fn report_reschedule() {
     let mut test = TestServerBuilder::new("smtp_report_reschedule")
         .await
-        .with_http_listener(19057)
+        .with_http_listener(19058)
         .await
         .capture_queue()
         .build()

@@ -129,6 +129,21 @@ pub async fn test(test: &TestServer) {
     assert_eq!(samples.iter().filter(|x| !x.1.is_spam).count(), 11);
     assert_eq!(samples.iter().filter(|x| x.1.is_spam).count(), 11);
 
+    let last_id = samples.iter().map(|(id, _)| id.id()).max().unwrap();
+    for _ in 0..2 {
+        admin
+            .registry_create_object(Task::SpamFilterMaintenance(TaskSpamFilterMaintenance {
+                maintenance_type: TaskSpamFilterMaintenanceType::Train,
+                status: TaskStatus::now(),
+            }))
+            .await;
+        test.wait_for_tasks().await;
+        let model = spam_classifier_model(&test.server).await;
+        assert_eq!(model.reservoir.ham.total_seen, 11);
+        assert_eq!(model.reservoir.spam.total_seen, 11);
+        assert_eq!(model.last_id, last_id);
+    }
+
     // Global spam samples should not appear in the account
     let samples = account.spam_training_samples().await;
     assert_eq!(samples.iter().filter(|x| !x.1.is_spam).count(), 11);

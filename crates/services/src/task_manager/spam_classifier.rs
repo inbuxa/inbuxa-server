@@ -15,13 +15,13 @@ use common::{
 use registry::{
     schema::{
         enums::TaskSpamFilterMaintenanceType,
-        prelude::ObjectType,
+        prelude::{Object, ObjectInner, ObjectType},
         structs::{
             HttpLookup, MemoryLookupKey, SpamDnsblServer, SpamFileExtension, SpamRule, SpamTag,
             TaskSpamFilterMaintenance,
         },
     },
-    types::EnumImpl,
+    types::{EnumImpl, ObjectImpl},
 };
 use spam_filter::modules::classifier::SpamClassifier;
 use std::time::{Duration, Instant};
@@ -100,11 +100,88 @@ struct Rules {
     file_exts: Vec<SpamFileExtension>,
 }
 
-#[derive(Default)]
+trait UpstreamObject: ObjectImpl + PartialEq + From<Object> + Into<ObjectInner> {
+    fn replacement_for(self, _local: &Self) -> Option<Self> {
+        Some(self)
+    }
+
+    // inbuxa: the object as its fingerprint sees it. Switching a rule on or
+    // off isn't an edit, so `enable` is left out.
+    fn without_enable(self) -> Self {
+        self
+    }
+}
+
+impl UpstreamObject for SpamRule {
+    fn replacement_for(mut self, local: &Self) -> Option<Self> {
+        self.set_enable(local.enable());
+        Some(self)
+    }
+
+    fn without_enable(mut self) -> Self {
+        self.set_enable(true);
+        self
+    }
+}
+
+impl UpstreamObject for SpamDnsblServer {
+    fn replacement_for(mut self, local: &Self) -> Option<Self> {
+        self.set_enable(local.enable());
+        Some(self)
+    }
+
+    fn without_enable(mut self) -> Self {
+        self.set_enable(true);
+        self
+    }
+}
+
+impl UpstreamObject for HttpLookup {
+    fn replacement_for(mut self, local: &Self) -> Option<Self> {
+        self.enable = local.enable;
+        Some(self)
+    }
+
+    fn without_enable(mut self) -> Self {
+        self.enable = true;
+        self
+    }
+}
+
+impl UpstreamObject for SpamTag {
+    fn replacement_for(self, _local: &Self) -> Option<Self> {
+        None
+    }
+}
+
+impl UpstreamObject for MemoryLookupKey {}
+
+impl UpstreamObject for SpamFileExtension {}
+
 struct RuleUpdateResult {
-    success: usize,
-    already_exists: usize,
+    object_type: ObjectType,
+    added: usize,
+    updated: usize,
+    unchanged: usize,
+    kept: usize,
     failed: usize,
+}
+
+impl RuleUpdateResult {
+    fn new(object_type: ObjectType) -> Self {
+        RuleUpdateResult {
+            object_type,
+            added: 0,
+            updated: 0,
+            unchanged: 0,
+            kept: 0,
+            failed: 0,
+        }
+    }
+
+    fn has_changes(&self) -> bool {
+        self.added + self.updated > 0
+    }
 }
 
 async fn update_spam_rules(server: &Server) -> trc::Result<TaskResult> {
@@ -121,171 +198,67 @@ async fn update_spam_rules(server: &Server) -> trc::Result<TaskResult> {
         }
     };
 
-    let registry = server.registry();
-    let mut stats: AHashMap<ObjectType, RuleUpdateResult> = AHashMap::new();
+    let settings = [
+        apply_upstream(server, rules.rules).await?,
+        apply_upstream(server, rules.dnsbls).await?,
+        apply_upstream(server, rules.tags).await?,
+        apply_upstream(server, rules.file_exts).await?,
+    ];
+    let lookups = [
+        apply_upstream(server, rules.http_lookups).await?,
+        apply_upstream(server, rules.key_lookups).await?,
+    ];
 
-    let mut reload_settings = false;
-    let mut reload_lookups = false;
-
-    for rule in rules.rules {
-        match registry.write(RegistryWrite::insert(&rule.into())).await? {
-            RegistryWriteResult::Success(_) => {
-                stats.entry(ObjectType::SpamRule).or_default().success += 1;
-                reload_settings = true;
-            }
-            RegistryWriteResult::PrimaryKeyConflict { .. } => {
-                stats
-                    .entry(ObjectType::SpamRule)
-                    .or_default()
-                    .already_exists += 1;
-            }
-            _ => {
-                stats.entry(ObjectType::SpamRule).or_default().failed += 1;
-            }
+    let mut reload_errors = Vec::new();
+    for object in [
+        settings
+            .iter()
+            .any(RuleUpdateResult::has_changes)
+            .then_some(ObjectType::SpamRule),
+        lookups
+            .iter()
+            .any(RuleUpdateResult::has_changes)
+            .then_some(ObjectType::MemoryLookupKey),
+    ]
+    .into_iter()
+    .flatten()
+    {
+        if let Err(reason) = reload_and_broadcast(server, object).await {
+            reload_errors.push(reason);
         }
     }
-
-    for dnsbl in rules.dnsbls {
-        match registry.write(RegistryWrite::insert(&dnsbl.into())).await? {
-            RegistryWriteResult::Success(_) => {
-                stats
-                    .entry(ObjectType::SpamDnsblServer)
-                    .or_default()
-                    .success += 1;
-                reload_settings = true;
-            }
-            RegistryWriteResult::PrimaryKeyConflict { .. } => {
-                stats
-                    .entry(ObjectType::SpamDnsblServer)
-                    .or_default()
-                    .already_exists += 1;
-            }
-            _ => {
-                stats.entry(ObjectType::SpamDnsblServer).or_default().failed += 1;
-            }
-        }
-    }
-
-    for tag in rules.tags {
-        match registry.write(RegistryWrite::insert(&tag.into())).await? {
-            RegistryWriteResult::Success(_) => {
-                stats.entry(ObjectType::SpamTag).or_default().success += 1;
-                reload_settings = true;
-            }
-            RegistryWriteResult::PrimaryKeyConflict { .. } => {
-                stats.entry(ObjectType::SpamTag).or_default().already_exists += 1;
-            }
-            _ => {
-                stats.entry(ObjectType::SpamTag).or_default().failed += 1;
-            }
-        }
-    }
-
-    for lookup in rules.http_lookups {
-        match registry
-            .write(RegistryWrite::insert(&lookup.into()))
-            .await?
-        {
-            RegistryWriteResult::Success(_) => {
-                stats.entry(ObjectType::HttpLookup).or_default().success += 1;
-                reload_lookups = true;
-            }
-            RegistryWriteResult::PrimaryKeyConflict { .. } => {
-                stats
-                    .entry(ObjectType::HttpLookup)
-                    .or_default()
-                    .already_exists += 1;
-            }
-            _ => {
-                stats.entry(ObjectType::HttpLookup).or_default().failed += 1;
-            }
-        }
-    }
-
-    for key_lookup in rules.key_lookups {
-        match registry
-            .write(RegistryWrite::insert(&key_lookup.into()))
-            .await?
-        {
-            RegistryWriteResult::Success(_) => {
-                stats
-                    .entry(ObjectType::MemoryLookupKey)
-                    .or_default()
-                    .success += 1;
-                reload_lookups = true;
-            }
-            RegistryWriteResult::PrimaryKeyConflict { .. } => {
-                stats
-                    .entry(ObjectType::MemoryLookupKey)
-                    .or_default()
-                    .already_exists += 1;
-            }
-            _ => {
-                stats.entry(ObjectType::MemoryLookupKey).or_default().failed += 1;
-            }
-        }
-    }
-
-    for ext in rules.file_exts {
-        match registry.write(RegistryWrite::insert(&ext.into())).await? {
-            RegistryWriteResult::Success(_) => {
-                stats
-                    .entry(ObjectType::SpamFileExtension)
-                    .or_default()
-                    .success += 1;
-                reload_settings = true;
-            }
-            RegistryWriteResult::PrimaryKeyConflict { .. } => {
-                stats
-                    .entry(ObjectType::SpamFileExtension)
-                    .or_default()
-                    .already_exists += 1;
-            }
-            _ => {
-                stats
-                    .entry(ObjectType::SpamFileExtension)
-                    .or_default()
-                    .failed += 1;
-            }
-        }
-    }
-
-    if reload_settings {
-        if let Err(err) =
-            Box::pin(server.reload_registry(RegistryChange::Reload(ObjectType::SpamRule))).await
-        {
-            trc::error!(err.details("Failed to reload registry after updating spam rules"));
-        }
-        server
-            .cluster_broadcast(BroadcastEvent::RegistryChange(RegistryChange::Reload(
-                ObjectType::SpamRule,
-            )))
-            .await;
-    }
-
-    if reload_lookups {
-        if let Err(err) =
-            Box::pin(server.reload_registry(RegistryChange::Reload(ObjectType::MemoryLookupKey)))
-                .await
-        {
-            trc::error!(err.details("Failed to reload registry after updating spam rules"));
-        }
-        server
-            .cluster_broadcast(BroadcastEvent::RegistryChange(RegistryChange::Reload(
-                ObjectType::MemoryLookupKey,
-            )))
-            .await;
-    }
-
-    // inbuxa: AU-1.10: what the update added, as one audit record
-    let added = stats
+    let failed: usize = settings
         .iter()
-        .filter(|(_, result)| result.success > 0)
-        .map(|(object_type, result)| format!("{} {}", result.success, object_type.as_str()))
-        .collect::<Vec<_>>();
-    if !added.is_empty() {
-        let mut added = added;
-        added.sort();
+        .chain(&lookups)
+        .map(|result| result.failed)
+        .sum();
+
+    // inbuxa: AU-1.10: what the update changed, as one audit record
+    let summary = |count: fn(&RuleUpdateResult) -> usize| {
+        let mut parts = settings
+            .iter()
+            .chain(&lookups)
+            .filter(|result| count(result) > 0)
+            .map(|result| format!("{} {}", count(result), result.object_type.as_str()))
+            .collect::<Vec<_>>();
+        parts.sort();
+        parts.join(", ")
+    };
+    let details = [
+        ("added", summary(|result| result.added)),
+        ("replaced", summary(|result| result.updated)),
+        ("kept as edited locally", summary(|result| result.kept)),
+        ("failed", summary(|result| result.failed)),
+    ]
+    .into_iter()
+    .filter(|(_, part)| !part.is_empty())
+    .map(|(what, part)| format!("{what} {part}"))
+    .collect::<Vec<_>>();
+    if settings
+        .iter()
+        .chain(&lookups)
+        .any(RuleUpdateResult::has_changes)
+    {
         server
             .audit_note(inbuxa_features::audit::Record {
                 at: std::time::SystemTime::now()
@@ -301,7 +274,7 @@ async fn update_spam_rules(server: &Server) -> trc::Result<TaskResult> {
                     ..Default::default()
                 },
                 changes: vec![],
-                details: Some(format!("Rules update added {}", added.join(", "))),
+                details: Some(format!("Rules update {}", details.join("; "))),
                 reason: None,
                 outcome: inbuxa_features::audit::Outcome::success(),
             })
@@ -310,27 +283,173 @@ async fn update_spam_rules(server: &Server) -> trc::Result<TaskResult> {
 
     trc::event!(
         Spam(SpamEvent::RulesUpdated),
-        Details = stats
+        Details = settings
             .into_iter()
-            .map(|(object_type, result)| {
+            .chain(lookups)
+            .map(|result| {
                 Value::Array(vec![
-                    Value::String(object_type.as_str().into()),
-                    Value::from(result.success),
-                    Value::from(result.already_exists),
+                    Value::String(result.object_type.as_str().into()),
+                    Value::from(result.added),
+                    Value::from(result.updated),
+                    Value::from(result.unchanged),
                     Value::from(result.failed),
+                    Value::from(result.kept),
                 ])
             })
             .collect::<Vec<_>>(),
         Elapsed = started.elapsed(),
     );
 
-    // inbuxa: so the next start knows these bundled rules are in
-    if bundled {
-        spam_rules::set_applied_version(server.store(), spam_rules::BUNDLED_SPAM_RULES_VERSION)
-            .await?;
+    if !reload_errors.is_empty() {
+        Ok(TaskResult::permanent(format!(
+            "Spam rules were stored but not activated ({}); fix the logged errors and run Reload settings",
+            reload_errors.join("; ")
+        )))
+    } else if failed > 0 {
+        Ok(TaskResult::permanent(format!(
+            "{failed} spam filter objects failed to import or update"
+        )))
+    } else {
+        // inbuxa: so the next start knows these bundled rules are in. Only
+        // once they all are: a failed update runs again on the next start.
+        if bundled {
+            spam_rules::set_applied_version(server.store(), spam_rules::BUNDLED_SPAM_RULES_APPLIED)
+                .await?;
+        }
+        Ok(TaskResult::Success(vec![]))
+    }
+}
+
+async fn reload_and_broadcast(server: &Server, object: ObjectType) -> Result<(), String> {
+    match Box::pin(server.reload_registry(RegistryChange::Reload(object))).await {
+        Ok(result) => {
+            result.log();
+            if result.has_errors() {
+                return Err(format!("{} configuration errors", result.errors.len()));
+            }
+            server
+                .cluster_broadcast(BroadcastEvent::RegistryChange(RegistryChange::Reload(
+                    object,
+                )))
+                .await;
+            Ok(())
+        }
+        Err(err) => {
+            let reason = err.to_string();
+            trc::error!(err.details("Failed to reload registry after updating spam rules"));
+            Err(reason)
+        }
+    }
+}
+
+async fn apply_upstream<T: UpstreamObject>(
+    server: &Server,
+    objects: Vec<T>,
+) -> trc::Result<RuleUpdateResult> {
+    let registry = server.registry();
+    let mut result = RuleUpdateResult::new(T::OBJECT);
+
+    for upstream in objects {
+        // inbuxa: every object the update writes is fingerprinted, and an
+        // existing object is replaced only while it still matches: one an
+        // admin edited is kept as it is.
+        let upstream_print = fingerprint(&upstream);
+        let written = Object::from(upstream.clone());
+        let existing_id = match registry.write(RegistryWrite::insert(&written)).await? {
+            RegistryWriteResult::Success(id) => {
+                spam_rules::set_fingerprint(server.store(), T::OBJECT, id.id(), &upstream_print)
+                    .await?;
+                result.added += 1;
+                continue;
+            }
+            RegistryWriteResult::PrimaryKeyConflict { existing_id, .. }
+                if existing_id.object() == T::OBJECT =>
+            {
+                existing_id
+            }
+            RegistryWriteResult::PrimaryKeyConflict { .. } => {
+                result.unchanged += 1;
+                continue;
+            }
+            _ => {
+                result.failed += 1;
+                continue;
+            }
+        };
+
+        let Some(local) = registry.get(existing_id).await? else {
+            result.failed += 1;
+            continue;
+        };
+        let revision = local.revision;
+        let local = T::from(local);
+        let local_print = fingerprint(&local);
+        let written_print =
+            spam_rules::fingerprint(server.store(), T::OBJECT, existing_id.id().id()).await?;
+
+        if local_print == upstream_print {
+            // The same as upstream's. An install from before fingerprints
+            // gets one here, so the next release can replace it.
+            if written_print.as_deref() != Some(upstream_print.as_str()) {
+                spam_rules::set_fingerprint(
+                    server.store(),
+                    T::OBJECT,
+                    existing_id.id().id(),
+                    &upstream_print,
+                )
+                .await?;
+            }
+            result.unchanged += 1;
+            continue;
+        }
+        if written_print.as_deref() != Some(local_print.as_str()) {
+            // Changed since the update wrote it, or never written by one.
+            result.kept += 1;
+            continue;
+        }
+
+        let Some(replacement) = upstream
+            .replacement_for(&local)
+            .filter(|replacement| replacement != &local)
+        else {
+            result.unchanged += 1;
+            continue;
+        };
+
+        let replacement = Object::from(replacement);
+        let local = Object::with_revision(local.into(), revision);
+        match registry
+            .write(RegistryWrite::update(
+                existing_id.id(),
+                &replacement,
+                &local,
+            ))
+            .await?
+        {
+            RegistryWriteResult::Success(_) => {
+                spam_rules::set_fingerprint(
+                    server.store(),
+                    T::OBJECT,
+                    existing_id.id().id(),
+                    &upstream_print,
+                )
+                .await?;
+                result.updated += 1
+            }
+            _ => result.failed += 1,
+        }
     }
 
-    Ok(TaskResult::Success(vec![]))
+    Ok(result)
+}
+
+/// inbuxa: a digest of an object's content, `enable` aside, in hex.
+fn fingerprint<T: UpstreamObject>(object: &T) -> String {
+    use sha2::Digest;
+    sha2::Sha256::digest(serde_json::to_vec(&object.clone().without_enable()).unwrap_or_default())
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
 }
 
 async fn fetch_spam_rules(server: &Server) -> Result<Rules, RuleUpdateError> {
@@ -347,13 +466,12 @@ async fn fetch_spam_rules(server: &Server) -> Result<Rules, RuleUpdateError> {
             reason,
         }),
     };
-    let rules_json: AHashMap<String, Vec<serde_json::Value>> =
-        bytes.and_then(|bytes| {
-            serde_json::from_slice(&bytes).map_err(|err| RuleUpdateError {
-                typ: TaskFailureType::Permanent,
-                reason: format!("Failed to parse spam rules JSON: {err}"),
-            })
-        })?;
+    let rules_json: AHashMap<String, Vec<serde_json::Value>> = bytes.and_then(|bytes| {
+        serde_json::from_slice(&bytes).map_err(|err| RuleUpdateError {
+            typ: TaskFailureType::Permanent,
+            reason: format!("Failed to parse spam rules JSON: {err}"),
+        })
+    })?;
 
     let mut rules = Rules::default();
     for (object_type, values) in rules_json {

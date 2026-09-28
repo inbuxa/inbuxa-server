@@ -7,6 +7,9 @@
 
 # OIDC directories: `main` has its own tests/src/directory/oidc.rs.
 tests/src/directory/mod.rs
+# Issuer-based directory routing (since v0.16.23), which `main` doesn't have
+# and doesn't carry the test for (DIR-2).
+tests/src/directory/issuer.rs
 # Tenants and archiving.
 tests/src/system/mod.rs
 # The LLM spam-filter classifier.
