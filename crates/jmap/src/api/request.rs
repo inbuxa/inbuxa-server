@@ -291,6 +291,12 @@ impl RequestHandler for Server {
                                     SetResponseMethod::Journal(set_response) => {
                                         set_response.update_created_ids(&mut response);
                                     }
+                                    SetResponseMethod::JournalExport(set_response) => {
+                                        set_response.update_created_ids(&mut response);
+                                    }
+                                    SetResponseMethod::JournalVerification(set_response) => {
+                                        set_response.update_created_ids(&mut response);
+                                    }
                                     SetResponseMethod::HeldMessage(set_response) => {
                                         set_response.update_created_ids(&mut response);
                                     }
@@ -530,6 +536,12 @@ impl RequestHandler for Server {
                     resolve_account_id(&mut req.account_id, method_name.obj, access_token)?;
                     crate::inbuxa::journal::get(self, access_token, *req).await?.into()
                 }
+                GetRequestMethod::JournalEntry(mut req) => {
+                    resolve_account_id(&mut req.account_id, method_name.obj, access_token)?;
+                    crate::inbuxa::journal_entry::get(self, access_token, session, *req)
+                        .await?
+                        .into()
+                }
                 // inbuxa: the audit log (AU-9)
                 GetRequestMethod::AuditEvent(mut req) => {
                     resolve_account_id(&mut req.account_id, method_name.obj, access_token)?;
@@ -723,6 +735,13 @@ impl RequestHandler for Server {
                 QueryRequestMethod::AuditEvent(mut req) => {
                     resolve_account_id(&mut req.account_id, method_name.obj, access_token)?;
                     crate::inbuxa::audit_log::event_query(self, access_token, *req)
+                        .await?
+                        .into()
+                }
+                // inbuxa: journaling (JR-15)
+                QueryRequestMethod::JournalEntry(mut req) => {
+                    resolve_account_id(&mut req.account_id, method_name.obj, access_token)?;
+                    crate::inbuxa::journal_entry::query(self, access_token, session, *req)
                         .await?
                         .into()
                 }
@@ -1051,6 +1070,19 @@ impl RequestHandler for Server {
                 SetRequestMethod::AuditVerification(mut req) => {
                     resolve_account_id(&mut req.account_id, method_name.obj, access_token)?;
                     crate::inbuxa::audit_log::verification_set(self, access_token, session, *req)
+                        .await?
+                        .into()
+                }
+                // inbuxa: journaling (JR-6, JR-16)
+                SetRequestMethod::JournalExport(mut req) => {
+                    resolve_account_id(&mut req.account_id, method_name.obj, access_token)?;
+                    crate::inbuxa::journal_entry::export_set(self, access_token, session, *req)
+                        .await?
+                        .into()
+                }
+                SetRequestMethod::JournalVerification(mut req) => {
+                    resolve_account_id(&mut req.account_id, method_name.obj, access_token)?;
+                    crate::inbuxa::journal_entry::verification_set(self, access_token, session, *req)
                         .await?
                         .into()
                 }

@@ -127,6 +127,7 @@ pub enum GetRequestMethod {
     MailRule(Box<GetRequest<crate::object::inbuxa_mail_rule::MailRule>>),
     SecurityAcceptance(Box<GetRequest<crate::object::inbuxa_security_acceptance::SecurityAcceptance>>),
     Journal(Box<GetRequest<crate::object::inbuxa_journal::Journal>>),
+    JournalEntry(Box<GetRequest<crate::object::inbuxa_journal_entry::JournalEntry>>),
     HeldMessage(Box<GetRequest<crate::object::inbuxa_held_message::HeldMessage>>),
     HoldExport(Box<GetRequest<crate::object::inbuxa_hold_export::HoldExport>>),
     ProtocolPolicy(Box<GetRequest<crate::object::inbuxa_protocol_policy::ProtocolPolicy>>),
@@ -169,6 +170,8 @@ pub enum SetRequestMethod<'x> {
         Box<SetRequest<'x, crate::object::inbuxa_security_acceptance::SecurityAcceptance>>,
     ),
     Journal(Box<SetRequest<'x, crate::object::inbuxa_journal::Journal>>),
+    JournalExport(Box<SetRequest<'x, crate::object::inbuxa_journal_entry::JournalExport>>),
+    JournalVerification(Box<SetRequest<'x, crate::object::inbuxa_journal_entry::JournalVerification>>),
     HeldMessage(Box<SetRequest<'x, crate::object::inbuxa_held_message::HeldMessage>>),
     HoldExport(Box<SetRequest<'x, crate::object::inbuxa_hold_export::HoldExport>>),
     ProtocolPolicy(Box<SetRequest<'x, crate::object::inbuxa_protocol_policy::ProtocolPolicy>>),
@@ -203,6 +206,7 @@ pub enum QueryRequestMethod {
     ShareNotification(Box<QueryRequest<ShareNotification>>),
     Registry(Box<QueryRequest<Registry>>),
     AuditEvent(Box<QueryRequest<crate::object::inbuxa_audit::AuditEvent>>),
+    JournalEntry(Box<QueryRequest<crate::object::inbuxa_journal_entry::JournalEntry>>),
 }
 
 #[derive(Debug)]

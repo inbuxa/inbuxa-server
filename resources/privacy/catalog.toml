@@ -136,6 +136,36 @@ retention = "object-life"
 note = ["content"]
 acceptedBy = ["identifier"]
 
+[object."inbuxa:JournalEntry"]
+file = "inbuxa_journal_entry.rs"
+default = "none"
+whose = ["holder", "correspondent"]
+where = ["data-store", "blob-store"]
+scope = "server"
+retention = { setting = "inbuxa:Journal.retentionDays" }
+[object."inbuxa:JournalEntry".properties]
+sender = ["identifier", "contact"]
+recipients = ["identifier", "contact"]
+subject = ["content"]
+messageId = ["identifier"]
+report = ["content", "identifier", "contact", "metadata"]
+
+[object."inbuxa:JournalExport"]
+file = "inbuxa_journal_entry.rs"
+default = "none"
+whose = ["holder", "correspondent"]
+where = ["blob-store"]
+scope = "server"
+retention = { setting = "x:Jmap.uploadTtl" }
+[object."inbuxa:JournalExport".properties]
+blobId = ["identifier", "contact", "content"]
+filter = ["identifier", "contact"]
+reason = ["content"]
+
+[object."inbuxa:JournalVerification"]
+file = "inbuxa_journal_entry.rs"
+default = "none"
+
 [object."inbuxa:LegalHold"]
 file = "inbuxa_legal_hold.rs"
 default = "none"

@@ -433,6 +433,9 @@ impl IntermediateChangesResponse {
             | MethodObject::MailRule
             | MethodObject::SecurityAcceptance
             | MethodObject::Journal
+            | MethodObject::JournalEntry
+            | MethodObject::JournalExport
+            | MethodObject::JournalVerification
             | MethodObject::HeldMessage
             | MethodObject::ProtocolPolicy
             | MethodObject::TenantProtocolPolicy

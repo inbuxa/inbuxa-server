@@ -118,6 +118,7 @@ impl JmapAuthorization for AccessToken {
                 }
                 // inbuxa: journaling (JR-18)
                 GetRequestMethod::Journal(_) => Permission::SysJournalGet,
+                GetRequestMethod::JournalEntry(_) => Permission::SysJournalSearch,
                 GetRequestMethod::HoldExport(_) => Permission::SysLegalHoldExport,
                 // inbuxa: accepted security items are read by whoever may
                 // see the server's security settings
@@ -301,6 +302,20 @@ impl JmapAuthorization for AccessToken {
                         Permission::SysJournalUpdate,
                         Permission::SysJournalUpdate,
                     ),
+                    SetRequestMethod::JournalExport(s) => validate_set(
+                        s,
+                        self,
+                        Permission::SysJournalExport,
+                        Permission::SysJournalExport,
+                        Permission::SysJournalExport,
+                    ),
+                    SetRequestMethod::JournalVerification(s) => validate_set(
+                        s,
+                        self,
+                        Permission::SysJournalGet,
+                        Permission::SysJournalGet,
+                        Permission::SysJournalGet,
+                    ),
                     // inbuxa: accepting a security to-do item, or removing
                     // an acceptance; nothing is ever edited
                     SetRequestMethod::SecurityAcceptance(s) => {
@@ -481,6 +496,9 @@ impl JmapAuthorization for AccessToken {
                 | MethodObject::SecurityAcceptance
                 | MethodObject::HeldMessage
                 | MethodObject::Journal
+                | MethodObject::JournalEntry
+                | MethodObject::JournalExport
+                | MethodObject::JournalVerification
                 | MethodObject::ProtocolPolicy
                 | MethodObject::TenantProtocolPolicy => Permission::JmapEmailChanges,
                 // inbuxa: x:MaskedEmail/changes reads what /get reads
@@ -539,6 +557,8 @@ impl JmapAuthorization for AccessToken {
                 QueryRequestMethod::ShareNotification(_) => Permission::JmapShareNotificationQuery,
                 // inbuxa: the audit log (AU-9)
                 QueryRequestMethod::AuditEvent(_) => Permission::SysAuditGet,
+                // inbuxa: journaling (JR-15)
+                QueryRequestMethod::JournalEntry(_) => Permission::SysJournalSearch,
                 QueryRequestMethod::Registry(_) => {
                     let MethodObject::Registry(object_type) = object else {
                         unreachable!()

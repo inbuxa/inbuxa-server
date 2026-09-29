@@ -94,6 +94,9 @@ impl Response<'_> {
                         GetResponseMethod::Journal(response) => {
                             response.eval_jptr(path, &mut results)
                         }
+                        GetResponseMethod::JournalEntry(response) => {
+                            response.eval_jptr(path, &mut results)
+                        }
                         GetResponseMethod::HeldMessage(response) => {
                             response.eval_jptr(path, &mut results)
                         }
