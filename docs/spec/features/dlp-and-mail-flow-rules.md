@@ -304,8 +304,9 @@ held mail, so what's released is what would have gone out. The daily
 clean-up rejects what's past its 7 days (recorded as the server's doing).
 `preview` returns the text (64 KB) only when asked for, and each read is
 recorded as `blobAccess`. Emails › Queue refuses to change or delete held
-mail, and the sender can't unsend it. The 7 days is a constant for now; a
-setting comes with the console page.
+mail, and the sender can't unsend it. How many days held mail waits is
+`inbuxa:DlpSettings.keepHeldDays`, 1 to 90, 7 by default; each held message
+keeps the days it was given.
 
 ### 2.7 What's recorded
 

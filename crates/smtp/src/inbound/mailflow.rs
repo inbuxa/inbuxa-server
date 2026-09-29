@@ -478,6 +478,9 @@ impl<T: SessionStream> Session<T> {
         size: u64,
     ) {
         let at = store::write::now();
+        let keep_days = held::settings(self.server.store())
+            .await
+            .map_or(KEEP_DAYS, |s| s.keep_held_days);
         let account = self.data.authenticated_as.as_ref();
         let record = Held {
             queue_id,
@@ -490,7 +493,8 @@ impl<T: SessionStream> Session<T> {
             rules: draft.rules,
             counts: draft.counts,
             held_at: at,
-            expires_at: at + KEEP_DAYS * 86_400,
+            expires_at: at + keep_days * 86_400,
+            keep_days,
         };
         if let Err(err) = held::create(self.server.store(), &record).await {
             trc::error!(

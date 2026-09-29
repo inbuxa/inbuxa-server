@@ -19,6 +19,7 @@ use registry::schema::{
 };
 use registry::types::map::Map;
 use serde_json::{Value, json};
+use std::str::FromStr;
 
 const USING: &[&str] = &[
     "urn:ietf:params:jmap:core",
@@ -817,6 +818,26 @@ pub async fn hold(test: &mut TestServer) {
         .as_str()
         .unwrap_or_else(|| panic!("{response}"))
         .to_string();
+    // How long held mail waits: 7 days unless set, from 1 to 90
+    let (_, response) = call(&admin, "inbuxa:DlpSettings/get", json!({"ids": null})).await;
+    assert_eq!(response["list"][0]["keepHeldDays"], 7, "{response}");
+    let (_, response) = call(
+        &admin,
+        "inbuxa:DlpSettings/set",
+        json!({"update": {"singleton": {"keepHeldDays": 0}}}),
+    )
+    .await;
+    assert!(
+        response["notUpdated"].get("singleton").is_some(),
+        "{response}"
+    );
+    let (_, response) = call(
+        &admin,
+        "inbuxa:DlpSettings/set",
+        json!({"update": {"singleton": {"keepHeldDays": 3}}}),
+    )
+    .await;
+    assert!(response["updated"].get("singleton").is_some(), "{response}");
     let body = "hold-me: card 4242 4242 4242 4242";
 
     // Accepted, held, listed
@@ -844,6 +865,9 @@ pub async fn hold(test: &mut TestServer) {
     assert_eq!(list[0]["sender"], "hold-sender@example.com");
     assert_eq!(list[0]["subject"], "Held one");
     assert_eq!(list[0]["rules"][0]["name"], "Hold cards");
+    let span = chrono_seconds(list[0]["expiresAt"].as_str().unwrap())
+        - chrono_seconds(list[0]["heldAt"].as_str().unwrap());
+    assert_eq!(span, 3 * 86_400, "held for the days set");
     assert_eq!(
         list[0]["counts"],
         json!([{"detector": "words", "count": 1}, {"detector": "payment-card", "count": 1}])
@@ -1057,7 +1081,7 @@ pub async fn hold(test: &mut TestServer) {
     );
     let notice = received(&sender, "Not sent: Held three", "X-Flow", Some(&mailbox)).await;
     assert!(
-        notice[0].1.contains("Nobody reviewed it within 7 days"),
+        notice[0].1.contains("Nobody reviewed it within 3 days"),
         "{notice:?}"
     );
     let (_, response) = call(
@@ -1073,6 +1097,13 @@ pub async fn hold(test: &mut TestServer) {
     );
 
     call(&admin, "inbuxa:MailRule/set", json!({"destroy": [rule]})).await;
+}
+
+/// Seconds since the epoch of a UTC date the server wrote.
+fn chrono_seconds(date: &str) -> i64 {
+    jmap_proto::types::date::UTCDate::from_str(date)
+        .map(|d| d.timestamp())
+        .unwrap_or_default()
 }
 
 /// Subjects in `account` matching `text` right now, not in `drafts`.
