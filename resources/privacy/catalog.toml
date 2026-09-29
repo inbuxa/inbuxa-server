@@ -79,6 +79,10 @@ lockedAt = ["metadata"]
 lockedBy = ["identifier"]
 delegates = ["identifier"]
 
+[object."inbuxa:DlpSettings"]
+file = "inbuxa_dlp_settings.rs"
+default = "none"
+
 [object."inbuxa:HeldMessage"]
 file = "inbuxa_held_message.rs"
 default = "none"

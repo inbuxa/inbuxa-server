@@ -24,7 +24,7 @@ use common::{
 };
 use inbuxa_features::{
     audit::{Action, Actor, Outcome, Record, Target},
-    mailflow::held::{self, HOLD_SECONDS, Held, KEEP_DAYS},
+    mailflow::held::{self, HOLD_SECONDS, Held},
 };
 use mail_builder::{
     MessageBuilder,
@@ -83,7 +83,8 @@ pub async fn reject(server: &Server, record: &Held, note: Option<&str>) -> trc::
     match note {
         Some(note) => text.push_str(&format!("\r\nThe reviewer's note: {note}\r\n")),
         None => text.push_str(&format!(
-            "\r\nNobody reviewed it within {KEEP_DAYS} days, so it was returned.\r\n"
+            "\r\nNobody reviewed it within {} days, so it was returned.\r\n",
+            record.keep_days
         )),
     }
     notify(
@@ -107,9 +108,10 @@ pub async fn notify_held(server: &Server, record: &Held) {
         .join(" ");
     let text = format!(
         "Your message \"{}\" to {} is held for review under this server's rules: {notices}\r\n\r\n\
-         It will be sent if a reviewer releases it, and returned otherwise within {KEEP_DAYS} days.\r\n",
+         It will be sent if a reviewer releases it, and returned otherwise within {} days.\r\n",
         record.subject,
         record.recipients.join(", "),
+        record.keep_days,
     );
     notify(
         server,
@@ -166,7 +168,8 @@ pub async fn expire(server: &Server) -> trc::Result<usize> {
                 },
                 changes: vec![],
                 details: Some(format!(
-                    "Rejected: nobody reviewed it within {KEEP_DAYS} days; the sender was told"
+                    "Rejected: nobody reviewed it within {} days; the sender was told",
+                    record.keep_days
                 )),
                 reason: None,
                 outcome: Outcome::success(),

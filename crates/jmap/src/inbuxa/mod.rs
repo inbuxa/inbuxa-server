@@ -12,6 +12,7 @@ pub mod account_lock;
 pub mod legal_hold;
 pub mod mail_rule;
 pub mod held_message;
+pub mod dlp_settings;
 pub mod hold_export;
 pub mod hold_export_api;
 pub mod audit;

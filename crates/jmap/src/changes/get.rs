@@ -419,6 +419,7 @@ impl IntermediateChangesResponse {
             | MethodObject::DeletedAccount
             | MethodObject::AiLimits
             | MethodObject::LogSettings
+            | MethodObject::DlpSettings
             | MethodObject::DataInventory
             | MethodObject::InventorySnapshot
             | MethodObject::Explanation

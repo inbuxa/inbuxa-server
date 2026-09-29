@@ -24,6 +24,7 @@ pub mod fastmail_masked_email; // inbuxa: masked email
 pub mod inbuxa_account_lock; // inbuxa: account lock with delegation
 pub mod inbuxa_ai_limits; // inbuxa: AI spam classification
 pub mod inbuxa_log_settings; // inbuxa: personal-data catalog, D1
+pub mod inbuxa_dlp_settings; // inbuxa: DLP settings
 pub mod inbuxa_data_inventory; // inbuxa: personal-data catalog
 pub mod inbuxa_inventory_snapshot; // inbuxa: personal-data catalog
 pub mod inbuxa_audit; // inbuxa: the audit log

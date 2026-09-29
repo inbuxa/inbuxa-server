@@ -64,6 +64,9 @@ impl Response<'_> {
                         GetResponseMethod::LogSettings(response) => {
                             response.eval_jptr(path, &mut results)
                         }
+                        GetResponseMethod::DlpSettings(response) => {
+                            response.eval_jptr(path, &mut results)
+                        }
                         GetResponseMethod::DataInventory(response) => {
                             response.eval_jptr(path, &mut results)
                         }

@@ -25,13 +25,41 @@ use trc::AddContext;
 
 const FEATURE: u8 = b'R';
 const KIND_HELD: u8 = b'h';
+const KIND_SETTINGS: u8 = b's';
 
 /// How far off a held message's release is set: a century, so it never
 /// comes due on its own.
 pub const HOLD_SECONDS: u64 = 100 * 365 * 24 * 60 * 60;
 
-/// How long unreviewed mail waits before it's rejected (settled answer 5).
+/// How long unreviewed mail waits before it's rejected, unless the setting
+/// says otherwise (settled answer 5).
 pub const KEEP_DAYS: u64 = 7;
+
+/// `inbuxa:DlpSettings`: how many days held mail waits for a reviewer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, SerdeSerialize, SerdeDeserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Settings {
+    pub keep_held_days: u64,
+}
+
+impl Default for Settings {
+    fn default() -> Self {
+        Settings {
+            keep_held_days: KEEP_DAYS,
+        }
+    }
+}
+
+impl Settings {
+    /// The property at fault and why, or fine.
+    pub fn check(&self) -> Result<(), (&'static str, &'static str)> {
+        if (1..=90).contains(&self.keep_held_days) {
+            Ok(())
+        } else {
+            Err(("keepHeldDays", "must be from 1 to 90 days"))
+        }
+    }
+}
 
 /// A rule that held the message, with its notice.
 #[derive(Debug, Clone, PartialEq, Eq, SerdeSerialize, SerdeDeserialize)]
@@ -59,6 +87,13 @@ pub struct Held {
     /// Seconds since the epoch.
     pub held_at: u64,
     pub expires_at: u64,
+    /// The days it was given, for what the sender is told.
+    #[serde(default = "default_keep_days")]
+    pub keep_days: u64,
+}
+
+fn default_keep_days() -> u64 {
+    KEEP_DAYS
 }
 
 impl Held {
@@ -104,6 +139,31 @@ fn class(queue_id: u64) -> ValueClass {
 
 fn key(queue_id: u64) -> ValueKey<ValueClass> {
     ValueKey::from(class(queue_id))
+}
+
+fn settings_class() -> ValueClass {
+    ValueClass::Any(AnyClass {
+        subspace: SUBSPACE_INBUXA,
+        key: vec![FEATURE, KIND_SETTINGS],
+    })
+}
+
+pub async fn settings(data: &Store) -> trc::Result<Settings> {
+    Ok(data
+        .get_value::<Json<Settings>>(ValueKey::from(settings_class()))
+        .await
+        .caused_by(trc::location!())?
+        .map(|Json(settings)| settings)
+        .unwrap_or_default())
+}
+
+pub async fn set_settings(data: &Store, settings: &Settings) -> trc::Result<()> {
+    let mut batch = BatchBuilder::new();
+    batch.set(settings_class(), Json(settings).serialize()?);
+    data.write(batch.build_all())
+        .await
+        .caused_by(trc::location!())?;
+    Ok(())
 }
 
 pub async fn get(data: &Store, queue_id: u64) -> trc::Result<Option<Held>> {
@@ -172,6 +232,7 @@ mod tests {
             counts: vec![("payment-card".into(), 5)],
             held_at: 1_000,
             expires_at: 1_000 + KEEP_DAYS * 86_400,
+            keep_days: KEEP_DAYS,
         };
         let json = serde_json::to_value(&held).unwrap();
         assert_eq!(json["heldAt"], 1_000);
@@ -179,5 +240,14 @@ mod tests {
         assert!(!held.is_expired(1_000 + KEEP_DAYS * 86_400 - 1));
         assert!(held.is_expired(1_000 + KEEP_DAYS * 86_400));
         assert!(HOLD_SECONDS > 90 * 365 * 86_400);
+    }
+
+    #[test]
+    fn settings_range() {
+        assert_eq!(Settings::default().keep_held_days, 7);
+        assert!(Settings { keep_held_days: 1 }.check().is_ok());
+        assert!(Settings { keep_held_days: 90 }.check().is_ok());
+        assert!(Settings { keep_held_days: 0 }.check().is_err());
+        assert!(Settings { keep_held_days: 91 }.check().is_err());
     }
 }

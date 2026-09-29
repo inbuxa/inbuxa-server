@@ -176,6 +176,13 @@ impl<'de> Visitor<'de> for CallVisitor {
                     return Err(de::Error::invalid_length(1, &self));
                 }
             },
+            (MethodFunction::Get, MethodObject::DlpSettings) => match seq.next_element() {
+                Ok(Some(value)) => RequestMethod::Get(GetRequestMethod::DlpSettings(value)),
+                Err(err) => RequestMethod::invalid(err),
+                Ok(None) => {
+                    return Err(de::Error::invalid_length(1, &self));
+                }
+            },
             (MethodFunction::Get, MethodObject::DataInventory) => match seq.next_element() {
                 Ok(Some(value)) => RequestMethod::Get(GetRequestMethod::DataInventory(value)),
                 Err(err) => RequestMethod::invalid(err),
@@ -373,6 +380,13 @@ impl<'de> Visitor<'de> for CallVisitor {
             },
             (MethodFunction::Set, MethodObject::LogSettings) => match seq.next_element() {
                 Ok(Some(value)) => RequestMethod::Set(SetRequestMethod::LogSettings(value)),
+                Err(err) => RequestMethod::invalid(err),
+                Ok(None) => {
+                    return Err(de::Error::invalid_length(1, &self));
+                }
+            },
+            (MethodFunction::Set, MethodObject::DlpSettings) => match seq.next_element() {
+                Ok(Some(value)) => RequestMethod::Set(SetRequestMethod::DlpSettings(value)),
                 Err(err) => RequestMethod::invalid(err),
                 Ok(None) => {
                     return Err(de::Error::invalid_length(1, &self));

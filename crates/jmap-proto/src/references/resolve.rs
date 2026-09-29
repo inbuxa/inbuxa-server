@@ -47,6 +47,7 @@ impl Response<'_> {
                 GetRequestMethod::DeletedAccount(request) => request.resolve_references(self)?,
                 GetRequestMethod::AiLimits(request) => request.resolve_references(self)?,
                 GetRequestMethod::LogSettings(request) => request.resolve_references(self)?,
+                GetRequestMethod::DlpSettings(request) => request.resolve_references(self)?,
                 GetRequestMethod::DataInventory(request) => request.resolve_references(self)?,
                 GetRequestMethod::InventorySnapshot(request) => request.resolve_references(self)?,
                 GetRequestMethod::AuditEvent(request) => request.resolve_references(self)?,
@@ -104,6 +105,9 @@ impl Response<'_> {
                     request.resolve_references(self, 1, false)?
                 }
                 SetRequestMethod::LogSettings(request) => {
+                    request.resolve_references(self, 1, false)?
+                }
+                SetRequestMethod::DlpSettings(request) => {
                     request.resolve_references(self, 1, false)?
                 }
                 SetRequestMethod::Explanation(request) => {
