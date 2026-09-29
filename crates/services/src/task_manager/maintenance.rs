@@ -291,6 +291,12 @@ async fn store_maintenance(
                 trc::error!(err.details("Failed to return unreviewed held mail"));
             }
 
+            // inbuxa: journaling, JR-13: entries past their retention go,
+            // except those a legal hold keeps
+            if let Err(err) = purge_journal(server).await {
+                trc::error!(err.details("Failed to purge journal entries"));
+            }
+
             // inbuxa: AU-7: audit records past their retention go; a
             // failure leaves them for the next run
             if let Err(err) = server.audit_purge().await {
@@ -407,6 +413,54 @@ async fn store_maintenance(
     }
 
     Ok(TaskResult::Success(vec![]))
+}
+
+/// inbuxa: journaling, JR-13: removes journal entries past their
+/// retention, keeping any whose sender or recipients a legal hold covers
+/// (deleted accounts a hold keeps included), and records how many went.
+async fn purge_journal(server: &Server) -> trc::Result<()> {
+    use inbuxa_features::audit::{Action, Actor, Outcome, Record, Target};
+    let mut held = server.held_accounts().await?;
+    if !held.is_empty() {
+        for (account_id, kept) in
+            inbuxa_features::undelete::data::kept_accounts(server.store()).await?
+        {
+            if server.is_kept_held(account_id, &kept).await? {
+                held.insert(account_id);
+            }
+        }
+    }
+    let at = store::write::now();
+    let purged = inbuxa_features::journal::entries::purge(server.store(), at, |entry| {
+        entry.accounts.iter().any(|account| held.contains(account))
+    })
+    .await?;
+    if purged.removed > 0 || purged.kept_for_hold > 0 {
+        server
+            .audit_note(Record {
+                at: at * 1000,
+                actor: Actor::system("Journal"),
+                via: None,
+                remote_ip: None,
+                action: Action::Destroy,
+                target: Target {
+                    kind: "inbuxa:JournalEntry".into(),
+                    id: None,
+                    name: None,
+                    account_id: None,
+                    tenant_id: None,
+                },
+                changes: vec![],
+                details: Some(format!(
+                    "{} past their retention removed; {} kept for a legal hold",
+                    purged.removed, purged.kept_for_hold
+                )),
+                reason: None,
+                outcome: Outcome::success(),
+            })
+            .await;
+    }
+    Ok(())
 }
 
 async fn account_maintenance(

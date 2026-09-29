@@ -116,6 +116,8 @@ impl JmapAuthorization for AccessToken {
                         Permission::SysDlpPolicyGet
                     }
                 }
+                // inbuxa: journaling (JR-18)
+                GetRequestMethod::Journal(_) => Permission::SysJournalGet,
                 GetRequestMethod::HoldExport(_) => Permission::SysLegalHoldExport,
                 // inbuxa: legacy protocols off. It takes listeners away and
                 // puts them back, so it takes the listener's permissions
@@ -288,6 +290,14 @@ impl JmapAuthorization for AccessToken {
                                 .details("You are not authorized to change mail rules"))
                         }
                     }
+                    // inbuxa: journaling (JR-18)
+                    SetRequestMethod::Journal(s) => validate_set(
+                        s,
+                        self,
+                        Permission::SysJournalUpdate,
+                        Permission::SysJournalUpdate,
+                        Permission::SysJournalUpdate,
+                    ),
                     // inbuxa: LH-12, exporting held data
                     SetRequestMethod::HoldExport(s) => validate_set(
                         s,
@@ -451,6 +461,7 @@ impl JmapAuthorization for AccessToken {
                 | MethodObject::HoldExport
                 | MethodObject::MailRule
                 | MethodObject::HeldMessage
+                | MethodObject::Journal
                 | MethodObject::ProtocolPolicy
                 | MethodObject::TenantProtocolPolicy => Permission::JmapEmailChanges,
                 // inbuxa: x:MaskedEmail/changes reads what /get reads

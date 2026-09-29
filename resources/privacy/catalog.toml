@@ -113,6 +113,18 @@ exceptions = ["contact", "content"]
 actions = ["contact", "content"]
 createdBy = ["identifier"]
 
+[object."inbuxa:Journal"]
+file = "inbuxa_journal.rs"
+default = "none"
+whose = ["administrator"]
+where = ["data-store"]
+scope = "server"
+retention = "unbounded"
+[object."inbuxa:Journal".properties]
+name = ["content"]
+description = ["content"]
+createdBy = ["identifier"]
+
 [object."inbuxa:LegalHold"]
 file = "inbuxa_legal_hold.rs"
 default = "none"
@@ -407,6 +419,19 @@ retention = "unbounded"
 captures = ["x:Email.maxMaskedAddresses"]
 leaves_host = false
 written_by = ["crates/features/src/masked_email/data.rs"]
+
+# Journaling (journaling spec, JR-5, JR-14): a copy of each message a
+# journal takes, with its envelope, kept for the journal's retention even
+# after the account is deleted, and longer while a legal hold covers
+# someone on it.
+[source."journal"]
+categories = ["content", "identifier", "contact", "metadata"]
+whose = ["holder", "correspondent"]
+where = ["data-store", "blob-store"]
+scope = "server"
+retention = { setting = "inbuxa:Journal.retentionDays" }
+leaves_host = false
+written_by = ["crates/features/src/journal/entries.rs", "crates/smtp/src/queue/journal.rs"]
 
 [source."outbound-reports"]
 categories = ["network", "identifier", "content"]

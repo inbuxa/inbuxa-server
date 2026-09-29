@@ -1755,6 +1755,11 @@ pub enum Permission {
     SysDlpPolicyUpdate = 677,
     SysDlpReviewGet = 678,
     SysDlpReviewUpdate = 679,
+    // inbuxa: journaling
+    SysJournalGet = 680,
+    SysJournalUpdate = 681,
+    SysJournalSearch = 682,
+    SysJournalExport = 683,
     SysAccountGet = 219,
     SysAccountCreate = 220,
     SysAccountUpdate = 221,

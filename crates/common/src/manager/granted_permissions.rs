@@ -52,6 +52,8 @@ const ADMIN_GRANTS: &[Permission] = &[
     Permission::SysDlpPolicyUpdate,
     Permission::SysDlpReviewGet,
     Permission::SysDlpReviewUpdate,
+    Permission::SysJournalGet,
+    Permission::SysJournalUpdate,
 ];
 
 /// Granted to the server-level Compliance Officer role once it exists:
@@ -61,6 +63,10 @@ const OFFICER_GRANTS: &[Permission] = &[
     Permission::SysDlpPolicyGet,
     Permission::SysDlpReviewGet,
     Permission::SysDlpReviewUpdate,
+    // journaling spec, JR-18: see journals, search and export them
+    Permission::SysJournalGet,
+    Permission::SysJournalSearch,
+    Permission::SysJournalExport,
 ];
 
 /// Granted to the default tenant administrator roles: reading and exporting

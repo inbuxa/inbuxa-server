@@ -69,6 +69,10 @@ const OFFICER: &[Permission] = &[
     Permission::SysDlpPolicyGet,
     Permission::SysDlpReviewGet,
     Permission::SysDlpReviewUpdate,
+    // journaling spec, JR-18: see journals, search and export them
+    Permission::SysJournalGet,
+    Permission::SysJournalSearch,
+    Permission::SysJournalExport,
 ];
 
 /// What a tenant's officer holds besides [`READS`].

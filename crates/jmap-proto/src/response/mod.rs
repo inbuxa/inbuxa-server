@@ -112,6 +112,7 @@ pub enum GetResponseMethod {
     AccountLock(GetResponse<crate::object::inbuxa_account_lock::AccountLock>),
     LegalHold(GetResponse<crate::object::inbuxa_legal_hold::LegalHold>),
     MailRule(GetResponse<crate::object::inbuxa_mail_rule::MailRule>),
+    Journal(GetResponse<crate::object::inbuxa_journal::Journal>),
     HeldMessage(GetResponse<crate::object::inbuxa_held_message::HeldMessage>),
     HoldExport(GetResponse<crate::object::inbuxa_hold_export::HoldExport>),
     ProtocolPolicy(GetResponse<crate::object::inbuxa_protocol_policy::ProtocolPolicy>),
@@ -150,6 +151,7 @@ pub enum SetResponseMethod {
     AccountLock(Box<SetResponse<crate::object::inbuxa_account_lock::AccountLock>>),
     LegalHold(Box<SetResponse<crate::object::inbuxa_legal_hold::LegalHold>>),
     MailRule(Box<SetResponse<crate::object::inbuxa_mail_rule::MailRule>>),
+    Journal(Box<SetResponse<crate::object::inbuxa_journal::Journal>>),
     HeldMessage(Box<SetResponse<crate::object::inbuxa_held_message::HeldMessage>>),
     HoldExport(Box<SetResponse<crate::object::inbuxa_hold_export::HoldExport>>),
     Explanation(Box<SetResponse<crate::object::inbuxa_explanation::Explanation>>),
@@ -838,6 +840,19 @@ impl<'x> From<GetResponse<crate::object::inbuxa_mail_rule::MailRule>> for Respon
 impl<'x> From<SetResponse<crate::object::inbuxa_mail_rule::MailRule>> for ResponseMethod<'x> {
     fn from(value: SetResponse<crate::object::inbuxa_mail_rule::MailRule>) -> Self {
         ResponseMethod::Set(SetResponseMethod::MailRule(Box::new(value)))
+    }
+}
+
+// inbuxa: journaling
+impl<'x> From<GetResponse<crate::object::inbuxa_journal::Journal>> for ResponseMethod<'x> {
+    fn from(value: GetResponse<crate::object::inbuxa_journal::Journal>) -> Self {
+        ResponseMethod::Get(GetResponseMethod::Journal(value))
+    }
+}
+
+impl<'x> From<SetResponse<crate::object::inbuxa_journal::Journal>> for ResponseMethod<'x> {
+    fn from(value: SetResponse<crate::object::inbuxa_journal::Journal>) -> Self {
+        ResponseMethod::Set(SetResponseMethod::Journal(Box::new(value)))
     }
 }
 

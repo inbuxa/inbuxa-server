@@ -62,7 +62,7 @@ fn one() -> u32 {
 
 /// Group and tenant ids in the JMAP form clients use (`"b"`, `"c"`…), held
 /// as numbers for matching. Plain numbers are read too.
-mod jmap_ids {
+pub(crate) mod jmap_ids {
     use serde::{Deserialize, Deserializer, Serializer, de::Error, ser::SerializeSeq};
     use std::str::FromStr;
     use types::id::Id;
