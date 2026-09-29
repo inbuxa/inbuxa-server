@@ -23,6 +23,7 @@ pub mod audit;
 pub mod branding;
 pub mod hold;
 pub mod lock;
+pub mod mailflow;
 pub mod masked_email;
 pub mod privacy;
 pub mod security;
