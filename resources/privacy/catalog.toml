@@ -79,6 +79,21 @@ lockedAt = ["metadata"]
 lockedBy = ["identifier"]
 delegates = ["identifier"]
 
+[object."inbuxa:MailRule"]
+file = "inbuxa_mail_rule.rs"
+default = "none"
+whose = ["administrator", "holder", "correspondent"]
+where = ["data-store"]
+scope = "server"
+retention = "unbounded"
+[object."inbuxa:MailRule".properties]
+name = ["content"]
+description = ["content"]
+conditions = ["contact", "content"]
+exceptions = ["contact", "content"]
+actions = ["contact", "content"]
+createdBy = ["identifier"]
+
 [object."inbuxa:LegalHold"]
 file = "inbuxa_legal_hold.rs"
 default = "none"

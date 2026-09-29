@@ -110,6 +110,7 @@ pub enum GetResponseMethod {
     AuditSettings(GetResponse<crate::object::inbuxa_audit::AuditSettings>),
     AccountLock(GetResponse<crate::object::inbuxa_account_lock::AccountLock>),
     LegalHold(GetResponse<crate::object::inbuxa_legal_hold::LegalHold>),
+    MailRule(GetResponse<crate::object::inbuxa_mail_rule::MailRule>),
     HoldExport(GetResponse<crate::object::inbuxa_hold_export::HoldExport>),
     ProtocolPolicy(GetResponse<crate::object::inbuxa_protocol_policy::ProtocolPolicy>),
     TenantProtocolPolicy(
@@ -145,6 +146,7 @@ pub enum SetResponseMethod {
     AuditVerification(Box<SetResponse<crate::object::inbuxa_audit::AuditVerification>>),
     AccountLock(Box<SetResponse<crate::object::inbuxa_account_lock::AccountLock>>),
     LegalHold(Box<SetResponse<crate::object::inbuxa_legal_hold::LegalHold>>),
+    MailRule(Box<SetResponse<crate::object::inbuxa_mail_rule::MailRule>>),
     HoldExport(Box<SetResponse<crate::object::inbuxa_hold_export::HoldExport>>),
     Explanation(Box<SetResponse<crate::object::inbuxa_explanation::Explanation>>),
     ProtocolPolicy(Box<SetResponse<crate::object::inbuxa_protocol_policy::ProtocolPolicy>>),
@@ -799,6 +801,18 @@ impl<'x> From<SetResponse<crate::object::inbuxa_account_lock::AccountLock>> for 
 }
 
 // inbuxa: legal hold
+impl<'x> From<GetResponse<crate::object::inbuxa_mail_rule::MailRule>> for ResponseMethod<'x> {
+    fn from(value: GetResponse<crate::object::inbuxa_mail_rule::MailRule>) -> Self {
+        ResponseMethod::Get(GetResponseMethod::MailRule(value))
+    }
+}
+
+impl<'x> From<SetResponse<crate::object::inbuxa_mail_rule::MailRule>> for ResponseMethod<'x> {
+    fn from(value: SetResponse<crate::object::inbuxa_mail_rule::MailRule>) -> Self {
+        ResponseMethod::Set(SetResponseMethod::MailRule(Box::new(value)))
+    }
+}
+
 impl<'x> From<GetResponse<crate::object::inbuxa_legal_hold::LegalHold>> for ResponseMethod<'x> {
     fn from(value: GetResponse<crate::object::inbuxa_legal_hold::LegalHold>) -> Self {
         ResponseMethod::Get(GetResponseMethod::LegalHold(value))

@@ -429,6 +429,7 @@ impl IntermediateChangesResponse {
             | MethodObject::AccountLock
             | MethodObject::LegalHold
             | MethodObject::HoldExport
+            | MethodObject::MailRule
             | MethodObject::ProtocolPolicy
             | MethodObject::TenantProtocolPolicy
             | MethodObject::Registry(_) => unreachable!(),

@@ -82,6 +82,9 @@ impl Response<'_> {
                         GetResponseMethod::LegalHold(response) => {
                             response.eval_jptr(path, &mut results)
                         }
+                        GetResponseMethod::MailRule(response) => {
+                            response.eval_jptr(path, &mut results)
+                        }
                         GetResponseMethod::HoldExport(response) => {
                             response.eval_jptr(path, &mut results)
                         }

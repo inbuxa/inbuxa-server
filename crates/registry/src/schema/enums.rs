@@ -1748,6 +1748,13 @@ pub enum Permission {
     SysLegalHoldExport = 672,
     // inbuxa: personal-data catalog, the data inventory and compliance overview
     SysComplianceGet = 673,
+    // inbuxa: DLP and mail flow rules
+    SysMailRuleGet = 674,
+    SysMailRuleUpdate = 675,
+    SysDlpPolicyGet = 676,
+    SysDlpPolicyUpdate = 677,
+    SysDlpReviewGet = 678,
+    SysDlpReviewUpdate = 679,
     SysAccountGet = 219,
     SysAccountCreate = 220,
     SysAccountUpdate = 221,
