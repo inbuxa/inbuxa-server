@@ -90,7 +90,9 @@ def start(env_file=None):
             "-p", f"127.0.0.1:{PORTS['submissions']}:465",
             "-p", f"127.0.0.1:{PORTS['imap']}:993",
             "-p", f"127.0.0.1:{PORTS['pop3']}:995",
-            "-p", f"127.0.0.1:{PORTS['smtp']}:25"]
+            "-p", f"127.0.0.1:{PORTS['smtp']}:25",
+            # This script signs in with passwords over JMAP (contract C-23).
+            "-e", "INBUXA_HTTP_BASIC_AUTH=all"]
     if env_file:
         args += ["--env-file", env_file]
     args += ["stalwartlabs/stalwart:v0.16.22", "--config", "/etc/inbuxa/config.json"]
