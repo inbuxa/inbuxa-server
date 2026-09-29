@@ -3947,9 +3947,12 @@ name = "inbuxa-features"
 version = "0.16.22"
 dependencies = [
  "ahash",
+ "aho-corasick",
  "base64 0.23.1",
  "flate2",
  "jmap_proto",
+ "quick-xml 0.41.0",
+ "regex",
  "registry",
  "serde",
  "serde_json",
@@ -3961,6 +3964,7 @@ dependencies = [
  "types",
  "utils",
  "xxhash-rust",
+ "zip",
 ]
 
 [[package]]
