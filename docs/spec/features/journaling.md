@@ -1,7 +1,6 @@
 # Feature spec: journaling
 
-Status: **draft, for approval**. The questions under [For John](#for-john)
-come with a recommendation each; nothing is built until they're answered.
+Status: **approved 2026-09-28**, with the answers under [Settled](#settled).
 Not a rebuild of an upstream feature, so it has no line in SPEC.md §4's table.
 Rule IDs: **JR-**.
 
@@ -272,23 +271,22 @@ stays out of production until John says.
 - Group accounts (`GroupAccount`) resolve as one account, not members; their
   mail is journaled under the group's address.
 
-## For John
+## Settled
 
-1. **Destinations.** Built-in journal, an outside archive by address, or
-   both, per journal? *Recommend: all three choices (JR-5, JR-7, JR-8).*
-2. **Scope.** Everyone, or chosen accounts, groups, domains and tenants by
-   direction, plus a **Journal it** rule action for journaling by content,
-   with no standard/premium split? *Recommend: yes (JR-9, JR-10).*
-3. **Retention.** No default: whoever turns a journal on picks 30 days to 10
-   years, and existing entries keep theirs when it changes? *Recommend: yes
-   (JR-12).*
-4. **Which mail.** Everything queued, including DSNs and Sieve redirects and
-   vacation replies, except the server's DMARC/TLS reports and journal
-   reports themselves? *Recommend: yes (JR-2).*
-5. **Who reads it.** Administrators configure; Compliance Officers search,
-   read and export; administrators read only if granted Search?
-   *Recommend: yes (JR-18).*
-6. **An outside archive that won't take a report.** Keep it in the built-in
-   journal and warn? *Recommend: yes (JR-7).*
-7. **Deleted accounts.** Their journal entries stay until their retention
-   ends, and the catalog says so? *Recommend: yes (JR-14).*
+John, 2026-09-28, all seven as recommended:
+
+1. **Destinations**: the built-in journal, an outside archive by address, or
+   both, per journal (JR-5, JR-7, JR-8).
+2. **Scope**: everyone, or chosen accounts, groups, domains and tenants by
+   direction, plus a **Journal it** rule action; no standard/premium split
+   (JR-9, JR-10).
+3. **Retention**: no default; 30 days to 10 years, picked when a journal is
+   turned on; existing entries keep theirs (JR-12).
+4. **Which mail**: everything queued, including DSNs, Sieve redirects and
+   vacation replies, except DMARC/TLS reports and journal reports (JR-2).
+5. **Who reads it**: administrators configure; Compliance Officers search,
+   read and export; administrators read only if granted Search (JR-18).
+6. **An outside archive that won't take a report**: kept in the built-in
+   journal, with a warning (JR-7).
+7. **Deleted accounts**: journal entries stay until their retention ends,
+   and the catalog says so (JR-14).
