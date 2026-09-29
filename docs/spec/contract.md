@@ -240,6 +240,50 @@ Each has an ID, and tests name the IDs they check.
   subscriptions to its own URL, with VAPID for browser notifications. The only
   difference is that it authenticates with its token rather than the password.
 
+### Passwords over HTTP
+
+- **C-23.** **Outside DAV, HTTP sign-in is a token, never a password.** JMAP
+  (`/jmap`, with session, upload, download, event source and WebSocket), the
+  management API (`/api`), and the OAuth endpoints that authenticate a user
+  (`/auth/introspect`, `/auth/userinfo`, authenticated `/auth/register`)
+  refuse an `Authorization: Basic` header with a 401 whose only challenge is
+  `Bearer`, and don't check the password. CalDAV and CardDAV (`/dav`) keep
+  Basic, since that's how calendar and contacts apps sign in, and their 401s
+  still offer it. The sign-in page's own endpoint (`/api/auth`) takes the
+  password in its body, not a header, and isn't affected. Neither is the token
+  endpoint's client authentication. SCIM already takes an API key only.
+  Bootstrap and recovery mode accept Basic everywhere, as they keep
+  permissive CORS (C-16).
+  **Decision**: without this, anyone can put up a copy of a front end on a
+  server of their own that collects a person's password and replays it as
+  Basic. Cross-origin rules (C-14) don't stop that, because a server isn't a
+  browser, and neither does client registration (C-5), because Basic never
+  goes through OAuth. With C-23, the password only goes to the server's own
+  sign-in page (C-8), or to a DAV client or mail app the person set up
+  themselves.
+  An operator who needs Basic on every endpoint sets
+  `INBUXA_HTTP_BASIC_AUTH=all`; `dav`, the default, is this rule. Any other
+  value logs a warning and keeps the default. The setting moves to the
+  registry with `x:FrontEnds` (C-4).
+  ihasmail-inbuxa confirms a typed password, which it does before creating
+  an app password, on `/api/auth` as its own client, to its registered
+  redirect URI, with a PKCE challenge whose verifier it discards. A
+  "two-factor code needed" answer counts as confirmed, since the server gives
+  it only after the password matched.
+  **Built, 2026-09-29.** `crates/http/src/auth/token_only.rs` names the
+  paths; `request.rs` refuses before routing and picks the 401's challenge by
+  path; `Http.basic_auth_everywhere` holds the setting. Test builds
+  (`test_mode`) accept Basic everywhere, since the integration suites sign in
+  with passwords. Checked by `tests/e2e/http_basic_auth.py` against the debug
+  build, 26 checks: everything above, both front ends' sign-in path, a wrong
+  password answered exactly as the right one, and a redirect URI the webmail
+  didn't register refused.
+  Observed before the change, in INBUXA's production logs from 2026-09-20 to 2026-09-29:
+  every HTTPS password sign-in was the operator's own, apart from
+  ihasmail-inbuxa's password sign-in on 2026-09-22, before it moved to OAuth.
+  The logs don't say whether a sign-in used a Basic header or the sign-in
+  page.
+
 ## First boot
 
 1. The installer, or INBUXA Admin's setup wizard, completes bootstrap

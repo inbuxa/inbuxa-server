@@ -8,13 +8,14 @@
 
 use crate::{
     HttpSessionManager,
-    api::{AuthChallenge, ManagementApi, ToManageHttpResponse},
+    api::{AuthChallenge, ManagementApi, ToManageHttpResponse, UnauthorizedResponse},
     auth::{
         authenticate::{Authenticator, HttpHeaders},
         oauth::{
             FormData, auth::OAuthApiHandler, openid::OpenIdHandler,
             registration::ClientRegistrationHandler, token::TokenHandler,
         },
+        token_only::{is_refused_basic, is_token_only_path},
     },
     form::FormHandler,
 };
@@ -90,6 +91,17 @@ impl ParseHttp for Server {
                     return Ok(JsonProblemResponse(status).into_http_response());
                 }
             }
+        }
+
+        // inbuxa: outside DAV, sign in with a token, never a password (contract C-23)
+        if is_refused_basic(&req, self.core.network.http.basic_auth_everywhere) {
+            trc::event!(
+                Auth(trc::AuthEvent::Failed),
+                SpanId = session.session_id,
+                RemoteIp = session.remote_ip,
+                Reason = "Basic authentication is accepted on DAV only; use a bearer token",
+            );
+            return Ok(HttpResponse::unauthorized(AuthChallenge::Bearer));
         }
 
         match path.next().unwrap_or_default() {
@@ -782,6 +794,15 @@ async fn handle_session<T: SessionStream>(inner: Arc<Inner>, session: SessionDat
                     // inbuxa: kept for the cross-origin allowlist (contract C-14)
                     let origin = req.headers().get(hyper::header::ORIGIN).cloned();
 
+                    // inbuxa: offer Basic only where it's accepted (contract C-23)
+                    let challenge = if server.core.network.http.basic_auth_everywhere
+                        || !is_token_only_path(req.uri().path())
+                    {
+                        AuthChallenge::BearerAndBasic
+                    } else {
+                        AuthChallenge::Bearer
+                    };
+
                     // Parse HTTP request
                     let response = match Box::pin(server.parse_http_request(
                         req,
@@ -799,7 +820,7 @@ async fn handle_session<T: SessionStream>(inner: Arc<Inner>, session: SessionDat
                     {
                         Ok(response) => response,
                         Err(err) => {
-                            let response = err.into_http_response(AuthChallenge::BearerAndBasic);
+                            let response = err.into_http_response(challenge);
                             trc::error!(err.span_id(session.session_id));
                             response
                         }

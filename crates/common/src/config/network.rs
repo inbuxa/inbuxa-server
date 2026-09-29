@@ -72,6 +72,10 @@ pub struct Http {
     pub cors_origins: Vec<hyper::header::HeaderValue>,
     pub use_forwarded: bool,
     pub redirect_root: Option<String>,
+    /// inbuxa: HTTP Basic accepted on every endpoint, not only DAV (contract
+    /// C-23). True in bootstrap and recovery mode, or with
+    /// `INBUXA_HTTP_BASIC_AUTH=all`.
+    pub basic_auth_everywhere: bool,
 }
 
 #[derive(Clone)]
@@ -453,6 +457,35 @@ impl Http {
                 .collect()
         };
 
+        // inbuxa: outside DAV, HTTP sign-in is a token unless the operator
+        // says otherwise (contract C-23). The integration suites sign in with
+        // passwords over JMAP and the API, so test builds accept Basic
+        // everywhere.
+        #[cfg(feature = "test_mode")]
+        let basic_auth_everywhere = true;
+
+        #[cfg(not(feature = "test_mode"))]
+        let basic_auth_everywhere = bp.registry.is_recovery_mode()
+            || bp.registry.is_bootstrap_mode()
+            || match types::branding::env_var("HTTP_BASIC_AUTH") {
+                Ok(value) if value.trim().eq_ignore_ascii_case("all") => true,
+                Ok(value)
+                    if value.trim().is_empty() || value.trim().eq_ignore_ascii_case("dav") =>
+                {
+                    false
+                }
+                Ok(value) => {
+                    bp.build_warning(
+                        ObjectType::Http.singleton(),
+                        format!(
+                            "INBUXA_HTTP_BASIC_AUTH is {value:?}; expected \"dav\" or \"all\". Basic authentication stays on DAV only."
+                        ),
+                    );
+                    false
+                }
+                Err(_) => false,
+            };
+
         if use_permissive_cors {
             http_headers.push((
                 hyper::header::ACCESS_CONTROL_ALLOW_ORIGIN,
@@ -512,6 +545,7 @@ impl Http {
             cors_origins,
             use_forwarded: http.use_x_forwarded,
             redirect_root: http.redirect_root,
+            basic_auth_everywhere,
         }
     }
 }
