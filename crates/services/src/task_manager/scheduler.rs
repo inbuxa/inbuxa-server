@@ -46,6 +46,8 @@ enum Event {
     StoreMetrics,
     // inbuxa: MON-25: alert evaluation
     EvaluateAlerts,
+    // inbuxa: settings-reorg: probe the other nodes' ports
+    ProbePeerPorts,
 }
 
 /// When the next metric-history tick is due (MON-4), read from the registry
@@ -94,6 +96,11 @@ pub fn spawn_task_scheduler(inner: Arc<Inner>) {
                 queue.schedule(
                     Instant::now() + server.registry().refresh_node_id_interval(),
                     Event::RenewNodeIdLease,
+                );
+                // inbuxa: first round a minute after start, once the others have a lease
+                queue.schedule(
+                    Instant::now() + Duration::from_secs(60),
+                    Event::ProbePeerPorts,
                 );
             }
 
@@ -226,6 +233,19 @@ pub fn spawn_task_scheduler(inner: Arc<Inner>) {
                         tokio::spawn(async move {
                             if let Err(err) = server.registry().refresh_node_id_lease().await {
                                 trc::error!(err.details("Failed to renew node ID lease"));
+                            }
+                        });
+                    }
+                    Event::ProbePeerPorts => {
+                        queue.schedule(
+                            Instant::now() + common::reachability::PROBE_INTERVAL,
+                            Event::ProbePeerPorts,
+                        );
+
+                        let server = server.clone();
+                        tokio::spawn(async move {
+                            if let Err(err) = common::reachability::probe_peers(&server).await {
+                                trc::error!(err.details("Failed to probe the other nodes' ports"));
                             }
                         });
                     }
@@ -476,6 +496,7 @@ impl Event {
             Event::RenewNodeIdLease => "renewNodeIdLease",
             Event::StoreMetrics => "storeMetrics",
             Event::EvaluateAlerts => "evaluateAlerts",
+            Event::ProbePeerPorts => "probePeerPorts",
         }
     }
 }
