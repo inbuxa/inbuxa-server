@@ -131,6 +131,29 @@ impl ManagementApi for Server {
                 let answer = jmap::inbuxa::directory_test::test(self, &request).await?;
                 Ok(JsonResponse::new(answer).no_cache().into_http_response())
             }
+            // inbuxa: send one sample event to a saved webhook
+            "webhook" if is_post && path.get(1).copied() == Some("test") => {
+                let (_in_flight, access_token) = self.authenticate_headers(req, session).await?;
+                jmap::inbuxa::webhook_test::assert_allowed(&access_token)?;
+                let request = body
+                    .as_deref()
+                    .and_then(|body| serde_json::from_slice::<serde_json::Value>(body).ok())
+                    .unwrap_or_default();
+                let answer = jmap::inbuxa::webhook_test::test(self, &request).await?;
+                Ok(JsonResponse::new(answer).no_cache().into_http_response())
+            }
+            // inbuxa: whether the outside world reaches each node's ports
+            "ports" if path.get(1).copied() == Some("check") => {
+                let (_in_flight, access_token) = self.authenticate_headers(req, session).await?;
+                if access_token.tenant_id().is_some() {
+                    return Err(trc::JmapEvent::Forbidden
+                        .into_err()
+                        .details("Port checks are for server-level administrators."));
+                }
+                access_token.enforce_permission(Permission::SysNetworkListenerGet)?;
+                let answer = common::reachability::report(self).await?;
+                Ok(JsonResponse::new(answer).no_cache().into_http_response())
+            }
             "account" => {
                 // Authenticate request
                 let (_in_flight, access_token) = self.authenticate_headers(req, session).await?;
