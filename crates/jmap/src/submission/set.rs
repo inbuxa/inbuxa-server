@@ -2,6 +2,8 @@
  * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
+ *
+ * Modified by Coffey Labs in 2026 for INBUXA.
  */
 
 use common::{
@@ -16,7 +18,7 @@ use email::{
     submission::{Address, Delivered, DeliveryStatus, EmailSubmission, UndoStatus},
 };
 use jmap_proto::{
-    error::set::{SetError, SetErrorType},
+    error::set::{DlpRule, SetError, SetErrorType},
     method::set::{SetRequest, SetResponse},
     object::email_submission::{self, EmailSubmissionProperty, EmailSubmissionValue},
     references::resolve::ResolveCreatedReference,
@@ -379,6 +381,8 @@ impl EmailSubmissionSet for Server {
         };
         let mut mail_from: Option<MailFrom<Cow<'_, str>>> = None;
         let mut rcpt_to: Vec<RcptTo<Cow<'_, str>>> = Vec::new();
+        // inbuxa: DLP (dlp-and-mail-flow-rules spec, §2.5)
+        let mut dlp_override: Option<String> = None;
 
         for (property, mut value) in object.into_expanded_object() {
             if let Err(err) = response.resolve_self_references(&mut value, 0, false) {
@@ -491,6 +495,25 @@ impl EmailSubmissionSet for Server {
                     continue;
                 }
                 (Key::Property(EmailSubmissionProperty::UndoStatus), Value::Element(_)) => {
+                    continue;
+                }
+                // inbuxa: the sender's reason to send despite a DLP warning
+                (Key::Property(EmailSubmissionProperty::DlpOverride), Value::Object(value)) => {
+                    let reason = value
+                        .iter()
+                        .find(|(key, _)| key.to_string() == "reason")
+                        .and_then(|(_, value)| value.as_str().map(|r| r.trim().to_string()))
+                        .filter(|r| !r.is_empty());
+                    match reason {
+                        Some(reason) => dlp_override = Some(reason.chars().take(500).collect()),
+                        None => {
+                            return Ok(Err(SetError::invalid_properties()
+                                .with_property(EmailSubmissionProperty::DlpOverride)
+                                .with_description("An override needs a reason.")));
+                        }
+                    }
+                }
+                (Key::Property(EmailSubmissionProperty::DlpOverride), Value::Null) => {
                     continue;
                 }
                 _ => {
@@ -700,6 +723,7 @@ impl EmailSubmissionSet for Server {
                 0,
             ),
         );
+        session.data.dlp_override = dlp_override;
 
         // Spawn SMTP session to avoid overflowing the stack
         let handle = tokio::spawn(async move {
@@ -730,6 +754,27 @@ impl EmailSubmissionSet for Server {
                 let response = session.queue_message().await;
                 if let smtp::core::State::Accepted(queue_id) = session.state {
                     Ok((responses, Some(queue_id)))
+                } else if let Some(refusal) = session.data.dlp_refusal.take() {
+                    // inbuxa: DLP (§2.5): which rules, and what they say
+                    let description = refusal
+                        .rules
+                        .iter()
+                        .map(|(_, notice)| notice.as_str())
+                        .collect::<Vec<_>>()
+                        .join(" ");
+                    Err(SetError::new(if refusal.blocked {
+                        SetErrorType::DlpBlocked
+                    } else {
+                        SetErrorType::DlpWarning
+                    })
+                    .with_description(description)
+                    .with_dlp_rules(
+                        refusal
+                            .rules
+                            .into_iter()
+                            .map(|(name, notice)| DlpRule { name, notice })
+                            .collect(),
+                    ))
                 } else {
                     Err(
                         SetError::new(SetErrorType::ForbiddenToSend).with_description(format!(

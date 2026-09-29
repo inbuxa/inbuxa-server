@@ -738,6 +738,20 @@ impl<T: SessionStream> Session<T> {
             }
         }
 
+        // inbuxa: DLP (dlp-and-mail-flow-rules spec, §2.1): after the system
+        // script, before headers and signing
+        match self
+            .check_mail_rules(edited_message.as_deref().unwrap_or(raw_message.as_slice()))
+            .await
+        {
+            super::mailflow::Checked::Accept => {}
+            super::mailflow::Checked::Replace(message) => edited_message = Some(message),
+            super::mailflow::Checked::Refuse(reply, refusal) => {
+                self.data.dlp_refusal = refusal;
+                return reply.into();
+            }
+        }
+
         // Build message
         let mail_from = self.data.mail_from.clone().unwrap();
         let rcpt_to = std::mem::take(&mut self.data.rcpt_to);

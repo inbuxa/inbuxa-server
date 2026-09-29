@@ -47,6 +47,18 @@ struct SetErrorInner<P: Property> {
     #[serde(skip_serializing_if = "Vec::is_empty")]
     #[serde(rename = "validationErrors")]
     validation_errors: Vec<ValidationError>,
+
+    // inbuxa: DLP (dlp-and-mail-flow-rules spec, §2.5): each rule that
+    // warned or blocked, with its notice
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    rules: Vec<DlpRule>,
+}
+
+/// inbuxa: a DLP rule named in an `inbuxa:dlpWarning` or `inbuxa:dlpBlocked`.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct DlpRule {
+    pub name: String,
+    pub notice: String,
 }
 
 #[derive(Debug, Clone)]
@@ -127,6 +139,12 @@ pub enum SetErrorType {
     // inbuxa: a create that couldn't run (ai-explain spec: busy, timeout, …)
     #[serde(rename = "serverFail")]
     ServerFail,
+    // inbuxa: DLP (dlp-and-mail-flow-rules spec, §2.5): a warning the
+    // sender may answer with inbuxa:dlpOverride, and a block
+    #[serde(rename = "inbuxa:dlpWarning")]
+    DlpWarning,
+    #[serde(rename = "inbuxa:dlpBlocked")]
+    DlpBlocked,
 }
 
 impl SetErrorType {
@@ -166,6 +184,8 @@ impl SetErrorType {
             SetErrorType::PrimaryKeyViolation => "primaryKeyViolation",
             SetErrorType::ValidationFailed => "validationFailed",
             SetErrorType::ServerFail => "serverFail",
+            SetErrorType::DlpWarning => "inbuxa:dlpWarning",
+            SetErrorType::DlpBlocked => "inbuxa:dlpBlocked",
         }
     }
 }
@@ -180,7 +200,14 @@ impl<T: Property> SetError<T> {
             object_id: None,
             linked_objects: Vec::new(),
             validation_errors: Vec::new(),
+            rules: Vec::new(),
         }))
+    }
+
+    /// inbuxa: the DLP rules behind a warning or block.
+    pub fn with_dlp_rules(mut self, rules: Vec<DlpRule>) -> Self {
+        self.0.rules = rules;
+        self
     }
 
     pub fn with_description(mut self, description: impl Into<Cow<'static, str>>) -> Self {
@@ -353,6 +380,7 @@ impl From<PatchError> for SetError<registry::schema::properties::Property> {
             object_id: None,
             linked_objects: Vec::new(),
             validation_errors: Vec::new(),
+            rules: Vec::new(),
         }))
     }
 }

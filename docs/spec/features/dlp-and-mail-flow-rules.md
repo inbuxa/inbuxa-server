@@ -293,13 +293,24 @@ once it's held (the webmail says so).
 Held messages count against no one's quota. Each held message and each
 decision is in the audit log.
 
+**Until phase 3** a hold rule blocks, with its notice, rather than let the
+message through unreviewed.
+
 ### 2.7 What's recorded
 
-Every DLP match writes one audit record: actor **DLP** (a system actor),
-target the message (queue id, sender, recipient domains), the rules and each
-detector's count, the action, and for an override the sender's reason.
-**Never the matched text**: the log would otherwise become a second copy of
-what the policy was keeping in. A card number isn't written, even masked.
+Every DLP match writes one audit record, and **never the matched text**:
+the log would otherwise become a second copy of what the policy was keeping
+in. A card number isn't written, even masked.
+
+**As built (phase 2f).** The actor is the sender (they sent it; filtering by
+sender is what a reviewer wants), the action `create`, the target kind
+`message`. The details say what happened, where to, and each rule with its
+detectors' counts: `DLP warned, to elsewhere.org: "Cards leaving"
+(payment-card 1)`. A block or an unanswered warning is recorded as refused
+(`inbuxa:dlpBlocked`, `inbuxa:dlpWarning`); an override as a success, with
+the sender's reason. No new audit action was added: an older node reading a
+record with an action it doesn't know fails its daily clean-up, so a new
+action would make rolling back unsafe.
 
 Transport rules that change a message record the rule and action the same way.
 Unmatched mail writes nothing.

@@ -2,6 +2,8 @@
  * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
+ *
+ * Modified by Coffey Labs in 2026 for INBUXA.
  */
 
 use crate::{inbound::auth::SaslToken, queue::QueueId};
@@ -92,6 +94,20 @@ pub struct SessionData {
     pub spf_ehlo: Option<SpfOutput>,
     pub spf_mail_from: Option<SpfOutput>,
     pub dnsbl_error: Option<Vec<u8>>,
+
+    // inbuxa: DLP (dlp-and-mail-flow-rules spec, §2.5): the reason a JMAP
+    // sender gave to send despite a warning, and why DATA refused a
+    // message, for the submission to report
+    pub dlp_override: Option<String>,
+    pub dlp_refusal: Option<DlpRefusal>,
+}
+
+/// inbuxa: a DATA refusal by DLP rules: blocked, or a warning the sender
+/// may override, with each rule's name and notice.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DlpRefusal {
+    pub blocked: bool,
+    pub rules: Vec<(String, String)>,
 }
 
 #[derive(Clone, Debug)]
@@ -168,6 +184,8 @@ impl SessionData {
             spf_ehlo: None,
             spf_mail_from: None,
             dnsbl_error: None,
+            dlp_override: None,
+            dlp_refusal: None,
         }
     }
 }
@@ -291,6 +309,8 @@ impl SessionData {
             spf_ehlo: None,
             spf_mail_from: None,
             dnsbl_error: None,
+            dlp_override: None,
+            dlp_refusal: None,
         }
     }
 }

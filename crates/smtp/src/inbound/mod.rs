@@ -2,6 +2,8 @@
  * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
+ *
+ * Modified by Coffey Labs in 2026 for INBUXA.
  */
 
 use mail_auth::{DkimResult, DmarcResult, IprevResult, SpfResult, dmarc::Policy};
@@ -13,6 +15,7 @@ pub mod dkim;
 pub mod ehlo;
 pub mod hooks;
 pub mod mail;
+pub mod mailflow; // inbuxa: DLP and mail flow rules
 pub mod milter;
 pub mod rcpt;
 pub mod session;
