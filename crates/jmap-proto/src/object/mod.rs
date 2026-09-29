@@ -28,6 +28,7 @@ pub mod inbuxa_data_inventory; // inbuxa: personal-data catalog
 pub mod inbuxa_inventory_snapshot; // inbuxa: personal-data catalog
 pub mod inbuxa_audit; // inbuxa: the audit log
 pub mod inbuxa_legal_hold; // inbuxa: legal hold
+pub mod inbuxa_mail_rule; // inbuxa: DLP and mail flow rules
 pub mod inbuxa_hold_export; // inbuxa: legal hold exports
 pub mod inbuxa_explanation; // inbuxa: "Explain this" with the local model
 pub mod inbuxa_protocol_policy; // inbuxa: legacy protocols off

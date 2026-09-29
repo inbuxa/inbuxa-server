@@ -65,6 +65,10 @@ const OFFICER: &[Permission] = &[
     Permission::SysLegalHoldUpdate,
     Permission::SysLegalHoldExport,
     Permission::SysAccountLockGet,
+    // dlp-and-mail-flow-rules spec, §2.8: see DLP rules, review held mail
+    Permission::SysDlpPolicyGet,
+    Permission::SysDlpReviewGet,
+    Permission::SysDlpReviewUpdate,
 ];
 
 /// What a tenant's officer holds besides [`READS`].
@@ -111,6 +115,11 @@ fn created_key(tenant: Option<Id>) -> ValueClass {
         subspace: SUBSPACE_INBUXA,
         key,
     })
+}
+
+/// The server-level Compliance Officer role the server made, if it has.
+pub async fn server_role(data: &Store) -> trc::Result<Option<Id>> {
+    recorded(data, None).await
 }
 
 async fn recorded(data: &Store, tenant: Option<Id>) -> trc::Result<Option<Id>> {
@@ -172,13 +181,19 @@ pub async fn ensure_compliance_roles(registry: &RegistryStore, data: &Store) -> 
 
 /// A new tenant gets its Compliance Officer role.
 pub async fn tenant_created(registry: &RegistryStore, data: &Store, tenant: Id) -> trc::Result<()> {
-    create_once(registry, data, Some(tenant), tenant_role(tenant)).await.map(|_| ())
+    create_once(registry, data, Some(tenant), tenant_role(tenant))
+        .await
+        .map(|_| ())
 }
 
 /// Before a tenant is deleted: removes its Compliance Officer role if nobody
 /// holds it, so the role doesn't block the delete. Returns whether it did,
 /// so a delete refused for another reason can put it back.
-pub async fn tenant_deleting(registry: &RegistryStore, data: &Store, tenant: Id) -> trc::Result<bool> {
+pub async fn tenant_deleting(
+    registry: &RegistryStore,
+    data: &Store,
+    tenant: Id,
+) -> trc::Result<bool> {
     let Some(role) = recorded(data, Some(tenant)).await? else {
         return Ok(false);
     };
@@ -220,7 +235,9 @@ mod tests {
             // Beyond what any user holds for their own account
             for permission in all.into_iter().filter(|p| !user.contains(p)) {
                 let name = permission.as_str();
-                let holds = name.starts_with("sysLegalHold");
+                // Placing holds and reviewing held mail are the officer's
+                // job, not settings (settled answers 2 and 4)
+                let holds = name.starts_with("sysLegalHold") || name.starts_with("sysDlpReview");
                 assert!(
                     !(name.ends_with("Update") && !holds)
                         && !(name.ends_with("Create") && !holds)
@@ -249,7 +266,11 @@ mod tests {
             assert!(officer.contains(&hold));
             assert!(!tenant.contains(&hold));
         }
-        for both in [Permission::SysComplianceGet, Permission::SysAuditGet, Permission::SysAccountGet] {
+        for both in [
+            Permission::SysComplianceGet,
+            Permission::SysAuditGet,
+            Permission::SysAccountGet,
+        ] {
             assert!(officer.contains(&both) && tenant.contains(&both));
         }
         assert!(!officer.contains(&Permission::SysAuditSettingsUpdate));
@@ -257,9 +278,15 @@ mod tests {
 
     #[test]
     fn records_are_per_place() {
-        let ValueClass::Any(server) = created_key(None) else { panic!() };
-        let ValueClass::Any(a) = created_key(Some(Id::from(1u64))) else { panic!() };
-        let ValueClass::Any(b) = created_key(Some(Id::from(2u64))) else { panic!() };
+        let ValueClass::Any(server) = created_key(None) else {
+            panic!()
+        };
+        let ValueClass::Any(a) = created_key(Some(Id::from(1u64))) else {
+            panic!()
+        };
+        let ValueClass::Any(b) = created_key(Some(Id::from(2u64))) else {
+            panic!()
+        };
         assert_eq!(server.key, b"Pc");
         assert_ne!(a.key, b.key);
         assert!(a.key.starts_with(b"Pc"));

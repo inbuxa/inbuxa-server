@@ -296,6 +296,17 @@ impl Default for DefaultPermissions {
                     default.superuser.push(permission);
                     default.tenant.push(permission);
                 }
+                // inbuxa: DLP and mail flow rules, and held mail, are the
+                // server's: never a tenant's (dlp-and-mail-flow-rules spec,
+                // settled answer 3)
+                Permission::SysMailRuleGet
+                | Permission::SysMailRuleUpdate
+                | Permission::SysDlpPolicyGet
+                | Permission::SysDlpPolicyUpdate
+                | Permission::SysDlpReviewGet
+                | Permission::SysDlpReviewUpdate => {
+                    default.superuser.push(permission);
+                }
                 // inbuxa: AL-12: tenant administrators lock and delegate
                 // within their tenant
                 Permission::SysAccountLockGet

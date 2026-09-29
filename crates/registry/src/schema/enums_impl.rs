@@ -7091,6 +7091,12 @@ impl EnumImpl for Permission {
             b"sysLegalHoldUpdate" => Permission::SysLegalHoldUpdate,
             b"sysLegalHoldExport" => Permission::SysLegalHoldExport,
             b"sysComplianceGet" => Permission::SysComplianceGet,
+            b"sysMailRuleGet" => Permission::SysMailRuleGet,
+            b"sysMailRuleUpdate" => Permission::SysMailRuleUpdate,
+            b"sysDlpPolicyGet" => Permission::SysDlpPolicyGet,
+            b"sysDlpPolicyUpdate" => Permission::SysDlpPolicyUpdate,
+            b"sysDlpReviewGet" => Permission::SysDlpReviewGet,
+            b"sysDlpReviewUpdate" => Permission::SysDlpReviewUpdate,
             b"sysAccountGet" => Permission::SysAccountGet,
             b"sysAccountCreate" => Permission::SysAccountCreate,
             b"sysAccountUpdate" => Permission::SysAccountUpdate,
@@ -7781,6 +7787,12 @@ impl EnumImpl for Permission {
             Permission::SysLegalHoldUpdate => "sysLegalHoldUpdate",
             Permission::SysLegalHoldExport => "sysLegalHoldExport",
             Permission::SysComplianceGet => "sysComplianceGet",
+            Permission::SysMailRuleGet => "sysMailRuleGet",
+            Permission::SysMailRuleUpdate => "sysMailRuleUpdate",
+            Permission::SysDlpPolicyGet => "sysDlpPolicyGet",
+            Permission::SysDlpPolicyUpdate => "sysDlpPolicyUpdate",
+            Permission::SysDlpReviewGet => "sysDlpReviewGet",
+            Permission::SysDlpReviewUpdate => "sysDlpReviewUpdate",
             Permission::SysAccountGet => "sysAccountGet",
             Permission::SysAccountCreate => "sysAccountCreate",
             Permission::SysAccountUpdate => "sysAccountUpdate",
@@ -8464,6 +8476,12 @@ impl EnumImpl for Permission {
             671 => Some(Permission::SysLegalHoldUpdate),
             672 => Some(Permission::SysLegalHoldExport),
             673 => Some(Permission::SysComplianceGet),
+            674 => Some(Permission::SysMailRuleGet),
+            675 => Some(Permission::SysMailRuleUpdate),
+            676 => Some(Permission::SysDlpPolicyGet),
+            677 => Some(Permission::SysDlpPolicyUpdate),
+            678 => Some(Permission::SysDlpReviewGet),
+            679 => Some(Permission::SysDlpReviewUpdate),
             219 => Some(Permission::SysAccountGet),
             220 => Some(Permission::SysAccountCreate),
             221 => Some(Permission::SysAccountUpdate),
@@ -8908,7 +8926,7 @@ impl EnumImpl for Permission {
         }
     }
 
-    const COUNT: usize = 674;
+    const COUNT: usize = 680;
 }
 
 impl serde::Serialize for Permission {

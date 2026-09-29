@@ -46,6 +46,21 @@ const ADMIN_GRANTS: &[Permission] = &[
     Permission::SysLegalHoldUpdate,
     Permission::SysLegalHoldExport,
     Permission::SysComplianceGet,
+    Permission::SysMailRuleGet,
+    Permission::SysMailRuleUpdate,
+    Permission::SysDlpPolicyGet,
+    Permission::SysDlpPolicyUpdate,
+    Permission::SysDlpReviewGet,
+    Permission::SysDlpReviewUpdate,
+];
+
+/// Granted to the server-level Compliance Officer role once it exists:
+/// seeing DLP rules and reviewing held mail (dlp-and-mail-flow-rules spec,
+/// §2.8, settled answer 4). A new install's role has them from the start.
+const OFFICER_GRANTS: &[Permission] = &[
+    Permission::SysDlpPolicyGet,
+    Permission::SysDlpReviewGet,
+    Permission::SysDlpReviewUpdate,
 ];
 
 /// Granted to the default tenant administrator roles: reading and exporting
@@ -65,13 +80,16 @@ const TENANT_GRANTS: &[Permission] = &[
 enum Audience {
     Admin,
     Tenant,
+    Officer,
 }
 
 fn granted_key(permission: Permission, audience: Audience) -> ValueClass {
     let mut key = b"Pg".to_vec();
     // Admin grants keep the key they were first recorded under
-    if audience == Audience::Tenant {
-        key.extend_from_slice(b"tenant:");
+    match audience {
+        Audience::Admin => {}
+        Audience::Tenant => key.extend_from_slice(b"tenant:"),
+        Audience::Officer => key.extend_from_slice(b"officer:"),
     }
     key.extend_from_slice(permission.as_str().as_bytes());
     ValueClass::Any(AnyClass {
@@ -82,7 +100,8 @@ fn granted_key(permission: Permission, audience: Audience) -> ValueClass {
 
 pub(crate) async fn grant_new_admin_permissions(bp: &mut Bootstrap) -> trc::Result<()> {
     grant(bp, Audience::Admin, ADMIN_GRANTS).await?;
-    grant(bp, Audience::Tenant, TENANT_GRANTS).await
+    grant(bp, Audience::Tenant, TENANT_GRANTS).await?;
+    grant(bp, Audience::Officer, OFFICER_GRANTS).await
 }
 
 async fn grant(bp: &mut Bootstrap, audience: Audience, grants: &[Permission]) -> trc::Result<()> {
@@ -101,39 +120,47 @@ async fn grant(bp: &mut Bootstrap, audience: Audience, grants: &[Permission]) ->
     if pending.is_empty() {
         return Ok(());
     }
-    // An administrator's default roles include the plain User role, which
-    // every user also holds; only roles that are the audience's alone get it
-    let admin_roles: Vec<Id> = bp
-        .registry
-        .object::<Authentication>(Id::singleton())
-        .await?
-        .map(|auth| {
-            let (own, shared) = match audience {
-                Audience::Admin => (
-                    auth.default_admin_role_ids.as_slice(),
-                    [
-                        auth.default_user_role_ids.as_slice(),
-                        auth.default_group_role_ids.as_slice(),
-                        auth.default_tenant_role_ids.as_slice(),
-                    ]
-                    .concat(),
-                ),
-                Audience::Tenant => (
-                    auth.default_tenant_role_ids.as_slice(),
-                    [
-                        auth.default_user_role_ids.as_slice(),
-                        auth.default_group_role_ids.as_slice(),
+    // The officer role is the one the server made, if it has made it yet: a
+    // new install makes it after this, with the permissions already in it
+    let admin_roles: Vec<Id> = if audience == Audience::Officer {
+        super::compliance_roles::server_role(&bp.data_store)
+            .await?
+            .into_iter()
+            .collect()
+    } else {
+        // An administrator's default roles include the plain User role, which
+        // every user also holds; only roles that are the audience's alone get it
+        bp.registry
+            .object::<Authentication>(Id::singleton())
+            .await?
+            .map(|auth| {
+                let (own, shared) = match audience {
+                    Audience::Admin => (
                         auth.default_admin_role_ids.as_slice(),
-                    ]
-                    .concat(),
-                ),
-            };
-            own.iter()
-                .filter(|id| !shared.contains(id))
-                .copied()
-                .collect()
-        })
-        .unwrap_or_default();
+                        [
+                            auth.default_user_role_ids.as_slice(),
+                            auth.default_group_role_ids.as_slice(),
+                            auth.default_tenant_role_ids.as_slice(),
+                        ]
+                        .concat(),
+                    ),
+                    Audience::Tenant | Audience::Officer => (
+                        auth.default_tenant_role_ids.as_slice(),
+                        [
+                            auth.default_user_role_ids.as_slice(),
+                            auth.default_group_role_ids.as_slice(),
+                            auth.default_admin_role_ids.as_slice(),
+                        ]
+                        .concat(),
+                    ),
+                };
+                own.iter()
+                    .filter(|id| !shared.contains(id))
+                    .copied()
+                    .collect()
+            })
+            .unwrap_or_default()
+    };
     // Fetched by id: the registry's listing doesn't reach stored roles
     for role_id in admin_roles {
         let Some(stored) = bp

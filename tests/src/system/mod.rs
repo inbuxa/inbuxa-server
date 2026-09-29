@@ -14,6 +14,7 @@ pub mod ai_explain;
 pub mod account_lock; // inbuxa: account lock with delegation
 pub mod legal_hold; // inbuxa: legal hold
 pub mod compliance; // inbuxa: the compliance roles
+pub mod mail_rules; // inbuxa: DLP and mail flow rules
 pub mod audit; // inbuxa: the audit log
 pub mod authorization;
 pub mod auto_reload; // inbuxa: registry writes apply at once

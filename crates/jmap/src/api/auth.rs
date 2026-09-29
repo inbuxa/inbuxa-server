@@ -103,6 +103,16 @@ impl JmapAuthorization for AccessToken {
                 // inbuxa: account lock (AL-12)
                 GetRequestMethod::AccountLock(_) => Permission::SysAccountLockGet,
                 GetRequestMethod::LegalHold(_) => Permission::SysLegalHoldGet,
+                // inbuxa: DLP and mail flow rules share an object; either
+                // permission reaches it, and the handler shows each kind
+                // only to those who may see it
+                GetRequestMethod::MailRule(_) => {
+                    if self.has_permission(Permission::SysMailRuleGet) {
+                        Permission::SysMailRuleGet
+                    } else {
+                        Permission::SysDlpPolicyGet
+                    }
+                }
                 GetRequestMethod::HoldExport(_) => Permission::SysLegalHoldExport,
                 // inbuxa: legacy protocols off. It takes listeners away and
                 // puts them back, so it takes the listener's permissions
@@ -247,6 +257,19 @@ impl JmapAuthorization for AccessToken {
                         Permission::SysLegalHoldUpdate,
                         Permission::SysLegalHoldUpdate,
                     ),
+                    // inbuxa: DLP and mail flow rules: either change
+                    // permission gets in; the handler checks each rule's kind
+                    SetRequestMethod::MailRule(_) => {
+                        if self.has_permission(Permission::SysMailRuleUpdate)
+                            || self.has_permission(Permission::SysDlpPolicyUpdate)
+                        {
+                            Ok(())
+                        } else {
+                            Err(trc::JmapEvent::Forbidden
+                                .into_err()
+                                .details("You are not authorized to change mail rules"))
+                        }
+                    }
                     // inbuxa: LH-12, exporting held data
                     SetRequestMethod::HoldExport(s) => validate_set(
                         s,
@@ -407,6 +430,7 @@ impl JmapAuthorization for AccessToken {
                 | MethodObject::AccountLock
                 | MethodObject::LegalHold
                 | MethodObject::HoldExport
+                | MethodObject::MailRule
                 | MethodObject::ProtocolPolicy
                 | MethodObject::TenantProtocolPolicy => Permission::JmapEmailChanges,
                 // inbuxa: x:MaskedEmail/changes reads what /get reads
