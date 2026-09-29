@@ -88,6 +88,9 @@ impl Response<'_> {
                         GetResponseMethod::MailRule(response) => {
                             response.eval_jptr(path, &mut results)
                         }
+                        GetResponseMethod::Journal(response) => {
+                            response.eval_jptr(path, &mut results)
+                        }
                         GetResponseMethod::HeldMessage(response) => {
                             response.eval_jptr(path, &mut results)
                         }

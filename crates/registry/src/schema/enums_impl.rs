@@ -7097,6 +7097,10 @@ impl EnumImpl for Permission {
             b"sysDlpPolicyUpdate" => Permission::SysDlpPolicyUpdate,
             b"sysDlpReviewGet" => Permission::SysDlpReviewGet,
             b"sysDlpReviewUpdate" => Permission::SysDlpReviewUpdate,
+            b"sysJournalGet" => Permission::SysJournalGet,
+            b"sysJournalUpdate" => Permission::SysJournalUpdate,
+            b"sysJournalSearch" => Permission::SysJournalSearch,
+            b"sysJournalExport" => Permission::SysJournalExport,
             b"sysAccountGet" => Permission::SysAccountGet,
             b"sysAccountCreate" => Permission::SysAccountCreate,
             b"sysAccountUpdate" => Permission::SysAccountUpdate,
@@ -7793,6 +7797,10 @@ impl EnumImpl for Permission {
             Permission::SysDlpPolicyUpdate => "sysDlpPolicyUpdate",
             Permission::SysDlpReviewGet => "sysDlpReviewGet",
             Permission::SysDlpReviewUpdate => "sysDlpReviewUpdate",
+            Permission::SysJournalGet => "sysJournalGet",
+            Permission::SysJournalUpdate => "sysJournalUpdate",
+            Permission::SysJournalSearch => "sysJournalSearch",
+            Permission::SysJournalExport => "sysJournalExport",
             Permission::SysAccountGet => "sysAccountGet",
             Permission::SysAccountCreate => "sysAccountCreate",
             Permission::SysAccountUpdate => "sysAccountUpdate",
@@ -8482,6 +8490,10 @@ impl EnumImpl for Permission {
             677 => Some(Permission::SysDlpPolicyUpdate),
             678 => Some(Permission::SysDlpReviewGet),
             679 => Some(Permission::SysDlpReviewUpdate),
+            680 => Some(Permission::SysJournalGet),
+            681 => Some(Permission::SysJournalUpdate),
+            682 => Some(Permission::SysJournalSearch),
+            683 => Some(Permission::SysJournalExport),
             219 => Some(Permission::SysAccountGet),
             220 => Some(Permission::SysAccountCreate),
             221 => Some(Permission::SysAccountUpdate),
@@ -8926,7 +8938,7 @@ impl EnumImpl for Permission {
         }
     }
 
-    const COUNT: usize = 680;
+    const COUNT: usize = 684;
 }
 
 impl serde::Serialize for Permission {

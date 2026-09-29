@@ -261,6 +261,38 @@ read, export.
 Each phase is its own PR with tests; releases as John decides. Like DLP, it
 stays out of production until John says.
 
+## As built
+
+Phase 2 (`feature/journal-capture`), where it differs from the design or
+fills in what it left open:
+
+- **The chain** is the journal's own (`crates/features/src/journal/
+  entries.rs`), not the audit log's code shared. Entries expire out of chain
+  order (each keeps its journal's retention, and holds keep some longer), so
+  a link names its entry by SHA-256 instead of holding it: purging removes
+  the entry, its indexes and its report's blob link, and writes a purge
+  marker; the link stays. An entry missing without a marker is a broken
+  chain. Purged links at a chain's start are cleared and a floor recorded,
+  as the audit log does.
+- **If the copy can't be taken**, the message isn't queued: the sender gets
+  a temporary failure and tries again. Nothing leaves unjournaled.
+- **The report** says `Authenticated: yes|no` instead of the signed-in
+  account (the queue doesn't keep which account it was). `Added by rule`
+  comes with **Journal it** in phase 3. A recipient given with an ORCPT
+  that names another address counts as expanded from that address.
+- **Journal reports** the server queues carry message flag bit 48
+  (`FROM_JOURNAL`); an older version ignores the bit.
+- **Permissions 680–683**: administrators get `sysJournalGet`/`Update`; the
+  Compliance Officer gets `Get`, `Search` and `Export`. So that an
+  administrator can still appoint an officer (and grant reading as settled
+  answer 5 describes), whoever holds `sysJournalUpdate` may grant `Search`
+  and `Export` without holding them; the role change is in the audit log.
+- **`inbuxa:JournalEntry`** (get, query) and **Check the journal** over
+  JMAP come in phase 4 with search, so every read is audited from the first
+  version that allows one. Phase 2 has `inbuxa:Journal` only.
+- **Outside archives** (a journal's destination) come in phase 3; every
+  journal writes to the built-in journal until then.
+
 ## Known gaps
 
 - A message a person saves to Sent over IMAP, or sends through another

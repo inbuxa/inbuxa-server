@@ -165,6 +165,14 @@ impl AccessToken {
         mut requested_permissions: Permissions,
     ) -> Result<(), Vec<Permission>> {
         requested_permissions.difference(self.permissions_bits());
+        // inbuxa: journaling, JR-18: whoever sets up journals may give
+        // others (or, through a role, themselves) the reading of them,
+        // which administrators don't hold by default; the role change is
+        // in the audit log
+        if self.has_permission(Permission::SysJournalUpdate) {
+            requested_permissions.clear(Permission::SysJournalSearch as usize);
+            requested_permissions.clear(Permission::SysJournalExport as usize);
+        }
         if requested_permissions.is_empty() {
             Ok(())
         } else {
@@ -307,6 +315,13 @@ impl Default for DefaultPermissions {
                 | Permission::SysDlpReviewUpdate => {
                     default.superuser.push(permission);
                 }
+                // inbuxa: journals are the server's; administrators set them
+                // up but read what's journaled only if granted it
+                // (journaling spec, JR-18, settled answer 5)
+                Permission::SysJournalGet | Permission::SysJournalUpdate => {
+                    default.superuser.push(permission);
+                }
+                Permission::SysJournalSearch | Permission::SysJournalExport => {}
                 // inbuxa: AL-12: tenant administrators lock and delegate
                 // within their tenant
                 Permission::SysAccountLockGet

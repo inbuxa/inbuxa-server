@@ -22,6 +22,7 @@ pub mod ai;
 pub mod audit;
 pub mod branding;
 pub mod hold;
+pub mod journal;
 pub mod lock;
 pub mod mailflow;
 pub mod masked_email;

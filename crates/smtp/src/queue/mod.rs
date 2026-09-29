@@ -24,6 +24,7 @@ use utils::DomainPart;
 
 pub mod dsn;
 pub mod held; // inbuxa: mail held for review
+pub mod journal; // inbuxa: journaling
 pub mod manager;
 pub mod quota;
 pub mod spool;

@@ -2,6 +2,8 @@
  * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
+ *
+ * Modified by Coffey Labs in 2026 for INBUXA.
  */
 
 use super::{
@@ -446,6 +448,25 @@ impl MessageWrapper {
         {
             trc::error!(
                 err.details("Failed to write blob.")
+                    .span_id(session_id)
+                    .caused_by(trc::location!())
+            );
+
+            return false;
+        }
+
+        // inbuxa: journaling, JR-1: the copy is taken before the message is
+        // queued; if it can't be, the message isn't queued either
+        if let Err(err) = crate::queue::journal::capture(
+            server,
+            self.queue_id,
+            &self.message,
+            message.as_ref(),
+        )
+        .await
+        {
+            trc::error!(
+                err.details("Failed to journal a message.")
                     .span_id(session_id)
                     .caused_by(trc::location!())
             );
