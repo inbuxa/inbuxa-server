@@ -19,8 +19,18 @@
 //! same card number pasted twice counts once. They stay in memory: callers
 //! read only [`Findings::len`].
 
+pub mod africa;
+pub mod americas;
 pub mod any;
+pub mod asia;
+pub mod australia;
+pub mod canada;
 pub mod checks;
+pub mod eu;
+pub mod europe;
+pub mod templates;
+pub mod uk;
+pub mod us;
 
 use ahash::AHashSet;
 
@@ -108,7 +118,20 @@ impl Detector {
 
 /// Every detector, in the order the console lists them.
 pub fn all() -> impl Iterator<Item = &'static Detector> {
-    any::DETECTORS.iter()
+    [
+        any::DETECTORS,
+        us::DETECTORS,
+        uk::DETECTORS,
+        canada::DETECTORS,
+        australia::DETECTORS,
+        eu::DETECTORS,
+        europe::DETECTORS,
+        asia::DETECTORS,
+        americas::DETECTORS,
+        africa::DETECTORS,
+    ]
+    .into_iter()
+    .flatten()
 }
 
 pub fn by_id(id: &str) -> Option<&'static Detector> {
@@ -159,6 +182,38 @@ pub fn stands_alone(text: &str, start: usize, end: usize) -> bool {
     before.is_none_or(|c| !c.is_alphanumeric()) && after.is_none_or(|c| !c.is_alphanumeric())
 }
 
+/// Days in `month` of `year` (0 for a month that doesn't exist).
+pub fn days_in(year: u32, month: u32) -> u32 {
+    match month {
+        1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
+        4 | 6 | 9 | 11 => 30,
+        2 if year.is_multiple_of(4) && (!year.is_multiple_of(100) || year.is_multiple_of(400)) => {
+            29
+        }
+        2 => 28,
+        _ => 0,
+    }
+}
+
+/// Whether `year`-`month`-`day` is a real date between 1900 and 2100.
+pub fn valid_date(year: u32, month: u32, day: u32) -> bool {
+    (1900..=2100).contains(&year) && (1..=days_in(year, month)).contains(&day)
+}
+
+/// Whether a two-digit year, month and day make a real date in either the
+/// 1900s or the 2000s.
+pub fn valid_short_date(yy: u32, month: u32, day: u32) -> bool {
+    valid_date(1900 + yy, month, day) || valid_date(2000 + yy, month, day)
+}
+
+/// The value of each digit in `s`.
+pub fn digit_values(s: &str) -> Vec<u32> {
+    s.bytes()
+        .filter(u8::is_ascii_digit)
+        .map(|b| u32::from(b - b'0'))
+        .collect()
+}
+
 /// The ASCII digits of `s`.
 pub fn digits(s: &str) -> String {
     s.chars().filter(char::is_ascii_digit).collect()
@@ -186,6 +241,30 @@ mod tests {
         let text = format!("passport {} X1234567", "é".repeat(45));
         let start = text.find("X123").unwrap();
         assert!(word_near(&text, start, start + 8, &["passport"]));
+    }
+
+    /// An ordinary business email: order, invoice and tracking numbers,
+    /// dates, amounts, a street address. Nothing here is an identifier, so
+    /// no detector may fire, except the contact ones on the signature.
+    #[test]
+    fn ordinary_mail_finds_nothing() {
+        let text = "Hi Dana,\n\nThanks for order 4471-2290 placed 2026-09-14. Invoice INV-2026-00917 \
+            for $12,480.00 is due 10/31/2026; PO 7731902 covers lines 1-14. Tracking \
+            1Z999AA10123456784, parcel 3 of 5, 12.5 kg, box 40x30x20 cm. Meeting moved to \
+            Tuesday 9:30-10:15 in room 2B, building 1177. Ticket #5520318, case 20260914-0042. \
+            Version 2026.9.28.4, build 118822, commit 5a73a118. Serial SN-88213-X. \
+            Ship to 1600 Amphitheatre Pkwy, Mountain View, CA 94043. Revenue grew 18% to \
+            1,204,332 units; see figures 3.1-3.4 and table 12.\n\nBest,\nSam\n\
+            Sam Rivera | +1 (415) 555-2671 | sam@example.com";
+        let quiet = ["email-addresses", "phone-numbers"];
+        for detector in all().filter(|d| !quiet.contains(&d.id)) {
+            assert_eq!(
+                detector.count(text),
+                0,
+                "{} fired on ordinary mail",
+                detector.id
+            );
+        }
     }
 
     #[test]
