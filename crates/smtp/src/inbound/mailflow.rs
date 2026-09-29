@@ -21,6 +21,7 @@ use inbuxa_features::{
             Attachment, Content, Decision, Envelope, Outcome as RulesOutcome, Recipient, RuleRef,
         },
         extract::{self, Extracted, Limits},
+        held::{self, Held, HeldRule, KEEP_DAYS},
         rewrite,
         rules::{Action as RuleAction, Kind},
     },
@@ -44,6 +45,20 @@ pub enum Checked {
     },
     /// Refuse, with this SMTP reply, and for a JMAP submission, why.
     Refuse(Vec<u8>, Option<DlpRefusal>),
+    /// Queue it held for review (§2.6), with any transport changes.
+    Hold {
+        draft: HeldDraft,
+        message: Option<Vec<u8>>,
+        envelope: Vec<EnvelopeChange>,
+    },
+}
+
+/// What the review record will say, once the message has a queue id.
+pub struct HeldDraft {
+    pub subject: String,
+    pub rules: Vec<HeldRule>,
+    pub counts: Vec<(String, usize)>,
+    pub notify_sender: bool,
 }
 
 /// What a transport rule changes about where a message goes.
@@ -219,6 +234,7 @@ impl<T: SessionStream> Session<T> {
             None
         };
         let checked_subject = tag.as_ref().map_or(subject, |(_, rest)| rest.as_str());
+        let held_subject = checked_subject.to_string();
 
         let mut content = Content {
             subject: checked_subject,
@@ -319,22 +335,51 @@ impl<T: SessionStream> Session<T> {
             .await;
         }
 
-        match decision {
-            Decision::Block(rules) | Decision::Hold { rules, .. } => {
-                // Hold for review is phase 3: until then a hold rule blocks,
-                // rather than let the message through unreviewed
+        let hold = match decision {
+            Decision::Block(rules) => {
                 let refusal = refusal(true, &rules);
-                Checked::Refuse(format!("550 5.7.1 {}\r\n", notices(&rules)).into_bytes(), Some(refusal))
+                return Checked::Refuse(
+                    format!("550 5.7.1 {}\r\n", notices(&rules)).into_bytes(),
+                    Some(refusal),
+                );
             }
-            Decision::Warn(rules) => Checked::Refuse(
-                format!(
-                    "550 5.7.1 {} To send anyway, start the subject with [override: your reason]\r\n",
-                    notices(&rules)
-                )
-                .into_bytes(),
-                Some(refusal(false, &rules)),
-            ),
-            Decision::Pass => {
+            Decision::Warn(rules) => {
+                return Checked::Refuse(
+                    format!(
+                        "550 5.7.1 {} To send anyway, start the subject with [override: your reason]\r\n",
+                        notices(&rules)
+                    )
+                    .into_bytes(),
+                    Some(refusal(false, &rules)),
+                );
+            }
+            // Accepted and queued, but not sent until a reviewer says so
+            // (§2.6); the transport rules still apply, so what's released
+            // is what would have gone out
+            Decision::Hold {
+                rules,
+                notify_sender,
+            } => Some(HeldDraft {
+                subject: held_subject,
+                rules: rules
+                    .iter()
+                    .map(|r| HeldRule {
+                        name: r.name.clone(),
+                        notice: r.notice.clone(),
+                    })
+                    .collect(),
+                counts: outcome
+                    .matched
+                    .iter()
+                    .filter(|m| m.kind == Kind::Dlp)
+                    .flat_map(|m| m.counts.iter().cloned())
+                    .collect(),
+                notify_sender,
+            }),
+            Decision::Pass => None,
+        };
+        {
+            {
                 // The tag was an instruction to the server, not part of the
                 // subject: it doesn't go out
                 let mut current: Option<Vec<u8>> =
@@ -344,12 +389,18 @@ impl<T: SessionStream> Session<T> {
                     for action in &matched.actions {
                         let now = current.as_deref().unwrap_or(message);
                         let next = match action {
-                            RuleAction::AddDisclaimer { text, html, position } => {
-                                rewrite::add_disclaimer(now, text, html.as_deref(), *position)
+                            RuleAction::AddDisclaimer {
+                                text,
+                                html,
+                                position,
+                            } => rewrite::add_disclaimer(now, text, html.as_deref(), *position),
+                            RuleAction::AddHeader { name, value } => {
+                                Some(rewrite::add_header(now, name, value))
                             }
-                            RuleAction::AddHeader { name, value } => Some(rewrite::add_header(now, name, value)),
                             RuleAction::RemoveHeader { name } => rewrite::remove_header(now, name),
-                            RuleAction::PrefixSubject { text } => rewrite::prefix_subject(now, text),
+                            RuleAction::PrefixSubject { text } => {
+                                rewrite::prefix_subject(now, text)
+                            }
                             RuleAction::AddRecipient { address } => {
                                 changes.push(EnvelopeChange::AddRecipient(address.clone()));
                                 None
@@ -363,13 +414,16 @@ impl<T: SessionStream> Session<T> {
                                 None
                             }
                             RuleAction::Refuse { text } => {
-                                self.record_transport(&sender, &matched.name, "refused", &domains).await;
+                                self.record_transport(&sender, &matched.name, "refused", &domains)
+                                    .await;
                                 return Checked::Refuse(
                                     format!("550 5.7.1 {}\r\n", reply_text(text)).into_bytes(),
                                     None,
                                 );
                             }
-                            RuleAction::Block { .. } | RuleAction::Warn { .. } | RuleAction::Hold { .. } => None,
+                            RuleAction::Block { .. }
+                            | RuleAction::Warn { .. }
+                            | RuleAction::Hold { .. } => None,
                         };
                         if next.is_some() {
                             current = next;
@@ -381,22 +435,73 @@ impl<T: SessionStream> Session<T> {
                         .actions
                         .iter()
                         .filter_map(|a| match a {
-                            RuleAction::AddRecipient { address } => Some(format!("copied to {address}")),
-                            RuleAction::Redirect { addresses } => Some(format!("redirected to {}", addresses.join(", "))),
+                            RuleAction::AddRecipient { address } => {
+                                Some(format!("copied to {address}"))
+                            }
+                            RuleAction::Redirect { addresses } => {
+                                Some(format!("redirected to {}", addresses.join(", ")))
+                            }
                             RuleAction::Route { queue } => Some(format!("routed through {queue}")),
                             _ => None,
                         })
                         .collect();
                     if !routed.is_empty() {
-                        self.record_transport(&sender, &matched.name, &routed.join(", "), &domains).await;
+                        self.record_transport(&sender, &matched.name, &routed.join(", "), &domains)
+                            .await;
                     }
                 }
-                if current.is_none() && changes.is_empty() {
-                    Checked::Accept
-                } else {
-                    Checked::Changed { message: current, envelope: changes }
+                match hold {
+                    Some(draft) => Checked::Hold {
+                        draft,
+                        message: current,
+                        envelope: changes,
+                    },
+                    None if current.is_none() && changes.is_empty() => Checked::Accept,
+                    None => Checked::Changed {
+                        message: current,
+                        envelope: changes,
+                    },
                 }
             }
+        }
+    }
+
+    /// Writes the review record for a message just queued held (§2.6),
+    /// and tells the sender when the rule asks. A failure to write it is
+    /// logged: the message stays held, never sent unreviewed.
+    pub async fn record_held(
+        &self,
+        queue_id: u64,
+        draft: HeldDraft,
+        sender: String,
+        recipients: Vec<String>,
+        size: u64,
+    ) {
+        let at = store::write::now();
+        let account = self.data.authenticated_as.as_ref();
+        let record = Held {
+            queue_id,
+            sender,
+            account_id: account.map(|a| a.account_id),
+            tenant_id: account.and_then(|a| a.account.id_tenant),
+            recipients,
+            subject: draft.subject,
+            size,
+            rules: draft.rules,
+            counts: draft.counts,
+            held_at: at,
+            expires_at: at + KEEP_DAYS * 86_400,
+        };
+        if let Err(err) = held::create(self.server.store(), &record).await {
+            trc::error!(
+                err.span_id(self.data.session_id)
+                    .caused_by(trc::location!())
+                    .details("Failed to write the review record of a held message")
+            );
+            return;
+        }
+        if draft.notify_sender {
+            crate::queue::held::notify_held(&self.server, &record).await;
         }
     }
 
@@ -485,9 +590,8 @@ impl<T: SessionStream> Session<T> {
             .collect::<Vec<_>>()
             .join("; ");
         let (what, outcome, reason) = match decision {
-            Decision::Block(_) | Decision::Hold { .. } => {
-                ("blocked", Outcome::refused("inbuxa:dlpBlocked", None), None)
-            }
+            Decision::Hold { .. } => ("held for review", Outcome::success(), None),
+            Decision::Block(_) => ("blocked", Outcome::refused("inbuxa:dlpBlocked", None), None),
             Decision::Warn(_) => ("warned", Outcome::refused("inbuxa:dlpWarning", None), None),
             Decision::Pass => (
                 "sent after a warning",

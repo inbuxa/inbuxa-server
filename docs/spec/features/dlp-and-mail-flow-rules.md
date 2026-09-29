@@ -293,8 +293,19 @@ once it's held (the webmail says so).
 Held messages count against no one's quota. Each held message and each
 decision is in the audit log.
 
-**Until phase 3** a hold rule blocks, with its notice, rather than let the
-message through unreviewed.
+**As built (phase 3).** Holding uses the queue's own future-release
+mechanism: the message is queued with its release a century off, every
+recipient's retry, notice and expiry pushed with it, so the stored format
+doesn't change. Release puts each recipient due now, keeps the gap to its
+next notice, and counts its lifetime from the release. The review record
+(`inbuxa:HeldMessage`, under `R` `h` + queue id) holds the sender,
+recipients, subject, size, rules and counts. Transport rules still apply to
+held mail, so what's released is what would have gone out. The daily
+clean-up rejects what's past its 7 days (recorded as the server's doing).
+`preview` returns the text (64 KB) only when asked for, and each read is
+recorded as `blobAccess`. Emails › Queue refuses to change or delete held
+mail, and the sender can't unsend it. The 7 days is a constant for now; a
+setting comes with the console page.
 
 ### 2.7 What's recorded
 

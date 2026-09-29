@@ -2,6 +2,8 @@
  * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
+ *
+ * Modified by Coffey Labs in 2026 for INBUXA.
  */
 
 use common::{
@@ -21,6 +23,7 @@ use types::blob_hash::BlobHash;
 use utils::DomainPart;
 
 pub mod dsn;
+pub mod held; // inbuxa: mail held for review
 pub mod manager;
 pub mod quota;
 pub mod spool;

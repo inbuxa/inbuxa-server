@@ -111,6 +111,7 @@ pub enum GetResponseMethod {
     AccountLock(GetResponse<crate::object::inbuxa_account_lock::AccountLock>),
     LegalHold(GetResponse<crate::object::inbuxa_legal_hold::LegalHold>),
     MailRule(GetResponse<crate::object::inbuxa_mail_rule::MailRule>),
+    HeldMessage(GetResponse<crate::object::inbuxa_held_message::HeldMessage>),
     HoldExport(GetResponse<crate::object::inbuxa_hold_export::HoldExport>),
     ProtocolPolicy(GetResponse<crate::object::inbuxa_protocol_policy::ProtocolPolicy>),
     TenantProtocolPolicy(
@@ -147,6 +148,7 @@ pub enum SetResponseMethod {
     AccountLock(Box<SetResponse<crate::object::inbuxa_account_lock::AccountLock>>),
     LegalHold(Box<SetResponse<crate::object::inbuxa_legal_hold::LegalHold>>),
     MailRule(Box<SetResponse<crate::object::inbuxa_mail_rule::MailRule>>),
+    HeldMessage(Box<SetResponse<crate::object::inbuxa_held_message::HeldMessage>>),
     HoldExport(Box<SetResponse<crate::object::inbuxa_hold_export::HoldExport>>),
     Explanation(Box<SetResponse<crate::object::inbuxa_explanation::Explanation>>),
     ProtocolPolicy(Box<SetResponse<crate::object::inbuxa_protocol_policy::ProtocolPolicy>>),
@@ -801,6 +803,18 @@ impl<'x> From<SetResponse<crate::object::inbuxa_account_lock::AccountLock>> for 
 }
 
 // inbuxa: legal hold
+impl<'x> From<GetResponse<crate::object::inbuxa_held_message::HeldMessage>> for ResponseMethod<'x> {
+    fn from(value: GetResponse<crate::object::inbuxa_held_message::HeldMessage>) -> Self {
+        ResponseMethod::Get(GetResponseMethod::HeldMessage(value))
+    }
+}
+
+impl<'x> From<SetResponse<crate::object::inbuxa_held_message::HeldMessage>> for ResponseMethod<'x> {
+    fn from(value: SetResponse<crate::object::inbuxa_held_message::HeldMessage>) -> Self {
+        ResponseMethod::Set(SetResponseMethod::HeldMessage(Box::new(value)))
+    }
+}
+
 impl<'x> From<GetResponse<crate::object::inbuxa_mail_rule::MailRule>> for ResponseMethod<'x> {
     fn from(value: GetResponse<crate::object::inbuxa_mail_rule::MailRule>) -> Self {
         ResponseMethod::Get(GetResponseMethod::MailRule(value))

@@ -49,6 +49,12 @@ use trc::AddContext;
 use types::{blob::BlobId, blob_hash::BlobHash, id::Id};
 use utils::map::vec_map::VecMap;
 
+/// inbuxa: held mail is the review queue's to decide.
+fn held_refusal() -> SetError<Property> {
+    SetError::forbidden()
+        .with_description("This message is held for review: release or reject it under Compliance, Held mail.")
+}
+
 pub(crate) async fn queued_message_set(
     mut set: RegistrySetResponse<'_>,
 ) -> trc::Result<RegistrySetResponse<'_>> {
@@ -66,6 +72,12 @@ pub(crate) async fn queued_message_set(
     let mut refresh_queue = false;
     'outer: for (id, value) in set.update.drain(..) {
         let queue_id = id.id();
+        // inbuxa: held mail is released or rejected by review, not here
+        // (dlp-and-mail-flow-rules spec, §2.6)
+        if inbuxa_features::mailflow::held::is_held(set.server.store(), queue_id).await? {
+            set.response.not_updated.append(id, held_refusal());
+            continue;
+        }
         let Some(archive) = set.server.read_message_archive(queue_id).await? else {
             set.response.not_updated.append(id, SetError::not_found());
             continue;
@@ -238,6 +250,11 @@ pub(crate) async fn queued_message_set(
 
     // Process destroy operations
     for id in set.destroy.drain(..) {
+        // inbuxa: §2.6, as above
+        if inbuxa_features::mailflow::held::is_held(set.server.store(), id.id()).await? {
+            set.response.not_destroyed.append(id, held_refusal());
+            continue;
+        }
         let Some(message) = set.server.read_message(id.id(), QueueName::default()).await else {
             set.response.not_destroyed.append(id, SetError::not_found());
             continue;

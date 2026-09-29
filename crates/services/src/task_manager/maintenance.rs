@@ -286,6 +286,11 @@ async fn store_maintenance(
                 trc::error!(err.details("Failed to purge expired IP bans"));
             }
 
+            // inbuxa: DLP, §2.6: mail nobody reviewed in time goes back
+            if let Err(err) = smtp::queue::held::expire(server).await {
+                trc::error!(err.details("Failed to return unreviewed held mail"));
+            }
+
             // inbuxa: AU-7: audit records past their retention go; a
             // failure leaves them for the next run
             if let Err(err) = server.audit_purge().await {

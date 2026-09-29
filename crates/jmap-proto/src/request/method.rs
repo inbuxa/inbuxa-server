@@ -67,6 +67,7 @@ pub enum MethodObject {
     ProtocolPolicy,
     // inbuxa: DLP and mail flow rules
     MailRule,
+    HeldMessage,
     TenantProtocolPolicy,
 }
 
@@ -105,7 +106,8 @@ impl MethodObject {
             | MethodObject::AccountLock
             | MethodObject::LegalHold
             | MethodObject::HoldExport
-            | MethodObject::MailRule => Capability::Inbuxa,
+            | MethodObject::MailRule
+            | MethodObject::HeldMessage => Capability::Inbuxa,
             MethodObject::ProtocolPolicy => Capability::Inbuxa,
             MethodObject::TenantProtocolPolicy => Capability::Inbuxa,
         }
@@ -301,6 +303,8 @@ impl MethodName {
             (MethodFunction::Set, MethodObject::LegalHold) => "inbuxa:LegalHold/set",
             (MethodFunction::Get, MethodObject::MailRule) => "inbuxa:MailRule/get",
             (MethodFunction::Set, MethodObject::MailRule) => "inbuxa:MailRule/set",
+            (MethodFunction::Get, MethodObject::HeldMessage) => "inbuxa:HeldMessage/get",
+            (MethodFunction::Set, MethodObject::HeldMessage) => "inbuxa:HeldMessage/set",
             (MethodFunction::Get, MethodObject::HoldExport) => "inbuxa:HoldExport/get",
             (MethodFunction::Set, MethodObject::HoldExport) => "inbuxa:HoldExport/set",
             (MethodFunction::Set, MethodObject::AuditVerification) => {
@@ -455,6 +459,8 @@ impl MethodName {
             "inbuxa:LegalHold/set" => (MethodObject::LegalHold, MethodFunction::Set),
             "inbuxa:MailRule/get" => (MethodObject::MailRule, MethodFunction::Get),
             "inbuxa:MailRule/set" => (MethodObject::MailRule, MethodFunction::Set),
+            "inbuxa:HeldMessage/get" => (MethodObject::HeldMessage, MethodFunction::Get),
+            "inbuxa:HeldMessage/set" => (MethodObject::HeldMessage, MethodFunction::Set),
             "inbuxa:HoldExport/get" => (MethodObject::HoldExport, MethodFunction::Get),
             "inbuxa:HoldExport/set" => (MethodObject::HoldExport, MethodFunction::Set),
             "inbuxa:AuditVerification/set" => (MethodObject::AuditVerification, MethodFunction::Set),
@@ -526,6 +532,7 @@ impl Display for MethodObject {
             MethodObject::AccountLock => "inbuxa:AccountLock",
             MethodObject::LegalHold => "inbuxa:LegalHold",
             MethodObject::MailRule => "inbuxa:MailRule",
+            MethodObject::HeldMessage => "inbuxa:HeldMessage",
             MethodObject::HoldExport => "inbuxa:HoldExport",
             MethodObject::ProtocolPolicy => "inbuxa:ProtocolPolicy",
             MethodObject::TenantProtocolPolicy => "inbuxa:TenantProtocolPolicy",

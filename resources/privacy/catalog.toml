@@ -79,6 +79,21 @@ lockedAt = ["metadata"]
 lockedBy = ["identifier"]
 delegates = ["identifier"]
 
+[object."inbuxa:HeldMessage"]
+file = "inbuxa_held_message.rs"
+default = "none"
+whose = ["holder", "correspondent"]
+where = ["data-store", "blob-store"]
+scope = "server"
+retention = "object-life"
+[object."inbuxa:HeldMessage".properties]
+sender = ["identifier", "contact"]
+recipients = ["identifier", "contact"]
+subject = ["content"]
+preview = ["content"]
+note = ["content"]
+counts = ["metadata"]
+
 [object."inbuxa:MailRule"]
 file = "inbuxa_mail_rule.rs"
 default = "none"

@@ -106,6 +106,8 @@ impl JmapAuthorization for AccessToken {
                 // inbuxa: DLP and mail flow rules share an object; either
                 // permission reaches it, and the handler shows each kind
                 // only to those who may see it
+                // inbuxa: mail held for review (§2.8)
+                GetRequestMethod::HeldMessage(_) => Permission::SysDlpReviewGet,
                 GetRequestMethod::MailRule(_) => {
                     if self.has_permission(Permission::SysMailRuleGet) {
                         Permission::SysMailRuleGet
@@ -256,6 +258,14 @@ impl JmapAuthorization for AccessToken {
                         Permission::SysLegalHoldCreate,
                         Permission::SysLegalHoldUpdate,
                         Permission::SysLegalHoldUpdate,
+                    ),
+                    // inbuxa: releasing or rejecting held mail (§2.8)
+                    SetRequestMethod::HeldMessage(s) => validate_set(
+                        s,
+                        self,
+                        Permission::SysDlpReviewUpdate,
+                        Permission::SysDlpReviewUpdate,
+                        Permission::SysDlpReviewUpdate,
                     ),
                     // inbuxa: DLP and mail flow rules: either change
                     // permission gets in; the handler checks each rule's kind
@@ -431,6 +441,7 @@ impl JmapAuthorization for AccessToken {
                 | MethodObject::LegalHold
                 | MethodObject::HoldExport
                 | MethodObject::MailRule
+                | MethodObject::HeldMessage
                 | MethodObject::ProtocolPolicy
                 | MethodObject::TenantProtocolPolicy => Permission::JmapEmailChanges,
                 // inbuxa: x:MaskedEmail/changes reads what /get reads
