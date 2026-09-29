@@ -285,6 +285,9 @@ impl RequestHandler for Server {
                                     SetResponseMethod::MailRule(set_response) => {
                                         set_response.update_created_ids(&mut response);
                                     }
+                                    SetResponseMethod::SecurityAcceptance(set_response) => {
+                                        set_response.update_created_ids(&mut response);
+                                    }
                                     SetResponseMethod::Journal(set_response) => {
                                         set_response.update_created_ids(&mut response);
                                     }
@@ -514,6 +517,13 @@ impl RequestHandler for Server {
                 GetRequestMethod::MailRule(mut req) => {
                     resolve_account_id(&mut req.account_id, method_name.obj, access_token)?;
                     crate::inbuxa::mail_rule::get(self, access_token, *req).await?.into()
+                }
+                // inbuxa: accepted security to-do items
+                GetRequestMethod::SecurityAcceptance(mut req) => {
+                    resolve_account_id(&mut req.account_id, method_name.obj, access_token)?;
+                    crate::inbuxa::security_acceptance::get(self, access_token, *req)
+                        .await?
+                        .into()
                 }
                 // inbuxa: journaling
                 GetRequestMethod::Journal(mut req) => {
@@ -989,6 +999,29 @@ impl RequestHandler for Server {
                         reason,
                         *req,
                         |req| Box::pin(crate::inbuxa::mail_rule::set(self, access_token, req)),
+                    )
+                    .await?
+                    .into()
+                }
+                // inbuxa: SS-26, every acceptance made or removed is in the
+                // audit log
+                SetRequestMethod::SecurityAcceptance(mut req) => {
+                    resolve_account_id(&mut req.account_id, method_name.obj, access_token)?;
+                    crate::inbuxa::audit::recorded(
+                        self,
+                        access_token,
+                        session,
+                        &method_name.obj.to_string(),
+                        None,
+                        None,
+                        *req,
+                        |req| {
+                            Box::pin(crate::inbuxa::security_acceptance::set(
+                                self,
+                                access_token,
+                                req,
+                            ))
+                        },
                     )
                     .await?
                     .into()

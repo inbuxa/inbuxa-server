@@ -68,6 +68,8 @@ pub enum MethodObject {
     ProtocolPolicy,
     // inbuxa: DLP and mail flow rules
     MailRule,
+    // inbuxa: accepted security to-do items
+    SecurityAcceptance,
     HeldMessage,
     // inbuxa: journaling
     Journal,
@@ -111,6 +113,7 @@ impl MethodObject {
             | MethodObject::LegalHold
             | MethodObject::HoldExport
             | MethodObject::MailRule
+            | MethodObject::SecurityAcceptance
             | MethodObject::HeldMessage
             | MethodObject::Journal => Capability::Inbuxa,
             MethodObject::ProtocolPolicy => Capability::Inbuxa,
@@ -310,6 +313,8 @@ impl MethodName {
             (MethodFunction::Set, MethodObject::LegalHold) => "inbuxa:LegalHold/set",
             (MethodFunction::Get, MethodObject::MailRule) => "inbuxa:MailRule/get",
             (MethodFunction::Set, MethodObject::MailRule) => "inbuxa:MailRule/set",
+            (MethodFunction::Get, MethodObject::SecurityAcceptance) => "inbuxa:SecurityAcceptance/get",
+            (MethodFunction::Set, MethodObject::SecurityAcceptance) => "inbuxa:SecurityAcceptance/set",
             (MethodFunction::Get, MethodObject::Journal) => "inbuxa:Journal/get",
             (MethodFunction::Set, MethodObject::Journal) => "inbuxa:Journal/set",
             (MethodFunction::Get, MethodObject::HeldMessage) => "inbuxa:HeldMessage/get",
@@ -470,6 +475,8 @@ impl MethodName {
             "inbuxa:LegalHold/set" => (MethodObject::LegalHold, MethodFunction::Set),
             "inbuxa:MailRule/get" => (MethodObject::MailRule, MethodFunction::Get),
             "inbuxa:MailRule/set" => (MethodObject::MailRule, MethodFunction::Set),
+            "inbuxa:SecurityAcceptance/get" => (MethodObject::SecurityAcceptance, MethodFunction::Get),
+            "inbuxa:SecurityAcceptance/set" => (MethodObject::SecurityAcceptance, MethodFunction::Set),
             "inbuxa:Journal/get" => (MethodObject::Journal, MethodFunction::Get),
             "inbuxa:Journal/set" => (MethodObject::Journal, MethodFunction::Set),
             "inbuxa:HeldMessage/get" => (MethodObject::HeldMessage, MethodFunction::Get),
@@ -546,6 +553,7 @@ impl Display for MethodObject {
             MethodObject::AccountLock => "inbuxa:AccountLock",
             MethodObject::LegalHold => "inbuxa:LegalHold",
             MethodObject::MailRule => "inbuxa:MailRule",
+            MethodObject::SecurityAcceptance => "inbuxa:SecurityAcceptance",
             MethodObject::Journal => "inbuxa:Journal",
             MethodObject::HeldMessage => "inbuxa:HeldMessage",
             MethodObject::HoldExport => "inbuxa:HoldExport",

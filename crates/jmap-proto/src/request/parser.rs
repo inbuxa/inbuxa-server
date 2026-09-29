@@ -653,6 +653,21 @@ impl<'de> Visitor<'de> for CallVisitor {
                     return Err(de::Error::invalid_length(1, &self));
                 }
             },
+            // inbuxa: accepted security to-do items
+            (MethodFunction::Get, MethodObject::SecurityAcceptance) => match seq.next_element() {
+                Ok(Some(value)) => RequestMethod::Get(GetRequestMethod::SecurityAcceptance(value)),
+                Err(err) => RequestMethod::invalid(err),
+                Ok(None) => {
+                    return Err(de::Error::invalid_length(1, &self));
+                }
+            },
+            (MethodFunction::Set, MethodObject::SecurityAcceptance) => match seq.next_element() {
+                Ok(Some(value)) => RequestMethod::Set(SetRequestMethod::SecurityAcceptance(value)),
+                Err(err) => RequestMethod::invalid(err),
+                Ok(None) => {
+                    return Err(de::Error::invalid_length(1, &self));
+                }
+            },
             // inbuxa: journaling
             (MethodFunction::Get, MethodObject::Journal) => match seq.next_element() {
                 Ok(Some(value)) => RequestMethod::Get(GetRequestMethod::Journal(value)),

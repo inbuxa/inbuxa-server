@@ -312,7 +312,10 @@ impl Default for DefaultPermissions {
                 | Permission::SysDlpPolicyGet
                 | Permission::SysDlpPolicyUpdate
                 | Permission::SysDlpReviewGet
-                | Permission::SysDlpReviewUpdate => {
+                | Permission::SysDlpReviewUpdate
+                // inbuxa: every security check is server-wide (security
+                // to-do list spec)
+                | Permission::SysSecurityAccept => {
                     default.superuser.push(permission);
                 }
                 // inbuxa: journals are the server's; administrators set them

@@ -31,7 +31,8 @@ use types::id::Id;
 /// Granted to the default administrator roles: "Explain this"
 /// (ai-explain spec, EX-4: superuser by default), the audit log, account
 /// locks and legal holds (audit-hold-lock spec, AU-9, AL-12, LH-13), and
-/// the data inventory (personal-data catalog spec).
+/// the data inventory (personal-data catalog spec), and accepting security
+/// to-do items (security to-do list spec).
 const ADMIN_GRANTS: &[Permission] = &[
     Permission::SysAiExplain,
     Permission::SysAuditGet,
@@ -54,6 +55,7 @@ const ADMIN_GRANTS: &[Permission] = &[
     Permission::SysDlpReviewUpdate,
     Permission::SysJournalGet,
     Permission::SysJournalUpdate,
+    Permission::SysSecurityAccept,
 ];
 
 /// Granted to the server-level Compliance Officer role once it exists:

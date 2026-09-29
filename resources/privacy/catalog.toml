@@ -125,6 +125,17 @@ name = ["content"]
 description = ["content"]
 createdBy = ["identifier"]
 
+[object."inbuxa:SecurityAcceptance"]
+file = "inbuxa_security_acceptance.rs"
+default = "none"
+whose = ["administrator"]
+where = ["data-store"]
+scope = "server"
+retention = "object-life"
+[object."inbuxa:SecurityAcceptance".properties]
+note = ["content"]
+acceptedBy = ["identifier"]
+
 [object."inbuxa:LegalHold"]
 file = "inbuxa_legal_hold.rs"
 default = "none"

@@ -125,6 +125,7 @@ pub enum GetRequestMethod {
     AccountLock(Box<GetRequest<crate::object::inbuxa_account_lock::AccountLock>>),
     LegalHold(Box<GetRequest<crate::object::inbuxa_legal_hold::LegalHold>>),
     MailRule(Box<GetRequest<crate::object::inbuxa_mail_rule::MailRule>>),
+    SecurityAcceptance(Box<GetRequest<crate::object::inbuxa_security_acceptance::SecurityAcceptance>>),
     Journal(Box<GetRequest<crate::object::inbuxa_journal::Journal>>),
     HeldMessage(Box<GetRequest<crate::object::inbuxa_held_message::HeldMessage>>),
     HoldExport(Box<GetRequest<crate::object::inbuxa_hold_export::HoldExport>>),
@@ -164,6 +165,9 @@ pub enum SetRequestMethod<'x> {
     AccountLock(Box<SetRequest<'x, crate::object::inbuxa_account_lock::AccountLock>>),
     LegalHold(Box<SetRequest<'x, crate::object::inbuxa_legal_hold::LegalHold>>),
     MailRule(Box<SetRequest<'x, crate::object::inbuxa_mail_rule::MailRule>>),
+    SecurityAcceptance(
+        Box<SetRequest<'x, crate::object::inbuxa_security_acceptance::SecurityAcceptance>>,
+    ),
     Journal(Box<SetRequest<'x, crate::object::inbuxa_journal::Journal>>),
     HeldMessage(Box<SetRequest<'x, crate::object::inbuxa_held_message::HeldMessage>>),
     HoldExport(Box<SetRequest<'x, crate::object::inbuxa_hold_export::HoldExport>>),

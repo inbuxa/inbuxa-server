@@ -30,6 +30,7 @@ pub mod inbuxa_inventory_snapshot; // inbuxa: personal-data catalog
 pub mod inbuxa_audit; // inbuxa: the audit log
 pub mod inbuxa_legal_hold; // inbuxa: legal hold
 pub mod inbuxa_mail_rule; // inbuxa: DLP and mail flow rules
+pub mod inbuxa_security_acceptance; // inbuxa: accepted security to-do items
 pub mod inbuxa_journal; // inbuxa: journaling
 pub mod inbuxa_held_message; // inbuxa: mail held for review
 pub mod inbuxa_hold_export; // inbuxa: legal hold exports
