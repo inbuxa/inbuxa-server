@@ -131,6 +131,17 @@ impl ManagementApi for Server {
                 let answer = jmap::inbuxa::directory_test::test(self, &request).await?;
                 Ok(JsonResponse::new(answer).no_cache().into_http_response())
             }
+            // inbuxa: send one sample event to a saved webhook
+            "webhook" if is_post && path.get(1).copied() == Some("test") => {
+                let (_in_flight, access_token) = self.authenticate_headers(req, session).await?;
+                jmap::inbuxa::webhook_test::assert_allowed(&access_token)?;
+                let request = body
+                    .as_deref()
+                    .and_then(|body| serde_json::from_slice::<serde_json::Value>(body).ok())
+                    .unwrap_or_default();
+                let answer = jmap::inbuxa::webhook_test::test(self, &request).await?;
+                Ok(JsonResponse::new(answer).no_cache().into_http_response())
+            }
             "account" => {
                 // Authenticate request
                 let (_in_flight, access_token) = self.authenticate_headers(req, session).await?;

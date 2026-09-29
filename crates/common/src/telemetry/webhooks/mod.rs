@@ -156,15 +156,7 @@ async fn post_webhook_events(
 
     // Add HMAC-SHA256 signature
     let mut headers = settings.headers.clone();
-    if !settings.key.is_empty() {
-        let key = hmac::Key::new(hmac::HMAC_SHA256, settings.key.as_bytes());
-        let tag = hmac::sign(&key, body.as_bytes());
-
-        headers.insert(
-            "X-Signature",
-            STANDARD.encode(tag.as_ref()).parse().unwrap(),
-        );
-    }
+    sign(&mut headers, &settings.key, &body);
 
     // Send request
     let response = settings
@@ -186,5 +178,152 @@ async fn post_webhook_events(
             response.status().as_u16(),
             response.status().canonical_reason().unwrap_or("Unknown")
         ))
+    }
+}
+
+/// Adds the HMAC-SHA256 `X-Signature` a receiver checks, when the webhook has a key.
+fn sign(headers: &mut hyper::HeaderMap, key: &str, body: &str) {
+    if !key.is_empty() {
+        let key = hmac::Key::new(hmac::HMAC_SHA256, key.as_bytes());
+        let tag = hmac::sign(&key, body.as_bytes());
+
+        headers.insert(
+            "X-Signature",
+            STANDARD.encode(tag.as_ref()).parse().unwrap(),
+        );
+    }
+}
+
+/// inbuxa: "Send test" for a saved webhook (settings-reorg, Webhooks). One
+/// sample event, sent the way a real batch is: the same URL, headers, sign-in,
+/// signature, timeout and certificate checks. The event's type,
+/// `webhook.test`, is none the server raises, and an `X-Inbuxa-Test` header
+/// marks it, so a receiver can tell it apart. Answers the HTTP status, or why
+/// nothing came back.
+pub async fn send_test(hook: &registry::schema::structs::WebHook) -> Result<u16, String> {
+    let mut headers = hook
+        .http_auth
+        .build_headers(hook.http_headers.clone(), "application/json".into())
+        .await
+        .map_err(|err| format!("Unable to build HTTP headers: {err}"))?;
+    let key = hook
+        .signature_key
+        .secret()
+        .await
+        .map_err(|err| format!("Unable to retrieve signature key: {err}"))?
+        .unwrap_or_default()
+        .into_owned();
+
+    let created = now();
+    let body = serde_json::json!({
+        "events": [{
+            "id": format!("test-{created}"),
+            "createdAt": mail_parser::DateTime::from_timestamp(created as i64).to_rfc3339(),
+            "type": "webhook.test",
+            "data": { "details": "A test from inbuxa Admin. Nothing happened on the server." },
+        }]
+    })
+    .to_string();
+    sign(&mut headers, &key, &body);
+    headers.insert("X-Inbuxa-Test", "true".parse().unwrap());
+
+    let response = utils::http::http_client_builder(hook.allow_invalid_certs)
+        .build()
+        .map_err(|err| format!("Unable to build an HTTP client: {err}"))?
+        .post(&hook.url)
+        .timeout(hook.timeout.into_inner())
+        .headers(headers)
+        .body(body)
+        .send()
+        .await
+        .map_err(|err| format!("Webhook request to {} failed: {err}", hook.url))?;
+    Ok(response.status().as_u16())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use registry::schema::structs::{SecretKeyOptional, SecretKeyValue, WebHook};
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    /// One request in, the given status out; hands back what was received.
+    async fn receiver(status: &'static str) -> (String, tokio::task::JoinHandle<String>) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}/hook", listener.local_addr().unwrap());
+        let task = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut buf = Vec::new();
+            let mut chunk = [0u8; 4096];
+            loop {
+                let n = socket.read(&mut chunk).await.unwrap();
+                buf.extend_from_slice(&chunk[..n]);
+                let text = String::from_utf8_lossy(&buf);
+                if let Some(end) = text.find("\r\n\r\n") {
+                    let length = text[..end]
+                        .lines()
+                        .find_map(|l| {
+                            l.to_ascii_lowercase()
+                                .strip_prefix("content-length:")
+                                .map(|v| v.trim().parse::<usize>().unwrap())
+                        })
+                        .unwrap_or(0);
+                    if buf.len() >= end + 4 + length || n == 0 {
+                        break;
+                    }
+                }
+            }
+            socket
+                .write_all(
+                    format!("HTTP/1.1 {status}\r\ncontent-length: 0\r\nconnection: close\r\n\r\n")
+                        .as_bytes(),
+                )
+                .await
+                .unwrap();
+            String::from_utf8_lossy(&buf).into_owned()
+        });
+        (url, task)
+    }
+
+    #[tokio::test]
+    async fn send_test_signs_and_marks_the_sample() {
+        let (url, task) = receiver("204 No Content").await;
+        let hook = WebHook {
+            url,
+            enable: false,
+            signature_key: SecretKeyOptional::Value(SecretKeyValue { secret: "k".into() }),
+            ..Default::default()
+        };
+        assert_eq!(send_test(&hook).await, Ok(204));
+
+        let request = task.await.unwrap();
+        let (head, body) = request.split_once("\r\n\r\n").unwrap();
+        let head = head.to_ascii_lowercase();
+        assert!(head.contains("x-inbuxa-test: true"), "{head}");
+        let parsed: serde_json::Value = serde_json::from_str(body).unwrap();
+        assert_eq!(parsed["events"][0]["type"], "webhook.test");
+        let tag = hmac::sign(&hmac::Key::new(hmac::HMAC_SHA256, b"k"), body.as_bytes());
+        assert!(
+            head.contains(&format!(
+                "x-signature: {}",
+                STANDARD.encode(tag.as_ref()).to_ascii_lowercase()
+            )),
+            "{head}"
+        );
+    }
+
+    #[tokio::test]
+    async fn send_test_reports_what_came_back() {
+        let (url, _task) = receiver("403 Forbidden").await;
+        let hook = WebHook {
+            url,
+            ..Default::default()
+        };
+        assert_eq!(send_test(&hook).await, Ok(403));
+
+        let hook = WebHook {
+            url: "http://127.0.0.1:9/hook".into(),
+            ..Default::default()
+        };
+        assert!(send_test(&hook).await.unwrap_err().contains("failed"));
     }
 }
