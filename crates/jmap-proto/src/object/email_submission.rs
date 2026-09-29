@@ -2,6 +2,8 @@
  * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
+ *
+ * Modified by Coffey Labs in 2026 for INBUXA.
  */
 
 use crate::{
@@ -40,6 +42,9 @@ pub enum EmailSubmissionProperty {
     Displayed,
     DsnBlobIds,
     MdnBlobIds,
+    // inbuxa: DLP (dlp-and-mail-flow-rules spec, §2.5): `{"reason": ...}`
+    // to send despite a warning
+    DlpOverride,
 
     Pointer(JsonPointer<EmailSubmissionProperty>),
 }
@@ -90,6 +95,7 @@ impl Property for EmailSubmissionProperty {
             EmailSubmissionProperty::Id => "id",
             EmailSubmissionProperty::IdentityId => "identityId",
             EmailSubmissionProperty::MdnBlobIds => "mdnBlobIds",
+            EmailSubmissionProperty::DlpOverride => "inbuxa:dlpOverride",
             EmailSubmissionProperty::SendAt => "sendAt",
             EmailSubmissionProperty::ThreadId => "threadId",
             EmailSubmissionProperty::UndoStatus => "undoStatus",
@@ -181,6 +187,7 @@ impl EmailSubmissionProperty {
             "displayed" => EmailSubmissionProperty::Displayed,
             "dsnBlobIds" => EmailSubmissionProperty::DsnBlobIds,
             "mdnBlobIds" => EmailSubmissionProperty::MdnBlobIds,
+            "inbuxa:dlpOverride" => EmailSubmissionProperty::DlpOverride,
         )
         .or_else(|| {
             if allow_patch && value.contains('/') {

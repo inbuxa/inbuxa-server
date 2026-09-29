@@ -46,7 +46,7 @@ pub struct Recipient<'a> {
 pub struct Attachment<'a> {
     pub name: Option<&'a str>,
     /// Declared type, or detected where the caller knows better.
-    pub content_type: &'a str,
+    pub content_type: Cow<'a, str>,
     pub size: u64,
     pub extracted: Extracted,
 }
@@ -606,13 +606,15 @@ mod tests {
             attachments: vec![
                 Attachment {
                     name: Some("plan.docx"),
-                    content_type: "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                    content_type:
+                        "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+                            .into(),
                     size: 40_000,
                     extracted: Extracted::Text("IBAN GB29 NWBK 6016 1331 9268 19".into()),
                 },
                 Attachment {
                     name: Some("scan.pdf"),
-                    content_type: "application/pdf",
+                    content_type: "application/pdf".into(),
                     size: 900_000,
                     extracted: Extracted::NotInspectable(Why::Pdf),
                 },
