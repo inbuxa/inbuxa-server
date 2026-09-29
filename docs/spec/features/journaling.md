@@ -1,6 +1,7 @@
 # Feature spec: journaling
 
-Status: **approved 2026-09-28**, with the answers under [Settled](#settled).
+Status: **approved 2026-09-28**, with the answers under [Settled](#settled);
+**built 2026-09-29** (phases 2–5, see [As built](#as-built)), not yet released.
 Not a rebuild of an upstream feature, so it has no line in SPEC.md §4's table.
 Rule IDs: **JR-**.
 
@@ -333,6 +334,18 @@ Phase 4 (`feature/journal-search`):
   and `manifest.sha256`.
 - `inbuxa:JournalVerification/set` rechecks the chains and every report
   against its entry, with `sysJournalGet`.
+
+Phase 5 (inbuxa-admin #62, server #119 for the menu, docs inbuxa.org #32):
+
+- One console page, **Management › Compliance › Journal**, with two tabs
+  instead of the two pages §3 named: **Search** (for those who may search)
+  and **Journals** (the editor, on/off, delete, archive warnings, and Check
+  the journal).
+- The warnings §3 put on the Overview (undelivered archive reports, a
+  node-local blob store) aren't there: archive failures show on each
+  journal, and there's no blob-store warning yet.
+- The rule editor's **Journal it**, on mail flow rules and as an optional
+  second action on DLP rules.
 
 ## Known gaps
 
