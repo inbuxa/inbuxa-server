@@ -63,9 +63,12 @@ pub struct HeldDraft {
 
 /// What a transport rule changes about where a message goes.
 pub enum EnvelopeChange {
-    AddRecipient(String),
-    Redirect(Vec<String>),
+    /// An address, and the rule that added it.
+    AddRecipient(String, String),
+    Redirect(Vec<String>, String),
     Route(String),
+    /// Journaling spec, JR-10: a journal the message goes to.
+    Journal(u32),
 }
 
 /// `[override: reason]` at the start of a subject: the reason, and the
@@ -402,11 +405,17 @@ impl<T: SessionStream> Session<T> {
                                 rewrite::prefix_subject(now, text)
                             }
                             RuleAction::AddRecipient { address } => {
-                                changes.push(EnvelopeChange::AddRecipient(address.clone()));
+                                changes.push(EnvelopeChange::AddRecipient(
+                                    address.clone(),
+                                    matched.name.clone(),
+                                ));
                                 None
                             }
                             RuleAction::Redirect { addresses } => {
-                                changes.push(EnvelopeChange::Redirect(addresses.clone()));
+                                changes.push(EnvelopeChange::Redirect(
+                                    addresses.clone(),
+                                    matched.name.clone(),
+                                ));
                                 None
                             }
                             RuleAction::Route { queue } => {
@@ -423,7 +432,8 @@ impl<T: SessionStream> Session<T> {
                             }
                             RuleAction::Block { .. }
                             | RuleAction::Warn { .. }
-                            | RuleAction::Hold { .. } => None,
+                            | RuleAction::Hold { .. }
+                            | RuleAction::Journal { .. } => None,
                         };
                         if next.is_some() {
                             current = next;
@@ -448,6 +458,19 @@ impl<T: SessionStream> Session<T> {
                     if !routed.is_empty() {
                         self.record_transport(&sender, &matched.name, &routed.join(", "), &domains)
                             .await;
+                    }
+                }
+                // JR-10: journals any matched rule sends the message to,
+                // DLP rules included
+                for matched in &outcome.matched {
+                    for action in &matched.actions {
+                        if let RuleAction::Journal { journal } = action
+                            && !changes
+                                .iter()
+                                .any(|c| matches!(c, EnvelopeChange::Journal(j) if j == journal))
+                        {
+                            changes.push(EnvelopeChange::Journal(*journal));
+                        }
                     }
                 }
                 match hold {

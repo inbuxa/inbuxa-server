@@ -494,6 +494,10 @@ impl<T: AsyncWrite + AsyncRead + Unpin> Session<T> {
         self.data.delivery_by = 0;
         self.data.future_release = 0;
         self.data.rcpt_oks = 0;
+        // inbuxa: what mail flow rules decided was for the last message only
+        self.data.mailflow_queue = None;
+        self.data.journal_marks.clear();
+        self.data.journal_added.clear();
     }
 
     pub fn reset_tls(&mut self) {

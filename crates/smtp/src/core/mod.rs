@@ -102,6 +102,10 @@ pub struct SessionData {
     pub dlp_refusal: Option<DlpRefusal>,
     // inbuxa: a mail flow rule's route for this message
     pub mailflow_queue: Option<String>,
+    // inbuxa: journaling (JR-3, JR-10): journals rules sent this message
+    // to, and recipients rules added, by rule name
+    pub journal_marks: Vec<u32>,
+    pub journal_added: Vec<(String, String)>,
 }
 
 /// inbuxa: a DATA refusal by DLP rules: blocked, or a warning the sender
@@ -189,6 +193,8 @@ impl SessionData {
             dlp_override: None,
             dlp_refusal: None,
             mailflow_queue: None,
+            journal_marks: Vec::new(),
+            journal_added: Vec::new(),
         }
     }
 }
@@ -315,6 +321,8 @@ impl SessionData {
             dlp_override: None,
             dlp_refusal: None,
             mailflow_queue: None,
+            journal_marks: Vec::new(),
+            journal_added: Vec::new(),
         }
     }
 }

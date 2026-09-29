@@ -95,6 +95,33 @@ pub(crate) mod jmap_ids {
     }
 }
 
+/// One id in the same form.
+pub(crate) mod jmap_id {
+    use serde::{Deserialize, Deserializer, Serializer, de::Error};
+    use std::str::FromStr;
+    use types::id::Id;
+
+    pub fn serialize<S: Serializer>(id: &u32, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(&Id::from(*id).to_string())
+    }
+
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum Either {
+        Text(String),
+        Number(u32),
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(deserializer: D) -> Result<u32, D::Error> {
+        match Either::deserialize(deserializer)? {
+            Either::Number(n) => Ok(n),
+            Either::Text(text) => Id::from_str(&text)
+                .map(|id| id.document_id())
+                .map_err(|_| D::Error::custom(format!("\"{text}\" isn't an id"))),
+        }
+    }
+}
+
 /// A detector and the least it must find.
 #[derive(Debug, Clone, PartialEq, Eq, SerdeSerialize, SerdeDeserialize)]
 #[serde(rename_all = "camelCase")]
@@ -222,6 +249,11 @@ pub enum Action {
     Route {
         queue: String,
     },
+    /// Journaling spec, JR-10: a copy into this journal, whatever its scope.
+    Journal {
+        #[serde(with = "jmap_id")]
+        journal: u32,
+    },
     // DLP actions
     Block {
         notice: String,
@@ -311,10 +343,16 @@ impl Rule {
                 if self.direction != Direction::Outgoing {
                     return Err(invalid("direction", "DLP rules check outgoing mail only."));
                 }
-                if dlp_actions != 1 || self.actions.len() != 1 {
+                // One of block, warn or hold; journaling may go with it
+                if dlp_actions != 1
+                    || self
+                        .actions
+                        .iter()
+                        .any(|a| !a.is_dlp() && !matches!(a, Action::Journal { .. }))
+                {
                     return Err(invalid(
                         "actions",
-                        "A DLP rule has exactly one action: block, warn or hold.",
+                        "A DLP rule has exactly one action: block, warn or hold, and may also journal the message.",
                     ));
                 }
             }
@@ -478,6 +516,7 @@ fn validate_action(action: &Action) -> Result<(), String> {
         }
         Action::Refuse { text: t } => text(t, "refusal text"),
         Action::Route { queue } => text(queue, "queue"),
+        Action::Journal { .. } => Ok(()),
         Action::Block { notice } | Action::Warn { notice } | Action::Hold { notice, .. } => {
             text(notice, "notice")
         }
@@ -617,6 +656,38 @@ mod tests {
             created_at: 0,
             updated_at: 0,
         }
+    }
+
+    #[test]
+    fn journal_action_goes_with_either_kind() {
+        let hold = Action::Hold {
+            notice: "Held.".into(),
+            notify_sender: false,
+        };
+        let journal = Action::Journal { journal: 3 };
+        assert!(
+            rule(Kind::Dlp, vec![hold.clone(), journal.clone()])
+                .validate()
+                .is_ok()
+        );
+        assert!(rule(Kind::Dlp, vec![journal.clone()]).validate().is_err());
+        assert!(
+            rule(
+                Kind::Dlp,
+                vec![hold, Action::PrefixSubject { text: "x".into() }]
+            )
+            .validate()
+            .is_err()
+        );
+        assert!(
+            rule(Kind::Transport, vec![journal.clone()])
+                .validate()
+                .is_ok()
+        );
+        let json = serde_json::to_value(&journal).unwrap();
+        assert_eq!(json, serde_json::json!({"type": "journal", "journal": "d"}));
+        let back: Action = serde_json::from_value(json).unwrap();
+        assert_eq!(back, journal);
     }
 
     #[test]

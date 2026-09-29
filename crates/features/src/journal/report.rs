@@ -20,6 +20,8 @@ use sha2::{Digest, Sha256};
 pub struct Recipient {
     pub address: String,
     pub orcpt: Option<String>,
+    /// The mail flow rule that added or redirected to it.
+    pub added_by: Option<String>,
 }
 
 /// What the queue knows about a message.
@@ -46,6 +48,8 @@ pub struct Fields {
     pub bcc: Vec<String>,
     /// A list's address, and its members among the recipients.
     pub expanded: Vec<(String, Vec<String>)>,
+    /// A rule's name, and the recipients it added.
+    pub added: Vec<(String, Vec<String>)>,
 }
 
 /// One line's worth of a value: no line breaks, no control characters.
@@ -106,7 +110,12 @@ pub fn fields(envelope: &Envelope<'_>, original: &[u8]) -> Fields {
             .as_deref()
             .map(orcpt_address)
             .filter(|via| !via.is_empty() && *via != address);
-        if header_to.contains(&address) {
+        if let Some(rule) = &rcpt.added_by {
+            match fields.added.iter_mut().find(|(name, _)| name == rule) {
+                Some((_, added)) => added.push(line(&rcpt.address)),
+                None => fields.added.push((line(rule), vec![line(&rcpt.address)])),
+            }
+        } else if header_to.contains(&address) {
             fields.to.push(line(&rcpt.address));
         } else if header_cc.contains(&address) {
             fields.cc.push(line(&rcpt.address));
@@ -158,6 +167,9 @@ pub fn text(envelope: &Envelope<'_>, fields: &Fields) -> String {
     field("Bcc", &fields.bcc.join(", "));
     for (list, members) in &fields.expanded {
         field("Expanded", &format!("{list} -> {}", members.join(", ")));
+    }
+    for (rule, added) in &fields.added {
+        field("Added by rule", &format!("{rule} -> {}", added.join(", ")));
     }
     if envelope.held {
         field("Held for review", "yes");
@@ -265,6 +277,7 @@ The figures.\r\n";
         Recipient {
             address: address.into(),
             orcpt: orcpt.map(Into::into),
+            added_by: None,
         }
     }
 
@@ -335,6 +348,19 @@ The figures.\r\n";
             "mx.example.com",
         );
         assert_eq!(original(&report), Some(unterminated));
+    }
+
+    #[test]
+    fn rule_added_recipients_say_so() {
+        let mut copied = rcpt("archive@example.com", None);
+        copied.added_by = Some("Copy finance".into());
+        let recipients = [rcpt("pay@bank.example", None), copied];
+        let env = envelope(&recipients);
+        let fields = fields(&env, ORIGINAL);
+        assert!(fields.bcc.is_empty(), "{fields:?}");
+        assert!(
+            text(&env, &fields).contains("Added by rule: Copy finance -> archive@example.com\r\n")
+        );
     }
 
     #[test]

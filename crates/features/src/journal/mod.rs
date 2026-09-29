@@ -16,6 +16,7 @@
 //! with `J`; journals are `j` + id (u32), as JSON. There are few, so they're
 //! read whole.
 
+pub mod archive;
 pub mod entries;
 pub mod report;
 
@@ -128,6 +129,12 @@ pub struct Journal {
     /// How long an entry this journal writes is kept. An entry keeps the
     /// retention it was written with (JR-12).
     pub retention_days: u32,
+    /// Whether entries go into the built-in journal (JR-5).
+    #[serde(default = "yes")]
+    pub built_in: bool,
+    /// An outside archive's journal address, sent each report (JR-7).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub archive_address: Option<String>,
     #[serde(default)]
     pub created_by: String,
     #[serde(default)]
@@ -164,11 +171,26 @@ impl Journal {
                 format!("Keep entries between {MIN_RETENTION_DAYS} and {MAX_RETENTION_DAYS} days."),
             );
         }
+        // Neither is a journal only rules send mail to (JR-10)
         let chosen = self.scope.lists().iter().any(|list| !list.is_empty());
-        if self.scope.everyone == chosen {
+        if self.scope.everyone && chosen {
             return invalid(
                 "scope",
                 "Journal everyone, or choose accounts, groups, domains or tenants; not both.",
+            );
+        }
+        if !self.built_in && self.archive_address.is_none() {
+            return invalid(
+                "builtIn",
+                "Keep entries in the built-in journal, send them to an archive, or both.",
+            );
+        }
+        if let Some(address) = &self.archive_address
+            && !is_address(address)
+        {
+            return invalid(
+                "archiveAddress",
+                format!("\"{address}\" isn't an email address."),
             );
         }
         if self.scope.lists().iter().any(|list| list.len() > MAX_LIST) {
@@ -179,11 +201,32 @@ impl Journal {
 
     /// Whether this journal takes a message going `direction` with these
     /// people here on either side.
+    /// Whether only rules send this journal mail (JR-10).
+    pub fn rules_only(&self) -> bool {
+        !self.scope.everyone && self.scope.lists().iter().all(|list| list.is_empty())
+    }
+
     pub fn takes(&self, direction: Direction, members: &[Member]) -> bool {
         self.enabled
             && self.direction.includes(direction)
             && (self.scope.everyone || members.iter().any(|m| self.scope.covers(m)))
     }
+}
+
+fn yes() -> bool {
+    true
+}
+
+/// An address an archive can be sent to: one `@`, something either side,
+/// nothing that would break an envelope.
+fn is_address(address: &str) -> bool {
+    address.len() <= 320
+        && address.split_once('@').is_some_and(|(local, domain)| {
+            !local.is_empty() && domain.contains('.') && !domain.contains('@')
+        })
+        && !address
+            .chars()
+            .any(|c| c.is_whitespace() || c.is_control() || matches!(c, '<' | '>' | ',' | ';'))
 }
 
 /// A value stored as JSON.
@@ -347,6 +390,8 @@ mod tests {
             direction: Direction::Any,
             scope,
             retention_days: 365,
+            built_in: true,
+            archive_address: None,
             created_by: String::new(),
             created_at: 0,
             updated_at: 0,
@@ -372,13 +417,49 @@ mod tests {
             .validate()
             .is_ok()
         );
-        assert!(journal(Scope::default()).validate().is_err());
+        // Nobody chosen: only rules send it mail
+        let rules_only = journal(Scope::default());
+        assert!(rules_only.validate().is_ok());
+        assert!(rules_only.rules_only());
+        assert!(!rules_only.takes(Direction::Any, &[member(3, vec![7])]));
         let both = Scope {
             everyone: true,
             groups: vec![4],
             ..Default::default()
         };
         assert_eq!(journal(both).validate().unwrap_err().property, "scope");
+    }
+
+    #[test]
+    fn destinations() {
+        let mut j = journal(Scope {
+            everyone: true,
+            ..Default::default()
+        });
+        j.built_in = false;
+        assert_eq!(j.validate().unwrap_err().property, "builtIn");
+        j.archive_address = Some("journal@archive.example".into());
+        assert!(j.validate().is_ok());
+        for bad in [
+            "archive",
+            "a@b",
+            "a b@c.example",
+            "<a@c.example>",
+            "a@b@c.example",
+        ] {
+            j.archive_address = Some(bad.into());
+            assert_eq!(
+                j.validate().unwrap_err().property,
+                "archiveAddress",
+                "{bad}"
+            );
+        }
+        // Stored before destinations existed: the built-in journal
+        let old: Journal = serde_json::from_str(
+            r#"{"name":"Old","direction":"any","scope":{"everyone":true},"retentionDays":30}"#,
+        )
+        .unwrap();
+        assert!(old.built_in && old.archive_address.is_none());
     }
 
     #[test]

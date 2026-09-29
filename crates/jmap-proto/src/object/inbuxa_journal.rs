@@ -31,6 +31,12 @@ pub enum JournalProperty {
     Scope,
     /// How long an entry is kept; each keeps what it was written with.
     RetentionDays,
+    /// Whether entries go into the built-in journal.
+    BuiltIn,
+    /// An outside archive's journal address.
+    ArchiveAddress,
+    /// Reports the archive didn't take: how many, when and why last.
+    ArchiveFailures,
     CreatedBy,
     CreatedAt,
     UpdatedAt,
@@ -59,6 +65,9 @@ impl Property for JournalProperty {
             JournalProperty::Direction => "direction",
             JournalProperty::Scope => "scope",
             JournalProperty::RetentionDays => "retentionDays",
+            JournalProperty::BuiltIn => "builtIn",
+            JournalProperty::ArchiveAddress => "archiveAddress",
+            JournalProperty::ArchiveFailures => "archiveFailures",
             JournalProperty::CreatedBy => "createdBy",
             JournalProperty::CreatedAt => "createdAt",
             JournalProperty::UpdatedAt => "updatedAt",
@@ -77,6 +86,9 @@ impl JournalProperty {
             b"direction" => JournalProperty::Direction,
             b"scope" => JournalProperty::Scope,
             b"retentionDays" => JournalProperty::RetentionDays,
+            b"builtIn" => JournalProperty::BuiltIn,
+            b"archiveAddress" => JournalProperty::ArchiveAddress,
+            b"archiveFailures" => JournalProperty::ArchiveFailures,
             b"createdBy" => JournalProperty::CreatedBy,
             b"createdAt" => JournalProperty::CreatedAt,
             b"updatedAt" => JournalProperty::UpdatedAt,
