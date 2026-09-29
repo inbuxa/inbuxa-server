@@ -60,6 +60,41 @@ fn one() -> u32 {
     1
 }
 
+/// Group and tenant ids in the JMAP form clients use (`"b"`, `"c"`…), held
+/// as numbers for matching. Plain numbers are read too.
+mod jmap_ids {
+    use serde::{Deserialize, Deserializer, Serializer, de::Error, ser::SerializeSeq};
+    use std::str::FromStr;
+    use types::id::Id;
+
+    pub fn serialize<S: Serializer>(ids: &[u32], serializer: S) -> Result<S::Ok, S::Error> {
+        let mut seq = serializer.serialize_seq(Some(ids.len()))?;
+        for id in ids {
+            seq.serialize_element(&Id::from(*id).to_string())?;
+        }
+        seq.end()
+    }
+
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum Either {
+        Text(String),
+        Number(u32),
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Vec<u32>, D::Error> {
+        Vec::<Either>::deserialize(deserializer)?
+            .into_iter()
+            .map(|id| match id {
+                Either::Number(n) => Ok(n),
+                Either::Text(text) => Id::from_str(&text)
+                    .map(|id| id.document_id())
+                    .map_err(|_| D::Error::custom(format!("\"{text}\" isn't an id"))),
+            })
+            .collect()
+    }
+}
+
 /// A detector and the least it must find.
 #[derive(Debug, Clone, PartialEq, Eq, SerdeSerialize, SerdeDeserialize)]
 #[serde(rename_all = "camelCase")]
@@ -83,9 +118,11 @@ pub enum Condition {
         domains: Vec<String>,
     },
     SenderGroup {
+        #[serde(with = "jmap_ids")]
         groups: Vec<u32>,
     },
     SenderTenant {
+        #[serde(with = "jmap_ids")]
         tenants: Vec<u32>,
     },
     /// Any recipient is one of these.
@@ -96,6 +133,7 @@ pub enum Condition {
         domains: Vec<String>,
     },
     RecipientGroup {
+        #[serde(with = "jmap_ids")]
         groups: Vec<u32>,
     },
     /// Any recipient isn't at a domain this server hosts.
@@ -607,6 +645,21 @@ mod tests {
         assert!(parsed.validate().is_ok());
         let back = serde_json::to_value(&parsed).unwrap();
         assert_eq!(back["actions"][0]["notifySender"], true);
+    }
+
+    #[test]
+    fn group_and_tenant_ids_are_jmap_ids() {
+        let condition: Condition =
+            serde_json::from_str(r#"{"type":"senderGroup","groups":["b", 7]}"#).unwrap();
+        assert_eq!(condition, Condition::SenderGroup { groups: vec![1, 7] });
+        assert_eq!(
+            serde_json::to_value(&condition).unwrap()["groups"],
+            serde_json::json!(["b", "h"])
+        );
+        assert!(
+            serde_json::from_str::<Condition>(r#"{"type":"senderTenant","tenants":["!!"]}"#)
+                .is_err()
+        );
     }
 
     #[test]
