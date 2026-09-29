@@ -70,6 +70,7 @@ pub mod cache;
 pub mod audit; // inbuxa: the audit log (audit-hold-lock spec, AU)
 pub mod hold; // inbuxa: legal holds (audit-hold-lock spec, LH)
 pub mod privacy; // inbuxa: the personal-data catalog, evaluated
+pub mod reachability; // inbuxa: whether the outside world reaches each node's ports
 pub mod config;
 pub mod expr;
 pub mod i18n;
@@ -129,6 +130,8 @@ pub const KV_LOCK_QUEUE_MESSAGE: u8 = 21;
 pub const KV_LOCK_TASK: u8 = 23;
 pub const KV_LOCK_DAV: u8 = 25;
 pub const KV_SIEVE_ID: u8 = 26;
+// inbuxa: far above upstream's prefixes, so a new one of theirs never collides
+pub const KV_PORT_REACHABILITY: u8 = 200;
 
 #[derive(Clone)]
 pub struct Server {
