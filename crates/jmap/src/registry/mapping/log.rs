@@ -146,6 +146,15 @@ pub(crate) async fn log_query(
         })?;
     response.anchor_found = true;
 
+    // inbuxa: the total is only known when the first page reached the end
+    // of the logs; counting them all would mean reading every file on every
+    // page. Upstream answered the query cap (5000) as the total, so a
+    // two-line log read "of 5000".
+    response.response.total = (req.request.calculate_total.unwrap_or(false)
+        && anchor == 0
+        && response.response.ids.len() < limit)
+        .then_some(response.response.ids.len());
+
     Ok(response)
 }
 
