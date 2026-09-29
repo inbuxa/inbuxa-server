@@ -6,7 +6,9 @@
 
 //! Detectors that aren't tied to one country (§2.3, region "Any").
 
-use super::{Detector, Findings, Region, Strength, checks, digits, stands_alone, word_near};
+use super::{
+    Detector, Findings, Region, Strength, checks, digits, stands_alone, valid_date, word_near,
+};
 use regex::Regex;
 use std::sync::LazyLock;
 
@@ -294,19 +296,6 @@ const BIRTH_WORDS: &[&str] = &[
     "urodzenia",
     "nascimento",
 ];
-
-fn valid_date(year: u32, month: u32, day: u32) -> bool {
-    let days = match month {
-        1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
-        4 | 6 | 9 | 11 => 30,
-        2 if year.is_multiple_of(4) && (!year.is_multiple_of(100) || year.is_multiple_of(400)) => {
-            29
-        }
-        2 => 28,
-        _ => return false,
-    };
-    (1900..=2100).contains(&year) && (1..=days).contains(&day)
-}
 
 fn month_number(name: &str) -> u32 {
     const MONTHS: [&str; 12] = [

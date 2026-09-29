@@ -139,6 +139,14 @@ DLP adds **detectors**. Each counts what it finds, and a rule sets a minimum
   either side, in the languages where the identifier is used ("passport",
   "Reisepass", "pasaporte"...).
 
+A check that about one random number in ten passes (Luhn, mod 10, mod 11) is
+too weak for a bare run of digits: invoice and phone numbers would match. So
+a checked identifier that is only digits (SSN, SIN, NHS, TFN, Medicare…)
+counts alone in the written form it's issued in (`536-22-1234`,
+`130 692 544`, `943 476 5919`), and as bare digits only beside a word. ABA
+routing numbers and NPIs are never written with separators, so they always
+need a word. (Refinement made while building phase 2, 2026-09-28.)
+
 The catalog (settled answer 6: the recognized, protected identifiers, not a
 chosen few). Each row is one table entry and one check function in
 `crates/features/src/mailflow/detectors/`:
@@ -157,10 +165,10 @@ chosen few). Each row is one table entry and one check function in
 | US | Social Security number | Checked | `AAA-GG-SSSS`, or nine digits with a word; never area 000, 666 or 9xx, group 00, serial 0000 |
 | US | ITIN | Checked | 9XX-GG-SSSS with the IRS's group ranges |
 | US | EIN | Needs a word | a valid IRS prefix and seven digits |
-| US | Bank routing number (ABA) | Checked | nine digits, a valid Federal Reserve prefix, the 3-7-1 checksum |
+| US | Bank routing number (ABA) | Needs a word | nine digits, a valid Federal Reserve prefix, the 3-7-1 checksum |
 | US | Driver's license | Needs a word | each state's published format |
 | US | Medicare Beneficiary Identifier | Checked | CMS's 11-character pattern and excluded letters |
-| US | National Provider Identifier | Checked | ten digits, Luhn over the `80840` prefix |
+| US | National Provider Identifier | Needs a word | ten digits, Luhn over the `80840` prefix |
 | US | DEA registration number | Checked | two letters, seven digits, DEA's check digit |
 | UK | National Insurance number | Checked | two letters (HMRC's excluded prefixes), six digits, A–D |
 | UK | NHS number | Checked | ten digits, mod 11 |
