@@ -798,6 +798,10 @@ mod tests {
         assert!(delivery_facts(&mut Facts::default(), &message, "no@example.com").is_err());
     }
 
+    fn is_timestamp(value: &str) -> bool {
+        chrono::DateTime::parse_from_rfc3339(value).is_ok()
+    }
+
     /// The settings questions a release prepares answers for (EX-26): every
     /// non-secret property of every settings object, at the object's own
     /// default, built exactly as a live question is.
@@ -842,6 +846,12 @@ mod tests {
                 if info.secret {
                     continue;
                 }
+                // A date's default is the moment the object is built, so its
+                // question changes every run and no live question ever
+                // matches it: nothing worth preparing.
+                if matches!(map[&property].as_str(), Some(v) if is_timestamp(v)) {
+                    continue;
+                }
                 let mut facts = Facts::default();
                 push_setting(&mut facts, &object, &property, &info, &map[&property]);
                 out.push((object.clone(), property, facts));
@@ -856,6 +866,7 @@ mod tests {
         assert!(questions.len() > 500, "found {}", questions.len());
         assert!(questions.iter().any(|(o, p, _)| o == "x:Domain" && p == "dnsManagement"));
         assert!(!questions.iter().any(|(o, p, _)| o == "x:AiModel" && p == "httpAuth"));
+        assert!(!questions.iter().any(|(o, p, _)| o == "x:Account" && p == "createdAt"));
     }
 
     /// Writes `resources/explain/settings.json.gz` (EX-26). Run before a
