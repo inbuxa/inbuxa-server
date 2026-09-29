@@ -11,7 +11,10 @@
 //! Changing or removing a journal never touches what it has taken.
 
 use common::{Server, auth::AccessToken};
-use inbuxa_features::journal::{self, Journal as Stored};
+use inbuxa_features::journal::{
+    self, Journal as Stored,
+    archive::{self, Failures},
+};
 use jmap_proto::{
     error::set::SetError,
     method::{
@@ -37,13 +40,22 @@ const ALL: &[P] = &[
     P::Direction,
     P::Scope,
     P::RetentionDays,
+    P::BuiltIn,
+    P::ArchiveAddress,
+    P::ArchiveFailures,
     P::CreatedBy,
     P::CreatedAt,
     P::UpdatedAt,
 ];
 
 /// Properties the server sets; a client that sends them is refused.
-const SERVER_SET: &[P] = &[P::Id, P::CreatedBy, P::CreatedAt, P::UpdatedAt];
+const SERVER_SET: &[P] = &[
+    P::Id,
+    P::ArchiveFailures,
+    P::CreatedBy,
+    P::CreatedAt,
+    P::UpdatedAt,
+];
 
 fn server_level(access_token: &AccessToken) -> trc::Result<()> {
     if access_token.tenant_id().is_some() {
@@ -86,7 +98,7 @@ fn date(seconds: u64) -> JValue {
     Value::Str(UTCDate::from_timestamp(seconds as i64).to_string().into())
 }
 
-fn to_value(journal: &Stored, properties: &[P]) -> JValue {
+fn to_value(journal: &Stored, failures: &Failures, properties: &[P]) -> JValue {
     let json = serde_json::to_value(journal).unwrap_or_default();
     let mut out = Map::with_capacity(properties.len());
     for property in properties {
@@ -94,6 +106,32 @@ fn to_value(journal: &Stored, properties: &[P]) -> JValue {
             P::Id => Value::Element(JournalValue::Id(Id::from(journal.id))),
             P::CreatedAt => date(journal.created_at),
             P::UpdatedAt => date(journal.updated_at),
+            P::ArchiveAddress => journal
+                .archive_address
+                .as_ref()
+                .map_or(Value::Null, |a| Value::Str(a.clone().into())),
+            // JR-7: what the console warns about
+            P::ArchiveFailures => {
+                let mut out = Map::with_capacity(3);
+                out.insert_unchecked(Key::Borrowed("count"), Value::Number(failures.count.into()));
+                out.insert_unchecked(
+                    Key::Borrowed("lastAt"),
+                    if failures.count > 0 {
+                        date(failures.last_at)
+                    } else {
+                        Value::Null
+                    },
+                );
+                out.insert_unchecked(
+                    Key::Borrowed("lastReason"),
+                    if failures.count > 0 {
+                        Value::Str(failures.last_reason.clone().into())
+                    } else {
+                        Value::Null
+                    },
+                );
+                Value::Object(out)
+            }
             other => json
                 .get(other.to_cow().as_ref())
                 .cloned()
@@ -162,21 +200,28 @@ pub async fn get(
         not_found,
     };
     let journals = journal::all(server.store()).await?;
-    match ids {
-        None => {
-            response.list = journals
-                .iter()
-                .map(|journal| to_value(journal, &properties))
-                .collect()
-        }
+    let wanted: Vec<&Stored> = match ids {
+        None => journals.iter().collect(),
         Some(ids) => {
+            let mut wanted = Vec::with_capacity(ids.len());
             for id in ids {
                 match journal_id(id).and_then(|id| journals.iter().find(|j| j.id == id)) {
-                    Some(journal) => response.list.push(to_value(journal, &properties)),
+                    Some(journal) => wanted.push(journal),
                     None => response.push_not_found(id),
                 }
             }
+            wanted
         }
+    };
+    for journal in wanted {
+        let failures = if properties.contains(&P::ArchiveFailures) {
+            archive::failures(server.store(), journal.id).await?
+        } else {
+            Failures::default()
+        };
+        response
+            .list
+            .push(to_value(journal, &failures, &properties));
     }
     Ok(response)
 }

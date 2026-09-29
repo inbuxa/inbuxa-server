@@ -370,6 +370,8 @@ pub(crate) struct QueueParams<'x, 'y> {
     pub session_id: u64,
     pub server: &'y Server,
     pub train_spam: Option<(bool, String)>,
+    // inbuxa: journaling, JR-3, JR-10
+    pub journal: crate::queue::journal::Hints,
 }
 
 impl MessageWrapper {
@@ -390,6 +392,7 @@ impl MessageWrapper {
             server,
             train_spam,
             metadata,
+            journal,
             ..
         } = params;
         let event = self.message.queued_event();
@@ -462,6 +465,7 @@ impl MessageWrapper {
             self.queue_id,
             &self.message,
             message.as_ref(),
+            &journal,
         )
         .await
         {
@@ -813,6 +817,20 @@ impl MessageWrapper {
     }
 
     pub async fn remove(self, server: &Server, prev_event: Option<u64>) -> bool {
+        // inbuxa: journaling, JR-7: a journal report the archive never took
+        // goes into the built-in journal before it leaves the queue
+        if self.message.flags & crate::queue::journal::FROM_JOURNAL != 0
+            && let Err(err) =
+                crate::queue::journal::settle(server, self.queue_id, &self.message).await
+        {
+            trc::error!(
+                err.details("Failed to settle a journal report; it stays queued.")
+                    .span_id(self.span_id)
+                    .caused_by(trc::location!())
+            );
+            return false;
+        }
+
         let mut batch = BatchBuilder::new();
 
         if let Some(prev_event) = prev_event {
@@ -987,6 +1005,19 @@ impl MessageWrapper {
         server: &Server,
         prev_events: AHashMap<QueueName, u64>,
     ) -> bool {
+        // inbuxa: journaling, JR-7, as in `remove`
+        if self.message.flags & crate::queue::journal::FROM_JOURNAL != 0
+            && let Err(err) =
+                crate::queue::journal::settle(server, self.queue_id, &self.message).await
+        {
+            trc::error!(
+                err.details("Failed to settle a journal report; it stays queued.")
+                    .span_id(self.span_id)
+                    .caused_by(trc::location!())
+            );
+            return false;
+        }
+
         let mut batch = BatchBuilder::new();
 
         for (queue_name, due) in prev_events {
@@ -1142,7 +1173,15 @@ impl<'x, 'y> QueueParams<'x, 'y> {
             original_raw_message: None,
             original_authenticated_message: None,
             metadata: Vec::new(),
+            journal: Default::default(),
         }
+    }
+
+    /// inbuxa: journals mail flow rules sent the message to, and the
+    /// recipients they added, by rule name.
+    pub fn with_journal(mut self, marks: Vec<u32>, added: Vec<(String, String)>) -> Self {
+        self.journal = crate::queue::journal::Hints { marks, added };
+        self
     }
 
     pub fn with_train_spam(mut self, train_spam: Option<(bool, String)>) -> Self {

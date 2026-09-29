@@ -290,8 +290,28 @@ fills in what it left open:
 - **`inbuxa:JournalEntry`** (get, query) and **Check the journal** over
   JMAP come in phase 4 with search, so every read is audited from the first
   version that allows one. Phase 2 has `inbuxa:Journal` only.
-- **Outside archives** (a journal's destination) come in phase 3; every
-  journal writes to the built-in journal until then.
+
+Phase 3 (`feature/journal-archive`):
+
+- **Destinations** are two properties of a journal: `builtIn` (true for
+  journals stored before phase 3) and `archiveAddress`. At least one.
+- **Journals only rules use**: a journal whose scope chooses nobody takes
+  only what a **Journal it** action sends it. The action goes on mail flow
+  rules, and on a DLP rule beside its block, warn or hold (a blocked
+  message isn't queued, so it isn't journaled).
+- **Reports to an archive** are queued from the empty sender, so a refusal
+  comes back to no one; a pending record per report says what to keep.
+  When the queue lets go of a report without delivering it (refused,
+  expired, or deleted from the queue), the report becomes its own entry in
+  the built-in journal under the sending journals' retention, even when
+  another journal already kept the message there, the journal's
+  `archiveFailures` (count, last time, reason) goes up, and the audit log
+  records it. If that can't be written, the report stays queued.
+- **Added by rule** lists recipients a transport rule added or redirected
+  to, by rule name, instead of counting them as Bcc.
+- A rule's route (and now its journal marks) is cleared between messages
+  in one SMTP session; before, a second message in the same session kept
+  the first one's route.
 
 ## Known gaps
 

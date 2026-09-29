@@ -20,6 +20,7 @@ use inbuxa_features::journal::{
 };
 use registry::schema::structs::{Expression, MtaStageAuth};
 use serde_json::{Value, json};
+use std::str::FromStr;
 use store::{Deserialize, write::BatchBuilder};
 
 const USING: &[&str] = &[
@@ -27,6 +28,7 @@ const USING: &[&str] = &[
     "urn:ietf:params:jmap:mail",
     "urn:ietf:params:jmap:submission",
     "urn:inbuxa:jmap",
+    "urn:inbuxa:jmap:registry",
 ];
 
 async fn call(account: &Account, method: &str, mut arguments: Value) -> (String, Value) {
@@ -171,8 +173,11 @@ pub async fn test(test: &mut TestServer) {
             "both": {"name": "Both", "enabled": true, "direction": "any",
                      "scope": {"everyone": true, "accounts": [sender.id_string()]},
                      "retentionDays": 365},
-            "none": {"name": "None", "enabled": true, "direction": "any",
-                     "scope": {}, "retentionDays": 365},
+            "none": {"name": "Nowhere", "enabled": true, "direction": "any",
+                     "scope": {"everyone": true}, "retentionDays": 365, "builtIn": false},
+            "badaddr": {"name": "Bad archive", "enabled": true, "direction": "any",
+                        "scope": {"everyone": true}, "retentionDays": 365,
+                        "archiveAddress": "not an address"},
             "server": {"name": "Mine", "enabled": true, "direction": "any",
                        "scope": {"everyone": true}, "retentionDays": 365,
                        "createdBy": "me"},
@@ -183,7 +188,7 @@ pub async fn test(test: &mut TestServer) {
         }}),
     )
     .await;
-    for refused in ["short", "both", "none", "server"] {
+    for refused in ["short", "both", "none", "badaddr", "server"] {
         assert_eq!(
             response["notCreated"][refused]["type"], "invalidProperties",
             "{refused}: {response}"
@@ -196,6 +201,14 @@ pub async fn test(test: &mut TestServer) {
     assert_eq!(
         response["notCreated"]["both"]["properties"],
         json!(["scope"])
+    );
+    assert_eq!(
+        response["notCreated"]["none"]["properties"],
+        json!(["builtIn"])
+    );
+    assert_eq!(
+        response["notCreated"]["badaddr"]["properties"],
+        json!(["archiveAddress"])
     );
     let everything = response["created"]["all"]["id"]
         .as_str()
@@ -445,6 +458,230 @@ pub async fn test(test: &mut TestServer) {
     );
 }
 
+/// Phase 3: journals only rules send mail to, recipients a rule added,
+/// reports sent to an outside archive, and what happens when the archive
+/// doesn't take one.
+pub async fn archive(test: &mut TestServer) {
+    println!("Running journal archive tests...");
+    let admin = test.account("admin@example.com");
+    let sender = admin
+        .create_user_account(
+            "archive-sender@example.com",
+            "archive-sender-secret-7201",
+            "Archive sender",
+            &[],
+            vec![],
+        )
+        .await;
+    let vault = admin
+        .create_user_account(
+            "journal-vault@example.com",
+            "journal-vault-secret-7202",
+            "Journal vault",
+            &[],
+            vec![],
+        )
+        .await;
+    let (_, response) = call(
+        &sender,
+        "Identity/set",
+        json!({"create": {"i": {"name": "Sender", "email": "archive-sender@example.com"}}}),
+    )
+    .await;
+    let identity = response["created"]["i"]["id"].as_str().unwrap().to_string();
+    let (_, response) = call(
+        &sender,
+        "Mailbox/set",
+        json!({"create": {"m": {"name": "Archive drafts"}}}),
+    )
+    .await;
+    let mailbox = response["created"]["m"]["id"].as_str().unwrap().to_string();
+
+    let (_, response) = call(
+        &admin,
+        "inbuxa:Journal/set",
+        json!({"create": {
+            "rules": {"name": "Only what rules send", "enabled": true, "direction": "any",
+                      "scope": {}, "retentionDays": 30},
+            "local": {"name": "To the vault", "enabled": true, "direction": "outgoing",
+                      "scope": {"accounts": [sender.id_string()]}, "retentionDays": 30,
+                      "builtIn": false, "archiveAddress": "journal-vault@example.com"},
+            "remote": {"name": "To an outside archive", "enabled": true, "direction": "internal",
+                       "scope": {"accounts": [sender.id_string()]}, "retentionDays": 30,
+                       "builtIn": false, "archiveAddress": "vault@elsewhere.org"}
+        }}),
+    )
+    .await;
+    let id = |name: &str| {
+        response["created"][name]["id"]
+            .as_str()
+            .unwrap_or_else(|| panic!("{name}: {response}"))
+            .to_string()
+    };
+    let (rules_only, local, remote) = (id("rules"), id("local"), id("remote"));
+    let number = |id: &str| types::id::Id::from_str(id).unwrap().document_id();
+    let (_, response) = call(
+        &admin,
+        "inbuxa:MailRule/set",
+        json!({"create": {"r": {
+            "name": "Copy and journal", "kind": "transport", "direction": "outgoing",
+            "conditions": [{"type": "words", "words": ["journal-me"]}],
+            "actions": [
+                {"type": "addRecipient", "address": "journal-vault@example.com"},
+                {"type": "journal", "journal": rules_only.clone()}
+            ]
+        }}}),
+    )
+    .await;
+    let rule = response["created"]["r"]["id"]
+        .as_str()
+        .unwrap_or_else(|| panic!("{response}"))
+        .to_string();
+    inbuxa_features::journal::invalidate();
+
+    // A rule sends it to a journal whose scope takes nobody, and says who
+    // it added
+    let response = send(
+        &sender,
+        &identity,
+        &mailbox,
+        &["archive-sender@example.com"],
+        &["archive-sender@example.com"],
+        "Marked journal-me",
+    )
+    .await;
+    assert!(response["created"].get("s").is_some(), "{response}");
+    let entry = all_entries(test)
+        .await
+        .into_iter()
+        .map(|(_, e)| e)
+        .find(|e| e.subject == "Marked journal-me" && e.journals.contains(&number(&rules_only)))
+        .expect("journaled by the rule");
+    assert_eq!(entry.journals, vec![number(&rules_only)], "{entry:?}");
+    let text = String::from_utf8_lossy(&report_of(test, &entry).await).into_owned();
+    assert!(
+        text.contains("Added by rule: Copy and journal -> journal-vault@example.com\r\n"),
+        "{text}"
+    );
+    assert!(!text.contains("Bcc:"), "{text}");
+
+    // The same message went to the outside archive, which can't be reached
+    // from here: once it leaves the queue (given up on, or deleted), it's
+    // kept in the built-in journal
+    let fallback = |entries: &[(EntryId, Entry)]| {
+        entries
+            .iter()
+            .any(|(_, e)| e.subject == "Marked journal-me" && e.journals == vec![number(&remote)])
+    };
+    let mut deleted = false;
+    for _ in 0..100 {
+        if fallback(&all_entries(test).await) {
+            break;
+        }
+        let (_, response) = call(&admin, "x:QueuedMessage/get", json!({"ids": null})).await;
+        if let Some(queued) = response["list"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|m| m.to_string().contains("vault@elsewhere.org"))
+        {
+            let queued_id = queued["id"].as_str().unwrap().to_string();
+            let (_, response) = call(
+                &admin,
+                "x:QueuedMessage/set",
+                json!({"destroy": [queued_id.clone()]}),
+            )
+            .await;
+            deleted = response["destroyed"] == json!([queued_id]);
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+    let kept: Vec<Entry> = all_entries(test)
+        .await
+        .into_iter()
+        .map(|(_, e)| e)
+        .filter(|e| e.subject == "Marked journal-me")
+        .collect();
+    assert_eq!(kept.len(), 2, "{kept:?}");
+    assert!(kept.iter().any(|e| e.journals == vec![number(&remote)]));
+    let (_, response) = call(
+        &admin,
+        "inbuxa:Journal/get",
+        json!({"ids": [remote.clone()]}),
+    )
+    .await;
+    let failures = &response["list"][0]["archiveFailures"];
+    assert_eq!(failures["count"], 1, "{response}");
+    assert_eq!(
+        failures["lastReason"],
+        if deleted {
+            "it wasn't delivered before leaving the queue"
+        } else {
+            "the archive refused it"
+        },
+        "{response}"
+    );
+    let (_, response) = call(
+        &admin,
+        "inbuxa:Journal/get",
+        json!({"ids": [local.clone()]}),
+    )
+    .await;
+    assert_eq!(response["list"][0]["archiveFailures"]["count"], 0);
+
+    // Delivered to an archive here: the report arrives, and nothing goes
+    // into the built-in journal for that journal
+    let response = send(
+        &sender,
+        &identity,
+        &mailbox,
+        &["someone@elsewhere.org"],
+        &["someone@elsewhere.org"],
+        "To the vault",
+    )
+    .await;
+    assert!(response["created"].get("s").is_some(), "{response}");
+    let mut arrived = Vec::new();
+    for _ in 0..100 {
+        let (_, response) = call(
+            &vault,
+            "Email/query",
+            json!({"filter": {"subject": "Journal report: To the vault"}}),
+        )
+        .await;
+        arrived = response["ids"].as_array().cloned().unwrap_or_default();
+        if !arrived.is_empty() {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+    assert_eq!(arrived.len(), 1, "the report arrived");
+    assert!(entry_for(test, "To the vault").await.is_none());
+    assert!(
+        all_entries(test)
+            .await
+            .iter()
+            .all(|(_, e)| !e.subject.starts_with("Journal report")),
+        "reports aren't journaled"
+    );
+    let (_, response) = call(
+        &admin,
+        "inbuxa:Journal/get",
+        json!({"ids": [local.clone()]}),
+    )
+    .await;
+    assert_eq!(response["list"][0]["archiveFailures"]["count"], 0);
+
+    call(&admin, "inbuxa:MailRule/set", json!({"destroy": [rule]})).await;
+    call(
+        &admin,
+        "inbuxa:Journal/set",
+        json!({"destroy": [rules_only, local, remote]}),
+    )
+    .await;
+    inbuxa_features::journal::invalidate();
+}
+
 struct Raw(Vec<u8>);
 
 impl Deserialize for Raw {
@@ -465,6 +702,7 @@ pub async fn journal_tests() {
     let admin = test.create_admin_account("admin@example.com").await;
     test.insert_account(admin);
     self::test(&mut test).await;
+    self::archive(&mut test).await;
     if test.is_reset() {
         test.temp_dir.delete();
     }

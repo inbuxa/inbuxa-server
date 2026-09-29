@@ -763,18 +763,26 @@ impl<T: SessionStream> Session<T> {
         }
         for change in envelope {
             match change {
-                super::mailflow::EnvelopeChange::AddRecipient(address) => {
+                super::mailflow::EnvelopeChange::AddRecipient(address, rule) => {
                     if !self
                         .data
                         .rcpt_to
                         .iter()
                         .any(|r| r.address_lcase.eq_ignore_ascii_case(&address))
                     {
+                        self.data.journal_added.push((address.to_lowercase(), rule));
                         self.data.rcpt_to.push(SessionAddress::new(address));
                     }
                 }
-                super::mailflow::EnvelopeChange::Redirect(addresses) => {
+                super::mailflow::EnvelopeChange::Redirect(addresses, rule) => {
+                    self.data.journal_added = addresses
+                        .iter()
+                        .map(|a| (a.to_lowercase(), rule.clone()))
+                        .collect();
                     self.data.rcpt_to = addresses.into_iter().map(SessionAddress::new).collect();
+                }
+                super::mailflow::EnvelopeChange::Journal(journal) => {
+                    self.data.journal_marks.push(journal);
                 }
                 super::mailflow::EnvelopeChange::Route(queue) => {
                     self.data.mailflow_queue = Some(queue);
@@ -882,7 +890,11 @@ impl<T: SessionStream> Session<T> {
                         .with_dkim_signers(dkim_signers)
                         .with_original_raw_message(original_message)
                         .with_original_authenticated_message(auth_message)
-                        .with_metadata(metadata),
+                        .with_metadata(metadata)
+                        .with_journal(
+                            std::mem::take(&mut self.data.journal_marks),
+                            std::mem::take(&mut self.data.journal_added),
+                        ),
                 )
                 .await
             {
