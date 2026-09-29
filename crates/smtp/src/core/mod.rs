@@ -100,6 +100,8 @@ pub struct SessionData {
     // message, for the submission to report
     pub dlp_override: Option<String>,
     pub dlp_refusal: Option<DlpRefusal>,
+    // inbuxa: a mail flow rule's route for this message
+    pub mailflow_queue: Option<String>,
 }
 
 /// inbuxa: a DATA refusal by DLP rules: blocked, or a warning the sender
@@ -186,6 +188,7 @@ impl SessionData {
             dnsbl_error: None,
             dlp_override: None,
             dlp_refusal: None,
+            mailflow_queue: None,
         }
     }
 }
@@ -311,6 +314,7 @@ impl SessionData {
             dnsbl_error: None,
             dlp_override: None,
             dlp_refusal: None,
+            mailflow_queue: None,
         }
     }
 }
