@@ -745,7 +745,26 @@ impl<T: SessionStream> Session<T> {
             .await
         {
             super::mailflow::Checked::Accept => {}
-            super::mailflow::Checked::Replace(message) => edited_message = Some(message),
+            super::mailflow::Checked::Changed { message, envelope } => {
+                if let Some(message) = message {
+                    edited_message = Some(message);
+                }
+                for change in envelope {
+                    match change {
+                        super::mailflow::EnvelopeChange::AddRecipient(address) => {
+                            if !self.data.rcpt_to.iter().any(|r| r.address_lcase.eq_ignore_ascii_case(&address)) {
+                                self.data.rcpt_to.push(SessionAddress::new(address));
+                            }
+                        }
+                        super::mailflow::EnvelopeChange::Redirect(addresses) => {
+                            self.data.rcpt_to = addresses.into_iter().map(SessionAddress::new).collect();
+                        }
+                        super::mailflow::EnvelopeChange::Route(queue) => {
+                            self.data.mailflow_queue = Some(queue);
+                        }
+                    }
+                }
+            }
             super::mailflow::Checked::Refuse(reply, refusal) => {
                 self.data.dlp_refusal = refusal;
                 return reply.into();
@@ -917,8 +936,10 @@ impl<T: SessionStream> Session<T> {
             };
 
             // Resolve queue
-            let queue = self.server.get_queue_or_default(
-                &self
+            // inbuxa: a mail flow rule's route comes before the strategy
+            let queue_name = match &self.data.mailflow_queue {
+                Some(queue) => queue.clone(),
+                None => self
                     .server
                     .eval_if::<String, _>(
                         &self.server.core.smtp.queue.queue,
@@ -927,8 +948,10 @@ impl<T: SessionStream> Session<T> {
                     )
                     .await
                     .unwrap_or_else(|| "default".to_string()),
-                self.data.session_id,
-            );
+            };
+            let queue = self
+                .server
+                .get_queue_or_default(&queue_name, self.data.session_id);
 
             // Set expiration and notification times
             let num_intervals = std::cmp::max(queue.notify.len(), 1);

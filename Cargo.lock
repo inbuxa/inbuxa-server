@@ -3951,6 +3951,8 @@ dependencies = [
  "base64 0.23.1",
  "flate2",
  "jmap_proto",
+ "mail-builder 1.0.0",
+ "mail-parser",
  "quick-xml 0.41.0",
  "regex",
  "registry",

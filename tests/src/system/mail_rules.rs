@@ -11,10 +11,11 @@
 use crate::utils::{
     account::Account,
     server::{TestServer, TestServerBuilder},
+    smtp::SmtpConnection,
 };
 use registry::schema::{
     prelude::{ObjectType, Property},
-    structs::{CustomRoles, Role, UserRoles},
+    structs::{CustomRoles, Expression, MtaStageAuth, Role, UserRoles},
 };
 use registry::types::map::Map;
 use serde_json::{Value, json};
@@ -502,6 +503,276 @@ pub async fn dlp(test: &mut TestServer) {
     .await;
 }
 
+/// The subjects, bodies and a header of what `account` received whose
+/// subject contains `text`, polling until something arrives.
+async fn received(
+    account: &Account,
+    text: &str,
+    header: &str,
+    drafts: Option<&str>,
+) -> Vec<(String, String, String)> {
+    for _ in 0..50 {
+        // Not the sender's own draft
+        let filter = match drafts {
+            Some(drafts) => json!({"subject": text, "inMailboxOtherThan": [drafts]}),
+            None => json!({"subject": text}),
+        };
+        let (_, response) = call(account, "Email/query", json!({"filter": filter})).await;
+        let ids = response["ids"].clone();
+        let (_, response) = call(
+            account,
+            "Email/get",
+            json!({"ids": ids, "properties": ["subject", "bodyValues", "textBody", format!("header:{header}:asText")],
+                   "fetchTextBodyValues": true}),
+        )
+        .await;
+        let list: Vec<(String, String, String)> = response["list"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|e| {
+                !e["subject"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .starts_with("Failed to deliver")
+            })
+            .map(|e| {
+                let part = e["textBody"][0]["partId"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .to_string();
+                (
+                    e["subject"].as_str().unwrap_or_default().to_string(),
+                    e["bodyValues"][part.as_str()]["value"]
+                        .as_str()
+                        .unwrap_or_default()
+                        .to_string(),
+                    e[format!("header:{header}:asText").as_str()]
+                        .as_str()
+                        .unwrap_or_default()
+                        .to_string(),
+                )
+            })
+            .collect();
+        if !list.is_empty() {
+            return list;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    }
+    Vec::new()
+}
+
+/// Transport rules (§2.4): the actions that change a message, where it
+/// goes, or refuse it, on outgoing and incoming mail.
+pub async fn transport(test: &mut TestServer) {
+    println!("Running mail flow action tests...");
+    let admin = test.account("admin@example.com");
+    let sender = admin
+        .create_user_account(
+            "flow-sender@example.com",
+            "flow-sender-secret-6602",
+            "Flow sender",
+            &[],
+            vec![],
+        )
+        .await;
+    let other = admin
+        .create_user_account(
+            "flow-other@example.com",
+            "flow-other-secret-6603",
+            "Flow other",
+            &[],
+            vec![],
+        )
+        .await;
+    let (_, response) = call(
+        &sender,
+        "Identity/set",
+        json!({"create": {"i": {"name": "Sender", "email": "flow-sender@example.com"}}}),
+    )
+    .await;
+    let identity = response["created"]["i"]["id"].as_str().unwrap().to_string();
+    let (_, response) = call(
+        &sender,
+        "Mailbox/set",
+        json!({"create": {"m": {"name": "Flow drafts"}}}),
+    )
+    .await;
+    let mailbox = response["created"]["m"]["id"].as_str().unwrap().to_string();
+
+    let (_, response) = call(
+        &admin,
+        "inbuxa:MailRule/set",
+        json!({"create": {
+            "d": {"name": "Footer and tag", "kind": "transport", "direction": "outgoing",
+                  "conditions": [{"type": "senderAddress", "addresses": ["flow-sender@example.com"]}],
+                  "actions": [
+                      {"type": "addDisclaimer", "text": "Sent by Example Co.", "position": "bottom"},
+                      {"type": "addHeader", "name": "X-Flow", "value": "checked"},
+                      {"type": "prefixSubject", "text": "[Example]"}
+                  ]},
+            "r": {"name": "Redirect projects", "kind": "transport", "direction": "outgoing",
+                  "conditions": [{"type": "words", "words": ["project falcon"]}],
+                  "actions": [{"type": "redirect", "addresses": ["flow-other@example.com"]}]},
+            "x": {"name": "No invoices", "kind": "transport", "direction": "outgoing",
+                  "conditions": [{"type": "words", "words": ["invoice-scam"]}],
+                  "actions": [{"type": "refuse", "text": "This kind of message isn't sent from here."}]},
+            "i": {"name": "Outside banner", "kind": "transport", "direction": "incoming",
+                  "conditions": [], "actions": [{"type": "prefixSubject", "text": "[External]"}]}
+        }}),
+    )
+    .await;
+    assert_eq!(
+        response["created"].as_object().map(|c| c.len()),
+        Some(4),
+        "{response}"
+    );
+
+    // Disclaimer, header and subject prefix on the sender's own copy
+    let response = submit(
+        &sender,
+        &identity,
+        &mailbox,
+        &["flow-sender@example.com"],
+        "Lunch",
+        "See you at noon.",
+        None,
+    )
+    .await;
+    assert!(response["created"].get("s").is_some(), "{response}");
+    let got = received(&sender, "Lunch", "X-Flow", Some(&mailbox)).await;
+    assert_eq!(got.len(), 1, "{got:?}");
+    let (subject, body, header) = &got[0];
+    assert_eq!(subject, "[Example] Lunch");
+    assert!(
+        body.starts_with("See you at noon.") && body.trim_end().ends_with("Sent by Example Co."),
+        "{body:?}"
+    );
+    assert_eq!(header.trim(), "checked");
+
+    // Redirected: the other user gets it, the named recipient doesn't
+    let response = submit(
+        &sender,
+        &identity,
+        &mailbox,
+        &["flow-sender@example.com"],
+        "Falcon",
+        "About Project Falcon.",
+        None,
+    )
+    .await;
+    assert!(response["created"].get("s").is_some(), "{response}");
+    assert_eq!(
+        received(&other, "Falcon", "X-Flow", None).await.len(),
+        1,
+        "redirected"
+    );
+    assert!(
+        received(&sender, "Falcon", "X-Flow", Some(&mailbox))
+            .await
+            .is_empty(),
+        "the named recipient didn't get it"
+    );
+
+    // Refused
+    let response = submit(
+        &sender,
+        &identity,
+        &mailbox,
+        &["flow-sender@example.com"],
+        "Pay",
+        "invoice-scam inside",
+        None,
+    )
+    .await;
+    let refused = &response["notCreated"]["s"];
+    assert_eq!(refused["type"], "forbiddenToSend", "{response}");
+    assert!(
+        refused["description"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("isn't sent from here"),
+        "{response}"
+    );
+
+    // Incoming mail: the banner rule, and none of the outgoing ones
+    // LMTP delivery without signing in, as mail from outside arrives
+    admin
+        .registry_create_object(MtaStageAuth {
+            require: Expression {
+                else_: "false".to_string(),
+                ..Default::default()
+            },
+            ..Default::default()
+        })
+        .await;
+    let mut lmtp = SmtpConnection::connect().await;
+    lmtp.ingest(
+        "someone@elsewhere.org",
+        &["flow-other@example.com"],
+        "From: someone@elsewhere.org\r\nTo: flow-other@example.com\r\nSubject: Hello from outside\r\n\r\nHi.\r\n",
+    )
+    .await;
+    let got = received(&other, "Hello from outside", "X-Flow", None).await;
+    assert_eq!(
+        got.first().map(|g| g.0.as_str()),
+        Some("[External] Hello from outside"),
+        "{got:?}"
+    );
+    assert!(
+        got[0].2.is_empty(),
+        "outgoing rules left incoming mail alone"
+    );
+
+    // The redirect and the refusal are recorded; the footer isn't
+    let (_, response) = call(
+        &admin,
+        "inbuxa:AuditEvent/query",
+        json!({"filter": {"targetKind": "message", "text": "Mail flow"}}),
+    )
+    .await;
+    let ids = response["ids"].clone();
+    let (_, response) = call(&admin, "inbuxa:AuditEvent/get", json!({"ids": ids})).await;
+    let details: Vec<String> = response["list"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|e| e["details"].as_str().map(str::to_string))
+        .collect();
+    assert!(
+        details.iter().any(|d| d.starts_with(
+            "Mail flow rule \"Redirect projects\" redirected to flow-other@example.com"
+        )),
+        "{details:?}"
+    );
+    assert!(
+        details
+            .iter()
+            .any(|d| d.starts_with("Mail flow rule \"No invoices\" refused")),
+        "{details:?}"
+    );
+    assert!(
+        !details.iter().any(|d| d.contains("Footer and tag")),
+        "{details:?}"
+    );
+
+    // Off again
+    let (_, response) = call(
+        &admin,
+        "inbuxa:MailRule/get",
+        json!({"ids": null, "properties": ["id", "kind"]}),
+    )
+    .await;
+    let transport: Vec<Value> = response["list"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|r| r["kind"] == "transport")
+        .map(|r| r["id"].clone())
+        .collect();
+    call(&admin, "inbuxa:MailRule/set", json!({"destroy": transport})).await;
+}
+
 #[ignore]
 #[tokio::test(flavor = "multi_thread")]
 pub async fn mail_rules_tests() {
@@ -515,6 +786,7 @@ pub async fn mail_rules_tests() {
     test.insert_account(admin);
     self::test(&mut test).await;
     self::dlp(&mut test).await;
+    self::transport(&mut test).await;
     if test.is_reset() {
         test.temp_dir.delete();
     }

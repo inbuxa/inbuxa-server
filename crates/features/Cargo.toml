@@ -26,6 +26,8 @@ regex = "1.13.1"
 aho-corasick = "1.1"
 zip = "8.6"
 quick-xml = "0.41"
+mail-parser = { version = "0.11", features = ["full_encoding"] }
+mail-builder = { version = "1.0" }
 
 [dev-dependencies]
 tokio = { version = "1.53", features = ["macros", "rt"] }

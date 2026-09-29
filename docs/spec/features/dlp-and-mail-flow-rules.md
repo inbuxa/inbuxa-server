@@ -312,8 +312,13 @@ the sender's reason. No new audit action was added: an older node reading a
 record with an action it doesn't know fails its daily clean-up, so a new
 action would make rolling back unsafe.
 
-Transport rules that change a message record the rule and action the same way.
-Unmatched mail writes nothing.
+Transport rules that refuse a message or change where it goes (redirect, add
+a recipient, route) record the rule and what it did the same way, the actor
+being the sender, or `system:mail-flow` for incoming mail. **As built
+(phase 2g)**, rules that only change wording or headers (a disclaimer, a
+header, a subject prefix) write nothing: a banner rule would otherwise write
+a record for every message, kept for the audit log's two years. Unmatched
+mail writes nothing.
 
 ### 2.8 Permissions and who does what
 
