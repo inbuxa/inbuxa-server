@@ -73,6 +73,9 @@ pub enum MethodObject {
     HeldMessage,
     // inbuxa: journaling
     Journal,
+    JournalEntry,
+    JournalExport,
+    JournalVerification,
     TenantProtocolPolicy,
 }
 
@@ -115,7 +118,10 @@ impl MethodObject {
             | MethodObject::MailRule
             | MethodObject::SecurityAcceptance
             | MethodObject::HeldMessage
-            | MethodObject::Journal => Capability::Inbuxa,
+            | MethodObject::Journal
+            | MethodObject::JournalEntry
+            | MethodObject::JournalExport
+            | MethodObject::JournalVerification => Capability::Inbuxa,
             MethodObject::ProtocolPolicy => Capability::Inbuxa,
             MethodObject::TenantProtocolPolicy => Capability::Inbuxa,
         }
@@ -317,6 +323,12 @@ impl MethodName {
             (MethodFunction::Set, MethodObject::SecurityAcceptance) => "inbuxa:SecurityAcceptance/set",
             (MethodFunction::Get, MethodObject::Journal) => "inbuxa:Journal/get",
             (MethodFunction::Set, MethodObject::Journal) => "inbuxa:Journal/set",
+            (MethodFunction::Get, MethodObject::JournalEntry) => "inbuxa:JournalEntry/get",
+            (MethodFunction::Query, MethodObject::JournalEntry) => "inbuxa:JournalEntry/query",
+            (MethodFunction::Set, MethodObject::JournalExport) => "inbuxa:JournalExport/set",
+            (MethodFunction::Set, MethodObject::JournalVerification) => {
+                "inbuxa:JournalVerification/set"
+            }
             (MethodFunction::Get, MethodObject::HeldMessage) => "inbuxa:HeldMessage/get",
             (MethodFunction::Set, MethodObject::HeldMessage) => "inbuxa:HeldMessage/set",
             (MethodFunction::Get, MethodObject::HoldExport) => "inbuxa:HoldExport/get",
@@ -479,6 +491,10 @@ impl MethodName {
             "inbuxa:SecurityAcceptance/set" => (MethodObject::SecurityAcceptance, MethodFunction::Set),
             "inbuxa:Journal/get" => (MethodObject::Journal, MethodFunction::Get),
             "inbuxa:Journal/set" => (MethodObject::Journal, MethodFunction::Set),
+            "inbuxa:JournalEntry/get" => (MethodObject::JournalEntry, MethodFunction::Get),
+            "inbuxa:JournalEntry/query" => (MethodObject::JournalEntry, MethodFunction::Query),
+            "inbuxa:JournalExport/set" => (MethodObject::JournalExport, MethodFunction::Set),
+            "inbuxa:JournalVerification/set" => (MethodObject::JournalVerification, MethodFunction::Set),
             "inbuxa:HeldMessage/get" => (MethodObject::HeldMessage, MethodFunction::Get),
             "inbuxa:HeldMessage/set" => (MethodObject::HeldMessage, MethodFunction::Set),
             "inbuxa:HoldExport/get" => (MethodObject::HoldExport, MethodFunction::Get),
@@ -555,6 +571,9 @@ impl Display for MethodObject {
             MethodObject::MailRule => "inbuxa:MailRule",
             MethodObject::SecurityAcceptance => "inbuxa:SecurityAcceptance",
             MethodObject::Journal => "inbuxa:Journal",
+            MethodObject::JournalEntry => "inbuxa:JournalEntry",
+            MethodObject::JournalExport => "inbuxa:JournalExport",
+            MethodObject::JournalVerification => "inbuxa:JournalVerification",
             MethodObject::HeldMessage => "inbuxa:HeldMessage",
             MethodObject::HoldExport => "inbuxa:HoldExport",
             MethodObject::ProtocolPolicy => "inbuxa:ProtocolPolicy",

@@ -114,6 +114,7 @@ pub enum GetResponseMethod {
     MailRule(GetResponse<crate::object::inbuxa_mail_rule::MailRule>),
     SecurityAcceptance(GetResponse<crate::object::inbuxa_security_acceptance::SecurityAcceptance>),
     Journal(GetResponse<crate::object::inbuxa_journal::Journal>),
+    JournalEntry(GetResponse<crate::object::inbuxa_journal_entry::JournalEntry>),
     HeldMessage(GetResponse<crate::object::inbuxa_held_message::HeldMessage>),
     HoldExport(GetResponse<crate::object::inbuxa_hold_export::HoldExport>),
     ProtocolPolicy(GetResponse<crate::object::inbuxa_protocol_policy::ProtocolPolicy>),
@@ -156,6 +157,8 @@ pub enum SetResponseMethod {
         Box<SetResponse<crate::object::inbuxa_security_acceptance::SecurityAcceptance>>,
     ),
     Journal(Box<SetResponse<crate::object::inbuxa_journal::Journal>>),
+    JournalExport(Box<SetResponse<crate::object::inbuxa_journal_entry::JournalExport>>),
+    JournalVerification(Box<SetResponse<crate::object::inbuxa_journal_entry::JournalVerification>>),
     HeldMessage(Box<SetResponse<crate::object::inbuxa_held_message::HeldMessage>>),
     HoldExport(Box<SetResponse<crate::object::inbuxa_hold_export::HoldExport>>),
     Explanation(Box<SetResponse<crate::object::inbuxa_explanation::Explanation>>),
@@ -865,6 +868,24 @@ impl<'x> From<SetResponse<crate::object::inbuxa_mail_rule::MailRule>> for Respon
 }
 
 // inbuxa: journaling
+impl<'x> From<GetResponse<crate::object::inbuxa_journal_entry::JournalEntry>> for ResponseMethod<'x> {
+    fn from(value: GetResponse<crate::object::inbuxa_journal_entry::JournalEntry>) -> Self {
+        ResponseMethod::Get(GetResponseMethod::JournalEntry(value))
+    }
+}
+
+impl<'x> From<SetResponse<crate::object::inbuxa_journal_entry::JournalExport>> for ResponseMethod<'x> {
+    fn from(value: SetResponse<crate::object::inbuxa_journal_entry::JournalExport>) -> Self {
+        ResponseMethod::Set(SetResponseMethod::JournalExport(Box::new(value)))
+    }
+}
+
+impl<'x> From<SetResponse<crate::object::inbuxa_journal_entry::JournalVerification>> for ResponseMethod<'x> {
+    fn from(value: SetResponse<crate::object::inbuxa_journal_entry::JournalVerification>) -> Self {
+        ResponseMethod::Set(SetResponseMethod::JournalVerification(Box::new(value)))
+    }
+}
+
 impl<'x> From<GetResponse<crate::object::inbuxa_journal::Journal>> for ResponseMethod<'x> {
     fn from(value: GetResponse<crate::object::inbuxa_journal::Journal>) -> Self {
         ResponseMethod::Get(GetResponseMethod::Journal(value))

@@ -669,6 +669,34 @@ impl<'de> Visitor<'de> for CallVisitor {
                 }
             },
             // inbuxa: journaling
+            (MethodFunction::Get, MethodObject::JournalEntry) => match seq.next_element() {
+                Ok(Some(value)) => RequestMethod::Get(GetRequestMethod::JournalEntry(value)),
+                Err(err) => RequestMethod::invalid(err),
+                Ok(None) => {
+                    return Err(de::Error::invalid_length(1, &self));
+                }
+            },
+            (MethodFunction::Query, MethodObject::JournalEntry) => match seq.next_element() {
+                Ok(Some(value)) => RequestMethod::Query(QueryRequestMethod::JournalEntry(value)),
+                Err(err) => RequestMethod::invalid(err),
+                Ok(None) => {
+                    return Err(de::Error::invalid_length(1, &self));
+                }
+            },
+            (MethodFunction::Set, MethodObject::JournalExport) => match seq.next_element() {
+                Ok(Some(value)) => RequestMethod::Set(SetRequestMethod::JournalExport(value)),
+                Err(err) => RequestMethod::invalid(err),
+                Ok(None) => {
+                    return Err(de::Error::invalid_length(1, &self));
+                }
+            },
+            (MethodFunction::Set, MethodObject::JournalVerification) => match seq.next_element() {
+                Ok(Some(value)) => RequestMethod::Set(SetRequestMethod::JournalVerification(value)),
+                Err(err) => RequestMethod::invalid(err),
+                Ok(None) => {
+                    return Err(de::Error::invalid_length(1, &self));
+                }
+            },
             (MethodFunction::Get, MethodObject::Journal) => match seq.next_element() {
                 Ok(Some(value)) => RequestMethod::Get(GetRequestMethod::Journal(value)),
                 Err(err) => RequestMethod::invalid(err),

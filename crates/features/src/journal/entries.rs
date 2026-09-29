@@ -358,6 +358,120 @@ pub async fn list(
     Ok(out)
 }
 
+/// Most results one search page returns.
+pub const MAX_QUERY_LIMIT: usize = 500;
+
+/// A search of the journal (JR-15): conditions that must all hold.
+#[derive(Debug, Clone, Default, PartialEq, Eq, SerdeSerialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Filter {
+    /// From this time on, in seconds.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub after: Option<u64>,
+    /// Before this time, in seconds.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub before: Option<u64>,
+    /// Part of the sender's address, ignoring case.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sender: Option<String>,
+    /// Part of any recipient's address, ignoring case.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub recipient: Option<String>,
+    /// Part of the sender's or any recipient's address.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub address: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub direction: Option<Direction>,
+    /// Words that must all appear in the subject, ignoring case.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub text: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub message_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub journal_id: Option<u32>,
+}
+
+impl Filter {
+    pub fn matches(&self, entry: &Entry) -> bool {
+        let has = |value: &str, part: &str| value.to_lowercase().contains(&part.to_lowercase());
+        self.after.is_none_or(|after| entry.at >= after)
+            && self.before.is_none_or(|before| entry.at < before)
+            && self.sender.as_deref().is_none_or(|s| has(&entry.sender, s))
+            && self
+                .recipient
+                .as_deref()
+                .is_none_or(|r| entry.recipients.iter().any(|a| has(a, r)))
+            && self
+                .address
+                .as_deref()
+                .is_none_or(|a| has(&entry.sender, a) || entry.recipients.iter().any(|r| has(r, a)))
+            && self
+                .direction
+                .is_none_or(|d| d == Direction::Any || d == entry.direction)
+            && self.text.as_deref().is_none_or(|text| {
+                let subject = entry.subject.to_lowercase();
+                text.to_lowercase()
+                    .split_whitespace()
+                    .all(|word| subject.contains(word))
+            })
+            && self.message_id.as_deref().is_none_or(|id| {
+                entry.message_id.trim_matches(['<', '>']) == id.trim_matches(['<', '>'])
+            })
+            && self.journal_id.is_none_or(|j| entry.journals.contains(&j))
+    }
+}
+
+/// Entries matching `filter`, newest first: a page from `position`, up to
+/// `limit`, and, when asked, how many match in all.
+pub async fn query(
+    data: &Store,
+    filter: &Filter,
+    position: usize,
+    limit: usize,
+    count_all: bool,
+) -> trc::Result<(Vec<EntryId>, usize)> {
+    let after = filter.after.unwrap_or(0);
+    let before = filter.before.unwrap_or(u64::MAX);
+    let mut ids = Vec::new();
+    data.iterate(
+        IterateParams::new(
+            key(KIND_TIME, &[after, 0, 0]),
+            key(KIND_TIME, &[before.saturating_sub(1), u64::MAX, u64::MAX]),
+        )
+        .descending()
+        .no_values(),
+        |key, _| {
+            if let Some(parts) = parse_key(key, KIND_TIME, 3) {
+                ids.push(EntryId {
+                    node: parts[1],
+                    seq: parts[2],
+                });
+            }
+            Ok(true)
+        },
+    )
+    .await
+    .caused_by(trc::location!())?;
+    let mut page = Vec::new();
+    let mut total = 0;
+    for id in ids {
+        let Some(entry) = get(data, id).await? else {
+            continue;
+        };
+        if !filter.matches(&entry) {
+            continue;
+        }
+        if total >= position && page.len() < limit {
+            page.push(id);
+        }
+        total += 1;
+        if !count_all && page.len() >= limit {
+            break;
+        }
+    }
+    Ok((page, total))
+}
+
 /// What a purge did.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Purged {
@@ -670,6 +784,72 @@ mod tests {
             Some(vec![5, 3, 9])
         );
         assert_eq!(parse_key(&any.key, KIND_TIME, 3), None);
+    }
+
+    #[test]
+    fn filters_match() {
+        let entry = Entry {
+            queue_id: 1,
+            at: 100,
+            direction: Direction::Outgoing,
+            sender: "Alice@example.com".into(),
+            authenticated: true,
+            recipients: vec!["pay@bank.example".into()],
+            subject: "Q3 figures, final".into(),
+            message_id: "<abc@example.com>".into(),
+            accounts: vec![3],
+            tenants: vec![],
+            journals: vec![2],
+            held: false,
+            blob: String::new(),
+            size: 0,
+            sha256: String::new(),
+            expires_at: 0,
+        };
+        let yes = |f: Filter| assert!(f.matches(&entry), "{f:?}");
+        let no = |f: Filter| assert!(!f.matches(&entry), "{f:?}");
+        yes(Filter::default());
+        yes(Filter {
+            sender: Some("alice@".into()),
+            ..Default::default()
+        });
+        yes(Filter {
+            address: Some("BANK".into()),
+            ..Default::default()
+        });
+        yes(Filter {
+            text: Some("final q3".into()),
+            ..Default::default()
+        });
+        yes(Filter {
+            message_id: Some("abc@example.com".into()),
+            ..Default::default()
+        });
+        yes(Filter {
+            direction: Some(Direction::Any),
+            ..Default::default()
+        });
+        no(Filter {
+            direction: Some(Direction::Incoming),
+            ..Default::default()
+        });
+        no(Filter {
+            recipient: Some("alice".into()),
+            ..Default::default()
+        });
+        no(Filter {
+            before: Some(100),
+            ..Default::default()
+        });
+        yes(Filter {
+            after: Some(100),
+            journal_id: Some(2),
+            ..Default::default()
+        });
+        no(Filter {
+            journal_id: Some(5),
+            ..Default::default()
+        });
     }
 
     #[test]

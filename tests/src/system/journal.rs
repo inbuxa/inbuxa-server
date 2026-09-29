@@ -18,7 +18,11 @@ use inbuxa_features::journal::{
     entries::{self, Entry, EntryId},
     report,
 };
-use registry::schema::structs::{Expression, MtaStageAuth};
+use registry::schema::{
+    prelude::{ObjectType, Property},
+    structs::{CustomRoles, Expression, MtaStageAuth, Role, UserRoles},
+};
+use registry::types::map::Map;
 use serde_json::{Value, json};
 use std::str::FromStr;
 use store::{Deserialize, write::BatchBuilder};
@@ -682,6 +686,223 @@ pub async fn archive(test: &mut TestServer) {
     inbuxa_features::journal::invalidate();
 }
 
+/// Phase 4: searching, reading and exporting over JMAP, by a Compliance
+/// Officer, each recorded; administrators set journals up but don't read
+/// them; the chain check.
+pub async fn search(test: &mut TestServer) {
+    println!("Running journal search tests...");
+    let admin = test.account("admin@example.com");
+    let sender = admin
+        .create_user_account(
+            "search-sender@example.com",
+            "search-sender-secret-7301",
+            "Search sender",
+            &[],
+            vec![],
+        )
+        .await;
+    let (_, response) = call(
+        &sender,
+        "Identity/set",
+        json!({"create": {"i": {"name": "Sender", "email": "search-sender@example.com"}}}),
+    )
+    .await;
+    let identity = response["created"]["i"]["id"].as_str().unwrap().to_string();
+    let (_, response) = call(
+        &sender,
+        "Mailbox/set",
+        json!({"create": {"m": {"name": "Search drafts"}}}),
+    )
+    .await;
+    let mailbox = response["created"]["m"]["id"].as_str().unwrap().to_string();
+    let (_, response) = call(
+        &admin,
+        "inbuxa:Journal/set",
+        json!({"create": {"s": {"name": "Search sender", "enabled": true, "direction": "any",
+            "scope": {"accounts": [sender.id_string()]}, "retentionDays": 30}}}),
+    )
+    .await;
+    let journal_id = response["created"]["s"]["id"]
+        .as_str()
+        .unwrap_or_else(|| panic!("{response}"))
+        .to_string();
+    inbuxa_features::journal::invalidate();
+    for subject in ["Budget draft", "Budget final", "Lunch"] {
+        let response = send(
+            &sender,
+            &identity,
+            &mailbox,
+            &["someone@elsewhere.org"],
+            &["someone@elsewhere.org"],
+            subject,
+        )
+        .await;
+        assert!(response["created"].get("s").is_some(), "{response}");
+    }
+
+    // Administrators set journals up but don't read them
+    let (name, response) = call(
+        &admin,
+        "inbuxa:JournalEntry/query",
+        json!({"filter": {"sender": "search-sender"}}),
+    )
+    .await;
+    assert_eq!(name, "error", "{response}");
+
+    // A Compliance Officer does
+    let mut officer_role = None;
+    for id in admin
+        .registry_query_ids(
+            ObjectType::Role,
+            Vec::<(&str, &str)>::new(),
+            Vec::<&str>::new(),
+        )
+        .await
+    {
+        let role = admin.registry_get::<Role>(id).await;
+        if role.description == "Compliance Officer" && role.member_tenant_id.is_none() {
+            officer_role = Some(id);
+        }
+    }
+    let officer = admin
+        .create_user_account(
+            "journal-officer@example.com",
+            "journal-officer-secret-7302",
+            "Officer",
+            &[],
+            vec![],
+        )
+        .await;
+    admin
+        .registry_update_object(
+            ObjectType::Account,
+            officer.id(),
+            json!({Property::Roles: UserRoles::Custom(CustomRoles {
+                role_ids: Map::new(vec![officer_role.expect("the officer role")]),
+            })}),
+        )
+        .await;
+    let (_, response) = call(
+        &officer,
+        "inbuxa:JournalEntry/query",
+        json!({"filter": {"sender": "search-sender", "text": "budget"}, "calculateTotal": true}),
+    )
+    .await;
+    assert_eq!(response["total"], 2, "{response}");
+    let ids = response["ids"].clone();
+    let (_, response) = call(&officer, "inbuxa:JournalEntry/get", json!({"ids": ids})).await;
+    let list = response["list"].as_array().unwrap();
+    assert_eq!(list.len(), 2, "{response}");
+    assert_eq!(list[0]["subject"], "Budget final", "newest first");
+    assert_eq!(list[0]["direction"], "outgoing");
+    assert_eq!(list[0]["journalIds"], json!([journal_id]));
+    assert!(list[0]["report"].is_null(), "only when asked for");
+    let first = list[0]["id"].as_str().unwrap().to_string();
+    let (_, response) = call(
+        &officer,
+        "inbuxa:JournalEntry/get",
+        json!({"ids": [first.clone()], "properties": ["subject", "report"]}),
+    )
+    .await;
+    let report = response["list"][0]["report"].as_str().unwrap_or_default();
+    assert!(
+        report.contains("Subject: Journal report: Budget final"),
+        "{response}"
+    );
+    assert!(report.contains("Sender: search-sender@example.com\r\n"));
+    let (_, response) = call(
+        &officer,
+        "inbuxa:JournalEntry/query",
+        json!({"filter": {"journalId": journal_id, "direction": "incoming"}}),
+    )
+    .await;
+    assert_eq!(response["ids"], json!([]), "{response}");
+    let (name, _) = call(
+        &officer,
+        "inbuxa:JournalEntry/query",
+        json!({"filter": {"colour": "red"}}),
+    )
+    .await;
+    assert_eq!(name, "error");
+
+    // Exports need a reason, and hold every report the filter matches
+    let (_, response) = call(
+        &officer,
+        "inbuxa:JournalExport/set",
+        json!({"create": {"x": {"filter": {"sender": "search-sender"}}}}),
+    )
+    .await;
+    assert_eq!(
+        response["notCreated"]["x"]["properties"],
+        json!(["reason"]),
+        "{response}"
+    );
+    let (_, response) = call(
+        &officer,
+        "inbuxa:JournalExport/set",
+        json!({"create": {"x": {"filter": {"sender": "search-sender"}, "reason": "Case 12"}}}),
+    )
+    .await;
+    let export = &response["created"]["x"];
+    assert_eq!(export["count"], 3, "{response}");
+    assert!(export["blobId"].as_str().is_some());
+    assert_eq!(export["sha256"].as_str().map(str::len), Some(64));
+
+    // The chain check, which the officer may run too
+    let (_, response) = call(
+        &officer,
+        "inbuxa:JournalVerification/set",
+        json!({"create": {"v": {}}}),
+    )
+    .await;
+    assert_eq!(response["created"]["v"]["verified"], true, "{response}");
+
+    // The officer changes no journals
+    let (name, _) = call(
+        &officer,
+        "inbuxa:Journal/set",
+        json!({"destroy": [journal_id.clone()]}),
+    )
+    .await;
+    assert_eq!(name, "error");
+
+    // Every search, listing, read, export and check is recorded
+    let (_, response) = call(
+        &admin,
+        "inbuxa:AuditEvent/query",
+        json!({"filter": {"targetKind": "inbuxa:JournalEntry", "actorId": officer.id_string()}}),
+    )
+    .await;
+    let ids = response["ids"].clone();
+    let (_, response) = call(&admin, "inbuxa:AuditEvent/get", json!({"ids": ids})).await;
+    let details: Vec<String> = response["list"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|e| format!("{} {}", e["action"], e["details"]))
+        .collect();
+    for expected in [
+        "Searched the journal",
+        "Listed 2 journal entries",
+        "Read a journaled message from search-sender@example.com",
+        "Exported 3 journal entries",
+        "verify",
+    ] {
+        assert!(
+            details.iter().any(|d| d.contains(expected)),
+            "{expected}: {details:?}"
+        );
+    }
+
+    call(
+        &admin,
+        "inbuxa:Journal/set",
+        json!({"destroy": [journal_id]}),
+    )
+    .await;
+    inbuxa_features::journal::invalidate();
+}
+
 struct Raw(Vec<u8>);
 
 impl Deserialize for Raw {
@@ -703,6 +924,7 @@ pub async fn journal_tests() {
     test.insert_account(admin);
     self::test(&mut test).await;
     self::archive(&mut test).await;
+    self::search(&mut test).await;
     if test.is_reset() {
         test.temp_dir.delete();
     }

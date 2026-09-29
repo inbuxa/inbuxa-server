@@ -313,6 +313,27 @@ Phase 3 (`feature/journal-archive`):
   in one SMTP session; before, a second message in the same session kept
   the first one's route.
 
+Phase 4 (`feature/journal-search`):
+
+- `inbuxa:JournalEntry/query` (after, before, sender, recipient, address,
+  direction, subject words, Message-ID, journal; newest first, pages of up
+  to 500) and `/get` (`report`, the whole journal report up to 10 MB of
+  text, only when asked for), with `sysJournalSearch`.
+- Recording (JR-17) happens before anything is returned, and nothing is
+  returned if it can't be written: a search with its terms, a listing
+  once per call, each report read on its own (as `blobAccess`, the
+  action reads of someone's mail already use), each export with its
+  reason (`export`), each check (`verify`). No new audit actions, so an
+  older version reads every record.
+- `inbuxa:JournalExport/set` builds the ZIP in the request, like the audit
+  log's export, rather than as a task: at most 10,000 reports and 1 GB,
+  and a search that matches more is refused with the count, to narrow.
+  The ZIP has the reports as `.eml`, `manifest.csv` with the envelope and
+  a SHA-256 per file, `exceptions.csv` for reports that couldn't be read,
+  and `manifest.sha256`.
+- `inbuxa:JournalVerification/set` rechecks the chains and every report
+  against its entry, with `sysJournalGet`.
+
 ## Known gaps
 
 - A message a person saves to Sent over IMAP, or sends through another
