@@ -114,6 +114,33 @@ pub async fn test(test: &mut TestServer) {
         "{rule}"
     );
 
+    // Group and tenant ids travel in their JMAP form
+    let mut by_tenant = transport_rule();
+    by_tenant["name"] = "By tenant".into();
+    by_tenant["conditions"] = json!([{"type": "senderTenant", "tenants": ["b"]}]);
+    let (_, response) = call(
+        &admin,
+        "inbuxa:MailRule/set",
+        json!({"create": {"g": by_tenant}}),
+    )
+    .await;
+    let tenant_rule = response["created"]["g"]["id"]
+        .as_str()
+        .unwrap_or_else(|| panic!("{response}"))
+        .to_string();
+    let (_, response) = call(&admin, "inbuxa:MailRule/get", json!({"ids": [tenant_rule]})).await;
+    assert_eq!(
+        response["list"][0]["conditions"][0]["tenants"],
+        json!(["b"]),
+        "{response}"
+    );
+    call(
+        &admin,
+        "inbuxa:MailRule/set",
+        json!({"destroy": [tenant_rule]}),
+    )
+    .await;
+
     // Checked when written
     let mut inbound = dlp_rule();
     inbound["direction"] = "incoming".into();
