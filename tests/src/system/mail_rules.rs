@@ -773,6 +773,329 @@ pub async fn transport(test: &mut TestServer) {
     call(&admin, "inbuxa:MailRule/set", json!({"destroy": transport})).await;
 }
 
+/// Hold for review (§2.6): held mail waits, shows in the review queue,
+/// can't be sent around the review, and a reviewer releases or rejects it.
+pub async fn hold(test: &mut TestServer) {
+    println!("Running held mail tests...");
+    let admin = test.account("admin@example.com");
+    let sender = admin
+        .create_user_account(
+            "hold-sender@example.com",
+            "hold-sender-secret-7703",
+            "Hold sender",
+            &[],
+            vec![],
+        )
+        .await;
+    let (_, response) = call(
+        &sender,
+        "Identity/set",
+        json!({"create": {"i": {"name": "Sender", "email": "hold-sender@example.com"}}}),
+    )
+    .await;
+    let identity = response["created"]["i"]["id"].as_str().unwrap().to_string();
+    let (_, response) = call(
+        &sender,
+        "Mailbox/set",
+        json!({"create": {"m": {"name": "Hold drafts"}}}),
+    )
+    .await;
+    let mailbox = response["created"]["m"]["id"].as_str().unwrap().to_string();
+    let (_, response) = call(
+        &admin,
+        "inbuxa:MailRule/set",
+        json!({"create": {"h": {
+            "name": "Hold cards", "kind": "dlp", "direction": "outgoing",
+            "conditions": [{"type": "words", "words": ["hold-me"]},
+                {"type": "detected", "detectors": [{"id": "payment-card"}]}],
+            "actions": [{"type": "hold", "notice": "Card numbers are reviewed first.", "notifySender": true}]
+        }}}),
+    )
+    .await;
+    let rule = response["created"]["h"]["id"]
+        .as_str()
+        .unwrap_or_else(|| panic!("{response}"))
+        .to_string();
+    let body = "hold-me: card 4242 4242 4242 4242";
+
+    // Accepted, held, listed
+    let response = submit(
+        &sender,
+        &identity,
+        &mailbox,
+        &["hold-sender@example.com"],
+        "Held one",
+        body,
+        None,
+    )
+    .await;
+    let submission = response["created"]["s"]["id"]
+        .as_str()
+        .unwrap_or_else(|| panic!("held, not refused: {response}"))
+        .to_string();
+    let (_, response) = call(&admin, "inbuxa:HeldMessage/get", json!({"ids": null})).await;
+    let list = response["list"]
+        .as_array()
+        .unwrap_or_else(|| panic!("{response}"));
+    assert_eq!(list.len(), 1, "{response}");
+    let first = list[0]["id"].as_str().unwrap().to_string();
+    assert_eq!(list[0]["sender"], "hold-sender@example.com");
+    assert_eq!(list[0]["subject"], "Held one");
+    assert_eq!(list[0]["rules"][0]["name"], "Hold cards");
+    assert_eq!(
+        list[0]["counts"],
+        json!([{"detector": "words", "count": 1}, {"detector": "payment-card", "count": 1}])
+    );
+    assert!(
+        list[0].get("preview").is_none(),
+        "no preview unless asked for"
+    );
+
+    // The sender is told, and it isn't delivered
+    let notice = received(
+        &sender,
+        "Held for review: Held one",
+        "X-Flow",
+        Some(&mailbox),
+    )
+    .await;
+    assert!(
+        notice[0].1.contains("Card numbers are reviewed first."),
+        "{notice:?}"
+    );
+    assert!(
+        received_now(&sender, "Held one", &mailbox)
+            .await
+            .iter()
+            .all(|s| s.starts_with("Held for review"))
+    );
+
+    // Not around the review: not from the queue, not by unsending
+    let (_, response) = call(
+        &admin,
+        "x:QueuedMessage/set",
+        json!({"update": {first.as_str(): {"nextRetry": "2026-01-01T00:00:00Z"}}}),
+    )
+    .await;
+    assert!(
+        response["notUpdated"][first.as_str()]["description"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("held for review"),
+        "{response}"
+    );
+    let (_, response) = call(&admin, "x:QueuedMessage/set", json!({"destroy": [first]})).await;
+    assert!(
+        response["notDestroyed"].get(first.as_str()).is_some(),
+        "{response}"
+    );
+    let (_, response) = call(
+        &sender,
+        "EmailSubmission/set",
+        json!({"update": {submission.as_str(): {"undoStatus": "canceled"}}}),
+    )
+    .await;
+    assert_eq!(
+        response["notUpdated"][submission.as_str()]["type"],
+        "cannotUnsend",
+        "{response}"
+    );
+
+    // Reading it is recorded
+    let (_, response) = call(
+        &admin,
+        "inbuxa:HeldMessage/get",
+        json!({"ids": [first], "properties": ["id", "preview"]}),
+    )
+    .await;
+    assert!(
+        response["list"][0]["preview"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("4242 4242"),
+        "{response}"
+    );
+    let (_, response) = call(
+        &admin,
+        "inbuxa:AuditEvent/query",
+        json!({"filter": {"targetKind": "inbuxa:HeldMessage", "action": "blobAccess"}}),
+    )
+    .await;
+    assert_eq!(
+        response["ids"].as_array().map(|i| i.len()),
+        Some(1),
+        "{response}"
+    );
+
+    // Rejected: a reason is required; the sender gets the note
+    let (_, response) = call(
+        &admin,
+        "inbuxa:HeldMessage/set",
+        json!({"update": {first.as_str(): {"decision": "reject"}}}),
+    )
+    .await;
+    assert!(
+        response["notUpdated"].get(first.as_str()).is_some(),
+        "no reason: {response}"
+    );
+    let (_, response) = call(
+        &admin,
+        "inbuxa:HeldMessage/set",
+        json!({"reason": "Card data may not leave by mail", "update": {first.as_str(): {"decision": "reject", "note": "Use the payments portal."}}}),
+    )
+    .await;
+    assert!(
+        response["updated"].get(first.as_str()).is_some(),
+        "{response}"
+    );
+    let notice = received(&sender, "Not sent: Held one", "X-Flow", Some(&mailbox)).await;
+    assert!(
+        notice[0].1.contains("Use the payments portal."),
+        "{notice:?}"
+    );
+    let (_, response) = call(&admin, "x:QueuedMessage/get", json!({"ids": [first]})).await;
+    assert_eq!(
+        response["notFound"][0],
+        first.as_str(),
+        "gone from the queue: {response}"
+    );
+
+    // Released: delivered
+    let response = submit(
+        &sender,
+        &identity,
+        &mailbox,
+        &["hold-sender@example.com"],
+        "Held two",
+        body,
+        None,
+    )
+    .await;
+    assert!(response["created"].get("s").is_some(), "{response}");
+    let (_, response) = call(&admin, "inbuxa:HeldMessage/get", json!({"ids": null})).await;
+    let second = response["list"][0]["id"]
+        .as_str()
+        .unwrap_or_else(|| panic!("{response}"))
+        .to_string();
+    let (_, response) = call(
+        &admin,
+        "inbuxa:HeldMessage/set",
+        json!({"reason": "Finance approved", "update": {second.as_str(): {"decision": "release"}}}),
+    )
+    .await;
+    assert!(
+        response["updated"].get(second.as_str()).is_some(),
+        "{response}"
+    );
+    let mut delivered = Vec::new();
+    for _ in 0..50 {
+        delivered = received_now(&sender, "Held two", &mailbox).await;
+        if delivered.iter().any(|s| s == "Held two") {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    }
+    assert!(delivered.iter().any(|s| s == "Held two"), "{delivered:?}");
+    let (_, response) = call(&admin, "inbuxa:HeldMessage/get", json!({"ids": null})).await;
+    assert_eq!(
+        response["list"].as_array().map(|l| l.len()),
+        Some(0),
+        "{response}"
+    );
+
+    // Both decisions are in the audit log, with their reasons
+    let (_, response) = call(
+        &admin,
+        "inbuxa:AuditEvent/query",
+        json!({"filter": {"targetKind": "inbuxa:HeldMessage", "action": "update"}}),
+    )
+    .await;
+    let ids = response["ids"].clone();
+    let (_, response) = call(&admin, "inbuxa:AuditEvent/get", json!({"ids": ids})).await;
+    let reasons: Vec<&str> = response["list"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|e| e["reason"].as_str())
+        .collect();
+    assert!(
+        reasons.contains(&"Card data may not leave by mail")
+            && reasons.contains(&"Finance approved"),
+        "{response}"
+    );
+
+    // Unreviewed: returned by the daily clean-up once its time is up
+    let response = submit(
+        &sender,
+        &identity,
+        &mailbox,
+        &["hold-sender@example.com"],
+        "Held three",
+        body,
+        None,
+    )
+    .await;
+    assert!(response["created"].get("s").is_some(), "{response}");
+    let store = test.server.store();
+    let mut record = inbuxa_features::mailflow::held::all(store)
+        .await
+        .unwrap()
+        .pop()
+        .expect("held");
+    record.expires_at = 0;
+    inbuxa_features::mailflow::held::create(store, &record)
+        .await
+        .unwrap();
+    assert_eq!(smtp::queue::held::expire(&test.server).await.unwrap(), 1);
+    assert!(
+        inbuxa_features::mailflow::held::all(store)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    let notice = received(&sender, "Not sent: Held three", "X-Flow", Some(&mailbox)).await;
+    assert!(
+        notice[0].1.contains("Nobody reviewed it within 7 days"),
+        "{notice:?}"
+    );
+    let (_, response) = call(
+        &admin,
+        "inbuxa:AuditEvent/query",
+        json!({"filter": {"targetKind": "inbuxa:HeldMessage", "action": "destroy"}}),
+    )
+    .await;
+    assert_eq!(
+        response["ids"].as_array().map(|i| i.len()),
+        Some(1),
+        "expiry recorded: {response}"
+    );
+
+    call(&admin, "inbuxa:MailRule/set", json!({"destroy": [rule]})).await;
+}
+
+/// Subjects in `account` matching `text` right now, not in `drafts`.
+async fn received_now(account: &Account, text: &str, drafts: &str) -> Vec<String> {
+    let (_, response) = call(
+        account,
+        "Email/query",
+        json!({"filter": {"subject": text, "inMailboxOtherThan": [drafts]}}),
+    )
+    .await;
+    let ids = response["ids"].clone();
+    let (_, response) = call(
+        account,
+        "Email/get",
+        json!({"ids": ids, "properties": ["subject"]}),
+    )
+    .await;
+    response["list"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|e| e["subject"].as_str().unwrap_or_default().to_string())
+        .collect()
+}
+
 #[ignore]
 #[tokio::test(flavor = "multi_thread")]
 pub async fn mail_rules_tests() {
@@ -787,6 +1110,7 @@ pub async fn mail_rules_tests() {
     self::test(&mut test).await;
     self::dlp(&mut test).await;
     self::transport(&mut test).await;
+    self::hold(&mut test).await;
     if test.is_reset() {
         test.temp_dir.delete();
     }

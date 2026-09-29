@@ -54,6 +54,7 @@ impl Response<'_> {
                 GetRequestMethod::AccountLock(request) => request.resolve_references(self)?,
                 GetRequestMethod::LegalHold(request) => request.resolve_references(self)?,
                 GetRequestMethod::MailRule(request) => request.resolve_references(self)?,
+                GetRequestMethod::HeldMessage(request) => request.resolve_references(self)?,
                 GetRequestMethod::HoldExport(request) => request.resolve_references(self)?,
                 GetRequestMethod::ProtocolPolicy(request) => request.resolve_references(self)?,
                 GetRequestMethod::TenantProtocolPolicy(request) => {
@@ -124,6 +125,9 @@ impl Response<'_> {
                     request.resolve_references(self, 1, false)?
                 }
                 SetRequestMethod::MailRule(request) => {
+                    request.resolve_references(self, 1, false)?
+                }
+                SetRequestMethod::HeldMessage(request) => {
                     request.resolve_references(self, 1, false)?
                 }
                 SetRequestMethod::HoldExport(request) => {

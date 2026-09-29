@@ -740,34 +740,45 @@ impl<T: SessionStream> Session<T> {
 
         // inbuxa: DLP (dlp-and-mail-flow-rules spec, §2.1): after the system
         // script, before headers and signing
-        match self
+        let mut held_draft = None;
+        let (message, envelope) = match self
             .check_mail_rules(edited_message.as_deref().unwrap_or(raw_message.as_slice()))
             .await
         {
-            super::mailflow::Checked::Accept => {}
-            super::mailflow::Checked::Changed { message, envelope } => {
-                if let Some(message) = message {
-                    edited_message = Some(message);
-                }
-                for change in envelope {
-                    match change {
-                        super::mailflow::EnvelopeChange::AddRecipient(address) => {
-                            if !self.data.rcpt_to.iter().any(|r| r.address_lcase.eq_ignore_ascii_case(&address)) {
-                                self.data.rcpt_to.push(SessionAddress::new(address));
-                            }
-                        }
-                        super::mailflow::EnvelopeChange::Redirect(addresses) => {
-                            self.data.rcpt_to = addresses.into_iter().map(SessionAddress::new).collect();
-                        }
-                        super::mailflow::EnvelopeChange::Route(queue) => {
-                            self.data.mailflow_queue = Some(queue);
-                        }
-                    }
-                }
+            super::mailflow::Checked::Accept => (None, Vec::new()),
+            super::mailflow::Checked::Changed { message, envelope } => (message, envelope),
+            // §2.6: queued, but not due for a century; a reviewer releases it
+            super::mailflow::Checked::Hold { draft, message, envelope } => {
+                self.data.future_release = inbuxa_features::mailflow::held::HOLD_SECONDS;
+                held_draft = Some(draft);
+                (message, envelope)
             }
             super::mailflow::Checked::Refuse(reply, refusal) => {
                 self.data.dlp_refusal = refusal;
                 return reply.into();
+            }
+        };
+        if let Some(message) = message {
+            edited_message = Some(message);
+        }
+        for change in envelope {
+            match change {
+                super::mailflow::EnvelopeChange::AddRecipient(address) => {
+                    if !self
+                        .data
+                        .rcpt_to
+                        .iter()
+                        .any(|r| r.address_lcase.eq_ignore_ascii_case(&address))
+                    {
+                        self.data.rcpt_to.push(SessionAddress::new(address));
+                    }
+                }
+                super::mailflow::EnvelopeChange::Redirect(addresses) => {
+                    self.data.rcpt_to = addresses.into_iter().map(SessionAddress::new).collect();
+                }
+                super::mailflow::EnvelopeChange::Route(queue) => {
+                    self.data.mailflow_queue = Some(queue);
+                }
             }
         }
 
@@ -850,6 +861,19 @@ impl<T: SessionStream> Session<T> {
                 .server
                 .eval_signers(&ac.dkim.sign, self, self.data.session_id)
                 .await;
+            // inbuxa: §2.6, who the held message is from and to
+            let held_envelope = held_draft.as_ref().map(|_| {
+                (
+                    message.message.return_path.to_string(),
+                    message
+                        .message
+                        .recipients
+                        .iter()
+                        .map(|r| r.address.to_string())
+                        .collect::<Vec<_>>(),
+                    message.message.size,
+                )
+            });
             if message
                 .queue(
                     QueueParams::new(raw_message, self.data.session_id, &self.server)
@@ -864,9 +888,17 @@ impl<T: SessionStream> Session<T> {
             {
                 self.state = State::Accepted(queue_id);
                 self.data.messages_sent += 1;
-                format!("250 2.0.0 Message queued with id {queue_id:x}.\r\n")
-                    .into_bytes()
-                    .into()
+                if let (Some(draft), Some((sender, recipients, size))) = (held_draft, held_envelope)
+                {
+                    self.record_held(queue_id, draft, sender, recipients, size).await;
+                    format!("250 2.0.0 Held for review, id {queue_id:x}.\r\n")
+                        .into_bytes()
+                        .into()
+                } else {
+                    format!("250 2.0.0 Message queued with id {queue_id:x}.\r\n")
+                        .into_bytes()
+                        .into()
+                }
             } else {
                 (b"451 4.3.5 Unable to accept message at this time.\r\n"[..]).into()
             }

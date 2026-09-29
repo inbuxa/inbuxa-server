@@ -282,6 +282,9 @@ impl RequestHandler for Server {
                                     SetResponseMethod::MailRule(set_response) => {
                                         set_response.update_created_ids(&mut response);
                                     }
+                                    SetResponseMethod::HeldMessage(set_response) => {
+                                        set_response.update_created_ids(&mut response);
+                                    }
                                     SetResponseMethod::HoldExport(set_response) => {
                                         set_response.update_created_ids(&mut response);
                                     }
@@ -488,6 +491,11 @@ impl RequestHandler for Server {
                 GetRequestMethod::LegalHold(mut req) => {
                     resolve_account_id(&mut req.account_id, method_name.obj, access_token)?;
                     crate::inbuxa::legal_hold::get(self, *req).await?.into()
+                }
+                // inbuxa: mail held for review
+                GetRequestMethod::HeldMessage(mut req) => {
+                    resolve_account_id(&mut req.account_id, method_name.obj, access_token)?;
+                    crate::inbuxa::held_message::get(self, access_token, *req).await?.into()
                 }
                 // inbuxa: DLP and mail flow rules
                 GetRequestMethod::MailRule(mut req) => {
@@ -914,6 +922,22 @@ impl RequestHandler for Server {
                         reason,
                         *req,
                         |req| Box::pin(crate::inbuxa::legal_hold::set(self, access_token, req)),
+                    )
+                    .await?
+                    .into()
+                }
+                SetRequestMethod::HeldMessage(mut req) => {
+                    resolve_account_id(&mut req.account_id, method_name.obj, access_token)?;
+                    let reason = req.arguments.reason.clone();
+                    crate::inbuxa::audit::recorded(
+                        self,
+                        access_token,
+                        session,
+                        &method_name.obj.to_string(),
+                        None,
+                        reason,
+                        *req,
+                        |req| Box::pin(crate::inbuxa::held_message::set(self, access_token, req)),
                     )
                     .await?
                     .into()

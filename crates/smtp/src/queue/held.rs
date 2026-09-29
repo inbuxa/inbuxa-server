@@ -1,0 +1,177 @@
+/*
+ * SPDX-FileCopyrightText: 2026 Coffey Labs
+ *
+ * SPDX-License-Identifier: AGPL-3.0-only
+ */
+
+//! inbuxa: mail held for review (dlp-and-mail-flow-rules spec, §2.6):
+//! releasing it, rejecting it, rejecting what nobody reviewed in time, and
+//! the notices the sender gets.
+//!
+//! A held message sits in the queue with its release [`HOLD_SECONDS`] off.
+//! Releasing it undoes exactly that: each recipient due now, its next
+//! notice as far from now as it was from its retry, its lifetime counted
+//! from the release.
+
+use crate::{
+    queue::{Message, MessageWrapper, Status, spool::SmtpSpool},
+    reporting::send::MtaReportSend,
+};
+use common::{
+    Server,
+    config::smtp::queue::{QueueExpiry, QueueName},
+    ipc::QueueEvent,
+};
+use inbuxa_features::{
+    audit::{Action, Actor, Outcome, Record, Target},
+    mailflow::held::{self, HOLD_SECONDS, Held, KEEP_DAYS},
+};
+use mail_builder::{
+    MessageBuilder,
+    headers::{HeaderType, address::Address},
+};
+use store::{ahash::AHashSet, write::now};
+
+/// Puts a held message back on its way. False when it's no longer queued.
+pub async fn release(server: &Server, queue_id: u64) -> trc::Result<bool> {
+    let Some(archive) = server.read_message_archive(queue_id).await? else {
+        held::delete(server.store(), queue_id).await?;
+        return Ok(false);
+    };
+    let mut message: Message = archive.to_unarchived::<Message>()?.deserialize()?;
+    let prev_events = message.next_events();
+    let at = now();
+    let mut modified = AHashSet::new();
+    for (idx, rcpt) in message.recipients.iter_mut().enumerate() {
+        if !matches!(rcpt.status, Status::Scheduled | Status::TemporaryFailure(_)) {
+            continue;
+        }
+        let notify_gap = rcpt.notify.due.saturating_sub(rcpt.retry.due);
+        rcpt.retry.due = at;
+        rcpt.notify.due = at + notify_gap;
+        if let QueueExpiry::Ttl(ttl) = rcpt.expires {
+            rcpt.expires = QueueExpiry::Ttl(
+                ttl.saturating_sub(HOLD_SECONDS) + at.saturating_sub(message.created),
+            );
+        }
+        modified.insert(idx);
+    }
+    let saved = MessageWrapper::new(message, queue_id, QueueName::default())
+        .save_registry_changes(server, prev_events, modified)
+        .await;
+    held::delete(server.store(), queue_id).await?;
+    let _ = server.inner.ipc.queue_tx.send(QueueEvent::Refresh).await;
+    Ok(saved)
+}
+
+/// Takes a held message out of the queue and tells its sender, with the
+/// reviewer's note if there is one. False when it's no longer queued.
+pub async fn reject(server: &Server, record: &Held, note: Option<&str>) -> trc::Result<bool> {
+    let removed = match server
+        .read_message(record.queue_id, QueueName::default())
+        .await
+    {
+        Some(message) => message.remove(server, None).await,
+        None => false,
+    };
+    held::delete(server.store(), record.queue_id).await?;
+    let mut text = format!(
+        "Your message \"{}\" to {} was held for review under this server's rules, and wasn't sent.\r\n",
+        record.subject,
+        record.recipients.join(", ")
+    );
+    match note {
+        Some(note) => text.push_str(&format!("\r\nThe reviewer's note: {note}\r\n")),
+        None => text.push_str(&format!(
+            "\r\nNobody reviewed it within {KEEP_DAYS} days, so it was returned.\r\n"
+        )),
+    }
+    notify(
+        server,
+        record,
+        &format!("Not sent: {}", record.subject),
+        text,
+    )
+    .await;
+    let _ = server.inner.ipc.queue_tx.send(QueueEvent::Refresh).await;
+    Ok(removed)
+}
+
+/// Tells the sender their message is held (when the rule asks).
+pub async fn notify_held(server: &Server, record: &Held) {
+    let notices = record
+        .rules
+        .iter()
+        .map(|r| r.notice.as_str())
+        .collect::<Vec<_>>()
+        .join(" ");
+    let text = format!(
+        "Your message \"{}\" to {} is held for review under this server's rules: {notices}\r\n\r\n\
+         It will be sent if a reviewer releases it, and returned otherwise within {KEEP_DAYS} days.\r\n",
+        record.subject,
+        record.recipients.join(", "),
+    );
+    notify(
+        server,
+        record,
+        &format!("Held for review: {}", record.subject),
+        text,
+    )
+    .await;
+}
+
+async fn notify(server: &Server, record: &Held, subject: &str, text: String) {
+    let domain = record
+        .sender
+        .rsplit_once('@')
+        .map_or("localhost", |(_, d)| d);
+    let from = format!("postmaster@{domain}");
+    let message = MessageBuilder::new()
+        .from(Address::new_address(Some("Mail review"), from.clone()))
+        .to(Address::new_address(None::<String>, record.sender.clone()))
+        .subject(subject)
+        .header("Auto-Submitted", HeaderType::Text("auto-replied".into()))
+        .text_body(text)
+        .write_to_vec()
+        .unwrap_or_default();
+    server
+        .send_autogenerated(from, [record.sender.as_str()].into_iter(), message, None, 0)
+        .await;
+}
+
+/// Rejects every held message nobody reviewed in time (§2.6), each
+/// recorded as the server's doing. Returns how many.
+pub async fn expire(server: &Server) -> trc::Result<usize> {
+    let at = now();
+    let mut count = 0;
+    for record in held::all(server.store()).await? {
+        if !record.is_expired(at) {
+            continue;
+        }
+        reject(server, &record, None).await?;
+        count += 1;
+        server
+            .audit_note(Record {
+                at: at * 1000,
+                actor: Actor::system("DLP"),
+                via: None,
+                remote_ip: None,
+                action: Action::Destroy,
+                target: Target {
+                    kind: "inbuxa:HeldMessage".into(),
+                    id: Some(record.queue_id.to_string()),
+                    name: Some(record.subject.clone()),
+                    account_id: record.account_id,
+                    tenant_id: record.tenant_id,
+                },
+                changes: vec![],
+                details: Some(format!(
+                    "Rejected: nobody reviewed it within {KEEP_DAYS} days; the sender was told"
+                )),
+                reason: None,
+                outcome: Outcome::success(),
+            })
+            .await;
+    }
+    Ok(count)
+}

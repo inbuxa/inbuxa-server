@@ -26,6 +26,7 @@ pub mod cache;
 pub mod detectors;
 pub mod engine;
 pub mod extract;
+pub mod held;
 pub mod rewrite;
 pub mod rules;
 pub mod words;

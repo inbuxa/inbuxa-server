@@ -609,6 +609,21 @@ impl<'de> Visitor<'de> for CallVisitor {
                     return Err(de::Error::invalid_length(1, &self));
                 }
             },
+            // inbuxa: mail held for review
+            (MethodFunction::Get, MethodObject::HeldMessage) => match seq.next_element() {
+                Ok(Some(value)) => RequestMethod::Get(GetRequestMethod::HeldMessage(value)),
+                Err(err) => RequestMethod::invalid(err),
+                Ok(None) => {
+                    return Err(de::Error::invalid_length(1, &self));
+                }
+            },
+            (MethodFunction::Set, MethodObject::HeldMessage) => match seq.next_element() {
+                Ok(Some(value)) => RequestMethod::Set(SetRequestMethod::HeldMessage(value)),
+                Err(err) => RequestMethod::invalid(err),
+                Ok(None) => {
+                    return Err(de::Error::invalid_length(1, &self));
+                }
+            },
             // inbuxa: DLP and mail flow rules
             (MethodFunction::Get, MethodObject::MailRule) => match seq.next_element() {
                 Ok(Some(value)) => RequestMethod::Get(GetRequestMethod::MailRule(value)),

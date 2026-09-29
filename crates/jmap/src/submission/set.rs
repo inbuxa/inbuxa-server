@@ -214,6 +214,17 @@ impl EmailSubmissionSet for Server {
             }
 
             match undo_status {
+                // inbuxa: held for review: the review decides, not an unsend
+                // (dlp-and-mail-flow-rules spec, §2.6)
+                Some(email_submission::UndoStatus::Canceled)
+                    if inbuxa_features::mailflow::held::is_held(self.store(), queue_id).await? =>
+                {
+                    response.not_updated.append(
+                        id,
+                        SetError::new(SetErrorType::CannotUnsend)
+                            .with_description("The message is held for review and can't be unsent."),
+                    );
+                }
                 Some(email_submission::UndoStatus::Canceled) => {
                     if let Some(queue_message) =
                         self.read_message(queue_id, QueueName::default()).await
