@@ -98,6 +98,20 @@ Each has an ID, and tests name the IDs they check.
   deliberate differences from upstream (see "Security note"). An operator who
   wants open dynamic registration for third-party apps can turn it back on;
   C-9's consent page still names every non-first-party client.
+
+  **`oAuthClientOverride` only in bootstrap and recovery mode** (2026-09-29).
+  Upstream lets an account holding it skip the client and redirect URI checks
+  on the sign-in page, at the code exchange and in the device flow.
+  Administrators hold it, so a link naming a made-up client and an attacker's
+  redirect URI handed an administrator's code, and then a token, to the
+  attacker: registration protected everyone except the accounts most worth
+  phishing. Now the permission counts only in bootstrap and recovery mode,
+  where the recovery administrator signs in before any client is registered.
+  An administrator otherwise signs in like anyone else, through a registered
+  client and one of its redirect URIs. INBUXA's production server was checked
+  first: its front ends' clients are registered with the redirect URIs they
+  use (C-6). Released in 2026.9.29.1. Checked by `tests/e2e/client_override.py` against the debug
+  build, with the same script failing against the build before the change.
 - **C-6.** Two first-party clients are registered as `x:OAuthClient` whenever
   `x:FrontEnds` is set or changed:
   - **`inbuxa-admin`**: a public client (no secret), authorization code with
