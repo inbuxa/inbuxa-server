@@ -91,6 +91,13 @@ impl EmailSubmissionSet for Server {
                     );
 
                     let send_at = submission.send_at;
+                    // inbuxa: DLP (§2.6): the sender learns it's held
+                    let held = match submission.queue_id {
+                        Some(queue_id) => {
+                            inbuxa_features::mailflow::held::is_held(self.store(), queue_id).await?
+                        }
+                        None => false,
+                    };
                     let undo_status = match submission.undo_status {
                         UndoStatus::Pending => email_submission::UndoStatus::Pending,
                         UndoStatus::Final => email_submission::UndoStatus::Final,
@@ -128,7 +135,8 @@ impl EmailSubmissionSet for Server {
                                 .with_key_value(
                                     EmailSubmissionProperty::UndoStatus,
                                     Value::Element(EmailSubmissionValue::UndoStatus(undo_status)),
-                                ),
+                                )
+                                .with_key_value(EmailSubmissionProperty::DlpHeld, Value::Bool(held)),
                         ),
                     );
                 }

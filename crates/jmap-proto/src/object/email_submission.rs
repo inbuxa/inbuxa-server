@@ -45,6 +45,9 @@ pub enum EmailSubmissionProperty {
     // inbuxa: DLP (dlp-and-mail-flow-rules spec, §2.5): `{"reason": ...}`
     // to send despite a warning
     DlpOverride,
+    // inbuxa: in a create's response, true when DLP held the message for
+    // review (§2.6)
+    DlpHeld,
 
     Pointer(JsonPointer<EmailSubmissionProperty>),
 }
@@ -96,6 +99,7 @@ impl Property for EmailSubmissionProperty {
             EmailSubmissionProperty::IdentityId => "identityId",
             EmailSubmissionProperty::MdnBlobIds => "mdnBlobIds",
             EmailSubmissionProperty::DlpOverride => "inbuxa:dlpOverride",
+            EmailSubmissionProperty::DlpHeld => "inbuxa:held",
             EmailSubmissionProperty::SendAt => "sendAt",
             EmailSubmissionProperty::ThreadId => "threadId",
             EmailSubmissionProperty::UndoStatus => "undoStatus",
@@ -188,6 +192,7 @@ impl EmailSubmissionProperty {
             "dsnBlobIds" => EmailSubmissionProperty::DsnBlobIds,
             "mdnBlobIds" => EmailSubmissionProperty::MdnBlobIds,
             "inbuxa:dlpOverride" => EmailSubmissionProperty::DlpOverride,
+            "inbuxa:held" => EmailSubmissionProperty::DlpHeld,
         )
         .or_else(|| {
             if allow_patch && value.contains('/') {

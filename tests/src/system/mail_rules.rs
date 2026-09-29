@@ -312,6 +312,7 @@ pub async fn dlp(test: &mut TestServer) {
         response["created"].get("s").is_some(),
         "no rules: {response}"
     );
+    assert_eq!(response["created"]["s"]["inbuxa:held"], false, "{response}");
 
     // A warning: refused with the rule and its notice, then sent with a reason
     let (_, response) = call(
@@ -833,6 +834,7 @@ pub async fn hold(test: &mut TestServer) {
         .as_str()
         .unwrap_or_else(|| panic!("held, not refused: {response}"))
         .to_string();
+    assert_eq!(response["created"]["s"]["inbuxa:held"], true, "{response}");
     let (_, response) = call(&admin, "inbuxa:HeldMessage/get", json!({"ids": null})).await;
     let list = response["list"]
         .as_array()
