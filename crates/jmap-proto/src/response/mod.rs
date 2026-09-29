@@ -112,6 +112,7 @@ pub enum GetResponseMethod {
     AccountLock(GetResponse<crate::object::inbuxa_account_lock::AccountLock>),
     LegalHold(GetResponse<crate::object::inbuxa_legal_hold::LegalHold>),
     MailRule(GetResponse<crate::object::inbuxa_mail_rule::MailRule>),
+    SecurityAcceptance(GetResponse<crate::object::inbuxa_security_acceptance::SecurityAcceptance>),
     Journal(GetResponse<crate::object::inbuxa_journal::Journal>),
     HeldMessage(GetResponse<crate::object::inbuxa_held_message::HeldMessage>),
     HoldExport(GetResponse<crate::object::inbuxa_hold_export::HoldExport>),
@@ -151,6 +152,9 @@ pub enum SetResponseMethod {
     AccountLock(Box<SetResponse<crate::object::inbuxa_account_lock::AccountLock>>),
     LegalHold(Box<SetResponse<crate::object::inbuxa_legal_hold::LegalHold>>),
     MailRule(Box<SetResponse<crate::object::inbuxa_mail_rule::MailRule>>),
+    SecurityAcceptance(
+        Box<SetResponse<crate::object::inbuxa_security_acceptance::SecurityAcceptance>>,
+    ),
     Journal(Box<SetResponse<crate::object::inbuxa_journal::Journal>>),
     HeldMessage(Box<SetResponse<crate::object::inbuxa_held_message::HeldMessage>>),
     HoldExport(Box<SetResponse<crate::object::inbuxa_hold_export::HoldExport>>),
@@ -828,6 +832,23 @@ impl<'x> From<GetResponse<crate::object::inbuxa_held_message::HeldMessage>> for 
 impl<'x> From<SetResponse<crate::object::inbuxa_held_message::HeldMessage>> for ResponseMethod<'x> {
     fn from(value: SetResponse<crate::object::inbuxa_held_message::HeldMessage>) -> Self {
         ResponseMethod::Set(SetResponseMethod::HeldMessage(Box::new(value)))
+    }
+}
+
+// inbuxa: accepted security to-do items
+impl<'x> From<GetResponse<crate::object::inbuxa_security_acceptance::SecurityAcceptance>>
+    for ResponseMethod<'x>
+{
+    fn from(value: GetResponse<crate::object::inbuxa_security_acceptance::SecurityAcceptance>) -> Self {
+        ResponseMethod::Get(GetResponseMethod::SecurityAcceptance(value))
+    }
+}
+
+impl<'x> From<SetResponse<crate::object::inbuxa_security_acceptance::SecurityAcceptance>>
+    for ResponseMethod<'x>
+{
+    fn from(value: SetResponse<crate::object::inbuxa_security_acceptance::SecurityAcceptance>) -> Self {
+        ResponseMethod::Set(SetResponseMethod::SecurityAcceptance(Box::new(value)))
     }
 }
 

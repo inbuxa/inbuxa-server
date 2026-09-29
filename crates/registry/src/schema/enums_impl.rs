@@ -7101,6 +7101,7 @@ impl EnumImpl for Permission {
             b"sysJournalUpdate" => Permission::SysJournalUpdate,
             b"sysJournalSearch" => Permission::SysJournalSearch,
             b"sysJournalExport" => Permission::SysJournalExport,
+            b"sysSecurityAccept" => Permission::SysSecurityAccept,
             b"sysAccountGet" => Permission::SysAccountGet,
             b"sysAccountCreate" => Permission::SysAccountCreate,
             b"sysAccountUpdate" => Permission::SysAccountUpdate,
@@ -7801,6 +7802,7 @@ impl EnumImpl for Permission {
             Permission::SysJournalUpdate => "sysJournalUpdate",
             Permission::SysJournalSearch => "sysJournalSearch",
             Permission::SysJournalExport => "sysJournalExport",
+            Permission::SysSecurityAccept => "sysSecurityAccept",
             Permission::SysAccountGet => "sysAccountGet",
             Permission::SysAccountCreate => "sysAccountCreate",
             Permission::SysAccountUpdate => "sysAccountUpdate",
@@ -8494,6 +8496,7 @@ impl EnumImpl for Permission {
             681 => Some(Permission::SysJournalUpdate),
             682 => Some(Permission::SysJournalSearch),
             683 => Some(Permission::SysJournalExport),
+            684 => Some(Permission::SysSecurityAccept),
             219 => Some(Permission::SysAccountGet),
             220 => Some(Permission::SysAccountCreate),
             221 => Some(Permission::SysAccountUpdate),
@@ -8938,7 +8941,7 @@ impl EnumImpl for Permission {
         }
     }
 
-    const COUNT: usize = 684;
+    const COUNT: usize = 685;
 }
 
 impl serde::Serialize for Permission {

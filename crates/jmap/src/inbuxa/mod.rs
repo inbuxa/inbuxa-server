@@ -11,6 +11,7 @@ pub mod access;
 pub mod account_lock;
 pub mod legal_hold;
 pub mod mail_rule;
+pub mod security_acceptance;
 pub mod journal;
 pub mod held_message;
 pub mod dlp_settings;

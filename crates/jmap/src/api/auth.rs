@@ -119,6 +119,9 @@ impl JmapAuthorization for AccessToken {
                 // inbuxa: journaling (JR-18)
                 GetRequestMethod::Journal(_) => Permission::SysJournalGet,
                 GetRequestMethod::HoldExport(_) => Permission::SysLegalHoldExport,
+                // inbuxa: accepted security items are read by whoever may
+                // see the server's security settings
+                GetRequestMethod::SecurityAcceptance(_) => Permission::SysSecurityGet,
                 // inbuxa: legacy protocols off. It takes listeners away and
                 // puts them back, so it takes the listener's permissions
                 GetRequestMethod::ProtocolPolicy(_) => Permission::SysNetworkListenerGet,
@@ -298,6 +301,21 @@ impl JmapAuthorization for AccessToken {
                         Permission::SysJournalUpdate,
                         Permission::SysJournalUpdate,
                     ),
+                    // inbuxa: accepting a security to-do item, or removing
+                    // an acceptance; nothing is ever edited
+                    SetRequestMethod::SecurityAcceptance(s) => {
+                        if s.update.as_ref().is_some_and(|u| !u.is_empty()) {
+                            Err(trc::JmapEvent::Forbidden
+                                .into_err()
+                                .details("An acceptance is replaced, not edited"))
+                        } else if self.has_permission(Permission::SysSecurityAccept) {
+                            Ok(())
+                        } else {
+                            Err(trc::JmapEvent::Forbidden
+                                .into_err()
+                                .details("You are not authorized to accept security items"))
+                        }
+                    }
                     // inbuxa: LH-12, exporting held data
                     SetRequestMethod::HoldExport(s) => validate_set(
                         s,
@@ -460,6 +478,7 @@ impl JmapAuthorization for AccessToken {
                 | MethodObject::LegalHold
                 | MethodObject::HoldExport
                 | MethodObject::MailRule
+                | MethodObject::SecurityAcceptance
                 | MethodObject::HeldMessage
                 | MethodObject::Journal
                 | MethodObject::ProtocolPolicy

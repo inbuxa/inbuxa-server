@@ -217,7 +217,11 @@ async fn before<T: JmapObject>(
 
     if let Some(MaybeResultReference::Value(destroy)) = &request.destroy {
         for id in destroy {
-            let before = stored(server, registry, id).await;
+            // inbuxa: a fork object is named from its own store, as an update is
+            let before = match registry {
+                Some(_) => stored(server, registry, id).await,
+                None => fork_current(server, object, id).await,
+            };
             let mut described = before.as_ref().map(diff::describe).unwrap_or_default();
             if let Some(before) = &before {
                 described.name = full_name(server, object, before, described.name).await;
@@ -430,6 +434,26 @@ async fn fork_current(server: &Server, object: &str, id: &MaybeInvalid<Id>) -> O
                     "from": date(hold.from),
                     "to": date(hold.to),
                     "released": !hold.is_active(),
+                }))
+            }
+            MaybeInvalid::Invalid(_) => None,
+        },
+        // SS-26: an acceptance named by its check and subject
+        "inbuxa:SecurityAcceptance" => match id {
+            MaybeInvalid::Value(id) => {
+                let acceptance =
+                    security::acceptance::get(data, u32::try_from(id.id()).ok()?)
+                        .await
+                        .ok()??;
+                let name = match acceptance.subject.as_str() {
+                    "" => acceptance.check.clone(),
+                    subject => format!("{} {subject}", acceptance.check),
+                };
+                Some(serde_json::json!({
+                    "name": name,
+                    "check": acceptance.check,
+                    "subject": acceptance.subject,
+                    "note": acceptance.note,
                 }))
             }
             MaybeInvalid::Invalid(_) => None,

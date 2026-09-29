@@ -362,6 +362,8 @@ is written.
 | 9 | Per-domain directories | A domain signs in against its own LDAP, SQL or OIDC directory | Added 2026-09-18. Signing in through an OIDC provider as the server's directory is already AGPL; only the per-domain choice is Enterprise. Built 2026-09-19 in `crates/common/src/auth` and `crates/directory`; status in `features/per-domain-directories.md`. |
 | — | Seat limits, license keys | Nothing: there's no license | Removed, not rebuilt. |
 
+Not a rebuild: the **security to-do list** is INBUXA's own design (inbuxa-drafts `specs/security-score.md`). The console runs its checks; the server's part is `inbuxa:SecurityAcceptance`, the accepted items (`crates/jmap/src/inbuxa/security_acceptance.rs`), and the `sysSecurityAccept` permission.
+
 ## 5. The web front ends
 
 **Which ihasmail.** Public ihasmail stays Stalwart-facing: its code, docs,
