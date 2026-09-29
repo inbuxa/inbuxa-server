@@ -270,13 +270,17 @@ impl ClientRegistrationHandler for Server {
             false
         };
 
-        // Check if the account is allowed to override client registration
-        if self
-            .access_token(account_id)
-            .await
-            .caused_by(trc::location!())?
-            .build()
-            .has_permission(Permission::OAuthClientOverride)
+        // Check if the account is allowed to override client registration.
+        // inbuxa: only while setting up or recovering, when the recovery
+        // administrator signs in before any client is registered (contract C-5)
+        let registry = self.registry();
+        if (registry.is_bootstrap_mode() || registry.is_recovery_mode())
+            && self
+                .access_token(account_id)
+                .await
+                .caused_by(trc::location!())?
+                .build()
+                .has_permission(Permission::OAuthClientOverride)
         {
             return Ok(None);
         }
