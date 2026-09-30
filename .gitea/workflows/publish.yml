@@ -42,6 +42,14 @@
 #
 # The push logs in with PACKAGE_TOKEN (jcoffey-dev, write:package): the job's
 # own token is refused by the container registry.
+#
+# BUILD_ON: when the Actions variable BUILD_ON is 'github' (org or repo), every
+# job here but the announcement skips, and the tag is published by
+# .github/workflows/ci.yml on the GitHub mirror instead -- same guards, same
+# tags, the same Release and binaries, created here through the API. The
+# `github` job waits for that run's commit status, "github/ci (tag)", and the
+# announcement follows it as it follows the binaries here. Unset, everything
+# runs here as before.
 name: publish
 
 on:
@@ -50,6 +58,7 @@ on:
 
 jobs:
   version:
+    if: ${{ vars.BUILD_ON != 'github' }}
     runs-on: light
     container:
       image: python:3.13-slim@sha256:8d9d0b8bcf6506481eae4907c18f5e3e7902e629f5f6d684f9e7c32e85e3ddf0 # 3.13-slim
@@ -88,6 +97,7 @@ jobs:
           echo "version $V"
 
   publish-amd64:
+    if: ${{ vars.BUILD_ON != 'github' }}
     needs: [version]
     runs-on: docker
     container:
@@ -128,6 +138,7 @@ jobs:
         run: docker logout "$REGISTRY" || true
 
   publish-arm64:
+    if: ${{ vars.BUILD_ON != 'github' }}
     needs: [version, publish-amd64]
     runs-on: docker
     container:
@@ -162,11 +173,44 @@ jobs:
       - if: always()
         run: docker logout "$REGISTRY" || true
 
+  # BUILD_ON=github: waits for the GitHub mirror's run for this tag, which
+  # posts its result back as the commit status "github/ci (tag)", and takes
+  # its answer. Fails after the timeout if no answer comes.
+  github:
+    if: ${{ vars.BUILD_ON == 'github' }}
+    runs-on: light
+    timeout-minutes: 240
+    container:
+      image: python:3.13-slim@sha256:8d9d0b8bcf6506481eae4907c18f5e3e7902e629f5f6d684f9e7c32e85e3ddf0 # 3.13-slim
+    steps:
+      - env:
+          TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          SHA: ${{ github.sha }}
+          CONTEXT: github/ci (tag)
+        run: |
+          python3 - <<'EOF'
+          import json, os, time, urllib.request
+          url = (f"{os.environ['CI_SERVER_INTERNAL']}/api/v1/repos/{os.environ['GITHUB_REPOSITORY']}"
+                 f"/commits/{os.environ['SHA']}/statuses?limit=50")
+          req = urllib.request.Request(url, headers={"Authorization": f"token {os.environ['TOKEN']}"})
+          ctx, last = os.environ["CONTEXT"], None
+          print(f"waiting for '{ctx}' on {os.environ['SHA']}", flush=True)
+          while True:
+              mine = [s for s in json.load(urllib.request.urlopen(req)) if s["context"] == ctx]
+              state = max(mine, key=lambda s: s["id"]) if mine else None
+              if state and state["status"] != last:
+                  last = state["status"]; print(f"{ctx}: {last}  {state.get('target_url', '')}", flush=True)
+              if last == "success": raise SystemExit(0)
+              if last in ("failure", "error"): raise SystemExit(1)
+              time.sleep(20)
+          EOF
+
   # The weekly release creates its Release (and so the tag) first; a tag
   # pushed by hand has none. Either way the tag ends up with exactly one
   # Release, created once the amd64 image exists so its pull instructions
   # work; arm64 and the binaries follow.
   release:
+    if: ${{ vars.BUILD_ON != 'github' }}
     needs: [version, publish-amd64]
     runs-on: light
     container:
@@ -216,6 +260,7 @@ jobs:
   # `docker create` does not start anything, so pulling an arm64 image on an
   # amd64 runner and copying a file out of it needs no emulation.
   binaries:
+    if: ${{ vars.BUILD_ON != 'github' }}
     needs: [version, publish-arm64, release]
     runs-on: docker
     container:
@@ -289,8 +334,14 @@ jobs:
   # The release above is made with the job's own token, and Gitea starts no
   # workflow for events the Actions bot causes -- announce.yml's
   # 'on: release' never fires for it -- so announce it from here.
+  #
+  # With BUILD_ON=github the release and binaries come from the GitHub run,
+  # so the announcement waits for the `github` job instead. The Release that
+  # run creates for a hand-pushed tag is made with a user token, so
+  # announce.yml fires for it too; discourse-release keeps one topic per tag.
   announce:
-    needs: [release, binaries]
+    needs: [release, binaries, github]
+    if: ${{ always() && ((needs.release.result == 'success' && needs.binaries.result == 'success') || needs.github.result == 'success') }}
     runs-on: light
     steps:
       - uses: coffey-labs/actions/discourse-release@e9293996e2efa770839121fa8f8da93083f216be

@@ -7,7 +7,12 @@
 # instance resolves short `uses:` against itself, never GitHub, so nothing
 # unreviewed can be pulled in.
 #
-# Not ported, as on GitLab: publish.yml and release.yml still need doing.
+# BUILD_ON: when the Actions variable BUILD_ON is 'github' (org or repo),
+# fork-checks and build skip here and the `github` job below waits for the
+# same work done by .github/workflows/ci.yml on the GitHub mirror, passing or
+# failing with it -- so this run still carries the answer pull requests and
+# merges look at. Unset, everything builds here as before. If GitHub is
+# unavailable, unset BUILD_ON and nothing else has to change.
 name: ci
 
 on:
@@ -25,6 +30,7 @@ jobs:
   # without the AGPL 5(a) notice. Seconds, and needs no toolchain. The notice
   # check diffs against the upstream snapshot branch, hence the full fetch.
   fork-checks:
+    if: ${{ vars.BUILD_ON != 'github' }}
     runs-on: light
     container:
       image: python:3.13-slim@sha256:8d9d0b8bcf6506481eae4907c18f5e3e7902e629f5f6d684f9e7c32e85e3ddf0 # 3.13-slim
@@ -52,6 +58,7 @@ jobs:
         run: python3 -m unittest discover -s tools/fork/tests
 
   build:
+    if: ${{ vars.BUILD_ON != 'github' }}
     # Either runner (host1 or host2): the build needs no docker socket.
     runs-on: light
     container:
@@ -101,3 +108,37 @@ jobs:
           used=$(du -s --block-size=1G /cache/target 2>/dev/null | cut -f1)
           echo "target dir: ${used:-0} GB"
           if [ "${used:-0}" -gt 60 ]; then rm -rf /cache/target && echo "over 60 GB: target dir cleared"; fi
+
+  # BUILD_ON=github: the GitHub mirror builds this commit and posts the result
+  # back as the commit status "github/ci (branch)". This waits for that status
+  # and takes its answer. The mirror pushes on every commit, so a missing
+  # status means GitHub has not got the push or is not running: after the
+  # timeout this fails, which is the cue to unset BUILD_ON.
+  github:
+    if: ${{ vars.BUILD_ON == 'github' }}
+    runs-on: light
+    timeout-minutes: 150
+    container:
+      image: python:3.13-slim@sha256:8d9d0b8bcf6506481eae4907c18f5e3e7902e629f5f6d684f9e7c32e85e3ddf0 # 3.13-slim
+    steps:
+      - env:
+          TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+          CONTEXT: github/ci (branch)
+        run: |
+          python3 - <<'EOF'
+          import json, os, time, urllib.request
+          url = (f"{os.environ['CI_SERVER_INTERNAL']}/api/v1/repos/{os.environ['GITHUB_REPOSITORY']}"
+                 f"/commits/{os.environ['SHA']}/statuses?limit=50")
+          req = urllib.request.Request(url, headers={"Authorization": f"token {os.environ['TOKEN']}"})
+          ctx, last = os.environ["CONTEXT"], None
+          print(f"waiting for '{ctx}' on {os.environ['SHA']}", flush=True)
+          while True:
+              mine = [s for s in json.load(urllib.request.urlopen(req)) if s["context"] == ctx]
+              state = max(mine, key=lambda s: s["id"]) if mine else None
+              if state and state["status"] != last:
+                  last = state["status"]; print(f"{ctx}: {last}  {state.get('target_url', '')}", flush=True)
+              if last == "success": raise SystemExit(0)
+              if last in ("failure", "error"): raise SystemExit(1)
+              time.sleep(20)
+          EOF
