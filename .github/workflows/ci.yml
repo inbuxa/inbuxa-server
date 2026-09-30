@@ -236,17 +236,16 @@ jobs:
           username: jcoffey-dev
           password: ${{ secrets.GITEA_TOKEN }}
       # Attestations off: they add manifests of their own, and the index
-      # should hold the two images and nothing else. The GitHub Actions cache
-      # keeps the dependency layer (`cargo chef cook`), which only a
-      # dependency change alters, between releases.
+      # should hold the two images and nothing else. No build cache: GitHub
+      # scopes a tag run's cache to that tag, so the next release could never
+      # read it, and each one would park several GB in the repository's 10 GB
+      # cache and evict main's cargo cache.
       - uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
         with:
           context: .
           platforms: linux/${{ matrix.arch }}
           provenance: false
           sbom: false
-          cache-from: type=gha,scope=image-${{ matrix.arch }}
-          cache-to: type=gha,mode=max,scope=image-${{ matrix.arch }}
           push: true
           tags: |
             ${{ env.IMAGE }}:${{ env.VERSION }}-${{ matrix.arch }}
