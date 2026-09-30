@@ -8,6 +8,10 @@
 
 ---
 
+> [!NOTE]
+> Development happens on [git.coffeylabs.org/inbuxa/inbuxa-server](https://git.coffeylabs.org/inbuxa/inbuxa-server); the copy on GitHub is a read-only mirror.
+> Report issues at **[git.coffeylabs.org/inbuxa/inbuxa-server/issues](https://git.coffeylabs.org/inbuxa/inbuxa-server/issues)**, and join discussions at **[community.coffeylabs.org](https://community.coffeylabs.org)**.
+
 **inbuxa** is a mail and collaboration server: JMAP, IMAP, POP3, SMTP,
 CalDAV, CardDAV and WebDAV, in one Rust binary, with ihasmail as its web front
 end. It is a fork of [Stalwart](https://github.com/stalwartlabs/stalwart).
