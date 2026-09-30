@@ -357,18 +357,23 @@ jobs:
           cat SHA256SUMS
       # A re-run of a tag replaces its assets rather than leaving two files
       # with the same name and different contents.
+      #
+      # The uploads cross Cloudflare, which dropped 50 MB HTTP/2 uploads
+      # part-way for v2026.9.30.1 (curl 92, PROTOCOL_ERROR; origin logged
+      # 400), once on each of two runs. Uploads go over HTTP/1.1 and retry.
       - name: attach them to the release
         run: |
           set -euo pipefail
           api="$GITEA_URL/api/v1/repos/$GITHUB_REPOSITORY"
           auth="Authorization: token $GITEA_TOKEN"
-          rel="$(curl -fsS -H "$auth" "$api/releases/tags/$TAG" | jq -r .id)"
-          assets="$(curl -fsS -H "$auth" "$api/releases/$rel/assets")"
+          retry=(--retry 5 --retry-all-errors --retry-delay 15)
+          rel="$(curl -fsS "${retry[@]}" -H "$auth" "$api/releases/tags/$TAG" | jq -r .id)"
+          assets="$(curl -fsS "${retry[@]}" -H "$auth" "$api/releases/$rel/assets")"
           for f in out/inbuxa-linux-amd64.tar.gz out/inbuxa-linux-arm64.tar.gz out/SHA256SUMS; do
             name="$(basename "$f")"
             old="$(jq -r --arg n "$name" '.[] | select(.name == $n) | .id' <<<"$assets")"
-            for id in $old; do curl -fsS -o /dev/null -X DELETE -H "$auth" "$api/releases/$rel/assets/$id"; done
-            curl -fsS -o /dev/null -X POST -H "$auth" -F "attachment=@$f" "$api/releases/$rel/assets?name=$name"
+            for id in $old; do curl -fsS "${retry[@]}" -o /dev/null -X DELETE -H "$auth" "$api/releases/$rel/assets/$id"; done
+            curl -fsS --http1.1 "${retry[@]}" -o /dev/null -X POST -H "$auth" -F "attachment=@$f" "$api/releases/$rel/assets?name=$name"
             echo "attached $name"
           done
 
