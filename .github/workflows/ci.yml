@@ -1,51 +1,384 @@
-# What CI can check without a mail server's worth of infrastructure.
+# CI and publishing on GitHub, for the repository Gitea mirrors here.
 #
-# The build, and that every test target compiles. It deliberately does not
-# *run* the test suites: the unit tests only build with the integration crate
-# in the graph, because that is what switches on the `test_mode` features they
-# rely on (docs/spec/SPEC.md 2.2b), and the integration suites need a `STORE`,
-# fixed ports, and in most cases a container apiece (docs/spec/
-# container-tests.md). Running them here would mean either a green tick that
-# skipped everything, or a red one that means "the runner has no Redis".
+# Gitea (git.coffeylabs.org) is where this project lives: pull requests,
+# issues, releases and the container registry are all there, and it pushes
+# every branch and tag to this GitHub copy as it changes. GitHub's hosted
+# runners are faster than the self-hosted ones -- and have native arm64 -- so
+# the building happens here, and the answer goes back to Gitea as a commit
+# status that Gitea's own ci.yml / publish.yml wait on.
 #
-# So this catches what it can honestly catch -- code that does not compile,
-# including test code -- and the suites are run by hand, one at a time, as
-# that page describes. If that changes, it changes because someone made the
-# suites runnable unattended, not because CI started ignoring failures.
-name: CI
+# One switch decides which side builds: the Actions variable BUILD_ON, set on
+# both forges. BUILD_ON=github runs every job below and turns Gitea's heavy
+# jobs into a wait for this one; anything else leaves Gitea building exactly
+# as before and every job here skips. If GitHub is ever unavailable, unset it
+# on Gitea and nothing else has to change.
+#
+# Needs, as organization settings rather than anything in this file:
+#   variables  BUILD_ON=github, REGISTRY (the Gitea container registry),
+#              GITEA_URL (the Gitea base URL)
+#   secret     GITEA_TOKEN -- jcoffey-dev, write:repository + write:package:
+#              commit statuses, the release and its assets, the registry push
+#
+# There is no pull_request trigger: pull requests happen on Gitea, and their
+# branch arrives here as an ordinary push. Branch pushes get what Gitea's
+# ci.yml checks; v* tags get what its publish.yml does. Schedules (the weekly
+# release, the upstream watch) and the release announcement stay on Gitea.
+#
+# Every `uses:` is pinned to a full commit SHA with the release in the
+# trailing comment. A tag is a mutable pointer; do not "simplify" a pin back
+# to one. Only GitHub's own actions and the three docker/* ones are used.
+name: ci
+
 on:
   push:
-    branches: [main]
-  pull_request:
-  # Lets CI be run by hand against any ref, including one that predates a CI
-  # change, without pushing an empty commit to move it.
+    branches: ['**']
+    tags: ['**']
   workflow_dispatch:
 
-# A second push to a branch cancels the run still going for the first: the
-# older run's answer is about code nobody is looking at any more.
+# A newer push to a branch cancels the run for the older one, whose answer is
+# about code nobody is looking at any more. A tag run is never cancelled: it
+# publishes.
 concurrency:
   group: ci-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: ${{ github.ref_type == 'branch' }}
+
+permissions:
+  contents: read
+
+env:
+  GITEA_URL: ${{ vars.GITEA_URL }}
+  # The Gitea status this run answers for. Gitea waits on the one matching
+  # its own event: "(branch)" from ci.yml, "(tag)" from publish.yml.
+  STATUS_CONTEXT: github/ci (${{ github.ref_type }})
 
 jobs:
-  build:
+  # Tells Gitea a run has started, so a pull request shows it as pending
+  # rather than missing while the build is still going.
+  start:
+    if: ${{ vars.BUILD_ON == 'github' }}
     runs-on: ubuntu-latest
     steps:
-      # Every `uses:` here is pinned to a full commit SHA, with the release it
-      # belongs to in the trailing comment. A tag is a mutable pointer, so
-      # trusting `@v7` is trusting every future version of that action,
-      # including one pushed by whoever compromises the account. Dependabot
-      # updates both halves together -- do not "simplify" a pin back to a tag.
+      - env:
+          GITEA_TOKEN: ${{ secrets.GITEA_TOKEN }}
+        run: |
+          jq -n --arg c "$STATUS_CONTEXT" \
+                --arg u "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID" \
+                '{state:"pending", context:$c, target_url:$u, description:"GitHub Actions"}' |
+          curl -fsS -o /dev/null -X POST -H "Authorization: token $GITEA_TOKEN" \
+               -H 'Content-Type: application/json' --data @- \
+               "$GITEA_URL/api/v1/repos/$GITHUB_REPOSITORY/statuses/$GITHUB_SHA"
+
+  # ----------------------------------------------------------- branches ------
+  # What an upstream merge can bring in or leave behind without a conflict:
+  # the upstream name in a new string literal, and a changed upstream file
+  # without the AGPL 5(a) notice. Seconds, and needs no toolchain. The notice
+  # check diffs against the upstream snapshot in the history, hence the full
+  # fetch.
+  fork-checks:
+    if: ${{ vars.BUILD_ON == 'github' && github.ref_type == 'branch' }}
+    runs-on: ubuntu-latest
+    steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
-      - name: System dependencies
-        # foundationdb and the search backends are off by default, but the
-        # default feature set still links against the system's C libraries.
-        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends clang
-      - name: Build the server
-        run: cargo build -p inbuxa --locked
-      - name: Compile every test target
-        # `--no-run` is the point: it builds the unit tests and the integration
-        # crate together, which is the combination that resolves the test
-        # features, and stops short of running anything that wants a store.
-        run: cargo test --workspace --locked --no-run
+        with:
+          fetch-depth: 0
+      - run: python3 tools/fork/name-check.py
+      - if: always()
+        run: python3 tools/fork/notice-check.py
+      # Cargo can patch a dependency to a directory in this repository, and
+      # the image builds from a context .dockerignore prunes to almost
+      # nothing. CI never sees the difference; a release does.
+      - if: always()
+        run: python3 tools/fork/context-check.py
+      # The personal-data catalog must classify every object and field the
+      # schema has, and name nothing that is gone.
+      - if: always()
+        run: python3 tools/fork/privacy-check.py
+      # The admin reads each expression field's allowed values and variables
+      # from the schema; they're generated from the registry and must match it.
+      - if: always()
+        run: python3 tools/fork/expr-schema.py --check
+      - if: always()
+        run: python3 -m unittest discover -s tools/fork/tests
+
+  # The build, and that every test target compiles. The suites are not run:
+  # they need a store, fixed ports and containers (docs/spec/
+  # container-tests.md), and are run by hand.
+  build:
+    if: ${{ vars.BUILD_ON == 'github' && github.ref_type == 'branch' }}
+    runs-on: ubuntu-latest
+    env:
+      CARGO_INCREMENTAL: "0"
+      # Debug info is most of a dev target dir, and nothing here runs a
+      # debugger. Without it the dev and test builds fit the runner's disk and
+      # the cache below stays small enough to be worth restoring.
+      CARGO_PROFILE_DEV_DEBUG: "0"
+      CARGO_PROFILE_TEST_DEBUG: "0"
+    steps:
+      # The hosted image carries toolchains this build never touches; a dev,
+      # test and release build of RocksDB and the workspace needs the room.
+      - run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
+          df -h /
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      # Current stable, as Gitea's rust:1 image is.
+      - id: rust
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup default stable
+          echo "version=$(rustc -V | cut -d' ' -f2)" >> "$GITHUB_OUTPUT"
+      - run: sudo apt-get update -qq && sudo apt-get install -y -qq --no-install-recommends clang >/dev/null
+      # Cargo's download cache and the dev/test target dir, keyed on the
+      # lockfile and the compiler. Saved from main only, so the one cache
+      # every branch restores is main's, and branches cannot evict it.
+      - uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            target/debug
+          key: cargo-${{ steps.rust.outputs.version }}-${{ hashFiles('Cargo.lock') }}
+          restore-keys: cargo-${{ steps.rust.outputs.version }}-
+      - run: cargo build -p inbuxa --locked
+      # --no-run: compiles every test target without running them, which
+      # catches a test that no longer builds without needing a store.
+      - run: cargo test --workspace --locked --no-run
+      - if: github.ref == 'refs/heads/main'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            target/debug
+          key: cargo-${{ steps.rust.outputs.version }}-${{ hashFiles('Cargo.lock') }}
+      # The release profile, on main only. It is the profile the image is
+      # built with, and it fails in ways the dev profile does not: v2026.9.24
+      # was tagged on a commit whose CI was green and whose release build
+      # could not compile the scim crate at all.
+      - if: github.ref == 'refs/heads/main'
+        run: cargo build -p inbuxa --locked --release
+
+  # --------------------------------------------------------------- tags ------
+  # Two guards before anything is pushed, the same as Gitea's publish.yml:
+  #   * the tag must be v<brand_version!>. The version is a string in
+  #     crates/types/src/branding.rs, not Cargo.toml, and the image is tagged
+  #     with it, so a tag beside an unbumped macro would publish an image that
+  #     reports a different version from its tag.
+  #   * the tag must be on main or on a release/* branch, so an image never
+  #     describes code that was never reviewed onto one of them. A release/*
+  #     branch carries a hotfix cut from an earlier release tag.
+  version:
+    if: ${{ vars.BUILD_ON == 'github' && github.ref_type == 'tag' && startsWith(github.ref_name, 'v') }}
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.v.outputs.version }}
+    steps:
+      # Full history, and every branch as origin/*: the ancestry check cannot
+      # be answered from a shallow clone.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+      - id: v
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          # Scoped to the macro body: branding.rs holds other string literals,
+          # and tagging an image from one of those would be worse than failing.
+          V="$(awk '/macro_rules! brand_version /,/^}/' crates/types/src/branding.rs \
+               | grep -om1 '"[0-9][^"]*"' | tr -d '"')"
+          [ -n "$V" ] || { echo "could not read brand_version! from branding.rs" >&2; exit 1; }
+          if [ "$TAG" != "v$V" ]; then
+            echo "Tag $TAG names a commit whose brand_version! says $V." >&2
+            echo "Refusing to publish an image that would report the wrong version." >&2
+            exit 1
+          fi
+          commit="$(git rev-parse "${TAG}^{commit}")"
+          on=""
+          for ref in origin/main $(git for-each-ref --format='%(refname:short)' 'refs/remotes/origin/release/*'); do
+            if git merge-base --is-ancestor "$commit" "$ref"; then on="$ref"; break; fi
+          done
+          [ -n "$on" ] || { echo "$TAG is not on main or a release/* branch" >&2; exit 1; }
+          echo "$TAG is on $on"
+          echo "version=$V" >> "$GITHUB_OUTPUT"
+
+  # Each architecture on its own native runner, side by side. The Dockerfile
+  # cross-compiles from the build platform, and on the self-hosted runners one
+  # machine built both one after the other; here two machines build at once,
+  # each natively (the builder stage picks the matching target, and the
+  # aarch64 toolchain it installs exists on arm64 too), and the small final
+  # stage needs no QEMU. amd64 also moves :<version> as soon as it is done, so
+  # a production deploy can start from it; :latest waits for the index below,
+  # so it never names an image without arm64.
+  publish:
+    needs: [version]
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            runner: ubuntu-latest
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+    env:
+      VERSION: ${{ needs.version.outputs.version }}
+    steps:
+      - run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
+          echo "IMAGE=${{ vars.REGISTRY }}/${GITHUB_REPOSITORY,,}" >> "$GITHUB_ENV"
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: docker/setup-buildx-action@594f3bf4285d9ea8dc53c9a0c9c4092420091003 # v4.4.0
+      - uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        with:
+          registry: ${{ vars.REGISTRY }}
+          username: jcoffey-dev
+          password: ${{ secrets.GITEA_TOKEN }}
+      # Attestations off: they add manifests of their own, and the index
+      # should hold the two images and nothing else. The GitHub Actions cache
+      # keeps the dependency layer (`cargo chef cook`), which only a
+      # dependency change alters, between releases.
+      - uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: .
+          platforms: linux/${{ matrix.arch }}
+          provenance: false
+          sbom: false
+          cache-from: type=gha,scope=image-${{ matrix.arch }}
+          cache-to: type=gha,mode=max,scope=image-${{ matrix.arch }}
+          push: true
+          tags: |
+            ${{ env.IMAGE }}:${{ env.VERSION }}-${{ matrix.arch }}
+            ${{ matrix.arch == 'amd64' && format('{0}:{1}', env.IMAGE, env.VERSION) || '' }}
+
+  # Joins the two per-architecture tags into :<version> and :latest. Built
+  # from the per-architecture tags rather than :<version>, which by now is
+  # the amd64 image and would be read as such.
+  index:
+    needs: [version, publish]
+    runs-on: ubuntu-latest
+    env:
+      VERSION: ${{ needs.version.outputs.version }}
+    steps:
+      - run: echo "IMAGE=${{ vars.REGISTRY }}/${GITHUB_REPOSITORY,,}" >> "$GITHUB_ENV"
+      - uses: docker/setup-buildx-action@594f3bf4285d9ea8dc53c9a0c9c4092420091003 # v4.4.0
+      - uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        with:
+          registry: ${{ vars.REGISTRY }}
+          username: jcoffey-dev
+          password: ${{ secrets.GITEA_TOKEN }}
+      - run: |
+          docker buildx imagetools create \
+            --tag "$IMAGE:$VERSION" \
+            --tag "$IMAGE:latest" \
+            "$IMAGE:$VERSION-amd64" "$IMAGE:$VERSION-arm64"
+          docker buildx imagetools inspect "$IMAGE:$VERSION"
+      # Gitea keeps a container package on its owner; linking it shows it on
+      # the repository's Packages tab. Idempotent.
+      - env:
+          GITEA_TOKEN: ${{ secrets.GITEA_TOKEN }}
+        run: |
+          owner="${GITHUB_REPOSITORY%%/*}"; name="${GITHUB_REPOSITORY#*/}"
+          curl -fsS -o /dev/null -X POST -H "Authorization: token $GITEA_TOKEN" \
+            "$GITEA_URL/api/v1/packages/${owner,,}/container/$name/-/link/$name" \
+            || echo "package already linked (or link refused); not fatal"
+
+  # The weekly release creates its Release (and so the tag) on Gitea first; a
+  # tag pushed by hand has none. Either way the tag ends up with exactly one
+  # Release there, created once the image exists so its pull instructions
+  # work.
+  release:
+    needs: [version, index]
+    runs-on: ubuntu-latest
+    steps:
+      - env:
+          TAG: ${{ github.ref_name }}
+          VERSION: ${{ needs.version.outputs.version }}
+          GITEA_TOKEN: ${{ secrets.GITEA_TOKEN }}
+          REGISTRY: ${{ vars.REGISTRY }}
+        run: |
+          set -euo pipefail
+          api="$GITEA_URL/api/v1/repos/$GITHUB_REPOSITORY"
+          code="$(curl -sS -o /dev/null -w '%{http_code}' -H "Authorization: token $GITEA_TOKEN" "$api/releases/tags/$TAG")"
+          if [ "$code" = 200 ]; then echo "$TAG already has a release"; exit 0; fi
+          [ "$code" = 404 ] || { echo "looking up the release for $TAG answered $code" >&2; exit 1; }
+          image="$REGISTRY/${GITHUB_REPOSITORY,,}:$VERSION"
+          body="Container image: \`$image\` (linux/amd64, linux/arm64); also \`:latest\`.
+
+          Binaries for a host install are attached: \`inbuxa-linux-amd64.tar.gz\` and \`inbuxa-linux-arm64.tar.gz\`, with \`SHA256SUMS\`. Each is the binary out of this release's image for that architecture, so it is the same build. The image grants it \`cap_net_bind_service\`; a host install has to grant that itself (\`setcap\`, or \`AmbientCapabilities\` in the unit) to bind port 25."
+          jq -n --arg tag "$TAG" --arg name "INBUXA $VERSION" --arg body "$body" \
+                '{tag_name:$tag, name:$name, body:$body}' |
+          curl -fsS -X POST -H "Authorization: token $GITEA_TOKEN" -H 'Content-Type: application/json' \
+               --data @- "$api/releases" | jq -r '"created release " + .tag_name'
+
+  # The binaries for a host install, taken out of the image that was just
+  # pushed rather than compiled again: the binary in the tarball is the file
+  # the image runs. `docker create` starts nothing, so copying a file out of
+  # the arm64 image on an amd64 runner needs no emulation.
+  binaries:
+    needs: [version, index, release]
+    runs-on: ubuntu-latest
+    env:
+      VERSION: ${{ needs.version.outputs.version }}
+      TAG: ${{ github.ref_name }}
+      GITEA_TOKEN: ${{ secrets.GITEA_TOKEN }}
+    steps:
+      - run: echo "IMAGE=${{ vars.REGISTRY }}/${GITHUB_REPOSITORY,,}" >> "$GITHUB_ENV"
+      - uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        with:
+          registry: ${{ vars.REGISTRY }}
+          username: jcoffey-dev
+          password: ${{ secrets.GITEA_TOKEN }}
+      - name: take the binaries out of the image
+        run: |
+          set -euo pipefail
+          mkdir -p out && cd out
+          for arch in amd64 arm64; do
+            docker pull -q --platform "linux/$arch" "$IMAGE:$VERSION"
+            id="$(docker create --platform "linux/$arch" "$IMAGE:$VERSION")"
+            docker cp "$id:/usr/local/bin/inbuxa" inbuxa
+            docker rm -f "$id" >/dev/null
+            chmod 0755 inbuxa
+            tar -czf "inbuxa-linux-$arch.tar.gz" inbuxa
+            rm inbuxa
+          done
+          sha256sum inbuxa-linux-*.tar.gz > SHA256SUMS
+          cat SHA256SUMS
+      # A re-run of a tag replaces its assets rather than leaving two files
+      # with the same name and different contents.
+      - name: attach them to the release
+        run: |
+          set -euo pipefail
+          api="$GITEA_URL/api/v1/repos/$GITHUB_REPOSITORY"
+          auth="Authorization: token $GITEA_TOKEN"
+          rel="$(curl -fsS -H "$auth" "$api/releases/tags/$TAG" | jq -r .id)"
+          assets="$(curl -fsS -H "$auth" "$api/releases/$rel/assets")"
+          for f in out/inbuxa-linux-amd64.tar.gz out/inbuxa-linux-arm64.tar.gz out/SHA256SUMS; do
+            name="$(basename "$f")"
+            old="$(jq -r --arg n "$name" '.[] | select(.name == $n) | .id' <<<"$assets")"
+            for id in $old; do curl -fsS -o /dev/null -X DELETE -H "$auth" "$api/releases/$rel/assets/$id"; done
+            curl -fsS -o /dev/null -X POST -H "$auth" -F "attachment=@$f" "$api/releases/$rel/assets?name=$name"
+            echo "attached $name"
+          done
+
+  # ------------------------------------------------------------- report ------
+  # One commit status on Gitea for the whole run: what Gitea's ci.yml and
+  # publish.yml wait on. Skipped jobs (the tag jobs on a branch, and the other
+  # way round) count as passing; a failed or cancelled one does not.
+  report:
+    if: ${{ always() && vars.BUILD_ON == 'github' }}
+    needs: [start, fork-checks, build, version, publish, index, release, binaries]
+    runs-on: ubuntu-latest
+    steps:
+      - env:
+          GITEA_TOKEN: ${{ secrets.GITEA_TOKEN }}
+          STATE: ${{ (contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled')) && 'failure' || 'success' }}
+        run: |
+          jq -n --arg s "$STATE" --arg c "$STATUS_CONTEXT" \
+                --arg u "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID" \
+                '{state:$s, context:$c, target_url:$u, description:"GitHub Actions"}' |
+          curl -fsS -o /dev/null -X POST -H "Authorization: token $GITEA_TOKEN" \
+               -H 'Content-Type: application/json' --data @- \
+               "$GITEA_URL/api/v1/repos/$GITHUB_REPOSITORY/statuses/$GITHUB_SHA"
+          echo "$STATUS_CONTEXT: $STATE"
