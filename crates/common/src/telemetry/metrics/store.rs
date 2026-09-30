@@ -104,6 +104,12 @@ impl StoredMetric {
     pub fn timestamp(&self) -> u64 {
         SnowflakeIdGenerator::to_timestamp(self.id)
     }
+
+    /// The node that wrote the sample. Histogram totals are per node, so a
+    /// reader diffs them per node.
+    pub fn node_id(&self) -> u64 {
+        SnowflakeIdGenerator::to_node_id(self.id)
+    }
 }
 
 /// What the node wrote last, so counters and histograms are written as

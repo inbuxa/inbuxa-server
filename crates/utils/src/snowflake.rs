@@ -108,6 +108,12 @@ impl SnowflakeIdGenerator {
         (id >> (SEQUENCE_LEN + NODE_ID_LEN)) / 1000 + DEFAULT_EPOCH
     }
 
+    // inbuxa: the node that made the id, so per-node history (metric
+    // totals) can be told apart
+    pub fn to_node_id(id: u64) -> u64 {
+        id & NODE_ID_MASK
+    }
+
     #[inline(always)]
     pub fn past_id(&self, period: Duration) -> Option<u64> {
         self.epoch.elapsed().ok().map(|elapsed| {

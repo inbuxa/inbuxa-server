@@ -6,7 +6,7 @@
 
 //! `x:Metric/get` and `/query` over the stored history (monitoring spec,
 //! "Interfaces"). Samples are server-level (MON-31) and read-only (MON-32).
-//! A sample's `timestamp` comes from its id.
+//! A sample's `timestamp` and `nodeId` come from its id.
 
 use crate::{
     api::query::QueryResponseBuilder,
@@ -54,12 +54,16 @@ fn metric_type(metric: &Metric) -> MetricType {
 
 fn to_value(sample: StoredMetric) -> JmapValue<'static> {
     let timestamp = sample.timestamp();
+    let node_id = sample.node_id();
     let mut value = sample.metric.into_value();
     if let JmapValue::Object(obj) = &mut value {
         obj.insert_unchecked(
             Property::Timestamp,
             JmapValue::Str(UTCDateTime::from_timestamp(timestamp as i64).to_string().into()),
         );
+        // Histograms are running totals per node; without this a reader
+        // diffs one node's total against another's
+        obj.insert_unchecked(Property::NodeId, JmapValue::Number(node_id.into()));
     }
     value
 }

@@ -2,6 +2,8 @@
  * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
+ *
+ * Modified by Coffey Labs in 2026 for INBUXA.
  */
 
 use crate::utils::server::TestServer;
@@ -52,6 +54,15 @@ pub async fn test(test: &TestServer) {
         metrics.len()
     );
     assert_eq!(metrics.len(), metric_ids.len());
+
+    // Every sample says which node wrote it, so histogram totals can be
+    // diffed per node
+    for metric in metrics {
+        assert!(
+            metric.get("nodeId").is_some_and(|v| v.is_u64()),
+            "Missing nodeId in {metric}"
+        );
+    }
 
     // Fetch the last 48 hours of metrics
     let metric_ids = admin
