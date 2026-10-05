@@ -445,6 +445,58 @@ impl Server {
         }
     }
 
+    /// MA-D0a: a message sent from an address that isn't the sender's own:
+    /// a group's, today. The message itself only says `From:` the group, so
+    /// the audit log is where the person who sent it is named. A delegate's
+    /// send is AL-9's record, not this one.
+    pub async fn audit_send_as(
+        &self,
+        token: &AccessToken,
+        submission_account_id: u32,
+        submission_id: u32,
+        address: &str,
+    ) {
+        let Ok(Some(as_account_id)) = self.account_id_from_email(address, true).await else {
+            return;
+        };
+        if as_account_id == token.account_id() || token.delegation(as_account_id).is_some() {
+            return;
+        }
+        let actor = self.audit_actor(token).await;
+        let tenant_id = self
+            .account(as_account_id)
+            .await
+            .ok()
+            .and_then(|account| account.id_tenant);
+        let details = if submission_account_id == as_account_id {
+            format!("Sent as {address}")
+        } else {
+            format!(
+                "Sent as {address}, from {}",
+                self.audit_account_name(submission_account_id).await
+            )
+        };
+        self.audit_note(Record {
+            at: ms(),
+            actor,
+            via: token.origin().cloned(),
+            remote_ip: None,
+            action: Action::Create,
+            target: Target {
+                kind: "EmailSubmission".into(),
+                id: Some(Id::from(submission_id).to_string()),
+                name: Some(address.to_string()),
+                account_id: Some(as_account_id),
+                tenant_id,
+            },
+            changes: vec![],
+            details: Some(details),
+            reason: None,
+            outcome: Outcome::success(),
+        })
+        .await;
+    }
+
     /// AU-7: removes entries past the retention period.
     pub async fn audit_purge(&self) -> trc::Result<usize> {
         let settings = log::settings(self.store()).await?;

@@ -8,6 +8,7 @@
 
 use common::{
     Server,
+    auth::AccessToken,
     config::smtp::queue::QueueName,
     network::{ServerInstance, stream::NullIo},
     storage::index::ObjectIndexBuilder,
@@ -49,6 +50,7 @@ pub trait EmailSubmissionSet: Sync + Send {
     fn email_submission_set<'x>(
         &self,
         request: SetRequest<'x, email_submission::EmailSubmission>,
+        access_token: &AccessToken,
         instance: &Arc<ServerInstance>,
         next_call: &mut Option<Call<RequestMethod<'x>>>,
     ) -> impl Future<Output = trc::Result<SetResponse<email_submission::EmailSubmission>>> + Send;
@@ -68,6 +70,7 @@ impl EmailSubmissionSet for Server {
     async fn email_submission_set<'x>(
         &self,
         mut request: SetRequest<'x, email_submission::EmailSubmission>,
+        access_token: &AccessToken,
         instance: &Arc<ServerInstance>,
         next_call: &mut Option<Call<RequestMethod<'x>>>,
     ) -> trc::Result<SetResponse<email_submission::EmailSubmission>> {
@@ -110,6 +113,15 @@ impl EmailSubmissionSet for Server {
                         .assign_document_ids(account_id, Collection::EmailSubmission, 1)
                         .await
                         .caused_by(trc::location!())?;
+
+                    // inbuxa: MA-D0a: who sent it, when it went out as someone else
+                    self.audit_send_as(
+                        access_token,
+                        account_id,
+                        document_id,
+                        &submission.envelope.mail_from.email,
+                    )
+                    .await;
                     batch
                         .with_account_id(account_id)
                         .with_collection(Collection::EmailSubmission)
