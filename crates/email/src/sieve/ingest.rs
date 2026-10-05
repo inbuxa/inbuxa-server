@@ -290,7 +290,11 @@ impl SieveScriptIngest for Server {
                     // inbuxa: AL-4: a locked account answers no sender, so a
                     // rejection is kept instead; sieve has already cleared
                     // the implicit keep, so it is filed here
-                    Event::Reject { .. } if access_token.is_locked() => {
+                    // A shared mailbox (MA-S) is a role address and answers
+                    // as one: its Sieve script runs as written
+                    Event::Reject { .. }
+                        if access_token.is_locked() && !access_token.is_shared_mailbox() =>
+                    {
                         if let Some(message) = messages.get_mut(0)
                             && !message.file_into.contains(&INBOX_ID)
                         {
@@ -403,7 +407,11 @@ impl SieveScriptIngest for Server {
                     // inbuxa: AL-4: a locked account sends nothing on its
                     // own: no redirect, vacation reply or notification. An
                     // unsent redirect leaves the message to be kept.
-                    Event::SendMessage { .. } if access_token.is_locked() => {
+                    // A shared mailbox's acknowledgements and redirects go
+                    // out (MA-S).
+                    Event::SendMessage { .. }
+                        if access_token.is_locked() && !access_token.is_shared_mailbox() =>
+                    {
                         trc::event!(
                             Sieve(SieveEvent::ActionReject),
                             Details = "Account is locked: nothing is sent",

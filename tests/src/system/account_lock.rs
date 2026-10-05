@@ -447,6 +447,156 @@ pub async fn test(test: &mut TestServer) {
         query["ids"].as_array().is_some_and(|ids| ids.len() >= 2),
         "AL-9: the delegate's access and changes weren't recorded: {query}"
     );
+
+    shared_mailbox(admin, &mut smtp_rx, &mut lmtp).await;
+}
+
+/// MA-S (specs/multi-account.md): a shared mailbox is a lock of its own
+/// kind. No reason is needed, more people fit, its Sieve replies go out,
+/// only what is sent as it is recorded, and it sends only as itself.
+async fn shared_mailbox(
+    admin: &Account,
+    smtp_rx: &mut tokio::sync::mpsc::Receiver<crate::jmap::mail::submission::MockMessage>,
+    lmtp: &mut SmtpConnection,
+) {
+    println!("Running shared mailbox tests...");
+    let support = admin
+        .create_user_account("support@example.com", "support-secret-3317", "Support", &[], vec![])
+        .await;
+    let agent = admin
+        .create_user_account("agent@example.com", "agent-secret-5520", "Agent", &[], vec![])
+        .await;
+    let support_id = support.id_string().to_string();
+
+    // An automatic acknowledgement, set up while it could still sign in
+    support
+        .jmap_client()
+        .await
+        .vacation_response_enable("Received", "We'll get back to you.".into(), None::<String>)
+        .await
+        .unwrap();
+
+    // More people than a lock may have
+    let mut delegates = vec![json!({"accountId": agent.id_string(), "access": "organize", "sendAs": true})];
+    for n in 0..11 {
+        let name: &'static str = Box::leak(format!("desk{n}@example.com").into_boxed_str());
+        let desk = admin.create_user_account(name, "desk-secret-7781", "Desk", &[], vec![]).await;
+        delegates.push(json!({"accountId": desk.id_string(), "access": "read"}));
+    }
+
+    // No reason needed
+    let response = admin
+        .lock_set(json!({"create": {"s": {"accountId": support_id, "kind": "sharedMailbox",
+            "delegates": delegates}}}))
+        .await;
+    assert_eq!(response["created"]["s"]["id"], support_id.as_str(), "MA-S1: {response}");
+    let (_, got) = admin
+        .call("inbuxa:AccountLock/get", json!({"accountId": admin.id_string(), "ids": [support_id]}))
+        .await;
+    assert_eq!(got["list"][0]["kind"], "sharedMailbox", "MA-S1: {got}");
+
+    // Nobody signs in to it
+    assert_ne!(support.session_status().await, 200, "MA-S1: a shared mailbox signed in");
+
+    // It says what it is to the people in it
+    let session = agent.jmap_session_object().await.0;
+    let delegation = &session["accounts"][support_id.as_str()]["accountCapabilities"]["urn:inbuxa:jmap"]["delegation"];
+    assert_eq!(delegation["kind"], "sharedMailbox", "MA-S: {session}");
+    assert_eq!(delegation["locked"], true, "MA-S: front ends that know no kind still see a lock");
+
+    // Its Sieve replies go out, where a lock's are held back
+    lmtp.ingest(
+        "carol@remote.org",
+        &["support@example.com"],
+        // Addressed to it: a vacation reply answers only mail sent to it
+        "From: carol@remote.org\r\nTo: support@example.com\r\nSubject: My order\r\n\r\nHello.\r\n",
+    )
+    .await;
+    assert_message_delivery(
+        smtp_rx,
+        MockMessage::new("<support@example.com>", ["<carol@remote.org>"], "@Received"),
+    )
+    .await;
+
+    // The agent answers as support@: sent, and recorded as the agent
+    let (_, mailboxes) = agent
+        .call("Mailbox/get", json!({"accountId": support_id, "ids": null, "properties": ["role"]}))
+        .await;
+    let drafts = mailboxes["list"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|m| m["role"] == "drafts")
+        .unwrap_or_else(|| panic!("no Drafts: {mailboxes}"))["id"]
+        .clone();
+    let (_, identities) = agent
+        .call("Identity/get", json!({"accountId": support_id, "ids": null}))
+        .await;
+    let identity = identities["list"][0]["id"].clone();
+    let send = |reply_to: Option<&str>, subject: &str| {
+        let mut email = json!({
+            "mailboxIds": {drafts.as_str().unwrap(): true},
+            "from": [{"email": "support@example.com"}],
+            "to": [{"email": "carol@remote.org"}],
+            "subject": subject,
+            "bodyValues": {"t": {"value": "Thanks for writing."}},
+            "textBody": [{"partId": "t", "type": "text/plain"}]
+        });
+        if let Some(reply_to) = reply_to {
+            email["replyTo"] = json!([{"email": reply_to}]);
+        }
+        json!([
+            ["Email/set", {"accountId": support_id, "create": {"m": email}}, "e"],
+            ["EmailSubmission/set", {"accountId": support_id,
+                "create": {"s": {"identityId": identity, "emailId": "#m"}}}, "s"]
+        ])
+    };
+    let response = agent.jmap_request(USING, send(None, "Re: My order")).await.0;
+    assert!(
+        response.pointer("/methodResponses/1/1/created/s").is_some(),
+        "MA-S3: the answer didn't go out: {response}"
+    );
+    assert_message_delivery(
+        smtp_rx,
+        MockMessage::new("<support@example.com>", ["<carol@remote.org>"], "@Re: My order"),
+    )
+    .await;
+
+    // MA-S3: a reply can't be steered to the agent's own address
+    let response = agent
+        .jmap_request(USING, send(Some("agent@example.com"), "Write to me directly"))
+        .await
+        .0;
+    assert_eq!(
+        response.pointer("/methodResponses/1/1/notCreated/s/type"),
+        Some(&json!("forbiddenFrom")),
+        "MA-S3: {response}"
+    );
+    expect_nothing(smtp_rx).await;
+
+    // MA-D0a: the send names the agent; AL-9's per-change records don't
+    // apply in a shared mailbox
+    let (_, query) = admin
+        .call(
+            "inbuxa:AuditEvent/query",
+            json!({"accountId": admin.id_string(),
+                "filter": {"actorId": agent.id_string(), "accountId": support_id}}),
+        )
+        .await;
+    let (_, records) = admin
+        .call("inbuxa:AuditEvent/get", json!({"accountId": admin.id_string(), "ids": query["ids"]}))
+        .await;
+    let kinds = records["list"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|r| r["target"]["kind"].as_str().unwrap_or_default().to_string())
+        .collect::<Vec<_>>();
+    assert_eq!(kinds, ["EmailSubmission"], "MA-D0a: {records}");
+
+    // Ending it needs no reason either
+    let response = admin.lock_set(json!({"destroy": [support_id]})).await;
+    assert_eq!(response["destroyed"][0], support_id.as_str(), "MA-S: {response}");
 }
 
 /// Runs these tests alone: `cargo test -p tests account_lock_tests -- --ignored`.

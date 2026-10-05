@@ -15,7 +15,7 @@ use common::{
 };
 use email::inbuxa_lock::apply_grants;
 use groupware::inbuxa_lock::invalidate;
-use inbuxa_features::lock::{self, Access, Delegate, Lock, MAX_DELEGATES};
+use inbuxa_features::lock::{self, Access, Delegate, Kind, Lock};
 use jmap_proto::{
     error::set::SetError,
     method::{
@@ -39,6 +39,7 @@ const ALL: &[P] = &[
     P::Id,
     P::AccountId,
     P::Name,
+    P::Kind,
     P::Reason,
     P::LockedAt,
     P::LockedBy,
@@ -75,6 +76,7 @@ async fn parse_delegates(
     server: &Server,
     access_token: &AccessToken,
     locked_id: u32,
+    kind: Kind,
     value: LValue,
 ) -> Result<Vec<Delegate>, SetError<P>> {
     let invalid = |why: String| {
@@ -86,8 +88,10 @@ async fn parse_delegates(
     let Some(items) = json.as_array() else {
         return Err(invalid("delegates must be a list.".into()));
     };
-    if items.len() > MAX_DELEGATES {
-        return Err(invalid(format!("At most {MAX_DELEGATES} delegates.")));
+    // MA-S: a shared mailbox holds more people than a lock hands over
+    let max = kind.max_delegates();
+    if items.len() > max {
+        return Err(invalid(format!("At most {max} delegates.")));
     }
     let locked_tenant = server.account(locked_id).await.ok().and_then(|a| a.id_tenant);
     let mut delegates: Vec<Delegate> = Vec::with_capacity(items.len());
@@ -173,6 +177,7 @@ async fn to_value(server: &Server, lock: &Lock, properties: &[P]) -> LValue {
         let value = match property {
             P::Id | P::AccountId => Value::Element(AccountLockValue::Id(Id::from(lock.account_id))),
             P::Name => Value::Str(server.audit_account_name(lock.account_id).await.into()),
+            P::Kind => Value::Str(Cow::Borrowed(lock.kind.as_str())),
             P::Reason => Value::Str(lock.reason.clone().into()),
             P::LockedAt => date(lock.locked_at),
             P::LockedBy => Value::Str(lock.locked_by.clone().into()),
@@ -283,6 +288,7 @@ pub async fn set(
 
     for (client_id, value) in request.unwrap_create() {
         let mut account_id = None;
+        let mut kind = Kind::Lock;
         let mut reason = None;
         let mut delegates_value = None;
         let mut invalid = None;
@@ -291,6 +297,17 @@ pub async fn set(
                 (Key::Property(P::AccountId), Value::Element(AccountLockValue::Id(id))) => {
                     account_id = Some(id.document_id())
                 }
+                (Key::Property(P::Kind), Value::Str(k)) => match Kind::parse(&k) {
+                    Some(k) => kind = k,
+                    None => {
+                        invalid = Some(
+                            SetError::invalid_properties()
+                                .with_property(P::Kind)
+                                .with_description("kind must be lock or sharedMailbox."),
+                        );
+                        break;
+                    }
+                },
                 (Key::Property(P::Reason), Value::Str(r)) => reason = reason_of(Some(&r)),
                 (Key::Property(P::Delegates), value) => delegates_value = Some(value.into_owned()),
                 _ => {
@@ -310,9 +327,14 @@ pub async fn set(
             );
             continue;
         };
-        let Some(reason) = reason.or_else(|| reason_of(arguments.reason.as_deref())) else {
-            response.not_created.append(client_id, reason_required());
-            continue;
+        // MA-S: a shared mailbox needs no reason; a lock always does
+        let reason = match reason.or_else(|| reason_of(arguments.reason.as_deref())) {
+            Some(reason) => reason,
+            None if kind == Kind::SharedMailbox => String::new(),
+            None => {
+                response.not_created.append(client_id, reason_required());
+                continue;
+            }
         };
         if let Err(error) = assert_reach(server, access_token, account_id).await {
             response.not_created.append(client_id, error);
@@ -321,12 +343,13 @@ pub async fn set(
         if lock::get(data, account_id).await?.is_some() {
             response.not_created.append(
                 client_id,
-                SetError::already_exists().with_description("That account is already locked."),
+                SetError::already_exists()
+                    .with_description("That account is already locked or a shared mailbox."),
             );
             continue;
         }
         let delegates = match delegates_value {
-            Some(value) => match parse_delegates(server, access_token, account_id, value).await {
+            Some(value) => match parse_delegates(server, access_token, account_id, kind, value).await {
                 Ok(delegates) => delegates,
                 Err(error) => {
                     response.not_created.append(client_id, error);
@@ -337,6 +360,7 @@ pub async fn set(
         };
         let mut created = Lock {
             account_id,
+            kind,
             reason,
             locked_at: now(),
             locked_by: actor.name.clone(),
@@ -370,7 +394,7 @@ pub async fn set(
             response.not_updated.append(id, SetError::not_found());
             continue;
         };
-        if reason_of(arguments.reason.as_deref()).is_none() {
+        if current.kind.is_lock() && reason_of(arguments.reason.as_deref()).is_none() {
             response.not_updated.append(id, reason_required());
             continue;
         }
@@ -379,7 +403,9 @@ pub async fn set(
         for (key, value) in value.into_expanded_object() {
             match (&key, value) {
                 (Key::Property(P::Delegates), value) => {
-                    match parse_delegates(server, access_token, account_id, value.into_owned()).await {
+                    match parse_delegates(server, access_token, account_id, current.kind, value.into_owned())
+                        .await
+                    {
                         Ok(delegates) => updated.delegates = delegates,
                         Err(error) => {
                             invalid = Some(error);
@@ -389,6 +415,7 @@ pub async fn set(
                 }
                 (Key::Property(P::Reason), Value::Str(r)) => match reason_of(Some(&r)) {
                     Some(r) => updated.reason = r,
+                    None if !current.kind.is_lock() => updated.reason = String::new(),
                     None => {
                         invalid = Some(reason_required());
                         break;
@@ -420,7 +447,7 @@ pub async fn set(
             response.not_destroyed.append(id, SetError::not_found());
             continue;
         };
-        if reason_of(arguments.reason.as_deref()).is_none() {
+        if current.kind.is_lock() && reason_of(arguments.reason.as_deref()).is_none() {
             response.not_destroyed.append(id, reason_required());
             continue;
         }

@@ -66,6 +66,53 @@ const KIND_DELEGATE: u8 = b'd';
 /// Most delegates one lock may have (AL-5).
 pub const MAX_DELEGATES: usize = 10;
 
+/// Most people one shared mailbox may have (MA-S): a help desk is bigger
+/// than the handful a departed colleague's mail is handed to.
+pub const MAX_SHARED_MAILBOX_DELEGATES: usize = 100;
+
+/// What a lock is for (multi-account spec, MA-S).
+///
+/// Both kinds keep receiving mail, can't be signed in to, and are opened by
+/// delegates through real grants. A shared mailbox is a role address such
+/// as support@: it needs no reason, holds more people, runs its own Sieve
+/// replies (an automatic acknowledgement), records only what is sent as it,
+/// and may only send as its own addresses.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, SerdeSerialize, SerdeDeserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum Kind {
+    #[default]
+    Lock,
+    SharedMailbox,
+}
+
+impl Kind {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Kind::Lock => "lock",
+            Kind::SharedMailbox => "sharedMailbox",
+        }
+    }
+
+    pub fn parse(value: &str) -> Option<Self> {
+        match value {
+            "lock" => Some(Kind::Lock),
+            "sharedMailbox" => Some(Kind::SharedMailbox),
+            _ => None,
+        }
+    }
+
+    pub fn is_lock(&self) -> bool {
+        matches!(self, Kind::Lock)
+    }
+
+    pub fn max_delegates(&self) -> usize {
+        match self {
+            Kind::Lock => MAX_DELEGATES,
+            Kind::SharedMailbox => MAX_SHARED_MAILBOX_DELEGATES,
+        }
+    }
+}
+
 /// What a delegate may do in the locked account (AL-6).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, SerdeSerialize, SerdeDeserialize)]
 #[serde(rename_all = "camelCase")]
@@ -189,6 +236,9 @@ pub struct Replaced {
 #[serde(rename_all = "camelCase")]
 pub struct Lock {
     pub account_id: u32,
+    /// Absent on locks written before shared mailboxes existed: a lock.
+    #[serde(default, skip_serializing_if = "Kind::is_lock")]
+    pub kind: Kind,
     pub reason: String,
     /// Seconds since the epoch.
     pub locked_at: u64,
@@ -401,8 +451,9 @@ pub async fn all(data: &Store) -> trc::Result<Vec<Lock>> {
     Ok(locks)
 }
 
-/// The accounts delegated to `delegate`, with its delegation in each.
-pub async fn delegated_to(data: &Store, delegate: u32) -> trc::Result<Vec<(u32, Delegate)>> {
+/// The accounts delegated to `delegate`, with its delegation in each and
+/// the kind of lock it is in.
+pub async fn delegated_to(data: &Store, delegate: u32) -> trc::Result<Vec<(u32, Delegate, Kind)>> {
     let mut locked = Vec::new();
     data.iterate(
         IterateParams::new(
@@ -425,7 +476,7 @@ pub async fn delegated_to(data: &Store, delegate: u32) -> trc::Result<Vec<(u32, 
         if let Some(lock) = get(data, account_id).await?
             && let Some(delegation) = lock.delegate(delegate)
         {
-            delegations.push((account_id, delegation.clone()));
+            delegations.push((account_id, delegation.clone(), lock.kind));
         }
     }
     Ok(delegations)
@@ -473,6 +524,22 @@ mod tests {
     use super::*;
 
     #[test]
+    fn kind_reads_back_and_defaults_to_lock() {
+        // MA-S: a lock stored before shared mailboxes existed has no kind
+        let stored = r#"{"accountId":1,"reason":"r","lockedAt":0,"lockedBy":"admin","delegates":[]}"#;
+        let lock: Lock = serde_json::from_str(stored).unwrap();
+        assert_eq!(lock.kind, Kind::Lock);
+        assert!(!serde_json::to_string(&lock).unwrap().contains("kind"), "a lock is written as before");
+
+        let shared = Lock { kind: Kind::SharedMailbox, ..lock };
+        let written = serde_json::to_string(&shared).unwrap();
+        assert!(written.contains(r#""kind":"sharedMailbox""#), "{written}");
+        assert_eq!(serde_json::from_str::<Lock>(&written).unwrap().kind, Kind::SharedMailbox);
+        assert_eq!(Kind::parse("sharedMailbox"), Some(Kind::SharedMailbox));
+        assert_eq!(Kind::SharedMailbox.max_delegates(), MAX_SHARED_MAILBOX_DELEGATES);
+    }
+
+    #[test]
     fn keys_read_back() {
         let ValueClass::Any(any) = class(KIND_DELEGATE, &[7, 9]) else {
             panic!()
@@ -509,6 +576,7 @@ mod tests {
     fn lock_with(delegates: Vec<Delegate>, replaced: Vec<Replaced>) -> Lock {
         Lock {
             account_id: 1,
+            kind: Kind::Lock,
             reason: "r".into(),
             locked_at: 0,
             locked_by: "admin".into(),
@@ -623,6 +691,7 @@ mod tests {
     fn expired_delegations_grant_nothing() {
         let lock = Lock {
             account_id: 1,
+            kind: Kind::Lock,
             reason: "Left the company".into(),
             locked_at: 100,
             locked_by: "admin".into(),

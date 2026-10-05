@@ -148,6 +148,7 @@ impl SessionHandler for Server {
                     Capabilities::InbuxaDelegated(InbuxaDelegatedCapabilities {
                         delegation: DelegationInfo {
                             locked: true,
+                            kind: delegation.kind.as_str(),
                             access: delegation.access.as_str(),
                             send_as: delegation.send_as,
                             until: delegation.until.map(|until| {
