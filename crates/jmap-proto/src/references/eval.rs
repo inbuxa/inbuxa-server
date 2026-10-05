@@ -109,6 +109,9 @@ impl Response<'_> {
                         GetResponseMethod::TenantProtocolPolicy(response) => {
                             response.eval_jptr(path, &mut results)
                         }
+                        GetResponseMethod::SharingPolicy(response) => {
+                            response.eval_jptr(path, &mut results)
+                        }
                         GetResponseMethod::Principal(response) => {
                             response.eval_jptr(path, &mut results)
                         }

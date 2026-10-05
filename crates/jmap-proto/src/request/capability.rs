@@ -183,6 +183,13 @@ pub struct InbuxaAccountCapabilities {
     /// spec, EX-1 to EX-4).
     #[serde(rename(serialize = "aiExplain"))]
     pub ai_explain: bool,
+    /// MA-C: whether the principal may share their own mail folders, and
+    /// add other accounts to the webmail: the stricter of the server's
+    /// switch and its tenant's.
+    #[serde(rename(serialize = "mailSharing"))]
+    pub mail_sharing: bool,
+    #[serde(rename(serialize = "addAccounts"))]
+    pub add_accounts: bool,
 }
 
 #[derive(Debug, Clone, serde::Serialize)]

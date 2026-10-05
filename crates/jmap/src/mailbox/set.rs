@@ -31,7 +31,7 @@ use jmap_proto::{
     types::state::State,
 };
 use jmap_tools::{JsonPointerItem, Key, Map, Value};
-use registry::schema::enums::StorageQuota;
+use registry::schema::enums::{Permission, StorageQuota};
 use std::future::Future;
 use store::{
     ValueKey,
@@ -619,6 +619,27 @@ impl MailboxSet for Server {
                     .with_property(MailboxProperty::ShareWith)
                     .with_description(
                         "This mailbox belongs to a group. Only an administrator can change who has it.",
+                    )));
+            }
+
+            // inbuxa: MA-C: with mail sharing off, nobody here starts or
+            // widens a share (narrowing or ending one is always allowed)
+            let before = current.as_ref().map(|m| m.inner.acls.as_slice()).unwrap_or_default();
+            let widens = changes.acls.iter().any(|grant| {
+                let had = before
+                    .iter()
+                    .find(|old| old.account_id == grant.account_id)
+                    .map_or(0, |old| old.grants.clone().into_inner());
+                grant.grants.clone().into_inner() & !had != 0
+            });
+            if widens
+                && !ctx.access_token.has_permission(Permission::Impersonate)
+                && !self.mail_sharing_allowed(ctx.account_id).await?
+            {
+                return Ok(Err(SetError::forbidden()
+                    .with_property(MailboxProperty::ShareWith)
+                    .with_description(
+                        "Your organization has turned off sharing mail folders. A shared mailbox or a group can be set up by an administrator instead.",
                     )));
             }
 

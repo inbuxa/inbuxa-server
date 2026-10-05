@@ -12,6 +12,7 @@ pub mod ai;
 pub mod ai_calibration;
 pub mod ai_explain;
 pub mod account_lock; // inbuxa: account lock with delegation
+pub mod sharing_policy; // inbuxa: MA-C, who may share mail
 pub mod legal_hold; // inbuxa: legal hold
 pub mod compliance; // inbuxa: the compliance roles
 pub mod mail_rules; // inbuxa: DLP and mail flow rules

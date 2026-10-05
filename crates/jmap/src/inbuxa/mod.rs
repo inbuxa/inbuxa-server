@@ -28,6 +28,7 @@ pub mod webhook_test;
 pub mod explanation;
 pub mod protocol_policy;
 pub mod tenant_protocol_policy;
+pub mod sharing_policy;
 pub mod deleted_account;
 pub mod fastmail;
 pub mod masked_email;

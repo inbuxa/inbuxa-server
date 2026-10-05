@@ -121,6 +121,9 @@ pub enum GetResponseMethod {
     TenantProtocolPolicy(
         GetResponse<crate::object::inbuxa_tenant_protocol_policy::TenantProtocolPolicy>,
     ),
+    SharingPolicy(
+        GetResponse<crate::object::inbuxa_sharing_policy::SharingPolicy>,
+    ),
 }
 
 #[derive(Debug, serde::Serialize)]
@@ -165,6 +168,9 @@ pub enum SetResponseMethod {
     ProtocolPolicy(Box<SetResponse<crate::object::inbuxa_protocol_policy::ProtocolPolicy>>),
     TenantProtocolPolicy(
         Box<SetResponse<crate::object::inbuxa_tenant_protocol_policy::TenantProtocolPolicy>>,
+    ),
+    SharingPolicy(
+        Box<SetResponse<crate::object::inbuxa_sharing_policy::SharingPolicy>>,
     ),
 }
 
@@ -352,6 +358,16 @@ impl<'x> From<GetResponse<crate::object::inbuxa_tenant_protocol_policy::TenantPr
     }
 }
 
+impl<'x> From<GetResponse<crate::object::inbuxa_sharing_policy::SharingPolicy>>
+    for ResponseMethod<'x>
+{
+    fn from(
+        value: GetResponse<crate::object::inbuxa_sharing_policy::SharingPolicy>,
+    ) -> Self {
+        ResponseMethod::Get(GetResponseMethod::SharingPolicy(value))
+    }
+}
+
 impl<'x> From<SetResponse<crate::object::inbuxa_tenant_protocol_policy::TenantProtocolPolicy>>
     for ResponseMethod<'x>
 {
@@ -359,6 +375,16 @@ impl<'x> From<SetResponse<crate::object::inbuxa_tenant_protocol_policy::TenantPr
         value: SetResponse<crate::object::inbuxa_tenant_protocol_policy::TenantProtocolPolicy>,
     ) -> Self {
         ResponseMethod::Set(SetResponseMethod::TenantProtocolPolicy(Box::new(value)))
+    }
+}
+
+impl<'x> From<SetResponse<crate::object::inbuxa_sharing_policy::SharingPolicy>>
+    for ResponseMethod<'x>
+{
+    fn from(
+        value: SetResponse<crate::object::inbuxa_sharing_policy::SharingPolicy>,
+    ) -> Self {
+        ResponseMethod::Set(SetResponseMethod::SharingPolicy(Box::new(value)))
     }
 }
 

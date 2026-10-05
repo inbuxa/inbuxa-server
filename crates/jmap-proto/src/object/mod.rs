@@ -38,6 +38,7 @@ pub mod inbuxa_hold_export; // inbuxa: legal hold exports
 pub mod inbuxa_explanation; // inbuxa: "Explain this" with the local model
 pub mod inbuxa_protocol_policy; // inbuxa: legacy protocols off
 pub mod inbuxa_tenant_protocol_policy; // inbuxa: legacy protocols off, per tenant
+pub mod inbuxa_sharing_policy; // inbuxa: MA-C, who may share mail
 pub mod inbuxa_deleted_account; // inbuxa: undelete
 pub mod file_node;
 pub mod identity;
