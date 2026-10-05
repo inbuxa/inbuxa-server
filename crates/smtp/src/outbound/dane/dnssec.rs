@@ -176,16 +176,23 @@ impl TlsaLookup for Server {
             return mail_auth::common::resolver::mock_resolve(key.as_ref());
         }
 
-        let tlsa_lookup = match self
-            .core
-            .smtp
-            .resolvers
-            .dnssec
-            .resolver
-            .tlsa_lookup(Name::from_str_relaxed(key.as_ref())?)
-            .await
+        // Through `validated_lookup`, like the MX and address lookups: a TLSA
+        // name that is a signed CNAME to a name with no TLSA record (seen at
+        // `_25._tcp.mail.usefulinsight.com`, behind Hetzner's resolvers) is
+        // otherwise called bogus, and the message waits on it until it
+        // expires.
+        let tlsa_lookup = match validated_lookup(
+            &self.core.smtp.resolvers.dnssec.resolver,
+            self.core.smtp.resolvers.dns.resolver(),
+            Name::from_str_relaxed(key.as_ref())?,
+            RecordType::TLSA,
+        )
+        .await
         {
-            Ok(tlsa_lookup) => tlsa_lookup,
+            // A TLSA record proved to sit in an unsigned zone is no DANE
+            // policy at all.
+            Ok(validated) if validated.insecure => return Ok(TlsaResult::Missing),
+            Ok(validated) => validated.lookup,
             Err(err) => {
                 if let Some(denial) = NegativeAnswer::from_error(&err) {
                     return Ok(if denial.dnssec_status == DnssecStatus::Bogus {
@@ -436,7 +443,8 @@ impl TlsaLookup for Server {
 //   record in the DS reply, and public resolvers often send none.
 // - A signed CNAME to a signed name without the record type queried. Hickory
 //   checks the denial of existence against the name first asked for, not the
-//   target's, and rejects it.
+//   target's, and rejects it. TLSA lookups hit this too: a TLSA name that is
+//   a CNAME to the zone apex, with no TLSA there, held mail to it for a week.
 //
 // When hickory says bogus, check the answer again with lookups it gets right.
 // A signed CNAME is followed and the lookup repeated at its target. Otherwise
@@ -869,4 +877,56 @@ mod tests {
         assert!(validated.insecure);
         assert!(!validated.lookup.answers().is_empty());
     }
+
+    // Needs the network: a TLSA name that is a signed CNAME to the zone apex,
+    // which has no TLSA record. Cloudflare's resolver answers with a compact
+    // denial at the name itself; Hetzner's (and others) follow the CNAME, and
+    // hickory then calls the answer bogus. Point the lookup at a resolver that
+    // follows it with INBUXA_TEST_DNS_TCP=<ip:port> (TCP), for instance over
+    // an SSH tunnel to 185.12.64.2:53 from a Hetzner host.
+    #[tokio::test]
+    #[ignore]
+    async fn validated_lookup_follows_signed_cname_for_tlsa() {
+        use mail_auth::hickory_resolver::{
+            config::{CLOUDFLARE, ConnectionConfig, NameServerConfig, ResolverConfig, ResolverOpts},
+            net::runtime::TokioRuntimeProvider,
+        };
+
+        let config = match std::env::var("INBUXA_TEST_DNS_TCP") {
+            Ok(addr) => {
+                let addr: std::net::SocketAddr = addr.parse().unwrap();
+                let mut ns = NameServerConfig::new(addr.ip(), true, vec![ConnectionConfig::tcp()]);
+                if let Some(c) = ns.connections.first_mut() {
+                    c.port = addr.port();
+                }
+                ResolverConfig::from_parts(None, vec![], vec![ns])
+            }
+            Err(_) => ResolverConfig::udp_and_tcp(&CLOUDFLARE),
+        };
+        let build = |validate: bool| {
+            let mut opts = ResolverOpts::default();
+            opts.validate = validate;
+            opts.num_concurrent_reqs = 1;
+            opts.cache_size = 0;
+            TokioResolver::builder_with_config(config.clone(), TokioRuntimeProvider::default())
+                .with_options(opts)
+                .build()
+                .unwrap()
+        };
+        let (dnssec, plain) = (build(true), build(false));
+        let query = name("_25._tcp.mail.usefulinsight.com.");
+
+        let direct = dnssec.lookup(query.clone(), RecordType::TLSA).await;
+        eprintln!("hickory alone: {:?}", direct.as_ref().err().map(|e| e.to_string()));
+
+        let err = match validated_lookup(&dnssec, &plain, query, RecordType::TLSA).await {
+            Ok(validated) => panic!("expected no TLSA record, got {:?}", validated.lookup.answers()),
+            Err(err) => err,
+        };
+        let denial = NegativeAnswer::from_error(&err).expect("a denial of existence");
+        assert_eq!(denial.response_code, ResponseCode::NoError);
+        assert_ne!(denial.dnssec_status, DnssecStatus::Bogus);
+    }
+
 }
+
