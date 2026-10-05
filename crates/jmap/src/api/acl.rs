@@ -187,6 +187,21 @@ impl JmapRights {
         Value::Object(obj)
     }
 
+    /// inbuxa: MA-D0: an owner's rights, which for a group's member are
+    /// everything but sharing it on.
+    pub fn owner_rights<T: JmapSharedObject>(
+        access_token: &AccessToken,
+        account_id: u32,
+    ) -> Value<'static, T::Property, T::Element> {
+        if access_token.is_group_member_only(account_id) {
+            let mut acl = Bitmap::<Acl>::all();
+            acl.remove(Acl::Share);
+            Self::rights::<T>(acl)
+        } else {
+            Self::all_rights::<T>()
+        }
+    }
+
     pub fn rights<T: JmapSharedObject>(
         acls: Bitmap<Acl>,
     ) -> Value<'static, T::Property, T::Element> {

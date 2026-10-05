@@ -105,6 +105,14 @@ impl CalendarSet for Server {
                 continue 'create;
             }
 
+            // inbuxa: MA-D0: a group's members don't share what it owns on.
+            if !calendar.acls.is_empty() && access_token.is_group_member_only(account_id) {
+                response.not_created.append(
+                    id,
+                    SetError::forbidden().with_description("This belongs to a group. Only an administrator can change who has it."),
+                );
+                continue 'create;
+            }
             // Validate ACLs
             if !calendar.acls.is_empty() {
                 if let Err(err) = self.acl_validate(account_id, &calendar.acls).await {
@@ -206,6 +214,14 @@ impl CalendarSet for Server {
                     );
                     continue 'update;
                 }
+            }
+            // inbuxa: MA-D0: a group's members don't share what it owns on.
+            if has_acl_changes && access_token.is_group_member_only(account_id) {
+                response.not_updated.append(
+                    id,
+                    SetError::forbidden().with_description("This belongs to a group. Only an administrator can change who has it."),
+                );
+                continue 'update;
             }
             if has_acl_changes {
                 if let Err(err) = self.acl_validate(account_id, &new_calendar.acls).await {

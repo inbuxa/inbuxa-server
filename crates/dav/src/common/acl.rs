@@ -133,6 +133,10 @@ impl DavAclHandler for Server {
         {
             return Err(DavError::Code(StatusCode::FORBIDDEN));
         }
+        // inbuxa: MA-D0: a group's members don't share what it owns on.
+        if access_token.is_group_member_only(account_id) {
+            return Err(DavError::Code(StatusCode::FORBIDDEN));
+        }
 
         // Validate ACEs
         let grants = self
@@ -565,7 +569,13 @@ impl Privileges for AccessToken {
         grants: &ArchivedVec<ArchivedAclGrant>,
         is_calendar: bool,
     ) -> Vec<Privilege> {
-        if self.is_member(account_id) {
+        if self.is_group_member_only(account_id) {
+            // inbuxa: MA-D0: everything but sharing it on.
+            Privilege::all(is_calendar)
+                .into_iter()
+                .filter(|privilege| !matches!(privilege, Privilege::All | Privilege::WriteAcl))
+                .collect()
+        } else if self.is_member(account_id) {
             Privilege::all(is_calendar)
         } else {
             current_user_privilege_set(grants.effective_acl(self))

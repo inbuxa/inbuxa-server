@@ -2,6 +2,8 @@
  * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
+ *
+ * Modified by Coffey Labs in 2026 for INBUXA.
  */
 
 use super::{AssertResult, ImapConnection, Type, append::assert_append_message};
@@ -68,6 +70,15 @@ pub async fn test(
         .send("DELETE \"Shared Folders/support@example.com/INBOX/Jane's Folder\"")
         .await;
     imap_jane.assert_read(Type::Tagged, ResponseType::Ok).await;
+
+    // inbuxa: MA-D0: but she can't share the group's mailbox on
+    imap_jane
+        .send("SETACL \"Shared Folders/support@example.com/INBOX\" jdoe@example.com lr")
+        .await;
+    imap_jane
+        .assert_read(Type::Tagged, ResponseType::No)
+        .await
+        .assert_contains("NOPERM");
 
     // John should have no shared folders
     imap_john.send("LIST \"\" \"*\"").await;
