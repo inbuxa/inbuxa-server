@@ -713,6 +713,35 @@ pub async fn test(test: &TestServer) {
             .await,
     );
 
+    // inbuxa: MA-D0: a member can't share the group's mailbox on, and isn't
+    // told it may. Who is in a group is an administrator's decision.
+    assert_forbidden(
+        john_client
+            .set_default_account_id(sales.id_string())
+            .mailbox_update_acl(&inbox_id, bill.id_string(), [ACL::ReadItems])
+            .await,
+    );
+    assert!(
+        !john_client
+            .set_default_account_id(sales.id_string())
+            .mailbox_get(&inbox_id, [mailbox::Property::MyRights].into())
+            .await
+            .unwrap()
+            .unwrap()
+            .my_rights()
+            .unwrap()
+            .acl_list()
+            .contains(&ACL::Administer)
+    );
+    bill_client.refresh_session().await.unwrap();
+    assert!(bill_client.session().account(sales.id_string()).is_none());
+    assert_forbidden(
+        bill_client
+            .set_default_account_id(sales.id_string())
+            .email_get(&email_id, [Property::Subject].into())
+            .await,
+    );
+
     // Remove John from the sales group
     admin
         .registry_update_object(

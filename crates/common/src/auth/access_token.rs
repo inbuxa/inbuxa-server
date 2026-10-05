@@ -553,6 +553,16 @@ impl AccessToken {
             || self.inner.access_to.iter().any(|a| a.account_id == account_id)
     }
 
+    /// inbuxa: MA-D0: in the account only because it is a group this token
+    /// belongs to. Such a member has the group's mailbox but may not share it
+    /// on: who is in a group is an administrator's decision, and a share
+    /// would let anyone in.
+    pub fn is_group_member_only(&self, account_id: u32) -> bool {
+        self.inner.account_id != account_id
+            && self.inner.member_of.contains(&account_id)
+            && !self.has_permission(Permission::Impersonate)
+    }
+
     pub fn is_account_id(&self, account_id: u32) -> bool {
         self.inner.account_id == account_id
     }
