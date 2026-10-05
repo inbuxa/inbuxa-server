@@ -7,11 +7,11 @@ Status: draft, 2026-09-18. Expands SPEC.md §5.2.
 | Party | What it is | How it reaches the server |
 |---|---|---|
 | **inbuxa-server** | The mail server | — |
-| **ihasmail-inbuxa** | The INBUXA fork of ihasmail: a Node server and a web app. Public ihasmail stays Stalwart-facing and isn't party to this (SPEC.md §5) | Its **Node server** calls inbuxa-server, server to server. The browser only ever talks to ihasmail-inbuxa |
+| **inbuxa-webmail** | The INBUXA fork of ihasmail: a Node server and a web app. Public ihasmail stays Stalwart-facing and isn't party to this (SPEC.md §5) | Its **Node server** calls inbuxa-server, server to server. The browser only ever talks to inbuxa-webmail |
 | **INBUXA Admin** (`inbuxa-admin`) | A static web app, a fork of Stalwart WebUI | The **browser** calls inbuxa-server directly, cross-origin |
 
 That split decides most of what follows. Cross-origin rules matter only for
-INBUXA Admin. Token custody matters most for ihasmail-inbuxa, which holds
+INBUXA Admin. Token custody matters most for inbuxa-webmail, which holds
 tokens on its server for people who aren't there.
 
 ## What upstream does today
@@ -45,7 +45,7 @@ Observed in the source at `v0.16.22` and against a running inbuxa-server on
 - **Endpoint gating:** `x:Http.allowedEndpoints` is an expression that can
   refuse endpoints by path and client IP. JMAP administration shares `/jmap`
   with everything else, so it can't separate admin calls on its own.
-- **ihasmail today** (public, and so the starting point for ihasmail-inbuxa)
+- **ihasmail today** (public, and so the starting point for inbuxa-webmail)
   signs in with HTTP Basic auth and keeps the password sealed in its session
   store (`sealedCredentials: {username, password}`), sending it on every
   upstream call. It registers JMAP push subscriptions to its own URL, and reads
@@ -76,7 +76,7 @@ Each has an ID, and tests name the IDs they check.
   (LP-19). Added 2026-09-21.
 - **C-2.** Each front end states the contract versions it supports and checks
   `contract` after signing in. Outside its range it stops, with a message
-  naming both versions. For ihasmail-inbuxa this replaces public ihasmail's
+  naming both versions. For inbuxa-webmail this replaces public ihasmail's
   "Stalwart 0.16 or later" check.
 - **C-3.** A breaking change to anything in this document bumps `contract`.
   Adding optional fields doesn't.
@@ -117,7 +117,7 @@ Each has an ID, and tests name the IDs they check.
   - **`inbuxa-admin`**: a public client (no secret), authorization code with
     PKCE S256, redirect URI `{adminUrl}/oauth/callback`.
   - **`ihasmail-inbuxa`**: a confidential client with a secret held by the
-    ihasmail-inbuxa server, authorization code with PKCE S256, redirect URI
+    inbuxa-webmail server, authorization code with PKCE S256, redirect URI
     `{webmailUrl}/api/auth/callback`.
   INBUXA Admin's `<meta name="oauth-client-id">` is set to `inbuxa-admin`.
   Served by the server itself it uses the web interface's client,
@@ -159,7 +159,7 @@ Each has an ID, and tests name the IDs they check.
 - **C-8.** People sign in on **the server's own sign-in page** (`/login`,
   already INBUXA-branded), never on a front end's form. Two-factor happens
   there, on the page's existing one-time-code step. Front ends never see a
-  password. ihasmail-inbuxa's own sign-in form is retired in favor of a
+  password. inbuxa-webmail's own sign-in form is retired in favor of a
   redirect.
 - **C-9.** **Consent for anything that isn't first-party.** When a client other
   than the two first-party ones asks to sign someone in, the sign-in page names
@@ -170,10 +170,10 @@ Each has an ID, and tests name the IDs they check.
 
 ### Tokens
 
-- **C-10.** ihasmail-inbuxa holds tokens, never passwords. It keeps the access
+- **C-10.** inbuxa-webmail holds tokens, never passwords. It keeps the access
   and refresh token for each session sealed in its session store, where it now
   keeps sealed credentials, and refreshes the access token before it expires.
-  The browser still holds only ihasmail-inbuxa's own session cookie. Public
+  The browser still holds only inbuxa-webmail's own session cookie. Public
   ihasmail's "the browser never holds a credential" property is kept.
 - **C-11.** INBUXA Admin holds its tokens in the browser, as upstream WebUI
   does, since it has no server of its own. So admin tokens are short-lived
@@ -193,9 +193,9 @@ Each has an ID, and tests name the IDs they check.
   A revoked token stops working on its next use, and never later than one
   access-token lifetime.
 - **C-13.** Grants are listed per account (client, device description, created,
-  last used, IP), so ihasmail-inbuxa's "your sessions" screen shows server-side
+  last used, IP), so inbuxa-webmail's "your sessions" screen shows server-side
   truth. Lifetimes, all configurable: access tokens 1 hour and refresh 30 days
-  for ihasmail-inbuxa; access tokens 15 minutes and refresh 8 hours for
+  for inbuxa-webmail; access tokens 15 minutes and refresh 8 hours for
   `inbuxa-admin`.
 
 ### Cross-origin
@@ -237,7 +237,7 @@ Each has an ID, and tests name the IDs they check.
   scope `inbuxa:admin`, which only that client is ever granted. An admin
   account signing in through a mail client can't administer the server with
   that token, even though the account could.
-- **C-19.** ihasmail-inbuxa's own administration (accounts, domains, groups,
+- **C-19.** inbuxa-webmail's own administration (accounts, domains, groups,
   lists, roles, tenants, the dashboard) uses the scope `inbuxa:account-admin`,
   granted only to `ihasmail-inbuxa`, and limited to those object types, plus
   `x:Metric` get and query for the dashboard's message cards (monitoring
@@ -250,7 +250,7 @@ Each has an ID, and tests name the IDs they check.
 
 ### Push
 
-- **C-22.** Unchanged from public ihasmail: ihasmail-inbuxa registers JMAP push
+- **C-22.** Unchanged from public ihasmail: inbuxa-webmail registers JMAP push
   subscriptions to its own URL, with VAPID for browser notifications. The only
   difference is that it authenticates with its token rather than the password.
 
@@ -279,7 +279,7 @@ Each has an ID, and tests name the IDs they check.
   `INBUXA_HTTP_BASIC_AUTH=all`; `dav`, the default, is this rule. Any other
   value logs a warning and keeps the default. The setting moves to the
   registry with `x:FrontEnds` (C-4).
-  ihasmail-inbuxa confirms a typed password, which it does before creating
+  inbuxa-webmail confirms a typed password, which it does before creating
   an app password, on `/api/auth` as its own client, to its registered
   redirect URI, with a PKCE challenge whose verifier it discards. A
   "two-factor code needed" answer counts as confirmed, since the server gives
@@ -294,7 +294,7 @@ Each has an ID, and tests name the IDs they check.
   didn't register refused.
   Observed before the change, in INBUXA's production logs from 2026-09-20 to 2026-09-29:
   every HTTPS password sign-in was the operator's own, apart from
-  ihasmail-inbuxa's password sign-in on 2026-09-22, before it moved to OAuth.
+  inbuxa-webmail's password sign-in on 2026-09-22, before it moved to OAuth.
   The logs don't say whether a sign-in used a Basic header or the sign-in
   page.
 
@@ -304,8 +304,8 @@ Each has an ID, and tests name the IDs they check.
    (SPEC.md §6.2). In bootstrap mode, CORS is permissive (C-16) and the
    recovery administrator applies.
 2. It sets `x:FrontEnds` (webmail and admin URLs, the public URL), which
-   registers both first-party clients (C-6). For ihasmail-inbuxa it returns the
-   client secret once, for the installer to write into ihasmail-inbuxa's
+   registers both first-party clients (C-6). For inbuxa-webmail it returns the
+   client secret once, for the installer to write into inbuxa-webmail's
    environment.
 3. After the restart out of bootstrap, CORS follows C-14, registration is
    required (C-5), and the recovery administrator is ignored (SPEC.md §6.2).
@@ -376,7 +376,7 @@ client and reload settings. This is the state C-5 and C-6 make the default.
 5. The phishing flow in the security note fails at step 1, and a registered
    third-party client with a non-first-party redirect shows the consent page
    (C-9).
-6. ihasmail-inbuxa signs in without ever handling a password. Its session
+6. inbuxa-webmail signs in without ever handling a password. Its session
    store holds tokens only (C-8, C-10).
 7. Revoking one grant stops that session within one access-token lifetime,
    leaves others working, and "sign out other sessions" keeps the current one
@@ -388,7 +388,7 @@ client and reload settings. This is the state C-5 and C-6 make the default.
 10. In bootstrap mode, INBUXA Admin reaches the server from any origin (C-16).
 11. An admin account's token from a third-party mail client can't read
     `x:NetworkListener`. The same account through `inbuxa-admin` can (C-18).
-12. ihasmail-inbuxa's token can manage accounts and tenants but not listeners
+12. inbuxa-webmail's token can manage accounts and tenants but not listeners
     or certificates (C-19).
 13. With `adminNetworks` set, an `inbuxa:admin` request from outside is refused
     (C-20).
@@ -402,4 +402,4 @@ client and reload settings. This is the state C-5 and C-6 make the default.
 2. The consent page's wording and whether it remembers a decision per client.
 3. API keys and app passwords with explicit scopes (C-21): what upstream's
    `x:ApiKey` already supports, to observe before specifying.
-4. Whether ihasmail-inbuxa's secret should rotate, and how.
+4. Whether inbuxa-webmail's secret should rotate, and how.

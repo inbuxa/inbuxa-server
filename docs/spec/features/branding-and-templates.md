@@ -275,7 +275,7 @@ Each requirement has an ID, and tests name the IDs they check.
 
 ## ihasmail changes
 
-These go in the INBUXA fork of ihasmail, ihasmail-inbuxa, never in public
+These go in the INBUXA fork of ihasmail, inbuxa-webmail, never in public
 ihasmail, which stays Stalwart-facing (SPEC.md §5).
 
 - **Administration, Domains:** a logo field on each domain. Upload a PNG, JPEG
@@ -389,7 +389,7 @@ files carry hooks marked `inbuxa:`. Acceptance tests 1 to 17 pass as
 `tests/src/system/branding.rs`.
 
 - **BT-1 to BT-26:** built.
-- **ihasmail changes** belong to ihasmail-inbuxa and aren't part of this
+- **ihasmail changes** belong to inbuxa-webmail and aren't part of this
   repository.
 - **Test 18 (compat)** is written as `branding_compat`, ignored, and unrun
   until a copy of INBUXA's data is provided. INBUXA holds no logos or

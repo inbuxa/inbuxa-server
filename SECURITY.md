@@ -36,7 +36,7 @@ to Stalwart Labs with credit to you, and you'll be told that has happened.
 This repository is the mail server. The web front ends have their own:
 
 - [inbuxa-admin](https://git.coffeylabs.org/inbuxa/inbuxa-admin)
-- [ihasmail-inbuxa](https://git.coffeylabs.org/inbuxa/ihasmail-inbuxa)
+- [inbuxa-webmail](https://git.coffeylabs.org/inbuxa/inbuxa-webmail)
 
 Upstream's own security documents are kept in `.github-upstream/` for
 reference. They describe Stalwart Labs' process, not this project's.

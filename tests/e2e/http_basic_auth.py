@@ -12,7 +12,7 @@ Boots the debug binary and checks that:
 - DAV still takes Basic, and its 401 still offers it;
 - a token from the sign-in endpoint (`/api/auth`, the password in the body)
   and the token endpoint works on JMAP: the path the front ends use, and the
-  one ihasmail-inbuxa's password check relies on;
+  one inbuxa-webmail's password check relies on;
 - INBUXA_HTTP_BASIC_AUTH=all puts Basic back everywhere, an unknown value
   keeps the default with a warning, and recovery mode accepts Basic.
 
@@ -64,7 +64,7 @@ def start(env=None):
             "-p", f"127.0.0.1:{PORT}:8080",
             # A debug build's workers need more than the default stack.
             "-e", "RUST_MIN_STACK=16777216",
-            # Registers inbuxa-admin and ihasmail-inbuxa (C-6).
+            # Registers inbuxa-admin and inbuxa-webmail (C-6).
             "-e", f"INBUXA_ADMIN_URL={ADMIN_URL}", "-e", f"INBUXA_WEBMAIL_URL={WEBMAIL_URL}"]
     env_file = f"{DIR}/secrets/basic-env"
     with open(env_file, "w") as f:
@@ -243,7 +243,7 @@ def main():
         status, _, _ = request("/api/account", f"Bearer {access}")
         check(status == 200, f"a token works on /api/account ({status})")
 
-    # ihasmail-inbuxa's password check before an app password: its own client,
+    # inbuxa-webmail's password check before an app password: its own client,
     # its registered redirect URI, a verifier it throws away.
     for password, want in ((user_pw, "authenticated"), ("not-the-password", "failure")):
         got = sign_in(user, password, "ihasmail-inbuxa", WEBMAIL_REDIRECT, secrets.token_urlsafe(48))

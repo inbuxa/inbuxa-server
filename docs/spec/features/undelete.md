@@ -276,7 +276,7 @@ marked `inbuxa:`. Acceptance tests 1 to 15 pass as
 `tests/src/system/undelete.rs`, with `/changes` and the `/query` filters.
 
 - **UD-1 to UD-17a:** built.
-- **ihasmail changes** belong to ihasmail-inbuxa and aren't part of this
+- **ihasmail changes** belong to inbuxa-webmail and aren't part of this
   repository.
 - **Test 16 (compat)** is written as `undelete_compat`, ignored, and unrun
   until a copy of INBUXA's data with archived items made on it is provided.
