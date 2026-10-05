@@ -148,8 +148,12 @@ pub struct InbuxaDelegatedCapabilities {
 
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct DelegationInfo {
-    /// Always true: only locked accounts are delegated.
+    /// Always true: only locked accounts are delegated. A shared mailbox is
+    /// a lock too, so a front end that knows no `kind` still treats it as
+    /// one it may only reach as a delegate.
     pub locked: bool,
+    /// MA-S: `lock` or `sharedMailbox`.
+    pub kind: &'static str,
     /// `read`, `organize` or `full`.
     pub access: &'static str,
     #[serde(rename(serialize = "sendAs"))]

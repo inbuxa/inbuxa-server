@@ -58,6 +58,7 @@ pub trait EmailSubmissionSet: Sync + Send {
     fn send_message(
         &self,
         account_id: u32,
+        own_addresses_only: bool,
         response: &SetResponse<email_submission::EmailSubmission>,
         instance: &Arc<ServerInstance>,
         object: Value<'_, EmailSubmissionProperty, EmailSubmissionValue>,
@@ -83,7 +84,14 @@ impl EmailSubmissionSet for Server {
         let mut batch = BatchBuilder::new();
         for (id, object) in request.unwrap_create() {
             match self
-                .send_message(account_id, &response, instance, object)
+                .send_message(
+                    account_id,
+                    // inbuxa: MA-S3: a shared mailbox's people send only as it
+                    access_token.delegated_shared_mailbox(account_id),
+                    &response,
+                    instance,
+                    object,
+                )
                 .await?
             {
                 Ok(submission) => {
@@ -400,6 +408,7 @@ impl EmailSubmissionSet for Server {
     async fn send_message(
         &self,
         account_id: u32,
+        own_addresses_only: bool,
         response: &SetResponse<email_submission::EmailSubmission>,
         instance: &Arc<ServerInstance>,
         object: Value<'_, EmailSubmissionProperty, EmailSubmissionValue>,
@@ -628,6 +637,46 @@ impl EmailSubmissionSet for Server {
         let metadata = metadata_
             .unarchive::<MessageMetadata>()
             .caused_by(trc::location!())?;
+
+        // inbuxa: MA-S3: mail that came to a shared mailbox goes out as it,
+        // so the answer comes back to the mailbox and not to whoever sent
+        // it: every From and Reply-To address must be the mailbox's own
+        if own_addresses_only {
+            let mut named = Vec::new();
+            for header in metadata.contents[0].parts[0].headers.iter() {
+                if !matches!(
+                    header.name,
+                    ArchivedMetadataHeaderName::From | ArchivedMetadataHeaderName::ReplyTo
+                ) {
+                    continue;
+                }
+                match &header.value {
+                    ArchivedMetadataHeaderValue::AddressList(addr) => {
+                        named.extend(addr.iter().filter_map(|a| a.address.as_ref().map(|v| v.to_string())));
+                    }
+                    ArchivedMetadataHeaderValue::AddressGroup(groups) => {
+                        for group in groups.iter() {
+                            named.extend(
+                                group
+                                    .addresses
+                                    .iter()
+                                    .filter_map(|a| a.address.as_ref().map(|v| v.to_string())),
+                            );
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            for address in named {
+                if self.account_id_from_email(&address, true).await? != Some(account_id) {
+                    return Ok(Err(SetError::new(SetErrorType::ForbiddenFrom).with_description(
+                        format!(
+                            "A shared mailbox sends only as its own addresses, so replies come back to it; {address} isn't one."
+                        ),
+                    )));
+                }
+            }
+        }
 
         // Add recipients to envelope if missing
         let mut bcc_header = None;

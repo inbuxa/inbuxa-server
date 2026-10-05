@@ -46,19 +46,22 @@ impl Server {
         // inbuxa: AL-2, AL-5: whether this account is locked, and which
         // locked accounts are handed to it. The token is their cache: every
         // change to a lock invalidates the tokens it touches.
-        let locked = inbuxa_features::lock::get(self.store(), account_id)
+        let lock_kind = inbuxa_features::lock::get(self.store(), account_id)
             .await
             .caused_by(trc::location!())?
-            .is_some();
+            .map(|lock| lock.kind);
+        let locked = lock_kind.is_some();
+        let shared_mailbox = lock_kind == Some(inbuxa_features::lock::Kind::SharedMailbox);
         let now_secs = now();
         let delegations: Box<[super::Delegation]> =
             inbuxa_features::lock::delegated_to(self.store(), account_id)
                 .await
                 .caused_by(trc::location!())?
                 .into_iter()
-                .filter(|(_, delegate)| delegate.is_current(now_secs))
-                .map(|(locked_id, delegate)| super::Delegation {
+                .filter(|(_, delegate, _)| delegate.is_current(now_secs))
+                .map(|(locked_id, delegate, kind)| super::Delegation {
                     account_id: locked_id,
+                    kind,
                     access: delegate.access,
                     send_as: delegate.send_as,
                     until: delegate.until,
@@ -247,6 +250,7 @@ impl Server {
                         .map(ConcurrencyLimiter::new),
                     obj_size: 0,
                     locked,
+                    shared_mailbox,
                     delegations: delegations.clone(),
                     revision,
                     revision_account,
@@ -300,6 +304,7 @@ impl Server {
                         .map(ConcurrencyLimiter::new),
                     obj_size: 0,
                     locked,
+                    shared_mailbox,
                     delegations: delegations.clone(),
                     revision,
                     revision_account,
@@ -658,6 +663,7 @@ impl AccessToken {
                     credential_version: old_inner.credential_version,
                     obj_size: old_inner.obj_size,
                     locked: old_inner.locked,
+                    shared_mailbox: old_inner.shared_mailbox,
                     delegations: old_inner.delegations.clone(),
                 };
 
@@ -848,6 +854,18 @@ impl AccessToken {
         self.inner.locked
     }
 
+    /// inbuxa: MA-S: the account is a shared mailbox (a lock of that kind).
+    pub fn is_shared_mailbox(&self) -> bool {
+        self.inner.shared_mailbox
+    }
+
+    /// inbuxa: MA-S: this account's delegation into `account_id` is to a
+    /// shared mailbox, not a locked account.
+    pub fn delegated_shared_mailbox(&self, account_id: u32) -> bool {
+        self.delegation(account_id)
+            .is_some_and(|d| d.kind == inbuxa_features::lock::Kind::SharedMailbox)
+    }
+
     /// inbuxa: AL-5: this account's delegation into a locked account, if it
     /// has one that hasn't ended.
     /// inbuxa: AL-6, AL-7: a delegate at organize or full, who may add to
@@ -928,6 +946,7 @@ impl AccessToken {
                 credential_version: Default::default(),
                 obj_size: Default::default(),
                 locked: false,
+                shared_mailbox: false,
                 delegations: Default::default(),
             }),
         }
@@ -988,6 +1007,7 @@ impl AccessTokenInner {
             credential_version: Default::default(),
             obj_size: Default::default(),
             locked: false,
+            shared_mailbox: false,
             delegations: Default::default(),
         }
     }

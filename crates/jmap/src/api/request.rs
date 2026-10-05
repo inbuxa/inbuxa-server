@@ -204,15 +204,20 @@ impl RequestHandler for Server {
                     // inbuxa: AL-9: a delegate's access, and what it
                     // changes, are recorded; anyone else here impersonated
                     if let Some(delegation) = access_token.delegation(account_id) {
-                        let access = delegation.access.as_str();
-                        self.audit_delegate(
-                            access_token,
-                            account_id,
-                            access,
-                            is_write.then_some(call_name.as_str()),
-                            result.as_ref().err(),
-                        )
-                        .await;
+                        // MA-S: in a shared mailbox only what is sent as it
+                        // is recorded (audit_send_as); every read and flag
+                        // on a busy desk would bury the log
+                        if delegation.kind.is_lock() {
+                            let access = delegation.access.as_str();
+                            self.audit_delegate(
+                                access_token,
+                                account_id,
+                                access,
+                                is_write.then_some(call_name.as_str()),
+                                result.as_ref().err(),
+                            )
+                            .await;
+                        }
                         if makes_containers
                             && result.is_ok()
                             && let Err(err) =
