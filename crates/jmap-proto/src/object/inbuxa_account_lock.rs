@@ -28,6 +28,8 @@ pub enum AccountLockProperty {
     /// The locked account (on create; afterwards the same as `id`).
     AccountId,
     Name,
+    /// MA-S: `lock` (the default) or `sharedMailbox`; set on create only.
+    Kind,
     Reason,
     LockedAt,
     LockedBy,
@@ -53,6 +55,7 @@ impl Property for AccountLockProperty {
             AccountLockProperty::Id => "id",
             AccountLockProperty::AccountId => "accountId",
             AccountLockProperty::Name => "name",
+            AccountLockProperty::Kind => "kind",
             AccountLockProperty::Reason => "reason",
             AccountLockProperty::LockedAt => "lockedAt",
             AccountLockProperty::LockedBy => "lockedBy",
@@ -68,6 +71,7 @@ impl AccountLockProperty {
             b"id" => AccountLockProperty::Id,
             b"accountId" => AccountLockProperty::AccountId,
             b"name" => AccountLockProperty::Name,
+            b"kind" => AccountLockProperty::Kind,
             b"reason" => AccountLockProperty::Reason,
             b"lockedAt" => AccountLockProperty::LockedAt,
             b"lockedBy" => AccountLockProperty::LockedBy,

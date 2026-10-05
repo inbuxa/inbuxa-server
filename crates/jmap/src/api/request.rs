@@ -204,15 +204,20 @@ impl RequestHandler for Server {
                     // inbuxa: AL-9: a delegate's access, and what it
                     // changes, are recorded; anyone else here impersonated
                     if let Some(delegation) = access_token.delegation(account_id) {
-                        let access = delegation.access.as_str();
-                        self.audit_delegate(
-                            access_token,
-                            account_id,
-                            access,
-                            is_write.then_some(call_name.as_str()),
-                            result.as_ref().err(),
-                        )
-                        .await;
+                        // MA-S: in a shared mailbox only what is sent as it
+                        // is recorded (audit_send_as); every read and flag
+                        // on a busy desk would bury the log
+                        if delegation.kind.is_lock() {
+                            let access = delegation.access.as_str();
+                            self.audit_delegate(
+                                access_token,
+                                account_id,
+                                access,
+                                is_write.then_some(call_name.as_str()),
+                                result.as_ref().err(),
+                            )
+                            .await;
+                        }
                         if makes_containers
                             && result.is_ok()
                             && let Err(err) =
@@ -310,6 +315,9 @@ impl RequestHandler for Server {
                                         set_response.update_created_ids(&mut response);
                                     }
                                     SetResponseMethod::TenantProtocolPolicy(set_response) => {
+                                        set_response.update_created_ids(&mut response);
+                                    }
+                                    SetResponseMethod::SharingPolicy(set_response) => {
                                         set_response.update_created_ids(&mut response);
                                     }
                                     SetResponseMethod::AddressBook(set_response) => {
@@ -566,6 +574,13 @@ impl RequestHandler for Server {
                 GetRequestMethod::TenantProtocolPolicy(mut req) => {
                     resolve_account_id(&mut req.account_id, method_name.obj, access_token)?;
                     crate::inbuxa::tenant_protocol_policy::get(self, access_token, *req)
+                        .await?
+                        .into()
+                }
+                // inbuxa: inbuxa:SharingPolicy/get (MA-C, who may share mail)
+                GetRequestMethod::SharingPolicy(mut req) => {
+                    resolve_account_id(&mut req.account_id, method_name.obj, access_token)?;
+                    crate::inbuxa::sharing_policy::get(self, access_token, *req)
                         .await?
                         .into()
                 }
@@ -1123,6 +1138,23 @@ impl RequestHandler for Server {
                         None,
                         *req,
                         |req| Box::pin(crate::inbuxa::tenant_protocol_policy::set(self, access_token, req)),
+                    )
+                    .await?
+                    .into()
+                }
+                // inbuxa: inbuxa:SharingPolicy/set (MA-C, who may share mail)
+                SetRequestMethod::SharingPolicy(mut req) => {
+                    resolve_account_id(&mut req.account_id, method_name.obj, access_token)?;
+                    // inbuxa: AU-1.2, AU-3
+                    crate::inbuxa::audit::recorded(
+                        self,
+                        access_token,
+                        session,
+                        &method_name.obj.to_string(),
+                        None,
+                        None,
+                        *req,
+                        |req| Box::pin(crate::inbuxa::sharing_policy::set(self, access_token, req)),
                     )
                     .await?
                     .into()

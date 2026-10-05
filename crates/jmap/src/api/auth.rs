@@ -130,6 +130,10 @@ impl JmapAuthorization for AccessToken {
                 // sign-in on the tenant's domains, so it takes the domain's
                 // permissions, which a tenant administrator already holds.
                 GetRequestMethod::TenantProtocolPolicy(_) => Permission::SysDomainGet,
+                // inbuxa: MA-C, who may share mail: a tenant administrator
+                // manages their tenant's, so the domain's permissions; the
+                // server's own also needs sysSharingUpdate (see the method)
+                GetRequestMethod::SharingPolicy(_) => Permission::SysDomainGet,
                 GetRequestMethod::Principal(_) => Permission::JmapPrincipalGet,
                 GetRequestMethod::Quota(_) => Permission::JmapQuotaGet,
                 GetRequestMethod::Blob(_) => Permission::JmapBlobGet,
@@ -370,6 +374,14 @@ impl JmapAuthorization for AccessToken {
                         Permission::SysDomainUpdate,
                         Permission::SysDomainUpdate,
                     ),
+                    // inbuxa: MA-C, who may share mail, with the domain's
+                    SetRequestMethod::SharingPolicy(s) => validate_set(
+                        s,
+                        self,
+                        Permission::SysDomainUpdate,
+                        Permission::SysDomainUpdate,
+                        Permission::SysDomainUpdate,
+                    ),
                     SetRequestMethod::VacationResponse(s) => validate_set(
                         s,
                         self,
@@ -500,7 +512,8 @@ impl JmapAuthorization for AccessToken {
                 | MethodObject::JournalExport
                 | MethodObject::JournalVerification
                 | MethodObject::ProtocolPolicy
-                | MethodObject::TenantProtocolPolicy => Permission::JmapEmailChanges,
+                | MethodObject::TenantProtocolPolicy
+                | MethodObject::SharingPolicy => Permission::JmapEmailChanges,
                 // inbuxa: x:MaskedEmail/changes reads what /get reads
                 MethodObject::Registry(object_type) => object_type.get_permission(),
             },

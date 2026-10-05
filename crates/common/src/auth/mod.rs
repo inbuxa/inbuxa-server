@@ -152,6 +152,8 @@ pub struct AccessTokenInner {
     pub(crate) obj_size: u64,
     // inbuxa: AL-2: the account is locked; it may not authenticate
     pub(crate) locked: bool,
+    // inbuxa: MA-S: the lock is a shared mailbox
+    pub(crate) shared_mailbox: bool,
     // inbuxa: AL-5: locked accounts handed to this one
     pub(crate) delegations: Box<[Delegation]>,
 }
@@ -165,6 +167,8 @@ pub struct Delegation {
     pub send_as: bool,
     /// Seconds since the epoch.
     pub until: Option<u64>,
+    /// MA-S: a locked account, or a shared mailbox.
+    pub kind: inbuxa_features::lock::Kind,
 }
 
 #[derive(Debug, Default, Hash, Clone)]

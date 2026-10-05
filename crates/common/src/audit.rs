@@ -446,9 +446,10 @@ impl Server {
     }
 
     /// MA-D0a: a message sent from an address that isn't the sender's own:
-    /// a group's, today. The message itself only says `From:` the group, so
-    /// the audit log is where the person who sent it is named. A delegate's
-    /// send is AL-9's record, not this one.
+    /// a group's or a shared mailbox's. The message itself only says
+    /// `From:` that address, so the audit log is where the person who sent
+    /// it is named. A locked account's delegate's send is AL-9's record, not
+    /// this one.
     pub async fn audit_send_as(
         &self,
         token: &AccessToken,
@@ -459,7 +460,11 @@ impl Server {
         let Ok(Some(as_account_id)) = self.account_id_from_email(address, true).await else {
             return;
         };
-        if as_account_id == token.account_id() || token.delegation(as_account_id).is_some() {
+        if as_account_id == token.account_id()
+            || token
+                .delegation(as_account_id)
+                .is_some_and(|delegation| delegation.kind.is_lock())
+        {
             return;
         }
         let actor = self.audit_actor(token).await;

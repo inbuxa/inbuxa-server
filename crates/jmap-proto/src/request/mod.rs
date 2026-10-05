@@ -134,6 +134,9 @@ pub enum GetRequestMethod {
     TenantProtocolPolicy(
         Box<GetRequest<crate::object::inbuxa_tenant_protocol_policy::TenantProtocolPolicy>>,
     ),
+    SharingPolicy(
+        Box<GetRequest<crate::object::inbuxa_sharing_policy::SharingPolicy>>,
+    ),
 }
 
 #[derive(Debug)]
@@ -177,6 +180,9 @@ pub enum SetRequestMethod<'x> {
     ProtocolPolicy(Box<SetRequest<'x, crate::object::inbuxa_protocol_policy::ProtocolPolicy>>),
     TenantProtocolPolicy(
         Box<SetRequest<'x, crate::object::inbuxa_tenant_protocol_policy::TenantProtocolPolicy>>,
+    ),
+    SharingPolicy(
+        Box<SetRequest<'x, crate::object::inbuxa_sharing_policy::SharingPolicy>>,
     ),
 }
 
