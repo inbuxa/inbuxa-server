@@ -56,6 +56,8 @@ impl Response<'_> {
                 GetRequestMethod::LegalHold(request) => request.resolve_references(self)?,
                 GetRequestMethod::MailRule(request) => request.resolve_references(self)?,
                 GetRequestMethod::SecurityAcceptance(request) => request.resolve_references(self)?,
+                GetRequestMethod::DeliverabilityReport(request) => request.resolve_references(self)?,
+                GetRequestMethod::DeliverabilitySettings(request) => request.resolve_references(self)?,
                 GetRequestMethod::Journal(request) => request.resolve_references(self)?,
                 GetRequestMethod::JournalEntry(request) => request.resolve_references(self)?,
                 GetRequestMethod::HeldMessage(request) => request.resolve_references(self)?,
@@ -138,6 +140,12 @@ impl Response<'_> {
                     request.resolve_references(self, 1, false)?
                 }
                 SetRequestMethod::SecurityAcceptance(request) => {
+                    request.resolve_references(self, 1, false)?
+                }
+                SetRequestMethod::DeliverabilityReport(request) => {
+                    request.resolve_references(self, 1, false)?
+                }
+                SetRequestMethod::DeliverabilitySettings(request) => {
                     request.resolve_references(self, 1, false)?
                 }
                 SetRequestMethod::Journal(request) => {

@@ -111,6 +111,9 @@ impl Server {
             Permission::SysLegalHoldCreate,
             Permission::SysLegalHoldUpdate,
             Permission::SysLegalHoldExport,
+            // inbuxa: DL-20: the lists and the check are the server's
+            Permission::SysDeliverabilityUpdate,
+            Permission::SysDeliverabilityCheck,
         ] {
             permissions.disabled.set(permission as usize);
         }
@@ -303,6 +306,16 @@ impl Default for DefaultPermissions {
                 Permission::SysComplianceGet => {
                     default.superuser.push(permission);
                     default.tenant.push(permission);
+                }
+                // inbuxa: deliverability spec, DL-20: a tenant administrator
+                // reads its own domains' findings; the lists and the check
+                // itself are the server's
+                Permission::SysDeliverabilityGet => {
+                    default.superuser.push(permission);
+                    default.tenant.push(permission);
+                }
+                Permission::SysDeliverabilityUpdate | Permission::SysDeliverabilityCheck => {
+                    default.superuser.push(permission);
                 }
                 // inbuxa: DLP and mail flow rules, and held mail, are the
                 // server's: never a tenant's (dlp-and-mail-flow-rules spec,

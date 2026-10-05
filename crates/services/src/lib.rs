@@ -26,6 +26,7 @@ pub mod broadcast;
 // inbuxa: AL-5, delegations end at their date
 pub mod inbuxa_lock_expiry;
 pub mod inbuxa_log_retention; // inbuxa: personal-data catalog, D1
+pub mod inbuxa_deliverability; // inbuxa: the deliverability check
 pub mod state_manager;
 pub mod task_manager;
 
@@ -73,6 +74,9 @@ impl SpawnServices for IpcReceivers {
 
             // inbuxa: personal-data catalog, D1: old log files go, per node
             inbuxa_log_retention::spawn_log_retention(inner.clone());
+
+            // inbuxa: deliverability spec, DL-14: each node checks itself daily
+            inbuxa_deliverability::spawn_deliverability(inner.clone());
 
             // Spawn task scheduler
             spawn_task_scheduler(inner);

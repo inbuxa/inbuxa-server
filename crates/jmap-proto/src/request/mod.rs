@@ -126,6 +126,8 @@ pub enum GetRequestMethod {
     LegalHold(Box<GetRequest<crate::object::inbuxa_legal_hold::LegalHold>>),
     MailRule(Box<GetRequest<crate::object::inbuxa_mail_rule::MailRule>>),
     SecurityAcceptance(Box<GetRequest<crate::object::inbuxa_security_acceptance::SecurityAcceptance>>),
+    DeliverabilityReport(Box<GetRequest<crate::object::inbuxa_deliverability_report::DeliverabilityReport>>),
+    DeliverabilitySettings(Box<GetRequest<crate::object::inbuxa_deliverability_settings::DeliverabilitySettings>>),
     Journal(Box<GetRequest<crate::object::inbuxa_journal::Journal>>),
     JournalEntry(Box<GetRequest<crate::object::inbuxa_journal_entry::JournalEntry>>),
     HeldMessage(Box<GetRequest<crate::object::inbuxa_held_message::HeldMessage>>),
@@ -172,6 +174,8 @@ pub enum SetRequestMethod<'x> {
     SecurityAcceptance(
         Box<SetRequest<'x, crate::object::inbuxa_security_acceptance::SecurityAcceptance>>,
     ),
+    DeliverabilityReport(Box<SetRequest<'x, crate::object::inbuxa_deliverability_report::DeliverabilityReport>>),
+    DeliverabilitySettings(Box<SetRequest<'x, crate::object::inbuxa_deliverability_settings::DeliverabilitySettings>>),
     Journal(Box<SetRequest<'x, crate::object::inbuxa_journal::Journal>>),
     JournalExport(Box<SetRequest<'x, crate::object::inbuxa_journal_entry::JournalExport>>),
     JournalVerification(Box<SetRequest<'x, crate::object::inbuxa_journal_entry::JournalVerification>>),

@@ -166,6 +166,18 @@ reason = ["content"]
 file = "inbuxa_journal_entry.rs"
 default = "none"
 
+# The deliverability check (deliverability spec): facts about the server's own
+# addresses, names and domains. The blocklists it asks see those addresses and
+# domains, as they would whenever anyone checks mail from the server; nothing
+# about people is sent or kept.
+[object."inbuxa:DeliverabilityReport"]
+file = "inbuxa_deliverability_report.rs"
+default = "none"
+
+[object."inbuxa:DeliverabilitySettings"]
+file = "inbuxa_deliverability_settings.rs"
+default = "none"
+
 [object."inbuxa:LegalHold"]
 file = "inbuxa_legal_hold.rs"
 default = "none"

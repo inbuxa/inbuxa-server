@@ -146,6 +146,10 @@ impl BroadcastBatch<Vec<BroadcastEvent>> {
                     serialized.push(13u8);
                     let _ = serialized.write_leb128(*account_id);
                 }
+                // inbuxa: DL-15
+                BroadcastEvent::DeliverabilityCheck => {
+                    serialized.push(14u8);
+                }
             }
         }
         serialized
@@ -284,6 +288,8 @@ where
                     let account_id = self.messages.next_leb128().ok_or(())?;
                     Ok(Some(BroadcastEvent::EndSessions(account_id)))
                 }
+                // inbuxa: DL-15
+                14 => Ok(Some(BroadcastEvent::DeliverabilityCheck)),
                 _ => Err(()),
             }
         } else {

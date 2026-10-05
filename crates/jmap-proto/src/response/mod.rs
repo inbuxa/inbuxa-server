@@ -113,6 +113,8 @@ pub enum GetResponseMethod {
     LegalHold(GetResponse<crate::object::inbuxa_legal_hold::LegalHold>),
     MailRule(GetResponse<crate::object::inbuxa_mail_rule::MailRule>),
     SecurityAcceptance(GetResponse<crate::object::inbuxa_security_acceptance::SecurityAcceptance>),
+    DeliverabilityReport(GetResponse<crate::object::inbuxa_deliverability_report::DeliverabilityReport>),
+    DeliverabilitySettings(GetResponse<crate::object::inbuxa_deliverability_settings::DeliverabilitySettings>),
     Journal(GetResponse<crate::object::inbuxa_journal::Journal>),
     JournalEntry(GetResponse<crate::object::inbuxa_journal_entry::JournalEntry>),
     HeldMessage(GetResponse<crate::object::inbuxa_held_message::HeldMessage>),
@@ -159,6 +161,8 @@ pub enum SetResponseMethod {
     SecurityAcceptance(
         Box<SetResponse<crate::object::inbuxa_security_acceptance::SecurityAcceptance>>,
     ),
+    DeliverabilityReport(Box<SetResponse<crate::object::inbuxa_deliverability_report::DeliverabilityReport>>),
+    DeliverabilitySettings(Box<SetResponse<crate::object::inbuxa_deliverability_settings::DeliverabilitySettings>>),
     Journal(Box<SetResponse<crate::object::inbuxa_journal::Journal>>),
     JournalExport(Box<SetResponse<crate::object::inbuxa_journal_entry::JournalExport>>),
     JournalVerification(Box<SetResponse<crate::object::inbuxa_journal_entry::JournalVerification>>),
@@ -861,6 +865,31 @@ impl<'x> From<GetResponse<crate::object::inbuxa_held_message::HeldMessage>> for 
 impl<'x> From<SetResponse<crate::object::inbuxa_held_message::HeldMessage>> for ResponseMethod<'x> {
     fn from(value: SetResponse<crate::object::inbuxa_held_message::HeldMessage>) -> Self {
         ResponseMethod::Set(SetResponseMethod::HeldMessage(Box::new(value)))
+    }
+}
+
+// inbuxa: the deliverability check
+impl<'x> From<GetResponse<crate::object::inbuxa_deliverability_report::DeliverabilityReport>> for ResponseMethod<'x> {
+    fn from(value: GetResponse<crate::object::inbuxa_deliverability_report::DeliverabilityReport>) -> Self {
+        ResponseMethod::Get(GetResponseMethod::DeliverabilityReport(value))
+    }
+}
+
+impl<'x> From<SetResponse<crate::object::inbuxa_deliverability_report::DeliverabilityReport>> for ResponseMethod<'x> {
+    fn from(value: SetResponse<crate::object::inbuxa_deliverability_report::DeliverabilityReport>) -> Self {
+        ResponseMethod::Set(SetResponseMethod::DeliverabilityReport(Box::new(value)))
+    }
+}
+
+impl<'x> From<GetResponse<crate::object::inbuxa_deliverability_settings::DeliverabilitySettings>> for ResponseMethod<'x> {
+    fn from(value: GetResponse<crate::object::inbuxa_deliverability_settings::DeliverabilitySettings>) -> Self {
+        ResponseMethod::Get(GetResponseMethod::DeliverabilitySettings(value))
+    }
+}
+
+impl<'x> From<SetResponse<crate::object::inbuxa_deliverability_settings::DeliverabilitySettings>> for ResponseMethod<'x> {
+    fn from(value: SetResponse<crate::object::inbuxa_deliverability_settings::DeliverabilitySettings>) -> Self {
+        ResponseMethod::Set(SetResponseMethod::DeliverabilitySettings(Box::new(value)))
     }
 }
 

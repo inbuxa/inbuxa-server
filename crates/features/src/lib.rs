@@ -21,6 +21,7 @@
 pub mod ai;
 pub mod audit;
 pub mod branding;
+pub mod deliverability; // inbuxa: the deliverability check (not a rebuild)
 pub mod hold;
 pub mod journal;
 pub mod lock;

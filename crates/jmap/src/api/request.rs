@@ -293,6 +293,12 @@ impl RequestHandler for Server {
                                     SetResponseMethod::SecurityAcceptance(set_response) => {
                                         set_response.update_created_ids(&mut response);
                                     }
+                                    SetResponseMethod::DeliverabilityReport(set_response) => {
+                                        set_response.update_created_ids(&mut response);
+                                    }
+                                    SetResponseMethod::DeliverabilitySettings(set_response) => {
+                                        set_response.update_created_ids(&mut response);
+                                    }
                                     SetResponseMethod::Journal(set_response) => {
                                         set_response.update_created_ids(&mut response);
                                     }
@@ -536,6 +542,19 @@ impl RequestHandler for Server {
                 GetRequestMethod::SecurityAcceptance(mut req) => {
                     resolve_account_id(&mut req.account_id, method_name.obj, access_token)?;
                     crate::inbuxa::security_acceptance::get(self, access_token, *req)
+                        .await?
+                        .into()
+                }
+                // inbuxa: the deliverability check
+                GetRequestMethod::DeliverabilityReport(mut req) => {
+                    resolve_account_id(&mut req.account_id, method_name.obj, access_token)?;
+                    crate::inbuxa::deliverability::get_reports(self, access_token, *req)
+                        .await?
+                        .into()
+                }
+                GetRequestMethod::DeliverabilitySettings(mut req) => {
+                    resolve_account_id(&mut req.account_id, method_name.obj, access_token)?;
+                    crate::inbuxa::deliverability::get_settings(self, access_token, *req)
                         .await?
                         .into()
                 }
@@ -1051,6 +1070,35 @@ impl RequestHandler for Server {
                         *req,
                         |req| {
                             Box::pin(crate::inbuxa::security_acceptance::set(
+                                self,
+                                access_token,
+                                req,
+                            ))
+                        },
+                    )
+                    .await?
+                    .into()
+                }
+                // inbuxa: DL-15, Check now; nothing it changes needs recording
+                SetRequestMethod::DeliverabilityReport(mut req) => {
+                    resolve_account_id(&mut req.account_id, method_name.obj, access_token)?;
+                    crate::inbuxa::deliverability::set_reports(self, access_token, *req)
+                        .await?
+                        .into()
+                }
+                // inbuxa: DL-6; which lists are asked is in the audit log
+                SetRequestMethod::DeliverabilitySettings(mut req) => {
+                    resolve_account_id(&mut req.account_id, method_name.obj, access_token)?;
+                    crate::inbuxa::audit::recorded(
+                        self,
+                        access_token,
+                        session,
+                        &method_name.obj.to_string(),
+                        None,
+                        None,
+                        *req,
+                        |req| {
+                            Box::pin(crate::inbuxa::deliverability::set_settings(
                                 self,
                                 access_token,
                                 req,

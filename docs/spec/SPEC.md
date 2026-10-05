@@ -364,6 +364,8 @@ is written.
 
 Not a rebuild: the **security to-do list** is INBUXA's own design (inbuxa-drafts `specs/security-score.md`). The console runs its checks; the server's part is `inbuxa:SecurityAcceptance`, the accepted items (`crates/jmap/src/inbuxa/security_acceptance.rs`), and the `sysSecurityAccept` permission.
 
+Not a rebuild: the **deliverability check** is INBUXA's own design (inbuxa-drafts `specs/deliverability.md`). Each sending node checks what other servers see of it (blocklists, reverse DNS, SPF, DKIM, DMARC, MTA-STS, certificates) and keeps a report: `inbuxa:DeliverabilityReport` and `inbuxa:DeliverabilitySettings` (`crates/jmap/src/inbuxa/deliverability.rs`, `crates/services/src/inbuxa_deliverability.rs`), and the `sysDeliverabilityGet`, `sysDeliverabilityUpdate` and `sysDeliverabilityCheck` permissions.
+
 ## 5. The web front ends
 
 **Which ihasmail.** Public ihasmail stays Stalwart-facing: its code, docs,

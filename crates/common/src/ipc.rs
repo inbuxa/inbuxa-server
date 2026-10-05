@@ -88,6 +88,8 @@ pub enum BroadcastEvent {
     QueueRefresh,
     // inbuxa: AL-3: end an account's open sessions on every node
     EndSessions(u32),
+    // inbuxa: deliverability spec, DL-15: every node checks itself now
+    DeliverabilityCheck,
 }
 
 #[derive(Debug, Clone, Copy)]
