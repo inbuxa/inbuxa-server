@@ -540,8 +540,108 @@ pub async fn test(test: &mut TestServer) {
         "AU-7: continued"
     );
 
+    // MA-D0a: a group member sending as the group is named in the log; the
+    // same person sending as themselves isn't recorded
+    let group = admin
+        .create_group_account("helpdesk@send-as.example.org", "Help desk", &[])
+        .await;
+    let agent = admin
+        .create_user_account(
+            "agent@send-as.example.org",
+            "agent-secret-for-send-as",
+            "Agent",
+            &[],
+            vec![],
+        )
+        .await;
+    admin
+        .registry_update_object(
+            ObjectType::Account,
+            agent.id(),
+            json!({"memberGroupIds": {group.id_string(): true}}),
+        )
+        .await;
+    agent.send_as("helpdesk@send-as.example.org").await;
+    agent.send_as("agent@send-as.example.org").await;
+    let sends = admin
+        .audit(json!({
+            "targetKind": "EmailSubmission",
+            "actorId": agent.id_string(),
+        }))
+        .await;
+    assert_eq!(sends.len(), 1, "MA-D0a: {sends:?}");
+    assert_eq!(sends[0]["target"]["name"], "helpdesk@send-as.example.org");
+    assert_eq!(
+        sends[0]["target"]["accountId"],
+        group.id_string(),
+        "MA-D0a: {}",
+        sends[0]
+    );
+    assert_eq!(
+        sends[0]["details"],
+        "Sent as helpdesk@send-as.example.org, from agent@send-as.example.org"
+    );
+
     // Clean up what later suites could trip over
     admin.registry_destroy_all(ObjectType::BlockedIp).await;
+}
+
+impl Account {
+    /// Sends one message to itself from its own account, as `from`.
+    async fn send_as(&self, from: &str) {
+        const USING: &[&str] = &[
+            "urn:ietf:params:jmap:core",
+            "urn:ietf:params:jmap:mail",
+            "urn:ietf:params:jmap:submission",
+        ];
+        let account_id = self.id_string();
+        let response = self
+            .jmap_request(
+                USING,
+                json!([
+                    ["Identity/get", {"accountId": account_id}, "i"],
+                    ["Mailbox/get", {"accountId": account_id, "properties": ["role"]}, "m"]
+                ]),
+            )
+            .await;
+        let identity = response
+            .0
+            .pointer("/methodResponses/0/1/list")
+            .and_then(Value::as_array)
+            .and_then(|list| list.iter().find(|identity| identity["email"] == from))
+            .unwrap_or_else(|| panic!("no identity for {from}: {}", response.0))["id"]
+            .clone();
+        let drafts = response
+            .0
+            .pointer("/methodResponses/1/1/list")
+            .and_then(Value::as_array)
+            .and_then(|list| list.iter().find(|mailbox| mailbox["role"] == "drafts"))
+            .unwrap_or_else(|| panic!("no drafts: {}", response.0))["id"]
+            .clone();
+        let response = self
+            .jmap_request(
+                USING,
+                json!([
+                    ["Email/set", {"accountId": account_id, "create": {"m": {
+                        "mailboxIds": {drafts.as_str().unwrap(): true},
+                        "from": [{"email": from}],
+                        "to": [{"email": self.name()}],
+                        "subject": format!("Sent as {from}"),
+                        "bodyValues": {"t": {"value": "MA-D0a"}},
+                        "textBody": [{"partId": "t", "type": "text/plain"}]
+                    }}}, "e"],
+                    ["EmailSubmission/set", {"accountId": account_id, "create": {"s": {
+                        "identityId": identity, "emailId": "#m"
+                    }}}, "s"]
+                ]),
+            )
+            .await;
+        assert!(
+            response.0.pointer("/methodResponses/1/1/created/s").is_some(),
+            "send as {from}: {}",
+            response.0
+        );
+    }
 }
 
 /// Runs these tests alone: `cargo test -p tests audit_log_tests -- --ignored`.

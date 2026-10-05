@@ -783,7 +783,7 @@ impl RequestHandler for Server {
                     // inbuxa: AL-8: a delegate may send as a locked account
                     access_token.assert_can_send(req.account_id)?;
 
-                    self.email_submission_set(*req, &session.instance, next_call)
+                    self.email_submission_set(*req, access_token, &session.instance, next_call)
                         .await?
                         .into()
                 }
