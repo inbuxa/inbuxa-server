@@ -2,6 +2,8 @@
  * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
+ *
+ * Modified by Coffey Labs in 2026 for INBUXA.
  */
 
 use crate::utils::{server::TestServer, webdav::GenerateTestDavResource};
@@ -406,6 +408,40 @@ pub async fn test(test: &TestServer) {
             .await
             .with_status(StatusCode::NO_CONTENT);
     }
+
+    // inbuxa: MA-D0: Jane, a member of the Support group, can make a folder in
+    // the group's account but can't share it on
+    let member_client = test.account("jane@example.com").webdav_client();
+    let john_principal = format!(
+        "{}/john%40example.com/",
+        DavResourceName::Principal.base_path()
+    );
+    for resource_type in [
+        DavResourceName::File,
+        DavResourceName::Cal,
+        DavResourceName::Card,
+    ] {
+        let group_folder = format!(
+            "{}/support%40example.com/group-folder/",
+            resource_type.base_path()
+        );
+        member_client
+            .request("MKCOL", &group_folder, "")
+            .await
+            .with_status(StatusCode::CREATED);
+        member_client
+            .acl(&group_folder, john_principal.as_str(), ["read"])
+            .await
+            .with_status(StatusCode::FORBIDDEN);
+        member_client
+            .request("DELETE", &group_folder, "")
+            .await
+            .with_status(StatusCode::NO_CONTENT);
+    }
+    // Reaching the group's calendars and address books made its defaults
+    member_client
+        .delete_default_containers_by_account("support@example.com")
+        .await;
 
     sharee_client.delete_default_containers().await;
     owner_client.delete_default_containers().await;

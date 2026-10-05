@@ -250,6 +250,16 @@ impl FileNodeSet for Server {
                 },
             };
 
+            // inbuxa: MA-D0: a group's members don't share what it owns on,
+            // at the top of its files as anywhere else
+            if has_acl_changes && access_token.is_group_member_only(account_id) {
+                response.not_created.append(
+                    id,
+                    SetError::forbidden().with_description("This belongs to a group. Only an administrator can change who has it."),
+                );
+                continue 'create;
+            }
+
             // Inherit ACLs from parent
             if file_node.parent_id > 0 {
                 let parent_id = file_node.parent_id - 1;
@@ -508,6 +518,14 @@ impl FileNodeSet for Server {
                     );
                     continue 'update;
                 }
+            }
+            // inbuxa: MA-D0: a group's members don't share what it owns on.
+            if has_acl_changes && access_token.is_group_member_only(account_id) {
+                response.not_updated.append(
+                    id,
+                    SetError::forbidden().with_description("This belongs to a group. Only an administrator can change who has it."),
+                );
+                continue 'update;
             }
             if has_acl_changes {
                 if let Err(err) = self.acl_validate(account_id, &new_file_node.acls).await {

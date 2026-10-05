@@ -2,6 +2,8 @@
  * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
+ *
+ * Modified by Coffey Labs in 2026 for INBUXA.
  */
 
 use crate::{api::acl::JmapRights, changes::state::JmapCacheState};
@@ -172,7 +174,7 @@ impl FileNodeGet for Server {
                                     file_node.acls.effective_acl(access_token),
                                 )
                             } else {
-                                JmapRights::all_rights::<file_node::FileNode>()
+                                JmapRights::owner_rights::<file_node::FileNode>(access_token, account_id)
                             },
                         );
                     }

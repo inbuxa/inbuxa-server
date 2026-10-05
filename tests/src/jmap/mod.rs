@@ -2,6 +2,8 @@
  * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
+ *
+ * Modified by Coffey Labs in 2026 for INBUXA.
  */
 
 use crate::utils::server::TestServerBuilder;
@@ -22,6 +24,7 @@ pub mod compliance;
 pub mod contacts;
 pub mod core;
 pub mod files;
+pub mod group_share;
 pub mod mail;
 pub mod principal;
 
@@ -219,6 +222,7 @@ pub async fn jmap_tests() {
 
     calendar::identity::test(&test).await;
     calendar::acl::test(&test).await;
+    group_share::test(&test).await;
 
     principal::get::test(&test).await;
     principal::availability::test(&test).await;
