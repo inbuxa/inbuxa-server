@@ -2,6 +2,8 @@
  * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
+ *
+ * Modified by Coffey Labs in 2026 for INBUXA.
  */
 
 use crate::DocumentId;
@@ -36,6 +38,13 @@ impl FromStr for Id {
     type Err = ();
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
+        // inbuxa: an empty id is not id 0. RFC 8620 §1.2 ids are 1 to 255
+        // characters, and "" would otherwise name each collection's first
+        // document: `mailboxIds: {"": true}` filed a message in the Inbox.
+        if s.is_empty() {
+            return Err(());
+        }
+
         let mut id = 0;
 
         for &ch in s.as_bytes() {
@@ -260,5 +269,11 @@ mod tests {
         }
 
         Id::from_str("p333333333333p333333333333").unwrap();
+    }
+
+    #[test]
+    fn empty_jmap_id_is_refused() {
+        assert!(Id::from_str("").is_err());
+        assert_eq!(Id::from_str("a").unwrap(), Id::from(0u64));
     }
 }
