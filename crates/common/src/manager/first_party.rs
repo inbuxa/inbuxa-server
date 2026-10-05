@@ -14,7 +14,7 @@
 //!   application names another;
 //! - INBUXA Admin hosted elsewhere, as `inbuxa-admin`, when `INBUXA_ADMIN_URL`
 //!   is set;
-//! - ihasmail-inbuxa, as the confidential client `ihasmail-inbuxa`, when
+//! - inbuxa-webmail, as the confidential client `ihasmail-inbuxa`, when
 //!   `INBUXA_WEBMAIL_URL` and `INBUXA_WEBMAIL_CLIENT_SECRET` are set.
 //!
 //! inbuxa: the environment variables stand in for `x:FrontEnds` (C-4) until
@@ -22,7 +22,7 @@
 //! it instead.
 //!
 //! A missing client is created. An existing one gains any redirect URI it
-//! lacks and, for ihasmail-inbuxa, the configured secret; nothing an operator
+//! lacks and, for inbuxa-webmail, the configured secret; nothing an operator
 //! added is removed.
 
 use directory::core::secret::{hash_secret, verify_secret_hash};

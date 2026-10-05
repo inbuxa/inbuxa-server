@@ -679,7 +679,7 @@ SCIM error documents (RFC 7644 §3.12): `schemas`
 
 ## ihasmail changes
 
-These go in ihasmail-inbuxa, not public ihasmail, which stays
+These go in inbuxa-webmail, not public ihasmail, which stays
 Stalwart-facing (SPEC.md §5).
 
 - **Domains:** an "Allow SCIM provisioning" switch on the domain form. Turning

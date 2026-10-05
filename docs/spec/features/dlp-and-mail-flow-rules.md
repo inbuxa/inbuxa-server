@@ -14,7 +14,7 @@ Written for the record SPEC.md §3 rule 3 asks for. Sources, and nothing else:
 |---|---|---|
 | This repository at `0502eb4` (2026-09-28): `crates/smtp/src/inbound/data.rs`, `crates/smtp/src/queue/`, `crates/jmap/src/submission/set.rs`, `crates/common/src/scripts/`, `vendor/sieve-rs`, `resources/schema/schema.json.gz` | AGPL-3.0-only | Where a check can run, what the queue stores, what a sender sees on a refusal |
 | inbuxa-admin at `b82904c` | AGPL-3.0-only | Where the pages go |
-| ihasmail-inbuxa (the webmail) at `290bc63` | AGPL-3.0-or-later | How a refused send reaches the person sending |
+| inbuxa-webmail (the webmail) at `290bc63` | AGPL-3.0-or-later | How a refused send reaches the person sending |
 | `inbuxa-drafts/queue/dlp.md`, `rule-builder.md` | Own | What John asked for and settled |
 | The personal-data catalog spec and the audit-hold-lock spec | Own | Roles, the audit log, legal holds, the catalog check |
 | RFC 5321, RFC 3463 (enhanced status codes), RFC 8620/8621 (JMAP) | Public | Refusal codes and the submission error shape |
@@ -385,7 +385,7 @@ first). The inspection limit caps the worst case.
 Every form previews the rule in words ("If a recipient is outside and the
 message contains 5 or more card numbers, hold it for review").
 
-## 4. Webmail (ihasmail-inbuxa)
+## 4. Webmail (inbuxa-webmail)
 
 - A warning dialog: the notice, a reason field, **Send anyway** and **Edit
   message**.

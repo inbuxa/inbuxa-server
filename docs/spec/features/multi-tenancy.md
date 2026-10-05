@@ -336,9 +336,9 @@ called from `system_tests` with no gate.
 - **MT-1 to MT-18, MT-20 to MT-23:** built.
 - **MT-19, MT-19a:** built, except the submission-time warning, **deferred**
   (see MT-19a) until the contract defines a warnings shape.
-- **ihasmail changes** (the section above) belong to ihasmail-inbuxa and
+- **ihasmail changes** (the section above) belong to inbuxa-webmail and
   aren't part of this repository. Its branding and quota warnings wait for
-  ihasmail-inbuxa.
+  inbuxa-webmail.
 - **Test 15 (compat)** is written as `tenant_compat`, ignored, and unrun until
   a copy of INBUXA's data is provided. Its doc comment says how to run it.
 - **Known limits, not requirements of this spec:**

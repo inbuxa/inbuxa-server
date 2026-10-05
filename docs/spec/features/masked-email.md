@@ -291,7 +291,7 @@ upstream files carry hooks marked `inbuxa:`. Acceptance tests 1 to 11 pass as
   `createdBy`. The server-set name is **deferred** until sign-in goes through
   OAuth (contract C-8): with Basic auth there's no client name, so a mask
   created through the Fastmail API has none.
-- **ihasmail changes** belong to ihasmail-inbuxa and aren't part of this
+- **ihasmail changes** belong to inbuxa-webmail and aren't part of this
   repository.
 - **Test 12 (compat)** is written as `masked_email_compat`, ignored, and unrun
   until a copy of INBUXA's data with masks made on it is provided. Its doc

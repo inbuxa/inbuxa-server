@@ -412,7 +412,7 @@ check it and the fork keeps it.
 
 ## ihasmail changes
 
-These go in ihasmail-inbuxa, the INBUXA fork of ihasmail, never in public
+These go in inbuxa-webmail, the INBUXA fork of ihasmail, never in public
 ihasmail, which stays Stalwart-facing (SPEC.md §5).
 
 - **Domain editor:** a directory picker offering "server default" and the

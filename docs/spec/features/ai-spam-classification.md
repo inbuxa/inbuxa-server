@@ -353,7 +353,7 @@ adds at most 2.
 
 ## ihasmail changes
 
-These go in the INBUXA fork of ihasmail, ihasmail-inbuxa, never in public
+These go in the INBUXA fork of ihasmail, inbuxa-webmail, never in public
 ihasmail, which stays Stalwart-facing (SPEC.md §5).
 
 - **Reading:** when a message has an `X-Spam-LLM` header, the message details

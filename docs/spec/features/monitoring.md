@@ -411,7 +411,7 @@ unchanged.
 
 ## ihasmail changes
 
-These go in ihasmail-inbuxa, not public ihasmail, which stays Stalwart-facing
+These go in inbuxa-webmail, not public ihasmail, which stays Stalwart-facing
 (SPEC.md §5).
 
 - The dashboard already reads `x:Metric` for received, sent and memory. Keep

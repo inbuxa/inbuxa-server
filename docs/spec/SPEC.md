@@ -618,7 +618,7 @@ the tenant administrators' own view is not yet recorded
 
 ## 8. Open decisions
 
-- The INBUXA fork of ihasmail is **ihasmail-inbuxa** (named 2026-09-18). Open: its repository, and how it tracks
+- The INBUXA fork of ihasmail is **inbuxa-webmail** (named ihasmail-inbuxa on 2026-09-18, renamed 2026-10-05). Open: how it tracks
   public ihasmail (§5).
 - Product name: whether the shipped product is called inbuxa-server or
   something else inside the INBUXA brand.

@@ -103,7 +103,7 @@ conflicts.
 
 1. Every requirement MT-1 to MT-23 is implemented, or deliberately deferred
    with a line in the spec saying so. The branding and quota warnings for
-   ihasmail can wait for ihasmail-inbuxa.
+   ihasmail can wait for inbuxa-webmail.
 2. Acceptance tests 1 to 14 pass as integration tests
    (`tests/src/system/tenant.rs`), with the `pending-rebuild` gate removed
    from the tenant call.

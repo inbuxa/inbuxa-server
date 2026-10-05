@@ -584,7 +584,7 @@ Three consequences:
   name whose DNS points at the mail addresses.
 - Whether the front ends need anything at cutover, or follow separately
   (SPEC.md §5). The rehearsal does not start them.
-- Whether ihasmail-inbuxa and INBUXA Admin behave under real use, rather
+- Whether inbuxa-webmail and INBUXA Admin behave under real use, rather
   than at first sign-in. Both were verified as far as signing in and, for the
   webmail, mail flowing.
 - The checks only users can make: the second account, the mailbox comparison
