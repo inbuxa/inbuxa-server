@@ -209,9 +209,9 @@ depends on `store` and can't be called from it (`features/scale-out-storage.md`)
 
 - No "Stalwart" in product names, binaries, images, UI text, packaging or
   domains.
-- Factual statements are allowed and required: "a fork of Stalwart",
-  "compatible with Stalwart 0.16 data". Upstream copyright notices stay on
-  every file they cover.
+- Factual statements are allowed and required: "started as a fork of
+  Stalwart", "compatible with Stalwart 0.16 data". Upstream copyright notices
+  stay on every file they cover.
 - **Identifiers people meet carry the fork's name** (changed 2026-09-22;
   this bullet used to keep upstream's). Upstream's JMAP capability for the
   registry (`x:`) objects is `urn:inbuxa:jmap:registry`, beside the fork's
@@ -242,14 +242,25 @@ depends on `store` and can't be called from it (`features/scale-out-storage.md`)
 - **Public material names it once, as fact, with the mark attributed** (added
   2026-09-19). Where the name appears outside the product — the site, release
   announcements, documentation — it carries the attribution: Stalwart is a
-  trademark of Stalwart Labs LLC, and INBUXA is not affiliated with or
-  endorsed by them. The fork relationship is stated in the provenance or
-  license section, and the migration path names the server it migrates from,
-  because an operator searching for it has to find it. The base *version*
-  belongs with the operator-facing material above — not in taglines, page
-  titles, hero copy or social previews, where it reads as a source identifier
-  rather than a fact. No comparison, favorable or otherwise: what INBUXA
-  offers is stated on its own terms.
+  trademark of Stalwart Labs LLC, and inbuxa is not affiliated with or
+  endorsed by them. The lineage is told in the past tense: inbuxa *started as*
+  a fork of Stalwart and its server *descends from* it; never "built on
+  Stalwart" or "Stalwart with extras". It is told once, in the license or
+  about section, and the clean-room provenance lives on one documentation
+  page that everything else links to. The migration path names the server it
+  migrates from, because an operator searching for it has to find it. The
+  base *version* belongs with the operator-facing material above — not in
+  taglines, page titles, hero copy or social previews, where it reads as a
+  source identifier rather than a fact.
+- **Comparisons: other products yes, Stalwart no** (changed 2026-10-05; this
+  bullet used to forbid comparison of any kind). Public material may compare
+  inbuxa with the hosted suites organizations choose between and with other
+  self-hosted mail stacks, when the comparison is factual, dated, names no
+  price, and says when the other choice is the better one. Self-hosted peers
+  are treated with respect. Stalwart is never compared: no editions, no
+  pricing, no commentary on Stalwart Labs or other forks. The rebuilt features
+  are described on their own merits, never as the features someone else
+  charges for.
 
 ### 2.5 Packaging
 
