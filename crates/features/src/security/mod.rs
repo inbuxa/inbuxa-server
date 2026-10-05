@@ -15,4 +15,5 @@ pub mod legacy_use;
 pub mod log_files;
 pub mod listeners;
 pub mod protocol_policy;
+pub mod sharing_policy;
 pub mod tenant_protocol_policy;

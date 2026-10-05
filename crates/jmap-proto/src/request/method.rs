@@ -77,6 +77,7 @@ pub enum MethodObject {
     JournalExport,
     JournalVerification,
     TenantProtocolPolicy,
+    SharingPolicy,
 }
 
 impl MethodObject {
@@ -124,6 +125,7 @@ impl MethodObject {
             | MethodObject::JournalVerification => Capability::Inbuxa,
             MethodObject::ProtocolPolicy => Capability::Inbuxa,
             MethodObject::TenantProtocolPolicy => Capability::Inbuxa,
+            MethodObject::SharingPolicy => Capability::Inbuxa,
         }
     }
 }
@@ -344,6 +346,12 @@ impl MethodName {
             (MethodFunction::Set, MethodObject::TenantProtocolPolicy) => {
                 "inbuxa:TenantProtocolPolicy/set"
             }
+            (MethodFunction::Get, MethodObject::SharingPolicy) => {
+                "inbuxa:SharingPolicy/get"
+            }
+            (MethodFunction::Set, MethodObject::SharingPolicy) => {
+                "inbuxa:SharingPolicy/set"
+            }
             (method, MethodObject::Registry(obj)) => {
                 return Cow::Owned(format!("x:{}/{}", obj.as_str(), method.as_str()));
             }
@@ -504,6 +512,8 @@ impl MethodName {
             "inbuxa:ProtocolPolicy/set" => (MethodObject::ProtocolPolicy, MethodFunction::Set),
             "inbuxa:TenantProtocolPolicy/get" => (MethodObject::TenantProtocolPolicy, MethodFunction::Get),
             "inbuxa:TenantProtocolPolicy/set" => (MethodObject::TenantProtocolPolicy, MethodFunction::Set),
+            "inbuxa:SharingPolicy/get" => (MethodObject::SharingPolicy, MethodFunction::Get),
+            "inbuxa:SharingPolicy/set" => (MethodObject::SharingPolicy, MethodFunction::Set),
 
         ).or_else(|| {
             let (obj, fnc) = s.strip_prefix("x:")?.split_once('/')?;
@@ -578,6 +588,7 @@ impl Display for MethodObject {
             MethodObject::HoldExport => "inbuxa:HoldExport",
             MethodObject::ProtocolPolicy => "inbuxa:ProtocolPolicy",
             MethodObject::TenantProtocolPolicy => "inbuxa:TenantProtocolPolicy",
+            MethodObject::SharingPolicy => "inbuxa:SharingPolicy",
             MethodObject::Registry(obj) => {
                 f.write_str("x:")?;
                 return f.write_str(obj.as_str());

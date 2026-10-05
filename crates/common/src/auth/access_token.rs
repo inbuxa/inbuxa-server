@@ -36,6 +36,32 @@ use utils::map::bitmap::{Bitmap, BitmapItem};
 use xxhash_rust::xxh3;
 
 impl Server {
+    /// inbuxa: MA-C: whether people in `owner`'s tenant may share their mail
+    /// (the server's switch, narrowed by the tenant's).
+    pub async fn mail_sharing_allowed(&self, owner: u32) -> trc::Result<bool> {
+        let tenant_id = self.account(owner).await.ok().and_then(|account| account.id_tenant);
+        Ok(
+            inbuxa_features::security::sharing_policy::effective_for(self.store(), tenant_id)
+                .await
+                .caused_by(trc::location!())?
+                .mail_sharing,
+        )
+    }
+
+    /// inbuxa: MA-C: whether `owner`'s mail shares give access now. A locked
+    /// account's or shared mailbox's grants are an administrator's and always
+    /// do; anyone else's only while their tenant allows mail sharing.
+    pub async fn mail_shares_honored(&self, owner: u32) -> trc::Result<bool> {
+        if inbuxa_features::lock::get(self.store(), owner)
+            .await
+            .caused_by(trc::location!())?
+            .is_some()
+        {
+            return Ok(true);
+        }
+        self.mail_sharing_allowed(owner).await
+    }
+
     async fn build_access_token(
         &self,
         account: Account,
@@ -100,6 +126,9 @@ impl Server {
                     .map(|m| m.id() as u32)
                     .collect::<TinyVec<[u32; 3]>>();
                 let mut access_to: Vec<AccessTo> = Vec::new();
+                // inbuxa: MA-C: whether an owner's mail shares are honored,
+                // looked up once per owner
+                let mut mail_shares_honored: Vec<(u32, bool)> = Vec::new();
                 for grant_account_id in [account_id].into_iter().chain(member_of.iter().copied()) {
                     for acl_item in self
                         .store()
@@ -118,6 +147,27 @@ impl Server {
                                     .details(format!("{acl_item:?}"))
                                     .account_id(grant_account_id)
                                     .caused_by(trc::location!()));
+                            }
+
+                            // inbuxa: MA-C: a mail share from an account whose
+                            // tenant (or server) has mail sharing off gives
+                            // nothing while it is off. It stays stored, so it
+                            // comes back when sharing does. A lock's and a
+                            // shared mailbox's grants are an administrator's,
+                            // and always count.
+                            if collection == Collection::Mailbox {
+                                let owner = acl_item.to_account_id;
+                                let honored = match mail_shares_honored.iter().find(|(id, _)| *id == owner) {
+                                    Some((_, honored)) => *honored,
+                                    None => {
+                                        let honored = self.mail_shares_honored(owner).await?;
+                                        mail_shares_honored.push((owner, honored));
+                                        honored
+                                    }
+                                };
+                                if !honored {
+                                    continue;
+                                }
                             }
 
                             let mut collections: Bitmap<Collection> = Bitmap::new();

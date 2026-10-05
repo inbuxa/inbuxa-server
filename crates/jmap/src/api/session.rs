@@ -80,6 +80,13 @@ impl SessionHandler for Server {
         let ai_explain = access_token.has_permission(Permission::SysAiExplain)
             && access_token.tenant_id().is_none()
             && self.ai_explain_model(&self.ai_limits().await).await.is_some();
+        // inbuxa: MA-C: what the sharing switches leave this principal
+        let sharing = inbuxa_features::security::sharing_policy::effective_for(
+            self.store(),
+            access_token.tenant_id(),
+        )
+        .await
+        .caused_by(trc::location!())?;
         account.account_capabilities.append(
             Capability::Inbuxa,
             Capabilities::Inbuxa(InbuxaAccountCapabilities {
@@ -87,6 +94,8 @@ impl SessionHandler for Server {
                 legacy_protocols,
                 legacy_allowed,
                 ai_explain,
+                mail_sharing: sharing.mail_sharing,
+                add_accounts: sharing.add_accounts,
             }),
         );
         // inbuxa: Fastmail's Masked Email API, for accounts that may hold masks

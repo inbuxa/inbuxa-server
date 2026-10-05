@@ -244,6 +244,16 @@ retention = "unbounded"
 changedBy = ["identifier"]
 recentLegacyUse = ["identifier", "metadata"]
 
+[object."inbuxa:SharingPolicy"]
+file = "inbuxa_sharing_policy.rs"
+default = "none"
+whose = ["administrator", "holder"]
+where = ["data-store"]
+scope = "tenant"
+retention = "unbounded"
+[object."inbuxa:SharingPolicy".properties]
+changedBy = ["identifier"]
+
 [object."inbuxa:AiLimits"]
 file = "inbuxa_ai_limits.rs"
 default = "none"

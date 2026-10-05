@@ -377,6 +377,34 @@ impl<T: SessionStream> Session<T> {
                 }
             }
 
+            // inbuxa: MA-C: with mail sharing off, nobody here starts or
+            // widens a share (narrowing or ending one is always allowed)
+            let had = current_mailbox
+                .inner
+                .acls
+                .iter()
+                .find(|item| item.account_id == acl_account_id)
+                .map_or(0, |item| item.grants.clone().into_inner());
+            let has = mailbox
+                .acls
+                .iter()
+                .find(|item| item.account_id == acl_account_id)
+                .map_or(0, |item| item.grants.clone().into_inner());
+            if has & !had != 0
+                && !access_token.has_permission(Permission::Impersonate)
+                && !data
+                    .server
+                    .mail_sharing_allowed(mailbox_id.account_id)
+                    .await
+                    .imap_ctx(&arguments.tag, trc::location!())?
+            {
+                return Err(trc::ImapEvent::Error
+                    .into_err()
+                    .details("Your organization has turned off sharing mail folders.")
+                    .code(ResponseCode::NoPerm)
+                    .id(arguments.tag.to_string()));
+            }
+
             if mailbox.acls.len() > data.server.core.groupware.max_shares_per_item {
                 return Err(trc::ImapEvent::Error
                     .into_err()
