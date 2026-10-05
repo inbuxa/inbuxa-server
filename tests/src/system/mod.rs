@@ -17,6 +17,7 @@ pub mod legal_hold; // inbuxa: legal hold
 pub mod compliance; // inbuxa: the compliance roles
 pub mod mail_rules; // inbuxa: DLP and mail flow rules
 pub mod security_acceptances; // inbuxa: accepted security to-do items
+pub mod deliverability; // inbuxa: the deliverability check
 pub mod journal; // inbuxa: journaling
 pub mod audit; // inbuxa: the audit log
 pub mod authorization;

@@ -70,6 +70,9 @@ pub enum MethodObject {
     MailRule,
     // inbuxa: accepted security to-do items
     SecurityAcceptance,
+    // inbuxa: the deliverability check
+    DeliverabilityReport,
+    DeliverabilitySettings,
     HeldMessage,
     // inbuxa: journaling
     Journal,
@@ -119,6 +122,8 @@ impl MethodObject {
             | MethodObject::MailRule
             | MethodObject::SecurityAcceptance
             | MethodObject::HeldMessage
+            | MethodObject::DeliverabilityReport
+            | MethodObject::DeliverabilitySettings
             | MethodObject::Journal
             | MethodObject::JournalEntry
             | MethodObject::JournalExport
@@ -323,6 +328,10 @@ impl MethodName {
             (MethodFunction::Set, MethodObject::MailRule) => "inbuxa:MailRule/set",
             (MethodFunction::Get, MethodObject::SecurityAcceptance) => "inbuxa:SecurityAcceptance/get",
             (MethodFunction::Set, MethodObject::SecurityAcceptance) => "inbuxa:SecurityAcceptance/set",
+            (MethodFunction::Get, MethodObject::DeliverabilityReport) => "inbuxa:DeliverabilityReport/get",
+            (MethodFunction::Set, MethodObject::DeliverabilityReport) => "inbuxa:DeliverabilityReport/set",
+            (MethodFunction::Get, MethodObject::DeliverabilitySettings) => "inbuxa:DeliverabilitySettings/get",
+            (MethodFunction::Set, MethodObject::DeliverabilitySettings) => "inbuxa:DeliverabilitySettings/set",
             (MethodFunction::Get, MethodObject::Journal) => "inbuxa:Journal/get",
             (MethodFunction::Set, MethodObject::Journal) => "inbuxa:Journal/set",
             (MethodFunction::Get, MethodObject::JournalEntry) => "inbuxa:JournalEntry/get",
@@ -497,6 +506,10 @@ impl MethodName {
             "inbuxa:MailRule/set" => (MethodObject::MailRule, MethodFunction::Set),
             "inbuxa:SecurityAcceptance/get" => (MethodObject::SecurityAcceptance, MethodFunction::Get),
             "inbuxa:SecurityAcceptance/set" => (MethodObject::SecurityAcceptance, MethodFunction::Set),
+            "inbuxa:DeliverabilityReport/get" => (MethodObject::DeliverabilityReport, MethodFunction::Get),
+            "inbuxa:DeliverabilityReport/set" => (MethodObject::DeliverabilityReport, MethodFunction::Set),
+            "inbuxa:DeliverabilitySettings/get" => (MethodObject::DeliverabilitySettings, MethodFunction::Get),
+            "inbuxa:DeliverabilitySettings/set" => (MethodObject::DeliverabilitySettings, MethodFunction::Set),
             "inbuxa:Journal/get" => (MethodObject::Journal, MethodFunction::Get),
             "inbuxa:Journal/set" => (MethodObject::Journal, MethodFunction::Set),
             "inbuxa:JournalEntry/get" => (MethodObject::JournalEntry, MethodFunction::Get),
@@ -580,6 +593,8 @@ impl Display for MethodObject {
             MethodObject::LegalHold => "inbuxa:LegalHold",
             MethodObject::MailRule => "inbuxa:MailRule",
             MethodObject::SecurityAcceptance => "inbuxa:SecurityAcceptance",
+            MethodObject::DeliverabilityReport => "inbuxa:DeliverabilityReport",
+            MethodObject::DeliverabilitySettings => "inbuxa:DeliverabilitySettings",
             MethodObject::Journal => "inbuxa:Journal",
             MethodObject::JournalEntry => "inbuxa:JournalEntry",
             MethodObject::JournalExport => "inbuxa:JournalExport",

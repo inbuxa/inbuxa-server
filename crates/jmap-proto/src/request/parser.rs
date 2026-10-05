@@ -686,6 +686,35 @@ impl<'de> Visitor<'de> for CallVisitor {
                     return Err(de::Error::invalid_length(1, &self));
                 }
             },
+            // inbuxa: the deliverability check
+            (MethodFunction::Get, MethodObject::DeliverabilityReport) => match seq.next_element() {
+                Ok(Some(value)) => RequestMethod::Get(GetRequestMethod::DeliverabilityReport(value)),
+                Err(err) => RequestMethod::invalid(err),
+                Ok(None) => {
+                    return Err(de::Error::invalid_length(1, &self));
+                }
+            },
+            (MethodFunction::Set, MethodObject::DeliverabilityReport) => match seq.next_element() {
+                Ok(Some(value)) => RequestMethod::Set(SetRequestMethod::DeliverabilityReport(value)),
+                Err(err) => RequestMethod::invalid(err),
+                Ok(None) => {
+                    return Err(de::Error::invalid_length(1, &self));
+                }
+            },
+            (MethodFunction::Get, MethodObject::DeliverabilitySettings) => match seq.next_element() {
+                Ok(Some(value)) => RequestMethod::Get(GetRequestMethod::DeliverabilitySettings(value)),
+                Err(err) => RequestMethod::invalid(err),
+                Ok(None) => {
+                    return Err(de::Error::invalid_length(1, &self));
+                }
+            },
+            (MethodFunction::Set, MethodObject::DeliverabilitySettings) => match seq.next_element() {
+                Ok(Some(value)) => RequestMethod::Set(SetRequestMethod::DeliverabilitySettings(value)),
+                Err(err) => RequestMethod::invalid(err),
+                Ok(None) => {
+                    return Err(de::Error::invalid_length(1, &self));
+                }
+            },
             // inbuxa: journaling
             (MethodFunction::Get, MethodObject::JournalEntry) => match seq.next_element() {
                 Ok(Some(value)) => RequestMethod::Get(GetRequestMethod::JournalEntry(value)),

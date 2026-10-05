@@ -123,6 +123,10 @@ impl JmapAuthorization for AccessToken {
                 // inbuxa: accepted security items are read by whoever may
                 // see the server's security settings
                 GetRequestMethod::SecurityAcceptance(_) => Permission::SysSecurityGet,
+                // inbuxa: deliverability spec; the lists are named on the
+                // page that shows the findings, so they read the same way
+                GetRequestMethod::DeliverabilityReport(_)
+                | GetRequestMethod::DeliverabilitySettings(_) => Permission::SysDeliverabilityGet,
                 // inbuxa: legacy protocols off. It takes listeners away and
                 // puts them back, so it takes the listener's permissions
                 GetRequestMethod::ProtocolPolicy(_) => Permission::SysNetworkListenerGet,
@@ -335,6 +339,23 @@ impl JmapAuthorization for AccessToken {
                                 .details("You are not authorized to accept security items"))
                         }
                     }
+                    // inbuxa: DL-15: a create runs the check; the handler
+                    // refuses the rest
+                    SetRequestMethod::DeliverabilityReport(s) => validate_set(
+                        s,
+                        self,
+                        Permission::SysDeliverabilityCheck,
+                        Permission::SysDeliverabilityCheck,
+                        Permission::SysDeliverabilityCheck,
+                    ),
+                    // inbuxa: DL-6, which lists are asked
+                    SetRequestMethod::DeliverabilitySettings(s) => validate_set(
+                        s,
+                        self,
+                        Permission::SysDeliverabilityUpdate,
+                        Permission::SysDeliverabilityUpdate,
+                        Permission::SysDeliverabilityUpdate,
+                    ),
                     // inbuxa: LH-12, exporting held data
                     SetRequestMethod::HoldExport(s) => validate_set(
                         s,
@@ -506,6 +527,8 @@ impl JmapAuthorization for AccessToken {
                 | MethodObject::HoldExport
                 | MethodObject::MailRule
                 | MethodObject::SecurityAcceptance
+                | MethodObject::DeliverabilityReport
+                | MethodObject::DeliverabilitySettings
                 | MethodObject::HeldMessage
                 | MethodObject::Journal
                 | MethodObject::JournalEntry

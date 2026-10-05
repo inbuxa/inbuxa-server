@@ -1762,6 +1762,10 @@ pub enum Permission {
     SysJournalExport = 683,
     // inbuxa: the security to-do list, accepting an item
     SysSecurityAccept = 684,
+    // inbuxa: the deliverability check
+    SysDeliverabilityGet = 685,
+    SysDeliverabilityUpdate = 686,
+    SysDeliverabilityCheck = 687,
     SysAccountGet = 219,
     SysAccountCreate = 220,
     SysAccountUpdate = 221,

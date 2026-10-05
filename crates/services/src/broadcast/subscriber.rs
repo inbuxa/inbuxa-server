@@ -189,6 +189,12 @@ pub fn spawn_broadcast_subscriber(inner: Arc<Inner>, mut shutdown_rx: watch::Rec
                                                         .send(PushEvent::Revoke { account_id })
                                                         .await;
                                                 }
+                                                // inbuxa: DL-15: this node checks
+                                                // itself too
+                                                BroadcastEvent::DeliverabilityCheck => {
+                                                    crate::inbuxa_deliverability::CHECK_NOW
+                                                        .notify_one();
+                                                }
                                                 BroadcastEvent::QueueRefresh => {
                                                     if inner.shared_core.load().network.roles.outbound_mta {
                                                         let _ = inner
@@ -278,6 +284,7 @@ fn log_event(event: &BroadcastEvent) -> trc::Value {
         BroadcastEvent::EndSessions(account_id) => {
             trc::Value::Array(vec!["EndSessions".into(), (*account_id).into()])
         }
+        BroadcastEvent::DeliverabilityCheck => "DeliverabilityCheck".into(),
         BroadcastEvent::RegistryChange(change) => match change {
             RegistryChange::Insert(id) => trc::Value::Array(vec![
                 "RegistryInsert".into(),

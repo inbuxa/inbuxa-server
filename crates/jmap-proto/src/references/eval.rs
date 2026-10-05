@@ -91,6 +91,12 @@ impl Response<'_> {
                         GetResponseMethod::SecurityAcceptance(response) => {
                             response.eval_jptr(path, &mut results)
                         }
+                        GetResponseMethod::DeliverabilityReport(response) => {
+                            response.eval_jptr(path, &mut results)
+                        }
+                        GetResponseMethod::DeliverabilitySettings(response) => {
+                            response.eval_jptr(path, &mut results)
+                        }
                         GetResponseMethod::Journal(response) => {
                             response.eval_jptr(path, &mut results)
                         }
