@@ -613,6 +613,15 @@ impl MailboxSet for Server {
         // Refresh ACLs
         let current = update.map(|(_, current)| current);
         if has_acl_changes {
+            // inbuxa: MA-D0: a group's members don't share its mailboxes on.
+            if ctx.access_token.is_group_member_only(ctx.account_id) {
+                return Ok(Err(SetError::forbidden()
+                    .with_property(MailboxProperty::ShareWith)
+                    .with_description(
+                        "This mailbox belongs to a group. Only an administrator can change who has it.",
+                    )));
+            }
+
             if !changes.acls.is_empty()
                 && let Err(err) = self.acl_validate(ctx.account_id, &changes.acls).await
             {

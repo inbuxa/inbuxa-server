@@ -212,7 +212,7 @@ impl<T: SessionStream> Session<T> {
                 }
                 rights
             } else {
-                vec![
+                let mut rights = vec![
                     Rights::Read,
                     Rights::Lookup,
                     Rights::Insert,
@@ -223,8 +223,12 @@ impl<T: SessionStream> Session<T> {
                     Rights::CreateMailbox,
                     Rights::DeleteMailbox,
                     Rights::Post,
-                    Rights::Administer,
-                ]
+                ];
+                // inbuxa: MA-D0: a group's members don't share its mailboxes on.
+                if !access_token.is_group_member_only(mailbox_id.account_id) {
+                    rights.push(Rights::Administer);
+                }
+                rights
             };
 
             trc::event!(
@@ -266,10 +270,20 @@ impl<T: SessionStream> Session<T> {
 
         spawn_op!(data, {
             // Validate mailbox
-            let (mailbox_id, current_mailbox, _) = data
+            let (mailbox_id, current_mailbox, access_token) = data
                 .get_acl_mailbox(&arguments, true)
                 .await
                 .imap_ctx(&arguments.tag, trc::location!())?;
+
+            // inbuxa: MA-D0: a group's members don't share its mailboxes on.
+            if access_token.is_group_member_only(mailbox_id.account_id) {
+                return Err(trc::ImapEvent::Error
+                    .into_err()
+                    .details("This mailbox belongs to a group. Only an administrator can change who has it.")
+                    .code(ResponseCode::NoPerm)
+                    .id(arguments.tag.to_string()));
+            }
+
             let current_mailbox = current_mailbox
                 .into_deserialized::<email::mailbox::Mailbox>()
                 .imap_ctx(&arguments.tag, trc::location!())?;

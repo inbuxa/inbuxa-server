@@ -2,6 +2,8 @@
  * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
+ *
+ * Modified by Coffey Labs in 2026 for INBUXA.
  */
 
 use common::{Server, auth::AccessToken, sharing::EffectiveAcl};
@@ -14,6 +16,7 @@ use jmap_tools::{Map, Value};
 use std::future::Future;
 use store::ahash::AHashSet;
 use types::{acl::Acl, collection::Collection, keyword::Keyword, special_use::SpecialUse};
+use utils::map::bitmap::Bitmap;
 
 use crate::{api::acl::JmapRights, changes::state::JmapCacheState};
 
@@ -138,6 +141,11 @@ impl MailboxGet for Server {
                             JmapRights::rights::<Mailbox>(
                                 cached_mailbox.acls.as_slice().effective_acl(access_token),
                             )
+                        } else if access_token.is_group_member_only(account_id) {
+                            // inbuxa: MA-D0: everything but sharing it on.
+                            let mut acl = Bitmap::<Acl>::all();
+                            acl.remove(Acl::Share);
+                            JmapRights::rights::<Mailbox>(acl)
                         } else {
                             JmapRights::all_rights::<Mailbox>()
                         }
