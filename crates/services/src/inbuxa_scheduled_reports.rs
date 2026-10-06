@@ -1189,7 +1189,7 @@ fn compose(
             text.push('\n');
         }
     }
-    let footer = "Sent by your inbuxa server. Change or turn off this report in the console under Reports › Scheduled reports.";
+    let footer = "Sent by your inbuxa server. Change or turn off this report in the console under Reports › Scheduled.";
     text.push_str(&format!("--\n{footer}\n"));
     html.push_str(&format!(
         "<p style=\"margin-top:24px;font-size:12px;color:#5f6b73\">{footer}</p></div>"
