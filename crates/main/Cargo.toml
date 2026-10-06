@@ -7,7 +7,7 @@ keywords = ["imap", "jmap", "smtp", "email", "mail", "webdav", "server"]
 categories = ["email"]
 # Upstream offers AGPL-3.0-only OR LicenseRef-SEL; inbuxa takes the AGPL only.
 license = "AGPL-3.0-only"
-version = "0.16.24"
+version = "0.16.25"
 edition = "2024"
 
 [[bin]]
