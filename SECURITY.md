@@ -17,7 +17,7 @@ visible to everyone, including whoever would use it, before there is a fix.
 
 Report it privately by email to:
 
-**johnellisATlinuxDOTcom**
+**securityATcoffeylabsDOTorg**
 
 Include as much as you can of:
 

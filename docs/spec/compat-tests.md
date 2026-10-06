@@ -204,7 +204,7 @@ the files are a picture of the day they were taken.
 ## The first run, 2026-09-19
 
 All eight ran against a copy of INBUXA's RocksDB store, taken from the
-stopped server, with `run-compat.sh` and `john@linuxexperts.net` as the
+stopped server, with `run-compat.sh` and the production administrator account as the
 administrator. **All eight pass.** SPEC.md §7's cutover steps 2 and 3 are
 met: INBUXA's data opens in the fork and reads back as it did.
 
