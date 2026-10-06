@@ -377,6 +377,8 @@ Not a rebuild: the **security to-do list** is INBUXA's own design (inbuxa-drafts
 
 Not a rebuild: the **deliverability check** is INBUXA's own design (inbuxa-drafts `specs/deliverability.md`). Each sending node checks what other servers see of it (blocklists, reverse DNS, SPF, DKIM, DMARC, MTA-STS, certificates) and keeps a report: `inbuxa:DeliverabilityReport` and `inbuxa:DeliverabilitySettings` (`crates/jmap/src/inbuxa/deliverability.rs`, `crates/services/src/inbuxa_deliverability.rs`), and the `sysDeliverabilityGet`, `sysDeliverabilityUpdate` and `sysDeliverabilityCheck` permissions.
 
+Not a rebuild: **scheduled reports and the weekly digest** are INBUXA's own design (inbuxa-drafts `specs/scheduled-reports.md`). An administrator picks sections, a schedule in a time zone and recipients on this server; every node looks for due reports once a minute, one claims each run with the task lock, and the report is built from data the server already keeps and mailed DKIM-signed: `inbuxa:ScheduledReport`, `inbuxa:ScheduledReportSettings` and `inbuxa:ReportExport` (a download: a ZIP of a summary and CSVs) (`crates/jmap/src/inbuxa/scheduled_reports.rs`, `crates/features/src/scheduled_reports/`, `crates/services/src/inbuxa_scheduled_reports.rs`, `crates/smtp/src/reporting/inbuxa_send.rs`), and the `sysScheduledReportGet` and `sysScheduledReportUpdate` permissions. The weekly digest is a built-in report, on by default.
+
 ## 5. The web front ends
 
 **Which ihasmail.** Public ihasmail stays Stalwart-facing: its code, docs,

@@ -715,6 +715,48 @@ impl<'de> Visitor<'de> for CallVisitor {
                     return Err(de::Error::invalid_length(1, &self));
                 }
             },
+            (MethodFunction::Get, MethodObject::ScheduledReport) => match seq.next_element() {
+                Ok(Some(value)) => RequestMethod::Get(GetRequestMethod::ScheduledReport(value)),
+                Err(err) => RequestMethod::invalid(err),
+                Ok(None) => {
+                    return Err(de::Error::invalid_length(1, &self));
+                }
+            },
+            (MethodFunction::Set, MethodObject::ScheduledReport) => match seq.next_element() {
+                Ok(Some(value)) => RequestMethod::Set(SetRequestMethod::ScheduledReport(value)),
+                Err(err) => RequestMethod::invalid(err),
+                Ok(None) => {
+                    return Err(de::Error::invalid_length(1, &self));
+                }
+            },
+            (MethodFunction::Get, MethodObject::ScheduledReportSettings) => match seq.next_element() {
+                Ok(Some(value)) => RequestMethod::Get(GetRequestMethod::ScheduledReportSettings(value)),
+                Err(err) => RequestMethod::invalid(err),
+                Ok(None) => {
+                    return Err(de::Error::invalid_length(1, &self));
+                }
+            },
+            (MethodFunction::Set, MethodObject::ScheduledReportSettings) => match seq.next_element() {
+                Ok(Some(value)) => RequestMethod::Set(SetRequestMethod::ScheduledReportSettings(value)),
+                Err(err) => RequestMethod::invalid(err),
+                Ok(None) => {
+                    return Err(de::Error::invalid_length(1, &self));
+                }
+            },
+            (MethodFunction::Get, MethodObject::ReportExport) => match seq.next_element() {
+                Ok(Some(value)) => RequestMethod::Get(GetRequestMethod::ReportExport(value)),
+                Err(err) => RequestMethod::invalid(err),
+                Ok(None) => {
+                    return Err(de::Error::invalid_length(1, &self));
+                }
+            },
+            (MethodFunction::Set, MethodObject::ReportExport) => match seq.next_element() {
+                Ok(Some(value)) => RequestMethod::Set(SetRequestMethod::ReportExport(value)),
+                Err(err) => RequestMethod::invalid(err),
+                Ok(None) => {
+                    return Err(de::Error::invalid_length(1, &self));
+                }
+            },
             // inbuxa: journaling
             (MethodFunction::Get, MethodObject::JournalEntry) => match seq.next_element() {
                 Ok(Some(value)) => RequestMethod::Get(GetRequestMethod::JournalEntry(value)),

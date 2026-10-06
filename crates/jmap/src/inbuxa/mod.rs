@@ -13,6 +13,7 @@ pub mod legal_hold;
 pub mod mail_rule;
 pub mod security_acceptance;
 pub mod deliverability; // inbuxa: the deliverability check
+pub mod scheduled_reports; // inbuxa: scheduled reports and the weekly digest
 pub mod journal;
 pub mod journal_entry;
 pub mod held_message;

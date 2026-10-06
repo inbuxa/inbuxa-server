@@ -7105,6 +7105,8 @@ impl EnumImpl for Permission {
             b"sysDeliverabilityGet" => Permission::SysDeliverabilityGet,
             b"sysDeliverabilityUpdate" => Permission::SysDeliverabilityUpdate,
             b"sysDeliverabilityCheck" => Permission::SysDeliverabilityCheck,
+            b"sysScheduledReportGet" => Permission::SysScheduledReportGet,
+            b"sysScheduledReportUpdate" => Permission::SysScheduledReportUpdate,
             b"sysAccountGet" => Permission::SysAccountGet,
             b"sysAccountCreate" => Permission::SysAccountCreate,
             b"sysAccountUpdate" => Permission::SysAccountUpdate,
@@ -7809,6 +7811,8 @@ impl EnumImpl for Permission {
             Permission::SysDeliverabilityGet => "sysDeliverabilityGet",
             Permission::SysDeliverabilityUpdate => "sysDeliverabilityUpdate",
             Permission::SysDeliverabilityCheck => "sysDeliverabilityCheck",
+            Permission::SysScheduledReportGet => "sysScheduledReportGet",
+            Permission::SysScheduledReportUpdate => "sysScheduledReportUpdate",
             Permission::SysAccountGet => "sysAccountGet",
             Permission::SysAccountCreate => "sysAccountCreate",
             Permission::SysAccountUpdate => "sysAccountUpdate",
@@ -8506,6 +8510,8 @@ impl EnumImpl for Permission {
             685 => Some(Permission::SysDeliverabilityGet),
             686 => Some(Permission::SysDeliverabilityUpdate),
             687 => Some(Permission::SysDeliverabilityCheck),
+            688 => Some(Permission::SysScheduledReportGet),
+            689 => Some(Permission::SysScheduledReportUpdate),
             219 => Some(Permission::SysAccountGet),
             220 => Some(Permission::SysAccountCreate),
             221 => Some(Permission::SysAccountUpdate),
@@ -8950,7 +8956,7 @@ impl EnumImpl for Permission {
         }
     }
 
-    const COUNT: usize = 688;
+    const COUNT: usize = 690;
 }
 
 impl serde::Serialize for Permission {

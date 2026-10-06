@@ -97,6 +97,15 @@ impl Response<'_> {
                         GetResponseMethod::DeliverabilitySettings(response) => {
                             response.eval_jptr(path, &mut results)
                         }
+                        GetResponseMethod::ReportExport(response) => {
+                            response.eval_jptr(path, &mut results)
+                        }
+                        GetResponseMethod::ScheduledReport(response) => {
+                            response.eval_jptr(path, &mut results)
+                        }
+                        GetResponseMethod::ScheduledReportSettings(response) => {
+                            response.eval_jptr(path, &mut results)
+                        }
                         GetResponseMethod::Journal(response) => {
                             response.eval_jptr(path, &mut results)
                         }

@@ -127,6 +127,11 @@ impl JmapAuthorization for AccessToken {
                 // page that shows the findings, so they read the same way
                 GetRequestMethod::DeliverabilityReport(_)
                 | GetRequestMethod::DeliverabilitySettings(_) => Permission::SysDeliverabilityGet,
+                // inbuxa: scheduled-reports spec; a tenant administrator sees
+                // their own tenant's reports (RP-22)
+                GetRequestMethod::ScheduledReport(_)
+                | GetRequestMethod::ScheduledReportSettings(_)
+                | GetRequestMethod::ReportExport(_) => Permission::SysScheduledReportGet,
                 // inbuxa: legacy protocols off. It takes listeners away and
                 // puts them back, so it takes the listener's permissions
                 GetRequestMethod::ProtocolPolicy(_) => Permission::SysNetworkListenerGet,
@@ -356,6 +361,29 @@ impl JmapAuthorization for AccessToken {
                         Permission::SysDeliverabilityUpdate,
                         Permission::SysDeliverabilityUpdate,
                     ),
+                    // inbuxa: scheduled reports; Send now is an update (RP-18)
+                    SetRequestMethod::ScheduledReport(s) => validate_set(
+                        s,
+                        self,
+                        Permission::SysScheduledReportUpdate,
+                        Permission::SysScheduledReportUpdate,
+                        Permission::SysScheduledReportUpdate,
+                    ),
+                    SetRequestMethod::ScheduledReportSettings(s) => validate_set(
+                        s,
+                        self,
+                        Permission::SysScheduledReportUpdate,
+                        Permission::SysScheduledReportUpdate,
+                        Permission::SysScheduledReportUpdate,
+                    ),
+                    // inbuxa: RP-19, a download reads what the report would send
+                    SetRequestMethod::ReportExport(s) => validate_set(
+                        s,
+                        self,
+                        Permission::SysScheduledReportGet,
+                        Permission::SysScheduledReportGet,
+                        Permission::SysScheduledReportGet,
+                    ),
                     // inbuxa: LH-12, exporting held data
                     SetRequestMethod::HoldExport(s) => validate_set(
                         s,
@@ -529,6 +557,9 @@ impl JmapAuthorization for AccessToken {
                 | MethodObject::SecurityAcceptance
                 | MethodObject::DeliverabilityReport
                 | MethodObject::DeliverabilitySettings
+                | MethodObject::ReportExport
+                | MethodObject::ScheduledReport
+                | MethodObject::ScheduledReportSettings
                 | MethodObject::HeldMessage
                 | MethodObject::Journal
                 | MethodObject::JournalEntry

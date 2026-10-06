@@ -33,6 +33,9 @@ pub mod inbuxa_mail_rule; // inbuxa: DLP and mail flow rules
 pub mod inbuxa_security_acceptance; // inbuxa: accepted security to-do items
 pub mod inbuxa_deliverability_report; // inbuxa: the deliverability check
 pub mod inbuxa_deliverability_settings; // inbuxa: the deliverability check
+pub mod inbuxa_report_export; // inbuxa: scheduled reports, RP-19
+pub mod inbuxa_scheduled_report; // inbuxa: scheduled reports
+pub mod inbuxa_scheduled_report_settings; // inbuxa: scheduled reports
 pub mod inbuxa_journal; // inbuxa: journaling
 pub mod inbuxa_journal_entry; // inbuxa: journaling, search and export
 pub mod inbuxa_held_message; // inbuxa: mail held for review

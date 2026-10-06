@@ -32,8 +32,8 @@ use types::id::Id;
 /// (ai-explain spec, EX-4: superuser by default), the audit log, account
 /// locks and legal holds (audit-hold-lock spec, AU-9, AL-12, LH-13), and
 /// the data inventory (personal-data catalog spec), accepting security
-/// to-do items (security to-do list spec), and the deliverability check
-/// (deliverability spec).
+/// to-do items (security to-do list spec), the deliverability check
+/// (deliverability spec), and scheduled reports (scheduled-reports spec).
 const ADMIN_GRANTS: &[Permission] = &[
     Permission::SysAiExplain,
     Permission::SysAuditGet,
@@ -60,6 +60,8 @@ const ADMIN_GRANTS: &[Permission] = &[
     Permission::SysDeliverabilityGet,
     Permission::SysDeliverabilityUpdate,
     Permission::SysDeliverabilityCheck,
+    Permission::SysScheduledReportGet,
+    Permission::SysScheduledReportUpdate,
 ];
 
 /// Granted to the server-level Compliance Officer role once it exists:
@@ -77,8 +79,8 @@ const OFFICER_GRANTS: &[Permission] = &[
 
 /// Granted to the default tenant administrator roles: reading and exporting
 /// the tenant's audit log (AU-9), locking and delegating its accounts
-/// (AL-12), the tenant's slice of the data inventory, and its own domains'
-/// deliverability findings (DL-20).
+/// (AL-12), the tenant's slice of the data inventory, its own domains'
+/// deliverability findings (DL-20), and its own scheduled reports (RP-22).
 const TENANT_GRANTS: &[Permission] = &[
     Permission::SysAuditGet,
     Permission::SysAuditExport,
@@ -88,6 +90,8 @@ const TENANT_GRANTS: &[Permission] = &[
     Permission::SysAccountLockDestroy,
     Permission::SysComplianceGet,
     Permission::SysDeliverabilityGet,
+    Permission::SysScheduledReportGet,
+    Permission::SysScheduledReportUpdate,
 ];
 
 #[derive(Clone, Copy, PartialEq, Eq)]

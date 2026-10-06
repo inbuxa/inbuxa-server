@@ -317,6 +317,12 @@ impl Default for DefaultPermissions {
                 Permission::SysDeliverabilityUpdate | Permission::SysDeliverabilityCheck => {
                     default.superuser.push(permission);
                 }
+                // inbuxa: scheduled-reports spec, RP-22: a tenant administrator
+                // makes reports for their own tenant, which the server limits
+                Permission::SysScheduledReportGet | Permission::SysScheduledReportUpdate => {
+                    default.superuser.push(permission);
+                    default.tenant.push(permission);
+                }
                 // inbuxa: DLP and mail flow rules, and held mail, are the
                 // server's: never a tenant's (dlp-and-mail-flow-rules spec,
                 // settled answer 3)

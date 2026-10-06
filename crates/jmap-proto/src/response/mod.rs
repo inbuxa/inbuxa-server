@@ -115,6 +115,9 @@ pub enum GetResponseMethod {
     SecurityAcceptance(GetResponse<crate::object::inbuxa_security_acceptance::SecurityAcceptance>),
     DeliverabilityReport(GetResponse<crate::object::inbuxa_deliverability_report::DeliverabilityReport>),
     DeliverabilitySettings(GetResponse<crate::object::inbuxa_deliverability_settings::DeliverabilitySettings>),
+    ReportExport(GetResponse<crate::object::inbuxa_report_export::ReportExport>),
+    ScheduledReport(GetResponse<crate::object::inbuxa_scheduled_report::ScheduledReport>),
+    ScheduledReportSettings(GetResponse<crate::object::inbuxa_scheduled_report_settings::ScheduledReportSettings>),
     Journal(GetResponse<crate::object::inbuxa_journal::Journal>),
     JournalEntry(GetResponse<crate::object::inbuxa_journal_entry::JournalEntry>),
     HeldMessage(GetResponse<crate::object::inbuxa_held_message::HeldMessage>),
@@ -163,6 +166,9 @@ pub enum SetResponseMethod {
     ),
     DeliverabilityReport(Box<SetResponse<crate::object::inbuxa_deliverability_report::DeliverabilityReport>>),
     DeliverabilitySettings(Box<SetResponse<crate::object::inbuxa_deliverability_settings::DeliverabilitySettings>>),
+    ReportExport(Box<SetResponse<crate::object::inbuxa_report_export::ReportExport>>),
+    ScheduledReport(Box<SetResponse<crate::object::inbuxa_scheduled_report::ScheduledReport>>),
+    ScheduledReportSettings(Box<SetResponse<crate::object::inbuxa_scheduled_report_settings::ScheduledReportSettings>>),
     Journal(Box<SetResponse<crate::object::inbuxa_journal::Journal>>),
     JournalExport(Box<SetResponse<crate::object::inbuxa_journal_entry::JournalExport>>),
     JournalVerification(Box<SetResponse<crate::object::inbuxa_journal_entry::JournalVerification>>),
@@ -890,6 +896,39 @@ impl<'x> From<GetResponse<crate::object::inbuxa_deliverability_settings::Deliver
 impl<'x> From<SetResponse<crate::object::inbuxa_deliverability_settings::DeliverabilitySettings>> for ResponseMethod<'x> {
     fn from(value: SetResponse<crate::object::inbuxa_deliverability_settings::DeliverabilitySettings>) -> Self {
         ResponseMethod::Set(SetResponseMethod::DeliverabilitySettings(Box::new(value)))
+    }
+}
+impl<'x> From<GetResponse<crate::object::inbuxa_report_export::ReportExport>> for ResponseMethod<'x> {
+    fn from(value: GetResponse<crate::object::inbuxa_report_export::ReportExport>) -> Self {
+        ResponseMethod::Get(GetResponseMethod::ReportExport(value))
+    }
+}
+
+impl<'x> From<SetResponse<crate::object::inbuxa_report_export::ReportExport>> for ResponseMethod<'x> {
+    fn from(value: SetResponse<crate::object::inbuxa_report_export::ReportExport>) -> Self {
+        ResponseMethod::Set(SetResponseMethod::ReportExport(Box::new(value)))
+    }
+}
+impl<'x> From<GetResponse<crate::object::inbuxa_scheduled_report::ScheduledReport>> for ResponseMethod<'x> {
+    fn from(value: GetResponse<crate::object::inbuxa_scheduled_report::ScheduledReport>) -> Self {
+        ResponseMethod::Get(GetResponseMethod::ScheduledReport(value))
+    }
+}
+
+impl<'x> From<SetResponse<crate::object::inbuxa_scheduled_report::ScheduledReport>> for ResponseMethod<'x> {
+    fn from(value: SetResponse<crate::object::inbuxa_scheduled_report::ScheduledReport>) -> Self {
+        ResponseMethod::Set(SetResponseMethod::ScheduledReport(Box::new(value)))
+    }
+}
+impl<'x> From<GetResponse<crate::object::inbuxa_scheduled_report_settings::ScheduledReportSettings>> for ResponseMethod<'x> {
+    fn from(value: GetResponse<crate::object::inbuxa_scheduled_report_settings::ScheduledReportSettings>) -> Self {
+        ResponseMethod::Get(GetResponseMethod::ScheduledReportSettings(value))
+    }
+}
+
+impl<'x> From<SetResponse<crate::object::inbuxa_scheduled_report_settings::ScheduledReportSettings>> for ResponseMethod<'x> {
+    fn from(value: SetResponse<crate::object::inbuxa_scheduled_report_settings::ScheduledReportSettings>) -> Self {
+        ResponseMethod::Set(SetResponseMethod::ScheduledReportSettings(Box::new(value)))
     }
 }
 

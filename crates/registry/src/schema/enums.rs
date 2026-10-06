@@ -1766,6 +1766,9 @@ pub enum Permission {
     SysDeliverabilityGet = 685,
     SysDeliverabilityUpdate = 686,
     SysDeliverabilityCheck = 687,
+    // inbuxa: scheduled reports and the weekly digest
+    SysScheduledReportGet = 688,
+    SysScheduledReportUpdate = 689,
     SysAccountGet = 219,
     SysAccountCreate = 220,
     SysAccountUpdate = 221,

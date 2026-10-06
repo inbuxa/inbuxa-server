@@ -299,6 +299,15 @@ impl RequestHandler for Server {
                                     SetResponseMethod::DeliverabilitySettings(set_response) => {
                                         set_response.update_created_ids(&mut response);
                                     }
+                                    SetResponseMethod::ReportExport(set_response) => {
+                                        set_response.update_created_ids(&mut response);
+                                    }
+                                    SetResponseMethod::ScheduledReport(set_response) => {
+                                        set_response.update_created_ids(&mut response);
+                                    }
+                                    SetResponseMethod::ScheduledReportSettings(set_response) => {
+                                        set_response.update_created_ids(&mut response);
+                                    }
                                     SetResponseMethod::Journal(set_response) => {
                                         set_response.update_created_ids(&mut response);
                                     }
@@ -555,6 +564,25 @@ impl RequestHandler for Server {
                 GetRequestMethod::DeliverabilitySettings(mut req) => {
                     resolve_account_id(&mut req.account_id, method_name.obj, access_token)?;
                     crate::inbuxa::deliverability::get_settings(self, access_token, *req)
+                        .await?
+                        .into()
+                }
+                // inbuxa: scheduled reports
+                GetRequestMethod::ScheduledReport(mut req) => {
+                    resolve_account_id(&mut req.account_id, method_name.obj, access_token)?;
+                    crate::inbuxa::scheduled_reports::get_reports(self, access_token, *req)
+                        .await?
+                        .into()
+                }
+                GetRequestMethod::ScheduledReportSettings(mut req) => {
+                    resolve_account_id(&mut req.account_id, method_name.obj, access_token)?;
+                    crate::inbuxa::scheduled_reports::get_settings(self, access_token, *req)
+                        .await?
+                        .into()
+                }
+                GetRequestMethod::ReportExport(mut req) => {
+                    resolve_account_id(&mut req.account_id, method_name.obj, access_token)?;
+                    crate::inbuxa::scheduled_reports::get_exports(self, access_token, *req)
                         .await?
                         .into()
                 }
@@ -1085,6 +1113,71 @@ impl RequestHandler for Server {
                     crate::inbuxa::deliverability::set_reports(self, access_token, *req)
                         .await?
                         .into()
+                }
+                // inbuxa: scheduled reports; every change is in the audit log
+                SetRequestMethod::ScheduledReport(mut req) => {
+                    resolve_account_id(&mut req.account_id, method_name.obj, access_token)?;
+                    crate::inbuxa::audit::recorded(
+                        self,
+                        access_token,
+                        session,
+                        &method_name.obj.to_string(),
+                        None,
+                        None,
+                        *req,
+                        |req| {
+                            Box::pin(crate::inbuxa::scheduled_reports::set_reports(
+                                self,
+                                access_token,
+                                req,
+                            ))
+                        },
+                    )
+                    .await?
+                    .into()
+                }
+                // inbuxa: RP-19; a download is in the audit log too
+                SetRequestMethod::ReportExport(mut req) => {
+                    resolve_account_id(&mut req.account_id, method_name.obj, access_token)?;
+                    crate::inbuxa::audit::recorded(
+                        self,
+                        access_token,
+                        session,
+                        &method_name.obj.to_string(),
+                        None,
+                        None,
+                        *req,
+                        |req| {
+                            Box::pin(crate::inbuxa::scheduled_reports::set_exports(
+                                self,
+                                access_token,
+                                req,
+                            ))
+                        },
+                    )
+                    .await?
+                    .into()
+                }
+                SetRequestMethod::ScheduledReportSettings(mut req) => {
+                    resolve_account_id(&mut req.account_id, method_name.obj, access_token)?;
+                    crate::inbuxa::audit::recorded(
+                        self,
+                        access_token,
+                        session,
+                        &method_name.obj.to_string(),
+                        None,
+                        None,
+                        *req,
+                        |req| {
+                            Box::pin(crate::inbuxa::scheduled_reports::set_settings(
+                                self,
+                                access_token,
+                                req,
+                            ))
+                        },
+                    )
+                    .await?
+                    .into()
                 }
                 // inbuxa: DL-6; which lists are asked is in the audit log
                 SetRequestMethod::DeliverabilitySettings(mut req) => {
