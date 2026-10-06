@@ -529,7 +529,7 @@ async fn insert_safe_defaults(bp: &mut Bootstrap) -> trc::Result<()> {
                     ansi: false,
                     prefix: "stalwart.log".into(),
                     rotate: LogRotateFrequency::Daily,
-                    path: "/var/log/stalwart".into(),
+                    path: "/var/log/inbuxa".into(),
                     ..Default::default()
                 })
                 .into(),

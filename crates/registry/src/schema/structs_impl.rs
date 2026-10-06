@@ -4151,7 +4151,7 @@ impl Default for Bootstrap {
             in_memory_store: InMemoryStore::Default,
             directory: DirectoryBootstrap::Internal,
             tracer: Tracer::Log(TracerLog {
-                path: "/var/log/stalwart/".to_string(),
+                path: "/var/log/inbuxa/".to_string(),
                 ..Default::default()
             }),
             dns_server: DnsServerBootstrap::Manual,
