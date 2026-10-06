@@ -2,6 +2,8 @@
  * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
+ *
+ * Modified by Coffey Labs in 2026 for INBUXA.
  */
 
 use crate::utils::{jmap::JmapUtils, server::TestServer};
@@ -11,8 +13,8 @@ use registry::{
         enums::{Permission, TaskSpamFilterMaintenanceType, TaskStoreMaintenanceType},
         prelude::{ObjectType, Property},
         structs::{
-            Permissions, PermissionsList, SpamTrainingSample, Task, TaskSpamFilterMaintenance,
-            TaskStatus, TaskStoreMaintenance,
+            Jmap, Permissions, PermissionsList, SpamTrainingSample, Task,
+            TaskSpamFilterMaintenance, TaskStatus, TaskStoreMaintenance,
         },
     },
     types::map::Map,
@@ -26,6 +28,21 @@ pub async fn test(test: &mut TestServer) {
 
     // Create test accounts
     let admin = test.account("admin@example.org");
+
+    // inbuxa: the quota test leaves uploads expiring after one second, at
+    // most three at a time. This test imports twenty samples, and a debug
+    // build can take longer than that between upload and import.
+    admin
+        .registry_update_setting(
+            Jmap::default(),
+            &[
+                Property::UploadQuota,
+                Property::MaxUploadCount,
+                Property::UploadTtl,
+            ],
+        )
+        .await;
+    admin.reload_settings().await;
     let account = test
         .create_user_account(
             "admin@example.org",
