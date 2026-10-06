@@ -325,6 +325,41 @@ pub async fn test(test: &mut TestServer) {
     .await;
     assert_eq!(name, "error", "a tenant changed the sender: {response}");
 
+    // --- Download (RP-19) ----------------------------------------------------
+    let (_, response) = call(
+        admin,
+        "inbuxa:ReportExport/set",
+        json!({"create": {
+            "last": {"reportId": &id},
+            "old": {"reportId": &id, "from": "2020-01-01T00:00:00Z", "to": "2020-01-02T00:00:00Z"}
+        }}),
+    )
+    .await;
+    let export = &response["created"]["last"];
+    assert!(export["blobId"].is_string(), "{response}");
+    assert!(
+        export["size"].as_u64().unwrap_or_default() > 0,
+        "{response}"
+    );
+    assert_eq!(
+        export["sha256"].as_str().map(|s| s.len()),
+        Some(64),
+        "{response}"
+    );
+    assert_eq!(export["files"][0], "summary.txt", "{response}");
+    assert!(
+        response["notCreated"]["old"].is_object(),
+        "a 2020 period was exported: {response}"
+    );
+    // A tenant administrator can't download a report that isn't theirs
+    let (_, response) = call(
+        &t_admin,
+        "inbuxa:ReportExport/set",
+        json!({"create": {"theirs": {"reportId": &id}}}),
+    )
+    .await;
+    assert!(response["notCreated"]["theirs"].is_object(), "{response}");
+
     // --- Deleting ------------------------------------------------------------
     let (_, response) = call(
         admin,

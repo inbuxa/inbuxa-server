@@ -23,6 +23,7 @@ use jmap_proto::{
         set::{SetRequest, SetResponse},
     },
     object::{
+        inbuxa_report_export::{ReportExport, ReportExportProperty as X, ReportExportValue},
         inbuxa_scheduled_report::{
             ScheduledReport, ScheduledReportProperty as R, ScheduledReportValue,
         },
@@ -35,7 +36,7 @@ use jmap_proto::{
     types::date::UTCDate,
 };
 use jmap_tools::{Element, Key, Map, Property, Value};
-use std::borrow::Cow;
+use std::{borrow::Cow, str::FromStr};
 use store::write::now;
 use types::id::Id;
 
@@ -530,6 +531,160 @@ pub async fn set_settings(
                 response.updated.append(id, None);
             }
         }
+    }
+    Ok(response)
+}
+
+/// RP-19: the furthest back a download goes, as far as metrics are kept.
+const EXPORT_MAX_AGE: u64 = 90 * 86_400;
+
+fn parse_date(value: &serde_json::Value) -> Option<u64> {
+    value
+        .as_str()
+        .and_then(|s| UTCDate::from_str(s).ok())
+        .map(|d| d.timestamp().max(0) as u64)
+}
+
+/// `inbuxa:ReportExport/get`: exports aren't kept, so there's never one.
+pub async fn get_exports(
+    _server: &Server,
+    _access_token: &AccessToken,
+    mut request: GetRequest<ReportExport>,
+) -> trc::Result<GetResponse<ReportExport>> {
+    let (ids, not_found) = request.unwrap_ids(1)?;
+    let mut response = GetResponse {
+        account_id: request.account_id.into(),
+        state: None,
+        list: Vec::new(),
+        not_found,
+    };
+    for id in ids.unwrap_or_default() {
+        response.push_not_found(id);
+    }
+    Ok(response)
+}
+
+/// `inbuxa:ReportExport/set`: create `{reportId, from?, to?}` builds that
+/// report for the period (by default its last full one) as a ZIP of a
+/// summary and CSVs, stored as an upload, and mails nobody (RP-19).
+pub async fn set_exports(
+    server: &Server,
+    access_token: &AccessToken,
+    mut request: SetRequest<'_, ReportExport>,
+) -> trc::Result<SetResponse<ReportExport>> {
+    use sha2::{Digest, Sha256};
+    use std::io::{Cursor, Write};
+    use zip::{CompressionMethod, ZipWriter, write::SimpleFileOptions};
+
+    let mut response = SetResponse::from_request(&request, server.core.jmap.set_max_objects)?;
+    for (id, _) in request.unwrap_update().into_valid() {
+        response.not_updated.append(
+            id,
+            SetError::forbidden().with_description("Exports can't be changed."),
+        );
+    }
+    for id in request.unwrap_destroy().into_valid() {
+        response.not_destroyed.append(
+            id,
+            SetError::forbidden().with_description("Exports aren't kept to destroy."),
+        );
+    }
+    for (client_id, value) in request.unwrap_create() {
+        let json = serde_json::to_value(&value).unwrap_or_default();
+        let invalid = |property: X, why: &str| {
+            SetError::invalid_properties()
+                .with_property(property)
+                .with_description(why.to_string())
+        };
+        let report = match json
+            .get("reportId")
+            .and_then(|v| v.as_str())
+            .and_then(|s| Id::from_str(s).ok())
+        {
+            Some(id) => model::report(server.store(), id.id())
+                .await?
+                .filter(|r| visible(access_token, r)),
+            None => None,
+        };
+        let Some(report) = report else {
+            response
+                .not_created
+                .append(client_id, invalid(X::ReportId, "A report you can see."));
+            continue;
+        };
+        let now = now();
+        let (default_from, default_to) = report.schedule.period(
+            report
+                .schedule
+                .next_due(report.last_due.min(now))
+                .filter(|d| *d <= now)
+                .unwrap_or(report.last_due.min(now)),
+        );
+        let from = json
+            .get("from")
+            .and_then(parse_date)
+            .unwrap_or(default_from);
+        let to = json.get("to").and_then(parse_date).unwrap_or(default_to);
+        if from >= to || to > now + 60 || from + EXPORT_MAX_AGE < now {
+            response.not_created.append(
+                client_id,
+                invalid(
+                    X::From,
+                    "A period that has started, ends no later than now, and goes back at most 90 days.",
+                ),
+            );
+            continue;
+        }
+        let files =
+            services::inbuxa_scheduled_reports::export_files(server, &report, from, to).await?;
+        let fail = |err: zip::result::ZipError| {
+            trc::StoreEvent::UnexpectedError
+                .into_err()
+                .details("Failed to write a report export")
+                .reason(err)
+        };
+        let options = SimpleFileOptions::default().compression_method(CompressionMethod::Deflated);
+        let mut zip = ZipWriter::new(Cursor::new(Vec::new()));
+        let names: Vec<String> = files.iter().map(|(name, _)| name.clone()).collect();
+        for (name, body) in &files {
+            zip.start_file(name.as_str(), options).map_err(fail)?;
+            zip.write_all(body).map_err(|err| {
+                trc::StoreEvent::UnexpectedError
+                    .into_err()
+                    .details("Failed to write a report export")
+                    .reason(err)
+            })?;
+        }
+        let bytes = zip.finish().map_err(fail)?.into_inner();
+        let sha256 = Sha256::digest(&bytes)
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect::<String>();
+        let blob = server
+            .put_jmap_blob(access_token.account_id(), &bytes)
+            .await?;
+
+        let mut created = Map::with_capacity(7);
+        created.insert_unchecked(
+            Key::Property(X::Id),
+            Value::Element(ReportExportValue::Id(Id::from(now))),
+        );
+        created.insert_unchecked(
+            Key::Property(X::BlobId),
+            Value::Str(blob.to_string().into()),
+        );
+        created.insert_unchecked(
+            Key::Property(X::Size),
+            Value::Number((bytes.len() as u64).into()),
+        );
+        created.insert_unchecked(Key::Property(X::Sha256), Value::Str(sha256.into()));
+        created.insert_unchecked(Key::Property(X::From), date(from));
+        created.insert_unchecked(Key::Property(X::To), date(to));
+        created.insert_unchecked(
+            Key::Property(X::Files),
+            Value::Array(names.into_iter().map(|n| Value::Str(n.into())).collect()),
+        );
+        response.created.insert(client_id, Value::Object(created));
     }
     Ok(response)
 }

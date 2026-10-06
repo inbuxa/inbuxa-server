@@ -434,6 +434,7 @@ impl IntermediateChangesResponse {
             | MethodObject::SecurityAcceptance
             | MethodObject::DeliverabilityReport
             | MethodObject::DeliverabilitySettings
+            | MethodObject::ReportExport
             | MethodObject::ScheduledReport
             | MethodObject::ScheduledReportSettings
             | MethodObject::Journal

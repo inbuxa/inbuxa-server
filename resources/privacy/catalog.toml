@@ -188,6 +188,16 @@ retention = "object-life"
 [object."inbuxa:ScheduledReport".properties]
 recipients = ["contact"]
 
+[object."inbuxa:ReportExport"]
+file = "inbuxa_report_export.rs"
+default = "none"
+whose = ["administrator", "holder", "correspondent"]
+where = ["blob-store"]
+scope = "tenant"
+retention = { setting = "x:Jmap.uploadTtl" }
+[object."inbuxa:ReportExport".properties]
+blobId = ["contact", "network", "metadata"]
+
 [object."inbuxa:ScheduledReportSettings"]
 file = "inbuxa_scheduled_report_settings.rs"
 default = "none"

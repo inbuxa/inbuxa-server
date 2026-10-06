@@ -1087,6 +1087,36 @@ async fn certificates(
     }))
 }
 
+/// RP-19: the report for a period as files, without mailing anyone: the
+/// summary as text, and a CSV for each section that has rows. A download
+/// doesn't move the deliverability baseline the next mail compares with.
+pub async fn export_files(
+    server: &Server,
+    report: &Report,
+    from: u64,
+    to: u64,
+) -> trc::Result<Vec<(String, Vec<u8>)>> {
+    let built = build(server, report, from, to).await?;
+    let mut summary = format!("{}\n{}\n\n", report.name, model::period_label(from, to));
+    if built.parts.is_empty() {
+        summary.push_str("Nothing to report for this period.\n");
+    }
+    for part in &built.parts {
+        summary.push_str(&format!("{}\n", part.title));
+        for line in &part.lines {
+            summary.push_str(&format!("  {line}\n"));
+        }
+        summary.push('\n');
+    }
+    let mut files = vec![("summary.txt".to_string(), summary.into_bytes())];
+    for part in built.parts {
+        if let Some((name, body)) = part.csv {
+            files.push((name, body.into_bytes()));
+        }
+    }
+    Ok(files)
+}
+
 // --- The mail -------------------------------------------------------------
 
 fn escape(s: &str) -> String {
