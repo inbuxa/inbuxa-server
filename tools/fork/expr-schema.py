@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# SPDX-FileCopyrightText: 2026 Coffey Labs
+# SPDX-FileCopyrightText: 2026 Coffey Labs LLC
 # SPDX-License-Identifier: AGPL-3.0-or-later
 """Tell INBUXA Admin what each expression field accepts.
 

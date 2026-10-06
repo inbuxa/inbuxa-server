@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# SPDX-FileCopyrightText: 2026 Coffey Labs
+# SPDX-FileCopyrightText: 2026 Coffey Labs LLC
 # SPDX-License-Identifier: AGPL-3.0-only
 #
 # Run the compat tests against a copy of INBUXA's RocksDB store.

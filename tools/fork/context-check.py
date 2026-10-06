@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# SPDX-FileCopyrightText: 2026 Coffey Labs
+# SPDX-FileCopyrightText: 2026 Coffey Labs LLC
 # SPDX-License-Identifier: AGPL-3.0-or-later
 """Every path Cargo patches has to be in the image's build context.
 

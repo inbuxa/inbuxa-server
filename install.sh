@@ -1,5 +1,5 @@
 #!/usr/bin/env sh
-# SPDX-FileCopyrightText: 2026 Coffey Labs
+# SPDX-FileCopyrightText: 2026 Coffey Labs LLC
 # SPDX-License-Identifier: AGPL-3.0-only
 #
 # Upstream's install.sh downloads Stalwart's release binaries from GitHub, so
