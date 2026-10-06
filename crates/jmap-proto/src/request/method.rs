@@ -73,6 +73,8 @@ pub enum MethodObject {
     // inbuxa: the deliverability check
     DeliverabilityReport,
     DeliverabilitySettings,
+    ScheduledReport,
+    ScheduledReportSettings,
     HeldMessage,
     // inbuxa: journaling
     Journal,
@@ -124,6 +126,8 @@ impl MethodObject {
             | MethodObject::HeldMessage
             | MethodObject::DeliverabilityReport
             | MethodObject::DeliverabilitySettings
+            | MethodObject::ScheduledReport
+            | MethodObject::ScheduledReportSettings
             | MethodObject::Journal
             | MethodObject::JournalEntry
             | MethodObject::JournalExport
@@ -332,6 +336,10 @@ impl MethodName {
             (MethodFunction::Set, MethodObject::DeliverabilityReport) => "inbuxa:DeliverabilityReport/set",
             (MethodFunction::Get, MethodObject::DeliverabilitySettings) => "inbuxa:DeliverabilitySettings/get",
             (MethodFunction::Set, MethodObject::DeliverabilitySettings) => "inbuxa:DeliverabilitySettings/set",
+            (MethodFunction::Get, MethodObject::ScheduledReport) => "inbuxa:ScheduledReport/get",
+            (MethodFunction::Set, MethodObject::ScheduledReport) => "inbuxa:ScheduledReport/set",
+            (MethodFunction::Get, MethodObject::ScheduledReportSettings) => "inbuxa:ScheduledReportSettings/get",
+            (MethodFunction::Set, MethodObject::ScheduledReportSettings) => "inbuxa:ScheduledReportSettings/set",
             (MethodFunction::Get, MethodObject::Journal) => "inbuxa:Journal/get",
             (MethodFunction::Set, MethodObject::Journal) => "inbuxa:Journal/set",
             (MethodFunction::Get, MethodObject::JournalEntry) => "inbuxa:JournalEntry/get",
@@ -510,6 +518,10 @@ impl MethodName {
             "inbuxa:DeliverabilityReport/set" => (MethodObject::DeliverabilityReport, MethodFunction::Set),
             "inbuxa:DeliverabilitySettings/get" => (MethodObject::DeliverabilitySettings, MethodFunction::Get),
             "inbuxa:DeliverabilitySettings/set" => (MethodObject::DeliverabilitySettings, MethodFunction::Set),
+            "inbuxa:ScheduledReport/get" => (MethodObject::ScheduledReport, MethodFunction::Get),
+            "inbuxa:ScheduledReport/set" => (MethodObject::ScheduledReport, MethodFunction::Set),
+            "inbuxa:ScheduledReportSettings/get" => (MethodObject::ScheduledReportSettings, MethodFunction::Get),
+            "inbuxa:ScheduledReportSettings/set" => (MethodObject::ScheduledReportSettings, MethodFunction::Set),
             "inbuxa:Journal/get" => (MethodObject::Journal, MethodFunction::Get),
             "inbuxa:Journal/set" => (MethodObject::Journal, MethodFunction::Set),
             "inbuxa:JournalEntry/get" => (MethodObject::JournalEntry, MethodFunction::Get),
@@ -595,6 +607,8 @@ impl Display for MethodObject {
             MethodObject::SecurityAcceptance => "inbuxa:SecurityAcceptance",
             MethodObject::DeliverabilityReport => "inbuxa:DeliverabilityReport",
             MethodObject::DeliverabilitySettings => "inbuxa:DeliverabilitySettings",
+            MethodObject::ScheduledReport => "inbuxa:ScheduledReport",
+            MethodObject::ScheduledReportSettings => "inbuxa:ScheduledReportSettings",
             MethodObject::Journal => "inbuxa:Journal",
             MethodObject::JournalEntry => "inbuxa:JournalEntry",
             MethodObject::JournalExport => "inbuxa:JournalExport",

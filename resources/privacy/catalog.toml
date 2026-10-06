@@ -178,6 +178,26 @@ default = "none"
 file = "inbuxa_deliverability_settings.rs"
 default = "none"
 
+[object."inbuxa:ScheduledReport"]
+file = "inbuxa_scheduled_report.rs"
+default = "none"
+whose = ["administrator"]
+where = ["data-store"]
+scope = "tenant"
+retention = "object-life"
+[object."inbuxa:ScheduledReport".properties]
+recipients = ["contact"]
+
+[object."inbuxa:ScheduledReportSettings"]
+file = "inbuxa_scheduled_report_settings.rs"
+default = "none"
+whose = ["administrator"]
+where = ["data-store"]
+scope = "server"
+retention = "unbounded"
+[object."inbuxa:ScheduledReportSettings".properties]
+fromAddress = ["contact"]
+
 [object."inbuxa:LegalHold"]
 file = "inbuxa_legal_hold.rs"
 default = "none"
@@ -297,6 +317,18 @@ retention = "unbounded"
 captures = ["x:DataRetention.expungeTrashAfter", "x:DataRetention.expungeSubmissionsAfter"]
 leaves_host = false
 written_by = ["crates/email/src/message/ingest.rs", "crates/groupware/src/calendar/storage.rs", "crates/groupware/src/contact/storage.rs", "crates/groupware/src/file/storage.rs"]
+
+# Scheduled reports are built when they're sent and not stored; the mail
+# lands in administrators' own mailboxes on this server (scheduled-reports
+# spec, RP-23), so it doesn't leave the host.
+[source."scheduled-report-mail"]
+categories = ["contact", "network", "metadata"]
+whose = ["holder", "correspondent", "administrator"]
+where = ["data-store", "blob-store"]
+scope = "tenant"
+retention = "receiver"
+leaves_host = false
+written_by = ["crates/services/src/inbuxa_scheduled_reports.rs"]
 
 [source."full-text-index"]
 categories = ["content", "identifier", "contact", "metadata"]

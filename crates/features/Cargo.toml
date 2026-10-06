@@ -28,6 +28,9 @@ zip = "8.6"
 quick-xml = "0.41"
 mail-parser = { version = "0.11", features = ["full_encoding"] }
 mail-builder = { version = "1.0" }
+# inbuxa: scheduled reports run at a local time (scheduled-reports spec, RP-15)
+chrono = { version = "0.4", default-features = false, features = ["std"] }
+chrono-tz = "0.10"
 
 [dev-dependencies]
 tokio = { version = "1.53", features = ["macros", "rt"] }

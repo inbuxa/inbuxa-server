@@ -27,6 +27,7 @@ pub mod broadcast;
 pub mod inbuxa_lock_expiry;
 pub mod inbuxa_log_retention; // inbuxa: personal-data catalog, D1
 pub mod inbuxa_deliverability; // inbuxa: the deliverability check
+pub mod inbuxa_scheduled_reports; // inbuxa: scheduled reports and the weekly digest
 pub mod state_manager;
 pub mod task_manager;
 
@@ -77,6 +78,9 @@ impl SpawnServices for IpcReceivers {
 
             // inbuxa: deliverability spec, DL-14: each node checks itself daily
             inbuxa_deliverability::spawn_deliverability(inner.clone());
+
+            // inbuxa: scheduled-reports spec, RP-16: every node looks for due reports
+            inbuxa_scheduled_reports::spawn_scheduled_reports(inner.clone());
 
             // Spawn task scheduler
             spawn_task_scheduler(inner);

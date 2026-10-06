@@ -58,6 +58,8 @@ impl Response<'_> {
                 GetRequestMethod::SecurityAcceptance(request) => request.resolve_references(self)?,
                 GetRequestMethod::DeliverabilityReport(request) => request.resolve_references(self)?,
                 GetRequestMethod::DeliverabilitySettings(request) => request.resolve_references(self)?,
+                GetRequestMethod::ScheduledReport(request) => request.resolve_references(self)?,
+                GetRequestMethod::ScheduledReportSettings(request) => request.resolve_references(self)?,
                 GetRequestMethod::Journal(request) => request.resolve_references(self)?,
                 GetRequestMethod::JournalEntry(request) => request.resolve_references(self)?,
                 GetRequestMethod::HeldMessage(request) => request.resolve_references(self)?,
@@ -146,6 +148,12 @@ impl Response<'_> {
                     request.resolve_references(self, 1, false)?
                 }
                 SetRequestMethod::DeliverabilitySettings(request) => {
+                    request.resolve_references(self, 1, false)?
+                }
+                SetRequestMethod::ScheduledReport(request) => {
+                    request.resolve_references(self, 1, false)?
+                }
+                SetRequestMethod::ScheduledReportSettings(request) => {
                     request.resolve_references(self, 1, false)?
                 }
                 SetRequestMethod::Journal(request) => {
