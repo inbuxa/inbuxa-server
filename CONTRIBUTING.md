@@ -54,7 +54,7 @@ Coffey Labs" line in place. New files carry:
 
 ```
 /*
- * SPDX-FileCopyrightText: 2026 Coffey Labs
+ * SPDX-FileCopyrightText: 2026 Coffey Labs LLC
  *
  * SPDX-License-Identifier: AGPL-3.0-only
  */

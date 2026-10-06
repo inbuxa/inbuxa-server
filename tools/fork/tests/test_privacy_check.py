@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: 2026 Coffey Labs
+# SPDX-FileCopyrightText: 2026 Coffey Labs LLC
 # SPDX-License-Identifier: AGPL-3.0-only
 """Tests for tools/fork/privacy-check.py: python3 -m unittest discover tools/fork/tests"""
 import gzip
