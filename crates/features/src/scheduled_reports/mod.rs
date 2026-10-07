@@ -11,12 +11,17 @@
 //! and mails it. The weekly digest is a built-in report (RP-21).
 //!
 //! Kept in the fork's subspace (`store::SUBSPACE_INBUXA`). Every key starts
-//! with `S`, then one byte for the kind:
+//! with `G`, then one byte for the kind:
 //!
 //! - `r` + report id (u64): a report, as JSON.
 //! - `s`: the settings, as JSON.
 //!
 //! Numbers are big-endian.
+//!
+//! 2026.10.6.2 kept them under `S`, a byte scale-out storage (`Sb`, `Sm`,
+//! `Sl`, replica markers `Sr` + index) and the spam-rules updater (`Sr`,
+//! `Sf`, `Sn`) already use. `ensure_digest` moves them once, deleting only
+//! the exact keys it moved.
 
 use chrono::{Datelike, Duration, LocalResult, NaiveDate, TimeZone, Utc};
 use chrono_tz::Tz;
@@ -27,7 +32,9 @@ use store::{
 };
 use trc::AddContext;
 
-const FEATURE: u8 = b'S';
+const FEATURE: u8 = b'G';
+/// Where 2026.10.6.2 kept them; see the module notes.
+const LEGACY_FEATURE: u8 = b'S';
 const KIND_REPORT: u8 = b'r';
 const KIND_SETTINGS: u8 = b's';
 
@@ -388,8 +395,12 @@ impl<T: for<'de> SerdeDeserialize<'de> + Send + Sync> Deserialize for Json<T> {
 }
 
 fn class(kind: u8, id: Option<u64>) -> ValueClass {
+    class_in(FEATURE, kind, id)
+}
+
+fn class_in(feature: u8, kind: u8, id: Option<u64>) -> ValueClass {
     let mut key = Vec::with_capacity(10);
-    key.push(FEATURE);
+    key.push(feature);
     key.push(kind);
     if let Some(id) = id {
         key.extend_from_slice(&id.to_be_bytes());
@@ -461,8 +472,66 @@ pub fn next_id(reports: &[Report]) -> u64 {
         + 1
 }
 
+static MOVED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Moves reports and settings from where 2026.10.6.2 kept them. Only what
+/// reads as a report or the settings is moved, and only those exact keys
+/// are deleted, so the spam-rules marker and replica markers stay put.
+async fn move_legacy(data: &Store) -> trc::Result<()> {
+    let mut found = Vec::new();
+    data.iterate(
+        IterateParams::new(
+            ValueKey::from(class_in(LEGACY_FEATURE, KIND_REPORT, Some(0))),
+            ValueKey::from(class_in(LEGACY_FEATURE, KIND_REPORT, Some(u64::MAX))),
+        ),
+        |_, value| {
+            if let Ok(Json(report)) = Json::<Report>::deserialize(value)
+                && !report.name.is_empty()
+            {
+                found.push(report);
+            }
+            Ok(true)
+        },
+    )
+    .await
+    .caused_by(trc::location!())?;
+    let legacy_settings = data
+        .get_value::<Json<Settings>>(ValueKey::from(class_in(
+            LEGACY_FEATURE,
+            KIND_SETTINGS,
+            None,
+        )))
+        .await
+        .caused_by(trc::location!())?;
+    if found.is_empty() && legacy_settings.is_none() {
+        return Ok(());
+    }
+    let mut batch = BatchBuilder::new();
+    for report in &found {
+        if self::report(data, report.id).await?.is_none() {
+            batch.set(
+                class(KIND_REPORT, Some(report.id)),
+                Json(report).serialize()?,
+            );
+        }
+        batch.clear(class_in(LEGACY_FEATURE, KIND_REPORT, Some(report.id)));
+    }
+    if let Some(Json(settings)) = legacy_settings {
+        batch.set(class(KIND_SETTINGS, None), Json(&settings).serialize()?);
+        batch.clear(class_in(LEGACY_FEATURE, KIND_SETTINGS, None));
+    }
+    data.write(batch.build_all())
+        .await
+        .caused_by(trc::location!())?;
+    Ok(())
+}
+
 /// Every server has the digest (RP-21); written the first time it's missed.
 pub async fn ensure_digest(data: &Store, now: u64) -> trc::Result<()> {
+    if !MOVED.load(std::sync::atomic::Ordering::Relaxed) {
+        move_legacy(data).await?;
+        MOVED.store(true, std::sync::atomic::Ordering::Relaxed);
+    }
     if report(data, DIGEST_ID).await?.is_none() {
         put_report(data, &Report::digest(now)).await?;
     }
