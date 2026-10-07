@@ -18,6 +18,10 @@ use registry::schema::{
 };
 use serde_json::{Value, json};
 use std::time::{Duration, Instant};
+use store::{
+    SUBSPACE_INBUXA, ValueKey,
+    write::{AnyClass, BatchBuilder, ValueClass},
+};
 
 const USING: &[&str] = &[
     "urn:ietf:params:jmap:core",
@@ -52,6 +56,80 @@ pub async fn test(test: &mut TestServer) {
     println!("Running scheduled reports tests...");
     let admin = test.account("admin@example.com");
     let me = "admin@example.com";
+
+    // --- Moved from where 2026.10.6.2 kept them (`S`, shared with the spam
+    // rules marker and replica markers), touching nothing else ---------------
+    let any = |key: Vec<u8>| {
+        ValueClass::Any(AnyClass {
+            subspace: SUBSPACE_INBUXA,
+            key,
+        })
+    };
+    let legacy_digest = [b"Sr".as_slice(), &1u64.to_be_bytes()].concat();
+    let mut batch = BatchBuilder::new();
+    batch.set(
+        any(legacy_digest.clone()),
+        serde_json::to_vec(&json!({
+            "id": 1, "name": "Weekly digest (moved)",
+            "enabled": true,
+            "builtIn": true,
+            "sections": ["mailFlow", "queue", "spoofing", "tlsFailures", "deliverability",
+                "security", "storage", "certificates"],
+            "createdAt": 1790000000,
+            "lastDue": 1790000000
+        }))
+        .unwrap(),
+    );
+    batch.set(
+        any(b"Ss".to_vec()),
+        serde_json::to_vec(&json!({"fromName": "Moved sender"})).unwrap(),
+    );
+    batch.set(any(b"Sr".to_vec()), b"3.0.2+2".to_vec());
+    test.server.store().write(batch.build_all()).await.unwrap();
+    let list = reports(admin).await;
+    assert!(
+        list.iter().any(|r| r["name"] == "Weekly digest (moved)"),
+        "the digest wasn't moved: {list:?}"
+    );
+    let (_, response) = call(
+        admin,
+        "inbuxa:ScheduledReportSettings/get",
+        json!({"ids": null}),
+    )
+    .await;
+    assert_eq!(
+        response["list"][0]["fromName"], "Moved sender",
+        "{response}"
+    );
+    let raw = |key: Vec<u8>| {
+        let store = test.server.store().clone();
+        async move {
+            store
+                .get_value::<String>(ValueKey::from(any(key)))
+                .await
+                .unwrap()
+        }
+    };
+    assert!(
+        raw(legacy_digest).await.is_none(),
+        "the old digest key is still there"
+    );
+    assert!(
+        raw(b"Ss".to_vec()).await.is_none(),
+        "the old settings key is still there"
+    );
+    assert_eq!(
+        raw(b"Sr".to_vec()).await.as_deref(),
+        Some("3.0.2+2"),
+        "the spam rules marker was touched"
+    );
+    // Back to the default sender for what follows
+    call(
+        admin,
+        "inbuxa:ScheduledReportSettings/set",
+        json!({"update": {"singleton": {"fromName": ""}}}),
+    )
+    .await;
 
     // --- The weekly digest every server has (RP-21) ------------------------
     let list = reports(admin).await;
