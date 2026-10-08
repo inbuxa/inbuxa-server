@@ -17,16 +17,102 @@ use crate::{
     },
 };
 use ahash::AHashMap;
-use deadpool_postgres::Object;
+use deadpool_postgres::{Object, Transaction};
+use futures::{StreamExt, future::BoxFuture, stream::FuturesOrdered};
 use rand::RngExt;
-use std::time::{Duration, Instant};
-use tokio_postgres::{IsolationLevel, error::SqlState};
+use std::{
+    borrow::Cow,
+    future::poll_fn,
+    task::Poll,
+    time::{Duration, Instant},
+};
+use tokio_postgres::{IsolationLevel, Statement, error::SqlState, types::ToSql};
 
 #[derive(Debug)]
 enum CommitError {
     Postgres(tokio_postgres::Error),
     Internal(trc::Error),
     //Retry,
+}
+
+// INBUXA: on a single node every statement is a microsecond away, so upstream
+// awaits each one before building the next. On a cluster each await is a
+// network round trip, and a batch of a few hundred operations held the
+// account's change-id row locked for all of them. Statements that need no
+// answer are now sent as soon as they are built and their replies are read
+// later, in order; the server still runs them in the order sent. Anything
+// that needs a reply to continue (asserts, merges, AddAndGet) drains the
+// queue first, so the first error reported is the real one and not
+// "current transaction is aborted".
+struct Pipeline<'b, 'a> {
+    trx: &'b Transaction<'a>,
+    queue: FuturesOrdered<BoxFuture<'b, Result<(), CommitError>>>,
+}
+
+// Owned (or batch-borrowed) statement parameters, so a queued statement can
+// outlive the loop iteration that built it.
+enum Params<'b> {
+    Key(Vec<u8>),
+    KeyValue(Vec<u8>, Cow<'b, [u8]>),
+    KeyInt(Vec<u8>, i64),
+    IntKey(i64, Vec<u8>),
+}
+
+impl Params<'_> {
+    fn as_sql(&self) -> Vec<&(dyn ToSql + Sync)> {
+        match self {
+            Params::Key(k) => vec![k],
+            Params::KeyValue(k, v) => vec![k, v],
+            Params::KeyInt(k, i) => vec![k, i],
+            Params::IntKey(i, k) => vec![i, k],
+        }
+    }
+}
+
+impl<'b, 'a> Pipeline<'b, 'a> {
+    fn new(trx: &'b Transaction<'a>) -> Self {
+        Pipeline {
+            trx,
+            queue: FuturesOrdered::new(),
+        }
+    }
+
+    // Queues a statement. With `require_row` the statement must touch a row
+    // (an UPDATE after a successful assert), otherwise the assert failed.
+    async fn execute(
+        &mut self,
+        statement: Statement,
+        params: Params<'b>,
+        require_row: bool,
+    ) -> Result<(), CommitError> {
+        let trx = self.trx;
+        self.queue.push_back(Box::pin(async move {
+            let rows = trx.execute(&statement, &params.as_sql()).await?;
+            if require_row && rows == 0 {
+                Err(trc::StoreEvent::AssertValueFailed
+                    .into_err()
+                    .caused_by(trc::location!())
+                    .into())
+            } else {
+                Ok(())
+            }
+        }));
+
+        // Poll once so the statement goes out now, in operation order; the
+        // reply is read at the next flush.
+        poll_fn(|cx| match self.queue.poll_next_unpin(cx) {
+            Poll::Ready(Some(result)) => Poll::Ready(result),
+            Poll::Ready(None) | Poll::Pending => Poll::Ready(Ok(())),
+        })
+        .await
+    }
+
+    async fn flush(&mut self) -> Result<(), CommitError> {
+        while let Some(result) = self.queue.next().await {
+            result?;
+        }
+        Ok(())
+    }
 }
 
 impl PostgresStore {
@@ -100,23 +186,34 @@ impl PostgresStore {
         let has_changes = !batch.changes.is_empty();
 
         if has_changes {
+            // INBUXA: one round trip for every account in the batch, not one each.
+            let s = trx
+                .prepare_cached(concat!(
+                    "INSERT INTO n (k, v) VALUES ($1, 1) ",
+                    "ON CONFLICT(k) DO UPDATE SET v = n.v + 1 RETURNING v"
+                ))
+                .await?;
+            let mut queries = FuturesOrdered::new();
             for &account_id in batch.changes.keys() {
                 let key = ValueClass::ChangeId.serialize(account_id, 0, 0, 0);
-                let s = trx
-                    .prepare_cached(concat!(
-                        "INSERT INTO n (k, v) VALUES ($1, 1) ",
-                        "ON CONFLICT(k) DO UPDATE SET v = n.v + 1 RETURNING v"
-                    ))
-                    .await?;
-                let change_id = trx
-                    .query_one(&s, &[&key])
-                    .await
-                    .and_then(|row| row.try_get::<_, i64>(0))?;
-                result.push_change_id(account_id, change_id as u64);
+                let s = s.clone();
+                let trx = &trx;
+                queries.push_back(async move {
+                    trx.query_one(&s, &[&key])
+                        .await
+                        .and_then(|row| row.try_get::<_, i64>(0))
+                        .map(|change_id| (account_id, change_id as u64))
+                });
+            }
+            while let Some(next) = queries.next().await {
+                let (account_id, change_id) = next?;
+                result.push_change_id(account_id, change_id);
             }
         }
 
-        for op in batch.ops.iter_mut() {
+        let mut pipeline = Pipeline::new(&trx);
+
+        for op in batch.ops.iter() {
             match op {
                 Operation::AccountId {
                     account_id: account_id_,
@@ -169,19 +266,16 @@ impl PostgresStore {
                                     .await?
                                 };
 
-                                if trx.execute(&s, &[&key, &(*value)]).await? == 0 {
-                                    return Err(trc::StoreEvent::AssertValueFailed
-                                        .into_err()
-                                        .caused_by(trc::location!())
-                                        .into());
-                                }
+                                pipeline
+                                    .execute(s, Params::KeyValue(key, Cow::Borrowed(value)), true)
+                                    .await?;
                             } else {
                                 let s = trx
                                     .prepare_cached(
                                         "INSERT INTO b (k) VALUES ($1) ON CONFLICT (k) DO NOTHING",
                                     )
                                     .await?;
-                                trx.execute(&s, &[&key]).await?;
+                                pipeline.execute(s, Params::Key(key), false).await?;
                             }
                         }
                         ValueOp::SetFnc(set_op) => {
@@ -212,14 +306,12 @@ impl PostgresStore {
                                 .await?
                             };
 
-                            if trx.execute(&s, &[&key, &value]).await? == 0 {
-                                return Err(trc::StoreEvent::AssertValueFailed
-                                    .into_err()
-                                    .caused_by(trc::location!())
-                                    .into());
-                            }
+                            pipeline
+                                .execute(s, Params::KeyValue(key, Cow::Owned(value)), true)
+                                .await?;
                         }
                         ValueOp::MergeFnc(merge_op) => {
+                            pipeline.flush().await?;
                             let s = trx
                                 .prepare_cached(&format!(
                                     "SELECT v FROM {} WHERE k = $1 FOR UPDATE",
@@ -260,7 +352,9 @@ impl PostgresStore {
                                         .await?
                                     };
 
-                                    trx.execute(&s, &[&key, &value]).await?;
+                                    pipeline
+                                        .execute(s, Params::KeyValue(key, Cow::Owned(value)), false)
+                                        .await?;
                                 }
                                 MergeResult::Delete if exists => {
                                     let s = trx
@@ -269,12 +363,13 @@ impl PostgresStore {
                                             table
                                         ))
                                         .await?;
-                                    trx.execute(&s, &[&key]).await?;
 
                                     // Update asserted value
                                     if let Some(exists) = asserted_values.get_mut(&key) {
                                         *exists = false;
                                     }
+
+                                    pipeline.execute(s, Params::Key(key), false).await?;
                                 }
                                 _ => (),
                             }
@@ -290,17 +385,18 @@ impl PostgresStore {
                                         table, table
                                     ))
                                     .await?;
-                                trx.execute(&s, &[&key, &*by]).await?;
+                                pipeline.execute(s, Params::KeyInt(key, *by), false).await?;
                             } else {
                                 let s = trx
                                     .prepare_cached(&format!(
                                         "UPDATE {table} SET v = v + $1 WHERE k = $2"
                                     ))
                                     .await?;
-                                trx.execute(&s, &[&*by, &key]).await?;
+                                pipeline.execute(s, Params::IntKey(*by, key), false).await?;
                             }
                         }
                         ValueOp::AddAndGet(by) => {
+                            pipeline.flush().await?;
                             let s = trx
                                 .prepare_cached(&format!(
                                     concat!(
@@ -311,7 +407,7 @@ impl PostgresStore {
                                 ))
                                 .await?;
                             result.push_counter_id(
-                                trx.query_one(&s, &[&key, &*by])
+                                trx.query_one(&s, &[&key, by])
                                     .await
                                     .and_then(|row| row.try_get::<_, i64>(0))?,
                             );
@@ -320,12 +416,13 @@ impl PostgresStore {
                             let s = trx
                                 .prepare_cached(&format!("DELETE FROM {} WHERE k = $1", table))
                                 .await?;
-                            trx.execute(&s, &[&key]).await?;
 
                             // Update asserted value
                             if let Some(exists) = asserted_values.get_mut(&key) {
                                 *exists = false;
                             }
+
+                            pipeline.execute(s, Params::Key(key), false).await?;
                         }
                     }
                 }
@@ -335,7 +432,7 @@ impl PostgresStore {
                         collection,
                         document_id,
                         field: *field,
-                        key: &*key,
+                        key,
                     }
                     .serialize(0);
 
@@ -347,7 +444,7 @@ impl PostgresStore {
                     } else {
                         trx.prepare_cached("DELETE FROM i WHERE k = $1").await?
                     };
-                    trx.execute(&s, &[&key]).await?;
+                    pipeline.execute(s, Params::Key(key), false).await?;
                 }
                 Operation::Log { collection, set } => {
                     let key = LogKey {
@@ -364,12 +461,15 @@ impl PostgresStore {
                         ))
                         .await?;
 
-                    trx.execute(&s, &[&key, &*set]).await?;
+                    pipeline
+                        .execute(s, Params::KeyValue(key, Cow::Borrowed(set)), false)
+                        .await?;
                 }
                 Operation::AssertValue {
                     class,
                     assert_value,
                 } => {
+                    pipeline.flush().await?;
                     let key = class.serialize(account_id, collection, document_id, 0);
                     let table = char::from(class.subspace(collection));
 
@@ -394,6 +494,9 @@ impl PostgresStore {
                 }
             }
         }
+
+        pipeline.flush().await?;
+        drop(pipeline);
 
         trx.commit().await.map(|_| result).map_err(Into::into)
     }
