@@ -2,6 +2,8 @@
  * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
+ *
+ * Modified by Coffey Labs in 2026 for INBUXA.
  */
 
 use crate::BlobStore;
@@ -94,6 +96,18 @@ impl S3Store {
         })))
     }
 
+    // inbuxa: upstream retried only a 5xx answer, so a dropped connection
+    // or a timeout on the way to the object store failed the read or write
+    // at once, and its first retry waited a whole second. A transport
+    // error and a 429 now retry the same way, and the waits start at
+    // 100 ms (100 ms, 200 ms, 400 ms ... capped at 5 s), so a Garage node
+    // restarting costs a request tenths of a second, not seconds.
+    async fn wait_before_retry(&self, retries_left: &mut u32) {
+        let attempt = self.max_retries - *retries_left;
+        *retries_left -= 1;
+        tokio::time::sleep(retry_wait(attempt)).await;
+    }
+
     pub(crate) async fn get_blob(
         &self,
         key: &[u8],
@@ -113,20 +127,21 @@ impl S3Store {
                     .await
             } else {
                 self.bucket.get_object(&path).await
-            }
-            .map_err(into_error)?;
+            };
+            let response = match response {
+                Ok(response) => response,
+                Err(_) if retries_left > 0 => {
+                    self.wait_before_retry(&mut retries_left).await;
+                    continue;
+                }
+                Err(err) => return Err(into_error(err)),
+            };
 
             match response.status_code() {
                 200..=299 => return Ok(Some(response.to_vec())),
                 404 => return Ok(None),
-                500..=599 if retries_left > 0 => {
-                    // wait backoff
-                    tokio::time::sleep(Duration::from_secs(
-                        1 << (self.max_retries - retries_left).min(6),
-                    ))
-                    .await;
-
-                    retries_left -= 1;
+                429 | 500..=599 if retries_left > 0 => {
+                    self.wait_before_retry(&mut retries_left).await;
                 }
                 code => {
                     return Err(trc::StoreEvent::S3Error
@@ -142,11 +157,14 @@ impl S3Store {
         let mut retries_left = self.max_retries;
 
         loop {
-            let response = self
-                .bucket
-                .put_object(&path, data)
-                .await
-                .map_err(into_error)?;
+            let response = match self.bucket.put_object(&path, data).await {
+                Ok(response) => response,
+                Err(_) if retries_left > 0 => {
+                    self.wait_before_retry(&mut retries_left).await;
+                    continue;
+                }
+                Err(err) => return Err(into_error(err)),
+            };
 
             match response.status_code() {
                 200..=299 => {
@@ -157,18 +175,19 @@ impl S3Store {
                     // Some S3-compatible backends acknowledge a PUT before the
                     // write is durable. HEAD the object to confirm it is visible
                     // to the read path before reporting success.
-                    let (_, head_status) =
-                        self.bucket.head_object(&path).await.map_err(into_error)?;
+                    let head_status = match self.bucket.head_object(&path).await {
+                        Ok((_, head_status)) => head_status,
+                        Err(_) if retries_left > 0 => {
+                            self.wait_before_retry(&mut retries_left).await;
+                            continue;
+                        }
+                        Err(err) => return Err(into_error(err)),
+                    };
 
                     match head_status {
                         200..=299 => return Ok(()),
-                        404 | 500..=599 if retries_left > 0 => {
-                            tokio::time::sleep(Duration::from_secs(
-                                1 << (self.max_retries - retries_left).min(6),
-                            ))
-                            .await;
-
-                            retries_left -= 1;
+                        404 | 429 | 500..=599 if retries_left > 0 => {
+                            self.wait_before_retry(&mut retries_left).await;
                         }
                         404 => {
                             return Err(trc::StoreEvent::S3Error
@@ -185,14 +204,8 @@ impl S3Store {
                         }
                     }
                 }
-                500..=599 if retries_left > 0 => {
-                    // wait backoff
-                    tokio::time::sleep(Duration::from_secs(
-                        1 << (self.max_retries - retries_left).min(6),
-                    ))
-                    .await;
-
-                    retries_left -= 1;
+                429 | 500..=599 if retries_left > 0 => {
+                    self.wait_before_retry(&mut retries_left).await;
                 }
                 code => {
                     return Err(trc::StoreEvent::S3Error
@@ -207,23 +220,20 @@ impl S3Store {
         let mut retries_left = self.max_retries;
 
         loop {
-            let response = self
-                .bucket
-                .delete_object(self.build_key(key))
-                .await
-                .map_err(into_error)?;
+            let response = match self.bucket.delete_object(self.build_key(key)).await {
+                Ok(response) => response,
+                Err(_) if retries_left > 0 => {
+                    self.wait_before_retry(&mut retries_left).await;
+                    continue;
+                }
+                Err(err) => return Err(into_error(err)),
+            };
 
             match response.status_code() {
                 200..=299 => return Ok(true),
                 404 => return Ok(false),
-                500..=599 if retries_left > 0 => {
-                    // wait backoff
-                    tokio::time::sleep(Duration::from_secs(
-                        1 << (self.max_retries - retries_left).min(6),
-                    ))
-                    .await;
-
-                    retries_left -= 1;
+                429 | 500..=599 if retries_left > 0 => {
+                    self.wait_before_retry(&mut retries_left).await;
                 }
                 code => {
                     return Err(trc::StoreEvent::S3Error
@@ -247,6 +257,11 @@ impl S3Store {
     }
 }
 
+/// The wait before retry number `attempt` (0-based).
+fn retry_wait(attempt: u32) -> Duration {
+    Duration::from_millis(100 << attempt.min(6)).min(Duration::from_secs(5))
+}
+
 fn into_error(err: impl std::error::Error) -> trc::Error {
     let mut reason = err.to_string();
     let mut source = err.source();
@@ -256,4 +271,19 @@ fn into_error(err: impl std::error::Error) -> trc::Error {
         source = err.source();
     }
     trc::StoreEvent::S3Error.reason(reason)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn retries_wait_from_a_tenth_of_a_second_to_five() {
+        assert_eq!(retry_wait(0), Duration::from_millis(100));
+        assert_eq!(retry_wait(1), Duration::from_millis(200));
+        assert_eq!(retry_wait(3), Duration::from_millis(800));
+        assert_eq!(retry_wait(5), Duration::from_millis(3200));
+        assert_eq!(retry_wait(6), Duration::from_secs(5));
+        assert_eq!(retry_wait(40), Duration::from_secs(5));
+    }
 }
