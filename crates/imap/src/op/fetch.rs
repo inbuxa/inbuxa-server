@@ -37,7 +37,7 @@ use imap_proto::{
 use registry::schema::enums::Permission;
 use std::{borrow::Cow, sync::Arc, time::Instant};
 use store::{
-    ValueKey,
+    READ_BATCH_SIZE, ValueKey,
     write::{AlignedBytes, Archive},
 };
 use store::{
@@ -359,261 +359,294 @@ impl<T: SessionStream> SessionData<T> {
             .await
             .imap_ctx(&arguments.tag, trc::location!())?;
 
-        for (seqnum, uid, id) in ids {
-            // Obtain attributes and keywords
-            let (metadata_, data) = if let (Some(email), Some(data)) = (
-                self.server
-                    .store()
-                    .get_value::<Archive<AlignedBytes>>(ValueKey::property(
-                        account_id,
-                        Collection::Email,
-                        id,
-                        EmailField::Metadata,
-                    ))
-                    .await
-                    .imap_ctx(&arguments.tag, trc::location!())?,
-                message_cache.email_by_id(&id),
-            ) {
-                (email, data)
-            } else {
-                trc::event!(
-                    Store(trc::StoreEvent::NotFound),
-                    AccountId = account_id,
-                    DocumentId = id,
-                    Collection = Collection::Email,
-                    Details = "Message metadata not found.",
-                    CausedBy = trc::location!(),
-                );
-                continue;
-            };
-            let metadata = metadata_
-                .unarchive::<MessageMetadata>()
+        for chunk in ids.chunks(READ_BATCH_SIZE) {
+            // inbuxa: the metadata of a batch of messages in one round trip,
+            // and the message data of those about to be marked \Seen in a
+            // second, instead of one or two round trips per message
+            let keys = chunk
+                .iter()
+                .map(|(_, _, id)| {
+                    ValueKey::property(account_id, Collection::Email, *id, EmailField::Metadata)
+                })
+                .collect::<Vec<_>>();
+            let metadatas = self
+                .server
+                .store()
+                .get_values::<Archive<AlignedBytes>>(&keys)
+                .await
                 .imap_ctx(&arguments.tag, trc::location!())?;
-            let raw_body;
+            let mut seen_archives = chunk
+                .iter()
+                .map(|_| None::<Archive<AlignedBytes>>)
+                .collect::<Vec<_>>();
+            if set_seen_flags {
+                let unseen = chunk
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, (_, _, id))| {
+                        message_cache
+                            .email_by_id(id)
+                            .is_some_and(|data| !message_cache.has_keyword(data, &Keyword::Seen))
+                    })
+                    .map(|(pos, (_, _, id))| (pos, *id))
+                    .collect::<Vec<_>>();
+                if !unseen.is_empty() {
+                    let keys = unseen
+                        .iter()
+                        .map(|(_, id)| ValueKey::archive(account_id, Collection::Email, *id))
+                        .collect::<Vec<_>>();
+                    for ((pos, _), archive) in unseen.into_iter().zip(
+                        self.server
+                            .store()
+                            .get_values::<Archive<AlignedBytes>>(&keys)
+                            .await
+                            .imap_ctx(&arguments.tag, trc::location!())?,
+                    ) {
+                        seen_archives[pos] = archive;
+                    }
+                }
+            }
 
-            // Fetch and parse blob
-            let mut raw_message = ChainedBytes::new(metadata.raw_headers.as_ref());
-            if needs_blobs {
-                // Retrieve raw message if needed
-                raw_body = self
-                    .server
-                    .blob_store()
-                    .get_blob(metadata.blob_hash.0.as_slice(), 0..usize::MAX)
-                    .await
-                    .imap_ctx(&arguments.tag, trc::location!())?;
-
-                if let Some(raw_body) = &raw_body {
-                    raw_message.append(
-                        raw_body
-                            .get(metadata.blob_body_offset.to_native() as usize..)
-                            .unwrap_or_default(),
-                    );
+            for (&(seqnum, uid, id), (metadata_, seen_archive)) in
+                chunk.iter().zip(metadatas.into_iter().zip(seen_archives))
+            {
+                // Obtain attributes and keywords
+                let (metadata_, data) = if let (Some(email), Some(data)) =
+                    (metadata_, message_cache.email_by_id(&id))
+                {
+                    (email, data)
                 } else {
                     trc::event!(
                         Store(trc::StoreEvent::NotFound),
                         AccountId = account_id,
                         DocumentId = id,
                         Collection = Collection::Email,
-                        BlobId = metadata.blob_hash.0.as_slice(),
-                        Details = "Blob not found.",
+                        Details = "Message metadata not found.",
                         CausedBy = trc::location!(),
                     );
-
                     continue;
-                }
-            }
+                };
+                let metadata = metadata_
+                    .unarchive::<MessageMetadata>()
+                    .imap_ctx(&arguments.tag, trc::location!())?;
+                let raw_body;
 
-            let message = &metadata.contents[0];
-            let decoded = metadata.decode_contents(raw_message.clone());
+                // Fetch and parse blob
+                let mut raw_message = ChainedBytes::new(metadata.raw_headers.as_ref());
+                if needs_blobs {
+                    // Retrieve raw message if needed
+                    raw_body = self
+                        .server
+                        .blob_store()
+                        .get_blob(metadata.blob_hash.0.as_slice(), 0..usize::MAX)
+                        .await
+                        .imap_ctx(&arguments.tag, trc::location!())?;
 
-            // Build response
-            let mut items = Vec::with_capacity(arguments.attributes.len());
-            let set_seen_flag = set_seen_flags && !message_cache.has_keyword(data, &Keyword::Seen);
-
-            for attribute in &arguments.attributes {
-                match attribute {
-                    Attribute::Envelope => {
-                        items.push(DataItem::Envelope {
-                            envelope: message.envelope(),
-                        });
-                    }
-                    Attribute::Flags => {
-                        let mut flags = message_cache
-                            .expand_keywords(data)
-                            .map(Flag::from)
-                            .collect::<Vec<_>>();
-                        if set_seen_flag {
-                            flags.push(Flag::Seen);
-                        }
-                        items.push(DataItem::Flags { flags });
-                    }
-                    Attribute::InternalDate => {
-                        items.push(DataItem::InternalDate {
-                            date: (metadata.rcvd_attach.to_native() & MESSAGE_RECEIVED_MASK) as i64,
-                        });
-                    }
-                    Attribute::Preview { .. } => {
-                        items.push(DataItem::Preview {
-                            contents: if !metadata.preview.is_empty() {
-                                Some(metadata.preview.as_bytes().into())
-                            } else {
-                                None
-                            },
-                        });
-                    }
-                    Attribute::Rfc822Size => {
-                        items.push(DataItem::Rfc822Size {
-                            size: data.size as usize,
-                        });
-                    }
-                    Attribute::Uid => {
-                        items.push(DataItem::Uid { uid });
-                    }
-                    Attribute::Rfc822 => {
-                        items.push(DataItem::Rfc822 {
-                            contents: raw_message.get_full_range(),
-                        });
-                    }
-                    Attribute::Rfc822Header => {
-                        let contents = raw_message.get_slice_range(
-                            0..u32::from(metadata.root_part().offset_body) as usize,
+                    if let Some(raw_body) = &raw_body {
+                        raw_message.append(
+                            raw_body
+                                .get(metadata.blob_body_offset.to_native() as usize..)
+                                .unwrap_or_default(),
+                        );
+                    } else {
+                        trc::event!(
+                            Store(trc::StoreEvent::NotFound),
+                            AccountId = account_id,
+                            DocumentId = id,
+                            Collection = Collection::Email,
+                            BlobId = metadata.blob_hash.0.as_slice(),
+                            Details = "Blob not found.",
+                            CausedBy = trc::location!(),
                         );
 
-                        if contents != SliceRange::None {
-                            items.push(DataItem::Rfc822Header { contents });
-                        }
-                    }
-                    Attribute::Rfc822Text => {
-                        items.push(DataItem::Rfc822Text {
-                            contents: raw_message.get_full_range(),
-                        });
-                    }
-                    Attribute::Body => {
-                        items.push(DataItem::Body {
-                            part: metadata.body_structure(&decoded, false),
-                        });
-                    }
-                    Attribute::BodyStructure => {
-                        items.push(DataItem::BodyStructure {
-                            part: metadata.body_structure(&decoded, true),
-                        });
-                    }
-                    Attribute::BodySection {
-                        sections, partial, ..
-                    } => {
-                        if let Some(contents) = metadata.body_section(&decoded, sections, *partial)
-                        {
-                            items.push(DataItem::BodySection {
-                                sections: sections.to_vec(),
-                                origin_octet: partial.map(|(start, _)| start),
-                                contents,
-                            });
-                        }
-                    }
-
-                    Attribute::Binary {
-                        sections, partial, ..
-                    } => match metadata.binary(&decoded, sections, *partial) {
-                        Ok(Some(contents)) => {
-                            items.push(DataItem::Binary {
-                                sections: sections.to_vec(),
-                                offset: partial.map(|(start, _)| start),
-                                contents,
-                            });
-                        }
-                        Err(_) => {
-                            self.write_error(
-                                trc::ImapEvent::Error
-                                    .into_err()
-                                    .details(format!(
-                                        "Failed to decode part {} of message {}.",
-                                        sections
-                                            .iter()
-                                            .map(|s| s.to_string())
-                                            .collect::<Vec<_>>()
-                                            .join("."),
-                                        if is_uid { uid } else { seqnum }
-                                    ))
-                                    .code(ResponseCode::UnknownCte),
-                            )
-                            .await?;
-                            continue;
-                        }
-                        _ => (),
-                    },
-                    Attribute::BinarySize { sections } => {
-                        if let Some(size) = metadata.binary_size(&decoded, sections) {
-                            items.push(DataItem::BinarySize {
-                                sections: sections.to_vec(),
-                                size,
-                            });
-                        }
-                    }
-                    Attribute::ModSeq => {
-                        items.push(DataItem::ModSeq {
-                            modseq: data.change_id + 1,
-                        });
-                    }
-                    Attribute::ObjectId => {
-                        items.push(DataItem::ObjectId(ObjectId {
-                            email_id: Some(Id::from_parts(data.thread_id, id)),
-                            thread_id: Some(Id::from(data.thread_id)),
-                            ..Default::default()
-                        }));
+                        continue;
                     }
                 }
-            }
 
-            // Add flags to the response if the message was unseen
-            if set_seen_flag && !arguments.attributes.contains(&Attribute::Flags) {
-                let mut flags = message_cache
-                    .expand_keywords(data)
-                    .map(Flag::from)
-                    .collect::<Vec<_>>();
-                flags.push(Flag::Seen);
-                items.push(DataItem::Flags { flags });
-            }
+                let message = &metadata.contents[0];
+                let decoded = metadata.decode_contents(raw_message.clone());
 
-            // Serialize fetch item
-            let mut buf = Vec::with_capacity(128);
-            FetchItem {
-                id: if is_uidonly { uid } else { seqnum },
-                is_uidonly,
-                items,
-            }
-            .serialize(&mut buf, is_utf8);
-            self.write_bytes(buf).await?;
+                // Build response
+                let mut items = Vec::with_capacity(arguments.attributes.len());
+                let set_seen_flag =
+                    set_seen_flags && !message_cache.has_keyword(data, &Keyword::Seen);
 
-            // Add to set flags
-            if set_seen_flag
-                && let Some(data_) = self
-                    .server
-                    .store()
-                    .get_value::<Archive<AlignedBytes>>(ValueKey::archive(
-                        account_id,
-                        Collection::Email,
-                        id,
-                    ))
-                    .await
-                    .imap_ctx(&arguments.tag, trc::location!())?
-            {
-                let data = data_
-                    .to_unarchived::<MessageData>()
-                    .imap_ctx(&arguments.tag, trc::location!())?;
-                let mut new_data = data.inner.to_builder();
-                new_data.keywords.push(Keyword::Seen);
+                for attribute in &arguments.attributes {
+                    match attribute {
+                        Attribute::Envelope => {
+                            items.push(DataItem::Envelope {
+                                envelope: message.envelope(),
+                            });
+                        }
+                        Attribute::Flags => {
+                            let mut flags = message_cache
+                                .expand_keywords(data)
+                                .map(Flag::from)
+                                .collect::<Vec<_>>();
+                            if set_seen_flag {
+                                flags.push(Flag::Seen);
+                            }
+                            items.push(DataItem::Flags { flags });
+                        }
+                        Attribute::InternalDate => {
+                            items.push(DataItem::InternalDate {
+                                date: (metadata.rcvd_attach.to_native() & MESSAGE_RECEIVED_MASK)
+                                    as i64,
+                            });
+                        }
+                        Attribute::Preview { .. } => {
+                            items.push(DataItem::Preview {
+                                contents: if !metadata.preview.is_empty() {
+                                    Some(metadata.preview.as_bytes().into())
+                                } else {
+                                    None
+                                },
+                            });
+                        }
+                        Attribute::Rfc822Size => {
+                            items.push(DataItem::Rfc822Size {
+                                size: data.size as usize,
+                            });
+                        }
+                        Attribute::Uid => {
+                            items.push(DataItem::Uid { uid });
+                        }
+                        Attribute::Rfc822 => {
+                            items.push(DataItem::Rfc822 {
+                                contents: raw_message.get_full_range(),
+                            });
+                        }
+                        Attribute::Rfc822Header => {
+                            let contents = raw_message.get_slice_range(
+                                0..u32::from(metadata.root_part().offset_body) as usize,
+                            );
 
-                batch
-                    .with_account_id(account_id)
-                    .with_collection(Collection::Email)
-                    .with_document(id)
-                    .custom(
-                        ObjectIndexBuilder::new()
-                            .with_current(data)
-                            .with_changes(new_data.seal()),
-                    )
-                    .imap_ctx(&arguments.tag, trc::location!())?
-                    .commit_point();
+                            if contents != SliceRange::None {
+                                items.push(DataItem::Rfc822Header { contents });
+                            }
+                        }
+                        Attribute::Rfc822Text => {
+                            items.push(DataItem::Rfc822Text {
+                                contents: raw_message.get_full_range(),
+                            });
+                        }
+                        Attribute::Body => {
+                            items.push(DataItem::Body {
+                                part: metadata.body_structure(&decoded, false),
+                            });
+                        }
+                        Attribute::BodyStructure => {
+                            items.push(DataItem::BodyStructure {
+                                part: metadata.body_structure(&decoded, true),
+                            });
+                        }
+                        Attribute::BodySection {
+                            sections, partial, ..
+                        } => {
+                            if let Some(contents) =
+                                metadata.body_section(&decoded, sections, *partial)
+                            {
+                                items.push(DataItem::BodySection {
+                                    sections: sections.to_vec(),
+                                    origin_octet: partial.map(|(start, _)| start),
+                                    contents,
+                                });
+                            }
+                        }
+
+                        Attribute::Binary {
+                            sections, partial, ..
+                        } => match metadata.binary(&decoded, sections, *partial) {
+                            Ok(Some(contents)) => {
+                                items.push(DataItem::Binary {
+                                    sections: sections.to_vec(),
+                                    offset: partial.map(|(start, _)| start),
+                                    contents,
+                                });
+                            }
+                            Err(_) => {
+                                self.write_error(
+                                    trc::ImapEvent::Error
+                                        .into_err()
+                                        .details(format!(
+                                            "Failed to decode part {} of message {}.",
+                                            sections
+                                                .iter()
+                                                .map(|s| s.to_string())
+                                                .collect::<Vec<_>>()
+                                                .join("."),
+                                            if is_uid { uid } else { seqnum }
+                                        ))
+                                        .code(ResponseCode::UnknownCte),
+                                )
+                                .await?;
+                                continue;
+                            }
+                            _ => (),
+                        },
+                        Attribute::BinarySize { sections } => {
+                            if let Some(size) = metadata.binary_size(&decoded, sections) {
+                                items.push(DataItem::BinarySize {
+                                    sections: sections.to_vec(),
+                                    size,
+                                });
+                            }
+                        }
+                        Attribute::ModSeq => {
+                            items.push(DataItem::ModSeq {
+                                modseq: data.change_id + 1,
+                            });
+                        }
+                        Attribute::ObjectId => {
+                            items.push(DataItem::ObjectId(ObjectId {
+                                email_id: Some(Id::from_parts(data.thread_id, id)),
+                                thread_id: Some(Id::from(data.thread_id)),
+                                ..Default::default()
+                            }));
+                        }
+                    }
+                }
+
+                // Add flags to the response if the message was unseen
+                if set_seen_flag && !arguments.attributes.contains(&Attribute::Flags) {
+                    let mut flags = message_cache
+                        .expand_keywords(data)
+                        .map(Flag::from)
+                        .collect::<Vec<_>>();
+                    flags.push(Flag::Seen);
+                    items.push(DataItem::Flags { flags });
+                }
+
+                // Serialize fetch item
+                let mut buf = Vec::with_capacity(128);
+                FetchItem {
+                    id: if is_uidonly { uid } else { seqnum },
+                    is_uidonly,
+                    items,
+                }
+                .serialize(&mut buf, is_utf8);
+                self.write_bytes(buf).await?;
+
+                // Add to set flags
+                if set_seen_flag && let Some(data_) = seen_archive {
+                    let data = data_
+                        .to_unarchived::<MessageData>()
+                        .imap_ctx(&arguments.tag, trc::location!())?;
+                    let mut new_data = data.inner.to_builder();
+                    new_data.keywords.push(Keyword::Seen);
+
+                    batch
+                        .with_account_id(account_id)
+                        .with_collection(Collection::Email)
+                        .with_document(id)
+                        .custom(
+                            ObjectIndexBuilder::new()
+                                .with_current(data)
+                                .with_changes(new_data.seal()),
+                        )
+                        .imap_ctx(&arguments.tag, trc::location!())?
+                        .commit_point();
+                }
             }
         }
 

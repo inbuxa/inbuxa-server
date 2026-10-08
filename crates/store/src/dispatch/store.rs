@@ -59,6 +59,81 @@ impl Store {
         .caused_by(trc::location!())
     }
 
+    /// inbuxa: reads a set of keys in one round trip where the backend can
+    /// (PostgreSQL: `k = ANY($1)`), one `get_value` per key elsewhere.
+    /// Values come back in the keys' order, `None` for a missing key.
+    /// Callers bound a batch at [`crate::READ_BATCH_SIZE`] keys so a
+    /// FETCH of a whole mailbox never holds every archive at once.
+    pub async fn get_values<U>(&self, keys: &[impl Key]) -> trc::Result<Vec<Option<U>>>
+    where
+        U: Deserialize + 'static,
+    {
+        async fn read<U>(store: &Store, keys: &[impl Key]) -> trc::Result<Vec<Option<U>>>
+        where
+            U: Deserialize + 'static,
+        {
+            match store {
+                #[cfg(feature = "postgres")]
+                Store::PostgreSQL(db) => db.get_values(keys).await,
+                _ => {
+                    let mut values = Vec::with_capacity(keys.len());
+                    for key in keys {
+                        values.push(store.get_value(key.clone()).await?);
+                    }
+                    Ok(values)
+                }
+            }
+        }
+
+        match self {
+            // ST-6 to ST-8, ST-12: one replica serves the batch when every
+            // key is in a replicated subspace; keys it has not received yet
+            // are read again from the primary
+            Self::Replicated(store) => {
+                let subspace = keys
+                    .first()
+                    .map(|key| key.subspace())
+                    .filter(|subspace| keys.iter().all(|key| key.subspace() == *subspace));
+                match subspace {
+                    Some(subspace) => match store.read_target(subspace).await {
+                        Some(index) => match read(&store.replicas[index].store, keys).await {
+                            Ok(mut values) => {
+                                store.served(index);
+                                let missing = values
+                                    .iter()
+                                    .enumerate()
+                                    .filter(|(_, value)| value.is_none())
+                                    .map(|(pos, _)| pos)
+                                    .collect::<Vec<_>>();
+                                if !missing.is_empty() {
+                                    let retry = missing
+                                        .iter()
+                                        .map(|pos| keys[*pos].clone())
+                                        .collect::<Vec<_>>();
+                                    for (pos, value) in missing
+                                        .into_iter()
+                                        .zip(read::<U>(&store.primary, &retry).await?)
+                                    {
+                                        values[pos] = value;
+                                    }
+                                }
+                                Ok(values)
+                            }
+                            Err(err) => {
+                                store.failed(index, err);
+                                read(&store.primary, keys).await
+                            }
+                        },
+                        None => read(&store.primary, keys).await,
+                    },
+                    None => read(self, keys).await,
+                }
+            }
+            _ => read(self, keys).await,
+        }
+        .caused_by(trc::location!())
+    }
+
     pub async fn key_exists(&self, key: impl Key) -> trc::Result<bool> {
         match self {
             #[cfg(feature = "sqlite")]

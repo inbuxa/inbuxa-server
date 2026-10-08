@@ -71,6 +71,10 @@ pub trait Key: Sync + Send + Clone {
     fn subspace(&self) -> u8;
 }
 
+/// inbuxa: how many keys a caller hands `Store::get_values` at once. Bounds
+/// the archives held in memory while a long FETCH or Email/get streams out.
+pub const READ_BATCH_SIZE: usize = 128;
+
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct IndexKey<T: AsRef<[u8]>> {
     pub account_id: u32,
