@@ -267,7 +267,7 @@ pub struct MessageCache {
     pub size: u32,
     /// inbuxa: the message's received date (IMAP INTERNALDATE) in seconds,
     /// valid when the owning `MessagesCache::has_received_at` is set
-    pub received_at: u32,
+    pub received_at: u64,
 }
 
 #[derive(Debug, Default, Clone, Copy)]

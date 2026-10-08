@@ -9,8 +9,8 @@
 use crate::{
     SearchStore, Store,
     search::{
-        IndexDocument, SearchComparator, SearchField, SearchFilter, SearchOperator, SearchQuery,
-        SearchValue,
+        IndexDocument, QueryResults, SearchComparator, SearchField, SearchFilter, SearchOperator,
+        SearchQuery, SearchValue,
         split::{SplitFilter, split_filters},
     },
     write::SearchIndex,
@@ -113,10 +113,17 @@ impl SearchStore {
         };
 
         // Merge results locally
-        let results = SearchQuery::new(query.index)
-            .with_filters(filters)
-            .with_mask(query.mask)
-            .filter();
+        let results = if has_local_filters || has_external_filters {
+            SearchQuery::new(query.index)
+                .with_filters(filters)
+                .with_mask(query.mask)
+                .filter()
+        } else {
+            // inbuxa: only the account filter, which the local filter skips,
+            // and it would answer with nothing: the result is the mask,
+            // sorted by the local comparators below
+            QueryResults::new(query.mask, Vec::new())
+        };
 
         let total_results = results.results().len();
         match total_results.cmp(&1) {

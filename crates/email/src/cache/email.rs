@@ -155,7 +155,7 @@ pub(crate) async fn full_email_cache_build(
         let mut missing = cache.index.clone();
         for (document_id, received_at) in values {
             if let Some(idx) = missing.remove(&document_id) {
-                cache.items[idx as usize].received_at = received_at.min(u32::MAX as u64) as u32;
+                cache.items[idx as usize].received_at = received_at;
             }
         }
         cache.has_received_at = true;
@@ -206,7 +206,8 @@ async fn fill_received_dates(
                     .rcvd_attach
                     .to_native()
                     & MESSAGE_RECEIVED_MASK;
-                cache.items[*idx as usize].received_at = received_at.min(u32::MAX as u64) as u32;
+                cache.items[*idx as usize].received_at = received_at;
+            } else {
             }
         }
     }
@@ -307,8 +308,9 @@ pub trait MessageCacheAccess {
 
     fn has_keyword(&self, message: &MessageCache, keyword: &Keyword) -> bool;
 
-    /// inbuxa: every message's received date, for a local receivedAt sort;
-    /// `None` when the cache has no dates (see `MessagesCache`)
+    /// inbuxa: every message's rank by received date, for a local
+    /// receivedAt sort; `None` when the cache has no dates (see
+    /// `MessagesCache`)
     fn received_at_order(&self) -> Option<AHashMap<u32, u32>>;
 
     /// inbuxa: the messages received in `[from, to)` seconds, for a local
@@ -429,11 +431,27 @@ impl MessageCacheAccess for MessageStoreCache {
     }
 
     fn received_at_order(&self) -> Option<AHashMap<u32, u32>> {
+        // Ranks rather than the dates themselves: a sorted set holds u32
+        // positions, and dates past 2106 would otherwise tie
         self.emails.has_received_at.then(|| {
-            self.emails
+            let mut order = self
+                .emails
                 .items
                 .iter()
-                .map(|m| (m.document_id, m.received_at))
+                .map(|m| (m.received_at, m.document_id))
+                .collect::<Vec<_>>();
+            order.sort_unstable();
+            let mut rank = 0;
+            let mut last = None;
+            order
+                .into_iter()
+                .map(|(received_at, document_id)| {
+                    if last != Some(received_at) {
+                        last = Some(received_at);
+                        rank += 1;
+                    }
+                    (document_id, rank)
+                })
                 .collect()
         })
     }
@@ -443,7 +461,7 @@ impl MessageCacheAccess for MessageStoreCache {
             self.emails
                 .items
                 .iter()
-                .filter(|m| (from..to).contains(&(m.received_at as u64)))
+                .filter(|m| (from..to).contains(&m.received_at))
                 .map(|m| m.document_id)
                 .collect()
         })
