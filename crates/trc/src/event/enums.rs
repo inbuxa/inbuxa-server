@@ -12,8 +12,10 @@
 // auth.legacy-protocol-refused (legacy-protocols LP-6); 643 is
 // security.legacy-protocols-changed (LP-8); 644 to 646 are the cluster
 // coordinator's connection events; 647 and 648 are the audit log's
-// (audit-hold-lock spec, AU-3, AU-8)
-pub const TOTAL_EVENT_COUNT: usize = 649;
+// (audit-hold-lock spec, AU-3, AU-8); 649 is cluster.node-id-reassigned.
+// TOTAL_EVENT_COUNT sizes the collector's per-event tables, so it is one
+// more than the highest id; the test below holds it to the variant list
+pub const TOTAL_EVENT_COUNT: usize = 650;
 pub const TOTAL_METRIC_COUNT: usize = 369;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -1384,4 +1386,48 @@ pub enum Key {
     Value = 63,
     Version = 64,
     QueueName = 65,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // inbuxa: a new event id past TOTAL_EVENT_COUNT panics the collector
+    // thread at startup and the server runs on without any logging
+    #[test]
+    fn event_ids_fit_the_collector_tables() {
+        let variants = EventType::variants();
+        assert_eq!(variants.len(), TOTAL_EVENT_COUNT);
+        let mut ids = variants
+            .iter()
+            .map(|event| event.to_id())
+            .collect::<Vec<_>>();
+        ids.sort_unstable();
+        ids.dedup();
+        assert_eq!(ids.len(), variants.len(), "duplicate event ids");
+        assert_eq!(
+            ids.last().map(|id| *id as usize + 1),
+            Some(TOTAL_EVENT_COUNT)
+        );
+        for event in variants {
+            assert_eq!(EventType::from_id(event.to_id()), Some(*event), "{event:?}");
+        }
+    }
+
+    #[test]
+    fn metric_ids_fit_the_metric_tables() {
+        let variants = MetricType::variants();
+        assert_eq!(variants.len(), TOTAL_METRIC_COUNT);
+        let mut ids = variants
+            .iter()
+            .map(|metric| metric.to_id())
+            .collect::<Vec<_>>();
+        ids.sort_unstable();
+        ids.dedup();
+        assert_eq!(ids.len(), variants.len(), "duplicate metric ids");
+        assert_eq!(
+            ids.last().map(|id| *id as usize + 1),
+            Some(TOTAL_METRIC_COUNT)
+        );
+    }
 }
