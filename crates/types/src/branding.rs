@@ -81,7 +81,7 @@ fn legacy_setting(name: &str, is_set: impl Fn(&str) -> bool) -> Option<String> {
 #[macro_export]
 macro_rules! brand_version {
     () => {
-        "2026.10.8"
+        "2026.10.8.1"
     };
 }
 
