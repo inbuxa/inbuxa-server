@@ -188,8 +188,7 @@ async fn report_bytes(server: &Server, entry: &Entry) -> trc::Result<Option<Vec<
     match entry.blob_hash() {
         Some(hash) => {
             server
-                .blob_store()
-                .get_blob(hash.as_slice(), 0..usize::MAX)
+                .get_message_blob(hash.as_slice(), 0..usize::MAX)
                 .await
         }
         None => Ok(None),

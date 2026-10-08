@@ -2,6 +2,8 @@
  * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
+ *
+ * Modified by Coffey Labs in 2026 for INBUXA.
  */
 
 use crate::{KV_QUOTA_BLOB, Server};
@@ -9,6 +11,8 @@ use mail_parser::{
     Encoding,
     decoders::{base64::base64_decode, quoted_printable::quoted_printable_decode},
 };
+use std::ops::Range;
+use std::sync::Arc;
 use store::{
     U32_LEN, U64_LEN,
     dispatch::lookup::KeyValue,
@@ -114,6 +118,7 @@ impl Server {
                 .put_blob(hash.as_ref(), data, self.core.email.compression)
                 .await
                 .caused_by(trc::location!())?;
+            self.cache_message_blob(hash.as_ref(), data);
 
             // Commit blob
             let mut batch = BatchBuilder::new();
@@ -177,6 +182,7 @@ impl Server {
                 .put_blob(hash.as_ref(), data, self.core.email.compression)
                 .await
                 .caused_by(trc::location!())?;
+            self.cache_message_blob(hash.as_ref(), data);
 
             // Commit blob
             let mut batch = BatchBuilder::new();
@@ -198,14 +204,55 @@ impl Server {
         ))
     }
 
+    /// inbuxa: a message blob, from this node's cache when it has it. Only
+    /// for content-hash keys; a key that is rewritten in place must go to
+    /// `blob_store().get_blob()`.
+    pub async fn get_message_blob(
+        &self,
+        hash: &[u8],
+        range: Range<usize>,
+    ) -> trc::Result<Option<Vec<u8>>> {
+        let Some(cache) = &self.inner.cache.blobs else {
+            return self.blob_store().get_blob(hash, range).await;
+        };
+        let blob = match cache.get(hash) {
+            Some(blob) => blob,
+            None => {
+                // The whole blob, so the next range is served from memory:
+                // the store never reads a range anyway
+                let Some(blob) = self.blob_store().get_blob(hash, 0..usize::MAX).await? else {
+                    return Ok(None);
+                };
+                cache.insert(hash, &blob);
+                if range.start == 0 && range.end >= blob.len() {
+                    return Ok(Some(blob));
+                }
+                Arc::from(blob)
+            }
+        };
+        Ok(Some(
+            blob.get(range.start..range.end.min(blob.len()))
+                .unwrap_or_default()
+                .to_vec(),
+        ))
+    }
+
+    /// inbuxa: remembers a blob this node just wrote, so a read that
+    /// follows (delivery, indexing, the client fetching what it sent) is
+    /// served from memory.
+    pub fn cache_message_blob(&self, hash: &[u8], data: &[u8]) {
+        if let Some(cache) = &self.inner.cache.blobs {
+            cache.insert(hash, data);
+        }
+    }
+
     pub async fn get_blob_section(
         &self,
         hash: &BlobHash,
         section: &BlobSection,
     ) -> trc::Result<Option<Vec<u8>>> {
         Ok(self
-            .blob_store()
-            .get_blob(
+            .get_message_blob(
                 hash.as_slice(),
                 (section.offset_start)..(section.offset_start.saturating_add(section.size)),
             )

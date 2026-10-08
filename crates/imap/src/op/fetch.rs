@@ -437,8 +437,7 @@ impl<T: SessionStream> SessionData<T> {
                     // Retrieve raw message if needed
                     raw_body = self
                         .server
-                        .blob_store()
-                        .get_blob(metadata.blob_hash.0.as_slice(), 0..usize::MAX)
+                        .get_message_blob(metadata.blob_hash.0.as_slice(), 0..usize::MAX)
                         .await
                         .imap_ctx(&arguments.tag, trc::location!())?;
 

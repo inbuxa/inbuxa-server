@@ -204,8 +204,7 @@ impl EmailGet for Server {
                 let mut raw_message = ChainedBytes::new(metadata.raw_headers.as_ref());
                 if needs_body {
                     raw_body = self
-                        .blob_store()
-                        .get_blob(blob_hash.as_slice(), 0..usize::MAX)
+                        .get_message_blob(blob_hash.as_slice(), 0..usize::MAX)
                         .await?;
 
                     if let Some(raw_body) = &raw_body {

@@ -197,6 +197,7 @@ impl Caches {
                 ((std::mem::size_of::<Ipv4Addr>() + 255) * 2) as u64,
             ),
             negative_cache_ttl: cache.negative_ttl.into_inner(),
+            blobs: crate::storage::blob_cache::BlobCache::from_env(),
         }
     }
 

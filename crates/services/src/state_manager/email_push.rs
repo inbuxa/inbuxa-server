@@ -2,6 +2,8 @@
  * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
+ *
+ * Modified by Coffey Labs in 2026 for INBUXA.
  */
 
 use aho_corasick::AhoCorasick;
@@ -124,8 +126,7 @@ pub async fn build_email_push_object(
     let mut raw_message = ChainedBytes::new(metadata.raw_headers.as_ref());
     if needs_body {
         let Some(blob) = server
-            .blob_store()
-            .get_blob(blob_hash.as_slice(), 0..usize::MAX)
+            .get_message_blob(blob_hash.as_slice(), 0..usize::MAX)
             .await
             .caused_by(trc::location!())?
         else {
