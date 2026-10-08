@@ -2,6 +2,8 @@
  * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
+ *
+ * Modified by Coffey Labs in 2026 for INBUXA.
  */
 
 use crate::{RegistryStore, Store, registry::RegistryObject};
@@ -189,7 +191,7 @@ impl Bootstrap {
     }
 
     pub fn node_id(&self) -> u16 {
-        self.registry.0.node_id
+        self.registry.node_id()
     }
 
     pub fn log_errors(&self) {

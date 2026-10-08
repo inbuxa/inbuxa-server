@@ -36,7 +36,7 @@ impl RegistryStoreInner {
             local_path,
             store: Store::None,
             id_generator: SnowflakeIdGenerator::new(),
-            node_id: 0,
+            node_id: Default::default(),
             env_recovery_mode: types::branding::env_var("RECOVERY_MODE")
                 .ok()
                 .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))

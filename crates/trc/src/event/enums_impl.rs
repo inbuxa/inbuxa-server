@@ -81,6 +81,7 @@ impl EventType {
             b"cluster.message-skipped" => EventType::Cluster(ClusterEvent::MessageSkipped),
             b"cluster.message-invalid" => EventType::Cluster(ClusterEvent::MessageInvalid),
             b"cluster.node-id-renewed" => EventType::Cluster(ClusterEvent::NodeIdRenewed),
+            b"cluster.node-id-reassigned" => EventType::Cluster(ClusterEvent::NodeIdReassigned),
             // inbuxa: coordinator connection
             b"cluster.coordinator-connected" => EventType::Cluster(ClusterEvent::CoordinatorConnected),
             b"cluster.coordinator-disconnected" => EventType::Cluster(ClusterEvent::CoordinatorDisconnected),
@@ -749,6 +750,7 @@ impl EventType {
             EventType::Cluster(ClusterEvent::MessageSkipped) => "cluster.message-skipped",
             EventType::Cluster(ClusterEvent::MessageInvalid) => "cluster.message-invalid",
             EventType::Cluster(ClusterEvent::NodeIdRenewed) => "cluster.node-id-renewed",
+            EventType::Cluster(ClusterEvent::NodeIdReassigned) => "cluster.node-id-reassigned",
             // inbuxa: coordinator connection
             EventType::Cluster(ClusterEvent::CoordinatorConnected) => {
                 "cluster.coordinator-connected"
@@ -1542,6 +1544,7 @@ impl EventType {
             EventType::Cluster(ClusterEvent::MessageSkipped) => 47,
             EventType::Cluster(ClusterEvent::MessageInvalid) => 49,
             EventType::Cluster(ClusterEvent::NodeIdRenewed) => 275,
+            EventType::Cluster(ClusterEvent::NodeIdReassigned) => 649,
             // inbuxa: coordinator connection
             EventType::Cluster(ClusterEvent::CoordinatorConnected) => 644,
             EventType::Cluster(ClusterEvent::CoordinatorDisconnected) => 645,
@@ -2201,6 +2204,7 @@ impl EventType {
             47 => Some(EventType::Cluster(ClusterEvent::MessageSkipped)),
             49 => Some(EventType::Cluster(ClusterEvent::MessageInvalid)),
             275 => Some(EventType::Cluster(ClusterEvent::NodeIdRenewed)),
+            649 => Some(EventType::Cluster(ClusterEvent::NodeIdReassigned)),
             // inbuxa: coordinator connection
             644 => Some(EventType::Cluster(ClusterEvent::CoordinatorConnected)),
             645 => Some(EventType::Cluster(ClusterEvent::CoordinatorDisconnected)),
@@ -3283,6 +3287,7 @@ impl EventType {
             EventType::Cluster(ClusterEvent::MessageSkipped) => "PubSub message skipped",
             EventType::Cluster(ClusterEvent::MessageInvalid) => "Invalid PubSub message",
             EventType::Cluster(ClusterEvent::NodeIdRenewed) => "Node ID renewed",
+            EventType::Cluster(ClusterEvent::NodeIdReassigned) => "Node ID reassigned after its lease was taken",
             // inbuxa: coordinator connection
             EventType::Cluster(ClusterEvent::CoordinatorConnected) => "Coordinator connected",
             EventType::Cluster(ClusterEvent::CoordinatorDisconnected) => "Coordinator unavailable",
@@ -4375,6 +4380,7 @@ impl EventType {
             EventType::Cluster(ClusterEvent::MessageSkipped),
             EventType::Cluster(ClusterEvent::MessageInvalid),
             EventType::Cluster(ClusterEvent::NodeIdRenewed),
+            EventType::Cluster(ClusterEvent::NodeIdReassigned),
             // inbuxa: coordinator connection
             EventType::Cluster(ClusterEvent::CoordinatorConnected),
             EventType::Cluster(ClusterEvent::CoordinatorDisconnected),

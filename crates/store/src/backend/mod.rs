@@ -34,7 +34,6 @@ pub mod scaleout;
 #[cfg(any(feature = "postgres", feature = "mysql"))]
 pub mod query_timeout;
 
-
 pub const MAX_TOKEN_LENGTH: usize = (u8::MAX >> 1) as usize;
 pub const MAX_TOKEN_MASK: usize = MAX_TOKEN_LENGTH - 1;
 

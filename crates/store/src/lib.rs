@@ -29,7 +29,11 @@ pub use xxhash_rust;
 use crate::backend::{elastic::ElasticSearchStore, meili::MeiliSearchStore};
 use ahash::AHashMap;
 use backend::{ephemeral::EphemeralStore, fs::FsStore, http::HttpStore, memory::StaticMemoryStore};
-use std::{borrow::Cow, path::PathBuf, sync::Arc};
+use std::{
+    borrow::Cow,
+    path::PathBuf,
+    sync::{Arc, atomic::AtomicU16},
+};
 use write::ValueClass;
 
 pub trait Deserialize: Sized + Sync + Send {
@@ -204,7 +208,8 @@ pub struct RegistryStore(pub(crate) Arc<RegistryStoreInner>);
 pub struct RegistryStoreInner {
     pub(crate) local_path: PathBuf,
     pub(crate) store: Store,
-    pub(crate) node_id: u16,
+    // inbuxa: atomic so a node can step down to a fresh id after losing its lease
+    pub(crate) node_id: Arc<AtomicU16>,
     pub(crate) env_recovery_mode: bool,
     pub(crate) env_recovery_admin: Option<(String, String)>,
     pub(crate) env_cluster_role: Option<String>,
@@ -708,7 +713,6 @@ impl Store {
     pub fn is_ephemeral(&self) -> bool {
         matches!(self, Self::Ephemeral(_))
     }
-
 }
 
 impl std::fmt::Debug for Store {

@@ -152,6 +152,7 @@ pub enum ClusterEvent {
     MessageSkipped = 47,
     MessageInvalid = 49,
     NodeIdRenewed = 275,
+    NodeIdReassigned = 649,
     // inbuxa: the coordinator's connection
     CoordinatorConnected = 644,
     CoordinatorDisconnected = 645,

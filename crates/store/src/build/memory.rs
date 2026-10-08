@@ -54,5 +54,4 @@ impl InMemoryStore {
             }
         }
     }
-
 }
