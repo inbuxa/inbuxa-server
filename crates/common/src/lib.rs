@@ -9,7 +9,6 @@
 // inbuxa: composite stores (sharded members, read replicas) nest store
 // futures deeply enough to pass rustc's default query depth
 #![recursion_limit = "512"]
-
 #![warn(clippy::large_futures)]
 
 use crate::auth::{AccessTokenInner, EmailAddress};
@@ -65,24 +64,23 @@ use utils::{
     snowflake::SnowflakeIdGenerator,
 };
 
+pub mod audit; // inbuxa: the audit log (audit-hold-lock spec, AU)
 pub mod auth;
 pub mod cache;
-pub mod audit; // inbuxa: the audit log (audit-hold-lock spec, AU)
-pub mod hold; // inbuxa: legal holds (audit-hold-lock spec, LH)
-pub mod privacy; // inbuxa: the personal-data catalog, evaluated
-pub mod reachability; // inbuxa: whether the outside world reaches each node's ports
 pub mod config;
+pub mod enterprise; // inbuxa: rebuilt features (AI spam classification)
 pub mod expr;
+pub mod hold; // inbuxa: legal holds (audit-hold-lock spec, LH)
 pub mod i18n;
 pub mod ipc;
 pub mod manager;
 pub mod network;
-pub mod enterprise; // inbuxa: rebuilt features (AI spam classification)
+pub mod privacy; // inbuxa: the personal-data catalog, evaluated
+pub mod reachability; // inbuxa: whether the outside world reaches each node's ports
 pub mod scripts;
 pub mod sharing;
 pub mod storage;
 pub mod telemetry;
-
 
 pub use psl;
 
@@ -254,6 +252,9 @@ pub struct MessagesCache {
     pub index: AHashMap<u32, u32>,
     pub keywords: Box<[Box<str>]>,
     pub size: u64,
+    /// inbuxa: every item's `received_at` is filled in, so receivedAt
+    /// sorts and date filters run on the cache instead of the search store
+    pub has_received_at: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -264,6 +265,9 @@ pub struct MessageCache {
     pub thread_id: u32,
     pub change_id: u64,
     pub size: u32,
+    /// inbuxa: the message's received date (IMAP INTERNALDATE) in seconds,
+    /// valid when the owning `MessagesCache::has_received_at` is set
+    pub received_at: u32,
 }
 
 #[derive(Debug, Default, Clone, Copy)]
@@ -410,7 +414,6 @@ pub struct Core {
     pub spam: SpamFilterConfig,
     pub groupware: GroupwareConfig,
     pub metrics: Metrics,
-
 }
 
 pub trait BuildServer {

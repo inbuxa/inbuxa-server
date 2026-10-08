@@ -2,6 +2,8 @@
  * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
+ *
+ * Modified by Coffey Labs in 2026 for INBUXA.
  */
 
 use super::{FromModSeq, ToModSeq};
@@ -331,8 +333,13 @@ impl<T: SessionStream> SessionData<T> {
                             .map(|m| m.document_id),
                     )));
                 }
+                // inbuxa: date filters run on the cache when it carries the
+                // received dates (see MessagesCache)
                 Filter::Before(date) => {
-                    filters.push(SearchFilter::lt(EmailSearchField::ReceivedAt, date));
+                    filters.push(match cache.received_between(0, date.max(0) as u64) {
+                        Some(set) => SearchFilter::is_in_set(set),
+                        None => SearchFilter::lt(EmailSearchField::ReceivedAt, date),
+                    });
                 }
                 Filter::Deleted => {
                     filters.push(SearchFilter::is_in_set(RoaringBitmap::from_iter(
@@ -360,10 +367,16 @@ impl<T: SessionStream> SessionData<T> {
                     filters.push(SearchFilter::gt(EmailSearchField::Size, size));
                 }
                 Filter::On(date) => {
-                    filters.push(SearchFilter::And);
-                    filters.push(SearchFilter::ge(EmailSearchField::ReceivedAt, date));
-                    filters.push(SearchFilter::lt(EmailSearchField::ReceivedAt, date + 86400));
-                    filters.push(SearchFilter::End);
+                    if let Some(set) =
+                        cache.received_between(date.max(0) as u64, date.max(0) as u64 + 86400)
+                    {
+                        filters.push(SearchFilter::is_in_set(set));
+                    } else {
+                        filters.push(SearchFilter::And);
+                        filters.push(SearchFilter::ge(EmailSearchField::ReceivedAt, date));
+                        filters.push(SearchFilter::lt(EmailSearchField::ReceivedAt, date + 86400));
+                        filters.push(SearchFilter::End);
+                    }
                 }
                 Filter::Seen => {
                     filters.push(SearchFilter::is_in_set(RoaringBitmap::from_iter(
@@ -383,7 +396,10 @@ impl<T: SessionStream> SessionData<T> {
                     filters.push(SearchFilter::ge(EmailSearchField::SentAt, date));
                 }
                 Filter::Since(date) => {
-                    filters.push(SearchFilter::ge(EmailSearchField::ReceivedAt, date));
+                    filters.push(match cache.received_between(date.max(0) as u64, u64::MAX) {
+                        Some(set) => SearchFilter::is_in_set(set),
+                        None => SearchFilter::ge(EmailSearchField::ReceivedAt, date),
+                    });
                 }
                 Filter::Smaller(size) => {
                     filters.push(SearchFilter::lt(EmailSearchField::Size, size));
@@ -448,16 +464,18 @@ impl<T: SessionStream> SessionData<T> {
                     filters.push(SearchFilter::End);*/
                 }
                 Filter::Older(secs) => {
-                    filters.push(SearchFilter::le(
-                        EmailSearchField::ReceivedAt,
-                        now().saturating_sub(secs as u64),
-                    ));
+                    let date = now().saturating_sub(secs as u64);
+                    filters.push(match cache.received_between(0, date + 1) {
+                        Some(set) => SearchFilter::is_in_set(set),
+                        None => SearchFilter::le(EmailSearchField::ReceivedAt, date),
+                    });
                 }
                 Filter::Younger(secs) => {
-                    filters.push(SearchFilter::ge(
-                        EmailSearchField::ReceivedAt,
-                        now().saturating_sub(secs as u64),
-                    ));
+                    let date = now().saturating_sub(secs as u64);
+                    filters.push(match cache.received_between(date, u64::MAX) {
+                        Some(set) => SearchFilter::is_in_set(set),
+                        None => SearchFilter::ge(EmailSearchField::ReceivedAt, date),
+                    });
                 }
                 Filter::ModSeq((modseq, _)) => {
                     let mut set = RoaringBitmap::new();
@@ -659,9 +677,16 @@ impl<T: SessionStream> SessionData<T> {
         let mut comparators = Vec::with_capacity(imap_comparator.len());
         for comparator in imap_comparator {
             comparators.push(match comparator.sort {
-                search::Sort::Arrival => {
-                    SearchComparator::field(EmailSearchField::ReceivedAt, comparator.ascending)
-                }
+                // inbuxa: sorted on the cache when it carries the dates
+                search::Sort::Arrival => match cache.received_at_order() {
+                    Some(set) => SearchComparator::SortedSet {
+                        set,
+                        ascending: comparator.ascending,
+                    },
+                    None => {
+                        SearchComparator::field(EmailSearchField::ReceivedAt, comparator.ascending)
+                    }
+                },
                 search::Sort::Cc => {
                     return Err(trc::ImapEvent::Error
                         .into_err()

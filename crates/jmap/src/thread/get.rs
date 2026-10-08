@@ -2,6 +2,8 @@
  * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
+ *
+ * Modified by Coffey Labs in 2026 for INBUXA.
  */
 
 use crate::changes::state::StateManager;
@@ -95,9 +97,16 @@ impl ThreadGet for Server {
                         SearchQuery::new(SearchIndex::Email)
                             .with_account_id(account_id)
                             .with_mask(all_ids)
-                            .with_comparator(SearchComparator::Field {
-                                field: SearchField::Email(EmailSearchField::ReceivedAt),
-                                ascending: true,
+                            // inbuxa: sorted on the cache when it has the dates
+                            .with_comparator(match cache.received_at_order() {
+                                Some(set) => SearchComparator::SortedSet {
+                                    set,
+                                    ascending: true,
+                                },
+                                None => SearchComparator::Field {
+                                    field: SearchField::Email(EmailSearchField::ReceivedAt),
+                                    ascending: true,
+                                },
                             }),
                     )
                     .await?,
