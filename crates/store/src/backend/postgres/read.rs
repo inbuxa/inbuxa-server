@@ -11,6 +11,7 @@ use crate::{
     Deserialize, IterateParams, Key, ValueKey, backend::postgres::into_pool_error,
     write::ValueClass,
 };
+use ahash::AHashMap;
 use futures::{TryStreamExt, pin_mut};
 
 impl PostgresStore {
@@ -39,6 +40,44 @@ impl PostgresStore {
                         Ok(None)
                     }
                 })
+        })
+        .await;
+        bounded(conn, result, limit)
+    }
+
+    /// inbuxa: reads every key in one round trip (`k = ANY($1)`) and
+    /// returns the values in the keys' order, `None` for a missing key.
+    /// All keys must live in the same subspace; the dispatcher checks.
+    pub(crate) async fn get_values<U>(&self, keys: &[impl Key]) -> trc::Result<Vec<Option<U>>>
+    where
+        U: Deserialize + 'static,
+    {
+        let Some(subspace) = keys.first().map(|key| key.subspace()) else {
+            return Ok(Vec::new());
+        };
+        let conn = self.conn_pool.get().await.map_err(into_pool_error)?;
+        let limit = self.timeouts.query;
+        let result = tokio::time::timeout(limit, async {
+            let s = conn
+                .prepare_cached(&format!(
+                    "SELECT k, v FROM {} WHERE k = ANY($1)",
+                    char::from(subspace)
+                ))
+                .await
+                .map_err(into_error)?;
+            let keys = keys.iter().map(|key| key.serialize(0)).collect::<Vec<_>>();
+            let mut found = AHashMap::with_capacity(keys.len());
+            for row in conn.query(&s, &[&keys]).await.map_err(into_error)? {
+                found.insert(row.get::<_, Vec<u8>>(0), row.get::<_, Vec<u8>>(1));
+            }
+            keys.iter()
+                .map(|key| {
+                    found
+                        .get(key)
+                        .map(|value| U::deserialize_with_key(key, value))
+                        .transpose()
+                })
+                .collect()
         })
         .await;
         bounded(conn, result, limit)

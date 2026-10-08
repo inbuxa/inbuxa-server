@@ -2,6 +2,8 @@
  * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
+ *
+ * Modified by Coffey Labs in 2026 for INBUXA.
  */
 
 use crate::message::metadata::{ArchivedMessageData, MessageData};
@@ -10,7 +12,7 @@ use common::{
     sharing::EffectiveAcl,
 };
 use store::write::{AlignedBytes, Archive};
-use store::{ValueKey, ahash::AHashMap, roaring::RoaringBitmap};
+use store::{READ_BATCH_SIZE, ValueKey, ahash::AHashMap, roaring::RoaringBitmap};
 use trc::AddContext;
 use types::{
     acl::Acl,
@@ -41,23 +43,32 @@ pub(crate) async fn update_email_cache(
         keywords: store_cache.emails.keywords.to_vec(),
     };
 
-    for (document_id, is_update) in changed_ids {
-        if *is_update
-            && let Some(archive) = server
+    // inbuxa: one round trip per batch of changed messages, not one per
+    // message; every node runs this after any write it hears about
+    let updated = changed_ids
+        .iter()
+        .filter(|(_, is_update)| **is_update)
+        .map(|(document_id, _)| *document_id)
+        .collect::<Vec<_>>();
+    for document_ids in updated.chunks(READ_BATCH_SIZE) {
+        let keys = document_ids
+            .iter()
+            .map(|document_id| ValueKey::archive(account_id, Collection::Email, *document_id))
+            .collect::<Vec<_>>();
+        for (document_id, archive) in document_ids.iter().zip(
+            server
                 .store()
-                .get_value::<Archive<AlignedBytes>>(ValueKey::archive(
-                    account_id,
-                    Collection::Email,
-                    *document_id,
-                ))
+                .get_values::<Archive<AlignedBytes>>(&keys)
                 .await
-                .caused_by(trc::location!())?
-        {
-            insert_item(
-                &mut new_cache,
-                *document_id,
-                archive.to_unarchived::<MessageData>()?,
-            );
+                .caused_by(trc::location!())?,
+        ) {
+            if let Some(archive) = archive {
+                insert_item(
+                    &mut new_cache,
+                    *document_id,
+                    archive.to_unarchived::<MessageData>()?,
+                );
+            }
         }
     }
 

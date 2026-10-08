@@ -2,6 +2,8 @@
  * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
+ *
+ * Modified by Coffey Labs in 2026 for INBUXA.
  */
 
 use crate::utils::{cleanup::store_assert_is_empty, server::TestServer};
@@ -29,6 +31,8 @@ fn value_gen(chunks: impl IntoIterator<Item = (u8, usize)>) -> Vec<u8> {
 
 pub async fn test(test: &TestServer) {
     let db = test.server.store().clone();
+
+    batched_reads(&db).await;
 
     #[cfg(feature = "foundationdb")]
     if matches!(db, store::Store::FoundationDb(_)) {
@@ -798,4 +802,63 @@ pub async fn test(test: &TestServer) {
         // Make sure everything is deleted
         store_assert_is_empty(&db, db.clone().into(), false).await;
     }
+}
+
+// inbuxa: `Store::get_values` answers in the keys' order, `None` for a
+// missing key, and agrees with `get_value` key by key
+async fn batched_reads(db: &store::Store) {
+    println!("Running batched reads test...");
+    const FIELD: u8 = 7;
+    let key = |document_id: u32| ValueKey::property(0, Collection::Email, document_id, FIELD);
+    let present = |document_id: u32| document_id % 7 != 3;
+
+    let mut batch = BatchBuilder::new();
+    batch.with_account_id(0).with_collection(Collection::Email);
+    for document_id in 0..300u32 {
+        if present(document_id) {
+            batch.with_document(document_id).set(
+                ValueClass::Property(FIELD),
+                (document_id as u64).to_be_bytes().to_vec(),
+            );
+        }
+    }
+    db.write(batch.build_all()).await.unwrap();
+
+    // A batch wider than READ_BATCH_SIZE, with gaps, a repeat and keys that
+    // were never written
+    let mut ids = (0..300u32).collect::<Vec<_>>();
+    ids.push(42);
+    ids.push(5000);
+    ids.push(42);
+    let keys = ids.iter().map(|id| key(*id)).collect::<Vec<_>>();
+    let values = db.get_values::<u64>(&keys).await.unwrap();
+    assert_eq!(values.len(), ids.len());
+    for (id, value) in ids.iter().zip(&values) {
+        let expected = db.get_value::<u64>(key(*id)).await.unwrap();
+        assert_eq!(value, &expected, "document {id}");
+        assert_eq!(value.is_some(), *id < 300 && present(*id), "document {id}");
+    }
+
+    assert!(
+        db.get_values::<u64>(&[] as &[ValueKey<ValueClass>])
+            .await
+            .unwrap()
+            .is_empty()
+    );
+
+    let mut batch = BatchBuilder::new();
+    batch.with_account_id(0).with_collection(Collection::Email);
+    for document_id in 0..300u32 {
+        batch
+            .with_document(document_id)
+            .clear(ValueClass::Property(FIELD));
+    }
+    db.write(batch.build_all()).await.unwrap();
+    assert!(
+        db.get_values::<u64>(&keys)
+            .await
+            .unwrap()
+            .iter()
+            .all(Option::is_none)
+    );
 }
