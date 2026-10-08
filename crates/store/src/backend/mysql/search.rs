@@ -15,8 +15,8 @@ use crate::{
         },
     },
     search::{
-        IndexDocument, SearchComparator, SearchDocumentId, SearchFilter, SearchOperator,
-        SearchQuery, SearchValue,
+        IndexDocument, SearchComparator, SearchDocumentId, SearchField, SearchFilter,
+        SearchOperator, SearchQuery, SearchValue,
     },
     write::SearchIndex,
 };
@@ -109,6 +109,38 @@ impl MysqlStore {
             conn.exec::<i64, _, _>(s, params)
                 .await
                 .map(|r| r.into_iter().map(|r| R::from_u64(r as u64)).collect())
+                .map_err(into_error)
+        })
+        .await;
+        bounded(conn, result, limit)
+    }
+
+    /// inbuxa: every document's value of one unsigned field in an account,
+    /// in one round trip (see the PostgreSQL backend).
+    pub async fn unsigned_values(
+        &self,
+        index: SearchIndex,
+        field: SearchField,
+        account_id: u32,
+    ) -> trc::Result<Vec<(u32, u64)>> {
+        let query = format!(
+            "SELECT {}, {} FROM {} WHERE {} = ?",
+            SearchField::DocumentId.column(),
+            field.column(),
+            index.mysql_table(),
+            SearchField::AccountId.column()
+        );
+        let mut conn = self.conn().await?;
+        let limit = self.timeouts.query;
+        let result = tokio::time::timeout(limit, async {
+            let s = conn.prep(query).await.map_err(into_error)?;
+            conn.exec::<(i32, i64), _, _>(s, (account_id as i32,))
+                .await
+                .map(|rows| {
+                    rows.into_iter()
+                        .map(|(id, value)| (id as u32, value as u64))
+                        .collect()
+                })
                 .map_err(into_error)
         })
         .await;

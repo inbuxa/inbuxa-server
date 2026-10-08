@@ -2,6 +2,8 @@
  * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
+ *
+ * Modified by Coffey Labs in 2026 for INBUXA.
  */
 
 use crate::{api::query::QueryResponseBuilder, changes::state::JmapCacheState};
@@ -181,14 +183,22 @@ impl EmailQuery for Server {
                             }),
                         )));
                     }
-                    EmailFilter::Before(date) => filters.push(SearchFilter::lt(
-                        EmailSearchField::ReceivedAt,
-                        date.timestamp(),
-                    )),
-                    EmailFilter::After(date) => filters.push(SearchFilter::gt(
-                        EmailSearchField::ReceivedAt,
-                        date.timestamp(),
-                    )),
+                    // inbuxa: received dates come from the cache when it has
+                    // them, so these filters cost no query (see MessagesCache)
+                    EmailFilter::Before(date) => {
+                        let date = date.timestamp().max(0) as u64;
+                        filters.push(match cached_messages.received_between(0, date) {
+                            Some(set) => SearchFilter::is_in_set(set),
+                            None => SearchFilter::lt(EmailSearchField::ReceivedAt, date),
+                        })
+                    }
+                    EmailFilter::After(date) => {
+                        let date = date.timestamp().max(0) as u64;
+                        filters.push(match cached_messages.received_between(date + 1, u64::MAX) {
+                            Some(set) => SearchFilter::is_in_set(set),
+                            None => SearchFilter::gt(EmailSearchField::ReceivedAt, date),
+                        })
+                    }
                     EmailFilter::MinSize(size) => {
                         filters.push(SearchFilter::ge(EmailSearchField::Size, size))
                     }
@@ -282,9 +292,19 @@ impl EmailQuery for Server {
             .unwrap_or_default()
         {
             comparators.push(match comparator.property {
-                EmailComparator::ReceivedAt => {
-                    SearchComparator::field(EmailSearchField::ReceivedAt, comparator.is_ascending)
-                }
+                // inbuxa: a local sort when the cache carries received dates;
+                // upstream pulled every message id of the account, ordered,
+                // from the search store on each query
+                EmailComparator::ReceivedAt => match cached_messages.received_at_order() {
+                    Some(set) => SearchComparator::SortedSet {
+                        set,
+                        ascending: comparator.is_ascending,
+                    },
+                    None => SearchComparator::field(
+                        EmailSearchField::ReceivedAt,
+                        comparator.is_ascending,
+                    ),
+                },
                 EmailComparator::Size => {
                     SearchComparator::field(EmailSearchField::Size, comparator.is_ascending)
                 }

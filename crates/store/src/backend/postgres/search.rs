@@ -15,8 +15,8 @@ use crate::{
         },
     },
     search::{
-        IndexDocument, SearchComparator, SearchDocumentId, SearchFilter, SearchOperator,
-        SearchQuery, SearchValue,
+        IndexDocument, SearchComparator, SearchDocumentId, SearchField, SearchFilter,
+        SearchOperator, SearchQuery, SearchValue,
     },
     write::SearchIndex,
 };
@@ -190,6 +190,44 @@ impl PostgresStore {
                     rows.into_iter()
                         .map(|row| row.try_get::<_, DocId>(0).map(|v| R::from_u64(v.0)))
                         .collect::<Result<Vec<R>, _>>()
+                })
+                .map_err(into_error)
+        })
+        .await;
+        bounded(conn, result, limit)
+    }
+
+    /// inbuxa: every document's value of one unsigned field in an account,
+    /// in one round trip. Feeds the message cache's received dates so
+    /// sorting by receivedAt needs no query at all.
+    pub async fn unsigned_values(
+        &self,
+        index: SearchIndex,
+        field: SearchField,
+        account_id: u32,
+    ) -> trc::Result<Vec<(u32, u64)>> {
+        let query = format!(
+            "SELECT {}, {} FROM {} WHERE {} = $1",
+            SearchField::DocumentId.column(),
+            field.column(),
+            index.psql_table(),
+            SearchField::AccountId.column()
+        );
+        let conn = self.conn_pool.get().await.map_err(into_pool_error)?;
+        let limit = self.timeouts.query;
+        let result = tokio::time::timeout(limit, async {
+            let s = conn.prepare_cached(&query).await.map_err(into_error)?;
+            conn.query(&s, &[&(account_id as i32)])
+                .await
+                .and_then(|rows| {
+                    rows.into_iter()
+                        .map(|row| {
+                            Ok((
+                                row.try_get::<_, i32>(0)? as u32,
+                                row.try_get::<_, i64>(1)? as u64,
+                            ))
+                        })
+                        .collect::<Result<Vec<_>, _>>()
                 })
                 .map_err(into_error)
         })

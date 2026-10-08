@@ -6,17 +6,25 @@
  * Modified by Coffey Labs in 2026 for INBUXA.
  */
 
-use crate::message::metadata::{ArchivedMessageData, MessageData};
+use crate::message::metadata::{
+    ArchivedMessageData, MESSAGE_RECEIVED_MASK, MessageData, MessageMetadata,
+};
 use common::{
     MessageCache, MessageStoreCache, MessageUidCache, MessagesCache, Server, auth::AccessToken,
     sharing::EffectiveAcl,
 };
-use store::write::{AlignedBytes, Archive};
-use store::{READ_BATCH_SIZE, ValueKey, ahash::AHashMap, roaring::RoaringBitmap};
+use store::write::{AlignedBytes, Archive, SearchIndex};
+use store::{
+    READ_BATCH_SIZE, ValueKey,
+    ahash::AHashMap,
+    roaring::RoaringBitmap,
+    search::{EmailSearchField, SearchField},
+};
 use trc::AddContext;
 use types::{
     acl::Acl,
     collection::Collection,
+    field::EmailField,
     keyword::{Keyword, OTHER},
 };
 use utils::map::bitmap::Bitmap;
@@ -27,6 +35,7 @@ struct MessagesCacheBuilder {
     pub index: AHashMap<u32, u32>,
     pub keywords: Vec<Box<str>>,
     pub size: u64,
+    pub has_received_at: bool,
 }
 
 pub(crate) async fn update_email_cache(
@@ -41,6 +50,7 @@ pub(crate) async fn update_email_cache(
         size: 0,
         change_id: 0,
         keywords: store_cache.emails.keywords.to_vec(),
+        has_received_at: store_cache.emails.has_received_at,
     };
 
     // inbuxa: one round trip per batch of changed messages, not one per
@@ -72,6 +82,22 @@ pub(crate) async fn update_email_cache(
         }
     }
 
+    // inbuxa: a message's received date never changes, so an updated
+    // message keeps the date the old cache had; a new one reads its metadata
+    if new_cache.has_received_at {
+        let mut new_ids = Vec::new();
+        for document_id in &updated {
+            let Some(idx) = new_cache.index.get(document_id) else {
+                continue;
+            };
+            match store_cache.email_by_id(document_id) {
+                Some(old) => new_cache.items[*idx as usize].received_at = old.received_at,
+                None => new_ids.push(*document_id),
+            }
+        }
+        fill_received_dates(server, account_id, &mut new_cache, new_ids).await?;
+    }
+
     for item in &store_cache.emails.items {
         if !changed_ids.contains_key(&item.document_id) {
             email_insert(&mut new_cache, item.clone());
@@ -92,6 +118,7 @@ pub(crate) async fn full_email_cache_build(
         keywords: Vec::new(),
         size: 0,
         change_id: 0,
+        has_received_at: false,
     };
 
     server
@@ -111,7 +138,80 @@ pub(crate) async fn full_email_cache_build(
         .await
         .caused_by(trc::location!())?;
 
+    // inbuxa: the received dates come from the search index in one query
+    // (an SQL search store), and from the metadata of the messages the
+    // index task has not reached yet. With another search store the dates
+    // stay unknown and sorts keep going through the store.
+    if let Some(values) = server
+        .search_store()
+        .unsigned_values(
+            SearchIndex::Email,
+            SearchField::Email(EmailSearchField::ReceivedAt),
+            account_id,
+        )
+        .await
+        .caused_by(trc::location!())?
+    {
+        let mut missing = cache.index.clone();
+        for (document_id, received_at) in values {
+            if let Some(idx) = missing.remove(&document_id) {
+                cache.items[idx as usize].received_at = received_at;
+            }
+        }
+        cache.has_received_at = true;
+        fill_received_dates(
+            server,
+            account_id,
+            &mut cache,
+            missing.into_keys().collect(),
+        )
+        .await?;
+    }
+
     Ok(cache.build())
+}
+
+/// inbuxa: sets the received date of `document_ids` from their metadata,
+/// a batch at a time
+async fn fill_received_dates(
+    server: &Server,
+    account_id: u32,
+    cache: &mut MessagesCacheBuilder,
+    mut document_ids: Vec<u32>,
+) -> trc::Result<()> {
+    document_ids.sort_unstable();
+    for document_ids in document_ids.chunks(READ_BATCH_SIZE) {
+        let keys = document_ids
+            .iter()
+            .map(|document_id| {
+                ValueKey::property(
+                    account_id,
+                    Collection::Email,
+                    *document_id,
+                    EmailField::Metadata,
+                )
+            })
+            .collect::<Vec<_>>();
+        for (document_id, metadata) in document_ids.iter().zip(
+            server
+                .store()
+                .get_values::<Archive<AlignedBytes>>(&keys)
+                .await
+                .caused_by(trc::location!())?,
+        ) {
+            if let (Some(metadata), Some(idx)) = (metadata, cache.index.get(document_id)) {
+                let received_at = metadata
+                    .unarchive::<MessageMetadata>()
+                    .caused_by(trc::location!())?
+                    .rcvd_attach
+                    .to_native()
+                    & MESSAGE_RECEIVED_MASK;
+                cache.items[*idx as usize].received_at = received_at;
+            } else {
+            }
+        }
+    }
+    Ok(())
 }
 
 fn insert_item(
@@ -134,6 +234,7 @@ fn insert_item(
         change_id: archive.version.change_id().unwrap_or_default(),
         document_id,
         size: message.size.to_native(),
+        received_at: 0,
     };
     for keyword in message.keywords.iter() {
         match keyword.id() {
@@ -163,6 +264,7 @@ impl MessagesCacheBuilder {
             index: self.index,
             keywords: self.keywords.into_boxed_slice(),
             size: self.size,
+            has_received_at: self.has_received_at,
         }
     }
 }
@@ -205,6 +307,15 @@ pub trait MessageCacheAccess {
     fn expand_keywords(&self, message: &MessageCache) -> impl Iterator<Item = Keyword>;
 
     fn has_keyword(&self, message: &MessageCache, keyword: &Keyword) -> bool;
+
+    /// inbuxa: every message's rank by received date, for a local
+    /// receivedAt sort; `None` when the cache has no dates (see
+    /// `MessagesCache`)
+    fn received_at_order(&self) -> Option<AHashMap<u32, u32>>;
+
+    /// inbuxa: the messages received in `[from, to)` seconds, for a local
+    /// date filter; `None` when the cache has no dates
+    fn received_between(&self, from: u64, to: u64) -> Option<RoaringBitmap>;
 }
 
 impl MessageCacheAccess for MessageStoreCache {
@@ -317,6 +428,43 @@ impl MessageCacheAccess for MessageStoreCache {
 
     fn has_keyword(&self, message: &MessageCache, keyword: &Keyword) -> bool {
         keyword_to_id(self, keyword).is_some_and(|id| message.keywords & (1 << id) != 0)
+    }
+
+    fn received_at_order(&self) -> Option<AHashMap<u32, u32>> {
+        // Ranks rather than the dates themselves: a sorted set holds u32
+        // positions, and dates past 2106 would otherwise tie
+        self.emails.has_received_at.then(|| {
+            let mut order = self
+                .emails
+                .items
+                .iter()
+                .map(|m| (m.received_at, m.document_id))
+                .collect::<Vec<_>>();
+            order.sort_unstable();
+            let mut rank = 0;
+            let mut last = None;
+            order
+                .into_iter()
+                .map(|(received_at, document_id)| {
+                    if last != Some(received_at) {
+                        last = Some(received_at);
+                        rank += 1;
+                    }
+                    (document_id, rank)
+                })
+                .collect()
+        })
+    }
+
+    fn received_between(&self, from: u64, to: u64) -> Option<RoaringBitmap> {
+        self.emails.has_received_at.then(|| {
+            self.emails
+                .items
+                .iter()
+                .filter(|m| (from..to).contains(&m.received_at))
+                .map(|m| m.document_id)
+                .collect()
+        })
     }
 }
 

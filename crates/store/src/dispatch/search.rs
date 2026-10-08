@@ -9,8 +9,8 @@
 use crate::{
     SearchStore, Store,
     search::{
-        IndexDocument, SearchComparator, SearchField, SearchFilter, SearchOperator, SearchQuery,
-        SearchValue,
+        IndexDocument, QueryResults, SearchComparator, SearchField, SearchFilter, SearchOperator,
+        SearchQuery, SearchValue,
         split::{SplitFilter, split_filters},
     },
     write::SearchIndex,
@@ -113,10 +113,17 @@ impl SearchStore {
         };
 
         // Merge results locally
-        let results = SearchQuery::new(query.index)
-            .with_filters(filters)
-            .with_mask(query.mask)
-            .filter();
+        let results = if has_local_filters || has_external_filters {
+            SearchQuery::new(query.index)
+                .with_filters(filters)
+                .with_mask(query.mask)
+                .filter()
+        } else {
+            // inbuxa: only the account filter, which the local filter skips,
+            // and it would answer with nothing: the result is the mask,
+            // sorted by the local comparators below
+            QueryResults::new(query.mask, Vec::new())
+        };
 
         let total_results = results.results().len();
         match total_results.cmp(&1) {
@@ -306,6 +313,57 @@ impl SearchStore {
             SearchStore::ElasticSearch(store) => store.unindex(query).await,
             SearchStore::MeiliSearch(store) => store.unindex(query).await,
         }
+    }
+
+    /// inbuxa: every document's value of one unsigned field in an account
+    /// (one round trip), or `None` when the search store is not SQL and
+    /// callers must keep sorting through the store. ST-6, ST-12: a replica
+    /// answers in a read scope.
+    pub async fn unsigned_values(
+        &self,
+        index: SearchIndex,
+        field: SearchField,
+        account_id: u32,
+    ) -> trc::Result<Option<Vec<(u32, u64)>>> {
+        if let SearchStore::Store(Store::Replicated(store)) = self {
+            if !store.primary.is_pg_or_mysql() {
+                return Ok(None);
+            }
+            return match store.read_target(crate::SUBSPACE_SEARCH_INDEX).await {
+                Some(replica) => match crate::sql_backend!(
+                    &store.replicas[replica].store,
+                    db => db.unsigned_values(index, field.clone(), account_id).await
+                ) {
+                    Ok(values) => {
+                        store.served(replica);
+                        Ok(Some(values))
+                    }
+                    Err(err) => {
+                        store.failed(replica, err);
+                        crate::sql_backend!(&store.primary, db => db.unsigned_values(index, field, account_id).await)
+                            .map(Some)
+                    }
+                },
+                None => {
+                    crate::sql_backend!(&store.primary, db => db.unsigned_values(index, field, account_id).await)
+                        .map(Some)
+                }
+            };
+        }
+        match self {
+            #[cfg(feature = "postgres")]
+            SearchStore::Store(Store::PostgreSQL(store)) => store
+                .unsigned_values(index, field, account_id)
+                .await
+                .map(Some),
+            #[cfg(feature = "mysql")]
+            SearchStore::Store(Store::MySQL(store)) => store
+                .unsigned_values(index, field, account_id)
+                .await
+                .map(Some),
+            _ => Ok(None),
+        }
+        .caused_by(trc::location!())
     }
 
     pub fn internal_fts(&self) -> Option<&Store> {
