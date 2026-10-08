@@ -17,6 +17,7 @@ use std::{
 use crate::Coordinator;
 use async_nats::Client;
 use registry::schema::structs::NatsCoordinator;
+use tokio::sync::watch;
 use trc::ClusterEvent;
 
 pub mod pubsub;
@@ -24,6 +25,7 @@ pub mod pubsub;
 #[derive(Debug)]
 pub struct NatsPubSub {
     client: Client,
+    reporter: Arc<Reporter>,
 }
 
 impl NatsPubSub {
@@ -60,7 +62,7 @@ impl NatsPubSub {
         // starts while NATS is down still joins the cluster once NATS is
         // back, instead of running without a coordinator until restarted;
         // and report the connection going and coming back
-        let reporter = Arc::new(Reporter::default());
+        let reporter = Arc::new(Reporter::new());
         opts = opts.retry_on_initial_connect().event_callback({
             let reporter = reporter.clone();
             move |event| {
@@ -74,9 +76,16 @@ impl NatsPubSub {
             .await
             .map(|client| {
                 reporter.watch_first_connection(client.clone(), connection_timeout);
-                Coordinator::Nats(Arc::new(NatsPubSub { client }))
+                Coordinator::Nats(Arc::new(NatsPubSub { client, reporter }))
             })
             .map_err(|err| format!("Failed to connect to Nats: {}", err))
+    }
+
+    /// inbuxa: counts the client's reconnections. Core NATS delivers at
+    /// most once, so whatever the cluster published while this node was
+    /// away is gone; a watcher drops what those events would have changed.
+    pub fn reconnects(&self) -> watch::Receiver<u64> {
+        self.reporter.reconnects.subscribe()
     }
 
     /// inbuxa: whether the client is connected to a NATS server right now.
@@ -89,21 +98,40 @@ impl NatsPubSub {
 }
 
 /// inbuxa: reports the client's connection events as the server's own.
-#[derive(Default)]
+#[derive(Debug)]
 struct Reporter {
     connected_once: AtomicBool,
     // A failed attempt raises an error each time the client retries, every
     // few seconds while NATS is down: report the first after each change
     error_reported: AtomicBool,
+    /// How many times the connection came back after being lost.
+    reconnects: watch::Sender<u64>,
 }
 
 impl Reporter {
+    fn new() -> Self {
+        Self {
+            connected_once: AtomicBool::new(false),
+            error_reported: AtomicBool::new(false),
+            reconnects: watch::Sender::new(0),
+        }
+    }
+
     fn report(&self, event: async_nats::Event) {
         match event {
             async_nats::Event::Connected => {
-                self.connected_once.store(true, Ordering::Relaxed);
+                let reconnected = self.connected_once.swap(true, Ordering::Relaxed);
                 self.error_reported.store(false, Ordering::Relaxed);
-                trc::event!(Cluster(ClusterEvent::CoordinatorConnected), Type = "nats");
+                if reconnected {
+                    self.reconnects.send_modify(|count| *count += 1);
+                    trc::event!(
+                        Cluster(ClusterEvent::CoordinatorConnected),
+                        Type = "nats",
+                        Details = "Reconnected",
+                    );
+                } else {
+                    trc::event!(Cluster(ClusterEvent::CoordinatorConnected), Type = "nats");
+                }
             }
             async_nats::Event::Disconnected => {
                 self.error_reported.store(false, Ordering::Relaxed);
@@ -167,5 +195,27 @@ impl Reporter {
                 );
             }
         });
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn only_a_connection_that_comes_back_counts() {
+        let reporter = Reporter::new();
+        let watcher = reporter.reconnects.subscribe();
+        reporter.report(async_nats::Event::Connected);
+        assert_eq!(
+            *watcher.borrow(),
+            0,
+            "the first connection is not a reconnect"
+        );
+        reporter.report(async_nats::Event::Disconnected);
+        reporter.report(async_nats::Event::Connected);
+        assert_eq!(*watcher.borrow(), 1);
+        reporter.report(async_nats::Event::Connected);
+        assert_eq!(*watcher.borrow(), 2);
     }
 }
