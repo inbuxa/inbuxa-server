@@ -11,7 +11,7 @@ use common::{
     BuildServer, Inner,
     ipc::{BroadcastEvent, PushEvent, PushNotification, QueueEvent, RegistryChange},
 };
-use registry::types::EnumImpl;
+use registry::{schema::prelude::ObjectType, types::EnumImpl};
 use std::{sync::Arc, time::Duration};
 use tokio::sync::watch;
 use trc::{ClusterEvent, ServerEvent};
@@ -27,6 +27,9 @@ pub fn spawn_broadcast_subscriber(inner: Arc<Inner>, mut shutdown_rx: watch::Rec
 
     tokio::spawn(async move {
         let mut retry_count: u32 = 0;
+        // inbuxa: whether events may have been published while this node
+        // had no subscription
+        let mut lost_events = false;
 
         trc::event!(Cluster(ClusterEvent::SubscriberStart));
 
@@ -43,6 +46,9 @@ pub fn spawn_broadcast_subscriber(inner: Arc<Inner>, mut shutdown_rx: watch::Rec
             let mut stream = match coordinator.subscribe(BROADCAST_TOPIC).await {
                 Ok(stream) => {
                     retry_count = 0;
+                    if std::mem::take(&mut lost_events) {
+                        recover_missed_events(&inner, "Subscribed again").await;
+                    }
                     stream
                 }
                 Err(err) => {
@@ -69,8 +75,28 @@ pub fn spawn_broadcast_subscriber(inner: Arc<Inner>, mut shutdown_rx: watch::Rec
                 }
             };
 
+            // inbuxa: the client subscribes again by itself after a
+            // reconnection, but core NATS delivers at most once, so what the
+            // cluster published meanwhile never arrives
+            let mut reconnects = coordinator.reconnects();
+            if let Some(reconnects) = &mut reconnects {
+                reconnects.mark_unchanged();
+            }
+
             loop {
                 tokio::select! {
+                    changed = async {
+                        match &mut reconnects {
+                            Some(reconnects) => reconnects.changed().await.is_ok(),
+                            None => std::future::pending().await,
+                        }
+                    } => {
+                        if changed {
+                            recover_missed_events(&inner, "Reconnected to the coordinator").await;
+                        } else {
+                            reconnects = None;
+                        }
+                    },
                     message = stream.next() => {
                         match message {
                             Some(message) => {
@@ -234,6 +260,7 @@ pub fn spawn_broadcast_subscriber(inner: Arc<Inner>, mut shutdown_rx: watch::Rec
                                 trc::event!(
                                     Cluster(ClusterEvent::SubscriberDisconnected),
                                 );
+                                lost_events = true;
                                 break;
                             }
                         }
@@ -247,6 +274,37 @@ pub fn spawn_broadcast_subscriber(inner: Arc<Inner>, mut shutdown_rx: watch::Rec
 
         trc::event!(Cluster(ClusterEvent::SubscriberStop));
     });
+}
+
+/// inbuxa: after a gap in which cluster events may have been missed, drops
+/// every local cache that only those events keep fresh and rebuilds the
+/// settings, certificates and blocked addresses from the registry, as the
+/// missed events would have. The message caches check the change log on
+/// each use and need nothing.
+async fn recover_missed_events(inner: &Arc<Inner>, why: &str) {
+    let server = inner.build_server();
+    server.invalidate_all_local_caches();
+    for object in [
+        ObjectType::ClusterRole,
+        ObjectType::Certificate,
+        ObjectType::BlockedIp,
+    ] {
+        match Box::pin(server.reload_registry(RegistryChange::Reload(object))).await {
+            Ok(result) => result.log(),
+            Err(err) => {
+                trc::error!(
+                    err.details("Failed to reload settings after the coordinator came back")
+                        .caused_by(trc::location!())
+                );
+            }
+        }
+    }
+    trc::event!(
+        Cluster(ClusterEvent::CoordinatorConnected),
+        Details = format!(
+            "{why}: events may have been missed; local caches dropped and settings reloaded"
+        ),
+    );
 }
 
 /// Delay before the next subscribe attempt: 1 s, 2 s, 4 s ... capped at 64 s.

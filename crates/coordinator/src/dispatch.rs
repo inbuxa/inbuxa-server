@@ -56,6 +56,16 @@ impl Coordinator {
             _ => None,
         }
     }
+
+    /// inbuxa: a watch on the number of reconnections, for backends that
+    /// report them (NATS); `None` for the others.
+    pub fn reconnects(&self) -> Option<tokio::sync::watch::Receiver<u64>> {
+        match self {
+            #[cfg(feature = "nats")]
+            Coordinator::Nats(store) => Some(store.reconnects()),
+            _ => None,
+        }
+    }
 }
 
 impl PubSubStream {
