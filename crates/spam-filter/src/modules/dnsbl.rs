@@ -2,13 +2,15 @@
  * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
+ *
+ * Modified by Coffey Labs in 2026 for INBUXA.
  */
 
 use super::expression::SpamFilterResolver;
 use crate::SpamFilterContext;
 use common::{
     Server,
-    config::mailstore::spamfilter::{DnsBlServer, Element, IpResolver, Location},
+    config::mailstore::spamfilter::{Element, IpResolver, Location},
     expr::functions::ResolveVariable,
 };
 use mail_auth::common::resolver::ToFqdn;
@@ -65,30 +67,69 @@ pub(crate) async fn check_dnsbl(
         Element::Header | Element::Body | Element::Any => unreachable!(),
     };
 
+    // inbuxa: upstream asked the lists one after the other, so a message
+    // waited for the sum of their answer times. The zones are built first
+    // (they only read the context), the lists not answered from the cache
+    // are asked together, up to the remaining budget, and the tags are
+    // applied afterwards in list order, as before.
+    let budget = max_checks.saturating_sub(checks);
+    let mut lookups = Vec::new();
     for dnsbl in &server.core.spam.dnsbl.servers {
-        if dnsbl.scope == scope
-            && checks < max_checks
-            && let Some(codes) = dnsbl_codes(
-                server,
-                dnsbl,
-                SpamFilterResolver::new(ctx, resolver, location),
-                scope,
-                &mut checks,
+        if dnsbl.scope != scope {
+            continue;
+        }
+        let zone = server
+            .eval_if::<String, _>(
+                &dnsbl.zone,
+                &SpamFilterResolver::new(ctx, resolver, location),
+                ctx.input.span_id,
             )
-            .await
-        {
-            for code in codes.iter() {
-                let tag = server
-                    .eval_if::<String, _>(
-                        &dnsbl.tags,
-                        &SpamFilterResolver::new(ctx, code, location),
-                        ctx.input.span_id,
-                    )
-                    .await;
+            .await;
+        if let Some(zone) = zone {
+            lookups.push((dnsbl, zone));
+        }
+    }
 
-                if let Some(tag) = tag {
-                    ctx.result.add_tag(tag);
-                }
+    let mut answers: Vec<(usize, Option<Arc<[IpResolver]>>)> = Vec::with_capacity(lookups.len());
+    let mut pending = Vec::new();
+    for (position, (_, zone)) in lookups.iter().enumerate() {
+        #[cfg(feature = "test_mode")]
+        if let Some(codes) = test_mode_codes(lookups[position].0, zone) {
+            answers.push((position, codes));
+            continue;
+        }
+        if let Some(codes) = server.inner.cache.dns_rbl.get(zone.as_str()) {
+            answers.push((position, codes));
+        } else if pending.len() < budget {
+            pending.push(position);
+        }
+    }
+    checks += pending.len();
+
+    let resolved = futures::future::join_all(pending.iter().map(|position| {
+        let zone = lookups[*position].1.as_str();
+        async move { (*position, dnsbl_codes(server, zone, scope).await) }
+    }))
+    .await;
+    answers.extend(resolved);
+    answers.sort_unstable_by_key(|(position, _)| *position);
+
+    for (position, codes) in answers {
+        let Some(codes) = codes else {
+            continue;
+        };
+        let dnsbl = lookups[position].0;
+        for code in codes.iter() {
+            let tag = server
+                .eval_if::<String, _>(
+                    &dnsbl.tags,
+                    &SpamFilterResolver::new(ctx, code, location),
+                    ctx.input.span_id,
+                )
+                .await;
+
+            if let Some(tag) = tag {
+                ctx.result.add_tag(tag);
             }
         }
     }
@@ -102,45 +143,37 @@ pub(crate) async fn check_dnsbl(
     }
 }
 
-async fn dnsbl_codes(
-    server: &Server,
-    config: &DnsBlServer,
-    resolver: SpamFilterResolver<'_, impl ResolveVariable>,
-    element: Element,
-    checks: &mut usize,
-) -> Option<Arc<[IpResolver]>> {
-    let time = Instant::now();
-    let zone = server
-        .eval_if::<String, _>(&config.zone, &resolver, resolver.ctx.input.span_id)
-        .await?;
+#[cfg(feature = "test_mode")]
+fn test_mode_codes(
+    config: &common::config::mailstore::spamfilter::DnsBlServer,
+    zone: &str,
+) -> Option<Option<Arc<[IpResolver]>>> {
+    if zone.contains(".11.20.") {
+        let parts = zone.split('.').collect::<Vec<_>>();
 
-    #[cfg(feature = "test_mode")]
-    {
-        if zone.contains(".11.20.") {
-            let parts = zone.split('.').collect::<Vec<_>>();
-
-            return if config.tags.if_then.iter().any(|i| i.expr.items.len() == 3) && parts[0] != "2"
-            {
+        Some(
+            if config.tags.if_then.iter().any(|i| i.expr.items.len() == 3) && parts[0] != "2" {
                 None
             } else {
                 Some(Arc::from([IpResolver::new(
                     format!("127.0.{}.{}", parts[1], parts[0]).parse().unwrap(),
                 )]))
-            };
-        }
+            },
+        )
+    } else {
+        None
     }
+}
 
-    if let Some(codes) = server.inner.cache.dns_rbl.get(zone.as_str()) {
-        return codes;
-    }
-
-    *checks += 1;
+/// Asks one list, caches the answer, and returns the codes it listed.
+async fn dnsbl_codes(server: &Server, zone: &str, element: Element) -> Option<Arc<[IpResolver]>> {
+    let time = Instant::now();
 
     match resolve_zone(server, zone.to_fqdn().as_ref()).await {
         Ok(DnsblAnswer::Listed { ips, expires }) => {
             trc::event!(
                 Spam(SpamEvent::Dnsbl),
-                Hostname = zone.clone(),
+                Hostname = zone.to_string(),
                 Result = ips
                     .iter()
                     .map(|ip| trc::Value::from(ip.to_string()))
@@ -165,7 +198,7 @@ async fn dnsbl_codes(
         Ok(DnsblAnswer::NotListed { expires }) => {
             trc::event!(
                 Spam(SpamEvent::Dnsbl),
-                Hostname = zone.clone(),
+                Hostname = zone.to_string(),
                 Result = trc::Value::None,
                 Details = element.as_str(),
                 Elapsed = time.elapsed()
@@ -184,7 +217,7 @@ async fn dnsbl_codes(
         Err(err) => {
             trc::event!(
                 Spam(SpamEvent::DnsblError),
-                Hostname = zone,
+                Hostname = zone.to_string(),
                 Elapsed = time.elapsed(),
                 Details = element.as_str(),
                 CausedBy = err
