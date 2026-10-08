@@ -244,8 +244,14 @@ impl PostgresStore {
         let conn = self.conn_pool.get().await.map_err(into_pool_error)?;
         let limit = self.timeouts.maintenance;
         let result = tokio::time::timeout(limit, async {
+            // inbuxa: prepared, not cached. The index task deletes a batch
+            // with one `docid = $n` term per document, so each batch shape
+            // is new SQL text, and the per-connection statement cache (no
+            // limit) kept every one of them for the life of the connection,
+            // on both sides. A deletion is maintenance; the extra round
+            // trip to prepare is nothing next to it.
             let s = conn
-                .prepare_cached(&format!("DELETE FROM {table}{where_clause}"))
+                .prepare(&format!("DELETE FROM {table}{where_clause}"))
                 .await
                 .map_err(into_error)?;
 
@@ -260,7 +266,7 @@ impl PostgresStore {
 
             loop {
                 let s = conn
-                    .prepare_cached(&format!(
+                    .prepare(&format!(
                         "DELETE FROM {table} WHERE ctid IN (SELECT ctid FROM {table}{where_clause} LIMIT {chunk_size})"
                     ))
                     .await
