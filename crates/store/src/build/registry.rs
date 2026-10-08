@@ -28,8 +28,12 @@ impl RegistryStore {
                 if !inner.env_recovery_mode && inner.env_recovery_admin.take().is_some() {
                     eprintln!();
                     eprintln!("⚠️  INBUXA_RECOVERY_ADMIN is set, but the");
-                    eprintln!("   server is configured and not in recovery mode, so it is ignored.");
-                    eprintln!("   Remove it from the environment. To use it for recovery, also set");
+                    eprintln!(
+                        "   server is configured and not in recovery mode, so it is ignored."
+                    );
+                    eprintln!(
+                        "   Remove it from the environment. To use it for recovery, also set"
+                    );
                     eprintln!("   INBUXA_RECOVERY_MODE=1.");
                     eprintln!();
                 }
@@ -164,7 +168,7 @@ impl RegistryStore {
             RegistryStoreInner {
                 local_path: PathBuf::from(path),
                 store,
-                node_id: 0,
+                node_id: Default::default(),
                 env_recovery_mode: false,
                 env_recovery_admin: Some(("admin".to_string(), "popolna_zapora".to_string())),
                 env_cluster_role: cluster_role,

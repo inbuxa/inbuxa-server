@@ -23,7 +23,11 @@ use mysql_async::{
 impl MysqlStore {
     pub async fn open(config: structs::MySqlStore) -> Result<Store, String> {
         // inbuxa: ST-15: where the primary is, to tell a replica from it
-        let primary_location = (config.host.clone(), config.port as u16, config.database.clone());
+        let primary_location = (
+            config.host.clone(),
+            config.port as u16,
+            config.database.clone(),
+        );
         let mut opts = OptsBuilder::default()
             .ip_or_hostname(config.host)
             .user(config.auth_username)

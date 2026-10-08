@@ -53,7 +53,11 @@ pub(crate) fn pool_timeouts(connect_timeout: Option<Duration>) -> Timeouts {
 impl PostgresStore {
     pub async fn open(config: structs::PostgreSqlStore) -> Result<Store, String> {
         // inbuxa: ST-15: where the primary is, to tell a replica from it
-        let primary_location = (config.host.clone(), config.port as u16, config.database.clone());
+        let primary_location = (
+            config.host.clone(),
+            config.port as u16,
+            config.database.clone(),
+        );
         let mut cfg = Config::new();
         cfg.dbname = config.database.into();
         cfg.host = config.host.into();

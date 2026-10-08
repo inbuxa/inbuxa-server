@@ -219,7 +219,9 @@ impl SearchStore {
                         crate::sql_backend!(&store.primary, db => db.query(index, filters, sort).await)
                     }
                 },
-                None => crate::sql_backend!(&store.primary, db => db.query(index, filters, sort).await),
+                None => {
+                    crate::sql_backend!(&store.primary, db => db.query(index, filters, sort).await)
+                }
             };
         }
         match self {

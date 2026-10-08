@@ -2,6 +2,8 @@
  * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
+ *
+ * Modified by Coffey Labs in 2026 for INBUXA.
  */
 
 use super::{
@@ -178,9 +180,14 @@ pub fn spawn_push_manager(inner: Arc<Inner>) -> mpsc::Sender<Event> {
             match event_or_timeout {
                 Ok(Some(event)) => match event {
                     Event::Update { account_id } => {
-                        if server.core.jmap.push_total_shards > 1
-                            && account_id % server.core.jmap.push_total_shards
-                                != server.registry().cluster_push_shard()
+                        // INBUXA: the startup load honours the node's role, but
+                        // subscription updates are broadcast to every node, so
+                        // without this check each node registered the
+                        // subscription and the client was pushed once per node.
+                        if !server.core.network.roles.push_notifications
+                            || (server.core.jmap.push_total_shards > 1
+                                && account_id % server.core.jmap.push_total_shards
+                                    != server.registry().cluster_push_shard())
                         {
                             continue;
                         }

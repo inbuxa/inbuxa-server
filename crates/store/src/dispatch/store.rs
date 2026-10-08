@@ -295,7 +295,9 @@ impl Store {
             #[cfg(feature = "rocks")]
             Self::RocksDb(store) => store.purge_store().await,
             Self::Ephemeral(store) => store.purge_store().await,
-            Self::Replicated(store) => crate::sql_backend!(&store.primary, db => db.purge_store().await),
+            Self::Replicated(store) => {
+                crate::sql_backend!(&store.primary, db => db.purge_store().await)
+            }
             Self::None => Err(trc::StoreEvent::NotConfigured.into()),
         }
         .caused_by(trc::location!())

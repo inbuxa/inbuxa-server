@@ -87,12 +87,19 @@ impl RegistryStore {
             return self.write_unhooked(write).await;
         };
         let (object_type, id, before, after) = match &write {
-            RegistryWrite::Insert { object, id } => (object.object_type(), *id, None, Some(*object)),
+            RegistryWrite::Insert { object, id } => {
+                (object.object_type(), *id, None, Some(*object))
+            }
             RegistryWrite::Update {
                 object,
                 id,
                 old_object,
-            } => (object.object_type(), Some(*id), Some(*old_object), Some(*object)),
+            } => (
+                object.object_type(),
+                Some(*id),
+                Some(*old_object),
+                Some(*object),
+            ),
             RegistryWrite::Delete {
                 object_id, object, ..
             } => (object_id.object(), Some(object_id.id()), *object, None),

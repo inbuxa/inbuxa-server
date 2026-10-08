@@ -19,9 +19,9 @@ use registry::{
     schema::{enums::ClusterNodeStatus, structs::ClusterNode},
     types::datetime::UTCDateTime,
 };
-use std::time::Duration;
-use trc::AddContext;
-use utils::snowflake::MAX_NODE_ID;
+use std::{sync::atomic::Ordering, time::Duration};
+use trc::{AddContext, ClusterEvent};
+use utils::snowflake::{MAX_NODE_ID, SnowflakeIdGenerator};
 
 const STALE_NODE_TIMEOUT: u64 = 60 * 60; // 1 hour
 const DEAD_NODE_TIMEOUT: u64 = 60 * 60 * 24; // 24 hours
@@ -50,46 +50,14 @@ struct NodeClaim {
 
 impl RegistryStoreInner {
     pub(super) async fn acquire_node_id(&mut self) -> Result<(), String> {
-        let mut retry_count = 0;
-        let slots = loop {
-            let now = now();
-            let slots = NodeSlot::list(&self.store, now)
-                .await
-                .map_err(|err| format!("Failed to iterate store: {err}"))?;
-            let claim = NodeSlot::claim(&slots, &self.env_hostname)?;
-            let mut batch = BatchBuilder::new();
-
-            batch
-                .assert_value(ValueClass::NodeId(claim.node_id), claim.assert)
-                .set(
-                    ValueClass::NodeId(claim.node_id),
-                    KeySerializer::new(self.env_hostname.len() + U64_LEN)
-                        .write(now)
-                        .write(&self.env_hostname)
-                        .finalize(),
-                );
-
-            match self.store.write(batch.build_all()).await {
-                Ok(_) => {
-                    self.node_id = claim.node_id;
-                    break slots;
-                }
-                Err(err) => {
-                    if err.is_assertion_failure() && retry_count < MAX_LEASE_RETRIES {
-                        retry_count += 1;
-                        continue;
-                    } else {
-                        return Err(format!("Failed to write node id to store: {err}"));
-                    }
-                }
-            }
-        };
+        let (node_id, slots) = NodeSlot::acquire(&self.store, &self.env_hostname).await?;
+        self.node_id.store(node_id, Ordering::Relaxed);
 
         if let Err(err) = NodeSlot::release(
             &self.store,
             slots
                 .iter()
-                .filter(|slot| slot.node_id != self.node_id && slot.is_dead()),
+                .filter(|slot| slot.node_id != node_id && slot.is_dead()),
         )
         .await
         {
@@ -102,7 +70,7 @@ impl RegistryStoreInner {
 
 impl RegistryStore {
     pub fn node_id(&self) -> u16 {
-        self.0.node_id
+        self.0.node_id.load(Ordering::Relaxed)
     }
 
     pub fn refresh_node_id_interval(&self) -> Duration {
@@ -116,7 +84,7 @@ impl RegistryStore {
     }
 
     pub async fn refresh_node_id_lease(&self) -> trc::Result<()> {
-        let node_id = self.0.node_id;
+        let node_id = self.node_id();
         let assert = match NodeSlot::list(&self.0.store, now())
             .await
             .caused_by(trc::location!())?
@@ -125,11 +93,30 @@ impl RegistryStore {
         {
             Some(slot) if slot.is_owned_by(&self.0.env_hostname) => AssertValue::Hash(slot.hash),
             Some(slot) => {
-                return Err(trc::StoreEvent::AssertValueFailed
-                    .into_err()
-                    .details("Node id lease is held by another host")
-                    .ctx(trc::Key::Id, node_id)
-                    .ctx(trc::Key::Hostname, slot.hostname));
+                // INBUXA: another host took this id after the hour of silence,
+                // so this node was cut off from the store for longer than
+                // STALE_NODE_TIMEOUT. Keeping the id would mint snowflake ids
+                // that collide with that host's. Step down and claim a fresh
+                // id instead of only logging it.
+                let (new_node_id, _) = NodeSlot::acquire(&self.0.store, &self.0.env_hostname)
+                    .await
+                    .map_err(|err| {
+                        trc::StoreEvent::UnexpectedError
+                            .into_err()
+                            .details(err)
+                            .ctx(trc::Key::Id, node_id)
+                    })?;
+                self.0.node_id.store(new_node_id, Ordering::Relaxed);
+                SnowflakeIdGenerator::set_node_id(new_node_id as u64);
+
+                trc::event!(
+                    Cluster(ClusterEvent::NodeIdReassigned),
+                    Id = new_node_id,
+                    Hostname = slot.hostname,
+                    Details = format!("Node id {node_id} lease is held by another host"),
+                );
+
+                return Ok(());
             }
             None => AssertValue::None,
         };
@@ -152,7 +139,7 @@ impl RegistryStore {
     }
 
     pub async fn purge_dead_nodes(&self) -> trc::Result<()> {
-        let node_id = self.0.node_id;
+        let node_id = self.node_id();
         let slots = NodeSlot::list(&self.0.store, now())
             .await
             .caused_by(trc::location!())?;
@@ -174,6 +161,43 @@ impl RegistryStore {
 }
 
 impl NodeSlot {
+    // Claims a node id for this hostname: its own slot if it still has one,
+    // otherwise a stale one or the lowest free id. Returns the id and the
+    // slots seen while claiming it.
+    async fn acquire(store: &Store, hostname: &str) -> Result<(u16, Vec<NodeSlot>), String> {
+        let mut retry_count = 0;
+        loop {
+            let now = now();
+            let slots = NodeSlot::list(store, now)
+                .await
+                .map_err(|err| format!("Failed to iterate store: {err}"))?;
+            let claim = NodeSlot::claim(&slots, hostname)?;
+            let mut batch = BatchBuilder::new();
+
+            batch
+                .assert_value(ValueClass::NodeId(claim.node_id), claim.assert)
+                .set(
+                    ValueClass::NodeId(claim.node_id),
+                    KeySerializer::new(hostname.len() + U64_LEN)
+                        .write(now)
+                        .write(hostname)
+                        .finalize(),
+                );
+
+            match store.write(batch.build_all()).await {
+                Ok(_) => return Ok((claim.node_id, slots)),
+                Err(err) => {
+                    if err.is_assertion_failure() && retry_count < MAX_LEASE_RETRIES {
+                        retry_count += 1;
+                        continue;
+                    } else {
+                        return Err(format!("Failed to write node id to store: {err}"));
+                    }
+                }
+            }
+        }
+    }
+
     async fn list(store: &Store, now: u64) -> trc::Result<Vec<NodeSlot>> {
         let mut slots = Vec::new();
 
@@ -346,10 +370,19 @@ mod tests {
     #[test]
     fn status_follows_the_heartbeat() {
         assert_eq!(slot(0).status(), ClusterNodeStatus::Active);
-        assert_eq!(slot(UNRESPONSIVE_NODE_TIMEOUT).status(), ClusterNodeStatus::Active);
-        assert_eq!(slot(UNRESPONSIVE_NODE_TIMEOUT + 1).status(), ClusterNodeStatus::Stale);
+        assert_eq!(
+            slot(UNRESPONSIVE_NODE_TIMEOUT).status(),
+            ClusterNodeStatus::Active
+        );
+        assert_eq!(
+            slot(UNRESPONSIVE_NODE_TIMEOUT + 1).status(),
+            ClusterNodeStatus::Stale
+        );
         assert_eq!(slot(DEAD_NODE_TIMEOUT).status(), ClusterNodeStatus::Stale);
-        assert_eq!(slot(DEAD_NODE_TIMEOUT + 1).status(), ClusterNodeStatus::Inactive);
+        assert_eq!(
+            slot(DEAD_NODE_TIMEOUT + 1).status(),
+            ClusterNodeStatus::Inactive
+        );
     }
 
     #[test]
@@ -359,6 +392,39 @@ mod tests {
         assert_eq!(quiet.status(), ClusterNodeStatus::Stale);
         assert!(!quiet.is_stale());
         assert!(slot(STALE_NODE_TIMEOUT + 1).is_stale());
+    }
+
+    fn owned(node_id: u16, hostname: &str, elapsed: u64) -> NodeSlot {
+        NodeSlot {
+            node_id,
+            hostname: hostname.into(),
+            last_renewal: 0,
+            elapsed,
+            hash: node_id as u64,
+        }
+    }
+
+    #[test]
+    fn a_node_whose_id_was_taken_claims_a_fresh_one() {
+        // mx2 held id 1, was silent for over an hour, and mx3 took it over.
+        // Back online, mx2 must not keep minting ids as node 1.
+        let slots = vec![
+            owned(0, "mail.example.org", 5),
+            owned(1, "mx3.example.org", 5),
+        ];
+        let claim = NodeSlot::claim(&slots, "mx2.example.org").unwrap();
+        assert_eq!(claim.node_id, 2);
+        assert!(matches!(claim.assert, AssertValue::None));
+
+        // Its own slot is preferred whenever it still has one.
+        let slots = vec![
+            owned(0, "mail.example.org", 5),
+            owned(3, "mx2.example.org", 5),
+        ];
+        assert_eq!(
+            NodeSlot::claim(&slots, "mx2.example.org").unwrap().node_id,
+            3
+        );
     }
 
     #[test]
