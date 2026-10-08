@@ -306,14 +306,17 @@ async fn create_search_tables<T: SearchableField + PsqlSearchField + 'static>(
                 .map_err(into_error)?;
             // inbuxa: every sorted query is for one account, so an index led
             // by the account column answers "this account, in this order"
-            // with an ordered scan instead of sorting the account's rows
-            let account_column = SearchField::AccountId.column();
-            let create_index_query = format!(
-                "CREATE INDEX IF NOT EXISTS idx_{table_name}_{account_column}_{column_name} ON {table_name}({account_column}, {column_name})",
-            );
-            conn.execute(&create_index_query, &[])
-                .await
-                .map_err(into_error)?;
+            // with an ordered scan instead of sorting the account's rows.
+            // The tracing table has no account column.
+            if T::primary_keys().contains(&SearchField::AccountId) {
+                let account_column = SearchField::AccountId.column();
+                let create_index_query = format!(
+                    "CREATE INDEX IF NOT EXISTS idx_{table_name}_{account_column}_{column_name} ON {table_name}({account_column}, {column_name})",
+                );
+                conn.execute(&create_index_query, &[])
+                    .await
+                    .map_err(into_error)?;
+            }
         }
     }
 
