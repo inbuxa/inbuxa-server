@@ -20,6 +20,7 @@ use store::{BlobStore, InMemoryStore, RegistryStore, SearchStore, Store};
 
 pub mod archive;
 pub mod blob;
+pub mod blob_cache; // inbuxa: per-node message blob cache
 pub mod branding; // inbuxa: branding BT-1, BT-2
 pub mod dav;
 pub mod document;

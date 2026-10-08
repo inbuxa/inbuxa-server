@@ -2,6 +2,8 @@
  * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
+ *
+ * Modified by Coffey Labs in 2026 for INBUXA.
  */
 
 use super::spool::SmtpSpool;
@@ -294,8 +296,7 @@ impl MessageWrapper {
 
         // Fetch up to MAX_HEADER_SIZE bytes of message headers
         let headers = match server
-            .blob_store()
-            .get_blob(self.message.blob_hash.as_slice(), 0..MAX_HEADER_SIZE)
+            .get_message_blob(self.message.blob_hash.as_slice(), 0..MAX_HEADER_SIZE)
             .await
         {
             Ok(Some(mut buf)) => {

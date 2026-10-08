@@ -271,7 +271,7 @@ async fn accounts(server: &Server, hold: &Hold, asked: &[u32]) -> trc::Result<Ve
 }
 
 async fn blob(server: &Server, hash: &[u8]) -> trc::Result<Option<Vec<u8>>> {
-    server.blob_store().get_blob(hash, 0..usize::MAX).await
+    server.get_message_blob(hash, 0..usize::MAX).await
 }
 
 /// Collects `accounts` under `hold` into a ZIP. Returns its bytes and item

@@ -2,6 +2,8 @@
  * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
+ *
+ * Modified by Coffey Labs in 2026 for INBUXA.
  */
 
 use crate::{Session, protocol::response::Response};
@@ -44,8 +46,7 @@ impl<T: SessionStream> Session<T> {
                     .caused_by(trc::location!())?;
                 if let Some(bytes) = self
                     .server
-                    .blob_store()
-                    .get_blob(metadata.blob_hash.0.as_slice(), 0..usize::MAX)
+                    .get_message_blob(metadata.blob_hash.0.as_slice(), 0..usize::MAX)
                     .await
                     .caused_by(trc::location!())?
                 {

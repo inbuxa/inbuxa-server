@@ -216,6 +216,9 @@ pub struct Caches {
 
     pub dkim_signers: Cache<u32, Arc<DkimSigners>>,
 
+    /// inbuxa: message blobs this node wrote or read recently
+    pub blobs: Option<storage::blob_cache::BlobCache>,
+
     pub dns_txt: CacheWithTtl<Box<str>, Txt>,
     pub dns_mx: CacheWithTtl<Box<str>, RecordSet<MX>>,
     pub dns_ptr: CacheWithTtl<IpAddr, RecordSet<Box<str>>>,

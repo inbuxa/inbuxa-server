@@ -75,8 +75,7 @@ async fn preview(server: &Server, queue_id: u64) -> trc::Result<Option<String>> 
         return Ok(None);
     };
     let Some(raw) = server
-        .blob_store()
-        .get_blob(message.message.blob_hash.as_slice(), 0..usize::MAX)
+        .get_message_blob(message.message.blob_hash.as_slice(), 0..usize::MAX)
         .await?
     else {
         return Ok(None);

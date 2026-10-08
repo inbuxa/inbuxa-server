@@ -457,6 +457,8 @@ impl MessageWrapper {
 
             return false;
         }
+        // inbuxa: delivery and indexing on this node read it straight back
+        server.cache_message_blob(self.message.blob_hash.as_slice(), message.as_ref());
 
         // inbuxa: journaling, JR-1: the copy is taken before the message is
         // queued; if it can't be, the message isn't queued either
