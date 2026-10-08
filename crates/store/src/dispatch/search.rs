@@ -319,6 +319,10 @@ impl SearchStore {
     /// (one round trip), or `None` when the search store is not SQL and
     /// callers must keep sorting through the store. ST-6, ST-12: a replica
     /// answers in a read scope.
+    #[cfg_attr(
+        not(any(feature = "postgres", feature = "mysql")),
+        allow(unused_variables)
+    )]
     pub async fn unsigned_values(
         &self,
         index: SearchIndex,

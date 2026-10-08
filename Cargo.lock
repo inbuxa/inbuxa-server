@@ -8176,6 +8176,7 @@ dependencies = [
  "common",
  "compact_str",
  "decancer",
+ "futures",
  "hashify",
  "hyper",
  "idna",
