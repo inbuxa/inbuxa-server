@@ -1,4 +1,7 @@
-FROM --platform=$BUILDPLATFORM docker.io/lukemathwalker/cargo-chef:latest-rust-slim-trixie@sha256:38dfdbf4fda95c516f873f33032e490baa988b75f7d83c7d12f788f770785b36 AS chef
+# Docker Hub images, pulled through Google's mirror: GitHub's shared runners
+# hit Docker Hub's anonymous pull limit (429), which the mirror is not subject
+# to. Same images, same digests (checked 2026-10-09).
+FROM --platform=$BUILDPLATFORM mirror.gcr.io/lukemathwalker/cargo-chef:latest-rust-slim-trixie@sha256:38dfdbf4fda95c516f873f33032e490baa988b75f7d83c7d12f788f770785b36 AS chef
 WORKDIR /build
 
 FROM --platform=$BUILDPLATFORM chef AS planner
@@ -28,7 +31,7 @@ COPY . .
 RUN RUSTFLAGS="$(cat /flags.txt)" cargo build --target "$(cat /target.txt)" --release -p inbuxa --no-default-features --features "sqlite postgres mysql rocks s3 redis azure nats"
 RUN mv "/build/target/$(cat /target.txt)/release" "/output"
 
-FROM docker.io/debian:trixie-slim
+FROM mirror.gcr.io/library/debian:trixie-slim
 RUN export DEBIAN_FRONTEND=noninteractive && \
     apt-get update && \
     apt-get install -yq --no-install-recommends ca-certificates curl libcap2-bin && \
