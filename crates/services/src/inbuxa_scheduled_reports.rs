@@ -819,6 +819,44 @@ fn failing_facts(reports: &[dlv::Report]) -> BTreeMap<String, String> {
     out
 }
 
+/// RP-5: a finding that stopped failing, in words. Only the keys are kept
+/// between runs, and each key carries what its sentence needs. Past tense,
+/// since a finding also goes when its address or domain does.
+fn fixed_text(key: &str) -> String {
+    if let Some(rest) = key.strip_prefix("ip:") {
+        if let Some((ip, list)) = rest.split_once(":list:") {
+            return format!("{ip} was listed on {list}");
+        }
+        if let Some(ip) = rest.strip_suffix(":ptr") {
+            return format!("{ip} had no reverse DNS");
+        }
+        if let Some(ip) = rest.strip_suffix(":fcrdns") {
+            return format!("{ip}'s reverse DNS didn't point back to it");
+        }
+    } else if let Some((domain, what)) = key
+        .strip_prefix("domain:")
+        .and_then(|rest| rest.split_once(':'))
+    {
+        if let Some(list) = what.strip_prefix("list:") {
+            return format!("{domain} was listed on {list}");
+        }
+        if let Some(ip) = what.strip_prefix("spf:") {
+            return format!("SPF for {domain} didn't let {ip} send");
+        }
+        if let Some(selector) = what.strip_prefix("dkim:") {
+            return format!(
+                "{domain}'s DKIM key {selector} was missing from DNS or wasn't the one signing"
+            );
+        }
+        if what == "mta-sts" {
+            return format!("{domain}'s MTA-STS policy couldn't be fetched");
+        }
+    } else if let Some(name) = key.strip_prefix("cert:") {
+        return format!("No certificate covered {name}");
+    }
+    key.to_string()
+}
+
 async fn deliverability(
     server: &Server,
     tenant: Option<u32>,
@@ -846,8 +884,9 @@ async fn deliverability(
         ]);
     }
     for key in before.iter().filter(|k| !now.contains_key(**k)) {
-        lines.push(format!("Fixed: {key}"));
-        rows.push(vec![key.to_string(), String::new(), "fixed".into()]);
+        let text = fixed_text(key);
+        lines.push(format!("Fixed: {text}"));
+        rows.push(vec![key.to_string(), text, "fixed".into()]);
     }
     let failing = now.keys().cloned().collect();
     if lines.is_empty() {
@@ -1278,6 +1317,44 @@ mod tests {
                 "ip:192.0.2.1:ptr"
             ]
         );
+    }
+
+    #[test]
+    fn fixed_findings_read_as_words() {
+        for (key, text) in [
+            (
+                "ip:192.0.2.1:list:Spamhaus ZEN",
+                "192.0.2.1 was listed on Spamhaus ZEN",
+            ),
+            ("ip:2001:db8::1:ptr", "2001:db8::1 had no reverse DNS"),
+            (
+                "ip:2001:db8::1:fcrdns",
+                "2001:db8::1's reverse DNS didn't point back to it",
+            ),
+            (
+                "domain:example.org:list:Spamhaus DBL",
+                "example.org was listed on Spamhaus DBL",
+            ),
+            (
+                "domain:example.org:spf:2001:db8::1",
+                "SPF for example.org didn't let 2001:db8::1 send",
+            ),
+            (
+                "domain:example.org:dkim:v1-ed25519",
+                "example.org's DKIM key v1-ed25519 was missing from DNS or wasn't the one signing",
+            ),
+            (
+                "domain:example.org:mta-sts",
+                "example.org's MTA-STS policy couldn't be fetched",
+            ),
+            (
+                "cert:mail.example.org",
+                "No certificate covered mail.example.org",
+            ),
+            ("something:new", "something:new"),
+        ] {
+            assert_eq!(fixed_text(key), text, "{key}");
+        }
     }
 
     #[test]
