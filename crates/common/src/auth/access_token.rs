@@ -599,13 +599,13 @@ impl AccessToken {
             || self.has_permission(Permission::Impersonate)
     }
 
-    /// inbuxa: AU-1.6: whether the account is reachable without
-    /// impersonation: its own, a group's it belongs to, or one shared with
-    /// it.
+    /// inbuxa: AU-1.6: whether the whole account is the token's without
+    /// impersonation: its own, or a group's it belongs to. A share doesn't
+    /// count. It grants some folders or calendars, not the account, and an
+    /// `Impersonate` holder reaches everything else in it unchecked, so
+    /// their access to a sharing account is audited too (GHSA-m992-gp7g-wc2j).
     pub fn is_member_directly(&self, account_id: u32) -> bool {
-        self.inner.account_id == account_id
-            || self.inner.member_of.contains(&account_id)
-            || self.inner.access_to.iter().any(|a| a.account_id == account_id)
+        self.inner.account_id == account_id || self.inner.member_of.contains(&account_id)
     }
 
     /// inbuxa: MA-D0: in the account only because it is a group this token

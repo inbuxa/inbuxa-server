@@ -308,8 +308,8 @@ impl Server {
 
     /// AU-1.6: access to another account's data through `Impersonate` (or a
     /// blob through `FetchAnyBlob`), once an hour per session's account and
-    /// target. Access through a share or group membership isn't this: the
-    /// owner granted it.
+    /// target. Group membership isn't this. A share is: it covers only what
+    /// was shared, and nothing tells which part an `Impersonate` holder read.
     pub async fn audit_foreign_access(&self, token: &AccessToken, target_id: u32, blob: bool) {
         if target_id == token.account_id() || token.is_member_directly(target_id) {
             return;
