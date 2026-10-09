@@ -1,0 +1,43 @@
+# SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
+# SPDX-FileCopyrightText: 2026 Coffey Labs LLC
+#
+# SPDX-License-Identifier: AGPL-3.0-only
+#
+# Modified by Coffey Labs in 2026 for INBUXA.
+
+[package]
+name = "sieve-playground"
+description = "WebAssembly build of the server's Sieve interpreter, for the Sieve playground in inbuxa Admin"
+version = "0.1.0"
+edition = "2024"
+license = "AGPL-3.0-only"
+publish = false
+
+# Its own workspace: the server's never builds it, and it builds for
+# wasm32-wasip1 (see build.sh).
+[workspace]
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+# The server's interpreter exactly: the vendored copy the root Cargo.toml
+# patches in, renamed extensions included.
+sieve-rs = { path = "../../vendor/sieve-rs" }
+mail-parser = { version = "0.11", features = ["full_encoding"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+# What the server's function modules (src/functions) use; hyper's Uri is
+# http's, under the name the modules import it by.
+http = "1"
+idna = "1.1"
+whatlang = "0.18"
+
+[profile.release]
+opt-level = "z"
+lto = true
+codegen-units = 1
+panic = "abort"
+
+[patch.crates-io]
+gethostname = { path = "shim/gethostname" }

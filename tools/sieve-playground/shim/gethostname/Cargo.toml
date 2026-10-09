@@ -1,0 +1,13 @@
+# SPDX-FileCopyrightText: 2026 Coffey Labs LLC
+#
+# SPDX-License-Identifier: AGPL-3.0-only
+
+# Stands in for gethostname, which mail-builder (through sieve-rs) builds by
+# default and which has no WASI implementation. The playground has no host
+# name: generated messages take local_hostname from the settings.
+[package]
+name = "gethostname"
+version = "1.1.0"
+edition = "2024"
+license = "AGPL-3.0-only"
+publish = false
