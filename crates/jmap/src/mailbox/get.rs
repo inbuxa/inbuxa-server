@@ -51,7 +51,7 @@ impl MailboxGet for Server {
         let account_id = request.account_id.document_id();
         let personal_id = access_token.personal_id(account_id, Collection::Mailbox);
         let cache = self.get_cached_messages(account_id).await?;
-        let shared_ids = if access_token.is_shared(account_id) {
+        let shared_ids = if access_token.reads_through_share(account_id) {
             cache.shared_mailboxes(access_token, Acl::Read).into()
         } else {
             None
@@ -137,7 +137,7 @@ impl MailboxGet for Server {
                             .into(),
                     ),
                     MailboxProperty::MyRights => {
-                        if access_token.is_shared(account_id) {
+                        if access_token.reads_through_share(account_id) {
                             JmapRights::rights::<Mailbox>(
                                 cached_mailbox.acls.as_slice().effective_acl(access_token),
                             )

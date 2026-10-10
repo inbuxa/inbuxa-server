@@ -2,6 +2,8 @@
  * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
+ *
+ * Modified by Coffey Labs in 2026 for INBUXA.
  */
 
 use crate::{DavResources, auth::AccessToken};
@@ -22,7 +24,7 @@ impl DavResources {
         for resource in &self.resources {
             if let Some(acls) = resource.acls() {
                 for acl in acls {
-                    if access_token.is_member(acl.account_id) {
+                    if access_token.is_member_directly(acl.account_id) {
                         let mut grants = acl.grants;
                         grants.intersection(&check_acls);
                         if grants == check_acls || (match_any && !grants.is_empty()) {
@@ -102,7 +104,7 @@ impl DavResources {
                 && let Some(acls) = resource.acls()
             {
                 for acl in acls {
-                    if access_token.is_member(acl.account_id) {
+                    if access_token.is_member_directly(acl.account_id) {
                         let mut grants = acl.grants;
                         grants.intersection(&check_acls);
                         return !grants.is_empty();
@@ -123,7 +125,7 @@ impl DavResources {
                 && let Some(acls) = resource.acls()
             {
                 for acl in acls {
-                    if access_token.is_member(acl.account_id) {
+                    if access_token.is_member_directly(acl.account_id) {
                         account_acls.union(&acl.grants);
                     }
                 }

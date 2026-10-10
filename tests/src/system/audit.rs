@@ -253,7 +253,7 @@ pub async fn test(test: &mut TestServer) {
             &mail,
             json!([["Mailbox/set", {
                 "accountId": sharer.id_string(),
-                "update": {inbox: {format!("shareWith/{admin_id}"): {"mayReadItems": true}}}
+                "update": {inbox.clone(): {format!("shareWith/{admin_id}"): {"mayReadItems": true}}}
             }, "0"]]),
         )
         .await;
@@ -280,6 +280,50 @@ pub async fn test(test: &mut TestServer) {
         access[0]["target"]["name"], "auditshare@example.org",
         "test 3b"
     );
+
+    // Test 3c (#186): in an account that shared with them, an administrator
+    // reads what was shared, with the share's rights: not every folder, and
+    // not folders shared with someone else.
+    let sent = mailboxes
+        .0
+        .pointer("/methodResponses/0/1/list")
+        .and_then(|list| list.as_array())
+        .and_then(|list| list.iter().find(|m| m["role"] == "sent"))
+        .and_then(|m| m["id"].as_str())
+        .unwrap_or_else(|| panic!("test 3c: no Sent in {}", mailboxes.0))
+        .to_string();
+    let shared = sharer
+        .jmap_request(
+            &mail,
+            json!([["Mailbox/set", {
+                "accountId": sharer.id_string(),
+                "update": {sent: {format!("shareWith/{}", user.id_string()): {"mayReadItems": true}}}
+            }, "0"]]),
+        )
+        .await;
+    assert!(
+        shared
+            .0
+            .pointer("/methodResponses/0/1/updated")
+            .is_some_and(|updated| !updated.is_null()),
+        "test 3c: share: {}",
+        shared.0
+    );
+    let response = admin
+        .jmap_request(
+            &mail,
+            json!([["Mailbox/get", {"accountId": sharer.id_string(), "ids": null, "properties": ["id", "myRights"]}, "0"]]),
+        )
+        .await;
+    let list = response
+        .0
+        .pointer("/methodResponses/0/1/list")
+        .and_then(|list| list.as_array())
+        .unwrap_or_else(|| panic!("test 3c: {}", response.0));
+    assert_eq!(list.len(), 1, "test 3c: {}", response.0);
+    assert_eq!(list[0]["id"], inbox.as_str(), "test 3c");
+    assert_eq!(list[0]["myRights"]["mayReadItems"], true, "test 3c");
+    assert_eq!(list[0]["myRights"]["mayDelete"], false, "test 3c");
 
     // AU-9: a plain user can't read the audit log
     let plain = Account::new(

@@ -71,7 +71,7 @@ impl FileNodeGet for Server {
             )
             .await?;
         // TODO: draft-14 section 5 case 2 - ancestors of shared nodes should be discoverable with mayRead=false
-        let file_node_ids = if access_token.is_member(account_id) {
+        let file_node_ids = if access_token.reads_as_owner(account_id) {
             cache
                 .resources
                 .iter()
@@ -169,7 +169,7 @@ impl FileNodeGet for Server {
                     FileNodeProperty::MyRights => {
                         result.insert_unchecked(
                             FileNodeProperty::MyRights,
-                            if access_token.is_shared(account_id) {
+                            if access_token.reads_through_share(account_id) {
                                 JmapRights::rights::<file_node::FileNode>(
                                     file_node.acls.effective_acl(access_token),
                                 )

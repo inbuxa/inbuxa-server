@@ -356,7 +356,7 @@ impl EmailQuery for Server {
                     .with_filters(filters)
                     .with_comparators(comparators)
                     .with_account_id(account_id)
-                    .with_mask(if access_token.is_shared(account_id) {
+                    .with_mask(if access_token.reads_through_share(account_id) {
                         cached_messages.shared_messages(access_token, Acl::ReadItems)
                     } else {
                         cached_messages

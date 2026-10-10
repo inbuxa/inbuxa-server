@@ -134,7 +134,7 @@ impl ChangesLookup for Server {
         };
         let account_id = request.account_id.document_id();
 
-        let allowed_ids: Option<RoaringBitmap> = if access_token.is_member(account_id) {
+        let allowed_ids: Option<RoaringBitmap> = if access_token.reads_as_owner(account_id) {
             None
         } else {
             Some(match object {

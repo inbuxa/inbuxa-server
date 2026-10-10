@@ -2,6 +2,8 @@
  * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
+ *
+ * Modified by Coffey Labs in 2026 for INBUXA.
  */
 
 use crate::auth::AccessToken;
@@ -27,7 +29,7 @@ impl EffectiveAcl for &[AclGrant] {
     fn effective_acl(&self, access_token: &AccessToken) -> Bitmap<Acl> {
         let mut acl = Bitmap::<Acl>::new();
         for item in self.iter() {
-            if access_token.is_member(item.account_id) {
+            if access_token.is_member_directly(item.account_id) {
                 acl.union(&item.grants);
             }
         }
@@ -40,7 +42,7 @@ impl EffectiveAcl for ArchivedVec<ArchivedAclGrant> {
     fn effective_acl(&self, access_token: &AccessToken) -> Bitmap<Acl> {
         let mut acl = Bitmap::<Acl>::new();
         for item in self.iter() {
-            if access_token.is_member(item.account_id.into()) {
+            if access_token.is_member_directly(item.account_id.into()) {
                 acl.union_raw(item.grants.bitmap);
             }
         }

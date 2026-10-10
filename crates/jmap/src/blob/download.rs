@@ -116,7 +116,7 @@ impl BlobDownload for Server {
                             collection,
                             document_id,
                         } => {
-                            if access_token.is_member(*account_id) {
+                            if access_token.reads_as_owner(*account_id) {
                                 // inbuxa: AU-1.6: another account's blob
                                 self.audit_foreign_access(access_token, *account_id, true)
                                     .await;

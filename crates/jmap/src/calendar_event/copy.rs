@@ -2,6 +2,8 @@
  * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
+ *
+ * Modified by Coffey Labs in 2026 for INBUXA.
  */
 
 use crate::{
@@ -90,7 +92,7 @@ impl JmapCalendarEventCopy for Server {
             )
             .await
             .caused_by(trc::location!())?;
-        let from_calendar_event_ids = if access_token.is_member(from_account_id) {
+        let from_calendar_event_ids = if access_token.reads_as_owner(from_account_id) {
             from_cache.document_ids(false).collect::<RoaringBitmap>()
         } else {
             from_cache.shared_items(access_token, [Acl::ReadItems], true)

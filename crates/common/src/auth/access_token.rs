@@ -608,6 +608,25 @@ impl AccessToken {
         self.inner.account_id == account_id || self.inner.member_of.contains(&account_id)
     }
 
+    /// inbuxa: #186: an account that shared something with this token and
+    /// isn't its own or a group's it belongs to. Reads there go through the
+    /// share even for an `Impersonate` holder, so an administrator sees what
+    /// was shared with them, with the share's rights, like anyone else.
+    /// Writes still follow `is_member`.
+    pub fn reads_through_share(&self, account_id: u32) -> bool {
+        !self.is_member_directly(account_id)
+            && self
+                .inner
+                .access_to
+                .iter()
+                .any(|a| a.account_id == account_id)
+    }
+
+    /// inbuxa: #186: reads see the whole account (see `reads_through_share`).
+    pub fn reads_as_owner(&self, account_id: u32) -> bool {
+        self.is_member(account_id) && !self.reads_through_share(account_id)
+    }
+
     /// inbuxa: MA-D0: in the account only because it is a group this token
     /// belongs to. Such a member has the group's mailbox but may not share it
     /// on: who is in a group is an administrator's decision, and a share

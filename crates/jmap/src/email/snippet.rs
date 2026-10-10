@@ -2,6 +2,8 @@
  * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
+ *
+ * Modified by Coffey Labs in 2026 for INBUXA.
  */
 
 use common::{Server, auth::AccessToken};
@@ -98,7 +100,7 @@ impl EmailSearchSnippet for Server {
             .get_cached_messages(account_id)
             .await
             .caused_by(trc::location!())?;
-        let document_ids = if access_token.is_member(account_id) {
+        let document_ids = if access_token.reads_as_owner(account_id) {
             cached_messages.email_document_ids()
         } else {
             cached_messages.shared_messages(access_token, Acl::ReadItems)

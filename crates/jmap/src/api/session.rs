@@ -116,7 +116,7 @@ impl SessionHandler for Server {
 
         // Add secondary accounts
         for &account_id in access_token.secondary_ids() {
-            let is_owner = access_token.is_member(account_id);
+            let is_owner = access_token.reads_as_owner(account_id);
             let Some(account) = self
                 .try_account(account_id)
                 .await
