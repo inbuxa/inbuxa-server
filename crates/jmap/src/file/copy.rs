@@ -98,7 +98,7 @@ impl FileNodeCopy for Server {
             )
             .await
             .caused_by(trc::location!())?;
-        let from_node_ids = if access_token.is_member(from_account_id) {
+        let from_node_ids = if access_token.reads_as_owner(from_account_id) {
             from_cache
                 .resources
                 .iter()

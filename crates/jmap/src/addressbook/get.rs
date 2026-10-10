@@ -60,7 +60,7 @@ impl AddressBookGet for Server {
                 SyncCollection::AddressBook,
             )
             .await?;
-        let address_book_ids = if access_token.is_member(account_id) {
+        let address_book_ids = if access_token.reads_as_owner(account_id) {
             cache.document_ids(true).collect::<RoaringBitmap>()
         } else {
             cache.shared_containers(access_token, [Acl::Read, Acl::ReadItems], true)
@@ -177,7 +177,7 @@ impl AddressBookGet for Server {
                     AddressBookProperty::MyRights => {
                         result.insert_unchecked(
                             AddressBookProperty::MyRights,
-                            if access_token.is_shared(account_id) {
+                            if access_token.reads_through_share(account_id) {
                                 JmapRights::rights::<addressbook::AddressBook>(
                                     address_book.acls.effective_acl(access_token),
                                 )

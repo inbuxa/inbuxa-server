@@ -73,7 +73,7 @@ impl CalendarGet for Server {
                 SyncCollection::Calendar,
             )
             .await?;
-        let is_owner = access_token.is_member(account_id);
+        let is_owner = access_token.reads_as_owner(account_id);
         let calendar_ids = if is_owner {
             cache.document_ids(true).collect::<RoaringBitmap>()
         } else {
@@ -250,7 +250,7 @@ impl CalendarGet for Server {
                     CalendarProperty::MyRights => {
                         result.insert_unchecked(
                             CalendarProperty::MyRights,
-                            if access_token.is_shared(account_id) {
+                            if access_token.reads_through_share(account_id) {
                                 JmapRights::rights::<calendar::Calendar>(
                                     calendar.acls.effective_acl(access_token),
                                 )

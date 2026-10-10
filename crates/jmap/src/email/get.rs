@@ -112,7 +112,7 @@ impl EmailGet for Server {
             .get_cached_messages(account_id)
             .await
             .caused_by(trc::location!())?;
-        let message_ids = if access_token.is_member(account_id) {
+        let message_ids = if access_token.reads_as_owner(account_id) {
             cache.email_document_ids()
         } else {
             cache.shared_messages(access_token, Acl::ReadItems)

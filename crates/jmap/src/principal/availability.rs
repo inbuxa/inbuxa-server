@@ -2,6 +2,8 @@
  * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
+ *
+ * Modified by Coffey Labs in 2026 for INBUXA.
  */
 
 use crate::{calendar::Availability, calendar_event::CalendarSyntheticId};
@@ -118,7 +120,7 @@ impl PrincipalGetAvailability for Server {
 
             // Obtain shared ids
             let is_account_owner = principal_id == account_id;
-            let shared_ids = if !access_token.is_member(account_id) {
+            let shared_ids = if !access_token.reads_as_owner(account_id) {
                 // Condition: The user has the "mayReadFreeBusy" permission for the calendar.
                 let shared_ids = resources.shared_items(
                     access_token,

@@ -2,6 +2,8 @@
  * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
+ *
+ * Modified by Coffey Labs in 2026 for INBUXA.
  */
 
 use crate::{api::query::QueryResponseBuilder, changes::state::JmapCacheState};
@@ -193,7 +195,7 @@ impl FileNodeQuery for Server {
 
         let results = SearchQuery::new(SearchIndex::InMemory)
             .with_filters(filters)
-            .with_mask(if access_token.is_shared(account_id) {
+            .with_mask(if access_token.reads_through_share(account_id) {
                 cache.shared_documents(access_token, [Acl::Read, Acl::ReadItems], true)
             } else {
                 cache.resources.iter().map(|r| r.document_id).collect()

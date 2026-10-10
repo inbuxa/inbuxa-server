@@ -44,7 +44,7 @@ impl ThreadGet for Server {
             .get_cached_messages(account_id)
             .await
             .caused_by(trc::location!())?;
-        let shared_ids = if access_token.is_shared(account_id) {
+        let shared_ids = if access_token.reads_through_share(account_id) {
             Some(cache.shared_messages(access_token, Acl::ReadItems))
         } else {
             None

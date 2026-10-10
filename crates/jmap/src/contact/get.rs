@@ -2,6 +2,8 @@
  * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
+ *
+ * Modified by Coffey Labs in 2026 for INBUXA.
  */
 
 use crate::changes::state::JmapCacheState;
@@ -52,7 +54,7 @@ impl ContactCardGet for Server {
                 SyncCollection::AddressBook,
             )
             .await?;
-        let contact_ids = if access_token.is_member(account_id) {
+        let contact_ids = if access_token.reads_as_owner(account_id) {
             cache.document_ids(false).collect::<RoaringBitmap>()
         } else {
             cache.shared_items(access_token, [Acl::ReadItems], true)
