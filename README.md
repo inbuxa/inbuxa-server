@@ -10,6 +10,7 @@
   <a href="LICENSES/AGPL-3.0-only.txt"><img alt="License: AGPL-3.0-only" src="https://img.shields.io/badge/license-AGPL--3.0--only-2dd4bf?style=flat-square"></a>
   <a href="https://git.coffeylabs.org/inbuxa/inbuxa-server/releases/latest"><img alt="Latest release" src="https://img.shields.io/gitea/v/release/inbuxa/inbuxa-server?gitea_url=https%3A%2F%2Fgit.coffeylabs.org&label=release&color=2dd4bf&style=flat-square"></a>
   <a href="https://docs.inbuxa.org/install/server/"><img alt="Documentation: docs.inbuxa.org" src="https://img.shields.io/badge/docs-docs.inbuxa.org-0ea5e9?style=flat-square"></a>
+  <a href="https://community.coffeylabs.org/c/inbuxa/5"><img alt="Forum: community.coffeylabs.org" src="https://img.shields.io/badge/forum-community.coffeylabs.org-0f766e?style=flat-square"></a>
   <a href="https://discord.gg/nqcY4TKfAn"><img alt="Chat on Discord" src="https://img.shields.io/discord/1523538164084637797?label=discord&logo=discord&logoColor=white&color=5865f2&style=flat-square"></a>
 </p>
 
