@@ -221,6 +221,66 @@ pub async fn test(test: &mut TestServer) {
         "test 3"
     );
 
+    // Test 3b, AU-1.6 (GHSA-m992-gp7g-wc2j): an account that shared one
+    // folder with the administrator is still audited when the administrator
+    // reaches the rest of it. A share used to count as the owner's grant for
+    // the whole account, so nothing was recorded.
+    let share_secret = "another-secret-password-5521";
+    let sharer_id = admin
+        .create_user_account(
+            "auditshare@example.org",
+            share_secret,
+            "Audit sharer",
+            &[],
+            vec![],
+        )
+        .await
+        .id();
+    let sharer = Account::new("auditshare@example.org", share_secret, &[], "", sharer_id);
+    let mail = ["urn:ietf:params:jmap:core", "urn:ietf:params:jmap:mail"];
+    let get_mailboxes = json!([["Mailbox/get", {"accountId": sharer.id_string(), "ids": null}, "0"]]);
+    let mailboxes = sharer.jmap_request(&mail, get_mailboxes.clone()).await;
+    let inbox = mailboxes
+        .0
+        .pointer("/methodResponses/0/1/list")
+        .and_then(|list| list.as_array())
+        .and_then(|list| list.iter().find(|m| m["role"] == "inbox"))
+        .and_then(|m| m["id"].as_str())
+        .unwrap_or_else(|| panic!("test 3b: no Inbox in {}", mailboxes.0))
+        .to_string();
+    let shared = sharer
+        .jmap_request(
+            &mail,
+            json!([["Mailbox/set", {
+                "accountId": sharer.id_string(),
+                "update": {inbox: {format!("shareWith/{admin_id}"): {"mayReadItems": true}}}
+            }, "0"]]),
+        )
+        .await;
+    assert!(
+        shared
+            .0
+            .pointer("/methodResponses/0/1/updated")
+            .is_some_and(|updated| !updated.is_null()),
+        "test 3b: share: {}",
+        shared.0
+    );
+    let response = admin.jmap_request(&mail, get_mailboxes).await;
+    assert_eq!(
+        response.0.pointer("/methodResponses/0/0"),
+        Some(&json!("Mailbox/get")),
+        "test 3b: {}",
+        response.0
+    );
+    let access = admin
+        .audit(json!({"action": "accountAccess", "accountId": sharer.id_string()}))
+        .await;
+    assert_eq!(access.len(), 1, "test 3b: {access:?}");
+    assert_eq!(
+        access[0]["target"]["name"], "auditshare@example.org",
+        "test 3b"
+    );
+
     // AU-9: a plain user can't read the audit log
     let plain = Account::new(
         "audituser@example.org",
