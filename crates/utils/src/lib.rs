@@ -2,6 +2,8 @@
  * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
+ *
+ * Modified by Coffey Labs in 2026 for INBUXA.
  */
 
 #![warn(clippy::large_futures)]
@@ -443,6 +445,35 @@ pub fn is_valid_domain(domain: &str) -> bool {
         || domain
             .rsplit_once('.')
             .is_some_and(|(_, tld)| RESERVED_TLDS.contains(&tld))
+        || has_private_suffix(domain, &PRIVATE_TLDS)
+}
+
+// inbuxa: networks that run their own DNS can name their own top-level
+// domains in INBUXA_PRIVATE_TLDS (comma or space separated), which are then
+// accepted alongside the reserved ones above. It is read from the environment
+// because the setup wizard needs it before any configuration exists.
+static PRIVATE_TLDS: std::sync::LazyLock<Vec<String>> = std::sync::LazyLock::new(|| {
+    std::env::var("INBUXA_PRIVATE_TLDS")
+        .map(|value| parse_private_tlds(&value))
+        .unwrap_or_default()
+});
+
+fn parse_private_tlds(value: &str) -> Vec<String> {
+    value
+        .split(|ch: char| ch == ',' || ch.is_whitespace())
+        .map(|tld| tld.trim_matches('.'))
+        .filter(|tld| !tld.is_empty())
+        .filter_map(|tld| idna::domain_to_ascii(tld).ok())
+        .collect()
+}
+
+fn has_private_suffix(domain: &str, suffixes: &[String]) -> bool {
+    suffixes.iter().any(|suffix| {
+        domain == suffix
+            || domain
+                .strip_suffix(suffix.as_str())
+                .is_some_and(|rest| rest.ends_with('.'))
+    })
 }
 
 #[cfg(test)]
@@ -508,6 +539,22 @@ mod tests {
         assert_eq!(sanitize_email("user@co.uk").as_deref(), Some("user@co.uk"));
         assert_eq!(sanitize_email("user@com"), None);
         assert_eq!(sanitize_email("user@example.invalidtld"), None);
+    }
+
+    #[test]
+    fn private_tlds_are_parsed_and_matched() {
+        use super::{has_private_suffix, parse_private_tlds};
+
+        let tlds = parse_private_tlds(" .MyOwnLab, home.arpa  lab,,");
+        assert_eq!(tlds, ["myownlab", "home.arpa", "lab"]);
+
+        assert!(has_private_suffix("myownlab", &tlds));
+        assert!(has_private_suffix("mail.myownlab", &tlds));
+        assert!(has_private_suffix("corp.home.arpa", &tlds));
+        assert!(!has_private_suffix("notmyownlab", &tlds));
+        assert!(!has_private_suffix("mail.notmyownlab", &tlds));
+        assert!(!has_private_suffix("example.invalidtld", &tlds));
+        assert!(!has_private_suffix("mail.myownlab", &[]));
     }
 
     #[test]
