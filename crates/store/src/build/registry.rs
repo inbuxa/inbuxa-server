@@ -63,7 +63,7 @@ impl RegistryStore {
                     eprintln!();
                     eprintln!("This password is shown only once. To pin a credential");
                     eprintln!("instead, set INBUXA_RECOVERY_ADMIN=admin:<password> in the");
-                    eprintln!("env file.");
+                    eprintln!("server's environment and restart it.");
                     eprintln!("════════════════════════════════════════════════════════════");
                     eprintln!();
                     inner.env_recovery_admin = Some(("admin".to_string(), password));
