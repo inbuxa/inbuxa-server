@@ -11,6 +11,23 @@ and it should be worth that.
 
 Small fixes — a bug, a typo, a test — need no ceremony. Send them.
 
+## Sending a change
+
+New accounts on git.coffeylabs.org can file issues but can't push or fork.
+Until you have repository access, open an
+[issue](https://git.coffeylabs.org/inbuxa/inbuxa-server/issues) for the change, or say hello
+on [community.coffeylabs.org](https://community.coffeylabs.org), and attach the
+change to the issue as a patch:
+
+```sh
+git format-patch origin/main --stdout > my-change.patch
+```
+
+Repository access goes to volunteers we have worked with; a few good issues or
+patches is the usual way in. After that you push a branch here and open a pull
+request. The GitHub copy is a read-only mirror, so pull requests opened
+there are not merged.
+
 ## How a change lands
 
 `main` is protected. It cannot be force-pushed or deleted, and a change
