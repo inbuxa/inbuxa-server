@@ -20,8 +20,8 @@ UDP answer.
 
 None. Each directory is `cargo package --no-verify` of that commit (the
 manifest normalized, so it builds outside hickory's workspace), without
-`Cargo.lock` and `Cargo.toml.orig`. `.cargo_vcs_info.json` records the
-commit.
+`Cargo.lock`, `Cargo.toml.orig` and `.cargo_vcs_info.json` (the
+repository ignores dotfiles; the commit is recorded above).
 
 Both answers hickory 0.26.3 called bogus in production (an insecure
 delegation below an unsigned zone, and a signed CNAME to a name without the
