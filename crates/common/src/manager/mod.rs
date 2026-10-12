@@ -25,6 +25,8 @@ pub mod first_party;
 pub mod granted_permissions; // inbuxa: permissions added after roles were stored
 pub mod restore;
 pub mod spam_rules; // inbuxa: rules bundled with the server
+#[cfg(target_os = "linux")]
+pub mod systemd;
 
 pub const SPAM_TRAINER_KEY: &[u8] = "INBUXA_SPAM_TRAIN_DATA.lz4".as_bytes();
 pub const SPAM_CLASSIFIER_KEY: &[u8] = "INBUXA_SPAM_CLASSIFIER_MODEL.lz4".as_bytes();

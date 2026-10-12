@@ -12,5 +12,6 @@
 # because CI builds from a checkout and only the image build has a context.
 !vendor
 
+!.cargo
 !Cargo.lock
 !Cargo.toml

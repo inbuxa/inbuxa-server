@@ -11,6 +11,8 @@
 #![warn(clippy::cast_possible_wrap)]
 #![warn(clippy::cast_sign_loss)]
 
+#[cfg(target_os = "linux")]
+use common::manager::systemd::ServiceState;
 use common::{
     BuildServer, Inner,
     config::server::{Listener, ServerProtocol},
@@ -29,6 +31,12 @@ use tokio::sync::watch;
 use trc::Collector;
 use utils::wait_for_shutdown;
 
+#[cfg(all(
+    target_arch = "x86_64",
+    target_feature = "sse4.2",
+    any(target_os = "linux", target_os = "freebsd")
+))]
+mod cpu;
 #[cfg(feature = "dev_mode")]
 pub mod test_data;
 
@@ -106,8 +114,14 @@ async fn main() -> std::io::Result<()> {
     let inner = init.inner.clone();
     spawn_broadcast_subscriber(init.inner, shutdown_rx);
 
+    #[cfg(target_os = "linux")]
+    ServiceState::Ready.notify();
+
     // Wait for shutdown signal
     wait_for_shutdown().await;
+
+    #[cfg(target_os = "linux")]
+    ServiceState::Stopping.notify();
 
     // inbuxa: hand back the task locks this node holds, so other nodes can
     // run those tasks now rather than when the locks expire

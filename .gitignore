@@ -11,6 +11,7 @@ run.sh
 !.github
 !.gitlab-ci.yml
 !.gitea
+!.cargo
 CLAUDE.md
 
 # The cutover rehearsal writes its fixture and state here.
