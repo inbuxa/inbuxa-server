@@ -436,7 +436,9 @@ impl TlsaLookup for Server {
 }
 
 // inbuxa: hickory 0.26.3 calls some valid answers bogus, and the queue then
-// retries those hosts until the message expires. Two cases seen in production:
+// retries those hosts until the message expires. Two cases seen in production
+// (the hickory vendored since upstream v0.16.26 gets both right in the
+// `--ignored` tests below; this stays as the fallback):
 //
 // - A zone delegated beneath an unsigned zone, such as `l.google.com` under
 //   `google.com`. To prove the delegation insecure, hickory wants an SOA
@@ -844,7 +846,10 @@ mod tests {
     }
 
     // Needs the network: a signed MX pointing into a zone delegated beneath an
-    // unsigned one. Run with `--ignored` to check a hickory upgrade.
+    // unsigned one. Run with `--ignored` to check a hickory upgrade. hickory
+    // 0.26.3 called it bogus and the recheck proved it insecure; the vendored
+    // hickory proves it itself. Either way the answer has to come out insecure.
+    // The TLSA test below prints whether hickory alone gets its case right.
     #[tokio::test]
     #[ignore]
     async fn validated_lookup_proves_delegation_below_unsigned_zone() {
@@ -870,12 +875,17 @@ mod tests {
         };
         let (dnssec, plain) = (build(true), build(false));
 
-        let validated =
-            validated_lookup(&dnssec, &plain, name("aspmx.l.google.com."), RecordType::A)
-                .await
-                .unwrap();
-        assert!(validated.insecure);
+        let query = name("aspmx.l.google.com.");
+        let validated = validated_lookup(&dnssec, &plain, query.clone(), RecordType::A)
+            .await
+            .unwrap();
         assert!(!validated.lookup.answers().is_empty());
+        let status = if validated.insecure {
+            DnssecStatus::Insecure
+        } else {
+            tlsa_base_status(&query, validated.lookup.answers(), RecordType::A)
+        };
+        assert_eq!(status, DnssecStatus::Insecure);
     }
 
     // Needs the network: a TLSA name that is a signed CNAME to the zone apex,

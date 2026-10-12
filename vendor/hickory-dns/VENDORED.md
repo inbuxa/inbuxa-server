@@ -23,9 +23,12 @@ manifest normalized, so it builds outside hickory's workspace), without
 `Cargo.lock` and `Cargo.toml.orig`. `.cargo_vcs_info.json` records the
 commit.
 
-The signed-CNAME-to-NODATA validation bug is not fixed on that branch, so
-`validated_lookup` in `crates/smtp/src/outbound/dane/dnssec.rs` still
-rechecks bogus answers.
+Both answers hickory 0.26.3 called bogus in production (an insecure
+delegation below an unsigned zone, and a signed CNAME to a name without the
+type asked for) validate with this copy: the `--ignored` tests at the end of
+`crates/smtp/src/outbound/dane/dnssec.rs` show it, the TLSA one through
+Hetzner's resolver (2026-10-12). `validated_lookup` there still rechecks
+answers hickory calls bogus, as a fallback.
 
 ## Updating
 
