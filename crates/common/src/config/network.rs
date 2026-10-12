@@ -451,7 +451,10 @@ impl Http {
         let cors_origins = if use_permissive_cors {
             Vec::new()
         } else {
-            crate::manager::first_party::front_end_origins()
+            let stored = inbuxa_features::security::front_ends::get(&bp.data_store)
+                .await
+                .unwrap_or_default();
+            crate::manager::first_party::front_end_origins(&stored)
                 .into_iter()
                 .filter_map(|origin| hyper::header::HeaderValue::from_str(&origin).ok())
                 .collect()

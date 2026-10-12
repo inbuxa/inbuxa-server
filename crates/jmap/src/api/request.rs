@@ -335,6 +335,9 @@ impl RequestHandler for Server {
                                     SetResponseMethod::SharingPolicy(set_response) => {
                                         set_response.update_created_ids(&mut response);
                                     }
+                                    SetResponseMethod::FrontEnds(set_response) => {
+                                        set_response.update_created_ids(&mut response);
+                                    }
                                     SetResponseMethod::AddressBook(set_response) => {
                                         set_response.update_created_ids(&mut response);
                                     }
@@ -628,6 +631,13 @@ impl RequestHandler for Server {
                 GetRequestMethod::SharingPolicy(mut req) => {
                     resolve_account_id(&mut req.account_id, method_name.obj, access_token)?;
                     crate::inbuxa::sharing_policy::get(self, access_token, *req)
+                        .await?
+                        .into()
+                }
+                // inbuxa: inbuxa:FrontEnds/get (C-4, where the front ends are)
+                GetRequestMethod::FrontEnds(mut req) => {
+                    resolve_account_id(&mut req.account_id, method_name.obj, access_token)?;
+                    crate::inbuxa::front_ends::get(self, access_token, *req)
                         .await?
                         .into()
                 }
@@ -1296,6 +1306,23 @@ impl RequestHandler for Server {
                         None,
                         *req,
                         |req| Box::pin(crate::inbuxa::sharing_policy::set(self, access_token, req)),
+                    )
+                    .await?
+                    .into()
+                }
+                // inbuxa: inbuxa:FrontEnds/set (C-4, where the front ends are)
+                SetRequestMethod::FrontEnds(mut req) => {
+                    resolve_account_id(&mut req.account_id, method_name.obj, access_token)?;
+                    // inbuxa: AU-1.2, AU-3
+                    crate::inbuxa::audit::recorded(
+                        self,
+                        access_token,
+                        session,
+                        &method_name.obj.to_string(),
+                        None,
+                        None,
+                        *req,
+                        |req| Box::pin(crate::inbuxa::front_ends::set(self, access_token, req)),
                     )
                     .await?
                     .into()

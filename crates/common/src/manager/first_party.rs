@@ -17,15 +17,19 @@
 //! - inbuxa-webmail, as the confidential client `ihasmail-inbuxa`, when
 //!   `INBUXA_WEBMAIL_URL` and `INBUXA_WEBMAIL_CLIENT_SECRET` are set.
 //!
-//! inbuxa: the environment variables stand in for `x:FrontEnds` (C-4) until
-//! that object exists; the installer and INBUXA Admin's setup wizard will set
-//! it instead.
+//! inbuxa: `inbuxa:FrontEnds` (C-4) holds the same addresses, set over JMAP
+//! by the installer (`inbuxa join`) or INBUXA Admin; the environment
+//! variables keep working beside it, and both are registered. Where both
+//! give the webmail a secret, the environment's wins, so a server configured
+//! through its environment is never changed by what was stored.
 //!
 //! A missing client is created. An existing one gains any redirect URI it
 //! lacks and, for inbuxa-webmail, the configured secret; nothing an operator
-//! added is removed.
+//! added is removed. This runs on every start, and again whenever
+//! `inbuxa:FrontEnds` is set.
 
 use directory::core::secret::{hash_secret, verify_secret_hash};
+use inbuxa_features::security::front_ends::{self, FrontEnds};
 use registry::{
     schema::{
         enums::{PasswordHashAlgorithm, ServiceProtocol},
@@ -52,16 +56,27 @@ pub struct FirstPartyClient {
     pub client_id: String,
     pub description: String,
     pub redirect_uris: Vec<String>,
-    pub secret: Option<String>,
+    pub secret: Option<ClientSecret>,
+}
+
+/// A confidential client's secret: given in the clear (the environment), or
+/// already hashed (`inbuxa:FrontEnds`, which never keeps it in the clear).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ClientSecret {
+    Plain(String),
+    Hash(String),
 }
 
 /// The first-party clients this server should have, from its applications and
-/// the front-end addresses it was given.
+/// the front-end addresses it was given. Each front end may have several
+/// addresses (the environment's and `inbuxa:FrontEnds`'), each a redirect URI
+/// of the same client.
 pub fn first_party_clients(
     base_url: &str,
     applications: &[Application],
-    admin_url: Option<&str>,
-    webmail: Option<(&str, &str)>,
+    admin_urls: &[&str],
+    webmail_urls: &[&str],
+    webmail_secret: Option<ClientSecret>,
 ) -> Vec<FirstPartyClient> {
     let base_url = base_url.trim_end_matches('/');
     let mut clients: Vec<FirstPartyClient> = Vec::new();
@@ -102,25 +117,41 @@ pub fn first_party_clients(
         }
     }
 
-    if let Some(url) = admin_url.map(|url| url.trim().trim_end_matches('/')).filter(|url| !url.is_empty()) {
+    let uris = |urls: &[&str], path: &str| {
+        let mut uris: Vec<String> = Vec::new();
+        for url in urls {
+            let url = url.trim().trim_end_matches('/');
+            let uri = format!("{url}{path}");
+            if !url.is_empty() && !uris.contains(&uri) {
+                uris.push(uri);
+            }
+        }
+        uris
+    };
+
+    let admin = uris(admin_urls, "/oauth/callback");
+    if !admin.is_empty() {
         clients.push(FirstPartyClient {
             client_id: ADMIN_CLIENT_ID.to_string(),
             description: "inbuxa Admin".to_string(),
-            redirect_uris: vec![format!("{url}/oauth/callback")],
+            redirect_uris: admin,
             secret: None,
         });
     }
 
-    if let Some((url, secret)) = webmail {
-        let url = url.trim().trim_end_matches('/');
-        if !url.is_empty() && !secret.is_empty() {
-            clients.push(FirstPartyClient {
-                client_id: WEBMAIL_CLIENT_ID.to_string(),
-                description: "ihasmail webmail".to_string(),
-                redirect_uris: vec![format!("{url}/api/auth/callback")],
-                secret: Some(secret.to_string()),
-            });
-        }
+    let webmail = uris(webmail_urls, "/api/auth/callback");
+    let webmail_secret = webmail_secret.filter(|secret| match secret {
+        ClientSecret::Plain(s) | ClientSecret::Hash(s) => !s.is_empty(),
+    });
+    if !webmail.is_empty()
+        && let Some(secret) = webmail_secret
+    {
+        clients.push(FirstPartyClient {
+            client_id: WEBMAIL_CLIENT_ID.to_string(),
+            description: "ihasmail webmail".to_string(),
+            redirect_uris: webmail,
+            secret: Some(secret),
+        });
     }
 
     clients
@@ -166,12 +197,17 @@ pub fn origin_of(url: &str) -> Option<String> {
 }
 
 /// The origins allowed to make cross-origin requests (contract C-14): INBUXA
-/// Admin's, the webmail's, and `INBUXA_CORS_EXTRA_ORIGINS` (comma-separated).
-///
-/// inbuxa: read from the environment until `x:FrontEnds` exists (C-4).
-pub fn front_end_origins() -> Vec<String> {
+/// Admin's, the webmail's, and `INBUXA_CORS_EXTRA_ORIGINS` (comma-separated),
+/// from the environment and from `inbuxa:FrontEnds` alike.
+pub fn front_end_origins(stored: &FrontEnds) -> Vec<String> {
     let mut origins = Vec::new();
-    for url in [env("ADMIN_URL"), env("WEBMAIL_URL")].into_iter().flatten() {
+    for url in [env("ADMIN_URL"), env("WEBMAIL_URL")]
+        .into_iter()
+        .flatten()
+        .chain(stored.admin_url.clone())
+        .chain(stored.webmail_url.clone())
+        .chain(stored.extra_origins.iter().cloned())
+    {
         origins.extend(origin_of(&url));
     }
     if let Some(extra) = env("CORS_EXTRA_ORIGINS") {
@@ -182,6 +218,12 @@ pub fn front_end_origins() -> Vec<String> {
     origins
 }
 
+/// Whether the environment gives the webmail its secret. `inbuxa:FrontEnds`
+/// can't set one then: the environment's would be put back at every start.
+pub fn webmail_secret_from_environment() -> bool {
+    env("WEBMAIL_CLIENT_SECRET").is_some()
+}
+
 fn env(name: &str) -> Option<String> {
     types::branding::env_var(name)
         .ok()
@@ -189,7 +231,9 @@ fn env(name: &str) -> Option<String> {
         .filter(|value| !value.is_empty())
 }
 
-pub(crate) async fn ensure_first_party_clients(bp: &mut Bootstrap) -> trc::Result<()> {
+/// Registers the first-party clients: at every start, and again whenever
+/// `inbuxa:FrontEnds` is set.
+pub async fn ensure_first_party_clients(bp: &mut Bootstrap) -> trc::Result<()> {
     retire_legacy_web_interface_client(bp).await?;
     let system = bp.setting_infallible::<SystemSettings>().await;
     let base_url = base_url(bp, &system);
@@ -199,18 +243,22 @@ pub(crate) async fn ensure_first_party_clients(bp: &mut Bootstrap) -> trc::Resul
         .into_iter()
         .map(|app| app.object)
         .collect::<Vec<_>>();
-    let admin_url = env("ADMIN_URL");
-    let webmail_url = env("WEBMAIL_URL");
-    let webmail_secret = env("WEBMAIL_CLIENT_SECRET");
-    if webmail_url.is_some() && webmail_secret.is_none() {
+    let stored = front_ends::get(&bp.data_store).await?;
+    let admin_urls: Vec<String> = env("ADMIN_URL").into_iter().chain(stored.admin_url.clone()).collect();
+    let webmail_urls: Vec<String> = env("WEBMAIL_URL").into_iter().chain(stored.webmail_url.clone()).collect();
+    let webmail_secret = env("WEBMAIL_CLIENT_SECRET")
+        .map(ClientSecret::Plain)
+        .or_else(|| stored.webmail_secret_hash.clone().map(ClientSecret::Hash));
+    if !webmail_urls.is_empty() && webmail_secret.is_none() {
         trc::event!(
             Auth(trc::AuthEvent::Error),
-            Details = "INBUXA_WEBMAIL_URL is set without INBUXA_WEBMAIL_CLIENT_SECRET; the webmail client was not registered."
+            Details = "The webmail's address is set without its client secret; the webmail client was not registered."
         );
     }
-    let webmail = webmail_url.as_deref().zip(webmail_secret.as_deref());
+    let admin_urls: Vec<&str> = admin_urls.iter().map(String::as_str).collect();
+    let webmail_urls: Vec<&str> = webmail_urls.iter().map(String::as_str).collect();
 
-    for client in first_party_clients(&base_url, &applications, admin_url.as_deref(), webmail) {
+    for client in first_party_clients(&base_url, &applications, &admin_urls, &webmail_urls, webmail_secret) {
         ensure_client(bp, client).await?;
     }
 
@@ -295,19 +343,27 @@ async fn ensure_client(bp: &mut Bootstrap, client: FirstPartyClient) -> trc::Res
                 updated.redirect_uris.push(uri.clone());
             }
         }
-        if let Some(secret) = &client.secret {
-            let matches = match updated.secret.as_deref() {
-                Some(hash) if !hash.is_empty() => {
-                    verify_secret_hash(hash, secret.as_bytes()).await?
+        match &client.secret {
+            Some(ClientSecret::Plain(secret)) => {
+                let matches = match updated.secret.as_deref() {
+                    Some(hash) if !hash.is_empty() => {
+                        verify_secret_hash(hash, secret.as_bytes()).await?
+                    }
+                    _ => false,
+                };
+                if !matches {
+                    updated.secret = Some(
+                        hash_secret(PasswordHashAlgorithm::Argon2id, secret.as_bytes().to_vec())
+                            .await?,
+                    );
                 }
-                _ => false,
-            };
-            if !matches {
-                updated.secret = Some(
-                    hash_secret(PasswordHashAlgorithm::Argon2id, secret.as_bytes().to_vec())
-                        .await?,
-                );
             }
+            Some(ClientSecret::Hash(hash)) => {
+                if updated.secret.as_deref() != Some(hash.as_str()) {
+                    updated.secret = Some(hash.clone());
+                }
+            }
+            None => {}
         }
         if updated == current {
             return Ok(());
@@ -318,9 +374,10 @@ async fn ensure_client(bp: &mut Bootstrap, client: FirstPartyClient) -> trc::Res
             .await?
     } else {
         let secret = match &client.secret {
-            Some(secret) => Some(
+            Some(ClientSecret::Plain(secret)) => Some(
                 hash_secret(PasswordHashAlgorithm::Argon2id, secret.as_bytes().to_vec()).await?,
             ),
+            Some(ClientSecret::Hash(hash)) => Some(hash.clone()),
             None => None,
         };
         bp.registry
@@ -365,7 +422,7 @@ mod tests {
 
     #[test]
     fn web_interface_gets_one_uri_per_prefix() {
-        let clients = first_party_clients("https://mail.example.org/", &[web_interface()], None, None);
+        let clients = first_party_clients("https://mail.example.org/", &[web_interface()], &[], &[], None);
         assert_eq!(
             clients,
             vec![FirstPartyClient {
@@ -387,7 +444,7 @@ mod tests {
         let mut named = web_interface();
         named.oauth_client_id = Some("custom".to_string());
         named.url_prefix = Map::new(vec!["portal".into()]);
-        let clients = first_party_clients("https://h", &[disabled, named], None, None);
+        let clients = first_party_clients("https://h", &[disabled, named], &[], &[], None);
         assert_eq!(clients.len(), 1);
         assert_eq!(clients[0].client_id, "custom");
         assert_eq!(clients[0].redirect_uris, vec!["https://h/portal/oauth/callback"]);
@@ -398,8 +455,9 @@ mod tests {
         let clients = first_party_clients(
             "https://h",
             &[],
-            Some("https://admin.example.org/"),
-            Some(("https://webmail.example.org", "s3cret")),
+            &["https://admin.example.org/"],
+            &["https://webmail.example.org"],
+            Some(ClientSecret::Plain("s3cret".into())),
         );
         assert_eq!(clients.len(), 2);
         assert_eq!(clients[0].client_id, ADMIN_CLIENT_ID);
@@ -407,7 +465,7 @@ mod tests {
         assert_eq!(clients[0].secret, None);
         assert_eq!(clients[1].client_id, WEBMAIL_CLIENT_ID);
         assert_eq!(clients[1].redirect_uris, vec!["https://webmail.example.org/api/auth/callback"]);
-        assert_eq!(clients[1].secret.as_deref(), Some("s3cret"));
+        assert_eq!(clients[1].secret, Some(ClientSecret::Plain("s3cret".into())));
     }
 
     #[test]
@@ -423,7 +481,42 @@ mod tests {
 
     #[test]
     fn webmail_needs_a_secret() {
-        let clients = first_party_clients("https://h", &[], Some(" "), Some(("https://w", "")));
+        let clients = first_party_clients("https://h", &[], &[" "], &["https://w"], Some(ClientSecret::Plain(String::new())));
         assert!(clients.is_empty());
+        let clients = first_party_clients("https://h", &[], &[], &["https://w"], None);
+        assert!(clients.is_empty());
+    }
+
+    #[test]
+    fn both_addresses_of_a_front_end_are_registered() {
+        // The environment's and inbuxa:FrontEnds', once each
+        let clients = first_party_clients(
+            "https://h",
+            &[],
+            &["https://admin.a.example", "https://admin.b.example/", "https://admin.a.example/"],
+            &["https://webmail.b.example"],
+            Some(ClientSecret::Hash("$argon2id$x".into())),
+        );
+        assert_eq!(
+            clients[0].redirect_uris,
+            vec![
+                "https://admin.a.example/oauth/callback",
+                "https://admin.b.example/oauth/callback"
+            ]
+        );
+        assert_eq!(clients[1].secret, Some(ClientSecret::Hash("$argon2id$x".into())));
+    }
+
+    #[test]
+    fn stored_front_ends_are_allowed_origins() {
+        let stored = FrontEnds {
+            admin_url: Some("https://Admin.Example.org/console".into()),
+            extra_origins: vec!["http://localhost:5173".into(), "not a url".into()],
+            ..Default::default()
+        };
+        let origins = front_end_origins(&stored);
+        assert!(origins.contains(&"https://admin.example.org".to_string()));
+        assert!(origins.contains(&"http://localhost:5173".to_string()));
+        assert!(!origins.iter().any(|o| o.contains("not a url")));
     }
 }

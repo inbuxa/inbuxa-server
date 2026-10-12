@@ -11,6 +11,7 @@
 //! `legacy-protocols.md`.
 
 pub mod acceptance;
+pub mod front_ends;
 pub mod legacy_use;
 pub mod log_files;
 pub mod listeners;

@@ -143,6 +143,9 @@ impl JmapAuthorization for AccessToken {
                 // manages their tenant's, so the domain's permissions; the
                 // server's own also needs sysSharingUpdate (see the method)
                 GetRequestMethod::SharingPolicy(_) => Permission::SysDomainGet,
+                // inbuxa: C-4, where the front ends are: the HTTP settings'
+                // (the method also refuses anyone inside a tenant)
+                GetRequestMethod::FrontEnds(_) => Permission::SysHttpGet,
                 GetRequestMethod::Principal(_) => Permission::JmapPrincipalGet,
                 GetRequestMethod::Quota(_) => Permission::JmapQuotaGet,
                 GetRequestMethod::Blob(_) => Permission::JmapBlobGet,
@@ -431,6 +434,15 @@ impl JmapAuthorization for AccessToken {
                         Permission::SysDomainUpdate,
                         Permission::SysDomainUpdate,
                     ),
+                    // inbuxa: C-4, where the front ends are: the HTTP
+                    // settings' (the method also needs sysOAuthClientUpdate)
+                    SetRequestMethod::FrontEnds(s) => validate_set(
+                        s,
+                        self,
+                        Permission::SysHttpUpdate,
+                        Permission::SysHttpUpdate,
+                        Permission::SysHttpUpdate,
+                    ),
                     SetRequestMethod::VacationResponse(s) => validate_set(
                         s,
                         self,
@@ -567,7 +579,8 @@ impl JmapAuthorization for AccessToken {
                 | MethodObject::JournalVerification
                 | MethodObject::ProtocolPolicy
                 | MethodObject::TenantProtocolPolicy
-                | MethodObject::SharingPolicy => Permission::JmapEmailChanges,
+                | MethodObject::SharingPolicy
+                | MethodObject::FrontEnds => Permission::JmapEmailChanges,
                 // inbuxa: x:MaskedEmail/changes reads what /get reads
                 MethodObject::Registry(object_type) => object_type.get_permission(),
             },

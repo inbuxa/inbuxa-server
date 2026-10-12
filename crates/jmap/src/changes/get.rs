@@ -445,6 +445,7 @@ impl IntermediateChangesResponse {
             | MethodObject::ProtocolPolicy
             | MethodObject::TenantProtocolPolicy
             | MethodObject::SharingPolicy
+            | MethodObject::FrontEnds
             | MethodObject::Registry(_) => unreachable!(),
         })
     }

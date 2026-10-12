@@ -44,6 +44,7 @@ pub mod inbuxa_explanation; // inbuxa: "Explain this" with the local model
 pub mod inbuxa_protocol_policy; // inbuxa: legacy protocols off
 pub mod inbuxa_tenant_protocol_policy; // inbuxa: legacy protocols off, per tenant
 pub mod inbuxa_sharing_policy; // inbuxa: MA-C, who may share mail
+pub mod inbuxa_front_ends; // inbuxa: C-4, where the front ends are
 pub mod inbuxa_deleted_account; // inbuxa: undelete
 pub mod file_node;
 pub mod identity;

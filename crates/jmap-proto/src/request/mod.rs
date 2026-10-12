@@ -142,6 +142,7 @@ pub enum GetRequestMethod {
     SharingPolicy(
         Box<GetRequest<crate::object::inbuxa_sharing_policy::SharingPolicy>>,
     ),
+    FrontEnds(Box<GetRequest<crate::object::inbuxa_front_ends::FrontEnds>>),
 }
 
 #[derive(Debug)]
@@ -194,6 +195,7 @@ pub enum SetRequestMethod<'x> {
     SharingPolicy(
         Box<SetRequest<'x, crate::object::inbuxa_sharing_policy::SharingPolicy>>,
     ),
+    FrontEnds(Box<SetRequest<'x, crate::object::inbuxa_front_ends::FrontEnds>>),
 }
 
 #[derive(Debug)]
