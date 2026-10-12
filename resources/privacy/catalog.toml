@@ -296,6 +296,17 @@ retention = "unbounded"
 [object."inbuxa:SharingPolicy".properties]
 changedBy = ["identifier"]
 
+[object."inbuxa:FrontEnds"]
+file = "inbuxa_front_ends.rs"
+default = "none"
+whose = ["administrator"]
+where = ["data-store"]
+scope = "server"
+retention = "unbounded"
+[object."inbuxa:FrontEnds".properties]
+webmailClientSecret = ["credential"]
+changedBy = ["identifier"]
+
 [object."inbuxa:AiLimits"]
 file = "inbuxa_ai_limits.rs"
 default = "none"

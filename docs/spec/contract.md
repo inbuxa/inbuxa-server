@@ -89,6 +89,23 @@ Each has an ID, and tests name the IDs they check.
   client registrations (C-6), the cross-origin allowlist (C-14) and the admin
   lane (C-18). The installer sets it, and so does INBUXA Admin's setup wizard.
 
+  **Built, 2026-10-11, as `inbuxa:FrontEnds`.** A fork JMAP object under
+  `urn:inbuxa:jmap` rather than a registry object (open question 1), kept in
+  the fork's subspace (`Fe`), like the other `inbuxa:` singletons; id
+  `singleton`. Properties: `adminUrl`, `webmailUrl`, `webmailClientSecret`
+  (write-only, at least 32 characters, stored only as its Argon2 hash;
+  `webmailClientSecretSet` says whether one is), `extraOrigins`, and,
+  server-set, `environmentAdminUrl`, `environmentWebmailUrl`,
+  `environmentWebmailClientSecret`, `changedAt`, `changedBy`. `/get` needs
+  `sysHttpGet`; `/set` needs `sysHttpUpdate` and `sysOAuthClientUpdate`;
+  neither exists inside a tenant. A set registers the clients at once (C-6)
+  and reloads the HTTP settings on every node (C-14); it's audited. The
+  environment variables below keep working beside it and both are honored;
+  where both give the webmail a secret the environment's wins, so setting
+  one is refused while `INBUXA_WEBMAIL_CLIENT_SECRET` is set. The installer's
+  `inbuxa join` sets it from a second machine. C-1 discovery and C-18's
+  admin lane don't read it yet. Tests: `system::front_ends::front_ends_tests`.
+
 ### Sign-in
 
 - **C-5.** INBUXA requires client registration: `requireClientRegistration`
@@ -126,8 +143,8 @@ Each has an ID, and tests name the IDs they check.
 
   **Built (interim), 2026-09-18.** C-5's defaults are in the server, and
   `crates/common/src/manager/first_party.rs` registers the clients on every
-  start. Until `x:FrontEnds` exists, three environment variables stand in for
-  it: `INBUXA_ADMIN_URL`, `INBUXA_WEBMAIL_URL` and
+  start, and again whenever `inbuxa:FrontEnds` is set (C-4). Beside it,
+  three environment variables give the same addresses: `INBUXA_ADMIN_URL`, `INBUXA_WEBMAIL_URL` and
   `INBUXA_WEBMAIL_CLIENT_SECRET` (the webmail client is registered only when
   both of its variables are set). A web interface the server serves itself
   (none on a new install since SPEC.md §5.3; possible on one upgraded from
@@ -206,9 +223,10 @@ Each has an ID, and tests name the IDs they check.
   `Access-Control-Allow-Origin` with `Vary: Origin`, never `*`, and sends
   nothing for any other origin.
 
-  **Built (interim), 2026-09-18.** Until `x:FrontEnds` exists, the allowed
-  origins come from `INBUXA_ADMIN_URL`, `INBUXA_WEBMAIL_URL` and
-  `INBUXA_CORS_EXTRA_ORIGINS` (comma-separated). Each is reduced to its origin,
+  **Built (interim), 2026-09-18.** The allowed origins come from
+  `INBUXA_ADMIN_URL`, `INBUXA_WEBMAIL_URL` and `INBUXA_CORS_EXTRA_ORIGINS`
+  (comma-separated), and since 2026-10-11 also from `inbuxa:FrontEnds`'s
+  `adminUrl`, `webmailUrl` and `extraOrigins` (C-4). Each is reduced to its origin,
   lowercased and without a default port, and anything that isn't an `http` or
   `https` URL is skipped. Every response carries `Vary: Origin`. A matching
   origin gets `Access-Control-Allow-Origin` echoed with the allowed headers and
@@ -396,9 +414,11 @@ client and reload settings. This is the state C-5 and C-6 make the default.
 
 ## Open questions
 
-1. Whether `x:FrontEnds` is a new registry object (a schema addition in the
-   fork's namespace) or kept in the fork's own store. A registry object is
-   editable in INBUXA Admin for free, since the admin is schema-driven.
+1. ~~Whether `x:FrontEnds` is a new registry object (a schema addition in the
+   fork's namespace) or kept in the fork's own store.~~ Settled 2026-10-11:
+   the fork's own store, as `inbuxa:FrontEnds` (C-4), like the other `inbuxa:`
+   singletons, which keeps upstream's generated schema untouched. INBUXA Admin
+   needs a page for it, as it has for the sharing policy.
 2. The consent page's wording and whether it remembers a decision per client.
 3. API keys and app passwords with explicit scopes (C-21): what upstream's
    `x:ApiKey` already supports, to observe before specifying.

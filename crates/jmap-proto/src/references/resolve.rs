@@ -72,6 +72,7 @@ impl Response<'_> {
                 GetRequestMethod::SharingPolicy(request) => {
                     request.resolve_references(self)?
                 }
+                GetRequestMethod::FrontEnds(request) => request.resolve_references(self)?,
                 GetRequestMethod::Principal(request) => request.resolve_references(self)?,
                 GetRequestMethod::Quota(request) => request.resolve_references(self)?,
                 GetRequestMethod::Blob(request) => request.resolve_references(self)?,
@@ -182,6 +183,9 @@ impl Response<'_> {
                     request.resolve_references(self, 1, false)?
                 }
                 SetRequestMethod::SharingPolicy(request) => {
+                    request.resolve_references(self, 1, false)?
+                }
+                SetRequestMethod::FrontEnds(request) => {
                     request.resolve_references(self, 1, false)?
                 }
                 SetRequestMethod::AddressBook(request) => {

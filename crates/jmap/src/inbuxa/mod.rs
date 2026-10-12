@@ -31,6 +31,7 @@ pub mod explanation;
 pub mod protocol_policy;
 pub mod tenant_protocol_policy;
 pub mod sharing_policy;
+pub mod front_ends;
 pub mod deleted_account;
 pub mod fastmail;
 pub mod masked_email;

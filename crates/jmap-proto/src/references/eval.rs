@@ -127,6 +127,9 @@ impl Response<'_> {
                         GetResponseMethod::SharingPolicy(response) => {
                             response.eval_jptr(path, &mut results)
                         }
+                        GetResponseMethod::FrontEnds(response) => {
+                            response.eval_jptr(path, &mut results)
+                        }
                         GetResponseMethod::Principal(response) => {
                             response.eval_jptr(path, &mut results)
                         }

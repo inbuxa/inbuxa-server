@@ -129,6 +129,7 @@ pub enum GetResponseMethod {
     SharingPolicy(
         GetResponse<crate::object::inbuxa_sharing_policy::SharingPolicy>,
     ),
+    FrontEnds(GetResponse<crate::object::inbuxa_front_ends::FrontEnds>),
 }
 
 #[derive(Debug, serde::Serialize)]
@@ -182,6 +183,7 @@ pub enum SetResponseMethod {
     SharingPolicy(
         Box<SetResponse<crate::object::inbuxa_sharing_policy::SharingPolicy>>,
     ),
+    FrontEnds(Box<SetResponse<crate::object::inbuxa_front_ends::FrontEnds>>),
 }
 
 #[derive(Debug, serde::Serialize)]
@@ -395,6 +397,18 @@ impl<'x> From<SetResponse<crate::object::inbuxa_sharing_policy::SharingPolicy>>
         value: SetResponse<crate::object::inbuxa_sharing_policy::SharingPolicy>,
     ) -> Self {
         ResponseMethod::Set(SetResponseMethod::SharingPolicy(Box::new(value)))
+    }
+}
+
+impl<'x> From<GetResponse<crate::object::inbuxa_front_ends::FrontEnds>> for ResponseMethod<'x> {
+    fn from(value: GetResponse<crate::object::inbuxa_front_ends::FrontEnds>) -> Self {
+        ResponseMethod::Get(GetResponseMethod::FrontEnds(value))
+    }
+}
+
+impl<'x> From<SetResponse<crate::object::inbuxa_front_ends::FrontEnds>> for ResponseMethod<'x> {
+    fn from(value: SetResponse<crate::object::inbuxa_front_ends::FrontEnds>) -> Self {
+        ResponseMethod::Set(SetResponseMethod::FrontEnds(Box::new(value)))
     }
 }
 

@@ -222,6 +222,13 @@ impl<'de> Visitor<'de> for CallVisitor {
                     return Err(de::Error::invalid_length(1, &self));
                 }
             },
+            (MethodFunction::Get, MethodObject::FrontEnds) => match seq.next_element() {
+                Ok(Some(value)) => RequestMethod::Get(GetRequestMethod::FrontEnds(value)),
+                Err(err) => RequestMethod::invalid(err),
+                Ok(None) => {
+                    return Err(de::Error::invalid_length(1, &self));
+                }
+            },
             (MethodFunction::Get, MethodObject::VacationResponse) => match seq.next_element() {
                 Ok(Some(value)) => RequestMethod::Get(GetRequestMethod::VacationResponse(value)),
                 Err(err) => RequestMethod::invalid(err),
@@ -428,6 +435,13 @@ impl<'de> Visitor<'de> for CallVisitor {
                 Ok(Some(value)) => {
                     RequestMethod::Set(SetRequestMethod::SharingPolicy(value))
                 }
+                Err(err) => RequestMethod::invalid(err),
+                Ok(None) => {
+                    return Err(de::Error::invalid_length(1, &self));
+                }
+            },
+            (MethodFunction::Set, MethodObject::FrontEnds) => match seq.next_element() {
+                Ok(Some(value)) => RequestMethod::Set(SetRequestMethod::FrontEnds(value)),
                 Err(err) => RequestMethod::invalid(err),
                 Ok(None) => {
                     return Err(de::Error::invalid_length(1, &self));
