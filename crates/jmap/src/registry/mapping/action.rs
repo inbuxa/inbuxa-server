@@ -5,6 +5,8 @@
  */
 
 use crate::registry::mapping::{RegistrySetResponse, map_bootstrap_error};
+#[cfg(target_os = "linux")]
+use common::manager::systemd::ServiceState;
 use common::{
     Server,
     config::mailstore::spamfilter::SpamFilterAction,
@@ -86,8 +88,13 @@ pub(crate) async fn action_set(
                     Action::ReloadBlockedIps => ObjectType::BlockedIp,
                     _ => unreachable!(),
                 };
+                #[cfg(target_os = "linux")]
+                ServiceState::Reloading.notify();
                 let result =
-                    Box::pin(set.server.reload_registry(RegistryChange::Reload(object))).await?;
+                    Box::pin(set.server.reload_registry(RegistryChange::Reload(object))).await;
+                #[cfg(target_os = "linux")]
+                ServiceState::Ready.notify();
+                let result = result?;
 
                 if !result.has_errors() {
                     set.server

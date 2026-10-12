@@ -9,6 +9,8 @@
 #![warn(clippy::cast_possible_wrap)]
 #![warn(clippy::cast_sign_loss)]
 
+#[cfg(target_os = "linux")]
+use common::manager::systemd::ServiceState;
 use common::{BuildServer, config::server::ServerProtocol, manager::boot::BootManager};
 use http::HttpSessionManager;
 use imap::core::ImapSessionManager;
@@ -20,6 +22,12 @@ use std::time::Duration;
 use trc::Collector;
 use utils::wait_for_shutdown;
 
+#[cfg(all(
+    target_arch = "x86_64",
+    target_feature = "sse4.2",
+    any(target_os = "linux", target_os = "freebsd")
+))]
+mod cpu;
 #[cfg(feature = "dev_mode")]
 pub mod test_data;
 
@@ -108,8 +116,14 @@ async fn main() -> std::io::Result<()> {
     // Start broadcast subscriber
     spawn_broadcast_subscriber(init.inner, shutdown_rx);
 
+    #[cfg(target_os = "linux")]
+    ServiceState::Ready.notify();
+
     // Wait for shutdown signal
     wait_for_shutdown().await;
+
+    #[cfg(target_os = "linux")]
+    ServiceState::Stopping.notify();
 
     // Shutdown collector
     Collector::shutdown();
