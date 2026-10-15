@@ -467,18 +467,56 @@ impl Server {
         {
             return;
         }
+        self.audit_send_as_record(
+            token,
+            as_account_id,
+            address,
+            ("EmailSubmission", Id::from(submission_id).to_string()),
+            submission_account_id,
+        )
+        .await;
+    }
+
+    /// MA-D0a over SMTP submission: the same record, naming the queued
+    /// message. The caller has already resolved the address and left out
+    /// the sender's own account and a locked account's delegate.
+    pub async fn audit_send_as_queued(
+        &self,
+        token: &AccessToken,
+        as_account_id: u32,
+        queue_id: u64,
+        address: &str,
+    ) {
+        self.audit_send_as_record(
+            token,
+            as_account_id,
+            address,
+            ("QueuedMessage", format!("{queue_id:x}")),
+            token.account_id(),
+        )
+        .await;
+    }
+
+    async fn audit_send_as_record(
+        &self,
+        token: &AccessToken,
+        as_account_id: u32,
+        address: &str,
+        (kind, id): (&str, String),
+        from_account_id: u32,
+    ) {
         let actor = self.audit_actor(token).await;
         let tenant_id = self
             .account(as_account_id)
             .await
             .ok()
             .and_then(|account| account.id_tenant);
-        let details = if submission_account_id == as_account_id {
+        let details = if from_account_id == as_account_id {
             format!("Sent as {address}")
         } else {
             format!(
                 "Sent as {address}, from {}",
-                self.audit_account_name(submission_account_id).await
+                self.audit_account_name(from_account_id).await
             )
         };
         self.audit_note(Record {
@@ -488,8 +526,8 @@ impl Server {
             remote_ip: None,
             action: Action::Create,
             target: Target {
-                kind: "EmailSubmission".into(),
-                id: Some(Id::from(submission_id).to_string()),
+                kind: kind.into(),
+                id: Some(id),
                 name: Some(address.to_string()),
                 account_id: Some(as_account_id),
                 tenant_id,

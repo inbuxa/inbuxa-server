@@ -74,6 +74,16 @@ impl<T: SessionStream> Session<T> {
             }
         };
 
+        // inbuxa: MA-S3: a shared mailbox's people send only as it over SMTP
+        // too, so the answer comes back to the mailbox
+        if let Some(address) = self.shared_mailbox_foreign_address(&parsed_message).await {
+            return format!(
+                "550 5.7.1 A shared mailbox sends only as its own addresses, so replies come back to it; {address} isn't one.\r\n"
+            )
+            .into_bytes()
+            .into();
+        }
+
         // Authenticate message
         let mut auth_message = AuthenticatedMessage::from_parsed(
             &parsed_message,
@@ -900,6 +910,8 @@ impl<T: SessionStream> Session<T> {
             {
                 self.state = State::Accepted(queue_id);
                 self.data.messages_sent += 1;
+                // inbuxa: MA-D0a, AL-9: a send as someone else is recorded
+                self.audit_queued_send_as(queue_id).await;
                 if let (Some(draft), Some((sender, recipients, size))) = (held_draft, held_envelope)
                 {
                     self.record_held(queue_id, draft, sender, recipients, size).await;

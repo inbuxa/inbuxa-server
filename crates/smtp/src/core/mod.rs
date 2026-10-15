@@ -9,7 +9,7 @@
 use crate::{inbound::auth::SaslToken, queue::QueueId};
 use common::{
     Inner, Server,
-    auth::AccountInfo,
+    auth::{AccessToken, AccountInfo},
     config::smtp::auth::VerifyStrategy,
     network::{ServerInstance, asn::AsnGeoLookupResult},
 };
@@ -80,6 +80,9 @@ pub struct SessionData {
     pub message: Vec<u8>,
 
     pub authenticated_as: Option<AccountInfo>,
+    // inbuxa: MA-S, AL-8: the signed-in token, for its delegations' sendAs
+    // and the audit record of a send as someone else (MA-D0a, AL-9)
+    pub access_token: Option<AccessToken>,
     pub auth_errors: usize,
 
     pub priority: i16,
@@ -195,6 +198,7 @@ impl SessionData {
             mailflow_queue: None,
             journal_marks: Vec::new(),
             journal_added: Vec::new(),
+            access_token: None,
         }
     }
 }
@@ -323,6 +327,7 @@ impl SessionData {
             mailflow_queue: None,
             journal_marks: Vec::new(),
             journal_added: Vec::new(),
+            access_token: None,
         }
     }
 }

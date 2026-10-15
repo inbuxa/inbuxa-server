@@ -505,6 +505,7 @@ impl<T: AsyncWrite + AsyncRead + Unpin> Session<T> {
         self.data.helo_domain.clear();
         self.data.spf_ehlo = None;
         self.data.authenticated_as = None;
+        self.data.access_token = None;
     }
 
     #[inline(always)]
