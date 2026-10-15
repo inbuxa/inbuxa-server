@@ -259,6 +259,9 @@ impl<T: SessionStream> Session<T> {
                     )
                     .await
                     .unwrap_or(false)
+                    // inbuxa: MA-S, AL-8: a delegate allowed to send as the
+                    // account that owns the address, as JMAP allows
+                    && !self.delegate_sends_as(address_lcase).await
                 {
                     trc::event!(
                         Smtp(SmtpEvent::MailFromUnauthorized),

@@ -12,6 +12,7 @@ use crate::{
     jmap::mail::submission::{
         MockMessage, assert_message_delivery, expect_nothing, spawn_mock_smtp_server,
     },
+    smtp::session::TestSession,
     utils::{
         account::Account,
         dns::DnsCache,
@@ -448,13 +449,14 @@ pub async fn test(test: &mut TestServer) {
         "AL-9: the delegate's access and changes weren't recorded: {query}"
     );
 
-    shared_mailbox(admin, &mut smtp_rx, &mut lmtp).await;
+    shared_mailbox(test, admin, &mut smtp_rx, &mut lmtp).await;
 }
 
 /// MA-S (specs/multi-account.md): a shared mailbox is a lock of its own
 /// kind. No reason is needed, more people fit, its Sieve replies go out,
 /// only what is sent as it is recorded, and it sends only as itself.
 async fn shared_mailbox(
+    test: &TestServer,
     admin: &Account,
     smtp_rx: &mut tokio::sync::mpsc::Receiver<crate::jmap::mail::submission::MockMessage>,
     lmtp: &mut SmtpConnection,
@@ -593,6 +595,65 @@ async fn shared_mailbox(
         .map(|r| r["target"]["kind"].as_str().unwrap_or_default().to_string())
         .collect::<Vec<_>>();
     assert_eq!(kinds, ["EmailSubmission"], "MA-D0a: {records}");
+
+    // Over SMTP submission too: the agent signs in as itself and sends as
+    // support@, a desk without sendAs can't, and the send is recorded
+    let smtp_session = || {
+        let mut session = test.new_mta_session();
+        session.stream.tls = true;
+        session
+    };
+    let mut session = smtp_session();
+    session.eval_session_params().await;
+    session.ehlo("agent.example.com").await;
+    session.auth_plain("agent@example.com", "agent-secret-5520", "235 2.7.0").await;
+    session
+        .send_message(
+            "support@example.com",
+            &["carol@remote.org"],
+            "From: support@example.com\r\nTo: carol@remote.org\r\nSubject: Re: Over SMTP\r\n\r\nThanks.\r\n",
+            "250",
+        )
+        .await;
+    assert_message_delivery(
+        smtp_rx,
+        MockMessage::new("<support@example.com>", ["<carol@remote.org>"], "@Re: Over SMTP"),
+    )
+    .await;
+    // MA-S3: and the reply still can't be steered to the agent
+    session
+        .send_message(
+            "support@example.com",
+            &["carol@remote.org"],
+            "From: support@example.com\r\nReply-To: agent@example.com\r\nTo: carol@remote.org\r\nSubject: Write to me\r\n\r\nHi.\r\n",
+            "550 5.7.1",
+        )
+        .await;
+    expect_nothing(smtp_rx).await;
+    let mut session = smtp_session();
+    session.eval_session_params().await;
+    session.ehlo("desk.example.com").await;
+    session.auth_plain("desk0@example.com", "desk-secret-7781", "235 2.7.0").await;
+    session.mail_from("support@example.com", "501 5.5.4").await;
+    session.mail_from("desk0@example.com", "250").await;
+    let (_, query) = admin
+        .call(
+            "inbuxa:AuditEvent/query",
+            json!({"accountId": admin.id_string(),
+                "filter": {"actorId": agent.id_string(), "accountId": support_id}}),
+        )
+        .await;
+    let (_, records) = admin
+        .call("inbuxa:AuditEvent/get", json!({"accountId": admin.id_string(), "ids": query["ids"]}))
+        .await;
+    let mut kinds = records["list"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|r| r["target"]["kind"].as_str().unwrap_or_default().to_string())
+        .collect::<Vec<_>>();
+    kinds.sort();
+    assert_eq!(kinds, ["EmailSubmission", "QueuedMessage"], "MA-D0a over SMTP: {records}");
 
     // Ending it needs no reason either
     let response = admin.lock_set(json!({"destroy": [support_id]})).await;
