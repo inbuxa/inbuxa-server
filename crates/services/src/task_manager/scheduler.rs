@@ -48,7 +48,13 @@ enum Event {
     EvaluateAlerts,
     // inbuxa: settings-reorg: probe the other nodes' ports
     ProbePeerPorts,
+    // inbuxa: re-queue DKIM rotation and ACME renewal tasks a domain is missing
+    CheckDomainTasks,
 }
+
+// inbuxa: first check a few minutes after start, then daily
+const DOMAIN_TASK_CHECK_DELAY: Duration = Duration::from_secs(5 * 60);
+const DOMAIN_TASK_CHECK_INTERVAL: Duration = Duration::from_secs(24 * 60 * 60);
 
 /// When the next metric-history tick is due (MON-4), read from the registry
 /// so a change needs no reload (MON-3).
@@ -146,6 +152,11 @@ pub fn spawn_task_scheduler(inner: Arc<Inner>) {
                 Event::StoreMetrics,
             );
 
+            // inbuxa: automatic domains keep their DKIM and ACME tasks
+            queue.schedule(
+                Instant::now() + DOMAIN_TASK_CHECK_DELAY,
+                Event::CheckDomainTasks,
+            );
         }
 
 
@@ -400,6 +411,23 @@ pub fn spawn_task_scheduler(inner: Arc<Inner>) {
                             server.store_metrics().await;
                         });
                     }
+                    // inbuxa: on the task scheduler only, like the tasks it queues
+                    Event::CheckDomainTasks => {
+                        queue.schedule(
+                            Instant::now() + DOMAIN_TASK_CHECK_INTERVAL,
+                            Event::CheckDomainTasks,
+                        );
+                        if roles.task_scheduler {
+                            let server = server.clone();
+                            tokio::spawn(async move {
+                                if let Err(err) =
+                                    super::domain_check::check_domain_tasks(&server).await
+                                {
+                                    trc::error!(err.details("Failed to check domain tasks"));
+                                }
+                            });
+                        }
+                    }
                     Event::TrainSpamClassifier => {
                         if let Some(train_frequency) = server
                             .core
@@ -497,6 +525,7 @@ impl Event {
             Event::StoreMetrics => "storeMetrics",
             Event::EvaluateAlerts => "evaluateAlerts",
             Event::ProbePeerPorts => "probePeerPorts",
+            Event::CheckDomainTasks => "checkDomainTasks",
         }
     }
 }
