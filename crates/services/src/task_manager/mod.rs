@@ -22,6 +22,7 @@ pub mod alarm;
 pub mod destroy_account;
 pub mod dkim;
 pub mod dns;
+pub mod domain_check; // inbuxa: re-queue missing DKIM/ACME tasks
 pub mod imip;
 pub mod inbuxa_restore; // inbuxa: undelete
 pub mod index;

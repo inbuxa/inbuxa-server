@@ -2,6 +2,8 @@
  * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
+ *
+ * Modified by Coffey Labs in 2026 for INBUXA.
  */
 
 use crate::utils::{account::Account, server::TestServer};
@@ -40,6 +42,7 @@ pub async fn test(test: &TestServer) {
     })
     .await;
     automatic_to_manual_dns_test(test).await;
+    orphaned_keys_test(test).await;
 
     println!("Running DKIM Management tests...");
     let account = test.account("admin@example.org");
@@ -525,6 +528,100 @@ async fn unscheduled_keys_test(
     account.registry_destroy_all(ObjectType::DnsServer).await;
 }
 
+// inbuxa: keys left with no rotation schedule and no DKIM task (a domain
+// switched to automatic before scheduling existed) are picked up by the
+// scheduler's domain task check, and a second check queues nothing more
+async fn orphaned_keys_test(test: &TestServer) {
+    println!("Running DKIM orphaned key tests...");
+    let account = test.account("admin@example.org");
+    DNS_RECORDS.lock().unwrap().clear();
+    account.dkim_signatures().await.assert_total(0, 0);
+    let dns_server_id = account.create_memory_dns_server().await;
+    let domain = "dkim-orphaned.org";
+    let domain_id = account
+        .registry_create_object(Domain {
+            name: domain.to_string(),
+            certificate_management: CertificateManagement::Manual,
+            dkim_management: dkim_management(LONG_ROTATION_MS),
+            dns_management: dns_management(dns_server_id),
+            ..Default::default()
+        })
+        .await;
+    let initial = account
+        .wait_for_dkim("active keys with a rotation schedule", |signatures| {
+            signatures.total() == 2
+                && signatures.stage_count(DkimRotationStage::Active) == 2
+                && signatures
+                    .keys()
+                    .all(|key| key.next_transition_at.is_some())
+        })
+        .await;
+    account.wait_for_dkim_task_count(domain_id, 1).await;
+
+    // Orphan the keys: no task and no schedule
+    account.registry_destroy_all(ObjectType::Task).await;
+    for (id, _) in account.registry_get_all::<DkimSignature>().await {
+        account
+            .registry_update_object(
+                ObjectType::DkimSignature,
+                id,
+                json!({ Property::NextTransitionAt: null }),
+            )
+            .await;
+    }
+    account
+        .wait_for_dkim("keys without a rotation schedule", |signatures| {
+            signatures
+                .keys()
+                .all(|key| key.next_transition_at.is_none())
+        })
+        .await;
+    account.wait_for_dkim_task_count(domain_id, 0).await;
+
+    // The check queues a DKIM task, which schedules the same keys
+    assert_eq!(
+        services::task_manager::domain_check::check_tasks_for_domains(&test.server, &[domain_id])
+            .await
+            .unwrap(),
+        1
+    );
+    let rescheduled = account
+        .wait_for_dkim("the same keys rescheduled", |signatures| {
+            signatures.total() == 2
+                && signatures.stage_count(DkimRotationStage::Active) == 2
+                && signatures
+                    .keys()
+                    .all(|key| key.next_transition_at.is_some())
+        })
+        .await;
+    assert_eq!(rescheduled.v1_rsa[0].selector, initial.v1_rsa[0].selector);
+    assert_eq!(
+        rescheduled.v1_ed25519[0].selector,
+        initial.v1_ed25519[0].selector
+    );
+    account.wait_for_dkim_task_count(domain_id, 1).await;
+
+    // The follow-up task counts as queued
+    assert_eq!(
+        services::task_manager::domain_check::check_tasks_for_domains(&test.server, &[domain_id])
+            .await
+            .unwrap(),
+        0
+    );
+    account.wait_for_dkim_task_count(domain_id, 1).await;
+
+    // Cleanup
+    account.registry_destroy_all(ObjectType::Task).await;
+    account
+        .registry_destroy_all(ObjectType::DkimSignature)
+        .await;
+    account
+        .registry_destroy(ObjectType::Domain, [domain_id])
+        .await
+        .assert_destroyed(&[domain_id]);
+    account.registry_destroy_all(ObjectType::DnsServer).await;
+}
+
 async fn automatic_to_manual_dns_test(test: &TestServer) {
     println!("Running DKIM automatic to manual DNS tests...");
     let account = test.account("admin@example.org");
@@ -774,6 +871,27 @@ impl Account {
             signatures = self.dkim_signatures().await;
         }
         panic!("DKIM signatures did not reach {expected}: {signatures:#?}");
+    }
+
+    // inbuxa: settles on exactly `count` DKIM tasks for the domain
+    async fn wait_for_dkim_task_count(&self, domain_id: Id, count: usize) {
+        let mut last = None;
+        for _ in 0..60 {
+            if let Some(tasks) = self.tasks().await {
+                let found = tasks
+                    .iter()
+                    .filter(|task| {
+                        matches!(&task.task, Task::DkimManagement(task) if task.domain_id == domain_id)
+                    })
+                    .count();
+                if found == count {
+                    return;
+                }
+                last = Some(found);
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+        }
+        panic!("Expected {count} DKIM tasks for the domain, found {last:?}");
     }
 
     async fn wait_for_no_dkim_tasks(&self, domain_id: Id) {
