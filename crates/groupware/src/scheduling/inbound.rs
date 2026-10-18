@@ -542,7 +542,7 @@ fn handle_reply(
     Ok(())
 }
 
-pub fn itip_merge_changes(ical: &mut ICalendar, changes: Vec<MergeAction>) {
+pub fn itip_merge_changes(ical: &mut ICalendar, itip: &ICalendar, changes: Vec<MergeAction>) {
     let mut remove_component_ids: Vec<u32> = Vec::new();
     for action in changes {
         match action {
@@ -600,6 +600,85 @@ pub fn itip_merge_changes(ical: &mut ICalendar, changes: Vec<MergeAction>) {
     if !remove_component_ids.is_empty() {
         ical.remove_component_ids(&remove_component_ids);
     }
+
+    merge_timezones(ical, itip);
+}
+
+fn merge_timezones(ical: &mut ICalendar, itip: &ICalendar) {
+    let Some(root) = ical
+        .components
+        .first()
+        .filter(|root| root.component_type == ICalendarComponentType::VCalendar)
+    else {
+        return;
+    };
+    let mut insert_at = root
+        .component_ids
+        .iter()
+        .position(|component_id| {
+            ical.component_by_id(*component_id)
+                .is_none_or(|comp| comp.component_type != ICalendarComponentType::VTimezone)
+        })
+        .unwrap_or(root.component_ids.len());
+
+    for tz in itip.timezones() {
+        let Some(tz_id) = timezone_id(tz) else {
+            continue;
+        };
+
+        let mut is_referenced = false;
+        for component in &ical.components {
+            if component.component_type == ICalendarComponentType::VTimezone {
+                if timezone_id(component) == Some(tz_id) {
+                    is_referenced = false;
+                    break;
+                }
+            } else if !is_referenced {
+                is_referenced = component
+                    .entries
+                    .iter()
+                    .any(|entry| entry.tz_id() == Some(tz_id));
+            }
+        }
+        if !is_referenced {
+            continue;
+        }
+
+        let tz_component_id = ical.components.len() as u32;
+        ical.components.reserve(tz.component_ids.len() + 1);
+        ical.components.push(ICalendarComponent {
+            component_type: ICalendarComponentType::VTimezone,
+            entries: tz.entries.clone(),
+            component_ids: Vec::new(),
+        });
+        ical.components.extend(
+            tz.component_ids
+                .iter()
+                .filter_map(|component_id| itip.component_by_id(*component_id))
+                .map(|item| ICalendarComponent {
+                    component_type: item.component_type.clone(),
+                    entries: item.entries.clone(),
+                    component_ids: Vec::new(),
+                }),
+        );
+        let last_item_id = ical.components.len() as u32;
+        if let Some(tz_component) = ical.components.get_mut(tz_component_id as usize) {
+            tz_component.component_ids = (tz_component_id + 1..last_item_id).collect();
+        }
+        if let Some(root) = ical.components.first_mut() {
+            root.component_ids.insert(insert_at, tz_component_id);
+            insert_at += 1;
+        }
+    }
+
+    ical.add_missing_timezones();
+}
+
+fn timezone_id(component: &ICalendarComponent) -> Option<&str> {
+    component
+        .property(&ICalendarProperty::Tzid)
+        .and_then(|entry| entry.values.first())
+        .and_then(|value| value.as_text())
 }
 
 pub fn itip_method(ical: &ICalendar) -> Result<&ICalendarMethod, ItipError> {

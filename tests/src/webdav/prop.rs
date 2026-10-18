@@ -170,6 +170,66 @@ pub async fn test(test: &TestServer, assisted_discovery: bool) {
             .with_status(StatusCode::MULTI_STATUS)
             .with_hrefs([test_path.as_str()]);
 
+        // Allprop must not return href-valued properties outside RFC 4918 unless included
+        let user_base_href = format!("{user_base_path}/");
+        let href_props = [
+            DavProperty::WebDav(WebDavProperty::CurrentUserPrincipal),
+            DavProperty::WebDav(WebDavProperty::Owner),
+            DavProperty::WebDav(WebDavProperty::PrincipalCollectionSet),
+        ];
+        for (path, hrefs) in [
+            (
+                resource_type.base_path(),
+                [resource_type.collection_path(), user_base_href.as_str()],
+            ),
+            (
+                user_base_path.as_str(),
+                [user_base_href.as_str(), test_base_path.as_str()],
+            ),
+            (
+                test_base_path.as_str(),
+                [test_base_path.as_str(), test_path.as_str()],
+            ),
+        ] {
+            let response = client
+                .request_with_headers("PROPFIND", path, [("depth", "1")], "")
+                .await
+                .with_status(StatusCode::MULTI_STATUS)
+                .into_propfind_response(None);
+            for href in hrefs {
+                let properties = response.properties(href);
+                properties.is_defined(DavProperty::WebDav(WebDavProperty::ResourceType));
+                for prop in &href_props {
+                    properties.is_undefined(prop);
+                }
+            }
+
+            let response = client
+                .request_with_headers(
+                    "PROPFIND",
+                    path,
+                    [("depth", "1")],
+                    concat!(
+                        r#"<D:propfind xmlns:D="DAV:"><D:allprop/>"#,
+                        r#"<D:include><D:current-user-principal/></D:include>"#,
+                        r#"</D:propfind>"#
+                    ),
+                )
+                .await
+                .with_status(StatusCode::MULTI_STATUS)
+                .into_propfind_response(None);
+            for href in hrefs {
+                response
+                    .properties(href)
+                    .get(DavProperty::WebDav(WebDavProperty::CurrentUserPrincipal))
+                    .with_values([format!(
+                        "D:href:{}/jane%40example.com/",
+                        DavResourceName::Principal.base_path()
+                    )
+                    .as_str()]);
+            }
+        }
+
         // Test 8 PROPFIND with prefer return=minimal
         let response = client
             .propfind_with_headers(&test_base_path, ALL_DAV_PROPERTIES, [])

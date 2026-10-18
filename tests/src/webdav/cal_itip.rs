@@ -2,6 +2,8 @@
  * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
+ *
+ * Modified by Coffey Labs in 2026 for INBUXA.
  */
 
 use ahash::AHashMap;
@@ -277,7 +279,7 @@ pub fn test() {
                                                     ) {
                                                         Ok(result) => match result {
                                                             MergeResult::Actions(changes) => {
-                                                                itip_merge_changes(ical, changes);
+                                                                itip_merge_changes(ical, &message.message, changes);
                                                                 Ok(None)
                                                             }
                                                             MergeResult::Message(message) => {

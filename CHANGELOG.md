@@ -2,6 +2,22 @@
 
 All notable changes to this project will be documented in this file. This project adheres to [Semantic Versioning](http://semver.org/).
 
+## [0.16.27] - 2026-10-18
+
+If you are upgrading from v0.16.x, replace the binary (or run `docker pull`). If you are upgrading from v0.15.x and below, please read the [upgrading documentation](https://github.com/stalwartlabs/stalwart/blob/main/UPGRADING/v0_16.md) for more information on how to upgrade from previous versions.
+
+## Added
+
+## Changed
+
+## Fixed
+- IMAP:
+  - `APPEND` and `COPY`/`MOVE` into another account's mailbox do not change the JMAP `EmailDelivery` state.
+  - `SEARCH RETURN` with `MIN` or `MAX` alongside `ALL` returns only the minimum and maximum in `ALL`, and `SAVE` combined with `MIN` or `MAX` and `ALL` or `COUNT` saves only the minimum and maximum instead of every match.
+- iTIP: Merging a received update does not copy the `VTIMEZONE` definitions it carries, so an occurrence moved by an external organizer can reference a `TZID` (for example `W. Europe Standard Time`) the stored event no longer defines, and Apple Calendar shows both the original and the moved occurrence.
+- OAuth: Loopback redirect URIs without a path (for example `http://127.0.0.1:45678`) are not matched against registered loopback URIs on any port and are rejected by dynamic client registration.
+- WebDAV: `PROPFIND` `allprop` returns `DAV:current-user-principal`, so Windows Explorer shows every file and folder under the account name.
+
 ## [0.16.26] - 2026-10-11
 
 If you are upgrading from v0.16.x, replace the binary (or run `docker pull`). If you are upgrading from v0.15.x and below, please read the [upgrading documentation](https://github.com/stalwartlabs/stalwart/blob/main/UPGRADING/v0_16.md) for more information on how to upgrade from previous versions.
@@ -11,6 +27,7 @@ If you are upgrading from v0.16.x, replace the binary (or run `docker pull`). If
 - JMAP: `Mailbox/set` allows moving a mailbox under a parent that already has a child with the same name, and rejects renames that only change the case of a mailbox name with `alreadyExists`.
 
 ## Changed
+- Breaking: x86_64 binaries and Docker images (except musl builds) now require a CPU with the x86-64-v2 instruction set (which includes SSE3, SSSE3, SSE4.1, SSE4.2 and POPCNT), and the server refuses to start on older CPUs. Virtual machines using a generic CPU model such as QEMU's "Common KVM processor" are affected. To fix it, set the VM CPU type to `host` or `x86-64-v2-AES` (Proxmox), or switch to the musl build: the `-alpine` Docker tags (for example `stalwartlabs/stalwart:v0.16-alpine`) or the `x86_64-unknown-linux-musl` binary.
 
 ## Fixed
 - DNSSEC: Use `hickory-resolver` patched fork at https://github.com/stalwartlabs/hickory-dns.

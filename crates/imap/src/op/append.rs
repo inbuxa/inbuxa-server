@@ -169,6 +169,7 @@ impl<T: SessionStream> SessionData<T> {
                 .broadcast_push_notification(PushNotification::StateChange(
                     StateChange::new(account_id)
                         .with_change_id(change_id)
+                        .with_change(DataType::EmailDelivery)
                         .with_change(DataType::Email)
                         .with_change(DataType::Mailbox)
                         .with_change(DataType::Thread),
