@@ -53,6 +53,7 @@ enum Event {
 }
 
 // inbuxa: first check a few minutes after start, then daily
+#[cfg_attr(feature = "test_mode", allow(dead_code))]
 const DOMAIN_TASK_CHECK_DELAY: Duration = Duration::from_secs(5 * 60);
 const DOMAIN_TASK_CHECK_INTERVAL: Duration = Duration::from_secs(24 * 60 * 60);
 
@@ -152,7 +153,11 @@ pub fn spawn_task_scheduler(inner: Arc<Inner>) {
                 Event::StoreMetrics,
             );
 
-            // inbuxa: automatic domains keep their DKIM and ACME tasks
+            // inbuxa: automatic domains keep their DKIM and ACME tasks. Not
+            // in test builds: a suite running past the first check would get
+            // DKIM keys for its test domains, and the tests call the check
+            // themselves.
+            #[cfg(not(feature = "test_mode"))]
             queue.schedule(
                 Instant::now() + DOMAIN_TASK_CHECK_DELAY,
                 Event::CheckDomainTasks,
