@@ -761,7 +761,7 @@ async fn commit_itip_merge(
         .caused_by(trc::location!())?;
 
     // Merge changes
-    itip_merge_changes(&mut event.data.event, changes);
+    itip_merge_changes(&mut event.data.event, &itip, changes);
 
     // Calculate the new ical size
     event.size = ical_size(&event.data.event) as u32;

@@ -57,7 +57,7 @@ use groupware::{
 use http_proto::HttpResponse;
 use hyper::StatusCode;
 use registry::schema::{enums::Permission, prelude::ObjectType};
-use std::sync::Arc;
+use std::{borrow::Cow, sync::Arc};
 use store::{
     ValueKey,
     registry::RegistryQuery,
@@ -1725,13 +1725,20 @@ async fn add_base_collection_response(
             ));
             return Ok(());
         }
-        PropFind::AllProp(_) => [
-            DavProperty::WebDav(WebDavProperty::ResourceType),
-            DavProperty::WebDav(WebDavProperty::CurrentUserPrincipal),
-            DavProperty::WebDav(WebDavProperty::SupportedReportSet),
-        ]
-        .as_slice(),
-        PropFind::Prop(items) => items,
+        PropFind::AllProp(include) => {
+            let mut props = Vec::with_capacity(include.len() + 2);
+            props.extend([
+                DavProperty::WebDav(WebDavProperty::ResourceType),
+                DavProperty::WebDav(WebDavProperty::SupportedReportSet),
+            ]);
+            for prop in include {
+                if !props.contains(prop) {
+                    props.push(prop.clone());
+                }
+            }
+            Cow::Owned(props)
+        }
+        PropFind::Prop(items) => Cow::Borrowed(items.as_slice()),
     };
 
     let mut fields = Vec::with_capacity(properties.len());
@@ -1741,9 +1748,9 @@ async fn add_base_collection_response(
         .await
         .caused_by(trc::location!())?;
 
-    for prop in properties {
+    for prop in properties.iter() {
         response.set_namespace(prop.namespace());
-        match &prop {
+        match prop {
             DavProperty::WebDav(WebDavProperty::ResourceType) => {
                 fields.push(DavPropertyValue::new(
                     prop.clone(),

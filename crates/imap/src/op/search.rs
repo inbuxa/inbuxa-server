@@ -173,9 +173,14 @@ impl<T: SessionStream> SessionData<T> {
             None
         };
         let mut imap_ids = Vec::with_capacity(results_len);
+        let return_all = arguments.result_options.is_empty()
+            || arguments.result_options.contains(&ResultOption::All);
         mailbox.map_search_results(
             result_set.into_iter(),
             is_uid,
+            return_all
+                || (saved_results.is_some()
+                    && arguments.result_options.contains(&ResultOption::Count)),
             arguments.result_options.contains(&ResultOption::Min),
             arguments.result_options.contains(&ResultOption::Max),
             &mut min,
@@ -245,13 +250,7 @@ impl<T: SessionStream> SessionData<T> {
                 } else {
                     None
                 },
-                ids: if arguments.result_options.is_empty()
-                    || arguments.result_options.contains(&ResultOption::All)
-                {
-                    imap_ids
-                } else {
-                    vec![]
-                },
+                ids: if return_all { imap_ids } else { vec![] },
                 is_sort,
                 is_esearch: arguments.is_esearch,
                 highest_modseq,
@@ -722,6 +721,7 @@ impl SelectedMailbox {
         &self,
         ids: impl Iterator<Item = u32>,
         is_uid: bool,
+        collect_all: bool,
         find_min: bool,
         find_max: bool,
         min: &mut Option<(u32, ImapId)>,
@@ -734,26 +734,25 @@ impl SelectedMailbox {
         let find_min_or_max = find_min || find_max;
         for document_id in ids {
             if let Some((id, imap_id)) = state.map_result_id(document_id, is_uid) {
-                if find_min_or_max {
-                    if find_min {
-                        if let Some((prev_min, _)) = min {
-                            if id < *prev_min {
-                                *min = Some((id, imap_id));
-                            }
-                        } else {
+                if find_min {
+                    if let Some((prev_min, _)) = min {
+                        if id < *prev_min {
                             *min = Some((id, imap_id));
                         }
+                    } else {
+                        *min = Some((id, imap_id));
                     }
-                    if find_max {
-                        if let Some((prev_max, _)) = max {
-                            if id > *prev_max {
-                                *max = Some((id, imap_id));
-                            }
-                        } else {
+                }
+                if find_max {
+                    if let Some((prev_max, _)) = max {
+                        if id > *prev_max {
                             *max = Some((id, imap_id));
                         }
+                    } else {
+                        *max = Some((id, imap_id));
                     }
-                } else {
+                }
+                if collect_all || !find_min_or_max {
                     imap_ids.push(id);
                     if let Some(r) = saved_results.as_mut() {
                         r.push(imap_id)
@@ -762,11 +761,12 @@ impl SelectedMailbox {
                 *total += 1;
             }
         }
-        if find_min || find_max {
-            for (id, imap_id) in [min, max].into_iter().flatten() {
-                imap_ids.push(*id);
+        if find_min_or_max && !collect_all {
+            let max = max.filter(|(max_id, _)| min.is_none_or(|(min_id, _)| min_id != *max_id));
+            for (id, imap_id) in [*min, max].into_iter().flatten() {
+                imap_ids.push(id);
                 if let Some(r) = saved_results.as_mut() {
-                    r.push(*imap_id)
+                    r.push(imap_id)
                 }
             }
         }

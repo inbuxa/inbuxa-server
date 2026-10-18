@@ -167,13 +167,10 @@ impl IntoValue for AccountPassword {
     fn into_value(self) -> JmapValue<'static> {
         let mut map = jmap_tools::Map::with_capacity(5);
         if self.secret.is_some() {
-            map.insert_unchecked(Property::Secret, JmapValue::Str(MASKED_PASSWORD.into()));
+            map.insert_unchecked(Property::Secret, secret_value(self.secret));
         }
         if self.current_secret.is_some() {
-            map.insert_unchecked(
-                Property::CurrentSecret,
-                JmapValue::Str(MASKED_PASSWORD.into()),
-            );
+            map.insert_unchecked(Property::CurrentSecret, secret_value(self.current_secret));
         }
         map.insert_unchecked(Property::OtpAuth, self.otp_auth.into_value());
         JmapValue::Object(map)
@@ -397,7 +394,7 @@ impl IntoValue for AcmeProvider {
         map.insert_unchecked(Property::ChallengeType, self.challenge_type.into_value());
         map.insert_unchecked(Property::Contact, self.contact.into_value());
         map.insert_unchecked(Property::Directory, self.directory.into_value());
-        map.insert_unchecked(Property::AccountKey, JmapValue::Str(MASKED_PASSWORD.into()));
+        map.insert_unchecked(Property::AccountKey, secret_value(self.account_key));
         map.insert_unchecked(Property::AccountUri, self.account_uri.into_value());
         map.insert_unchecked(Property::RenewBefore, self.renew_before.into_value());
         map.insert_unchecked(Property::MaxRetries, self.max_retries.into_value());
@@ -1523,7 +1520,7 @@ impl IntoValue for ApiKey {
     fn into_value(self) -> JmapValue<'static> {
         let mut map = jmap_tools::Map::with_capacity(8);
         map.insert_unchecked(Property::Description, self.description.into_value());
-        map.insert_unchecked(Property::Secret, JmapValue::Str(MASKED_PASSWORD.into()));
+        map.insert_unchecked(Property::Secret, secret_value(self.secret));
         map.insert_unchecked(Property::CreatedAt, self.created_at.into_value());
         map.insert_unchecked(Property::ExpiresAt, self.expires_at.into_value());
         map.insert_unchecked(Property::Permissions, self.permissions.into_value());
@@ -1631,7 +1628,7 @@ impl IntoValue for AppPassword {
     fn into_value(self) -> JmapValue<'static> {
         let mut map = jmap_tools::Map::with_capacity(8);
         map.insert_unchecked(Property::Description, self.description.into_value());
-        map.insert_unchecked(Property::Secret, JmapValue::Str(MASKED_PASSWORD.into()));
+        map.insert_unchecked(Property::Secret, secret_value(self.secret));
         map.insert_unchecked(Property::CreatedAt, self.created_at.into_value());
         map.insert_unchecked(Property::ExpiresAt, self.expires_at.into_value());
         map.insert_unchecked(Property::Permissions, self.permissions.into_value());
@@ -30552,7 +30549,7 @@ impl IntoValue for OAuthClient {
         map.insert_unchecked(Property::Description, self.description.into_value());
         map.insert_unchecked(Property::Contacts, self.contacts.into_value());
         if self.secret.is_some() {
-            map.insert_unchecked(Property::Secret, JmapValue::Str(MASKED_PASSWORD.into()));
+            map.insert_unchecked(Property::Secret, secret_value(self.secret));
         }
         map.insert_unchecked(Property::CreatedAt, self.created_at.into_value());
         map.insert_unchecked(Property::ExpiresAt, self.expires_at.into_value());
@@ -30953,10 +30950,10 @@ impl IntoValue for OtpAuth {
     fn into_value(self) -> JmapValue<'static> {
         let mut map = jmap_tools::Map::with_capacity(4);
         if self.otp_code.is_some() {
-            map.insert_unchecked(Property::OtpCode, JmapValue::Str(MASKED_PASSWORD.into()));
+            map.insert_unchecked(Property::OtpCode, secret_value(self.otp_code));
         }
         if self.otp_url.is_some() {
-            map.insert_unchecked(Property::OtpUrl, JmapValue::Str(MASKED_PASSWORD.into()));
+            map.insert_unchecked(Property::OtpUrl, secret_value(self.otp_url));
         }
         JmapValue::Object(map)
     }
@@ -31047,9 +31044,9 @@ impl IntoValue for PasswordCredential {
     fn into_value(self) -> JmapValue<'static> {
         let mut map = jmap_tools::Map::with_capacity(7);
         map.insert_unchecked(Property::CredentialId, self.credential_id.into_value());
-        map.insert_unchecked(Property::Secret, JmapValue::Str(MASKED_PASSWORD.into()));
+        map.insert_unchecked(Property::Secret, secret_value(self.secret));
         if self.otp_auth.is_some() {
-            map.insert_unchecked(Property::OtpAuth, JmapValue::Str(MASKED_PASSWORD.into()));
+            map.insert_unchecked(Property::OtpAuth, secret_value(self.otp_auth));
         }
         map.insert_unchecked(Property::ExpiresAt, self.expires_at.into_value());
         map.insert_unchecked(Property::AllowedIps, self.allowed_ips.into_value());
@@ -34812,7 +34809,7 @@ impl IntoValue for SecondaryCredential {
         let mut map = jmap_tools::Map::with_capacity(9);
         map.insert_unchecked(Property::CredentialId, self.credential_id.into_value());
         map.insert_unchecked(Property::Description, self.description.into_value());
-        map.insert_unchecked(Property::Secret, JmapValue::Str(MASKED_PASSWORD.into()));
+        map.insert_unchecked(Property::Secret, secret_value(self.secret));
         map.insert_unchecked(Property::CreatedAt, self.created_at.into_value());
         map.insert_unchecked(Property::ExpiresAt, self.expires_at.into_value());
         map.insert_unchecked(Property::Permissions, self.permissions.into_value());
@@ -35215,7 +35212,7 @@ impl Default for SecretKeyValue {
 impl IntoValue for SecretKeyValue {
     fn into_value(self) -> JmapValue<'static> {
         let mut map = jmap_tools::Map::with_capacity(3);
-        map.insert_unchecked(Property::Secret, JmapValue::Str(MASKED_PASSWORD.into()));
+        map.insert_unchecked(Property::Secret, secret_value(self.secret));
         JmapValue::Object(map)
     }
 }
@@ -35500,7 +35497,7 @@ impl Default for SecretTextValue {
 impl IntoValue for SecretTextValue {
     fn into_value(self) -> JmapValue<'static> {
         let mut map = jmap_tools::Map::with_capacity(3);
-        map.insert_unchecked(Property::Secret, JmapValue::Str(MASKED_PASSWORD.into()));
+        map.insert_unchecked(Property::Secret, secret_value(self.secret));
         JmapValue::Object(map)
     }
 }

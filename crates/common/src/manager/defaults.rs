@@ -26,6 +26,12 @@ use store::{
     },
 };
 
+pub const WEBUI_LATEST_URL: &str =
+    "https://github.com/stalwartlabs/webui/releases/latest/download/webui.zip";
+pub const WEBUI_PINNED_URL: &str =
+    "https://github.com/stalwartlabs/webui/releases/download/v1.0.11/webui.zip";
+pub const WEBUI_MAX_MAJOR_VERSION: u32 = 1;
+
 pub const ASN_IPV4: &str =
     "https://github.com/sapics/ip-location-db/releases/download/latest/origin-asn-ipv4.csv";
 pub const ASN_IPV6: &str =
@@ -63,9 +69,7 @@ async fn insert_safe_defaults(bp: &mut Bootstrap) -> trc::Result<()> {
                     description: "Stalwart Web Interface".to_string(),
                     enabled: true,
                     #[cfg(not(feature = "dev_mode"))]
-                    resource_url:
-                        "https://github.com/stalwartlabs/webui/releases/latest/download/webui.zip"
-                            .into(),
+                    resource_url: WEBUI_PINNED_URL.into(),
                     #[cfg(feature = "dev_mode")]
                     resource_url: "file:///Users/me/code/webui/.ignore/webui.zip".into(),
                     unpack_directory: None,

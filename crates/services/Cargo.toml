@@ -1,6 +1,6 @@
 [package]
 name = "services"
-version = "0.16.26"
+version = "0.16.27"
 edition = "2024"
 
 [dependencies]
@@ -30,7 +30,7 @@ hkdf = "0.13"
 sha2 = "0.11"
 reqwest = { version = "0.13", default-features = false, features = ["rustls", "http2"]}
 base64 = "0.23"
-dns-update = { version = "0.5" }
+dns-update = { version = "0.6" }
 psl = "2"
 
 [dev-dependencies]

@@ -1218,12 +1218,21 @@ impl EmailSet for Server {
         if let Some(change_id) = last_change_id {
             if response.updated.is_empty() && response.destroyed.is_empty() {
                 // Message ingest does not broadcast state changes
+                let mut state_change = StateChange::new(account_id)
+                    .with_change_id(change_id)
+                    .with_change(DataType::Email)
+                    .with_change(DataType::Mailbox)
+                    .with_change(DataType::Thread);
+                if !response.created.is_empty() {
+                    state_change.set_change(DataType::EmailDelivery);
+                }
+                self.broadcast_push_notification(PushNotification::StateChange(state_change))
+                    .await;
+            } else if !response.created.is_empty() {
                 self.broadcast_push_notification(PushNotification::StateChange(
                     StateChange::new(account_id)
                         .with_change_id(change_id)
-                        .with_change(DataType::Email)
-                        .with_change(DataType::Mailbox)
-                        .with_change(DataType::Thread),
+                        .with_change(DataType::EmailDelivery),
                 ))
                 .await;
             }

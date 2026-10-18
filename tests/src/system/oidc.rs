@@ -246,6 +246,9 @@ pub async fn test(test: &mut TestServer) {
         "http://127.0.0.1/cb",
         "http://127.0.0.1:54321/cb",
         "http://[::1]:8080/cb",
+        "http://127.0.0.1",
+        "http://127.0.0.1:54321",
+        "http://[::1]:8080",
     ] {
         let (status, body) = post_json_raw(
             &metadata.registration_endpoint,

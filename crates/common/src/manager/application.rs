@@ -4,13 +4,19 @@
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
  */
 
-use crate::{Server, manager::fetch_resource};
+use crate::{
+    Server,
+    manager::{
+        defaults::{WEBUI_LATEST_URL, WEBUI_MAX_MAJOR_VERSION, WEBUI_PINNED_URL},
+        fetch_resource,
+    },
+};
 use ahash::AHashMap;
 use arc_swap::ArcSwap;
 use registry::schema::{enums::CompressionAlgo, structs::Application};
 use std::{
     borrow::Cow,
-    io::{self, Cursor, Read},
+    io::{self, Cursor, Read, Seek},
     path::{Path, PathBuf},
     sync::{
         Arc,
@@ -197,7 +203,11 @@ impl WebApplicationManager {
         Self {
             base_path,
             blob_key: BlobHash::generate(format!("{}{}", APP_BLOB_PREFIX, app.id.id()).as_bytes()),
-            url: app.object.resource_url,
+            url: if app.object.resource_url == WEBUI_LATEST_URL {
+                WEBUI_PINNED_URL.to_string()
+            } else {
+                app.object.resource_url
+            },
             description: app.object.description,
             expiry: app.object.auto_update_frequency.as_secs(),
             oauth_client_id: app.object.oauth_client_id,
@@ -261,6 +271,15 @@ impl WebApplicationManager {
                     .ctx(Key::Url, url.clone())
                     .details("Failed to decompress application bundle")
             })?;
+            if let Some(version) = unsupported_bundle_version(&mut archive) {
+                return Err(trc::ResourceEvent::Error
+                    .caused_by(trc::location!())
+                    .ctx(Key::Url, url.clone())
+                    .details(format!(
+                        "Application bundle version {version} requires Stalwart v1 or later, set the resource URL to {WEBUI_PINNED_URL}"
+                    )));
+            }
+
             let mut resources = AHashMap::with_capacity(archive.len());
             for i in 0..archive.len() {
                 let mut file = archive.by_index(i).map_err(|err| {
@@ -494,6 +513,19 @@ fn rewrite_index(html: &str, prefix: &str, oauth_client_id_meta: Option<&str>) -
     }
     out.push_str(&html[pos..]);
     out.into_bytes()
+}
+
+fn unsupported_bundle_version<R: Read + Seek>(archive: &mut zip::ZipArchive<R>) -> Option<String> {
+    let file = archive.by_name("VERSION").ok()?;
+    let mut version = String::new();
+    let is_supported = file.take(32).read_to_string(&mut version).is_ok()
+        && version
+            .trim()
+            .split('.')
+            .next()
+            .and_then(|major| major.parse::<u32>().ok())
+            .is_some_and(|major| major <= WEBUI_MAX_MAJOR_VERSION);
+    (!is_supported).then(|| version.trim().to_string())
 }
 
 fn oauth_client_id_meta(client_id: &str) -> String {
@@ -749,5 +781,39 @@ mod tests {
         let apps = WebApplications::new();
 
         assert_ne!(apps.next_generation(), apps.next_generation());
+    }
+
+    fn bundle(version: Option<&str>) -> zip::ZipArchive<Cursor<Vec<u8>>> {
+        let mut writer = zip::ZipWriter::new(Cursor::new(Vec::new()));
+        let options = zip::write::SimpleFileOptions::default();
+        writer.start_file("index.html", options).unwrap();
+        io::Write::write_all(&mut writer, INDEX.as_bytes()).unwrap();
+        if let Some(version) = version {
+            writer.start_file("VERSION", options).unwrap();
+            io::Write::write_all(&mut writer, version.as_bytes()).unwrap();
+        }
+        zip::ZipArchive::new(writer.finish().unwrap()).unwrap()
+    }
+
+    #[test]
+    fn bundles_newer_than_the_supported_major_version_are_rejected() {
+        // Bundles without VERSION or with a 1.x VERSION are accepted, anything else is rejected
+        assert_eq!(unsupported_bundle_version(&mut bundle(None)), None);
+        assert_eq!(
+            unsupported_bundle_version(&mut bundle(Some("1.0.12\n"))),
+            None
+        );
+        assert_eq!(
+            unsupported_bundle_version(&mut bundle(Some("2.0.0\n"))),
+            Some("2.0.0".to_string())
+        );
+        assert_eq!(
+            unsupported_bundle_version(&mut bundle(Some("10.1.0"))),
+            Some("10.1.0".to_string())
+        );
+        assert_eq!(
+            unsupported_bundle_version(&mut bundle(Some("garbage"))),
+            Some("garbage".to_string())
+        );
     }
 }

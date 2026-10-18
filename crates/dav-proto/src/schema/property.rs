@@ -366,7 +366,7 @@ impl Rfc1123DateTime {
 }
 
 impl DavProperty {
-    pub const ALL_PROPS: [DavProperty; 11] = [
+    pub const ALL_PROPS: [DavProperty; 10] = [
         DavProperty::WebDav(WebDavProperty::CreationDate),
         DavProperty::WebDav(WebDavProperty::DisplayName),
         DavProperty::WebDav(WebDavProperty::GetETag),
@@ -374,7 +374,6 @@ impl DavProperty {
         DavProperty::WebDav(WebDavProperty::ResourceType),
         DavProperty::WebDav(WebDavProperty::LockDiscovery),
         DavProperty::WebDav(WebDavProperty::SupportedLock),
-        DavProperty::WebDav(WebDavProperty::CurrentUserPrincipal),
         DavProperty::WebDav(WebDavProperty::GetContentLanguage),
         DavProperty::WebDav(WebDavProperty::GetContentLength),
         DavProperty::WebDav(WebDavProperty::GetContentType),
@@ -390,7 +389,6 @@ impl DavProperty {
                 | DavProperty::WebDav(WebDavProperty::ResourceType)
                 | DavProperty::WebDav(WebDavProperty::LockDiscovery)
                 | DavProperty::WebDav(WebDavProperty::SupportedLock)
-                | DavProperty::WebDav(WebDavProperty::CurrentUserPrincipal)
                 | DavProperty::WebDav(WebDavProperty::GetContentLanguage)
                 | DavProperty::WebDav(WebDavProperty::GetContentLength)
                 | DavProperty::WebDav(WebDavProperty::GetContentType)

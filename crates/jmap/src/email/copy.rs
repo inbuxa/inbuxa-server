@@ -8,7 +8,7 @@ use crate::{
     changes::state::JmapCacheState,
     email::{PatchResult, handle_email_patch, ingested_into_object},
 };
-use common::{Server, auth::AccessToken};
+use common::{Server, auth::AccessToken, ipc::PushNotification};
 use email::{
     cache::{MessageCacheFetch, email::MessageCacheAccess, mailbox::MailboxCacheAccess},
     mailbox::JUNK_ID,
@@ -35,7 +35,10 @@ use jmap_tools::{Key, Value};
 use std::future::Future;
 use store::write::BatchBuilder;
 use trc::AddContext;
-use types::acl::Acl;
+use types::{
+    acl::Acl,
+    type_state::{DataType, StateChange},
+};
 use utils::map::vec_map::VecMap;
 
 pub trait JmapEmailCopy: Sync + Send {
@@ -94,6 +97,7 @@ impl JmapEmailCopy for Server {
         let mut destroy_ids = Vec::new();
         let mut train_batch = BatchBuilder::new();
         let mut did_train = false;
+        let mut last_change_id = None;
         train_batch.with_account_id(from_account_id);
 
         'create: for (id, create) in request.create.into_valid() {
@@ -230,6 +234,7 @@ impl JmapEmailCopy for Server {
                 .await?
             {
                 Ok(email) => {
+                    last_change_id = Some(email.change_id);
                     if train_spam {
                         self.add_account_spam_sample(
                             &mut train_batch,
@@ -275,7 +280,16 @@ impl JmapEmailCopy for Server {
         }
 
         // Update state
-        if !response.created.is_empty() {
+        if let Some(change_id) = last_change_id {
+            self.broadcast_push_notification(PushNotification::StateChange(
+                StateChange::new(account_id)
+                    .with_change_id(change_id)
+                    .with_change(DataType::EmailDelivery)
+                    .with_change(DataType::Email)
+                    .with_change(DataType::Mailbox)
+                    .with_change(DataType::Thread),
+            ))
+            .await;
             response.new_state = self.get_cached_messages(account_id).await?.get_state(false);
         }
 
