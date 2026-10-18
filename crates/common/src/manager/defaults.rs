@@ -14,7 +14,7 @@ use aws_lc_rs::{
 use registry::{
     schema::{
         enums::*,
-        prelude::{Object, ObjectType, SocketAddr},
+        prelude::{ObjectType, SocketAddr},
         structs::*,
     },
     types::{duration::Duration, error::Error, list::List, map::Map},
@@ -407,7 +407,7 @@ async fn insert_safe_defaults(bp: &mut Bootstrap) -> trc::Result<()> {
         let mut retention = bp.setting_infallible::<DataRetention>().await;
         new_install_privacy_defaults(&mut security, &mut classifier, &mut pyzor, &mut retention);
         for object in [
-            Object::from(security),
+            registry::schema::prelude::Object::from(security),
             classifier.into(),
             pyzor.into(),
             retention.into(),
