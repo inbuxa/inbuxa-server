@@ -29,6 +29,7 @@ pub mod crypto;
 pub mod delivery;
 pub mod directory;
 pub mod masked_email;
+pub mod masked_secrets; // inbuxa: "****" is never saved as a secret
 pub mod monitoring;
 pub mod oidc;
 pub mod purge;

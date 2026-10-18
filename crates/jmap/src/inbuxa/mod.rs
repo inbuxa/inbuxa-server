@@ -28,6 +28,7 @@ pub mod data_inventory;
 pub mod directory_test;
 pub mod webhook_test;
 pub mod explanation;
+pub mod masked_secrets; // inbuxa: "****" is never saved as a secret
 pub mod protocol_policy;
 pub mod tenant_protocol_policy;
 pub mod sharing_policy;

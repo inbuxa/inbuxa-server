@@ -6,6 +6,7 @@
  * Modified by Coffey Labs in 2026 for INBUXA.
  */
 
+use crate::inbuxa::masked_secrets;
 use crate::registry::{
     EnterpriseRegistry,
     mapping::{
@@ -348,6 +349,10 @@ impl RegistrySet for Server {
                         continue 'outer;
                     };
 
+                    // inbuxa: "****" is never saved as a secret (accounts keep
+                    // their own credential checks)
+                    let guard_masked_secrets = object_type != ObjectType::Account;
+
                     if is_create
                         || value
                             .as_object()
@@ -356,6 +361,13 @@ impl RegistrySet for Server {
                             .and_then(|v| v.as_str())
                             .is_some_and(|t| new_object.object_variant().is_some_and(|v| v != t))
                     {
+                        if guard_masked_secrets
+                            && let Some(property) = masked_secrets::masked_secret_in_object(&value)
+                        {
+                            set.failed(modification, masked_secrets::masked_secret_error(property));
+                            continue 'outer;
+                        }
+
                         // Patch object
                         match new_object.patch(
                             JsonPointerPatch::new(&JsonPointer::new(vec![]))
@@ -410,6 +422,22 @@ impl RegistrySet for Server {
                                 Key::Borrowed(other) => JsonPointer::parse(other),
                                 Key::Owned(other) => JsonPointer::parse(&other),
                             };
+
+                            // inbuxa: "****" written back at a secret keeps it;
+                            // anywhere deeper there is nothing it could stand for
+                            if guard_masked_secrets {
+                                if masked_secrets::keeps_stored_secret(&ptr, &value) {
+                                    continue;
+                                } else if masked_secrets::holds_masked_secret(&value) {
+                                    set.failed(
+                                        modification,
+                                        masked_secrets::masked_secret_error(
+                                            masked_secrets::top_level_property(&ptr),
+                                        ),
+                                    );
+                                    continue 'outer;
+                                }
+                            }
 
                             // Patch object
                             match new_object.patch(
