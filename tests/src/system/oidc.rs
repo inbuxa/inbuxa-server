@@ -351,6 +351,29 @@ pub async fn test(test: &mut TestServer) {
         "unknown resource indicator must not be authorized"
     );
 
+    // inbuxa: only S256 is accepted. `plain`, named or as RFC 7636's default
+    // when no method is given, sends the verifier itself as the challenge.
+    for method in [Some("plain"), None] {
+        let (status, _) = post_login_raw(&LoginRequest::AuthCode {
+            account_name: "user@example.org".to_string(),
+            account_secret: "this is a very strong password".to_string(),
+            mfa_token: None,
+            client_id: client_id.to_string(),
+            redirect_uri: "com.example.app:/cb".to_string().into(),
+            nonce: None,
+            scope: Some(PROFILE_SCOPE.to_string()),
+            code_challenge: Some(PKCE_VERIFIER.to_string()),
+            code_challenge_method: method.map(str::to_string),
+            state: None,
+            resource: vec![],
+        })
+        .await;
+        assert_ne!(
+            status, 200,
+            "PKCE method {method:?} must not be authorized"
+        );
+    }
+
     // Authenticate with the correct password, PKCE (S256), scope and a valid resource indicator
     let response = http
         .post::<LoginResponse>(
