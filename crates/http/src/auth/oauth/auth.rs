@@ -2,6 +2,8 @@
  * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
+ *
+ * Modified by Coffey Labs in 2026 for INBUXA.
  */
 
 use super::{DeviceAuthResponse, FormData, MAX_POST_LEN, OAuthCode, PkceCodeChallenge};
@@ -260,16 +262,16 @@ impl OAuthApiHandler for Server {
                 }
 
                 // Parse and validate PKCE challenge (RFC 7636).
+                // inbuxa: S256 only, as the metadata says. With `plain` (also
+                // RFC 7636's default when no method is named) the challenge is
+                // the verifier, so it protects nothing.
                 let pkce_challenge = match code_challenge {
-                    Some(challenge) => match code_challenge_method.as_deref().unwrap_or("plain") {
-                        "S256" => PkceCodeChallenge::S256(challenge),
-                        "plain" if stateless_client.is_none() => {
-                            PkceCodeChallenge::Plain(challenge)
-                        }
+                    Some(challenge) => match code_challenge_method.as_deref() {
+                        Some("S256") => PkceCodeChallenge::S256(challenge),
                         _ => {
-                            return Err(trc::AuthEvent::Error
-                                .into_err()
-                                .details("Unsupported PKCE code_challenge_method."));
+                            return Err(trc::AuthEvent::Error.into_err().details(
+                                "Unsupported PKCE code_challenge_method: use S256.",
+                            ));
                         }
                     },
                     None => {
