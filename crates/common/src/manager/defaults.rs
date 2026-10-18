@@ -28,6 +28,12 @@ use store::{
     },
 };
 
+pub const WEBUI_LATEST_URL: &str =
+    "https://github.com/stalwartlabs/webui/releases/latest/download/webui.zip";
+pub const WEBUI_PINNED_URL: &str =
+    "https://github.com/stalwartlabs/webui/releases/download/v1.0.11/webui.zip";
+pub const WEBUI_MAX_MAJOR_VERSION: u32 = 1;
+
 pub const ASN_IPV4: &str =
     "https://github.com/sapics/ip-location-db/releases/download/latest/origin-asn-ipv4.csv";
 pub const ASN_IPV6: &str =

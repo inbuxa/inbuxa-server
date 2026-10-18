@@ -29,7 +29,7 @@ pub async fn test(imap: &mut ImapConnection, imap_check: &mut ImapConnection, te
     imap.send("SEARCH RETURN (MIN MAX COUNT ALL) ALL").await;
     imap.assert_read(Type::Tagged, ResponseType::Ok)
         .await
-        .assert_contains("COUNT 10 MIN 1 MAX 10 ALL 1,10");
+        .assert_contains("COUNT 10 MIN 1 MAX 10 ALL 1:10");
     imap_check.send("UID SEARCH ALL").await;
     imap_check
         .assert_read(Type::Tagged, ResponseType::Ok)
@@ -117,6 +117,65 @@ pub async fn test(imap: &mut ImapConnection, imap_check: &mut ImapConnection, te
         .assert_read(Type::Tagged, ResponseType::Ok)
         .await
         .assert_contains("MIN 2 MAX 9");
+
+    // Saved search with MIN/MAX and ALL saves every match
+    imap_check.send(
+        "UID SEARCH RETURN (SAVE MIN MAX ALL) OR OR FROM nathaniel FROM vandelay OR SUBJECT rfc FROM gore",
+    )
+    .await;
+    imap_check
+        .assert_read(Type::Tagged, ResponseType::Ok)
+        .await
+        .assert_contains("MIN 1 MAX 10 ALL 1,3:4,6,8,10");
+    imap_check.send("UID SEARCH $").await;
+    imap_check
+        .assert_read(Type::Tagged, ResponseType::Ok)
+        .await
+        .assert_equals("* SEARCH 1 3 4 6 8 10");
+
+    // Saved search with MIN and COUNT saves every match
+    imap_check.send(
+        "UID SEARCH RETURN (SAVE MIN COUNT) OR OR FROM nathaniel FROM vandelay OR SUBJECT rfc FROM gore",
+    )
+    .await;
+    imap_check
+        .assert_read(Type::Tagged, ResponseType::Ok)
+        .await
+        .assert_contains("COUNT 6 MIN 1");
+    imap_check.send("UID SEARCH $").await;
+    imap_check
+        .assert_read(Type::Tagged, ResponseType::Ok)
+        .await
+        .assert_equals("* SEARCH 1 3 4 6 8 10");
+
+    // Saved search with only MIN and MAX saves the extremes
+    imap_check.send(
+        "UID SEARCH RETURN (SAVE MIN MAX) OR OR FROM nathaniel FROM vandelay OR SUBJECT rfc FROM gore",
+    )
+    .await;
+    imap_check
+        .assert_read(Type::Tagged, ResponseType::Ok)
+        .await
+        .assert_contains("MIN 1 MAX 10");
+    imap_check.send("UID SEARCH $").await;
+    imap_check
+        .assert_read(Type::Tagged, ResponseType::Ok)
+        .await
+        .assert_equals("* SEARCH 1 10");
+
+    // Saved search with MIN and MAX on a single match saves it once
+    imap_check
+        .send("UID SEARCH RETURN (SAVE MIN MAX) UID 8")
+        .await;
+    imap_check
+        .assert_read(Type::Tagged, ResponseType::Ok)
+        .await
+        .assert_contains("MIN 8 MAX 8");
+    imap_check.send("UID SEARCH $").await;
+    imap_check
+        .assert_read(Type::Tagged, ResponseType::Ok)
+        .await
+        .assert_equals("* SEARCH 8");
 
     // Sort
     imap_check

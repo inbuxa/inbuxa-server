@@ -31,6 +31,7 @@ pub use crate::types::string::StringValidator;
 pub use serde::{Deserialize, Serialize};
 pub use std::borrow::Cow;
 pub use std::str::FromStr;
+use std::sync::LazyLock;
 pub use types::blob::BlobId;
 pub use types::id::Id;
 pub use utils::map::vec_map::VecMap;
@@ -56,3 +57,17 @@ pub const OBJ_FILTER_ACCOUNT: u64 = 1 << 2;
 pub const OBJ_FILTER_TENANT: u64 = 1 << 3;
 
 pub const MASKED_PASSWORD: &str = "****";
+
+// Temporary migration aid, will be removed by v1.
+pub static INCLUDE_SECRETS: LazyLock<bool> = LazyLock::new(|| {
+    std::env::var("STALWART_INCLUDE_SECRETS")
+        .is_ok_and(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+});
+
+pub fn secret_value(value: impl IntoValue) -> JmapValue<'static> {
+    if *INCLUDE_SECRETS {
+        value.into_value()
+    } else {
+        JmapValue::Str(MASKED_PASSWORD.into())
+    }
+}

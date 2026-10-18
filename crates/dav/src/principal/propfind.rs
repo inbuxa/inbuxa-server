@@ -448,17 +448,23 @@ fn all_props(collection: Collection, all_props: Option<&[DavProperty]>) -> Vec<D
             DavProperty::WebDav(WebDavProperty::DisplayName),
             DavProperty::WebDav(WebDavProperty::ResourceType),
             DavProperty::WebDav(WebDavProperty::SupportedReportSet),
-            DavProperty::WebDav(WebDavProperty::CurrentUserPrincipal),
-            DavProperty::WebDav(WebDavProperty::SyncToken),
-            DavProperty::WebDav(WebDavProperty::Owner),
-            DavProperty::WebDav(WebDavProperty::PrincipalCollectionSet),
         ];
 
-        if let Some(all_props) = all_props {
-            props.extend(all_props.iter().filter(|p| !p.is_all_prop()).cloned());
-            props
+        if let Some(include) = all_props {
+            for prop in include {
+                if !prop.is_all_prop() && !props.contains(prop) {
+                    props.push(prop.clone());
+                }
+            }
         } else {
-            props
+            props.extend([
+                DavProperty::WebDav(WebDavProperty::CurrentUserPrincipal),
+                DavProperty::WebDav(WebDavProperty::SyncToken),
+                DavProperty::WebDav(WebDavProperty::Owner),
+                DavProperty::WebDav(WebDavProperty::PrincipalCollectionSet),
+            ]);
         }
+
+        props
     }
 }

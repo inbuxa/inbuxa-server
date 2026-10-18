@@ -97,6 +97,37 @@ pub async fn test(test: &TestServer) {
     .await;
     assert_ping(&mut event_rx).await;
 
+    // Import email and expect EmailDelivery state change
+    client
+        .email_import(
+            concat!(
+                "From: bill@example.com\r\n",
+                "To: jdoe@example.com\r\n",
+                "Subject: TPS Report (imported)\r\n",
+                "\r\n",
+                "Did you get the memo?"
+            )
+            .as_bytes()
+            .to_vec(),
+            [Id::from(INBOX_ID).to_string()],
+            None::<Vec<&str>>,
+            None,
+        )
+        .await
+        .unwrap();
+    assert_state(
+        &mut event_rx,
+        account.id_string(),
+        &[
+            DataType::EmailDelivery,
+            DataType::Email,
+            DataType::Thread,
+            DataType::Mailbox,
+        ],
+    )
+    .await;
+    assert_ping(&mut event_rx).await;
+
     // Destroy mailbox
     client.mailbox_destroy(&mailbox_id, true).await.unwrap();
     assert_state(&mut event_rx, account.id_string(), &[DataType::Mailbox]).await;
