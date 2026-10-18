@@ -278,7 +278,7 @@ impl WebApplicationManager {
                     .caused_by(trc::location!())
                     .ctx(Key::Url, url.clone())
                     .details(format!(
-                        "Application bundle version {version} requires Stalwart v1 or later, set the resource URL to {WEBUI_PINNED_URL}"
+                        "Application bundle version {version} is for a newer server, set the resource URL to {WEBUI_PINNED_URL}"
                     )));
             }
 

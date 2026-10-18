@@ -2,6 +2,8 @@
  * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
+ *
+ * Modified by Coffey Labs in 2026 for INBUXA.
  */
 pub use crate::jmap::IntoValue;
 pub use crate::jmap::JmapValue;
@@ -60,7 +62,7 @@ pub const MASKED_PASSWORD: &str = "****";
 
 // Temporary migration aid, will be removed by v1.
 pub static INCLUDE_SECRETS: LazyLock<bool> = LazyLock::new(|| {
-    std::env::var("STALWART_INCLUDE_SECRETS")
+    std::env::var("INBUXA_INCLUDE_SECRETS")
         .is_ok_and(|v| v == "1" || v.eq_ignore_ascii_case("true"))
 });
 

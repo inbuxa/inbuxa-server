@@ -41,6 +41,7 @@ TEXT_RENAMES = [
     ('(vnd.stalwart)', '(vnd.inbuxa)', None),
     ('stalwart-webui', 'inbuxa-webui', None),
     ('STALWART_SPAM_', 'INBUXA_SPAM_', None),
+    ('STALWART_INCLUDE_SECRETS', 'INBUXA_INCLUDE_SECRETS', ('crates',)),
     # Configuration defaults, as upstream's generated registry code spells
     # them. Server code only: the tests use the same spelling for fixtures
     # that must match their containers and identity provider (database users,
