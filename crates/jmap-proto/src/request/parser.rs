@@ -12,7 +12,7 @@ use super::{
 };
 use crate::request::{
     CopyRequestMethod, GetRequestMethod, ParseRequestMethod, QueryChangesRequestMethod,
-    QueryRequestMethod, SetRequestMethod, deserialize::DeserializeArguments,
+    QueryRequestMethod, SetRequestMethod, capability::Using, deserialize::DeserializeArguments,
 };
 use serde::{
     Deserialize, Deserializer,
@@ -24,6 +24,12 @@ impl<'x> Request<'x> {
     pub fn parse(json: &'x [u8], max_calls: usize, max_size: usize) -> trc::Result<Self> {
         if json.len() <= max_size {
             match serde_json::from_slice::<Request>(json) {
+                Ok(Request {
+                    unknown_capability: Some(capability),
+                    ..
+                }) => Err(trc::JmapEvent::UnknownCapability
+                    .into_err()
+                    .details(capability)),
                 Ok(request) => {
                     if request.method_calls.len() <= max_calls {
                         Ok(request)
@@ -49,7 +55,9 @@ impl<'de> DeserializeArguments<'de> for Request<'de> {
     {
         hashify::fnc_map!(key.as_bytes(),
             b"using" => {
-                self.using = map.next_value()?;
+                let using = map.next_value::<Using>()?;
+                self.using = using.ids;
+                self.unknown_capability = using.unknown;
             },
             b"methodCalls" => {
                 self.method_calls = map.next_value()?;
@@ -1337,6 +1345,45 @@ mod tests {
         println!("{:#?}", Request::parse(TEST.as_bytes(), 10, 10240));
         println!("{:#?}", Request::parse(TEST1.as_bytes(), 10, 10240));
         println!("{:#?}", Request::parse(TEST2.as_bytes(), 10, 10240));
+    }
+
+    // inbuxa: an unknown capability fails the request as unknownCapability,
+    // naming it, and a known one parses as before.
+    #[test]
+    fn unknown_capability_is_named() {
+        let request = r#"{"using": ["urn:ietf:params:jmap:core", "urn:example:nope", "urn:example:other"],
+                          "methodCalls": [["Core/echo", {}, "0"]]}"#;
+        let err = Request::parse(request.as_bytes(), 10, 10240).unwrap_err();
+        assert_eq!(
+            *err.as_ref(),
+            trc::EventType::Jmap(trc::JmapEvent::UnknownCapability)
+        );
+        assert_eq!(
+            err.value(trc::Key::Details).and_then(|v| v.as_str()),
+            Some("urn:example:nope")
+        );
+
+        let request = r#"{"using": ["urn:ietf:params:jmap:core", "urn:inbuxa:jmap:registry"],
+                          "methodCalls": [["Core/echo", {}, "0"]]}"#;
+        let request = Request::parse(request.as_bytes(), 10, 10240).unwrap();
+        assert!(
+            request
+                .using
+                .contains(crate::request::capability::Capability::Stalwart)
+        );
+        assert!(request.unknown_capability.is_none());
+    }
+
+    #[test]
+    fn unknown_capability_over_websocket_is_named() {
+        let message = r#"{"@type": "Request", "id": "r1", "using": ["urn:example:nope"],
+                          "methodCalls": [["Core/echo", {}, "0"]]}"#;
+        let err = crate::request::websocket::WebSocketMessage::parse(message.as_bytes(), 10, 10240)
+            .unwrap_err();
+        assert_eq!(
+            *err.as_ref(),
+            trc::EventType::Jmap(trc::JmapEvent::UnknownCapability)
+        );
     }
 
     #[test]
