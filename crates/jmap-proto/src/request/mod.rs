@@ -61,6 +61,8 @@ where
 #[derive(Debug)]
 pub struct Request<'x> {
     pub using: CapabilityIds,
+    // inbuxa: the first capability in `using` the server doesn't know.
+    pub unknown_capability: Option<String>,
     pub method_calls: Vec<Call<RequestMethod<'x>>>,
     pub created_ids: Option<HashMap<String, AnyId>>,
 }
@@ -298,6 +300,7 @@ impl Default for Request<'_> {
     fn default() -> Self {
         Request {
             using: CapabilityIds::default(),
+            unknown_capability: None,
             method_calls: Vec::new(),
             created_ids: None,
         }

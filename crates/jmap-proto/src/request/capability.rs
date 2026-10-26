@@ -553,15 +553,24 @@ impl Capability {
     }
 }
 
-impl<'de> Deserialize<'de> for CapabilityIds {
+// inbuxa: a request's `using`. A capability the server doesn't know is kept,
+// not a parse error, so the request fails with unknownCapability naming it
+// (RFC 8620, section 3.6.1) instead of notRequest.
+#[derive(Debug, Clone, Default)]
+pub struct Using {
+    pub ids: CapabilityIds,
+    pub unknown: Option<String>,
+}
+
+impl<'de> Deserialize<'de> for Using {
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
     where
         D: Deserializer<'de>,
     {
-        struct CapabilityIdsVisitor;
+        struct UsingVisitor;
 
-        impl<'de> serde::de::Visitor<'de> for CapabilityIdsVisitor {
-            type Value = CapabilityIds;
+        impl<'de> serde::de::Visitor<'de> for UsingVisitor {
+            type Value = Using;
 
             fn expecting(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
                 formatter.write_str("an array of capability strings")
@@ -571,23 +580,23 @@ impl<'de> Deserialize<'de> for CapabilityIds {
             where
                 A: serde::de::SeqAccess<'de>,
             {
-                let mut capability_flags = 0u32;
+                let mut using = Using::default();
 
                 while let Some(capability_str) = seq.next_element::<std::borrow::Cow<str>>()? {
-                    let capability =
-                        Capability::parse(capability_str.as_ref()).ok_or_else(|| {
-                            serde::de::Error::custom(format!(
-                                "Unknown capability: {capability_str:?}"
-                            ))
-                        })?;
-
-                    capability_flags |= capability as u32;
+                    match Capability::parse(capability_str.as_ref()) {
+                        Some(capability) => using.ids.0 |= capability as u32,
+                        None => {
+                            if using.unknown.is_none() {
+                                using.unknown = Some(capability_str.into_owned());
+                            }
+                        }
+                    }
                 }
 
-                Ok(CapabilityIds(capability_flags))
+                Ok(using)
             }
         }
 
-        deserializer.deserialize_seq(CapabilityIdsVisitor)
+        deserializer.deserialize_seq(UsingVisitor)
     }
 }

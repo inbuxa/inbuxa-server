@@ -2,6 +2,8 @@
  * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
+ *
+ * Modified by Coffey Labs in 2026 for INBUXA.
  */
 
 use super::Request;
@@ -107,6 +109,16 @@ impl<'x> WebSocketMessage<'x> {
     pub fn parse(json: &'x [u8], max_calls: usize, max_size: usize) -> trc::Result<Self> {
         if json.len() <= max_size {
             match serde_json::from_slice::<Self>(json) {
+                Ok(WebSocketMessage::Request(WebSocketRequest {
+                    request:
+                        Request {
+                            unknown_capability: Some(capability),
+                            ..
+                        },
+                    ..
+                })) => Err(trc::JmapEvent::UnknownCapability
+                    .into_err()
+                    .details(capability)),
                 Ok(WebSocketMessage::Request(req))
                     if req.request.method_calls.len() > max_calls =>
                 {
