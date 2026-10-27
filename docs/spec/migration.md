@@ -214,6 +214,76 @@ Corresponding Source (AGPL section 13). The tool should say so once, at the
 end of a successful migration, rather than leaving an obligation to be
 discovered. It is satisfied by a link, and INBUXA's own is published.
 
+## Stalwart 1.0
+
+Measured 2026-10-26 against Stalwart v1.0.0 and its copy tool,
+`stalwartlabs/stalwart-migrate` 1.0.0 (default and `-oss` builds), on local
+test stores. Nothing below is built yet.
+
+**What changed upstream.** 1.0 has a new store layout and can't open a 0.16
+store. Upstream's tool copies a 0.16.27 store into a new 1.0 one; it never
+writes to the source, keeps account, message and thread ids, and verifies
+its result. 1.0 also stamps each store with the edition that created it:
+schema version 7 for builds with the `enterprise` feature (the official
+images and binaries) and `7 | 1<<31` without it. Each refuses the other's
+store. The check is in AGPL code (`crates/common/src/manager/schema.rs`).
+
+**An INBUXA store through upstream's tool.** A seeded INBUXA store (two
+accounts with mail, an event, a card, an active Sieve script, an app
+password, a tenant, a masked address, 21 audit entries):
+
+- `prepare` stops on any role holding one of our 29 permissions, numbered
+  661 to 689 in the 0.16 enum (AI explanations, audit, account lock, legal
+  hold, compliance, mail rules, DLP, journal, security acceptance,
+  deliverability, scheduled reports). 1.0 renumbers the enum (0 to 642), so
+  they have no place in it.
+- With those removed from the roles, both builds pass. The default build
+  drops 12 values, all settings 1.0 removed (four OIDC registration knobs,
+  the LLM spam tags, `threadPoolSize`). The `-oss` build drops 16 objects
+  and fields as Enterprise-only, among them the tenant, every
+  `memberTenantId`, the masked address, the metrics and tracing stores and
+  the retention hold periods.
+- `run --final` with the default build: 0 errors, verified. Started on the
+  copy, the official 1.0 image showed both accounts' mailboxes, message ids,
+  keywords, threads, events, cards and Sieve scripts identical (1.0 adds a
+  `$hasnoattachment` keyword), with the tenant and roles present.
+- **Our own subspace (`SUBSPACE_INBUXA`, `_`) is not copied, and the report
+  doesn't mention it.** The target has no `_` column family. That is the
+  audit log, legal holds, the journal, deliverability reports, AI limits and
+  the rest of `crates/features`. 1.0's `Subspace` enum is closed and has no
+  `_`.
+
+**What follows for INBUXA's own move to a 1.0 base**, v1.0.0 being the last
+upstream import:
+
+1. The 1.0-based server adds `_` back to `Subspace` and keeps
+   `crates/features`' key formats. The keys are built from ids of our own
+   (audit entries, holds, cluster nodes) or from account and document ids,
+   which the copy keeps, so `_` should carry across byte for byte. Not yet
+   checked feature by feature: anything keyed on an id the copy might
+   reassign, such as an archived item's.
+2. Our permissions get numbers after 1.0's last one. With no later import,
+   nothing upstream adds can collide with them.
+3. The upgrade wraps upstream's default-build tool, unmodified: take our
+   permissions out of the roles (recording them), run the copy, copy `_`
+   across, put the permissions back under their new numbers, then set the
+   edition flag our build expects.
+4. The rehearsal compares the audit chain and the hold, journal and
+   deliverability records as well as the mail, before and after.
+
+**What follows for a Stalwart 1.0 install moving to INBUXA:** an official
+store carries the Enterprise edition flag, and an AGPL-only build without
+the check relaxed refuses it. With the check relaxed, user data read back
+identical, but the roles failed to load: they hold permissions that exist
+only in the Enterprise build's enum (cause inferred, not traced). So the
+INBUXA build accepts both flags and keeps those enum values, unused, so a
+role naming them still decodes. Singleton settings and Enterprise data from
+a licensed install weren't tested.
+
+**Sieve.** Scripts written for upstream `require "vnd.stalwart.while"` or
+`"vnd.stalwart.expressions"`. The vendored sieve-rs accepts both as aliases;
+1.0 moves Sieve in-tree (`crates/sieve`), and the alias has to move with it.
+
 ## Open
 
 - Where it lives: a command in ihasmail-oneshot, a sibling to
