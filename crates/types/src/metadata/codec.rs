@@ -2,6 +2,8 @@
  * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
+ *
+ * Modified by Coffey Labs in 2026 for INBUXA.
  */
 
 pub(crate) const MAX_NESTING: u32 = 128;
@@ -147,17 +149,34 @@ impl<'x, const TRUSTED: bool> Reader<'x, TRUSTED> {
 
     #[inline]
     pub(crate) fn text(&mut self, len: usize) -> Option<&'x str> {
-        let bytes = self.take(len)?;
-        if TRUSTED {
-            Some(unsafe { std::str::from_utf8_unchecked(bytes) })
-        } else {
-            std::str::from_utf8(bytes).ok()
-        }
+        // inbuxa: checked in trusted readers too. They read store records,
+        // and a restored or damaged record is only checksummed, so unchecked
+        // bytes could become a `&str` that isn't UTF-8.
+        std::str::from_utf8(self.take(len)?).ok()
     }
 
     #[inline]
     pub(crate) fn str(&mut self) -> Option<&'x str> {
         let len = self.len()?;
         self.text(len)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::metadata::MetadataView;
+
+    // inbuxa: one IMAP entry whose key bytes (FF FE) aren't UTF-8, as a
+    // damaged or hand-made store record could hold.
+    const BAD_KEY: &[u8] = &[1, 4, 1, (2 << 3) | 3, 0xFF, 0xFE, 0];
+
+    #[test]
+    fn trusted_reads_never_yield_invalid_utf8() {
+        assert!(MetadataView::new(BAD_KEY).is_none());
+        let view = unsafe { MetadataView::from_trusted(BAD_KEY) }.expect("header is valid");
+        assert!(
+            view.imap()
+                .all(|(name, _)| std::str::from_utf8(name.as_bytes()).is_ok())
+        );
     }
 }

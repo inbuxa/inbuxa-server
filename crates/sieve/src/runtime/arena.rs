@@ -2,6 +2,8 @@
  * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
+ *
+ * Modified by Coffey Labs in 2026 for INBUXA.
  */
 
 use bumpalo::Bump;
@@ -23,6 +25,13 @@ pub struct Arena {
 }
 
 unsafe impl Send for Arena {}
+
+// inbuxa: the Send impl above holds only while what the arena owns is Send.
+const _: fn() = || {
+    fn is_send<T: Send>() {}
+    is_send::<Message<'static>>();
+    is_send::<Bump>();
+};
 
 impl Arena {
     pub fn new() -> Self {

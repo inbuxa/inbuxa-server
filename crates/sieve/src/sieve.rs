@@ -2,6 +2,8 @@
  * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
+ *
+ * Modified by Coffey Labs in 2026 for INBUXA.
  */
 
 use crate::{
@@ -93,14 +95,6 @@ impl<'a> Sieve<'a> {
         let sieve = Self::build(bytes, sections, Cow::Borrowed(blob))?;
         verify(&sieve)?;
         Ok(sieve)
-    }
-
-    #[allow(clippy::missing_safety_doc)]
-    pub unsafe fn from_bytes_unchecked(bytes: &'a [u8]) -> Result<Sieve<'a>, LoadError> {
-        let sections = Self::sections(bytes)?;
-        let blob =
-            unsafe { std::str::from_utf8_unchecked(&bytes[sections.blob.0..sections.blob.1]) };
-        Self::build(bytes, sections, Cow::Borrowed(blob))
     }
 
     fn sections(bytes: &[u8]) -> Result<Sections, LoadError> {
@@ -356,9 +350,15 @@ impl ScriptArena {
     }
 
     pub fn push(&self, script: Sieve<'static>) -> &Sieve<'static> {
-        let boxed = Box::new(script);
-        let stable: *const Sieve<'static> = &*boxed;
-        unsafe { (*self.scripts.get()).push(boxed) };
+        // inbuxa: the pointer is taken after the Box is in the Vec, so moving
+        // the Box can't invalidate it. Sound only while ScriptArena is !Sync
+        // (the UnsafeCell keeps it so) and never hands out the Vec.
+        let scripts = unsafe { &mut *self.scripts.get() };
+        scripts.push(Box::new(script));
+        let stable: *const Sieve<'static> = match scripts.last() {
+            Some(boxed) => &**boxed,
+            None => unreachable!(),
+        };
         unsafe { &*stable }
     }
 
