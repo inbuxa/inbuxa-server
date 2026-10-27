@@ -259,9 +259,11 @@ upstream import:
 1. The 1.0-based server adds `_` back to `Subspace` and keeps
    `crates/features`' key formats. The keys are built from ids of our own
    (audit entries, holds, cluster nodes) or from account and document ids,
-   which the copy keeps, so `_` should carry across byte for byte. Not yet
-   checked feature by feature: anything keyed on an id the copy might
-   reassign, such as an archived item's.
+   which the copy keeps, so `_` should carry across byte for byte. Legal
+   holds also key on archived-item ids (`H` `o`). The copy kept the ids of
+   every registry object type both versions share (accounts, domains,
+   roles, tenants, DKIM keys, listeners, spam rules), but the test store had
+   no archived items, so that one is still to be seen.
 2. Our permissions get numbers after 1.0's last one. With no later import,
    nothing upstream adds can collide with them.
 3. The upgrade wraps upstream's default-build tool, unmodified: take our
