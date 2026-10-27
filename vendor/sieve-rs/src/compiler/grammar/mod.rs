@@ -732,5 +732,35 @@ fn lookup_capabilities(input: &str) -> Option<Capability> {
         // Extensions
         "vnd.inbuxa.while" => Capability::While,
         "vnd.inbuxa.expressions" => Capability::Expressions,
+        // The pre-rename spellings, so scripts written for upstream still
+        // compile when they're edited. They're never advertised.
+        "vnd.stalwart.while" => Capability::While,
+        "vnd.stalwart.expressions" => Capability::Expressions,
     )
+}
+
+#[cfg(test)]
+mod legacy_extension_names {
+    use super::Capability;
+    use crate::Compiler;
+
+    #[test]
+    fn old_spelling_parses_new_spelling_is_shown() {
+        for (old, new) in [
+            ("vnd.stalwart.while", "vnd.inbuxa.while"),
+            ("vnd.stalwart.expressions", "vnd.inbuxa.expressions"),
+        ] {
+            let parsed = Capability::parse(old);
+            assert_eq!(parsed.to_string(), new);
+            assert_eq!(parsed, Capability::parse(new));
+        }
+    }
+
+    #[test]
+    fn script_using_old_spelling_compiles() {
+        let script = b"require [\"vnd.stalwart.expressions\", \"variables\"];\nlet \"n\" \"1 + 2\";\n";
+        Compiler::new()
+            .compile(script)
+            .expect("a script requiring the pre-rename name compiles");
+    }
 }

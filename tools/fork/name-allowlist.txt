@@ -23,6 +23,12 @@ crates/migration/src/lib.rs	"STALWART_SPAM_CLASSIFIER_MODEL.lz4"
 crates/migration/src/lib.rs	"STALWART_SPAM_TRAIN_DATA.lz4"
 crates/types/src/branding.rs	"STALWART"
 
+# Pre-rename Sieve extension names, accepted as aliases so scripts written
+# for upstream still compile when edited. Never advertised; the test proves it.
+vendor/sieve-rs/src/compiler/grammar/mod.rs	"vnd.stalwart.while"
+vendor/sieve-rs/src/compiler/grammar/mod.rs	"vnd.stalwart.expressions"
+vendor/sieve-rs/src/compiler/grammar/mod.rs	"require [\\\"vnd.stalwart.expressions\\\", \\\"variables\\\"];\\nlet \\\"n\\\" \\\"1 + 2\\\";\\n"
+
 # Upstream's old default rules source, read only to treat it as unset: the
 # server uses the rules bundled with it (resources/spam-filter/).
 crates/common/src/manager/spam_rules.rs	"https://github.com/stalwartlabs/spam-filter/releases/latest/download/spam-filter-rules.json.gz"

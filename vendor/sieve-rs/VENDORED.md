@@ -11,7 +11,11 @@ Every changed file carries the AGPL 5(a) notice in its header.
 
 - `src/compiler/grammar/mod.rs`: the extensions scripts `require` and
   ManageSieve advertises are `vnd.inbuxa.while` and
-  `vnd.inbuxa.expressions`.
+  `vnd.inbuxa.expressions`. The pre-rename `vnd.stalwart.*` spellings are
+  still accepted, never advertised, so a script written for upstream compiles
+  when it's edited. Without them, the name is treated as an unknown extension
+  and `let` or `eval` fails with "Undeclared capability". The
+  `legacy_extension_names` tests cover both.
 - `src/runtime/mod.rs`: the default `environment "name"` is `inbuxa Sieve`
   (the server sets its own name on both of its runtimes anyway), and the
   test-only capability is `vnd.inbuxa.testsuite`.
