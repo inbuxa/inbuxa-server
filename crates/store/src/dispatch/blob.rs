@@ -6,8 +6,8 @@
  * Modified by Coffey Labs in 2026 for INBUXA.
  */
 
-use crate::{BlobStore, CompressionAlgo, Store, U32_LEN};
-use std::{ops::Range, time::Instant};
+use crate::{BlobStore, CompressionAlgo, Store, Subspace, U32_LEN};
+use std::{borrow::Cow, ops::Range, time::Instant};
 use trc::{AddContext, StoreEvent};
 
 const MAGIC_MARKER: u8 = 0xa0;
@@ -15,10 +15,38 @@ const LZ4_MARKER: u8 = MAGIC_MARKER | 0x01;
 //const ZSTD_MARKER: u8 = MAGIC_MARKER | 0x02;
 const NONE_MARKER: u8 = 0x00;
 
+fn decode<'x>(key: &[u8], data: &'x [u8]) -> trc::Result<Cow<'x, [u8]>> {
+    match data.split_last() {
+        Some((&LZ4_MARKER, payload)) => lz4_flex::decompress_size_prepended(payload)
+            .map(Cow::Owned)
+            .map_err(|err| {
+                trc::StoreEvent::DecompressError
+                    .reason(err)
+                    .ctx(trc::Key::Key, key)
+                    .ctx(trc::Key::CausedBy, trc::location!())
+            }),
+        Some((&NONE_MARKER, payload)) => Ok(Cow::Borrowed(payload)),
+        Some(_) => {
+            trc::event!(Store(StoreEvent::BlobMissingMarker), Key = key);
+            Ok(Cow::Borrowed(data))
+        }
+        None => Ok(Cow::Borrowed(data)),
+    }
+}
+
+fn store_uncompressed(data: &[u8]) -> Vec<u8> {
+    let mut uncompressed = Vec::with_capacity(data.len() + 1);
+    uncompressed.extend_from_slice(data);
+    uncompressed.push(NONE_MARKER);
+    uncompressed
+}
+
 impl BlobStore {
     pub async fn get_blob(&self, key: &[u8], range: Range<usize>) -> trc::Result<Option<Vec<u8>>> {
+
         let start_time = Instant::now();
         let result = self.raw_get(key).await.caused_by(trc::location!())?;
+
 
         trc::event!(
             Store(StoreEvent::BlobRead),
@@ -31,29 +59,12 @@ impl BlobStore {
             return Ok(None);
         };
 
-        let mut data = match data.last().copied() {
-            Some(LZ4_MARKER) => {
-                lz4_flex::decompress_size_prepended(data.get(..data.len() - 1).unwrap_or_default())
-                    .map_err(|err| {
-                        trc::StoreEvent::DecompressError
-                            .reason(err)
-                            .ctx(trc::Key::Key, key)
-                            .ctx(trc::Key::CausedBy, trc::location!())
-                    })?
-            }
-            Some(NONE_MARKER) => {
-                if !data.is_empty() {
-                    data.truncate(data.len() - 1);
-                }
+        let mut data = match decode(key, &data)? {
+            Cow::Owned(decompressed) => decompressed,
+            Cow::Borrowed(payload) => {
+                let len = payload.len();
+                data.truncate(len);
                 data
-            }
-            Some(_) => {
-                trc::event!(Store(StoreEvent::BlobMissingMarker), Key = key);
-
-                data
-            }
-            None => {
-                return Ok(Some(data));
             }
         };
 
@@ -73,65 +84,6 @@ impl BlobStore {
         }
     }
 
-    pub async fn put_blob(
-        &self,
-        key: &[u8],
-        data: &[u8],
-        compression: CompressionAlgo,
-    ) -> trc::Result<()> {
-        let data = match compression {
-            CompressionAlgo::None => {
-                let mut uncompressed = Vec::with_capacity(data.len() + 1);
-                uncompressed.extend_from_slice(data);
-                uncompressed.push(NONE_MARKER);
-                uncompressed
-            }
-            CompressionAlgo::Lz4 => {
-                let mut compressed =
-                    vec![
-                        LZ4_MARKER;
-                        lz4_flex::block::get_maximum_output_size(data.len()) + U32_LEN + 1
-                    ];
-
-                // Compress the data
-                let compressed_len =
-                    lz4_flex::compress_into(data, &mut compressed[U32_LEN..]).unwrap();
-
-                // Prepend the length of the uncompressed data
-                compressed[..U32_LEN].copy_from_slice(&(data.len() as u32).to_le_bytes());
-
-                // Truncate to the actual size
-                compressed.truncate(compressed_len + U32_LEN + 1);
-                compressed
-            }
-        };
-
-        let start_time = Instant::now();
-        let result = self.raw_put(key, &data).await.caused_by(trc::location!());
-
-        trc::event!(
-            Store(StoreEvent::BlobWrite),
-            Key = key,
-            Elapsed = start_time.elapsed(),
-            Size = data.len(),
-        );
-
-        result
-    }
-
-    pub async fn delete_blob(&self, key: &[u8]) -> trc::Result<bool> {
-        let start_time = Instant::now();
-        let result = self.raw_delete(key).await.caused_by(trc::location!());
-
-        trc::event!(
-            Store(StoreEvent::BlobWrite),
-            Key = key,
-            Elapsed = start_time.elapsed(),
-        );
-
-        result
-    }
-
     /// A stored blob as it is on the backend, compression marker included.
     pub(crate) async fn raw_get(&self, key: &[u8]) -> trc::Result<Option<Vec<u8>>> {
         match &self {
@@ -148,7 +100,7 @@ impl BlobStore {
                 Store::RocksDb(store) => store.get_blob(key, 0..usize::MAX).await,
                 Store::Ephemeral(store) => store.get_blob(key, 0..usize::MAX).await,
                 // inbuxa: ST-9: a replica, then the primary for what it lacks
-                Store::Replicated(store) => match store.read_target(crate::SUBSPACE_BLOBS).await {
+                Store::Replicated(store) => match store.read_target(Subspace::Blobs).await {
                     Some(index) => match crate::sql_backend!(
                         &store.replicas[index].store,
                         db => db.get_blob(key, 0..usize::MAX).await
@@ -186,32 +138,94 @@ impl BlobStore {
         }
     }
 
-    pub(crate) async fn raw_put(&self, key: &[u8], data: &[u8]) -> trc::Result<()> {
+    pub async fn put_blob(
+        &self,
+        key: &[u8],
+        data: &[u8],
+        compression: CompressionAlgo,
+    ) -> trc::Result<()> {
+        let data = match compression {
+            CompressionAlgo::Lz4 => {
+                let mut compressed =
+                    vec![
+                        LZ4_MARKER;
+                        lz4_flex::block::get_maximum_output_size(data.len()) + U32_LEN + 1
+                    ];
+
+                // Compress the data
+                let compressed_len =
+                    lz4_flex::compress_into(data, &mut compressed[U32_LEN..]).unwrap();
+
+                if compressed_len + U32_LEN < data.len() {
+                    // Prepend the length of the uncompressed data
+                    compressed[..U32_LEN].copy_from_slice(&(data.len() as u32).to_le_bytes());
+
+                    // Truncate to the actual size
+                    compressed.truncate(compressed_len + U32_LEN + 1);
+                    compressed
+                } else {
+                    store_uncompressed(data)
+                }
+            }
+            CompressionAlgo::None => store_uncompressed(data),
+        };
+
+
+        let start_time = Instant::now();
+        let size = data.len();
+        let result = self.raw_put(key, data).await.caused_by(trc::location!());
+
+        trc::event!(
+            Store(StoreEvent::BlobWrite),
+            Key = key,
+            Elapsed = start_time.elapsed(),
+            Size = size,
+        );
+
+        result
+    }
+
+    pub async fn delete_blob(&self, key: &[u8]) -> trc::Result<bool> {
+
+        let start_time = Instant::now();
+        let result = self.raw_delete(key).await.caused_by(trc::location!());
+
+        trc::event!(
+            Store(StoreEvent::BlobWrite),
+            Key = key,
+            Elapsed = start_time.elapsed(),
+        );
+
+        result
+    }
+
+    /// inbuxa: stores data as given, already encoded.
+    pub(crate) async fn raw_put(&self, key: &[u8], data: Vec<u8>) -> trc::Result<()> {
         match &self {
             BlobStore::Store(store) => match store {
                 #[cfg(feature = "sqlite")]
                 Store::SQLite(store) => store.put_blob(key, data).await,
                 #[cfg(feature = "foundation")]
-                Store::FoundationDb(store) => store.put_blob(key, data).await,
+                Store::FoundationDb(store) => store.put_blob(key, &data).await,
                 #[cfg(feature = "postgres")]
-                Store::PostgreSQL(store) => store.put_blob(key, data).await,
+                Store::PostgreSQL(store) => store.put_blob(key, &data).await,
                 #[cfg(feature = "mysql")]
-                Store::MySQL(store) => store.put_blob(key, data).await,
+                Store::MySQL(store) => store.put_blob(key, &data).await,
                 #[cfg(feature = "rocks")]
                 Store::RocksDb(store) => store.put_blob(key, data).await,
-                Store::Ephemeral(store) => store.put_blob(key, data).await,
+                Store::Ephemeral(store) => store.put_blob(key, &data).await,
                 Store::Replicated(store) => {
-                    crate::sql_backend!(&store.primary, db => db.put_blob(key, data).await)
+                    crate::sql_backend!(&store.primary, db => db.put_blob(key, &data).await)
                 }
                 Store::None => Err(trc::StoreEvent::NotConfigured.into()),
             },
-            BlobStore::Fs(store) => store.put_blob(key, data).await,
+            BlobStore::Fs(store) => store.put_blob(key, &data).await,
             #[cfg(feature = "s3")]
             BlobStore::S3(store) => store.put_blob(key, data).await,
             #[cfg(feature = "azure")]
             BlobStore::Azure(store) => store.put_blob(key, data).await,
             // inbuxa: ST-18
-            BlobStore::Sharded(store) => store.put(key, data).await,
+            BlobStore::Sharded(store) => store.put(key, &data).await,
         }
     }
 
@@ -243,4 +257,40 @@ impl BlobStore {
             BlobStore::Sharded(store) => store.delete(key).await,
         }
     }
+
+    pub async fn delete_blobs(&self, keys: &[&[u8]]) -> trc::Result<()> {
+        match self {
+            #[cfg(feature = "rocks")]
+            BlobStore::Store(Store::RocksDb(store)) => {
+                delete_blobs_timed(keys, store.delete_blobs(keys)).await
+            }
+            #[cfg(feature = "s3")]
+            BlobStore::S3(store) => delete_blobs_timed(keys, store.delete_blobs(keys)).await,
+            _ => {
+                for key in keys {
+                    self.delete_blob(key).await?;
+                }
+                Ok(())
+            }
+        }
+    }
 }
+
+#[cfg(any(feature = "rocks", feature = "s3"))]
+async fn delete_blobs_timed(
+    keys: &[&[u8]],
+    delete: impl Future<Output = trc::Result<()>>,
+) -> trc::Result<()> {
+
+    let start_time = Instant::now();
+    let result = delete.await.caused_by(trc::location!());
+
+    trc::event!(
+        Store(StoreEvent::BlobWrite),
+        Total = keys.len(),
+        Elapsed = start_time.elapsed(),
+    );
+
+    result
+}
+

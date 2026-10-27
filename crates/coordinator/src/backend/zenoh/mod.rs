@@ -5,6 +5,7 @@
  */
 
 use registry::schema::structs::ZenohCoordinator;
+use std::sync::Arc;
 
 use crate::Coordinator;
 pub mod pubsub;
@@ -22,6 +23,6 @@ impl ZenohPubSub {
             .await
             .map_err(|err| format!("Failed to create Zenoh session: {}", err))
             .map(|session| ZenohPubSub { session })
-            .map(|store| Coordinator::Zenoh(std::sync::Arc::new(store)))
+            .map(|store| Coordinator::Zenoh(Arc::new(store)))
     }
 }

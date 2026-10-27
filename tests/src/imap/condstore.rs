@@ -2,6 +2,8 @@
  * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
+ *
+ * Modified by Coffey Labs in 2026 for INBUXA.
  */
 
 use imap_proto::ResponseType;
@@ -140,10 +142,13 @@ pub async fn test(imap: &mut ImapConnection, imap_check: &mut ImapConnection) {
         modseqs[0]
     ))
     .await;
+    // inbuxa: 1.0 reports every UID expunged since the modseq, including
+    // ones created after it (RFC 7162 3.2.10 lets a server do that)
     imap.assert_read(Type::Tagged, ResponseType::Ok)
         .await
         .assert_count("FETCH (", 3)
-        .assert_count("VANISHED", 0);
+        .assert_count("VANISHED", 1)
+        .assert_contains("VANISHED (EARLIER) 1:2");
 
     // Fetch changes since SEQ 1, UID MOVE should count as a deletion
     imap.send(&format!(
@@ -228,8 +233,20 @@ pub async fn test(imap: &mut ImapConnection, imap_check: &mut ImapConnection) {
         .assert_read(Type::Tagged, ResponseType::Ok)
         .await
         .assert_contains("3 EXISTS");
+    // inbuxa: 1.0 matches MODSEQ inclusively (RFC 7162 3.1.5: equal to or
+    // greater), so the message stored at modseqs[4] matches too
     imap_check
         .send(&format!("SEARCH MODSEQ {}", modseqs[4]))
+        .await;
+    imap_check
+        .assert_read(Type::Tagged, ResponseType::Ok)
+        .await
+        .assert_contains("SEARCH 1 2 3 (MODSEQ");
+    imap_check
+        .send(&format!(
+            "SEARCH MODSEQ {}",
+            modseqs[4].parse::<u64>().unwrap() + 1
+        ))
         .await;
     imap_check
         .assert_read(Type::Tagged, ResponseType::Ok)

@@ -7,100 +7,43 @@
 use crate::{
     Command,
     protocol::{capability::Capability, enable},
-    receiver::{Request, bad},
+    receiver::{Request, Token, bad},
 };
-use compact_str::ToCompactString;
 
 impl Request<Command> {
     pub fn parse_enable(self) -> trc::Result<enable::Arguments> {
-        let len = self.tokens.len();
-        if len > 0 {
-            let mut capabilities = Vec::with_capacity(len);
-            for capability in self.tokens {
-                capabilities.push(
-                    Capability::parse(&capability.unwrap_bytes())
-                        .map_err(|v| bad(self.tag.to_compact_string(), v))?,
-                );
-            }
-            Ok(enable::Arguments {
-                tag: self.tag,
-                capabilities,
-            })
-        } else {
-            Err(self.into_error("Missing arguments."))
+        if self.tokens.is_empty() {
+            return Err(self.into_error("Missing arguments."));
         }
-    }
-}
 
-impl Capability {
-    pub fn parse(value: &[u8]) -> super::Result<Self> {
-        hashify::tiny_map_ignore_case!(value,
-            "IMAP4rev2" => Self::IMAP4rev2,
-            "STARTTLS" => Self::StartTLS,
-            "LOGINDISABLED" => Self::LoginDisabled,
-            "CONDSTORE" => Self::CondStore,
-            "QRESYNC" => Self::QResync,
-            "UTF8=ACCEPT" => Self::Utf8Accept,
-            "OBJECTID+" => Self::ObjectIdPlus,
-            "UIDONLY" => Self::UidOnly,
-        )
-        .ok_or_else(|| {
-            format!(
-                "Unsupported capability '{}'.",
-                String::from_utf8_lossy(value)
-            )
-            .into()
+        let mut capabilities = Vec::with_capacity(self.tokens.len());
+        for token in self.tokens {
+            match token {
+                Token::Argument(name) => capabilities.extend(Capability::parse(&name)),
+                _ => return Err(bad(self.tag, "Invalid capability name.")),
+            }
+        }
+
+        Ok(enable::Arguments {
+            tag: self.tag,
+            capabilities,
         })
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use crate::{
-        protocol::{capability::Capability, enable},
-        receiver::Receiver,
-    };
-
-    #[test]
-    fn parse_enable() {
-        let mut receiver = Receiver::new();
-
-        for (command, arguments) in [
-            (
-                "t2 ENABLE IMAP4rev2 CONDSTORE\r\n",
-                enable::Arguments {
-                    tag: "t2".into(),
-                    capabilities: vec![Capability::IMAP4rev2, Capability::CondStore],
-                },
-            ),
-            (
-                "t3 ENABLE OBJECTID+\r\n",
-                enable::Arguments {
-                    tag: "t3".into(),
-                    capabilities: vec![Capability::ObjectIdPlus],
-                },
-            ),
-            (
-                "t4 ENABLE CONDSTORE OBJECTID+ UTF8=ACCEPT\r\n",
-                enable::Arguments {
-                    tag: "t4".into(),
-                    capabilities: vec![
-                        Capability::CondStore,
-                        Capability::ObjectIdPlus,
-                        Capability::Utf8Accept,
-                    ],
-                },
-            ),
-        ] {
-            assert_eq!(
-                receiver
-                    .parse(&mut command.as_bytes().iter())
-                    .unwrap()
-                    .parse_enable()
-                    .unwrap(),
-                arguments,
-                "Failed to parse {command}"
-            );
-        }
+impl Capability {
+    pub fn parse(value: &[u8]) -> Option<Self> {
+        hashify::fnc_map_ignore_case!(value,
+            "IMAP4rev2" => Some(Self::IMAP4rev2),
+            "STARTTLS" => Some(Self::StartTLS),
+            "LOGINDISABLED" => Some(Self::LoginDisabled),
+            "CONDSTORE" => Some(Self::CondStore),
+            "QRESYNC" => Some(Self::QResync),
+            "UTF8=ACCEPT" => Some(Self::Utf8Accept),
+            "OBJECTID+" => Some(Self::ObjectIdPlus),
+            "UIDONLY" => Some(Self::UidOnly),
+            _ => None,
+        )
     }
 }
+

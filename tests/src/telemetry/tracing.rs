@@ -2,9 +2,14 @@
  * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
+ *
+ * Modified by Coffey Labs in 2026 for INBUXA.
  */
 
-use crate::utils::{server::TestServer, smtp::SmtpConnection};
+use crate::{
+    telemetry::purge_all_traces,
+    utils::{server::TestServer, smtp::SmtpConnection},
+};
 use common::telemetry::tracers::store::TracingStore;
 use registry::schema::{
     prelude::{ObjectType, Property},
@@ -165,6 +170,9 @@ pub async fn test(test: &TestServer) {
             .collect::<Vec<_>>(),
         Vec::<Id>::new()
     );
+
+    // inbuxa: and the index rows the purge keeps (see purge_all_traces)
+    purge_all_traces(test).await;
 
     admin.destroy_account(account).await;
     test.cleanup().await;

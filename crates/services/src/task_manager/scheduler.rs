@@ -13,6 +13,7 @@ use std::{
     time::{Instant, SystemTime},
 };
 
+use crate::task_manager::reconcile::insert_task_if_absent;
 use common::{
     BuildServer, Inner, LONG_1D_SLUMBER,
     config::{mailstore::spamfilter, telemetry::OtelMetrics},
@@ -24,7 +25,7 @@ use registry::{
     },
     types::EnumImpl,
 };
-use store::write::{BatchBuilder, now};
+use store::write::now;
 use trc::{ClusterEvent, Collector, MetricType, TaskManagerEvent, TelemetryEvent};
 
 #[derive(PartialEq, Eq)]
@@ -53,7 +54,7 @@ enum Event {
 }
 
 // inbuxa: first check a few minutes after start, then daily
-#[cfg_attr(feature = "test_mode", allow(dead_code))]
+#[cfg_attr(inbuxa_tests, allow(dead_code))]
 const DOMAIN_TASK_CHECK_DELAY: Duration = Duration::from_secs(5 * 60);
 const DOMAIN_TASK_CHECK_INTERVAL: Duration = Duration::from_secs(24 * 60 * 60);
 
@@ -112,12 +113,12 @@ pub fn spawn_task_scheduler(inner: Arc<Inner>) {
             }
 
             // Spam classifier training
-            if let Some(train_frequency) = server
+            if let Some(train_interval) = server
                 .core
                 .spam
                 .classifier
                 .as_ref()
-                .and_then(|c| c.train_frequency)
+                .and_then(|c| c.train_interval)
             {
                 let next_train = match server.inner.data.spam_classifier.load().as_ref() {
                     spamfilter::SpamClassifier::FhClassifier {
@@ -125,8 +126,8 @@ pub fn spawn_task_scheduler(inner: Arc<Inner>) {
                     }
                     | spamfilter::SpamClassifier::CcfhClassifier {
                         last_trained_at, ..
-                    } => now().saturating_sub(*last_trained_at).min(train_frequency),
-                    spamfilter::SpamClassifier::Disabled => train_frequency,
+                    } => now().saturating_sub(*last_trained_at).min(train_interval),
+                    spamfilter::SpamClassifier::Disabled => train_interval,
                 };
 
                 queue.schedule(
@@ -157,7 +158,7 @@ pub fn spawn_task_scheduler(inner: Arc<Inner>) {
             // in test builds: a suite running past the first check would get
             // DKIM keys for its test domains, and the tests call the check
             // themselves.
-            #[cfg(not(feature = "test_mode"))]
+            #[cfg(not(inbuxa_tests))]
             queue.schedule(
                 Instant::now() + DOMAIN_TASK_CHECK_DELAY,
                 Event::CheckDomainTasks,
@@ -166,13 +167,15 @@ pub fn spawn_task_scheduler(inner: Arc<Inner>) {
 
 
         let mut next_metric_update = Instant::now();
+        #[cfg(feature = "enterprise")]
+        let mut license_retry = LICENSE_RETRY_MIN;
 
         loop {
             tokio::time::sleep(queue.wake_up_time()).await;
 
             let server = inner.build_server();
             let roles = &server.core.network.roles;
-            let mut batch = (roles.task_scheduler).then(BatchBuilder::new);
+            let mut tasks = (roles.task_scheduler).then(Vec::new);
 
             while let Some(event) = queue.pop() {
                 match event.event {
@@ -183,13 +186,13 @@ pub fn spawn_task_scheduler(inner: Arc<Inner>) {
                             Event::PurgeAccount,
                         );
 
-                        if let Some(batch) = batch.as_mut() {
+                        if let Some(tasks) = tasks.as_mut() {
                             trc::event!(
                                 TaskManager(TaskManagerEvent::TaskQueued),
                                 Type = TaskStoreMaintenanceType::PurgeAccounts.as_str()
                             );
 
-                            batch.schedule_task(Task::StoreMaintenance(TaskStoreMaintenance {
+                            tasks.push(Task::StoreMaintenance(TaskStoreMaintenance {
                                 maintenance_type: TaskStoreMaintenanceType::PurgeAccounts,
                                 status: TaskStatus::now(),
                                 shard_index: None,
@@ -202,13 +205,13 @@ pub fn spawn_task_scheduler(inner: Arc<Inner>) {
                             Event::PurgeDataStore,
                         );
 
-                        if let Some(batch) = batch.as_mut() {
+                        if let Some(tasks) = tasks.as_mut() {
                             trc::event!(
                                 TaskManager(TaskManagerEvent::TaskQueued),
                                 Type = TaskStoreMaintenanceType::PurgeData.as_str()
                             );
 
-                            batch.schedule_task(Task::StoreMaintenance(TaskStoreMaintenance {
+                            tasks.push(Task::StoreMaintenance(TaskStoreMaintenance {
                                 maintenance_type: TaskStoreMaintenanceType::PurgeData,
                                 status: TaskStatus::now(),
                                 shard_index: None,
@@ -221,13 +224,13 @@ pub fn spawn_task_scheduler(inner: Arc<Inner>) {
                             Event::PurgeBlobStore,
                         );
 
-                        if let Some(batch) = batch.as_mut() {
+                        if let Some(tasks) = tasks.as_mut() {
                             trc::event!(
                                 TaskManager(TaskManagerEvent::TaskQueued),
                                 Type = TaskStoreMaintenanceType::PurgeBlob.as_str()
                             );
 
-                            batch.schedule_task(Task::StoreMaintenance(TaskStoreMaintenance {
+                            tasks.push(Task::StoreMaintenance(TaskStoreMaintenance {
                                 maintenance_type: TaskStoreMaintenanceType::PurgeBlob,
                                 status: TaskStatus::now(),
                                 shard_index: None,
@@ -242,7 +245,7 @@ pub fn spawn_task_scheduler(inner: Arc<Inner>) {
 
                         trc::event!(
                             Cluster(ClusterEvent::NodeIdRenewed),
-                            Id = server.registry().node_id()
+                            NodeId = server.registry().node_id()
                         );
 
                         let server = server.clone();
@@ -344,6 +347,7 @@ pub fn spawn_task_scheduler(inner: Arc<Inner>) {
                                 }
                             }
 
+
                             match tokio::task::spawn_blocking(memory_stats::memory_stats).await {
                                 Ok(Some(stats)) => {
                                     Collector::update_gauge(
@@ -434,26 +438,26 @@ pub fn spawn_task_scheduler(inner: Arc<Inner>) {
                         }
                     }
                     Event::TrainSpamClassifier => {
-                        if let Some(train_frequency) = server
+                        if let Some(train_interval) = server
                             .core
                             .spam
                             .classifier
                             .as_ref()
-                            .and_then(|c| c.train_frequency)
+                            .and_then(|c| c.train_interval)
                         {
                             // Schedule next training
                             queue.schedule(
-                                Instant::now() + Duration::from_secs(train_frequency),
+                                Instant::now() + Duration::from_secs(train_interval),
                                 Event::TrainSpamClassifier,
                             );
 
-                            if let Some(batch) = batch.as_mut() {
+                            if let Some(tasks) = tasks.as_mut() {
                                 trc::event!(
                                     TaskManager(TaskManagerEvent::TaskQueued),
                                     Type = TaskType::SpamFilterMaintenance.as_str()
                                 );
 
-                                batch.schedule_task(Task::SpamFilterMaintenance(
+                                tasks.push(Task::SpamFilterMaintenance(
                                     TaskSpamFilterMaintenance {
                                         maintenance_type: TaskSpamFilterMaintenanceType::Train,
                                         status: TaskStatus::now(),
@@ -466,15 +470,15 @@ pub fn spawn_task_scheduler(inner: Arc<Inner>) {
                 }
             }
 
-            if let Some(mut batch) = batch
-                && !batch.is_empty()
-                && let Err(err) = server.store().write(batch.build_all()).await
-            {
-                trc::error!(err.details("Failed to write scheduled tasks"));
+            for task in tasks.into_iter().flatten() {
+                if let Err(err) = insert_task_if_absent(&server, task).await {
+                    trc::error!(err.details("Failed to write scheduled task"));
+                }
             }
         }
     });
 }
+
 
 impl Queue {
     pub fn schedule(&mut self, due: Instant, event: Event) {
@@ -483,7 +487,7 @@ impl Queue {
             Due = trc::Value::Timestamp(
                 now() + due.saturating_duration_since(Instant::now()).as_secs()
             ),
-            Id = event.name()
+            Name = event.name()
         );
 
         self.heap.push(Action { due, event });

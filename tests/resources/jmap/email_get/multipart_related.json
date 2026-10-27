@@ -3,10 +3,11 @@
     "a": true
   },
   "keywords": {
+    "$hasattachment": true,
     "tag": true
   },
   "size": 11304,
-  "receivedAt": "2328-03-18T08:00:00Z",
+  "receivedAt": "2106-02-07T06:28:15Z",
   "messageId": [
     "4.2.0.58.20000519003556.00a918e0@pop.example.com"
   ],
@@ -25,9 +26,10 @@
   "subject": "Die Hasen und die Frosche",
   "sentAt": "2000-05-19T04:36:58Z",
   "bodyStructure": {
+    "size": 10832,
     "headers": [
       {
-        "name": "Message-ID",
+        "name": "Message-Id",
         "value": " <4.2.0.58.20000519003556.00a918e0@pop.example.com>"
       },
       {
@@ -59,7 +61,7 @@
         "value": " =?iso-8859-1?Q?Die_Hasen_und_die_Frosche?="
       },
       {
-        "name": "MIME-Version",
+        "name": "Mime-Version",
         "value": " 1.0"
       },
       {
@@ -70,6 +72,7 @@
     "type": "multipart/mixed",
     "subParts": [
       {
+        "size": 6741,
         "headers": [
           {
             "name": "Content-Type",
@@ -79,6 +82,7 @@
         "type": "multipart/related",
         "subParts": [
           {
+            "size": 2331,
             "headers": [
               {
                 "name": "Content-Type",
@@ -90,7 +94,7 @@
               {
                 "partId": "3",
                 "blobId": "blob_0",
-                "size": 779,
+                "size": 763,
                 "headers": [
                   {
                     "name": "Content-Type",
@@ -107,7 +111,7 @@
               {
                 "partId": "4",
                 "blobId": "blob_1",
-                "size": 1154,
+                "size": 1138,
                 "headers": [
                   {
                     "name": "Content-Type",
@@ -241,7 +245,7 @@
     {
       "partId": "3",
       "blobId": "blob_0",
-      "size": 779,
+      "size": 763,
       "headers": [
         {
           "name": "Content-Type",
@@ -260,7 +264,7 @@
     {
       "partId": "4",
       "blobId": "blob_1",
-      "size": 1154,
+      "size": 1138,
       "headers": [
         {
           "name": "Content-Type",

@@ -42,11 +42,18 @@ use smtp::{
         hooks::{self, Request, SmtpResponse},
         milter::{
             Action, Command, Macros, MilterClient, Modification, Options, Response,
+            protocol::*,
             receiver::{FrameResult, Receiver},
         },
     },
 };
-use std::{fs, net::SocketAddr, path::PathBuf, sync::Arc, time::Duration};
+use std::{
+    fs,
+    net::{IpAddr, SocketAddr},
+    path::PathBuf,
+    sync::Arc,
+    time::Duration,
+};
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::{TcpListener, TcpStream},
@@ -80,7 +87,7 @@ async fn milter_session() {
                 else_: "true".into(),
                 ..Default::default()
             },
-            hostname: "localhost".into(), // inbuxa: resolved when the session connects
+            host: "localhost".into(), // inbuxa: resolved when the session connects
             port: 9332,
             use_tls: false,
             stages: Map::new(vec![MtaStage::Data]),
@@ -668,10 +675,18 @@ async fn milter_client_test() {
 
     let r = client.data().await.unwrap();
     println!("DATA: {:?}", r);
-    let r = client.headers(message.headers_raw()).await.unwrap();
+    let r = client
+        .headers(message.headers().iter().map(|header| {
+            (
+                header.raw_name(),
+                std::str::from_utf8(header.raw_value()).unwrap_or_default(),
+            )
+        }))
+        .await
+        .unwrap();
     println!("HEADERS: {:?}", r);
     let r = client
-        .body(&message.raw_message()[message.root_part().raw_body_offset() as usize..])
+        .body(&message.raw()[message.root_part().offset_body() as usize..])
         .await
         .unwrap();
     println!("BODY: {:?}", r);
@@ -760,7 +775,7 @@ async fn accept_milter(
         loop {
             match receiver.read_frame(&buf[..br]) {
                 FrameResult::Frame(bytes) => {
-                    let cmd = Command::deserialize(bytes.as_ref());
+                    let cmd = deserialize_command(bytes.as_ref());
                     println!("CMD: {cmd}");
 
                     let response = match cmd {
@@ -814,9 +829,9 @@ async fn accept_milter(
                                 for modification in modifications {
                                     // Write modifications
                                     stream
-                                        .write_all(
-                                            &Response::Modification(modification).serialize(),
-                                        )
+                                        .write_all(&serialize_response(&Response::Modification(
+                                            modification,
+                                        )))
                                         .await
                                         .unwrap();
                                 }
@@ -827,7 +842,10 @@ async fn accept_milter(
                     };
 
                     // Write response
-                    stream.write_all(&response.serialize()).await.unwrap();
+                    stream
+                        .write_all(&serialize_response(&response))
+                        .await
+                        .unwrap();
                 }
                 FrameResult::Incomplete => continue 'outer,
                 FrameResult::TooLarge(size) => {
@@ -1040,5 +1058,238 @@ fn handle_mta_hook(request: Request, tests: Arc<Vec<HeaderTest>>) -> hooks::Resp
                 })
                 .collect(),
         },
+    }
+}
+
+// inbuxa: 1.0 dropped the milter codec's server side (Command::deserialize,
+// Response::serialize), so the mock milter server carries its own copy.
+// Macro contents are skipped: Macros can't be built outside the smtp crate
+// and the mock server ignores them.
+fn deserialize_command(bytes: &[u8]) -> Command<'_> {
+    let mut reader = PacketReader::new(bytes);
+    match reader.byte() {
+        SMFIC_ABORT => Command::Abort,
+        SMFIC_BODY => Command::Body { value: &bytes[1..] },
+        SMFIC_BODYEOB => Command::EndOfBody,
+        SMFIC_CONNECT => {
+            let hostname = reader.read_nul_terminated().unwrap();
+            let family = reader.byte();
+            let port = reader.read_u16();
+            let address = std::str::from_utf8(reader.read_nul_terminated().unwrap()).unwrap();
+            Command::Connect {
+                hostname,
+                port,
+                address: match family {
+                    b'4' => IpAddr::V4(address.parse().unwrap()),
+                    b'6' => IpAddr::V6(address.parse().unwrap()),
+                    _ => unreachable!(),
+                },
+            }
+        }
+        SMFIC_MACRO => Command::Macro {
+            macros: Macros::new(),
+        },
+        SMFIC_HEADER => {
+            let name = reader.read_nul_terminated().unwrap();
+            let value = reader.read_nul_terminated().unwrap();
+            Command::Header { name, value }
+        }
+        SMFIC_EOH => Command::EndOfHeader,
+        SMFIC_HELO => {
+            let hostname = reader.read_nul_terminated().unwrap();
+            Command::Helo { hostname }
+        }
+        SMFIC_MAIL => {
+            let sender = reader.read_nul_terminated().unwrap();
+            let mut args = Vec::new();
+            while let Some(arg) = reader.read_nul_terminated() {
+                args.push(arg);
+            }
+            Command::MailFrom {
+                sender,
+                args: Some(args),
+            }
+        }
+        SMFIC_RCPT => {
+            let recipient = reader.read_nul_terminated().unwrap();
+            let mut args = Vec::new();
+            while let Some(arg) = reader.read_nul_terminated() {
+                args.push(arg);
+            }
+            Command::Rcpt {
+                recipient,
+                args: Some(args),
+            }
+        }
+        SMFIC_OPTNEG => Command::OptionNegotiation(Options {
+            version: reader.read_u32(),
+            actions: reader.read_u32(),
+            protocol: reader.read_u32(),
+        }),
+        SMFIC_QUIT => Command::Quit,
+        SMFIC_DATA => Command::Data,
+        SMFIC_QUIT_NC => Command::QuitNewConnection,
+        c => panic!("Unknown command: {}", char::from(c)),
+    }
+}
+
+fn build_frame(command: u8, len: u32) -> Vec<u8> {
+    let mut buf = Vec::with_capacity(len as usize + 1 + std::mem::size_of::<u32>());
+    buf.extend_from_slice((len + 1).to_be_bytes().as_slice());
+    buf.push(command);
+    buf
+}
+
+fn serialize_response(response: &Response) -> Vec<u8> {
+    match response {
+        Response::Action(action) => match action {
+            Action::Accept => build_frame(SMFIR_ACCEPT, 0),
+            Action::Continue => build_frame(SMFIR_CONTINUE, 0),
+            Action::Discard => build_frame(SMFIR_DISCARD, 0),
+            Action::Reject => build_frame(SMFIR_REJECT, 0),
+            Action::TempFail => build_frame(SMFIR_TEMPFAIL, 0),
+            Action::ReplyCode { code, text } => {
+                let mut buf = build_frame(SMFIR_REPLYCODE, text.len() as u32 + 4 + 1);
+                buf.extend(code);
+                buf.push(b' ');
+                buf.extend(text.as_bytes());
+                buf.push(0x00);
+                buf
+            }
+            Action::Shutdown => build_frame(SMFIR_SHUTDOWN, 0),
+            Action::ConnectionFailure => build_frame(SMFIR_CONN_FAIL, 0),
+        },
+        Response::Modification(modif) => match modif {
+            Modification::ChangeFrom { sender, args } => {
+                let mut buf =
+                    build_frame(SMFIR_CHGFROM, sender.len() as u32 + args.len() as u32 + 2);
+                buf.extend(sender.as_bytes());
+                buf.push(0x00);
+                buf.extend(args.as_bytes());
+                buf.push(0x00);
+                buf
+            }
+            Modification::AddRcpt { recipient, args } => {
+                let mut buf = build_frame(
+                    SMFIR_ADDRCPT_PAR,
+                    recipient.len() as u32 + args.len() as u32 + 2,
+                );
+                buf.extend(recipient.as_bytes());
+                buf.push(0x00);
+                buf.extend(args.as_bytes());
+                buf.push(0x00);
+                buf
+            }
+            Modification::DeleteRcpt { recipient } => {
+                let mut buf = build_frame(SMFIR_DELRCPT, recipient.len() as u32 + 1);
+                buf.extend(recipient.as_bytes());
+                buf.push(0x00);
+                buf
+            }
+            Modification::ReplaceBody { value } => {
+                let mut buf = build_frame(SMFIR_REPLBODY, value.len() as u32);
+                buf.extend(value);
+                buf
+            }
+            Modification::AddHeader { name, value } => {
+                let mut buf =
+                    build_frame(SMFIR_ADDHEADER, name.len() as u32 + value.len() as u32 + 2);
+                buf.extend(name.as_bytes());
+                buf.push(0x00);
+                buf.extend(value.as_bytes());
+                buf.push(0x00);
+                buf
+            }
+            Modification::InsertHeader { index, name, value } => {
+                let mut buf = build_frame(
+                    SMFIR_INSHEADER,
+                    name.len() as u32 + value.len() as u32 + std::mem::size_of::<u32>() as u32 + 2,
+                );
+                buf.extend(index.to_be_bytes().as_slice());
+                buf.extend(name.as_bytes());
+                buf.push(0x00);
+                buf.extend(value.as_bytes());
+                buf.push(0x00);
+                buf
+            }
+            Modification::ChangeHeader { index, name, value } => {
+                let mut buf = build_frame(
+                    SMFIR_CHGHEADER,
+                    name.len() as u32 + value.len() as u32 + std::mem::size_of::<u32>() as u32 + 2,
+                );
+                buf.extend(index.to_be_bytes().as_slice());
+                buf.extend(name.as_bytes());
+                buf.push(0x00);
+                buf.extend(value.as_bytes());
+                buf.push(0x00);
+                buf
+            }
+            Modification::Quarantine { reason } => {
+                let mut buf = build_frame(SMFIR_QUARANTINE, reason.len() as u32 + 1);
+                buf.extend(reason.as_bytes());
+                buf.push(0x00);
+                buf
+            }
+        },
+        Response::Progress => build_frame(SMFIR_PROGRESS, 0),
+        Response::Skip => build_frame(SMFIR_SKIP, 0),
+        Response::SetSymbols => build_frame(SMFIR_SETSYMLIST, 0),
+        Response::OptionNegotiation(opt) => {
+            let mut buf = build_frame(SMFIC_OPTNEG, 3 * std::mem::size_of::<u32>() as u32);
+            buf.extend(opt.version.to_be_bytes().as_slice());
+            buf.extend(opt.actions.to_be_bytes().as_slice());
+            buf.extend(opt.protocol.to_be_bytes().as_slice());
+            buf
+        }
+    }
+}
+
+struct PacketReader<'x> {
+    bytes: &'x [u8],
+    iter: std::iter::Enumerate<std::slice::Iter<'x, u8>>,
+}
+
+impl<'x> PacketReader<'x> {
+    fn new(bytes: &'x [u8]) -> PacketReader<'x> {
+        Self {
+            bytes,
+            iter: bytes.iter().enumerate(),
+        }
+    }
+
+    fn byte(&mut self) -> u8 {
+        *self.iter.next().unwrap().1
+    }
+
+    fn read_nul_terminated(&mut self) -> Option<&'x [u8]> {
+        let (start_pos, ch) = self.iter.next()?;
+        let mut end_pos = start_pos;
+
+        if *ch != 0x00 {
+            loop {
+                match self.iter.next().unwrap().1 {
+                    0x00 => break,
+                    _ => end_pos += 1,
+                }
+            }
+        }
+
+        Some(&self.bytes[start_pos..end_pos + 1])
+    }
+
+    fn read_u32(&mut self) -> u32 {
+        let mut buf = [0u8; 4];
+        for byte in buf.iter_mut() {
+            *byte = self.byte();
+        }
+        u32::from_be_bytes(buf)
+    }
+
+    fn read_u16(&mut self) -> u16 {
+        let mut buf = [0u8; 2];
+        for byte in buf.iter_mut() {
+            *byte = self.byte();
+        }
+        u16::from_be_bytes(buf)
     }
 }

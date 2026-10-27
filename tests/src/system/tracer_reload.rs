@@ -23,11 +23,16 @@ use registry::{
 use serde_json::json;
 use std::{
     path::{Path, PathBuf},
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
     time::{Duration, Instant},
 };
 use trc::{EventType, ServerEvent};
 
 const PREFIX: &str = "tracer-reload";
+const MAX_SEQ: usize = 100_000;
 
 #[tokio::test(flavor = "multi_thread")]
 pub async fn tracer_reload_tests() {
@@ -90,7 +95,7 @@ async fn test_log_tracer_moves(test: &TestServer) {
             enable: true,
             level: TracingLevel::Trace,
             lossy: false,
-            events: Map::new(vec![EventType::Server(ServerEvent::Licensing)]),
+            events: Map::new(vec![EventType::Server(ServerEvent::RecoveryMode)]),
             events_policy: EventPolicy::Include,
         })])
         .await;
@@ -99,13 +104,20 @@ async fn test_log_tracer_moves(test: &TestServer) {
     emit("marker-before");
     wait_for(&old_file, "marker-before").await;
 
-    // Events keep coming while the path changes
-    let stream = tokio::spawn(async {
-        for i in 0..2000u32 {
-            emit(&format!("seq-{i:05}-end"));
-            if i % 50 == 0 {
-                tokio::time::sleep(Duration::from_millis(1)).await;
+    // Events keep coming while the path changes, until the reload has run
+    let stop = Arc::new(AtomicBool::new(false));
+    let stream = tokio::spawn({
+        let stop = stop.clone();
+        async move {
+            let mut i = 0;
+            while i < MAX_SEQ && (i < 2000 || !stop.load(Ordering::Relaxed)) {
+                emit(&format!("seq-{i:06}-end"));
+                if i % 50 == 0 {
+                    tokio::time::sleep(Duration::from_millis(1)).await;
+                }
+                i += 1;
             }
+            i
         }
     });
     tokio::time::sleep(Duration::from_millis(5)).await;
@@ -116,13 +128,15 @@ async fn test_log_tracer_moves(test: &TestServer) {
         )
         .await;
     assert_applied(&response);
-    stream.await.unwrap();
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    stop.store(true, Ordering::Relaxed);
+    let sent = stream.await.unwrap();
+    assert!(sent < MAX_SEQ, "the stream outran the reload");
 
     // Once the reload has run, events go to the new file only
-    tokio::time::sleep(Duration::from_millis(200)).await;
     emit("marker-after");
     wait_for(&new_file, "marker-after").await;
-    wait_for(&new_file, "seq-01999-end").await;
+    wait_for(&new_file, &format!("seq-{:06}-end", sent - 1)).await;
     tokio::time::sleep(Duration::from_millis(200)).await;
     let old = read(&old_file);
     let new = read(&new_file);
@@ -137,11 +151,11 @@ async fn test_log_tracer_moves(test: &TestServer) {
         old_seq.iter().filter(|c| **c > 0).count(),
         new_seq.iter().filter(|c| **c > 0).count()
     );
-    for i in 0..2000 {
+    for i in 0..sent {
         assert_eq!(
             old_seq[i] + new_seq[i],
             1,
-            "seq-{i:05} written {} + {} times",
+            "seq-{i:06} written {} + {} times",
             old_seq[i],
             new_seq[i]
         );
@@ -163,8 +177,10 @@ async fn test_log_tracer_moves(test: &TestServer) {
     assert!(!read(&old_file).contains("marker-removed"));
 }
 
+// inbuxa: 1.0 dropped ServerEvent::Licensing; RecoveryMode is just as quiet
+// while the tests run, so it stands in as the marker event
 fn emit(marker: &str) {
-    trc::event!(Server(ServerEvent::Licensing), Details = marker.to_string());
+    trc::event!(Server(ServerEvent::RecoveryMode), Details = marker.to_string());
 }
 
 fn read(path: &Path) -> String {
@@ -172,10 +188,10 @@ fn read(path: &Path) -> String {
 }
 
 fn count_seq(text: &str) -> Vec<u32> {
-    let mut counts = vec![0u32; 2000];
+    let mut counts = vec![0u32; MAX_SEQ];
     for part in text.split("seq-").skip(1) {
-        if let Some(n) = part.get(..5).and_then(|n| n.parse::<usize>().ok())
-            && part[5..].starts_with("-end")
+        if let Some(n) = part.get(..6).and_then(|n| n.parse::<usize>().ok())
+            && part[6..].starts_with("-end")
         {
             counts[n] += 1;
         }

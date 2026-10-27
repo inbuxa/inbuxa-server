@@ -9,7 +9,7 @@
 //! bounds each one's retention, which stores and endpoints are elsewhere.
 //! Read from the registry on each request, so every node answers alike.
 
-use crate::Server;
+use crate::{Server, enterprise::llm::AiModelExt};
 use inbuxa_features::privacy::{
     self, Days, Inventory, LiveFacts, is_loopback,
     snapshot::{self, Snapshot, Trigger},
@@ -17,9 +17,10 @@ use inbuxa_features::privacy::{
 use registry::schema::{
     prelude::Object,
     structs::{
-        AiModel, BlobStore, DataRetention, DataStore, InMemoryStore, Jmap, MtaHook, MtaMilter,
+        AiModel, BlobStore, Cache, CacheSwap, DataRetention, DataStore, InMemoryStore, Jmap,
+        MtaHook, MtaMilter,
         MtaRoute, Search, SearchStore, SpamClassifier, SpamClassifierModel, SpamDnsblServer,
-        SpamLlm, SpamPyzor, Tracer, TracingStore, WebHook,
+        SpamAi, SpamPyzor, Tracer, TracingStore, WebHook,
     },
 };
 use registry::types::duration::Duration;
@@ -37,7 +38,8 @@ pub const INVENTORY_OBJECTS: &[&str] = &[
     "x:Tracer",
     "x:WebHook",
     "x:AiModel",
-    "x:SpamLlm",
+    "x:SpamAi",
+    "x:Cache",
     "x:SpamDnsblServer",
     "x:SpamPyzor",
     "x:MtaMilter",
@@ -221,11 +223,11 @@ impl Server {
                 Tracer::Journal(t) => console_on |= t.enable,
                 Tracer::OtelHttp(t) if t.enable => {
                     otel_on = true;
-                    endpoint(&mut facts, "otel-tracer", t.endpoint);
+                    endpoint(&mut facts, "otel-tracer", t.url);
                 }
                 Tracer::OtelGrpc(t) if t.enable => {
                     otel_on = true;
-                    endpoint(&mut facts, "otel-tracer", t.endpoint.unwrap_or_default());
+                    endpoint(&mut facts, "otel-tracer", t.url.unwrap_or_default());
                 }
                 _ => {}
             }
@@ -245,28 +247,30 @@ impl Server {
         }
         facts.collected.insert("webhooks".into(), hooks_on);
 
-        // AI: the classifier's model, and Explain's
+        // AI: the classifier's models (every tier), and Explain's
         let models = self.registry().list::<AiModel>().await?;
         let model_url = |id: Id| {
             models
                 .iter()
                 .find(|m| Id::from(m.id.id()) == id)
-                .map(|m| m.object.url.clone())
+                .map(|m| m.object.base_url().to_string())
         };
-        let llm_on = match self.singleton::<SpamLlm>().await? {
-            SpamLlm::Enable(props) => {
-                if let Some(url) = model_url(props.model_id) {
-                    endpoint(&mut facts, "spam-llm", url);
+        let llm_on = match self.singleton::<SpamAi>().await? {
+            SpamAi::Enable(props) => {
+                for tier in props.tiers.iter() {
+                    if let Some(url) = model_url(tier.model_id) {
+                        endpoint(&mut facts, "spam-llm", url);
+                    }
                 }
                 true
             }
-            SpamLlm::Disable => false,
+            SpamAi::Disable => false,
         };
         facts.collected.insert("spam-llm".into(), llm_on);
         let limits = self.ai_limits().await;
         let explain = self.ai_explain_model(&limits).await;
         if let Some((_, model)) = &explain {
-            endpoint(&mut facts, "inbuxa:Explanation", model.url.clone());
+            endpoint(&mut facts, "inbuxa:Explanation", model.base_url().to_string());
         }
         facts
             .collected
@@ -293,6 +297,10 @@ impl Server {
         }
         facts.collected.insert("spam-pyzor".into(), pyzor.enable);
 
+        // Account cache snapshots
+        let swap_on = !matches!(self.singleton::<Cache>().await?.swap, CacheSwap::Disabled);
+        facts.collected.insert("cache-swap".into(), swap_on);
+
         // Mail handed to others
         let mut hooks = false;
         for milter in self.registry().list::<MtaMilter>().await? {
@@ -300,7 +308,7 @@ impl Server {
             endpoint(
                 &mut facts,
                 "mta-milter-and-hooks",
-                format!("{}:{}", milter.object.hostname, milter.object.port),
+                format!("{}:{}", milter.object.host, milter.object.port),
             );
         }
         for hook in self.registry().list::<MtaHook>().await? {
@@ -312,7 +320,7 @@ impl Server {
         for route in self.registry().list::<MtaRoute>().await? {
             if let MtaRoute::Relay(relay) = route.object {
                 relays = true;
-                endpoint(&mut facts, "relay", format!("{}:{}", relay.address, relay.port));
+                endpoint(&mut facts, "relay", format!("{}:{}", relay.host, relay.port));
             }
         }
         facts.collected.insert("relay".into(), relays);

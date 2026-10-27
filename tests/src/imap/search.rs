@@ -2,6 +2,8 @@
  * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
+ *
+ * Modified by Coffey Labs in 2026 for INBUXA.
  */
 
 use crate::utils::server::TestServer;
@@ -72,8 +74,18 @@ pub async fn test(imap: &mut ImapConnection, imap_check: &mut ImapConnection, te
         .await
         .assert_equals("* SEARCH 10");
 
+    // inbuxa: a parenthesized list is a conjunction (RFC 3501 6.4.4); no
+    // message is \Answered, so 1.0 matches them all here (0.16 answered as
+    // if ANSWERED were left out). UNANSWERED gives the old expected result.
     imap_check
         .send("UID SEARCH NOT (FROM nathaniel ANSWERED)")
+        .await;
+    imap_check
+        .assert_read(Type::Tagged, ResponseType::Ok)
+        .await
+        .assert_equals("* SEARCH 1 2 3 4 5 6 7 8 9 10");
+    imap_check
+        .send("UID SEARCH NOT (FROM nathaniel UNANSWERED)")
         .await;
     imap_check
         .assert_read(Type::Tagged, ResponseType::Ok)
@@ -188,11 +200,35 @@ pub async fn test(imap: &mut ImapConnection, imap_check: &mut ImapConnection, te
 
     imap.send("UID SORT RETURN (COUNT ALL) (DATE SUBJECT) UTF-8 ALL")
         .await;
-    imap.assert_read(Type::Tagged, ResponseType::Ok)
+    // inbuxa: 1.0 sorts a message without a usable Date by its internal
+    // date (RFC 5256), so UIDs 2, 3, 7, 8 and 9 follow their APPEND time
+    // (seconds) and then their base subject, which varies from run to run.
+    // The dated messages keep their order, after the others on MySQL.
+    let response = imap
+        .assert_read(Type::Tagged, ResponseType::Ok)
         .await
-        .assert_contains(if !test.server.search_store().is_mysql() {
-            "COUNT 10 ALL 6,4:5,1,10,3,7:8,2,9"
-        } else {
-            "COUNT 10 ALL 9,3,7:8,2,6,4:5,1,10"
-        }); //6,4:5,1,10,9,3,7:8,2");
+        .assert_contains("COUNT 10 ALL ");
+    let all = response
+        .iter()
+        .find_map(|line| line.split_once("COUNT 10 ALL ").map(|(_, all)| all.trim()))
+        .unwrap();
+    let uids = all
+        .split(',')
+        .flat_map(|range| match range.split_once(':') {
+            Some((from, to)) => {
+                (from.parse::<u32>().unwrap()..=to.parse::<u32>().unwrap()).collect::<Vec<_>>()
+            }
+            None => vec![range.parse::<u32>().unwrap()],
+        })
+        .collect::<Vec<_>>();
+    let (dated, undated) = if !test.server.search_store().is_mysql() {
+        uids.split_at(5)
+    } else {
+        let (undated, dated) = uids.split_at(5);
+        (dated, undated)
+    };
+    assert_eq!(dated, [6, 4, 5, 1, 10], "{all}");
+    let mut undated = undated.to_vec();
+    undated.sort_unstable();
+    assert_eq!(undated, [2, 3, 7, 8, 9], "{all}");
 }

@@ -9,7 +9,7 @@
 
 use crate::utils::server::TestServer;
 use ahash::AHashSet;
-use common::network::dns::update::DNS_RECORDS;
+use common::network::{acme::AcmeError, dns::update::DNS_RECORDS};
 use dns_update::DnsRecord;
 use jmap_proto::error::set::SetErrorType;
 use registry::{
@@ -163,6 +163,8 @@ pub async fn test(test: &TestServer) {
     // ACME provider creation should fail without a contact email
     account
         .registry_create_object_expect_err(AcmeProvider {
+            // inbuxa: 1.0 makes the description required
+            description: "Test ACME provider".to_string(),
             directory: "https://localhost:14000/dir".to_string(),
             ..Default::default()
         })
@@ -173,6 +175,8 @@ pub async fn test(test: &TestServer) {
     // Create an ACME provider using TLS-ALPN-01 challenge
     let tls_acme_id = account
         .registry_create_object(AcmeProvider {
+            // inbuxa: 1.0 makes the description required
+            description: "Test ACME provider".to_string(),
             directory: "https://localhost:14000/dir".to_string(),
             contact: Map::new(vec!["mailto:hello@tls.org".to_string()]),
             challenge_type: AcmeChallengeType::TlsAlpn01,
@@ -293,25 +297,17 @@ pub async fn test(test: &TestServer) {
     // inbuxa: renewing while a valid certificate already covers the names
     // (say, one stored by hand before the domain went automatic) schedules
     // the renewal for when it falls due. It used to end the task for good.
-    let rescheduled = test
-        .server
-        .acme_renew(tls_domain_id)
-        .await
-        .ok()
-        .expect("a renewal that isn't due yet to be rescheduled, not to fail");
-    assert!(
-        matches!(
-            rescheduled.as_slice(),
-            [Task::AcmeRenewal(TaskDomainManagement { domain_id, .. })] if *domain_id == tls_domain_id
+    // 1.0 answers NotDue with that time here, and its ACME task turns NotDue
+    // into a renewal task due then (services task_manager/tasks/acme.rs).
+    match test.server.acme_renew(tls_domain_id).await {
+        Err(AcmeError::NotDue { renew_at, .. }) => assert_eq!(
+            renew_at as i64,
+            not_valid_before + length / 2,
+            "The rescheduled renewal should fall due when the certificate does"
         ),
-        "Expected one rescheduled ACME renewal, found: {:?}",
-        rescheduled
-    );
-    assert_eq!(
-        rescheduled[0].due_timestamp() as i64,
-        not_valid_before + length / 2,
-        "The rescheduled renewal should fall due when the certificate does"
-    );
+        Err(err) => panic!("Expected a renewal that isn't due yet to be rescheduled, got {err}"),
+        Ok(tasks) => panic!("Expected a renewal that isn't due yet to be rescheduled, got {tasks:?}"),
+    }
 
     account.registry_destroy_all(ObjectType::Certificate).await;
     account.registry_destroy_all(ObjectType::Task).await;
@@ -319,6 +315,8 @@ pub async fn test(test: &TestServer) {
     // Test ACME using HTTP-01 challenge and the server domain "mail.example.org"
     let http_acme_id = account
         .registry_create_object(AcmeProvider {
+            // inbuxa: 1.0 makes the description required
+            description: "Test ACME provider".to_string(),
             directory: "https://localhost:14000/dir".to_string(),
             contact: Map::new(vec!["mailto:hello@example.org".to_string()]),
             challenge_type: AcmeChallengeType::Http01,
@@ -363,6 +361,8 @@ pub async fn test(test: &TestServer) {
     // Test ACME using DNS-01 challenge
     let dns_acme_id = account
         .registry_create_object(AcmeProvider {
+            // inbuxa: 1.0 makes the description required
+            description: "Test ACME provider".to_string(),
             directory: "https://localhost:14000/dir".to_string(),
             contact: Map::new(vec!["mailto:hello@dns.org".to_string()]),
             challenge_type: AcmeChallengeType::Dns01,
@@ -401,47 +401,25 @@ pub async fn test(test: &TestServer) {
     account.registry_destroy_all(ObjectType::Certificate).await;
     account.registry_destroy_all(ObjectType::Task).await;
 
-    // Test ACME using DNS-01 challenge
-    let dns_acme_id = account
-        .registry_create_object(AcmeProvider {
+    // Test ACME using DNS-PERSIST-01 challenge
+    // inbuxa: 1.0 follows the later dns-persist-01 draft: the CA's directory
+    // advertises accountHashPrefix and issuerDomainNames, and the record's
+    // accounturi is a hash under that prefix. Pebble (2026-04 image, the
+    // newest) advertises neither and still checks the plain account URL, so
+    // issuance can't run against it. 1.0 refuses such a provider up front.
+    account
+        .registry_create_object_expect_err(AcmeProvider {
+            description: "Test ACME provider".to_string(),
             directory: "https://localhost:14000/dir".to_string(),
             contact: Map::new(vec!["mailto:hello@persist.org".to_string()]),
             challenge_type: AcmeChallengeType::DnsPersist01,
             ..Default::default()
         })
-        .await;
-    let persist_domain_id = account
-        .registry_create_object(Domain {
-            name: "persist.org".to_string(),
-            certificate_management: CertificateManagement::Automatic(
-                CertificateManagementProperties {
-                    acme_provider_id: dns_acme_id,
-                    subject_alternative_names: Default::default(),
-                },
-            ),
-            dkim_management: DkimManagement::Manual,
-            dns_management: DnsManagement::Automatic(DnsManagementProperties {
-                dns_server_id: pebble_dns_id,
-                publish_records: Map::new(vec![DnsRecordType::Caa]),
-                ..Default::default()
-            }),
-            ..Default::default()
-        })
-        .await;
-    test.wait_for_tasks_skip_not_due().await;
-    let certificate = account
-        .registry_get_all::<Certificate>()
         .await
-        .into_iter()
-        .next()
-        .unwrap()
-        .1;
-    let mut sans = certificate.subject_alternative_names.into_inner();
-    sans.sort();
-    assert_eq!(
-        sans,
-        vec!["*.persist.org".to_string(), "persist.org".to_string()]
-    );
+        .assert_type(SetErrorType::InvalidProperties)
+        .assert_description_contains(
+            "does not advertise both accountHashPrefix and issuerDomainNames",
+        );
 
     // Test preferred chain selection against the alternate chains Pebble offers (RFC 8555 7.4.2)
     let pebble_roots = pebble_root_common_names().await;
@@ -454,6 +432,8 @@ pub async fn test(test: &TestServer) {
     // Renew without a preferred chain to discover the default root
     let default_acme_id = account
         .registry_create_object(AcmeProvider {
+            // inbuxa: 1.0 makes the description required
+            description: "Test ACME provider".to_string(),
             directory: "https://localhost:14000/dir".to_string(),
             contact: Map::new(vec!["mailto:hello@chain.org".to_string()]),
             challenge_type: AcmeChallengeType::TlsAlpn01,
@@ -509,6 +489,8 @@ pub async fn test(test: &TestServer) {
         .expect("an alternate root distinct from the default");
     let preferred_acme_id = account
         .registry_create_object(AcmeProvider {
+            // inbuxa: 1.0 makes the description required
+            description: "Test ACME provider".to_string(),
             directory: "https://localhost:14000/dir".to_string(),
             contact: Map::new(vec!["mailto:hello@chainalt.org".to_string()]),
             challenge_type: AcmeChallengeType::TlsAlpn01,
@@ -572,6 +554,8 @@ pub async fn test(test: &TestServer) {
 
         let reuse_acme_id = account
             .registry_create_object(AcmeProvider {
+                // inbuxa: 1.0 makes the description required
+                description: "Test ACME provider".to_string(),
                 directory: "https://localhost:14000/dir".to_string(),
                 contact: Map::new(vec!["mailto:hello@reuse.org".to_string()]),
                 challenge_type: AcmeChallengeType::TlsAlpn01,
@@ -676,10 +660,10 @@ pub async fn test(test: &TestServer) {
     account
         .registry_destroy(
             ObjectType::Domain,
-            [tls_domain_id, dns_domain_id, persist_domain_id],
+            [tls_domain_id, dns_domain_id],
         )
         .await
-        .assert_destroyed(&[tls_domain_id, dns_domain_id, persist_domain_id]);
+        .assert_destroyed(&[tls_domain_id, dns_domain_id]);
     account.registry_destroy_all(ObjectType::DnsServer).await;
     account.registry_destroy_all(ObjectType::AcmeProvider).await;
     account.registry_destroy_all(ObjectType::Certificate).await;

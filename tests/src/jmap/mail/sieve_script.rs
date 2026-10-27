@@ -2,6 +2,8 @@
  * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
+ *
+ * Modified by Coffey Labs in 2026 for INBUXA.
  */
 
 use crate::{
@@ -14,6 +16,7 @@ use jmap_client::{
     email, mailbox,
     sieve::query::{Comparator, Filter},
 };
+use ::email::message::delete::EmailDeletion;
 use registry::schema::{prelude::ObjectType, structs::SieveUserScript};
 use std::{
     fs,
@@ -196,13 +199,14 @@ pub async fn test(test: &TestServer) {
         .await
         .unwrap()
         .unwrap();
+    // inbuxa: 1.0 also sets the server keyword $hasnoattachment
     assert_eq!(
         email.keywords().len(),
-        2,
-        "Expected 2 keywords, found {:?}.",
+        3,
+        "Expected 3 keywords, found {:?}.",
         email.keywords()
     );
-    for keyword in ["$important", "$seen"] {
+    for keyword in ["$important", "$seen", "$hasnoattachment"] {
         if !email.keywords().contains(&keyword) {
             panic!("Keyword {} not found in {:?}.", keyword, email.keywords());
         }
@@ -568,6 +572,12 @@ pub async fn test(test: &TestServer) {
     admin
         .registry_destroy_all(ObjectType::SieveUserScript)
         .await;
+    // inbuxa: 1.0 keeps vacation and duplicate ids with the account until
+    // they expire, so expire them all now
+    server
+        .purge_sieve_seen_ids(account.id().document_id(), u64::MAX)
+        .await
+        .unwrap();
     test.assert_is_empty().await;
 }
 

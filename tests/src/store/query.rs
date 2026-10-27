@@ -20,12 +20,11 @@ use store::{
     rand::{self, RngExt, distr::Alphanumeric},
     roaring::RoaringBitmap,
     search::{
-        EmailSearchField, IndexDocument, SearchComparator, SearchField, SearchFilter,
-        SearchOperator, SearchQuery, SearchValue, TracingSearchField,
+        EmailSearchField, IndexDocument, KeyValueMatch, SearchComparator, SearchField,
+        SearchFilter, SearchQuery, SearchValue, TracingSearchField,
     },
     write::SearchIndex,
 };
-use utils::map::vec_map::VecMap;
 
 pub const FIELDS: [&str; 20] = [
     "id",
@@ -63,28 +62,134 @@ pub const FIELDS: [&str; 20] = [
  "accession_number" // To
 */
 
-const FIELD_MAPPINGS: [EmailSearchField; 20] = [
-    EmailSearchField::HasAttachment, // "id",
-    EmailSearchField::To,            // "accession_number",
-    EmailSearchField::Headers,       // "artist",
-    EmailSearchField::Cc,            // "artistRole",
-    EmailSearchField::HasAttachment, // "artistId",
-    EmailSearchField::Subject,       // "title",
-    EmailSearchField::HasAttachment, // "dateText",
-    EmailSearchField::From,          // "medium",
-    EmailSearchField::Body,          // "creditLine",
-    EmailSearchField::ReceivedAt,    // "year",
-    EmailSearchField::Bcc,           // "acquisitionYear",
-    EmailSearchField::HasAttachment, // "dimensions",
-    EmailSearchField::Size,          // "width",
-    EmailSearchField::SentAt,        // "height",
-    EmailSearchField::HasAttachment, // "depth",
-    EmailSearchField::HasAttachment, // "units",
-    EmailSearchField::HasAttachment, // "inscription",
-    EmailSearchField::HasAttachment, // "thumbnailCopyright",
-    EmailSearchField::HasAttachment, // "thumbnailUrl",
-    EmailSearchField::HasAttachment, // "url",
+// inbuxa: 1.0's email index holds text only. ReceivedAt, Size and SentAt
+// left it (the server filters and sorts on them from the message cache and
+// hands the search store document sets and ranks), so the test keeps those
+// columns itself, in `Docs`, and turns them into the same sets and ranks.
+#[derive(Clone, PartialEq, Eq)]
+enum Column {
+    Text(EmailSearchField),
+    ReceivedAt,
+    Size,
+    SentAt,
+    Skip,
+}
+
+const FIELD_MAPPINGS: [Column; 20] = [
+    Column::Skip,                            // "id",
+    Column::Text(EmailSearchField::To),      // "accession_number",
+    Column::Text(EmailSearchField::Headers), // "artist",
+    Column::Text(EmailSearchField::Cc),      // "artistRole",
+    Column::Skip,                            // "artistId",
+    Column::Text(EmailSearchField::Subject), // "title",
+    Column::Skip,                            // "dateText",
+    Column::Text(EmailSearchField::From),    // "medium",
+    Column::Text(EmailSearchField::Body),    // "creditLine",
+    Column::ReceivedAt,                      // "year",
+    Column::Text(EmailSearchField::Bcc),     // "acquisitionYear",
+    Column::Skip,                            // "dimensions",
+    Column::Size,                            // "width",
+    Column::SentAt,                          // "height",
+    Column::Skip,                            // "depth",
+    Column::Skip,                            // "units",
+    Column::Skip,                            // "inscription",
+    Column::Skip,                            // "thumbnailCopyright",
+    Column::Skip,                            // "thumbnailUrl",
+    Column::Skip,                            // "url",
 ];
+
+/// The sortable columns of one test document.
+#[derive(Debug, Default, Clone)]
+struct Doc {
+    from: String,
+    to: String,
+    cc: String,
+    bcc: String,
+    received_at: u64,
+    size: u64,
+    sent_at: u64,
+}
+
+#[derive(Default)]
+struct Docs(AHashMap<u32, Doc>);
+
+impl Docs {
+    fn to(&self, document_id: u32) -> &str {
+        &self.0.get(&document_id).unwrap().to
+    }
+
+    /// The documents a cache-side filter would pass to the search store.
+    fn matching(&self, filter: impl Fn(&Doc) -> bool) -> SearchFilter {
+        SearchFilter::is_in_set(
+            self.0
+                .iter()
+                .filter(|(_, doc)| filter(doc))
+                .map(|(document_id, _)| *document_id)
+                .collect(),
+        )
+    }
+
+    /// A cache-side sort, as dense ranks of the column.
+    fn sort<K: Ord>(&self, key: impl Fn(&Doc) -> K, ascending: bool) -> SearchComparator {
+        let mut sorted = self
+            .0
+            .iter()
+            .map(|(document_id, doc)| (key(doc), *document_id))
+            .collect::<Vec<_>>();
+        sorted.sort_by(|a, b| a.0.cmp(&b.0));
+
+        let mut ranks = AHashMap::with_capacity(sorted.len());
+        let mut rank = 0u32;
+        let mut prev: Option<&K> = None;
+        for (value, document_id) in &sorted {
+            if prev.is_none_or(|prev| prev != value) {
+                rank += 1;
+            }
+            ranks.insert(*document_id, rank);
+            prev = Some(value);
+        }
+
+        SearchComparator::sorted_set(ranks, ascending)
+    }
+}
+
+/// `field >= value`, which 1.0's integer filters spell as `>` or `=`.
+fn integer_ge(field: impl Into<SearchField>, value: impl Into<u64>) -> Vec<SearchFilter> {
+    let field = field.into();
+    let value = value.into();
+    vec![
+        SearchFilter::Or,
+        SearchFilter::integer_gt(field.clone(), value),
+        SearchFilter::integer_eq(field, value),
+        SearchFilter::End,
+    ]
+}
+
+// inbuxa: 1.0's global search takes Id filters only as conjunctions (no Or
+// group), so ">= value" becomes "> value - 1", or "< i64::MAX" for 0 (the
+// SQL backends store ids as BIGINT).
+fn id_ge(value: u64) -> SearchFilter {
+    match value.checked_sub(1) {
+        Some(prev) => SearchFilter::integer_gt(SearchField::Id, prev),
+        None => SearchFilter::integer_lt(SearchField::Id, i64::MAX as u64),
+    }
+}
+
+// inbuxa: 1.0's built-in index drops an account's documents by range; the
+// other backends take a query.
+async fn unindex_account(store: &SearchStore, index: SearchIndex, account_id: u32) {
+    if let Some(internal) = store.internal_fts() {
+        internal.unindex_account(index, account_id).await.unwrap();
+    } else {
+        store
+            .unindex(
+                SearchQuery::new(index)
+                    .with_filter(SearchFilter::integer_eq(SearchField::AccountId, account_id)),
+            )
+            .await
+            .unwrap();
+    }
+}
 
 const ALL_IDS: &[&str] = &[
     "p11293", "p79426", "p79427", "p79428", "p79429", "p79430", "d05503", "d00399", "d05352",
@@ -118,7 +223,7 @@ pub async fn test(test: &TestServer) {
     let now = Instant::now();
     let documents = Arc::new(Mutex::new(Vec::new()));
     let mut mask = RoaringBitmap::new();
-    let mut fields = AHashMap::new();
+    let mut docs = Docs::default();
 
     // Global ids test
     println!("Running global id filtering tests...");
@@ -164,13 +269,6 @@ pub async fn test(test: &TestServer) {
     }
     for field in [EmailSearchField::Body, EmailSearchField::Attachment] {
         document.index_text(field, &large_text, Language::English);
-    }
-    for field in [
-        EmailSearchField::ReceivedAt,
-        EmailSearchField::SentAt,
-        EmailSearchField::Size,
-    ] {
-        document.index_unsigned(field, rand::rng().random_range(100u64..1_000_000u64));
     }
     store.index(vec![document]).await.unwrap();
     // Refresh
@@ -220,51 +318,63 @@ pub async fn test(test: &TestServer) {
                 let mut document = IndexDocument::new(SearchIndex::Email)
                     .with_account_id(0)
                     .with_document_id(document_id as u32);
+                let mut doc = Doc::default();
                 for (pos, field) in record.iter().enumerate() {
-                    match FIELD_MAPPINGS[pos] {
-                        EmailSearchField::From
-                        | EmailSearchField::To
-                        | EmailSearchField::Cc
-                        | EmailSearchField::Bcc => {
-                            document.index_text(
-                                FIELD_MAPPINGS[pos].clone(),
-                                &field.to_lowercase(),
-                                Language::None,
-                            );
+                    match &FIELD_MAPPINGS[pos] {
+                        Column::Text(
+                            text_field @ (EmailSearchField::From
+                            | EmailSearchField::To
+                            | EmailSearchField::Cc
+                            | EmailSearchField::Bcc),
+                        ) => {
+                            let value = field.to_lowercase();
+                            document.index_text(text_field.clone(), &value, Language::None);
+                            *match text_field {
+                                EmailSearchField::From => &mut doc.from,
+                                EmailSearchField::To => &mut doc.to,
+                                EmailSearchField::Cc => &mut doc.cc,
+                                _ => &mut doc.bcc,
+                            } = value;
                         }
-                        EmailSearchField::Subject
-                        | EmailSearchField::Body
-                        | EmailSearchField::Attachment => {
+                        Column::Text(
+                            text_field @ (EmailSearchField::Subject
+                            | EmailSearchField::Body
+                            | EmailSearchField::Attachment),
+                        ) => {
                             document.index_text(
-                                FIELD_MAPPINGS[pos].clone(),
+                                text_field.clone(),
                                 &field
                                     .replace(|ch: char| !ch.is_alphanumeric(), " ")
                                     .to_lowercase(),
                                 Language::English,
                             );
                         }
-                        EmailSearchField::Headers => {
+                        Column::Text(EmailSearchField::Headers) => {
                             document.insert_key_value(
                                 EmailSearchField::Headers,
                                 "artist",
                                 field.to_lowercase(),
                             );
                         }
-                        EmailSearchField::ReceivedAt
-                        | EmailSearchField::SentAt
-                        | EmailSearchField::Size => {
-                            document.index_unsigned(
-                                FIELD_MAPPINGS[pos].clone(),
-                                field.parse::<u64>().unwrap_or(0),
-                            );
+                        Column::ReceivedAt => {
+                            doc.received_at = field.parse::<u64>().unwrap_or(0);
                         }
-                        _ => {
+                        Column::Size => {
+                            doc.size = field.parse::<u64>().unwrap_or(0);
+                        }
+                        Column::SentAt => {
+                            doc.sent_at = field.parse::<u64>().unwrap_or(0);
+                        }
+                        Column::Skip => {
                             continue;
                         }
                     };
                 }
 
-                documents.lock().unwrap().push(document);
+                documents
+                    .lock()
+                    .unwrap()
+                    .push((document_id as u32, document, doc));
             });
         }
     });
@@ -281,14 +391,13 @@ pub async fn test(test: &TestServer) {
     print!("Inserting... ",);
     let mut chunks = Vec::new();
     let mut chunk = Vec::new();
-    for document in batches {
-        let mut document_id = None;
+    for (document_id, document, doc) in batches {
         let mut to_field = None;
 
         for (key, value) in document.fields() {
             if key == &SearchField::DocumentId {
                 if let SearchValue::Uint(id) = value {
-                    document_id = Some(*id as u32);
+                    assert_eq!(*id as u32, document_id);
                 }
             } else if key == &SearchField::Email(EmailSearchField::To)
                 && let SearchValue::Text { value, .. } = value
@@ -296,10 +405,9 @@ pub async fn test(test: &TestServer) {
                 to_field = Some(value.to_string());
             }
         }
-        let document_id = document_id.unwrap();
-        let to_field = to_field.unwrap();
+        assert_eq!(to_field.unwrap(), doc.to);
         mask.insert(document_id);
-        fields.insert(document_id, to_field);
+        docs.0.insert(document_id, doc);
 
         chunk.push(document);
         if chunk.len() == 10 {
@@ -348,8 +456,8 @@ pub async fn test(test: &TestServer) {
         let ids = store
             .query_account(
                 SearchQuery::new(SearchIndex::Email)
-                    .with_filters(vec![SearchFilter::eq(SearchField::AccountId, 0u32)])
-                    .with_comparator(SearchComparator::ascending(EmailSearchField::ReceivedAt))
+                    .with_filters(vec![SearchFilter::integer_eq(SearchField::AccountId, 0u32)])
+                    .with_comparator(docs.sort(|doc| doc.received_at, true))
                     .with_mask(mask.clone()),
             )
             .await
@@ -360,10 +468,8 @@ pub async fn test(test: &TestServer) {
         let ids = store
             .query_account(
                 SearchQuery::new(SearchIndex::Email)
-                    .with_filters(vec![
-                        SearchFilter::eq(SearchField::AccountId, 0u32),
-                        SearchFilter::ge(SearchField::DocumentId, 0u32),
-                    ])
+                    .with_filters(vec![SearchFilter::integer_eq(SearchField::AccountId, 0u32)])
+                    .with_filters(integer_ge(SearchField::DocumentId, 0u32))
                     .with_mask(mask.clone()),
             )
             .await
@@ -375,53 +481,53 @@ pub async fn test(test: &TestServer) {
 
     println!("Running account filter tests...");
     let now = Instant::now();
-    test_filter(store.clone(), &fields, &mask).await;
+    test_filter(store.clone(), &docs, &mask).await;
     println!("Filtering took {} ms.", now.elapsed().as_millis());
 
     println!("Running account sort tests...");
     let now = Instant::now();
-    test_sort(store.clone(), &fields, &mask).await;
+    test_sort(store.clone(), &docs, &mask).await;
     println!("Sorting took {} ms.", now.elapsed().as_millis());
 
     println!("Running unindex tests...");
     let now = Instant::now();
-    test_unindex(store.clone(), &fields).await;
+    test_unindex(store.clone(), &docs).await;
     println!("Unindexing took {} ms.", now.elapsed().as_millis());
 }
 
-async fn test_filter(store: SearchStore, fields: &AHashMap<u32, String>, mask: &RoaringBitmap) {
+async fn test_filter(store: SearchStore, docs: &Docs, mask: &RoaringBitmap) {
     let can_stem = !store.is_mysql();
     let can_negate_text = !store.is_meilisearch();
 
     let tests = [
         (
             vec![
-                SearchFilter::eq(SearchField::AccountId, 0u32),
+                SearchFilter::integer_eq(SearchField::AccountId, 0u32),
                 SearchFilter::has_english_text(EmailSearchField::Subject, "water"),
-                SearchFilter::eq(EmailSearchField::ReceivedAt, 1979u32),
+                docs.matching(|doc| doc.received_at == 1979),
             ],
             vec!["p11293"],
         ),
         (
             vec![
-                SearchFilter::eq(SearchField::AccountId, 0u32),
+                SearchFilter::integer_eq(SearchField::AccountId, 0u32),
                 SearchFilter::has_keyword(EmailSearchField::From, "gelatin"),
-                SearchFilter::gt(EmailSearchField::ReceivedAt, 2000u32),
-                SearchFilter::lt(EmailSearchField::Size, 180u32),
-                SearchFilter::gt(EmailSearchField::Size, 0u32),
+                docs.matching(|doc| doc.received_at > 2000),
+                docs.matching(|doc| doc.size < 180),
+                docs.matching(|doc| doc.size > 0),
             ],
             vec!["p79426", "p79427", "p79428", "p79429", "p79430"],
         ),
         (
             vec![
-                SearchFilter::eq(SearchField::AccountId, 0u32),
+                SearchFilter::integer_eq(SearchField::AccountId, 0u32),
                 SearchFilter::has_english_text(EmailSearchField::Subject, "'rustic bridge'"),
             ],
             vec!["d05503"],
         ),
         (
             vec![
-                SearchFilter::eq(SearchField::AccountId, 0u32),
+                SearchFilter::integer_eq(SearchField::AccountId, 0u32),
                 SearchFilter::has_english_text(EmailSearchField::Subject, "'rustic'"),
                 SearchFilter::has_english_text(
                     EmailSearchField::Subject,
@@ -432,26 +538,23 @@ async fn test_filter(store: SearchStore, fields: &AHashMap<u32, String>, mask: &
         ),
         (
             vec![
-                SearchFilter::eq(SearchField::AccountId, 0u32),
-                SearchFilter::cond(
-                    EmailSearchField::Headers,
-                    SearchOperator::Contains,
-                    SearchValue::KeyValues(VecMap::from_iter([(
-                        "artist".to_string(),
-                        "kunst, mauro".to_string(),
-                    )])),
-                ),
+                SearchFilter::integer_eq(SearchField::AccountId, 0u32),
+                SearchFilter::KeyValue {
+                    field: EmailSearchField::Headers.into(),
+                    key: "artist".to_string(),
+                    op: KeyValueMatch::Contains("kunst, mauro".to_string()),
+                },
                 SearchFilter::has_keyword(EmailSearchField::Cc, "artist"),
                 SearchFilter::Or,
-                SearchFilter::eq(EmailSearchField::ReceivedAt, 1969u32),
-                SearchFilter::eq(EmailSearchField::ReceivedAt, 1971u32),
+                docs.matching(|doc| doc.received_at == 1969),
+                docs.matching(|doc| doc.received_at == 1971),
                 SearchFilter::End,
             ],
             vec!["p01764", "t05843"],
         ),
         (
             vec![
-                SearchFilter::eq(SearchField::AccountId, 0u32),
+                SearchFilter::integer_eq(SearchField::AccountId, 0u32),
                 SearchFilter::Not,
                 SearchFilter::has_keyword(EmailSearchField::From, "oil"),
                 SearchFilter::End,
@@ -461,12 +564,12 @@ async fn test_filter(store: SearchStore, fields: &AHashMap<u32, String>, mask: &
                 ),
                 SearchFilter::Or,
                 SearchFilter::And,
-                SearchFilter::ge(EmailSearchField::ReceivedAt, 1900u32),
-                SearchFilter::lt(EmailSearchField::ReceivedAt, 1910u32),
+                docs.matching(|doc| doc.received_at >= 1900),
+                docs.matching(|doc| doc.received_at < 1910),
                 SearchFilter::End,
                 SearchFilter::And,
-                SearchFilter::ge(EmailSearchField::ReceivedAt, 2000u32),
-                SearchFilter::lt(EmailSearchField::ReceivedAt, 2010u32),
+                docs.matching(|doc| doc.received_at >= 2000),
+                docs.matching(|doc| doc.received_at < 2010),
                 SearchFilter::End,
                 SearchFilter::End,
             ],
@@ -479,28 +582,25 @@ async fn test_filter(store: SearchStore, fields: &AHashMap<u32, String>, mask: &
         (
             vec![
                 SearchFilter::And,
-                SearchFilter::eq(SearchField::AccountId, 0u32),
-                SearchFilter::cond(
-                    EmailSearchField::Headers,
-                    SearchOperator::Contains,
-                    SearchValue::KeyValues(VecMap::from_iter([(
-                        "artist".to_string(),
-                        "warhol".to_string(),
-                    )])),
-                ),
+                SearchFilter::integer_eq(SearchField::AccountId, 0u32),
+                SearchFilter::KeyValue {
+                    field: EmailSearchField::Headers.into(),
+                    key: "artist".to_string(),
+                    op: KeyValueMatch::Contains("warhol".to_string()),
+                },
                 SearchFilter::Not,
                 SearchFilter::has_english_text(EmailSearchField::Subject, "'campbell'"),
                 SearchFilter::End,
                 SearchFilter::Not,
                 SearchFilter::Or,
-                SearchFilter::gt(EmailSearchField::ReceivedAt, 1980u32),
+                docs.matching(|doc| doc.received_at > 1980),
                 SearchFilter::And,
-                SearchFilter::gt(EmailSearchField::Size, 500u32),
-                SearchFilter::gt(EmailSearchField::SentAt, 500u32),
+                docs.matching(|doc| doc.size > 500),
+                docs.matching(|doc| doc.sent_at > 500),
                 SearchFilter::End,
                 SearchFilter::End,
                 SearchFilter::End,
-                SearchFilter::eq(EmailSearchField::Bcc, "2008".to_string()),
+                SearchFilter::text_eq(EmailSearchField::Bcc, "2008"),
                 SearchFilter::End,
             ],
             vec!["ar00039", "t12600"],
@@ -508,7 +608,7 @@ async fn test_filter(store: SearchStore, fields: &AHashMap<u32, String>, mask: &
         (
             if can_stem {
                 vec![
-                    SearchFilter::eq(SearchField::AccountId, 0u32),
+                    SearchFilter::integer_eq(SearchField::AccountId, 0u32),
                     SearchFilter::has_english_text(EmailSearchField::Subject, "study"),
                     SearchFilter::has_keyword(EmailSearchField::From, "paper"),
                     SearchFilter::has_english_text(EmailSearchField::Body, "'purchased'"),
@@ -520,12 +620,12 @@ async fn test_filter(store: SearchStore, fields: &AHashMap<u32, String>, mask: &
                     SearchFilter::has_english_text(EmailSearchField::Subject, "'girl'"),
                     SearchFilter::End,
                     SearchFilter::End,
-                    SearchFilter::gt(EmailSearchField::ReceivedAt, 1900u32),
-                    SearchFilter::gt(EmailSearchField::Bcc, "2008".to_string()),
+                    docs.matching(|doc| doc.received_at > 1900),
+                    docs.matching(|doc| doc.bcc.as_str() > "2008"),
                 ]
             } else {
                 vec![
-                    SearchFilter::eq(SearchField::AccountId, 0u32),
+                    SearchFilter::integer_eq(SearchField::AccountId, 0u32),
                     SearchFilter::Or,
                     SearchFilter::has_english_text(EmailSearchField::Subject, "study"),
                     SearchFilter::has_english_text(EmailSearchField::Subject, "studies"),
@@ -540,8 +640,8 @@ async fn test_filter(store: SearchStore, fields: &AHashMap<u32, String>, mask: &
                     SearchFilter::has_english_text(EmailSearchField::Subject, "'girl'"),
                     SearchFilter::End,
                     SearchFilter::End,
-                    SearchFilter::gt(EmailSearchField::ReceivedAt, 1900u32),
-                    SearchFilter::gt(EmailSearchField::Bcc, "2008".to_string()),
+                    docs.matching(|doc| doc.received_at > 1900),
+                    docs.matching(|doc| doc.bcc.as_str() > "2008"),
                 ]
             },
             vec!["p80203", "t13209", "t13560", "t13561"],
@@ -558,7 +658,7 @@ async fn test_filter(store: SearchStore, fields: &AHashMap<u32, String>, mask: &
             .query_account(
                 SearchQuery::new(SearchIndex::Email)
                     .with_filters(filters)
-                    .with_comparator(SearchComparator::ascending(EmailSearchField::To))
+                    .with_comparator(docs.sort(|doc| doc.to.clone(), true))
                     .with_mask(mask.clone()),
             )
             .await
@@ -566,7 +666,7 @@ async fn test_filter(store: SearchStore, fields: &AHashMap<u32, String>, mask: &
 
         let mut results = Vec::new();
         for document_id in ids {
-            results.push(fields.get(&document_id).unwrap());
+            results.push(docs.to(document_id));
         }
         assert_eq!(results, expected_results);
     }
@@ -590,11 +690,7 @@ fn has_negated_text(filters: &[SearchFilter]) -> bool {
                     negated -= 1;
                 }
             }
-            SearchFilter::Operator {
-                op: SearchOperator::Equal | SearchOperator::Contains,
-                value: SearchValue::Text { .. },
-                ..
-            } if negated > 0 => {
+            SearchFilter::Text { .. } if negated > 0 => {
                 return true;
             }
             _ => (),
@@ -604,22 +700,23 @@ fn has_negated_text(filters: &[SearchFilter]) -> bool {
     false
 }
 
-async fn test_sort(store: SearchStore, fields: &AHashMap<u32, String>, mask: &RoaringBitmap) {
-    let is_reversed = store.is_postgres();
-
+// inbuxa: in 1.0 the search store only filters; sorting is done on ranks the
+// caller supplies (from the message cache on a real server), so the order no
+// longer depends on the backend and PostgreSQL's reversed order is gone.
+async fn test_sort(store: SearchStore, docs: &Docs, mask: &RoaringBitmap) {
     let tests = [
         (
             vec![
-                SearchFilter::eq(SearchField::AccountId, 0u32),
-                SearchFilter::gt(EmailSearchField::ReceivedAt, 0u32),
-                SearchFilter::gt(EmailSearchField::Bcc, "0000".to_string()),
-                SearchFilter::gt(EmailSearchField::Size, 0u32),
+                SearchFilter::integer_eq(SearchField::AccountId, 0u32),
+                docs.matching(|doc| doc.received_at > 0),
+                docs.matching(|doc| doc.bcc.as_str() > "0000"),
+                docs.matching(|doc| doc.size > 0),
             ],
             vec![
-                SearchComparator::descending(EmailSearchField::ReceivedAt),
-                SearchComparator::ascending(EmailSearchField::Bcc),
-                SearchComparator::ascending(EmailSearchField::Size),
-                SearchComparator::descending(EmailSearchField::To),
+                docs.sort(|doc| doc.received_at, false),
+                docs.sort(|doc| doc.bcc.clone(), true),
+                docs.sort(|doc| doc.size, true),
+                docs.sort(|doc| doc.to.clone(), false),
             ],
             vec![
                 "t13655", "t13811", "p13352", "p13351", "p13350", "p13349", "p13348", "p13347",
@@ -633,13 +730,13 @@ async fn test_sort(store: SearchStore, fields: &AHashMap<u32, String>, mask: &Ro
         ),
         (
             vec![
-                SearchFilter::eq(SearchField::AccountId, 0u32),
-                SearchFilter::gt(EmailSearchField::Size, 0u32),
-                SearchFilter::gt(EmailSearchField::SentAt, 0u32),
+                SearchFilter::integer_eq(SearchField::AccountId, 0u32),
+                docs.matching(|doc| doc.size > 0),
+                docs.matching(|doc| doc.sent_at > 0),
             ],
             vec![
-                SearchComparator::descending(EmailSearchField::Size),
-                SearchComparator::ascending(EmailSearchField::SentAt),
+                docs.sort(|doc| doc.size, false),
+                docs.sort(|doc| doc.sent_at, true),
             ],
             vec![
                 "t03681", "t12601", "ar00166", "t12625", "t12915", "p04182", "t06483", "ar00703",
@@ -648,25 +745,17 @@ async fn test_sort(store: SearchStore, fields: &AHashMap<u32, String>, mask: &Ro
             ],
         ),
         (
-            vec![SearchFilter::eq(SearchField::AccountId, 0u32)],
+            vec![SearchFilter::integer_eq(SearchField::AccountId, 0u32)],
             vec![
-                SearchComparator::descending(EmailSearchField::From),
-                SearchComparator::descending(EmailSearchField::Cc),
-                SearchComparator::ascending(EmailSearchField::To),
+                docs.sort(|doc| doc.from.clone(), false),
+                docs.sort(|doc| doc.cc.clone(), false),
+                docs.sort(|doc| doc.to.clone(), true),
             ],
-            if is_reversed {
-                vec![
-                    "ar00052", "ar00627", "t00352", "t07275", "t12318", "t04931", "t13683",
-                    "t13686", "t13687", "t13688", "t13689", "t13690", "t13691", "t13769", "t13773",
-                    "t07151", "t13684", "t07523", "t12369", "t12567",
-                ]
-            } else {
-                vec![
-                    "ar00627", "ar00052", "t00352", "t07275", "t12318", "t04931", "t13683",
-                    "t13686", "t13687", "t13688", "t13689", "t13690", "t13691", "t07766", "t07918",
-                    "t12993", "ar00044", "t13326", "t07614", "t12414",
-                ]
-            },
+            vec![
+                "ar00627", "ar00052", "t00352", "t07275", "t12318", "t04931", "t13683", "t13686",
+                "t13687", "t13688", "t13689", "t13690", "t13691", "t07766", "t07918", "t12993",
+                "ar00044", "t13326", "t07614", "t12414",
+            ],
         ),
     ];
 
@@ -684,23 +773,26 @@ async fn test_sort(store: SearchStore, fields: &AHashMap<u32, String>, mask: &Ro
 
         let mut results = Vec::new();
         for document_id in ids.into_iter().take(expected_results.len()) {
-            results.push(fields.get(&document_id).unwrap());
+            results.push(docs.to(document_id));
         }
         assert_eq!(results, expected_results);
     }
 }
 
-async fn test_unindex(store: SearchStore, fields: &AHashMap<u32, String>) {
+async fn test_unindex(store: SearchStore, docs: &Docs) {
+    let gelatin_filters = || {
+        vec![
+            SearchFilter::has_keyword(EmailSearchField::From, "gelatin"),
+            docs.matching(|doc| doc.received_at > 2000),
+            docs.matching(|doc| doc.size < 180),
+            docs.matching(|doc| doc.size > 0),
+        ]
+    };
     let ids = store
         .query_account(
             SearchQuery::new(SearchIndex::Email)
-                .with_mask(RoaringBitmap::from_iter(fields.keys().copied()))
-                .with_filters(vec![
-                    SearchFilter::has_keyword(EmailSearchField::From, "gelatin"),
-                    SearchFilter::gt(EmailSearchField::ReceivedAt, 2000u32),
-                    SearchFilter::lt(EmailSearchField::Size, 180u32),
-                    SearchFilter::gt(EmailSearchField::Size, 0u32),
-                ])
+                .with_mask(RoaringBitmap::from_iter(docs.0.keys().copied()))
+                .with_filters(gelatin_filters())
                 .with_account_id(0),
         )
         .await
@@ -708,15 +800,25 @@ async fn test_unindex(store: SearchStore, fields: &AHashMap<u32, String>) {
     assert!(!ids.is_empty());
     let expected_count = ids.len().saturating_sub(10);
 
-    let mut query = SearchQuery::new(SearchIndex::Email)
-        .with_account_id(0)
-        .with_filter(SearchFilter::Or);
-    for id in ids.into_iter().take(10) {
-        query = query.with_filter(SearchFilter::eq(SearchField::DocumentId, id));
-    }
-    query = query.with_filter(SearchFilter::End);
+    let unindex_ids = ids.into_iter().take(10).collect::<Vec<_>>();
+    if let Some(internal) = store.internal_fts() {
+        // inbuxa: 1.0's built-in index has no query-based unindex; the
+        // index task drops documents by id, one account at a time
+        internal
+            .index_account_documents(0, SearchIndex::Email, vec![], unindex_ids)
+            .await
+            .unwrap();
+    } else {
+        let mut query = SearchQuery::new(SearchIndex::Email)
+            .with_account_id(0)
+            .with_filter(SearchFilter::Or);
+        for id in unindex_ids {
+            query = query.with_filter(SearchFilter::integer_eq(SearchField::DocumentId, id));
+        }
+        query = query.with_filter(SearchFilter::End);
 
-    store.unindex(query).await.unwrap();
+        store.unindex(query).await.unwrap();
+    }
 
     // Refresh
     if let SearchStore::ElasticSearch(store) = &store {
@@ -727,14 +829,9 @@ async fn test_unindex(store: SearchStore, fields: &AHashMap<u32, String>) {
         store
             .query_account(
                 SearchQuery::new(SearchIndex::Email)
-                    .with_filters(vec![
-                        SearchFilter::has_keyword(EmailSearchField::From, "gelatin"),
-                        SearchFilter::gt(EmailSearchField::ReceivedAt, 2000u32),
-                        SearchFilter::lt(EmailSearchField::Size, 180u32),
-                        SearchFilter::gt(EmailSearchField::Size, 0u32),
-                    ])
+                    .with_filters(gelatin_filters())
                     .with_account_id(0)
-                    .with_mask(RoaringBitmap::from_iter(fields.keys().copied())),
+                    .with_mask(RoaringBitmap::from_iter(docs.0.keys().copied())),
             )
             .await
             .unwrap()
@@ -770,7 +867,7 @@ async fn test_global(store: SearchStore) {
         store
             .query_global(
                 SearchQuery::new(SearchIndex::Tracing)
-                    .with_filter(SearchFilter::ge(SearchField::Id, 0u64))
+                    .with_filter(id_ge(0u64))
             )
             .await
             .unwrap()
@@ -784,8 +881,8 @@ async fn test_global(store: SearchStore) {
         store
             .query_global(
                 SearchQuery::new(SearchIndex::Tracing)
-                    .with_filter(SearchFilter::gt(SearchField::Id, 1u64))
-                    .with_filter(SearchFilter::lt(SearchField::Id, 5u64))
+                    .with_filter(SearchFilter::integer_gt(SearchField::Id, 1u64))
+                    .with_filter(SearchFilter::integer_lt(SearchField::Id, 5u64))
                     .with_filter(SearchFilter::has_keyword(
                         TracingSearchField::Keywords,
                         "start",
@@ -798,11 +895,25 @@ async fn test_global(store: SearchStore) {
         AHashSet::from_iter([2, 4])
     );
 
+    // inbuxa: 1.0's built-in index has no query-based unindex; it drops
+    // traces in whole id buckets (retention), and ids 0-5 share the first
+    if let Some(internal) = store.internal_fts() {
+        internal.unindex_traces(u64::MAX).await.unwrap();
+        assert!(
+            store
+                .query_global(SearchQuery::new(SearchIndex::Tracing).with_filter(id_ge(0u64)))
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        return;
+    }
+
     // Delete by filter
     store
         .unindex(
             SearchQuery::new(SearchIndex::Tracing)
-                .with_filter(SearchFilter::lt(SearchField::Id, 3u64)),
+                .with_filter(SearchFilter::integer_lt(SearchField::Id, 3u64)),
         )
         .await
         .unwrap();
@@ -816,7 +927,7 @@ async fn test_global(store: SearchStore) {
         store
             .query_global(
                 SearchQuery::new(SearchIndex::Tracing)
-                    .with_filter(SearchFilter::ge(SearchField::Id, 0u64))
+                    .with_filter(id_ge(0u64))
             )
             .await
             .unwrap()
@@ -830,14 +941,10 @@ async fn test_global(store: SearchStore) {
 // into every search backend (the SQL backends type etyp and qid as BIGINT)
 // and are found again by queue id and keyword.
 async fn test_trace_documents(store: SearchStore) {
-    use registry::schema::{
-        enums::SearchTracingField,
-        structs::{
-            Trace, TraceEvent, TraceKeyValue, TraceValue, TraceValueString,
-            TraceValueUnsignedInt,
-        },
+    use registry::schema::structs::{
+        Trace, TraceEvent, TraceKeyValue, TraceValue, TraceValueString, TraceValueUnsignedInt,
     };
-    use services::task_manager::index::trace_search_document;
+    use services::index_queue::document::trace_search_document;
     use trc::{DeliveryEvent, EventType, Key, SmtpEvent};
 
     let kv_u = |key: Key, value: u64| TraceKeyValue {
@@ -856,9 +963,9 @@ async fn test_trace_documents(store: SearchStore) {
         ..Default::default()
     };
     let fields = [
-        SearchTracingField::EventType,
-        SearchTracingField::QueueId,
-        SearchTracingField::Keywords,
+        TracingSearchField::EventType,
+        TracingSearchField::QueueId,
+        TracingSearchField::Keywords,
     ];
 
     // An SMTP session that queued two messages, and a delivery attempt
@@ -874,7 +981,10 @@ async fn test_trace_documents(store: SearchStore) {
             ),
             event(
                 EventType::Smtp(SmtpEvent::RcptTo),
-                vec![kv_u(Key::QueueId, 9_000_000_001), kv_s(Key::To, "rcpt@example.net")],
+                vec![
+                    kv_u(Key::QueueId, 9_000_000_001),
+                    kv_s(Key::To, "rcpt@example.net"),
+                ],
             ),
             event(
                 EventType::Smtp(SmtpEvent::RcptTo),
@@ -882,23 +992,28 @@ async fn test_trace_documents(store: SearchStore) {
             ),
         ]
         .into(),
+        ..Default::default()
     };
     let delivery = Trace {
         events: vec![event(
             EventType::Delivery(DeliveryEvent::AttemptStart),
-            vec![kv_u(Key::QueueId, 9_000_000_003), kv_s(Key::Hostname, "relay.example.net")],
+            vec![
+                kv_u(Key::QueueId, 9_000_000_003),
+                kv_s(Key::Hostname, "relay.example.net"),
+            ],
         )]
         .into(),
+        ..Default::default()
     };
     let documents = vec![
         trace_search_document(100, &session, &fields),
         trace_search_document(101, &delivery, &fields),
     ];
     assert!(
-        documents
-            .iter()
-            .all(|d| d.has_field(&SearchField::Tracing(TracingSearchField::QueueId))
-                && d.has_field(&SearchField::Tracing(TracingSearchField::EventType))),
+        documents.iter().all(
+            |d| d.has_field(&SearchField::Tracing(TracingSearchField::QueueId))
+                && d.has_field(&SearchField::Tracing(TracingSearchField::EventType))
+        ),
         "trace documents carry a queue id and an event type"
     );
     store.index(documents).await.unwrap();
@@ -912,7 +1027,7 @@ async fn test_trace_documents(store: SearchStore) {
             store
                 .query_global(
                     SearchQuery::new(SearchIndex::Tracing)
-                        .with_filter(SearchFilter::ge(SearchField::Id, 100u64))
+                        .with_filter(id_ge(100u64))
                         .with_filters(filters),
                 )
                 .await
@@ -926,7 +1041,7 @@ async fn test_trace_documents(store: SearchStore) {
     let by_queue_id = |queue_id: u64| {
         vec![
             SearchFilter::Or,
-            SearchFilter::eq(TracingSearchField::QueueId, queue_id),
+            SearchFilter::integer_eq(TracingSearchField::QueueId, queue_id),
             SearchFilter::has_text(
                 TracingSearchField::Keywords,
                 queue_id.to_string(),
@@ -935,17 +1050,30 @@ async fn test_trace_documents(store: SearchStore) {
             SearchFilter::End,
         ]
     };
-    assert_eq!(query(by_queue_id(9_000_000_001)).await, AHashSet::from_iter([100]));
-    assert_eq!(query(by_queue_id(9_000_000_002)).await, AHashSet::from_iter([100]));
-    assert_eq!(query(by_queue_id(9_000_000_003)).await, AHashSet::from_iter([101]));
+    assert_eq!(
+        query(by_queue_id(9_000_000_001)).await,
+        AHashSet::from_iter([100])
+    );
+    assert_eq!(
+        query(by_queue_id(9_000_000_002)).await,
+        AHashSet::from_iter([100])
+    );
+    assert_eq!(
+        query(by_queue_id(9_000_000_003)).await,
+        AHashSet::from_iter([101])
+    );
     assert_eq!(query(by_queue_id(9_000_000_004)).await, AHashSet::new());
     assert_eq!(
-        query(vec![SearchFilter::eq(TracingSearchField::QueueId, 9_000_000_003u64)]).await,
+        query(vec![SearchFilter::integer_eq(
+            TracingSearchField::QueueId,
+            9_000_000_003u64
+        )])
+        .await,
         AHashSet::from_iter([101])
     );
     // By opening event type
     assert_eq!(
-        query(vec![SearchFilter::eq(
+        query(vec![SearchFilter::integer_eq(
             TracingSearchField::EventType,
             EventType::Delivery(DeliveryEvent::AttemptStart).to_id() as u64,
         )])
@@ -972,11 +1100,16 @@ async fn test_trace_documents(store: SearchStore) {
         AHashSet::from_iter([101])
     );
 
+    // inbuxa: 1.0's built-in index drops traces only in whole id buckets
+    if let Some(internal) = store.internal_fts() {
+        internal.unindex_traces(u64::MAX).await.unwrap();
+        return;
+    }
     for id in [100u64, 101] {
         store
             .unindex(
                 SearchQuery::new(SearchIndex::Tracing)
-                    .with_filter(SearchFilter::eq(SearchField::Id, id)),
+                    .with_filter(SearchFilter::integer_eq(SearchField::Id, id)),
             )
             .await
             .unwrap();
@@ -1032,6 +1165,8 @@ async fn test_address_search(store: SearchStore) {
         EmailSearchField::Bcc,
     ];
 
+    // inbuxa: 0.16 sorted by a received-at equal to the document id; 1.0
+    // returns unsorted results in document id order, the same order.
     let mut documents = Vec::new();
     let mut mask = RoaringBitmap::new();
     for (document_id, message) in messages.iter().enumerate() {
@@ -1046,7 +1181,6 @@ async fn test_address_search(store: SearchStore) {
                 document.index_text(field.clone(), address, Language::None);
             }
         }
-        document.index_unsigned(EmailSearchField::ReceivedAt, document_id as u64);
         documents.push(document);
         mask.insert(document_id as u32);
     }
@@ -1095,10 +1229,9 @@ async fn test_address_search(store: SearchStore) {
             .query_account(
                 SearchQuery::new(SearchIndex::Email)
                     .with_filters(vec![
-                        SearchFilter::eq(SearchField::AccountId, ACCOUNT_ID),
+                        SearchFilter::integer_eq(SearchField::AccountId, ACCOUNT_ID),
                         SearchFilter::has_keyword(field.clone(), text),
                     ])
-                    .with_comparator(SearchComparator::ascending(EmailSearchField::ReceivedAt))
                     .with_mask(mask.clone()),
             )
             .await
@@ -1111,7 +1244,7 @@ async fn test_address_search(store: SearchStore) {
         .query_account(
             SearchQuery::new(SearchIndex::Email)
                 .with_filters(vec![
-                    SearchFilter::eq(SearchField::AccountId, ACCOUNT_ID),
+                    SearchFilter::integer_eq(SearchField::AccountId, ACCOUNT_ID),
                     SearchFilter::Or,
                     SearchFilter::has_keyword(EmailSearchField::From, "example.org"),
                     SearchFilter::has_keyword(EmailSearchField::To, "example.org"),
@@ -1119,20 +1252,13 @@ async fn test_address_search(store: SearchStore) {
                     SearchFilter::has_keyword(EmailSearchField::Bcc, "example.org"),
                     SearchFilter::End,
                 ])
-                .with_comparator(SearchComparator::ascending(EmailSearchField::ReceivedAt))
                 .with_mask(mask.clone()),
         )
         .await
         .unwrap();
     assert_eq!(ids, vec![0, 1, 2, 3, 4]);
 
-    store
-        .unindex(
-            SearchQuery::new(SearchIndex::Email)
-                .with_filter(SearchFilter::eq(SearchField::AccountId, ACCOUNT_ID)),
-        )
-        .await
-        .unwrap();
+    unindex_account(&store, SearchIndex::Email, ACCOUNT_ID).await;
 }
 
 async fn test_url_word_search(store: SearchStore) {
@@ -1152,7 +1278,6 @@ async fn test_url_word_search(store: SearchStore) {
             .with_account_id(ACCOUNT_ID)
             .with_document_id(document_id as u32);
         document.index_text(EmailSearchField::Body, body, Language::English);
-        document.index_unsigned(EmailSearchField::ReceivedAt, document_id as u64);
         documents.push(document);
         mask.insert(document_id as u32);
     }
@@ -1191,10 +1316,9 @@ async fn test_url_word_search(store: SearchStore) {
             .query_account(
                 SearchQuery::new(SearchIndex::Email)
                     .with_filters(vec![
-                        SearchFilter::eq(SearchField::AccountId, ACCOUNT_ID),
+                        SearchFilter::integer_eq(SearchField::AccountId, ACCOUNT_ID),
                         SearchFilter::has_english_text(EmailSearchField::Body, text),
                     ])
-                    .with_comparator(SearchComparator::ascending(EmailSearchField::ReceivedAt))
                     .with_mask(mask.clone()),
             )
             .await
@@ -1202,11 +1326,5 @@ async fn test_url_word_search(store: SearchStore) {
         assert_eq!(ids, expected, "Body {text:?}");
     }
 
-    store
-        .unindex(
-            SearchQuery::new(SearchIndex::Email)
-                .with_filter(SearchFilter::eq(SearchField::AccountId, ACCOUNT_ID)),
-        )
-        .await
-        .unwrap();
+    unindex_account(&store, SearchIndex::Email, ACCOUNT_ID).await;
 }

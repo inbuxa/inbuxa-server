@@ -2,6 +2,8 @@
  * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
+ *
+ * Modified by Coffey Labs in 2026 for INBUXA.
  */
 
 use crate::store::{deflate_test_resource, query::FIELDS};
@@ -49,22 +51,27 @@ pub async fn test(test: &TestServer) {
         for mailbox_id in 1545..3010 {
             batch
                 .with_document(mailbox_id)
-                .custom(ObjectIndexBuilder::<(), _>::new().with_changes(Mailbox {
-                    name: format!("Mailbox {mailbox_id}"),
-                    role: SpecialUse::None,
-                    parent_id: 0,
-                    sort_order: None,
-                    uid_validity: 0,
-                    subscribers: vec![],
-                    acls: vec![],
-                }))
+                .custom(
+                    ObjectIndexBuilder::<(), _>::new().with_changes(
+                        Mailbox {
+                            name: format!("Mailbox {mailbox_id}"),
+                            parent_id: 0,
+                            sort_order: None,
+                            uid_validity: 0,
+                            subscribers: vec![],
+                            acls: vec![],
+                            flags: 0,
+                        }
+                        .with_role(SpecialUse::None),
+                    ),
+                )
                 .unwrap();
         }
         server
             .core
             .storage
             .data
-            .write(batch.build_all())
+            .write_batch(&mut batch)
             .await
             .unwrap();
 
@@ -78,9 +85,8 @@ pub async fn test(test: &TestServer) {
                 .await
                 .unwrap()
                 .emails
-                .items
                 .iter()
-                .map(|m| m.thread_id)
+                .map(|m| m.thread_id())
                 .collect::<AHashSet<_>>()
                 .len(),
             MAX_THREADS
@@ -298,7 +304,9 @@ pub async fn query(client: &Client, can_stem: bool) {
         ),
         (
             Filter::and(vec![
-                (email::query::Filter::after(1875)),
+                // inbuxa: after is inclusive in 1.0 (RFC 8621 4.4.1), so
+                // 1876 keeps the 1876-1877 range 0.16 returned for 1875
+                (email::query::Filter::after(1876)),
                 (email::query::Filter::before(1878)),
             ]),
             vec![
@@ -314,7 +322,9 @@ pub async fn query(client: &Client, can_stem: bool) {
         ),
         (
             Filter::and(vec![
-                (email::query::Filter::after(1875)),
+                // inbuxa: after is inclusive in 1.0 (RFC 8621 4.4.1), so
+                // 1876 keeps the 1876-1877 range 0.16 returned for 1875
+                (email::query::Filter::after(1876)),
                 (email::query::Filter::before(1878)),
             ]),
             vec![
@@ -335,7 +345,7 @@ pub async fn query(client: &Client, can_stem: bool) {
                 (email::query::Filter::has_keyword("T")),
             ]),
             vec![
-                email::query::Comparator::has_keyword("attributed to"),
+                email::query::Comparator::has_keyword("attributed_to"),
                 email::query::Comparator::from(),
                 email::query::Comparator::sent_at(),
             ],
@@ -355,7 +365,7 @@ pub async fn query(client: &Client, can_stem: bool) {
                 (email::query::Filter::has_keyword("T")),
             ]),
             vec![
-                email::query::Comparator::has_keyword("attributed to").descending(),
+                email::query::Comparator::has_keyword("attributed_to").descending(),
                 email::query::Comparator::from(),
                 email::query::Comparator::sent_at(),
             ],
@@ -813,7 +823,9 @@ pub async fn create(test: &TestServer, account: &Account) {
                 || keyword == "artist"
                 || keyword == "Bronze"
             {
-                keywords.push(keyword);
+                // inbuxa: 1.0 refuses keywords with characters outside the
+                // IMAP atom set (RFC 8621 4.1.1), such as a space
+                keywords.push(keyword.replace(' ', "_"));
             }
         }
 

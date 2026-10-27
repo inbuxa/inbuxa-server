@@ -42,6 +42,7 @@ pub enum IndexValue<'x> {
     Bytes(Vec<u8>),
     U64(u64),
     I64(i64),
+    U32(u32),
     U16(u16),
     None,
 }
@@ -158,6 +159,28 @@ impl<'x> IndexBuilder<'x> {
 
     pub fn is_empty(&self) -> bool {
         self.keys.is_empty()
+    }
+}
+
+impl IndexKey<'_> {
+    pub fn text_with_nul(&self) -> Option<Property> {
+        match self {
+            IndexKey::Unique {
+                property,
+                value_1,
+                value_2,
+                ..
+            } => (value_1.has_nul() || value_2.has_nul()).then_some(*property),
+            IndexKey::Search { property, value } => value.has_nul().then_some(*property),
+            IndexKey::ForeignKey { .. } => None,
+        }
+    }
+}
+
+impl IndexValue<'_> {
+    #[inline]
+    pub fn has_nul(&self) -> bool {
+        matches!(self, IndexValue::Text(text) if text.as_bytes().contains(&0))
     }
 }
 

@@ -6,64 +6,41 @@
  * Modified by Coffey Labs in 2026 for INBUXA.
  */
 
+use crate::SpamFilterInput;
 use common::config::mailstore::spamfilter::PyzorConfig;
-use mail_parser::{Message, PartType, decoders::html::add_html_token};
+use mail_parser::PartKind;
 use nlp::tokenizers::types::{TokenType, TypesTokenizer};
+
+use super::html::{TEXT_STOP, byte_table, push_span, scan_until};
 use sha1::{Digest, Sha1};
 use std::{
     borrow::Cow,
     net::SocketAddr,
+    ops::Range,
     time::{Duration, SystemTime},
 };
 use tokio::net::UdpSocket;
 use utils::HexEncode;
 
-const MIN_LINE_LENGTH: usize = 8;
-const ATOMIC_NUM_LINES: usize = 4;
-const DIGEST_SPEC: &[(usize, usize)] = &[(20, 3), (60, 3)];
+static TAG_STOP: [bool; 256] = byte_table(b"<>/! \t\r\n");
+static STYLE_STOP: [bool; 256] = byte_table(b"< \t\r\n");
+static COMMENT_MARK: [bool; 256] = byte_table(b"->");
+
+pub(crate) const MIN_LINE_LENGTH: usize = 8;
+pub(crate) const ATOMIC_NUM_LINES: usize = 4;
+pub(crate) const DIGEST_SPEC: &[(usize, usize)] = &[(20, 3), (60, 3)];
 
 #[derive(Default, Debug, PartialEq, Eq)]
-pub(crate) struct PyzorResponse {
+pub struct PyzorResponse {
     pub code: u32,
     pub count: u64,
     pub wl_count: u64,
 }
 
-pub(crate) async fn pyzor_check(
-    message: &Message<'_>,
-    config: &PyzorConfig,
-) -> trc::Result<Option<PyzorResponse>> {
-    let Some(request) = message.pyzor_check_message() else {
-        return Ok(None);
-    };
-
-    // Send message to address. inbuxa: in tests, a fixed table answers
-    // instead of a public server (test_response).
-    #[cfg(not(feature = "test_mode"))]
-    let response = match tokio::time::timeout(config.timeout, config.address()).await {
-        Ok(Ok(address)) => pyzor_send_message(address, config.timeout, &request).await,
-        Ok(Err(err)) => Err(err),
-        Err(_) => Err(std::io::Error::new(
-            std::io::ErrorKind::TimedOut,
-            "Timed out resolving the Pyzor server",
-        )),
-    };
-    #[cfg(feature = "test_mode")]
-    let response = std::io::Result::Ok(test_response(&request));
-
-    response.map(Into::into).map_err(|err| {
-        trc::SpamEvent::PyzorError
-            .into_err()
-            .ctx(trc::Key::Url, format!("{}:{}", config.host, config.port))
-            .reason(err)
-            .details("Pyzor failed")
-    })
-}
-
 /// inbuxa: the answers tests get, by digest, instead of a public server's,
 /// whose counts change and which a test may not be able to reach. Upstream
-/// answered the first three here and sent every other digest to the network.
-#[cfg(feature = "test_mode")]
+/// answers the first three here and sends every other digest to the network.
+#[cfg(inbuxa_tests)]
 fn test_response(request: &str) -> PyzorResponse {
     let (count, wl_count) = if request.contains("b5b476f0b5ba6e1c038361d3ded5818dd39c90a2")
         // The digest of an empty body, as an HTML-only message with no text
@@ -85,7 +62,7 @@ fn test_response(request: &str) -> PyzorResponse {
     }
 }
 
-#[cfg_attr(feature = "test_mode", allow(dead_code))]
+#[cfg_attr(inbuxa_tests, allow(dead_code))]
 async fn pyzor_send_message(
     addr: SocketAddr,
     timeout: Duration,
@@ -142,7 +119,7 @@ async fn pyzor_send_message(
     }
 }
 
-trait PyzorWrite {
+pub trait PyzorWrite {
     fn write_all(&mut self, data: &[u8]);
 }
 
@@ -158,93 +135,103 @@ impl PyzorWrite for Sha1 {
     }
 }
 
-trait PyzorDigest<W: PyzorWrite> {
-    fn pyzor_digest(&self, writer: W) -> Option<W>;
-}
+impl SpamFilterInput<'_> {
+    pub(crate) async fn pyzor_check(
+        &self,
+        config: &PyzorConfig,
+    ) -> trc::Result<Option<PyzorResponse>> {
+        let Some(request) = self.pyzor_check_message() else {
+            return Ok(None);
+        };
 
-pub trait PyzorCheck {
-    fn pyzor_check_message(&self) -> Option<String>;
-}
+        // Send message to address. inbuxa: in tests, a fixed table answers
+        // instead of a public server (test_response).
+        #[cfg(not(inbuxa_tests))]
+        let response = match tokio::time::timeout(config.timeout, config.address()).await {
+            Ok(Ok(address)) => pyzor_send_message(address, config.timeout, &request).await,
+            Ok(Err(err)) => Err(err),
+            Err(_) => Err(std::io::Error::new(
+                std::io::ErrorKind::TimedOut,
+                "Timed out resolving the Pyzor server",
+            )),
+        };
+        #[cfg(inbuxa_tests)]
+        let response = std::io::Result::Ok(test_response(&request));
 
-impl<W: PyzorWrite> PyzorDigest<W> for Message<'_> {
-    fn pyzor_digest(&self, writer: W) -> Option<W> {
+        response.map(Into::into).map_err(|err| {
+            trc::SpamEvent::PyzorError
+                .into_err()
+                .ctx(trc::Key::Url, format!("{}:{}", config.host, config.port))
+                .reason(err)
+                .details("Pyzor failed")
+        })
+    }
+
+    pub fn pyzor_digest<W: PyzorWrite>(&self, writer: W) -> Option<W> {
+        let texts = self.texts;
         let parts = self
-            .parts
-            .iter()
-            .filter_map(|part| match &part.body {
-                PartType::Text(text) => Some(text.as_ref().into()),
-                PartType::Html(html) => Some(html_to_text(html.as_ref()).into()),
+            .message
+            .root()
+            .parts()
+            .filter_map(|part| match part.kind() {
+                PartKind::Text => texts.get(part.id()).map(Cow::Borrowed),
+                PartKind::Html => Some(Cow::Owned(html_to_text(texts.get(part.id())?))),
                 _ => None,
             })
-            .collect::<Vec<Cow<str>>>();
+            .collect::<Vec<_>>();
 
         pyzor_digest(writer, parts.iter().flat_map(|text| text.lines()))
     }
-}
 
-impl PyzorCheck for Message<'_> {
-    fn pyzor_check_message(&self) -> Option<String> {
+    pub fn pyzor_check_message(&self) -> Option<String> {
         let time = SystemTime::now()
             .duration_since(SystemTime::UNIX_EPOCH)
             .map_or(0, |d| d.as_secs());
 
-        pyzor_create_message(
-            self,
+        self.pyzor_create_message(
             time,
             (time & 0xFFFF) as u16 ^ ((time >> 16) & 0xFFFF) as u16,
         )
     }
+
+    fn pyzor_create_message(&self, time: u64, thread: u16) -> Option<String> {
+        let hash = self.pyzor_digest(Sha1::new())?.finalize().hex_encode();
+        let mut hash_key = Sha1::new();
+        hash_key.update("anonymous:".as_bytes());
+        let hash_key = hash_key.finalize().hex_encode();
+
+        let message = format!(
+            "Op: check\nOp-Digest: {hash}\nThread: {thread}\nPV: 2.1\nUser: anonymous\nTime: {time}"
+        );
+        let mut msg_hash = Sha1::new();
+        msg_hash.update(message.as_bytes());
+        let msg_hash = msg_hash.finalize();
+
+        let mut sig = Sha1::new();
+        sig.update(msg_hash);
+        sig.update(format!(":{time}:{hash_key}"));
+        let sig = sig.finalize().hex_encode();
+
+        Some(format!("{message}\nSig: {sig}\n"))
+    }
 }
 
-fn pyzor_create_message(message: &Message<'_>, time: u64, thread: u16) -> Option<String> {
-    // Hash message
-    let hash = message.pyzor_digest(Sha1::new())?.finalize().hex_encode();
-    // Hash key
-    let mut hash_key = Sha1::new();
-    hash_key.update("anonymous:".as_bytes());
-    let hash_key = hash_key.finalize().hex_encode();
-
-    // Hash message
-    let message = format!(
-        "Op: check\nOp-Digest: {hash}\nThread: {thread}\nPV: 2.1\nUser: anonymous\nTime: {time}"
-    );
-    let mut msg_hash = Sha1::new();
-    msg_hash.update(message.as_bytes());
-    let msg_hash = msg_hash.finalize();
-
-    // Sign
-    let mut sig = Sha1::new();
-    sig.update(msg_hash);
-    sig.update(format!(":{time}:{hash_key}"));
-    let sig = sig.finalize().hex_encode();
-
-    Some(format!("{message}\nSig: {sig}\n"))
-}
-
-fn pyzor_digest<'x, I, W>(mut writer: W, lines: I) -> Option<W>
+pub fn pyzor_digest<'x, I, W>(mut writer: W, lines: I) -> Option<W>
 where
     I: Iterator<Item = &'x str>,
     W: PyzorWrite,
 {
-    let mut result = Vec::with_capacity(16);
+    let mut buffer = String::new();
+    let mut kept: Vec<Range<usize>> = Vec::with_capacity(16);
 
     for line in lines {
-        let mut clean_line = String::with_capacity(line.len());
+        if line.len() < MIN_LINE_LENGTH {
+            continue;
+        }
+        buffer.reserve(line.len());
+        let line_start = buffer.len();
         let mut token_start = usize::MAX;
         let mut token_end = usize::MAX;
-
-        let add_line = |line: &mut String, span: &str| {
-            if !span.contains(char::from(0)) {
-                if span.len() < 10 {
-                    line.push_str(span);
-                }
-            } else {
-                let span = span.replace(char::from(0), "");
-                if span.len() < 10 {
-                    line.push_str(&span);
-                }
-            }
-        };
 
         for token in TypesTokenizer::new(line) {
             match token.word {
@@ -266,7 +253,7 @@ where
                 | TokenType::IpAddr(_)
                 | TokenType::Email(_) => {
                     if token_start != usize::MAX {
-                        add_line(&mut clean_line, &line[token_start..token_end]);
+                        add_span(&mut buffer, &line[token_start..token_end]);
                         token_start = usize::MAX;
                         token_end = usize::MAX;
                     }
@@ -275,38 +262,53 @@ where
         }
 
         if token_start != usize::MAX {
-            add_line(&mut clean_line, &line[token_start..token_end]);
+            add_span(&mut buffer, &line[token_start..token_end]);
         }
 
-        if clean_line.len() >= MIN_LINE_LENGTH {
-            result.push(clean_line);
+        if buffer.len() - line_start >= MIN_LINE_LENGTH {
+            kept.push(line_start..buffer.len());
+        } else {
+            buffer.truncate(line_start);
         }
     }
 
-    if result.is_empty() {
+    if kept.is_empty() {
         return None;
     }
 
-    if result.len() > ATOMIC_NUM_LINES {
+    if kept.len() > ATOMIC_NUM_LINES {
         for (offset, length) in DIGEST_SPEC {
             for i in 0..*length {
-                if let Some(line) = result.get((*offset * result.len() / 100) + i) {
-                    writer.write_all(line.as_bytes());
+                if let Some(line) = kept.get((*offset * kept.len() / 100) + i) {
+                    writer.write_all(buffer[line.clone()].as_bytes());
                 }
             }
         }
     } else {
-        for line in result {
-            writer.write_all(line.as_bytes());
+        for line in kept {
+            writer.write_all(buffer[line].as_bytes());
         }
     }
 
     Some(writer)
 }
 
-fn html_to_text(input: &str) -> String {
+#[inline(always)]
+fn add_span(line: &mut String, span: &str) {
+    if !span.as_bytes().contains(&0) {
+        if span.len() < 10 {
+            line.push_str(span);
+        }
+    } else if span.len() - span.as_bytes().iter().filter(|&&ch| ch == 0).count() < 10 {
+        for part in span.split('\0') {
+            line.push_str(part);
+        }
+    }
+}
+
+pub fn html_to_text(input: &str) -> String {
     let mut result = String::with_capacity(input.len());
-    let input = input.as_bytes();
+    let bytes = input.as_bytes();
 
     let mut in_tag = false;
     let mut in_comment = false;
@@ -323,112 +325,150 @@ fn html_to_text(input: &str) -> String {
     let mut tag_token_pos = 0;
     let mut comment_pos = 0;
 
-    for (pos, ch) in input.iter().enumerate() {
-        if !in_comment {
-            match ch {
-                b'<' => {
-                    if !(in_tag || in_style || in_script || is_token_start) {
-                        add_html_token(
-                            &mut result,
-                            &input[token_start..token_end + 1],
-                            is_after_space,
-                        );
-                        is_after_space = false;
-                    }
+    let mut pos = 0;
 
-                    tag_token_pos = 0;
-                    in_tag = true;
-                    is_token_start = true;
-                    is_tag_close = false;
-                    continue;
+    while let Some(&ch) = bytes.get(pos) {
+        if in_comment {
+            let stop = scan_until(bytes, pos, &COMMENT_MARK);
+            if stop > pos {
+                comment_pos = 0;
+            }
+            pos = stop;
+            match bytes.get(pos) {
+                None => break,
+                Some(b'-') => {
+                    comment_pos += 1;
                 }
-                b'>' if in_tag => {
-                    if tag_token_pos == 1
-                        && let Some(tag) = input.get(token_start..token_end + 1)
-                    {
-                        if tag.eq_ignore_ascii_case(b"style") {
-                            in_style = !is_tag_close;
-                        } else if tag.eq_ignore_ascii_case(b"script") {
-                            in_script = !is_tag_close;
-                        }
+                Some(_) => {
+                    if comment_pos == 2 {
+                        in_comment = false;
+                        in_tag = false;
+                        is_token_start = true;
                     }
+                    comment_pos = 0;
+                }
+            }
+            pos += 1;
+            continue;
+        }
 
-                    in_tag = false;
-                    is_token_start = true;
-                    is_after_space = !result.is_empty();
-
-                    continue;
-                }
-                b'/' if in_tag => {
-                    if tag_token_pos == 0 {
-                        is_tag_close = true;
-                    }
-                    continue;
-                }
-                b'!' if in_tag && tag_token_pos == 0 => {
-                    if let Some(b"--") = input.get(pos + 1..pos + 3) {
-                        in_comment = true;
-                        continue;
-                    }
-                }
-                b' ' | b'\t' | b'\r' | b'\n' => {
-                    if !(in_tag || in_style || in_script) {
-                        if !is_token_start {
-                            add_html_token(
-                                &mut result,
-                                &input[token_start..token_end + 1],
-                                is_after_space,
-                            );
-                        }
-                        is_after_space = true;
-                    }
-
-                    is_token_start = true;
-                    continue;
-                }
-                b'&' if !(in_tag || is_token_start || in_style || in_script) => {
-                    add_html_token(
+        match ch {
+            b'<' => {
+                if !(in_tag || in_style || in_script || is_token_start) {
+                    push_span(
                         &mut result,
-                        &input[token_start..token_end + 1],
+                        input,
+                        token_start,
+                        token_end + 1,
                         is_after_space,
                     );
-                    is_token_start = true;
                     is_after_space = false;
                 }
-                b';' if !(in_tag || is_token_start || in_style || in_script) => {
-                    add_html_token(&mut result, &input[token_start..pos + 1], is_after_space);
-                    is_token_start = true;
-                    is_after_space = false;
+
+                tag_token_pos = 0;
+                in_tag = true;
+                is_token_start = true;
+                is_tag_close = false;
+                pos += 1;
+                continue;
+            }
+            b'>' if in_tag => {
+                if tag_token_pos == 1
+                    && let Some(tag) = bytes.get(token_start..token_end + 1)
+                {
+                    if tag.eq_ignore_ascii_case(b"style") {
+                        in_style = !is_tag_close;
+                    } else if tag.eq_ignore_ascii_case(b"script") {
+                        in_script = !is_tag_close;
+                    }
+                }
+
+                in_tag = false;
+                is_token_start = true;
+                is_after_space = !result.is_empty();
+                pos += 1;
+                continue;
+            }
+            b'/' if in_tag => {
+                if tag_token_pos == 0 {
+                    is_tag_close = true;
+                }
+                pos += 1;
+                continue;
+            }
+            b'!' if in_tag && tag_token_pos == 0 => {
+                if let Some(b"--") = bytes.get(pos + 1..pos + 3) {
+                    in_comment = true;
+                    pos += 1;
                     continue;
                 }
-                _ => (),
             }
-            if is_token_start {
-                token_start = pos;
-                is_token_start = false;
-                if in_tag {
-                    tag_token_pos += 1;
+            b' ' | b'\t' | b'\r' | b'\n' => {
+                if !(in_tag || in_style || in_script) {
+                    if !is_token_start {
+                        push_span(
+                            &mut result,
+                            input,
+                            token_start,
+                            token_end + 1,
+                            is_after_space,
+                        );
+                    }
+                    is_after_space = true;
                 }
+
+                is_token_start = true;
+                pos += 1;
+                while matches!(bytes.get(pos), Some(b' ' | b'\t' | b'\r' | b'\n')) {
+                    pos += 1;
+                }
+                continue;
             }
-            token_end = pos;
-        } else {
-            match ch {
-                b'-' => comment_pos += 1,
-                b'>' if comment_pos == 2 => {
-                    comment_pos = 0;
-                    in_comment = false;
-                    in_tag = false;
-                    is_token_start = true;
-                }
-                _ => comment_pos = 0,
+            b'&' if !(in_tag || is_token_start || in_style || in_script) => {
+                push_span(
+                    &mut result,
+                    input,
+                    token_start,
+                    token_end + 1,
+                    is_after_space,
+                );
+                is_token_start = true;
+                is_after_space = false;
+            }
+            b';' if !(in_tag || is_token_start || in_style || in_script) => {
+                push_span(&mut result, input, token_start, pos + 1, is_after_space);
+                is_token_start = true;
+                is_after_space = false;
+                pos += 1;
+                continue;
+            }
+            _ => (),
+        }
+
+        if is_token_start {
+            token_start = pos;
+            is_token_start = false;
+            if in_tag {
+                tag_token_pos += 1;
             }
         }
+        let stop = if in_tag {
+            scan_until(bytes, pos + 1, &TAG_STOP)
+        } else if in_style || in_script {
+            scan_until(bytes, pos + 1, &STYLE_STOP)
+        } else {
+            scan_until(bytes, pos + 1, &TEXT_STOP)
+        };
+        token_end = stop - 1;
+        pos = stop;
     }
 
     if !(in_tag || is_token_start || in_style || in_script) {
-        add_html_token(
+        push_span(
             &mut result,
-            &input[token_start..token_end + 1],
+            input,
+            token_start,
+            token_end + 1,
             is_after_space,
         );
     }
@@ -437,369 +477,3 @@ fn html_to_text(input: &str) -> String {
     result
 }
 
-#[cfg(test)]
-mod test {
-    use std::time::Duration;
-
-    use mail_parser::MessageParser;
-    use sha1::Digest;
-    use sha1::Sha1;
-    use utils::HexEncode;
-
-    use super::pyzor_create_message;
-    use super::pyzor_send_message;
-    use super::{PyzorDigest, html_to_text, pyzor_digest};
-
-    use super::PyzorResponse;
-
-    #[ignore]
-    #[tokio::test]
-    async fn send_message() {
-        assert_eq!(
-            pyzor_send_message(
-                "public.pyzor.org:24441".parse().unwrap(),
-                Duration::from_secs(10),
-                concat!(
-                    "Op: check\n",
-                    "Op-Digest: b2c27325a034c581df0c9ef37e4a0d63208a3e7e\n",
-                    "Thread: 49005\n",
-                    "PV: 2.1\n",
-                    "User: anonymous\n",
-                    "Time: 1697468672\n",
-                    "Sig: 9cf4571b85d3887fdd0d4f444fd0c164e0290722\n"
-                ),
-            )
-            .await
-            .unwrap(),
-            PyzorResponse {
-                code: 200,
-                count: 0,
-                wl_count: 0
-            }
-        );
-    }
-
-    #[test]
-    fn message_pyzor() {
-        let message = pyzor_create_message(
-            &MessageParser::new().parse(HTML_TEXT_STYLE_SCRIPT).unwrap(),
-            1697468672,
-            49005,
-        )
-        .unwrap();
-
-        assert_eq!(
-            message,
-            concat!(
-                "Op: check\n",
-                "Op-Digest: b2c27325a034c581df0c9ef37e4a0d63208a3e7e\n",
-                "Thread: 49005\n",
-                "PV: 2.1\n",
-                "User: anonymous\n",
-                "Time: 1697468672\n",
-                "Sig: 9cf4571b85d3887fdd0d4f444fd0c164e0290722\n"
-            )
-        );
-    }
-
-    #[test]
-    fn digest_pyzor() {
-        // HTML stripping
-        assert_eq!(html_to_text(HTML_RAW), HTML_RAW_STRIPED);
-
-        // Token stripping
-        for strip_me in [
-            "t@abc.com",
-            "t1@abc.com",
-            "t+a@abc.com",
-            "t.a@abc.com",
-            "0A2D3f%a#S",
-            "3sddkf9jdkd9",
-            "@@#@@@@@@@@@",
-            "http://spammer.com/special-offers?buy=now",
-        ] {
-            assert_eq!(
-                String::from_utf8(
-                    pyzor_digest(Vec::new(), format!("Test {strip_me} Test2").lines()).unwrap()
-                )
-                .unwrap(),
-                "TestTest2"
-            );
-        }
-
-        // Test short lines
-        assert_eq!(
-            String::from_utf8(
-                pyzor_digest(
-                    Vec::new(),
-                    concat!("This line is included\n", "not this\n", "This also").lines(),
-                )
-                .unwrap()
-            )
-            .unwrap(),
-            "ThislineisincludedThisalso"
-        );
-
-        // Test atomic
-        assert_eq!(
-            String::from_utf8(
-                pyzor_digest(
-                    Vec::new(),
-                    "All this message\nShould be included\nIn the digest".lines(),
-                )
-                .unwrap()
-            )
-            .unwrap(),
-            "AllthismessageShouldbeincludedInthedigest"
-        );
-
-        // Test spec
-        let mut text = String::new();
-        for i in 0..100 {
-            text += format!("Line{i} test test test\n").as_str();
-        }
-        let mut expected = String::new();
-        for i in [20, 21, 22, 60, 61, 62] {
-            expected += format!("Line{i}testtesttest").as_str();
-        }
-        assert_eq!(
-            String::from_utf8(pyzor_digest(Vec::new(), text.lines()).unwrap()).unwrap(),
-            expected
-        );
-
-        // Test email parsing
-        for (input, expected) in [
-            (
-                HTML_TEXT,
-                concat!(
-                    "Emailspam,alsoknownasjunkemailorbulkemail,isasubset",
-                    "ofspaminvolvingnearlyidenticalmessagessenttonumerous",
-                    "byemail.Clickingonlinksinspamemailmaysendusersto",
-                    "byemail.Clickingonlinksinspamemailmaysendusersto",
-                    "phishingwebsitesorsitesthatarehostingmalware.",
-                    "Emailspam.Emailspam,alsoknownasjunkemailorbulkemail,",
-                    "isasubsetofspaminvolvingnearlyidenticalmessage",
-                    "ssenttonumerousbyemail.Clickingonlinksinspamemailmaysenduse",
-                    "rstophishingwebsitesorsitesthatarehostingmalware."
-                ),
-            ),
-            (HTML_TEXT_STYLE_SCRIPT, "Thisisatest.Thisisatest."),
-            (TEXT_ATTACHMENT, "Thisisatestmailing"),
-            (TEXT_ATTACHMENT_W_NULL, "Thisisatestmailing"),
-            (TEXT_ATTACHMENT_W_MULTIPLE_NULLS, "Thisisatestmailing"),
-            (TEXT_ATTACHMENT_W_SUBJECT_NULL, "Thisisatestmailing"),
-            (TEXT_ATTACHMENT_W_CONTENTTYPE_NULL, "Thisisatestmailing"),
-        ] {
-            assert_eq!(
-                String::from_utf8(
-                    MessageParser::new()
-                        .parse(input)
-                        .unwrap()
-                        .pyzor_digest(Vec::new())
-                        .unwrap()
-                )
-                .unwrap(),
-                expected,
-                "failed for {input}"
-            )
-        }
-
-        // Test SHA hash
-        assert_eq!(
-            MessageParser::new()
-                .parse(HTML_TEXT_STYLE_SCRIPT)
-                .unwrap()
-                .pyzor_digest(Sha1::new())
-                .unwrap()
-                .finalize()
-                .hex_encode(),
-            "b2c27325a034c581df0c9ef37e4a0d63208a3e7e",
-        )
-    }
-
-    const HTML_TEXT: &str = r#"MIME-Version: 1.0
-Sender: chirila@gapps.spamexperts.com
-Received: by 10.216.157.70 with HTTP; Thu, 16 Jan 2014 00:43:31 -0800 (PST)
-Date: Thu, 16 Jan 2014 10:43:31 +0200
-Delivered-To: chirila@gapps.spamexperts.com
-X-Google-Sender-Auth: ybCmONS9U9D6ZUfjx-9_tY-hF2Q
-Message-ID: <CAK-mJS8sE-V6qtspzzZ+bZ1eSUE_FNMt3K-5kBOG-z3NMgU_Rg@mail.gmail.com>
-Subject: Test
-From: Alexandru Chirila <chirila@spamexperts.com>
-To: Alexandru Chirila <chirila@gapps.spamexperts.com>
-Content-Type: multipart/alternative; boundary=001a11c25ff293069304f0126bfd
-
---001a11c25ff293069304f0126bfd
-Content-Type: text/plain; charset=ISO-8859-1
-
-Email spam.
-
-Email spam, also known as junk email or unsolicited bulk email, is a subset
-of electronic spam involving nearly identical messages sent to numerous
-recipients by email. Clicking on links in spam email may send users to
-phishing web sites or sites that are hosting malware.
-
---001a11c25ff293069304f0126bfd
-Content-Type: text/html; charset=ISO-8859-1
-Content-Transfer-Encoding: quoted-printable
-
-<div dir=3D"ltr"><div>Email spam.</div><div><br></div><div>Email spam, also=
- known as junk email or unsolicited bulk email, is a subset of electronic s=
-pam involving nearly identical messages sent to numerous recipients by emai=
-l. Clicking on links in spam email may send users to phishing web sites or =
-sites that are hosting malware.</div>
-</div>
-
---001a11c25ff293069304f0126bfd--
-"#;
-
-    const HTML_TEXT_STYLE_SCRIPT: &str = r#"MIME-Version: 1.0
-Sender: chirila@gapps.spamexperts.com
-Received: by 10.216.157.70 with HTTP; Thu, 16 Jan 2014 00:43:31 -0800 (PST)
-Date: Thu, 16 Jan 2014 10:43:31 +0200
-Delivered-To: chirila@gapps.spamexperts.com
-X-Google-Sender-Auth: ybCmONS9U9D6ZUfjx-9_tY-hF2Q
-Message-ID: <CAK-mJS8sE-V6qtspzzZ+bZ1eSUE_FNMt3K-5kBOG-z3NMgU_Rg@mail.gmail.com>
-Subject: Test
-From: Alexandru Chirila <chirila@spamexperts.com>
-To: Alexandru Chirila <chirila@gapps.spamexperts.com>
-Content-Type: multipart/alternative; boundary=001a11c25ff293069304f0126bfd
-
---001a11c25ff293069304f0126bfd
-Content-Type: text/plain; charset=ISO-8859-1
-
-This is a test.
-
---001a11c25ff293069304f0126bfd
-Content-Type: text/html; charset=ISO-8859-1
-Content-Transfer-Encoding: quoted-printable
-
-<div dir=3D"ltr">
-<style> This is my style.</style>
-<script> This is my script.</script>
-<div>This is a test.</div>
-</div>
-
---001a11c25ff293069304f0126bfd--
-"#;
-
-    const TEXT_ATTACHMENT: &str = r#"MIME-Version: 1.0
-Received: by 10.76.127.40 with HTTP; Fri, 17 Jan 2014 02:21:43 -0800 (PST)
-Date: Fri, 17 Jan 2014 12:21:43 +0200
-Delivered-To: chirila.s.alexandru@gmail.com
-Message-ID: <CALTHOsuHFaaatiXJKU=LdDCo4NmD_h49yvG2RDsWw17D0-NXJg@mail.gmail.com>
-Subject: Test
-From: Alexandru Chirila <chirila.s.alexandru@gmail.com>
-To: Alexandru Chirila <chirila.s.alexandru@gmail.com>
-Content-Type: multipart/mixed; boundary=f46d040a62c49bb1c804f027e8cc
-
---f46d040a62c49bb1c804f027e8cc
-Content-Type: multipart/alternative; boundary=f46d040a62c49bb1c404f027e8ca
-
---f46d040a62c49bb1c404f027e8ca
-Content-Type: text/plain; charset=ISO-8859-1
-
-This is a test mailing
-
---f46d040a62c49bb1c404f027e8ca--
---f46d040a62c49bb1c804f027e8cc
-Content-Type: image/png; name="tar.png"
-Content-Disposition: attachment; filename="tar.png"
-Content-Transfer-Encoding: base64
-X-Attachment-Id: f_hqjas5ad0
-
-iVBORw0KGgoAAAANSUhEUgAAAskAAADlCAAAAACErzVVAAAACXBIWXMAAAsTAAALEwEAmpwYAAAD
-QmCC
---f46d040a62c49bb1c804f027e8cc--"#;
-
-    const TEXT_ATTACHMENT_W_NULL: &str = "MIME-Version: 1.0
-Received: by 10.76.127.40 with HTTP; Fri, 17 Jan 2014 02:21:43 -0800 (PST)
-Date: Fri, 17 Jan 2014 12:21:43 +0200
-Delivered-To: chirila.s.alexandru@gmail.com
-Message-ID: <CALTHOsuHFaaatiXJKU=LdDCo4NmD_h49yvG2RDsWw17D0-NXJg@mail.gmail.com>
-Subject: Test
-From: Alexandru Chirila <chirila.s.alexandru@gmail.com>
-To: Alexandru Chirila <chirila.s.alexandru@gmail.com>
-Content-Type: multipart/mixed; boundary=f46d040a62c49bb1c804f027e8cc
-
---f46d040a62c49bb1c804f027e8cc
-Content-Type: multipart/alternative; boundary=f46d040a62c49bb1c404f027e8ca
-
---f46d040a62c49bb1c404f027e8ca
-Content-Type: text/plain; charset=ISO-8859-1
-
-This is a test ma\0iling
---f46d040a62c49bb1c804f027e8cc--";
-
-    const TEXT_ATTACHMENT_W_MULTIPLE_NULLS: &str = "MIME-Version: 1.0
-Received: by 10.76.127.40 with HTTP; Fri, 17 Jan 2014 02:21:43 -0800 (PST)
-Date: Fri, 17 Jan 2014 12:21:43 +0200
-Delivered-To: chirila.s.alexandru@gmail.com
-Message-ID: <CALTHOsuHFaaatiXJKU=LdDCo4NmD_h49yvG2RDsWw17D0-NXJg@mail.gmail.com>
-Subject: Test
-From: Alexandru Chirila <chirila.s.alexandru@gmail.com>
-To: Alexandru Chirila <chirila.s.alexandru@gmail.com>
-Content-Type: multipart/mixed; boundary=f46d040a62c49bb1c804f027e8cc
-
---f46d040a62c49bb1c804f027e8cc
-Content-Type: multipart/alternative; boundary=f46d040a62c49bb1c404f027e8ca
-
---f46d040a62c49bb1c404f027e8ca
-Content-Type: text/plain; charset=ISO-8859-1
-
-This is a test ma\0\0\0iling
---f46d040a62c49bb1c804f027e8cc--";
-
-    const TEXT_ATTACHMENT_W_SUBJECT_NULL: &str = "MIME-Version: 1.0
-Received: by 10.76.127.40 with HTTP; Fri, 17 Jan 2014 02:21:43 -0800 (PST)
-Date: Fri, 17 Jan 2014 12:21:43 +0200
-Delivered-To: chirila.s.alexandru@gmail.com
-Message-ID: <CALTHOsuHFaaatiXJKU=LdDCo4NmD_h49yvG2RDsWw17D0-NXJg@mail.gmail.com>
-Subject: Te\0\0\0st
-From: Alexandru Chirila <chirila.s.alexandru@gmail.com>
-To: Alexandru Chirila <chirila.s.alexandru@gmail.com>
-Content-Type: multipart/mixed; boundary=f46d040a62c49bb1c804f027e8cc
-
---f46d040a62c49bb1c804f027e8cc
-Content-Type: multipart/alternative; boundary=f46d040a62c49bb1c404f027e8ca
-
---f46d040a62c49bb1c404f027e8ca
-Content-Type: text/plain; charset=ISO-8859-1
-
-This is a test mailing
---f46d040a62c49bb1c804f027e8cc--";
-
-    const TEXT_ATTACHMENT_W_CONTENTTYPE_NULL: &str = "MIME-Version: 1.0
-Received: by 10.76.127.40 with HTTP; Fri, 17 Jan 2014 02:21:43 -0800 (PST)
-Date: Fri, 17 Jan 2014 12:21:43 +0200
-Delivered-To: chirila.s.alexandru@gmail.com
-Message-ID: <CALTHOsuHFaaatiXJKU=LdDCo4NmD_h49yvG2RDsWw17D0-NXJg@mail.gmail.com>
-Subject: Test
-From: Alexandru Chirila <chirila.s.alexandru@gmail.com>
-To: Alexandru Chirila <chirila.s.alexandru@gmail.com>
-Content-Type: multipart/mixed; boundary=f46d040a62c49bb1c804f027e8cc
-
---f46d040a62c49bb1c804f027e8cc
-Content-Type: multipart/alternative; boundary=f46d040a62c49bb1c404f027e8ca
-
---f46d040a62c49bb1c404f027e8ca
-Content-Type: text/plain; charset=\"iso-8859-1\0\0\0\"
-
-This is a test mailing
---f46d040a62c49bb1c804f027e8cc--";
-
-    const HTML_RAW: &str = r#"<html><head><title>Email spam</title></head><body>
-<p><b>Email spam</b>, also known as <b>junk email</b> 
-or <b>unsolicited bulk email</b> (<i>UBE</i>), is a subset of 
-<a href="/wiki/Spam_(electronic)" title="Spam (electronic)">electronic spam</a> 
-involving nearly identical messages sent to numerous recipients by <a href="/wiki/Email" title="Email">
-email</a>. Clicking on <a href="/wiki/Html_email#Security_vulnerabilities" title="Html email" class="mw-redirect">
-links in spam email</a> may send users to <a href="/wiki/Phishing" title="Phishing">phishing</a> 
-web sites or sites that are hosting <a href="/wiki/Malware" title="Malware">malware</a>.</body></html>"#;
-
-    const HTML_RAW_STRIPED: &str = concat!(
-        "Email spam Email spam , also known as junk email or unsolicited bulk email ( UBE ),",
-        " is a subset of electronic spam involving nearly identical messages sent to numerous recipients by email",
-        " . Clicking on links in spam email may send users to phishing web sites or sites that are hosting malware ."
-    );
-}

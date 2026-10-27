@@ -5,35 +5,48 @@
  */
 
 use super::NatsPubSub;
-use crate::{Msg, PubSubStream};
+use crate::{Msg, Subscription};
+use async_nats::{Client, Subscriber, connection::State};
 use futures::StreamExt;
 use trc::{ClusterEvent, Error, EventType};
 
-pub struct NatsPubSubStream {
-    subs: async_nats::Subscriber,
+pub struct NatsPublisher {
+    client: Client,
+    topic: &'static str,
 }
 
 impl NatsPubSub {
-    pub async fn publish(&self, topic: &'static str, message: Vec<u8>) -> trc::Result<()> {
-        self.client
-            .publish(topic, message.into())
-            .await
-            .map_err(|err| Error::new(EventType::Cluster(ClusterEvent::PublisherError)).reason(err))
+    pub(crate) fn publisher(&self, topic: &'static str) -> NatsPublisher {
+        NatsPublisher {
+            client: self.client.clone(),
+            topic,
+        }
     }
 
-    pub async fn subscribe(&self, topic: &'static str) -> trc::Result<PubSubStream> {
+    pub async fn subscribe(&self, topic: &'static str) -> trc::Result<Subscription> {
         self.client
             .subscribe(topic)
             .await
-            .map(|subs| PubSubStream::Nats(NatsPubSubStream { subs }))
+            .map(Subscription::Nats)
             .map_err(|err| {
                 Error::new(EventType::Cluster(ClusterEvent::SubscriberError)).reason(err)
             })
     }
 }
 
-impl NatsPubSubStream {
-    pub async fn next(&mut self) -> Option<Msg> {
-        self.subs.next().await.map(Msg::Nats)
+impl NatsPublisher {
+    pub async fn publish(&mut self, payload: &mut Vec<u8>) -> trc::Result<()> {
+        if self.client.connection_state() != State::Connected {
+            return Err(Error::new(EventType::Cluster(ClusterEvent::PublisherError))
+                .details("Not connected to NATS"));
+        }
+        self.client
+            .publish(self.topic, std::mem::take(payload).into())
+            .await
+            .map_err(|err| Error::new(EventType::Cluster(ClusterEvent::PublisherError)).reason(err))
     }
+}
+
+pub(crate) async fn nats_next<'x>(subscriber: &mut Subscriber) -> Option<Msg<'x>> {
+    subscriber.next().await.map(Msg::Nats)
 }

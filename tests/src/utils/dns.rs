@@ -2,20 +2,30 @@
  * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
+ *
+ * Modified by Coffey Labs in 2026 for INBUXA.
  */
 
 use common::{
     Server,
-    config::{mailstore::spamfilter::IpResolver, smtp::resolver::Tlsa},
+    config::{
+        mailstore::spamfilter::{IpResolver, SpamLookup},
+        smtp::resolver::Tlsa,
+    },
 };
-use mail_auth::{DnssecStatus, MX, RecordSet, Txt, common::resolver::ToFqdn};
+use mail_auth::{DnssecStatus, Mx, RecordSet, TxtRecord, dns::ToFqdn};
 use std::{
     net::{IpAddr, Ipv4Addr, Ipv6Addr},
     sync::Arc,
 };
 
 pub trait DnsCache {
-    fn txt_add(&self, name: impl ToFqdn, value: impl Into<Txt>, valid_until: std::time::Instant);
+    fn txt_add(
+        &self,
+        name: impl ToFqdn,
+        value: impl Into<TxtRecord>,
+        valid_until: std::time::Instant,
+    );
     fn ipv4_add(&self, name: impl ToFqdn, value: Vec<Ipv4Addr>, valid_until: std::time::Instant);
     fn ipv6_add(&self, name: impl ToFqdn, value: Vec<Ipv6Addr>, valid_until: std::time::Instant);
     fn ipv4_add_dnssec(
@@ -37,7 +47,7 @@ pub trait DnsCache {
     fn mx_add(
         &self,
         name: impl ToFqdn,
-        value: Vec<MX>,
+        value: Vec<Mx>,
         dnssec_status: DnssecStatus,
         valid_until: std::time::Instant,
     );
@@ -45,7 +55,12 @@ pub trait DnsCache {
 }
 
 impl DnsCache for Server {
-    fn txt_add(&self, name: impl ToFqdn, value: impl Into<Txt>, valid_until: std::time::Instant) {
+    fn txt_add(
+        &self,
+        name: impl ToFqdn,
+        value: impl Into<TxtRecord>,
+        valid_until: std::time::Instant,
+    ) {
         self.inner.cache.dns_txt.insert_with_expiry(
             name.to_fqdn().into_owned().into_boxed_str(),
             value.into(),
@@ -66,18 +81,18 @@ impl DnsCache for Server {
     ) {
         self.inner.cache.dns_ipv4.insert_with_expiry(
             name.to_fqdn().into_owned().into_boxed_str(),
-            RecordSet {
-                rrset: Arc::from(value),
+            Ok(RecordSet {
+                records: Arc::from(value),
                 dnssec_status,
-            },
+            }),
             valid_until,
         );
     }
 
     fn dnsbl_add(&self, name: &str, value: Vec<Ipv4Addr>, valid_until: std::time::Instant) {
-        self.inner.cache.dns_rbl.insert_with_expiry(
+        self.inner.cache.spam_lookup.insert_with_expiry(
             name.into(),
-            Some(
+            SpamLookup::Dnsbl(
                 value
                     .into_iter()
                     .map(|ip| IpResolver::new(ip.into()))
@@ -100,10 +115,10 @@ impl DnsCache for Server {
     ) {
         self.inner.cache.dns_ipv6.insert_with_expiry(
             name.to_fqdn().into_owned().into_boxed_str(),
-            RecordSet {
-                rrset: Arc::from(value),
+            Ok(RecordSet {
+                records: Arc::from(value),
                 dnssec_status,
-            },
+            }),
             valid_until,
         );
     }
@@ -111,10 +126,10 @@ impl DnsCache for Server {
     fn ptr_add(&self, name: IpAddr, value: Vec<String>, valid_until: std::time::Instant) {
         self.inner.cache.dns_ptr.insert_with_expiry(
             name,
-            RecordSet {
-                rrset: Arc::from(value.into_iter().map(Into::into).collect::<Vec<_>>()),
+            Ok(RecordSet {
+                records: Arc::from(value.into_iter().map(Into::into).collect::<Vec<_>>()),
                 dnssec_status: DnssecStatus::Indeterminate,
-            },
+            }),
             valid_until,
         );
     }
@@ -122,16 +137,16 @@ impl DnsCache for Server {
     fn mx_add(
         &self,
         name: impl ToFqdn,
-        value: Vec<MX>,
+        value: Vec<Mx>,
         dnssec_status: DnssecStatus,
         valid_until: std::time::Instant,
     ) {
         self.inner.cache.dns_mx.insert_with_expiry(
             name.to_fqdn().into_owned().into_boxed_str(),
-            RecordSet {
-                rrset: Arc::from(value),
+            Ok(RecordSet {
+                records: Arc::from(value),
                 dnssec_status,
-            },
+            }),
             valid_until,
         );
     }
@@ -139,7 +154,7 @@ impl DnsCache for Server {
     fn tlsa_add(&self, name: impl ToFqdn, value: Arc<Tlsa>, valid_until: std::time::Instant) {
         self.inner.cache.dns_tlsa.insert_with_expiry(
             name.to_fqdn().into_owned().into_boxed_str(),
-            value,
+            Some(value),
             valid_until,
         );
     }

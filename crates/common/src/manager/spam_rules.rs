@@ -53,7 +53,7 @@ pub fn rules_url(configured: Option<String>) -> Option<String> {
 /// The bundled rules, uncompressed: the same JSON the rules URL serves.
 pub fn bundled_rules() -> Result<Vec<u8>, String> {
     let mut json = Vec::new();
-    mail_auth::flate2::read::GzDecoder::new(BUNDLED_SPAM_RULES)
+    flate2::read::GzDecoder::new(BUNDLED_SPAM_RULES)
         .read_to_end(&mut json)
         .map_err(|err| format!("Failed to decompress the bundled spam rules: {err}"))?;
     Ok(json)
@@ -94,7 +94,7 @@ pub async fn set_fingerprint(
 ) -> trc::Result<()> {
     let mut batch = BatchBuilder::new();
     batch.set(fingerprint_key(object, id), fingerprint.as_bytes().to_vec());
-    data.write(batch.build_all())
+    data.write_batch(&mut batch)
         .await
         .caused_by(trc::location!())
         .map(|_| ())
@@ -112,7 +112,7 @@ pub async fn applied_version(data: &Store) -> trc::Result<Option<String>> {
 pub async fn set_applied_version(data: &Store, version: &str) -> trc::Result<()> {
     let mut batch = BatchBuilder::new();
     batch.set(applied_key(), version.as_bytes().to_vec());
-    data.write(batch.build_all())
+    data.write_batch(&mut batch)
         .await
         .caused_by(trc::location!())
         .map(|_| ())
@@ -135,7 +135,7 @@ fn new_install_key() -> ValueClass {
 pub async fn mark_new_install(data: &Store) -> trc::Result<()> {
     let mut batch = BatchBuilder::new();
     batch.set(new_install_key(), b"D5".to_vec());
-    data.write(batch.build_all())
+    data.write_batch(&mut batch)
         .await
         .caused_by(trc::location!())
         .map(|_| ())
@@ -184,7 +184,7 @@ pub async fn apply_new_install(
     }
     let mut batch = BatchBuilder::new();
     batch.clear(new_install_key());
-    data.write(batch.build_all())
+    data.write_batch(&mut batch)
         .await
         .caused_by(trc::location!())?;
     Ok(changed)

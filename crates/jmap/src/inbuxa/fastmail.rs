@@ -203,7 +203,7 @@ pub async fn set(
     // Creates
     for (client_id, object) in request.unwrap_create() {
         let mut mask = MaskedEmail {
-            enabled: true,
+            enable: true,
             ..Default::default()
         };
         let mut prefix = None;
@@ -222,7 +222,7 @@ pub async fn set(
                 .append(client_id, refusal.into_set_error(P::EmailPrefix, P::Email));
             continue;
         }
-        mask.enabled = state.is_live();
+        mask.enable = state.is_live();
         mask.created_by = None;
         match registry
             .write(RegistryWrite::insert(&Object::from(mask.clone())))
@@ -272,7 +272,7 @@ pub async fn set(
                 .append(id, invalid(P::State, "A mask can't return to pending."));
             continue;
         }
-        changed.enabled = new_state.is_live();
+        changed.enable = new_state.is_live();
         if changed != mask.object {
             // The stored object carries the revision the write is checked against
             let Some(old) = registry

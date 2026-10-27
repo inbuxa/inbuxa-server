@@ -9,7 +9,9 @@
 //! alias, and a trained spam filter moves to its new keys.
 
 use crate::utils::server::TestServerBuilder;
-use common::manager::{SPAM_CLASSIFIER_KEY, SPAM_TRAINER_KEY, first_party::WEB_INTERFACE_CLIENT_ID};
+use common::manager::{
+    SPAM_CLASSIFIER_KEY, SPAM_TRAINER_KEY, first_party::WEB_INTERFACE_CLIENT_ID,
+};
 use registry::{
     schema::{
         enums::CompressionAlgo,
@@ -36,7 +38,7 @@ async fn renamed_identifiers() {
         })
         .await
         .with_object(Application {
-            enabled: false,
+            enable: false,
             description: "Web interface".to_string(),
             resource_url: "https://127.0.0.1/webui.zip".to_string(),
             url_prefix: Map::new(vec!["/admin".to_string()]),
@@ -69,21 +71,39 @@ async fn renamed_identifiers() {
         Some(WEB_INTERFACE_CLIENT_ID),
         "an application naming the old client moves to the new one"
     );
+}
 
+// inbuxa: 0.16 moved these in its migration crate; since 1.0 the move runs at
+// startup (common::manager::renamed_blobs).
+#[tokio::test(flavor = "multi_thread")]
+async fn renamed_spam_blobs() {
+    let test = TestServerBuilder::new("renamed_spam_blobs")
+        .await
+        .disable_services()
+        .build()
+        .await;
+
+    println!("Running renamed spam blob tests...");
     // A trained model under the pre-rename keys moves to the new ones.
     let blobs = test.server.blob_store();
     for (key, data) in [
         (OLD_TRAINER_KEY, &b"trainer"[..]),
         (OLD_CLASSIFIER_KEY, &b"classifier"[..]),
     ] {
-        blobs.put_blob(key, data, CompressionAlgo::None).await.unwrap();
+        blobs
+            .put_blob(key, data, CompressionAlgo::None)
+            .await
+            .unwrap();
     }
-    migration::try_migrate(&test.server).await.unwrap();
+    try_migrate(&test.server).await;
     for (old, new, data) in [
         (OLD_TRAINER_KEY, SPAM_TRAINER_KEY, &b"trainer"[..]),
         (OLD_CLASSIFIER_KEY, SPAM_CLASSIFIER_KEY, &b"classifier"[..]),
     ] {
-        assert_eq!(blobs.get_blob(new, 0..usize::MAX).await.unwrap().as_deref(), Some(data));
+        assert_eq!(
+            blobs.get_blob(new, 0..usize::MAX).await.unwrap().as_deref(),
+            Some(data)
+        );
         assert_eq!(blobs.get_blob(old, 0..usize::MAX).await.unwrap(), None);
     }
 
@@ -92,7 +112,7 @@ async fn renamed_identifiers() {
         .put_blob(OLD_CLASSIFIER_KEY, b"stale", CompressionAlgo::None)
         .await
         .unwrap();
-    migration::try_migrate(&test.server).await.unwrap();
+    try_migrate(&test.server).await;
     assert_eq!(
         blobs
             .get_blob(SPAM_CLASSIFIER_KEY, 0..usize::MAX)
@@ -101,12 +121,28 @@ async fn renamed_identifiers() {
             .as_deref(),
         Some(&b"classifier"[..])
     );
-    assert_eq!(blobs.get_blob(OLD_CLASSIFIER_KEY, 0..usize::MAX).await.unwrap(), None);
+    assert_eq!(
+        blobs
+            .get_blob(OLD_CLASSIFIER_KEY, 0..usize::MAX)
+            .await
+            .unwrap(),
+        None
+    );
 
     // With nothing left to move, starting again changes nothing.
-    migration::try_migrate(&test.server).await.unwrap();
+    try_migrate(&test.server).await;
     assert_eq!(
-        blobs.get_blob(SPAM_TRAINER_KEY, 0..usize::MAX).await.unwrap().as_deref(),
+        blobs
+            .get_blob(SPAM_TRAINER_KEY, 0..usize::MAX)
+            .await
+            .unwrap()
+            .as_deref(),
         Some(&b"trainer"[..])
     );
+}
+
+async fn try_migrate(server: &common::Server) {
+    common::manager::renamed_blobs::rename_spam_blobs(server)
+        .await
+        .unwrap();
 }

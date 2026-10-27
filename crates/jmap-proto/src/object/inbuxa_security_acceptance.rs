@@ -58,14 +58,15 @@ impl Property for SecurityAcceptanceProperty {
 
 impl SecurityAcceptanceProperty {
     fn parse(value: &str) -> Option<Self> {
-        hashify::tiny_map!(value.as_bytes(),
-            b"id" => SecurityAcceptanceProperty::Id,
-            b"check" => SecurityAcceptanceProperty::Check,
-            b"subject" => SecurityAcceptanceProperty::Subject,
-            b"acceptedValue" => SecurityAcceptanceProperty::AcceptedValue,
-            b"note" => SecurityAcceptanceProperty::Note,
-            b"acceptedBy" => SecurityAcceptanceProperty::AcceptedBy,
-            b"acceptedAt" => SecurityAcceptanceProperty::AcceptedAt,
+        hashify::fnc_map!(value.as_bytes(),
+            b"id" => Some(SecurityAcceptanceProperty::Id),
+            b"check" => Some(SecurityAcceptanceProperty::Check),
+            b"subject" => Some(SecurityAcceptanceProperty::Subject),
+            b"acceptedValue" => Some(SecurityAcceptanceProperty::AcceptedValue),
+            b"note" => Some(SecurityAcceptanceProperty::Note),
+            b"acceptedBy" => Some(SecurityAcceptanceProperty::AcceptedBy),
+            b"acceptedAt" => Some(SecurityAcceptanceProperty::AcceptedAt),
+            _ => None,
         )
     }
 }

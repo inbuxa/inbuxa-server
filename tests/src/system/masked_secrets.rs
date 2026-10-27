@@ -45,11 +45,14 @@ async fn stored_secrets(server: &Server, id: &str) -> (String, String) {
         .await
         .unwrap()
         .expect("webhook not found");
-    let ObjectInner::WebHook(WebHook {
+    let ObjectInner::WebHook(webhook) = object.inner else {
+        panic!("not a webhook with Basic auth");
+    };
+    let WebHook {
         http_auth: HttpAuth::Basic(basic),
         signature_key,
         ..
-    }) = object.inner
+    } = *webhook
     else {
         panic!("not a webhook with Basic auth");
     };

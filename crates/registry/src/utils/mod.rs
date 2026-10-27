@@ -2,12 +2,15 @@
  * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
+ *
+ * Modified by Coffey Labs in 2026 for INBUXA.
  */
 
 use crate::schema::prelude::{DkimSignature, Roles, SecretText};
 use types::id::Id;
 
 pub mod account;
+// inbuxa: undelete (1.0 ships the file but no longer builds it)
 pub mod archived_item;
 pub mod cron;
 pub mod dkim;
@@ -32,7 +35,8 @@ impl DkimSignature {
             DkimSignature::Dkim1Ed25519Sha256(signature) => &signature.private_key,
             DkimSignature::Dkim1RsaSha256(signature) => &signature.private_key,
             DkimSignature::Dkim2Ed25519Sha256(signature) => &signature.private_key,
-            DkimSignature::Dkim2RsaSha256(signature) => &signature.private_key,
+            DkimSignature::Dkim2RsaSha256(signature)
+            | DkimSignature::Dkim2MlDsa44Ed25519Sha512(signature) => &signature.private_key,
         }
     }
 
@@ -41,7 +45,8 @@ impl DkimSignature {
             DkimSignature::Dkim1Ed25519Sha256(signature) => &mut signature.private_key,
             DkimSignature::Dkim1RsaSha256(signature) => &mut signature.private_key,
             DkimSignature::Dkim2Ed25519Sha256(signature) => &mut signature.private_key,
-            DkimSignature::Dkim2RsaSha256(signature) => &mut signature.private_key,
+            DkimSignature::Dkim2RsaSha256(signature)
+            | DkimSignature::Dkim2MlDsa44Ed25519Sha512(signature) => &mut signature.private_key,
         }
     }
 }

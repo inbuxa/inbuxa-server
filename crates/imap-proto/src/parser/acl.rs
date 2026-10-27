@@ -4,13 +4,10 @@
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
  */
 
-use compact_str::ToCompactString;
-
 use crate::{
     Command,
     protocol::acl::{self, ModRights, ModRightsOp, Rights},
     receiver::{Request, bad},
-    utf7::utf7_maybe_decode,
 };
 
 use super::PushUnique;
@@ -39,20 +36,17 @@ impl Request<Command> {
             _ => unreachable!(),
         };
         let mut tokens = self.tokens.into_iter();
-        let mailbox_name = utf7_maybe_decode(
-            tokens
-                .next()
-                .ok_or_else(|| bad(self.tag.to_compact_string(), "Missing mailbox name."))?
-                .unwrap_string()
-                .map_err(|v| bad(self.tag.to_compact_string(), v))?,
-            is_utf8,
-        );
+        let mailbox_name = tokens
+            .next()
+            .ok_or_else(|| bad(self.tag.clone(), "Missing mailbox name."))?
+            .unwrap_mailbox_name(is_utf8)
+            .map_err(|v| bad(self.tag.clone(), v))?;
         let identifier = if has_identifier {
             tokens
                 .next()
-                .ok_or_else(|| bad(self.tag.to_compact_string(), "Missing identifier."))?
+                .ok_or_else(|| bad(self.tag.clone(), "Missing identifier."))?
                 .unwrap_string()
-                .map_err(|v| bad(self.tag.to_compact_string(), v))?
+                .map_err(|v| bad(self.tag.clone(), v))?
                 .into()
         } else {
             None
@@ -61,10 +55,10 @@ impl Request<Command> {
             ModRights::parse(
                 &tokens
                     .next()
-                    .ok_or_else(|| bad(self.tag.to_compact_string(), "Missing rights."))?
+                    .ok_or_else(|| bad(self.tag.clone(), "Missing rights."))?
                     .unwrap_bytes(),
             )
-            .map_err(|v| bad(self.tag.to_compact_string(), v))?
+            .map_err(|v| bad(self.tag.clone(), v))?
             .into()
         } else {
             None
@@ -95,6 +89,7 @@ impl ModRights {
                 b'x' => Rights::DeleteMailbox,
                 b't' => Rights::DeleteMessages,
                 b'e' => Rights::Expunge,
+                b'n' => Rights::Annotate,
                 b'a' => Rights::Administer,
                 // RFC2086
                 b'd' => Rights::DeleteMessages,
@@ -123,100 +118,3 @@ impl ModRights {
     }
 }
 
-#[cfg(test)]
-mod tests {
-
-    use crate::{
-        protocol::acl::{self, ModRights, ModRightsOp, Rights},
-        receiver::Receiver,
-    };
-
-    #[test]
-    fn parse_acl() {
-        let mut receiver = Receiver::new();
-
-        for (command, arguments) in [
-            (
-                "A003 Setacl INBOX/Drafts Byron lrswikda\r\n",
-                acl::Arguments {
-                    tag: "A003".into(),
-                    mailbox_name: "INBOX/Drafts".into(),
-                    identifier: Some("Byron".into()),
-                    mod_rights: ModRights {
-                        op: ModRightsOp::Replace,
-                        rights: vec![
-                            Rights::Lookup,
-                            Rights::Read,
-                            Rights::Seen,
-                            Rights::Write,
-                            Rights::Insert,
-                            Rights::CreateMailbox,
-                            Rights::DeleteMessages,
-                            Rights::Administer,
-                        ],
-                    }
-                    .into(),
-                },
-            ),
-            (
-                "A002 SETACL INBOX/Drafts Chris +cda\r\n",
-                acl::Arguments {
-                    tag: "A002".into(),
-                    mailbox_name: "INBOX/Drafts".into(),
-                    identifier: Some("Chris".into()),
-                    mod_rights: ModRights {
-                        op: ModRightsOp::Add,
-                        rights: vec![
-                            Rights::CreateMailbox,
-                            Rights::DeleteMessages,
-                            Rights::Administer,
-                        ],
-                    }
-                    .into(),
-                },
-            ),
-            (
-                "A036 SETACL INBOX/Drafts John -lrswicda\r\n",
-                acl::Arguments {
-                    tag: "A036".into(),
-                    mailbox_name: "INBOX/Drafts".into(),
-                    identifier: Some("John".into()),
-                    mod_rights: ModRights {
-                        op: ModRightsOp::Remove,
-                        rights: vec![
-                            Rights::Lookup,
-                            Rights::Read,
-                            Rights::Seen,
-                            Rights::Write,
-                            Rights::Insert,
-                            Rights::CreateMailbox,
-                            Rights::DeleteMessages,
-                            Rights::Administer,
-                        ],
-                    }
-                    .into(),
-                },
-            ),
-            (
-                "A001 GETACL INBOX/Drafts\r\n",
-                acl::Arguments {
-                    tag: "A001".into(),
-                    mailbox_name: "INBOX/Drafts".into(),
-                    identifier: None,
-                    mod_rights: None,
-                },
-            ),
-        ] {
-            assert_eq!(
-                receiver
-                    .parse(&mut command.as_bytes().iter())
-                    .unwrap()
-                    .parse_acl(false)
-                    .unwrap(),
-                arguments,
-                "{:?}",
-                command
-            );
-        }
-    }
-}

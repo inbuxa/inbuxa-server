@@ -2,6 +2,8 @@
  * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
+ *
+ * Modified by Coffey Labs in 2026 for INBUXA.
  */
 
 use crate::utils::smtp::SmtpConnection;
@@ -124,7 +126,8 @@ pub async fn test(
     imap_check
         .assert_read(Type::Status, ResponseType::Ok)
         .await
-        .assert_contains("* 1 FETCH (FLAGS () UID 1)");
+        // inbuxa: 1.0 shows the server keyword $hasnoattachment as a flag
+        .assert_contains("* 1 FETCH (FLAGS ($hasnoattachment) UID 1)");
 
     // Delete message and expect an update
     imap.send("SELECT Parmeggiano").await;
@@ -138,7 +141,7 @@ pub async fn test(
     imap_check
         .assert_read(Type::Status, ResponseType::Ok)
         .await
-        .assert_contains("* 1 FETCH (FLAGS (\\Deleted) UID 1)");
+        .assert_contains("* 1 FETCH (FLAGS ($hasnoattachment \\Deleted) UID 1)");
 
     imap.send("UID EXPUNGE").await;
     imap.assert_read(Type::Tagged, ResponseType::Ok)

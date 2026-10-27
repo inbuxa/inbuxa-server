@@ -2,6 +2,8 @@
  * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
+ *
+ * Modified by Coffey Labs in 2026 for INBUXA.
  */
 
 use crate::{
@@ -19,7 +21,7 @@ use registry::schema::{
 use spam_filter::modules::classifier::SpamTrainer;
 use store::{
     Deserialize,
-    write::{AlignedBytes, Archive},
+    write::{Archive, ArchiveBytes},
 };
 
 pub async fn test(test: &TestServer) {
@@ -93,25 +95,29 @@ pub async fn test(test: &TestServer) {
     }
     tokio::time::sleep(std::time::Duration::from_millis(200)).await;
     imap.send_ok("SELECT INBOX").await;
-    imap.send("FETCH 11 (FLAGS RFC822.TEXT)").await;
+    // inbuxa: these checks read headers, and 1.0 returns only the body for
+    // RFC822.TEXT (RFC 3501 6.4.5), so fetch the whole message. $Junk is no
+    // longer the first flag ($hasnoattachment comes first), so look for it
+    // anywhere
+    imap.send("FETCH 11 (FLAGS RFC822)").await;
     imap.assert_read(Type::Tagged, ResponseType::Ok)
         .await
-        .assert_not_contains("FLAGS ($Junk")
+        .assert_not_contains("$Junk")
         .assert_contains("Subject: can someone explain")
         .assert_contains("X-Spam-Status: No")
         .assert_contains("PROB_HAM_HIGH");
-    imap.send("FETCH 12 (FLAGS RFC822.TEXT)").await;
+    imap.send("FETCH 12 (FLAGS RFC822)").await;
     imap.assert_read(Type::Tagged, ResponseType::Ok)
         .await
-        .assert_not_contains("FLAGS ($Junk")
+        .assert_not_contains("$Junk")
         .assert_contains("Subject: classifier test")
         .assert_contains("X-Spam-Status: No")
         .assert_contains_any(&["PROB_SPAM_UNCERTAIN", "PROB_HAM_LOW"]);
     imap.send_ok("SELECT \"Junk Mail\"").await;
-    imap.send("FETCH 10 (FLAGS RFC822.TEXT)").await;
+    imap.send("FETCH 10 (FLAGS RFC822)").await;
     imap.assert_read(Type::Tagged, ResponseType::Ok)
         .await
-        .assert_contains("FLAGS ($Junk")
+        .assert_contains("$Junk")
         .assert_contains("Subject: save up to")
         .assert_contains("X-Spam-Status: Yes")
         .assert_contains("PROB_SPAM_HIGH");
@@ -191,7 +197,7 @@ pub async fn spam_classifier_model(server: &Server) -> SpamTrainer {
         .get_blob(SPAM_TRAINER_KEY, 0..usize::MAX)
         .await
         .and_then(|archive| match archive {
-            Some(archive) => <Archive<AlignedBytes> as Deserialize>::deserialize(&archive)
+            Some(archive) => <Archive<ArchiveBytes> as Deserialize>::deserialize(&archive)
                 .and_then(|archive| archive.deserialize_untrusted::<SpamTrainer>())
                 .map(Some),
             None => Ok(None),

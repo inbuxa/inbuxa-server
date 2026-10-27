@@ -10,10 +10,11 @@
 pub mod journald;
 pub mod log;
 pub mod otel;
+pub mod spans;
 pub mod stdout;
 pub mod store; // inbuxa: monitoring history (MON-10 to MON-17)
 
-
+// inbuxa: MON-10, a span's events as a stored trace (1.0 dropped this)
 use registry::{
     schema::structs::{
         Trace, TraceEvent, TraceKeyValue, TraceValue, TraceValueBoolean, TraceValueDuration,
@@ -22,7 +23,7 @@ use registry::{
     },
     types::{datetime::UTCDateTime, ipaddr::IpAddr, list::List},
 };
-use trc::{Event, EventDetails, Value};
+use trc::{Event, EventDetails, Key, Value};
 
 pub trait TraceEvents {
     fn build_trace_events<'x>(
@@ -66,9 +67,48 @@ impl TraceEvents for Trace {
         span_events: impl IntoIterator<Item = &'x Event<EventDetails>>,
         num_events: usize,
     ) -> Self {
-        Trace {
-            events: Self::build_trace_events(span_events, num_events).into(),
+        let events = Self::build_trace_events(span_events, num_events);
+        let mut trace = Trace {
+            timestamp: events
+                .first()
+                .map_or(UTCDateTime::from_timestamp(0), |event| event.timestamp),
+            ..Default::default()
+        };
+
+        // 1.0 also keeps the message's envelope on the trace: the first
+        // sender and size seen, and every recipient
+        let mut to = Vec::new();
+        for kv in events.iter().flat_map(|event| event.key_values.iter()) {
+            match kv.key {
+                Key::From if trace.from.is_empty() => trace.from = trace_text(&kv.value),
+                Key::To => to.push(trace_text(&kv.value)),
+                Key::Size if trace.size == 0 => {
+                    if let TraceValue::UnsignedInt(size) = &kv.value {
+                        trace.size = size.value;
+                    }
+                }
+                _ => {}
+            }
         }
+        to.retain(|addr| !addr.is_empty());
+        to.dedup();
+        trace.to = to.join(", ");
+        trace.events = events.into();
+        trace
+    }
+}
+
+fn trace_text(value: &TraceValue) -> String {
+    match value {
+        TraceValue::String(value) => value.value.clone(),
+        TraceValue::List(list) => list
+            .value
+            .iter()
+            .map(trace_text)
+            .filter(|value| !value.is_empty())
+            .collect::<Vec<_>>()
+            .join(", "),
+        _ => String::new(),
     }
 }
 

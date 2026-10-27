@@ -9,6 +9,8 @@ use super::{
     acme::resolver::{IsTlsAlpnChallenge, build_acme_static_resolver},
 };
 use crate::{Inner, Server};
+use ahash::AHashMap;
+use compact_str::{CompactString, ToCompactString};
 use rustls::{
     SupportedProtocolVersion,
     server::{ClientHello, ResolvesServerCert},
@@ -25,6 +27,29 @@ use tokio_rustls::{Accept, LazyConfigAcceptor};
 
 pub static TLS13_VERSION: &[&SupportedProtocolVersion] = &[&TLS13];
 pub static TLS12_VERSION: &[&SupportedProtocolVersion] = &[&TLS12];
+
+const MAX_HOSTNAME_LEN: usize = 253;
+const WILDCARD_PREFIX: &[u8] = b"*.";
+
+pub(crate) fn lookup_certificate<'x>(
+    certs: &'x AHashMap<Box<str>, Arc<CertifiedKey>>,
+    name: &str,
+) -> Option<&'x Arc<CertifiedKey>> {
+    certs.get(name).or_else(|| lookup_wildcard(certs, name))
+}
+
+fn lookup_wildcard<'x>(
+    certs: &'x AHashMap<Box<str>, Arc<CertifiedKey>>,
+    name: &str,
+) -> Option<&'x Arc<CertifiedKey>> {
+    let (_, parent) = name.split_once('.')?;
+    let mut buf = [0u8; MAX_HOSTNAME_LEN];
+    let key = buf.get_mut(..WILDCARD_PREFIX.len() + parent.len())?;
+    let (prefix, rest) = key.split_at_mut(WILDCARD_PREFIX.len());
+    prefix.copy_from_slice(WILDCARD_PREFIX);
+    rest.copy_from_slice(parent.as_bytes());
+    certs.get(str::from_utf8(key).ok()?)
+}
 
 #[derive(Clone)]
 pub struct CertificateResolver {
@@ -45,16 +70,7 @@ impl ResolvesServerCert for CertificateResolver {
 
 impl Server {
     pub fn resolve_certificate(&self, name: &str) -> Option<Arc<CertifiedKey>> {
-        let certs = self.inner.data.tls_certificates.load();
-
-        certs
-            .get(name)
-            .or_else(|| {
-                // Try with a wildcard certificate
-                name.split_once('.')
-                    .and_then(|(_, domain)| certs.get(domain))
-            })
-            .cloned()
+        lookup_certificate(&self.inner.data.tls_certificates.load(), name).cloned()
     }
 }
 
@@ -65,20 +81,13 @@ impl CertificateResolver {
         name.map_or_else(
             || certs.get("*"),
             |name| {
-                certs
-                    .get(name)
-                    .or_else(|| {
-                        // Try with a wildcard certificate
-                        name.split_once('.')
-                            .and_then(|(_, domain)| certs.get(domain))
-                    })
-                    .or_else(|| {
-                        trc::event!(
-                            Tls(trc::TlsEvent::CertificateNotFound),
-                            Hostname = name.to_string(),
-                        );
-                        certs.get("*")
-                    })
+                lookup_certificate(&certs, name).or_else(|| {
+                    trc::event!(
+                        Tls(trc::TlsEvent::CertificateNotFound),
+                        Hostname = CompactString::from(name),
+                    );
+                    certs.get("*")
+                })
             },
         )
         .or_else(|| match certs.len().cmp(&1) {
@@ -132,7 +141,7 @@ impl TcpAcceptor {
                                         trc::event!(
                                             Acme(trc::AcmeEvent::ClientSuppliedSni),
                                             ListenerId = instance.id.clone(),
-                                            Domain = domain.to_string(),
+                                            Domain = CompactString::from(domain),
                                             Result = key.is_some(),
                                         );
 
@@ -164,7 +173,7 @@ impl TcpAcceptor {
                                         trc::event!(
                                             Acme(trc::AcmeEvent::TlsAlpnError),
                                             ListenerId = instance.id.clone(),
-                                            Reason = err.to_string(),
+                                            Reason = err.to_compact_string(),
                                         );
                                     }
                                 }
@@ -178,7 +187,7 @@ impl TcpAcceptor {
                             trc::event!(
                                 Tls(trc::TlsEvent::HandshakeError),
                                 ListenerId = instance.id.clone(),
-                                Reason = err.to_string(),
+                                Reason = err.to_compact_string(),
                             );
                         }
                     }
@@ -212,3 +221,4 @@ impl std::fmt::Debug for CertificateResolver {
         f.debug_struct("CertificateResolver").finish()
     }
 }
+

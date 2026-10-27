@@ -3,7 +3,6 @@
 
 # Allow what is needed
 !crates
-!tests
 !resources
 
 # The patched dependency Cargo.toml's [patch.crates-io] points at. Without

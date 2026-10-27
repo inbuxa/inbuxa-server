@@ -2,6 +2,8 @@
  * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
+ *
+ * Modified by Coffey Labs in 2026 for INBUXA.
  */
 
 use crate::registry::mapping::{
@@ -21,18 +23,21 @@ use registry::{
     },
     types::map::Map,
 };
+use std::borrow::Cow;
 use types::id::Id;
+use utils::outbound::{OutboundError, OutboundPolicy};
 
+#[cfg_attr(not(feature = "enterprise"), allow(unused_variables))]
 pub(crate) async fn validate_domain(
     set: &RegistrySetResponse<'_>,
     domain: &mut Domain,
     old_domain: Option<&Domain>,
+    outbound_policy: OutboundPolicy,
     tasks: &mut Vec<Task>,
 ) -> ValidationResult {
+    // inbuxa: MT: tenant quota, kept from 0.16
     let response = if old_domain.is_none() {
-        match validate_tenant_quota(set.server, set.access_token, TenantStorageQuota::MaxDomains)
-            .await?
-        {
+        match validate_tenant_quota(set.server, set.access_token, TenantStorageQuota::MaxDomains).await? {
             Ok(response) => response,
             Err(err) => {
                 return Ok(Err(err));
@@ -63,45 +68,38 @@ pub(crate) async fn validate_domain(
             .with_description(err)));
     }
 
-    // Validate that names and aliases do not collide with another domain
-    let registry = set.server.registry();
-    if old_domain.is_none_or(|old| old.name != domain.name)
-        && let Some(existing) = registry
-            .primary_key(
-                ObjectType::Domain.into(),
-                Property::Aliases,
-                domain.name.as_bytes().to_vec(),
-            )
+    let check_name =
+        old_domain.is_none_or(|old| old.name != domain.name && !old.aliases.contains(&domain.name));
+    let mut lookups = Vec::with_capacity(usize::from(check_name) + domain.aliases.len() * 2);
+    if check_name {
+        lookups.push((Property::Aliases, domain.name.as_bytes()));
+    }
+    for alias in domain.aliases.iter().filter(|alias| {
+        *alias != &domain.name
+            && old_domain.is_none_or(|old| !old.aliases.contains(*alias) && &old.name != *alias)
+    }) {
+        lookups.push((Property::Name, alias.as_bytes()));
+        lookups.push((Property::Aliases, alias.as_bytes()));
+    }
+    if !lookups.is_empty()
+        && let Some((position, existing)) = set
+            .server
+            .registry()
+            .first_primary_key(ObjectType::Domain.into(), &lookups)
             .await?
     {
         return Ok(Err(SetError::new(SetErrorType::PrimaryKeyViolation)
-            .with_property(Property::Name)
+            .with_property(if check_name && position == 0 {
+                Property::Name
+            } else {
+                Property::Aliases
+            })
             .with_object_id(existing)));
-    }
-
-    for alias in domain.aliases.iter() {
-        if alias == &domain.name
-            || old_domain.is_some_and(|old| old.aliases.contains(alias) || &old.name == alias)
-        {
-            continue;
-        }
-
-        for index in [Property::Name, Property::Aliases] {
-            if let Some(existing) = registry
-                .primary_key(ObjectType::Domain.into(), index, alias.as_bytes().to_vec())
-                .await?
-            {
-                return Ok(Err(SetError::new(SetErrorType::PrimaryKeyViolation)
-                    .with_property(Property::Aliases)
-                    .with_object_id(existing)));
-            }
-        }
     }
 
     // Schedule DNS update task
     let will_trigger_dkim = matches!(domain.dkim_management, DkimManagement::Automatic(_))
-        && old_domain
-            .is_none_or(|old| !matches!(old.dkim_management, DkimManagement::Automatic(_)));
+        && old_domain.is_none_or(|old| old.dkim_management != domain.dkim_management);
     let will_schedule_dkim = !will_trigger_dkim
         && matches!(domain.dkim_management, DkimManagement::Automatic(_))
         && publishes_dkim(domain)
@@ -151,12 +149,7 @@ pub(crate) async fn validate_domain(
     // Schedule ACME renewal task if needed
     if !will_trigger_acme
         && let CertificateManagement::Automatic(details) = &domain.certificate_management
-        && old_domain.is_none_or(|old| {
-            !matches!(
-                old.certificate_management,
-                CertificateManagement::Automatic(_)
-            )
-        })
+        && old_domain.is_none_or(|old| old.certificate_management != domain.certificate_management)
     {
         let Some(provider) = set
             .server
@@ -189,25 +182,27 @@ pub(crate) async fn validate_domain(
 }
 
 fn publishes_dkim(domain: &Domain) -> bool {
-    matches!(
-        &domain.dns_management,
-        DnsManagement::Automatic(details) if details.publish_records.contains(&DnsRecordType::Dkim)
-    )
+    domain.dns_management.publishes(DnsRecordType::Dkim)
 }
 
 pub(crate) async fn validate_dns_server(
     set: &RegistrySetResponse<'_>,
     dns: &mut DnsServer,
     old_dns: Option<&DnsServer>,
+    outbound_policy: OutboundPolicy,
 ) -> ValidationResult {
+    if outbound_policy == OutboundPolicy::PublicOnly
+        && old_dns.is_none_or(|old_dns| old_dns != dns)
+        && let Err((property, err)) = validate_dns_server_destination(dns).await
+    {
+        return Ok(Err(SetError::invalid_properties()
+            .with_property(property)
+            .with_description(err.as_str())));
+    }
+
+    // inbuxa: MT: tenant quota, kept from 0.16
     let response = if old_dns.is_none() {
-        match validate_tenant_quota(
-            set.server,
-            set.access_token,
-            TenantStorageQuota::MaxDnsServers,
-        )
-        .await?
-        {
+        match validate_tenant_quota(set.server, set.access_token, TenantStorageQuota::MaxDnsServers).await? {
             Ok(response) => response,
             Err(err) => {
                 return Ok(Err(err));
@@ -225,4 +220,72 @@ pub(crate) async fn validate_dns_server(
     }
 
     Ok(Ok(response))
+}
+
+async fn validate_dns_server_destination(dns: &DnsServer) -> Result<(), (Property, OutboundError)> {
+    let policy = OutboundPolicy::PublicOnly;
+    let check_url = |url: &str| {
+        policy
+            .parse_url(url)
+            .map(|_| ())
+            .map_err(|err| (Property::Url, err))
+    };
+    let check_host = |host: &str| {
+        if host.contains("://") {
+            policy.parse_url(host)
+        } else {
+            policy.parse_url(&format!("https://{host}"))
+        }
+        .map(|_| ())
+        .map_err(|err| (Property::Host, err))
+    };
+
+    match dns {
+        DnsServer::Tsig(server) => policy
+            .check_ip(server.host.into_inner())
+            .map_err(|err| (Property::Host, err)),
+        DnsServer::BluecatV2(server) => check_url(&server.url),
+        DnsServer::Cpanel(server) => check_url(&server.url),
+        DnsServer::Plesk(server) => check_url(&server.url),
+        DnsServer::PowerDns(server) => server
+            .url
+            .as_deref()
+            .ok_or((Property::Url, OutboundError::MissingHost))
+            .and_then(check_url),
+        DnsServer::UltraDns(server) => server.url.as_deref().map_or(Ok(()), check_url),
+        DnsServer::EdgeDns(server) => check_host(&server.host),
+        DnsServer::Infoblox(server) => check_host(&server.host),
+        DnsServer::Volcengine(server) => {
+            if server
+                .scheme
+                .as_deref()
+                .is_some_and(|scheme| !scheme.eq_ignore_ascii_case("https"))
+            {
+                Err((Property::Scheme, OutboundError::InsecureScheme))
+            } else {
+                server.host.as_deref().map_or(Ok(()), check_host)
+            }
+        }
+        DnsServer::GoogleCloudDns(server) => {
+            let Ok(service_account) = server.service_account_json.secret().await else {
+                return Ok(());
+            };
+            serde_json::from_str::<ServiceAccountTokenUri<'_>>(&service_account)
+                .ok()
+                .and_then(|account| account.token_uri)
+                .map_or(Ok(()), |token_uri| {
+                    policy
+                        .parse_url(&token_uri)
+                        .map(|_| ())
+                        .map_err(|err| (Property::ServiceAccountJson, err))
+                })
+        }
+        _ => Ok(()),
+    }
+}
+
+#[derive(serde::Deserialize)]
+struct ServiceAccountTokenUri<'x> {
+    #[serde(borrow)]
+    token_uri: Option<Cow<'x, str>>,
 }

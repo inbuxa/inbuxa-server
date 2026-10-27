@@ -60,7 +60,7 @@ pub async fn set_pending(data: &Store, queue_id: u64, pending: &Pending) -> trc:
         class(KIND_PENDING, &queue_id.to_be_bytes()),
         Json(pending).serialize()?,
     );
-    data.write(batch.build_all())
+    data.write_batch(&mut batch)
         .await
         .caused_by(trc::location!())?;
     Ok(())
@@ -77,7 +77,7 @@ pub async fn pending(data: &Store, queue_id: u64) -> trc::Result<Option<Pending>
 pub async fn clear_pending(data: &Store, queue_id: u64) -> trc::Result<()> {
     let mut batch = BatchBuilder::new();
     batch.clear(class(KIND_PENDING, &queue_id.to_be_bytes()));
-    data.write(batch.build_all())
+    data.write_batch(&mut batch)
         .await
         .caused_by(trc::location!())?;
     Ok(())
@@ -112,7 +112,7 @@ pub async fn record_failure(
             class(KIND_FAILURES, &journal_id.to_be_bytes()),
             Json(&failures).serialize()?,
         );
-        data.write(batch.build_all())
+        data.write_batch(&mut batch)
             .await
             .caused_by(trc::location!())?;
     }

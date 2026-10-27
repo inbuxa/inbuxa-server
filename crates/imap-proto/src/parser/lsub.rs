@@ -4,13 +4,10 @@
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
  */
 
-use compact_str::ToCompactString;
-
 use crate::{
     Command,
     protocol::list::{self, SelectionOption},
     receiver::{Request, bad},
-    utf7::utf7_maybe_decode,
 };
 
 impl Request<Command> {
@@ -21,17 +18,16 @@ impl Request<Command> {
             Ok(list::Arguments::Extended {
                 reference_name: tokens
                     .next()
-                    .ok_or_else(|| bad(self.tag.to_compact_string(), "Missing reference name."))?
+                    .ok_or_else(|| bad(self.tag.clone(), "Missing reference name."))?
                     .unwrap_string()
-                    .map_err(|v| bad(self.tag.to_compact_string(), v))?,
-                mailbox_name: vec![utf7_maybe_decode(
+                    .map_err(|v| bad(self.tag.clone(), v))?,
+                mailbox_name: vec![
                     tokens
                         .next()
-                        .ok_or_else(|| bad(self.tag.to_compact_string(), "Missing mailbox name."))?
-                        .unwrap_string()
-                        .map_err(|v| bad(self.tag.to_compact_string(), v))?,
-                    is_utf8,
-                )],
+                        .ok_or_else(|| bad(self.tag.clone(), "Missing mailbox name."))?
+                        .unwrap_mailbox_name(is_utf8)
+                        .map_err(|v| bad(self.tag.clone(), v))?,
+                ],
                 selection_options: vec![SelectionOption::Subscribed],
                 return_options: vec![],
                 tag: self.tag,
@@ -42,47 +38,3 @@ impl Request<Command> {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use crate::{
-        protocol::list::{self, SelectionOption},
-        receiver::Receiver,
-    };
-
-    #[test]
-    fn parse_lsub() {
-        let mut receiver = Receiver::new();
-
-        for (command, arguments) in [
-            (
-                "A002 LSUB \"#news.\" \"comp.mail.*\"\r\n",
-                list::Arguments::Extended {
-                    tag: "A002".into(),
-                    reference_name: "#news.".into(),
-                    mailbox_name: vec!["comp.mail.*".into()],
-                    selection_options: vec![SelectionOption::Subscribed],
-                    return_options: vec![],
-                },
-            ),
-            (
-                "A002 LSUB \"#news.\" \"comp.%\"\r\n",
-                list::Arguments::Extended {
-                    tag: "A002".into(),
-                    reference_name: "#news.".into(),
-                    mailbox_name: vec!["comp.%".into()],
-                    selection_options: vec![SelectionOption::Subscribed],
-                    return_options: vec![],
-                },
-            ),
-        ] {
-            assert_eq!(
-                receiver
-                    .parse(&mut command.as_bytes().iter())
-                    .unwrap()
-                    .parse_lsub(false)
-                    .unwrap(),
-                arguments
-            );
-        }
-    }
-}

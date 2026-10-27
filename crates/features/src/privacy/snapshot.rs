@@ -74,7 +74,7 @@ pub async fn record(data: &Store, snapshot: &Snapshot) -> trc::Result<()> {
     })?;
     let mut batch = BatchBuilder::new();
     batch.set(class(snapshot.taken_at), bytes);
-    data.write(batch.build_all())
+    data.write_batch(&mut batch)
         .await
         .caused_by(trc::location!())
         .map(|_| ())
@@ -125,7 +125,7 @@ pub async fn purge(data: &Store, before: u64) -> trc::Result<usize> {
     for taken_at in &old {
         batch.clear(class(*taken_at));
     }
-    data.write(batch.build_all())
+    data.write_batch(&mut batch)
         .await
         .caused_by(trc::location!())?;
     Ok(old.len())

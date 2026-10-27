@@ -2,6 +2,8 @@
  * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
+ *
+ * Modified by Coffey Labs in 2026 for INBUXA.
  */
 
 use crate::{
@@ -77,15 +79,20 @@ pub async fn test(test: &TestServer) {
     );
 
     // Test automatic identity creation
-    for (identity_id, email) in [(2u64, "jdoe@example.com"), (1u64, "john.doe@example.com")] {
+    // inbuxa: 1.0 numbers the automatic identities in a different order, so
+    // check that ids 1 and 2 hold the two addresses, whichever way round
+    let mut emails = Vec::new();
+    for identity_id in [1u64, 2u64] {
         let identity = client
             .identity_get(&Id::from(identity_id).to_string(), None)
             .await
             .unwrap()
             .unwrap();
-        assert_eq!(identity.email().unwrap(), email);
+        emails.push(identity.email().unwrap().to_string());
         assert_eq!(identity.name().unwrap(), "John Doe");
     }
+    emails.sort();
+    assert_eq!(emails, ["jdoe@example.com", "john.doe@example.com"]);
 
     // Users should be allowed to create identities only
     // using email addresses associated to their principal
@@ -283,21 +290,21 @@ pub async fn test(test: &TestServer) {
         .unwrap()
         .unwrap();
     assert_eq!(email_submission.undo_status().unwrap(), &UndoStatus::Final);
+    // inbuxa: 1.0 records each recipient's delivery result on the
+    // submission, so the queued placeholder is replaced by the remote reply
+    let delivered = || {
+        DeliveryStatus::new(
+            "Code: 250, Enhanced code: 0.0.0, Message: OK",
+            Delivered::Yes,
+            Displayed::Unknown,
+        )
+    };
     assert_eq!(
         email_submission.delivery_status().unwrap(),
         &AHashMap::from_iter([
-            (
-                "tim@foobar.com".to_string(),
-                DeliveryStatus::new("250 2.1.5 Queued", Delivered::Unknown, Displayed::Unknown)
-            ),
-            (
-                "secret_rcpt@test.com".to_string(),
-                DeliveryStatus::new("250 2.1.5 Queued", Delivered::Unknown, Displayed::Unknown)
-            ),
-            (
-                "james@other_domain.com".to_string(),
-                DeliveryStatus::new("250 2.1.5 Queued", Delivered::Unknown, Displayed::Unknown)
-            ),
+            ("tim@foobar.com".to_string(), delivered()),
+            ("secret_rcpt@test.com".to_string(), delivered()),
+            ("james@other_domain.com".to_string(), delivered()),
         ])
     );
 
@@ -324,7 +331,8 @@ pub async fn test(test: &TestServer) {
     .await;
     expect_nothing(&mut smtp_rx).await;
 
-    // Verify SMTP replies
+    // Verify SMTP replies (inbuxa: 1.0 answers an unknown mailbox with
+    // 5.1.1, RFC 3463's bad destination mailbox, where 0.16 used 5.1.2)
     tokio::time::sleep(Duration::from_millis(100)).await;
     let email_submission = client
         .email_submission_get(&email_submission_id, None)
@@ -341,7 +349,7 @@ pub async fn test(test: &TestServer) {
             (
                 "nonexistant@example.com".to_string(),
                 DeliveryStatus::new(
-                    "550 5.1.2 Mailbox does not exist.",
+                    "550 5.1.1 Mailbox does not exist.",
                     Delivered::No,
                     Displayed::Unknown
                 )
@@ -393,7 +401,7 @@ pub async fn test(test: &TestServer) {
             (
                 "nonexistant@example.com".to_string(),
                 DeliveryStatus::new(
-                    "550 5.1.2 Mailbox does not exist.",
+                    "550 5.1.1 Mailbox does not exist.",
                     Delivered::No,
                     Displayed::Unknown
                 )

@@ -23,8 +23,10 @@ pub struct Storage {
     pub blob: BlobStore,
     pub search: SearchStore,
     pub memory: InMemoryStore,
-    pub metrics: Store,
+    // inbuxa: MON-10, the stores for trace history and metrics (0.16 had
+    // them; 1.0 dropped them)
     pub tracing: Store,
+    pub metrics: Store,
     pub coordinator: Coordinator,
     pub directory: Option<Arc<Directory>>,
     pub directories: IdMap<Directory>,

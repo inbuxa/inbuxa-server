@@ -2,6 +2,8 @@
  * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
+ *
+ * Modified by Coffey Labs in 2026 for INBUXA.
  */
 
 use crate::utils::{jmap::JmapUtils, server::TestServer};
@@ -13,6 +15,8 @@ use jmap_proto::{
 use serde_json::json;
 use types::id::Id;
 
+// inbuxa: 1.0 adds the maySetMetadata right (Acl::ModifyMetadata) to every
+// rights object; owners hold it, sharees here aren't granted it
 pub async fn test(test: &TestServer) {
     println!("Running Contacts ACL tests...");
     let john = test.account("jdoe@example.com");
@@ -98,7 +102,8 @@ pub async fn test(test: &TestServer) {
           "mayRead": true,
           "mayWrite": true,
           "mayDelete": true,
-          "mayShare": true
+          "mayShare": true,
+          "maySetMetadata": true
         },
         "shareWith": {}
         }));
@@ -125,7 +130,8 @@ pub async fn test(test: &TestServer) {
         .await
         .method_response()
         .typ(),
-        "forbidden"
+        // inbuxa: 1.0 answers accountNotFound when nothing in the account is shared
+        "accountNotFound"
     );
 
     // Share address book with Jane
@@ -164,7 +170,8 @@ pub async fn test(test: &TestServer) {
                 "mayRead": true,
                 "mayWrite": false,
                 "mayDelete": false,
-                "mayShare": false
+                "mayShare": false,
+                "maySetMetadata": false
             }
         }
         }));
@@ -189,7 +196,8 @@ pub async fn test(test: &TestServer) {
             "mayRead": true,
             "mayWrite": false,
             "mayDelete": false,
-            "mayShare": false
+            "mayShare": false,
+            "maySetMetadata": false
         }
         }));
     jane.jmap_get_account(
@@ -245,29 +253,39 @@ pub async fn test(test: &TestServer) {
             "mayRead": false,
             "mayWrite": false,
             "mayDelete": false,
-            "mayShare": false
+            "mayShare": false,
+            "maySetMetadata": false
           },
           "newRights": {
             "mayRead": true,
             "mayWrite": false,
             "mayDelete": false,
-            "mayShare": false
+            "mayShare": false,
+            "maySetMetadata": false
           },
           "name": null
         }));
 
-    // Updating and deleting should fail
+    // Updating and deleting should fail (inbuxa: 1.0 accepts an empty patch
+    // as a no-op, so each update changes something. In 1.0 every writable
+    // address book property except shareWith (name, description, sortOrder,
+    // isSubscribed) is a per-user preference, so a sharee's rename only
+    // changes their own view and there is no Modify refusal any more; the
+    // closest book-level refusal is changing shareWith without mayShare.)
     assert_eq!(
         jane.jmap_update_account(
             john,
             MethodObject::AddressBook,
-            [(&john_book_id, json!({}))],
+            [(
+                &john_book_id,
+                json!({format!("shareWith/{jane_id}/mayWrite"): true}),
+            )],
             Vec::<(&str, &str)>::new(),
         )
         .await
         .not_updated(&john_book_id)
         .description(),
-        "You are not allowed to modify this address book."
+        "You are not allowed to share this address book."
     );
     assert_eq!(
         jane.jmap_destroy_account(
@@ -285,7 +303,7 @@ pub async fn test(test: &TestServer) {
         jane.jmap_update_account(
             john,
             MethodObject::ContactCard,
-            [(&john_contact_id, json!({}))],
+            [(&john_contact_id, json!({"name": {"full": "Renamed by Jane"}}))],
             Vec::<(&str, &str)>::new(),
         )
         .await
@@ -339,7 +357,8 @@ pub async fn test(test: &TestServer) {
             "mayRead": true,
             "mayWrite": true,
             "mayDelete": true,
-            "mayShare": false
+            "mayShare": false,
+            "maySetMetadata": false
         }
         }));
 
@@ -381,13 +400,15 @@ pub async fn test(test: &TestServer) {
             "mayRead": true,
             "mayWrite": false,
             "mayDelete": false,
-            "mayShare": false
+            "mayShare": false,
+            "maySetMetadata": false
           },
           "newRights": {
             "mayRead": true,
             "mayWrite": true,
             "mayDelete": true,
-            "mayShare": false
+            "mayShare": false,
+            "maySetMetadata": false
           },
           "name": null
         }));
@@ -587,7 +608,8 @@ pub async fn test(test: &TestServer) {
         .await
         .method_response()
         .typ(),
-        "forbidden"
+        // inbuxa: 1.0 answers accountNotFound when nothing in the account is shared
+        "accountNotFound"
     );
 
     // Verify Jane received a share notification with the updated rights
@@ -627,13 +649,15 @@ pub async fn test(test: &TestServer) {
             "mayRead": true,
             "mayWrite": true,
             "mayDelete": true,
-            "mayShare": false
+            "mayShare": false,
+            "maySetMetadata": false
           },
           "newRights": {
             "mayRead": false,
             "mayWrite": false,
             "mayDelete": false,
-            "mayShare": false
+            "mayShare": false,
+            "maySetMetadata": false
           },
           "name": null
         }));

@@ -47,7 +47,7 @@ pub async fn cluster_tests() {
         "Nats" => {
             crate::utils::containers::ensure_nats().await;
             Coordinator::Nats(NatsCoordinator {
-                addresses: Map::new(vec!["127.0.0.1:4222".to_string()]),
+                hosts: Map::new(vec!["127.0.0.1:4222".to_string()]),
                 use_tls: false,
                 ..Default::default()
             })
@@ -109,7 +109,7 @@ pub async fn cluster_tests() {
                     SocketAddr::from_str(&format!("127.0.0.1:1100{node_id}")).unwrap(),
                 ]),
                 protocol: NetworkListenerProtocol::Http,
-                tls_implicit: true,
+                implicit_tls: true,
                 use_tls: true,
                 ..Default::default()
             })
@@ -121,7 +121,7 @@ pub async fn cluster_tests() {
                     SocketAddr::from_str(&format!("127.0.0.1:1200{node_id}")).unwrap(),
                 ]),
                 protocol: NetworkListenerProtocol::Imap,
-                tls_implicit: false,
+                implicit_tls: false,
                 use_tls: true,
                 ..Default::default()
             })

@@ -17,8 +17,9 @@ use common::auth::{
     ACCOUNT_FLAG_ENCRYPT_ALGO_CHACHA20_POLY1305, ACCOUNT_FLAG_ENCRYPT_APPEND,
     ACCOUNT_FLAG_ENCRYPT_METHOD_PGP, ACCOUNT_FLAG_ENCRYPT_TRAIN_SPAM_FILTER, EncryptionKeys,
 };
-use mail_builder::{encoders::Base64Encoder, mime::make_boundary};
-use mail_parser::{Message, MimeHeaders, PartType};
+use encodify::base64::MIME;
+use mail_builder::mime::make_boundary;
+use mail_parser::{Message, PartKind};
 use openpgp::{
     parse::Parse,
     serialize::stream,
@@ -36,7 +37,7 @@ use rasn_cms::{
 };
 use rsa::{Oaep, Pkcs1v15Encrypt, RsaPublicKey, pkcs1::DecodeRsaPublicKey, sha2::Sha256};
 use sequoia_openpgp as openpgp;
-use std::io::Cursor;
+use std::{fmt::Display, io::Cursor};
 
 const AES256_GCM: &Oid =
     Oid::JOINT_ISO_ITU_T_COUNTRY_US_ORGANIZATION_GOV_CSOR_NIST_ALGORITHMS_AES256_GCM;
@@ -62,6 +63,7 @@ pub trait EncryptMessage {
         flags: u64,
     ) -> Result<Vec<u8>, EncryptMessageError>;
     fn is_encrypted(&self) -> bool;
+    fn split_mime_headers(&self) -> (Vec<u8>, Vec<u8>);
 }
 
 impl EncryptMessage for Message<'_> {
@@ -77,24 +79,7 @@ impl EncryptMessage for Message<'_> {
             ));
         }
 
-        let root = self.root_part();
-        let raw_message = self.raw_message();
-        let mut outer_message = Vec::with_capacity((raw_message.len() as f64 * 1.5) as usize);
-        let mut inner_message = Vec::with_capacity(raw_message.len());
-
-        // Move MIME headers and body to inner message
-        for header in root.headers() {
-            (if header.name.is_mime_header() {
-                &mut inner_message
-            } else {
-                &mut outer_message
-            })
-            .extend_from_slice(
-                &raw_message[header.offset_field() as usize..header.offset_end() as usize],
-            );
-        }
-        inner_message.extend_from_slice(b"\r\n");
-        inner_message.extend_from_slice(&raw_message[root.raw_body_offset() as usize..]);
+        let (mut outer_message, inner_message) = self.split_mime_headers();
 
         // Encrypt inner message
         if flags & ACCOUNT_FLAG_ENCRYPT_METHOD_PGP != 0 {
@@ -219,13 +204,14 @@ impl EncryptMessage for Message<'_> {
 
             // Encrypt contents (TODO: use rayon)
             let (encrypted_contents, mac, key, nonce) = tokio::task::spawn_blocking(move || {
-                let (encrypted_contents, mac) = cipher.encrypt(&key, &nonce, &inner_message);
-                (encrypted_contents, mac, key, nonce)
+                cipher
+                    .encrypt(&key, &nonce, &inner_message)
+                    .map(|(encrypted_contents, mac)| (encrypted_contents, mac, key, nonce))
             })
             .await
             .map_err(|err| {
                 EncryptMessageError::Error(format!("Failed to encrypt message: {}", err))
-            })?;
+            })??;
 
             // Encrypt key using public keys
             let key_encryption_algorithm = cipher.key_encryption_algorithm()?;
@@ -334,25 +320,44 @@ impl EncryptMessage for Message<'_> {
                 )
                 .as_bytes(),
             );
-            Base64Encoder::new()
-                .wrap_lines()
-                .encode_to_writer(&pkcs7, &mut outer_message)
-                .map_err(|err| {
-                    EncryptMessageError::Error(format!("Failed to base64 encode PKCS7: {}", err))
-                })?;
+            MIME.encode_append(&pkcs7, &mut outer_message);
         }
 
         Ok(outer_message)
     }
 
+    fn split_mime_headers(&self) -> (Vec<u8>, Vec<u8>) {
+        let root = self.root_part();
+        let raw_message = self.raw();
+        let mut outer_message = Vec::with_capacity((raw_message.len() as f64 * 1.5) as usize);
+        let mut inner_message = Vec::with_capacity(raw_message.len());
+        for header in root.headers() {
+            let target = if header.name().is_mime_header() {
+                &mut inner_message
+            } else {
+                &mut outer_message
+            };
+            let field = raw_message
+                .get(header.offset_field() as usize..header.offset_end() as usize)
+                .unwrap_or_default();
+            target.extend_from_slice(field);
+            if !field.ends_with(b"\n") {
+                target.extend_from_slice(b"\r\n");
+            }
+        }
+        inner_message.extend_from_slice(b"\r\n");
+        inner_message.extend_from_slice(
+            raw_message
+                .get(root.offset_body() as usize..)
+                .unwrap_or_default(),
+        );
+        (outer_message, inner_message)
+    }
+
     fn is_encrypted(&self) -> bool {
         if self.content_type().is_some_and(|ct| {
-            let main_type = ct.c_type.as_ref();
-            let sub_type = ct
-                .c_subtype
-                .as_ref()
-                .map(|s| s.as_ref())
-                .unwrap_or_default();
+            let main_type = ct.ctype();
+            let sub_type = ct.subtype().unwrap_or_default();
 
             (main_type.eq_ignore_ascii_case("application")
                 && (sub_type.eq_ignore_ascii_case("pkcs7-mime")
@@ -368,16 +373,18 @@ impl EncryptMessage for Message<'_> {
             return true;
         }
 
-        if self.parts.len() <= 2 {
+        let root = self.root();
+        let num_parts = root.parts().count();
+        if num_parts <= 2 {
             let mut text_part = None;
             let mut is_multipart = false;
 
-            for part in &self.parts {
-                match &part.body {
-                    PartType::Text(text) => {
-                        text_part = Some(text.as_ref());
+            for part in root.parts() {
+                match part.kind() {
+                    PartKind::Text => {
+                        text_part = part.text();
                     }
-                    PartType::Multipart(_) => {
+                    PartKind::Multipart => {
                         is_multipart = true;
                     }
                     _ => (),
@@ -386,7 +393,7 @@ impl EncryptMessage for Message<'_> {
 
             match text_part {
                 Some(text)
-                    if (self.parts.len() == 1 || is_multipart)
+                    if (num_parts == 1 || is_multipart)
                         && text.trim_start().starts_with("-----BEGIN PGP MESSAGE-----") =>
                 {
                     return true;
@@ -436,6 +443,11 @@ impl EncryptionFlags for u64 {
     }
 }
 
+#[cold]
+fn encrypt_error(algorithm: &str, err: impl Display) -> EncryptMessageError {
+    EncryptMessageError::Error(format!("{algorithm} encryption failed: {err}"))
+}
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum SymmetricCipher {
     Aes128Cbc,
@@ -468,43 +480,46 @@ impl SymmetricCipher {
         )
     }
 
-    fn encrypt(self, key: &[u8], nonce: &[u8], contents: &[u8]) -> (Vec<u8>, Option<Vec<u8>>) {
+    fn encrypt(
+        self,
+        key: &[u8],
+        nonce: &[u8],
+        contents: &[u8],
+    ) -> Result<(Vec<u8>, Option<Vec<u8>>), EncryptMessageError> {
         match self {
-            SymmetricCipher::Aes128Cbc => (
+            SymmetricCipher::Aes128Cbc => {
                 cbc::Encryptor::<aes::Aes128>::new_from_slices(key, nonce)
-                    .expect("invalid key or iv length")
-                    .encrypt_padded_vec::<Pkcs7>(contents),
-                None,
-            ),
-            SymmetricCipher::Aes256Cbc => (
+                    .map(|cipher| (cipher.encrypt_padded_vec::<Pkcs7>(contents), None))
+                    .map_err(|err| encrypt_error("AES-128-CBC", err))
+            }
+            SymmetricCipher::Aes256Cbc => {
                 cbc::Encryptor::<aes::Aes256>::new_from_slices(key, nonce)
-                    .expect("invalid key or iv length")
-                    .encrypt_padded_vec::<Pkcs7>(contents),
-                None,
-            ),
+                    .map(|cipher| (cipher.encrypt_padded_vec::<Pkcs7>(contents), None))
+                    .map_err(|err| encrypt_error("AES-256-CBC", err))
+            }
             SymmetricCipher::Aes256Gcm => {
-                let cipher = Aes256Gcm::new_from_slice(key).expect("invalid key length");
+                let cipher = Aes256Gcm::new_from_slice(key)
+                    .map_err(|err| encrypt_error("AES-256-GCM", err))?;
+                let nonce = nonce
+                    .try_into()
+                    .map_err(|err| encrypt_error("AES-256-GCM", err))?;
                 let mut buffer = contents.to_vec();
                 let tag = cipher
-                    .encrypt_inout_detached(
-                        nonce.try_into().expect("invalid nonce length"),
-                        b"",
-                        buffer.as_mut_slice().into(),
-                    )
-                    .expect("AES-GCM encryption failed");
-                (buffer, Some(tag.to_vec()))
+                    .encrypt_inout_detached(nonce, b"", buffer.as_mut_slice().into())
+                    .map_err(|err| encrypt_error("AES-256-GCM", err))?;
+                Ok((buffer, Some(tag.to_vec())))
             }
             SymmetricCipher::ChaCha20Poly1305 => {
-                let cipher = ChaCha20Poly1305::new_from_slice(key).expect("invalid key length");
+                let cipher = ChaCha20Poly1305::new_from_slice(key)
+                    .map_err(|err| encrypt_error("ChaCha20-Poly1305", err))?;
+                let nonce = nonce
+                    .try_into()
+                    .map_err(|err| encrypt_error("ChaCha20-Poly1305", err))?;
                 let mut buffer = contents.to_vec();
                 let tag = cipher
-                    .encrypt_inout_detached(
-                        nonce.try_into().expect("invalid nonce length"),
-                        b"",
-                        buffer.as_mut_slice().into(),
-                    )
-                    .expect("ChaCha20-Poly1305 encryption failed");
-                (buffer, Some(tag.to_vec()))
+                    .encrypt_inout_detached(nonce, b"", buffer.as_mut_slice().into())
+                    .map_err(|err| encrypt_error("ChaCha20-Poly1305", err))?;
+                Ok((buffer, Some(tag.to_vec())))
             }
         }
     }
@@ -598,3 +613,4 @@ fn encode_null() -> Result<Vec<u8>, EncryptMessageError> {
         EncryptMessageError::Error(format!("Failed to encode NULL parameters: {}", err))
     })
 }
+

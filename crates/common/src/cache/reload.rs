@@ -40,6 +40,10 @@ pub struct ReloadResult {
 
 impl Server {
     pub async fn reload_registry(&self, change: RegistryChange) -> trc::Result<ReloadResult> {
+        Box::pin(self.reload(change)).await
+    }
+
+    async fn reload(&self, change: RegistryChange) -> trc::Result<ReloadResult> {
         let mut bootstrap = Bootstrap::new(self.registry().clone()).await;
         let object = match change {
             RegistryChange::Insert(id) => {
@@ -54,8 +58,7 @@ impl Server {
                         if expires_at > now() {
                             let mut ips = self.inner.data.blocked_ips.write();
                             if let Some(ip) = ip.address.try_to_ip() {
-                                ips.blocked_ip_addresses
-                                    .insert(IpWithTtl::new(ip, expires_at));
+                                ips.block(ip, expires_at);
                             } else {
                                 ips.blocked_ip_networks
                                     .push(IpWithTtl::new(ip.address, expires_at));
@@ -113,9 +116,9 @@ impl Server {
                     data: storage.data.clone(),
                     blob: storage.blob.clone(),
                     search: storage.search.clone(),
-                    metrics: storage.metrics.clone(),
-                    tracing: storage.tracing.clone(),
                     memory: storage.memory.clone(),
+                    tracing: storage.tracing.clone(),
+                    metrics: storage.metrics.clone(),
                     coordinator: storage.coordinator.clone(),
                     directory: directory.default_directory,
                     directories: directory.directories,
@@ -131,7 +134,12 @@ impl Server {
                 // applying it. Objects that already failed then are missing
                 // from the running settings anyway, as at boot, so their
                 // errors are reported but don't hold the reload back.
-                let tracers = Telemetry::parse(&mut bootstrap, &storage).await;
+                let tracers = Telemetry::parse(
+                    &mut bootstrap,
+                    &storage,
+                    self.inner.ipc.index_queue_notify(),
+                )
+                .await;
                 let core = Box::pin(Core::parse(&mut bootstrap, storage)).await;
                 let mut servers = Listeners::parse(&mut bootstrap).await;
 
@@ -159,7 +167,7 @@ impl Server {
                         // every scan; scan now, so a role that gained task
                         // types starts claiming them without waiting out the
                         // refresh interval
-                        self.inner.ipc.task_tx.notify_one();
+                        self.inner.ipc.task_tx.notify(store::write::TaskTypes::ALL);
 
                         self.record_build_errors(&bootstrap.errors);
 

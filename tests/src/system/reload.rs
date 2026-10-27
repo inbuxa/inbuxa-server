@@ -128,7 +128,7 @@ async fn test_build_errors(test: &TestServer) {
 
     // A new error refuses the reload and names the object
     let err = admin
-        .registry_create_object_expect_err(Action::ReloadSettings)
+        .registry_create_object_expect_err(Action::ReloadSettings(Default::default()))
         .await;
     let description = err.description.clone().unwrap_or_default();
     assert!(
@@ -191,7 +191,7 @@ async fn test_build_errors(test: &TestServer) {
         );
     }
     admin
-        .registry_create_object_expect_err(Action::ReloadSettings)
+        .registry_create_object_expect_err(Action::ReloadSettings(Default::default()))
         .await;
     let tracer_ids = tracer_ids.split_off(2);
     admin

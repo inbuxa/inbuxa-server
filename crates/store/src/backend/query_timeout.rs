@@ -51,7 +51,7 @@ impl Default for QueryTimeouts {
     }
 }
 
-#[cfg(feature = "test_mode")]
+#[cfg(inbuxa_tests)]
 impl crate::Store {
     /// Sets the query limits of a SQL store that was just built (tests only:
     /// the limits aren't configurable).

@@ -285,9 +285,18 @@ impl Account {
                 "fromAccountId": from_account.id_string(),
                 "accountId": to_account.id_string(),
                 "onSuccessDestroyOriginal": on_success_destroy,
+                // inbuxa: 1.0 follows RFC 8620 5.4: each copy carries the
+                // source "id"; the creation id stays the source id.
                 "create": items
                         .into_iter()
-                        .map(|(i, item)| (i.to_string(), item)).collect::<serde_json::Map<_, _>>()
+                        .map(|(i, mut item)| {
+                            if let Some(object) = item.as_object_mut() {
+                                object
+                                    .entry("id")
+                                    .or_insert_with(|| Value::String(i.to_string()));
+                            }
+                            (i.to_string(), item)
+                        }).collect::<serde_json::Map<_, _>>()
             },
             "0"
         ]]))

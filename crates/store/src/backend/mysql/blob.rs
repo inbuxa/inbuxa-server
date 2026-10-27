@@ -6,11 +6,9 @@
  * Modified by Coffey Labs in 2026 for INBUXA.
  */
 
-use std::ops::Range;
-
-use mysql_async::prelude::Queryable;
-
 use super::{MysqlStore, bounded, into_error};
+use mysql_async::prelude::Queryable;
+use std::ops::Range;
 
 impl MysqlStore {
     pub(crate) async fn get_blob(

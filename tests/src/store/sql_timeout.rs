@@ -2,6 +2,8 @@
  * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
+ *
+ * Modified by Coffey Labs in 2026 for INBUXA.
  */
 
 use crate::utils::{server::TestServer, storage::build_data_store};
@@ -9,8 +11,7 @@ use futures::FutureExt;
 use registry::schema::structs::DataStore;
 use std::{panic::AssertUnwindSafe, time::Duration};
 use store::{
-    IterateParams, Key, Rows, SUBSPACE_COUNTER, SUBSPACE_PROPERTY, Store, U32_LEN, Value, ValueKey,
-    write::ValueClass,
+    IterateParams, Key, Rows, Store, Subspace, U32_LEN, Value, ValueKey, write::ValueClass,
 };
 use types::collection::Collection;
 
@@ -284,7 +285,7 @@ impl Backend {
     }
 
     fn populate_query(&self) -> String {
-        let table = char::from(SUBSPACE_PROPERTY);
+        let table = Subspace::Property.name();
         let prefix = key_prefix();
         let padding = VALUE_SIZE - U32_LEN;
         let last = NUM_KEYS - 1;
@@ -308,7 +309,7 @@ impl Backend {
     }
 
     fn populate_counters_query(&self) -> String {
-        let table = char::from(SUBSPACE_COUNTER);
+        let table = Subspace::Counter.name();
         let prefix = key_prefix();
         let last = NUM_KEYS - 1;
 
@@ -328,11 +329,11 @@ impl Backend {
     }
 
     fn purge_query(&self) -> String {
-        format!("DELETE FROM {} WHERE v = 0", char::from(SUBSPACE_COUNTER))
+        format!("DELETE FROM {} WHERE v = 0", Subspace::Counter.name())
     }
 
     fn count_counters_query(&self) -> String {
-        let table = char::from(SUBSPACE_COUNTER);
+        let table = Subspace::Counter.name();
         match self {
             #[cfg(feature = "postgres")]
             Backend::Postgres => format!("SELECT COUNT(*) FROM {table} WHERE k >= $1 AND k <= $2"),
@@ -342,7 +343,7 @@ impl Backend {
     }
 
     fn scan_query(&self) -> String {
-        let table = char::from(SUBSPACE_PROPERTY);
+        let table = Subspace::Property.name();
         match self {
             #[cfg(feature = "postgres")]
             Backend::Postgres => {
@@ -356,7 +357,7 @@ impl Backend {
     }
 
     fn delete_query(&self) -> String {
-        let table = char::from(SUBSPACE_PROPERTY);
+        let table = Subspace::Property.name();
         match self {
             #[cfg(feature = "postgres")]
             Backend::Postgres => format!("DELETE FROM {table} WHERE k >= $1 AND k <= $2"),

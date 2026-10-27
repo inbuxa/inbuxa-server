@@ -157,7 +157,7 @@ impl ShardedBlobStore {
 
     /// Writes go to the home member only (ST-18, ST-21).
     pub async fn put(&self, key: &[u8], data: &[u8]) -> trc::Result<()> {
-        Box::pin(self.members[self.home(key)].raw_put(key, data)).await
+        Box::pin(self.members[self.home(key)].raw_put(key, data.to_vec())).await
     }
 
     /// The home member first, then the others until one had it (ST-18).

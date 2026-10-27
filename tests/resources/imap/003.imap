@@ -8,7 +8,7 @@ BODY (
          "charset" "us-ascii"
       ) NIL NIL "7bit" 69 2
    )(
-      "application" "x-whatever" NIL NIL NIL NIL 51
+      "application" "x-whatever" NIL NIL NIL "7bit" 51
    ) "alternative"
 )
 
@@ -16,13 +16,13 @@ BODYSTRUCTURE (
    (
       "text" "plain" (
          "charset" "us-ascii"
-      ) NIL NIL "7bit" 48 1 "2229d79e5de40eae37c43fe934adbd24" NIL NIL NIL
+      ) NIL NIL "7bit" 48 1 NIL NIL NIL NIL
    )(
       "text" "enriched" (
          "charset" "us-ascii"
-      ) NIL NIL "7bit" 69 2 "1aba0fd91c6544b8626008f78b83c3f9" NIL NIL NIL
+      ) NIL NIL "7bit" 69 2 NIL NIL NIL NIL
    )(
-      "application" "x-whatever" NIL NIL NIL NIL 51 "7f7ef645554f637854b8acdd853aa612" NIL NIL NIL
+      "application" "x-whatever" NIL NIL NIL "7bit" 51 NIL NIL NIL NIL
    ) "alternative" (
       "boundary" "boundary42"
    ) NIL NIL NIL
@@ -32,13 +32,13 @@ BODYSTRUCTURE UTF8=ACCEPT (
    (
       "text" "plain" (
          "charset" "us-ascii"
-      ) NIL NIL "7bit" 48 1 "2229d79e5de40eae37c43fe934adbd24" NIL NIL NIL
+      ) NIL NIL "7bit" 48 1 NIL NIL NIL NIL
    )(
       "text" "enriched" (
          "charset" "us-ascii"
-      ) NIL NIL "7bit" 69 2 "1aba0fd91c6544b8626008f78b83c3f9" NIL NIL NIL
+      ) NIL NIL "7bit" 69 2 NIL NIL NIL NIL
    )(
-      "application" "x-whatever" NIL NIL NIL NIL 51 "7f7ef645554f637854b8acdd853aa612" NIL NIL NIL
+      "application" "x-whatever" NIL NIL NIL "7bit" 51 NIL NIL NIL NIL
    ) "alternative" (
       "boundary" "boundary42"
    ) NIL NIL NIL
@@ -153,7 +153,7 @@ BODY[1.TEXT] {48}
 ... plain text version of message goes here ...
 
 ----------------------------------
-BODY[1.MIME] {45}
+BODY[1.MIME] {44}
 Content-Type: text/plain; charset=us-ascii
 
 
@@ -186,7 +186,7 @@ BODY[2.TEXT] {69}
     goes here ...
 
 ----------------------------------
-BODY[2.MIME] {30}
+BODY[2.MIME] {29}
 Content-Type: text/enriched
 
 
@@ -218,7 +218,7 @@ BODY[3.TEXT] {51}
 ... fanciest version of same message goes here ...
 
 ----------------------------------
-BODY[3.MIME] {39}
+BODY[3.MIME] {38}
 Content-Type: application/x-whatever
 
 

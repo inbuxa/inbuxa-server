@@ -4,29 +4,42 @@
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
  */
 
-use crate::config::mailstore::jmap::JmapConfig;
+use crate::{
+    config::{mailstore::jmap::JmapConfig, metadata::MetadataConfig},
+    storage::dav::{
+        FORBIDDEN_FILE_NAME_CHARS, FORBIDDEN_FILE_NODE_NAMES, MAX_DAV_FILE_NAME_LEN,
+        MAX_FILE_NODE_DEPTH,
+    },
+};
 use ahash::AHashSet;
 use calcard::icalendar::ICalendarDuration;
 use jmap_proto::{
-    object::{email::EmailComparator, file_node::FileNodeComparator},
+    object::{
+        email::EmailComparator,
+        file_node::{FileNodeComparator, FileNodeNodeType},
+    },
     request::capability::{
         BlobCapabilities, CalendarCapabilities, Capabilities, Capability, ContactsCapabilities,
-        CoreCapabilities, EmptyCapabilities, FileNodeCapabilities, MailCapabilities,
-        PrincipalAvailabilityCapabilities, PrincipalCapabilities, SieveAccountCapabilities,
-        SieveSessionCapabilities, SubmissionCapabilities, WebPushCapabilities,
+        CoreCapabilities, DataTypeMetadataInfo, EmptyCapabilities, FileNodeCapabilities,
+        MailCapabilities, MetadataCapabilities, PrincipalAvailabilityCapabilities,
+        PrincipalCapabilities, SieveAccountCapabilities, SieveSessionCapabilities,
+        SubmissionCapabilities, WebPushCapabilities,
     },
     types::date::UTCDate,
 };
 use registry::{
-    schema::structs::{Calendar, Email, SieveUserInterpreter},
+    schema::structs::{AddressBook, Calendar, Email, SieveUserInterpreter},
     types::EnumImpl,
 };
 use store::registry::bootstrap::Bootstrap;
-use types::type_state::DataType;
+use types::{
+    metadata::{NamespaceScope, REGISTERED_NAMESPACES},
+    type_state::DataType,
+};
 use utils::map::vec_map::VecMap;
 
 impl JmapConfig {
-    pub async fn add_capabilities(&mut self, bp: &mut Bootstrap) {
+    pub async fn add_capabilities(&mut self, bp: &mut Bootstrap, metadata: &MetadataConfig) {
         // Add core capabilities
         self.capabilities.session.append(
             Capability::Core,
@@ -55,7 +68,7 @@ impl JmapConfig {
         self.capabilities.account.insert(
             Capability::Mail,
             Capabilities::Mail(MailCapabilities {
-                max_mailboxes_per_email: None,
+                max_mailboxes_per_email: email.max_mailboxes_per_email.into(),
                 max_mailbox_depth: email.max_mailbox_depth,
                 max_size_mailbox_name: email.max_mailbox_name_length,
                 max_size_attachments_per_email: email.max_attachment_size,
@@ -75,6 +88,7 @@ impl JmapConfig {
         );
 
         // Add calendar capabilities
+        let calendar = bp.setting_infallible::<Calendar>().await;
         self.capabilities.session.append(
             Capability::Calendars,
             Capabilities::Empty(EmptyCapabilities::default()),
@@ -82,7 +96,7 @@ impl JmapConfig {
         self.capabilities.account.insert(
             Capability::Calendars,
             Capabilities::Calendar(CalendarCapabilities {
-                max_calendars_per_event: None,
+                max_calendars_per_event: calendar.max_calendars_per_event.into(),
                 min_date_time: UTCDate {
                     year: 1,
                     month: 1,
@@ -105,13 +119,11 @@ impl JmapConfig {
                     tz_hour: 0,
                     tz_minute: 0,
                 },
-                max_expanded_query_duration: ICalendarDuration::from_seconds(86400 * 365)
-                    .to_string(),
-                max_participants_per_event: bp
-                    .setting_infallible::<Calendar>()
-                    .await
-                    .max_attendees
-                    .into(),
+                max_expanded_query_duration: ICalendarDuration::from_seconds(
+                    calendar.max_expanded_query_duration.into_inner().as_secs() as i64,
+                )
+                .to_string(),
+                max_participants_per_event: calendar.max_attendees.into(),
                 may_create_calendar: true,
             }),
         );
@@ -126,6 +138,7 @@ impl JmapConfig {
         );
 
         // Add contacts capabilities
+        let address_book = bp.setting_infallible::<AddressBook>().await;
         self.capabilities.session.append(
             Capability::Contacts,
             Capabilities::Empty(EmptyCapabilities::default()),
@@ -133,7 +146,7 @@ impl JmapConfig {
         self.capabilities.account.insert(
             Capability::Contacts,
             Capabilities::Contacts(ContactsCapabilities {
-                max_address_books_per_card: None,
+                max_address_books_per_card: address_book.max_address_books_per_card.into(),
                 may_create_address_book: true,
             }),
         );
@@ -154,23 +167,28 @@ impl JmapConfig {
         self.capabilities.account.insert(
             Capability::FileNode,
             Capabilities::FileNode(FileNodeCapabilities {
-                max_file_node_depth: None,
-                max_size_file_node_name: 255,
-                forbidden_name_chars: Some("/<>:\"\\|?*".to_string()),
+                max_file_node_depth: Some(MAX_FILE_NODE_DEPTH as u64),
+                max_size_file_node_name: MAX_DAV_FILE_NAME_LEN as u64,
+                forbidden_name_chars: Some(FORBIDDEN_FILE_NAME_CHARS.to_string()),
                 forbidden_node_names: Some(
-                    [
-                        ".", "..", "CON", "PRN", "AUX", "NUL", "COM0", "COM1", "COM2", "COM3",
-                        "COM4", "COM5", "COM6", "COM7", "COM8", "COM9", "LPT0", "LPT1", "LPT2",
-                        "LPT3", "LPT4", "LPT5", "LPT6", "LPT7", "LPT8", "LPT9",
-                    ]
-                    .into_iter()
-                    .map(str::to_string)
-                    .collect(),
+                    FORBIDDEN_FILE_NODE_NAMES
+                        .iter()
+                        .map(|name| name.to_string())
+                        .collect(),
                 ),
                 file_node_query_sort_options: vec![
                     FileNodeComparator::Name,
                     FileNodeComparator::Size,
+                    FileNodeComparator::Created,
+                    FileNodeComparator::Modified,
+                    FileNodeComparator::MediaType,
                     FileNodeComparator::NodeType,
+                    FileNodeComparator::Tree,
+                ],
+                supported_node_types: &[
+                    FileNodeNodeType::Directory,
+                    FileNodeNodeType::File,
+                    FileNodeNodeType::SymLink,
                 ],
                 may_create_top_level_file_node: true,
                 case_insensitive_names: false,
@@ -198,7 +216,10 @@ impl JmapConfig {
         self.capabilities.account.insert(
             Capability::PrincipalsAvailability,
             Capabilities::PrincipalsAvailability(PrincipalAvailabilityCapabilities {
-                max_availability_duration: ICalendarDuration::from_seconds(86400 * 365).to_string(),
+                max_availability_duration: ICalendarDuration::from_seconds(
+                    calendar.max_availability_duration.into_inner().as_secs() as i64,
+                )
+                .to_string(),
             }),
         );
 
@@ -241,6 +262,7 @@ impl JmapConfig {
             .collect::<AHashSet<&str>>();
         let mut extensions = sieve::compiler::grammar::Capability::all()
             .iter()
+            .filter(|c| !matches!(c, sieve::compiler::grammar::Capability::ImapSieve))
             .map(|c| c.to_string())
             .filter(|c| !disabled_capabilities.contains(c.as_str()))
             .collect::<Vec<String>>();
@@ -281,6 +303,8 @@ impl JmapConfig {
                     DataType::Email,
                     DataType::Thread,
                     DataType::SieveScript,
+                    DataType::CalendarEvent,
+                    DataType::ContactCard,
                 ],
                 supported_digest_algorithms: vec!["sha", "sha-256", "sha-512"],
             }),
@@ -305,6 +329,42 @@ impl JmapConfig {
             Capability::EmailPush,
             Capabilities::Empty(EmptyCapabilities::default()),
         );
+
+        let mut data_types = metadata
+            .data_types
+            .map(|data_type| {
+                (
+                    data_type,
+                    DataTypeMetadataInfo {
+                        namespaces: REGISTERED_NAMESPACES
+                            .iter()
+                            .filter(|namespace| {
+                                namespace.is_advertised()
+                                    && namespace.data_types.contains(&data_type)
+                                    && (metadata.private_metadata
+                                        || namespace.scope != NamespaceScope::PrivateMetadata)
+                            })
+                            .map(|namespace| namespace.name)
+                            .collect(),
+                        supports_vendor_namespaces: metadata.vendor_namespaces,
+                        supports_private: metadata.private_metadata,
+                        max_depth: metadata.max_depth,
+                    },
+                )
+            })
+            .filter(|(_, info)| info.supports_vendor_namespaces || !info.namespaces.is_empty())
+            .collect::<VecMap<_, _>>();
+        if !data_types.is_empty() {
+            data_types.sort_unstable_by_key();
+            self.capabilities.session.append(
+                Capability::Metadata,
+                Capabilities::Empty(EmptyCapabilities::default()),
+            );
+            self.capabilities.account.insert(
+                Capability::Metadata,
+                Capabilities::Metadata(MetadataCapabilities { data_types }),
+            );
+        }
 
         // Add Web Push VAPID capabilities
         if let Some(application_server_key) = self

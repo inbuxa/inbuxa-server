@@ -2,6 +2,8 @@
  * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
+ *
+ * Modified by Coffey Labs in 2026 for INBUXA.
  */
 
 use common::{Server, auth::AccessToken};
@@ -27,7 +29,9 @@ pub mod bootstrap;
 pub mod cluster;
 pub mod dkim;
 pub mod domain;
+pub mod index_queue;
 pub mod log;
+pub mod oauth_client;
 pub mod principal;
 pub mod public_key;
 pub mod queued_message;
@@ -40,6 +44,7 @@ pub mod tls;
 
 pub(crate) struct RegistryGetResponse<'x> {
     pub server: &'x Server,
+    // inbuxa: MT: tenant scoping, kept from 0.16
     pub access_token: &'x AccessToken,
     pub account_id: u32,
     pub ids: Option<Vec<Id>>,
@@ -47,6 +52,7 @@ pub(crate) struct RegistryGetResponse<'x> {
     pub response: GetResponse<Registry>,
     pub object_type: ObjectType,
     pub object_flags: u64,
+    // inbuxa: MT: tenant scoping, kept from 0.16
     pub is_tenant_filtered: bool,
     pub is_account_filtered: bool,
 }
@@ -61,6 +67,7 @@ pub(crate) struct RegistrySetResponse<'x> {
     pub destroy: Vec<Id>,
     pub response: SetResponse<Registry>,
     pub object_type: ObjectType,
+    // inbuxa: MT: tenant scoping, kept from 0.16
     pub is_tenant_filtered: bool,
     pub is_account_filtered: bool,
 }

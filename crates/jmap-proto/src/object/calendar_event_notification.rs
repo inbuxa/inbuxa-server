@@ -6,14 +6,17 @@
 
 use crate::{
     object::{AnyId, JmapObject, JmapObjectId},
-    request::{MaybeInvalid, deserialize::DeserializeArguments},
+    request::{
+        MaybeInvalid,
+        deserialize::{CowStr, DeserializeArguments},
+    },
     types::{date::UTCDate, state::State},
 };
 use calcard::jscalendar::JSCalendar;
 use jmap_tools::{Element, Key, Property};
-use serde::Serialize;
+use serde::{Serialize, Serializer};
 use std::{borrow::Cow, fmt::Display, str::FromStr};
-use types::{blob::BlobId, id::Id};
+use types::{blob::BlobId, id::Id, text::Text};
 
 #[derive(Debug, Clone, Default)]
 pub struct CalendarEventNotification;
@@ -23,41 +26,73 @@ pub struct CalendarEventNotification;
 pub struct CalendarEventNotificationObject {
     pub id: Id,
 
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub created: Option<UTCDate>,
+    #[serde(skip_serializing_if = "ResponseProperty::is_not_requested")]
+    pub created: ResponseProperty<UTCDate>,
 
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub changed_by: Option<PersonObject>,
+    #[serde(skip_serializing_if = "ResponseProperty::is_not_requested")]
+    pub changed_by: ResponseProperty<PersonObject>,
 
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub comment: Option<String>,
+    #[serde(skip_serializing_if = "ResponseProperty::is_not_requested")]
+    pub comment: ResponseProperty<String>,
 
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(skip_serializing_if = "ResponseProperty::is_not_requested")]
     #[serde(rename = "type")]
-    pub notification_type: Option<CalendarEventNotificationType>,
+    pub notification_type: ResponseProperty<CalendarEventNotificationType>,
 
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub calendar_event_id: Option<Id>,
+    #[serde(skip_serializing_if = "ResponseProperty::is_not_requested")]
+    pub calendar_event_id: ResponseProperty<Id>,
 
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub is_draft: Option<bool>,
+    #[serde(skip_serializing_if = "ResponseProperty::is_not_requested")]
+    pub is_draft: ResponseProperty<bool>,
 
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub event: Option<JSCalendar<'static, Id, BlobId>>,
+    #[serde(skip_serializing_if = "ResponseProperty::is_not_requested")]
+    pub event: ResponseProperty<JSCalendar<'static, Id, BlobId>>,
 
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub event_patch: Option<JSCalendar<'static, Id, BlobId>>,
+    #[serde(skip_serializing_if = "ResponseProperty::is_not_requested")]
+    pub event_patch: ResponseProperty<JSCalendar<'static, Id, BlobId>>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub enum ResponseProperty<T> {
+    #[default]
+    NotRequested,
+    Requested(Option<T>),
+}
+
+impl<T> ResponseProperty<T> {
+    pub fn is_not_requested(&self) -> bool {
+        matches!(self, ResponseProperty::NotRequested)
+    }
+
+    pub fn value(&self) -> Option<&T> {
+        match self {
+            ResponseProperty::Requested(Some(value)) => Some(value),
+            _ => None,
+        }
+    }
+}
+
+impl<T> From<Option<T>> for ResponseProperty<T> {
+    fn from(value: Option<T>) -> Self {
+        ResponseProperty::Requested(value)
+    }
+}
+
+impl<T: Serialize> Serialize for ResponseProperty<T> {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        match self.value() {
+            Some(value) => value.serialize(serializer),
+            None => serializer.serialize_none(),
+        }
+    }
 }
 
 #[derive(Debug, Serialize, Clone, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct PersonObject {
     pub name: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub email: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub principal_id: Option<Id>,
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub calendar_address: Option<String>,
 }
 
@@ -128,6 +163,10 @@ impl Property for CalendarEventNotificationProperty {
         }
         .into()
     }
+
+    fn key_eq(&self, other: &Self) -> bool {
+        self == other
+    }
 }
 
 impl Element for CalendarEventNotificationValue {
@@ -155,21 +194,35 @@ impl Element for CalendarEventNotificationValue {
     }
 
     fn to_cow(&self) -> Cow<'static, str> {
+        self.text().to_cow()
+    }
+
+    fn serialize_text<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
         match self {
-            CalendarEventNotificationValue::Id(id) => id.to_string().into(),
-            CalendarEventNotificationValue::Date(date) => date.to_string().into(),
-            CalendarEventNotificationValue::Type(t) => t.as_str().into(),
+            CalendarEventNotificationValue::Date(date) => date.serialize(serializer),
+            value => value.text().serialize(serializer),
+        }
+    }
+}
+
+impl CalendarEventNotificationValue {
+    pub fn text(&self) -> Text<'_> {
+        match self {
+            CalendarEventNotificationValue::Id(id) => Text::Id(*id),
+            CalendarEventNotificationValue::Date(date) => Text::Display(date),
+            CalendarEventNotificationValue::Type(t) => Text::Static(t.as_str()),
         }
     }
 }
 
 impl CalendarEventNotificationType {
     fn parse(value: &str) -> Option<Self> {
-        hashify::tiny_map!(value.as_bytes(),
+        hashify::map!(value.as_bytes(), CalendarEventNotificationType,
             b"created" => CalendarEventNotificationType::Created,
             b"updated" => CalendarEventNotificationType::Updated,
             b"destroyed" => CalendarEventNotificationType::Destroyed,
         )
+        .copied()
     }
 
     pub fn as_str(&self) -> &'static str {
@@ -183,16 +236,17 @@ impl CalendarEventNotificationType {
 
 impl CalendarEventNotificationProperty {
     fn parse(value: &str) -> Option<Self> {
-        hashify::tiny_map!(value.as_bytes(),
-            b"id" => CalendarEventNotificationProperty::Id,
-            b"created" => CalendarEventNotificationProperty::Created,
-            b"changedBy" => CalendarEventNotificationProperty::ChangedBy,
-            b"comment" => CalendarEventNotificationProperty::Comment,
-            b"type" => CalendarEventNotificationProperty::Type,
-            b"calendarEventId" => CalendarEventNotificationProperty::CalendarEventId,
-            b"isDraft" => CalendarEventNotificationProperty::IsDraft,
-            b"event" => CalendarEventNotificationProperty::Event,
-            b"eventPatch" => CalendarEventNotificationProperty::EventPatch
+        hashify::fnc_map!(value.as_bytes(),
+            b"id" => Some(CalendarEventNotificationProperty::Id),
+            b"created" => Some(CalendarEventNotificationProperty::Created),
+            b"changedBy" => Some(CalendarEventNotificationProperty::ChangedBy),
+            b"comment" => Some(CalendarEventNotificationProperty::Comment),
+            b"type" => Some(CalendarEventNotificationProperty::Type),
+            b"calendarEventId" => Some(CalendarEventNotificationProperty::CalendarEventId),
+            b"isDraft" => Some(CalendarEventNotificationProperty::IsDraft),
+            b"event" => Some(CalendarEventNotificationProperty::Event),
+            b"eventPatch" => Some(CalendarEventNotificationProperty::EventPatch),
+            _ => None
         )
     }
 }
@@ -277,13 +331,13 @@ impl<'de> DeserializeArguments<'de> for CalendarEventNotificationComparator {
         A: serde::de::MapAccess<'de>,
     {
         if key == "property" {
-            let value = map.next_value::<Cow<str>>()?;
+            let value = map.next_value::<CowStr>()?.0;
             hashify::fnc_map!(value.as_bytes(),
                 b"created" => {
                     *self = CalendarEventNotificationComparator::Created;
                 },
                 _ => {
-                    *self = CalendarEventNotificationComparator::_T(value.to_string());
+                    *self = CalendarEventNotificationComparator::_T(value.into_owned());
                 }
             );
         } else {

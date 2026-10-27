@@ -138,7 +138,7 @@ pub async fn test(server: &Server, body: &Value) -> trc::Result<Value> {
             secret: password.to_string(),
             mfa_token: None,
         };
-        out["signIn"] = match directory.authenticate(&credentials).await {
+        out["signIn"] = match directory.authenticate(&credentials, &server.inner.data.password_verifier).await {
             Ok(a) => json!({
                 "ok": true,
                 "email": a.email,

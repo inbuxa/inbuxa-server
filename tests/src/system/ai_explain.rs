@@ -18,11 +18,11 @@ use crate::utils::{
 use common::manager::defaults::BootstrapDefaults;
 use registry::{
     schema::{
-        enums::{AiModelType, Permission},
+        enums::Permission,
         prelude::{ObjectType, Property},
         structs::{
-            AiModel, Authentication, CertificateManagement, DkimManagement, DnsManagement, Domain,
-            Role,
+            AiModel, AiModelOpenAi, Authentication, CertificateManagement, DkimManagement,
+            DnsManagement, Domain, Role,
         },
     },
     types::{EnumImpl, id::ObjectId},
@@ -45,7 +45,7 @@ pub async fn test(test: &mut TestServer) {
     let domain = admin
         .registry_create_object(Domain {
             name: "explain.example.org".into(),
-            is_enabled: true,
+            enable: true,
             certificate_management: CertificateManagement::Manual,
             dns_management: DnsManagement::Manual,
             dkim_management: DkimManagement::Manual,
@@ -53,7 +53,7 @@ pub async fn test(test: &mut TestServer) {
         })
         .await;
     let setting = json!({"@type": "Setting", "object": "x:Domain",
-        "id": domain.to_string(), "property": "isEnabled"});
+        "id": domain.to_string(), "property": "enable"});
 
     // Acceptance test 1: no model, no Explain (EX-1)
     assert!(!admin.ai_explain_flag().await, "test 1: session");
@@ -65,14 +65,13 @@ pub async fn test(test: &mut TestServer) {
 
     // Acceptance test 2: a model, classifier off (EX-2, EX-3)
     let model = admin
-        .registry_create_object(AiModel {
+        .registry_create_object(AiModel::OpenAi(AiModelOpenAi {
             name: "stub".to_string(),
             model: "stub-model".to_string(),
-            model_type: AiModelType::Chat,
-            url: format!("https://127.0.0.1:{PORT}/v1/chat/completions"),
+            url: Some(format!("https://127.0.0.1:{PORT}/v1/chat/completions")),
             allow_invalid_certs: true,
             ..Default::default()
-        })
+        }))
         .await;
     assert!(
         admin.ai_explain_flag().await,
@@ -120,7 +119,7 @@ pub async fn test(test: &mut TestServer) {
 
     // Acceptance test 7: a secret setting is refused, not masked (EX-9)
     let before = stub.count();
-    for (object, property) in [("x:AiModel", "httpAuth"), ("x:AcmeProvider", "accountKey")] {
+    for (object, property) in [("x:AiModel", "apiKey"), ("x:AcmeProvider", "accountKey")] {
         let (_, failed) = admin
             .explain(json!({"@type": "Setting", "object": object,
                 "id": model.to_string(), "property": property}))
@@ -303,7 +302,7 @@ pub async fn test(test: &mut TestServer) {
         subspace: SUBSPACE_INBUXA,
         key: b"PgsysAiExplain".to_vec(),
     }));
-    bp.data_store.write(batch.build_all()).await.unwrap();
+    bp.data_store.write_batch(&mut batch).await.unwrap();
     bp.insert_safe_defaults().await;
     assert!(bp.errors.is_empty(), "{:?}", bp.errors);
     assert!(has_grant().await, "granted on upgrade");

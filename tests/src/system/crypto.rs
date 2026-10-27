@@ -2,6 +2,8 @@
  * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
+ *
+ * Modified by Coffey Labs in 2026 for INBUXA.
  */
 
 use crate::utils::{jmap::JmapUtils, server::TestServer, smtp::SmtpConnection};
@@ -13,7 +15,7 @@ use common::{
     storage::encryption::{EncryptionMethod, parse_public_key},
 };
 use email::message::crypto::EncryptMessage;
-use mail_parser::{MessageParser, MimeHeaders};
+use mail_parser::MessageParser;
 use registry::schema::{
     prelude::{ObjectType, Property},
     structs::{EncryptionAtRest, EncryptionSettings, PublicKey},
@@ -96,8 +98,7 @@ pub async fn test(test: &mut TestServer) {
             .account(account.id().document_id())
             .await
             .unwrap()
-            .encryption_key
-            .as_ref()
+            .encryption_key()
             .unwrap(),
         &certs_parsed[1]
     );

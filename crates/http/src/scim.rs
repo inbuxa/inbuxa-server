@@ -8,7 +8,7 @@
 //! enforces the rate limits and the body cap, and hands the request to the
 //! `scim` crate.
 
-use crate::auth::authenticate::{Authenticator, HttpHeaders};
+use crate::auth::authenticate::{Authenticator, HttpAuthenticated, HttpHeaders};
 use common::Server;
 use http_proto::{HttpRequest, HttpResponse, HttpSessionData, request::fetch_body};
 use percent_encoding::percent_decode_str;
@@ -97,13 +97,14 @@ async fn respond(
         }
         Some(_) => {}
     }
-    let (_in_flight, access_token) = match server.authenticate_headers(req, session).await {
-        Ok(result) => result,
-        Err(err) => {
-            trc::error!(err.clone().span_id(session.session_id));
-            return refusal(err);
-        }
-    };
+    let HttpAuthenticated { access_token, .. } =
+        match server.authenticate_headers(req, session).await {
+            Ok(result) => result,
+            Err(err) => {
+                trc::error!(err.clone().span_id(session.session_id));
+                return refusal(err);
+            }
+        };
 
     // SCIM-51: 1 MiB for every body, /Bulk included
     let Some(body) = fetch_body(req, scim::MAX_PAYLOAD, session.session_id).await else {

@@ -335,7 +335,7 @@ pub async fn scaleout_memory_tests() {
     for n in 0..3 {
         assert_eq!(
             sharded
-                .counter_incr(KeyValue::new(b"scaleout-counter".to_vec(), 2), true)
+                .key_incr(KeyValue::new(b"scaleout-counter".to_vec(), 2))
                 .await
                 .unwrap(),
             2 * (n + 1)
@@ -354,21 +354,21 @@ pub async fn scaleout_memory_tests() {
     };
     assert!(
         sharded
-            .is_rate_allowed(9, b"who", &rate, false)
+            .is_rate_allowed(9, b"who", &rate)
             .await
             .unwrap()
             .is_none()
     );
     assert!(
         sharded
-            .is_rate_allowed(9, b"who", &rate, false)
+            .is_rate_allowed(9, b"who", &rate)
             .await
             .unwrap()
             .is_none()
     );
     assert!(
         sharded
-            .is_rate_allowed(9, b"who", &rate, false)
+            .is_rate_allowed(9, b"who", &rate)
             .await
             .unwrap()
             .is_some()

@@ -14,13 +14,16 @@
 //! from the release.
 
 use crate::{
-    queue::{Message, MessageWrapper, Status, spool::SmtpSpool},
+    queue::{
+        Message, MessageWrapper, Status,
+        spool::{RegistryWrite, SmtpSpool},
+    },
     reporting::send::MtaReportSend,
 };
 use common::{
     Server,
     config::smtp::queue::{QueueExpiry, QueueName},
-    ipc::QueueEvent,
+    ipc::{QueueEvent, QueueRefresh},
 };
 use inbuxa_features::{
     audit::{Action, Actor, Outcome, Record, Target},
@@ -58,9 +61,15 @@ pub async fn release(server: &Server, queue_id: u64) -> trc::Result<bool> {
     }
     let saved = MessageWrapper::new(message, queue_id, QueueName::default())
         .save_registry_changes(server, prev_events, modified)
-        .await;
+        .await
+        == RegistryWrite::Written;
     held::delete(server.store(), queue_id).await?;
-    let _ = server.inner.ipc.queue_tx.send(QueueEvent::Refresh).await;
+    let _ = server
+        .inner
+        .ipc
+        .queue_tx
+        .send(QueueEvent::Refresh(QueueRefresh::All))
+        .await;
     Ok(saved)
 }
 
@@ -69,7 +78,7 @@ pub async fn release(server: &Server, queue_id: u64) -> trc::Result<bool> {
 pub async fn reject(server: &Server, record: &Held, note: Option<&str>) -> trc::Result<bool> {
     let removed = match server
         .read_message(record.queue_id, QueueName::default())
-        .await
+        .await?
     {
         Some(message) => message.remove(server, None).await,
         None => false,
@@ -94,7 +103,12 @@ pub async fn reject(server: &Server, record: &Held, note: Option<&str>) -> trc::
         text,
     )
     .await;
-    let _ = server.inner.ipc.queue_tx.send(QueueEvent::Refresh).await;
+    let _ = server
+        .inner
+        .ipc
+        .queue_tx
+        .send(QueueEvent::Refresh(QueueRefresh::All))
+        .await;
     Ok(removed)
 }
 

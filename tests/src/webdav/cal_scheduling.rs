@@ -2,6 +2,8 @@
  * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
+ *
+ * Modified by Coffey Labs in 2026 for INBUXA.
  */
 
 use crate::{
@@ -25,11 +27,11 @@ use groupware::{
 use hyper::StatusCode;
 use mail_parser::{DateTime, MessageParser};
 use serde_json::{Value, json};
-use services::task_manager::imip::build_itip_template;
+use services::task_manager::tasks::imip::build_itip_template;
 use std::str::FromStr;
 use store::{
     ValueKey,
-    write::{AlignedBytes, Archive, BatchBuilder, now},
+    write::{Archive, ArchiveBytes, BatchBuilder, now},
 };
 use types::collection::{Collection, SyncCollection};
 
@@ -37,7 +39,7 @@ async fn set_hide_attendees(test: &TestServer, account_id: u32, document_id: u32
     let archive = test
         .server
         .store()
-        .get_value::<Archive<AlignedBytes>>(ValueKey::archive(
+        .get_value::<Archive<ArchiveBytes>>(ValueKey::archive(
             account_id,
             Collection::CalendarEvent,
             document_id,
@@ -52,11 +54,12 @@ async fn set_hide_attendees(test: &TestServer, account_id: u32, document_id: u32
     let account_info = test.server.account_info(account_id).await.unwrap();
     let mut batch = BatchBuilder::new();
     event
-        .update(
-            account_info.account_tenant_ids(),
+        .update_meta(
+            account_info.changed_by(),
             previous,
             account_id,
             document_id,
+            None,
             &mut batch,
         )
         .unwrap();
@@ -240,10 +243,10 @@ pub async fn test(test: &TestServer) {
             .get_cached_messages(client.account_id)
             .await
             .unwrap();
-        assert_eq!(messages.emails.items.len(), 1);
+        assert_eq!(messages.emails.len(), 1);
         let events = test
             .server
-            .fetch_dav_resources(
+            .fetch_groupware_resources(
                 client.account_id,
                 client.account_id,
                 SyncCollection::Calendar,
@@ -253,7 +256,7 @@ pub async fn test(test: &TestServer) {
         assert_eq!(events.resources.len(), 2);
         let events = test
             .server
-            .fetch_dav_resources(
+            .fetch_groupware_resources(
                 client.account_id,
                 client.account_id,
                 SyncCollection::CalendarEventNotification,
@@ -381,16 +384,12 @@ pub async fn test(test: &TestServer) {
         .await
         .unwrap()
         .emails
-        .items[0]
-        .document_id;
+        .at(0)
+        .unwrap()
+        .document_id();
     let contents = test.fetch_email(bill_client.account_id, document_id).await;
     let message = MessageParser::new().parse(&contents).unwrap();
-    let contents = message
-        .html_bodies()
-        .next()
-        .unwrap()
-        .text_contents()
-        .unwrap();
+    let contents = message.html_bodies().next().unwrap();
     let url = contents
         .split("href=\"")
         .filter_map(|s| {
@@ -477,7 +476,7 @@ pub async fn test(test: &TestServer) {
         .with_status(StatusCode::CREATED);
     let external_document_id = test
         .server
-        .fetch_dav_resources(
+        .fetch_groupware_resources(
             john_client.account_id,
             john_client.account_id,
             SyncCollection::Calendar,
@@ -620,7 +619,7 @@ pub async fn test(test: &TestServer) {
         .with_status(StatusCode::CREATED);
     let recurring_document_id = test
         .server
-        .fetch_dav_resources(
+        .fetch_groupware_resources(
             john_client.account_id,
             john_client.account_id,
             SyncCollection::Calendar,
@@ -705,7 +704,7 @@ pub async fn test(test: &TestServer) {
         .with_status(StatusCode::CREATED);
     let hidden_document_id = test
         .server
-        .fetch_dav_resources(
+        .fetch_groupware_resources(
             john_client.account_id,
             john_client.account_id,
             SyncCollection::Calendar,
@@ -809,8 +808,13 @@ pub async fn test(test: &TestServer) {
                         value,
                         "3.7;Invalid calendar user or insufficient permissions"
                     );
-                } else {
+                } else if account == "jdoe@example.com" {
                     assert_eq!(value, "2.0;Success");
+                } else {
+                    // inbuxa: 1.0 only answers free-busy for another user when
+                    // the requester can read that user's calendars (ReadItems or
+                    // read-free-busy); 0.16 answered for anyone.
+                    assert_eq!(value, "3.8;No authority", "for {account}");
                 }
             }
             "A:schedule-response.A:response.A:calendar-data" => {

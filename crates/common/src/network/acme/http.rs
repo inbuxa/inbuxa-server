@@ -2,40 +2,56 @@
  * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
+ *
+ * Modified by Coffey Labs in 2026 for INBUXA.
  */
 
 use crate::network::acme::{AcmeError, AcmeResult};
-use chrono::{DateTime, Utc};
+use compact_str::CompactString;
 use hyper::{
     Method, StatusCode,
     header::{CONTENT_TYPE, USER_AGENT},
 };
+use jiff::{Timestamp, fmt::rfc2822::DateTimeParser};
+use registry::schema::structs::AcmeProvider;
 use reqwest::Response;
 use std::time::Duration;
+use utils::{
+    HttpLimitResponse,
+    outbound::{OutboundClient, OutboundPolicy, Redirects},
+};
 
-#[allow(unused_mut)]
+const MAX_ERROR_BODY_LEN: usize = 512;
+const MAX_RESPONSE_LEN: usize = 1024 * 1024;
+const MAX_REDIRECTS: usize = 10;
+
+#[cfg_attr(not(feature = "enterprise"), allow(unused_variables))]
+pub(crate) fn acme_client(provider: &AcmeProvider) -> OutboundClient {
+    #[cfg(any(feature = "dev_mode", inbuxa_tests))]
+    let allow_invalid_certs = provider.directory.starts_with("https://localhost")
+        || provider.directory.starts_with("https://127.0.0.1");
+    #[cfg(not(any(feature = "dev_mode", inbuxa_tests)))]
+    let allow_invalid_certs = false;
+
+    #[cfg(not(feature = "enterprise"))]
+    let policy = OutboundPolicy::Trusted;
+
+    OutboundClient::new(
+        utils::http::http1_client_builder(allow_invalid_certs).timeout(Duration::from_secs(30)),
+        policy,
+        Redirects::Limited(MAX_REDIRECTS),
+    )
+}
+
 pub(crate) async fn https(
-    url: impl AsRef<str>,
+    client: &OutboundClient,
+    url: &str,
     method: Method,
     body: Option<String>,
-    max_retries: u32,
 ) -> AcmeResult<Response> {
-    let url = url.as_ref();
-
-    #[allow(unused_mut)]
-    #[allow(unused_assignments)]
-    let mut allow_invalid_certs = false;
-
-    #[cfg(any(feature = "dev_mode", feature = "test_mode"))]
-    {
-        allow_invalid_certs =
-            url.starts_with("https://localhost") || url.starts_with("https://127.0.0.1");
-    }
-
-    let mut request = utils::http::http1_client_builder(allow_invalid_certs)
-        .timeout(Duration::from_secs(30))
-        .build()?
+    let mut request = client
         .request(method, url)
+        .map_err(|err| AcmeError::Invalid(format!("Rejected ACME URL {url}: {err}")))?
         .header(USER_AGENT, crate::USER_AGENT);
 
     if let Some(body) = body {
@@ -55,20 +71,40 @@ pub(crate) async fn https(
 
         trc::event!(
             Acme(trc::AcmeEvent::RenewBackoff),
-            Url = url.to_string(),
+            Url = CompactString::from(url),
             Code = response.status().as_u16(),
             Elapsed = wait.unwrap_or_default(),
         );
 
-        Err(AcmeError::Backoff { wait, max_retries })
+        Err(AcmeError::Backoff { wait })
     } else {
         let status = response.status();
-        let text = response.text().await.unwrap_or_default();
+        let text = read_body_prefix(response).await;
         Err(AcmeError::HttpStatus(format!(
             "Unexpected status {}: {}",
             status, text
         )))
     }
+}
+
+pub(crate) async fn read_body(response: Response) -> AcmeResult<String> {
+    let body = response
+        .bytes_with_limit(MAX_RESPONSE_LEN)
+        .await?
+        .ok_or_else(|| AcmeError::Invalid("ACME response exceeds maximum size".to_string()))?;
+    String::from_utf8(body)
+        .map_err(|_| AcmeError::Invalid("ACME response is not valid UTF-8".to_string()))
+}
+
+async fn read_body_prefix(mut response: Response) -> String {
+    let mut prefix = Vec::with_capacity(MAX_ERROR_BODY_LEN);
+    while prefix.len() < MAX_ERROR_BODY_LEN
+        && let Ok(Some(chunk)) = response.chunk().await
+    {
+        let remaining = MAX_ERROR_BODY_LEN - prefix.len();
+        prefix.extend_from_slice(chunk.get(..remaining).unwrap_or(&chunk));
+    }
+    String::from_utf8_lossy(&prefix).into_owned()
 }
 
 pub(crate) fn get_header(response: &Response, header: &'static str) -> AcmeResult<String> {
@@ -118,83 +154,20 @@ fn alternate_links<'a>(values: impl Iterator<Item = &'a str>) -> Vec<String> {
 }
 
 pub(crate) fn parse_retry_after(response: &Response) -> Option<Duration> {
-    let value = response.headers().get("Retry-After")?.to_str().ok()?;
+    retry_after(
+        response.headers().get("Retry-After")?.to_str().ok()?,
+        Timestamp::now(),
+    )
+}
+
+fn retry_after(value: &str, now: Timestamp) -> Option<Duration> {
     if let Ok(secs) = value.parse::<u64>() {
         Some(Duration::from_secs(secs + 1))
-    } else if let Ok(dt) = DateTime::parse_from_rfc2822(value) {
-        Utc::now()
-            .signed_duration_since(dt.with_timezone(&Utc))
-            .to_std()
-            .map(|dur| dur + Duration::from_secs(1))
-            .ok()
     } else {
-        None
+        let retry_at = DateTimeParser::new().parse_timestamp(value).ok()?;
+        Duration::try_from(retry_at.duration_since(now))
+            .ok()
+            .map(|delay| delay + Duration::from_secs(1))
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::alternate_links;
-
-    #[test]
-    fn parses_single_alternate_link() {
-        let links =
-            alternate_links([r#"<https://acme.example/cert/1/1>;rel="alternate""#].into_iter());
-        assert_eq!(links, vec!["https://acme.example/cert/1/1".to_string()]);
-    }
-
-    #[test]
-    fn parses_multiple_alternates_in_one_header() {
-        let links = alternate_links(
-            [r#"<https://acme.example/cert/1/1>;rel="alternate", <https://acme.example/cert/1/2>;rel="alternate""#]
-                .into_iter(),
-        );
-        assert_eq!(
-            links,
-            vec![
-                "https://acme.example/cert/1/1".to_string(),
-                "https://acme.example/cert/1/2".to_string(),
-            ]
-        );
-    }
-
-    #[test]
-    fn parses_alternates_across_multiple_headers() {
-        let links = alternate_links(
-            [
-                r#"<https://acme.example/cert/1/1>;rel="alternate""#,
-                r#"<https://acme.example/cert/1/2>;rel="alternate""#,
-            ]
-            .into_iter(),
-        );
-        assert_eq!(
-            links,
-            vec![
-                "https://acme.example/cert/1/1".to_string(),
-                "https://acme.example/cert/1/2".to_string(),
-            ]
-        );
-    }
-
-    #[test]
-    fn ignores_non_alternate_relations() {
-        let links = alternate_links(
-            [r#"<https://acme.example/index>;rel="index", <https://acme.example/cert/1/1>;rel="alternate""#]
-                .into_iter(),
-        );
-        assert_eq!(links, vec!["https://acme.example/cert/1/1".to_string()]);
-    }
-
-    #[test]
-    fn tolerates_unquoted_rel_and_extra_whitespace() {
-        let links =
-            alternate_links([r#" <https://acme.example/cert/1/1> ; rel=alternate "#].into_iter());
-        assert_eq!(links, vec!["https://acme.example/cert/1/1".to_string()]);
-    }
-
-    #[test]
-    fn returns_empty_when_no_alternates() {
-        let links = alternate_links([r#"<https://acme.example/dir>;rel="index""#].into_iter());
-        assert!(links.is_empty());
-    }
-}

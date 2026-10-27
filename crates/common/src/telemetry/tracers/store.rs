@@ -9,16 +9,13 @@
 //! attempt, and writes it once, when the span closes, as an `x:Trace` in the
 //! registry's own encoding under `TelemetryClass::Span(span_id)`.
 
-use crate::telemetry::tracers::TraceEvents;
+use crate::{config::telemetry::StoreTracer, telemetry::tracers::TraceEvents};
 use ahash::AHashMap;
 use registry::{
     pickle::PickledStream,
     schema::{
         prelude::{ObjectInner, ObjectType},
-        structs::{
-            Task, TaskIndexTrace, TaskStatus, Trace, TraceKeyValue, TraceValue,
-            TraceValueString, TraceValueUnsignedInt,
-        },
+        structs::{Trace, TraceKeyValue, TraceValue, TraceValueString, TraceValueUnsignedInt},
     },
 };
 use std::{future::Future, sync::Arc, time::Duration};
@@ -62,13 +59,23 @@ impl TracingStore for Store {
         .await
         .caused_by(trc::location!())?;
         if let Some(search) = search {
-            search
-                .unindex(
-                    SearchQuery::new(SearchIndex::Tracing)
-                        .with_filter(SearchFilter::lt(store::search::SearchField::Id, until)),
-                )
-                .await
-                .caused_by(trc::location!())?;
+            if let Some(internal) = search.internal_fts() {
+                // The built-in index (1.0) has no query-based unindex; it
+                // drops traces in whole id buckets before the cutoff.
+                internal
+                    .unindex_traces(until)
+                    .await
+                    .caused_by(trc::location!())?;
+            } else {
+                search
+                    .unindex(
+                        SearchQuery::new(SearchIndex::Tracing).with_filter(
+                            SearchFilter::integer_lt(store::search::SearchField::Id, until),
+                        ),
+                    )
+                    .await
+                    .caused_by(trc::location!())?;
+            }
         }
         Ok(())
     }
@@ -79,7 +86,7 @@ pub fn decode_trace(bytes: &[u8]) -> Option<Trace> {
     PickledStream::new(bytes)
         .and_then(|mut stream| ObjectInner::unpickle(ObjectType::Trace, &mut stream))
         .and_then(|inner| match inner {
-            ObjectInner::Trace(trace) => Some(trace),
+            ObjectInner::Trace(trace) => Some(*trace),
             _ => None,
         })
 }
@@ -151,8 +158,13 @@ fn build_trace(span: &Span) -> Trace {
 /// Starts the subscriber that stores traces in `tracing`, scheduling their
 /// indexing in `data` (MON-16). Lossy: a slow store loses history, never
 /// delays mail (MON-34, MON-35).
-pub(crate) fn spawn_store_tracer(builder: SubscriberBuilder, tracing: Store, data: Store) {
-    let (_, mut rx) = builder.register();
+pub(crate) fn spawn_store_tracer(builder: SubscriberBuilder, settings: StoreTracer) {
+    let StoreTracer {
+        tracing,
+        data,
+        index_tx,
+    } = settings;
+    let (_, mut rx, _) = builder.register();
     tokio::spawn(async move {
         let mut spans: AHashMap<u64, Span> = AHashMap::new();
         while let Some(events) = rx.recv().await {
@@ -204,17 +216,16 @@ pub(crate) fn spawn_store_tracer(builder: SubscriberBuilder, tracing: Store, dat
                 for (span_id, span) in &closed {
                     batch.set(
                         ValueClass::Telemetry(TelemetryClass::Span(*span_id)),
-                        ObjectInner::Trace(build_trace(span)).to_pickled_vec(),
+                        ObjectInner::Trace(Box::new(build_trace(span))).to_pickled_vec(),
                     );
-                    tasks.schedule_task(Task::IndexTrace(TaskIndexTrace {
-                        trace_id: (*span_id).into(),
-                        status: TaskStatus::now(),
-                    }));
+                    tasks.queue_trace_index(*span_id);
                 }
-                if let Err(err) = tracing.write(batch.build_all()).await {
+                if let Err(err) = tracing.write_batch(&mut batch).await {
                     trc::error!(err.details("Failed to store trace history"));
-                } else if let Err(err) = data.write(tasks.build_all()).await {
+                } else if let Err(err) = data.write_batch(&mut tasks).await {
                     trc::error!(err.details("Failed to schedule trace indexing"));
+                } else {
+                    index_tx.notify();
                 }
             }
 

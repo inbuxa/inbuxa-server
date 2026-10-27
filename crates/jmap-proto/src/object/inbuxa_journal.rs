@@ -78,20 +78,21 @@ impl Property for JournalProperty {
 
 impl JournalProperty {
     fn parse(value: &str) -> Option<Self> {
-        hashify::tiny_map!(value.as_bytes(),
-            b"id" => JournalProperty::Id,
-            b"name" => JournalProperty::Name,
-            b"description" => JournalProperty::Description,
-            b"enabled" => JournalProperty::Enabled,
-            b"direction" => JournalProperty::Direction,
-            b"scope" => JournalProperty::Scope,
-            b"retentionDays" => JournalProperty::RetentionDays,
-            b"builtIn" => JournalProperty::BuiltIn,
-            b"archiveAddress" => JournalProperty::ArchiveAddress,
-            b"archiveFailures" => JournalProperty::ArchiveFailures,
-            b"createdBy" => JournalProperty::CreatedBy,
-            b"createdAt" => JournalProperty::CreatedAt,
-            b"updatedAt" => JournalProperty::UpdatedAt,
+        hashify::fnc_map!(value.as_bytes(),
+            b"id" => Some(JournalProperty::Id),
+            b"name" => Some(JournalProperty::Name),
+            b"description" => Some(JournalProperty::Description),
+            b"enabled" => Some(JournalProperty::Enabled),
+            b"direction" => Some(JournalProperty::Direction),
+            b"scope" => Some(JournalProperty::Scope),
+            b"retentionDays" => Some(JournalProperty::RetentionDays),
+            b"builtIn" => Some(JournalProperty::BuiltIn),
+            b"archiveAddress" => Some(JournalProperty::ArchiveAddress),
+            b"archiveFailures" => Some(JournalProperty::ArchiveFailures),
+            b"createdBy" => Some(JournalProperty::CreatedBy),
+            b"createdAt" => Some(JournalProperty::CreatedAt),
+            b"updatedAt" => Some(JournalProperty::UpdatedAt),
+            _ => None,
         )
     }
 }

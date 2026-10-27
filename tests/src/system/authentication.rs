@@ -2,6 +2,8 @@
  * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
+ *
+ * Modified by Coffey Labs in 2026 for INBUXA.
  */
 
 use crate::utils::{jmap::JmapUtils, server::TestServer};
@@ -9,7 +11,7 @@ use common::auth::credential::{ApiKey, AppPassword};
 use jmap_proto::error::set::SetErrorType;
 use registry::{
     schema::{
-        enums::StorageQuota,
+        enums::{ClientIpSource, StorageQuota},
         prelude::{ObjectType, Property},
         structs::{
             self, Account, Credential, Http, PasswordCredential, SecondaryCredential, UserAccount,
@@ -32,10 +34,10 @@ pub async fn test(test: &TestServer) {
     admin
         .registry_update_setting(
             Http {
-                use_x_forwarded: true,
+                client_ip_source: ClientIpSource::XForwardedFor,
                 ..Default::default()
             },
-            &[Property::UseXForwarded],
+            &[Property::ClientIpSource],
         )
         .await;
     admin.reload_settings().await;
@@ -354,10 +356,10 @@ pub async fn test(test: &TestServer) {
     admin
         .registry_update_setting(
             Http {
-                use_x_forwarded: false,
+                client_ip_source: ClientIpSource::Peer,
                 ..Default::default()
             },
-            &[Property::UseXForwarded],
+            &[Property::ClientIpSource],
         )
         .await;
     admin.reload_settings().await;
@@ -380,8 +382,8 @@ pub async fn validate_password_with_ip(
         .build()
         .unwrap()
         .get("https://127.0.0.1:8899/.well-known/jmap")
-        .basic_auth(username, Some(password))
-        .header("X-Forwarded-For", remote_ip)
+        .basic_auth(username, Some(password));
+    let response = with_forwarded_for(response, remote_ip)
         .send()
         .await
         .unwrap();
@@ -408,8 +410,8 @@ pub async fn validate_token_with_ip(token: &str, remote_ip: &str, is_valid: bool
         .build()
         .unwrap()
         .get("https://127.0.0.1:8899/.well-known/jmap")
-        .bearer_auth(token)
-        .header("X-Forwarded-For", remote_ip)
+        .bearer_auth(token);
+    let response = with_forwarded_for(response, remote_ip)
         .send()
         .await
         .unwrap();
@@ -427,5 +429,22 @@ pub async fn validate_token_with_ip(token: &str, remote_ip: &str, is_valid: bool
             status,
             text
         );
+    }
+}
+
+// inbuxa: 1.0 answers 400 to a loopback address in X-Forwarded-For (a
+// spoofing guard) and takes the peer address when a loopback peer sends
+// no header, so a loopback client IP is sent as a plain request.
+fn with_forwarded_for(
+    request: reqwest::RequestBuilder,
+    remote_ip: &str,
+) -> reqwest::RequestBuilder {
+    if remote_ip
+        .parse::<std::net::IpAddr>()
+        .is_ok_and(|ip| ip.is_loopback())
+    {
+        request
+    } else {
+        request.header("X-Forwarded-For", remote_ip)
     }
 }

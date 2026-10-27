@@ -85,7 +85,7 @@ pub async fn test(test: &mut TestServer) {
         serde_json::to_vec(&json!({"fromName": "Moved sender"})).unwrap(),
     );
     batch.set(any(b"Sr".to_vec()), b"3.0.2+2".to_vec());
-    test.server.store().write(batch.build_all()).await.unwrap();
+    test.server.store().write_batch(&mut batch).await.unwrap();
     let list = reports(admin).await;
     assert!(
         list.iter().any(|r| r["name"] == "Weekly digest (moved)"),
@@ -335,7 +335,7 @@ pub async fn test(test: &mut TestServer) {
     admin
         .registry_create_object(Domain {
             name: "reports.example.org".to_string(),
-            is_enabled: true,
+            enable: true,
             member_tenant_id: Some(tenant),
             certificate_management: CertificateManagement::Manual,
             dns_management: DnsManagement::Manual,

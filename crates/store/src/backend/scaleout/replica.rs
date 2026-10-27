@@ -13,10 +13,10 @@
 //! replica is answered from the primary (ST-8, ST-12).
 
 use crate::{
-    InMemoryStore, SUBSPACE_ACL, SUBSPACE_BLOB_LINK, SUBSPACE_BLOBS, SUBSPACE_COUNTER,
-    SUBSPACE_INDEXES, SUBSPACE_LOGS, SUBSPACE_PROPERTY, SUBSPACE_SEARCH_INDEX, Store, ValueKey,
-    write::{AssignedId, AssignedIds, ValueClass},
+    InMemoryStore, Store, Subspace, ValueKey,
+    write::{AssignedIds, ValueClass},
 };
+use types::collection::{ChangeGroup, SyncCollection};
 use ahash::AHashMap;
 use std::{
     future::Future,
@@ -114,8 +114,8 @@ pub struct ReplicatedStore {
     pub kind: ReplicaKind,
     next: AtomicUsize,
     /// The highest change id this node has written or heard of, per account
-    /// (ST-7).
-    marks: Mutex<AHashMap<u32, u64>>,
+    /// and change group: 1.0 counts change ids per group (ST-7).
+    marks: Mutex<AHashMap<(u32, ChangeGroup), u64>>,
     /// Shared marks, when more than one node runs (ST-7, step 2).
     shared: OnceLock<InMemoryStore>,
 }
@@ -123,26 +123,29 @@ pub struct ReplicatedStore {
 /// Account data a replica may serve. Everything else (the registry,
 /// in-memory values, the task queue, telemetry, the fork's own records)
 /// is always read from the primary (ST-5).
-pub fn is_replica_subspace(subspace: u8) -> bool {
+pub fn is_replica_subspace(subspace: Subspace) -> bool {
     matches!(
         subspace,
-        SUBSPACE_PROPERTY
-            | SUBSPACE_INDEXES
-            | SUBSPACE_LOGS
-            | SUBSPACE_COUNTER
-            | SUBSPACE_ACL
-            | SUBSPACE_BLOB_LINK
-            | SUBSPACE_BLOBS
-            | SUBSPACE_SEARCH_INDEX
+        Subspace::Property
+            | Subspace::Immutable
+            | Subspace::IndexProperty
+            | Subspace::Indexes
+            | Subspace::Logs
+            | Subspace::Counter
+            | Subspace::Acl
+            | Subspace::BlobLink
+            | Subspace::Blobs
+            | Subspace::SearchTerm
+            | Subspace::SearchDocument
     )
 }
 
-/// A read scope: the accounts whose data it reads, each with any change id
-/// the client presented (ST-7, step 4), and the replica it settled on.
+/// A read scope: the accounts whose data it reads, any change id the client
+/// presented (ST-7, step 4), and the replica it settled on.
 pub struct ReadScope {
-    accounts: Vec<(u32, u64)>,
+    accounts: Vec<u32>,
     /// Change ids the client presented during the scope (ST-7, step 4).
-    presented: Mutex<Vec<(u32, u64)>>,
+    presented: Mutex<Vec<(u32, ChangeGroup, u64)>>,
     choice: tokio::sync::OnceCell<Option<usize>>,
     /// Set by any write made inside the scope: from then on it reads from
     /// the primary (ST-6: a read in a request that writes).
@@ -151,13 +154,14 @@ pub struct ReadScope {
 
 /// A state the client presented raises the mark a replica must have
 /// reached before it may answer this scope (ST-7, step 4).
-pub fn present_change(account_id: u32, change_id: u64) {
+pub fn present_change(account_id: u32, group: impl Into<ChangeGroup>, change_id: u64) {
+    let group = group.into();
     let _ = READ_SCOPE.try_with(|scope| {
         scope
             .presented
             .lock()
             .unwrap()
-            .push((account_id, change_id))
+            .push((account_id, group, change_id))
     });
 }
 
@@ -171,10 +175,10 @@ tokio::task_local! {
     static READ_SCOPE: Arc<ReadScope>;
 }
 
-/// Runs `fut` with replica-eligible reads for `accounts`: `(account, the
-/// change id the client presented, or 0)` (ST-6).
+/// Runs `fut` with replica-eligible reads for `accounts` (ST-6). A state the
+/// client presents goes in with [`present_change`], inside `fut`.
 pub async fn replica_read<F: Future>(
-    accounts: impl IntoIterator<Item = (u32, u64)>,
+    accounts: impl IntoIterator<Item = u32>,
     fut: F,
 ) -> F::Output {
     READ_SCOPE
@@ -203,13 +207,31 @@ pub fn carry<F: Future>(fut: F) -> impl Future<Output = F::Output> {
 }
 
 #[allow(dead_code)] // used with a PostgreSQL or MySQL backend
-fn change_id_key(account_id: u32) -> ValueKey<ValueClass> {
+fn change_id_key(account_id: u32, group: ChangeGroup) -> ValueKey<ValueClass> {
     ValueKey {
         account_id,
         collection: 0,
         document_id: 0,
-        class: ValueClass::ChangeId,
+        class: ValueClass::ChangeId(group),
     }
+}
+
+/// Every change group a client can hold a state for.
+fn all_groups() -> impl Iterator<Item = ChangeGroup> {
+    [
+        SyncCollection::Email,
+        SyncCollection::Thread,
+        SyncCollection::Calendar,
+        SyncCollection::AddressBook,
+        SyncCollection::FileNode,
+        SyncCollection::Identity,
+        SyncCollection::EmailSubmission,
+        SyncCollection::SieveScript,
+        SyncCollection::CalendarEventNotification,
+        SyncCollection::ShareNotification,
+    ]
+    .into_iter()
+    .map(ChangeGroup::from)
 }
 
 impl ReplicatedStore {
@@ -239,16 +261,17 @@ impl ReplicatedStore {
     }
 
     #[allow(dead_code)] // used with the redis feature
-    fn shared_key(account_id: u32) -> Vec<u8> {
+    fn shared_key(account_id: u32, group: ChangeGroup) -> Vec<u8> {
         let mut key = b"_rm".to_vec();
         key.extend_from_slice(&account_id.to_be_bytes());
+        key.push(group.to_u8());
         key
     }
 
     /// Records a change this node made or heard of (ST-7, step 1).
-    pub fn note_change(&self, account_id: u32, change_id: u64) {
+    pub fn note_change(&self, account_id: u32, group: ChangeGroup, change_id: u64) {
         let mut marks = self.marks.lock().unwrap();
-        let mark = marks.entry(account_id).or_default();
+        let mark = marks.entry((account_id, group)).or_default();
         if change_id > *mark {
             *mark = change_id;
         }
@@ -258,18 +281,18 @@ impl ReplicatedStore {
     /// in the shared store before the write returns (ST-7, steps 1 and 2).
     pub async fn note_write(&self, ids: &AssignedIds) {
         let mut changes = Vec::new();
-        for id in &ids.ids {
-            if let AssignedId::ChangeId(change) = id {
-                self.note_change(change.account_id, change.change_id);
-                changes.push((change.account_id, change.change_id));
+        for counter in ids.change_counters() {
+            for change_id in ids.change_ids(counter.account_id, counter.group) {
+                self.note_change(counter.account_id, counter.group, change_id);
+                changes.push((counter.account_id, counter.group, change_id));
             }
         }
         #[cfg(feature = "redis")]
         if let Some(InMemoryStore::Redis(redis)) = self.shared.get() {
-            for (account_id, change_id) in changes {
+            for (account_id, group, change_id) in changes {
                 let _ = redis
                     .key_set(
-                        &Self::shared_key(account_id),
+                        &Self::shared_key(account_id, group),
                         change_id.to_string().as_bytes(),
                         Some(2 * LAG_LIMIT_MS / 1000),
                     )
@@ -280,18 +303,18 @@ impl ReplicatedStore {
         let _ = changes;
     }
 
-    async fn mark(&self, account_id: u32) -> u64 {
+    async fn mark(&self, account_id: u32, group: ChangeGroup) -> u64 {
         let local = self
             .marks
             .lock()
             .unwrap()
-            .get(&account_id)
+            .get(&(account_id, group))
             .copied()
             .unwrap_or_default();
         #[cfg(feature = "redis")]
         let shared = match self.shared.get() {
             Some(InMemoryStore::Redis(redis)) => redis
-                .key_get::<String>(&Self::shared_key(account_id))
+                .key_get::<String>(&Self::shared_key(account_id, group))
                 .await
                 .ok()
                 .flatten()
@@ -305,7 +328,7 @@ impl ReplicatedStore {
     }
 
     /// The replica the current scope reads from, if any (ST-7, ST-13).
-    pub async fn read_target(&self, subspace: u8) -> Option<usize> {
+    pub async fn read_target(&self, subspace: Subspace) -> Option<usize> {
         if !is_replica_subspace(subspace) {
             return None;
         }
@@ -326,28 +349,51 @@ impl ReplicatedStore {
                 continue;
             }
             let presented = scope.presented.lock().unwrap().clone();
-            for (account_id, from_request) in &scope.accounts {
-                let highest = presented
-                    .iter()
-                    .filter(|(id, _)| id == account_id)
-                    .map(|(_, change_id)| *change_id)
-                    .max()
-                    .unwrap_or_default();
-                let mark = self.mark(*account_id).await.max(*from_request).max(highest);
-                if mark == 0 {
-                    continue;
-                }
-                let seen: trc::Result<i64> = crate::sql_backend!(
-                    &replica.store,
-                    db => db.get_counter(change_id_key(*account_id)).await
+            for account_id in &scope.accounts {
+                // The groups with a mark: every group when marks are shared,
+                // since another node's writes are known only there
+                let mut groups = if self.shared.get().is_some() {
+                    all_groups().collect::<Vec<_>>()
+                } else {
+                    self.marks
+                        .lock()
+                        .unwrap()
+                        .keys()
+                        .filter(|(id, _)| id == account_id)
+                        .map(|(_, group)| *group)
+                        .collect::<Vec<_>>()
+                };
+                groups.extend(
+                    presented
+                        .iter()
+                        .filter(|(id, _, _)| id == account_id)
+                        .map(|(_, group, _)| *group),
                 );
-                match seen {
-                    Ok(seen) if seen as u64 >= mark => {}
-                    // Behind for this account: the primary answers (ST-7)
-                    Ok(_) => return None,
-                    Err(err) => {
-                        self.failed(index, err);
-                        continue 'replicas;
+                groups.sort_unstable();
+                groups.dedup();
+                for group in groups {
+                    let highest = presented
+                        .iter()
+                        .filter(|(id, g, _)| id == account_id && *g == group)
+                        .map(|(_, _, change_id)| *change_id)
+                        .max()
+                        .unwrap_or_default();
+                    let mark = self.mark(*account_id, group).await.max(highest);
+                    if mark == 0 {
+                        continue;
+                    }
+                    let seen: trc::Result<i64> = crate::sql_backend!(
+                        &replica.store,
+                        db => db.get_counter(change_id_key(*account_id, group)).await
+                    );
+                    match seen {
+                        Ok(seen) if seen as u64 >= mark => {}
+                        // Behind for this account: the primary answers (ST-7)
+                        Ok(_) => return None,
+                        Err(err) => {
+                            self.failed(index, err);
+                            continue 'replicas;
+                        }
                     }
                 }
             }
@@ -375,9 +421,9 @@ impl ReplicatedStore {
 impl Store {
     /// Records a change heard from another node (ST-7, step 1). Nothing to
     /// do without replicas.
-    pub fn note_change(&self, account_id: u32, change_id: u64) {
+    pub fn note_change(&self, account_id: u32, group: ChangeGroup, change_id: u64) {
         if let Store::Replicated(store) = self {
-            store.note_change(account_id, change_id);
+            store.note_change(account_id, group, change_id);
         }
     }
 

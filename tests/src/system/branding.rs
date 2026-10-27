@@ -20,7 +20,7 @@ use email::cache::MessageCacheFetch;
 use groupware::scheduling::{ItipField, ItipParticipant, ItipSummary, ItipTime, ItipValue};
 use hyper::StatusCode;
 use jmap_proto::error::set::SetErrorType;
-use mail_parser::{MessageParser, MimeHeaders};
+use mail_parser::MessageParser;
 use registry::types::EnumImpl;
 use registry::schema::{
     prelude::{Object, ObjectInner, ObjectType, Property},
@@ -30,7 +30,7 @@ use registry::schema::{
     },
 };
 use serde_json::json;
-use services::task_manager::imip::build_itip_template;
+use services::task_manager::tasks::imip::build_itip_template;
 use std::{str::FromStr, time::Duration};
 use store::{
     registry::write::{RegistryWrite, RegistryWriteResult},
@@ -162,10 +162,10 @@ pub async fn test(test: &mut TestServer) {
     admin
         .registry_update_setting(
             Enterprise {
-                logo_url: Some(png_url.clone()),
+                logo: Some(png_url.clone()),
                 ..Default::default()
             },
-            &[Property::LogoUrl],
+            &[Property::Logo],
         )
         .await;
     let answer = get(&admin, "/logo?domain=plain-brand.example.org", None).await;
@@ -313,20 +313,20 @@ pub async fn test(test: &mut TestServer) {
     // warning at each reload
     store_directly(
         test,
-        ObjectInner::CalendarScheduling(CalendarScheduling {
+        ObjectInner::CalendarScheduling(Box::new(CalendarScheduling {
             email_template: Some("RAW[{{!event_title}}]".to_string()),
             ..Default::default()
-        }),
+        })),
     )
     .await;
     let body = itip_html(test, &user, &itip_summaries()[0].1).await;
     assert!(body.contains("RAW[&lt;b&gt;x&lt;/b&gt;]"), "test 13: {body}");
     store_directly(
         test,
-        ObjectInner::CalendarScheduling(CalendarScheduling {
+        ObjectInner::CalendarScheduling(Box::new(CalendarScheduling {
             email_template: Some("{{#if header}}unclosed".to_string()),
             ..Default::default()
-        }),
+        })),
     )
     .await;
     let body = itip_html(test, &user, &itip_summaries()[0].1).await;
@@ -438,7 +438,7 @@ pub async fn test(test: &mut TestServer) {
 
     // Clean up
     admin
-        .registry_update_setting(Enterprise::default(), &[Property::LogoUrl])
+        .registry_update_setting(Enterprise::default(), &[Property::Logo])
         .await;
     admin
         .registry_update_setting(CalendarAlarm::default(), &[Property::Template])
@@ -614,19 +614,16 @@ async fn alarm_email(test: &TestServer, user: &Account) -> (String, Option<(Stri
     for _ in 0..40 {
         tokio::time::sleep(Duration::from_millis(250)).await;
         let messages = test.server.get_cached_messages(account_id).await.unwrap();
-        if let Some(message) = messages.emails.items.first() {
-            let raw = test.fetch_email(account_id, message.document_id).await;
+        if let Some(message) = messages.emails.iter().next() {
+            let raw = test.fetch_email(account_id, message.document_id()).await;
             let message = MessageParser::new().parse(&raw).unwrap();
-            let html = String::from_utf8(
-                message.html_bodies().next().unwrap().contents().to_vec(),
-            )
-            .unwrap();
+            let html = message.html_bodies().next().unwrap().into_owned();
             let logo = message.attachments().find(|part| part.content_id().is_some()).map(|part| {
                 (
                     part.content_type()
                         .map(|ct| format!("{}/{}", ct.ctype(), ct.subtype().unwrap_or_default()))
                         .unwrap_or_default(),
-                    part.contents().to_vec(),
+                    part.decoded().to_vec(),
                 )
             });
             return (html, logo);
@@ -779,7 +776,7 @@ impl Account {
     async fn brand_domain(&self, name: &str, tenant: Option<Id>) -> Id {
         self.registry_create_object(Domain {
             name: name.to_string(),
-            is_enabled: true,
+            enable: true,
             member_tenant_id: tenant,
             certificate_management: CertificateManagement::Manual,
             dns_management: DnsManagement::Manual,

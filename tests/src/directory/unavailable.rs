@@ -2,20 +2,26 @@
  * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
+ *
+ * Modified by Coffey Labs in 2026 for INBUXA.
  */
 
-use directory::{Credentials, Directory, UnavailableDirectory, backend::oidc::OpenIdDirectory};
-use registry::{
-    schema::{enums::DirectoryType, structs},
-    types::map::Map,
+use directory::{
+    Credentials, Directory, UnavailableDirectory, backend::oidc::OpenIdDirectory,
+    core::verifier::PasswordVerifier,
 };
-use std::time::{Duration, Instant};
+use registry::schema::{enums::DirectoryType, structs};
+use std::{
+    num::NonZeroUsize,
+    time::{Duration, Instant},
+};
 
 const DISCOVERY_RETRY_FOR: Duration = Duration::from_secs(30);
 
 pub async fn test() {
     println!("Running unavailable directory tests...");
 
+    let verifier = PasswordVerifier::new(NonZeroUsize::MIN);
     let started_at = Instant::now();
     let error = OpenIdDirectory::open(structs::OidcDirectory {
         description: "Unreachable OIDC directory".to_string(),
@@ -24,9 +30,8 @@ pub async fn test() {
         claim_name: None,
         claim_groups: None,
         username_domain: None,
-        require_audience: None,
-        require_scopes: Map::new(vec![]),
         member_tenant_id: None,
+        ..Default::default()
     })
     .await
     .expect_err("Discovery against an unreachable issuer must fail");
@@ -38,20 +43,26 @@ pub async fn test() {
 
     let oidc = Directory::Unavailable(UnavailableDirectory::new(DirectoryType::Oidc, error));
     assert!(
-        oidc.authenticate(&Credentials::Basic {
-            username: "john.doe@example.org".to_string(),
-            secret: "this is an OIDC password".to_string(),
-            mfa_token: None,
-        })
+        oidc.authenticate(
+            &Credentials::Basic {
+                username: "john.doe@example.org".to_string(),
+                secret: "this is an OIDC password".to_string(),
+                mfa_token: None,
+            },
+            &verifier
+        )
         .await
         .is_err(),
         "Password authentication must not fall back to internal credentials"
     );
     assert!(
-        oidc.authenticate(&Credentials::Bearer {
-            username: None,
-            token: "not a token".to_string(),
-        })
+        oidc.authenticate(
+            &Credentials::Bearer {
+                username: None,
+                token: "not a token".to_string(),
+            },
+            &verifier
+        )
         .await
         .is_err()
     );
@@ -64,11 +75,14 @@ pub async fn test() {
         "LDAP bind password is required when bind DN is set",
     ));
     assert!(
-        ldap.authenticate(&Credentials::Basic {
-            username: "john.doe@example.org".to_string(),
-            secret: "this is John's LDAP password".to_string(),
-            mfa_token: None,
-        })
+        ldap.authenticate(
+            &Credentials::Basic {
+                username: "john.doe@example.org".to_string(),
+                secret: "this is John's LDAP password".to_string(),
+                mfa_token: None,
+            },
+            &verifier
+        )
         .await
         .is_err()
     );

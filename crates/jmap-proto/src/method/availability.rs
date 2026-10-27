@@ -13,14 +13,14 @@ use crate::{
 };
 use calcard::jscalendar::{JSCalendar, JSCalendarProperty};
 use serde::{Deserialize, Deserializer, Serialize};
-use types::{blob::BlobId, id::Id};
+use types::{TimeRange, blob::BlobId, id::Id};
 
 #[derive(Debug, Clone, Default)]
 pub struct GetAvailabilityRequest {
     pub account_id: Id,
     pub id: Id,
-    pub utc_start: UTCDate,
-    pub utc_end: UTCDate,
+    pub utc_start: Option<UTCDate>,
+    pub utc_end: Option<UTCDate>,
     pub show_details: bool,
     pub event_properties: Option<Vec<MaybeInvalid<JSCalendarProperty<Id>>>>,
 }
@@ -38,14 +38,24 @@ pub struct BusyPeriod {
     pub utc_end: UTCDate,
     pub busy_status: Option<BusyStatus>,
     pub event: Option<JSCalendar<'static, Id, BlobId>>,
+    pub account_id: Option<Id>,
 }
 
-#[derive(Debug, Serialize, Clone, Copy, PartialOrd, Ord, PartialEq, Eq)]
+#[derive(Debug, Serialize, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 #[serde(rename_all = "lowercase")]
 pub enum BusyStatus {
-    Confirmed,
     Tentative,
     Unavailable,
+    Confirmed,
+}
+
+impl GetAvailabilityRequest {
+    pub fn time_range(&self) -> Option<TimeRange> {
+        let start = self.utc_start.as_ref().filter(|date| date.is_valid())?;
+        let end = self.utc_end.as_ref().filter(|date| date.is_valid())?;
+        Some(TimeRange::new(start.timestamp(), end.timestamp()))
+            .filter(|range| range.end > range.start)
+    }
 }
 
 impl<'de> DeserializeArguments<'de> for GetAvailabilityRequest {
@@ -89,3 +99,4 @@ impl<'de> Deserialize<'de> for GetAvailabilityRequest {
         deserialize_request(deserializer)
     }
 }
+

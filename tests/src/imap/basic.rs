@@ -7,9 +7,9 @@
  */
 
 use super::{AssertResult, ImapConnection, Type};
+use base64::{Engine, engine::general_purpose::STANDARD};
 use directory::Credentials;
 use imap_proto::ResponseType;
-use mail_parser::decoders::base64::base64_decode;
 
 pub async fn test(imap: &mut ImapConnection, _imap_check: &mut ImapConnection) {
     println!("Running basic tests...");
@@ -21,16 +21,17 @@ pub async fn test(imap: &mut ImapConnection, _imap_check: &mut ImapConnection) {
             username: Some("user@example.com".to_string()),
         },
         Credentials::decode_sasl_challenge_oauth(
-            &base64_decode(
-                concat!(
-                    "bixhPXVzZXJAZXhhbXBsZS5jb20sAWhv",
-                    "c3Q9c2VydmVyLmV4YW1wbGUuY29tAXBvcnQ9MTQzAWF1dGg9QmVhcmVyI",
-                    "HZGOWRmdDRxbVRjMk52YjNSbGNrQmhiSFJoZG1semRHRXVZMjl0Q2c9PQ",
-                    "EB"
+            &STANDARD
+                .decode(
+                    concat!(
+                        "bixhPXVzZXJAZXhhbXBsZS5jb20sAWhv",
+                        "c3Q9c2VydmVyLmV4YW1wbGUuY29tAXBvcnQ9MTQzAWF1dGg9QmVhcmVyI",
+                        "HZGOWRmdDRxbVRjMk52YjNSbGNrQmhiSFJoZG1semRHRXVZMjl0Q2c9PQ",
+                        "EB"
+                    )
+                    .as_bytes(),
                 )
-                .as_bytes(),
-            )
-            .unwrap(),
+                .unwrap(),
         )
         .unwrap()
     );

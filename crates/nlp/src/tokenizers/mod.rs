@@ -9,6 +9,7 @@ pub mod japanese;
 pub mod space;
 pub mod stream;
 pub mod types;
+mod unicode;
 pub mod word;
 
 use std::borrow::Cow;

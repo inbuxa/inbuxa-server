@@ -7,10 +7,10 @@
 use crate::InMemoryStore;
 use deadpool::{
     Runtime,
-    managed::{Manager, Pool},
+    managed::{Manager, Pool, QueueMode},
 };
 use redis::{
-    Client, ConnectionAddr, IntoConnectionInfo, ProtocolVersion, Script, TlsMode,
+    Client, ConnectionAddr, ConnectionInfo, IntoConnectionInfo, ProtocolVersion, Script, TlsMode,
     cluster::{ClusterClient, ClusterClientBuilder},
     cluster_read_routing::RandomReplicaStrategy,
     sentinel::{SentinelClient, SentinelClientBuilder, SentinelServerType},
@@ -24,10 +24,14 @@ use std::{fmt::Display, sync::Arc};
 pub mod lookup;
 pub mod pool;
 
+const CLUSTER_RESPONSE_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(500);
+
 #[derive(Debug)]
 pub struct RedisStore {
     pub pool: RedisPool,
     incr_expire: Script,
+    lease_renew: Script,
+    lease_release: Script,
 }
 
 pub struct RedisConnectionManager {
@@ -60,6 +64,18 @@ impl RedisStore {
                  redis.call('EXPIRE', KEYS[1], ARGV[2])
                  return redis.call('GET', KEYS[1])",
             ),
+            lease_renew: Script::new(
+                "if redis.call('GET', KEYS[1]) == ARGV[1] then
+                    return redis.call('EXPIRE', KEYS[1], ARGV[2])
+                 end
+                 return 0",
+            ),
+            lease_release: Script::new(
+                "if redis.call('GET', KEYS[1]) == ARGV[1] then
+                    return redis.call('DEL', KEYS[1])
+                 end
+                 return 0",
+            ),
         }
     }
 
@@ -67,9 +83,9 @@ impl RedisStore {
         Ok(InMemoryStore::Redis(Arc::new(RedisStore::new(
             RedisPool::Single(build_pool(
                 RedisConnectionManager {
-                    client: Client::open(config.url)
+                    client: Client::open(connection_info(config.url, config.allow_invalid_certs)?)
                         .map_err(|err| format!("Failed to open Redis client: {err:?}"))?,
-                    timeout: config.timeout.into_inner(),
+                    timeout: config.connect_timeout.into_inner(),
                 },
                 config.pool_max_connections,
                 config.pool_timeout_create,
@@ -80,7 +96,12 @@ impl RedisStore {
     }
 
     pub async fn open_cluster(config: structs::RedisClusterStore) -> Result<InMemoryStore, String> {
-        let mut builder = ClusterClientBuilder::new(config.urls);
+        let mut nodes = Vec::with_capacity(config.urls.len());
+        for url in config.urls {
+            nodes.push(connection_info(url, config.allow_invalid_certs)?);
+        }
+        let mut builder =
+            ClusterClientBuilder::new(nodes).response_timeout(CLUSTER_RESPONSE_TIMEOUT);
         if let Some(value) = config.auth_username {
             builder = builder.username(value);
         }
@@ -111,7 +132,7 @@ impl RedisStore {
             RedisPool::Cluster(build_pool(
                 RedisClusterConnectionManager {
                     client,
-                    timeout: config.timeout.into_inner(),
+                    timeout: config.connect_timeout.into_inner(),
                 },
                 config.pool_max_connections,
                 config.pool_timeout_create,
@@ -127,9 +148,7 @@ impl RedisStore {
         let mut sentinels = Vec::with_capacity(config.urls.len());
         let mut tls_mode = None;
         for url in config.urls {
-            let info = url
-                .into_connection_info()
-                .map_err(|err| format!("Invalid Redis Sentinel URL: {err}"))?;
+            let info = connection_info(url, config.allow_invalid_certs)?;
             let url_tls_mode = match info.addr() {
                 ConnectionAddr::TcpTls { insecure: true, .. } => Some(TlsMode::Insecure),
                 ConnectionAddr::TcpTls {
@@ -183,7 +202,7 @@ impl RedisStore {
             RedisPool::Sentinel(build_pool(
                 RedisSentinelConnectionManager {
                     client: tokio::sync::Mutex::new(client),
-                    timeout: config.timeout.into_inner(),
+                    timeout: config.connect_timeout.into_inner(),
                 },
                 config.pool_max_connections,
                 config.pool_timeout_create,
@@ -191,6 +210,20 @@ impl RedisStore {
                 config.pool_timeout_recycle,
             )?),
         ))))
+    }
+}
+
+fn connection_info(url: String, allow_invalid_certs: bool) -> Result<ConnectionInfo, String> {
+    let info = url
+        .into_connection_info()
+        .map_err(|err| format!("Invalid Redis URL: {err}"))?;
+    let mut addr = info.addr().clone();
+    match &mut addr {
+        ConnectionAddr::TcpTls { insecure, .. } if allow_invalid_certs && !*insecure => {
+            *insecure = true;
+            Ok(info.set_addr(addr))
+        }
+        _ => Ok(info),
     }
 }
 
@@ -203,6 +236,7 @@ fn build_pool<M: Manager>(
 ) -> Result<Pool<M>, String> {
     Pool::builder(manager)
         .runtime(Runtime::Tokio1)
+        .queue_mode(QueueMode::Lifo)
         .max_size(max_size as usize)
         .create_timeout(create_timeout.map(|v| v.into_inner()))
         .wait_timeout(wait_timeout.map(|v| v.into_inner()))

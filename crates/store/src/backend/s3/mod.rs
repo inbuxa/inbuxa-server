@@ -2,288 +2,199 @@
  * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
- *
- * Modified by Coffey Labs in 2026 for INBUXA.
  */
 
 use crate::BlobStore;
-use registry::schema::structs;
-use s3::{Bucket, Region, creds::Credentials};
-use std::{io::Write, ops::Range, sync::Arc, time::Duration};
-use utils::codec::base32_custom::Base32Writer;
+use encodify::base32::STALWART;
+use registry::schema::structs::{self, S3StoreRegion};
+use s3::{
+    Bucket, BucketConfig, Credentials, DeleteBatch, Endpoint, RetryPolicy, UrlStyle,
+    delete::MAX_DELETE_KEYS,
+};
+use std::{ops::Range, sync::Arc};
+use trc::StoreEvent;
+use utils::http::http1_client_builder;
 
 pub struct S3Store {
-    bucket: Box<Bucket>,
-    prefix: Option<String>,
-    max_retries: u32,
+    bucket: Bucket,
+    prefix: Option<Box<str>>,
     verify_after_write: bool,
 }
 
 impl S3Store {
     pub async fn open(config: structs::S3Store) -> Result<BlobStore, String> {
-        // Obtain region and endpoint from config
-        let region = match config.region {
-            structs::S3StoreRegion::UsEast1 => Region::UsEast1,
-            structs::S3StoreRegion::UsEast2 => Region::UsEast2,
-            structs::S3StoreRegion::UsWest1 => Region::UsWest1,
-            structs::S3StoreRegion::UsWest2 => Region::UsWest2,
-            structs::S3StoreRegion::CaCentral1 => Region::CaCentral1,
-            structs::S3StoreRegion::AfSouth1 => Region::Custom {
-                region: "af-south-1".into(),
-                endpoint: "s3.af-south-1.amazonaws.com".into(),
-            },
-            structs::S3StoreRegion::ApEast1 => Region::ApEast1,
-            structs::S3StoreRegion::ApSouth1 => Region::ApSouth1,
-            structs::S3StoreRegion::ApNortheast1 => Region::ApNortheast1,
-            structs::S3StoreRegion::ApNortheast2 => Region::ApNortheast2,
-            structs::S3StoreRegion::ApNortheast3 => Region::ApNortheast3,
-            structs::S3StoreRegion::ApSoutheast1 => Region::ApSoutheast1,
-            structs::S3StoreRegion::ApSoutheast2 => Region::ApSoutheast2,
-            structs::S3StoreRegion::CnNorth1 => Region::CnNorth1,
-            structs::S3StoreRegion::CnNorthwest1 => Region::CnNorthwest1,
-            structs::S3StoreRegion::EuNorth1 => Region::EuNorth1,
-            structs::S3StoreRegion::EuCentral1 => Region::EuCentral1,
-            structs::S3StoreRegion::EuCentral2 => Region::EuCentral2,
-            structs::S3StoreRegion::EuWest1 => Region::EuWest1,
-            structs::S3StoreRegion::EuWest2 => Region::EuWest2,
-            structs::S3StoreRegion::EuWest3 => Region::EuWest3,
-            structs::S3StoreRegion::IlCentral1 => Region::IlCentral1,
-            structs::S3StoreRegion::MeSouth1 => Region::MeSouth1,
-            structs::S3StoreRegion::SaEast1 => Region::SaEast1,
-            structs::S3StoreRegion::DoNyc3 => Region::DoNyc3,
-            structs::S3StoreRegion::DoAms3 => Region::DoAms3,
-            structs::S3StoreRegion::DoSgp1 => Region::DoSgp1,
-            structs::S3StoreRegion::DoFra1 => Region::DoFra1,
-            structs::S3StoreRegion::Yandex => Region::Yandex,
-            structs::S3StoreRegion::WaUsEast1 => Region::WaUsEast1,
-            structs::S3StoreRegion::WaUsEast2 => Region::WaUsEast2,
-            structs::S3StoreRegion::WaUsCentral1 => Region::WaUsCentral1,
-            structs::S3StoreRegion::WaUsWest1 => Region::WaUsWest1,
-            structs::S3StoreRegion::WaCaCentral1 => Region::WaCaCentral1,
-            structs::S3StoreRegion::WaEuCentral1 => Region::WaEuCentral1,
-            structs::S3StoreRegion::WaEuCentral2 => Region::WaEuCentral2,
-            structs::S3StoreRegion::WaEuWest1 => Region::WaEuWest1,
-            structs::S3StoreRegion::WaEuWest2 => Region::WaEuWest2,
-            structs::S3StoreRegion::WaApNortheast1 => Region::WaApNortheast1,
-            structs::S3StoreRegion::WaApNortheast2 => Region::WaApNortheast2,
-            structs::S3StoreRegion::WaApSoutheast1 => Region::WaApSoutheast1,
-            structs::S3StoreRegion::WaApSoutheast2 => Region::WaApSoutheast2,
-            structs::S3StoreRegion::Custom(custom) => Region::Custom {
-                region: custom.custom_region,
-                endpoint: custom.custom_endpoint,
-            },
-        };
-        let credentials = Credentials::new(
-            config.access_key.value().await?.as_deref(),
+        let (region, endpoint) = region_endpoint(&config.region);
+        let endpoint = Endpoint::parse(endpoint).map_err(|err| err.to_string())?;
+        let credentials = Credentials::resolve(
+            config.access_key_id.value().await?.as_deref(),
             config.secret_key.secret().await?.as_deref(),
-            config.security_token.secret().await?.as_deref(),
             config.session_token.secret().await?.as_deref(),
             config.profile.as_deref(),
         )
-        .map_err(|err| format!("Failed to create credentials: {err:?}"))?;
+        .map_err(|err| format!("Failed to create credentials: {err}"))?;
+        let http = http1_client_builder(config.allow_invalid_certs)
+            .timeout(config.timeout.into_inner())
+            .build()
+            .map_err(|err| format!("Failed to build the S3 HTTP client: {err}"))?;
+        let bucket = Bucket::new(
+            http,
+            BucketConfig {
+                endpoint,
+                bucket: &config.bucket,
+                region,
+                style: UrlStyle::Path,
+                credentials,
+                retry: RetryPolicy::new(u32::try_from(config.max_retries).unwrap_or(u32::MAX)),
+            },
+        )
+        .map_err(|err| format!("Failed to create bucket: {err}"))?;
 
         Ok(BlobStore::S3(Arc::new(S3Store {
-            bucket: Bucket::new(&config.bucket, region, credentials)
-                .map_err(|err| format!("Failed to create bucket: {err:?}"))?
-                .with_path_style()
-                .set_dangerous_config(config.allow_invalid_certs, config.allow_invalid_certs)
-                .map_err(|err| format!("Failed to create bucket: {err:?}"))?
-                .with_request_timeout(config.timeout.into_inner())
-                .map_err(|err| format!("Failed to create bucket: {err:?}"))?,
-            max_retries: config.max_retries as u32,
-            prefix: config.key_prefix,
+            bucket,
+            prefix: config.key_prefix.map(String::into_boxed_str),
             verify_after_write: config.verify_after_write,
         })))
     }
 
-    // inbuxa: upstream retried only a 5xx answer, so a dropped connection
-    // or a timeout on the way to the object store failed the read or write
-    // at once, and its first retry waited a whole second. A transport
-    // error and a 429 now retry the same way, and the waits start at
-    // 100 ms (100 ms, 200 ms, 400 ms ... capped at 5 s), so a Garage node
-    // restarting costs a request tenths of a second, not seconds.
-    async fn wait_before_retry(&self, retries_left: &mut u32) {
-        let attempt = self.max_retries - *retries_left;
-        *retries_left -= 1;
-        tokio::time::sleep(retry_wait(attempt)).await;
+    pub async fn get_blob(&self, key: &[u8], range: Range<usize>) -> trc::Result<Option<Vec<u8>>> {
+        let range = (range.start != 0 || range.end != usize::MAX)
+            .then(|| range.start as u64..u64::try_from(range.end).unwrap_or(u64::MAX));
+        self.bucket
+            .get_object(&self.build_key(key), range)
+            .await
+            .map(|body| body.map(Vec::from))
+            .map_err(into_error)
     }
 
-    pub(crate) async fn get_blob(
-        &self,
-        key: &[u8],
-        range: Range<usize>,
-    ) -> trc::Result<Option<Vec<u8>>> {
+    pub async fn put_blob(&self, key: &[u8], data: Vec<u8>) -> trc::Result<()> {
         let path = self.build_key(key);
-        let mut retries_left = self.max_retries;
-
-        loop {
-            let response = if range.start != 0 || range.end != usize::MAX {
-                self.bucket
-                    .get_object_range(
-                        &path,
-                        range.start as u64,
-                        Some(range.end.saturating_sub(1) as u64),
-                    )
-                    .await
-            } else {
-                self.bucket.get_object(&path).await
-            };
-            let response = match response {
-                Ok(response) => response,
-                Err(_) if retries_left > 0 => {
-                    self.wait_before_retry(&mut retries_left).await;
-                    continue;
-                }
-                Err(err) => return Err(into_error(err)),
-            };
-
-            match response.status_code() {
-                200..=299 => return Ok(Some(response.to_vec())),
-                404 => return Ok(None),
-                429 | 500..=599 if retries_left > 0 => {
-                    self.wait_before_retry(&mut retries_left).await;
-                }
-                code => {
-                    return Err(trc::StoreEvent::S3Error
-                        .reason(String::from_utf8_lossy(response.as_slice()))
-                        .ctx(trc::Key::Code, code));
-                }
-            }
+        let data = bytes::Bytes::from(data);
+        let sent_checksum = self.bucket.sends_checksum();
+        let result = if self.verify_after_write {
+            self.bucket.put_object_verified(&path, data).await
+        } else {
+            self.bucket.put_object(&path, data).await
+        };
+        if sent_checksum && !self.bucket.sends_checksum() {
+            trc::event!(
+                Store(StoreEvent::S3Error),
+                Reason = "The S3 service refused the x-amz-checksum-crc32c header; uploads continue with Content-MD5",
+            );
         }
+        result.map_err(into_error)
     }
 
-    pub(crate) async fn put_blob(&self, key: &[u8], data: &[u8]) -> trc::Result<()> {
-        let path = self.build_key(key);
-        let mut retries_left = self.max_retries;
-
-        loop {
-            let response = match self.bucket.put_object(&path, data).await {
-                Ok(response) => response,
-                Err(_) if retries_left > 0 => {
-                    self.wait_before_retry(&mut retries_left).await;
-                    continue;
-                }
-                Err(err) => return Err(into_error(err)),
-            };
-
-            match response.status_code() {
-                200..=299 => {
-                    if !self.verify_after_write {
-                        return Ok(());
-                    }
-
-                    // Some S3-compatible backends acknowledge a PUT before the
-                    // write is durable. HEAD the object to confirm it is visible
-                    // to the read path before reporting success.
-                    let head_status = match self.bucket.head_object(&path).await {
-                        Ok((_, head_status)) => head_status,
-                        Err(_) if retries_left > 0 => {
-                            self.wait_before_retry(&mut retries_left).await;
-                            continue;
-                        }
-                        Err(err) => return Err(into_error(err)),
-                    };
-
-                    match head_status {
-                        200..=299 => return Ok(()),
-                        404 | 429 | 500..=599 if retries_left > 0 => {
-                            self.wait_before_retry(&mut retries_left).await;
-                        }
-                        404 => {
-                            return Err(trc::StoreEvent::S3Error
-                                .reason(concat!(
-                                    "PUT acknowledged with 2xx but object not visible",
-                                    "to read path; backend may be silently losing writes"
-                                ))
-                                .ctx(trc::Key::Code, head_status));
-                        }
-                        code => {
-                            return Err(trc::StoreEvent::S3Error
-                                .reason("HEAD verification failed after PUT")
-                                .ctx(trc::Key::Code, code));
-                        }
-                    }
-                }
-                429 | 500..=599 if retries_left > 0 => {
-                    self.wait_before_retry(&mut retries_left).await;
-                }
-                code => {
-                    return Err(trc::StoreEvent::S3Error
-                        .reason(String::from_utf8_lossy(response.as_slice()))
-                        .ctx(trc::Key::Code, code));
-                }
-            }
-        }
+    pub async fn delete_blob(&self, key: &[u8]) -> trc::Result<bool> {
+        self.bucket
+            .delete_object(&self.build_key(key))
+            .await
+            .map_err(into_error)
     }
 
-    pub(crate) async fn delete_blob(&self, key: &[u8]) -> trc::Result<bool> {
-        let mut retries_left = self.max_retries;
-
-        loop {
-            let response = match self.bucket.delete_object(self.build_key(key)).await {
-                Ok(response) => response,
-                Err(_) if retries_left > 0 => {
-                    self.wait_before_retry(&mut retries_left).await;
-                    continue;
+    pub async fn delete_blobs(&self, keys: &[&[u8]]) -> trc::Result<()> {
+        if !self.bucket.supports_multi_delete() {
+            return self.delete_each(keys).await;
+        }
+        let key_len = self.key_len(keys.first().map_or(0, |key| key.len()));
+        let mut path = String::with_capacity(key_len);
+        for (index, chunk) in keys.chunks(MAX_DELETE_KEYS).enumerate() {
+            let mut batch = DeleteBatch::with_capacity(chunk.len(), key_len);
+            for key in chunk {
+                path.clear();
+                self.build_key_into(key, &mut path);
+                batch.push(&path).map_err(into_error)?;
+            }
+            match self.bucket.delete_objects(batch).await {
+                Ok(()) => {}
+                Err(err) if err.is_not_implemented() => {
+                    return self
+                        .delete_each(keys.get(index * MAX_DELETE_KEYS..).unwrap_or_default())
+                        .await;
                 }
                 Err(err) => return Err(into_error(err)),
-            };
-
-            match response.status_code() {
-                200..=299 => return Ok(true),
-                404 => return Ok(false),
-                429 | 500..=599 if retries_left > 0 => {
-                    self.wait_before_retry(&mut retries_left).await;
-                }
-                code => {
-                    return Err(trc::StoreEvent::S3Error
-                        .reason(String::from_utf8_lossy(response.as_slice()))
-                        .ctx(trc::Key::Code, code));
-                }
             }
         }
+        Ok(())
+    }
+
+    async fn delete_each(&self, keys: &[&[u8]]) -> trc::Result<()> {
+        for key in keys {
+            self.delete_blob(key).await?;
+        }
+        Ok(())
+    }
+
+    fn key_len(&self, key_len: usize) -> usize {
+        self.prefix.as_ref().map_or(0, |prefix| prefix.len()) + STALWART.encoded_len(key_len)
     }
 
     fn build_key(&self, key: &[u8]) -> String {
+        let mut out = String::with_capacity(self.key_len(key.len()));
+        self.build_key_into(key, &mut out);
+        out
+    }
+
+    fn build_key_into(&self, key: &[u8], out: &mut String) {
         if let Some(prefix) = &self.prefix {
-            let mut writer =
-                Base32Writer::with_raw_capacity(prefix.len() + (key.len().div_ceil(4) * 5));
-            writer.push_string(prefix);
-            writer.write_all(key).unwrap();
-            writer.finalize()
-        } else {
-            Base32Writer::from_bytes(key).finalize()
+            out.push_str(prefix);
         }
+        STALWART.encode_append(key, out);
     }
 }
 
-/// The wait before retry number `attempt` (0-based).
-fn retry_wait(attempt: u32) -> Duration {
-    Duration::from_millis(100 << attempt.min(6)).min(Duration::from_secs(5))
-}
-
-fn into_error(err: impl std::error::Error) -> trc::Error {
-    let mut reason = err.to_string();
-    let mut source = err.source();
-    while let Some(err) = source {
-        reason.push_str(": ");
-        reason.push_str(&err.to_string());
-        source = err.source();
+fn region_endpoint(region: &S3StoreRegion) -> (&str, &str) {
+    match region {
+        S3StoreRegion::UsEast1 => ("us-east-1", "s3.us-east-1.amazonaws.com"),
+        S3StoreRegion::UsEast2 => ("us-east-2", "s3.us-east-2.amazonaws.com"),
+        S3StoreRegion::UsWest1 => ("us-west-1", "s3.us-west-1.amazonaws.com"),
+        S3StoreRegion::UsWest2 => ("us-west-2", "s3.us-west-2.amazonaws.com"),
+        S3StoreRegion::CaCentral1 => ("ca-central-1", "s3.ca-central-1.amazonaws.com"),
+        S3StoreRegion::AfSouth1 => ("af-south-1", "s3.af-south-1.amazonaws.com"),
+        S3StoreRegion::ApEast1 => ("ap-east-1", "s3.ap-east-1.amazonaws.com"),
+        S3StoreRegion::ApSouth1 => ("ap-south-1", "s3.ap-south-1.amazonaws.com"),
+        S3StoreRegion::ApNortheast1 => ("ap-northeast-1", "s3.ap-northeast-1.amazonaws.com"),
+        S3StoreRegion::ApNortheast2 => ("ap-northeast-2", "s3.ap-northeast-2.amazonaws.com"),
+        S3StoreRegion::ApNortheast3 => ("ap-northeast-3", "s3.ap-northeast-3.amazonaws.com"),
+        S3StoreRegion::ApSoutheast1 => ("ap-southeast-1", "s3.ap-southeast-1.amazonaws.com"),
+        S3StoreRegion::ApSoutheast2 => ("ap-southeast-2", "s3.ap-southeast-2.amazonaws.com"),
+        S3StoreRegion::CnNorth1 => ("cn-north-1", "s3.cn-north-1.amazonaws.com.cn"),
+        S3StoreRegion::CnNorthwest1 => ("cn-northwest-1", "s3.cn-northwest-1.amazonaws.com.cn"),
+        S3StoreRegion::EuNorth1 => ("eu-north-1", "s3.eu-north-1.amazonaws.com"),
+        S3StoreRegion::EuCentral1 => ("eu-central-1", "s3.eu-central-1.amazonaws.com"),
+        S3StoreRegion::EuCentral2 => ("eu-central-2", "s3.eu-central-2.amazonaws.com"),
+        S3StoreRegion::EuWest1 => ("eu-west-1", "s3.eu-west-1.amazonaws.com"),
+        S3StoreRegion::EuWest2 => ("eu-west-2", "s3.eu-west-2.amazonaws.com"),
+        S3StoreRegion::EuWest3 => ("eu-west-3", "s3.eu-west-3.amazonaws.com"),
+        S3StoreRegion::IlCentral1 => ("il-central-1", "s3.il-central-1.amazonaws.com"),
+        S3StoreRegion::MeSouth1 => ("me-south-1", "s3.me-south-1.amazonaws.com"),
+        S3StoreRegion::SaEast1 => ("sa-east-1", "s3.sa-east-1.amazonaws.com"),
+        S3StoreRegion::DoNyc3 => ("nyc3", "nyc3.digitaloceanspaces.com"),
+        S3StoreRegion::DoAms3 => ("ams3", "ams3.digitaloceanspaces.com"),
+        S3StoreRegion::DoSgp1 => ("sgp1", "sgp1.digitaloceanspaces.com"),
+        S3StoreRegion::DoFra1 => ("fra1", "fra1.digitaloceanspaces.com"),
+        S3StoreRegion::Yandex => ("ru-central1", "storage.yandexcloud.net"),
+        S3StoreRegion::WaUsEast1 => ("us-east-1", "s3.us-east-1.wasabisys.com"),
+        S3StoreRegion::WaUsEast2 => ("us-east-2", "s3.us-east-2.wasabisys.com"),
+        S3StoreRegion::WaUsCentral1 => ("us-central-1", "s3.us-central-1.wasabisys.com"),
+        S3StoreRegion::WaUsWest1 => ("us-west-1", "s3.us-west-1.wasabisys.com"),
+        S3StoreRegion::WaCaCentral1 => ("ca-central-1", "s3.ca-central-1.wasabisys.com"),
+        S3StoreRegion::WaEuCentral1 => ("eu-central-1", "s3.eu-central-1.wasabisys.com"),
+        S3StoreRegion::WaEuCentral2 => ("eu-central-2", "s3.eu-central-2.wasabisys.com"),
+        S3StoreRegion::WaEuWest1 => ("eu-west-1", "s3.eu-west-1.wasabisys.com"),
+        S3StoreRegion::WaEuWest2 => ("eu-west-2", "s3.eu-west-2.wasabisys.com"),
+        S3StoreRegion::WaApNortheast1 => ("ap-northeast-1", "s3.ap-northeast-1.wasabisys.com"),
+        S3StoreRegion::WaApNortheast2 => ("ap-northeast-2", "s3.ap-northeast-2.wasabisys.com"),
+        S3StoreRegion::WaApSoutheast1 => ("ap-southeast-1", "s3.ap-southeast-1.wasabisys.com"),
+        S3StoreRegion::WaApSoutheast2 => ("ap-southeast-2", "s3.ap-southeast-2.wasabisys.com"),
+        S3StoreRegion::Custom(custom) => (&custom.region, &custom.url),
     }
-    trc::StoreEvent::S3Error.reason(reason)
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn retries_wait_from_a_tenth_of_a_second_to_five() {
-        assert_eq!(retry_wait(0), Duration::from_millis(100));
-        assert_eq!(retry_wait(1), Duration::from_millis(200));
-        assert_eq!(retry_wait(3), Duration::from_millis(800));
-        assert_eq!(retry_wait(5), Duration::from_millis(3200));
-        assert_eq!(retry_wait(6), Duration::from_secs(5));
-        assert_eq!(retry_wait(40), Duration::from_secs(5));
+fn into_error(err: s3::Error) -> trc::Error {
+    let error = StoreEvent::S3Error.reason(err.to_string());
+    match err.status() {
+        Some(status) => error.ctx(trc::Key::Code, status),
+        None => error,
     }
 }
+

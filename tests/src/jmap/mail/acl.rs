@@ -228,11 +228,21 @@ pub async fn test(test: &TestServer) {
         .unwrap()
         .unwrap()
         .take_blob_id();
-    assert_forbidden(
-        john_client
-            .set_default_account_id(john.id_string())
-            .blob_copy(jane.id_string(), &blob_id)
-            .await,
+    // inbuxa: 1.0's Blob/copy answers notFound for a blob the caller can't
+    // read, so it doesn't reveal that the blob exists
+    let result = john_client
+        .set_default_account_id(john.id_string())
+        .blob_copy(jane.id_string(), &blob_id)
+        .await;
+    assert!(
+        matches!(
+            result,
+            Err(jmap_client::Error::Set(SetError {
+                type_: SetErrorType::NotFound,
+                ..
+            }))
+        ),
+        "Expected notFound, got {result:?}"
     );
 
     // John only has ReadItems access to Inbox
@@ -771,11 +781,15 @@ pub async fn test(test: &TestServer) {
     test.assert_is_empty().await;
 }
 
+// inbuxa: 1.0 answers accountNotFound (RFC 8620 3.6.2) when the caller has
+// no access to the account at all, and forbidden when it can see the account
+// but not the item; both are a refusal
+#[track_caller]
 pub fn assert_forbidden<T: Debug>(result: Result<T, jmap_client::Error>) {
     if !matches!(
         result,
         Err(jmap_client::Error::Method(MethodError {
-            p_type: MethodErrorType::Forbidden
+            p_type: MethodErrorType::Forbidden | MethodErrorType::AccountNotFound
         })) | Err(jmap_client::Error::Set(SetError {
             type_: SetErrorType::BlobNotFound | SetErrorType::Forbidden,
             ..

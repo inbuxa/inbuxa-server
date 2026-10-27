@@ -11,15 +11,15 @@
 
 use crate::{cache::GroupwareCache, calendar::Calendar, contact::AddressBook, file::FileNode};
 use common::{
-    DavResourceMetadata, Server,
-    auth::AccountTenantIds,
+    GroupwareResourceMetadata, Server,
+    auth::ChangedBy,
     cache::invalidate::CacheInvalidationBuilder,
     ipc::CacheInvalidation,
 };
 use inbuxa_features::lock::{self, Lock, Replaced};
 use store::{
     ValueKey,
-    write::{AlignedBytes, Archive, BatchBuilder, now},
+    write::{Archive, ArchiveBytes, BatchBuilder, now},
 };
 use trc::AddContext;
 use types::collection::{Collection, SyncCollection};
@@ -33,8 +33,8 @@ pub const DAV_COLLECTIONS: [Collection; 3] = [
 
 /// Who a lock's grant changes are recorded as having been made by: the
 /// locked account itself, as the server acting for it.
-pub async fn changed_by(server: &Server, account_id: u32) -> AccountTenantIds {
-    AccountTenantIds {
+pub async fn changed_by(server: &Server, account_id: u32) -> ChangedBy {
+    ChangedBy {
         account_id,
         tenant_id: server.account(account_id).await.ok().and_then(|a| a.id_tenant),
     }
@@ -59,29 +59,35 @@ pub async fn apply_dav_grants(
         (SyncCollection::FileNode, Collection::FileNode),
     ] {
         let resources = server
-            .fetch_dav_resources(account_id, account_id, sync)
+            .fetch_groupware_resources(account_id, account_id, sync)
             .await
             .caused_by(trc::location!())?;
-        for resource in &resources.resources {
+        for resource in resources.resources.iter() {
             // A folder covers what's in it; a file outside any folder
             // needs its own grant
-            let top_level_file = matches!(
-                &resource.data,
-                DavResourceMetadata::File {
-                    parent_id: None,
-                    ..
+            let top_level_file = resource.file_flags().is_some() && resource.parent_id().is_none();
+            // 1.0's cache also counts notification inboxes as containers
+            let own_kind = match collection {
+                Collection::Calendar => {
+                    matches!(resource.resource.data, GroupwareResourceMetadata::Calendar { .. })
                 }
-            );
+                Collection::AddressBook => matches!(
+                    resource.resource.data,
+                    GroupwareResourceMetadata::AddressBook { .. }
+                ),
+                _ => resource.file_flags().is_some(),
+            };
+            if !own_kind {
+                continue;
+            }
             if !resource.is_container() && !top_level_file {
                 continue;
             }
-            let Some(current) = resource.acls() else {
-                continue;
-            };
+            let document_id = resource.document_id();
             let Some(acls) = lock::merge_grants(
-                current,
+                resource.acls(),
                 collection,
-                resource.document_id,
+                document_id,
                 false,
                 old,
                 new,
@@ -92,10 +98,10 @@ pub async fn apply_dav_grants(
             };
             let Some(archive) = server
                 .store()
-                .get_value::<Archive<AlignedBytes>>(ValueKey::archive(
+                .get_value::<Archive<ArchiveBytes>>(ValueKey::archive(
                     account_id,
                     collection,
-                    resource.document_id,
+                    document_id,
                 ))
                 .await
                 .caused_by(trc::location!())?
@@ -112,7 +118,7 @@ pub async fn apply_dav_grants(
                         .caused_by(trc::location!())?;
                     changed.acls = acls;
                     changed
-                        .update(changed_by, current, account_id, resource.document_id, batch)
+                        .update(changed_by, current, account_id, document_id, batch)
                         .caused_by(trc::location!())?;
                 }
                 Collection::AddressBook => {
@@ -124,7 +130,7 @@ pub async fn apply_dav_grants(
                         .caused_by(trc::location!())?;
                     changed.acls = acls;
                     changed
-                        .update(changed_by, current, account_id, resource.document_id, batch)
+                        .update(changed_by, current, account_id, document_id, batch)
                         .caused_by(trc::location!())?;
                 }
                 _ => {
@@ -140,7 +146,7 @@ pub async fn apply_dav_grants(
                             changed_by,
                             current,
                             account_id,
-                            resource.document_id,
+                            document_id,
                             false,
                             batch,
                         )

@@ -13,10 +13,10 @@ use crate::utils::server::TestServerBuilder;
 use common::Server;
 use registry::{
     schema::{
-        enums::{ClusterTaskType, IndexDocumentType},
+        enums::{ClusterTaskType, TaskSpamFilterMaintenanceType},
         structs::{
             ClusterListenerGroup, ClusterRole, ClusterTaskGroup, ClusterTaskGroupProperties, Task,
-            TaskDnsManagement, TaskIndexDocument, TaskStatus, TaskTlsReport,
+            TaskDnsManagement, TaskSpamFilterMaintenance, TaskStatus, TaskTlsReport,
         },
     },
     types::map::Map,
@@ -24,12 +24,14 @@ use registry::{
 use std::time::{Duration, Instant};
 use store::{
     ValueKey,
-    write::{BatchBuilder, TaskQueueClass, ValueClass},
+    write::{BatchBuilder, TaskId, TaskQueueClass, ValueClass},
 };
 use utils::snowflake::SnowflakeIdGenerator;
 
 const QUEUE_ROLE: &str = "tasks_queue";
-const INDEX_MTA_ROLE: &str = "tasks_index_mta";
+// inbuxa: 1.0 indexes through a queue, not tasks, so no task needs
+// searchIndexing; spam filter maintenance stands in as the role-gated task
+const SPAM_MTA_ROLE: &str = "tasks_spam_mta";
 
 #[tokio::test(flavor = "multi_thread")]
 pub async fn task_role_tests() {
@@ -52,9 +54,9 @@ pub async fn task_role_tests() {
         .with_object(role(QUEUE_ROLE, &[ClusterTaskType::TaskQueueProcessing]))
         .await
         .with_object(role(
-            INDEX_MTA_ROLE,
+            SPAM_MTA_ROLE,
             &[
-                ClusterTaskType::SearchIndexing,
+                ClusterTaskType::SpamClassifierTraining,
                 ClusterTaskType::OutboundMta,
             ],
         ))
@@ -75,11 +77,11 @@ pub async fn task_role_tests() {
     .await;
     let server_a = node_a.server.clone();
     let roles = &server_a.core.network.roles;
-    assert!(roles.task_manager && !roles.search_indexing && !roles.outbound_mta);
+    assert!(roles.task_manager && !roles.spam_training && !roles.outbound_mta);
 
-    // A DNS task (taskQueueProcessing), an unindex task (searchIndexing) and
+    // A DNS task (taskQueueProcessing), a spam filter task (spamClassifierTraining) and
     // a TLS report (outboundMta), all due now
-    let [dns, unindex, report] = new_task_ids();
+    let [dns, spam, report] = new_task_ids();
     let mut batch = BatchBuilder::new();
     batch
         .schedule_task_with_id(
@@ -90,11 +92,9 @@ pub async fn task_role_tests() {
             }),
         )
         .schedule_task_with_id(
-            unindex,
-            Task::UnindexDocument(TaskIndexDocument {
-                account_id: 0u32.into(),
-                document_id: u32::MAX.into(),
-                document_type: IndexDocumentType::File,
+            spam,
+            Task::SpamFilterMaintenance(TaskSpamFilterMaintenance {
+                maintenance_type: TaskSpamFilterMaintenanceType::Abort,
                 status: TaskStatus::now(),
             }),
         )
@@ -105,7 +105,7 @@ pub async fn task_role_tests() {
                 status: TaskStatus::now(),
             }),
         );
-    server_a.store().write(batch.build_all()).await.unwrap();
+    server_a.store().write_batch(&mut batch).await.unwrap();
     server_a.notify_task_queue();
 
     // Node A runs the DNS task and leaves the other two alone. Upstream ran
@@ -116,20 +116,20 @@ pub async fn task_role_tests() {
     server_a.notify_task_queue();
     tokio::time::sleep(Duration::from_secs(2)).await;
     assert!(
-        is_pending(&server_a, unindex).await,
-        "unindex ran on node A"
+        is_pending(&server_a, spam).await,
+        "spam filter task ran on node A"
     );
     assert!(
         is_pending(&server_a, report).await,
         "TLS report ran on node A"
     );
 
-    // Node B (search indexing and outbound MTA) comes up and picks up what
+    // Node B (spam classifier training and outbound MTA) comes up and picks up what
     // node A left
     let node_b = TestServerBuilder::new_with_role(
         "task_roles_b",
         "node-b.example.com".into(),
-        Some(INDEX_MTA_ROLE.into()),
+        Some(SPAM_MTA_ROLE.into()),
         false,
     )
     .await
@@ -137,9 +137,9 @@ pub async fn task_role_tests() {
     .await;
     let server_b = node_b.server.clone();
     let roles = &server_b.core.network.roles;
-    assert!(!roles.task_manager && roles.search_indexing && roles.outbound_mta);
+    assert!(!roles.task_manager && roles.spam_training && roles.outbound_mta);
     server_b.notify_task_queue();
-    wait_until_run(&server_b, &[unindex, report], Duration::from_secs(20)).await;
+    wait_until_run(&server_b, &[spam, report], Duration::from_secs(20)).await;
 
     // A queue task scheduled now still runs, on node A: node B may not
     // claim it
@@ -152,7 +152,7 @@ pub async fn task_role_tests() {
             ..Default::default()
         }),
     );
-    server_b.store().write(batch.build_all()).await.unwrap();
+    server_b.store().write_batch(&mut batch).await.unwrap();
     server_b.notify_task_queue();
     tokio::time::sleep(Duration::from_secs(3)).await;
     assert!(is_pending(&server_b, dns).await, "DNS task ran on node B");
@@ -187,7 +187,9 @@ async fn is_pending(server: &Server, id: u64) -> bool {
         server
             .store()
             .get_value::<Task>(ValueKey::from(ValueClass::TaskQueue(
-                TaskQueueClass::Task { id },
+                TaskQueueClass::Task {
+                    id: TaskId::Assigned(id),
+                },
             )))
             .await
             .unwrap()

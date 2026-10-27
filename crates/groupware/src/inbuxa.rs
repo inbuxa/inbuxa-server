@@ -13,10 +13,6 @@ use inbuxa_features::undelete::{
     data::Extra,
     groupware::{Kind, Note, note},
 };
-use registry::schema::{
-    enums::IndexDocumentType,
-    structs::{Task, TaskIndexDocument, TaskStatus},
-};
 use store::write::BatchBuilder;
 
 /// A file (not a folder) deleted for good.
@@ -26,17 +22,11 @@ pub fn note_file(
     document_id: u32,
     node: &FileNode,
 ) -> trc::Result<()> {
-    let Some(file) = &node.file else {
+    let Some(file) = node.file() else {
         return Ok(());
     };
-    // Files aren't search-indexed, so nothing else schedules the task that
-    // archives the note: schedule it here
-    batch.schedule_task(Task::UnindexDocument(TaskIndexDocument {
-        account_id: account_id.into(),
-        document_id: document_id.into(),
-        document_type: IndexDocumentType::File,
-        status: TaskStatus::now(),
-    }));
+    // 1.0 search-indexes files, so deleting one queues the unindex that
+    // archives the note
     note(
         batch,
         Kind::File,
@@ -57,12 +47,14 @@ pub fn note_file(
     )
 }
 
-/// A calendar event deleted for good.
+/// A calendar event deleted for good. `ical` is its content, which 1.0
+/// keeps apart from the event's record.
 pub fn note_event(
     batch: &mut BatchBuilder,
     account_id: u32,
     document_id: u32,
     event: &CalendarEvent,
+    ical: Option<String>,
 ) -> trc::Result<()> {
     note(
         batch,
@@ -72,7 +64,7 @@ pub fn note_event(
         Note {
             deleted_at: 0,
             created_at: event.created,
-            content: Some(event.data.event.to_string()),
+            content: ical,
             blob_hash: None,
             extra: Extra::CalendarEvent {
                 calendar_ids: event.names.iter().map(|n| n.parent_id).collect(),
@@ -82,12 +74,14 @@ pub fn note_event(
     )
 }
 
-/// A contact deleted for good.
+/// A contact deleted for good. `vcard` is its content, which 1.0 keeps
+/// apart from the card's record.
 pub fn note_card(
     batch: &mut BatchBuilder,
     account_id: u32,
     document_id: u32,
     card: &ContactCard,
+    vcard: Option<String>,
 ) -> trc::Result<()> {
     note(
         batch,
@@ -97,7 +91,7 @@ pub fn note_card(
         Note {
             deleted_at: 0,
             created_at: card.created,
-            content: Some(card.card.to_string()),
+            content: vcard,
             blob_hash: None,
             extra: Extra::ContactCard {
                 address_book_ids: card.names.iter().map(|n| n.parent_id).collect(),

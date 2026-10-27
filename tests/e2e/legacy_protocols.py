@@ -278,7 +278,7 @@ def tenant_checks(admin, admin_pw, account):
     t2 = created(one(admin, admin_pw, "x:Tenant/set", {"create": {"t": {"name": "legacy-t2"}}}),
                  "t", "second tenant")
     domain = created(one(admin, admin_pw, "x:Domain/set", {"create": {"d": {
-        "name": "t.legacy.test", "isEnabled": True, "memberTenantId": t,
+        "name": "t.legacy.test", "enable": True, "memberTenantId": t,
         "certificateManagement": {"@type": "Manual"}, "dnsManagement": {"@type": "Manual"},
         "dkimManagement": {"@type": "Manual"}}}}), "d", "tenant domain")
     user_pw = secret_file("legacy-tenant-user")
@@ -542,7 +542,7 @@ def main():
     got = one("admin", recovery, "x:Bootstrap/get", {"ids": None})
     singleton = got[1]["list"][0]["id"]
     res = one("admin", recovery, "x:Bootstrap/set", {"update": {singleton: {
-        "serverHostname": "mail.legacy.test", "defaultDomain": "legacy.test",
+        "defaultHostname": "mail.legacy.test", "defaultDomain": "legacy.test",
         "requestTlsCertificate": False}}})
     updated = res[1].get("updated", {}).get(singleton)
     check(bool(updated), "bootstrap completed")
@@ -667,7 +667,7 @@ def main():
     # test 4), and the refusal names the policy.
     res = one(admin, admin_pw, "x:NetworkListener/set", {"create": {"m": {
         "name": "imap-new", "protocol": "imap", "bind": {"0.0.0.0:1993": True},
-        "tlsImplicit": True}}})
+        "implicitTls": True}}})
     refused = (res[1].get("notCreated") or {}).get("m") or {}
     check(refused.get("type") == "invalidProperties"
           and "protocol" in (refused.get("properties") or [])

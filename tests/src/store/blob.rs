@@ -2,19 +2,21 @@
  * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
+ *
+ * Modified by Coffey Labs in 2026 for INBUXA.
  */
 
 use crate::utils::{cleanup::store_destroy, server::TestServerBuilder};
 use ahash::AHashMap;
-use email::message::metadata::MessageMetadata;
+use email::message::metadata::{MessageMetadata, MetadataRow};
 use registry::{
     schema::{enums::CompressionAlgo, structs::Jmap},
     types::duration::Duration,
 };
-use services::task_manager::destroy_account::destroy_account_blobs;
+use services::task_manager::tasks::destroy_account::destroy_account_blobs;
 use store::{
-    BlobStore, Serialize, SerializeInfallible,
-    write::{Archiver, BatchBuilder, BlobLink, BlobOp, ValueClass, now},
+    BlobStore, Store,
+    write::{BatchBuilder, BlobLink, BlobOp, ValueClass, blob::BlobLinkValue, now},
 };
 use types::{blob::BlobClass, blob_hash::BlobHash, collection::Collection, field::EmailField};
 
@@ -57,18 +59,13 @@ pub async fn blob_tests() {
     // Reserve blob
     let until = now() + 1;
     store
-        .write(
-            BatchBuilder::new()
-                .with_account_id(0)
-                .set(
-                    BlobOp::Link {
-                        to: BlobLink::Temporary { until },
-                        hash: hash.clone(),
-                    },
-                    1024u32.serialize(),
-                )
-                .build_all(),
-        )
+        .write_batch(BatchBuilder::new().with_account_id(0).set(
+            BlobOp::Link {
+                to: BlobLink::Temporary { until },
+                hash: hash.clone(),
+            },
+            BlobLinkValue::new(1024u32),
+        ))
         .await
         .unwrap();
 
@@ -83,11 +80,7 @@ pub async fn blob_tests() {
 
     // Commit blob
     store
-        .write(
-            BatchBuilder::new()
-                .set(BlobOp::Commit { hash: hash.clone() }, Vec::new())
-                .build_all(),
-        )
+        .write_batch(BatchBuilder::new().set(BlobOp::Commit { hash: hash.clone() }, Vec::new()))
         .await
         .unwrap();
 
@@ -103,30 +96,30 @@ pub async fn blob_tests() {
 
     // AccountId 0 should be able to read blob
     assert!(
-        store
-            .blob_has_access(
-                &hash,
-                BlobClass::Reserved {
-                    account_id: 0,
-                    expires: until
-                }
-            )
-            .await
-            .unwrap()
+        blob_has_access(
+            &store,
+            &hash,
+            BlobClass::Reserved {
+                account_id: 0,
+                expires: until
+            }
+        )
+        .await
+        .unwrap()
     );
 
     // AccountId 1 should not be able to read blob
     assert!(
-        !store
-            .blob_has_access(
-                &hash,
-                BlobClass::Reserved {
-                    account_id: 1,
-                    expires: until
-                }
-            )
-            .await
-            .unwrap()
+        !blob_has_access(
+            &store,
+            &hash,
+            BlobClass::Reserved {
+                account_id: 1,
+                expires: until
+            }
+        )
+        .await
+        .unwrap()
     );
 
     // Purge expired blobs
@@ -141,16 +134,16 @@ pub async fn blob_tests() {
 
     // AccountId 0 should not be able to read blob
     assert!(
-        !store
-            .blob_has_access(
-                &hash,
-                BlobClass::Reserved {
-                    account_id: 0,
-                    expires: until
-                }
-            )
-            .await
-            .unwrap()
+        !blob_has_access(
+            &store,
+            &hash,
+            BlobClass::Reserved {
+                account_id: 0,
+                expires: until
+            }
+        )
+        .await
+        .unwrap()
     );
 
     // Blob should no longer be in store
@@ -168,13 +161,13 @@ pub async fn blob_tests() {
         (b"efg", now() + 10),
         (b"hij", now() + 10),
     ]);
-    for (document_id, (blob, _)) in [
-        (b"123", vec![]),
-        (b"456", vec![]),
-        (b"789", vec![]),
-        (b"abc", 5000u32.serialize()),
-        (b"efg", 1000u32.serialize()),
-        (b"hij", 2000u32.serialize()),
+    for (document_id, (blob, link_value)) in [
+        (b"123", BlobLinkValue::new(3u32)),
+        (b"456", BlobLinkValue::new(3u32)),
+        (b"789", BlobLinkValue::new(3u32)),
+        (b"abc", BlobLinkValue::new(5000u32)),
+        (b"efg", BlobLinkValue::new(1000u32)),
+        (b"hij", BlobLinkValue::new(2000u32)),
     ]
     .into_iter()
     .enumerate()
@@ -191,7 +184,7 @@ pub async fn blob_tests() {
                     hash: hash.clone(),
                     to: BlobLink::Temporary { until: *until },
                 },
-                vec![],
+                link_value,
             );
         } else {
             batch
@@ -200,25 +193,24 @@ pub async fn blob_tests() {
                         hash: hash.clone(),
                         to: BlobLink::Document,
                     },
-                    vec![],
+                    link_value,
                 )
+                // inbuxa: 1.0 keeps message metadata as an immutable row
                 .set(
-                    ValueClass::Property(EmailField::Metadata.into()),
-                    Archiver::new(MessageMetadata {
-                        contents: Default::default(),
-                        rcvd_attach: Default::default(),
-                        blob_hash: hash.clone(),
-                        blob_body_offset: Default::default(),
-                        preview: Default::default(),
-                        raw_headers: Default::default(),
-                    })
-                    .serialize()
+                    ValueClass::Immutable(EmailField::Metadata.into()),
+                    MetadataRow::encode(
+                        MessageMetadata {
+                            blob_hash: hash.clone(),
+                            ..Default::default()
+                        },
+                        &[],
+                    )
                     .unwrap(),
                 );
         };
         batch.set(BlobOp::Commit { hash: hash.clone() }, vec![]);
 
-        store.write(batch.build_all()).await.unwrap();
+        store.write_batch(&mut batch).await.unwrap();
         blob_store
             .put_blob(hash.as_ref(), blob.as_slice(), CompressionAlgo::Lz4)
             .await
@@ -282,7 +274,7 @@ pub async fn blob_tests() {
     {
         let hash = BlobHash::generate(blob.as_slice());
         let ct = pos == 0;
-        assert!(store.blob_has_access(&hash, blob_class).await.unwrap() ^ ct);
+        assert!(blob_has_access(&store, &hash, blob_class).await.unwrap() ^ ct);
         assert!(store.blob_exists(&hash).await.unwrap() ^ ct);
         assert!(
             blob_store
@@ -296,22 +288,22 @@ pub async fn blob_tests() {
 
     // AccountId 0 should not have access to accountId 1's blobs
     assert!(
-        !store
-            .blob_has_access(
-                BlobHash::generate(b"123".as_slice()),
-                BlobClass::Linked {
-                    account_id: 0,
-                    collection: 0,
-                    document_id: 0,
-                }
-            )
-            .await
-            .unwrap()
+        !blob_has_access(
+            &store,
+            BlobHash::generate(b"123".as_slice()),
+            BlobClass::Linked {
+                account_id: 0,
+                collection: 0,
+                document_id: 0,
+            }
+        )
+        .await
+        .unwrap()
     );
 
     // Unlink blob
     store
-        .write(
+        .write_batch(
             BatchBuilder::new()
                 .with_account_id(0)
                 .with_collection(Collection::Email)
@@ -319,8 +311,7 @@ pub async fn blob_tests() {
                 .clear(BlobOp::Link {
                     hash: BlobHash::generate(b"789".as_slice()),
                     to: BlobLink::Document,
-                })
-                .build_all(),
+                }),
         )
         .await
         .unwrap();
@@ -375,7 +366,7 @@ pub async fn blob_tests() {
     {
         let ct = pos == 0;
         let hash = BlobHash::generate(blob.as_slice());
-        assert!(store.blob_has_access(&hash, blob_class).await.unwrap() ^ ct);
+        assert!(blob_has_access(&store, &hash, blob_class).await.unwrap() ^ ct);
         assert!(store.blob_exists(&hash).await.unwrap() ^ ct);
         assert!(
             blob_store
@@ -432,7 +423,7 @@ pub async fn blob_tests() {
     {
         let ct = pos == 0;
         let hash = BlobHash::generate(blob.as_slice());
-        assert!(store.blob_has_access(&hash, blob_class).await.unwrap() ^ ct);
+        assert!(blob_has_access(&store, &hash, blob_class).await.unwrap() ^ ct);
         assert!(store.blob_exists(&hash).await.unwrap() ^ ct);
         assert!(
             blob_store
@@ -530,4 +521,16 @@ async fn test_store(store: BlobStore) {
             .unwrap()
             .is_none()
     );
+}
+
+// inbuxa: 1.0 reads a link's size; a link that is there grants access
+async fn blob_has_access(
+    store: &Store,
+    hash: impl AsRef<BlobHash>,
+    class: BlobClass,
+) -> trc::Result<bool> {
+    store
+        .blob_link_size(hash.as_ref(), &class)
+        .await
+        .map(|size| size.is_some())
 }

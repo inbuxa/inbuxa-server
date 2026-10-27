@@ -11,7 +11,7 @@
 
 use base64::{Engine, engine::general_purpose::STANDARD};
 
-/// How to read an answer: `x:SpamLlm`'s settings.
+/// How to read an answer.
 #[derive(Debug, Clone)]
 pub struct Rules<'x> {
     pub separator: &'x str,
@@ -26,6 +26,9 @@ pub struct Rules<'x> {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Classified {
     pub tag: String,
+    /// The configured category and confidence the answer named.
+    pub category: String,
+    pub confidence: Option<String>,
     pub explanation: Option<String>,
 }
 
@@ -63,10 +66,13 @@ pub fn parse(answer: &str, rules: &Rules<'_>) -> Option<Classified> {
     };
     let category = pick(rules.pos_category, rules.categories)?;
     let mut tag = format!("LLM_{}", tag_part(&category));
-    if let Some(pos) = rules.pos_confidence {
-        let confidence = pick(pos, rules.confidence)?;
+    let confidence = match rules.pos_confidence {
+        Some(pos) => Some(pick(pos, rules.confidence)?),
+        None => None,
+    };
+    if let Some(confidence) = &confidence {
         tag.push('_');
-        tag.push_str(&tag_part(&confidence));
+        tag.push_str(&tag_part(confidence));
     }
     let explanation = rules.pos_explanation.and_then(|pos| {
         let last_used = rules.pos_category.max(rules.pos_confidence.unwrap_or(0));
@@ -79,7 +85,103 @@ pub fn parse(answer: &str, rules: &Rules<'_>) -> Option<Classified> {
         let text = text.trim();
         (!text.is_empty()).then(|| text.to_string())
     });
-    Some(Classified { tag, explanation })
+    Some(Classified {
+        tag,
+        category,
+        confidence,
+        explanation,
+    })
+}
+
+/// inbuxa: 1.0's `x:SpamAi` replaced `x:SpamLlm`'s answer format settings
+/// with categories and verbal confidence. The answer format is now fixed:
+/// `category|confidence|explanation` on one line.
+pub const SPAM_AI_SEPARATOR: &str = "|";
+
+/// The confidence words a model answers with, most confident first.
+pub const SPAM_AI_CONFIDENCE: [&str; 3] = ["High", "Medium", "Low"];
+
+/// One `x:SpamAiCategory`, as the prompt describes it.
+pub struct PromptCategory<'x> {
+    pub name: &'x str,
+    pub description: &'x str,
+    pub includes: Vec<&'x str>,
+}
+
+/// The system prompt for `x:SpamAi`: the operator's instructions, the
+/// categories, and the answer format the parser reads.
+pub fn spam_ai_prompt(
+    instructions: &str,
+    categories: &[PromptCategory<'_>],
+    explanation: bool,
+) -> String {
+    let mut prompt = instructions.trim_end().to_string();
+    if !prompt.is_empty() {
+        prompt.push_str("\n\n");
+    }
+    prompt.push_str("Classify the email into exactly one of these categories:\n");
+    for category in categories {
+        prompt.push_str("- ");
+        prompt.push_str(category.name);
+        let description = category.description.trim();
+        if !description.is_empty() {
+            prompt.push_str(": ");
+            prompt.push_str(description);
+        }
+        if !category.includes.is_empty() {
+            prompt.push_str(" (for example: ");
+            prompt.push_str(&category.includes.join("; "));
+            prompt.push(')');
+        }
+        prompt.push('\n');
+    }
+    prompt.push_str(&format!(
+        "\nAnswer with a single line: the category name, then {SPAM_AI_SEPARATOR}, then your \
+         confidence ({}).",
+        SPAM_AI_CONFIDENCE.join(", ")
+    ));
+    if explanation {
+        prompt.push_str(&format!(
+            " Then {SPAM_AI_SEPARATOR} and a short explanation of the verdict."
+        ));
+    }
+    prompt
+}
+
+/// How an answer is read, for `x:SpamAi`.
+pub fn spam_ai_rules<'x>(categories: &'x [String], confidence: &'x [String], explanation: bool) -> Rules<'x> {
+    Rules {
+        separator: SPAM_AI_SEPARATOR,
+        pos_category: 0,
+        pos_confidence: Some(1),
+        pos_explanation: explanation.then_some(2),
+        categories,
+        confidence,
+    }
+}
+
+/// The probability a verbal confidence stands for (`verbalHigh` and so on).
+pub fn verbal_probability(confidence: &str, high: f64, medium: f64, low: f64) -> f64 {
+    if confidence.eq_ignore_ascii_case("high") {
+        high
+    } else if confidence.eq_ignore_ascii_case("medium") {
+        medium
+    } else {
+        low
+    }
+}
+
+/// The tag for a category at a probability (`bucketHigh`, `bucketMedium`):
+/// `LLM_<CATEGORY>_<HIGH|MEDIUM|LOW>`, as the bundled rules score them.
+pub fn bucket_tag(category: &str, probability: f64, high: f64, medium: f64) -> String {
+    let bucket = if probability >= high {
+        "HIGH"
+    } else if probability >= medium {
+        "MEDIUM"
+    } else {
+        "LOW"
+    };
+    format!("LLM_{}_{bucket}", tag_part(category))
 }
 
 /// Whether a tag is the classifier's (AI-13).
@@ -223,6 +325,8 @@ mod tests {
             parse("Unsolicited,High,Test", &r),
             Some(Classified {
                 tag: "LLM_UNSOLICITED_HIGH".into(),
+                category: "Unsolicited".into(),
+                confidence: Some("High".into()),
                 explanation: Some("Test".into())
             })
         );
@@ -231,6 +335,8 @@ mod tests {
             parse("\n  unsolicited , HIGH , Lots of commas, here\nmore", &r),
             Some(Classified {
                 tag: "LLM_UNSOLICITED_HIGH".into(),
+                category: "Unsolicited".into(),
+                confidence: Some("High".into()),
                 explanation: Some("Lots of commas, here".into())
             })
         );
@@ -246,6 +352,38 @@ mod tests {
             ..rules(&cats, &conf)
         };
         assert_eq!(parse("Unsolicited,whatever", &r).unwrap().tag, "LLM_UNSOLICITED");
+    }
+
+    #[test]
+    fn spam_ai_answers() {
+        let cats = ["Unsolicited", "Legitimate"].map(String::from).to_vec();
+        let conf = SPAM_AI_CONFIDENCE.map(String::from).to_vec();
+        let prompt = spam_ai_prompt(
+            "Be careful.",
+            &[PromptCategory {
+                name: "Unsolicited",
+                description: "Bulk mail nobody asked for",
+                includes: vec!["cold sales"],
+            }],
+            true,
+        );
+        assert!(prompt.starts_with("Be careful.\n\n"));
+        assert!(prompt.contains("- Unsolicited: Bulk mail nobody asked for (for example: cold sales)"));
+        assert!(prompt.contains("short explanation"));
+
+        let r = spam_ai_rules(&cats, &conf, true);
+        let c = parse("legitimate | medium | a known sender", &r).unwrap();
+        assert_eq!(c.category, "Legitimate");
+        assert_eq!(c.confidence.as_deref(), Some("Medium"));
+        assert_eq!(c.explanation.as_deref(), Some("a known sender"));
+        let r = spam_ai_rules(&cats, &conf, false);
+        assert_eq!(parse("Unsolicited|High|why", &r).unwrap().explanation, None);
+
+        assert_eq!(verbal_probability("HIGH", 0.9, 0.7, 0.5), 0.9);
+        assert_eq!(verbal_probability("whatever", 0.9, 0.7, 0.5), 0.5);
+        assert_eq!(bucket_tag("Unsolicited", 0.9, 0.85, 0.6), "LLM_UNSOLICITED_HIGH");
+        assert_eq!(bucket_tag("Unsolicited", 0.7, 0.85, 0.6), "LLM_UNSOLICITED_MEDIUM");
+        assert_eq!(bucket_tag("Unsolicited", 0.5, 0.85, 0.6), "LLM_UNSOLICITED_LOW");
     }
 
     #[test]

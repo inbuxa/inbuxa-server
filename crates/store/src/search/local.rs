@@ -50,6 +50,14 @@ impl SearchQuery {
         self
     }
 
+    pub fn index(&self) -> SearchIndex {
+        self.index
+    }
+
+    pub fn filters(&self) -> &[SearchFilter] {
+        &self.filters
+    }
+
     pub fn with_comparator(mut self, comparator: SearchComparator) -> Self {
         self.comparators.push(comparator);
         self
@@ -61,11 +69,8 @@ impl SearchQuery {
     }
 
     pub fn with_account_id(mut self, account_id: u32) -> Self {
-        self.filters.push(SearchFilter::cond(
-            SearchField::AccountId,
-            SearchOperator::Equal,
-            SearchValue::Uint(account_id as u64),
-        ));
+        self.filters
+            .push(SearchFilter::integer_eq(SearchField::AccountId, account_id));
         self
     }
 
@@ -101,7 +106,9 @@ impl SearchQuery {
                         break;
                     }
                 }
-                SearchFilter::Operator { .. } => {
+                SearchFilter::Integer { .. }
+                | SearchFilter::Text { .. }
+                | SearchFilter::KeyValue { .. } => {
                     continue;
                 }
             };
@@ -142,12 +149,15 @@ impl SearchQuery {
 
             // And short-circuit
             if matches!(state.op, SearchFilter::And) && state.bm.as_ref().unwrap().is_empty() {
+                let mut depth = 0u32;
                 while let Some(filter) = filters.peek() {
-                    if matches!(filter, SearchFilter::End) {
-                        break;
-                    } else {
-                        filters.next();
+                    match filter {
+                        SearchFilter::And | SearchFilter::Or | SearchFilter::Not => depth += 1,
+                        SearchFilter::End if depth == 0 => break,
+                        SearchFilter::End => depth -= 1,
+                        _ => {}
                     }
+                    filters.next();
                 }
             }
         }
@@ -210,7 +220,6 @@ impl QueryResults {
                                 *ascending,
                             )
                         }
-                        SearchComparator::Field { .. } => continue,
                     };
 
                     let ordering = if is_ascending { a.cmp(&b) } else { b.cmp(&a) };

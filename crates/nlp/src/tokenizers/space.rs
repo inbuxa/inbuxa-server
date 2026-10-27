@@ -4,54 +4,73 @@
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
  */
 
-use std::str::Chars;
+use std::borrow::Cow;
+
+use super::{unicode::is_uppercase, word::next_alnum_run};
 
 pub struct SpaceTokenizer<'x> {
-    iterator: Chars<'x>,
-    token: String,
+    text: &'x str,
+    pos: usize,
     max_token_length: usize,
 }
 
 impl SpaceTokenizer<'_> {
     pub fn new(text: &'_ str, max_token_length: usize) -> SpaceTokenizer<'_> {
         SpaceTokenizer {
-            iterator: text.chars(),
-            token: String::new(),
+            text,
+            pos: 0,
             max_token_length,
         }
     }
 }
 
-impl Iterator for SpaceTokenizer<'_> {
-    type Item = String;
+#[inline(never)]
+fn lowercase_ascii(word: &str) -> String {
+    let mut token = String::with_capacity(word.len());
+    for &byte in word.as_bytes() {
+        token.push(byte.to_ascii_lowercase() as char);
+    }
+    token
+}
+
+#[inline(never)]
+fn lowercase_chars(word: &str) -> String {
+    let mut token = String::with_capacity(word.len());
+    for ch in word.chars() {
+        if is_uppercase(ch) {
+            token.extend(ch.to_lowercase());
+        } else {
+            token.push(ch);
+        }
+    }
+    token
+}
+
+impl<'x> Iterator for SpaceTokenizer<'x> {
+    type Item = Cow<'x, str>;
 
     fn next(&mut self) -> Option<Self::Item> {
-        for ch in self.iterator.by_ref() {
-            if ch.is_alphanumeric() {
-                if ch.is_uppercase() {
-                    for ch in ch.to_lowercase() {
-                        self.token.push(ch);
-                    }
-                } else {
-                    self.token.push(ch);
-                }
-            } else if !self.token.is_empty() {
-                if self.token.len() < self.max_token_length {
-                    return Some(std::mem::take(&mut self.token));
-                } else {
-                    self.token.clear();
-                }
-            }
-        }
+        let text = self.text;
+        loop {
+            let run = next_alnum_run(text, self.pos)?;
+            self.pos = run.resume;
+            let word = &text[run.start..run.end];
 
-        if !self.token.is_empty() {
-            if self.token.len() < self.max_token_length {
-                return Some(std::mem::take(&mut self.token));
+            if !run.has_upper {
+                if word.len() < self.max_token_length {
+                    return Some(Cow::Borrowed(word));
+                }
+            } else if run.is_ascii {
+                if word.len() < self.max_token_length {
+                    return Some(Cow::Owned(lowercase_ascii(word)));
+                }
             } else {
-                self.token.clear();
+                let token = lowercase_chars(word);
+                if token.len() < self.max_token_length {
+                    return Some(Cow::Owned(token));
+                }
             }
         }
-
-        None
     }
 }
+

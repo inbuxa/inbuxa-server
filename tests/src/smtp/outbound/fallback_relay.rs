@@ -2,13 +2,15 @@
  * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
+ *
+ * Modified by Coffey Labs in 2026 for INBUXA.
  */
 
 use crate::{
     smtp::session::TestSession,
     utils::{dns::DnsCache, server::TestServerBuilder},
 };
-use mail_auth::{DnssecStatus, MX};
+use mail_auth::{DnssecStatus, Mx};
 use registry::{
     schema::{
         enums::MtaProtocol,
@@ -71,7 +73,7 @@ async fn fallback_relay() {
         .await;
     local_admin
         .registry_create_object(MtaRoute::Relay(MtaRouteRelay {
-            address: "fallback.foobar.org".into(),
+            host: "fallback.foobar.org".into(),
             implicit_tls: false,
             allow_invalid_certs: true,
             name: "fallback".into(),
@@ -98,7 +100,7 @@ async fn fallback_relay() {
     // Add mock DNS entries
     local.server.mx_add(
         "foobar.org",
-        vec![MX {
+        vec![Mx {
             exchanges: vec!["_dns_error.foobar.org".into()].into_boxed_slice(),
             preference: 10,
         }],

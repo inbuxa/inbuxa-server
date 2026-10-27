@@ -28,7 +28,10 @@
 //! added is removed. This runs on every start, and again whenever
 //! `inbuxa:FrontEnds` is set.
 
-use directory::core::secret::{hash_secret, verify_secret_hash};
+use directory::core::{
+    secret::{hash_secret, verify_secret_hash},
+    verifier::PasswordVerifier,
+};
 use inbuxa_features::security::front_ends::{self, FrontEnds};
 use registry::{
     schema::{
@@ -81,7 +84,7 @@ pub fn first_party_clients(
     let base_url = base_url.trim_end_matches('/');
     let mut clients: Vec<FirstPartyClient> = Vec::new();
 
-    for app in applications.iter().filter(|app| app.enabled) {
+    for app in applications.iter().filter(|app| app.enable) {
         let client_id = app
             .oauth_client_id
             .as_deref()
@@ -316,6 +319,8 @@ async fn retire_legacy_web_interface_client(bp: &mut Bootstrap) -> trc::Result<(
 }
 
 async fn ensure_client(bp: &mut Bootstrap, client: FirstPartyClient) -> trc::Result<()> {
+    // At boot there is no server yet, so a verifier of our own
+    let verifier = PasswordVerifier::new(std::num::NonZeroUsize::MIN);
     let existing = match bp
         .registry
         .primary_key(
@@ -347,13 +352,13 @@ async fn ensure_client(bp: &mut Bootstrap, client: FirstPartyClient) -> trc::Res
             Some(ClientSecret::Plain(secret)) => {
                 let matches = match updated.secret.as_deref() {
                     Some(hash) if !hash.is_empty() => {
-                        verify_secret_hash(hash, secret.as_bytes()).await?
+                        verify_secret_hash(&verifier, hash, secret.as_bytes()).await?
                     }
                     _ => false,
                 };
                 if !matches {
                     updated.secret = Some(
-                        hash_secret(PasswordHashAlgorithm::Argon2id, secret.as_bytes().to_vec())
+                        hash_secret(&verifier, PasswordHashAlgorithm::Argon2id, secret.as_bytes().to_vec())
                             .await?,
                     );
                 }
@@ -375,7 +380,7 @@ async fn ensure_client(bp: &mut Bootstrap, client: FirstPartyClient) -> trc::Res
     } else {
         let secret = match &client.secret {
             Some(ClientSecret::Plain(secret)) => Some(
-                hash_secret(PasswordHashAlgorithm::Argon2id, secret.as_bytes().to_vec()).await?,
+                hash_secret(&verifier, PasswordHashAlgorithm::Argon2id, secret.as_bytes().to_vec()).await?,
             ),
             Some(ClientSecret::Hash(hash)) => Some(hash.clone()),
             None => None,
@@ -414,7 +419,7 @@ mod tests {
     fn web_interface() -> Application {
         Application {
             description: "inbuxa Web Interface".to_string(),
-            enabled: true,
+            enable: true,
             url_prefix: Map::new(vec!["/admin".into(), "/account".into()]),
             ..Default::default()
         }
@@ -440,7 +445,7 @@ mod tests {
     #[test]
     fn disabled_applications_and_named_clients() {
         let mut disabled = web_interface();
-        disabled.enabled = false;
+        disabled.enable = false;
         let mut named = web_interface();
         named.oauth_client_id = Some("custom".to_string());
         named.url_prefix = Map::new(vec!["portal".into()]);

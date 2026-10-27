@@ -13,6 +13,7 @@ use crate::expr::{
     if_block::{BootstrapExprExt, IfBlock},
 };
 use ahash::AHashSet;
+use bytes::Bytes;
 use hyper::HeaderMap;
 use registry::schema::{
     enums::{self, ExpressionConstant, MtaStage},
@@ -42,10 +43,16 @@ pub struct SessionConfig {
     pub rcpt: Rcpt,
     pub data: Data,
     pub extensions: Extensions,
-    pub mta_sts_policy: Option<Policy>,
+    pub mta_sts_policy: Option<LocalMtaStsPolicy>,
 
     pub milters: Vec<Milter>,
     pub hooks: Vec<MTAHook>,
+}
+
+#[derive(Clone)]
+pub struct LocalMtaStsPolicy {
+    pub policy: Policy,
+    pub text: Bytes,
 }
 
 #[derive(Clone)]
@@ -221,10 +228,16 @@ impl SessionConfig {
             });
         }
 
+        let mta_sts_policy = Policy::try_parse(bp).await.map(|policy| LocalMtaStsPolicy {
+            text: Bytes::from(policy.to_string()),
+            policy,
+        });
+        let milters = bp.list_infallible::<MtaMilter>().await;
+
         SessionConfig {
             timeout: bp.compile_expr(
                 ObjectType::MtaInboundSession.singleton(),
-                &session.ctx_timeout(),
+                &session.ctx_idle_timeout(),
             ),
             duration: bp.compile_expr(
                 ObjectType::MtaInboundSession.singleton(),
@@ -374,10 +387,8 @@ impl SessionConfig {
                     &ext.ctx_mt_priority(),
                 ),
             },
-            mta_sts_policy: Policy::try_parse(bp).await,
-            milters: bp
-                .list_infallible::<MtaMilter>()
-                .await
+            mta_sts_policy,
+            milters: milters
                 .into_iter()
                 .filter_map(|milter| {
                     let id = milter.id;
@@ -392,15 +403,15 @@ impl SessionConfig {
                         // address is kept as is; a name is resolved on each
                         // connection (MilterClient::connect).
                         addrs: milter
-                            .hostname
+                            .host
                             .parse::<IpAddr>()
                             .map(|ip| vec![SocketAddr::new(ip, milter.port as u16)])
                             .unwrap_or_default(),
-                        hostname: milter.hostname,
+                        hostname: milter.host,
                         port: milter.port as u16,
-                        timeout_connect: milter.timeout_connect.into_inner(),
-                        timeout_command: milter.timeout_command.into_inner(),
-                        timeout_data: milter.timeout_data.into_inner(),
+                        timeout_connect: milter.connect_timeout.into_inner(),
+                        timeout_command: milter.command_timeout.into_inner(),
+                        timeout_data: milter.data_timeout.into_inner(),
                         tls: milter.use_tls,
                         tls_allow_invalid_certs: milter.allow_invalid_certs,
                         tempfail_on_error: milter.temp_fail_on_error,
@@ -485,7 +496,7 @@ impl<'x> TryFrom<Variable<'x>> for Mechanism {
                 let mut mechanism = 0;
 
                 for item in items {
-                    match item {
+                    match *item {
                         Variable::Constant(value) => mechanism |= Mechanism::try_from(value)?.0,
                         _ => return Err(()),
                     }
@@ -536,7 +547,6 @@ impl<'x> TryFrom<Variable<'x>> for MtPriority {
                 _ => Err(()),
             },
             Variable::String(value) => {
-                let value = value.as_str();
                 if value.eq_ignore_ascii_case("MIXER") {
                     Ok(MtPriority::Mixer)
                 } else if value.eq_ignore_ascii_case("STANAG4406") {

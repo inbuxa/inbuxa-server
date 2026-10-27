@@ -5,18 +5,24 @@
  */
 
 use crate::queue::{MessageWrapper, Metadata, spool::QueueParams};
+use ahash::AHashSet;
 use common::{
     Server,
-    config::smtp::auth::{Dkim1Signer, DkimSigners},
-    expr::{functions::ResolveVariable, if_block::IfBlock},
+    config::smtp::auth::{Dkim1Signer, Dkim2Signers, DkimSigners},
+    expr::{Bump, functions::ResolveVariable, if_block::IfBlock},
 };
 use mail_auth::{
-    AuthenticatedMessage,
-    common::headers::HeaderWriter,
-    dkim2::{Hop, MessageInstance},
+    AuthenticatedMessage, Dkim2Result,
+    dkim2::{
+        ChainBinding, Dkim2Error, Dkim2Output, Envelope, Hop, MessageInstance, Signature,
+        Verification,
+    },
+    headers::HeaderWriter,
 };
-use mail_parser::{Address, parsers::MessageStream};
-use std::{collections::HashSet, sync::Arc};
+use mail_parser::HeaderForm;
+use memchr::memchr_iter;
+use std::{iter::once, sync::Arc};
+use trc::{Dkim2Event, EventType};
 use utils::sanitize_email;
 
 pub(crate) trait DkimSign: Sync + Send {
@@ -24,7 +30,7 @@ pub(crate) trait DkimSign: Sync + Send {
         &self,
         message: &mut MessageWrapper,
         params: &mut QueueParams<'_, '_>,
-    ) -> impl Future<Output = Option<Vec<u8>>> + Send;
+    ) -> impl Future<Output = SignedMessage> + Send;
 
     fn eval_signers(
         &self,
@@ -32,6 +38,37 @@ pub(crate) trait DkimSign: Sync + Send {
         resolver: &impl ResolveVariable,
         session_id: u64,
     ) -> impl Future<Output = Option<Arc<DkimSigners>>> + Send;
+
+    fn dkim2_signing_proof<'x, R>(
+        &'x self,
+        signers: Option<&DkimSigners>,
+        message: &'x AuthenticatedMessage<'x>,
+        mail_from: &str,
+        rcpt_to: R,
+    ) -> impl Future<Output = Option<Dkim2Output<'x>>> + Send
+    where
+        R: IntoIterator<Item: AsRef<str> + Send, IntoIter: Send> + Send;
+
+    fn dkim2_sign_or_restart(
+        &self,
+        message: &MessageWrapper,
+        params: &mut QueueParams<'_, '_>,
+        dkim2: &Dkim2Signers,
+        headers: &mut Vec<u8>,
+    ) -> impl Future<Output = Option<Vec<u8>>> + Send;
+
+    fn restart_dkim2_chain(
+        &self,
+        message: &MessageWrapper,
+        params: &mut QueueParams<'_, '_>,
+        dkim2: &Dkim2Signers,
+        headers: &mut Vec<u8>,
+    ) -> impl Future<Output = Option<Vec<u8>>> + Send;
+
+    fn has_remote_domain<'x>(
+        &self,
+        domains: impl Iterator<Item = &'x str> + Send,
+    ) -> impl Future<Output = bool> + Send;
 }
 
 impl DkimSign for Server {
@@ -39,120 +76,191 @@ impl DkimSign for Server {
         &self,
         message: &mut MessageWrapper,
         params: &mut QueueParams<'_, '_>,
-    ) -> Option<Vec<u8>> {
-        let signers = params.dkim_signers.as_ref().unwrap();
-        let raw_message = params.raw_message;
+    ) -> SignedMessage {
+        let signers = params.dkim_signers.take();
+        let dkim2 = signers.as_ref().and_then(|signers| signers.dkim2.as_ref());
+        let chain_broken = params.dkim2_verified.is_some_and(|output| {
+            matches!(
+                output.result(),
+                Dkim2Result::Fail(_) | Dkim2Result::PermError(_) | Dkim2Result::TempError(_)
+            )
+        });
 
-        // DKIM1 signing
-        let mut headers = Vec::with_capacity(64);
-        for signer in &signers.dkim1 {
-            let result = match (signer, params.raw_headers) {
-                (Dkim1Signer::RsaSha256(signer), None) => signer.sign(raw_message),
-                (Dkim1Signer::Ed25519Sha256(signer), None) => signer.sign(raw_message),
-                (Dkim1Signer::RsaSha256(signer), Some(headers)) => {
-                    signer.sign_chained([headers, raw_message].iter().copied())
-                }
-                (Dkim1Signer::Ed25519Sha256(signer), Some(headers)) => {
-                    signer.sign_chained([headers, raw_message].iter().copied())
-                }
-            };
-
-            match result {
-                Ok(signature) => {
-                    signature.write_header(&mut headers);
-                }
-                Err(err) => {
-                    trc::error!(
-                        trc::Error::from(err)
-                            .span_id(params.session_id)
-                            .details("Failed to sign message")
-                            .caused_by(trc::location!())
-                    );
-                }
+        let mut dkim2_headers = Vec::new();
+        let stripped_message = match dkim2 {
+            Some(dkim2) if chain_broken => {
+                self.restart_dkim2_chain(message, params, dkim2, &mut dkim2_headers)
+                    .await
             }
-        }
+            Some(dkim2) => {
+                self.dkim2_sign_or_restart(message, params, dkim2, &mut dkim2_headers)
+                    .await
+            }
+            None => None,
+        };
 
-        // DKIM2 signing
-        if let Some(signer) = &signers.dkim2
-            && let Some(modified) =
-                AuthenticatedMessage::parse_with_opts(raw_message, params.raw_headers, true)
+        let mut headers = Vec::new();
+        if let Some(signers) = &signers
+            && !signers.dkim1.is_empty()
         {
-            // Generate message instance
-            let original = params.original_authenticated_message.take().or_else(|| {
-                params
-                    .original_raw_message
-                    .and_then(AuthenticatedMessage::parse)
-            });
-            let instance = MessageInstance::from_message(&modified, original.as_ref());
-            if let Some(instance) = &instance {
-                instance.write_header(&mut headers);
-            }
+            let raw_message = stripped_message.as_deref().unwrap_or(params.raw_message);
+            headers.reserve(64 + dkim2_headers.len());
+            for signer in &signers.dkim1 {
+                let result = match (signer, params.raw_headers) {
+                    (Dkim1Signer::RsaSha256(signer), None) => signer.sign(raw_message),
+                    (Dkim1Signer::Ed25519Sha256(signer), None) => signer.sign(raw_message),
+                    (Dkim1Signer::RsaSha256(signer), Some(headers)) => {
+                        signer.sign_chained([headers, raw_message].iter().copied())
+                    }
+                    (Dkim1Signer::Ed25519Sha256(signer), Some(headers)) => {
+                        signer.sign_chained([headers, raw_message].iter().copied())
+                    }
+                };
 
-            // Obtain disclosed and undisclosed recipients
-            let envelopes = message.undisclosed_recipients(&modified);
-
-            // Generate DKIM2 signature for disclosed recipients
-            if !envelopes.disclosed_recipients.is_empty() {
-                match signer.sign_with_message_instance(
-                    &modified,
-                    instance.as_ref(),
-                    Hop::real(
-                        message.message.return_path.as_ref(),
-                        envelopes.disclosed_recipients,
-                    ),
-                ) {
+                match result {
                     Ok(signature) => {
-                        if envelopes.undisclosed_recipients.is_empty() {
-                            // Happy path: no undisclosed recipients, serialize signature straight to blob
-                            signature.write_header(&mut headers);
-                        } else {
-                            // Undisclosed recipients present, serialize signature to metadata
-                            let mut header = Vec::with_capacity(64);
-                            signature.write_header(&mut header);
-                            params.metadata.push(Metadata::Headers {
-                                value: header.into_boxed_slice(),
-                                id: u64::MAX,
-                            });
-                        }
+                        signature.write_header(&mut headers);
                     }
                     Err(err) => {
                         trc::error!(
                             trc::Error::from(err)
                                 .span_id(params.session_id)
-                                .details("Failed to DKIM2 sign message")
-                        );
-                    }
-                }
-            }
-
-            // Generate DKIM2 signature for undisclosed recipients
-            for (pos, rcpt) in envelopes.undisclosed_recipients {
-                match signer.sign_with_message_instance(
-                    &modified,
-                    instance.as_ref(),
-                    Hop::real(message.message.return_path.as_ref(), [rcpt]),
-                ) {
-                    Ok(signature) => {
-                        // Serialize signature to metadata
-                        let mut header = Vec::with_capacity(64);
-                        signature.write_header(&mut header);
-                        params.metadata.push(Metadata::Headers {
-                            value: header.into_boxed_slice(),
-                            id: pos as u64,
-                        });
-                    }
-                    Err(err) => {
-                        trc::error!(
-                            trc::Error::from(err)
-                                .span_id(params.session_id)
-                                .details("Failed to DKIM2 sign message")
+                                .details("Failed to sign message")
+                                .caused_by(trc::location!())
                         );
                     }
                 }
             }
         }
+        if headers.is_empty() {
+            headers = dkim2_headers;
+        } else {
+            headers.extend_from_slice(&dkim2_headers);
+        }
 
-        (!headers.is_empty()).then_some(headers)
+        SignedMessage {
+            headers,
+            stripped_message,
+        }
+    }
+
+    async fn dkim2_signing_proof<'x, R>(
+        &'x self,
+        signers: Option<&DkimSigners>,
+        message: &'x AuthenticatedMessage<'x>,
+        mail_from: &str,
+        rcpt_to: R,
+    ) -> Option<Dkim2Output<'x>>
+    where
+        R: IntoIterator<Item: AsRef<str> + Send, IntoIter: Send> + Send,
+    {
+        if signers.is_some_and(|signers| signers.dkim2.is_some())
+            && (!message.dkim2_signatures().is_empty()
+                || !message.dkim2_instances().is_empty()
+                || message.has_dkim2_errors())
+        {
+            Some(
+                self.core
+                    .smtp
+                    .resolvers
+                    .dns
+                    .verify_dkim2(
+                        self.inner.cache.build_auth_parameters(message),
+                        Envelope { mail_from, rcpt_to },
+                    )
+                    .await,
+            )
+        } else {
+            None
+        }
+    }
+
+    async fn dkim2_sign_or_restart(
+        &self,
+        message: &MessageWrapper,
+        params: &mut QueueParams<'_, '_>,
+        dkim2: &Dkim2Signers,
+        headers: &mut Vec<u8>,
+    ) -> Option<Vec<u8>> {
+        let modified =
+            AuthenticatedMessage::parse_with_opts(params.raw_message, params.raw_headers, true)?;
+        let verified = params.dkim2_verified.filter(|output| {
+            matches!(output.result(), Dkim2Result::Pass)
+                && output.verification() == Verification::Full
+        });
+        let has_chain = !modified.dkim2_signatures().is_empty()
+            || !modified.dkim2_instances().is_empty()
+            || modified.has_dkim2_errors();
+
+        if !has_chain || verified.is_some() {
+            let parsed_original;
+            let original = match params.original_authenticated_message {
+                Some(original) => Some(original),
+                None if has_chain => {
+                    parsed_original = params
+                        .original_raw_message
+                        .and_then(AuthenticatedMessage::parse);
+                    parsed_original.as_ref()
+                }
+                None => None,
+            };
+            match dkim2_sign(
+                message, params, dkim2, &modified, original, verified, headers,
+            ) {
+                Ok(()) => return None,
+                Err(mail_auth::Error::Dkim2(Dkim2Error::NotValidlySigned)) => {}
+                Err(err) => {
+                    log_dkim2_error(err, params.session_id);
+                    if !has_chain {
+                        return None;
+                    }
+                }
+            }
+        }
+
+        self.restart_dkim2_chain(message, params, dkim2, headers)
+            .await
+    }
+
+    async fn restart_dkim2_chain(
+        &self,
+        message: &MessageWrapper,
+        params: &mut QueueParams<'_, '_>,
+        dkim2: &Dkim2Signers,
+        headers: &mut Vec<u8>,
+    ) -> Option<Vec<u8>> {
+        if !self
+            .has_remote_domain(
+                message
+                    .message
+                    .recipients
+                    .iter()
+                    .map(|rcpt| rcpt.domain_part()),
+            )
+            .await
+        {
+            return None;
+        }
+
+        let stripped = strip_dkim2_headers(params.raw_message);
+        if let Some(fresh) = AuthenticatedMessage::parse_with_opts(
+            stripped.as_deref().unwrap_or(params.raw_message),
+            params.raw_headers,
+            true,
+        ) && let Err(err) = dkim2_sign(message, params, dkim2, &fresh, None, None, headers)
+        {
+            log_dkim2_error(err, params.session_id);
+        }
+        stripped
+    }
+
+    async fn has_remote_domain<'x>(&self, domains: impl Iterator<Item = &'x str> + Send) -> bool {
+        for domain in domains {
+            if !matches!(self.domain(domain).await, Ok(Some(_))) {
+                return true;
+            }
+        }
+        false
     }
 
     async fn eval_signers(
@@ -161,8 +269,9 @@ impl DkimSign for Server {
         resolver: &impl ResolveVariable,
         session_id: u64,
     ) -> Option<Arc<DkimSigners>> {
+        let mut arena = Bump::new();
         let sign_with_domain = self
-            .eval_if::<String, _>(if_block, resolver, session_id)
+            .eval_if::<String, _>(if_block, resolver, &mut arena, session_id)
             .await?;
         match self.dkim_signers(&sign_with_domain).await {
             Ok(signers) => signers,
@@ -175,6 +284,162 @@ impl DkimSign for Server {
             }
         }
     }
+}
+
+pub(crate) struct SignedMessage {
+    pub headers: Vec<u8>,
+    pub stripped_message: Option<Vec<u8>>,
+}
+
+fn log_dkim2_error(err: mail_auth::Error, session_id: u64) {
+    let err = trc::Error::from(err);
+    let err = if matches!(
+        err.as_ref(),
+        EventType::Dkim2(Dkim2Event::CustodyBroken | Dkim2Event::ChainInvalid)
+    ) {
+        err
+    } else {
+        EventType::Dkim2(Dkim2Event::SigningFailed).caused_by(err)
+    };
+    trc::error!(err.span_id(session_id).caused_by(trc::location!()));
+}
+
+fn dkim2_sign(
+    message: &MessageWrapper,
+    params: &mut QueueParams<'_, '_>,
+    dkim2: &Dkim2Signers,
+    modified: &AuthenticatedMessage<'_>,
+    original: Option<&AuthenticatedMessage<'_>>,
+    verified: Option<&Dkim2Output<'_>>,
+    headers: &mut Vec<u8>,
+) -> mail_auth::Result<()> {
+    let instance = MessageInstance::from_message(modified, original, &dkim2.hashes)?;
+    let signer = &dkim2.signer;
+    let exploded = params.exploded || message.message.recipients.len() > 1;
+    let return_path = message.message.return_path.as_ref();
+    let envelopes = message.undisclosed_recipients(modified);
+
+    let disclosed = if !envelopes.disclosed_recipients.is_empty() {
+        Some(signer.sign_with_message_instance(
+            modified,
+            instance.as_ref(),
+            dkim2_hop(return_path, envelopes.disclosed_recipients, exploded),
+            verified,
+        )?)
+    } else {
+        None
+    };
+    let mut undisclosed = Vec::with_capacity(envelopes.undisclosed_recipients.len() + 1);
+    for (pos, rcpt) in envelopes.undisclosed_recipients {
+        undisclosed.push((
+            pos as u64,
+            signer.sign_with_message_instance(
+                modified,
+                instance.as_ref(),
+                dkim2_hop(return_path, [rcpt], exploded),
+                verified,
+            )?,
+        ));
+    }
+
+    if let Some(instance) = &instance {
+        instance.write_header(headers);
+    }
+    if let Some(signed) = disclosed {
+        if undisclosed.is_empty() {
+            headers.reserve(signature_header_capacity(&signed.signature));
+            signed.signature.write_header(headers);
+        } else {
+            undisclosed.push((u64::MAX, signed));
+        }
+    }
+    for (id, signed) in undisclosed {
+        let mut header = Vec::with_capacity(signature_header_capacity(&signed.signature));
+        signed.signature.write_header(&mut header);
+        params.metadata.push(Metadata::Headers {
+            value: header.into_boxed_slice(),
+            id,
+        });
+    }
+
+    Ok(())
+}
+
+fn dkim2_hop<'x, R>(return_path: &'x str, rcpt_to: R, exploded: bool) -> Hop<&'x str, R, String>
+where
+    R: IntoIterator<Item = &'x str>,
+{
+    let hop = Hop::real(return_path, rcpt_to);
+    if exploded { hop.exploded() } else { hop }
+}
+
+fn signature_header_capacity(signature: &Signature) -> usize {
+    let tags = match &signature.chain {
+        ChainBinding::Envelope { mail_from, rcpt_to } => {
+            mail_from.len() + rcpt_to.iter().map(|rcpt| rcpt.len() + 1).sum::<usize>()
+        }
+        ChainBinding::NextDomain(domain) => domain.len(),
+    };
+    let len = HEADER_BASE_CAPACITY
+        + tags.div_ceil(3) * 4
+        + signature
+            .s
+            .iter()
+            .map(|value| value.selector.len() + value.b.len().div_ceil(3) * 4 + 32)
+            .sum::<usize>();
+    len + len / 32
+}
+
+const HEADER_BASE_CAPACITY: usize = 256;
+
+fn strip_dkim2_headers(message: &[u8]) -> Option<Vec<u8>> {
+    let mut stripped: Option<Vec<u8>> = None;
+    let mut offset = 0;
+    let mut skipping = false;
+    for line in header_lines(message) {
+        if !is_continuation(line) {
+            skipping = is_dkim2_field(line);
+        }
+        match &mut stripped {
+            Some(stripped) if !skipping => stripped.extend_from_slice(line),
+            None if skipping => {
+                let mut buf = Vec::with_capacity(message.len());
+                buf.extend_from_slice(message.get(..offset).unwrap_or_default());
+                stripped = Some(buf);
+            }
+            _ => {}
+        }
+        offset += line.len();
+    }
+    let mut stripped = stripped?;
+    stripped.extend_from_slice(message.get(offset..).unwrap_or_default());
+    Some(stripped)
+}
+
+pub(crate) fn has_dkim2_headers(message: &[u8]) -> bool {
+    header_lines(message).any(|line| !is_continuation(line) && is_dkim2_field(line))
+}
+
+fn header_lines(message: &[u8]) -> impl Iterator<Item = &[u8]> {
+    let mut start = 0;
+    memchr_iter(b'\n', message)
+        .map(|pos| pos + 1)
+        .chain(once(message.len()))
+        .map_while(move |end| {
+            let line = message.get(start..end)?;
+            start = end;
+            (!matches!(line, b"" | b"\r\n" | b"\n")).then_some(line)
+        })
+}
+
+fn is_continuation(line: &[u8]) -> bool {
+    matches!(line.first(), Some(b' ' | b'\t'))
+}
+
+fn is_dkim2_field(line: &[u8]) -> bool {
+    line.split(|&ch| ch == b':').next().is_some_and(|name| {
+        hashify::set_ignore_case!(name.trim_ascii(), "dkim2-signature", "message-instance")
+    })
 }
 
 struct Dkim2Envelopes<'x> {
@@ -194,37 +459,21 @@ impl MessageWrapper {
             };
         }
 
-        let mut recipients = HashSet::with_capacity(self.message.recipients.len());
+        let mut recipients = AHashSet::with_capacity(self.message.recipients.len());
 
-        for addr in message.headers.iter().filter_map(|(name, value)| {
+        for (name, value) in message.headers() {
             let name = name.trim_ascii();
             if name.len() == 2
                 && (name.eq_ignore_ascii_case(b"to") || name.eq_ignore_ascii_case(b"cc"))
             {
-                MessageStream::new(value).parse_address().into_address()
-            } else {
-                None
-            }
-        }) {
-            match addr {
-                Address::List(addrs) => {
+                let parsed = HeaderForm::Addresses.parse(value);
+                if let Some(addresses) = parsed.value().as_address() {
                     recipients.extend(
-                        addrs
-                            .iter()
+                        addresses
+                            .mailboxes()
                             .filter_map(|a| a.address())
                             .map(sanitize_or_lower),
                     );
-                }
-                Address::Group(groups) => {
-                    for group in groups {
-                        recipients.extend(
-                            group
-                                .addresses
-                                .iter()
-                                .filter_map(|a| a.address())
-                                .map(sanitize_or_lower),
-                        );
-                    }
                 }
             }
         }
@@ -252,167 +501,3 @@ fn sanitize_or_lower(rcpt: &str) -> String {
     sanitize_email(rcpt).unwrap_or_else(|| rcpt.to_lowercase())
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::queue::{Message, QueueId, Recipient};
-    use common::config::smtp::queue::QueueName;
-    use std::net::{IpAddr, Ipv4Addr};
-
-    fn wrapper(recipients: &[&str]) -> MessageWrapper {
-        MessageWrapper {
-            queue_id: 0 as QueueId,
-            queue_name: QueueName::default(),
-            is_multi_queue: false,
-            span_id: 0,
-            message: Message {
-                created: 0,
-                blob_hash: Default::default(),
-                return_path: "sender@example.com".into(),
-                recipients: recipients.iter().map(Recipient::new).collect(),
-                received_from_ip: IpAddr::V4(Ipv4Addr::LOCALHOST),
-                received_via_port: 0,
-                flags: 0,
-                env_id: None,
-                priority: 0,
-                size: 0,
-                metadata: Default::default(),
-            },
-        }
-    }
-
-    fn split(headers: &str, recipients: &[&str]) -> (Vec<String>, Vec<String>) {
-        let raw = format!("{headers}\r\nSubject: test\r\n\r\nbody\r\n");
-        let auth = AuthenticatedMessage::parse(raw.as_bytes()).expect("parse message");
-        let message = wrapper(recipients);
-        let envelopes = message.undisclosed_recipients(&auth);
-        let mut disclosed = envelopes
-            .disclosed_recipients
-            .iter()
-            .map(|s| s.to_string())
-            .collect::<Vec<_>>();
-        let mut undisclosed = envelopes
-            .undisclosed_recipients
-            .iter()
-            .map(|(_, s)| s.to_string())
-            .collect::<Vec<_>>();
-        disclosed.sort();
-        undisclosed.sort();
-        (disclosed, undisclosed)
-    }
-
-    #[test]
-    fn single_recipient_is_always_disclosed() {
-        let (disclosed, undisclosed) = split("To: someone-else@example.com", &["bcc@example.org"]);
-        assert_eq!(disclosed, vec!["bcc@example.org".to_string()]);
-        assert!(undisclosed.is_empty());
-    }
-
-    #[test]
-    fn all_recipients_disclosed() {
-        let (disclosed, undisclosed) = split(
-            "To: alice@example.com, bob@example.com\r\nCc: carol@example.com",
-            &["alice@example.com", "bob@example.com", "carol@example.com"],
-        );
-        assert_eq!(
-            disclosed,
-            vec![
-                "alice@example.com".to_string(),
-                "bob@example.com".to_string(),
-                "carol@example.com".to_string(),
-            ]
-        );
-        assert!(undisclosed.is_empty());
-    }
-
-    #[test]
-    fn mixed_disclosed_and_undisclosed() {
-        let (disclosed, undisclosed) = split(
-            "To: alice@example.com\r\nCc: bob@example.com",
-            &[
-                "alice@example.com",
-                "bob@example.com",
-                "eve@secret.example.org",
-                "mallory@secret.example.org",
-            ],
-        );
-        assert_eq!(
-            disclosed,
-            vec![
-                "alice@example.com".to_string(),
-                "bob@example.com".to_string()
-            ]
-        );
-        assert_eq!(
-            undisclosed,
-            vec![
-                "eve@secret.example.org".to_string(),
-                "mallory@secret.example.org".to_string(),
-            ]
-        );
-    }
-
-    #[test]
-    fn no_to_or_cc_header_all_undisclosed() {
-        let (disclosed, undisclosed) = split(
-            "From: sender@example.com",
-            &["eve@example.org", "mallory@example.org"],
-        );
-        assert!(disclosed.is_empty());
-        assert_eq!(
-            undisclosed,
-            vec![
-                "eve@example.org".to_string(),
-                "mallory@example.org".to_string()
-            ]
-        );
-    }
-
-    #[test]
-    fn group_addresses_are_disclosed() {
-        let (disclosed, undisclosed) = split(
-            "To: Team:alice@example.com,bob@example.com;",
-            &["alice@example.com", "bob@example.com", "eve@example.org"],
-        );
-        assert_eq!(
-            disclosed,
-            vec![
-                "alice@example.com".to_string(),
-                "bob@example.com".to_string()
-            ]
-        );
-        assert_eq!(undisclosed, vec!["eve@example.org".to_string()]);
-    }
-
-    #[test]
-    fn header_address_casing_is_ignored() {
-        let (disclosed, undisclosed) = split(
-            "To: Alice@Example.COM, BOB@EXAMPLE.com",
-            &["alice@example.com", "bob@example.com", "eve@example.org"],
-        );
-        assert_eq!(
-            disclosed,
-            vec![
-                "alice@example.com".to_string(),
-                "bob@example.com".to_string()
-            ]
-        );
-        assert_eq!(undisclosed, vec!["eve@example.org".to_string()]);
-    }
-
-    #[test]
-    fn display_names_and_brackets_are_ignored() {
-        let (disclosed, undisclosed) = split(
-            "To: \"Alice Doe\" <alice@example.com>\r\nCc: Bob <bob@example.com>",
-            &["alice@example.com", "bob@example.com", "eve@example.org"],
-        );
-        assert_eq!(
-            disclosed,
-            vec![
-                "alice@example.com".to_string(),
-                "bob@example.com".to_string()
-            ]
-        );
-        assert_eq!(undisclosed, vec!["eve@example.org".to_string()]);
-    }
-}

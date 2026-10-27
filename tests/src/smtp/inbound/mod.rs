@@ -15,8 +15,8 @@ use registry::{schema::prelude::ObjectType, types::ObjectImpl};
 use smtp::queue::{Message, MessageWrapper, QueueId, QueuedMessage};
 use std::time::Duration;
 use store::{
-    Deserialize, IterateParams, U64_LEN, ValueKey,
-    write::{AlignedBytes, Archive, QueueClass, ValueClass, key::DeserializeBigEndian},
+    Deserialize, IterateParams, ValueKey,
+    write::{Archive, ArchiveBytes, QueueClass, ValueClass, key::DeserializeBigEndian},
 };
 use tokio::sync::mpsc::error::TryRecvError;
 use types::id::Id;
@@ -218,13 +218,8 @@ impl TestServer {
             .iterate(
                 IterateParams::new(from_key, to_key).ascending().no_values(),
                 |key, _| {
-                    events.push(store::write::QueueEvent {
-                        due: key.deserialize_be_u64(0)?,
-                        queue_id: key.deserialize_be_u64(U64_LEN)?,
-                        queue_name: key[U64_LEN + 1..U64_LEN + 9]
-                            .try_into()
-                            .expect("Queue name must be 8 bytes"),
-                    });
+                    // inbuxa: 1.0 keys start with the queue name
+                    events.push(store::write::QueueEvent::deserialize(key)?);
                     Ok(true)
                 },
             )
@@ -249,7 +244,7 @@ impl TestServer {
                         queue_name: Default::default(),
                         is_multi_queue: false,
                         span_id: 0,
-                        message: <Archive<AlignedBytes> as Deserialize>::deserialize(value)?
+                        message: <Archive<ArchiveBytes> as Deserialize>::deserialize(value)?
                             .deserialize::<Message>()?,
                     });
                     Ok(true)
@@ -339,7 +334,7 @@ impl TestQueueEvent for QueueEvent {
     fn is_refresh(&self) -> bool {
         matches!(
             self,
-            QueueEvent::Refresh
+            QueueEvent::Refresh(_)
                 | QueueEvent::WorkerDone {
                     status: QueueEventStatus::Deferred,
                     ..
@@ -349,7 +344,7 @@ impl TestQueueEvent for QueueEvent {
 
     fn assert_refresh(self) {
         match self {
-            QueueEvent::Refresh
+            QueueEvent::Refresh(_)
             | QueueEvent::WorkerDone {
                 status: QueueEventStatus::Deferred,
                 ..

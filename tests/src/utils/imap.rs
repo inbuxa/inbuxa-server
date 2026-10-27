@@ -2,6 +2,8 @@
  * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
+ *
+ * Modified by Coffey Labs in 2026 for INBUXA.
  */
 
 use base64::{Engine, engine::general_purpose};
@@ -109,6 +111,15 @@ impl ImapConnection {
             }
             Err(_) => panic!("Timeout while waiting for server response."),
         }
+    }
+
+    // inbuxa: reads until the tagged completion of another tag, for commands
+    // the server may run concurrently and answer out of order
+    pub async fn read_until_tag(&mut self, tag: &'static str) -> Vec<String> {
+        let own_tag = std::mem::replace(&mut self.tag, tag.as_bytes());
+        let lines = self.read(Type::Tagged).await;
+        self.tag = own_tag;
+        lines
     }
 
     pub async fn read(&mut self, t: Type) -> Vec<String> {

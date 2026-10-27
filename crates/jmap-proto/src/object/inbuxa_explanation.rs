@@ -66,17 +66,18 @@ impl Property for ExplanationProperty {
 
 impl ExplanationProperty {
     fn parse(value: &str) -> Option<Self> {
-        hashify::tiny_map!(value.as_bytes(),
-            b"id" => ExplanationProperty::Id,
-            b"subject" => ExplanationProperty::Subject,
-            b"text" => ExplanationProperty::Text,
-            b"model" => ExplanationProperty::Model,
-            b"node" => ExplanationProperty::Node,
-            b"elapsedMs" => ExplanationProperty::ElapsedMs,
-            b"grounded" => ExplanationProperty::Grounded,
-            b"source" => ExplanationProperty::Source,
-            b"answeredAt" => ExplanationProperty::AnsweredAt,
-            b"preparedFor" => ExplanationProperty::PreparedFor,
+        hashify::fnc_map!(value.as_bytes(),
+            b"id" => Some(ExplanationProperty::Id),
+            b"subject" => Some(ExplanationProperty::Subject),
+            b"text" => Some(ExplanationProperty::Text),
+            b"model" => Some(ExplanationProperty::Model),
+            b"node" => Some(ExplanationProperty::Node),
+            b"elapsedMs" => Some(ExplanationProperty::ElapsedMs),
+            b"grounded" => Some(ExplanationProperty::Grounded),
+            b"source" => Some(ExplanationProperty::Source),
+            b"answeredAt" => Some(ExplanationProperty::AnsweredAt),
+            b"preparedFor" => Some(ExplanationProperty::PreparedFor),
+            _ => None,
         )
     }
 }

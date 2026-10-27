@@ -16,7 +16,7 @@ use common::{BuildServer, auth::AuthRequest};
 use directory::Credentials;
 use registry::{
     schema::{
-        enums::TenantStorageQuota,
+        enums::{OidcUnscopedTokenPolicy, TenantStorageQuota},
         prelude::{ObjectType, Property},
         structs::{
             self, CertificateManagement, DkimManagement, DnsManagement, Domain, Expression,
@@ -48,13 +48,12 @@ fn realm_directory(realm: &str, tenant: Option<Id>) -> structs::Directory {
         claim_name: Some("name".to_string()),
         claim_groups: Some("groups".to_string()),
         username_domain: None,
-        require_audience: Some("stalwart".to_string()),
-        require_scopes: Map::new(vec![
-            "email".to_string(),
-            "profile".to_string(),
-            "openid".to_string(),
-        ]),
+        // inbuxa: 1.0 dropped requireScopes; Keycloak tokens carry none of the
+        // urn:ietf:params:oauth:scope:* data scopes, so they get full access
+        accepted_audiences: Map::new(vec!["stalwart".to_string()]),
+        unscoped_tokens: OidcUnscopedTokenPolicy::Full,
         member_tenant_id: tenant,
+        ..Default::default()
     })
 }
 
@@ -110,7 +109,7 @@ async fn bearer(
             IpAddr::from([127, 0, 0, 1]),
         ))
         .await
-        .map(|token| token.account_id())
+        .map(|token| token.access_token.account_id())
 }
 
 /// A JWT with a new header and payload but the original signature.
@@ -267,30 +266,37 @@ pub async fn test() {
             "test 16: {what}"
         );
     }
-    // Keycloak adds its default scopes to every token, so only a token that
-    // really lacks one of the required scopes is checked
-    if let Some(narrow) = token("stalwart", "stalwart-secret", JOHN, "openid").await {
-        let payload = serde_json::from_slice::<serde_json::Value>(
-            &URL_SAFE_NO_PAD
-                .decode(narrow.split('.').nth(1).unwrap())
-                .unwrap(),
+    // inbuxa: 1.0 has no required scopes. What it refuses instead is a token
+    // carrying none of the urn:ietf:params:oauth:scope:* data scopes while
+    // unscopedTokens is "reject", and Keycloak's tokens carry none of them.
+    let narrow = token("stalwart", "stalwart-secret", JOHN, "openid")
+        .await
+        .unwrap_or_else(|| john_token.clone());
+    admin
+        .registry_update_object(
+            ObjectType::Directory,
+            keycloak,
+            json!({ Property::UnscopedTokens: "reject" }),
         )
-        .unwrap();
-        let scopes = payload["scope"].as_str().unwrap_or_default().to_string();
-        let lacks = ["openid", "email", "profile"]
-            .iter()
-            .any(|s| !scopes.split(' ').any(|t| t == *s));
-        if lacks {
-            assert!(
-                bearer(&test, None, &narrow).await.is_err(),
-                "test 16: a required scope missing ({scopes})"
-            );
-        } else {
-            println!(
-                "  Keycloak granted every required scope ({scopes}); scope check not exercised"
-            );
-        }
-    }
+        .await;
+    admin.reload_settings().await;
+    assert!(
+        bearer(&test, None, &narrow).await.is_err(),
+        "test 16: a token without a data scope"
+    );
+    admin
+        .registry_update_object(
+            ObjectType::Directory,
+            keycloak,
+            json!({ Property::UnscopedTokens: "full" }),
+        )
+        .await;
+    admin.reload_settings().await;
+    assert_eq!(
+        bearer(&test, None, &narrow).await.unwrap(),
+        john,
+        "test 16: accepted again under unscopedTokens full"
+    );
 
     // Test 8: an OIDC domain has no recipient lookup (DIR-10)
     assert_eq!(rcpt(BILL).await, '5', "test 8: never signed in");
@@ -309,7 +315,7 @@ pub async fn test() {
         .await;
     let other_domain = admin
         .registry_create_object(Domain {
-            is_enabled: true,
+            enable: true,
             name: "second.example.org".to_string(),
             certificate_management: CertificateManagement::Manual,
             dns_management: DnsManagement::Manual,
@@ -336,13 +342,34 @@ pub async fn test() {
             .unwrap();
         assert!(document.contains(realm), "test 10: {address}: {document}");
     }
-    for (domain, realm) in [
-        ("example.org", "realms/stalwart"),
-        ("second.example.org", "realms/inbuxa"),
-    ] {
+    // inbuxa: 1.0 puts a provider's issuer in the PACC record only when
+    // the provider passes its OAuth public-client conformance checks (an
+    // https issuer among them); the test realms are served over http, so
+    // an OIDC domain gets the password-only record. A domain on the
+    // internal directory still gets the server's own issuer, which shows
+    // the record follows each domain's directory.
+    for domain in ["example.org", "second.example.org"] {
         let pacc = server(&test).get_pacc_for_domain(domain).await.unwrap();
-        assert!(pacc.contains(realm), "test 10: PACC for {domain}: {pacc}");
+        assert!(
+            pacc.contains(r#""authentication":{"password":true}"#)
+                && !pacc.contains("oauth-public")
+                && !pacc.contains("realms/"),
+            "test 10: PACC for {domain}: {pacc}"
+        );
     }
+    admin.find_or_create_domain("internal.example.org").await;
+    let pacc = server(&test)
+        .get_pacc_for_domain("internal.example.org")
+        .await
+        .unwrap();
+    let issuer = format!(
+        r#""oauth-public":{{"issuer":"{}"}}"#,
+        server(&test).core.network.http.url_https
+    );
+    assert!(
+        pacc.contains(&issuer),
+        "test 10: PACC for internal.example.org: {pacc}"
+    );
     let _ = other_domain;
 
     // Test 13: sign-in can't pass a tenant's limit (DIR-15)
@@ -356,7 +383,7 @@ pub async fn test() {
     let tenant_directory = admin.registry_create_object(directory(Some(tenant))).await;
     let tenant_domain = admin
         .registry_create_object(Domain {
-            is_enabled: true,
+            enable: true,
             name: "tenant.example.org".to_string(),
             certificate_management: CertificateManagement::Manual,
             dns_management: DnsManagement::Manual,
@@ -392,6 +419,15 @@ pub async fn test() {
                 ..Default::default()
             },
             &[Property::AuthBanRate],
+        )
+        .await;
+    // inbuxa: 1.0 refuses opaque tokens unless the directory validates them
+    // (opaqueTokenValidation, default none); 0.16 always asked userinfo
+    admin
+        .registry_update_object(
+            ObjectType::Directory,
+            keycloak,
+            json!({ Property::OpaqueTokenValidation: "userInfo" }),
         )
         .await;
     admin.reload_settings().await;

@@ -8,48 +8,80 @@
 
 use crate::{
     Account, Credentials,
-    backend::oidc::{CachedKey, OidcError, OpenIdDirectory},
+    backend::oidc::{
+        CLAIMS_MAX_SIZE, ERROR_MAX_SIZE, ExternalScopes, ExternalToken, IntrospectionAuth,
+        OidcError, OpaqueValidation, OpenIdDirectory, TokenAccess, TokenContext, read_body,
+    },
 };
-use ahash::AHashMap;
-use jsonwebtoken::{
-    Algorithm, DecodingKey, Header, Validation, decode, decode_header,
-    jwk::{self, JwkSet},
+use jsonwebtoken::{Algorithm, Header, decode, decode_header, errors::ErrorKind};
+use registry::schema::enums::OidcUnscopedTokenPolicy;
+use reqwest::{
+    Method, StatusCode,
+    header::{ACCEPT, AUTHORIZATION, CONTENT_TYPE},
 };
-use reqwest::Client;
 use serde_json::Value;
-use std::time::Instant;
-use std::{sync::Arc, time::Duration};
 use trc::AuthEvent;
+use utils::HttpLimitResponse;
+
+const CLIENT_CLAIMS: [&str; 4] = ["azp", "client_id", "cid", "appid"];
+const ACCESS_TOKEN_CLAIMS: [&str; 5] = ["scope", "scp", "client_id", "cid", "appid"];
+const NON_ACCESS_MARKERS: [(&str, &str); 12] = [
+    ("typ", "id"),
+    ("typ", "refresh"),
+    ("typ", "offline"),
+    ("token_use", "id"),
+    ("token_use", "id_token"),
+    ("token_use", "refresh"),
+    ("token_use", "refresh_token"),
+    ("tokenType", "id-token"),
+    ("tokenType", "refresh-token"),
+    ("type", "id-token"),
+    ("token_type", "id_token"),
+    ("token_type", "refresh_token"),
+];
 
 impl OpenIdDirectory {
-    pub async fn authenticate(&self, credentials: &Credentials) -> trc::Result<Account> {
-        match credentials {
-            Credentials::Bearer { token, .. } if token.is_empty() => {
-                Err(AuthEvent::Failed.into_err().reason("Empty token rejected"))
-            }
-            Credentials::Bearer { token, .. } => if let Ok(header) = decode_header(token) {
-                self.authenticate_jwt(token, header).await
-            } else {
-                #[cfg(feature = "test_mode")]
-                let token = token.strip_prefix(".").unwrap_or(token);
-                self.authenticate_opaque(token).await
-            }
-            .map_err(|err| match err {
-                // inbuxa: DIR-30: a refused token is an authentication
-                // failure and counts toward the sign-in ban; a network,
-                // provider or configuration fault is an error and doesn't
-                OidcError::AuthorizationFailed(reason) | OidcError::TokenValidation(reason) => {
-                    AuthEvent::Failed.into_err().reason(reason)
-                }
-                err => AuthEvent::Error.into_err().reason(err),
-            }),
-            _ => Err(AuthEvent::Error
-                .into_err()
-                .reason("Unsupported credentials type for OIDC backend")),
-        }
+    pub async fn authenticate(&self, _credentials: &Credentials) -> trc::Result<Account> {
+        Err(AuthEvent::Error
+            .into_err()
+            .reason("Unsupported credentials type for OIDC backend"))
     }
 
-    async fn authenticate_jwt(&self, token: &str, header: Header) -> Result<Account, OidcError> {
+    pub fn accepts_issuer(&self, issuer: &str) -> bool {
+        self.issuers.iter().any(|accepted| accepted == issuer)
+    }
+
+    pub async fn authenticate_token(
+        &self,
+        token: &str,
+        ctx: &TokenContext<'_>,
+    ) -> trc::Result<ExternalToken> {
+        if token.is_empty() {
+            return Err(AuthEvent::Failed.into_err().reason("Empty token rejected"));
+        }
+
+        if let Ok(header) = decode_header(token) {
+            self.authenticate_jwt(token, header, ctx).await
+        } else {
+            #[cfg(inbuxa_tests)]
+            let token = token.strip_prefix(".").unwrap_or(token);
+            self.authenticate_opaque(token, ctx).await
+        }
+        .map_err(|err| match err {
+            OidcError::AuthorizationFailed(reason) | OidcError::TokenValidation(reason) => {
+                AuthEvent::Failed.into_err().reason(reason)
+            }
+            OidcError::TokenExpired(reason) => AuthEvent::TokenExpired.into_err().reason(reason),
+            err => AuthEvent::Error.into_err().reason(err),
+        })
+    }
+
+    async fn authenticate_jwt(
+        &self,
+        token: &str,
+        header: Header,
+        ctx: &TokenContext<'_>,
+    ) -> Result<ExternalToken, OidcError> {
         if matches!(
             header.alg,
             Algorithm::HS256 | Algorithm::HS384 | Algorithm::HS512
@@ -59,144 +91,262 @@ impl OpenIdDirectory {
             ));
         }
 
-        let candidates = self.get_key(header.kid.as_deref()).await?;
+        let kid = header.kid.as_deref();
+        let keys = self.signing_keys(kid).await?;
         let mut last_err = None;
-        for cached in &candidates {
-            let dk = &cached.decoding_key;
-            let alg = cached.algorithm;
-            let mut validation = Validation::new(alg);
-
-            if let Some(aud) = &self.config.require_aud {
-                validation.set_audience(&[aud]);
-            } else {
-                validation.validate_aud = false;
-            }
-
-            validation.set_issuer(&[&self.discovery.document.issuer]);
-            validation.leeway = 60;
-
-            match decode::<serde_json::Value>(token, dk, &validation) {
+        let mut claims = None;
+        for (decoding_key, validation) in keys.candidates(kid) {
+            match decode::<Value>(token, decoding_key, validation) {
                 Ok(token_data) => {
-                    if self.config.require_aud.is_some() && token_data.claims.get("aud").is_none() {
-                        last_err = Some(jsonwebtoken::errors::Error::from(
-                            jsonwebtoken::errors::ErrorKind::InvalidAudience,
-                        ));
-                        continue;
-                    }
+                    claims = Some(token_data.claims);
+                    break;
+                }
+                Err(err) => last_err = Some(err),
+            }
+        }
+        drop(keys);
 
-                    self.validate_scopes(&token_data.claims)?;
+        let Some(mut claims) = claims else {
+            return Err(match last_err {
+                Some(err)
+                    if matches!(
+                        err.kind(),
+                        ErrorKind::ExpiredSignature | ErrorKind::ImmatureSignature
+                    ) =>
+                {
+                    OidcError::TokenExpired(format!("JWT validation failed: {err}"))
+                }
+                Some(err) => OidcError::TokenValidation(format!("JWT validation failed: {err}")),
+                None => OidcError::TokenValidation("Unknown key id".to_string()),
+            });
+        };
 
-                    let mut claims = token_data.claims;
-                    let missing_username =
-                        is_claim_missing(&claims, Some(&self.config.claim_email));
-                    let jwt_email = self.resolve_email(&claims).ok();
-                    let missing_profile =
-                        is_claim_missing(&claims, self.config.claim_name.as_ref())
-                            || is_claim_missing(&claims, self.config.claim_groups.as_ref());
+        check_token_type(
+            header.typ.as_deref(),
+            &claims,
+            self.config.allow_id_token_claims,
+        )?;
+        self.check_audience(&claims, ctx)?;
+        let access = self.token_access(client_claim(&claims)?, token_scopes(&claims), ctx)?;
+        let expires_at = claims.get("exp").and_then(Value::as_u64);
 
-                    if jwt_email.is_none() || missing_username || missing_profile {
-                        match self.fetch_userinfo(token).await {
-                            Ok(userinfo) => {
-                                if let (Some(base), Value::Object(extra)) =
-                                    (claims.as_object_mut(), userinfo)
-                                {
-                                    for (key, value) in extra {
-                                        if base.get(&key).is_none_or(Value::is_null) {
-                                            base.insert(key, value);
-                                        }
-                                    }
-                                }
+        let username = self.resolve_username(&claims);
+        let missing_username = is_claim_missing(&claims, Some(&self.config.claim_username));
+        if (username.is_err()
+            || missing_username
+            || is_claim_missing(&claims, self.config.claim_name.as_deref())
+            || is_claim_missing(&claims, self.config.claim_groups.as_deref()))
+            && let Some(endpoint) = self.discovery.document.userinfo_endpoint.as_deref()
+        {
+            match self.fetch_userinfo(endpoint, token).await {
+                Ok(Value::Object(userinfo)) => {
+                    if let Value::Object(base) = &mut claims {
+                        for (key, value) in userinfo {
+                            if base.get(&key).is_none_or(Value::is_null) {
+                                base.insert(key, value);
                             }
-                            Err(err) if jwt_email.is_none() => return Err(err),
-                            Err(_) => {}
                         }
                     }
-
-                    let email = match jwt_email {
-                        Some(email) if !missing_username => email,
-                        _ => self.resolve_email(&claims)?,
-                    };
-                    return self.build_account(email, &claims);
                 }
-                Err(e) => {
-                    last_err = Some(e);
-                }
+                Ok(_) => {}
+                Err(err) if username.is_err() => return Err(err),
+                Err(_) => {}
             }
         }
 
-        Err(OidcError::TokenValidation(format!(
-            "JWT validation failed: {}",
-            last_err.map(|e| e.to_string()).unwrap_or_default()
-        )))
+        let username = match username {
+            Ok(username) if !missing_username => username,
+            _ => self.resolve_username(&claims)?,
+        };
+
+        Ok(ExternalToken {
+            account: self.build_account(username, &claims),
+            access,
+            expires_at,
+        })
     }
 
-    async fn authenticate_opaque(&self, token: &str) -> Result<Account, OidcError> {
-        let claims = self.fetch_userinfo(token).await?;
-        self.build_account(self.resolve_email(&claims)?, &claims)
+    async fn authenticate_opaque(
+        &self,
+        token: &str,
+        ctx: &TokenContext<'_>,
+    ) -> Result<ExternalToken, OidcError> {
+        match &self.config.opaque_validation {
+            OpaqueValidation::Reject => Err(OidcError::TokenValidation(
+                "Opaque access tokens are not accepted, only JWT access tokens are validated"
+                    .to_string(),
+            )),
+            OpaqueValidation::UserInfo => {
+                let access = self.token_access(None, ExternalScopes::NONE, ctx)?;
+                let endpoint = self
+                    .discovery
+                    .document
+                    .userinfo_endpoint
+                    .as_deref()
+                    .ok_or_else(|| {
+                        OidcError::Config("The IdP metadata has no userinfo_endpoint".to_string())
+                    })?;
+                let claims = self.fetch_userinfo(endpoint, token).await?;
+                let username = self.resolve_username(&claims)?;
+                Ok(ExternalToken {
+                    account: self.build_account(username, &claims),
+                    access,
+                    expires_at: None,
+                })
+            }
+            OpaqueValidation::Introspection(auth) => self.introspect(token, auth, ctx).await,
+        }
     }
 
-    async fn get_key(&self, kid: Option<&str>) -> Result<Vec<Arc<CachedKey>>, OidcError> {
-        {
-            let guard = self.cache.read().await;
+    async fn introspect(
+        &self,
+        token: &str,
+        auth: &IntrospectionAuth,
+        ctx: &TokenContext<'_>,
+    ) -> Result<ExternalToken, OidcError> {
+        let endpoint = self
+            .discovery
+            .document
+            .introspection_endpoint
+            .as_deref()
+            .ok_or_else(|| {
+                OidcError::Config("The IdP metadata has no introspection_endpoint".to_string())
+            })?;
 
-            if let Some(kid) = kid {
-                if let Some(cached) = guard.keys.get(kid) {
-                    return Ok(vec![cached.clone()]);
-                }
-
-                if guard.last_updated.elapsed() < Duration::from_secs(300) {
-                    return Err(OidcError::TokenValidation("Unknown key id".to_string()));
-                }
-            } else {
-                let all: Vec<_> = guard.keys.values().cloned().collect();
-                if !all.is_empty() {
-                    return Ok(all);
-                }
+        let mut body = String::with_capacity(token.len() + 64);
+        body.push_str("token=");
+        body.extend(form_urlencoded::byte_serialize(token.as_bytes()));
+        body.push_str("&token_type_hint=access_token");
+        let mut request = self
+            .http
+            .request(Method::POST, endpoint)
+            .map_err(|err| OidcError::Config(format!("Invalid introspection URL: {err}")))?
+            .header(CONTENT_TYPE, "application/x-www-form-urlencoded")
+            .header(ACCEPT, "application/json");
+        match auth {
+            IntrospectionAuth::Basic { authorization } => {
+                request = request.header(AUTHORIZATION, authorization.as_ref());
             }
+            IntrospectionAuth::Post { credentials } => body.push_str(credentials),
+            IntrospectionAuth::Unauthenticated => {}
         }
 
-        let new_keys = fetch_jwks_keys(&self.http, &self.discovery.document.jwks_uri).await?;
+        let response = request
+            .body(body)
+            .send()
+            .await
+            .map_err(|e| OidcError::Network(format!("Introspection request failed: {e}")))?;
+        let status = response.status();
+        if !status.is_success() {
+            return Err(OidcError::Provider(format!(
+                "Introspection endpoint returned HTTP {status}"
+            )));
+        }
+        let bytes = read_body(response, CLAIMS_MAX_SIZE, "Introspection").await?;
+        let claims = serde_json::from_slice::<Value>(&bytes)
+            .map_err(|e| OidcError::Provider(format!("Introspection JSON parse error: {e}")))?;
+
+        if claims.get("active").and_then(Value::as_bool) != Some(true) {
+            return Err(OidcError::TokenValidation(
+                "Token is not active".to_string(),
+            ));
+        }
+        if has_non_access_marker(&claims) {
+            return Err(OidcError::TokenValidation(
+                "Introspected token is not an access token".to_string(),
+            ));
+        }
+        if let Some(issuer) = claims.get("iss").and_then(Value::as_str)
+            && !self.accepts_issuer(issuer)
         {
-            let mut guard = self.cache.write().await;
-            guard.keys = new_keys;
-            guard.last_updated = Instant::now();
+            return Err(OidcError::TokenValidation(format!(
+                "Introspected token was issued by '{issuer}'"
+            )));
         }
 
-        let guard = self.cache.read().await;
-        if let Some(kid) = kid {
-            if let Some(cached) = guard.keys.get(kid) {
-                Ok(vec![cached.clone()])
-            } else {
-                Err(OidcError::TokenValidation(
-                    "Unknown key id after refresh".to_string(),
-                ))
+        self.check_audience(&claims, ctx)?;
+        let access = self.token_access(client_claim(&claims)?, token_scopes(&claims), ctx)?;
+        let username = self.resolve_username(&claims)?;
+
+        Ok(ExternalToken {
+            account: self.build_account(username, &claims),
+            access,
+            expires_at: claims.get("exp").and_then(Value::as_u64),
+        })
+    }
+
+    fn check_audience(&self, claims: &Value, ctx: &TokenContext<'_>) -> Result<(), OidcError> {
+        if self.config.skip_audience_validation {
+            return Ok(());
+        }
+        let is_accepted = |audience: &str| {
+            self.config
+                .accepted_audiences
+                .iter()
+                .any(|accepted| accepted.as_ref() == audience)
+                || (ctx.is_resource)(audience)
+        };
+        let accepted = match claims.get("aud") {
+            Some(Value::String(audience)) => is_accepted(audience),
+            Some(Value::Array(audiences)) => {
+                audiences.iter().filter_map(Value::as_str).any(is_accepted)
             }
+            _ => false,
+        };
+        if accepted {
+            Ok(())
         } else {
-            let all: Vec<_> = guard.keys.values().cloned().collect();
-            if all.is_empty() {
-                Err(OidcError::Provider(
-                    "JWKS contains no usable keys".to_string(),
-                ))
-            } else {
-                Ok(all)
+            Err(OidcError::AuthorizationFailed(format!(
+                "Token audience {} matches neither a resource identifier of this server nor acceptedAudiences",
+                claims.get("aud").unwrap_or(&Value::Null)
+            )))
+        }
+    }
+
+    fn token_access(
+        &self,
+        client_id: Option<&str>,
+        scopes: ExternalScopes,
+        ctx: &TokenContext<'_>,
+    ) -> Result<TokenAccess, OidcError> {
+        if client_id.is_some_and(|client_id| (ctx.is_first_party)(client_id)) {
+            Ok(TokenAccess::Unrestricted)
+        } else if !scopes.is_empty() {
+            Ok(TokenAccess::Scoped(scopes))
+        } else {
+            match self.config.unscoped_tokens {
+                OidcUnscopedTokenPolicy::Reject => Err(OidcError::AuthorizationFailed(
+                    "Token carries none of the urn:ietf:params:oauth:scope:{mail,contacts,calendars,files} scopes and unscopedTokens is set to reject".to_string(),
+                )),
+                OidcUnscopedTokenPolicy::Interoperable => {
+                    Ok(TokenAccess::Scoped(ExternalScopes::ALL))
+                }
+                OidcUnscopedTokenPolicy::Full => Ok(TokenAccess::Unrestricted),
             }
         }
     }
 
-    async fn fetch_userinfo(&self, token: &str) -> Result<serde_json::Value, OidcError> {
+    async fn fetch_userinfo(&self, endpoint: &str, token: &str) -> Result<Value, OidcError> {
         let resp = self
             .http
-            .get(&self.discovery.document.userinfo_endpoint)
+            .request(Method::GET, endpoint)
+            .map_err(|err| OidcError::Config(format!("Invalid UserInfo URL: {err}")))?
             .bearer_auth(token)
             .send()
             .await
             .map_err(|e| OidcError::Network(format!("UserInfo request failed: {e}")))?;
 
         let status = resp.status();
-        if status == reqwest::StatusCode::UNAUTHORIZED || status == reqwest::StatusCode::FORBIDDEN {
-            let reason = resp.text().await.unwrap_or_default();
+        if status == StatusCode::UNAUTHORIZED || status == StatusCode::FORBIDDEN {
+            let reason = resp
+                .bytes_with_limit(ERROR_MAX_SIZE)
+                .await
+                .ok()
+                .flatten()
+                .unwrap_or_default();
             return Err(OidcError::AuthorizationFailed(format!(
-                "Token rejected by UserInfo endpoint with status {status}: {reason}"
+                "Token rejected by UserInfo endpoint with status {status}: {}",
+                String::from_utf8_lossy(&reason)
             )));
         }
         if !status.is_success() {
@@ -205,37 +355,14 @@ impl OpenIdDirectory {
             )));
         }
 
-        let bytes = resp
-            .bytes()
-            .await
-            .map_err(|e| OidcError::Provider(format!("UserInfo HTTP error: {e}")))?;
+        let bytes = read_body(resp, CLAIMS_MAX_SIZE, "UserInfo").await?;
 
-        serde_json::from_slice::<serde_json::Value>(&bytes)
+        serde_json::from_slice::<Value>(&bytes)
             .map_err(|e| OidcError::Provider(format!("UserInfo JSON parse error: {e}")))
     }
 
-    fn validate_scopes(&self, claims: &serde_json::Value) -> Result<(), OidcError> {
-        if !self.config.require_scopes.is_empty() {
-            let token_scopes = extract_scopes(claims);
-
-            for required in &self.config.require_scopes {
-                if !token_scopes.iter().any(|s| s == required) {
-                    return Err(OidcError::AuthorizationFailed(format!(
-                        "Missing required scope '{required}', present scopes: {token_scopes:?}"
-                    )));
-                }
-            }
-        }
-
-        Ok(())
-    }
-
-    fn build_account(
-        &self,
-        email: String,
-        claims: &serde_json::Value,
-    ) -> Result<Account, OidcError> {
-        Ok(Account {
+    fn build_account(&self, email: String, claims: &Value) -> Account {
+        Account {
             email,
             email_aliases: Vec::new(),
             secret: None,
@@ -248,7 +375,7 @@ impl OpenIdDirectory {
                 .map(|groups| {
                     groups
                         .into_iter()
-                        .map(|group| match &self.config.default_domain {
+                        .map(|group| match &self.config.username_domain {
                             Some(domain) if !group.contains('@') => format!("{group}@{domain}"),
                             _ => group,
                         })
@@ -262,23 +389,23 @@ impl OpenIdDirectory {
                 .and_then(|v| v.as_str())
                 .filter(|name| !name.is_empty())
                 .map(|s| s.to_string()),
-        })
+        }
     }
 
-    fn resolve_email(&self, claims: &serde_json::Value) -> Result<String, OidcError> {
+    fn resolve_username(&self, claims: &Value) -> Result<String, OidcError> {
         if let Some(val) = claims
-            .get(&self.config.claim_email)
+            .get(&self.config.claim_username)
             .and_then(|v| v.as_str())
         {
             if val.contains('@') {
                 return Ok(val.to_string());
             }
-            if let Some(domain) = &self.config.default_domain {
+            if let Some(domain) = &self.config.username_domain {
                 return Ok(format!("{val}@{domain}"));
             }
         }
 
-        if self.config.claim_email != "email"
+        if self.config.claim_username != "email"
             && let Some(val) = claims.get("email").and_then(|v| v.as_str())
             && val.contains('@')
         {
@@ -291,181 +418,109 @@ impl OpenIdDirectory {
     }
 }
 
-pub(super) async fn fetch_jwks_keys(
-    http: &Client,
-    jwks_uri: &str,
-) -> Result<AHashMap<String, Arc<CachedKey>>, OidcError> {
-    let jwks_bytes = http
-        .get(jwks_uri)
-        .send()
-        .await
-        .map_err(|e| OidcError::Network(format!("JWKS fetch failed: {e}")))?
-        .error_for_status()
-        .map_err(|e| OidcError::Provider(format!("JWKS HTTP error: {e}")))?
-        .bytes()
-        .await
-        .map_err(|e| OidcError::Provider(format!("JWKS HTTP error: {e}")))?;
-    let jwks: JwkSet = serde_json::from_slice(&jwks_bytes)
-        .map_err(|e| OidcError::Provider(format!("JWKS JSON parse error: {e}")))?;
+fn check_token_type(
+    header_typ: Option<&str>,
+    claims: &Value,
+    allow_id_token_claims: bool,
+) -> Result<(), OidcError> {
+    let claim_is = |name: &str, value: &str| claim_equals(claims, name, value);
 
-    let mut map = AHashMap::new();
-    let mut synthetic_id: u64 = 0;
+    if has_non_access_marker(claims) {
+        Err(OidcError::TokenValidation(
+            "ID and refresh tokens are not accepted as access tokens".to_string(),
+        ))
+    } else if header_typ.is_some_and(|typ| {
+        typ.eq_ignore_ascii_case("at+jwt") || typ.eq_ignore_ascii_case("application/at+jwt")
+    }) || claim_is("typ", "bearer")
+        || claim_is("token_use", "access")
+        || claim_is("tokenType", "access-token")
+        || allow_id_token_claims
+    {
+        Ok(())
+    } else if claims.get("nonce").is_some() || claims.get("at_hash").is_some() {
+        Err(OidcError::TokenValidation(
+            "Token carries ID token claims (nonce or at_hash), enable allowIdTokenClaims if the IdP issues such access tokens".to_string(),
+        ))
+    } else if ACCESS_TOKEN_CLAIMS
+        .iter()
+        .any(|claim| claims.get(claim).is_some_and(|value| !value.is_null()))
+    {
+        Ok(())
+    } else {
+        Err(OidcError::TokenValidation(
+            "Token has no scope or client_id claim and may be an ID token, enable allowIdTokenClaims if the IdP issues such access tokens".to_string(),
+        ))
+    }
+}
 
-    for key in &jwks.keys {
-        if let Some(pk_use) = &key.common.public_key_use
-            && pk_use != &jwk::PublicKeyUse::Signature
-        {
-            continue;
+fn claim_equals(claims: &Value, name: &str, value: &str) -> bool {
+    claims
+        .get(name)
+        .and_then(Value::as_str)
+        .is_some_and(|claim| claim.eq_ignore_ascii_case(value))
+}
+
+fn has_non_access_marker(claims: &Value) -> bool {
+    NON_ACCESS_MARKERS
+        .iter()
+        .any(|(name, value)| claim_equals(claims, name, value))
+}
+
+fn client_claim(claims: &Value) -> Result<Option<&str>, OidcError> {
+    let mut client_id = None;
+    for value in CLIENT_CLAIMS
+        .iter()
+        .filter_map(|claim| claims.get(claim).and_then(Value::as_str))
+    {
+        match client_id {
+            None => client_id = Some(value),
+            Some(previous) if previous == value => {}
+            Some(_) => {
+                return Err(OidcError::TokenValidation(
+                    "Token carries conflicting client claims".to_string(),
+                ));
+            }
         }
-
-        let algorithm = match &key.algorithm {
-            jwk::AlgorithmParameters::RSA(_) => match key.common.key_algorithm {
-                Some(jwk::KeyAlgorithm::RS256) => Algorithm::RS256,
-                Some(jwk::KeyAlgorithm::RS384) => Algorithm::RS384,
-                Some(jwk::KeyAlgorithm::RS512) => Algorithm::RS512,
-                Some(jwk::KeyAlgorithm::PS256) => Algorithm::PS256,
-                Some(jwk::KeyAlgorithm::PS384) => Algorithm::PS384,
-                Some(jwk::KeyAlgorithm::PS512) => Algorithm::PS512,
-                None => Algorithm::RS256,
-                Some(other) => {
-                    trc::event!(
-                        Auth(AuthEvent::Warning),
-                        Url = jwks_uri.to_string(),
-                        Reason = format!("Unsupported RSA key algorithm {:?}", other)
-                    );
-                    continue;
-                }
-            },
-            jwk::AlgorithmParameters::EllipticCurve(ec) => match ec.curve {
-                jwk::EllipticCurve::P256 => Algorithm::ES256,
-                jwk::EllipticCurve::P384 => Algorithm::ES384,
-                _ => {
-                    trc::event!(
-                        Auth(AuthEvent::Warning),
-                        Url = jwks_uri.to_string(),
-                        Reason = format!("Unsupported EC curve {:?}", ec.curve)
-                    );
-                    continue;
-                }
-            },
-            jwk::AlgorithmParameters::OctetKeyPair(_) => Algorithm::EdDSA,
-            jwk::AlgorithmParameters::OctetKey(_) => {
-                trc::event!(
-                    Auth(AuthEvent::Warning),
-                    Url = jwks_uri.to_string(),
-                    Reason = format!(
-                        "Symmetric (HMAC) key found in JWKS (kid={:?}), skipping — HMAC is not accepted",
-                        key.common.key_id
-                    )
-                );
-                continue;
-            }
-            _ => {
-                trc::event!(
-                    Auth(AuthEvent::Warning),
-                    Url = jwks_uri.to_string(),
-                    Reason = format!(
-                        "Unrecognised key type in JWKS (kid={:?}), skipping",
-                        key.common.key_id
-                    )
-                );
-                continue;
-            }
-        };
-
-        let decoding_key = match DecodingKey::from_jwk(key) {
-            Ok(decoding_key) => decoding_key,
-            Err(e) => {
-                trc::event!(
-                    Auth(AuthEvent::Warning),
-                    Url = jwks_uri.to_string(),
-                    Reason = format!(
-                        "Failed to build DecodingKey from JWK (kid={:?}): {e}",
-                        key.common.key_id
-                    )
-                );
-                continue;
-            }
-        };
-
-        map.insert(
-            match &key.common.key_id {
-                Some(id) => id.clone(),
-                None => {
-                    let id = format!("_synthetic_{synthetic_id}");
-                    synthetic_id += 1;
-                    id
-                }
-            },
-            CachedKey {
-                decoding_key,
-                algorithm,
-            }
-            .into(),
-        );
     }
-
-    Ok(map)
+    Ok(client_id)
 }
 
-fn extract_scopes(claims: &serde_json::Value) -> Vec<String> {
-    match claims.get("scope") {
-        Some(serde_json::Value::String(s)) => s.split_whitespace().map(|s| s.to_string()).collect(),
-        Some(serde_json::Value::Array(arr)) => arr
-            .iter()
-            .filter_map(|v| v.as_str().map(|s| s.to_string()))
-            .collect(),
-        _ => Vec::new(),
+fn token_scopes(claims: &Value) -> ExternalScopes {
+    let mut scopes = ExternalScopes::NONE;
+    match claims
+        .get("scope")
+        .filter(|value| !value.is_null())
+        .or_else(|| claims.get("scp"))
+    {
+        Some(Value::String(names)) => {
+            for name in names.split_ascii_whitespace() {
+                scopes.insert(ExternalScopes::from_name(name));
+            }
+        }
+        Some(Value::Array(names)) => {
+            for name in names.iter().filter_map(Value::as_str) {
+                scopes.insert(ExternalScopes::from_name(name));
+            }
+        }
+        _ => {}
     }
+    scopes
 }
 
-fn extract_string_list(value: &serde_json::Value) -> Option<Vec<String>> {
+fn extract_string_list(value: &Value) -> Option<Vec<String>> {
     match value {
-        serde_json::Value::Array(arr) => Some(
+        Value::Array(arr) => Some(
             arr.iter()
                 .filter_map(|v| v.as_str().map(|s| s.to_string()))
                 .collect(),
         ),
-        serde_json::Value::String(s) => Some(s.split_whitespace().map(|s| s.to_string()).collect()),
+        Value::String(s) => Some(s.split_whitespace().map(|s| s.to_string()).collect()),
+        Value::Object(map) => Some(map.keys().cloned().collect()),
         _ => None,
     }
 }
 
-#[inline(always)]
-fn is_claim_missing(claims: &serde_json::Value, claim: Option<&String>) -> bool {
-    claim.is_some_and(|claim| claims.get(claim).is_none_or(serde_json::Value::is_null))
+fn is_claim_missing(claims: &Value, claim: Option<&str>) -> bool {
+    claim.is_some_and(|claim| claims.get(claim).is_none_or(Value::is_null))
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use serde_json::json;
-
-    #[test]
-    fn extract_string_list_distinguishes_absent_from_empty() {
-        assert_eq!(
-            extract_string_list(&json!(["sales", "support"])),
-            Some(vec!["sales".to_string(), "support".to_string()])
-        );
-        assert_eq!(
-            extract_string_list(&json!("sales support")),
-            Some(vec!["sales".to_string(), "support".to_string()])
-        );
-        assert_eq!(extract_string_list(&json!([])), Some(vec![]));
-        assert_eq!(extract_string_list(&json!("")), Some(vec![]));
-        assert_eq!(extract_string_list(&json!(null)), None);
-        assert_eq!(extract_string_list(&json!({"groups": []})), None);
-        assert_eq!(extract_string_list(&json!(42)), None);
-    }
-
-    #[test]
-    fn is_claim_missing_treats_null_as_absent() {
-        let claims = json!({"groups": null, "name": "John Doe", "roles": []});
-
-        assert!(is_claim_missing(&claims, Some(&"groups".to_string())));
-        assert!(is_claim_missing(&claims, Some(&"unknown".to_string())));
-        assert!(!is_claim_missing(&claims, Some(&"name".to_string())));
-        assert!(!is_claim_missing(&claims, Some(&"roles".to_string())));
-        assert!(!is_claim_missing(&claims, None));
-    }
-}

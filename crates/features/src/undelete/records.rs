@@ -72,7 +72,7 @@ pub async fn insert(
         id,
         Change::Created,
     );
-    data.write(batch.build_all())
+    data.write_batch(&mut batch)
         .await
         .caused_by(trc::location!())?;
 
@@ -83,7 +83,7 @@ pub async fn insert(
         .set(account_index(account_id, item_id), vec![]);
     registry
         .store()
-        .write(batch.build_all())
+        .write_batch(&mut batch)
         .await
         .caused_by(trc::location!())?;
     Ok(id)
@@ -123,7 +123,7 @@ pub async fn set_deadline(
         });
     }
     data::log_change(&mut batch, account_id, registry.assign_id(), id, Change::Updated);
-    data.write(batch.build_all())
+    data.write_batch(&mut batch)
         .await
         .caused_by(trc::location!())?;
 
@@ -131,7 +131,7 @@ pub async fn set_deadline(
     batch.set(item_class(id.id()), updated.to_pickled_vec());
     registry
         .store()
-        .write(batch.build_all())
+        .write_batch(&mut batch)
         .await
         .caused_by(trc::location!())?;
     Ok(updated)
@@ -154,7 +154,7 @@ pub async fn remove(
         .clear(account_index(account_id, id.id()));
     registry
         .store()
-        .write(batch.build_all())
+        .write_batch(&mut batch)
         .await
         .caused_by(trc::location!())?;
 
@@ -175,7 +175,7 @@ pub async fn remove(
         id,
         Change::Destroyed,
     );
-    data.write(batch.build_all())
+    data.write_batch(&mut batch)
         .await
         .caused_by(trc::location!())
         .map(|_| ())

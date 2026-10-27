@@ -27,7 +27,7 @@ pub mod upload;
 pub mod validate;
 
 #[inline(always)]
-fn ahash_is_empty<K, V>(map: &AHashMap<K, V>) -> bool {
+pub(crate) fn ahash_is_empty<K, V>(map: &AHashMap<K, V>) -> bool {
     map.is_empty()
 }
 
@@ -46,7 +46,7 @@ impl<T: Property> Serialize for PropertyWrapper<T> {
     where
         S: Serializer,
     {
-        serializer.serialize_str(self.0.to_cow().as_ref())
+        self.0.serialize_text(serializer)
     }
 }
 

@@ -160,7 +160,7 @@ pub async fn settings(data: &Store) -> trc::Result<Settings> {
 pub async fn set_settings(data: &Store, settings: &Settings) -> trc::Result<()> {
     let mut batch = BatchBuilder::new();
     batch.set(settings_class(), Json(settings).serialize()?);
-    data.write(batch.build_all())
+    data.write_batch(&mut batch)
         .await
         .caused_by(trc::location!())?;
     Ok(())
@@ -196,7 +196,7 @@ pub async fn all(data: &Store) -> trc::Result<Vec<Held>> {
 pub async fn create(data: &Store, held: &Held) -> trc::Result<()> {
     let mut batch = BatchBuilder::new();
     batch.set(class(held.queue_id), Json(held).serialize()?);
-    data.write(batch.build_all())
+    data.write_batch(&mut batch)
         .await
         .caused_by(trc::location!())?;
     Ok(())
@@ -205,7 +205,7 @@ pub async fn create(data: &Store, held: &Held) -> trc::Result<()> {
 pub async fn delete(data: &Store, queue_id: u64) -> trc::Result<()> {
     let mut batch = BatchBuilder::new();
     batch.clear(class(queue_id));
-    data.write(batch.build_all())
+    data.write_batch(&mut batch)
         .await
         .caused_by(trc::location!())?;
     Ok(())

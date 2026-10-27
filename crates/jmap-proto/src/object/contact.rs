@@ -5,12 +5,18 @@
  */
 
 use crate::{
-    object::{AnyId, JmapObject, JmapObjectId},
-    request::{MaybeInvalid, deserialize::DeserializeArguments},
+    object::{
+        AnyId, JmapObject, JmapObjectId,
+        metadata::{MetadataFilter, MetadataProperty, MetadataRoot},
+    },
+    request::{
+        MaybeInvalid,
+        deserialize::{CowStr, DeserializeArguments, next_lowercase_value},
+    },
     types::date::UTCDate,
 };
 use calcard::jscontact::{JSContactProperty, JSContactValue};
-use jmap_tools::{JsonPointerItem, Key};
+use jmap_tools::{JsonPointer, JsonPointerItem, Key};
 use std::borrow::Cow;
 use types::{blob::BlobId, id::Id};
 
@@ -101,6 +107,7 @@ pub enum ContactCardFilter {
     OnlineService(String),
     Address(String),
     Note(String),
+    Metadata(MetadataFilter),
     _T(String),
 }
 
@@ -145,44 +152,49 @@ impl<'de> DeserializeArguments<'de> for ContactCardFilter {
                 *self = ContactCardFilter::UpdatedAfter(map.next_value()?);
             },
             b"text" => {
-                *self = ContactCardFilter::Text(map.next_value::<Cow<str>>()?.to_lowercase());
+                *self = ContactCardFilter::Text(next_lowercase_value(map)?);
             },
             b"name" => {
-                *self = ContactCardFilter::Name(map.next_value::<Cow<str>>()?.to_lowercase());
+                *self = ContactCardFilter::Name(next_lowercase_value(map)?);
             },
             b"name/given" => {
-                *self = ContactCardFilter::NameGiven(map.next_value::<Cow<str>>()?.to_lowercase());
+                *self = ContactCardFilter::NameGiven(next_lowercase_value(map)?);
             },
             b"name/surname" => {
-                *self = ContactCardFilter::NameSurname(map.next_value::<Cow<str>>()?.to_lowercase());
+                *self = ContactCardFilter::NameSurname(next_lowercase_value(map)?);
             },
             b"name/surname2" => {
-                *self = ContactCardFilter::NameSurname2(map.next_value::<Cow<str>>()?.to_lowercase());
+                *self = ContactCardFilter::NameSurname2(next_lowercase_value(map)?);
             },
             b"nickname" => {
-                *self = ContactCardFilter::Nickname(map.next_value::<Cow<str>>()?.to_lowercase());
+                *self = ContactCardFilter::Nickname(next_lowercase_value(map)?);
             },
             b"organization" => {
-                *self = ContactCardFilter::Organization(map.next_value::<Cow<str>>()?.to_lowercase());
+                *self = ContactCardFilter::Organization(next_lowercase_value(map)?);
             },
             b"email" => {
-                *self = ContactCardFilter::Email(map.next_value()?);
+                *self = ContactCardFilter::Email(next_lowercase_value(map)?);
             },
             b"phone" => {
-                *self = ContactCardFilter::Phone(map.next_value::<Cow<str>>()?.to_lowercase());
+                *self = ContactCardFilter::Phone(next_lowercase_value(map)?);
             },
             b"onlineService" => {
-                *self = ContactCardFilter::OnlineService(map.next_value::<Cow<str>>()?.to_lowercase());
+                *self = ContactCardFilter::OnlineService(next_lowercase_value(map)?);
             },
             b"address" => {
-                *self = ContactCardFilter::Address(map.next_value::<Cow<str>>()?.to_lowercase());
+                *self = ContactCardFilter::Address(next_lowercase_value(map)?);
             },
             b"note" => {
-                *self = ContactCardFilter::Note(map.next_value::<Cow<str>>()?.to_lowercase());
+                *self = ContactCardFilter::Note(next_lowercase_value(map)?);
             },
             _ => {
-                *self = ContactCardFilter::_T(key.to_string());
-                let _ = map.next_value::<serde::de::IgnoredAny>()?;
+                *self = match MetadataFilter::try_deserialize(key, map)? {
+                    Some(filter) => ContactCardFilter::Metadata(filter),
+                    None => {
+                        let _ = map.next_value::<serde::de::IgnoredAny>()?;
+                        ContactCardFilter::_T(key.to_string())
+                    }
+                };
             }
         );
         Ok(())
@@ -195,7 +207,7 @@ impl<'de> DeserializeArguments<'de> for ContactCardComparator {
         A: serde::de::MapAccess<'de>,
     {
         if key == "property" {
-            let value = map.next_value::<Cow<str>>()?;
+            let value = map.next_value::<CowStr>()?.0;
             hashify::fnc_map!(value.as_bytes(),
                 b"created" => {
                     *self = ContactCardComparator::Created;
@@ -213,7 +225,7 @@ impl<'de> DeserializeArguments<'de> for ContactCardComparator {
                     *self = ContactCardComparator::NameSurname2;
                 },
                 _ => {
-                    *self = ContactCardComparator::_T(value.to_string());
+                    *self = ContactCardComparator::_T(value.into_owned());
                 }
             );
         } else {
@@ -246,6 +258,7 @@ impl ContactCardFilter {
             ContactCardFilter::OnlineService(_) => "onlineService",
             ContactCardFilter::Address(_) => "address",
             ContactCardFilter::Note(_) => "note",
+            ContactCardFilter::Metadata(filter) => filter.as_str(),
             ContactCardFilter::_T(s) => return Cow::Owned(s),
         }
         .into()
@@ -275,6 +288,30 @@ impl Default for ContactCardFilter {
 impl Default for ContactCardComparator {
     fn default() -> Self {
         ContactCardComparator::_T(String::new())
+    }
+}
+
+impl MetadataProperty for JSContactProperty<Id> {
+    fn as_metadata_root(&self) -> Option<MetadataRoot> {
+        match self {
+            JSContactProperty::Metadata => Some(MetadataRoot::Shared),
+            JSContactProperty::PrivateMetadata => Some(MetadataRoot::Private),
+            _ => None,
+        }
+    }
+
+    fn as_pointer(&self) -> Option<&JsonPointer<Self>> {
+        match self {
+            JSContactProperty::Pointer(pointer) => Some(pointer),
+            _ => None,
+        }
+    }
+
+    fn from_metadata_root(root: MetadataRoot) -> Self {
+        match root {
+            MetadataRoot::Shared => JSContactProperty::Metadata,
+            MetadataRoot::Private => JSContactProperty::PrivateMetadata,
+        }
     }
 }
 

@@ -6,23 +6,49 @@
  * Modified by Coffey Labs in 2026 for INBUXA.
  */
 
+#[cfg(feature = "postgres")]
+use crate::backend::postgres::search::DENSE_ACCOUNT_DOCUMENTS;
 use crate::{
-    SearchStore, Store,
+    SearchStore, Store, Subspace,
+    backend::scaleout::replica::ReplicatedStore,
     search::{
-        IndexDocument, QueryResults, SearchComparator, SearchField, SearchFilter, SearchOperator,
-        SearchQuery, SearchValue,
+        IndexDocument, QueryResults, SearchField, SearchFilter, SearchQuery, SearchValue,
         split::{SplitFilter, split_filters},
     },
     write::SearchIndex,
 };
-use std::cmp::Ordering;
+use roaring::{RoaringBitmap, RoaringTreemap};
+use std::{cmp::Ordering, future::Future};
 use trc::AddContext;
 
+pub const MAX_FILTER_CANDIDATES: usize = 16_384;
+#[cfg(feature = "postgres")]
+const DENSE_QUERY_FIXED_ROWS: f64 = 12_000.0;
+#[cfg(feature = "postgres")]
+const DENSE_QUERY_ROWS_PER_DOCUMENT: f64 = 0.011;
+
 impl SearchStore {
-    pub async fn query_account(&self, query: SearchQuery) -> trc::Result<Vec<u32>> {
+    pub async fn query_account(&self, mut query: SearchQuery) -> trc::Result<Vec<u32>> {
+        let comparators = std::mem::take(&mut query.comparators);
+        let results = self.filter_account(query).await?;
+
+        Ok(match results.len().cmp(&1) {
+            Ordering::Equal => vec![results.min().unwrap()],
+            Ordering::Less => vec![],
+            Ordering::Greater if !comparators.is_empty() => {
+                QueryResults::new(results, comparators).into_sorted()
+            }
+            Ordering::Greater => results.iter().collect(),
+        })
+    }
+
+    pub async fn filter_account(&self, query: SearchQuery) -> trc::Result<RoaringBitmap> {
+
+        debug_assert!(query.comparators.is_empty());
+
         // Pre-filter by mask
         if query.mask.is_empty() {
-            return Ok(vec![]);
+            return Ok(RoaringBitmap::new());
         }
 
         // If the store does not support FTS, use the internal FTS store
@@ -30,23 +56,25 @@ impl SearchStore {
             return store.query_account(query).await;
         }
 
-        // If all filters and comparators are external, delegate to the underlying store
+        // If all filters are external, delegate to the underlying store
         let mut account_id = u32::MAX;
         let mut has_local_filters = false;
         let mut has_external_filters = false;
         for filter in &query.filters {
             match filter {
-                SearchFilter::Operator {
+                SearchFilter::Integer {
+                    value,
                     field: SearchField::AccountId,
-                    op: SearchOperator::Equal,
-                    value: SearchValue::Uint(id),
+                    ..
                 } => {
-                    account_id = *id as u32;
+                    account_id = *value as u32;
                 }
                 SearchFilter::DocumentSet(_) => {
                     has_local_filters = true;
                 }
-                SearchFilter::Operator { .. } => {
+                SearchFilter::Text { .. }
+                | SearchFilter::KeyValue { .. }
+                | SearchFilter::Integer { .. } => {
                     has_external_filters = true;
                 }
                 _ => (),
@@ -59,25 +87,15 @@ impl SearchStore {
                 .caused_by(trc::location!()));
         }
 
-        if !has_local_filters && !has_external_filters && query.comparators.is_empty() {
-            return Ok(query.mask.iter().collect());
+        if !has_local_filters && !has_external_filters {
+            return Ok(query.mask);
         }
 
-        if !has_local_filters && query.comparators.iter().all(|c| c.is_external()) {
+        if !has_local_filters {
             return self
-                .sub_query(query.index, &query.filters, &query.comparators)
+                .sub_query(query.index, &query.filters, &query.mask)
                 .await
-                .map(|results| {
-                    if !results.is_empty() || has_external_filters {
-                        results
-                            .into_iter()
-                            .filter(|id| query.mask.contains(*id))
-                            .collect()
-                    } else {
-                        // Database sort is broken, return masked results
-                        query.mask.iter().collect()
-                    }
-                })
+                .map(|results| results & query.mask)
                 .caused_by(trc::location!());
         }
 
@@ -95,10 +113,7 @@ impl SearchStore {
                     SplitFilter::External(external) => {
                         // Execute sub-query
                         filters.push(SearchFilter::DocumentSet(
-                            self.sub_query(query.index, &external, &[])
-                                .await?
-                                .into_iter()
-                                .collect(),
+                            self.sub_query(query.index, &external, &query.mask).await?,
                         ));
                     }
                     SplitFilter::Internal(filter) => {
@@ -113,286 +128,192 @@ impl SearchStore {
         };
 
         // Merge results locally
-        let results = if has_local_filters || has_external_filters {
-            SearchQuery::new(query.index)
-                .with_filters(filters)
-                .with_mask(query.mask)
-                .filter()
-        } else {
-            // inbuxa: only the account filter, which the local filter skips,
-            // and it would answer with nothing: the result is the mask,
-            // sorted by the local comparators below
-            QueryResults::new(query.mask, Vec::new())
-        };
+        Ok(SearchQuery::new(query.index)
+            .with_filters(filters)
+            .with_mask(query.mask)
+            .filter()
+            .into_bitmap())
+    }
 
-        let total_results = results.results().len();
-        match total_results.cmp(&1) {
-            Ordering::Equal => Ok(vec![results.results().min().unwrap()]),
-            Ordering::Less => Ok(vec![]),
-            Ordering::Greater => {
-                if !query.comparators.is_empty() {
-                    let mut local = Vec::with_capacity(query.comparators.len());
-                    let mut external = Vec::with_capacity(query.comparators.len());
-                    let mut external_first = false;
-                    for (pos, comparator) in query.comparators.into_iter().enumerate() {
-                        if comparator.is_external() {
-                            external.push(comparator);
-                            if pos == 0 {
-                                external_first = true;
-                            }
-                        } else {
-                            local.push(comparator);
-                        }
-                    }
-
-                    if !external.is_empty() {
-                        let mut results = results.results().clone();
-                        let filters = vec![
-                            SearchFilter::Operator {
-                                field: SearchField::AccountId,
-                                op: SearchOperator::Equal,
-                                value: SearchValue::Uint(account_id as u64),
-                            },
-                            SearchFilter::Operator {
-                                field: SearchField::DocumentId,
-                                op: SearchOperator::GreaterEqualThan,
-                                value: SearchValue::Uint(results.min().unwrap() as u64),
-                            },
-                            SearchFilter::Operator {
-                                field: SearchField::DocumentId,
-                                op: SearchOperator::LowerEqualThan,
-                                value: SearchValue::Uint(results.max().unwrap() as u64),
-                            },
-                        ];
-
-                        let mut ordered_results = Vec::with_capacity(total_results as usize);
-                        for ordered_result in
-                            self.sub_query(query.index, &filters, &external).await?
-                        {
-                            if results.remove(ordered_result) {
-                                ordered_results.push(ordered_result);
-                            }
-                        }
-                        // Add any remaining results not yet in the index
-                        ordered_results.extend(results);
-
-                        if local.is_empty() {
-                            return Ok(ordered_results);
-                        }
-
-                        let comparator = SearchComparator::SortedSet {
-                            set: ordered_results
-                                .into_iter()
-                                .enumerate()
-                                .map(|(pos, id)| (id, pos as u32))
-                                .collect(),
-                            ascending: true,
-                        };
-
-                        if external_first {
-                            local.insert(0, comparator);
-                        } else {
-                            local.push(comparator);
-                        }
-                    }
-
-                    Ok(results.with_comparators(local).into_sorted())
-                } else {
-                    Ok(results.results().iter().collect())
-                }
+    #[cfg_attr(not(feature = "postgres"), allow(unused_variables))]
+    pub fn account_query_rows(&self, documents: u64) -> Option<f64> {
+        match self {
+            #[cfg(feature = "postgres")]
+            SearchStore::PostgreSQL(_) if documents >= DENSE_ACCOUNT_DOCUMENTS => {
+                Some(DENSE_QUERY_FIXED_ROWS + DENSE_QUERY_ROWS_PER_DOCUMENT * documents as f64)
             }
+            // inbuxa: ST-3: as its primary
+            SearchStore::Replicated(store) => sql_search(&store.primary).account_query_rows(documents),
+            _ => None,
         }
     }
 
-    async fn sub_query(
+    pub fn supports_windowed_walk(&self) -> bool {
+        match self {
+            #[cfg(feature = "postgres")]
+            SearchStore::PostgreSQL(_) => true,
+            // inbuxa: ST-3: as its primary
+            SearchStore::Replicated(store) => sql_search(&store.primary).supports_windowed_walk(),
+            _ => false,
+        }
+    }
+
+    pub fn supports_candidate_filter(&self) -> bool {
+        match self {
+            #[cfg(feature = "postgres")]
+            SearchStore::PostgreSQL(_) => true,
+            #[cfg(feature = "mysql")]
+            SearchStore::MySQL(_) => true,
+            // inbuxa: ST-3: as its primary
+            SearchStore::Replicated(store) => sql_search(&store.primary).supports_candidate_filter(),
+            _ => false,
+        }
+    }
+
+    pub async fn filter_candidates(
         &self,
-        index: SearchIndex,
-        filters: &[SearchFilter],
-        sort: &[SearchComparator],
-    ) -> trc::Result<Vec<u32>> {
-        // inbuxa: ST-6, ST-12: a replica answers search queries in a read scope
-        if let SearchStore::Store(Store::Replicated(store)) = self {
-            return match store.read_target(crate::SUBSPACE_SEARCH_INDEX).await {
-                Some(replica) => match crate::sql_backend!(
-                    &store.replicas[replica].store,
-                    db => db.query(index, filters, sort).await
-                ) {
-                    Ok(ids) => {
-                        store.served(replica);
-                        Ok(ids)
-                    }
-                    Err(err) => {
-                        store.failed(replica, err);
-                        crate::sql_backend!(&store.primary, db => db.query(index, filters, sort).await)
-                    }
-                },
-                None => {
-                    crate::sql_backend!(&store.primary, db => db.query(index, filters, sort).await)
-                }
-            };
-        }
-        match self {
-            SearchStore::Store(store) => match store {
-                #[cfg(feature = "postgres")]
-                Store::PostgreSQL(store) => store.query(index, filters, sort).await,
-                #[cfg(feature = "mysql")]
-                Store::MySQL(store) => store.query(index, filters, sort).await,
-                _ => unreachable!(),
-            },
-            SearchStore::ElasticSearch(store) => store.query(index, filters, sort).await,
-            SearchStore::MeiliSearch(store) => store.query(index, filters, sort).await,
+        query: &SearchQuery,
+        candidates: &[u32],
+    ) -> trc::Result<RoaringBitmap> {
+        debug_assert!(candidates.len() <= MAX_FILTER_CANDIDATES);
+
+        if self.supports_candidate_filter() && has_external_filters_only(&query.filters) {
+
+            self.sub_query_candidates(query.index, &query.filters, candidates)
+                .await
+                .caused_by(trc::location!())
+        } else {
+            self.filter_account(SearchQuery {
+                index: query.index,
+                filters: query.filters.clone(),
+                comparators: Vec::new(),
+                mask: candidates.iter().copied().collect(),
+            })
+            .await
         }
     }
 
-    pub async fn query_global(&self, query: SearchQuery) -> trc::Result<Vec<u64>> {
-        // inbuxa: ST-5: global queries are maintenance, on the primary
-        if let SearchStore::Store(Store::Replicated(store)) = self {
-            return crate::sql_backend!(
-                &store.primary,
-                db => db.query(query.index, &query.filters, &query.comparators).await
-            );
-        }
-        match self {
-            SearchStore::Store(store) => match store {
-                #[cfg(feature = "postgres")]
-                Store::PostgreSQL(store) => {
-                    store
-                        .query(query.index, &query.filters, &query.comparators)
-                        .await
-                }
-                #[cfg(feature = "mysql")]
-                Store::MySQL(store) => {
-                    store
-                        .query(query.index, &query.filters, &query.comparators)
-                        .await
-                }
-                store => store.query_global(query).await,
-            },
-            SearchStore::ElasticSearch(store) => {
-                store
-                    .query(query.index, &query.filters, &query.comparators)
-                    .await
-            }
-            SearchStore::MeiliSearch(store) => {
-                store
-                    .query(query.index, &query.filters, &query.comparators)
-                    .await
-            }
-        }
-    }
-
-    pub async fn index(&self, documents: Vec<IndexDocument>) -> trc::Result<()> {
-        if let SearchStore::Store(Store::Replicated(store)) = self {
-            return crate::sql_backend!(&store.primary, db => db.index(documents).await);
-        }
-        match self {
-            SearchStore::Store(store) => match store {
-                #[cfg(feature = "postgres")]
-                Store::PostgreSQL(store) => store.index(documents).await,
-                #[cfg(feature = "mysql")]
-                Store::MySQL(store) => store.index(documents).await,
-                store => store.index(documents).await,
-            },
-            SearchStore::ElasticSearch(store) => store.index(documents).await,
-            SearchStore::MeiliSearch(store) => store.index(documents).await,
-        }
-    }
-
-    pub async fn unindex(&self, query: SearchQuery) -> trc::Result<u64> {
-        if let SearchStore::Store(Store::Replicated(store)) = self {
-            return crate::sql_backend!(&store.primary, db => db.unindex(query).await);
-        }
-        match self {
-            SearchStore::Store(store) => match store {
-                #[cfg(feature = "postgres")]
-                Store::PostgreSQL(store) => store.unindex(query).await,
-                #[cfg(feature = "mysql")]
-                Store::MySQL(store) => store.unindex(query).await,
-                store => store.unindex(query).await.map(|_| 0),
-            },
-            SearchStore::ElasticSearch(store) => store.unindex(query).await,
-            SearchStore::MeiliSearch(store) => store.unindex(query).await,
-        }
-    }
-
-    /// inbuxa: every document's value of one unsigned field in an account
-    /// (one round trip), or `None` when the search store is not SQL and
-    /// callers must keep sorting through the store. ST-6, ST-12: a replica
-    /// answers in a read scope.
     #[cfg_attr(
         not(any(feature = "postgres", feature = "mysql")),
         allow(unused_variables)
     )]
-    pub async fn unsigned_values(
+    async fn sub_query_candidates(
         &self,
         index: SearchIndex,
-        field: SearchField,
-        account_id: u32,
-    ) -> trc::Result<Option<Vec<(u32, u64)>>> {
-        if let SearchStore::Store(Store::Replicated(store)) = self {
-            if !store.primary.is_pg_or_mysql() {
-                return Ok(None);
-            }
-            return match store.read_target(crate::SUBSPACE_SEARCH_INDEX).await {
-                Some(replica) => match crate::sql_backend!(
-                    &store.replicas[replica].store,
-                    db => db.unsigned_values(index, field.clone(), account_id).await
-                ) {
-                    Ok(values) => {
-                        store.served(replica);
-                        Ok(Some(values))
-                    }
-                    Err(err) => {
-                        store.failed(replica, err);
-                        crate::sql_backend!(&store.primary, db => db.unsigned_values(index, field, account_id).await)
-                            .map(Some)
-                    }
-                },
-                None => {
-                    crate::sql_backend!(&store.primary, db => db.unsigned_values(index, field, account_id).await)
-                        .map(Some)
-                }
-            };
-        }
+        filters: &[SearchFilter],
+        candidates: &[u32],
+    ) -> trc::Result<RoaringBitmap> {
         match self {
             #[cfg(feature = "postgres")]
-            SearchStore::Store(Store::PostgreSQL(store)) => store
-                .unsigned_values(index, field, account_id)
-                .await
-                .map(Some),
+            SearchStore::PostgreSQL(store) => {
+                store.filter_candidates(index, filters, candidates).await
+            }
             #[cfg(feature = "mysql")]
-            SearchStore::Store(Store::MySQL(store)) => store
-                .unsigned_values(index, field, account_id)
+            SearchStore::MySQL(store) => store.filter_candidates(index, filters, candidates).await,
+            // inbuxa: ST-6, ST-12
+            SearchStore::Replicated(store) => {
+                replicated_read(store, |search| async move {
+                    Box::pin(search.sub_query_candidates(index, filters, candidates)).await
+                })
                 .await
-                .map(Some),
-            _ => Ok(None),
+            }
+            _ => Err(trc::StoreEvent::NotSupported.into_err()),
         }
-        .caused_by(trc::location!())
+    }
+
+    #[cfg_attr(not(feature = "postgres"), allow(unused_variables))]
+    async fn sub_query(
+        &self,
+        index: SearchIndex,
+        filters: &[SearchFilter],
+        mask: &RoaringBitmap,
+    ) -> trc::Result<RoaringBitmap> {
+        match self {
+            #[cfg(feature = "postgres")]
+            SearchStore::PostgreSQL(store) => store.query_account(index, filters, mask).await,
+            #[cfg(feature = "mysql")]
+            SearchStore::MySQL(store) => store.query(index, filters).await,
+            SearchStore::ElasticSearch(store) => store.query(index, filters).await,
+            SearchStore::MeiliSearch(store) => store.query(index, filters).await,
+            // inbuxa: ST-6, ST-12
+            SearchStore::Replicated(store) => {
+                replicated_read(store, |search| async move {
+                    Box::pin(search.sub_query(index, filters, mask)).await
+                })
+                .await
+            }
+            SearchStore::Store(_) => unreachable!(),
+        }
+    }
+
+    pub async fn query_global(&self, query: SearchQuery) -> trc::Result<RoaringTreemap> {
+
+        match self {
+            #[cfg(feature = "postgres")]
+            SearchStore::PostgreSQL(store) => store.query(query.index, &query.filters).await,
+            #[cfg(feature = "mysql")]
+            SearchStore::MySQL(store) => store.query(query.index, &query.filters).await,
+            SearchStore::Store(store) => store.query_global(query).await,
+            SearchStore::ElasticSearch(store) => store.query(query.index, &query.filters).await,
+            SearchStore::MeiliSearch(store) => store.query(query.index, &query.filters).await,
+            // inbuxa: ST-5: global queries are maintenance, on the primary
+            SearchStore::Replicated(store) => Box::pin(sql_search(&store.primary).query_global(query)).await,
+        }
+    }
+
+    pub async fn index(&self, documents: Vec<IndexDocument>) -> trc::Result<()> {
+
+        match self {
+            #[cfg(feature = "postgres")]
+            SearchStore::PostgreSQL(store) => store.index(documents).await,
+            #[cfg(feature = "mysql")]
+            SearchStore::MySQL(store) => store.index(documents).await,
+            SearchStore::ElasticSearch(store) => store.index(documents).await,
+            SearchStore::MeiliSearch(store) => store.index(documents).await,
+            // inbuxa: writes go to the primary
+            SearchStore::Replicated(store) => Box::pin(sql_search(&store.primary).index(documents)).await,
+            SearchStore::Store(store) => index_internal(store, documents).await,
+        }
+    }
+
+    pub async fn unindex(&self, query: SearchQuery) -> trc::Result<u64> {
+
+        match self {
+            #[cfg(feature = "postgres")]
+            SearchStore::PostgreSQL(store) => store.unindex(query).await,
+            #[cfg(feature = "mysql")]
+            SearchStore::MySQL(store) => store.unindex(query).await,
+            SearchStore::ElasticSearch(store) => store.unindex(query).await,
+            SearchStore::MeiliSearch(store) => store.unindex(query).await,
+            SearchStore::Replicated(store) => Box::pin(sql_search(&store.primary).unindex(query)).await,
+            SearchStore::Store(_) => unreachable!(),
+        }
     }
 
     pub fn internal_fts(&self) -> Option<&Store> {
         match self {
-            SearchStore::Store(store) => match store {
-                #[cfg(feature = "postgres")]
-                Store::PostgreSQL(_) => None,
-                #[cfg(feature = "mysql")]
-                Store::MySQL(_) => None,
-                // inbuxa: ST-3: as its primary
-                Store::Replicated(replicated) if replicated.primary.is_pg_or_mysql() => None,
-                store => Some(store),
-            },
+            SearchStore::Store(store) => Some(store),
             _ => None,
+        }
+    }
+
+    pub fn splits_identifiers(&self) -> bool {
+        match self {
+            SearchStore::Store(_) => true,
+            #[cfg(feature = "postgres")]
+            SearchStore::PostgreSQL(_) => true,
+            // inbuxa: ST-3: as its primary
+            SearchStore::Replicated(store) => sql_search(&store.primary).splits_identifiers(),
+            _ => false,
         }
     }
 
     pub fn is_mysql(&self) -> bool {
         match self {
             #[cfg(feature = "mysql")]
-            SearchStore::Store(Store::MySQL(_)) => true,
-            #[cfg(feature = "mysql")]
-            SearchStore::Store(Store::Replicated(store)) => {
-                matches!(store.primary, Store::MySQL(_))
-            }
+            SearchStore::MySQL(_) => true,
+            // inbuxa: ST-3: as its primary
+            SearchStore::Replicated(store) => sql_search(&store.primary).is_mysql(),
             _ => false,
         }
     }
@@ -400,11 +321,9 @@ impl SearchStore {
     pub fn is_postgres(&self) -> bool {
         match self {
             #[cfg(feature = "postgres")]
-            SearchStore::Store(Store::PostgreSQL(_)) => true,
-            #[cfg(feature = "postgres")]
-            SearchStore::Store(Store::Replicated(store)) => {
-                matches!(store.primary, Store::PostgreSQL(_))
-            }
+            SearchStore::PostgreSQL(_) => true,
+            // inbuxa: ST-3: as its primary
+            SearchStore::Replicated(store) => sql_search(&store.primary).is_postgres(),
             _ => false,
         }
     }
@@ -419,30 +338,105 @@ impl SearchStore {
 
     pub async fn create_indexes(&self) -> trc::Result<()> {
         match self {
-            SearchStore::Store(store) => match store {
-                #[cfg(feature = "postgres")]
-                Store::PostgreSQL(store) => store.create_search_tables().await,
-                #[cfg(feature = "mysql")]
-                Store::MySQL(store) => store.create_search_tables().await,
-                Store::Replicated(store) => {
-                    crate::sql_backend!(&store.primary, db => db.create_search_tables().await)
-                }
-                _ => Ok(()),
-            },
+            #[cfg(feature = "postgres")]
+            SearchStore::PostgreSQL(store) => store.create_search_tables().await,
+            #[cfg(feature = "mysql")]
+            SearchStore::MySQL(store) => store.create_search_tables().await,
+            SearchStore::Store(_) => Ok(()),
             SearchStore::ElasticSearch(store) => store.create_indexes().await,
             SearchStore::MeiliSearch(store) => store.create_indexes().await,
+            SearchStore::Replicated(store) => Box::pin(sql_search(&store.primary).create_indexes()).await,
         }
     }
 }
 
-impl SearchFilter {
-    pub fn is_external(&self) -> bool {
-        matches!(self, SearchFilter::Operator { .. })
+/// inbuxa: the SQL search store of a replicated primary or replica.
+fn sql_search(store: &Store) -> SearchStore {
+    match store {
+        #[cfg(feature = "postgres")]
+        Store::PostgreSQL(store) => SearchStore::PostgreSQL(store.clone()),
+        #[cfg(feature = "mysql")]
+        Store::MySQL(store) => SearchStore::MySQL(store.clone()),
+        store => SearchStore::Store(store.clone()),
     }
 }
 
-impl SearchComparator {
-    pub fn is_external(&self) -> bool {
-        matches!(self, SearchComparator::Field { .. })
+/// inbuxa: ST-6, ST-12: a replica answers search reads in a read scope,
+/// and the primary when there is none or it fails.
+async fn replicated_read<T, F, Fut>(store: &ReplicatedStore, read: F) -> trc::Result<T>
+where
+    F: Fn(SearchStore) -> Fut,
+    Fut: Future<Output = trc::Result<T>>,
+{
+    if let Some(replica) = store.read_target(Subspace::SearchDocument).await {
+        match read(sql_search(&store.replicas[replica].store)).await {
+            Ok(result) => {
+                store.served(replica);
+                return Ok(result);
+            }
+            Err(err) => store.failed(replica, err),
+        }
     }
+    read(sql_search(&store.primary)).await
+}
+
+fn has_external_filters_only(filters: &[SearchFilter]) -> bool {
+    let mut has_external_filters = false;
+    for filter in filters {
+        match filter {
+            SearchFilter::DocumentSet(_) => return false,
+            SearchFilter::Integer {
+                field: SearchField::AccountId,
+                ..
+            } => (),
+            SearchFilter::Text { .. }
+            | SearchFilter::KeyValue { .. }
+            | SearchFilter::Integer { .. } => has_external_filters = true,
+            SearchFilter::And | SearchFilter::Or | SearchFilter::Not | SearchFilter::End => (),
+        }
+    }
+    has_external_filters
+}
+
+impl SearchFilter {
+    pub fn is_external(&self) -> bool {
+        matches!(
+            self,
+            SearchFilter::Text { .. } | SearchFilter::KeyValue { .. }
+        )
+    }
+}
+
+/// inbuxa: the index queue writes to the internal store one partition at a
+/// time; this routes a mixed batch the same way, so callers outside the
+/// queue (tools, tests) can index into it as into any other search store.
+async fn index_internal(store: &Store, documents: Vec<IndexDocument>) -> trc::Result<()> {
+    let mut traces = Vec::new();
+    let mut partitions: Vec<((SearchIndex, u32), Vec<IndexDocument>)> = Vec::new();
+    for document in documents {
+        if document.index == SearchIndex::Tracing {
+            traces.push(document);
+            continue;
+        }
+        let Some(SearchValue::Uint(account_id)) = document.fields.get(&SearchField::AccountId)
+        else {
+            return Err(trc::StoreEvent::UnexpectedError
+                .reason("Document has no account ID")
+                .caused_by(trc::location!()));
+        };
+        let partition = (document.index, *account_id as u32);
+        match partitions.iter_mut().find(|(key, _)| *key == partition) {
+            Some((_, batch)) => batch.push(document),
+            None => partitions.push((partition, vec![document])),
+        }
+    }
+    if !traces.is_empty() {
+        store.index_trace(traces).await?;
+    }
+    for ((index, account_id), batch) in partitions {
+        store
+            .index_account_documents(account_id, index, batch, Vec::new())
+            .await?;
+    }
+    Ok(())
 }

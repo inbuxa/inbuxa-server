@@ -101,15 +101,15 @@ where
     T: Pickle + MapItem,
 {
     fn pickle(&self, out: &mut Vec<u8>) {
-        (self.0.len() as u32).pickle(out);
+        (self.0.len() as u64).pickle(out);
         for item in &self.0 {
             item.pickle(out);
         }
     }
 
     fn unpickle(stream: &mut PickledStream<'_>) -> Option<Self> {
-        let len = u32::unpickle(stream)? as usize;
-        let mut vec = Vec::with_capacity(len);
+        let len = usize::try_from(u64::unpickle(stream)?).ok()?;
+        let mut vec = Vec::with_capacity(len.min(stream.remaining_len()));
         for _ in 0..len {
             vec.push(T::unpickle(stream)?);
         }
@@ -418,27 +418,3 @@ impl<T: MapItem> IntoIterator for Map<T> {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::{jmap::JsonPointerPatch, schema::prelude::Property};
-    use jmap_tools::JsonPointer;
-
-    fn patch_member(ptr_str: &str) -> Map<Id> {
-        let mut map = Map::<Id>::default();
-        let ptr = JsonPointer::<Property>::parse(ptr_str);
-        let pointer = JsonPointerPatch::new(&ptr);
-        map.patch(pointer, Value::Bool(true)).expect("patch failed");
-        map
-    }
-
-    #[test]
-    fn patch_map_id_digit_keys() {
-        for id in [0u64, 28, 29, 70, 861, 954, 957, 30554] {
-            let id = Id::new(id);
-            let key = id.as_string();
-            let map = patch_member(&key);
-            assert_eq!(map.0, vec![id], "id {} via key '{key}'", id.id());
-        }
-    }
-}

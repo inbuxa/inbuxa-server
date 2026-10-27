@@ -2,6 +2,8 @@
  * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
+ *
+ * Modified by Coffey Labs in 2026 for INBUXA.
  */
 
 use crate::utils::{
@@ -466,7 +468,6 @@ pub async fn test(test: &mut TestServer) {
             .await
             .unwrap()
             .emails
-            .items
             .len(),
         1,
     );
@@ -487,6 +488,20 @@ pub async fn test(test: &mut TestServer) {
         .registry_destroy(ObjectType::Account, [account_id, other_account_id])
         .await
         .assert_destroyed(&[account_id, other_account_id]);
+
+    // inbuxa: put the upload limits back; with a one-second upload lifetime
+    // the next suite's uploads can expire before their import under load
+    admin
+        .registry_update_setting(
+            Jmap::default(),
+            &[
+                Property::UploadQuota,
+                Property::MaxUploadCount,
+                Property::UploadTtl,
+            ],
+        )
+        .await;
+    admin.reload_settings().await;
     test.cleanup().await;
 }
 

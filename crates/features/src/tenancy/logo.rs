@@ -34,7 +34,7 @@ pub async fn for_account(registry: &RegistryStore, account_id: u32) -> trc::Resu
     let server = registry
         .object::<Enterprise>(Id::singleton())
         .await?
-        .and_then(|e| e.logo_url);
+        .and_then(|e| e.logo);
     Ok([
         domain.as_ref().and_then(|d| d.logo.as_deref()),
         tenant.as_ref().and_then(|t| t.logo.as_deref()),

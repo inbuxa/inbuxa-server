@@ -4,14 +4,15 @@
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
  */
 
-use std::future::Future;
-
+use crate::{
+    Hostname, SpamFilterContext, TextPart,
+    analysis::{contains_ignore_ascii_case, starts_with_ignore_ascii_case, to_lowercase_cow},
+    modules::html::*,
+};
 use common::Server;
 use hyper::Uri;
-use mail_parser::MimeHeaders;
 use nlp::tokenizers::types::{TokenType, TypesTokenizer};
-
-use crate::{Hostname, SpamFilterContext, TextPart, modules::html::*};
+use std::{borrow::Cow, future::Future};
 
 pub trait SpamFilterAnalyzeHtml: Sync + Send {
     fn spam_filter_analyze_html(
@@ -21,13 +22,19 @@ pub trait SpamFilterAnalyzeHtml: Sync + Send {
 }
 
 #[derive(Debug)]
-struct Href {
-    url_parsed: Option<Uri>,
-    host: Option<Hostname>,
+struct Href<'x> {
+    url_parsed: Option<Cow<'x, Uri>>,
+    host: Option<Cow<'x, Hostname>>,
 }
 
 impl SpamFilterAnalyzeHtml for Server {
     async fn spam_filter_analyze_html(&self, ctx: &mut SpamFilterContext<'_>) {
+        SpamFilterContext::analyze_html(ctx);
+    }
+}
+
+impl SpamFilterContext<'_> {
+    pub fn analyze_html(ctx: &mut Self) {
         // Message only has text/html MIME parts
         if ctx.input.message.content_type().is_some_and(|ct| {
             ct.ctype().eq_ignore_ascii_case("text")
@@ -40,9 +47,7 @@ impl SpamFilterAnalyzeHtml for Server {
         }
 
         for (part_id, part) in ctx.output.text_parts.iter().enumerate() {
-            let part_id = part_id as u32;
-            let is_body_part = ctx.input.message.text_body.contains(&part_id)
-                || ctx.input.message.html_body.contains(&part_id);
+            let is_body_part = ctx.input.is_body(part_id as u32);
 
             let (html_tokens, tokens) = if let TextPart::Html {
                 html_tokens,
@@ -76,13 +81,25 @@ impl SpamFilterAnalyzeHtml for Server {
                                     None
                                 }
                             }) {
-                                let url = attr.trim().to_lowercase();
-                                let url_parsed = url.parse::<Uri>().ok();
-                                let href = Href {
-                                    host: url_parsed
-                                        .as_ref()
-                                        .and_then(|uri| uri.host().map(Hostname::new)),
-                                    url_parsed,
+                                let url = to_lowercase_cow(attr.trim());
+                                let href = if let Some(parsed) = ctx
+                                    .output
+                                    .urls
+                                    .get(url.as_ref())
+                                    .and_then(|url| url.element.url_parsed.as_ref())
+                                {
+                                    Href {
+                                        url_parsed: Some(Cow::Borrowed(&parsed.parts)),
+                                        host: Some(Cow::Borrowed(&parsed.host)),
+                                    }
+                                } else {
+                                    let url_parsed = url.parse::<Uri>().ok();
+                                    Href {
+                                        host: url_parsed.as_ref().and_then(|uri| {
+                                            uri.host().map(|host| Cow::Owned(Hostname::new(host)))
+                                        }),
+                                        url_parsed: url_parsed.map(Cow::Owned),
+                                    }
                                 };
 
                                 if is_body_part
@@ -117,14 +134,16 @@ impl SpamFilterAnalyzeHtml for Server {
                                         WIDTH => &mut img_width,
                                         HEIGHT => &mut img_height,
                                         SRC => {
-                                            let src = value.to_ascii_lowercase();
-                                            if src.starts_with("data:") && src.contains(";base64,")
+                                            if starts_with_ignore_ascii_case(value, "data:")
+                                                && contains_ignore_ascii_case(value, ";base64,")
                                             {
                                                 // Has Data URI encoding
                                                 ctx.result.add_tag("HAS_DATA_URI");
-                                            } else if src.starts_with("https://")
-                                                || src.starts_with("http://")
-                                            {
+                                            } else if starts_with_ignore_ascii_case(
+                                                value, "https://",
+                                            ) || starts_with_ignore_ascii_case(
+                                                value, "http://",
+                                            ) {
                                                 // Has external image
                                                 ctx.result.add_tag("HAS_EXTERNAL_IMG");
                                             }
@@ -172,7 +191,7 @@ impl SpamFilterAnalyzeHtml for Server {
                                             has_equiv_refresh = true;
                                         }
                                     } else if *attr == CONTENT
-                                        && value.to_ascii_lowercase().contains("url=")
+                                        && contains_ignore_ascii_case(value, "url=")
                                     {
                                         has_content_url = true;
                                     }
@@ -193,11 +212,11 @@ impl SpamFilterAnalyzeHtml for Server {
                                     value.as_deref().map(|v| v.trim()).filter(|v| !v.is_empty())
                                 {
                                     if *attr == REL {
-                                        if value.to_ascii_lowercase().contains("stylesheet") {
+                                        if contains_ignore_ascii_case(value, "stylesheet") {
                                             has_rel_style = true;
                                         }
                                     } else if *attr == HREF
-                                        && value.to_ascii_lowercase().contains(".css")
+                                        && contains_ignore_ascii_case(value, ".css")
                                     {
                                         has_href_css = true;
                                     }
@@ -232,7 +251,10 @@ impl SpamFilterAnalyzeHtml for Server {
                     HtmlToken::Text { text } if in_head == 0 => {
                         if let Some((href_url, href_host)) = last_href
                             .as_ref()
-                            .and_then(|href| Some((href.url_parsed.as_ref()?, href.host.as_ref()?)))
+                            .and_then(|href| {
+                                Some((href.url_parsed.as_deref()?, href.host.as_deref()?))
+                            })
+                            .filter(|_| can_contain_url(text))
                         {
                             for token in TypesTokenizer::new(text.as_ref())
                                 .tokenize_numbers(false)
@@ -241,9 +263,13 @@ impl SpamFilterAnalyzeHtml for Server {
                                 .tokenize_emails(true)
                             {
                                 let text_url = match token.word {
-                                    TokenType::Url(url) => url.to_lowercase(),
+                                    TokenType::Url(url) => to_lowercase_cow(url),
                                     TokenType::UrlNoScheme(url) => {
-                                        format!("http://{}", url.to_lowercase())
+                                        let url = to_lowercase_cow(url);
+                                        let mut with_scheme = String::with_capacity(url.len() + 7);
+                                        with_scheme.push_str("http://");
+                                        with_scheme.push_str(url.as_ref());
+                                        Cow::Owned(with_scheme)
                                     }
                                     _ => continue,
                                 };
@@ -283,7 +309,8 @@ impl SpamFilterAnalyzeHtml for Server {
             }
 
             if is_body_part {
-                if in_head != 0 || in_body != 0 {
+                let is_whole = !ctx.input.texts.is_cut(part_id as u32);
+                if is_whole && (in_head != 0 || in_body != 0) {
                     // HTML tags are not properly closed
                     ctx.result.add_tag("HTML_UNBALANCED_TAG");
                 }
@@ -310,6 +337,7 @@ impl SpamFilterAnalyzeHtml for Server {
                 }
 
                 match html_text_chars {
+                    _ if !is_whole => (),
                     0..1024 => {
                         ctx.result.add_tag("HTML_SHORT_1");
                     }
@@ -329,11 +357,17 @@ impl SpamFilterAnalyzeHtml for Server {
                     ctx.result.add_tag("HTML_TEXT_IMG_RATIO");
                 }
 
-                if html_uris > 0 && html_words == 0 {
+                if is_whole && html_uris > 0 && html_words == 0 {
                     // Message only contains URIs in HTML
                     ctx.result.add_tag("BODY_URI_ONLY");
                 }
             }
         }
     }
+}
+
+fn can_contain_url(text: &str) -> bool {
+    text.as_bytes()
+        .iter()
+        .any(|byte| matches!(byte, b'.' | b'['))
 }

@@ -149,14 +149,14 @@ impl RegistryStore {
         inner
     }
 
-    #[cfg(feature = "test_mode")]
+    #[cfg(inbuxa_tests)]
     pub fn clone_with_public_url(&self, url: String) -> Self {
         let mut inner = self.0.as_ref().clone();
         inner.env_public_url = Some(url);
         Self(inner.into())
     }
 
-    #[cfg(feature = "test_mode")]
+    #[cfg(inbuxa_tests)]
     pub async fn new(
         path: &str,
         store: Store,
@@ -184,3 +184,4 @@ impl RegistryStore {
         .unwrap()
     }
 }
+

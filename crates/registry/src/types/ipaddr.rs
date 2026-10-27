@@ -92,18 +92,13 @@ impl Pickle for std::net::IpAddr {
     }
 
     fn unpickle(data: &mut PickledStream<'_>) -> Option<Self> {
-        let kind = data.read()?;
-        match kind {
-            4 => {
-                let mut arr = [0u8; 4];
-                arr.copy_from_slice(data.read_bytes(4)?);
-                Some(std::net::IpAddr::V4(Ipv4Addr::from(arr)))
-            }
-            6 => {
-                let mut arr = [0u8; 16];
-                arr.copy_from_slice(data.read_bytes(16)?);
-                Some(std::net::IpAddr::V6(std::net::Ipv6Addr::from(arr)))
-            }
+        match data.read()? {
+            4 => data
+                .read_array::<4>()
+                .map(|octets| std::net::IpAddr::V4(Ipv4Addr::from(octets))),
+            6 => data
+                .read_array::<16>()
+                .map(|octets| std::net::IpAddr::V6(std::net::Ipv6Addr::from(octets))),
             _ => None,
         }
     }

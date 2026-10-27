@@ -1,42 +1,50 @@
 [package]
 name = "utils"
-version = "0.16.27"
+version = "1.0.0"
 edition = "2024"
 
 [dependencies]
 trc = { path = "../trc" }
-rustls = { version = "0.23.43", default-features = false, features = ["std", "aws_lc_rs", "tls12"] }
+rustls = { version = "0.23.46", default-features = false, features = ["std", "aws_lc_rs", "tls12"] }
 rustls-pki-types = { version = "1" }
 rustls-platform-verifier = "0.7"
-tokio = { version = "1.53", features = ["net", "macros", "signal"] }
+tokio = { version = "1.54", features = ["net", "macros", "signal", "rt-multi-thread"] }
 tokio-rustls = { version = "0.26", default-features = false, features = ["aws_lc_rs", "tls12"] }
 serde = { version = "1.0", features = ["derive"]}
-mail-auth = { version = "0.13" }
+mail-auth = { version = "0.14" }
 ahash = { version = "0.8", features = ["serde"] }
-chrono = "0.4"
+jiff = "0.2.38"
 aws-lc-rs = { version = "1" }
-base64 = "0.23"
+encodify = "1.0"
 reqwest = { version = "0.13", default-features = false, features = ["rustls", "http2", "stream"]}
 futures = "0.3"
 form_urlencoded = "1.2.2"
 psl = "2"
+url = "2.5"
+hashify = "0.3"
 idna = "1.1"
 quick_cache = "0.7"
-rkyv = { version = "0.8.18", features = ["little_endian"] }
+rkyv.workspace = true
 compact_str = "0.10.0"
-xxhash-rust = { version = "0.8.18", features = ["xxh3"] }
+xxhash-rust = { version = "0.8.19", features = ["xxh3"] }
 farmhash = "1.1.5"
 nohash-hasher = "0.2.0"
 arcstr = "1.2.0"
+memchr = "2.8"
+simdutf8 = "0.1.5"
+libc = "0.2.191"
 
 [target.'cfg(unix)'.dependencies]
-privdrop = "0.5.6"
+privdrop = "0.5.7"
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = ["Win32_System_SystemInformation"] }
 
 [features]
-test_mode = []
+enterprise = ["trc/enterprise"]
 
 [dev-dependencies]
-tokio = { version = "1.53", features = ["full"] }
+tokio = { version = "1.54", features = ["full"] }
 
 [lints]
 workspace = true

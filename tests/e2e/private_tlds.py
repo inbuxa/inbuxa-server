@@ -117,14 +117,14 @@ def bootstrap(recovery):
     got = one("admin", recovery, "x:Bootstrap/get", {"ids": None})
     singleton = got[1]["list"][0]["id"]
     res = one("admin", recovery, "x:Bootstrap/set", {"update": {singleton: {
-        "serverHostname": "mail.home.myownlab", "defaultDomain": "home.myownlab",
+        "defaultHostname": "mail.home.myownlab", "defaultDomain": "home.myownlab",
         "requestTlsCertificate": False}}})
     return res[1].get("updated", {}).get(singleton), res[1].get("notUpdated", {}).get(singleton)
 
 
 def create_domain(admin, admin_pw, name):
     res = one(admin, admin_pw, "x:Domain/set", {"create": {"d": {
-        "name": name, "isEnabled": True,
+        "name": name, "enable": True,
         "certificateManagement": {"@type": "Manual"}, "dnsManagement": {"@type": "Manual"},
         "dkimManagement": {"@type": "Manual"}}}})
     return (res[1].get("created") or {}).get("d", {}).get("id"), res[1].get("notCreated")

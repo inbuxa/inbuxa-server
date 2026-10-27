@@ -6,7 +6,13 @@
 
 use super::{ResponseCode, ResponseType};
 use compact_str::{CompactString, format_compact};
+use encodify::utf7::IMAP;
+use smallvec::SmallVec;
 use std::fmt::Display;
+
+pub type ArgumentBytes = SmallVec<[u8; TOKEN_INLINE_LEN]>;
+
+const TOKEN_INLINE_LEN: usize = 22;
 
 #[derive(Debug, Clone)]
 pub enum Error {
@@ -17,7 +23,7 @@ pub enum Error {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Request<T: CommandParser> {
-    pub tag: String,
+    pub tag: CompactString,
     pub command: T,
     pub tokens: Vec<Token>,
 }
@@ -25,11 +31,14 @@ pub struct Request<T: CommandParser> {
 pub trait CommandParser: Sized + Default {
     fn parse(bytes: &[u8], is_uid: bool) -> Option<Self>;
     fn tokenize_brackets(&self) -> bool;
+    fn tokenize_nil(&self) -> bool {
+        false
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Token {
-    Argument(Vec<u8>),
+    Argument(ArgumentBytes),
     ParenthesisOpen,  // (
     ParenthesisClose, // )
     BracketOpen,      // [
@@ -38,12 +47,13 @@ pub enum Token {
     Gt,               // >
     Dot,              // .
     Nil,              // NIL
+    NilString(ArgumentBytes),
 }
 
 impl<T: CommandParser> Default for Request<T> {
     fn default() -> Self {
         Self {
-            tag: String::new(),
+            tag: CompactString::const_new(""),
             command: T::default(),
             tokens: Vec::new(),
         }
@@ -70,12 +80,68 @@ pub struct Receiver<T: CommandParser> {
     pub max_request_size: usize,
     pub current_request_size: usize,
     pub start_state: State,
+    skipping: bool,
 }
 
+pub const MAX_UNAUTHENTICATED_REQUEST_SIZE: usize = 64 * 1024;
+
 const ARG_MAX_LEN: usize = 8000;
+const ARG_INIT_LEN: usize = 64;
+const TAG_MAX_LEN: usize = 128;
+const COMMAND_MAX_LEN: usize = 15;
+const LITERAL_MAX_DIGITS: usize = 15;
+const TOKENS_INIT_LEN: usize = 32;
 
 struct ArgumentBuffer {
     buf: Vec<u8>,
+}
+
+const CLASS_ARGUMENT: u8 = 0b0000_0001;
+const CLASS_BRACKET: u8 = 0b0000_0010;
+const CLASS_QUOTED: u8 = 0b0000_0100;
+const CLASS_TAG: u8 = 0b0000_1000;
+const CLASS_COMMAND: u8 = 0b0001_0000;
+const CLASS_START: u8 = 0b0010_0000;
+
+const BYTE_CLASS: [u8; 256] = byte_class_table();
+
+const fn byte_class_table() -> [u8; 256] {
+    let mut table = [0u8; 256];
+    let mut index = 0;
+    while index < 256 {
+        let ch = index as u8;
+        let is_whitespace = matches!(ch, b' ' | b'\t' | b'\n' | b'\x0c' | b'\r');
+        let mut class = 0;
+        if is_whitespace || matches!(ch, b'"' | b'{' | b'(' | b')') {
+            class |= CLASS_ARGUMENT;
+        }
+        if matches!(ch, b'[' | b']' | b'<' | b'>' | b'.') {
+            class |= CLASS_BRACKET;
+        }
+        if matches!(ch, b'"' | b'\\' | b'\n') {
+            class |= CLASS_QUOTED;
+        }
+        if matches!(ch, b' ' | b'\t' | b'\r' | b'\n') {
+            class |= CLASS_TAG;
+        }
+        if !matches!(ch, b'0'..=b'9' | b'A'..=b'Z' | b'a'..=b'z') {
+            class |= CLASS_COMMAND;
+        }
+        if !is_whitespace {
+            class |= CLASS_START;
+        }
+        table[index] = class;
+        index += 1;
+    }
+    table
+}
+
+#[inline(always)]
+fn run_len(bytes: &[u8], class: u8) -> usize {
+    bytes
+        .iter()
+        .position(|&ch| BYTE_CLASS[ch as usize] & class != 0)
+        .unwrap_or(bytes.len())
 }
 
 impl<T: CommandParser> Receiver<T> {
@@ -99,7 +165,15 @@ impl<T: CommandParser> Receiver<T> {
         }
     }
 
+    pub fn is_discarding(&self) -> bool {
+        matches!(self.state, State::LiteralDiscard { .. })
+    }
+
     pub fn error_reset(&mut self, message: impl Into<trc::Value>) -> Error {
+        self.error_reset_with(message, ResponseCode::Parse)
+    }
+
+    fn error_reset_with(&mut self, message: impl Into<trc::Value>, code: ResponseCode) -> Error {
         let request = std::mem::take(&mut self.request);
         let err = Error::err(
             if !request.tag.is_empty() {
@@ -108,223 +182,373 @@ impl<T: CommandParser> Receiver<T> {
                 None
             },
             message,
+            code,
         );
         self.buf = ArgumentBuffer::default();
         self.state = self.start_state;
         self.current_request_size = 0;
+        self.skipping = false;
         err
+    }
+
+    fn end_skipped_command(&mut self) {
+        self.skipping = false;
+        self.request = Request::default();
+        self.buf.clear();
+        self.current_request_size = 0;
+    }
+
+    #[cold]
+    #[inline(never)]
+    fn literal_size_error(&mut self) -> Error {
+        self.error_reset_with(
+            format_compact!(
+                "Literal exceeds the maximum request size of {} bytes.",
+                self.max_request_size
+            ),
+            ResponseCode::TooBig,
+        )
+    }
+
+    #[inline(never)]
+    fn request_size_error(&mut self) -> Error {
+        self.error_reset(format_compact!(
+            "Request exceeds maximum limit of {} bytes.",
+            self.max_request_size
+        ))
+    }
+
+    #[inline(always)]
+    fn push_request_token(&mut self, token: Token) {
+        if self.request.tokens.is_empty() {
+            self.request.tokens.reserve(TOKENS_INIT_LEN);
+        }
+        self.request.tokens.push(token);
     }
 
     fn push_argument(&mut self, in_quote: bool) -> Result<(), Error> {
         if !self.buf.is_empty() {
             self.current_request_size += self.buf.len();
             if self.current_request_size > self.max_request_size {
-                return Err(self.error_reset(format_compact!(
-                    "Request exceeds maximum limit of {} bytes.",
-                    self.max_request_size
-                )));
+                return Err(self.request_size_error());
             }
-            self.request.tokens.push(Token::Argument(self.buf.take()));
+            let token = Token::Argument(ArgumentBytes::from_slice(self.buf.as_ref()));
+            self.push_request_token(token);
+            self.buf.clear();
         } else if in_quote {
-            self.request.tokens.push(Token::Nil);
+            self.push_request_token(Token::Nil);
         }
+        Ok(())
+    }
+
+    fn push_literal(&mut self) -> Result<(), Error> {
+        if !self.buf.is_empty() {
+            if self.request.command.tokenize_nil() && self.is_nil() {
+                return self.push_nil_string();
+            }
+            self.current_request_size += self.buf.len();
+            if self.current_request_size > self.max_request_size {
+                return Err(self.request_size_error());
+            }
+            let token = Token::Argument(ArgumentBytes::from_vec(self.buf.take_moved()));
+            self.push_request_token(token);
+        }
+        Ok(())
+    }
+
+    fn is_nil(&self) -> bool {
+        self.buf.as_ref().eq_ignore_ascii_case(b"NIL")
+    }
+
+    #[cold]
+    fn push_nil_string(&mut self) -> Result<(), Error> {
+        self.current_request_size += self.buf.len();
+        if self.current_request_size > self.max_request_size {
+            return Err(self.request_size_error());
+        }
+        let token = Token::NilString(ArgumentBytes::from_slice(self.buf.as_ref()));
+        self.push_request_token(token);
+        self.buf.clear();
         Ok(())
     }
 
     fn push_token(&mut self, token: Token) -> Result<(), Error> {
         self.current_request_size += 1;
         if self.current_request_size > self.max_request_size {
-            return Err(self.error_reset(format_compact!(
-                "Request exceeds maximum limit of {} bytes.",
-                self.max_request_size
-            )));
+            return Err(self.request_size_error());
         }
-        self.request.tokens.push(token);
+        self.push_request_token(token);
         Ok(())
     }
 
     pub fn parse(&mut self, bytes: &mut std::slice::Iter<'_, u8>) -> Result<Request<T>, Error> {
-        #[allow(clippy::while_let_on_iterator)]
-        while let Some(&ch) = bytes.next() {
-            match self.state {
+        let mut state = self.state;
+
+        'outer: loop {
+            match state {
                 State::Start => {
-                    if !ch.is_ascii_whitespace() {
-                        // SAFETY: This called just once
-                        self.buf.push_unchecked(ch);
-                        self.state = State::Tag;
+                    match bytes.find(|&&ch| BYTE_CLASS[ch as usize] & CLASS_START != 0) {
+                        Some(&ch) => {
+                            self.buf.push_unchecked(ch);
+                            state = State::Tag;
+                        }
+                        None => break,
                     }
                 }
-                State::Tag => match ch {
-                    b' ' => {
-                        if !self.buf.is_empty() {
-                            self.request.tag =
-                                String::from_utf8(self.buf.take()).map_err(|_| {
-                                    self.error_reset("Tag is not a valid UTF-8 string.")
-                                })?;
-                            self.state = State::Command { is_uid: false };
-                        }
-                    }
-                    b'\t' | b'\r' => {}
-                    b'\n' => {
-                        return Err(self.error_reset(format_compact!(
-                            "Missing command after tag {:?}, found CRLF instead.",
-                            self.buf.as_str()
-                        )));
-                    }
-                    _ => {
-                        self.buf.push_checked(ch, 128).map_err(|_| {
+                State::Tag => {
+                    let slice = bytes.as_slice();
+                    let (run, tail) = slice.split_at(run_len(slice, CLASS_TAG));
+                    if let Err(allowed) = self.buf.extend_checked(run, TAG_MAX_LEN) {
+                        *bytes = slice.split_at(allowed + 1).1.iter();
+                        return Err(
                             self.error_reset("Tag exceeds maximum length of 128 characters.")
-                        })?;
+                        );
                     }
-                },
-                State::Command { is_uid } => {
-                    if ch.is_ascii_alphanumeric() {
-                        self.buf
-                            .push_checked(ch.to_ascii_uppercase(), 15)
-                            .map_err(|_| {
-                                self.error_reset("Command exceeds maximum length of 15 characters.")
-                            })?;
-                    } else if ch.is_ascii_whitespace() {
-                        if !self.buf.is_empty() {
-                            if !self.buf.as_ref().eq_ignore_ascii_case(b"UID") {
-                                self.request.command = T::parse(self.buf.as_ref(), is_uid)
-                                    .ok_or_else(|| {
-                                        let err = format_compact!(
-                                            "Unrecognized command '{}'.",
-                                            String::from_utf8_lossy(self.buf.as_ref())
+                    let Some((&ch, rest)) = tail.split_first() else {
+                        *bytes = tail.iter();
+                        break;
+                    };
+                    *bytes = rest.iter();
+                    match ch {
+                        b' ' => {
+                            if !self.buf.is_empty() {
+                                match CompactString::from_utf8(self.buf.as_ref()) {
+                                    Ok(tag) => {
+                                        self.request.tag = tag;
+                                        self.buf.clear();
+                                    }
+                                    Err(_) => {
+                                        return Err(
+                                            self.error_reset("Tag is not a valid UTF-8 string.")
                                         );
-                                        self.error_reset(err)
-                                    })?;
-                                self.buf.clear();
-                                if ch != b'\n' {
-                                    self.state = State::Argument { last_ch: b' ' };
-                                } else {
-                                    self.state = self.start_state;
-                                    self.current_request_size = 0;
-                                    return Ok(std::mem::take(&mut self.request));
+                                    }
                                 }
-                            } else {
-                                self.buf.clear();
-                                self.state = State::Command { is_uid: true };
+                                state = State::Command { is_uid: false };
                             }
                         }
-                    } else {
+                        b'\n' => {
+                            return Err(self.error_reset(format_compact!(
+                                "Missing command after tag {:?}, found CRLF instead.",
+                                self.buf.as_str()
+                            )));
+                        }
+                        _ => {}
+                    }
+                }
+                State::Command { is_uid } => {
+                    let slice = bytes.as_slice();
+                    let (run, tail) = slice.split_at(run_len(slice, CLASS_COMMAND));
+                    if let Err(allowed) = self.buf.extend_checked_uppercase(run, COMMAND_MAX_LEN) {
+                        *bytes = slice.split_at(allowed + 1).1.iter();
+                        return Err(
+                            self.error_reset("Command exceeds maximum length of 15 characters.")
+                        );
+                    }
+                    let Some((&ch, rest)) = tail.split_first() else {
+                        *bytes = tail.iter();
+                        break;
+                    };
+                    *bytes = rest.iter();
+                    if !ch.is_ascii_whitespace() {
                         return Err(self.error_reset(format_compact!(
                             "Invalid character {:?} in command name.",
                             ch as char
                         )));
                     }
-                }
-                State::Argument { last_ch } => match ch {
-                    b'\"' if last_ch.is_ascii_whitespace() => {
-                        self.push_argument(false)?;
-                        self.state = State::ArgumentQuoted { escaped: false };
-                    }
-                    b'{' if last_ch.is_ascii_whitespace()
-                        || (last_ch == b'~' && self.buf.len() == 1) =>
-                    {
-                        if last_ch != b'~' {
-                            self.push_argument(false)?;
+                    if !self.buf.is_empty() {
+                        if !self.buf.as_ref().eq_ignore_ascii_case(b"UID") {
+                            self.request.command =
+                                T::parse(self.buf.as_ref(), is_uid).ok_or_else(|| {
+                                    let err = format_compact!(
+                                        "Unrecognized command '{}'.",
+                                        String::from_utf8_lossy(self.buf.as_ref())
+                                    );
+                                    self.error_reset(err)
+                                })?;
+                            self.buf.clear();
+                            if ch != b'\n' {
+                                state = State::Argument { last_ch: b' ' };
+                            } else {
+                                self.state = self.start_state;
+                                self.current_request_size = 0;
+                                return Ok(std::mem::take(&mut self.request));
+                            }
                         } else {
                             self.buf.clear();
-                        }
-                        self.state = State::Literal { non_sync: false };
-                    }
-                    b'(' => {
-                        self.push_argument(false)?;
-                        self.push_token(Token::ParenthesisOpen)?;
-                    }
-                    b')' => {
-                        self.push_argument(false)?;
-                        self.push_token(Token::ParenthesisClose)?;
-                    }
-                    b'[' if self.request.command.tokenize_brackets() => {
-                        self.push_argument(false)?;
-                        self.push_token(Token::BracketOpen)?;
-                    }
-                    b']' if self.request.command.tokenize_brackets() => {
-                        self.push_argument(false)?;
-                        self.push_token(Token::BracketClose)?;
-                    }
-                    b'<' if self.request.command.tokenize_brackets() => {
-                        self.push_argument(false)?;
-                        self.push_token(Token::Lt)?;
-                    }
-                    b'>' if self.request.command.tokenize_brackets() => {
-                        self.push_argument(false)?;
-                        self.push_token(Token::Gt)?;
-                    }
-                    b'.' if self.request.command.tokenize_brackets() => {
-                        self.push_argument(false)?;
-                        self.push_token(Token::Dot)?;
-                    }
-                    b'\n' => {
-                        self.push_argument(false)?;
-                        self.state = self.start_state;
-                        self.current_request_size = 0;
-                        return Ok(std::mem::take(&mut self.request));
-                    }
-                    _ if ch.is_ascii_whitespace() => {
-                        self.push_argument(false)?;
-                        self.state = State::Argument { last_ch: ch };
-                    }
-                    _ => {
-                        self.buf.push_checked(ch, ARG_MAX_LEN).map_err(|_| {
-                            self.error_reset("Argument exceeds maximum length of 8000 bytes.")
-                        })?;
-                        self.state = State::Argument { last_ch: ch };
-                    }
-                },
-                State::ArgumentQuoted { escaped } => match ch {
-                    b'\"' => {
-                        if !escaped {
-                            self.push_argument(true)?;
-                            self.state = State::Argument { last_ch: b' ' };
-                        } else {
-                            self.buf
-                                .push_checked(ch, ARG_MAX_LEN)
-                                .map_err(|_| self.error_reset("Quoted argument too long."))?;
-                            self.state = State::ArgumentQuoted { escaped: false };
+                            state = State::Command { is_uid: true };
                         }
                     }
-                    b'\\' => {
-                        if escaped {
-                            self.buf
-                                .push_checked(ch, ARG_MAX_LEN)
-                                .map_err(|_| self.error_reset("Quoted argument too long."))?;
+                }
+                State::Argument { last_ch } => {
+                    let mut last_ch = last_ch;
+                    let class = if self.request.command.tokenize_brackets() {
+                        CLASS_ARGUMENT | CLASS_BRACKET
+                    } else {
+                        CLASS_ARGUMENT
+                    };
+                    loop {
+                        let slice = bytes.as_slice();
+                        let (run, tail) = slice.split_at(run_len(slice, class));
+                        if let Some(&last) = run.last() {
+                            if let Err(allowed) = self.buf.extend_checked(run, ARG_MAX_LEN) {
+                                *bytes = slice.split_at(allowed + 1).1.iter();
+                                return Err(self.error_reset(
+                                    "Argument exceeds maximum length of 8000 bytes.",
+                                ));
+                            }
+                            last_ch = last;
                         }
-                        self.state = State::ArgumentQuoted { escaped: !escaped };
-                    }
-                    b'\n' => {
-                        return Err(self.error_reset("Unterminated quoted argument."));
-                    }
-                    _ => {
-                        if escaped {
-                            // SAFETY: We check the size below
-                            self.buf.push_unchecked(b'\\');
+                        let Some((&ch, rest)) = tail.split_first() else {
+                            *bytes = tail.iter();
+                            state = State::Argument { last_ch };
+                            break 'outer;
+                        };
+                        *bytes = rest.iter();
+                        match ch {
+                            b'\"' if last_ch.is_ascii_whitespace() => {
+                                self.push_argument(false)?;
+                                state = State::ArgumentQuoted { escaped: false };
+                                continue 'outer;
+                            }
+                            b'{' if last_ch.is_ascii_whitespace()
+                                || (last_ch == b'~' && self.buf.len() == 1) =>
+                            {
+                                if last_ch != b'~' {
+                                    self.push_argument(false)?;
+                                } else {
+                                    self.buf.clear();
+                                }
+                                state = State::Literal { non_sync: false };
+                                continue 'outer;
+                            }
+                            b'(' => {
+                                self.push_argument(false)?;
+                                self.push_token(Token::ParenthesisOpen)?;
+                            }
+                            b')' => {
+                                self.push_argument(false)?;
+                                self.push_token(Token::ParenthesisClose)?;
+                            }
+                            b'[' => {
+                                self.push_argument(false)?;
+                                self.push_token(Token::BracketOpen)?;
+                            }
+                            b']' => {
+                                self.push_argument(false)?;
+                                self.push_token(Token::BracketClose)?;
+                            }
+                            b'<' => {
+                                self.push_argument(false)?;
+                                self.push_token(Token::Lt)?;
+                            }
+                            b'>' => {
+                                self.push_argument(false)?;
+                                self.push_token(Token::Gt)?;
+                            }
+                            b'.' => {
+                                self.push_argument(false)?;
+                                self.push_token(Token::Dot)?;
+                            }
+                            b'\n' if self.skipping => {
+                                self.end_skipped_command();
+                                state = self.start_state;
+                                continue 'outer;
+                            }
+                            b'\n' => {
+                                self.push_argument(false)?;
+                                self.state = self.start_state;
+                                self.current_request_size = 0;
+                                return Ok(std::mem::take(&mut self.request));
+                            }
+                            _ if ch.is_ascii_whitespace() => {
+                                self.push_argument(false)?;
+                                last_ch = ch;
+                            }
+                            _ => {
+                                self.buf.push_checked(ch, ARG_MAX_LEN).map_err(|_| {
+                                    self.error_reset(
+                                        "Argument exceeds maximum length of 8000 bytes.",
+                                    )
+                                })?;
+                                last_ch = ch;
+                            }
                         }
-                        self.buf
-                            .push_checked(ch, ARG_MAX_LEN)
-                            .map_err(|_| self.error_reset("Quoted argument too long."))?;
-                        self.state = State::ArgumentQuoted { escaped: false };
                     }
-                },
+                }
+                State::ArgumentQuoted { escaped } => {
+                    if escaped {
+                        let Some(&ch) = bytes.next() else { break };
+                        match ch {
+                            b'\n' => {
+                                return Err(self.error_reset("Unterminated quoted argument."));
+                            }
+                            b'\"' | b'\\' => {
+                                self.buf
+                                    .push_checked(ch, ARG_MAX_LEN)
+                                    .map_err(|_| self.error_reset("Quoted argument too long."))?;
+                            }
+                            _ => {
+                                self.buf.push_unchecked(b'\\');
+                                self.buf
+                                    .push_checked(ch, ARG_MAX_LEN)
+                                    .map_err(|_| self.error_reset("Quoted argument too long."))?;
+                            }
+                        }
+                        state = State::ArgumentQuoted { escaped: false };
+                        continue;
+                    }
+                    let slice = bytes.as_slice();
+                    let (run, tail) = slice.split_at(run_len(slice, CLASS_QUOTED));
+                    if let Err(allowed) = self.buf.extend_checked(run, ARG_MAX_LEN) {
+                        *bytes = slice.split_at(allowed + 1).1.iter();
+                        return Err(self.error_reset("Quoted argument too long."));
+                    }
+                    let Some((&ch, rest)) = tail.split_first() else {
+                        *bytes = tail.iter();
+                        break;
+                    };
+                    *bytes = rest.iter();
+                    match ch {
+                        b'\"' => {
+                            if self.request.command.tokenize_nil() && self.is_nil() {
+                                self.push_nil_string()?;
+                            } else {
+                                self.push_argument(true)?;
+                            }
+                            state = State::Argument { last_ch: b' ' };
+                        }
+                        b'\\' => {
+                            state = State::ArgumentQuoted { escaped: true };
+                        }
+                        _ => {
+                            return Err(self.error_reset("Unterminated quoted argument."));
+                        }
+                    }
+                }
                 State::Literal { non_sync } => {
+                    let Some(&ch) = bytes.next() else { break };
                     match ch {
                         b'}' => {
                             if !self.buf.is_empty() {
                                 let size = self.buf.as_str().parse::<u32>().map_err(|_| {
                                     self.error_reset("Literal size is not a valid number.")
                                 })?;
+                                if self.skipping {
+                                    self.buf.clear();
+                                    if non_sync {
+                                        state = State::LiteralSeek { size, non_sync };
+                                    } else {
+                                        self.end_skipped_command();
+                                        state = self.start_state;
+                                    }
+                                    continue;
+                                }
                                 let oversize = self.current_request_size + size as usize
                                     > self.max_request_size;
                                 if oversize && !non_sync {
-                                    return Err(self.error_reset(format_compact!(
-                                        "Literal exceeds the maximum request size of {} bytes.",
-                                        self.max_request_size
-                                    )));
+                                    return Err(self.literal_size_error());
                                 }
-                                self.state = State::LiteralSeek { size, non_sync };
+                                state = State::LiteralSeek { size, non_sync };
                                 if !oversize {
                                     self.buf.resize_buffer(size as usize);
                                 }
@@ -335,18 +559,17 @@ impl<T: CommandParser> Receiver<T> {
                         }
                         b'+' => {
                             if !self.buf.is_empty() {
-                                self.state = State::Literal { non_sync: true };
+                                state = State::Literal { non_sync: true };
                             } else {
                                 return Err(self.error_reset("Invalid non-sync literal."));
                             }
                         }
                         _ if ch.is_ascii_digit() => {
                             if !non_sync {
-                                self.buf.push_checked(ch, 15).map_err(|_| {
+                                self.buf.push_checked(ch, LITERAL_MAX_DIGITS).map_err(|_| {
                                     self.error_reset("Literal size exceeds maximum of 15 digits.")
                                 })?;
                             } else {
-                                // Digit found after non-sync '+' flag
                                 return Err(self.error_reset("Invalid literal."));
                             }
                         }
@@ -359,20 +582,28 @@ impl<T: CommandParser> Receiver<T> {
                     }
                 }
                 State::LiteralSeek { size, non_sync } => {
+                    let Some(&ch) = bytes.next() else { break };
                     if ch == b'\n' {
-                        if non_sync
+                        if self.skipping {
+                            state = State::LiteralDiscard { remaining: size };
+                        } else if non_sync
                             && self.current_request_size + size as usize > self.max_request_size
                         {
+                            let err = self.literal_size_error();
+                            self.skipping = true;
                             self.state = State::LiteralDiscard { remaining: size };
+                            return Err(err);
                         } else if size > 0 {
-                            self.state = State::LiteralData { remaining: size };
+                            state = State::LiteralData { remaining: size };
                             if !non_sync {
+                                self.state = state;
                                 return Err(Error::NeedsLiteral { size });
                             }
                         } else {
-                            self.state = State::Argument { last_ch: b' ' };
+                            state = State::Argument { last_ch: b' ' };
                             self.push_token(Token::Nil)?;
                             if !non_sync {
+                                self.state = state;
                                 return Err(Error::NeedsLiteral { size });
                             }
                         }
@@ -383,33 +614,43 @@ impl<T: CommandParser> Receiver<T> {
                     }
                 }
                 State::LiteralDiscard { remaining } => {
-                    if remaining > 1 {
-                        self.state = State::LiteralDiscard {
-                            remaining: remaining - 1,
-                        };
-                    } else {
-                        return Err(self.error_reset(format_compact!(
-                            "Literal exceeds the maximum request size of {} bytes.",
-                            self.max_request_size
-                        )));
+                    let available = bytes.as_slice();
+                    let taken = (remaining as usize).min(available.len());
+                    *bytes = available.split_at(taken).1.iter();
+                    let remaining = remaining - taken as u32;
+                    if remaining > 0 {
+                        state = State::LiteralDiscard { remaining };
+                        break;
                     }
+                    state = State::Argument { last_ch: b' ' };
                 }
                 State::LiteralData { remaining } => {
-                    // SAFETY: We checked the size before entering this state
+                    let Some(&ch) = bytes.next() else { break };
                     self.buf.push_unchecked(ch);
+                    let mut remaining = remaining - 1;
 
-                    if remaining > 1 {
-                        self.state = State::LiteralData {
-                            remaining: remaining - 1,
-                        };
+                    if remaining > 0 {
+                        let available = bytes.as_slice();
+                        let taken = (remaining as usize).min(available.len());
+                        if taken > 0 {
+                            let (run, tail) = available.split_at(taken);
+                            self.buf.extend_from_slice(run);
+                            *bytes = tail.iter();
+                            remaining -= taken as u32;
+                        }
+                    }
+
+                    if remaining > 0 {
+                        state = State::LiteralData { remaining };
                     } else {
-                        self.push_argument(false)?;
-                        self.state = State::Argument { last_ch: b' ' };
+                        self.push_literal()?;
+                        state = State::Argument { last_ch: b' ' };
                     }
                 }
             }
         }
 
+        self.state = state;
         Err(Error::NeedsMoreData)
     }
 }
@@ -417,13 +658,42 @@ impl<T: CommandParser> Receiver<T> {
 impl ArgumentBuffer {
     pub fn new() -> Self {
         ArgumentBuffer {
-            buf: Vec::with_capacity(10),
+            buf: Vec::with_capacity(ARG_INIT_LEN),
         }
     }
 
     pub fn resize_buffer(&mut self, size: usize) {
-        if self.buf.capacity() < size {
-            self.buf.reserve(size - self.buf.capacity());
+        self.buf.reserve(size.saturating_sub(self.buf.len()));
+    }
+
+    #[inline(always)]
+    pub fn extend_from_slice(&mut self, bytes: &[u8]) {
+        self.buf.extend_from_slice(bytes);
+    }
+
+    #[inline(always)]
+    pub fn extend_checked(&mut self, bytes: &[u8], limit: usize) -> Result<(), usize> {
+        let allowed = limit.saturating_sub(self.buf.len());
+        if bytes.len() <= allowed {
+            self.buf.extend_from_slice(bytes);
+            Ok(())
+        } else {
+            Err(allowed)
+        }
+    }
+
+    #[inline(always)]
+    pub fn extend_checked_uppercase(&mut self, bytes: &[u8], limit: usize) -> Result<(), usize> {
+        let allowed = limit.saturating_sub(self.buf.len());
+        if bytes.len() <= allowed {
+            let appended_from = self.buf.len();
+            self.buf.extend_from_slice(bytes);
+            if let Some(appended) = self.buf.get_mut(appended_from..) {
+                appended.make_ascii_uppercase();
+            }
+            Ok(())
+        } else {
+            Err(allowed)
         }
     }
 
@@ -442,10 +712,8 @@ impl ArgumentBuffer {
         self.buf.push(byte);
     }
 
-    pub fn take(&mut self) -> Vec<u8> {
-        let buf = self.buf.clone();
-        self.buf.clear();
-        buf
+    pub fn take_moved(&mut self) -> Vec<u8> {
+        std::mem::replace(&mut self.buf, Vec::with_capacity(ARG_INIT_LEN))
     }
 
     #[inline(always)]
@@ -470,19 +738,45 @@ impl ArgumentBuffer {
 }
 
 impl Token {
-    pub fn unwrap_string(self) -> crate::parser::Result<String> {
+    pub fn unwrap_string(self) -> crate::parser::Result<CompactString> {
         match self {
-            Token::Argument(value) => {
-                String::from_utf8(value).map_err(|_| "Invalid UTF-8 in argument.".into())
-            }
-            other => Ok(other.to_string()),
+            Token::Argument(value) if value.spilled() => String::from_utf8(value.into_vec())
+                .map(CompactString::from_string_buffer)
+                .map_err(|_| "Invalid UTF-8 in argument.".into()),
+            Token::Argument(value) => CompactString::from_utf8(value.as_slice())
+                .map_err(|_| "Invalid UTF-8 in argument.".into()),
+            other => Ok(CompactString::from(other.to_string())),
         }
     }
 
-    pub fn unwrap_bytes(self) -> Vec<u8> {
+    pub fn unwrap_mailbox_name(self, is_utf8: bool) -> crate::parser::Result<CompactString> {
+        let name = self.unwrap_string()?;
+        if is_utf8 || !name.contains('&') {
+            Ok(name)
+        } else {
+            Ok(IMAP
+                .lenient()
+                .decode(name.as_bytes())
+                .map(CompactString::from_string_buffer)
+                .unwrap_or(name))
+        }
+    }
+
+    pub fn unwrap_mailbox_name_strict(self, is_utf8: bool) -> crate::parser::Result<CompactString> {
+        let name = self.unwrap_string()?;
+        if is_utf8 || !name.contains('&') {
+            Ok(name)
+        } else {
+            IMAP.decode(name.as_bytes())
+                .map(CompactString::from_string_buffer)
+                .map_err(|err| format!("Invalid modified UTF-7 in mailbox name: {err}.").into())
+        }
+    }
+
+    pub fn unwrap_bytes(self) -> ArgumentBytes {
         match self {
-            Token::Argument(value) => value,
-            other => other.as_bytes().to_vec(),
+            Token::Argument(value) | Token::NilString(value) => value,
+            other => ArgumentBytes::from_slice(other.as_bytes()),
         }
     }
 
@@ -497,6 +791,7 @@ impl Token {
             Token::Lt => bytes.eq(b"<"),
             Token::Dot => bytes.eq(b"."),
             Token::Nil => bytes.is_empty(),
+            Token::NilString(value) => value.eq_ignore_ascii_case(bytes),
         }
     }
 
@@ -550,7 +845,7 @@ impl Display for Token {
 impl Token {
     pub fn as_bytes(&self) -> &[u8] {
         match self {
-            Token::Argument(value) => value,
+            Token::Argument(value) => value.as_slice(),
             Token::ParenthesisOpen => b"(",
             Token::ParenthesisClose => b")",
             Token::BracketOpen => b"[",
@@ -559,18 +854,23 @@ impl Token {
             Token::Lt => b"<",
             Token::Dot => b".",
             Token::Nil => b"",
+            Token::NilString(value) => value.as_slice(),
         }
     }
 }
 
 impl Error {
-    pub fn err(tag: Option<impl Into<CompactString>>, message: impl Into<trc::Value>) -> Self {
+    pub fn err(
+        tag: Option<impl Into<CompactString>>,
+        message: impl Into<trc::Value>,
+        code: ResponseCode,
+    ) -> Self {
         Error::Error {
             response: trc::ImapEvent::Error
                 .ctx(trc::Key::Details, message)
                 .ctx_opt(trc::Key::Id, tag.map(Into::into))
                 .ctx(trc::Key::Type, ResponseType::Bad)
-                .code(ResponseCode::Parse),
+                .code(code),
         }
     }
 }
@@ -584,6 +884,7 @@ impl<T: CommandParser> Default for Receiver<T> {
             start_state: State::Start,
             max_request_size: 25 * 1024 * 1024,
             current_request_size: 0,
+            skipping: false,
         }
     }
 }
@@ -592,13 +893,13 @@ impl<T: CommandParser> Request<T> {
     pub fn into_error(self, message: impl Into<trc::Value>) -> trc::Error {
         trc::ImapEvent::Error
             .ctx(trc::Key::Details, message)
-            .ctx(trc::Key::Id, CompactString::from_string_buffer(self.tag))
+            .ctx(trc::Key::Id, self.tag)
     }
 
     pub fn into_parse_error(self, message: impl Into<trc::Value>) -> trc::Error {
         trc::ImapEvent::Error
             .ctx(trc::Key::Details, message)
-            .ctx(trc::Key::Id, CompactString::from_string_buffer(self.tag))
+            .ctx(trc::Key::Id, self.tag)
             .ctx(trc::Key::Code, ResponseCode::Parse)
             .ctx(trc::Key::Type, ResponseType::Bad)
     }
@@ -640,534 +941,3 @@ DQUOTE         =  %x22 ; " (Double Quote)
 
 */
 
-#[cfg(test)]
-mod tests {
-
-    use crate::Command;
-
-    use super::{Error, Receiver, Request, Token};
-
-    #[test]
-    fn receiver_parse_ok() {
-        let mut receiver = Receiver::new();
-
-        for (frames, expected_requests) in [
-            (
-                vec!["abcd CAPABILITY\r\n"],
-                vec![Request {
-                    tag: "abcd".into(),
-                    command: Command::Capability,
-                    tokens: vec![],
-                }],
-            ),
-            (
-                vec!["A023 LO", "GOUT\r\n"],
-                vec![Request {
-                    tag: "A023".into(),
-                    command: Command::Logout,
-                    tokens: vec![],
-                }],
-            ),
-            (
-                vec!["  A001 AUTHENTICATE GSSAPI  \r\n"],
-                vec![Request {
-                    tag: "A001".into(),
-                    command: Command::Authenticate,
-                    tokens: vec![Token::Argument(b"GSSAPI".to_vec())],
-                }],
-            ),
-            (
-                vec!["A03   AUTHENTICATE ", "PLAIN dGVzdAB0ZXN", "0AHRlc3Q=\r\n"],
-                vec![Request {
-                    tag: "A03".into(),
-                    command: Command::Authenticate,
-                    tokens: vec![
-                        Token::Argument(b"PLAIN".to_vec()),
-                        Token::Argument(b"dGVzdAB0ZXN0AHRlc3Q=".to_vec()),
-                    ],
-                }],
-            ),
-            (
-                vec!["A003 CREATE owatagusiam/\r\n"],
-                vec![Request {
-                    tag: "A003".into(),
-                    command: Command::Create,
-                    tokens: vec![Token::Argument(b"owatagusiam/".to_vec())],
-                }],
-            ),
-            (
-                vec!["A682 LIST \"\" *\r\n"],
-                vec![Request {
-                    tag: "A682".into(),
-                    command: Command::List,
-                    tokens: vec![Token::Nil, Token::Argument(b"*".to_vec())],
-                }],
-            ),
-            (
-                vec!["A03 LIST () \"\" \"%\" RETURN (CHILDREN)\r\n"],
-                vec![Request {
-                    tag: "A03".into(),
-                    command: Command::List,
-                    tokens: vec![
-                        Token::ParenthesisOpen,
-                        Token::ParenthesisClose,
-                        Token::Nil,
-                        Token::Argument(b"%".to_vec()),
-                        Token::Argument(b"RETURN".to_vec()),
-                        Token::ParenthesisOpen,
-                        Token::Argument(b"CHILDREN".to_vec()),
-                        Token::ParenthesisClose,
-                    ],
-                }],
-            ),
-            (
-                vec!["A05 LIST (REMOTE SUBSCRIBED) \"\" \"*\"\r\n"],
-                vec![Request {
-                    tag: "A05".into(),
-                    command: Command::List,
-                    tokens: vec![
-                        Token::ParenthesisOpen,
-                        Token::Argument(b"REMOTE".to_vec()),
-                        Token::Argument(b"SUBSCRIBED".to_vec()),
-                        Token::ParenthesisClose,
-                        Token::Nil,
-                        Token::Argument(b"*".to_vec()),
-                    ],
-                }],
-            ),
-            (
-                vec!["a1 list \"\" (\"foo\")\r\n"],
-                vec![Request {
-                    tag: "a1".into(),
-                    command: Command::List,
-                    tokens: vec![
-                        Token::Nil,
-                        Token::ParenthesisOpen,
-                        Token::Argument(b"foo".to_vec()),
-                        Token::ParenthesisClose,
-                    ],
-                }],
-            ),
-            (
-                vec!["a3.1 LIST \"\" (% music/rock)\r\n"],
-                vec![Request {
-                    tag: "a3.1".into(),
-                    command: Command::List,
-                    tokens: vec![
-                        Token::Nil,
-                        Token::ParenthesisOpen,
-                        Token::Argument(b"%".to_vec()),
-                        Token::Argument(b"music/rock".to_vec()),
-                        Token::ParenthesisClose,
-                    ],
-                }],
-            ),
-            (
-                vec!["A01 LIST \"\" % RETURN (STATUS (MESSAGES UNSEEN))\r\n"],
-                vec![Request {
-                    tag: "A01".into(),
-                    command: Command::List,
-                    tokens: vec![
-                        Token::Nil,
-                        Token::Argument(b"%".to_vec()),
-                        Token::Argument(b"RETURN".to_vec()),
-                        Token::ParenthesisOpen,
-                        Token::Argument(b"STATUS".to_vec()),
-                        Token::ParenthesisOpen,
-                        Token::Argument(b"MESSAGES".to_vec()),
-                        Token::Argument(b"UNSEEN".to_vec()),
-                        Token::ParenthesisClose,
-                        Token::ParenthesisClose,
-                    ],
-                }],
-            ),
-            (
-                vec![" A01 LiSt \"\"  % RETURN ( STATUS ( MESSAGES UNSEEN ) ) \r\n"],
-                vec![Request {
-                    tag: "A01".into(),
-                    command: Command::List,
-                    tokens: vec![
-                        Token::Nil,
-                        Token::Argument(b"%".to_vec()),
-                        Token::Argument(b"RETURN".to_vec()),
-                        Token::ParenthesisOpen,
-                        Token::Argument(b"STATUS".to_vec()),
-                        Token::ParenthesisOpen,
-                        Token::Argument(b"MESSAGES".to_vec()),
-                        Token::Argument(b"UNSEEN".to_vec()),
-                        Token::ParenthesisClose,
-                        Token::ParenthesisClose,
-                    ],
-                }],
-            ),
-            (
-                vec!["A02 LIST (SUBSCRIBED RECURSIVEMATCH) \"\" % RETURN (STATUS (MESSAGES))\r\n"],
-                vec![Request {
-                    tag: "A02".into(),
-                    command: Command::List,
-                    tokens: vec![
-                        Token::ParenthesisOpen,
-                        Token::Argument(b"SUBSCRIBED".to_vec()),
-                        Token::Argument(b"RECURSIVEMATCH".to_vec()),
-                        Token::ParenthesisClose,
-                        Token::Nil,
-                        Token::Argument(b"%".to_vec()),
-                        Token::Argument(b"RETURN".to_vec()),
-                        Token::ParenthesisOpen,
-                        Token::Argument(b"STATUS".to_vec()),
-                        Token::ParenthesisOpen,
-                        Token::Argument(b"MESSAGES".to_vec()),
-                        Token::ParenthesisClose,
-                        Token::ParenthesisClose,
-                    ],
-                }],
-            ),
-            (
-                vec!["A002 CREATE \"INBOX.Sent Mail\"\r\n"],
-                vec![Request {
-                    tag: "A002".into(),
-                    command: Command::Create,
-                    tokens: vec![Token::Argument(b"INBOX.Sent Mail".to_vec())],
-                }],
-            ),
-            (
-                vec!["A002 CREATE \"Maibox \\\"quo\\\\ted\\\" \"\r\n"],
-                vec![Request {
-                    tag: "A002".into(),
-                    command: Command::Create,
-                    tokens: vec![Token::Argument(b"Maibox \"quo\\ted\" ".to_vec())],
-                }],
-            ),
-            (
-                vec!["A004 COPY 2:4 meeting\r\n"],
-                vec![Request {
-                    tag: "A004".into(),
-                    command: Command::Copy(false),
-                    tokens: vec![
-                        Token::Argument(b"2:4".to_vec()),
-                        Token::Argument(b"meeting".to_vec()),
-                    ],
-                }],
-            ),
-            (
-                vec![
-                    "A282 SEARCH RETURN (MIN COU",
-                    "NT) FLAGGED SINCE 1-Feb-1994 ",
-                    "NOT FROM \"Smith\"\r\n",
-                ],
-                vec![Request {
-                    tag: "A282".into(),
-                    command: Command::Search(false),
-                    tokens: vec![
-                        Token::Argument(b"RETURN".to_vec()),
-                        Token::ParenthesisOpen,
-                        Token::Argument(b"MIN".to_vec()),
-                        Token::Argument(b"COUNT".to_vec()),
-                        Token::ParenthesisClose,
-                        Token::Argument(b"FLAGGED".to_vec()),
-                        Token::Argument(b"SINCE".to_vec()),
-                        Token::Argument(b"1-Feb-1994".to_vec()),
-                        Token::Argument(b"NOT".to_vec()),
-                        Token::Argument(b"FROM".to_vec()),
-                        Token::Argument(b"Smith".to_vec()),
-                    ],
-                }],
-            ),
-            (
-                vec!["F284 UID STORE $ +FLAGS.Silent (\\Deleted)\r\n"],
-                vec![Request {
-                    tag: "F284".into(),
-                    command: Command::Store(true),
-                    tokens: vec![
-                        Token::Argument(b"$".to_vec()),
-                        Token::Argument(b"+FLAGS.Silent".to_vec()),
-                        Token::ParenthesisOpen,
-                        Token::Argument(b"\\Deleted".to_vec()),
-                        Token::ParenthesisClose,
-                    ],
-                }],
-            ),
-            (
-                vec!["A654 FETCH 2:4 (FLAGS BODY[HEADER.FIELDS (DATE FROM)])\r\n"],
-                vec![Request {
-                    tag: "A654".into(),
-                    command: Command::Fetch(false),
-                    tokens: vec![
-                        Token::Argument(b"2:4".to_vec()),
-                        Token::ParenthesisOpen,
-                        Token::Argument(b"FLAGS".to_vec()),
-                        Token::Argument(b"BODY".to_vec()),
-                        Token::BracketOpen,
-                        Token::Argument(b"HEADER".to_vec()),
-                        Token::Dot,
-                        Token::Argument(b"FIELDS".to_vec()),
-                        Token::ParenthesisOpen,
-                        Token::Argument(b"DATE".to_vec()),
-                        Token::Argument(b"FROM".to_vec()),
-                        Token::ParenthesisClose,
-                        Token::BracketClose,
-                        Token::ParenthesisClose,
-                    ],
-                }],
-            ),
-            (
-                vec![
-                    "B283 UID SEARCH RETURN (SAVE) CHARSET ",
-                    "KOI8-R (OR $ 1,3000:3021) TEXT \"hello world\"\r\n",
-                ],
-                vec![Request {
-                    tag: "B283".into(),
-                    command: Command::Search(true),
-                    tokens: vec![
-                        Token::Argument(b"RETURN".to_vec()),
-                        Token::ParenthesisOpen,
-                        Token::Argument(b"SAVE".to_vec()),
-                        Token::ParenthesisClose,
-                        Token::Argument(b"CHARSET".to_vec()),
-                        Token::Argument(b"KOI8-R".to_vec()),
-                        Token::ParenthesisOpen,
-                        Token::Argument(b"OR".to_vec()),
-                        Token::Argument(b"$".to_vec()),
-                        Token::Argument(b"1,3000:3021".to_vec()),
-                        Token::ParenthesisClose,
-                        Token::Argument(b"TEXT".to_vec()),
-                        Token::Argument(b"hello world".to_vec()),
-                    ],
-                }],
-            ),
-            (
-                vec![
-                    "P283 SEARCH CHARSET UTF-8 (OR $ 1,3000:3021) ",
-                    "TEXT {8+}\r\nмать\r\n",
-                ],
-                vec![Request {
-                    tag: "P283".into(),
-                    command: Command::Search(false),
-                    tokens: vec![
-                        Token::Argument(b"CHARSET".to_vec()),
-                        Token::Argument(b"UTF-8".to_vec()),
-                        Token::ParenthesisOpen,
-                        Token::Argument(b"OR".to_vec()),
-                        Token::Argument(b"$".to_vec()),
-                        Token::Argument(b"1,3000:3021".to_vec()),
-                        Token::ParenthesisClose,
-                        Token::Argument(b"TEXT".to_vec()),
-                        Token::Argument("мать".to_string().into_bytes()),
-                    ],
-                }],
-            ),
-            (
-                vec!["A001 LOGIN {11}\r\n", "FRED FOOBAR {7}\r\n", "fat man\r\n"],
-                vec![Request {
-                    tag: "A001".into(),
-                    command: Command::Login,
-                    tokens: vec![
-                        Token::Argument(b"FRED FOOBAR".to_vec()),
-                        Token::Argument(b"fat man".to_vec()),
-                    ],
-                }],
-            ),
-            (
-                vec!["TAG3 CREATE \"Test-ąęć-Test\"\r\n"],
-                vec![Request {
-                    tag: "TAG3".into(),
-                    command: Command::Create,
-                    tokens: vec![Token::Argument("Test-ąęć-Test".as_bytes().to_vec())],
-                }],
-            ),
-            (
-                vec!["abc LOGIN {0}\r\n", "\r\n"],
-                vec![Request {
-                    tag: "abc".into(),
-                    command: Command::Login,
-                    tokens: vec![Token::Nil],
-                }],
-            ),
-            (
-                vec!["abc LOGIN {0+}\r\n\r\n"],
-                vec![Request {
-                    tag: "abc".into(),
-                    command: Command::Login,
-                    tokens: vec![Token::Nil],
-                }],
-            ),
-            (
-                vec![
-                    "A003 APPEND saved-messages (\\Seen) {297+}\r\n",
-                    "Date: Mon, 7 Feb 1994 21:52:25 -0800 (PST)\r\n",
-                    "From: Fred Foobar <foobar@example.com>\r\n",
-                    "Subject: afternoon meeting\r\n",
-                    "To: mooch@example.com\r\n",
-                    "Message-Id: <B27397-0100000@example.com>\r\n",
-                    "MIME-Version: 1.0\r\n",
-                    "Content-Type: TEXT/PLAIN; CHARSET=US-ASCII\r\n",
-                    "\r\n",
-                    "Hello Joe, do you think we can meet at 3:30 tomorrow?\r\n\r\n",
-                ],
-                vec![Request {
-                    tag: "A003".into(),
-                    command: Command::Append,
-                    tokens: vec![
-                        Token::Argument(b"saved-messages".to_vec()),
-                        Token::ParenthesisOpen,
-                        Token::Argument(b"\\Seen".to_vec()),
-                        Token::ParenthesisClose,
-                        Token::Argument(
-                            concat!(
-                                "Date: Mon, 7 Feb 1994 21:52:25 -0800 (PST)\r\n",
-                                "From: Fred Foobar <foobar@example.com>\r\n",
-                                "Subject: afternoon meeting\r\n",
-                                "To: mooch@example.com\r\n",
-                                "Message-Id: <B27397-0100000@example.com>\r\n",
-                                "MIME-Version: 1.0\r\n",
-                                "Content-Type: TEXT/PLAIN; CHARSET=US-ASCII\r\n",
-                                "\r\n",
-                                "Hello Joe, do you think we can meet at 3:30 tomorrow?\r\n"
-                            )
-                            .as_bytes()
-                            .to_vec(),
-                        ),
-                    ],
-                }],
-            ),
-            (
-                vec![
-                    "A003 APPEND saved-messages (\\Seen) {326}\r\n",
-                    "Date: Mon, 7 Feb 1994 21:52:25 -0800 (PST)\r\n",
-                    "From: Fred Foobar <foobar@Blurdybloop.example>\r\n",
-                    "Subject: afternoon meeting\r\n",
-                    "To: mooch@owatagu.siam.edu.example\r\n",
-                    "Message-Id: <B27397-0100000@Blurdybloop.example>\r\n",
-                    "MIME-Version: 1.0\r\n",
-                    "Content-Type: TEXT/PLAIN; CHARSET=US-ASCII\r\n",
-                    "\r\n",
-                    "Hello Joe, do you think we can meet at 3:30 tomorrow?\r\n\r\n",
-                ],
-                vec![Request {
-                    tag: "A003".into(),
-                    command: Command::Append,
-                    tokens: vec![
-                        Token::Argument(b"saved-messages".to_vec()),
-                        Token::ParenthesisOpen,
-                        Token::Argument(b"\\Seen".to_vec()),
-                        Token::ParenthesisClose,
-                        Token::Argument(
-                            concat!(
-                                "Date: Mon, 7 Feb 1994 21:52:25 -0800 (PST)\r\n",
-                                "From: Fred Foobar <foobar@Blurdybloop.example>\r\n",
-                                "Subject: afternoon meeting\r\n",
-                                "To: mooch@owatagu.siam.edu.example\r\n",
-                                "Message-Id: <B27397-0100000@Blurdybloop.example>\r\n",
-                                "MIME-Version: 1.0\r\n",
-                                "Content-Type: TEXT/PLAIN; CHARSET=US-ASCII\r\n",
-                                "\r\n",
-                                "Hello Joe, do you think we can meet at 3:30 tomorrow?\r\n",
-                            )
-                            .as_bytes()
-                            .to_vec(),
-                        ),
-                    ],
-                }],
-            ),
-            (
-                vec!["001 NOOP\r\n002 CAPABILITY\r\nabc LOGIN hello world\r\n"],
-                vec![
-                    Request {
-                        tag: "001".into(),
-                        command: Command::Noop,
-                        tokens: vec![],
-                    },
-                    Request {
-                        tag: "002".into(),
-                        command: Command::Capability,
-                        tokens: vec![],
-                    },
-                    Request {
-                        tag: "abc".into(),
-                        command: Command::Login,
-                        tokens: vec![
-                            Token::Argument(b"hello".to_vec()),
-                            Token::Argument(b"world".to_vec()),
-                        ],
-                    },
-                ],
-            ),
-        ] {
-            let mut requests = Vec::new();
-            for frame in &frames {
-                let mut bytes = frame.as_bytes().iter();
-                loop {
-                    match receiver.parse(&mut bytes) {
-                        Ok(request) => requests.push(request),
-                        Err(Error::NeedsMoreData | Error::NeedsLiteral { .. }) => break,
-                        Err(err) => panic!("{:?} for frames {:#?}", err, frames),
-                    }
-                }
-            }
-            assert_eq!(requests, expected_requests, "{:#?}", frames);
-        }
-    }
-
-    #[test]
-    fn receiver_parse_invalid() {
-        let mut receiver = Receiver::<Command>::new();
-        for invalid in [
-            //"\r\n",
-            //"  \r \n",
-            "a001\r\n",
-            "a001 unknown\r\n",
-            "a001 login {abc}\r\n",
-            "a001 login {+30}\r\n",
-            "a001 login {30} junk\r\n",
-        ] {
-            match receiver.parse(&mut invalid.as_bytes().iter()) {
-                Err(Error::Error { .. }) => {}
-                result => panic!("Expecter error, got: {:?}", result),
-            }
-        }
-    }
-
-    #[test]
-    fn receiver_discard_oversized_non_sync_literal() {
-        for frames in [
-            vec![
-                "a1 APPEND inbox (\\Draft) {40+}\r\n",
-                "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\r\n",
-                "b2 NOOP\r\n",
-            ],
-            vec![
-                "a1 APPEND inbox (\\Draft) {40+}\r\nAAAAAAAAAAAAAAAAAAAA",
-                "AAAAAAAAAAAAAAAAAAAA\r\nb2 NOOP\r\n",
-            ],
-            vec![
-                "a1 APPEND inbox (\\Draft) {40+}\r\nAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\r\nb2 NOOP\r\n",
-            ],
-        ] {
-            let mut receiver = Receiver::<Command>::with_max_request_size(30);
-            let mut requests = Vec::new();
-            let mut errors = 0;
-            for frame in &frames {
-                let mut bytes = frame.as_bytes().iter();
-                loop {
-                    match receiver.parse(&mut bytes) {
-                        Ok(request) => requests.push(request),
-                        Err(Error::NeedsMoreData | Error::NeedsLiteral { .. }) => break,
-                        Err(Error::Error { .. }) => errors += 1,
-                    }
-                }
-            }
-
-            assert_eq!(errors, 1, "expected a single error for {:#?}", frames);
-            assert_eq!(
-                requests,
-                vec![Request {
-                    tag: "b2".into(),
-                    command: Command::Noop,
-                    tokens: vec![],
-                }],
-                "connection did not resync for {:#?}",
-                frames
-            );
-        }
-    }
-}

@@ -3,6 +3,7 @@
     "a": true
   },
   "keywords": {
+    "$hasnoattachment": true,
     "tag": true
   },
   "size": 1378,
@@ -27,7 +28,7 @@
   "bodyStructure": {
     "partId": "0",
     "blobId": "blob_0",
-    "size": 754,
+    "size": 738,
     "headers": [
       {
         "name": "From",
@@ -96,7 +97,7 @@
     {
       "partId": "0",
       "blobId": "blob_0",
-      "size": 754,
+      "size": 738,
       "headers": [
         {
           "name": "From",
@@ -159,7 +160,7 @@
     {
       "partId": "0",
       "blobId": "blob_0",
-      "size": 754,
+      "size": 738,
       "headers": [
         {
           "name": "From",

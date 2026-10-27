@@ -2,22 +2,22 @@
  * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
+ *
+ * Modified by Coffey Labs in 2026 for INBUXA.
  */
 
 use super::resources_dir;
-use email::message::metadata::{MessageMetadata, build_metadata_contents};
-use imap::op::fetch::AsImapDataItem;
+use email::message::metadata::{ArchivedMessageMetadata, ExtraHeaders, MessageMetadata};
+use imap::op::fetch::{
+    source::DecodedSources,
+    structure::{Binary, ImapMetadata},
+};
 use imap_proto::{
     ResponseCode, StatusResponse,
     protocol::fetch::{BodyContents, DataItem, Section},
 };
 use mail_parser::MessageParser;
-use std::fs;
-use store::{
-    Deserialize, Serialize,
-    write::{Archive, Archiver},
-};
-use utils::chained_bytes::ChainedBytes;
+use std::{borrow::Cow, fs};
 
 pub fn test() {
     println!("Running BODYSTRUCTURE...");
@@ -31,40 +31,18 @@ pub fn test() {
         let mut buf = Vec::new();
         let raw_message = fs::read(&file_name).unwrap();
         let message_ = MessageParser::new().parse(&raw_message).unwrap();
-        let metadata = MessageMetadata {
-            preview: Default::default(),
-            raw_headers: message_
-                .raw_message
-                .as_ref()
-                .get(
-                    message_.root_part().offset_header as usize
-                        ..message_.root_part().offset_body as usize,
-                )
-                .unwrap_or_default()
-                .into(),
-            blob_hash: Default::default(),
-            blob_body_offset: message_.root_part().offset_body as u32,
-            contents: build_metadata_contents(message_),
-            rcvd_attach: 0,
-        };
-        let metadata_ =
-            Archive::deserialize_owned(Archiver::new(metadata).serialize().unwrap()).unwrap();
-        let metadata = metadata_.unarchive::<MessageMetadata>().unwrap();
-        let raw_message = ChainedBytes::new(metadata.raw_headers.as_ref()).with_last(
-            raw_message
-                .get(metadata.blob_body_offset.to_native() as usize..)
-                .unwrap_or_default(),
-        );
-        let decoded = metadata.decode_contents(raw_message);
+        // inbuxa: 1.0 builds the metadata in one step and reads the raw
+        // message through it; decoded parts live in a DecodedSources per read
+        let built = MessageMetadata::build(&message_, &ExtraHeaders::default(), Default::default());
+        let archive = rkyv::to_bytes::<rkyv::rancor::Error>(&built.metadata).unwrap();
+        let metadata =
+            rkyv::access::<ArchivedMessageMetadata, rkyv::rancor::Error>(&archive).unwrap();
+        let raw = metadata.raw_message(Some(&built.raw_headers), &raw_message);
 
         // Serialize body and bodystructure
         for (is_extended, is_utf8) in [(false, false), (true, false), (true, true)] {
             let mut buf_ = Vec::new();
-            metadata.body_structure(&decoded, is_extended).serialize(
-                &mut buf_,
-                is_extended,
-                is_utf8,
-            );
+            metadata.write_structure(&mut buf_, is_extended, is_utf8);
             if !is_extended {
                 buf.extend_from_slice(b"BODY ");
             } else if !is_utf8 {
@@ -124,37 +102,43 @@ pub fn test() {
                             true
                         };
 
+                        let mut sources = DecodedSources::default();
                         if let Some(contents) =
-                            metadata.body_section(&decoded, &body_sections, None)
+                            metadata.body_section(raw, &mut sources, &body_sections, None, None)
                         {
                             DataItem::BodySection {
-                                sections: body_sections,
+                                sections: Cow::Borrowed(&body_sections),
                                 origin_octet: None,
                                 contents,
                             }
-                            .serialize(&mut buf, false);
+                            .serialize(&mut buf);
 
                             if is_first {
-                                match metadata.binary(&decoded, &sections, None) {
-                                    Ok(Some(contents)) => {
+                                let mut sources = DecodedSources::default();
+                                match metadata.binary(raw, &mut sources, &sections, None) {
+                                    Binary::Found(contents) => {
                                         buf.push(b'\n');
                                         DataItem::Binary {
-                                            sections: sections.clone(),
+                                            sections: Cow::Borrowed(&sections),
                                             offset: None,
                                             contents: match contents {
-                                                BodyContents::Bytes(bytes) => BodyContents::Text(
-                                                    std::str::from_utf8(bytes.as_ref())
-                                                        .unwrap_or("[binary content]")
-                                                        .to_string()
-                                                        .into(),
+                                                BodyContents::Text(text) => {
+                                                    BodyContents::Text(text)
+                                                }
+                                                bytes => BodyContents::Text(
+                                                    std::str::from_utf8(
+                                                        &bytes.as_chained().to_vec(),
+                                                    )
+                                                    .unwrap_or("[binary content]")
+                                                    .to_string()
+                                                    .into(),
                                                 ),
-                                                text => text,
                                             },
                                         }
-                                        .serialize(&mut buf, false);
+                                        .serialize(&mut buf);
                                     }
-                                    Ok(None) => (),
-                                    Err(_) => {
+                                    Binary::Missing => (),
+                                    Binary::UnknownCte => {
                                         buf.push(b'\n');
                                         buf.extend_from_slice(
                                             &StatusResponse::no(format!(
@@ -172,13 +156,13 @@ pub fn test() {
                                     }
                                 }
 
-                                if let Some(size) = metadata.binary_size(&decoded, &sections) {
+                                if let Binary::Found(size) = metadata.binary_size(&sections) {
                                     buf.push(b'\n');
                                     DataItem::BinarySize {
-                                        sections: sections.clone(),
+                                        sections: Cow::Borrowed(&sections),
                                         size,
                                     }
-                                    .serialize(&mut buf, false);
+                                    .serialize(&mut buf);
                                 }
                             }
 
@@ -211,21 +195,25 @@ pub fn test() {
                 fields: vec!["Subject".into(), "Cc".into()],
             }],
         ] {
-            DataItem::BodySection {
-                contents: metadata.body_section(&decoded, &sections, None).unwrap(),
-                sections: sections.clone(),
-                origin_octet: None,
-            }
-            .serialize(&mut buf, false);
-            buf.extend_from_slice(b"\n----------------------------------\n");
+            let mut sources = DecodedSources::default();
             DataItem::BodySection {
                 contents: metadata
-                    .body_section(&decoded, &sections, (10, 25).into())
+                    .body_section(raw, &mut sources, &sections, None, None)
                     .unwrap(),
-                sections,
+                sections: Cow::Borrowed(&sections),
+                origin_octet: None,
+            }
+            .serialize(&mut buf);
+            buf.extend_from_slice(b"\n----------------------------------\n");
+            let mut sources = DecodedSources::default();
+            DataItem::BodySection {
+                contents: metadata
+                    .body_section(raw, &mut sources, &sections, (10, 25).into(), None)
+                    .unwrap(),
+                sections: Cow::Borrowed(&sections),
                 origin_octet: 10.into(),
             }
-            .serialize(&mut buf, false);
+            .serialize(&mut buf);
             buf.extend_from_slice(b"\n----------------------------------\n");
         }
 

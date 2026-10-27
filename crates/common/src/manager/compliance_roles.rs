@@ -140,7 +140,7 @@ async fn record(data: &Store, tenant: Option<Id>, role: Option<Id>) -> trc::Resu
         Some(role) => batch.set(created_key(tenant), role.id().to_be_bytes().to_vec()),
         None => batch.clear(created_key(tenant)),
     };
-    data.write(batch.build_all())
+    data.write_batch(&mut batch)
         .await
         .caused_by(trc::location!())
         .map(|_| ())

@@ -2,6 +2,8 @@
  * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
+ *
+ * Modified by Coffey Labs in 2026 for INBUXA.
  */
 
 use base64::{Engine, engine::general_purpose};
@@ -240,7 +242,7 @@ impl TestSession for Session<DummyIo> {
     async fn test_builder(&self) {
         let message = self
             .build_message(
-                SessionAddress {
+                &SessionAddress {
                     address: "bill@foobar.org".into(),
                     address_lcase: "bill@foobar.org".into(),
                     domain: "foobar.org".into(),

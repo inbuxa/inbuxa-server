@@ -64,17 +64,18 @@ impl Property for FastmailMaskedEmailProperty {
 
 impl FastmailMaskedEmailProperty {
     fn parse(value: &str) -> Option<Self> {
-        hashify::tiny_map!(value.as_bytes(),
-            b"id" => FastmailMaskedEmailProperty::Id,
-            b"email" => FastmailMaskedEmailProperty::Email,
-            b"state" => FastmailMaskedEmailProperty::State,
-            b"forDomain" => FastmailMaskedEmailProperty::ForDomain,
-            b"description" => FastmailMaskedEmailProperty::Description,
-            b"lastMessageAt" => FastmailMaskedEmailProperty::LastMessageAt,
-            b"createdAt" => FastmailMaskedEmailProperty::CreatedAt,
-            b"createdBy" => FastmailMaskedEmailProperty::CreatedBy,
-            b"url" => FastmailMaskedEmailProperty::Url,
-            b"emailPrefix" => FastmailMaskedEmailProperty::EmailPrefix,
+        hashify::fnc_map!(value.as_bytes(),
+            b"id" => Some(FastmailMaskedEmailProperty::Id),
+            b"email" => Some(FastmailMaskedEmailProperty::Email),
+            b"state" => Some(FastmailMaskedEmailProperty::State),
+            b"forDomain" => Some(FastmailMaskedEmailProperty::ForDomain),
+            b"description" => Some(FastmailMaskedEmailProperty::Description),
+            b"lastMessageAt" => Some(FastmailMaskedEmailProperty::LastMessageAt),
+            b"createdAt" => Some(FastmailMaskedEmailProperty::CreatedAt),
+            b"createdBy" => Some(FastmailMaskedEmailProperty::CreatedBy),
+            b"url" => Some(FastmailMaskedEmailProperty::Url),
+            b"emailPrefix" => Some(FastmailMaskedEmailProperty::EmailPrefix),
+            _ => None,
         )
     }
 }

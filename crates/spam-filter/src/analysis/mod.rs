@@ -10,7 +10,9 @@ use crate::{
     Recipient, SpamFilterContext, SpamFilterInput, SpamFilterOutput, SpamFilterResult, TextPart,
 };
 use common::{Server, config::mailstore::spamfilter::Location};
-use mail_parser::{Header, parsers::MessageStream};
+use compact_str::CompactString;
+use mail_parser::{Header, HeaderForm};
+use memchr::memchr2_iter;
 use std::{
     borrow::Cow,
     hash::{Hash, Hasher},
@@ -41,14 +43,14 @@ pub mod url;
 
 
 impl SpamFilterInput<'_> {
-    pub fn header_as_address(&self, header: &Header<'_>) -> Option<Cow<'_, str>> {
-        self.message
-            .raw_message()
-            .get(header.offset_start as usize..header.offset_end as usize)
-            .map(|bytes| MessageStream::new(bytes).parse_address())
-            .and_then(|addr| addr.into_address())
-            .and_then(|addr| addr.into_list().into_iter().next())
-            .and_then(|addr| addr.address)
+    pub fn header_as_address(&self, header: &Header<'_>) -> Option<String> {
+        HeaderForm::Addresses
+            .parse(header.raw_value())
+            .value()
+            .as_address()?
+            .first()?
+            .address()
+            .map(str::to_string)
     }
 }
 
@@ -59,31 +61,42 @@ impl SpamFilterOutput<'_> {
             .chain(self.recipients_cc.iter())
             .chain(self.recipients_bcc.iter())
     }
-}
 
-impl SpamFilterContext<'_> {
-    pub fn text_body(&self) -> Option<&str> {
-        self.input
-            .message
-            .text_body
-            .first()
-            .or_else(|| self.input.message.html_body.first())
-            .and_then(|idx| self.output.text_parts.get(*idx as usize))
+    pub fn text_body(&self, input: &SpamFilterInput<'_>) -> Option<&str> {
+        input
+            .first_body_part()
+            .and_then(|idx| self.text_parts.get(idx as usize))
             .and_then(|part| match part {
                 TextPart::Plain { text_body, .. } => Some(*text_body),
-                TextPart::Html { text_body, .. } => Some(text_body.as_str()),
+                TextPart::Html { text_body, .. } => Some(*text_body),
                 TextPart::None => None,
             })
     }
 }
 
+impl SpamFilterContext<'_> {
+    pub fn text_body(&self) -> Option<&str> {
+        self.output.text_body(&self.input)
+    }
+}
+
 impl SpamFilterResult {
-    pub fn add_tag(&mut self, tag: impl Into<String>) {
+    pub fn add_tag(&mut self, tag: impl Into<CompactString>) {
         self.tags.insert(tag.into());
     }
 
     pub fn has_tag(&self, tag: impl AsRef<str>) -> bool {
         self.tags.contains(tag.as_ref())
+    }
+
+    pub fn classifier_probability(&self) -> Option<f32> {
+        let mut total = 0.0f32;
+        let mut count = 0u32;
+        for confidence in self.classifier_confidence.iter().flatten() {
+            total += confidence;
+            count += 1;
+        }
+        (count > 0).then(|| total / count as f32)
     }
 }
 
@@ -106,6 +119,18 @@ impl<T: PartialEq> PartialEq for ElementLocation<T> {
 }
 
 impl<T: Eq> Eq for ElementLocation<T> {}
+
+impl std::borrow::Borrow<crate::Email> for ElementLocation<Recipient> {
+    fn borrow(&self) -> &crate::Email {
+        &self.element.email
+    }
+}
+
+impl std::borrow::Borrow<str> for ElementLocation<crate::analysis::url::UrlParts<'_>> {
+    fn borrow(&self) -> &str {
+        self.element.url.as_str()
+    }
+}
 
 impl<T> ElementLocation<T> {
     pub fn new(element: T, location: impl Into<Location>) -> Self {
@@ -149,3 +174,95 @@ pub(crate) async fn is_url_redirector(server: &Server, url: &str, span_id: u64) 
         false
     }
 }
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum ExcessEncoding {
+    None,
+    QuotedPrintable,
+    Base64,
+    Other,
+}
+
+#[inline]
+pub(crate) fn excess_encoding(text: &str) -> ExcessEncoding {
+    if !text.contains("=?") || !text.contains("?=") {
+        return ExcessEncoding::None;
+    }
+
+    let bytes = text.as_bytes();
+    let mut has_qp = false;
+    let mut has_base64 = false;
+
+    for (pos, _) in text.match_indices('?') {
+        if bytes.get(pos + 2) == Some(&b'?') {
+            match bytes.get(pos + 1) {
+                Some(b'q' | b'Q') => has_qp = true,
+                Some(b'b' | b'B') => has_base64 = true,
+                _ => {}
+            }
+        }
+    }
+
+    if has_qp {
+        ExcessEncoding::QuotedPrintable
+    } else if has_base64 {
+        ExcessEncoding::Base64
+    } else {
+        ExcessEncoding::Other
+    }
+}
+
+pub(crate) fn eq_lowercase_str(left: &str, right: &str) -> bool {
+    if left.is_ascii() && right.is_ascii() {
+        left.eq_ignore_ascii_case(right)
+    } else {
+        left.to_lowercase() == right.to_lowercase()
+    }
+}
+
+pub(crate) fn to_lowercase_cow(text: &str) -> Cow<'_, str> {
+    if text.is_ascii() {
+        if text.as_bytes().iter().any(u8::is_ascii_uppercase) {
+            Cow::Owned(text.to_ascii_lowercase())
+        } else {
+            Cow::Borrowed(text)
+        }
+    } else {
+        Cow::Owned(text.to_lowercase())
+    }
+}
+
+pub(crate) fn eq_lowercase(text: &str, lowercase_literal: &str) -> bool {
+    debug_assert!(
+        lowercase_literal
+            .bytes()
+            .all(|b| b.is_ascii() && !b.is_ascii_uppercase())
+    );
+    text.chars()
+        .flat_map(char::to_lowercase)
+        .eq(lowercase_literal.chars())
+}
+
+pub(crate) fn starts_with_ignore_ascii_case(text: &str, prefix: &str) -> bool {
+    text.as_bytes()
+        .get(..prefix.len())
+        .is_some_and(|start| start.eq_ignore_ascii_case(prefix.as_bytes()))
+}
+
+pub(crate) fn contains_ignore_ascii_case(text: &str, needle: &str) -> bool {
+    let haystack = text.as_bytes();
+    let Some((&first, rest)) = needle.as_bytes().split_first() else {
+        return true;
+    };
+    memchr2_iter(
+        first.to_ascii_lowercase(),
+        first.to_ascii_uppercase(),
+        haystack,
+    )
+    .any(|pos| {
+        haystack
+            .get(pos + 1..pos + 1 + rest.len())
+            .is_some_and(|tail| tail.eq_ignore_ascii_case(rest))
+    })
+}
+

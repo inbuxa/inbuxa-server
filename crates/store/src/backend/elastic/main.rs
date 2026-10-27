@@ -2,6 +2,8 @@
  * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
+ *
+ * Modified by Coffey Labs in 2026 for INBUXA.
  */
 
 use std::sync::Arc;
@@ -10,8 +12,8 @@ use crate::{
     SearchStore,
     backend::elastic::ElasticSearchStore,
     search::{
-        CalendarSearchField, ContactSearchField, EmailSearchField, SearchableField,
-        TracingSearchField,
+        CalendarSearchField, ContactSearchField, EmailSearchField, FileSearchField,
+        SearchableField, TracingSearchField,
     },
 };
 use registry::schema::structs;
@@ -43,7 +45,31 @@ impl ElasticSearchStore {
         self.create_index::<EmailSearchField>().await?;
         self.create_index::<CalendarSearchField>().await?;
         self.create_index::<ContactSearchField>().await?;
+        self.create_index::<FileSearchField>().await?;
         self.create_index::<TracingSearchField>().await?;
+        Ok(())
+    }
+
+    /// inbuxa: drops every index, for a clean test run (0.16 had this)
+    #[cfg(inbuxa_tests)]
+    pub async fn drop_indexes(&self) -> trc::Result<()> {
+        use crate::write::SearchIndex;
+
+        for index in [
+            SearchIndex::Email,
+            SearchIndex::Calendar,
+            SearchIndex::Contacts,
+            SearchIndex::File,
+            SearchIndex::Tracing,
+        ] {
+            // A missing index answers 404, which is what's wanted
+            self.client
+                .delete(format!("{}/{}", self.url, index.index_name()))
+                .send()
+                .await
+                .map_err(|err| trc::StoreEvent::ElasticsearchError.reason(err))?;
+        }
+
         Ok(())
     }
 
@@ -112,29 +138,6 @@ impl ElasticSearchStore {
             }
         }
     }
-
-    #[cfg(feature = "test_mode")]
-    pub async fn drop_indexes(&self) -> trc::Result<()> {
-        use crate::write::SearchIndex;
-
-        for index in &[
-            SearchIndex::Email,
-            SearchIndex::Calendar,
-            SearchIndex::Contacts,
-            SearchIndex::Tracing,
-        ] {
-            assert_success(
-                self.client
-                    .delete(format!("{}/{}", self.url, index.index_name()))
-                    .send()
-                    .await,
-            )
-            .await
-            .map(|_| ())?;
-        }
-
-        Ok(())
-    }
 }
 
 pub(crate) async fn assert_success(response: Result<Response, Error>) -> trc::Result<Response> {
@@ -152,3 +155,4 @@ pub(crate) async fn assert_success(response: Result<Response, Error>) -> trc::Re
         Err(err) => Err(trc::StoreEvent::ElasticsearchError.reason(err)),
     }
 }
+

@@ -39,7 +39,7 @@ struct Slot;
 impl Slot {
     fn take() -> Option<Slot> {
         STREAMS
-            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |n| {
+            .try_update(Ordering::SeqCst, Ordering::SeqCst, |n| {
                 (n < MAX_STREAMS).then_some(n + 1)
             })
             .ok()
@@ -151,7 +151,7 @@ pub fn live_tracing(query: Option<&str>) -> trc::Result<HttpResponse> {
         }
     }
     let id = format!("live-tracing-{}", store::rand::random::<u64>());
-    let (_, mut rx) = SubscriberBuilder::new(id.clone())
+    let (_, mut rx, _) = SubscriberBuilder::new(id.clone())
         .with_interests(interests.clone())
         .with_lossy(true)
         .register();

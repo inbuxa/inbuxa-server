@@ -1,29 +1,27 @@
 [package]
 name = "dav-proto"
-version = "0.16.27"
+version = "1.0.0"
 edition = "2024"
 
 [dependencies]
 trc = { path = "../trc" }
 types = { path = "../types" }
-hashify = "0.2.9"
-quick-xml = "0.41"
-calcard = { version = "0.3", features = ["rkyv"] }
-mail-parser = { version = "0.11", features = ["full_encoding", "rkyv"] }
-hyper = "1.11.1"
-chrono = { version = "0.4.45", features = ["serde"], optional = true }
+hashify = "0.3"
+quick-xml = "0.42"
+calcard = { path = "../calcard", features = ["rkyv"] }
+mail-parser = { version = "1.0", features = ["full_encoding"] }
+hyper = "1.12.0"
 compact_str = "0.10.0"
+memchr = "2.8.3"
 
 [dev-dependencies]
-calcard = { version = "0.3", features = ["serde", "rkyv"] }
-types = { path = "../types", features = ["test_mode"] }
+calcard = { path = "../calcard", features = ["serde", "rkyv"] }
+types = { path = "../types" }
 serde = { version = "1.0.229", features = ["derive"] }
-serde_json = "1.0.151"
-chrono = { version = "0.4.45", features = ["serde"] }
+serde_json = "1.0.154"
 
 [features]
-test_mode = ["chrono"]
-enterprise = []
+enterprise = ["trc/enterprise"]
 
 [lints]
 workspace = true

@@ -6,13 +6,14 @@
  * Modified by Coffey Labs in 2026 for INBUXA.
  */
 
+use crate::request::MaybeInvalid;
 use jmap_tools::{Key, Property};
 use registry::types::{
     error::{PatchError, ValidationError},
     id::ObjectId,
 };
 use std::borrow::Cow;
-use types::id::Id;
+use types::{blob::BlobId, id::Id};
 
 #[derive(Debug, Clone, serde::Serialize)]
 #[serde(bound(serialize = "InvalidProperty<P>: serde::Serialize"))]
@@ -47,6 +48,10 @@ struct SetErrorInner<P: Property> {
     #[serde(skip_serializing_if = "Vec::is_empty")]
     #[serde(rename = "validationErrors")]
     validation_errors: Vec<ValidationError>,
+
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    #[serde(rename = "notFound")]
+    not_found: Vec<MaybeInvalid<BlobId>>,
 
     // inbuxa: DLP (dlp-and-mail-flow-rules spec, §2.5): each rule that
     // warned or blocked, with its notice
@@ -200,8 +205,14 @@ impl<T: Property> SetError<T> {
             object_id: None,
             linked_objects: Vec::new(),
             validation_errors: Vec::new(),
+            not_found: Vec::new(),
             rules: Vec::new(),
         }))
+    }
+
+    pub fn with_not_found(mut self, not_found: Vec<MaybeInvalid<BlobId>>) -> Self {
+        self.0.not_found = not_found;
+        self
     }
 
     /// inbuxa: the DLP rules behind a warning or block.
@@ -380,6 +391,7 @@ impl From<PatchError> for SetError<registry::schema::properties::Property> {
             object_id: None,
             linked_objects: Vec::new(),
             validation_errors: Vec::new(),
+            not_found: Vec::new(),
             rules: Vec::new(),
         }))
     }

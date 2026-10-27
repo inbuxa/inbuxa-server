@@ -1,0 +1,25 @@
+[package]
+name = "s3"
+version = "1.0.0"
+edition = "2024"
+license = "AGPL-3.0-only OR LicenseRef-SEL"
+publish = false
+
+[dependencies]
+reqwest = { version = "0.13", default-features = false, features = ["rustls", "http2", "stream"] }
+bytes = "1.12"
+aws-lc-rs = "1"
+encodify = "1.0"
+md5 = "0.8"
+quick-xml = "0.42"
+crc-fast = { version = "1.10", default-features = false, features = ["std"] }
+tokio = { version = "1.54", features = ["time"] }
+rand = "0.10.3"
+hashify = "0.3"
+memchr = "2.8"
+
+[lints]
+workspace = true
+
+[dev-dependencies]
+jiff = "0.2.38"

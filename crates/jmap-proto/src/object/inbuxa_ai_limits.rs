@@ -64,19 +64,20 @@ impl Property for AiLimitsProperty {
 
 impl AiLimitsProperty {
     fn parse(value: &str) -> Option<Self> {
-        hashify::tiny_map!(value.as_bytes(),
-            b"id" => AiLimitsProperty::Id,
-            b"spamMaxAdded" => AiLimitsProperty::SpamMaxAdded,
-            b"spamMaxSubtracted" => AiLimitsProperty::SpamMaxSubtracted,
-            b"spamCallCeiling" => AiLimitsProperty::SpamCallCeiling,
-            b"maxConcurrentCalls" => AiLimitsProperty::MaxConcurrentCalls,
-            b"maxContentBytes" => AiLimitsProperty::MaxContentBytes,
-            b"failureBackoff" => AiLimitsProperty::FailureBackoff,
-            b"userCallsPerHour" => AiLimitsProperty::UserCallsPerHour,
-            b"explainEnabled" => AiLimitsProperty::ExplainEnabled,
-            b"explainModelId" => AiLimitsProperty::ExplainModelId,
-            b"explainCallsPerHour" => AiLimitsProperty::ExplainCallsPerHour,
-            b"explainCeiling" => AiLimitsProperty::ExplainCeiling,
+        hashify::fnc_map!(value.as_bytes(),
+            b"id" => Some(AiLimitsProperty::Id),
+            b"spamMaxAdded" => Some(AiLimitsProperty::SpamMaxAdded),
+            b"spamMaxSubtracted" => Some(AiLimitsProperty::SpamMaxSubtracted),
+            b"spamCallCeiling" => Some(AiLimitsProperty::SpamCallCeiling),
+            b"maxConcurrentCalls" => Some(AiLimitsProperty::MaxConcurrentCalls),
+            b"maxContentBytes" => Some(AiLimitsProperty::MaxContentBytes),
+            b"failureBackoff" => Some(AiLimitsProperty::FailureBackoff),
+            b"userCallsPerHour" => Some(AiLimitsProperty::UserCallsPerHour),
+            b"explainEnabled" => Some(AiLimitsProperty::ExplainEnabled),
+            b"explainModelId" => Some(AiLimitsProperty::ExplainModelId),
+            b"explainCallsPerHour" => Some(AiLimitsProperty::ExplainCallsPerHour),
+            b"explainCeiling" => Some(AiLimitsProperty::ExplainCeiling),
+            _ => None,
         )
     }
 }

@@ -2,6 +2,8 @@
  * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
+ *
+ * Modified by Coffey Labs in 2026 for INBUXA.
  */
 
 use crate::utils::server::TestServer;
@@ -156,7 +158,7 @@ pub async fn test(test: &TestServer) {
                         .log_item_delete(SyncCollection::Email, None);
                 }
                 LogAction::UpdateChild(id) => {
-                    batch.log_container_property_change(SyncCollection::Email, id as u32);
+                    batch.log_container_property_change(SyncCollection::Email, (id as u32).into());
                 }
                 LogAction::Move(old_id, new_id) => {
                     batch
@@ -168,13 +170,16 @@ pub async fn test(test: &TestServer) {
             }
         }
 
-        server
+        let assigned_ids = server
             .core
             .storage
             .data
-            .write(batch.build_all())
+            .write_batch(&mut batch)
             .await
             .unwrap();
+        // inbuxa: 1.0 answers Email/changes from the cached message state, which
+        // a raw changelog write leaves fresh; mark it stale as commit_batch does
+        server.inner.mark_caches_stale_from(&assigned_ids);
 
         let mut new_state = State::Initial;
         for (test_num, state) in (states).iter().enumerate() {

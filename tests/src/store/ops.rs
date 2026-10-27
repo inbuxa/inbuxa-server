@@ -12,7 +12,10 @@ use std::collections::HashSet;
 use store::{
     ValueKey,
     rand::{self, RngExt},
-    write::{AlignedBytes, Archive, Archiver, BatchBuilder, MergeResult, Params, ValueClass},
+    write::{
+        Archive, ArchiveBytes, Archiver, BatchBuilder, MergeResult, Patch, PatchSource, ValueClass,
+        compress::Compression,
+    },
 };
 use types::collection::Collection;
 use types::collection::SyncCollection;
@@ -70,7 +73,7 @@ pub async fn test(test: &TestServer) {
                 value.clone(),
             );
         }
-        db.write(batch.build_all()).await.unwrap();
+        db.write_batch(&mut batch).await.unwrap();
 
         // Iterate over all keys
         let mut results = Vec::new();
@@ -131,7 +134,7 @@ pub async fn test(test: &TestServer) {
         // Read-your-writes through the cached read version: overwrite a key in a tight loop
         println!("Running FoundationDB read-your-writes test...");
         for n in 0u64..200 {
-            db.write(
+            db.write_batch(
                 BatchBuilder::new()
                     .with_account_id(0)
                     .with_collection(Collection::Email)
@@ -142,8 +145,7 @@ pub async fn test(test: &TestServer) {
                             item_id: 0,
                         }),
                         n.to_be_bytes().to_vec(),
-                    )
-                    .build_all(),
+                    ),
             )
             .await
             .unwrap();
@@ -163,7 +165,7 @@ pub async fn test(test: &TestServer) {
                 .unwrap();
             assert_eq!(got, n, "stale read: wrote {n} but read back {got}");
         }
-        db.write(
+        db.write_batch(
             BatchBuilder::new()
                 .with_account_id(0)
                 .with_collection(Collection::Email)
@@ -171,8 +173,7 @@ pub async fn test(test: &TestServer) {
                 .clear(ValueClass::Registry(RegistryClass::Item {
                     object_id: 100,
                     item_id: 0,
-                }))
-                .build_all(),
+                })),
         )
         .await
         .unwrap();
@@ -185,13 +186,12 @@ pub async fn test(test: &TestServer) {
             let db = db.clone();
             tokio::spawn(async move {
                 for _ in 0..n_increments {
-                    db.write(
+                    db.write_batch(
                         BatchBuilder::new()
                             .with_account_id(0)
                             .with_collection(Collection::Email)
                             .with_document(5000)
-                            .add_and_get(ValueClass::Quota, 1)
-                            .build_all(),
+                            .add_and_get(ValueClass::Quota, 1),
                     )
                     .await
                     .unwrap();
@@ -241,13 +241,12 @@ pub async fn test(test: &TestServer) {
             n_increments as i64,
             "counter did not reach the expected total"
         );
-        db.write(
+        db.write_batch(
             BatchBuilder::new()
                 .with_account_id(0)
                 .with_collection(Collection::Email)
                 .with_document(5000)
-                .clear(ValueClass::Quota)
-                .build_all(),
+                .clear(ValueClass::Quota),
         )
         .await
         .unwrap();
@@ -262,13 +261,12 @@ pub async fn test(test: &TestServer) {
             class: ValueClass::Property(ORPHAN_FIELD),
         };
         let marker = value_gen([(b'z', 16)]);
-        db.write(
+        db.write_batch(
             BatchBuilder::new()
                 .with_account_id(0)
                 .with_collection(Collection::Email)
                 .with_document(1)
-                .set(ValueClass::Property(ORPHAN_FIELD), marker.clone())
-                .build_all(),
+                .set(ValueClass::Property(ORPHAN_FIELD), marker.clone()),
         )
         .await
         .unwrap();
@@ -284,13 +282,12 @@ pub async fn test(test: &TestServer) {
             (b'h', 0),
         ] {
             let value = value_gen([(byte, size)]);
-            db.write(
+            db.write_batch(
                 BatchBuilder::new()
                     .with_account_id(0)
                     .with_collection(Collection::Email)
                     .with_document(0)
-                    .set(ValueClass::Property(ORPHAN_FIELD), value.clone())
-                    .build_all(),
+                    .set(ValueClass::Property(ORPHAN_FIELD), value.clone()),
             )
             .await
             .unwrap();
@@ -332,29 +329,24 @@ pub async fn test(test: &TestServer) {
         // as the database schema version does in the property subspace
         println!("Running FoundationDB short key test...");
         for document_id in [0u32, 1, 0xFFFF, 0x10000] {
-            db.write(
+            db.write_batch(
                 BatchBuilder::new()
                     .with_account_id(document_id)
                     .with_collection(Collection::Email)
                     .with_document(document_id)
-                    .set(ValueClass::Property(ORPHAN_FIELD), marker.clone())
-                    .build_all(),
+                    .set(ValueClass::Property(ORPHAN_FIELD), marker.clone()),
             )
             .await
             .unwrap();
         }
 
-        db.write(
-            BatchBuilder::new()
-                .set(
-                    ValueClass::Any(store::write::AnyClass {
-                        subspace: store::SUBSPACE_PROPERTY,
-                        key: vec![0u8],
-                    }),
-                    vec![1u8],
-                )
-                .build_all(),
-        )
+        db.write_batch(BatchBuilder::new().set(
+            ValueClass::Any(store::write::AnyClass {
+                subspace: store::Subspace::Property,
+                key: vec![0u8],
+            }),
+            vec![1u8],
+        ))
         .await
         .unwrap();
 
@@ -382,25 +374,22 @@ pub async fn test(test: &TestServer) {
                 "property key for account {document_id} was cleared by a shorter key"
             );
 
-            db.write(
+            db.write_batch(
                 BatchBuilder::new()
                     .with_account_id(document_id)
                     .with_collection(Collection::Email)
                     .with_document(document_id)
-                    .clear(ValueClass::Property(ORPHAN_FIELD))
-                    .build_all(),
+                    .clear(ValueClass::Property(ORPHAN_FIELD)),
             )
             .await
             .unwrap();
         }
 
-        db.write(
-            BatchBuilder::new()
-                .clear(ValueClass::Any(store::write::AnyClass {
-                    subspace: store::SUBSPACE_PROPERTY,
-                    key: vec![0u8],
-                }))
-                .build_all(),
+        db.write_batch(
+            BatchBuilder::new().clear(ValueClass::Any(store::write::AnyClass {
+                subspace: store::Subspace::Property,
+                key: vec![0u8],
+            })),
         )
         .await
         .unwrap();
@@ -427,7 +416,7 @@ pub async fn test(test: &TestServer) {
                 );
 
                 if n % 10000 == 0 {
-                    db.write(batch.build_all()).await.unwrap();
+                    db.write_batch(&mut batch).await.unwrap();
                     batch = BatchBuilder::new();
                     batch
                         .with_account_id(0)
@@ -435,7 +424,7 @@ pub async fn test(test: &TestServer) {
                         .with_document(0);
                 }
             }
-            db.write(batch.build_all()).await.unwrap();
+            db.write_batch(&mut batch).await.unwrap();
 
             println!("Created 900.000 keys...");
 
@@ -489,7 +478,7 @@ pub async fn test(test: &TestServer) {
                 }));
 
                 if n % 10000 == 0 {
-                    db.write(batch.build_all()).await.unwrap();
+                    db.write_batch(&mut batch).await.unwrap();
                     batch = BatchBuilder::new();
                     batch
                         .with_account_id(0)
@@ -497,7 +486,7 @@ pub async fn test(test: &TestServer) {
                         .with_document(0);
                 }
             }
-            db.write(batch.build_all()).await.unwrap();
+            db.write_batch(&mut batch).await.unwrap();
         }
     }
 
@@ -514,23 +503,19 @@ pub async fn test(test: &TestServer) {
                         .with_account_id(0)
                         .with_collection(Collection::Email)
                         .with_document(0)
-                        .merge_fnc(
-                            ValueClass::Property(3),
-                            Params::with_capacity(0),
-                            |_, _, bytes| {
-                                if let Some(bytes) = bytes {
-                                    Ok(MergeResult::Update(
-                                        (u64::from_be_bytes(bytes.try_into().unwrap()) + 1)
-                                            .to_be_bytes()
-                                            .to_vec(),
-                                    ))
-                                } else {
-                                    Ok(MergeResult::Update(0u64.to_be_bytes().to_vec()))
-                                }
-                            },
-                        );
+                        .merge_fnc(ValueClass::Property(3), |_, bytes| {
+                            if let Some(bytes) = bytes {
+                                Ok(MergeResult::Update(
+                                    (u64::from_be_bytes(bytes.try_into().unwrap()) + 1)
+                                        .to_be_bytes()
+                                        .to_vec(),
+                                ))
+                            } else {
+                                Ok(MergeResult::Update(0u64.to_be_bytes().to_vec()))
+                            }
+                        });
 
-                    match db.write(builder.build_all()).await {
+                    match db.write_batch(&mut builder).await {
                         Ok(_) => {
                             break;
                         }
@@ -578,11 +563,10 @@ pub async fn test(test: &TestServer) {
                     .with_collection(Collection::Email)
                     .with_document(0)
                     .add_and_get(ValueClass::Quota, 1);
-                db.write(builder.build_all())
+                db.write_batch(&mut builder)
                     .await
                     .unwrap()
                     .last_counter_id()
-                    .unwrap()
             })
         });
     }
@@ -625,35 +609,32 @@ pub async fn test(test: &TestServer) {
                     vec![0u8; 100000]
                 };
 
-                let (offset, archived_value) = Archiver::new(value).serialize_versioned().unwrap();
+                // inbuxa: 1.0 writes the change id into the archive with a
+                // patch instead of a set function
+                let (offset, archived_value) =
+                    Archiver::with_compression(value, Compression::Zstd(None))
+                        .serialize_versioned()
+                        .unwrap();
 
                 builder
                     .with_account_id(0)
                     .with_collection(Collection::Email)
                     .with_document(document_id)
-                    .set_fnc(
+                    .set(
                         ValueClass::Property(5),
-                        Params::with_capacity(2)
-                            .with_bytes(archived_value)
-                            .with_u64(offset),
-                        |params, ids| {
-                            let change_id = ids.current_change_id()?;
-                            let archive = params.bytes(0);
-                            let offset = params.u64(1);
-
-                            let mut bytes = Vec::with_capacity(archive.len());
-                            bytes.extend_from_slice(&archive[..offset as usize]);
-                            bytes.extend_from_slice(&change_id.to_be_bytes()[..]);
-                            bytes.push(archive.last().copied().unwrap()); // Marker
-                            Ok(bytes)
-                        },
+                        (
+                            archived_value,
+                            vec![Patch {
+                                offset: offset as u32,
+                                source: PatchSource::ChangeIdBe,
+                            }],
+                        ),
                     )
                     .log_container_insert(SyncCollection::Email);
-                db.write(builder.build_all())
+                db.write_batch(&mut builder)
                     .await
                     .unwrap()
-                    .last_change_id(0)
-                    .unwrap()
+                    .last_change_id(0, SyncCollection::Email)
             })
         });
     }
@@ -670,7 +651,7 @@ pub async fn test(test: &TestServer) {
     let mut change_ids = AHashSet::new();
     for document_id in 0..1000 {
         let archive = db
-            .get_value::<Archive<AlignedBytes>>(ValueKey {
+            .get_value::<Archive<ArchiveBytes>>(ValueKey {
                 account_id: 0,
                 collection: 0,
                 document_id,
@@ -707,15 +688,14 @@ pub async fn test(test: &TestServer) {
     {
         // Write value
         let test_len = value.len();
-        db.write(
+        db.write_batch(
             BatchBuilder::new()
                 .with_account_id(0)
                 .with_collection(Collection::Email)
                 .with_document(0)
                 .set(ValueClass::Property(1), value.as_slice())
                 .set(ValueClass::Property(0), "check1".as_bytes())
-                .set(ValueClass::Property(2), "check2".as_bytes())
-                .build_all(),
+                .set(ValueClass::Property(2), "check2".as_bytes()),
         )
         .await
         .unwrap();
@@ -736,13 +716,12 @@ pub async fn test(test: &TestServer) {
         );
 
         // Delete value
-        db.write(
+        db.write_batch(
             BatchBuilder::new()
                 .with_account_id(0)
                 .with_collection(Collection::Email)
                 .with_document(0)
-                .clear(ValueClass::Property(1))
-                .build_all(),
+                .clear(ValueClass::Property(1)),
         )
         .await
         .unwrap();
@@ -789,7 +768,7 @@ pub async fn test(test: &TestServer) {
             .clear(ValueClass::Property(2))
             .clear(ValueClass::Property(3))
             .clear(ValueClass::Quota)
-            .clear(ValueClass::ChangeId);
+            .clear(ValueClass::ChangeId(SyncCollection::Email.into()));
 
         for document_id in 0..1000 {
             batch
@@ -797,7 +776,7 @@ pub async fn test(test: &TestServer) {
                 .clear(ValueClass::Property(5));
         }
 
-        db.write(batch.build_all()).await.unwrap();
+        db.write_batch(&mut batch).await.unwrap();
 
         // Make sure everything is deleted
         store_assert_is_empty(&db, db.clone().into(), false).await;
@@ -822,7 +801,7 @@ async fn batched_reads(db: &store::Store) {
             );
         }
     }
-    db.write(batch.build_all()).await.unwrap();
+    db.write_batch(&mut batch).await.unwrap();
 
     // A batch wider than READ_BATCH_SIZE, with gaps, a repeat and keys that
     // were never written
@@ -853,7 +832,7 @@ async fn batched_reads(db: &store::Store) {
             .with_document(document_id)
             .clear(ValueClass::Property(FIELD));
     }
-    db.write(batch.build_all()).await.unwrap();
+    db.write_batch(&mut batch).await.unwrap();
     assert!(
         db.get_values::<u64>(&keys)
             .await

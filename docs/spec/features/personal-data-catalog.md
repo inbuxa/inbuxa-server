@@ -66,7 +66,8 @@ and events), `administrator` (people acting on the server).
 
 **Where** (location): `data-store`, `blob-store`, `search-store`,
 `in-memory-store` (the configured one; the data store by default),
-`memory` (process RAM, per node), `log-file`, `external` (sent to an
+`memory` (process RAM, per node), `log-file`, `local-file` (a file on the
+node's disk outside any store), `external` (sent to an
 endpoint). **Leaves the host** is a separate column: a store is local unless
 the operator points it at a remote backend.
 

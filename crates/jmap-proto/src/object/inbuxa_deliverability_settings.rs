@@ -49,10 +49,11 @@ impl Property for DeliverabilitySettingsProperty {
 
 impl DeliverabilitySettingsProperty {
     fn parse(value: &str) -> Option<Self> {
-        hashify::tiny_map!(value.as_bytes(),
-            b"id" => DeliverabilitySettingsProperty::Id,
-            b"disabledLists" => DeliverabilitySettingsProperty::DisabledLists,
-            b"lists" => DeliverabilitySettingsProperty::Lists,
+        hashify::fnc_map!(value.as_bytes(),
+            b"id" => Some(DeliverabilitySettingsProperty::Id),
+            b"disabledLists" => Some(DeliverabilitySettingsProperty::DisabledLists),
+            b"lists" => Some(DeliverabilitySettingsProperty::Lists),
+            _ => None,
         )
     }
 }

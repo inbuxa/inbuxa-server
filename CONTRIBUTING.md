@@ -83,7 +83,14 @@ that is missing from there on every import.
 
 ## Running the tests
 
-`cargo test -p tests` runs what needs nothing but a store on disk. The rest
+The test helpers are compiled in only with `--cfg inbuxa_tests`, which a
+release build never sets, so every test command here runs with it:
+
+```sh
+export RUSTFLAGS="--cfg inbuxa_tests"
+```
+
+`cargo test -p tests` then runs what needs nothing but a store on disk. The rest
 need containers, a particular backend, or a copy of real data, and are
 `#[ignore]`d:
 

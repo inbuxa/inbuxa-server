@@ -4,8 +4,11 @@
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
  */
 
-use chrono::{Datelike, Local, TimeDelta, TimeZone, Timelike};
-use std::{str::FromStr, time::Duration};
+use jiff::{
+    SignedDuration, Span, ToSpan, Zoned,
+    civil::{Date, Time},
+};
+use std::time::Duration;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SimpleCron {
@@ -16,47 +19,61 @@ pub enum SimpleCron {
 
 impl SimpleCron {
     pub fn time_to_next(&self) -> Duration {
-        let now = Local::now();
-        let next = match self {
-            SimpleCron::Day { hour, minute } => {
-                let next = Local
-                    .with_ymd_and_hms(now.year(), now.month(), now.day(), *hour, *minute, 0)
-                    .earliest()
-                    .unwrap_or_else(|| now - TimeDelta::try_seconds(1).unwrap_or_default());
-                if next <= now {
-                    next + TimeDelta::try_days(1).unwrap_or_default()
-                } else {
-                    next
-                }
-            }
-            SimpleCron::Week { day, hour, minute } => {
-                let next = Local
-                    .with_ymd_and_hms(now.year(), now.month(), now.day(), *hour, *minute, 0)
-                    .earliest()
-                    .unwrap_or_else(|| now - TimeDelta::try_seconds(1).unwrap_or_default());
-                if next <= now {
-                    next + TimeDelta::try_days(
-                        (7 - now.weekday().number_from_monday() + *day).into(),
-                    )
-                    .unwrap_or_default()
-                } else {
-                    next
-                }
-            }
-            SimpleCron::Hour { minute } => {
-                let next = Local
-                    .with_ymd_and_hms(now.year(), now.month(), now.day(), now.hour(), *minute, 0)
-                    .earliest()
-                    .unwrap_or_else(|| now - TimeDelta::try_seconds(1).unwrap_or_default());
-                if next <= now {
-                    next + TimeDelta::try_hours(1).unwrap_or_default()
-                } else {
-                    next
-                }
-            }
-        };
+        let now = Zoned::now();
+        self.next_after(&now)
+            .and_then(|next| Duration::try_from(now.duration_until(&next)).ok())
+            .unwrap_or_else(|| self.as_duration())
+    }
 
-        (next - now).to_std().unwrap_or_else(|_| self.as_duration())
+    fn next_after(&self, now: &Zoned) -> Option<Zoned> {
+        match *self {
+            SimpleCron::Hour { minute } => {
+                let next = now
+                    .with()
+                    .minute(i8::try_from(minute).ok()?)
+                    .second(0)
+                    .subsec_nanosecond(0)
+                    .build()
+                    .ok()?;
+                if next > *now {
+                    Some(next)
+                } else {
+                    next.checked_add(SignedDuration::from_hours(1)).ok()
+                }
+            }
+            SimpleCron::Day { hour, minute } => {
+                Self::next_local_time(now, 0, 1.day(), hour, minute)
+            }
+            SimpleCron::Week { day, hour, minute } => Self::next_local_time(
+                now,
+                (i64::from(day) - i64::from(now.weekday().to_sunday_zero_offset())).rem_euclid(7),
+                1.week(),
+                hour,
+                minute,
+            ),
+        }
+    }
+
+    fn next_local_time(
+        now: &Zoned,
+        days_ahead: i64,
+        period: Span,
+        hour: u32,
+        minute: u32,
+    ) -> Option<Zoned> {
+        let time = Time::new(i8::try_from(hour).ok()?, i8::try_from(minute).ok()?, 0, 0).ok()?;
+        let date = now.date().checked_add(days_ahead.days()).ok()?;
+        let at = |date: Date| {
+            date.to_datetime(time)
+                .to_zoned(now.time_zone().clone())
+                .ok()
+        };
+        let next = at(date)?;
+        if next > *now {
+            Some(next)
+        } else {
+            at(date.checked_add(period).ok()?)
+        }
     }
 
     pub fn as_duration(&self) -> Duration {
@@ -68,71 +85,9 @@ impl SimpleCron {
     }
 }
 
-impl FromStr for SimpleCron {
-    type Err = String;
-
-    fn from_str(value: &str) -> Result<Self, Self::Err> {
-        let mut hour = 0;
-        let mut minute = 0;
-
-        for (pos, value) in value.split(' ').enumerate() {
-            if pos == 0 {
-                minute = value
-                    .parse::<u32>()
-                    .map_err(|_| "Invalid cron key: failed to parse cron minute".to_string())?;
-                if !(0..=59).contains(&minute) {
-                    return Err(format!(
-                        "Invalid cron key: failed to parse minute, invalid value: {minute}"
-                    ));
-                }
-            } else if pos == 1 {
-                if value
-                    .as_bytes()
-                    .first()
-                    .ok_or_else(|| "Invalid cron key: failed to parse cron hour".to_string())?
-                    == &b'*'
-                {
-                    return Ok(SimpleCron::Hour { minute });
-                } else {
-                    hour = value
-                        .parse::<u32>()
-                        .map_err(|_| "Invalid cron key: failed to parse cron hour".to_string())?;
-                    if !(0..=23).contains(&hour) {
-                        return Err(format!(
-                            "Invalid cron key: failed to parse hour, invalid value: {hour}"
-                        ));
-                    }
-                }
-            } else if pos == 2 {
-                if value
-                    .as_bytes()
-                    .first()
-                    .ok_or_else(|| "Invalid cron key: failed to parse cron weekday".to_string())?
-                    == &b'*'
-                {
-                    return Ok(SimpleCron::Day { hour, minute });
-                } else {
-                    let day = value.parse::<u32>().map_err(|_| {
-                        "Invalid cron key: failed to parse cron weekday".to_string()
-                    })?;
-                    if !(1..=7).contains(&hour) {
-                        return Err(format!(
-                            "Invalid cron key: failed to parse weekday, invalid value: {}, range is 1 (Monday) to 7 (Sunday).",
-                            hour,
-                        ));
-                    }
-
-                    return Ok(SimpleCron::Week { day, hour, minute });
-                }
-            }
-        }
-
-        Err("Invalid cron key: parse cron expression.".to_string())
-    }
-}
-
 impl Default for SimpleCron {
     fn default() -> Self {
         SimpleCron::Hour { minute: 0 }
     }
 }
+

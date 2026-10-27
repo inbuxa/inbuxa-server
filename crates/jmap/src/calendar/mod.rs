@@ -4,9 +4,7 @@
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
  */
 
-use groupware::calendar::{
-    CALENDAR_AVAILABILITY_ALL, CALENDAR_AVAILABILITY_ATTENDING, CALENDAR_AVAILABILITY_NONE,
-};
+use groupware::calendar::availability::AvailabilityPreference;
 use jmap_proto::object::calendar::IncludeInAvailability;
 
 pub mod get;
@@ -18,14 +16,10 @@ pub(crate) trait Availability: Sized {
 
 impl Availability for IncludeInAvailability {
     fn from_flags(flags: u16) -> Option<Self> {
-        if flags & CALENDAR_AVAILABILITY_ALL != 0 {
-            Some(IncludeInAvailability::All)
-        } else if flags & CALENDAR_AVAILABILITY_ATTENDING != 0 {
-            Some(IncludeInAvailability::Attending)
-        } else if flags & CALENDAR_AVAILABILITY_NONE != 0 {
-            Some(IncludeInAvailability::None)
-        } else {
-            None
-        }
+        AvailabilityPreference::from_flags(flags).map(|preference| match preference {
+            AvailabilityPreference::All => IncludeInAvailability::All,
+            AvailabilityPreference::Attending => IncludeInAvailability::Attending,
+            AvailabilityPreference::None => IncludeInAvailability::None,
+        })
     }
 }

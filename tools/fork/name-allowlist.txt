@@ -11,31 +11,36 @@
 # invalidate every sealed OAuth token and client id already issued.
 crates/common/src/auth/oauth/client_id.rs	"stalwart-oauth-client-id-sw1"
 crates/common/src/auth/oauth/token.rs	"stalwart-oauth-token-sw1"
+crates/common/src/auth/oauth/config.rs	"stalwart-oauth-refresh-nonce-sw1"
 
 # Hashed before it's used as a blob key, so it never appears anywhere.
 crates/common/src/manager/application.rs	"STALWART_APP_"
+crates/common/src/cache/swap/blob.rs	"STALWART_SWAP_{}_{}_{}"
+crates/common/src/cache/swap/blob.rs	"STALWART_SWAP_{}_{}_{}_{}"
 
 # Pre-rename names, read only to retire them: the web interface's OAuth
 # client (removed on start), the spam filter's blobs (moved to their new
-# keys), and the environment prefix (refused with the variable to rename).
+# keys), the environment prefix (refused with the variable to rename), and
+# the application manifest bundles built for upstream carry.
 crates/common/src/manager/first_party.rs	"stalwart-webui"
-crates/migration/src/lib.rs	"STALWART_SPAM_CLASSIFIER_MODEL.lz4"
-crates/migration/src/lib.rs	"STALWART_SPAM_TRAIN_DATA.lz4"
+crates/common/src/manager/renamed_blobs.rs	"STALWART_SPAM_CLASSIFIER_MODEL.lz4"
+crates/common/src/manager/renamed_blobs.rs	"STALWART_SPAM_TRAIN_DATA.lz4"
+crates/common/src/manager/application.rs	"stalwart-app.json"
 crates/types/src/branding.rs	"STALWART"
 
 # Pre-rename Sieve extension names, accepted as aliases so scripts written
 # for upstream still compile when edited. Never advertised; the test proves it.
+crates/sieve/src/compiler/grammar/mod.rs	"vnd.stalwart.while"
+crates/sieve/src/compiler/grammar/mod.rs	"vnd.stalwart.expressions"
+crates/sieve/src/compiler/grammar/mod.rs	"require [\\\"vnd.stalwart.expressions\\\", \\\"variables\\\"];\\nlet \\\"n\\\" \\\"1 + 2\\\";\\n"
+# tools/sieve-playground builds the vendored copy
 vendor/sieve-rs/src/compiler/grammar/mod.rs	"vnd.stalwart.while"
 vendor/sieve-rs/src/compiler/grammar/mod.rs	"vnd.stalwart.expressions"
 vendor/sieve-rs/src/compiler/grammar/mod.rs	"require [\\\"vnd.stalwart.expressions\\\", \\\"variables\\\"];\\nlet \\\"n\\\" \\\"1 + 2\\\";\\n"
 
 # Upstream's old default rules source, read only to treat it as unset: the
-# server uses the rules bundled with it (resources/spam-filter/).
+# server uses the rules bundled with it (resources/spam-filter/). The
+# registry's fallback for records older than the field still names it.
 crates/common/src/manager/spam_rules.rs	"https://github.com/stalwartlabs/spam-filter/releases/latest/download/spam-filter-rules.json.gz"
+crates/registry/src/schema/structs_impl.rs	"https://github.com/stalwartlabs/spam-filter/releases/latest/download/spam-filter-rules.json.gz"
 
-# Upstream's web interface downloads, used only by an install upgraded from
-# Stalwart that still has its web application: inbuxa installs none
-# (docs/spec/SPEC.md §5.3), and the pin keeps an upgraded one on the 1.x
-# bundles this server line can serve.
-crates/common/src/manager/defaults.rs	"https://github.com/stalwartlabs/webui/releases/download/v1.0.11/webui.zip"
-crates/common/src/manager/defaults.rs	"https://github.com/stalwartlabs/webui/releases/latest/download/webui.zip"

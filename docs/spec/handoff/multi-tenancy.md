@@ -138,7 +138,7 @@ conflicts.
   ```
 
   An empty `etc` starts it in bootstrap mode. `x:Bootstrap/set` over JMAP
-  (`serverHostname`, `defaultDomain`, `requestTlsCertificate: false`)
+  (`defaultHostname`, `defaultDomain`, `requestTlsCertificate: false`)
   returns the permanent admin. Restart it without the recovery admin
   variable, then create tenants, domains and accounts over JMAP (`x:Tenant`,
   `x:Domain`, `x:Account` with `@type: User`). Delete the container and its

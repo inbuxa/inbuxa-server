@@ -43,9 +43,10 @@ impl Property for DlpSettingsProperty {
 
 impl DlpSettingsProperty {
     fn parse(value: &str) -> Option<Self> {
-        hashify::tiny_map!(value.as_bytes(),
-            b"id" => DlpSettingsProperty::Id,
-            b"keepHeldDays" => DlpSettingsProperty::KeepHeldDays,
+        hashify::fnc_map!(value.as_bytes(),
+            b"id" => Some(DlpSettingsProperty::Id),
+            b"keepHeldDays" => Some(DlpSettingsProperty::KeepHeldDays),
+            _ => None,
         )
     }
 }

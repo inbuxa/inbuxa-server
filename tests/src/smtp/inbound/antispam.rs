@@ -24,26 +24,27 @@ use common::{
     config::mailstore::spamfilter::SpamFilterAction,
 };
 use mail_auth::{
-    ArcOutput, DkimOutput, DkimResult, DmarcResult, DnssecStatus, IprevOutput, IprevResult, MX,
+    ArcOutput, DkimOutput, DkimResult, DmarcResult, DnssecStatus, IprevOutput, IprevResult, Mx,
     SpfOutput, SpfResult, dkim::Signature, dmarc::Policy,
 };
 use mail_parser::MessageParser;
 use registry::{
     schema::{
-        enums::{AiModelType, TaskSpamFilterMaintenanceType},
+        enums::TaskSpamFilterMaintenanceType,
         prelude::{ObjectType, Property},
         structs::{
-            self, AiModel, MemoryLookupKey, SpamLlm, SpamLlmProperties, SpamSettings, Task,
-            TaskSpamFilterMaintenance, TaskStatus,
+            self, AiModel, AiModelOpenAi, Expression, MemoryLookupKey, SpamAi, SpamAiCategory,
+            SpamAiProperties, SpamAiTier, SpamPyzor, SpamSettings, Task, TaskSpamFilterMaintenance,
+            TaskStatus,
         },
     },
-    types::{float::Float, map::Map},
+    types::{float::Float, list::List},
 };
 use serde_json::json;
 use smtp::core::SessionAddress;
 use smtp_proto::{MAIL_BODY_8BITMIME, MAIL_SMTPUTF8};
 use spam_filter::{
-    SpamFilterInput,
+    MessageTexts, SpamFilterInput,
     analysis::{
         classifier::SpamFilterAnalyzeClassify, date::SpamFilterAnalyzeDate,
         dmarc::SpamFilterAnalyzeDmarc, domain::SpamFilterAnalyzeDomain,
@@ -58,6 +59,7 @@ use spam_filter::{
     },
     modules::{
         classifier::{SpamClassifier, Token},
+        expression::ScoreVariables,
         html::{HtmlToken, html_to_tokens},
     },
 };
@@ -93,6 +95,13 @@ async fn antispam() {
             ..Default::default()
         })
         .await;
+    // inbuxa: Pyzor is off by default in 1.0
+    admin
+        .registry_create_object(SpamPyzor {
+            enable: true,
+            ..Default::default()
+        })
+        .await;
     admin
         .registry_create_object(structs::SpamClassifier {
             min_ham_samples: 10,
@@ -101,35 +110,47 @@ async fn antispam() {
         })
         .await;
     let model_id = admin
-        .registry_create_object(AiModel {
-            model_type: AiModelType::Chat,
+        .registry_create_object(AiModel::OpenAi(AiModelOpenAi {
             allow_invalid_certs: true,
             model: "gpt-dummy".to_string(),
             name: "dummy".to_string(),
-            url: "https://127.0.0.1:9090/v1/chat/completions".to_string(),
+            url: Some("https://127.0.0.1:9090/v1/chat/completions".to_string()),
             ..Default::default()
-        })
+        }))
         .await;
+    // inbuxa: 1.0's x:SpamAi replaced x:SpamLlm: the answer format is fixed
+    // (category|confidence|explanation, confidence High/Medium/Low), the
+    // model sits in a tier, and the condition is opened up so every test
+    // message reaches the model whatever its provisional score.
     admin
-        .registry_create_object(SpamLlm::Enable(SpamLlmProperties {
-            categories: Map::new(vec![
-                "Unsolicited".to_string(),
-                "Commercial".to_string(),
-                "Harmful".to_string(),
-                "Legitimate".to_string(),
-            ]),
-            confidence: Map::new(vec![
-                "High".to_string(),
-                "Medium".to_string(),
-                "Low".to_string(),
-            ]),
-            model_id,
-            prompt: "You are an AI assistant specialized in analyzing email content to detect spam"
-                .to_string(),
-            response_pos_category: 0,
-            response_pos_confidence: 1.into(),
-            response_pos_explanation: 2.into(),
-            separator: ",".to_string(),
+        .registry_create_object(SpamAi::Enable(SpamAiProperties {
+            condition: Expression {
+                else_: "true".to_string(),
+                ..Default::default()
+            },
+            tiers: List::from_iter([SpamAiTier {
+                model_id,
+                ..Default::default()
+            }]),
+            // inbuxa: 1.0 requires each category's description (it goes in
+            // the prompt)
+            categories: List::from_iter(
+                [
+                    ("Unsolicited", "Unsolicited bulk email"),
+                    ("Commercial", "Commercial or promotional email"),
+                    ("Harmful", "Phishing, malware or fraud"),
+                    ("Legitimate", "Legitimate personal or business email"),
+                ]
+                .map(|(name, description)| SpamAiCategory {
+                    name: name.to_string(),
+                    description: description.to_string(),
+                    ..Default::default()
+                }),
+            ),
+            instructions:
+                "You are an AI assistant specialized in analyzing email content to detect spam"
+                    .to_string(),
+            explanation: true,
             ..Default::default()
         }))
         .await;
@@ -225,7 +246,7 @@ async fn antispam() {
     ] {
         test.server.mx_add(
             mx,
-            vec![MX {
+            vec![Mx {
                 exchanges: vec!["127.0.0.1".into()].into_boxed_slice(),
                 preference: 10,
             }],
@@ -250,6 +271,16 @@ async fn antispam() {
                     .contains("You are an AI assistant specialized in analyzing email")
             );
             let message = &req.messages.last().unwrap().content;
+            // inbuxa: the test messages hold the answer in their subject,
+            // written with commas; 1.0 reads '|' between the fields
+            let answer = message
+                .split_once("Subject: ")
+                .unwrap()
+                .1
+                .lines()
+                .next()
+                .unwrap()
+                .replace(',', "|");
 
             JsonResponse::new(&ChatCompletionResponse {
                 created: 0,
@@ -261,7 +292,7 @@ async fn antispam() {
                     finish_reason: "stop".to_string(),
                     message: Message {
                         role: "assistant".to_string(),
-                        content: message.split_once("Subject: ").unwrap().1.to_string(),
+                        content: answer,
                     },
                 }],
             })
@@ -422,20 +453,10 @@ async fn antispam() {
                                 .result = IprevResult::from_str(value);
                         }
                         "dkim.result" => {
-                            dkim_result = match DkimResult::from_str(value) {
-                                DkimResult::Pass => DkimOutput::pass(),
-                                DkimResult::Neutral(error) => DkimOutput::neutral(error),
-                                DkimResult::Fail(error) => DkimOutput::fail(error),
-                                DkimResult::PermError(error) => DkimOutput::perm_err(error),
-                                DkimResult::TempError(error) => DkimOutput::temp_err(error),
-                                DkimResult::None => unreachable!(),
-                            }
-                            .into();
+                            dkim_result = DkimOutput::from(DkimResult::from_str(value)).into();
                         }
                         "arc.result" => {
-                            arc_result = ArcOutput::default()
-                                .with_result(DkimResult::from_str(value))
-                                .into();
+                            arc_result = ArcOutput::from(DkimResult::from_str(value)).into();
                         }
                         "dkim.domains" => {
                             dkim_signatures = value
@@ -567,8 +588,10 @@ async fn antispam() {
             }
 
             // Initialize filter
+            let texts = MessageTexts::new(&parsed_message, test.server.core.spam.text_limits);
             let mut spam_input = session.build_spam_input(
                 &parsed_message,
+                &texts,
                 &dkim_domains,
                 None,
                 arc_result.as_ref(),
@@ -669,7 +692,7 @@ async fn antispam() {
                             r.headers
                                 .split_ascii_whitespace()
                                 .filter(|t| t.starts_with("PROB_"))
-                                .map(|t| t.to_string()),
+                                .map(|t| t.into()),
                         ),
                         _ => unreachable!(),
                     }
@@ -678,21 +701,29 @@ async fn antispam() {
                     server.spam_filter_analyze_pyzor(&mut spam_ctx).await;
                 }
                 "llm" => {
-                    server.spam_filter_analyze_llm(&mut spam_ctx).await;
+                    server
+                        .spam_filter_analyze_llm(&mut spam_ctx, ScoreVariables::default())
+                        .await;
                 }
                 _ => panic!("Invalid test {test_name:?}"),
             }
 
             // Compare tags
-            if spam_ctx.result.tags != expected_tags {
-                for tag in &spam_ctx.result.tags {
+            let tags = spam_ctx
+                .result
+                .tags
+                .iter()
+                .map(|tag| tag.to_string())
+                .collect::<AHashSet<String>>();
+            if tags != expected_tags {
+                for tag in &tags {
                     if !expected_tags.contains(tag) {
                         println!("Unexpected tag: {tag:?}");
                     }
                 }
 
                 for tag in &expected_tags {
-                    if !spam_ctx.result.tags.contains(tag) {
+                    if !tags.contains(tag) {
                         println!("Missing tag: {tag:?}");
                     }
                 }
@@ -720,8 +751,9 @@ async fn classifier_features(server: &Server, contents: String) {
 
         // Build features
         let message = MessageParser::new().parse(input).unwrap_or_default();
-        let mut ctx =
-            server.spam_filter_init(SpamFilterInput::from_message(&message, 0).train_mode());
+        let texts = MessageTexts::new(&message, server.core.spam.text_limits);
+        let mut ctx = server
+            .spam_filter_init(SpamFilterInput::from_message(&message, &texts, 0).train_mode());
         server.spam_filter_analyze_domain(&mut ctx).await;
         server.spam_filter_analyze_url(&mut ctx).await;
         let mut tokens = server

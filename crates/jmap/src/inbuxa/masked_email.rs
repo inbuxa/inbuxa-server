@@ -97,7 +97,7 @@ pub async fn prepare_create(
     let data = &server.core.storage.data;
     let account = server.account(account_id).await?;
     let limit = server.object_quota(
-        account.quota_objects.as_deref(),
+        account.object_quotas(),
         StorageQuota::MaxMaskedAddresses,
     );
     if !policy::within_limit(
@@ -117,7 +117,6 @@ pub async fn prepare_create(
                     count: per_hour,
                     period: Duration::from_millis(3_600_000),
                 },
-                false,
             )
             .await
             .caused_by(trc::location!())?
@@ -172,8 +171,16 @@ pub(crate) async fn validate(
                     .and_then(|value: &JmapValue<'_>| value.as_str())
                     .map(|value| value.to_string())
             };
-            let prefix = text(Property::EmailPrefix);
-            let domain = text(Property::EmailDomain);
+            // inbuxa: the merged schema stores emailPrefix and emailDomain on
+            // the object (1.0 has them as fields); 0.16 left them unpatched
+            let prefix = mask
+                .email_prefix
+                .clone()
+                .or_else(|| text(Property::EmailPrefix));
+            let domain = mask
+                .email_domain
+                .clone()
+                .or_else(|| text(Property::EmailDomain));
             Ok(prepare_create(
                 set.server,
                 set.account_id,
@@ -211,20 +218,20 @@ pub(crate) async fn validate(
     }
 }
 
-/// After `x:MaskedEmail/set` creates a mask: it starts `enabled`, or
-/// `deleted` if created with `enabled: false` (ME-7a).
+/// After `x:MaskedEmail/set` creates a mask: it starts `enable`, or
+/// `deleted` if created with `enable: false` (ME-7a).
 pub async fn created(server: &Server, id: Id, mask: &MaskedEmail) -> trc::Result<()> {
     ops::created(
         &server.core.storage.data,
         server.registry(),
         id,
         mask,
-        State::from_upstream(mask.enabled),
+        State::from_upstream(mask.enable),
     )
     .await
 }
 
-/// After `x:MaskedEmail/set` changes a mask: `enabled` sets the state
+/// After `x:MaskedEmail/set` changes a mask: `enable` sets the state
 /// (ME-2), and anything else leaves it as it was.
 pub async fn updated(
     server: &Server,
@@ -234,8 +241,8 @@ pub async fn updated(
 ) -> trc::Result<()> {
     let data = &server.core.storage.data;
     if let Some(mask) = ops::load(data, server.registry(), id).await? {
-        let state = if old.enabled != new.enabled {
-            State::from_upstream_write(new.enabled)
+        let state = if old.enable != new.enable {
+            State::from_upstream_write(new.enable)
         } else {
             mask.state
         };
@@ -250,20 +257,20 @@ pub async fn destroyed(server: &Server, id: Id, mask: &MaskedEmail) -> trc::Resu
     ops::destroyed(&server.core.storage.data, server.registry(), id, mask).await
 }
 
-/// `x:MaskedEmail/get`: `enabled` reports whether mail is accepted, so an
+/// `x:MaskedEmail/get`: `enable` reports whether mail is accepted, so an
 /// expired or deleted mask reads false (ME-6a). `false` when the mask is gone
 /// (a pending one past its deadline, ME-8).
 pub async fn read(server: &Server, id: Id, mask: &mut MaskedEmail) -> trc::Result<bool> {
     match ops::load(&server.core.storage.data, server.registry(), id).await? {
         Some(loaded) => {
-            mask.enabled = loaded.state.as_upstream_enabled(loaded.expired);
+            mask.enable = loaded.state.as_upstream_enabled(loaded.expired);
             Ok(true)
         }
         None => Ok(false),
     }
 }
 
-/// `x:MaskedEmail/query`, which also filters on `enabled`, `forDomain` and
+/// `x:MaskedEmail/query`, which also filters on `enable`, `forDomain` and
 /// text in the address and description (a fork addition).
 pub(crate) async fn query(mut req: RegistryQueryResponse<'_>) -> trc::Result<QueryResponseBuilder> {
     let mut enabled = None;
@@ -272,7 +279,7 @@ pub(crate) async fn query(mut req: RegistryQueryResponse<'_>) -> trc::Result<Que
     let mut text = None;
     req.request
         .extract_filters(|property, op, value| match (property, op, value) {
-            (Property::Enabled, RegistryFilterOp::Equal, serde_json::Value::Bool(v)) => {
+            (Property::Enable, RegistryFilterOp::Equal, serde_json::Value::Bool(v)) => {
                 enabled = Some(v);
                 true
             }

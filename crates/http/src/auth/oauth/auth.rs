@@ -2,13 +2,22 @@
  * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
- *
- * Modified by Coffey Labs in 2026 for INBUXA.
  */
 
-use super::{DeviceAuthResponse, FormData, MAX_POST_LEN, OAuthCode, PkceCodeChallenge};
+use super::{
+    DeviceAuthResponse, ErrorType, FormData, MAX_POST_LEN, OAuthCode, PkceCodeChallenge,
+    TokenResponse,
+    authorize::{
+        AuthorizationError, granted_scope, is_resource_path, issuer, resource_origin, scope_labels,
+        validate_authorization,
+    },
+    logout::END_SESSION_PATH,
+    request_origin,
+    token::{ClientCredentials, TokenHandler, token_response},
+};
 use crate::auth::oauth::{
-    OAuthStatus, openid::OpenIdHandler, registration::ClientRegistrationHandler,
+    OAuthStatus, TOKEN_ENDPOINT_AUTH_METHODS,
+    openid::{OidcMetadataRequest, OpenIdHandler},
 };
 use common::{
     KV_OAUTH, Server,
@@ -16,16 +25,17 @@ use common::{
         AuthRequest,
         authentication::UsernameParts,
         oauth::{
-            CLIENT_ID_MAX_LEN, DEVICE_CODE_LEN, SUPPORTED_SCOPES, USER_CODE_ALPHABET,
-            USER_CODE_LEN,
-            client_id::{decode_client_id, scopes_to_mask},
-            registration::redirect_uri_matches,
+            DEVICE_CODE_LEN, USER_CODE_ALPHABET, USER_CODE_LEN,
+            client::{RequestOrigin, ResolveContext, ResolveMode, ResolvedClient},
+            supported_scopes,
         },
     },
 };
 use directory::Credentials;
 use http_proto::*;
-use std::future::Future;
+use hyper::{StatusCode, body::Bytes};
+use registry::schema::enums::OAuthGrantType;
+use std::{borrow::Cow, future::Future};
 use store::{
     Serialize,
     dispatch::lookup::KeyValue,
@@ -37,45 +47,59 @@ use store::{
         distr::{Alphanumeric, StandardUniform},
         rng,
     },
-    write::AlignedBytes,
+    write::ArchiveBytes,
 };
 use trc::AddContext;
 
 #[derive(Debug, serde::Serialize)]
-pub struct ProtectedResourceMetadata {
+pub struct ProtectedResourceMetadata<'x> {
     pub resource: String,
-    pub authorization_servers: [String; 1],
+    pub authorization_servers: [Cow<'x, str>; 1],
     pub scopes_supported: &'static [&'static str],
     pub bearer_methods_supported: &'static [&'static str],
 }
 
 #[derive(Debug, serde::Serialize)]
-pub struct OAuthMetadata {
+pub struct OAuthMetadata<'x> {
     pub issuer: String,
     pub token_endpoint: String,
     pub authorization_endpoint: String,
     pub device_authorization_endpoint: String,
     pub registration_endpoint: String,
     pub introspection_endpoint: String,
+    pub revocation_endpoint: String,
+    pub end_session_endpoint: String,
     pub grant_types_supported: &'static [&'static str],
     pub response_types_supported: &'static [&'static str],
     pub scopes_supported: &'static [&'static str],
     pub token_endpoint_auth_methods_supported: &'static [&'static str],
+    pub revocation_endpoint_auth_methods_supported: &'static [&'static str],
     pub code_challenge_methods_supported: &'static [&'static str],
     pub authorization_response_iss_parameter_supported: bool,
+    pub client_id_metadata_document_supported: bool,
+    pub protected_resources: &'x [Box<str>],
 }
 
 pub trait OAuthApiHandler: Sync + Send {
     fn handle_discover_request(
         &self,
         session: &HttpSessionData,
+        origin: RequestOrigin<'_>,
         account_name: &str,
     ) -> impl Future<Output = trc::Result<HttpResponse>> + Send;
 
     fn handle_login_request(
         &self,
         session: &HttpSessionData,
+        origin: RequestOrigin<'_>,
         body: Vec<u8>,
+    ) -> impl Future<Output = trc::Result<HttpResponse>> + Send;
+
+    fn handle_client_info_request(
+        &self,
+        session: &HttpSessionData,
+        origin: RequestOrigin<'_>,
+        query: &str,
     ) -> impl Future<Output = trc::Result<HttpResponse>> + Send;
 
     fn handle_device_auth(
@@ -84,10 +108,15 @@ pub trait OAuthApiHandler: Sync + Send {
         session: &HttpSessionData,
     ) -> impl Future<Output = trc::Result<HttpResponse>> + Send;
 
-    fn handle_oauth_metadata(&self) -> impl Future<Output = trc::Result<HttpResponse>> + Send;
+    fn handle_oauth_metadata(
+        &self,
+        origin: RequestOrigin<'_>,
+    ) -> impl Future<Output = trc::Result<HttpResponse>> + Send;
 
     fn handle_oauth_protected_resource(
         &self,
+        origin: RequestOrigin<'_>,
+        path: &str,
     ) -> impl Future<Output = trc::Result<HttpResponse>> + Send;
 }
 
@@ -102,30 +131,24 @@ pub enum LoginRequest {
         #[serde(skip_serializing_if = "Option::is_none")]
         #[serde(default)]
         mfa_token: Option<String>,
-        client_id: String,
+        query: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
         #[serde(default)]
-        redirect_uri: Option<String>,
-        #[serde(default)]
-        nonce: Option<String>,
-        #[serde(default)]
-        scope: Option<String>,
-        #[serde(default)]
-        code_challenge: Option<String>,
-        #[serde(default)]
-        code_challenge_method: Option<String>,
-        #[serde(default)]
-        state: Option<String>,
-        #[serde(default)]
-        resource: Vec<String>,
+        consent: Option<bool>,
     },
     #[serde(rename_all = "camelCase")]
     AuthDevice {
+        #[serde(default)]
         account_name: String,
+        #[serde(default)]
         account_secret: String,
         #[serde(skip_serializing_if = "Option::is_none")]
         #[serde(default)]
         mfa_token: Option<String>,
         code: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        #[serde(default)]
+        consent: Option<bool>,
     },
 }
 
@@ -133,16 +156,55 @@ pub enum LoginRequest {
 #[serde(tag = "type")]
 #[serde(rename_all = "camelCase")]
 pub enum LoginResponse {
-    Authenticated { client_code: String, iss: String },
+    Authenticated {
+        location: String,
+    },
+    Redirect {
+        location: String,
+    },
+    Invalid {
+        error: ErrorType,
+        description: Cow<'static, str>,
+    },
     Verified,
+    Denied,
     MfaRequired,
+    Expired,
     Failure,
+}
+
+#[derive(Debug, serde::Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ClientInfo {
+    pub name: Option<String>,
+    pub logo: Option<String>,
+    pub client_host: Option<String>,
+    pub redirect_host: Option<String>,
+    pub scopes: Vec<&'static str>,
+    pub verified: bool,
+    pub consent_required: bool,
+    pub deny_location: Option<String>,
+}
+
+#[derive(Debug, serde::Serialize, PartialEq, Eq)]
+#[serde(untagged)]
+pub enum ClientInfoResponse {
+    Client(ClientInfo),
+    Error {
+        error: ErrorType,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        description: Option<&'static str>,
+        redirect: bool,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        location: Option<String>,
+    },
 }
 
 impl OAuthApiHandler for Server {
     async fn handle_discover_request(
         &self,
         session: &HttpSessionData,
+        origin: RequestOrigin<'_>,
         account_name: &str,
     ) -> trc::Result<HttpResponse> {
         let username = UsernameParts::new(account_name.trim());
@@ -159,17 +221,25 @@ impl OAuthApiHandler for Server {
                 .await?
                 .and_then(|directory| directory.oidc_discovery_document())
         {
-            Ok(JsonResponse::new(&endpoint.document)
-                .no_cache()
-                .into_http_response())
+            Ok(HttpResponse::new(StatusCode::OK)
+                .with_content_type("application/json; charset=utf-8")
+                .with_binary_body(Bytes::from_owner(endpoint.web_document.clone()))
+                .with_no_store())
         } else {
-            self.handle_oidc_metadata(!session.is_tls).await
+            self.handle_oidc_metadata(
+                OidcMetadataRequest::Discover {
+                    is_tls: session.is_tls,
+                },
+                origin,
+            )
+            .await
         }
     }
 
     async fn handle_login_request(
         &self,
         session: &HttpSessionData,
+        origin: RequestOrigin<'_>,
         body: Vec<u8>,
     ) -> trc::Result<HttpResponse> {
         let request = serde_json::from_slice::<LoginRequest>(&body).map_err(|err| {
@@ -181,191 +251,86 @@ impl OAuthApiHandler for Server {
                 account_name,
                 account_secret,
                 mfa_token,
-                client_id,
-                redirect_uri,
-                nonce,
-                scope,
-                code_challenge,
-                code_challenge_method,
-                resource,
-                ..
+                query,
+                consent,
             } => {
-                // Validate clientId
-                if client_id.len() > CLIENT_ID_MAX_LEN {
-                    return Err(trc::AuthEvent::Error
-                        .into_err()
-                        .details("Client ID is too long."));
-                } else if redirect_uri
-                    .as_ref()
-                    .is_some_and(|uri| uri.starts_with("http://"))
-                {
-                    #[cfg(not(feature = "dev_mode"))]
-                    if !self.registry().is_recovery_mode() && code_challenge.is_none() {
-                        return Err(trc::AuthEvent::Error
-                            .into_err()
-                            .details("Redirect URI must be HTTPS."));
-                    }
-                }
-
-                // Resolve the client and validate the redirect URI against the registration.
-                // Stateless client ids are self-describing; otherwise fall back to the registry.
-                let redirect_uri = redirect_uri.ok_or_else(|| {
-                    trc::AuthEvent::Error
-                        .into_err()
-                        .details("A redirect URI is required.")
-                })?;
-                let stateless_client =
-                    decode_client_id(self.core.oauth.oauth_key.as_bytes(), &client_id);
-                let granted_scope = match &stateless_client {
-                    Some(meta) => {
-                        if !meta
-                            .redirect_uris
-                            .iter()
-                            .any(|uri| redirect_uri_matches(uri, &redirect_uri))
-                        {
-                            return Err(trc::AuthEvent::Error
-                                .into_err()
-                                .details("Redirect URI does not match the client registration."));
-                        }
-                        grant_scope(scope.as_deref(), meta.scope_mask)
-                    }
-                    None => scope,
-                };
-
-                // Validate Resource Indicators (RFC 8707)
-                for resource in &resource {
-                    if !is_known_resource(
-                        [self.core.network.server_name.as_str()]
-                            .into_iter()
-                            .chain(
-                                self.core
-                                    .network
-                                    .info
-                                    .services
-                                    .values()
-                                    .filter_map(|v| v.hostname.as_deref()),
-                            )
-                            .chain(
-                                self.core
-                                    .network
-                                    .info
-                                    .mxs
-                                    .iter()
-                                    .filter_map(|mx| mx.hostname.as_deref()),
-                            ),
-                        resource,
-                    ) {
-                        return Err(trc::AuthEvent::Error
-                            .into_err()
-                            .details(format!("Unknown resource indicator: {}", resource)));
-                    }
-                }
-
-                // Parse and validate PKCE challenge (RFC 7636).
-                // inbuxa: S256 only, as the metadata says. With `plain` (also
-                // RFC 7636's default when no method is named) the challenge is
-                // the verifier, so it protects nothing.
-                let pkce_challenge = match code_challenge {
-                    Some(challenge) => match code_challenge_method.as_deref() {
-                        Some("S256") => PkceCodeChallenge::S256(challenge),
-                        _ => {
-                            return Err(trc::AuthEvent::Error.into_err().details(
-                                "Unsupported PKCE code_challenge_method: use S256.",
-                            ));
-                        }
-                    },
-                    None => {
-                        if stateless_client.is_some() {
-                            return Err(trc::AuthEvent::Error.into_err().details(
-                                "A PKCE code_challenge with the S256 method is required.",
-                            ));
-                        }
-                        PkceCodeChallenge::None
-                    }
-                };
-
-                // Authenticate
-                match self
-                    .authenticate(&AuthRequest {
-                        credentials: Credentials::Basic {
-                            username: account_name,
-                            secret: account_secret,
-                            mfa_token,
-                        },
-                        session_id: session.session_id,
+                let issuer = issuer(self, origin);
+                let authorization = match validate_authorization(
+                    self,
+                    &query,
+                    &ResolveContext {
+                        mode: ResolveMode::Authorize,
+                        origin: Some(origin),
                         remote_ip: session.remote_ip,
-                    })
-                    .await
-                {
-                    Ok(access_token) => {
-                        // Registry-backed clients are validated once the account is known
-                        if stateless_client.is_none()
-                            && self
-                                .validate_client_registration(
-                                    &client_id,
-                                    Some(redirect_uri.as_str()),
-                                    access_token.account_id(),
-                                )
-                                .await?
-                                .is_some()
-                        {
-                            return Err(trc::AuthEvent::Error
-                                .into_err()
-                                .details("Invalid client registration."));
-                        }
-
-                        // Generate client code
-                        let client_code = rng()
-                            .sample_iter(Alphanumeric)
-                            .take(DEVICE_CODE_LEN)
-                            .map(char::from)
-                            .collect::<String>();
-
-                        // Serialize OAuth code
-                        let value = Archiver::new(OAuthCode {
-                            status: OAuthStatus::Authorized,
-                            account_id: access_token.account_id(),
-                            client_id,
-                            nonce,
-                            params: redirect_uri,
-                            code_challenge: pkce_challenge,
-                            scope: granted_scope,
-                            resources: resource,
-                        })
-                        .untrusted()
-                        .serialize()
-                        .caused_by(trc::location!())?;
-
-                        // Insert client code
-                        self.in_memory_store()
-                            .key_set(
-                                KeyValue::with_prefix(KV_OAUTH, client_code.as_bytes(), value)
-                                    .expires(self.core.oauth.oauth_expiry_auth_code),
-                            )
-                            .await?;
-
-                        LoginResponse::Authenticated {
-                            client_code,
-                            iss: self.core.network.http.url_https.clone(),
-                        }
-                    }
-                    Err(err) => match *err.as_ref() {
-                        trc::EventType::Auth(trc::AuthEvent::MfaRequired) => {
-                            trc::error!(err.span_id(session.session_id));
-                            LoginResponse::MfaRequired
-                        }
-                        trc::EventType::Auth(_) => {
-                            trc::error!(err.span_id(session.session_id));
-                            LoginResponse::Failure
-                        }
-                        trc::EventType::Security(_) => {
-                            trc::error!(err.span_id(session.session_id));
-                            LoginResponse::Failure
-                        }
-                        _ => {
-                            return Err(err);
-                        }
                     },
+                    &issuer,
+                )
+                .await?
+                {
+                    Ok(authorization) => authorization,
+                    Err(AuthorizationError::Invalid { error, description }) => {
+                        return Ok(JsonResponse::new(LoginResponse::Invalid {
+                            error,
+                            description: description.into(),
+                        })
+                        .no_cache()
+                        .into_http_response());
+                    }
+                    Err(AuthorizationError::Redirect { location }) => {
+                        return Ok(JsonResponse::new(LoginResponse::Redirect { location })
+                            .no_cache()
+                            .into_http_response());
+                    }
+                };
+
+                if authorization.client.requires_consent() && consent != Some(true) {
+                    LoginResponse::Redirect {
+                        location: authorization.error_location(ErrorType::AccessDenied, &issuer),
+                    }
+                } else {
+                    match authenticate_login(
+                        self,
+                        session,
+                        &authorization.client,
+                        account_name,
+                        account_secret,
+                        mfa_token,
+                    )
+                    .await?
+                    {
+                        Ok(login) => {
+                            let client_code = rng()
+                                .sample_iter(Alphanumeric)
+                                .take(DEVICE_CODE_LEN)
+                                .map(char::from)
+                                .collect::<String>();
+                            let location = authorization.code_location(&client_code, &issuer);
+
+                            let value = Archiver::new(OAuthCode {
+                                status: OAuthStatus::Authorized,
+                                account_id: login.account_id,
+                                credential_version: login.credential_version,
+                                client_id: authorization.client_id,
+                                nonce: authorization.nonce,
+                                params: authorization.redirect_uri,
+                                code_challenge: authorization.code_challenge,
+                                scope: authorization.scope,
+                            })
+                            .untrusted()
+                            .serialize()
+                            .caused_by(trc::location!())?;
+
+                            self.in_memory_store()
+                                .key_set(
+                                    KeyValue::with_prefix(KV_OAUTH, client_code.as_bytes(), value)
+                                        .expires(self.core.oauth.oauth_expiry_auth_code),
+                                )
+                                .await?;
+
+                            LoginResponse::Authenticated { location }
+                        }
+                        Err(response) => response,
+                    }
                 }
             }
             LoginRequest::AuthDevice {
@@ -373,97 +338,85 @@ impl OAuthApiHandler for Server {
                 account_secret,
                 mfa_token,
                 code,
+                consent,
             } => {
-                // Obtain code
-                let mut result = LoginResponse::Failure;
-                if let Some(auth_code_) = self
-                    .in_memory_store()
-                    .key_get::<Archive<AlignedBytes>>(KeyValue::<()>::build_key(
-                        KV_OAUTH,
-                        code.as_bytes(),
-                    ))
-                    .await?
-                {
-                    let oauth = auth_code_
-                        .unarchive::<OAuthCode>()
-                        .caused_by(trc::location!())?;
-                    if oauth.status == OAuthStatus::Pending {
-                        // Authenticate
-                        match self
-                            .authenticate(&AuthRequest {
-                                credentials: Credentials::Basic {
-                                    username: account_name,
-                                    secret: account_secret,
-                                    mfa_token,
-                                },
-                                session_id: session.session_id,
-                                remote_ip: session.remote_ip,
-                            })
-                            .await
-                        {
-                            Ok(access_token) => {
-                                let new_oauth_code = OAuthCode {
-                                    status: OAuthStatus::Authorized,
-                                    account_id: access_token.account_id(),
-                                    client_id: oauth.client_id.to_string(),
-                                    nonce: oauth.nonce.as_ref().map(|s| s.to_string()),
-                                    params: Default::default(),
-                                    code_challenge: PkceCodeChallenge::None,
-                                    scope: oauth.scope.as_ref().map(|s| s.to_string()),
-                                    resources: oauth
-                                        .resources
-                                        .iter()
-                                        .map(|s| s.to_string())
-                                        .collect(),
-                                };
+                approve_device(
+                    self,
+                    session,
+                    account_name,
+                    account_secret,
+                    mfa_token,
+                    &code,
+                    consent,
+                )
+                .await?
+            }
+        };
 
-                                // Delete issued user code
-                                self.in_memory_store()
-                                    .key_delete(KeyValue::<()>::build_key(
-                                        KV_OAUTH,
-                                        code.as_bytes(),
-                                    ))
-                                    .await?;
+        Ok(JsonResponse::new(response).no_cache().into_http_response())
+    }
 
-                                // Update device code status
-                                self.in_memory_store()
-                                    .key_set(
-                                        KeyValue::with_prefix(
-                                            KV_OAUTH,
-                                            oauth.params.as_bytes(),
-                                            Archiver::new(new_oauth_code)
-                                                .untrusted()
-                                                .serialize()
-                                                .caused_by(trc::location!())?,
-                                        )
-                                        .expires(self.core.oauth.oauth_expiry_auth_code),
-                                    )
-                                    .await?;
-
-                                result = LoginResponse::Verified;
-                            }
-                            Err(err) => match *err.as_ref() {
-                                trc::EventType::Auth(trc::AuthEvent::MfaRequired) => {
-                                    trc::error!(err.span_id(session.session_id));
-                                    result = LoginResponse::MfaRequired;
-                                }
-                                trc::EventType::Auth(_) => {
-                                    trc::error!(err.span_id(session.session_id));
-                                    result = LoginResponse::Failure;
-                                }
-                                trc::EventType::Security(_) => {
-                                    trc::error!(err.span_id(session.session_id));
-                                    result = LoginResponse::Failure;
-                                }
-                                _ => {
-                                    return Err(err);
-                                }
-                            },
-                        }
+    async fn handle_client_info_request(
+        &self,
+        session: &HttpSessionData,
+        origin: RequestOrigin<'_>,
+        query: &str,
+    ) -> trc::Result<HttpResponse> {
+        let user_code = form_urlencoded::parse(query.as_bytes())
+            .find_map(|(name, value)| (name == "user_code").then_some(value));
+        let response = if let Some(user_code) = user_code {
+            device_client_info(self, &user_code, session)
+                .await?
+                .map(ClientInfoResponse::Client)
+                .unwrap_or_else(|| ClientInfoResponse::Error {
+                    error: ErrorType::InvalidGrant,
+                    description: Some("The device code is invalid or has expired."),
+                    redirect: false,
+                    location: None,
+                })
+        } else {
+            let issuer = issuer(self, origin);
+            match validate_authorization(
+                self,
+                query,
+                &ResolveContext {
+                    mode: ResolveMode::Authorize,
+                    origin: Some(origin),
+                    remote_ip: session.remote_ip,
+                },
+                &issuer,
+            )
+            .await?
+            {
+                Ok(authorization) => {
+                    let client = &authorization.client;
+                    ClientInfoResponse::Client(ClientInfo {
+                        name: client.display_name().map(str::to_string),
+                        logo: client.display_logo().map(str::to_string),
+                        client_host: client.client_host().map(str::to_string),
+                        redirect_host: authorization.redirect_host(),
+                        scopes: authorization.scope_labels(),
+                        verified: client.is_verified(),
+                        consent_required: client.requires_consent(),
+                        deny_location: Some(
+                            authorization.error_location(ErrorType::AccessDenied, &issuer),
+                        ),
+                    })
+                }
+                Err(AuthorizationError::Invalid { error, description }) => {
+                    ClientInfoResponse::Error {
+                        error,
+                        description: Some(description),
+                        redirect: false,
+                        location: None,
                     }
                 }
-
-                result
+                Err(AuthorizationError::Redirect { location }) => ClientInfoResponse::Error {
+                    error: ErrorType::InvalidRequest,
+                    description: None,
+                    redirect: true,
+                    location: Some(location),
+                },
             }
         };
 
@@ -475,20 +428,47 @@ impl OAuthApiHandler for Server {
         req: &mut HttpRequest,
         session: &HttpSessionData,
     ) -> trc::Result<HttpResponse> {
-        // Parse form
         let mut form_data = FormData::from_request(req, MAX_POST_LEN, session.session_id).await?;
-        let client_id = form_data
-            .remove("client_id")
-            .filter(|client_id| client_id.len() <= CLIENT_ID_MAX_LEN)
-            .ok_or_else(|| {
-                trc::ResourceEvent::BadParameters
-                    .into_err()
-                    .details("Client ID is missing.")
-            })?;
+        let credentials = ClientCredentials::new(req, &form_data);
+        let Some(client_id) = credentials
+            .client_id
+            .as_deref()
+            .filter(|_| !credentials.is_ambiguous)
+            .map(str::to_string)
+        else {
+            return Ok(token_response(
+                TokenResponse::error(ErrorType::InvalidRequest),
+                credentials.used_basic,
+            ));
+        };
+        let client = match self
+            .resolve_token_client(
+                &client_id,
+                &credentials,
+                &ResolveContext {
+                    mode: ResolveMode::Token,
+                    origin: Some(request_origin(req, session)),
+                    remote_ip: session.remote_ip,
+                },
+                OAuthGrantType::DeviceCode,
+            )
+            .await?
+        {
+            Ok(client) => client,
+            Err(error) => {
+                return Ok(token_response(
+                    TokenResponse::error(error),
+                    credentials.used_basic,
+                ));
+            }
+        };
+        let used_basic = credentials.used_basic;
+        drop(credentials);
+        let scope = match granted_scope(form_data.get("scope"), client.allowed_scopes()) {
+            Ok(scope) => scope,
+            Err(error) => return Ok(token_response(TokenResponse::error(error), used_basic)),
+        };
         let nonce = form_data.remove("nonce");
-        let scope = form_data
-            .remove("scope")
-            .and_then(|scope| grant_scope(Some(&scope), u64::MAX));
 
         // Generate device code
         let device_code = rng()
@@ -515,12 +495,12 @@ impl OAuthApiHandler for Server {
         let oauth_code = Archiver::new(OAuthCode {
             status: OAuthStatus::Pending,
             account_id: u32::MAX,
+            credential_version: 0,
             client_id,
             nonce,
             params: device_code.clone(),
             code_challenge: PkceCodeChallenge::None,
             scope,
-            resources: Vec::new(),
         })
         .untrusted()
         .serialize()
@@ -556,14 +536,17 @@ impl OAuthApiHandler for Server {
         .into_http_response())
     }
 
-    async fn handle_oauth_metadata(&self) -> trc::Result<HttpResponse> {
-        let base_url = &self.core.network.http.url_https;
+    async fn handle_oauth_metadata(&self, origin: RequestOrigin<'_>) -> trc::Result<HttpResponse> {
+        let base_url = issuer(self, origin);
+        let resources = &self.core.network.resources;
 
         Ok(JsonResponse::new(OAuthMetadata {
             authorization_endpoint: format!("{base_url}/login",),
             token_endpoint: format!("{base_url}/auth/token"),
             device_authorization_endpoint: format!("{base_url}/auth/device"),
             introspection_endpoint: format!("{base_url}/auth/introspect"),
+            revocation_endpoint: format!("{base_url}/auth/revoke"),
+            end_session_endpoint: format!("{base_url}{END_SESSION_PATH}"),
             registration_endpoint: format!("{base_url}/auth/register"),
             grant_types_supported: &[
                 "authorization_code",
@@ -571,27 +554,38 @@ impl OAuthApiHandler for Server {
                 "urn:ietf:params:oauth:grant-type:device_code",
             ],
             response_types_supported: &["code"],
-            scopes_supported: SUPPORTED_SCOPES,
-            token_endpoint_auth_methods_supported: &[
-                "none",
-                "client_secret_post",
-                "client_secret_basic",
-            ],
+            scopes_supported: supported_scopes(resources.serves_files),
+            token_endpoint_auth_methods_supported: TOKEN_ENDPOINT_AUTH_METHODS,
+            revocation_endpoint_auth_methods_supported: TOKEN_ENDPOINT_AUTH_METHODS,
             code_challenge_methods_supported: &["S256"],
             authorization_response_iss_parameter_supported: true,
-            issuer: base_url.to_string(),
+            client_id_metadata_document_supported: true,
+            protected_resources: &resources.identifiers,
+            issuer: base_url.into_owned(),
         })
         .into_http_response()
         .with_cors_unrestricted())
     }
 
-    async fn handle_oauth_protected_resource(&self) -> trc::Result<HttpResponse> {
-        let base_url = &self.core.network.http.url_https;
+    async fn handle_oauth_protected_resource(
+        &self,
+        origin: RequestOrigin<'_>,
+        path: &str,
+    ) -> trc::Result<HttpResponse> {
+        let Some(mut resource) = resource_origin(self, origin).filter(|_| is_resource_path(path))
+        else {
+            return Err(trc::ResourceEvent::NotFound.into_err());
+        };
+        resource.push_str(path);
+        let authorization_server = match self.external_issuer_for_host(origin.authority).await? {
+            Some(issuer) => Cow::Owned(issuer),
+            None => issuer(self, origin),
+        };
 
         Ok(JsonResponse::new(ProtectedResourceMetadata {
-            resource: base_url.to_string(),
-            authorization_servers: [base_url.to_string()],
-            scopes_supported: SUPPORTED_SCOPES,
+            resource,
+            authorization_servers: [authorization_server],
+            scopes_supported: supported_scopes(self.core.network.resources.serves_files),
             bearer_methods_supported: &["header"],
         })
         .into_http_response()
@@ -599,53 +593,227 @@ impl OAuthApiHandler for Server {
     }
 }
 
-fn grant_scope(requested: Option<&str>, registered_mask: u64) -> Option<String> {
-    let mut granted = String::new();
-    for scope in requested.unwrap_or_default().split_ascii_whitespace() {
-        let bit = scopes_to_mask(scope);
-        if bit != 0 && registered_mask & bit == bit {
-            if !granted.is_empty() {
-                granted.push(' ');
-            }
-            granted.push_str(scope);
-        }
+async fn device_client_info(
+    server: &Server,
+    user_code: &str,
+    session: &HttpSessionData,
+) -> trc::Result<Option<ClientInfo>> {
+    if !is_user_code(user_code) {
+        return Ok(None);
+    }
+    let Some(stored) = server
+        .in_memory_store()
+        .key_get::<Archive<ArchiveBytes>>(KeyValue::<()>::build_key(KV_OAUTH, user_code.as_bytes()))
+        .await?
+    else {
+        return Ok(None);
+    };
+    let oauth = stored
+        .unarchive::<OAuthCode>()
+        .caused_by(trc::location!())?;
+    if oauth.status != OAuthStatus::Pending {
+        return Ok(None);
     }
 
-    (!granted.is_empty()).then_some(granted)
+    match server
+        .resolve_oauth_client(
+            oauth.client_id.as_str(),
+            &ResolveContext {
+                mode: ResolveMode::Token,
+                origin: None,
+                remote_ip: session.remote_ip,
+            },
+        )
+        .await?
+    {
+        Ok(client) if client.allows_grant(OAuthGrantType::DeviceCode) => Ok(Some(ClientInfo {
+            name: client.display_name().map(str::to_string),
+            logo: client.display_logo().map(str::to_string),
+            client_host: None,
+            redirect_host: None,
+            scopes: scope_labels(&client, oauth.scope.as_ref().map(|scope| scope.as_str())),
+            verified: client.is_verified(),
+            consent_required: true,
+            deny_location: None,
+        })),
+        _ => Ok(None),
+    }
 }
 
-fn is_known_resource<'x>(hostnames: impl IntoIterator<Item = &'x str>, uri: &str) -> bool {
-    let Some((scheme, rest)) = uri.split_once("://") else {
-        return false;
+struct LoginAccount {
+    account_id: u32,
+    credential_version: u64,
+}
+
+async fn authenticate_login(
+    server: &Server,
+    session: &HttpSessionData,
+    client: &ResolvedClient,
+    username: String,
+    secret: String,
+    mfa_token: Option<String>,
+) -> trc::Result<Result<LoginAccount, LoginResponse>> {
+    match server
+        .authenticate(&AuthRequest {
+            credentials: Credentials::Basic {
+                username,
+                secret,
+                mfa_token,
+            },
+            session_id: session.session_id,
+            remote_ip: session.remote_ip,
+        })
+        .await
+    {
+        Ok(authenticated) => {
+            let access_token = authenticated.access_token;
+            let account_id = access_token.account_id();
+            if !client.is_first_party() && access_token.is_main_credential_expired() {
+                trc::event!(
+                    Auth(trc::AuthEvent::CredentialExpired),
+                    AccountId = account_id,
+                    SpanId = session.session_id,
+                    Reason = "Main credential expired, refusing sign-in to third-party client.",
+                );
+                return Ok(Err(LoginResponse::Expired));
+            }
+
+            Ok(Ok(LoginAccount {
+                account_id,
+                credential_version: access_token.credential_version(),
+            }))
+        }
+        Err(err) => {
+            let response = match *err.as_ref() {
+                trc::EventType::Auth(trc::AuthEvent::MfaRequired) => LoginResponse::MfaRequired,
+                trc::EventType::Auth(_) | trc::EventType::Security(_) => LoginResponse::Failure,
+                _ => return Err(err),
+            };
+            trc::error!(err.span_id(session.session_id));
+            Ok(Err(response))
+        }
+    }
+}
+
+async fn approve_device(
+    server: &Server,
+    session: &HttpSessionData,
+    account_name: String,
+    account_secret: String,
+    mfa_token: Option<String>,
+    code: &str,
+    consent: Option<bool>,
+) -> trc::Result<LoginResponse> {
+    let Some(consent) = consent.filter(|_| is_user_code(code)) else {
+        return Ok(LoginResponse::Failure);
     };
-    let supported = hashify::tiny_map!(scheme.as_bytes(),
-        b"http" => true,
-        b"https" => true,
-        b"smtp" => true,
-        b"smtps" => true,
-        b"imap" => true,
-        b"imaps" => true,
-        b"pop3" => true,
-        b"pop3s" => true,
-        b"caldav" => true,
-        b"caldavs" => true,
-        b"webdav" => true,
-        b"webdavs" => true,
-        b"carddav" => true,
-        b"carddavs" => true,
-        b"sieve" => true,
-        b"sieves" => true
-    )
-    .unwrap_or(false);
+    let Some(stored) = server
+        .in_memory_store()
+        .key_get::<Archive<ArchiveBytes>>(KeyValue::<()>::build_key(KV_OAUTH, code.as_bytes()))
+        .await?
+    else {
+        return Ok(LoginResponse::Failure);
+    };
+    let oauth = stored
+        .unarchive::<OAuthCode>()
+        .caused_by(trc::location!())?;
+    if oauth.status != OAuthStatus::Pending {
+        return Ok(LoginResponse::Failure);
+    }
 
-    let authority = rest.split_once('/').map_or(rest, |(auth, _)| auth);
-    let host = authority
-        .rsplit_once(':')
-        .filter(|(_, port)| !port.is_empty() && port.as_bytes().iter().all(|c| c.is_ascii_digit()))
-        .map_or(authority, |(host, _)| host);
+    let denied = || {
+        (
+            OAuthStatus::Denied,
+            u32::MAX,
+            0,
+            server.core.oauth.oauth_expiry_user_code,
+            LoginResponse::Denied,
+        )
+    };
+    let (status, account_id, credential_version, expiry, response) = if consent {
+        match server
+            .resolve_oauth_client(
+                oauth.client_id.as_str(),
+                &ResolveContext {
+                    mode: ResolveMode::Token,
+                    origin: None,
+                    remote_ip: session.remote_ip,
+                },
+            )
+            .await?
+        {
+            Ok(client) => match authenticate_login(
+                server,
+                session,
+                &client,
+                account_name,
+                account_secret,
+                mfa_token,
+            )
+            .await?
+            {
+                Ok(login) => (
+                    OAuthStatus::Authorized,
+                    login.account_id,
+                    login.credential_version,
+                    server.core.oauth.oauth_expiry_auth_code,
+                    LoginResponse::Verified,
+                ),
+                Err(LoginResponse::Expired) => {
+                    let (status, account_id, credential_version, expiry, _) = denied();
+                    (
+                        status,
+                        account_id,
+                        credential_version,
+                        expiry,
+                        LoginResponse::Expired,
+                    )
+                }
+                Err(response) => return Ok(response),
+            },
+            Err(_) => denied(),
+        }
+    } else {
+        denied()
+    };
 
-    supported
-        && hostnames
-            .into_iter()
-            .any(|hostname| host.eq_ignore_ascii_case(hostname))
+    let value = Archiver::new(OAuthCode {
+        status,
+        account_id,
+        credential_version,
+        client_id: oauth.client_id.to_string(),
+        nonce: oauth.nonce.as_ref().map(|nonce| nonce.to_string()),
+        params: String::new(),
+        code_challenge: PkceCodeChallenge::None,
+        scope: oauth.scope.as_ref().map(|scope| scope.to_string()),
+    })
+    .untrusted()
+    .serialize()
+    .caused_by(trc::location!())?;
+
+    if !server
+        .in_memory_store()
+        .key_delete(KeyValue::<()>::build_key(KV_OAUTH, code.as_bytes()))
+        .await?
+    {
+        return Ok(LoginResponse::Failure);
+    }
+    server
+        .in_memory_store()
+        .key_set(KeyValue::with_prefix(KV_OAUTH, oauth.params.as_bytes(), value).expires(expiry))
+        .await?;
+
+    Ok(response)
 }
+
+fn is_user_code(code: &str) -> bool {
+    code.len() == USER_CODE_LEN + 1
+        && code.bytes().enumerate().all(|(pos, ch)| {
+            if pos == USER_CODE_LEN / 2 {
+                ch == b'-'
+            } else {
+                USER_CODE_ALPHABET.contains(&ch)
+            }
+        })
+}
+

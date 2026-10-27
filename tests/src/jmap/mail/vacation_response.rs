@@ -2,6 +2,8 @@
  * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
+ *
+ * Modified by Coffey Labs in 2026 for INBUXA.
  */
 
 use crate::{
@@ -11,9 +13,12 @@ use crate::{
     utils::{dns::DnsCache, server::TestServer, smtp::SmtpConnection},
 };
 use chrono::{TimeDelta, Utc};
+use email::message::delete::EmailDeletion;
 use jmap_client::core::response::VacationResponseSetResponse;
 use std::time::Instant;
 
+// inbuxa: 1.0 sends vacation replies with a null return path (RFC 3834
+// 3.3, RFC 5230 5.6), so the mock server sees MAIL FROM:<>
 pub async fn test(test: &TestServer) {
     println!("Running Vacation Response tests...");
 
@@ -59,7 +64,7 @@ pub async fn test(test: &TestServer) {
     assert_message_delivery(
         &mut smtp_rx,
         MockMessage::new(
-            "<jdoe@example.com>",
+            "<>",
             ["<michael@remote.org>"],
             "@I am away.",
         ),
@@ -97,7 +102,7 @@ pub async fn test(test: &TestServer) {
     // Await vacation response
     assert_message_delivery(
         &mut smtp_rx,
-        MockMessage::new("<jdoe@example.com>", ["<bill@remote.org>"], "@Kokomo"),
+        MockMessage::new("<>", ["<bill@remote.org>"], "@Kokomo"),
     )
     .await;
 
@@ -186,7 +191,7 @@ pub async fn test(test: &TestServer) {
 
     assert_message_delivery(
         &mut smtp_rx,
-        MockMessage::new("<jdoe@example.com>", ["<jane_smith@remote.org>"], "@Kokomo"),
+        MockMessage::new("<>", ["<jane_smith@remote.org>"], "@Kokomo"),
     )
     .await;
 
@@ -199,5 +204,11 @@ pub async fn test(test: &TestServer) {
         client.sieve_script_destroy(&id).await.unwrap();
     }
     test.destroy_all_mailboxes(account).await;
+    // inbuxa: 1.0 keeps the vacation ids with the account until they
+    // expire, so expire them all now
+    server
+        .purge_sieve_seen_ids(account.id().document_id(), u64::MAX)
+        .await
+        .unwrap();
     test.assert_is_empty().await;
 }

@@ -218,7 +218,7 @@ async fn grant(bp: &mut Bootstrap, audience: Audience, grants: &[Permission]) ->
         batch.set(granted_key(permission, audience), b"granted".to_vec());
     }
     bp.data_store
-        .write(batch.build_all())
+        .write_batch(&mut batch)
         .await
         .caused_by(trc::location!())
         .map(|_| ())

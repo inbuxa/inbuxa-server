@@ -6,11 +6,24 @@
 
 use crate::{
     DavError,
-    common::uri::{OwnedUri, UriResource},
+    common::{
+        quoted_etag,
+        uri::{OwnedUri, UriResource},
+    },
 };
-use common::{DavResourcePath, DavResources};
+use common::{
+    DavResourcePath, GroupwareResources,
+    auth::AccessToken,
+    storage::dav::{DavFileNameError, FILE_KIND_SYMLINK, dav_file_name},
+};
 use dav_proto::schema::property::{DavProperty, WebDavProperty};
+use groupware::file::ArchivedFileNode;
 use hyper::StatusCode;
+use store::{roaring::RoaringBitmap, write::BatchBuilder};
+use types::{
+    acl::Acl,
+    collection::{Collection, SyncCollection},
+};
 
 pub mod copy_move;
 pub mod delete;
@@ -81,14 +94,28 @@ pub(crate) trait DavFileResource {
 
     fn map_parent<'x>(&self, resource: &'x str) -> Option<(Option<DavResourcePath<'_>>, &'x str)>;
 
-    #[allow(clippy::type_complexity)]
-    fn map_parent_resource<'x, T: FromDavResource>(
+    fn map_directory_parent(&self, resource: &str) -> crate::Result<Option<DavResourcePath<'_>>>;
+
+    fn log_descendant_updates(&self, batch: &mut BatchBuilder, account_id: u32, path: &str);
+
+    fn hide_undiscoverable(
         &self,
-        resource: &OwnedUri<'x>,
-    ) -> crate::Result<UriResource<u32, (Option<T>, &'x str)>>;
+        discoverable: &RoaringBitmap,
+        path: &str,
+        hidden_target: StatusCode,
+        hidden_parent: StatusCode,
+    ) -> crate::Result<()>;
+
+    fn hide_undiscoverable_for(
+        &self,
+        access_token: &AccessToken,
+        path: &str,
+        hidden_target: StatusCode,
+        hidden_parent: StatusCode,
+    ) -> crate::Result<()>;
 }
 
-impl DavFileResource for DavResources {
+impl DavFileResource for GroupwareResources {
     fn map_resource<T: FromDavResource>(
         &self,
         resource: &OwnedUri<'_>,
@@ -96,6 +123,7 @@ impl DavFileResource for DavResources {
         resource
             .resource
             .and_then(|r| self.by_path(r))
+            .filter(|r| !is_symlink(r))
             .map(|r| UriResource {
                 collection: resource.collection,
                 account_id: resource.account_id,
@@ -114,25 +142,118 @@ impl DavFileResource for DavResources {
         Some((parent, child))
     }
 
-    fn map_parent_resource<'x, T: FromDavResource>(
-        &self,
-        resource: &OwnedUri<'x>,
-    ) -> crate::Result<UriResource<u32, (Option<T>, &'x str)>> {
-        if let Some(r) = resource.resource {
-            if self.by_path(r).is_none() {
-                self.map_parent(r)
-                    .map(|(parent, child)| UriResource {
-                        collection: resource.collection,
-                        account_id: resource.account_id,
-                        resource: (parent.map(T::from_dav_resource), child),
-                    })
-                    .ok_or(DavError::Code(StatusCode::CONFLICT))
-            } else {
-                Err(DavError::Code(StatusCode::METHOD_NOT_ALLOWED))
-            }
-        } else {
-            Err(DavError::Code(StatusCode::METHOD_NOT_ALLOWED))
+    fn map_directory_parent(&self, resource: &str) -> crate::Result<Option<DavResourcePath<'_>>> {
+        self.map_parent(resource)
+            .map(|(parent, _)| parent)
+            .filter(|parent| parent.as_ref().is_none_or(DavResourcePath::is_container))
+            .ok_or(DavError::Code(StatusCode::CONFLICT))
+    }
+
+    fn log_descendant_updates(&self, batch: &mut BatchBuilder, account_id: u32, path: &str) {
+        let mut descendants = self
+            .subtree(path)
+            .filter(|descendant| descendant.path() != path)
+            .peekable();
+        if descendants.peek().is_none() {
+            return;
         }
+        batch
+            .with_account_id(account_id)
+            .with_collection(Collection::FileNode);
+        for descendant in descendants {
+            batch
+                .with_document(descendant.document_id())
+                .log_item_update(SyncCollection::FileNode, None);
+        }
+        batch.commit_point();
+    }
+
+    fn hide_undiscoverable(
+        &self,
+        discoverable: &RoaringBitmap,
+        path: &str,
+        hidden_target: StatusCode,
+        hidden_parent: StatusCode,
+    ) -> crate::Result<()> {
+        hide_unless(self, path, hidden_target, hidden_parent, |document_id| {
+            discoverable.contains(document_id)
+        })
+    }
+
+    fn hide_undiscoverable_for(
+        &self,
+        access_token: &AccessToken,
+        path: &str,
+        hidden_target: StatusCode,
+        hidden_parent: StatusCode,
+    ) -> crate::Result<()> {
+        hide_unless(self, path, hidden_target, hidden_parent, |document_id| {
+            self.file_discoverable(access_token, document_id)
+        })
+    }
+}
+
+fn hide_unless(
+    resources: &GroupwareResources,
+    path: &str,
+    hidden_target: StatusCode,
+    hidden_parent: StatusCode,
+    is_discoverable: impl Fn(u32) -> bool,
+) -> crate::Result<()> {
+    let mut current = Some(path);
+    let mut status = hidden_target;
+    while let Some(path) = current {
+        if let Some(resource) = resources.by_path(path) {
+            return if is_discoverable(resource.document_id()) {
+                Ok(())
+            } else {
+                Err(DavError::Code(status))
+            };
+        }
+        status = hidden_parent;
+        current = path.rsplit_once('/').map(|(parent, _)| parent);
+    }
+    Ok(())
+}
+
+pub(crate) fn file_name_from_uri(uri: &str) -> crate::Result<String> {
+    let segment = uri
+        .trim_end_matches('/')
+        .rsplit_once('/')
+        .map_or(uri, |(_, segment)| segment);
+    dav_file_name(segment).map_err(|err| {
+        DavError::Code(match err {
+            DavFileNameError::TooLong => StatusCode::URI_TOO_LONG,
+            DavFileNameError::Empty
+            | DavFileNameError::InvalidCharacter
+            | DavFileNameError::ReservedName => StatusCode::BAD_REQUEST,
+        })
+    })
+}
+
+pub(crate) fn file_etag(node: &ArchivedFileNode) -> String {
+    quoted_etag(node.etag.to_native().into())
+}
+
+pub(crate) fn is_symlink(resource: &DavResourcePath<'_>) -> bool {
+    resource.resource.file_kind() == Some(FILE_KIND_SYMLINK)
+}
+
+pub(crate) fn validate_file_parent_acl(
+    resources: &GroupwareResources,
+    access_token: &AccessToken,
+    is_member: bool,
+    parent_id: Option<u32>,
+    acl: Acl,
+) -> crate::Result<u32> {
+    match parent_id {
+        Some(parent_id)
+            if is_member || resources.file_acl(access_token, parent_id).contains(acl) =>
+        {
+            Ok(parent_id + 1)
+        }
+        None if is_member => Ok(0),
+        _ => Err(DavError::Code(StatusCode::FORBIDDEN)),
     }
 }
 

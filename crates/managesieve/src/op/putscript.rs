@@ -2,21 +2,24 @@
  * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
+ *
+ * Modified by Coffey Labs in 2026 for INBUXA.
  */
 
 use crate::core::{Command, ResponseCode, Session, StatusResponse};
 use common::{network::SessionStream, storage::index::ObjectIndexBuilder};
+use compact_str::ToCompactString;
 use email::sieve::SieveScript;
 use imap_proto::receiver::Request;
 use registry::schema::enums::{Permission, StorageQuota};
 use sieve::compiler::ErrorType;
 use std::time::Instant;
 use store::{
-    Serialize, ValueKey,
-    write::{AlignedBytes, Archive, Archiver, BatchBuilder},
+    ValueKey,
+    write::{Archive, ArchiveBytes, BatchBuilder},
 };
 use trc::AddContext;
-use types::{collection::Collection, field::SieveField};
+use types::{blob_hash::BlobHash, collection::Collection, field::SieveField};
 
 impl<T: SessionStream> Session<T> {
     pub async fn handle_putscript(&mut self, request: Request<Command>) -> trc::Result<Vec<u8>> {
@@ -35,7 +38,7 @@ impl<T: SessionStream> Session<T> {
             })?
             .trim()
             .to_string();
-        let mut script_bytes = tokens
+        let script_bytes = tokens
             .next()
             .ok_or_else(|| {
                 trc::ManageSieveEvent::Error
@@ -49,10 +52,13 @@ impl<T: SessionStream> Session<T> {
         let access_token = self.state.access_token();
         let account_id = access_token.account_id();
         let account = self.server.account(account_id).await?;
-        self.server
-            .has_available_quota(&account, script_bytes.len() as u64)
-            .await
-            .caused_by(trc::location!())?;
+        // inbuxa: MT-19: a tenant's disk quota applies too
+        if account.id_tenant.is_some() {
+            self.server
+                .has_available_quota(&account, script_bytes.len() as u64)
+                .await
+                .caused_by(trc::location!())?;
+        }
 
         if self
             .server
@@ -72,34 +78,27 @@ impl<T: SessionStream> Session<T> {
         }
 
         // Compile script
-        match self
+        let compiled_script = match self
             .server
             .core
             .sieve
             .untrusted_compiler
             .compile(&script_bytes)
         {
-            Ok(compiled_script) => {
-                script_bytes.extend(
-                    Archiver::new(compiled_script)
-                        .untrusted()
-                        .serialize()
-                        .caused_by(trc::location!())?,
-                );
-            }
+            Ok(compiled_script) => compiled_script,
             Err(err) => {
                 return Err(if let ErrorType::ScriptTooLong = &err.error_type() {
                     trc::ManageSieveEvent::Error
                         .into_err()
-                        .details(err.to_string())
+                        .details(err.to_compact_string())
                         .code(ResponseCode::QuotaMaxSize)
                 } else {
                     trc::ManageSieveEvent::Error
                         .into_err()
-                        .details(err.to_string())
+                        .details(err.to_compact_string())
                 });
             }
-        }
+        };
 
         // Validate name
         if let Some(document_id) = self.validate_name(account_id, &name).await? {
@@ -107,7 +106,7 @@ impl<T: SessionStream> Session<T> {
             let script_ = self
                 .server
                 .store()
-                .get_value::<Archive<AlignedBytes>>(ValueKey::archive(
+                .get_value::<Archive<ArchiveBytes>>(ValueKey::archive(
                     account_id,
                     Collection::SieveScript,
                     document_id,
@@ -127,13 +126,19 @@ impl<T: SessionStream> Session<T> {
             // Write script blob
             let (blob_hash, blob_hold) = self
                 .server
-                .put_temporary_blob(account_id, &script_bytes, 60)
+                .hold_blob(
+                    account_id,
+                    BlobHash::generate(&script_bytes),
+                    &script_bytes,
+                    60,
+                )
                 .await?;
 
             // Write record
             let mut batch = BatchBuilder::new();
+            batch.with_account_id(account_id);
+            self.server.limit_disk_quota(&mut batch, &account);
             batch
-                .with_account_id(account_id)
                 .with_collection(Collection::SieveScript)
                 .with_document(document_id)
                 .custom(
@@ -143,13 +148,14 @@ impl<T: SessionStream> Session<T> {
                                 .deserialize()
                                 .caused_by(trc::location!())?
                                 .with_size(script_size as u32)
-                                .with_blob_hash(blob_hash.clone()),
+                                .with_blob_hash(blob_hash.clone())
+                                .with_script(&compiled_script),
                         )
                         .with_current(script)
-                        .with_changed_by(account.account_tenant_ids()),
+                        .with_changed_by(account.changed_by()),
                 )
-                .caused_by(trc::location!())?
-                .clear(blob_hold);
+                .caused_by(trc::location!())?;
+            blob_hold.release(&mut batch);
 
             self.server
                 .commit_batch(batch)
@@ -159,7 +165,7 @@ impl<T: SessionStream> Session<T> {
             trc::event!(
                 ManageSieve(trc::ManageSieveEvent::UpdateScript),
                 SpanId = self.session_id,
-                Id = name.to_string(),
+                Script = name,
                 DocumentId = document_id,
                 Size = script_size,
                 Elapsed = op_start.elapsed(),
@@ -168,33 +174,36 @@ impl<T: SessionStream> Session<T> {
             // Write script blob
             let (blob_hash, blob_hold) = self
                 .server
-                .put_temporary_blob(account_id, &script_bytes, 60)
+                .hold_blob(
+                    account_id,
+                    BlobHash::generate(&script_bytes),
+                    &script_bytes,
+                    60,
+                )
                 .await?;
 
             // Write record
             let mut batch = BatchBuilder::new();
-            let document_id = self
-                .server
-                .store()
-                .assign_document_ids(account_id, Collection::SieveScript, 1)
-                .await
-                .caused_by(trc::location!())?;
+            let slot = batch.reserve_document_id(account_id, Collection::SieveScript);
+            batch.with_account_id(account_id);
+            self.server.limit_disk_quota(&mut batch, &account);
             batch
-                .with_account_id(account_id)
                 .with_collection(Collection::SieveScript)
-                .with_document(document_id)
+                .create_document(slot)
                 .custom(
                     ObjectIndexBuilder::<(), _>::new()
                         .with_changes(
                             SieveScript::new(name.clone(), blob_hash.clone())
-                                .with_size(script_size as u32),
+                                .with_size(script_size as u32)
+                                .with_script(&compiled_script),
                         )
-                        .with_changed_by(account.account_tenant_ids()),
+                        .with_changed_by(account.changed_by()),
                 )
-                .caused_by(trc::location!())?
-                .clear(blob_hold);
+                .caused_by(trc::location!())?;
+            blob_hold.release(&mut batch);
 
-            self.server
+            let assigned_ids = self
+                .server
                 .commit_batch(batch)
                 .await
                 .caused_by(trc::location!())?;
@@ -202,8 +211,8 @@ impl<T: SessionStream> Session<T> {
             trc::event!(
                 ManageSieve(trc::ManageSieveEvent::CreateScript),
                 SpanId = self.session_id,
-                Id = name,
-                DocumentId = document_id,
+                Script = name,
+                DocumentId = assigned_ids.slot(slot),
                 Elapsed = op_start.elapsed()
             );
         }

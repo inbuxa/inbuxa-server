@@ -125,8 +125,8 @@ accepted, which is the fact `enabled` reports.
 - **ME-5.** `disabled` delivers into the account's Trash mailbox, skipping
   the user's filing rules but not spam checks.
 - **ME-6.** `deleted`, expired and destroyed masks refuse the message at
-  `RCPT TO` with `550 5.1.2 Mailbox does not exist.`, upstream's own reply for
-  disabled and expired masks (observed 1). It's permanent, and identical to
+  `RCPT TO` with `550 5.1.1 Mailbox does not exist.`, upstream's own reply for
+  disabled and expired masks (observed 1; `5.1.2` before 1.0). It's permanent, and identical to
   the reply for an address that never existed, so a sender learns nothing
   about the mask.
 - **ME-6a.** **Decision**, a deliberate difference: an expired mask reads
@@ -325,7 +325,7 @@ deleted, and nothing was left. No upstream code was read.
 
 1. **Refused delivery.** A disabled mask and an expired mask were each refused
    at `RCPT TO` on the submission connection with `550 5.1.2 Mailbox does not
-   exist.`: permanent, and worded as for a nonexistent address. The expired
+   exist.` (`5.1.1` since 1.0): permanent, and worded as for a nonexistent address. The expired
    mask kept `enabled: true` in its record and stayed in the list.
 2. **Upstream's addresses and creation.** A default mask is
    `{16 chars}.{24 chars}@{account's domain}`. With `emailPrefix` the prefix

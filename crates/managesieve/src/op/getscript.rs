@@ -12,10 +12,10 @@ use registry::schema::enums::Permission;
 use std::time::Instant;
 use store::{
     ValueKey,
-    write::{AlignedBytes, Archive},
+    write::{Archive, ArchiveBytes},
 };
 use trc::AddContext;
-use types::{blob::BlobSection, blob_hash::BlobHash, collection::Collection};
+use types::collection::Collection;
 
 impl<T: SessionStream> Session<T> {
     pub async fn handle_getscript(&mut self, request: Request<Command>) -> trc::Result<Vec<u8>> {
@@ -38,7 +38,7 @@ impl<T: SessionStream> Session<T> {
         let sieve_ = self
             .server
             .store()
-            .get_value::<Archive<AlignedBytes>>(ValueKey::archive(
+            .get_value::<Archive<ArchiveBytes>>(ValueKey::archive(
                 account_id,
                 Collection::SieveScript,
                 document_id,
@@ -54,16 +54,10 @@ impl<T: SessionStream> Session<T> {
         let sieve = sieve_
             .unarchive::<SieveScript>()
             .caused_by(trc::location!())?;
-        let blob_size = u32::from(sieve.size) as usize;
         let script = self
             .server
-            .get_blob_section(
-                &BlobHash::from(&sieve.blob_hash),
-                &BlobSection {
-                    size: blob_size,
-                    ..Default::default()
-                },
-            )
+            .blob_store()
+            .get_blob(sieve.blob_hash.0.as_ref(), 0..usize::MAX)
             .await
             .caused_by(trc::location!())?
             .ok_or_else(|| {
@@ -72,11 +66,10 @@ impl<T: SessionStream> Session<T> {
                     .details("Script blob not found")
                     .code(ResponseCode::NonExistent)
             })?;
-        debug_assert_eq!(script.len(), blob_size);
 
         let mut response = Vec::with_capacity(script.len() + 32);
         response.push(b'{');
-        response.extend_from_slice(blob_size.to_string().as_bytes());
+        response.extend_from_slice(script.len().to_string().as_bytes());
         response.extend_from_slice(b"}\r\n");
         response.extend(script);
         response.extend_from_slice(b"\r\n");
@@ -84,7 +77,7 @@ impl<T: SessionStream> Session<T> {
         trc::event!(
             ManageSieve(trc::ManageSieveEvent::GetScript),
             SpanId = self.session_id,
-            Id = name,
+            Script = name,
             DocumentId = document_id,
             Elapsed = op_start.elapsed()
         );

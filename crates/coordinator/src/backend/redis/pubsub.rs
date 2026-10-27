@@ -4,59 +4,79 @@
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
  */
 
-use crate::{Msg, PubSubStream};
+use crate::{Msg, Subscription};
+use deadpool::managed::Manager;
 use futures::StreamExt;
-use redis::{AsyncCommands, PushInfo, cluster::ClusterConfig, cluster_async::ClusterConnection};
-use std::fmt::Display;
+use redis::{
+    AsyncCommands, PushInfo, aio::MultiplexedConnection, cluster::ClusterConfig,
+    cluster_async::ClusterConnection,
+};
+use std::{fmt::Display, sync::Arc};
 use store::backend::redis::{RedisPool, RedisStore};
 use tokio::sync::mpsc::UnboundedReceiver;
 
-pub struct RedisPubSubStream {
-    stream: redis::aio::PubSubStream,
+pub enum RedisSubscription {
+    Single(redis::aio::PubSubStream),
+    Cluster {
+        _conn: ClusterConnection,
+        rx: UnboundedReceiver<PushInfo>,
+    },
 }
 
-pub struct RedisClusterPubSubStream {
-    _conn: ClusterConnection,
-    rx: UnboundedReceiver<PushInfo>,
-}
-
-pub(crate) async fn redis_publish(
-    redis: &RedisStore,
+pub struct RedisPublisher {
+    store: Arc<RedisStore>,
     topic: &'static str,
-    message: Vec<u8>,
-) -> trc::Result<()> {
-    match &redis.pool {
-        RedisPool::Single(pool) => pool
-            .get()
-            .await
-            .map_err(into_error)?
-            .as_mut()
-            .publish(topic, message)
-            .await
-            .map_err(into_error),
-        RedisPool::Cluster(pool) => pool
-            .get()
-            .await
-            .map_err(into_error)?
-            .as_mut()
-            .publish(topic, message)
-            .await
-            .map_err(into_error),
-        RedisPool::Sentinel(pool) => pool
-            .get()
-            .await
-            .map_err(into_error)?
-            .as_mut()
-            .publish(topic, message)
-            .await
-            .map_err(into_error),
+    connection: Option<PublishConnection>,
+}
+
+enum PublishConnection {
+    Multiplexed(MultiplexedConnection),
+    Cluster(ClusterConnection),
+}
+
+impl RedisPublisher {
+    pub(crate) fn new(store: Arc<RedisStore>, topic: &'static str) -> Self {
+        RedisPublisher {
+            store,
+            topic,
+            connection: None,
+        }
+    }
+
+    pub async fn publish(&mut self, payload: &[u8]) -> trc::Result<()> {
+        let connection = match &mut self.connection {
+            Some(connection) => connection,
+            None => self
+                .connection
+                .insert(PublishConnection::open(&self.store).await?),
+        };
+        let result = match connection {
+            PublishConnection::Multiplexed(connection) => {
+                connection.publish(self.topic, payload).await
+            }
+            PublishConnection::Cluster(connection) => connection.publish(self.topic, payload).await,
+        };
+        if result.is_err() {
+            self.connection = None;
+        }
+        result.map_err(into_error)
+    }
+}
+
+impl PublishConnection {
+    async fn open(store: &RedisStore) -> trc::Result<Self> {
+        match &store.pool {
+            RedisPool::Single(pool) => pool.manager().create().await.map(Self::Multiplexed),
+            RedisPool::Cluster(pool) => pool.manager().create().await.map(Self::Cluster),
+            RedisPool::Sentinel(pool) => pool.manager().create().await.map(Self::Multiplexed),
+        }
     }
 }
 
 pub(crate) async fn redis_subscribe(
     redis: &RedisStore,
     topic: &'static str,
-) -> trc::Result<PubSubStream> {
+) -> trc::Result<Subscription> {
     match &redis.pool {
         RedisPool::Single(pool) => {
             let mut pubsub = pool
@@ -67,9 +87,9 @@ pub(crate) async fn redis_subscribe(
                 .map_err(into_error)?;
             pubsub.subscribe(topic).await.map_err(into_error)?;
 
-            Ok(PubSubStream::Redis(RedisPubSubStream {
-                stream: pubsub.into_on_message(),
-            }))
+            Ok(Subscription::Redis(RedisSubscription::Single(
+                pubsub.into_on_message(),
+            )))
         }
         RedisPool::Cluster(pool) => {
             let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
@@ -83,7 +103,7 @@ pub(crate) async fn redis_subscribe(
 
             _conn.subscribe(topic).await.map_err(into_error)?;
 
-            Ok(PubSubStream::RedisCluster(RedisClusterPubSubStream {
+            Ok(Subscription::Redis(RedisSubscription::Cluster {
                 _conn,
                 rx,
             }))
@@ -101,25 +121,22 @@ pub(crate) async fn redis_subscribe(
             let mut pubsub = client.get_async_pubsub().await.map_err(into_error)?;
             pubsub.subscribe(topic).await.map_err(into_error)?;
 
-            Ok(PubSubStream::Redis(RedisPubSubStream {
-                stream: pubsub.into_on_message(),
-            }))
+            Ok(Subscription::Redis(RedisSubscription::Single(
+                pubsub.into_on_message(),
+            )))
         }
     }
 }
 
-impl RedisPubSubStream {
-    pub async fn next(&mut self) -> Option<Msg> {
-        self.stream.next().await.map(Msg::Redis)
-    }
-}
-
-impl RedisClusterPubSubStream {
-    pub async fn next(&mut self) -> Option<Msg> {
-        loop {
-            if let Some(msg) = redis::Msg::from_push_info(self.rx.recv().await?) {
-                return Some(Msg::Redis(msg));
-            }
+impl RedisSubscription {
+    pub async fn next<'x>(&mut self) -> Option<Msg<'x>> {
+        match self {
+            RedisSubscription::Single(stream) => stream.next().await.map(Msg::Redis),
+            RedisSubscription::Cluster { rx, .. } => loop {
+                if let Some(msg) = redis::Msg::from_push_info(rx.recv().await?) {
+                    return Some(Msg::Redis(msg));
+                }
+            },
         }
     }
 }

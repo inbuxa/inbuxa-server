@@ -2,10 +2,13 @@
  * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
+ *
+ * Modified by Coffey Labs in 2026 for INBUXA.
  */
 
 use crate::utils::server::{TestServer, TestServerBuilder};
 use registry::{
+    pickle::Pickle,
     schema::{
         enums::TaskSpamFilterMaintenanceType,
         prelude::{Object, ObjectType},
@@ -215,7 +218,7 @@ async fn update_rules(test: &TestServer, rules: &Value) {
     test.wait_for_tasks().await;
 }
 
-async fn stored<T: ObjectImpl + From<Object>>(
+async fn stored<T: ObjectImpl + Pickle + From<Object>>(
     test: &TestServer,
     property: &str,
     value: &str,

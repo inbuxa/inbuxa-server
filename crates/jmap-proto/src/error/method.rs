@@ -120,6 +120,16 @@ impl Serialize for MethodErrorWrapper {
                     ("invalidResultReference", description.unwrap_or_default())
                 }
                 trc::JmapEvent::Forbidden => ("forbidden", description.unwrap_or_default()),
+                trc::JmapEvent::ObjectNotFound => ("notFound", description.unwrap_or_default()),
+                trc::JmapEvent::ExpandDurationTooLarge => {
+                    ("expandDurationTooLarge", description.unwrap_or_default())
+                }
+                trc::JmapEvent::CannotCalculateOccurrences => (
+                    "cannotCalculateOccurrences",
+                    description.unwrap_or_default(),
+                ),
+                trc::JmapEvent::TooLarge => ("tooLarge", description.unwrap_or_default()),
+                trc::JmapEvent::RateLimit => ("rateLimit", description.unwrap_or_default()),
                 trc::JmapEvent::AccountNotFound => (
                     "accountNotFound",
                     "The accountId does not correspond to a valid account",
@@ -134,6 +144,17 @@ impl Serialize for MethodErrorWrapper {
                 trc::JmapEvent::AccountReadOnly => (
                     "accountReadOnly",
                     "This method modifies state, but the account is read-only.",
+                ),
+                trc::JmapEvent::FromAccountNotFound => (
+                    "fromAccountNotFound",
+                    "The fromAccountId does not correspond to a valid account.",
+                ),
+                trc::JmapEvent::FromAccountNotSupportedByMethod => (
+                    "fromAccountNotSupportedByMethod",
+                    concat!(
+                        "The fromAccountId given corresponds to a valid account, ",
+                        "but the account does not support this data type."
+                    ),
                 ),
                 trc::JmapEvent::UnknownDataType => (
                     "unknownDataType",
@@ -164,6 +185,9 @@ impl Serialize for MethodErrorWrapper {
                     "This server is temporarily unavailable.",
                 ),
             },
+            trc::EventType::Limit(trc::LimitEvent::SizeRequest) => {
+                ("unsupportedFilter", description.unwrap_or_default())
+            }
             _ => (
                 "serverUnavailable",
                 concat!(

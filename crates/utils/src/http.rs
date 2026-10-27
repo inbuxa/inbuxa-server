@@ -6,7 +6,7 @@
  * Modified by Coffey Labs in 2026 for INBUXA.
  */
 
-use base64::{Engine, engine::general_purpose};
+use encodify::base64::STANDARD;
 use reqwest::{
     Client, ClientBuilder,
     header::{AUTHORIZATION, CONTENT_TYPE, HeaderMap, HeaderName, HeaderValue, USER_AGENT},
@@ -147,7 +147,8 @@ pub fn build_http_client(
     allow_invalid_certs: bool,
 ) -> Result<Client, String> {
     let mut headers = build_http_headers(raw_headers, username, password, token, content_type)?;
-    headers.insert(USER_AGENT, "inbuxa/1.0.0".parse().unwrap()); // types::brand!(); utils does not depend on types
+    // types::brand!(); utils does not depend on types
+    headers.insert(USER_AGENT, HeaderValue::from_static("inbuxa/1.0.0"));
 
     match http_client_builder(allow_invalid_certs)
         .connect_timeout(timeout)
@@ -169,7 +170,11 @@ pub fn build_http_headers(
     let mut headers = HeaderMap::new();
 
     if let Some(content_type) = content_type {
-        headers.insert(CONTENT_TYPE, HeaderValue::from_str(content_type).unwrap());
+        headers.insert(
+            CONTENT_TYPE,
+            HeaderValue::from_str(content_type)
+                .map_err(|err| format!("Invalid content type {content_type:?}: {err}"))?,
+        );
     }
 
     for (header, value) in raw_headers
@@ -188,17 +193,19 @@ pub fn build_http_headers(
     }
 
     if let (Some(name), Some(secret)) = (username, password) {
+        let mut value = String::from("Basic ");
+        STANDARD.encode_append(format!("{name}:{secret}"), &mut value);
         headers.insert(
             AUTHORIZATION,
-            format!(
-                "Basic {}",
-                general_purpose::STANDARD.encode(format!("{}:{}", name, secret))
-            )
-            .parse()
-            .unwrap(),
+            HeaderValue::try_from(value)
+                .map_err(|err| format!("Invalid basic credentials: {err}"))?,
         );
     } else if let Some(token) = token {
-        headers.insert(AUTHORIZATION, format!("Bearer {}", token).parse().unwrap());
+        headers.insert(
+            AUTHORIZATION,
+            HeaderValue::try_from(format!("Bearer {token}"))
+                .map_err(|err| format!("Invalid bearer token: {err}"))?,
+        );
     }
 
     Ok(headers)

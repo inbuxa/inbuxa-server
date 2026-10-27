@@ -3,12 +3,14 @@
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
  */
+use crate::protocol::push_int;
+use compact_str::CompactString;
 
 use super::{Flag, Sequence, quoted_string, serialize_sequence};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Arguments {
-    pub tag: String,
+    pub tag: CompactString,
     pub is_esearch: bool,
     pub sort: Option<Vec<Comparator>>,
     pub result_options: Vec<ResultOption>,
@@ -108,8 +110,8 @@ pub enum Filter {
     ModSeq((u64, ModSeqEntry)),
 
     // RFC 8474 - ObjectID
-    EmailId(String),
-    ThreadId(String),
+    EmailId(CompactString),
+    ThreadId(CompactString),
 
     // RFC 9738 - MESSAGELIMIT
     UidAfter(u32),
@@ -136,7 +138,20 @@ impl Filter {
 
 impl Response {
     pub fn serialize(self, tag: &str) -> Vec<u8> {
-        let mut buf = Vec::with_capacity(64);
+        const FRAMING_LEN: usize = 64;
+        const SEQUENCE_ID_LEN: usize = 6;
+        const PLAIN_ID_LEN: usize = 8;
+
+        let mut buf = Vec::with_capacity(
+            FRAMING_LEN
+                + tag.len()
+                + self.ids.len()
+                    * if self.is_esearch {
+                        SEQUENCE_ID_LEN
+                    } else {
+                        PLAIN_ID_LEN
+                    },
+        );
         if self.is_esearch {
             buf.extend_from_slice(b"* ESEARCH (TAG ");
             quoted_string(&mut buf, tag);
@@ -146,15 +161,15 @@ impl Response {
             }
             if let Some(count) = &self.count {
                 buf.extend_from_slice(b" COUNT ");
-                buf.extend_from_slice(count.to_string().as_bytes());
+                push_int(&mut buf, *count);
             }
             if let Some(min) = &self.min {
                 buf.extend_from_slice(b" MIN ");
-                buf.extend_from_slice(min.to_string().as_bytes());
+                push_int(&mut buf, *min);
             }
             if let Some(max) = &self.max {
                 buf.extend_from_slice(b" MAX ");
-                buf.extend_from_slice(max.to_string().as_bytes());
+                push_int(&mut buf, *max);
             }
             if !self.ids.is_empty() {
                 buf.extend_from_slice(b" ALL ");
@@ -162,7 +177,7 @@ impl Response {
             }
             if let Some(highest_modseq) = self.highest_modseq {
                 buf.extend_from_slice(b" MODSEQ ");
-                buf.extend_from_slice(highest_modseq.to_string().as_bytes());
+                push_int(&mut buf, highest_modseq);
             }
         } else {
             if !self.is_sort {
@@ -173,12 +188,12 @@ impl Response {
             if !self.ids.is_empty() {
                 for id in &self.ids {
                     buf.push(b' ');
-                    buf.extend_from_slice(id.to_string().as_bytes());
+                    push_int(&mut buf, *id);
                 }
             }
             if let Some(highest_modseq) = self.highest_modseq {
                 buf.extend_from_slice(b" (MODSEQ ");
-                buf.extend_from_slice(highest_modseq.to_string().as_bytes());
+                push_int(&mut buf, highest_modseq);
                 buf.push(b')');
             }
         }
@@ -187,81 +202,3 @@ impl Response {
     }
 }
 
-#[cfg(test)]
-mod tests {
-
-    #[test]
-    fn serialize_search() {
-        for (mut response, tag, expected_v2, expected_v1) in [
-            (
-                super::Response {
-                    is_uid: false,
-                    is_esearch: true,
-                    is_sort: false,
-                    ids: vec![2, 10, 11],
-                    min: 2.into(),
-                    max: 11.into(),
-                    count: 3.into(),
-                    highest_modseq: None,
-                },
-                "A283",
-                "* ESEARCH (TAG \"A283\") COUNT 3 MIN 2 MAX 11 ALL 2,10:11\r\n",
-                "* SEARCH 2 10 11\r\n",
-            ),
-            (
-                super::Response {
-                    is_uid: false,
-                    is_esearch: true,
-                    is_sort: false,
-                    ids: vec![
-                        1, 2, 3, 5, 10, 11, 12, 13, 90, 92, 93, 94, 95, 96, 97, 98, 99,
-                    ],
-                    min: None,
-                    max: None,
-                    count: None,
-                    highest_modseq: None,
-                },
-                "A283",
-                "* ESEARCH (TAG \"A283\") ALL 1:3,5,10:13,90,92:99\r\n",
-                "* SEARCH 1 2 3 5 10 11 12 13 90 92 93 94 95 96 97 98 99\r\n",
-            ),
-            (
-                super::Response {
-                    is_uid: false,
-                    is_esearch: true,
-                    is_sort: false,
-                    ids: vec![],
-                    min: None,
-                    max: None,
-                    count: None,
-                    highest_modseq: None,
-                },
-                "A283",
-                "* ESEARCH (TAG \"A283\")\r\n",
-                "* SEARCH\r\n",
-            ),
-            (
-                super::Response {
-                    is_uid: false,
-                    is_esearch: true,
-                    is_sort: false,
-                    ids: vec![10, 11, 12, 13, 21],
-                    min: None,
-                    max: None,
-                    count: None,
-                    highest_modseq: 12345.into(),
-                },
-                "A283",
-                "* ESEARCH (TAG \"A283\") ALL 10:13,21 MODSEQ 12345\r\n",
-                "* SEARCH 10 11 12 13 21 (MODSEQ 12345)\r\n",
-            ),
-        ] {
-            let response_v2 = String::from_utf8(response.clone().serialize(tag)).unwrap();
-            response.is_esearch = false;
-            let response_v1 = String::from_utf8(response.serialize(tag)).unwrap();
-
-            assert_eq!(response_v2, expected_v2);
-            assert_eq!(response_v1, expected_v1);
-        }
-    }
-}

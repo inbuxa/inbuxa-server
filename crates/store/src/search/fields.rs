@@ -24,44 +24,12 @@ impl SearchableField for EmailSearchField {
             SearchField::Email(EmailSearchField::Subject),
             SearchField::Email(EmailSearchField::Body),
             SearchField::Email(EmailSearchField::Attachment),
-            SearchField::Email(EmailSearchField::ReceivedAt),
-            SearchField::Email(EmailSearchField::SentAt),
-            SearchField::Email(EmailSearchField::Size),
-            SearchField::Email(EmailSearchField::HasAttachment),
             SearchField::Email(EmailSearchField::Headers),
         ]
     }
 
     fn is_indexed(&self) -> bool {
-        #[cfg(not(feature = "test_mode"))]
-        {
-            matches!(
-                self,
-                EmailSearchField::From
-                    | EmailSearchField::To
-                    | EmailSearchField::Subject
-                    | EmailSearchField::ReceivedAt
-                    | EmailSearchField::SentAt
-                    | EmailSearchField::Size
-                    | EmailSearchField::HasAttachment,
-            )
-        }
-
-        #[cfg(feature = "test_mode")]
-        {
-            matches!(
-                self,
-                EmailSearchField::From
-                    | EmailSearchField::To
-                    | EmailSearchField::Subject
-                    | EmailSearchField::ReceivedAt
-                    | EmailSearchField::SentAt
-                    | EmailSearchField::Size
-                    | EmailSearchField::HasAttachment
-                    | EmailSearchField::Bcc
-                    | EmailSearchField::Cc
-            )
-        }
+        false
     }
 
     fn is_text(&self) -> bool {
@@ -94,17 +62,15 @@ impl SearchableField for CalendarSearchField {
             SearchField::Calendar(CalendarSearchField::Location),
             SearchField::Calendar(CalendarSearchField::Owner),
             SearchField::Calendar(CalendarSearchField::Attendee),
-            SearchField::Calendar(CalendarSearchField::Start),
-            SearchField::Calendar(CalendarSearchField::Uid),
         ]
     }
 
     fn is_indexed(&self) -> bool {
-        matches!(self, CalendarSearchField::Start | CalendarSearchField::Uid)
+        false
     }
 
     fn is_text(&self) -> bool {
-        !self.is_indexed()
+        true
     }
 }
 
@@ -129,16 +95,15 @@ impl SearchableField for ContactSearchField {
             SearchField::Contact(ContactSearchField::OnlineService),
             SearchField::Contact(ContactSearchField::Address),
             SearchField::Contact(ContactSearchField::Note),
-            SearchField::Contact(ContactSearchField::Uid),
         ]
     }
 
     fn is_indexed(&self) -> bool {
-        matches!(self, ContactSearchField::Uid | ContactSearchField::Kind)
+        matches!(self, ContactSearchField::Kind)
     }
 
     fn is_text(&self) -> bool {
-        !self.is_indexed()
+        !matches!(self, ContactSearchField::Kind)
     }
 }
 
@@ -152,10 +117,7 @@ impl SearchableField for FileSearchField {
     }
 
     fn all_fields() -> &'static [SearchField] {
-        &[
-            SearchField::File(FileSearchField::Name),
-            SearchField::File(FileSearchField::Content),
-        ]
+        &[SearchField::File(FileSearchField::Content)]
     }
 
     fn is_indexed(&self) -> bool {
@@ -219,6 +181,20 @@ impl SearchField {
         }
     }
 
+    #[cfg(feature = "postgres")]
+    pub(crate) fn is_identifier(&self) -> bool {
+        matches!(
+            self,
+            SearchField::Contact(
+                ContactSearchField::Email
+                    | ContactSearchField::Phone
+                    | ContactSearchField::OnlineService
+                    | ContactSearchField::Member
+            ) | SearchField::Calendar(CalendarSearchField::Owner | CalendarSearchField::Attendee)
+        )
+    }
+
+    #[cfg(feature = "postgres")]
     pub(crate) fn is_json(&self) -> bool {
         matches!(self, SearchField::Email(EmailSearchField::Headers))
     }

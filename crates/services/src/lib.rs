@@ -12,6 +12,8 @@
 
 #![warn(clippy::large_futures)]
 
+use crate::index_queue::manager::spawn_index_queue_manager;
+use crate::task_manager::{manager::spawn_task_manager, scheduler::spawn_task_scheduler};
 use broadcast::publisher::spawn_broadcast_publisher;
 use common::{
     BuildServer, Inner,
@@ -20,14 +22,13 @@ use common::{
 use state_manager::manager::spawn_push_router;
 use std::sync::Arc;
 
-use crate::task_manager::{manager::spawn_task_manager, scheduler::spawn_task_scheduler};
-
 pub mod broadcast;
 // inbuxa: AL-5, delegations end at their date
 pub mod inbuxa_lock_expiry;
 pub mod inbuxa_log_retention; // inbuxa: personal-data catalog, D1
 pub mod inbuxa_deliverability; // inbuxa: the deliverability check
 pub mod inbuxa_scheduled_reports; // inbuxa: scheduled reports and the weekly digest
+pub mod index_queue;
 pub mod state_manager;
 pub mod task_manager;
 
@@ -81,6 +82,9 @@ impl SpawnServices for IpcReceivers {
 
             // inbuxa: scheduled-reports spec, RP-16: every node looks for due reports
             inbuxa_scheduled_reports::spawn_scheduled_reports(inner.clone());
+
+            // Spawn search index queue manager
+            spawn_index_queue_manager(inner.clone());
 
             // Spawn task scheduler
             spawn_task_scheduler(inner);

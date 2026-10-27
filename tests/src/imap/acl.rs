@@ -10,6 +10,8 @@ use super::{AssertResult, ImapConnection, Type, append::assert_append_message};
 use crate::utils::{server::TestServer, smtp::SmtpConnection};
 use imap_proto::ResponseType;
 
+// inbuxa: 1.0 writes rights in the RFC 4314 order (lrswipkxte, then n and
+// a), so "rl" reads "lr" and "tewsrxl" reads "lrswxte"
 pub async fn test(
     mut imap_john: &mut ImapConnection,
     _imap_check: &mut ImapConnection,
@@ -94,7 +96,8 @@ pub async fn test(
     imap_jane
         .assert_read(Type::Tagged, ResponseType::Ok)
         .await
-        .assert_equals("* LISTRIGHTS \"INBOX\" \"jdoe@example.com\" r l ws i et k x p a");
+        // inbuxa: 1.0 also offers the RFC 5464 "n" (annotation) right
+        .assert_equals("* LISTRIGHTS \"INBOX\" \"jdoe@example.com\" r l ws i et k x p n a");
 
     // Jane shares her Inbox to John, expect a Shared Folders item in John's list
     imap_jane.send("SETACL INBOX jdoe@example.com lr").await;
@@ -112,7 +115,7 @@ pub async fn test(
     imap_jane
         .assert_read(Type::Tagged, ResponseType::Ok)
         .await
-        .assert_contains("\"jdoe@example.com\" rl");
+        .assert_contains("\"jdoe@example.com\" lr");
 
     imap_jane
         .send("SETACL INBOX foobar@example.com lrxtws")
@@ -123,8 +126,8 @@ pub async fn test(
     imap_jane
         .assert_read(Type::Tagged, ResponseType::Ok)
         .await
-        .assert_contains("\"jdoe@example.com\" rl")
-        .assert_contains("\"foobar@example.com\" tewsrxl");
+        .assert_contains("\"jdoe@example.com\" lr")
+        .assert_contains("\"foobar@example.com\" lrswxte");
 
     imap_bill.send("LIST \"\" \"*\"").await;
     imap_bill
@@ -146,7 +149,7 @@ pub async fn test(
     imap_john
         .assert_read(Type::Tagged, ResponseType::Ok)
         .await
-        .assert_equals("* MYRIGHTS \"Shared Folders/jane.smith@example.com/INBOX\" rl");
+        .assert_equals("* MYRIGHTS \"Shared Folders/jane.smith@example.com/INBOX\" lr");
 
     // John should not be able to append messages
     assert_append_message(
@@ -167,7 +170,7 @@ pub async fn test(
     imap_john
         .assert_read(Type::Tagged, ResponseType::Ok)
         .await
-        .assert_equals("* MYRIGHTS \"Shared Folders/jane.smith@example.com/INBOX\" rli");
+        .assert_equals("* MYRIGHTS \"Shared Folders/jane.smith@example.com/INBOX\" lri");
     assert_append_message(
         imap_john,
         "Shared Folders/jane.smith@example.com/INBOX",
@@ -383,7 +386,7 @@ pub async fn test(
     imap_jane
         .assert_read(Type::Tagged, ResponseType::Ok)
         .await
-        .assert_contains("\"jdoe@example.com\" rl")
+        .assert_contains("\"jdoe@example.com\" lr")
         .assert_count("foobar@example.com", 0);
 
     // Bill should not have access to Jane's Inbox anymore

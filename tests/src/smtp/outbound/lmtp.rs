@@ -2,6 +2,8 @@
  * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
+ *
+ * Modified by Coffey Labs in 2026 for INBUXA.
  */
 
 use crate::{
@@ -91,7 +93,7 @@ async fn lmtp_delivery() {
         .await;
     local_admin
         .registry_create_object(MtaRoute::Relay(MtaRouteRelay {
-            address: "lmtp.foobar.org".into(),
+            host: "lmtp.foobar.org".into(),
             allow_invalid_certs: true,
             implicit_tls: true,
             name: "lmtp".into(),
@@ -208,7 +210,7 @@ async fn lmtp_delivery() {
     let mut dsn = Vec::new();
     loop {
         match local.try_read_event().await {
-            Some(QueueEvent::Refresh | QueueEvent::WorkerDone { .. }) => {}
+            Some(QueueEvent::Refresh(_) | QueueEvent::WorkerDone { .. }) => {}
             Some(QueueEvent::Paused(_)) | Some(QueueEvent::ReloadSettings) => unreachable!(),
             None | Some(QueueEvent::Stop) => break,
         }
@@ -228,6 +230,7 @@ async fn lmtp_delivery() {
                 .server
                 .read_message(event.queue_id, QueueName::default())
                 .await
+                .unwrap()
                 .unwrap();
             if message.message.return_path.is_empty() {
                 message

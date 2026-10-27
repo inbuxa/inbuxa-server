@@ -161,7 +161,7 @@ pub async fn set(data: &Store, tenant_id: u32, policy: &TenantProtocolPolicy) ->
     })?;
     let mut batch = BatchBuilder::new();
     batch.set(key(tenant_id), bytes);
-    data.write(batch.build_all())
+    data.write_batch(&mut batch)
         .await
         .caused_by(trc::location!())
         .map(|_| ())
@@ -172,7 +172,7 @@ pub async fn set(data: &Store, tenant_id: u32, policy: &TenantProtocolPolicy) ->
 pub async fn remove(data: &Store, tenant_id: u32) -> trc::Result<()> {
     let mut batch = BatchBuilder::new();
     batch.clear(key(tenant_id));
-    data.write(batch.build_all())
+    data.write_batch(&mut batch)
         .await
         .caused_by(trc::location!())
         .map(|_| ())

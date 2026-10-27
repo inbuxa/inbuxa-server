@@ -2,11 +2,16 @@
  * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
+ *
+ * Modified by Coffey Labs in 2026 for INBUXA.
  */
 
 use crate::utils::{http::HttpRequest, server::TestServerBuilder};
 use registry::{
-    schema::structs::{Directory, OidcDirectory},
+    schema::{
+        enums::OidcUnscopedTokenPolicy,
+        structs::{Directory, OidcDirectory},
+    },
     types::map::Map,
 };
 
@@ -76,12 +81,10 @@ fn oidc_test_directory() -> OidcDirectory {
         claim_username: "preferred_username".to_string(),
         claim_name: Some("name".to_string()),
         claim_groups: Some("groups".to_string()),
-        require_audience: Some("stalwart".to_string()),
-        require_scopes: Map::new(vec![
-            "email".to_string(),
-            "profile".to_string(),
-            "openid".to_string(),
-        ]),
+        // inbuxa: 1.0 dropped requireScopes; Keycloak tokens carry none of the
+        // urn:ietf:params:oauth:scope:* data scopes, so they get full access
+        accepted_audiences: Map::new(vec!["stalwart".to_string()]),
+        unscoped_tokens: OidcUnscopedTokenPolicy::Full,
         ..Default::default()
     }
 }

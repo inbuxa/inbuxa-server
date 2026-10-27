@@ -335,7 +335,7 @@ pub async fn test(test: &mut TestServer) {
     forged.recipients = vec!["nobody@elsewhere.org".into()];
     let mut batch = BatchBuilder::new();
     batch.set(key.class.clone(), serde_json::to_vec(&forged).unwrap());
-    store.write(batch.build_all()).await.unwrap();
+    store.write_batch(&mut batch).await.unwrap();
     let reports = entries::verify(store, None).await.unwrap();
     let broken = reports
         .iter()
@@ -354,7 +354,7 @@ pub async fn test(test: &mut TestServer) {
     );
     let mut batch = BatchBuilder::new();
     batch.set(key.class.clone(), stored.clone());
-    store.write(batch.build_all()).await.unwrap();
+    store.write_batch(&mut batch).await.unwrap();
     assert!(
         entries::verify(store, None)
             .await
@@ -366,7 +366,7 @@ pub async fn test(test: &mut TestServer) {
     // An entry removed without a purge shows too
     let mut batch = BatchBuilder::new();
     batch.clear(key.class.clone());
-    store.write(batch.build_all()).await.unwrap();
+    store.write_batch(&mut batch).await.unwrap();
     let reports = entries::verify(store, None).await.unwrap();
     assert!(
         reports.iter().any(|r| r
@@ -378,7 +378,7 @@ pub async fn test(test: &mut TestServer) {
     );
     let mut batch = BatchBuilder::new();
     batch.set(key.class.clone(), stored);
-    store.write(batch.build_all()).await.unwrap();
+    store.write_batch(&mut batch).await.unwrap();
 
     // Retention: nothing is due yet; a year on, what's kept for a hold
     // stays, the rest goes, and the chain still checks out

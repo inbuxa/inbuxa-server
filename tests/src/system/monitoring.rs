@@ -24,7 +24,7 @@ use registry::schema::{
 };
 use serde_json::{Value, json};
 use std::time::Duration;
-use trc::{ClusterEvent, Collector, EventType, MetricType};
+use trc::{ClusterEvent, Collector, EventType, MetricType, TelemetryEvent};
 use types::id::Id;
 
 const SECRET: &str = "monitoring test user passphrase";
@@ -376,7 +376,13 @@ pub async fn test(test: &mut TestServer) {
             }),
         })
         .await;
-    let fired = || Collector::read_metric(MetricType::TelemetryAlertEvent);
+    // inbuxa: 1.0 dropped the TelemetryAlertEvent metric; read the event's
+    // own counter instead
+    let fired = || {
+        Collector::read_metric_counter(
+            EventType::Telemetry(TelemetryEvent::AlertEvent).to_id() as usize,
+        ) as f64
+    };
     let before = fired();
     Collector::update_gauge(MetricType::DomainCount, 100);
     test.server.process_alerts().await.unwrap();
@@ -404,7 +410,7 @@ pub async fn test(test: &mut TestServer) {
     let domain = admin
         .registry_create_object(Domain {
             name: "mon-t.example.org".into(),
-            is_enabled: true,
+            enable: true,
             member_tenant_id: Some(tenant),
             certificate_management: CertificateManagement::Manual,
             dns_management: DnsManagement::Manual,

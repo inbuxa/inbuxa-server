@@ -18,9 +18,7 @@ use store::{
     ahash::AHashSet,
     roaring::RoaringBitmap,
     search::{SearchFilter, SearchQuery},
-    write::{
-        IndexPropertyClass, QueueClass, SearchIndex, ValueClass, key::DeserializeBigEndian, now,
-    },
+    write::{IndexPropertyClass, QueueClass, SearchIndex, ValueClass, key::DeserializeBigEndian},
 };
 use trc::AddContext;
 use types::{
@@ -64,7 +62,7 @@ impl EmailSubmissionQuery for Server {
                         document_id: 0,
                         class: ValueClass::IndexProperty(IndexPropertyClass::Integer {
                             property: EmailSubmissionField::Metadata.into(),
-                            value: now() - (3 * 86400),
+                            value: 0,
                         }),
                     },
                     ValueKey {
@@ -87,12 +85,10 @@ impl EmailSubmissionQuery for Server {
                         email_id: value.deserialize_be_u32(0)?,
                         thread_id: value.deserialize_be_u32(U32_LEN)?,
                         identity_id: value.deserialize_be_u32(U32_LEN + U32_LEN)?,
-                        queue_id: if value.len() == (U32_LEN * 3) + U64_LEN + 1 {
-                            value.deserialize_be_u64(U32_LEN * 3)?
-                        } else {
-                            0
-                        },
-                        undo_status: value.last().copied().unwrap(),
+                        queue_id: value.deserialize_be_u64(U32_LEN * 3)?,
+                        undo_status: value.get(U32_LEN * 3 + U64_LEN).copied().ok_or_else(
+                            || trc::Error::corrupted_key(key, value.into(), trc::location!()),
+                        )?,
                     });
 
                     document_ids.insert(document_id);

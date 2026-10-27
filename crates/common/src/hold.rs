@@ -240,7 +240,7 @@ impl Server {
             kept.kept_until = until;
             let mut batch = store::write::BatchBuilder::new();
             undelete_data::set_kept_account(&mut batch, account_id, &kept)?;
-            data.write(batch.build_all())
+            data.write_batch(&mut batch)
                 .await
                 .caused_by(trc::location!())?;
         }

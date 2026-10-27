@@ -4,17 +4,38 @@
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
  */
 
+use encodify::base32::STALWART;
 use jmap_tools::{Element, Property, Value};
-use std::{borrow::Borrow, str::FromStr, time::SystemTime};
-use utils::codec::{
-    base32_custom::{Base32Reader, Base32Writer},
-    leb128::{Leb128Iterator, Leb128Writer},
+use std::{
+    io::{Cursor, Write},
+    ops::Range,
+    str::FromStr,
+    time::SystemTime,
 };
+use utils::codec::leb128::{Leb128, Leb128Iterator};
 
-use crate::blob_hash::BlobHash;
+use crate::blob_hash::{BLOB_HASH_LEN, BlobHash};
 
 const B_LINKED: u8 = 0x10;
 const B_RESERVED: u8 = 0x20;
+const B_EMBEDDED: u8 = 0x40;
+const B_NESTED: u8 = 0x80;
+const ENCODING_MASK: u8 = 0x0F;
+const ENCODING_NONE: u8 = 0;
+const ENCODING_QUOTED_PRINTABLE: u8 = 1;
+const ENCODING_BASE64: u8 = 2;
+const MAX_LEB128_LEN: usize = 10;
+const MAX_CLASS_LEN: usize = 2 * MAX_LEB128_LEN;
+const MAX_RANGE_LEN: usize = 2 * MAX_LEB128_LEN;
+const MAX_CONTAINER_LEN: usize = 1 + MAX_RANGE_LEN;
+const MAX_SERIALIZED_LEN: usize = 1
+    + BLOB_HASH_LEN
+    + MAX_CLASS_LEN
+    + MAX_RANGE_LEN
+    + 1
+    + MAX_SECTION_CONTAINERS * MAX_CONTAINER_LEN;
+
+pub const MAX_SECTION_CONTAINERS: usize = 8;
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum BlobClass {
@@ -23,6 +44,11 @@ pub enum BlobClass {
         expires: u64,
     },
     Linked {
+        account_id: u32,
+        collection: u8,
+        document_id: u32,
+    },
+    Embedded {
         account_id: u32,
         collection: u8,
         document_id: u32,
@@ -47,9 +73,9 @@ impl AsRef<BlobClass> for BlobClass {
 impl BlobClass {
     pub fn account_id(&self) -> u32 {
         match self {
-            BlobClass::Reserved { account_id, .. } | BlobClass::Linked { account_id, .. } => {
-                *account_id
-            }
+            BlobClass::Reserved { account_id, .. }
+            | BlobClass::Linked { account_id, .. }
+            | BlobClass::Embedded { account_id, .. } => *account_id,
         }
     }
 
@@ -61,7 +87,7 @@ impl BlobClass {
                         .duration_since(SystemTime::UNIX_EPOCH)
                         .map_or(0, |d| d.as_secs())
             }
-            BlobClass::Linked { .. } => true,
+            BlobClass::Linked { .. } | BlobClass::Embedded { .. } => true,
         }
     }
 
@@ -77,11 +103,154 @@ pub struct BlobId {
     pub section: Option<BlobSection>,
 }
 
-#[derive(Debug, Default, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct BlobSection {
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct EncodedRange {
     pub offset_start: usize,
     pub size: usize,
     pub encoding: u8,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum BlobSection {
+    Single(EncodedRange),
+    Nested(Box<NestedSection>),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct NestedSection {
+    containers: Vec<EncodedRange>,
+    part: EncodedRange,
+}
+
+impl EncodedRange {
+    pub fn new(offset_start: usize, size: usize, encoding: u8) -> Self {
+        EncodedRange {
+            offset_start,
+            size,
+            encoding,
+        }
+    }
+
+    pub fn range(&self) -> Range<usize> {
+        self.offset_start..self.offset_start.saturating_add(self.size)
+    }
+
+    pub fn is_encoded(&self) -> bool {
+        self.encoding != ENCODING_NONE
+    }
+
+    pub fn is_container(&self) -> bool {
+        matches!(self.encoding, ENCODING_QUOTED_PRINTABLE | ENCODING_BASE64)
+    }
+
+    fn shifted(self, shift: usize) -> Option<Self> {
+        Some(EncodedRange {
+            offset_start: self.offset_start.checked_add(shift)?,
+            ..self
+        })
+    }
+
+    fn marker(&self) -> u8 {
+        self.encoding.saturating_add(1) & ENCODING_MASK
+    }
+
+    fn from_leb128<T>(it: &mut T, encoding: u8) -> Option<Self>
+    where
+        T: Leb128Iterator,
+    {
+        Some(EncodedRange {
+            offset_start: it.next_leb128()?,
+            size: it.next_leb128()?,
+            encoding,
+        })
+    }
+
+    fn write_range(&self, writer: &mut impl Write) {
+        let _ = writer.write_all(&self.offset_start.to_leb128());
+        let _ = writer.write_all(&self.size.to_leb128());
+    }
+}
+
+impl BlobSection {
+    pub fn new(offset_start: usize, size: usize, encoding: u8) -> Self {
+        BlobSection::Single(EncodedRange::new(offset_start, size, encoding))
+    }
+
+    pub fn nested(containers: Vec<EncodedRange>, part: EncodedRange) -> Option<Self> {
+        match containers.len() {
+            0 => Some(BlobSection::Single(part)),
+            1..=MAX_SECTION_CONTAINERS if containers.iter().all(EncodedRange::is_container) => {
+                Some(BlobSection::Nested(Box::new(NestedSection {
+                    containers,
+                    part,
+                })))
+            }
+            _ => None,
+        }
+    }
+
+    pub fn part(&self) -> &EncodedRange {
+        match self {
+            BlobSection::Single(part) => part,
+            BlobSection::Nested(nested) => &nested.part,
+        }
+    }
+
+    pub fn containers(&self) -> &[EncodedRange] {
+        match self {
+            BlobSection::Single(_) => &[],
+            BlobSection::Nested(nested) => &nested.containers,
+        }
+    }
+
+    pub fn outermost(&self) -> &EncodedRange {
+        self.containers().first().unwrap_or(self.part())
+    }
+
+    fn marker(&self) -> u8 {
+        match self {
+            BlobSection::Single(part) => part.marker(),
+            BlobSection::Nested(nested) => B_NESTED | nested.part.marker(),
+        }
+    }
+
+    fn from_leb128<T>(it: &mut T, marker: u8) -> Option<Option<Self>>
+    where
+        T: Leb128Iterator,
+    {
+        let Some(encoding) = (marker & ENCODING_MASK).checked_sub(1) else {
+            return (marker & B_NESTED == 0).then_some(None);
+        };
+        let part = EncodedRange::from_leb128(it, encoding)?;
+        if marker & B_NESTED == 0 {
+            return Some(Some(BlobSection::Single(part)));
+        }
+        let count = usize::from(it.next()?);
+        if !(1..=MAX_SECTION_CONTAINERS).contains(&count) {
+            return None;
+        }
+        let mut containers = Vec::with_capacity(count);
+        for _ in 0..count {
+            let encoding = it.next()?;
+            let container = EncodedRange::from_leb128(it, encoding)?;
+            if !container.is_container() {
+                return None;
+            }
+            containers.push(container);
+        }
+        BlobSection::nested(containers, part).map(Some)
+    }
+
+    fn write_levels(&self, writer: &mut impl Write) {
+        self.part().write_range(writer);
+        if let BlobSection::Nested(nested) = self {
+            let _ = writer.write_all(&[nested.containers.len() as u8]);
+            for container in &nested.containers {
+                let _ = writer.write_all(&[container.encoding]);
+                container.write_range(writer);
+            }
+        }
+    }
 }
 
 impl FromStr for BlobId {
@@ -111,47 +280,74 @@ impl BlobId {
         BlobId {
             hash,
             class,
-            section: BlobSection {
-                offset_start,
-                size: offset_end - offset_start,
-                encoding: encoding.into(),
-            }
-            .into(),
+            section: BlobSection::new(offset_start, offset_end - offset_start, encoding.into())
+                .into(),
         }
     }
 
-    pub fn with_section_size(mut self, size: usize) -> Self {
-        self.section.get_or_insert_with(Default::default).size = size;
-        self
+    pub fn inner_part(&self, containers: &[EncodedRange], part: EncodedRange) -> Option<Self> {
+        let (mut levels, shift) = match &self.section {
+            None => (Vec::new(), 0),
+            Some(section) => {
+                let base = section.part();
+                let mut levels = Vec::with_capacity(
+                    section.containers().len() + usize::from(base.is_encoded()) + containers.len(),
+                );
+                levels.extend_from_slice(section.containers());
+                if base.is_encoded() {
+                    levels.push(*base);
+                    (levels, 0)
+                } else {
+                    (levels, base.offset_start)
+                }
+            }
+        };
+        let part = match containers.split_first() {
+            Some((first, rest)) => {
+                levels.push(first.shifted(shift)?);
+                levels.extend_from_slice(rest);
+                part
+            }
+            None => part.shifted(shift)?,
+        };
+        Some(BlobId {
+            hash: self.hash.clone(),
+            class: self.class.clone(),
+            section: Some(BlobSection::nested(levels, part)?),
+        })
     }
 
     #[inline]
     pub fn from_base32(value: impl AsRef<[u8]>) -> Option<Self> {
-        BlobId::from_iter(&mut Base32Reader::new(value.as_ref()))
+        BlobId::from_iter(&mut STALWART.decoder(value.as_ref()))
     }
 
     #[allow(clippy::should_implement_trait)]
-    pub fn from_iter<T, U>(it: &mut T) -> Option<Self>
+    pub fn from_iter<T>(it: &mut T) -> Option<Self>
     where
-        T: Iterator<Item = U> + Leb128Iterator<U>,
-        U: Borrow<u8>,
+        T: Leb128Iterator,
     {
-        let class = *it.next()?.borrow();
-        let encoding = class & 0x0F;
+        let class = it.next()?;
 
         let mut hash = BlobHash::default();
         for byte in hash.as_mut().iter_mut() {
-            *byte = *it.next()?.borrow();
+            *byte = it.next()?;
         }
 
         let account_id: u32 = it.next_leb128()?;
 
         BlobId {
             hash,
-            class: if (class & B_LINKED) != 0 {
+            class: if (class & B_EMBEDDED) != 0 {
+                BlobClass::Embedded {
+                    account_id,
+                    collection: it.next()?,
+                    document_id: it.next_leb128()?,
+                }
+            } else if (class & B_LINKED) != 0 {
                 BlobClass::Linked {
                     account_id,
-                    collection: *it.next()?.borrow(),
+                    collection: it.next()?,
                     document_id: it.next_leb128()?,
                 }
             } else {
@@ -160,70 +356,48 @@ impl BlobId {
                     expires: it.next_leb128()?,
                 }
             },
-            section: if encoding != 0 {
-                BlobSection {
-                    offset_start: it.next_leb128()?,
-                    size: it.next_leb128()?,
-                    encoding: encoding - 1,
-                }
-                .into()
-            } else {
-                None
-            },
+            section: BlobSection::from_leb128(it, class)?,
         }
         .into()
     }
 
-    fn serialize_as(&self, writer: &mut impl Leb128Writer) {
-        let marker = self
-            .section
-            .as_ref()
-            .map_or(0, |section| section.encoding + 1)
-            | if matches!(
-                self,
-                BlobId {
-                    class: BlobClass::Linked { .. },
-                    ..
-                }
-            ) {
-                B_LINKED
-            } else {
-                B_RESERVED
+    fn serialize_as(&self, writer: &mut impl Write) {
+        let marker = self.section.as_ref().map_or(0, BlobSection::marker)
+            | match self.class {
+                BlobClass::Linked { .. } => B_LINKED,
+                BlobClass::Embedded { .. } => B_EMBEDDED,
+                BlobClass::Reserved { .. } => B_RESERVED,
             };
 
-        let _ = writer.write(&[marker]);
-        let _ = writer.write(self.hash.as_ref());
+        let _ = writer.write_all(&[marker]);
+        let _ = writer.write_all(self.hash.as_ref());
 
         match &self.class {
             BlobClass::Reserved {
                 account_id,
                 expires,
             } => {
-                let _ = writer.write_leb128(*account_id);
-                let _ = writer.write_leb128(*expires);
+                let _ = writer.write_all(&account_id.to_leb128());
+                let _ = writer.write_all(&expires.to_leb128());
             }
             BlobClass::Linked {
                 account_id,
                 collection,
                 document_id,
+            }
+            | BlobClass::Embedded {
+                account_id,
+                collection,
+                document_id,
             } => {
-                let _ = writer.write_leb128(*account_id);
-                let _ = writer.write(&[*collection]);
-                let _ = writer.write_leb128(*document_id);
+                let _ = writer.write_all(&account_id.to_leb128());
+                let _ = writer.write_all(&[*collection]);
+                let _ = writer.write_all(&document_id.to_leb128());
             }
         }
 
         if let Some(section) = &self.section {
-            let _ = writer.write_leb128(section.offset_start);
-            let _ = writer.write_leb128(section.size);
-        }
-    }
-
-    pub fn start_offset(&self) -> usize {
-        if let Some(section) = &self.section {
-            section.offset_start
-        } else {
-            0
+            section.write_levels(writer);
         }
     }
 
@@ -237,7 +411,7 @@ impl serde::Serialize for BlobId {
     where
         S: serde::Serializer,
     {
-        serializer.serialize_str(self.to_string().as_str())
+        serializer.collect_str(self)
     }
 }
 
@@ -252,11 +426,15 @@ impl<'de> serde::Deserialize<'de> for BlobId {
 }
 
 impl std::fmt::Display for BlobId {
-    #[allow(clippy::unused_io_amount)]
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let mut writer = Base32Writer::with_capacity(std::mem::size_of::<BlobId>() * 2);
-        self.serialize_as(&mut writer);
-        f.write_str(&writer.finalize())
+        let mut bytes = Cursor::new([0u8; MAX_SERIALIZED_LEN]);
+        self.serialize_as(&mut bytes);
+        let len = bytes.position() as usize;
+        write!(
+            f,
+            "{}",
+            STALWART.display(bytes.get_ref().get(..len).unwrap_or_default())
+        )
     }
 }
 
@@ -265,3 +443,4 @@ impl<'x, P: Property, E: Element + From<BlobId>> From<BlobId> for Value<'x, P, E
         Value::Element(E::from(id))
     }
 }
+

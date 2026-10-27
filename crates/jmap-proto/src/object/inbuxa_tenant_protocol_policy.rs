@@ -66,16 +66,17 @@ impl Property for TenantProtocolPolicyProperty {
 
 impl TenantProtocolPolicyProperty {
     fn parse(value: &str) -> Option<Self> {
-        hashify::tiny_map!(value.as_bytes(),
-            b"id" => TenantProtocolPolicyProperty::Id,
-            b"tenantId" => TenantProtocolPolicyProperty::TenantId,
-            b"legacyProtocols" => TenantProtocolPolicyProperty::LegacyProtocols,
-            b"imap" => TenantProtocolPolicyProperty::Imap,
-            b"pop3" => TenantProtocolPolicyProperty::Pop3,
-            b"manageSieve" => TenantProtocolPolicyProperty::ManageSieve,
-            b"changedAt" => TenantProtocolPolicyProperty::ChangedAt,
-            b"changedBy" => TenantProtocolPolicyProperty::ChangedBy,
-            b"recentLegacyUse" => TenantProtocolPolicyProperty::RecentLegacyUse,
+        hashify::fnc_map!(value.as_bytes(),
+            b"id" => Some(TenantProtocolPolicyProperty::Id),
+            b"tenantId" => Some(TenantProtocolPolicyProperty::TenantId),
+            b"legacyProtocols" => Some(TenantProtocolPolicyProperty::LegacyProtocols),
+            b"imap" => Some(TenantProtocolPolicyProperty::Imap),
+            b"pop3" => Some(TenantProtocolPolicyProperty::Pop3),
+            b"manageSieve" => Some(TenantProtocolPolicyProperty::ManageSieve),
+            b"changedAt" => Some(TenantProtocolPolicyProperty::ChangedAt),
+            b"changedBy" => Some(TenantProtocolPolicyProperty::ChangedBy),
+            b"recentLegacyUse" => Some(TenantProtocolPolicyProperty::RecentLegacyUse),
+            _ => None,
         )
     }
 }

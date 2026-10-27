@@ -88,10 +88,12 @@ pub async fn test(test: &TestServer) {
             .await
             .with_status(StatusCode::OK);
         if is_file {
+            // inbuxa: 1.0 takes ACLs on folders only; a file inherits its
+            // folder's, so an ACL on the file itself is refused
             owner_client
                 .acl(&owner_file, sharee_principal.as_str(), ["read"])
                 .await
-                .with_status(StatusCode::OK);
+                .with_status(StatusCode::FORBIDDEN);
         }
         sharee_client
             .propfind_with_headers(
@@ -261,7 +263,7 @@ pub async fn test(test: &TestServer) {
                     ["read", "write-content", "write-properties"],
                 )
                 .await
-                .with_status(StatusCode::OK);
+                .with_status(StatusCode::FORBIDDEN);
         }
         let response = owner_client
             .propfind(&owner_folder, [DavProperty::WebDav(WebDavProperty::Acl)])
@@ -318,6 +320,20 @@ pub async fn test(test: &TestServer) {
             .request("PUT", &owner_file, &owner_file_content)
             .await
             .with_status(StatusCode::NO_CONTENT);
+        // inbuxa: 1.0 maps write-content to changing members only; adding one
+        // takes DAV:bind (RFC 3744 3.9), so grant it and try again
+        sharee_client
+            .request("PUT", &sharee_created_file, resource_type.generate())
+            .await
+            .with_status(StatusCode::FORBIDDEN);
+        owner_client
+            .acl(
+                &owner_folder,
+                sharee_principal.as_str(),
+                ["read", "write-content", "write-properties", "bind"],
+            )
+            .await
+            .with_status(StatusCode::OK);
         sharee_client
             .request("PUT", &sharee_created_file, resource_type.generate())
             .await
@@ -332,7 +348,7 @@ pub async fn test(test: &TestServer) {
             owner_client
                 .acl(&owner_file, sharee_principal.as_str(), ["read", "write"])
                 .await
-                .with_status(StatusCode::OK);
+                .with_status(StatusCode::FORBIDDEN);
             owner_client
                 .acl(
                     &sharee_created_file,
@@ -340,7 +356,7 @@ pub async fn test(test: &TestServer) {
                     ["read", "write"],
                 )
                 .await
-                .with_status(StatusCode::OK);
+                .with_status(StatusCode::FORBIDDEN);
         }
         sharee_client
             .request_with_headers(
@@ -355,10 +371,24 @@ pub async fn test(test: &TestServer) {
             .request("DELETE", &sharee_created_file, "")
             .await
             .with_status(StatusCode::NO_CONTENT);
-        sharee_client
-            .request("DELETE", &owner_folder, "")
-            .await
-            .with_status(StatusCode::NO_CONTENT);
+        if is_file {
+            sharee_client
+                .request("DELETE", &owner_folder, "")
+                .await
+                .with_status(StatusCode::NO_CONTENT);
+        } else {
+            // inbuxa: in 1.0 no DAV privilege lets a sharee remove a shared
+            // calendar or address book itself (that is unbind on the owner's
+            // home), so only the owner can
+            sharee_client
+                .request("DELETE", &owner_folder, "")
+                .await
+                .with_status(StatusCode::FORBIDDEN);
+            owner_client
+                .request("DELETE", &owner_folder, "")
+                .await
+                .with_status(StatusCode::NO_CONTENT);
+        }
 
         // Test 12: Share and unshare a resource
         owner_client

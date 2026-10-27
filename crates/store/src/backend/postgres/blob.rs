@@ -6,11 +6,9 @@
  * Modified by Coffey Labs in 2026 for INBUXA.
  */
 
-use std::ops::Range;
-
-use crate::backend::postgres::into_pool_error;
-
 use super::{PostgresStore, bounded, into_error};
+use crate::backend::postgres::into_pool_error;
+use std::ops::Range;
 
 impl PostgresStore {
     pub(crate) async fn get_blob(

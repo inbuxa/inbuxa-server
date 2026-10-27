@@ -52,7 +52,7 @@ five flagged fields are nullable strings. Null means "use the built-in".
 
 | Object | Field | Schema type | Meaning |
 |---|---|---|---|
-| `x:Enterprise` (singleton) | `logoUrl` | `Uri?` | The server-wide default logo |
+| `x:Enterprise` (singleton) | `logo` | `String?` | The server-wide default logo |
 | `x:Domain` | `logo` | `String?` | The domain's logo: "URL or base64-encoded image" |
 | `x:CalendarAlarm` (singleton) | `template` | `Html?` | Replaces the built-in alarm email |
 | `x:CalendarScheduling` (singleton) | `emailTemplate` | `Html?` | Replaces the built-in iMIP email |
@@ -62,10 +62,10 @@ Related, not flagged, and unchanged:
 
 - `x:Tenant.logo` (multi-tenancy spec).
 - `x:CalendarAlarm`: `enable`, `fromName` (default `INBUXA Calendar` in the
-  fork), `fromEmail`, `allowExternalRcpts`, `minTriggerInterval`.
+  fork), `fromAddress`, `allowExternalRcpts`, `minTriggerInterval`.
 - `x:CalendarScheduling`: `enable`, `httpRsvpEnable` (default true),
   `httpRsvpUrl`, `httpRsvpLinkExpiry` (default 90 days), `autoAddInvitations`,
-  `itipMaxSize`, `maxRecipients`.
+  `maxItipSize`, `maxRecipients`.
 - `x:Enterprise.licenseKey` and `apiKey`. There's no license (SPEC.md §4).
   **Decision**: they stay readable and writable so existing data round-trips,
   and are ignored.
@@ -87,7 +87,7 @@ Each requirement has an ID, and tests name the IDs they check.
 - **BT-1.** Logos are resolved for a domain name. For a name D:
   1. the `logo` of the `x:Domain` whose `name` or `aliases` match D;
   2. else the `logo` of that domain's tenant (`memberTenantId`);
-  3. else `x:Enterprise.logoUrl`;
+  3. else `x:Enterprise.logo`;
   4. else the built-in INBUXA logo.
   This is the order upstream documents. **Decision** on matching: exact match
   first, then D with its leftmost label removed, repeated while at least two
@@ -109,7 +109,7 @@ Each requirement has an ID, and tests name the IDs they check.
     `image/gif`, `image/webp` or `image/svg+xml`.
   **Decision** on writes: anything else is refused with `invalidProperties`
   naming the field, and so is a data URL whose decoded image is over 256 KiB
-  or whose bytes don't match its declared type. `logoUrl` takes the same two
+  or whose bytes don't match its declared type. `x:Enterprise.logo` takes the same two
   forms: a data URL is a valid URI.
 - **BT-4.** Stored values that predate the fork are read as they are, never
   rewritten, and never refused on read. **Decision** on odd ones: a bare
@@ -149,7 +149,7 @@ Each requirement has an ID, and tests name the IDs they check.
   that can be embedded, ending at the built-in PNG.
 - **BT-10.** A logo change takes effect without a restart, on every node of a
   cluster, through the existing `DomainLogo` and `TenantLogo` cache
-  invalidations. A change to `logoUrl` clears the whole logo cache.
+  invalidations. A change to `x:Enterprise.logo` clears the whole logo cache.
 
 ### Email templates
 
@@ -208,7 +208,7 @@ Each requirement has an ID, and tests name the IDs they check.
   client's business. The plain-text part of each email is still generated from
   the rendered HTML, as today.
 - **BT-17.** Subjects, sender names and addresses aren't templated. They stay
-  as the shared code builds them, with `fromName` and `fromEmail` for alarms.
+  as the shared code builds them, with `fromName` and `fromAddress` for alarms.
 - **BT-18.** A template change takes effect for the next email rendered, with
   no restart and no settings reload. **Decision**, matching undelete UD-6a:
   whether upstream needs a reload is open question 4.
@@ -243,7 +243,7 @@ Each requirement has an ID, and tests name the IDs they check.
 
 ### Who can change what
 
-- **BT-24.** The three templates and `logoUrl` live on server-wide singletons.
+- **BT-24.** The three templates and `x:Enterprise.logo` live on server-wide singletons.
   Only a principal in no tenant, holding the matching `sys*Update`
   permission, can change them. A principal in a tenant can't, whatever its
   permissions (multi-tenancy MT-2).
@@ -301,7 +301,7 @@ marked **(compat)** also runs against a copy of INBUXA's data.
 
 1. Nothing set: `/logo` answers `404`, and alarm and invite emails carry the
    built-in INBUXA PNG, referenced by `cid:` (BT-1, BT-5, BT-9).
-2. `logoUrl` set to a PNG data URL: `/logo` answers `200` `image/png` with the
+2. `x:Enterprise.logo` set to a PNG data URL: `/logo` answers `200` `image/png` with the
    bytes, and emails embed it (BT-1, BT-5, BT-9).
 3. Tenant T with a logo, its domain without one: `/logo?domain=` for the
    domain gives T's logo. With the domain's own logo set, the domain's wins
@@ -336,7 +336,7 @@ marked **(compat)** also runs against a copy of INBUXA's data.
     BT-21's headers. With `httpRsvpEnable` false, the page and the API are
     both gone (BT-20, BT-21).
 16. A tenant administrator can set its domain's logo, but can't change
-    `logoUrl`, any template, or its tenant's logo (BT-24, BT-25).
+    `x:Enterprise.logo`, any template, or its tenant's logo (BT-24, BT-25).
 17. The built-in sign-in and RSVP pages show a URL logo through `/logo`'s
     redirect, and their built-in logo when `/logo` is `404` (BT-26).
 18. **(compat)** Every logo and template INBUXA holds reads back unchanged, and
@@ -348,7 +348,7 @@ To check read-only against INBUXA's live Enterprise server before
 implementation. None blocks the spec. Items 2 and 5 need a write, so they need
 the operator's approval first, as with the other features' probes.
 
-1. **What INBUXA holds.** Read `x:Enterprise.logoUrl`, every `x:Domain.logo`
+1. **What INBUXA holds.** Read `x:Enterprise.logo`, every `x:Domain.logo`
    and `x:Tenant.logo`, and the three template fields. If all are null, test 18
    has nothing to carry over. Note the forms any logos take (URL, data URL,
    bare base64), which BT-4 depends on.
@@ -412,7 +412,7 @@ Settled on 2026-09-18 against INBUXA's live Enterprise server (Stalwart
 0.16.22), read-only, as a server-level administrator and the throwaway test
 account. No upstream code was read.
 
-1. **What INBUXA holds** (open question 1). `x:Enterprise.logoUrl`, all three
+1. **What INBUXA holds** (open question 1). `x:Enterprise.logo`, all three
    templates and every tenant logo are null. Six of nine domains had a logo:
    four held the same `https:` URL, pointing at a retired website that now
    answers with an HTML page, and two held the literal string `admin`. With

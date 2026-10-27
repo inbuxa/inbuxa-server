@@ -2,14 +2,20 @@
  * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
+ *
+ * Modified by Coffey Labs in 2026 for INBUXA.
  */
 
 use crate::{
     smtp::session::TestSession,
     utils::{dns::DnsCache, server::TestServerBuilder},
 };
-use common::{BuildServer, config::smtp::queue::QueueName, ipc::QueueEvent};
-use mail_auth::{DnssecStatus, MX};
+use common::{
+    BuildServer,
+    config::smtp::queue::QueueName,
+    ipc::{QueueEvent, QueueRefresh},
+};
+use mail_auth::{DnssecStatus, Mx};
 use registry::{
     schema::{
         enums::NetworkListenerProtocol,
@@ -181,7 +187,7 @@ async fn virtual_queue() {
     // Add mock DNS entries
     local.server.mx_add(
         "foobar.org",
-        vec![MX {
+        vec![Mx {
             exchanges: vec!["mx.foobar.org".into()].into_boxed_slice(),
             preference: 10,
         }],
@@ -206,7 +212,7 @@ async fn virtual_queue() {
         let server = inner.build_server();
         server.mx_add(
             "foobar.org",
-            vec![MX {
+            vec![Mx {
                 exchanges: vec!["mx.foobar.org".into()].into_boxed_slice(),
                 preference: 10,
             }],
@@ -240,7 +246,12 @@ async fn virtual_queue() {
 
     // Wake up all queues
     for inner in &inners {
-        inner.ipc.queue_tx.send(QueueEvent::Refresh).await.unwrap();
+        inner
+            .ipc
+            .queue_tx
+            .send(QueueEvent::Refresh(QueueRefresh::All))
+            .await
+            .unwrap();
     }
     for _ in 0..(NUM_MESSAGES / 2) {
         session
@@ -266,7 +277,7 @@ async fn virtual_queue() {
                 e.len()
             );
             /*for inner in &inners {
-                inner.ipc.queue_tx.send(QueueEvent::Refresh).await.unwrap();
+                inner.ipc.queue_tx.send(QueueEvent::Refresh(QueueRefresh::All)).await.unwrap();
             }*/
         } else {
             break;

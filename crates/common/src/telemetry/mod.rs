@@ -95,30 +95,6 @@ impl Telemetry {
         Collector::set_metrics(self.metrics);
         Collector::reload();
     }
-
-    #[cfg(feature = "test_mode")]
-    pub fn test_tracer(level: trc::Level) {
-        let mut interests = trc::ipc::subscriber::Interests::default();
-        for event in trc::EventType::variants() {
-            if level.is_contained(event.level()) {
-                interests.set(*event);
-            }
-        }
-
-        spawn_console_tracer(
-            SubscriberBuilder::new("stderr".to_string())
-                .with_interests(interests.clone())
-                .with_lossy(false),
-            crate::config::telemetry::ConsoleTracer {
-                ansi: true,
-                multiline: false,
-                buffered: false,
-            },
-        );
-
-        Collector::union_interests(interests);
-        Collector::reload();
-    }
 }
 
 impl TelemetrySubscriberType {
@@ -132,7 +108,7 @@ impl TelemetrySubscriberType {
             TelemetrySubscriberType::OtelTracer(settings) => spawn_otel_tracer(builder, settings),
             // inbuxa: MON-10: trace history
             TelemetrySubscriberType::StoreTracer(settings) => {
-                tracers::store::spawn_store_tracer(builder, settings.tracing, settings.data)
+                tracers::store::spawn_store_tracer(builder, settings)
             }
             #[cfg(unix)]
             TelemetrySubscriberType::JournalTracer(subscriber) => {
@@ -141,3 +117,4 @@ impl TelemetrySubscriberType {
         }
     }
 }
+

@@ -2,6 +2,8 @@
  * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
+ *
+ * Modified by Coffey Labs in 2026 for INBUXA.
  */
 
 use crate::utils::{
@@ -262,7 +264,8 @@ impl Account {
     }
 
     pub async fn reload_settings(&self) {
-        self.registry_create_object(Action::ReloadSettings).await;
+        self.registry_create_object(Action::ReloadSettings(Default::default()))
+            .await;
     }
 
     pub async fn reload_lookup_stores(&self) {
@@ -458,9 +461,15 @@ fn remove_server_set_props(typ: ObjectType, value: &mut serde_json::Value) {
                 "retireAt",
                 "accountKey",
                 "accountUri",
+                // inbuxa: 1.0 adds these server-set AcmeProvider fields
+                "accountHashPrefix",
+                "issuerDomainNames",
+                "caaIdentities",
             ]
             .contains(&k.as_str())
                 || (is_app_pass && k == "secret")
+                // inbuxa: 1.0's action results carry server-set warnings
+                || (typ == ObjectType::Action && k == "warnings")
                 || (k == "memberTenantId" && v.is_null()))
         });
         for v in obj.values_mut() {

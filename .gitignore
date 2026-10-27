@@ -19,3 +19,5 @@ tools/fork/cutover-rehearsal/__pycache__/
 tools/fork/cutover-rehearsal/before.json
 tools/fork/cutover-rehearsal/phase2_notes.json
 tools/fork/__pycache__/
+tools/registry-gen/__pycache__/
+tools/registry-gen/out/

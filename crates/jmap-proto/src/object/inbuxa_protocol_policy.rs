@@ -78,19 +78,20 @@ impl Property for ProtocolPolicyProperty {
 
 impl ProtocolPolicyProperty {
     fn parse(value: &str) -> Option<Self> {
-        hashify::tiny_map!(value.as_bytes(),
-            b"id" => ProtocolPolicyProperty::Id,
-            b"legacyProtocols" => ProtocolPolicyProperty::LegacyProtocols,
-            b"imap" => ProtocolPolicyProperty::Imap,
-            b"pop3" => ProtocolPolicyProperty::Pop3,
-            b"manageSieve" => ProtocolPolicyProperty::ManageSieve,
-            b"closeSubmission" => ProtocolPolicyProperty::CloseSubmission,
-            b"savedListeners" => ProtocolPolicyProperty::SavedListeners,
-            b"changedAt" => ProtocolPolicyProperty::ChangedAt,
-            b"changedBy" => ProtocolPolicyProperty::ChangedBy,
-            b"recentLegacyUse" => ProtocolPolicyProperty::RecentLegacyUse,
-            b"lockedProtocols" => ProtocolPolicyProperty::LockedProtocols,
-            b"wouldClose" => ProtocolPolicyProperty::WouldClose,
+        hashify::fnc_map!(value.as_bytes(),
+            b"id" => Some(ProtocolPolicyProperty::Id),
+            b"legacyProtocols" => Some(ProtocolPolicyProperty::LegacyProtocols),
+            b"imap" => Some(ProtocolPolicyProperty::Imap),
+            b"pop3" => Some(ProtocolPolicyProperty::Pop3),
+            b"manageSieve" => Some(ProtocolPolicyProperty::ManageSieve),
+            b"closeSubmission" => Some(ProtocolPolicyProperty::CloseSubmission),
+            b"savedListeners" => Some(ProtocolPolicyProperty::SavedListeners),
+            b"changedAt" => Some(ProtocolPolicyProperty::ChangedAt),
+            b"changedBy" => Some(ProtocolPolicyProperty::ChangedBy),
+            b"recentLegacyUse" => Some(ProtocolPolicyProperty::RecentLegacyUse),
+            b"lockedProtocols" => Some(ProtocolPolicyProperty::LockedProtocols),
+            b"wouldClose" => Some(ProtocolPolicyProperty::WouldClose),
+            _ => None,
         )
     }
 }

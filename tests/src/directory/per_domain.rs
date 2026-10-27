@@ -90,7 +90,7 @@ fn broken_directory(description: &str) -> structs::Directory {
 
 fn domain(name: &str, directory_id: Option<Id>) -> Domain {
     Domain {
-        is_enabled: true,
+        enable: true,
         name: name.to_string(),
         certificate_management: CertificateManagement::Manual,
         dns_management: DnsManagement::Manual,
@@ -112,7 +112,7 @@ async fn sign_in(test: &TestServer, user: &str, secret: &str) -> trc::Result<u32
             IpAddr::from([127, 0, 0, 1]),
         ))
         .await
-        .map(|token| token.account_id())
+        .map(|token| token.access_token.account_id())
 }
 
 async fn account_of(test: &TestServer, address: &str) -> Option<u32> {

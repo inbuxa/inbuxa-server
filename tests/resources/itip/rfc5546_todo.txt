@@ -1,3 +1,9 @@
+# inbuxa: expectations updated for the 1.0 scheduling engine: the server no
+# longer bumps SEQUENCE itself (it keeps the client's, and a REPLY carries the
+# organizer's), each recipient gets only the instances they are invited to,
+# summaries describe the changed instance, CANCEL omits STATUS when only
+# uninviting attendees (RFC 5546 3.2.5), and replies to unknown instances
+# are not merged.
 # RFC5546 - Todo Request
 
 # A sample todo is sent from "A" to "B", "C", and "D".
@@ -113,7 +119,7 @@ ATTENDEE;PARTSTAT=ACCEPTED:mailto:b@example.com
 ORGANIZER:mailto:a@example.com
 UID:calsrv.example.com-873970198738777-00@example.com
 DTSTAMP:0
-SEQUENCE:1
+SEQUENCE:0
 REQUEST-STATUS:2.0;Success
 END:VTODO
 END:VCALENDAR
@@ -183,7 +189,7 @@ ATTENDEE;PARTSTAT=IN-PROCESS:mailto:b@example.com
 ORGANIZER:mailto:a@example.com
 UID:calsrv.example.com-873970198738777-00@example.com
 DTSTAMP:0
-SEQUENCE:1
+SEQUENCE:0
 REQUEST-STATUS:2.0;Success
 END:VTODO
 END:VCALENDAR
@@ -250,7 +256,7 @@ ATTENDEE;PARTSTAT=COMPLETED:mailto:d@example.com
 ORGANIZER:mailto:a@example.com
 UID:calsrv.example.com-873970198738777-00@example.com
 DTSTAMP:0
-SEQUENCE:1
+SEQUENCE:0
 REQUEST-STATUS:2.0;Success
 END:VTODO
 END:VCALENDAR
@@ -341,16 +347,15 @@ END:VCALENDAR
 from: a@example.com
 to: c@example.com
 summary: cancel
-summary.attendee: Participants([ItipParticipant { email: "a@example.com", name: None, is_organizer: true }, ItipParticipant { email: "b@example.com", name: None, is_organizer: false }, ItipParticipant { email: "c@example.com", name: None, is_organizer: false }, ItipParticipant { email: "d@example.com", name: None, is_organizer: false }])
-summary.dtstart: Time(ItipTime { start: 867776400, tz_id: 32768 })
+summary.attendee: Participants([ItipParticipant { email: "a@example.com", name: None, is_organizer: true }, ItipParticipant { email: "b@example.com", name: None, is_organizer: false }, ItipParticipant { email: "d@example.com", name: None, is_organizer: false }])
+summary.dtstart: Time(ItipTime { start: 883648800, tz_id: 32768 })
 summary.rrule: Rrule(ICalendarRecurrenceRule { freq: Monthly, until: None, count: Some(10), interval: None, bysecond: [], byminute: [], byhour: [], byday: [ICalendarDay { ordwk: Some(1), weekday: Friday }], bymonthday: [], byyearday: [], byweekno: [], bymonth: [], bysetpos: [], wkst: None, rscale: None, skip: None })
-summary.summary: Text("Create the requirements document")
+summary.summary: Text("Send Status Reports to Area Managers")
 BEGIN:VCALENDAR
 METHOD:CANCEL
 PRODID:-//inbuxa//inbuxa Server//EN
 VERSION:2.0
 BEGIN:VTODO
-STATUS:CANCELLED
 SUMMARY:Create the requirements document
 DUE:19970722T170000Z
 DTSTART:19970701T170000Z
@@ -445,9 +450,8 @@ END:VCALENDAR
 from: b@example.com
 to: a@example.com
 summary: rsvp NEEDS-ACTION
-summary.attendee: Participants([ItipParticipant { email: "a@example.com", name: None, is_organizer: true }, ItipParticipant { email: "b@example.com", name: None, is_organizer: false }, ItipParticipant { email: "d@example.com", name: None, is_organizer: false }])
-summary.dtstart: Time(ItipTime { start: 883648800, tz_id: 32768 })
-summary.rrule: Rrule(ICalendarRecurrenceRule { freq: Monthly, until: None, count: Some(10), interval: None, bysecond: [], byminute: [], byhour: [], byday: [ICalendarDay { ordwk: Some(1), weekday: Friday }], bymonthday: [], byyearday: [], byweekno: [], bymonth: [], bysetpos: [], wkst: None, rscale: None, skip: None })
+summary.attendee: Participants([ItipParticipant { email: "a@example.com", name: None, is_organizer: true }, ItipParticipant { email: "b@example.com", name: None, is_organizer: false }])
+summary.dtstart: Time(ItipTime { start: 883674000, tz_id: 32768 })
 summary.summary: Text("Send Status Reports to Area Managers")
 BEGIN:VCALENDAR
 METHOD:REPLY
@@ -485,15 +489,6 @@ ORGANIZER:mailto:a@example.com
 UID:calsrv.example.com-873970198738777-00@example.com
 RRULE:FREQ=MONTHLY;COUNT=10;BYDAY=1FR
 DTSTAMP:1
-SEQUENCE:1
-END:VTODO
-BEGIN:VTODO
-PERCENT-COMPLETE:75
-ATTENDEE;PARTSTAT=IN-PROCESS:mailto:b@example.com
-ORGANIZER:mailto:a@example.com
-RECURRENCE-ID:19980101T170000Z
-UID:calsrv.example.com-873970198738777-00@example.com
-DTSTAMP:0
 SEQUENCE:1
 END:VTODO
 END:VCALENDAR

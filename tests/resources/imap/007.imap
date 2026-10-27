@@ -11,7 +11,7 @@ BODY (
                   "charset" "us-ascii"
                ) NIL NIL "7bit" 1 0
             )(
-               "image" "jpeg" NIL NIL NIL NIL 1
+               "image" "jpeg" NIL NIL NIL "7bit" 1
             )(
                "text" "plain" (
                   "charset" "us-ascii"
@@ -23,15 +23,15 @@ BODY (
                   "charset" "us-ascii"
                ) NIL NIL "7bit" 14 0
             )(
-               "image" "jpeg" NIL NIL NIL NIL 1
+               "image" "jpeg" NIL NIL NIL "7bit" 1
             ) "related"
          ) "alternative"
       )(
-         "image" "jpeg" NIL NIL NIL NIL 1
+         "image" "jpeg" NIL NIL NIL "7bit" 1
       )(
-         "application" "x-excel" NIL NIL NIL NIL 1
+         "application" "x-excel" NIL NIL NIL "7bit" 1
       )(
-         "message" "rfc822" NIL NIL NIL NIL 13 (
+         "message" "rfc822" NIL NIL NIL "7bit" 13 (
             NIL "J" (
                (
                   NIL NIL "unknown" "localhost"
@@ -49,7 +49,7 @@ BODY (
             "text" "plain" (
                "charset" "us-ascii"
             ) NIL NIL "7bit" 1 0
-         ) 0
+         ) 2
       ) "mixed"
    )(
       "text" "plain" (
@@ -62,7 +62,7 @@ BODYSTRUCTURE (
    (
       "text" "plain" (
          "charset" "us-ascii"
-      ) NIL NIL "7bit" 1 0 "7fc56270e7a70fa81a5935b72eacbe29" (
+      ) NIL NIL "7bit" 1 0 NIL (
          "inline" NIL
       ) NIL NIL
    )(
@@ -71,17 +71,17 @@ BODYSTRUCTURE (
             (
                "text" "plain" (
                   "charset" "us-ascii"
-               ) NIL NIL "7bit" 1 0 "9d5ed678fe57bcca610140957afab571" (
+               ) NIL NIL "7bit" 1 0 NIL (
                   "inline" NIL
                ) NIL NIL
             )(
-               "image" "jpeg" NIL NIL NIL NIL 1 "0d61f8370cad1d412f80b84d143e1257" (
+               "image" "jpeg" NIL NIL NIL "7bit" 1 NIL (
                   "inline" NIL
                ) NIL NIL
             )(
                "text" "plain" (
                   "charset" "us-ascii"
-               ) NIL NIL "7bit" 1 0 "f623e75af30e62bbd73d6df5b50bb7b5" (
+               ) NIL NIL "7bit" 1 0 NIL (
                   "inline" NIL
                ) NIL NIL
             ) "mixed" (
@@ -91,9 +91,9 @@ BODYSTRUCTURE (
             (
                "text" "html" (
                   "charset" "us-ascii"
-               ) NIL NIL "7bit" 14 0 "ece7293a99c7e12f8d044b683e5c2f33" NIL NIL NIL
+               ) NIL NIL "7bit" 14 0 NIL NIL NIL NIL
             )(
-               "image" "jpeg" NIL NIL NIL NIL 1 "800618943025315f869e4e1f09471012" NIL NIL NIL
+               "image" "jpeg" NIL NIL NIL "7bit" 1 NIL NIL NIL NIL
             ) "related" (
                "boundary" "5"
             ) NIL NIL NIL
@@ -101,13 +101,13 @@ BODYSTRUCTURE (
             "boundary" "3"
          ) NIL NIL NIL
       )(
-         "image" "jpeg" NIL NIL NIL NIL 1 "dfcf28d0734569a6a693bc8194de62bf" (
+         "image" "jpeg" NIL NIL NIL "7bit" 1 NIL (
             "attachment" NIL
          ) NIL NIL
       )(
-         "application" "x-excel" NIL NIL NIL NIL 1 "c1d9f50f86825a1a2302ec2449c17196" NIL NIL NIL
+         "application" "x-excel" NIL NIL NIL "7bit" 1 NIL NIL NIL NIL
       )(
-         "message" "rfc822" NIL NIL NIL NIL 13 (
+         "message" "rfc822" NIL NIL NIL "7bit" 13 (
             NIL "J" (
                (
                   NIL NIL "unknown" "localhost"
@@ -124,15 +124,15 @@ BODYSTRUCTURE (
          ) (
             "text" "plain" (
                "charset" "us-ascii"
-            ) NIL NIL "7bit" 1 0 "ff44570aca8241914870afbc310cdb85" NIL NIL NIL
-         ) 0 "9c9888d1b2c167dd33f7542df5a65aa7" NIL NIL NIL
+            ) NIL NIL "7bit" 1 0 NIL NIL NIL NIL
+         ) 2 NIL NIL NIL NIL
       ) "mixed" (
          "boundary" "2"
       ) NIL NIL NIL
    )(
       "text" "plain" (
          "charset" "us-ascii"
-      ) NIL NIL "7bit" 1 0 "a5f3c6a11b03839d46af9fb43c97c188" (
+      ) NIL NIL "7bit" 1 0 NIL (
          "inline" NIL
       ) NIL NIL
    ) "mixed" (
@@ -144,7 +144,7 @@ BODYSTRUCTURE UTF8=ACCEPT (
    (
       "text" "plain" (
          "charset" "us-ascii"
-      ) NIL NIL "7bit" 1 0 "7fc56270e7a70fa81a5935b72eacbe29" (
+      ) NIL NIL "7bit" 1 0 NIL (
          "inline" NIL
       ) NIL NIL
    )(
@@ -153,17 +153,17 @@ BODYSTRUCTURE UTF8=ACCEPT (
             (
                "text" "plain" (
                   "charset" "us-ascii"
-               ) NIL NIL "7bit" 1 0 "9d5ed678fe57bcca610140957afab571" (
+               ) NIL NIL "7bit" 1 0 NIL (
                   "inline" NIL
                ) NIL NIL
             )(
-               "image" "jpeg" NIL NIL NIL NIL 1 "0d61f8370cad1d412f80b84d143e1257" (
+               "image" "jpeg" NIL NIL NIL "7bit" 1 NIL (
                   "inline" NIL
                ) NIL NIL
             )(
                "text" "plain" (
                   "charset" "us-ascii"
-               ) NIL NIL "7bit" 1 0 "f623e75af30e62bbd73d6df5b50bb7b5" (
+               ) NIL NIL "7bit" 1 0 NIL (
                   "inline" NIL
                ) NIL NIL
             ) "mixed" (
@@ -173,9 +173,9 @@ BODYSTRUCTURE UTF8=ACCEPT (
             (
                "text" "html" (
                   "charset" "us-ascii"
-               ) NIL NIL "7bit" 14 0 "ece7293a99c7e12f8d044b683e5c2f33" NIL NIL NIL
+               ) NIL NIL "7bit" 14 0 NIL NIL NIL NIL
             )(
-               "image" "jpeg" NIL NIL NIL NIL 1 "800618943025315f869e4e1f09471012" NIL NIL NIL
+               "image" "jpeg" NIL NIL NIL "7bit" 1 NIL NIL NIL NIL
             ) "related" (
                "boundary" "5"
             ) NIL NIL NIL
@@ -183,13 +183,13 @@ BODYSTRUCTURE UTF8=ACCEPT (
             "boundary" "3"
          ) NIL NIL NIL
       )(
-         "image" "jpeg" NIL NIL NIL NIL 1 "dfcf28d0734569a6a693bc8194de62bf" (
+         "image" "jpeg" NIL NIL NIL "7bit" 1 NIL (
             "attachment" NIL
          ) NIL NIL
       )(
-         "application" "x-excel" NIL NIL NIL NIL 1 "c1d9f50f86825a1a2302ec2449c17196" NIL NIL NIL
+         "application" "x-excel" NIL NIL NIL "7bit" 1 NIL NIL NIL NIL
       )(
-         "message" "rfc822" NIL NIL NIL NIL 13 (
+         "message" "rfc822" NIL NIL NIL "7bit" 13 (
             NIL "J" (
                (
                   NIL NIL "unknown" "localhost"
@@ -206,15 +206,15 @@ BODYSTRUCTURE UTF8=ACCEPT (
          ) (
             "text" "plain" (
                "charset" "us-ascii"
-            ) NIL NIL "7bit" 1 0 "ff44570aca8241914870afbc310cdb85" NIL NIL NIL
-         ) 0 "9c9888d1b2c167dd33f7542df5a65aa7" NIL NIL NIL
+            ) NIL NIL "7bit" 1 0 NIL NIL NIL NIL
+         ) 2 NIL NIL NIL NIL
       ) "mixed" (
          "boundary" "2"
       ) NIL NIL NIL
    )(
       "text" "plain" (
          "charset" "us-ascii"
-      ) NIL NIL "7bit" 1 0 "a5f3c6a11b03839d46af9fb43c97c188" (
+      ) NIL NIL "7bit" 1 0 NIL (
          "inline" NIL
       ) NIL NIL
    ) "mixed" (
@@ -473,7 +473,7 @@ Content-Disposition: inline
 BODY[1.TEXT] {1}
 A
 ----------------------------------
-BODY[1.MIME] {55}
+BODY[1.MIME] {54}
 Content-Type: text/plain
 Content-Disposition: inline
 
@@ -663,7 +663,7 @@ J
 --2--
 
 ----------------------------------
-BODY[2.MIME] {46}
+BODY[2.MIME] {45}
 Content-Type: multipart/mixed; boundary="2"
 
 
@@ -786,7 +786,7 @@ F
 --3-- 
 
 ----------------------------------
-BODY[2.1.MIME] {52}
+BODY[2.1.MIME] {51}
 Content-Type: multipart/alternative; boundary="3"
 
 
@@ -855,7 +855,7 @@ D
 --4--
 
 ----------------------------------
-BODY[2.1.1.MIME] {46}
+BODY[2.1.1.MIME] {45}
 Content-Type: multipart/mixed; boundary="4"
 
 
@@ -875,7 +875,7 @@ Content-Disposition: inline
 BODY[2.1.1.1.TEXT] {1}
 B
 ----------------------------------
-BODY[2.1.1.1.MIME] {55}
+BODY[2.1.1.1.MIME] {54}
 Content-Type: text/plain
 Content-Disposition: inline
 
@@ -902,7 +902,7 @@ Content-Disposition: inline
 BODY[2.1.1.2.TEXT] {1}
 C
 ----------------------------------
-BODY[2.1.1.2.MIME] {55}
+BODY[2.1.1.2.MIME] {54}
 Content-Type: image/jpeg
 Content-Disposition: inline
 
@@ -929,7 +929,7 @@ Content-Disposition: inline
 BODY[2.1.1.3.TEXT] {1}
 D
 ----------------------------------
-BODY[2.1.1.3.MIME] {55}
+BODY[2.1.1.3.MIME] {54}
 Content-Type: text/plain
 Content-Disposition: inline
 
@@ -984,7 +984,7 @@ F
 --5--  
 
 ----------------------------------
-BODY[2.1.2.MIME] {48}
+BODY[2.1.2.MIME] {47}
 Content-Type: multipart/related; boundary="5"
 
 
@@ -1003,7 +1003,7 @@ Content-Type: text/html
 BODY[2.1.2.1.TEXT] {14}
 <html>E</html>
 ----------------------------------
-BODY[2.1.2.1.MIME] {26}
+BODY[2.1.2.1.MIME] {25}
 Content-Type: text/html
 
 
@@ -1028,7 +1028,7 @@ Content-Type: image/jpeg
 BODY[2.1.2.2.TEXT] {1}
 F
 ----------------------------------
-BODY[2.1.2.2.MIME] {27}
+BODY[2.1.2.2.MIME] {26}
 Content-Type: image/jpeg
 
 
@@ -1054,7 +1054,7 @@ Content-Disposition: attachment
 BODY[2.2.TEXT] {1}
 G
 ----------------------------------
-BODY[2.2.MIME] {59}
+BODY[2.2.MIME] {58}
 Content-Type: image/jpeg
 Content-Disposition: attachment
 
@@ -1080,7 +1080,7 @@ Content-Type: application/x-excel
 BODY[2.3.TEXT] {1}
 H
 ----------------------------------
-BODY[2.3.MIME] {36}
+BODY[2.3.MIME] {35}
 Content-Type: application/x-excel
 
 
@@ -1109,7 +1109,7 @@ Subject: J
 BODY[2.4.TEXT] {1}
 J
 ----------------------------------
-BODY[2.4.MIME] {31}
+BODY[2.4.MIME] {30}
 Content-Type: message/rfc822
 
 
@@ -1135,7 +1135,7 @@ Content-Disposition: inline
 BODY[3.TEXT] {1}
 K
 ----------------------------------
-BODY[3.MIME] {55}
+BODY[3.MIME] {54}
 Content-Type: text/plain
 Content-Disposition: inline
 

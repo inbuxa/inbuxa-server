@@ -42,8 +42,10 @@ pub struct AfterSave {
 /// The domain a principal lives on.
 fn principal_domain(object: &ObjectInner) -> Option<Id> {
     match object {
-        ObjectInner::Account(Account::User(obj)) => Some(obj.domain_id),
-        ObjectInner::Account(Account::Group(obj)) => Some(obj.domain_id),
+        ObjectInner::Account(account) => match account.as_ref() {
+            Account::User(obj) => Some(obj.domain_id),
+            Account::Group(obj) => Some(obj.domain_id),
+        },
         ObjectInner::MailingList(obj) => Some(obj.domain_id),
         _ => None,
     }
@@ -128,10 +130,8 @@ pub async fn check(
         }
 
         // A new domain's generated DKIM keys, one per algorithm, count too (MT-9)
-        if let ObjectInner::Domain(Domain {
-            dkim_management: DkimManagement::Automatic(dkim),
-            ..
-        }) = &new.inner
+        if let ObjectInner::Domain(domain) = &new.inner
+            && let DkimManagement::Automatic(dkim) = &domain.dkim_management
         {
             let quota = TenantStorageQuota::MaxDkimKeys;
             let keys = dkim.algorithms.iter().count() as u64;

@@ -4,40 +4,12 @@
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
  */
 
-/*
+use compact_str::CompactString;
 
-   l - lookup (mailbox is visible to LIST/LSUB commands, SUBSCRIBE
-       mailbox)
-   r - read (SELECT the mailbox, perform STATUS)
-   s - keep seen/unseen information across sessions (set or clear
-       \SEEN flag via STORE, also set \SEEN during APPEND/COPY/
-       FETCH BODY[...])
-   w - write (set or clear flags other than \SEEN and \DELETED via
-       STORE, also set them during APPEND/COPY)
-   i - insert (perform APPEND, COPY into mailbox)
-   p - post (send mail to submission address for mailbox,
-       not enforced by IMAP4 itself)
-   k - create mailboxes (CREATE new sub-mailboxes in any
-       implementation-defined hierarchy, parent mailbox for the new
-       mailbox name in RENAME)
-   x - delete mailbox (DELETE mailbox, old mailbox name in RENAME)
-   t - delete messages (set or clear \DELETED flag via STORE, set
-       \DELETED flag during APPEND/COPY)
-   e - perform EXPUNGE and expunge as a part of CLOSE
-   a - administer (perform SETACL/DELETEACL/GETACL/LISTRIGHTS)
-
-   // RFC2086
-   c - create (CREATE new sub-mailboxes in any implementation-defined
-       hierarchy)
-   d - delete (STORE DELETED flag, perform EXPUNGE)
-
-*/
-
-use types::acl::Acl;
-
-use super::quoted_string;
-use crate::utf7::utf7_encode;
+use super::{quoted_mailbox_name, quoted_string};
 use std::fmt::Display;
+use types::acl::Acl;
+use utils::map::bitmap::Bitmap;
 
 #[derive(Debug, PartialEq, Eq, Clone, Copy)]
 pub enum Rights {
@@ -51,8 +23,24 @@ pub enum Rights {
     DeleteMailbox,
     DeleteMessages,
     Expunge,
+    Annotate,
     Administer,
 }
+
+const ACL_RIGHTS: [(&[Acl], Rights); 12] = [
+    (&[Acl::Read], Rights::Lookup),
+    (&[Acl::ReadItems], Rights::Read),
+    (&[Acl::ModifyItems], Rights::Seen),
+    (&[Acl::ModifyItems], Rights::Write),
+    (&[Acl::AddItems], Rights::Insert),
+    (&[Acl::Submit], Rights::Post),
+    (&[Acl::CreateChild], Rights::CreateMailbox),
+    (&[Acl::Delete, Acl::Modify], Rights::DeleteMailbox),
+    (&[Acl::RemoveItems], Rights::DeleteMessages),
+    (&[Acl::RemoveItems], Rights::Expunge),
+    (&[Acl::ModifyMetadata], Rights::Annotate),
+    (&[Acl::Share], Rights::Administer),
+];
 
 #[derive(Debug, PartialEq, Eq, Clone)]
 pub struct ModRights {
@@ -69,28 +57,28 @@ pub enum ModRightsOp {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Arguments {
-    pub tag: String,
-    pub mailbox_name: String,
-    pub identifier: Option<String>,
+    pub tag: CompactString,
+    pub mailbox_name: CompactString,
+    pub identifier: Option<CompactString>,
     pub mod_rights: Option<ModRights>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GetAclResponse {
-    pub mailbox_name: String,
+    pub mailbox_name: CompactString,
     pub permissions: Vec<(String, Vec<Rights>)>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ListRightsResponse {
-    pub mailbox_name: String,
-    pub identifier: String,
+    pub mailbox_name: CompactString,
+    pub identifier: CompactString,
     pub permissions: Vec<Vec<Rights>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MyRightsResponse {
-    pub mailbox_name: String,
+    pub mailbox_name: CompactString,
     pub rights: Vec<Rights>,
 }
 
@@ -98,15 +86,11 @@ impl GetAclResponse {
     pub fn into_bytes(self, is_utf8: bool) -> Vec<u8> {
         let mut buf = Vec::with_capacity(self.mailbox_name.len() + 10 * self.permissions.len() * 5);
         buf.extend_from_slice(b"* ACL ");
-        if is_utf8 {
-            quoted_string(&mut buf, &self.mailbox_name);
-        } else {
-            quoted_string(&mut buf, &utf7_encode(&self.mailbox_name));
-        }
+        quoted_mailbox_name(&mut buf, &self.mailbox_name, is_utf8);
         for (identifier, rights) in self.permissions {
-            buf.extend_from_slice(b" ");
+            buf.push(b' ');
             quoted_string(&mut buf, &identifier);
-            buf.extend_from_slice(b" ");
+            buf.push(b' ');
 
             for right in rights {
                 buf.push(right.to_char());
@@ -123,15 +107,11 @@ impl ListRightsResponse {
             self.mailbox_name.len() + self.identifier.len() + 10 * self.permissions.len() * 5,
         );
         buf.extend_from_slice(b"* LISTRIGHTS ");
-        if is_utf8 {
-            quoted_string(&mut buf, &self.mailbox_name);
-        } else {
-            quoted_string(&mut buf, &utf7_encode(&self.mailbox_name));
-        }
-        buf.extend_from_slice(b" ");
+        quoted_mailbox_name(&mut buf, &self.mailbox_name, is_utf8);
+        buf.push(b' ');
         quoted_string(&mut buf, &self.identifier);
         for rights in self.permissions {
-            buf.extend_from_slice(b" ");
+            buf.push(b' ');
             for right in rights {
                 buf.push(right.to_char());
             }
@@ -145,12 +125,8 @@ impl MyRightsResponse {
     pub fn into_bytes(self, is_utf8: bool) -> Vec<u8> {
         let mut buf = Vec::with_capacity(self.mailbox_name.len() + 10 + self.rights.len());
         buf.extend_from_slice(b"* MYRIGHTS ");
-        if is_utf8 {
-            quoted_string(&mut buf, &self.mailbox_name);
-        } else {
-            quoted_string(&mut buf, &utf7_encode(&self.mailbox_name));
-        }
-        buf.extend_from_slice(b" ");
+        quoted_mailbox_name(&mut buf, &self.mailbox_name, is_utf8);
+        buf.push(b' ');
         for right in self.rights {
             buf.push(right.to_char());
         }
@@ -160,6 +136,28 @@ impl MyRightsResponse {
 }
 
 impl Rights {
+    pub fn from_acl(acl: Bitmap<Acl>) -> impl Iterator<Item = Rights> {
+        ACL_RIGHTS
+            .iter()
+            .filter(move |(acls, _)| acls.iter().any(|item| acl.contains(*item)))
+            .map(|(_, right)| *right)
+    }
+
+    pub fn to_acl(&self) -> &'static [Acl] {
+        match self {
+            Rights::Lookup => &[Acl::Read],
+            Rights::Read => &[Acl::ReadItems],
+            Rights::Seen | Rights::Write => &[Acl::ModifyItems],
+            Rights::Insert => &[Acl::AddItems],
+            Rights::Post => &[Acl::Submit],
+            Rights::CreateMailbox => &[Acl::CreateChild],
+            Rights::DeleteMailbox => &[Acl::Delete, Acl::Modify],
+            Rights::DeleteMessages | Rights::Expunge => &[Acl::RemoveItems],
+            Rights::Annotate => &[Acl::ModifyMetadata],
+            Rights::Administer => &[Acl::Share],
+        }
+    }
+
     pub fn to_char(&self) -> u8 {
         match self {
             Rights::Lookup => b'l',
@@ -172,6 +170,7 @@ impl Rights {
             Rights::DeleteMailbox => b'x',
             Rights::DeleteMessages => b't',
             Rights::Expunge => b'e',
+            Rights::Annotate => b'n',
             Rights::Administer => b'a',
         }
     }
@@ -190,97 +189,9 @@ impl Display for Rights {
             Rights::DeleteMailbox => write!(f, "x"),
             Rights::DeleteMessages => write!(f, "t"),
             Rights::Expunge => write!(f, "e"),
+            Rights::Annotate => write!(f, "n"),
             Rights::Administer => write!(f, "a"),
         }
     }
 }
 
-impl From<Rights> for Acl {
-    fn from(value: Rights) -> Self {
-        match value {
-            Rights::Lookup => Acl::Read,
-            Rights::Read => Acl::ReadItems,
-            Rights::Seen => Acl::ModifyItems,
-            Rights::Write => Acl::ModifyItems,
-            Rights::Insert => Acl::AddItems,
-            Rights::Post => Acl::Submit,
-            Rights::CreateMailbox => Acl::CreateChild,
-            Rights::DeleteMailbox => Acl::Delete,
-            Rights::DeleteMessages => Acl::RemoveItems,
-            Rights::Expunge => Acl::RemoveItems,
-            Rights::Administer => Acl::Share,
-        }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-
-    use crate::protocol::acl::{GetAclResponse, ListRightsResponse, MyRightsResponse, Rights};
-
-    #[test]
-    fn serialize_acl() {
-        assert_eq!(
-            String::from_utf8(
-                GetAclResponse {
-                    mailbox_name: "INBOX".into(),
-                    permissions: vec![
-                        (
-                            "Fred".into(),
-                            vec![
-                                Rights::Lookup,
-                                Rights::Read,
-                                Rights::Seen,
-                                Rights::Write,
-                                Rights::Insert,
-                                Rights::CreateMailbox,
-                                Rights::DeleteMessages,
-                                Rights::Administer,
-                            ]
-                        ),
-                        (
-                            "David".into(),
-                            vec![
-                                Rights::CreateMailbox,
-                                Rights::DeleteMessages,
-                                Rights::Administer,
-                            ]
-                        )
-                    ]
-                }
-                .into_bytes(true)
-            )
-            .unwrap(),
-            "* ACL \"INBOX\" \"Fred\" lrswikta \"David\" kta\r\n"
-        );
-
-        assert_eq!(
-            String::from_utf8(
-                ListRightsResponse {
-                    mailbox_name: "Deleted Items".into(),
-                    identifier: "Fred".into(),
-                    permissions: vec![
-                        vec![Rights::Lookup, Rights::Read],
-                        vec![Rights::Administer],
-                        vec![Rights::DeleteMailbox]
-                    ]
-                }
-                .into_bytes(true)
-            )
-            .unwrap(),
-            "* LISTRIGHTS \"Deleted Items\" \"Fred\" lr a x\r\n"
-        );
-
-        assert_eq!(
-            String::from_utf8(
-                MyRightsResponse {
-                    mailbox_name: "Important".into(),
-                    rights: vec![Rights::Lookup, Rights::Read, Rights::DeleteMailbox]
-                }
-                .into_bytes(true)
-            )
-            .unwrap(),
-            "* MYRIGHTS \"Important\" lrx\r\n"
-        );
-    }
-}

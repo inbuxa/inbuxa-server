@@ -6,7 +6,9 @@
 
 use crate::{
     object::{
-        AnyId, JmapObject, JmapObjectId, JmapRight, JmapSharedObject, MaybeReference, parse_ref,
+        AnyId, JmapObject, JmapObjectId, JmapRight, JmapSharedObject, MaybeReference,
+        metadata::{MetadataFilter, MetadataProperty, MetadataRoot, property_names},
+        parse_ref,
     },
     request::{deserialize::DeserializeArguments, reference::MaybeIdReference},
     types::date::UTCDate,
@@ -16,9 +18,10 @@ use calcard::{
     icalendar::ICalendarDuration,
     jscalendar::{JSCalendarAlertAction, JSCalendarRelativeTo, JSCalendarType},
 };
-use jmap_tools::{Element, JsonPointer, JsonPointerItem, Key, Property};
+use jmap_tools::{Element, JsonPointer, JsonPointerItem, Key, PointerDepth, Property};
+use serde::{Serialize, Serializer};
 use std::{borrow::Cow, fmt::Display, str::FromStr};
-use types::{acl::Acl, id::Id};
+use types::{acl::Acl, id::Id, text::Text};
 
 #[derive(Debug, Clone, Default)]
 pub struct Calendar;
@@ -39,6 +42,8 @@ pub enum CalendarProperty {
     TimeZone,
     ShareWith,
     MyRights,
+    Metadata,
+    PrivateMetadata,
 
     // Alert object properties
     When,
@@ -64,6 +69,7 @@ pub enum CalendarRight {
     MayRSVP,
     MayShare,
     MayDelete,
+    MaySetMetadata,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -89,46 +95,48 @@ pub enum IncludeInAvailability {
 
 impl Property for CalendarProperty {
     fn try_parse(key: Option<&Key<'_, Self>>, value: &str) -> Option<Self> {
-        let allow_patch = key.is_none();
-        if let Some(Key::Property(key)) = key {
-            match key.patch_or_prop() {
+        Self::try_parse_nested(key, value, PointerDepth::default())
+    }
+
+    fn try_parse_nested(
+        key: Option<&Key<'_, Self>>,
+        value: &str,
+        depth: PointerDepth,
+    ) -> Option<Self> {
+        match key {
+            Some(Key::Property(key)) => match key.patch_or_prop() {
                 CalendarProperty::ShareWith => {
                     Id::from_str(value).ok().map(CalendarProperty::IdValue)
                 }
-                _ => CalendarProperty::parse(value, allow_patch),
-            }
-        } else {
-            CalendarProperty::parse(value, allow_patch)
+                _ => CalendarProperty::parse_nested_name(value),
+            },
+            Some(_) => CalendarProperty::parse_nested_name(value),
+            None => CalendarProperty::parse(value, Some(depth)),
         }
     }
 
+    fn is_opaque(&self) -> bool {
+        self.metadata_root().is_some()
+    }
+
     fn to_cow(&self) -> Cow<'static, str> {
-        match self {
-            CalendarProperty::Id => "id",
-            CalendarProperty::Name => "name",
-            CalendarProperty::Description => "description",
-            CalendarProperty::Color => "color",
-            CalendarProperty::SortOrder => "sortOrder",
-            CalendarProperty::IsSubscribed => "isSubscribed",
-            CalendarProperty::IsVisible => "isVisible",
-            CalendarProperty::IsDefault => "isDefault",
-            CalendarProperty::IncludeInAvailability => "includeInAvailability",
-            CalendarProperty::DefaultAlertsWithTime => "defaultAlertsWithTime",
-            CalendarProperty::DefaultAlertsWithoutTime => "defaultAlertsWithoutTime",
-            CalendarProperty::TimeZone => "timeZone",
-            CalendarProperty::ShareWith => "shareWith",
-            CalendarProperty::MyRights => "myRights",
-            CalendarProperty::When => "when",
-            CalendarProperty::Trigger => "trigger",
-            CalendarProperty::Offset => "offset",
-            CalendarProperty::RelativeTo => "relativeTo",
-            CalendarProperty::Action => "action",
-            CalendarProperty::Type => "@type",
-            CalendarProperty::Rights(calendar_right) => calendar_right.as_str(),
-            CalendarProperty::Pointer(json_pointer) => return json_pointer.to_string().into(),
-            CalendarProperty::IdValue(id) => return id.to_string().into(),
+        self.text().to_cow()
+    }
+
+    fn key_eq(&self, other: &Self) -> bool {
+        if self.has_dynamic_text() || other.has_dynamic_text() {
+            self.text().eq_text(other.text())
+        } else {
+            self == other
         }
-        .into()
+    }
+
+    fn key_eq_str(&self, other: &str) -> bool {
+        self.text().eq_str(other)
+    }
+
+    fn serialize_text<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        self.text().serialize(serializer)
     }
 }
 
@@ -143,17 +151,19 @@ impl CalendarRight {
             CalendarRight::MayRSVP => "mayRSVP",
             CalendarRight::MayShare => "mayShare",
             CalendarRight::MayDelete => "mayDelete",
+            CalendarRight::MaySetMetadata => "maySetMetadata",
         }
     }
 }
 
 impl IncludeInAvailability {
     fn parse(value: &str) -> Option<Self> {
-        hashify::tiny_map!(value.as_bytes(),
+        hashify::map!(value.as_bytes(), IncludeInAvailability,
             b"all" => IncludeInAvailability::All,
             b"attending" => IncludeInAvailability::Attending,
             b"none" => IncludeInAvailability::None,
         )
+        .copied()
     }
 
     pub fn as_str(&self) -> &'static str {
@@ -199,7 +209,7 @@ impl Element for CalendarValue {
 
     fn to_cow(&self) -> Cow<'static, str> {
         match self {
-            CalendarValue::Id(id) => id.to_string().into(),
+            CalendarValue::Id(id) => id.as_string().into(),
             CalendarValue::IdReference(r) => format!("#{r}").into(),
             CalendarValue::IncludeInAvailability(include) => include.as_str().into(),
             CalendarValue::Date(date) => date.to_string().into(),
@@ -210,46 +220,103 @@ impl Element for CalendarValue {
             CalendarValue::Timezone(tz) => tz.name().unwrap_or_default(),
         }
     }
+
+    fn serialize_text<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        match self {
+            CalendarValue::Id(id) => serializer.serialize_str(id.text().as_str()),
+            CalendarValue::IdReference(reference) => {
+                serializer.collect_str(&format_args!("#{reference}"))
+            }
+            CalendarValue::Date(date) => date.serialize(serializer),
+            CalendarValue::Duration(duration) => serializer.collect_str(duration),
+            CalendarValue::IncludeInAvailability(include) => {
+                serializer.serialize_str(include.as_str())
+            }
+            CalendarValue::Action(action) => serializer.serialize_str(action.as_str()),
+            CalendarValue::RelativeTo(relative) => serializer.serialize_str(relative.as_str()),
+            CalendarValue::Type(typ) => serializer.serialize_str(typ.as_str()),
+            CalendarValue::Timezone(tz) => serializer.serialize_str(&tz.name().unwrap_or_default()),
+        }
+    }
 }
 
 impl CalendarProperty {
-    fn parse(value: &str, allow_patch: bool) -> Option<Self> {
-        hashify::tiny_map!(value.as_bytes(),
-            b"id" => CalendarProperty::Id,
-            b"name" => CalendarProperty::Name,
-            b"description" => CalendarProperty::Description,
-            b"color" => CalendarProperty::Color,
-            b"sortOrder" => CalendarProperty::SortOrder,
-            b"isSubscribed" => CalendarProperty::IsSubscribed,
-            b"isVisible" => CalendarProperty::IsVisible,
-            b"isDefault" => CalendarProperty::IsDefault,
-            b"includeInAvailability" => CalendarProperty::IncludeInAvailability,
-            b"defaultAlertsWithTime" => CalendarProperty::DefaultAlertsWithTime,
-            b"defaultAlertsWithoutTime" => CalendarProperty::DefaultAlertsWithoutTime,
-            b"timeZone" => CalendarProperty::TimeZone,
-            b"shareWith" => CalendarProperty::ShareWith,
-            b"myRights" => CalendarProperty::MyRights,
-            b"mayReadFreeBusy" => CalendarProperty::Rights(CalendarRight::MayReadFreeBusy),
-            b"mayReadItems" => CalendarProperty::Rights(CalendarRight::MayReadItems),
-            b"mayWriteAll" => CalendarProperty::Rights(CalendarRight::MayWriteAll),
-            b"mayWriteOwn" => CalendarProperty::Rights(CalendarRight::MayWriteOwn),
-            b"mayUpdatePrivate" => CalendarProperty::Rights(CalendarRight::MayUpdatePrivate),
-            b"mayRSVP" => CalendarProperty::Rights(CalendarRight::MayRSVP),
-            b"mayShare" => CalendarProperty::Rights(CalendarRight::MayShare),
-            b"mayDelete" => CalendarProperty::Rights(CalendarRight::MayDelete),
-            b"@type" => CalendarProperty::Type,
-            b"when" => CalendarProperty::When,
-            b"trigger" => CalendarProperty::Trigger,
-            b"offset" => CalendarProperty::Offset,
-            b"relativeTo" => CalendarProperty::RelativeTo,
-            b"action" => CalendarProperty::Action,
+    pub fn text(&self) -> Text<'_> {
+        Text::Static(match self {
+            CalendarProperty::Id => "id",
+            CalendarProperty::Name => "name",
+            CalendarProperty::Description => "description",
+            CalendarProperty::Color => "color",
+            CalendarProperty::SortOrder => "sortOrder",
+            CalendarProperty::IsSubscribed => "isSubscribed",
+            CalendarProperty::IsVisible => "isVisible",
+            CalendarProperty::IsDefault => "isDefault",
+            CalendarProperty::IncludeInAvailability => "includeInAvailability",
+            CalendarProperty::DefaultAlertsWithTime => "defaultAlertsWithTime",
+            CalendarProperty::DefaultAlertsWithoutTime => "defaultAlertsWithoutTime",
+            CalendarProperty::TimeZone => "timeZone",
+            CalendarProperty::ShareWith => "shareWith",
+            CalendarProperty::MyRights => "myRights",
+            CalendarProperty::Metadata => "metadata",
+            CalendarProperty::PrivateMetadata => "privateMetadata",
+            CalendarProperty::When => "when",
+            CalendarProperty::Trigger => "trigger",
+            CalendarProperty::Offset => "offset",
+            CalendarProperty::RelativeTo => "relativeTo",
+            CalendarProperty::Action => "action",
+            CalendarProperty::Type => "@type",
+            CalendarProperty::Rights(calendar_right) => calendar_right.as_str(),
+            CalendarProperty::Pointer(json_pointer) => return Text::Display(json_pointer),
+            CalendarProperty::IdValue(id) => return Text::Id(*id),
+        })
+    }
+
+    fn has_dynamic_text(&self) -> bool {
+        matches!(
+            self,
+            CalendarProperty::Pointer(_) | CalendarProperty::IdValue(_)
         )
-        .or_else(|| {
-            if allow_patch && value.contains('/') {
-                CalendarProperty::Pointer(JsonPointer::parse(value)).into()
-            } else {
-                None
-            }
+    }
+
+    property_names!(
+        CalendarProperty,
+        "id" => CalendarProperty::Id,
+        "name" => CalendarProperty::Name,
+        "description" => CalendarProperty::Description,
+        "color" => CalendarProperty::Color,
+        "sortOrder" => CalendarProperty::SortOrder,
+        "isSubscribed" => CalendarProperty::IsSubscribed,
+        "isVisible" => CalendarProperty::IsVisible,
+        "isDefault" => CalendarProperty::IsDefault,
+        "includeInAvailability" => CalendarProperty::IncludeInAvailability,
+        "defaultAlertsWithTime" => CalendarProperty::DefaultAlertsWithTime,
+        "defaultAlertsWithoutTime" => CalendarProperty::DefaultAlertsWithoutTime,
+        "timeZone" => CalendarProperty::TimeZone,
+        "shareWith" => CalendarProperty::ShareWith,
+        "myRights" => CalendarProperty::MyRights,
+        "mayReadFreeBusy" => CalendarProperty::Rights(CalendarRight::MayReadFreeBusy),
+        "mayReadItems" => CalendarProperty::Rights(CalendarRight::MayReadItems),
+        "mayWriteAll" => CalendarProperty::Rights(CalendarRight::MayWriteAll),
+        "mayWriteOwn" => CalendarProperty::Rights(CalendarRight::MayWriteOwn),
+        "mayUpdatePrivate" => CalendarProperty::Rights(CalendarRight::MayUpdatePrivate),
+        "mayRSVP" => CalendarProperty::Rights(CalendarRight::MayRSVP),
+        "mayShare" => CalendarProperty::Rights(CalendarRight::MayShare),
+        "mayDelete" => CalendarProperty::Rights(CalendarRight::MayDelete),
+        "maySetMetadata" => CalendarProperty::Rights(CalendarRight::MaySetMetadata),
+        "@type" => CalendarProperty::Type,
+        "when" => CalendarProperty::When,
+        "trigger" => CalendarProperty::Trigger,
+        "offset" => CalendarProperty::Offset,
+        "relativeTo" => CalendarProperty::RelativeTo,
+        "action" => CalendarProperty::Action,
+    );
+
+    fn parse(value: &str, patch_depth: Option<PointerDepth>) -> Option<Self> {
+        CalendarProperty::parse_name(value).or_else(|| {
+            patch_depth
+                .filter(|_| value.contains('/'))
+                .and_then(|depth| JsonPointer::parse_nested(value, depth))
+                .map(CalendarProperty::Pointer)
         })
     }
 
@@ -260,6 +327,30 @@ impl CalendarProperty {
             prop
         } else {
             self
+        }
+    }
+}
+
+impl MetadataProperty for CalendarProperty {
+    fn as_metadata_root(&self) -> Option<MetadataRoot> {
+        match self {
+            CalendarProperty::Metadata => Some(MetadataRoot::Shared),
+            CalendarProperty::PrivateMetadata => Some(MetadataRoot::Private),
+            _ => None,
+        }
+    }
+
+    fn as_pointer(&self) -> Option<&JsonPointer<Self>> {
+        match self {
+            CalendarProperty::Pointer(pointer) => Some(pointer),
+            _ => None,
+        }
+    }
+
+    fn from_metadata_root(root: MetadataRoot) -> Self {
+        match root {
+            MetadataRoot::Shared => CalendarProperty::Metadata,
+            MetadataRoot::Private => CalendarProperty::PrivateMetadata,
         }
     }
 }
@@ -295,7 +386,41 @@ impl FromStr for CalendarProperty {
     type Err = ();
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
-        CalendarProperty::parse(s, false).ok_or(())
+        CalendarProperty::parse(s, None)
+            .or_else(|| {
+                MetadataRoot::from_selector(s)
+                    .map(|_| CalendarProperty::Pointer(JsonPointer::parse(s)))
+            })
+            .ok_or(())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CalendarFilter {
+    Metadata(MetadataFilter),
+    _T(String),
+}
+
+impl<'de> DeserializeArguments<'de> for CalendarFilter {
+    fn deserialize_argument<A>(&mut self, key: &str, map: &mut A) -> Result<(), A::Error>
+    where
+        A: serde::de::MapAccess<'de>,
+    {
+        *self = match MetadataFilter::try_deserialize(key, map)? {
+            Some(filter) => CalendarFilter::Metadata(filter),
+            None => {
+                let _ = map.next_value::<serde::de::IgnoredAny>()?;
+                CalendarFilter::_T(key.to_string())
+            }
+        };
+
+        Ok(())
+    }
+}
+
+impl Default for CalendarFilter {
+    fn default() -> Self {
+        CalendarFilter::_T("".to_string())
     }
 }
 
@@ -306,7 +431,7 @@ impl JmapObject for Calendar {
 
     type Id = Id;
 
-    type Filter = ();
+    type Filter = CalendarFilter;
 
     type Comparator = ();
 
@@ -414,7 +539,16 @@ impl JmapRight for CalendarRight {
             CalendarRight::MayUpdatePrivate => &[Acl::ModifyPrivateProperties],
             CalendarRight::MayRSVP => &[Acl::ModifyRSVP],
             CalendarRight::MayShare => &[Acl::Share],
-            CalendarRight::MayDelete => &[Acl::Delete, Acl::RemoveItems],
+            CalendarRight::MayDelete => &[Acl::Delete],
+            CalendarRight::MaySetMetadata => &[Acl::ModifyMetadata],
+        }
+    }
+
+    fn implied_by_acl(&self) -> &'static [Acl] {
+        match self {
+            CalendarRight::MayWriteOwn => &[Acl::AddItems, Acl::ModifyItems, Acl::RemoveItems],
+            CalendarRight::MayUpdatePrivate | CalendarRight::MayRSVP => &[Acl::ModifyItems],
+            _ => &[],
         }
     }
 
@@ -428,6 +562,7 @@ impl JmapRight for CalendarRight {
             CalendarRight::MayRSVP,
             CalendarRight::MayShare,
             CalendarRight::MayDelete,
+            CalendarRight::MaySetMetadata,
         ]
     }
 }

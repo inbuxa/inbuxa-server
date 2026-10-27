@@ -86,12 +86,11 @@ pub fn body(
     model: &str,
     system: Option<&str>,
     user: &str,
-    temperature: f64,
+    temperature: Option<f64>,
     max_tokens: u32,
     stream: bool,
 ) -> Value {
-    let temperature = temperature.clamp(0.0, 1.0);
-    match kind {
+    let mut body = match kind {
         Kind::Chat => {
             let mut messages = Vec::with_capacity(2);
             if let Some(system) = system {
@@ -101,7 +100,6 @@ pub fn body(
             json!({
                 "model": model,
                 "messages": messages,
-                "temperature": temperature,
                 "max_tokens": max_tokens,
                 "stream": stream,
             })
@@ -114,12 +112,17 @@ pub fn body(
             json!({
                 "model": model,
                 "prompt": prompt,
-                "temperature": temperature,
                 "max_tokens": max_tokens,
                 "stream": stream,
             })
         }
+    };
+    // inbuxa: 1.0's models may leave the temperature empty: the provider's
+    // default then applies
+    if let Some(temperature) = temperature {
+        body["temperature"] = json!(temperature.clamp(0.0, 1.0));
     }
+    body
 }
 
 /// The answer in a response body (AI-7): `choices[0].message.content` for
@@ -204,16 +207,17 @@ mod tests {
         assert!(text.contains("[truncated]"));
         assert_eq!(text.matches('é').count(), 25);
 
-        let chat = body(Kind::Chat, "m", Some("sys"), "usr", 1.5, 200, false);
+        let chat = body(Kind::Chat, "m", Some("sys"), "usr", Some(1.5), 200, false);
         assert_eq!(chat["messages"][0]["role"], "system");
         assert_eq!(chat["messages"][1]["content"], "usr");
         assert_eq!(chat["temperature"], 1.0);
         assert_eq!(chat["stream"], false);
         assert!(chat.get("user").is_none());
-        let text = body(Kind::Text, "m", Some("sys"), "usr", 0.5, 200, false);
+        let text = body(Kind::Text, "m", Some("sys"), "usr", Some(0.5), 200, false);
         assert_eq!(text["prompt"], "sys\n\nusr");
-        let sieve = body(Kind::Chat, "m", None, "hello", 0.5, 1000, false);
+        let sieve = body(Kind::Chat, "m", None, "hello", None, 1000, false);
         assert_eq!(sieve["messages"].as_array().unwrap().len(), 1);
+        assert!(sieve.get("temperature").is_none());
     }
 
     #[test]

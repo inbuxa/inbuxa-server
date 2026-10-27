@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
  */
 
-use crate::network::acme::ParsedCert;
+use crate::network::{acme::ParsedCert, tls::lookup_certificate};
 use ahash::{AHashMap, AHashSet};
 use rcgen::generate_simple_self_signed;
 use registry::{
@@ -12,7 +12,7 @@ use registry::{
         prelude::Object,
         structs::{Certificate, PublicText, SecretText, SystemSettings},
     },
-    types::{datetime::UTCDateTime, map::Map},
+    types::map::Map,
 };
 use rustls::{
     SupportedProtocolVersion,
@@ -61,10 +61,8 @@ pub(crate) async fn parse_certificates(
             };
             match ParsedCert::parse(&pem) {
                 Ok(parsed) => {
-                    let not_valid_after =
-                        UTCDateTime::from_timestamp(parsed.valid_not_after.timestamp());
-                    let not_valid_before =
-                        UTCDateTime::from_timestamp(parsed.valid_not_before.timestamp());
+                    let not_valid_after = parsed.valid_not_after;
+                    let not_valid_before = parsed.valid_not_before;
                     let sans = Map::new(parsed.sans);
                     if cert.not_valid_after != not_valid_after
                         || cert.not_valid_before != not_valid_before
@@ -180,18 +178,21 @@ pub(crate) async fn parse_certificates(
                 let key = Arc::new(key);
                 for name in cert.subject_alternative_names.into_inner() {
                     subject_names.insert(name.as_str().into());
-                    certificates.insert(
-                        name.strip_prefix("*.")
-                            .map(Into::into)
-                            .unwrap_or_else(|| name.into_boxed_str()),
-                        key.clone(),
-                    );
+                    certificates.insert(name.into_boxed_str(), key.clone());
                 }
             }
             Err(err) => {
                 bp.build_error(obj_id, format!("Invalid certificate: {err}"));
             }
         }
+    }
+
+    if !certificates.contains_key("*")
+        && !system.default_hostname.is_empty()
+        && let Some(key) =
+            lookup_certificate(certificates, system.default_hostname.as_str()).cloned()
+    {
+        certificates.insert("*".into(), key);
     }
 
     // Remove expired certificates

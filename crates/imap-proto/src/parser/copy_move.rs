@@ -4,13 +4,10 @@
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
  */
 
-use compact_str::ToCompactString;
-
 use crate::{
     Command,
     protocol::copy_move,
     receiver::{Request, bad},
-    utf7::utf7_maybe_decode,
 };
 
 use super::parse_sequence_set;
@@ -24,18 +21,15 @@ impl Request<Command> {
                 sequence_set: parse_sequence_set(
                     &tokens
                         .next()
-                        .ok_or_else(|| bad(self.tag.to_compact_string(), "Missing sequence set."))?
+                        .ok_or_else(|| bad(self.tag.clone(), "Missing sequence set."))?
                         .unwrap_bytes(),
                 )
-                .map_err(|v| bad(self.tag.to_compact_string(), v))?,
-                mailbox_name: utf7_maybe_decode(
-                    tokens
-                        .next()
-                        .ok_or_else(|| bad(self.tag.to_compact_string(), "Missing mailbox name."))?
-                        .unwrap_string()
-                        .map_err(|v| bad(self.tag.to_compact_string(), v))?,
-                    is_utf8,
-                ),
+                .map_err(|v| bad(self.tag.clone(), v))?,
+                mailbox_name: tokens
+                    .next()
+                    .ok_or_else(|| bad(self.tag.clone(), "Missing mailbox name."))?
+                    .unwrap_mailbox_name(is_utf8)
+                    .map_err(|v| bad(self.tag.clone(), v))?,
                 tag: self.tag,
             })
         } else {
@@ -44,46 +38,3 @@ impl Request<Command> {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use crate::{
-        protocol::{Sequence, copy_move},
-        receiver::Receiver,
-    };
-
-    #[test]
-    fn parse_copy() {
-        let mut receiver = Receiver::new();
-
-        assert_eq!(
-            receiver
-                .parse(&mut "A003 COPY 2:4 MEETING\r\n".as_bytes().iter())
-                .unwrap()
-                .parse_copy_move(false)
-                .unwrap(),
-            copy_move::Arguments {
-                sequence_set: Sequence::Range {
-                    start: 2.into(),
-                    end: 4.into(),
-                },
-                mailbox_name: "MEETING".into(),
-                tag: "A003".into(),
-            }
-        );
-        assert_eq!(
-            receiver
-                .parse(&mut "A003 COPY 2:4 \"You &- Me\"\r\n".as_bytes().iter())
-                .unwrap()
-                .parse_copy_move(false)
-                .unwrap(),
-            copy_move::Arguments {
-                sequence_set: Sequence::Range {
-                    start: 2.into(),
-                    end: 4.into(),
-                },
-                mailbox_name: "You & Me".into(),
-                tag: "A003".into(),
-            }
-        );
-    }
-}

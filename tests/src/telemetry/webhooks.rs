@@ -2,13 +2,16 @@
  * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
+ *
+ * Modified by Coffey Labs in 2026 for INBUXA.
  */
 
+use crate::telemetry::purge_all_traces;
 use crate::utils::server::TestServer;
 use crate::utils::smtp::SmtpConnection;
 use aws_lc_rs::hmac;
 use base64::{Engine, engine::general_purpose::STANDARD};
-use common::{manager::application::Resource, telemetry::tracers::store::TracingStore};
+use common::manager::application::Resource;
 use http_proto::{ToHttpResponse, request::fetch_body};
 use hyper::{body, server::conn::http1, service::service_fn};
 use hyper_util::rt::TokioIo;
@@ -118,11 +121,8 @@ pub async fn test(test: &TestServer) {
     admin.registry_destroy_all(ObjectType::WebHook).await;
     admin.reload_settings().await;
     admin.destroy_account(john).await;
-    test.server
-        .tracing_store()
-        .purge_spans(Duration::from_secs(0), test.server.search_store().into())
-        .await
-        .unwrap();
+    // inbuxa: purge_spans alone leaves 1.0's index rows (see purge_all_traces)
+    purge_all_traces(test).await;
     test.cleanup().await;
 }
 

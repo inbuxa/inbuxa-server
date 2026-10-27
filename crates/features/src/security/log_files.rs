@@ -107,7 +107,7 @@ pub async fn set(data: &Store, settings: &LogSettings) -> trc::Result<()> {
     })?;
     let mut batch = BatchBuilder::new();
     batch.set(key(), bytes);
-    data.write(batch.build_all())
+    data.write_batch(&mut batch)
         .await
         .caused_by(trc::location!())
         .map(|_| ())

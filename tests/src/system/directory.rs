@@ -2,6 +2,8 @@
  * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
+ *
+ * Modified by Coffey Labs in 2026 for INBUXA.
  */
 
 use crate::utils::{jmap::JmapUtils, server::TestServer};
@@ -38,7 +40,7 @@ pub async fn test(test: &TestServer) {
             dns_management: DnsManagement::Manual,
             dkim_management: DkimManagement::Manual,
             aliases: Map::new(vec!["beispiel.de".to_string()]),
-            is_enabled: true,
+            enable: true,
             catch_all_address: Some("catchy@example.com".to_string()),
             sub_addressing: SubAddressing::Enabled,
             ..Default::default()
@@ -122,7 +124,7 @@ pub async fn test(test: &TestServer) {
             aliases: List::from_iter([EmailAlias {
                 name: "inva..lid".to_string(),
                 domain_id,
-                enabled: true,
+                enable: true,
                 ..Default::default()
             }]),
             ..Default::default()
@@ -144,7 +146,7 @@ pub async fn test(test: &TestServer) {
             aliases: List::from_iter([EmailAlias {
                 name: "jdoe".to_string(),
                 domain_id,
-                enabled: true,
+                enable: true,
                 ..Default::default()
             }]),
             quotas: VecMap::from_iter([
@@ -164,8 +166,7 @@ pub async fn test(test: &TestServer) {
     assert_eq!(account_cache.quota_disk, 1024);
     assert_eq!(
         account_cache
-            .quota_objects
-            .as_ref()
+            .object_quotas()
             .unwrap()
             .get(StorageQuota::MaxEmails),
         100
@@ -438,7 +439,7 @@ pub async fn test(test: &TestServer) {
     let domain_2_id = account
         .registry_create_object(Domain {
             name: "another-example.com".to_string(),
-            is_enabled: true,
+            enable: true,
             certificate_management: CertificateManagement::Manual,
             dns_management: DnsManagement::Manual,
             dkim_management: DkimManagement::Manual,
@@ -557,7 +558,7 @@ pub async fn test(test: &TestServer) {
     let domain_3_id = account
         .registry_create_object(Domain {
             name: "list-catch-all.com".to_string(),
-            is_enabled: true,
+            enable: true,
             certificate_management: CertificateManagement::Manual,
             dns_management: DnsManagement::Manual,
             dkim_management: DkimManagement::Manual,
@@ -568,7 +569,7 @@ pub async fn test(test: &TestServer) {
     let domain_4_id = account
         .registry_create_object(Domain {
             name: "subaddress-catch-all.com".to_string(),
-            is_enabled: true,
+            enable: true,
             certificate_management: CertificateManagement::Manual,
             dns_management: DnsManagement::Manual,
             dkim_management: DkimManagement::Manual,

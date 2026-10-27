@@ -2,6 +2,8 @@
  * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
+ *
+ * Modified by Coffey Labs in 2026 for INBUXA.
  */
 
 use super::{CompCtx, TestOutcome, check, check_contains, check_eq};
@@ -50,7 +52,7 @@ pub async fn run(test: &TestServer, ctx: &CompCtx<'_>) {
                 name: "mock-push-compliance".into(),
                 bind: Map::new(vec![SocketAddr::from_str("127.0.0.1:19000").unwrap()]),
                 protocol: NetworkListenerProtocol::Http,
-                tls_implicit: true,
+                implicit_tls: true,
                 use_tls: true,
                 socket_reuse_address: true,
                 socket_reuse_port: true,

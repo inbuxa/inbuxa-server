@@ -8,15 +8,20 @@
 //! (`docs/spec/features/undelete.md`, UD-8 to UD-11). Email restores in
 //! `restore_item.rs`.
 
-use crate::task_manager::TaskResult;
+use crate::task_manager::outcome::Outcome;
 use calcard::{Entry, Parser, common::timezone::Tz};
 use common::{DavName, Server, auth::BuildAccessToken};
 use email::sieve::{SieveScript, ingest::SieveScriptIngest};
+use common::GroupwareResources;
 use groupware::{
     cache::GroupwareCache,
-    calendar::{CalendarEvent, CalendarEventData},
-    contact::ContactCard,
-    file::{FileNode, FileProperties},
+    calendar::{
+        CalendarEvent, CalendarEventContent, CalendarEventData,
+        alerts::DefaultAlertsResolver,
+        schedule::{EventAlarmScheduler, EventAlarmUsers},
+    },
+    contact::{ContactCard, ContactCardContent},
+    file::{FileNode, FileNodeContent, FileProperties},
 };
 use inbuxa_features::undelete::{self, data::Extra, groupware::candidates};
 use registry::schema::structs::{ArchivedItem, TaskRestoreArchivedItem};
@@ -28,19 +33,19 @@ use types::{
 };
 
 /// The names already used under a parent in an account's resources.
-fn names_under(resources: &common::DavResources, parent: Option<u32>) -> Vec<String> {
-    resources
-        .paths
-        .iter()
-        .filter(|path| path.parent_id == parent)
-        .map(|path| {
-            path.path
-                .rsplit('/')
-                .next()
-                .unwrap_or(&path.path)
-                .to_string()
-        })
-        .collect()
+fn names_under(resources: &GroupwareResources, parent: Option<u32>) -> Vec<String> {
+    let last = |path: &str| path.rsplit('/').next().unwrap_or(path).to_string();
+    match parent {
+        Some(parent_id) => resources
+            .children(parent_id)
+            .map(|path| last(path.path()))
+            .collect(),
+        None => resources
+            .tree_with_depth(0)
+            .filter(|path| path.parent_id().is_none())
+            .map(|path| last(path.path()))
+            .collect(),
+    }
 }
 
 fn free(name: &str, taken: &[String]) -> String {
@@ -62,7 +67,7 @@ pub(crate) async fn restore_other(
     let account_id = task.account_id.document_id();
     let access_token = server.access_token(account_id).await?.build();
     let account = server.account(account_id).await?;
-    let changed_by = access_token.account_tenant_ids();
+    let changed_by = access_token.changed_by();
     let hash = &task.blob_id.hash;
 
     let Some(bytes) = server
@@ -97,7 +102,7 @@ pub(crate) async fn restore_other(
                 _ => (0, archived.name.clone(), None),
             };
             let resources = server
-                .fetch_dav_resources(account_id, account_id, SyncCollection::FileNode)
+                .fetch_groupware_resources(account_id, account_id, SyncCollection::FileNode)
                 .await?;
             // Back to its folder if that still exists, else the root
             let parent_id = if parent_id > 0
@@ -109,14 +114,11 @@ pub(crate) async fn restore_other(
             };
             let parent = parent_id.checked_sub(1);
             let name = free(&name, &names_under(&resources, parent));
-            let document_id = server
-                .store()
-                .assign_document_ids(account_id, Collection::FileNode, 1)
-                .await?;
+            let document_id = batch.reserve_document_id(account_id, Collection::FileNode);
             FileNode {
                 parent_id,
                 name,
-                file: Some(FileProperties {
+                content: FileNodeContent::File(FileProperties {
                     blob_hash: hash.clone(),
                     size: bytes.len() as u32,
                     media_type,
@@ -137,7 +139,7 @@ pub(crate) async fn restore_other(
                 _ => (vec![], String::new()),
             };
             let resources = server
-                .fetch_dav_resources(account_id, account_id, SyncCollection::Calendar)
+                .fetch_groupware_resources(account_id, account_id, SyncCollection::Calendar)
                 .await?;
             // Back to its calendar if that still exists, else the default
             let calendar_id = match calendar_ids
@@ -146,7 +148,7 @@ pub(crate) async fn restore_other(
             {
                 Some(id) => id,
                 None => match server
-                    .get_or_create_default_calendar(account_id, account_id)
+                    .get_or_create_default_calendar(&account, &account)
                     .await?
                 {
                     Some(id) => id,
@@ -154,26 +156,40 @@ pub(crate) async fn restore_other(
                 },
             };
             let name = free(&name, &names_under(&resources, Some(calendar_id)));
-            let mut next_alarm = None;
-            let event = CalendarEvent {
-                names: vec![DavName {
-                    name,
-                    parent_id: calendar_id,
-                }],
+            let content = CalendarEventContent {
                 data: CalendarEventData::new(
                     ical,
                     Tz::Floating,
                     server.core.groupware.max_ical_instances,
-                    &mut next_alarm,
                 ),
+                preferences: vec![],
+            };
+            let next_alarms = server
+                .next_event_alarms(
+                    account_id,
+                    &EventAlarmUsers::new(account_id, &content)?,
+                    &content.data,
+                    &[calendar_id],
+                    store::write::now() as i64,
+                    &mut DefaultAlertsResolver::with_resources(account_id, resources.clone()),
+                )
+                .await
+                .caused_by(trc::location!())?;
+            let event = CalendarEvent {
+                names: vec![DavName::new(name, calendar_id)],
                 size: bytes.len() as u32,
                 ..Default::default()
             };
-            let document_id = server
-                .store()
-                .assign_document_ids(account_id, Collection::CalendarEvent, 1)
-                .await?;
-            event.insert(changed_by, account_id, document_id, next_alarm, &mut batch)?;
+            let document_id = batch.reserve_document_id(account_id, Collection::CalendarEvent);
+            event.insert(
+                content,
+                changed_by,
+                account_id,
+                document_id,
+                None,
+                next_alarms,
+                &mut batch,
+            )?;
         }
         (ArchivedItem::ContactCard(_), extra) => {
             let Entry::VCard(card) = Parser::new(&String::from_utf8_lossy(&bytes)).entry() else {
@@ -187,7 +203,7 @@ pub(crate) async fn restore_other(
                 _ => (vec![], String::new()),
             };
             let resources = server
-                .fetch_dav_resources(account_id, account_id, SyncCollection::AddressBook)
+                .fetch_groupware_resources(account_id, account_id, SyncCollection::AddressBook)
                 .await?;
             // Back to its address book if that still exists, else the first
             let book_id = match address_book_ids
@@ -195,8 +211,8 @@ pub(crate) async fn restore_other(
                 .find(|id| resources.container_resource_by_id(*id).is_some())
             {
                 Some(id) => id,
-                None => match resources.document_ids(true).next() {
-                    Some(id) => id,
+                None => match resources.containers().next() {
+                    Some(book) => book.document_id(),
                     None => match server.create_default_addressbook(&account, &account).await? {
                         Some(id) => id,
                         None => return Ok(Some("The account has no address book.".into())),
@@ -204,20 +220,21 @@ pub(crate) async fn restore_other(
                 },
             };
             let name = free(&name, &names_under(&resources, Some(book_id)));
-            let document_id = server
-                .store()
-                .assign_document_ids(account_id, Collection::ContactCard, 1)
-                .await?;
+            let document_id = batch.reserve_document_id(account_id, Collection::ContactCard);
             ContactCard {
-                names: vec![DavName {
-                    name,
-                    parent_id: book_id,
-                }],
-                card,
+                names: vec![DavName::new(name, book_id)],
                 size: bytes.len() as u32,
                 ..Default::default()
             }
-            .insert(changed_by, account_id, document_id, &mut batch)?;
+            .insert(
+                ContactCardContent { card },
+                server.core.groupware.vcard_version,
+                changed_by,
+                account_id,
+                document_id,
+                None,
+                &mut batch,
+            )?;
         }
         (ArchivedItem::SieveScript(archived), _) => {
             // Back as an inactive script, never activated (UD-8)
@@ -235,14 +252,11 @@ pub(crate) async fn restore_other(
             let Some(name) = name else {
                 return Ok(Some("No free script name.".into()));
             };
-            let document_id = server
-                .store()
-                .assign_document_ids(account_id, Collection::SieveScript, 1)
-                .await?;
+            let document_id = batch.reserve_document_id(account_id, Collection::SieveScript);
             batch
                 .with_account_id(account_id)
                 .with_collection(Collection::SieveScript)
-                .with_document(document_id)
+                .create_document(document_id)
                 .custom(
                     common::storage::index::ObjectIndexBuilder::<(), _>::new()
                         .with_changes(
@@ -264,9 +278,9 @@ pub(crate) async fn restore_other(
 
 /// The result of a restore that couldn't happen: the item stays archived,
 /// and a new request can try again (UD-10).
-pub(crate) async fn not_restored(server: &Server, item_id: Id, reason: String) -> trc::Result<TaskResult> {
+pub(crate) async fn not_restored(server: &Server, item_id: Id, reason: String) -> trc::Result<Outcome> {
     let mut batch = BatchBuilder::new();
     undelete::data::clear_restore_requested(&mut batch, item_id);
-    server.core.storage.data.write(batch.build_all()).await?;
-    Ok(TaskResult::permanent(reason))
+    server.core.storage.data.write_batch(&mut batch).await?;
+    Ok(Outcome::fatal(reason))
 }

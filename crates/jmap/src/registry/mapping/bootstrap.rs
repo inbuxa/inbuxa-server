@@ -7,11 +7,14 @@
  */
 
 use crate::registry::{
-    mapping::{RegistryGetResponse, RegistrySetResponse, map_bootstrap_error},
+    mapping::{
+        RegistryGetResponse, RegistrySetResponse, cluster::validate_in_memory_store,
+        map_bootstrap_error,
+    },
     set::map_write_error,
 };
 use common::{
-    DATABASE_SCHEMA_VERSION, Server, config::storage::Storage,
+    Server, config::storage::Storage, is_current_schema,
     network::acme::account::acme_create_account, psl,
 };
 use directory::core::secret::hash_secret;
@@ -22,12 +25,12 @@ use jmap_proto::{
 use jmap_tools::{JsonPointer, JsonPointerItem, Key};
 use rand::{RngExt, distr::Alphanumeric, rng};
 use registry::{
-    jmap::{IntoValue, JmapValue, JsonPointerPatch, RegistryJsonPatch},
+    jmap::{IntoValue, JmapValue, JsonPointerPatch, RegistryJsonPatch, ValueOptions},
     schema::{
         enums::{AcmeChallengeType, DnsRecordType},
         prelude::{Object, Property},
         structs::{
-            Account, AcmeProvider, BlobStore, Bootstrap, CertificateManagement,
+            Account, AcmeProvider, Authentication, BlobStore, Bootstrap, CertificateManagement,
             CertificateManagementProperties, Credential, DataStore, Directory, DirectoryBootstrap,
             DkimManagement, DkimManagementProperties, DnsManagement, DnsManagementProperties,
             DnsServer, DnsServerBootstrap, Domain, InMemoryStore, PasswordCredential, RocksDbStore,
@@ -39,9 +42,9 @@ use registry::{
 };
 use std::time::Duration;
 use store::{
-    RegistryStore, SUBSPACE_PROPERTY, Store,
+    RegistryStore, Store, Subspace,
     registry::write::{RegistryWrite, RegistryWriteResult},
-    write::{AnyKey, BatchBuilder},
+    write::{AnyKey, BatchBuilder, key::SystemKind},
 };
 use types::id::Id;
 use utils::{DomainPart, is_valid_domain};
@@ -64,7 +67,9 @@ pub(crate) async fn bootstrap_get(
         if id == Id::singleton() {
             get.insert(
                 Id::singleton(),
-                build_default_bootstrap(get.server).into_value(),
+                build_default_bootstrap(get.server).into_value_with(ValueOptions {
+                    include_secrets: get.server.core.network.include_secrets,
+                }),
             );
             break;
         } else {
@@ -127,7 +132,7 @@ pub(crate) async fn bootstrap_set(
 
         // Validate domain name and hostname
         let server_hostname = bootstrap
-            .server_hostname
+            .default_hostname
             .trim()
             .to_lowercase()
             .to_ascii_domain()
@@ -144,7 +149,7 @@ pub(crate) async fn bootstrap_set(
             set.response.not_updated.append(
                 id,
                 SetError::invalid_properties()
-                    .with_property(Property::ServerHostname)
+                    .with_property(Property::DefaultHostname)
                     .with_description("Invalid server hostname"),
             );
             break;
@@ -156,6 +161,13 @@ pub(crate) async fn bootstrap_set(
                     .with_property(Property::DefaultDomain)
                     .with_description("Invalid default domain"),
             );
+            break;
+        }
+
+        if let Err(err) = validate_in_memory_store(set.server, &bootstrap.in_memory_store).await? {
+            set.response
+                .not_updated
+                .append(id, err.with_property(Property::InMemoryStore));
             break;
         }
 
@@ -186,12 +198,13 @@ pub(crate) async fn bootstrap_set(
 
         // Make sure this is blank deployment
         let probe = store.get_value::<u32>(AnyKey {
-            subspace: SUBSPACE_PROPERTY,
-            key: vec![0u8],
+            subspace: Subspace::System,
+            key: vec![SystemKind::SchemaVersion as u8],
         });
         match tokio::time::timeout(Duration::from_secs(30), probe).await {
             Ok(Ok(None)) => {}
-            Ok(Ok(Some(DATABASE_SCHEMA_VERSION))) => {
+            // inbuxa: either edition's store is in use
+            Ok(Ok(Some(version))) if is_current_schema(version) => {
                 set.response.not_updated.append(
                     id,
                     SetError::invalid_properties()
@@ -206,9 +219,8 @@ pub(crate) async fn bootstrap_set(
                     SetError::invalid_properties()
                         .with_property(Property::DataStore)
                         .with_description(concat!(
-                            "The selected data store contains information from an older version. ",
-                            "Please follow the upgrade instructions at ",
-                            "https://docs.inbuxa.org/install/migrating/"
+                            "The selected data store was created by an older version ",
+                            "or a different edition and cannot be used."
                         )),
                 );
                 break;
@@ -341,6 +353,14 @@ pub(crate) async fn bootstrap_set(
                 }
             }
         }
+        if let Some(directory_id) = directory_id
+            && let Err(err) = set_default_directory(&registry, directory_id).await
+        {
+            set.response
+                .not_updated
+                .append(id, err.with_property(Property::Directory));
+            break 'outer;
+        }
         if let Some(dns_server) = map_dns_server(&bootstrap.dns_server) {
             match write_object(&registry, &dns_server.into()).await {
                 Ok(id) => {
@@ -369,6 +389,10 @@ pub(crate) async fn bootstrap_set(
                 directory: "https://acme-v02.api.letsencrypt.org/directory".to_string(),
                 #[cfg(feature = "dev_mode")]
                 directory: "https://localhost:14000/dir".to_string(),
+                #[cfg(not(feature = "dev_mode"))]
+                description: "Let's Encrypt".to_string(),
+                #[cfg(feature = "dev_mode")]
+                description: "Pebble".to_string(),
                 ..Default::default()
             };
             if let Err(err) = acme_create_account(&mut acme_provider, None).await {
@@ -402,7 +426,7 @@ pub(crate) async fn bootstrap_set(
         ]);
         let domain = Domain {
             name: domain_name.clone(),
-            is_enabled: true,
+            enable: true,
             certificate_management: if let Some(acme_provider_id) = acme_provider_id {
                 CertificateManagement::Automatic(CertificateManagementProperties {
                     acme_provider_id,
@@ -425,7 +449,6 @@ pub(crate) async fn bootstrap_set(
             } else {
                 DnsManagement::Manual
             },
-            directory_id,
             ..Default::default()
         };
         let domain_id = match write_object(&registry, &domain.into()).await {
@@ -440,7 +463,7 @@ pub(crate) async fn bootstrap_set(
 
         // Write system settings
         let system_settings = SystemSettings {
-            default_hostname: bootstrap.server_hostname,
+            default_hostname: bootstrap.default_hostname,
             default_domain_id: domain_id,
             ..Default::default()
         };
@@ -476,7 +499,7 @@ pub(crate) async fn bootstrap_set(
             }));
         }
         if !batch.is_empty() {
-            match registry.store().write(batch.build_all()).await {
+            match registry.store().write_batch(&mut batch).await {
                 Ok(_) => {}
                 Err(err) => {
                     trc::error!(err.caused_by(trc::location!()));
@@ -498,6 +521,7 @@ pub(crate) async fn bootstrap_set(
                 credentials: List::from_iter([Credential::Password(PasswordCredential {
                     credential_id: Id::new(0),
                     secret: hash_secret(
+                        &set.server.inner.data.password_verifier,
                         set.server.core.network.security.password_hash_algorithm,
                         secret.clone().into_bytes(),
                     )
@@ -539,7 +563,47 @@ pub(crate) async fn bootstrap_set(
 }
 
 async fn write_object(registry: &RegistryStore, object: &Object) -> Result<Id, SetError<Property>> {
-    match registry.write(RegistryWrite::insert(object)).await {
+    apply_write(registry, RegistryWrite::insert(object)).await
+}
+
+async fn set_default_directory(
+    registry: &RegistryStore,
+    directory_id: Id,
+) -> Result<Id, SetError<Property>> {
+    match registry.get(Authentication::OBJECT.singleton()).await {
+        Ok(Some(old_object)) => {
+            let mut authentication = Authentication::from(old_object.clone());
+            authentication.directory_id = Some(directory_id);
+            apply_write(
+                registry,
+                RegistryWrite::update(Id::singleton(), &authentication.into(), &old_object),
+            )
+            .await
+        }
+        Ok(None) => {
+            write_object(
+                registry,
+                &Authentication {
+                    directory_id: Some(directory_id),
+                    ..Default::default()
+                }
+                .into(),
+            )
+            .await
+        }
+        Err(err) => {
+            let details = format!("Failed to save settings: {err}");
+            trc::error!(err.caused_by(trc::location!()));
+            Err(SetError::invalid_properties().with_description(details))
+        }
+    }
+}
+
+async fn apply_write(
+    registry: &RegistryStore,
+    write: RegistryWrite<'_>,
+) -> Result<Id, SetError<Property>> {
+    match registry.write(write).await {
         Ok(RegistryWriteResult::Success(id)) => Ok(id),
         Ok(err) => Err(map_write_error(err)),
         Err(err) => {
@@ -561,7 +625,7 @@ fn map_directory(directory: &DirectoryBootstrap) -> Option<Directory> {
 
 fn map_dns_server(dns_server: &DnsServerBootstrap) -> Option<registry::schema::structs::DnsServer> {
     match dns_server {
-        DnsServerBootstrap::Manual | DnsServerBootstrap::Deprecated1 => None,
+        DnsServerBootstrap::Manual => None,
         DnsServerBootstrap::Tsig(dns_server_tsig) => {
             DnsServer::Tsig(dns_server_tsig.clone()).into()
         }
@@ -680,12 +744,12 @@ fn build_default_bootstrap(server: &Server) -> Bootstrap {
         directory: DirectoryBootstrap::Internal,
         tracer: Tracer::Log(TracerLog {
             path: "/var/log/inbuxa/".to_string(),
-            prefix: "inbuxa".to_string(),
+            prefix: "inbuxa.log".to_string(),
             ansi: true,
             enable: true,
             ..Default::default()
         }),
-        server_hostname,
+        default_hostname: server_hostname,
         default_domain,
         request_tls_certificate: true,
         generate_dkim_keys: true,

@@ -2,14 +2,16 @@
  * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
+ *
+ * Modified by Coffey Labs in 2026 for INBUXA.
  */
 
 use crate::{
     SearchStore,
     backend::meili::{MeiliSearchStore, Task, TaskStatus, TaskUid},
     search::{
-        CalendarSearchField, ContactSearchField, EmailSearchField, SearchField, SearchableField,
-        TracingSearchField,
+        CalendarSearchField, ContactSearchField, EmailSearchField, FileSearchField, SearchField,
+        SearchableField, TracingSearchField,
     },
 };
 use registry::schema::structs;
@@ -49,7 +51,7 @@ impl MeiliSearchStore {
             client: ms.client,
             url: ms.url,
             task_poll_interval: config.poll_interval.into_inner(),
-            task_poll_retries: config.max_retries as usize,
+            task_poll_retries: config.max_polls as usize,
             task_fail_on_timeout: config.fail_on_timeout,
         })))
     }
@@ -58,7 +60,35 @@ impl MeiliSearchStore {
         self.create_index::<EmailSearchField>().await?;
         self.create_index::<CalendarSearchField>().await?;
         self.create_index::<ContactSearchField>().await?;
+        self.create_index::<FileSearchField>().await?;
         self.create_index::<TracingSearchField>().await?;
+        Ok(())
+    }
+
+    /// inbuxa: drops every index, for a clean test run (0.16 had this)
+    #[cfg(inbuxa_tests)]
+    pub async fn drop_indexes(&self) -> trc::Result<()> {
+        use crate::write::SearchIndex;
+
+        for index in [
+            SearchIndex::Email,
+            SearchIndex::Calendar,
+            SearchIndex::Contacts,
+            SearchIndex::File,
+            SearchIndex::Tracing,
+        ] {
+            let response = self
+                .client
+                .delete(format!("{}/indexes/{}", self.url, index.index_name()))
+                .send()
+                .await
+                .map_err(|err| trc::StoreEvent::MeilisearchError.reason(err))?;
+            // A missing index answers 404, which is what's wanted
+            if response.status().is_success() {
+                self.wait_for_task(response).await?;
+            }
+        }
+
         Ok(())
     }
 
@@ -86,6 +116,9 @@ impl MeiliSearchStore {
         let index_name = T::index().index_name();
 
         if self.index_exists(index_name).await? {
+            if self.index_max_total_hits(index_name).await? != Some(MAX_TOTAL_HITS) {
+                self.update_index_pagination(index_name).await?;
+            }
             return Ok(());
         }
 
@@ -131,7 +164,7 @@ impl MeiliSearchStore {
             }
         }
 
-        #[cfg(feature = "test_mode")]
+        #[cfg(inbuxa_tests)]
         filterable.push(Value::String("bcc".into()));
 
         if !searchable.is_empty() {
@@ -160,6 +193,27 @@ impl MeiliSearchStore {
         self.update_index_pagination(index_name).await?;
 
         Ok(())
+    }
+
+    async fn index_max_total_hits(&self, index_uid: &str) -> trc::Result<Option<u64>> {
+        let response = assert_success(
+            self.client
+                .get(format!(
+                    "{}/indexes/{}/settings/pagination",
+                    self.url, index_uid
+                ))
+                .send()
+                .await,
+        )
+        .await?;
+        let body = response
+            .text()
+            .await
+            .map_err(|err| trc::StoreEvent::MeilisearchError.reason(err))?;
+
+        serde_json::from_str::<Value>(&body)
+            .map(|value| value.get("maxTotalHits").and_then(Value::as_u64))
+            .map_err(|err| trc::StoreEvent::MeilisearchError.reason(err))
     }
 
     async fn update_index_pagination(&self, index_uid: &str) -> trc::Result<bool> {
@@ -196,44 +250,6 @@ impl MeiliSearchStore {
         )
         .await?;
         self.wait_for_task(response).await
-    }
-
-    #[cfg(feature = "test_mode")]
-    pub async fn drop_indexes(&self) -> trc::Result<()> {
-        use crate::write::SearchIndex;
-
-        for index in &[
-            SearchIndex::Email,
-            SearchIndex::Calendar,
-            SearchIndex::Contacts,
-            SearchIndex::Tracing,
-        ] {
-            let response = self
-                .client
-                .delete(format!("{}/indexes/{}", self.url, index.index_name()))
-                .send()
-                .await
-                .map_err(|err| trc::StoreEvent::MeilisearchError.reason(err))?;
-
-            match response.status().as_u16() {
-                200..=299 => {
-                    self.wait_for_task(response).await?;
-                }
-                400..=499 => {
-                    // Index does not exist
-                    return Ok(());
-                }
-                _ => {
-                    let status = response.status();
-                    let msg = response.text().await.unwrap_or_default();
-                    return Err(trc::StoreEvent::MeilisearchError
-                        .reason(msg)
-                        .ctx(trc::Key::Code, status.as_u16()));
-                }
-            }
-        }
-
-        Ok(())
     }
 
     pub(crate) async fn wait_for_task(&self, response: Response) -> trc::Result<bool> {
@@ -323,3 +339,4 @@ pub(crate) async fn assert_success(response: Result<Response, Error>) -> trc::Re
         Err(err) => Err(trc::StoreEvent::MeilisearchError.reason(err)),
     }
 }
+

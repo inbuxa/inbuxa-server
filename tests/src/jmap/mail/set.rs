@@ -2,13 +2,15 @@
  * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
+ *
+ * Modified by Coffey Labs in 2026 for INBUXA.
  */
 
 use crate::{
     jmap::{find_values, replace_blob_ids, replace_boundaries, replace_values},
     utils::server::TestServer,
 };
-use ::email::{mailbox::INBOX_ID, message::metadata::MessageData};
+use ::email::{mailbox::INBOX_ID, message::messagedata::MessageData};
 use ahash::AHashSet;
 use jmap_client::{
     Error, Set,
@@ -19,10 +21,7 @@ use jmap_client::{
 };
 use registry::schema::prelude::ObjectType;
 use std::{fs, path::PathBuf, str::FromStr};
-use store::{
-    ValueKey,
-    write::{AlignedBytes, Archive},
-};
+use store::ValueKey;
 use types::{collection::Collection, id::Id};
 
 pub async fn test(test: &TestServer) {
@@ -159,15 +158,40 @@ async fn create(client: &Client, mailbox_id: &str) {
 
         // Compare response
         file_name.set_extension("jmap");
-        let result = replace_blob_ids(replace_boundaries(
+        let result = strip_multipart_sizes(replace_blob_ids(replace_boundaries(
             serde_json::to_string_pretty(&email).unwrap(),
-        ));
+        )));
         if fs::read(&file_name).unwrap() != result.as_bytes() {
             file_name.set_extension("jmap_failed");
             fs::write(&file_name, result.as_bytes()).unwrap();
             panic!("Test failed, output saved to {}", file_name.display());
         }
     }
+}
+
+// inbuxa: 1.0 reports the size of multipart parts too, and that depends on
+// the length of the boundaries generated for each new message (hex without
+// padding), so it is left out of the comparison. A multipart part has no
+// partId or blobId, so its size is the first field of its object.
+fn strip_multipart_sizes(json: String) -> String {
+    let mut result = String::with_capacity(json.len());
+    let mut after_open = false;
+    for line in json.split_inclusive('\n') {
+        let trimmed = line.trim();
+        if after_open && trimmed.starts_with("\"size\": ") {
+            let size = trimmed
+                .trim_start_matches("\"size\": ")
+                .trim_end_matches(',')
+                .parse::<u64>()
+                .unwrap();
+            assert!(size > 0, "multipart part without a size");
+            after_open = false;
+            continue;
+        }
+        after_open = trimmed.ends_with('{');
+        result.push_str(line);
+    }
+    result
 }
 
 async fn update(client: &Client, root_mailbox_id: &str) {
@@ -376,15 +400,13 @@ async fn message_uids(
 ) -> std::collections::BTreeMap<u32, u32> {
     test.server
         .store()
-        .get_value::<Archive<AlignedBytes>>(ValueKey::archive(
+        .get_value::<MessageData>(ValueKey::archive(
             account_id,
             Collection::Email,
             document_id,
         ))
         .await
         .unwrap()
-        .unwrap()
-        .deserialize::<MessageData>()
         .unwrap()
         .mailboxes
         .iter()
@@ -416,8 +438,19 @@ pub async fn assert_email_properties(
             .collect::<AHashSet<_>>()
     );
 
-    assert_eq!(
-        keywords.iter().copied().collect::<AHashSet<_>>(),
-        result.keywords().iter().copied().collect::<AHashSet<_>>()
-    );
+    // inbuxa: 1.0 sets $hasattachment or $hasnoattachment on every message;
+    // exactly one of them must be there, unless the test expects it
+    let mut actual = result.keywords().iter().copied().collect::<AHashSet<_>>();
+    if !keywords
+        .iter()
+        .any(|k| matches!(*k, "$hasattachment" | "$hasnoattachment"))
+    {
+        let has_attachment = actual.remove("$hasattachment");
+        let has_no_attachment = actual.remove("$hasnoattachment");
+        assert!(
+            has_attachment ^ has_no_attachment,
+            "expected exactly one of $hasattachment/$hasnoattachment on {message_id}"
+        );
+    }
+    assert_eq!(keywords.iter().copied().collect::<AHashSet<_>>(), actual);
 }

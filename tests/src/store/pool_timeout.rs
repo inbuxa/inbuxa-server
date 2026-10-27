@@ -85,7 +85,7 @@ pub async fn postgres_pool_timeout() {
             host: "127.0.0.1".into(),
             port: port as u64,
             database: "none".into(),
-            timeout: Some(Duration::from_secs(2).into()),
+            connect_timeout: Some(Duration::from_secs(2).into()),
             use_tls: false,
             ..Default::default()
         }),
@@ -226,7 +226,7 @@ async fn assert_queries_time_out(store: Store, proxy: &PausableProxy) {
                         .with_collection(types::collection::Collection::Email)
                         .with_document(0)
                         .set(ValueClass::Property(0), 1u64.to_be_bytes().to_vec());
-                    store.write(batch.build_all()).await.map(|_| ())
+                    store.write_batch(&mut batch).await.map(|_| ())
                 }
             }
         })
@@ -267,7 +267,7 @@ pub async fn postgres_query_timeout() {
     config.host = "127.0.0.1".into();
     config.port = proxy.port as u64;
     // New connections through the paused proxy give up as quickly
-    config.timeout = Some(TEST_LIMITS.query.into());
+    config.connect_timeout = Some(TEST_LIMITS.query.into());
     let store = Store::build(DataStore::PostgreSql(config))
         .await
         .unwrap()
@@ -323,7 +323,7 @@ pub async fn postgres_readiness() {
     let proxy = PausableProxy::start(config.port as u16).await;
     config.host = "127.0.0.1".into();
     config.port = proxy.port as u64;
-    config.timeout = Some(TEST_LIMITS.query.into());
+    config.connect_timeout = Some(TEST_LIMITS.query.into());
     let store = Store::build(DataStore::PostgreSql(config))
         .await
         .unwrap()

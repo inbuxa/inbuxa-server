@@ -136,7 +136,7 @@ pub async fn record(
         key(account_id, Some(protocol)).class,
         now.to_be_bytes().to_vec(),
     );
-    data.write(batch.build_all())
+    data.write_batch(&mut batch)
         .await
         .caused_by(trc::location!())
         .map(|_| ())
@@ -203,7 +203,7 @@ mod tests {
             };
             assert_eq!(parse_key(&any.key), Some((42, protocol)));
             // With the subspace byte in front, too.
-            let mut with_subspace = vec![SUBSPACE_INBUXA];
+            let mut with_subspace = vec![SUBSPACE_INBUXA.byte()];
             with_subspace.extend_from_slice(&any.key);
             assert_eq!(parse_key(&with_subspace), Some((42, protocol)));
         }

@@ -4,9 +4,10 @@
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
  */
 
-use super::download::BlobDownload;
+use super::{download::BlobDownload, embedded::EmbeddedBlobs};
 use common::{Server, auth::AccessToken};
-use email::message::metadata::MessageData;
+use email::message::messagedata::MessageData;
+use encodify::base64::STANDARD;
 use jmap_proto::{
     method::{
         get::{GetRequest, GetResponse},
@@ -16,17 +17,13 @@ use jmap_proto::{
     request::{IntoValid, MaybeInvalid},
 };
 use jmap_tools::{Map, Value};
-use mail_builder::encoders::Base64Encoder;
 use sha1::{Digest, Sha1};
 use sha2::{Sha256, Sha512};
 use std::future::Future;
-use store::{
-    ValueKey,
-    write::{AlignedBytes, Archive},
-};
+use store::ValueKey;
 use trc::AddContext;
 use types::{blob::BlobClass, collection::Collection, id::Id, type_state::DataType};
-use utils::map::vec_map::VecMap;
+use utils::{map::vec_map::VecMap, text::validate_utf8};
 
 pub trait BlobOperations: Sync + Send {
     fn blob_get(
@@ -92,63 +89,38 @@ impl BlobOperations for Server {
                             DigestProperty::Sha => {
                                 let mut hasher = Sha1::new();
                                 hasher.update(bytes_range);
-                                String::from_utf8(
-                                    Base64Encoder::new()
-                                        .encode(&hasher.finalize()[..])
-                                        .unwrap_or_default(),
-                                )
-                                .unwrap()
+                                STANDARD.encode(hasher.finalize())
                             }
                             DigestProperty::Sha256 => {
                                 let mut hasher = Sha256::new();
                                 hasher.update(bytes_range);
-                                String::from_utf8(
-                                    Base64Encoder::new()
-                                        .encode(&hasher.finalize()[..])
-                                        .unwrap_or_default(),
-                                )
-                                .unwrap()
+                                STANDARD.encode(hasher.finalize())
                             }
                             DigestProperty::Sha512 => {
                                 let mut hasher = Sha512::new();
                                 hasher.update(bytes_range);
-                                String::from_utf8(
-                                    Base64Encoder::new()
-                                        .encode(&hasher.finalize()[..])
-                                        .unwrap_or_default(),
-                                )
-                                .unwrap()
+                                STANDARD.encode(hasher.finalize())
                             }
                         }
                         .into(),
                         BlobProperty::Data(data) => match data {
-                            DataProperty::AsText => match std::str::from_utf8(bytes_range) {
-                                Ok(text) => text.to_string().into(),
-                                Err(_) => {
+                            DataProperty::AsText => match validate_utf8(bytes_range) {
+                                Some(text) => text.to_string().into(),
+                                None => {
                                     blob.insert_unchecked(BlobProperty::IsEncodingProblem, true);
                                     Value::Null
                                 }
                             },
-                            DataProperty::AsBase64 => String::from_utf8(
-                                Base64Encoder::new().encode(bytes_range).unwrap_or_default(),
-                            )
-                            .unwrap()
-                            .into(),
-                            DataProperty::Default => match std::str::from_utf8(bytes_range) {
-                                Ok(text) => {
+                            DataProperty::AsBase64 => STANDARD.encode(bytes_range).into(),
+                            DataProperty::Default => match validate_utf8(bytes_range) {
+                                Some(text) => {
                                     property = BlobProperty::Data(DataProperty::AsText);
                                     text.to_string().into()
                                 }
-                                Err(_) => {
+                                None => {
                                     property = BlobProperty::Data(DataProperty::AsBase64);
                                     blob.insert_unchecked(BlobProperty::IsEncodingProblem, true);
-                                    String::from_utf8(
-                                        Base64Encoder::new()
-                                            .encode(bytes_range)
-                                            .unwrap_or_default(),
-                                    )
-                                    .unwrap()
-                                    .into()
+                                    STANDARD.encode(bytes_range).into()
                                 }
                             },
                         },
@@ -168,33 +140,15 @@ impl BlobOperations for Server {
     }
 
     async fn blob_lookup(&self, request: BlobLookupRequest) -> trc::Result<BlobLookupResponse> {
-        let mut include_email = false;
-        let mut include_mailbox = false;
-        let mut include_thread = false;
-
-        let type_names = request
-            .type_names
-            .into_iter()
-            .map(|tn| match tn {
-                MaybeInvalid::Value(value) => {
-                    match &value {
-                        DataType::Email => {
-                            include_email = true;
-                        }
-                        DataType::Mailbox => {
-                            include_mailbox = true;
-                        }
-                        DataType::Thread => {
-                            include_thread = true;
-                        }
-                        _ => (),
-                    }
-
-                    Ok(value)
-                }
-                MaybeInvalid::Invalid(_) => Err(trc::JmapEvent::UnknownDataType.into_err()),
-            })
-            .collect::<Result<Vec<_>, _>>()?;
+        let mut type_names = Vec::with_capacity(request.type_names.len());
+        for type_name in request.type_names {
+            let MaybeInvalid::Value(type_name) = type_name else {
+                return Err(trc::JmapEvent::UnknownDataType.into_err());
+            };
+            if !type_names.contains(&type_name) {
+                type_names.push(type_name);
+            }
+        }
         let req_account_id = request.account_id.document_id();
         let mut response = BlobLookupResponse {
             account_id: request.account_id,
@@ -203,60 +157,73 @@ impl BlobOperations for Server {
         };
 
         for id in request.ids.into_valid() {
-            let mut matched_ids = VecMap::new();
+            let mut matched_ids = type_names
+                .iter()
+                .map(|type_name| (*type_name, Vec::new()))
+                .collect::<VecMap<_, _>>();
 
             match &id.class {
                 BlobClass::Linked {
                     account_id,
                     collection,
                     document_id,
-                } if *account_id == req_account_id => {
-                    let collection = Collection::from(*collection);
-                    if collection == Collection::Email {
-                        if let Some(data_) = self
-                            .store()
-                            .get_value::<Archive<AlignedBytes>>(ValueKey::archive(
-                                req_account_id,
-                                Collection::Email,
-                                *document_id,
-                            ))
-                            .await?
-                        {
-                            let data = data_
-                                .unarchive::<MessageData>()
-                                .caused_by(trc::location!())?;
-                            if include_email {
-                                matched_ids.append(
-                                    DataType::Email,
-                                    vec![Id::from_parts(u32::from(data.thread_id), *document_id)],
-                                );
-                            }
-                            if include_thread {
-                                matched_ids.append(
-                                    DataType::Thread,
-                                    vec![Id::from(u32::from(data.thread_id))],
-                                );
-                            }
-                            if include_mailbox {
-                                matched_ids.append(
-                                    DataType::Mailbox,
-                                    data.mailboxes
-                                        .iter()
-                                        .map(|m| {
-                                            debug_assert!(m.uid != 0);
-                                            Id::from(u32::from(m.mailbox_id))
-                                        })
-                                        .collect::<Vec<_>>(),
-                                );
+                } if *account_id == req_account_id
+                    && self
+                        .store()
+                        .blob_link_size(&id.hash, &id.class)
+                        .await
+                        .caused_by(trc::location!())?
+                        .is_some() =>
+                {
+                    match Collection::from(*collection) {
+                        Collection::Email => {
+                            if let Some(data) = self
+                                .store()
+                                .get_value::<MessageData>(ValueKey::archive(
+                                    req_account_id,
+                                    Collection::Email,
+                                    *document_id,
+                                ))
+                                .await?
+                            {
+                                if let Some(ids) = matched_ids.get_mut(&DataType::Email) {
+                                    ids.push(Id::from_parts(data.thread_id, *document_id));
+                                }
+                                if let Some(ids) = matched_ids.get_mut(&DataType::Thread) {
+                                    ids.push(Id::from(data.thread_id));
+                                }
+                                if let Some(ids) = matched_ids.get_mut(&DataType::Mailbox) {
+                                    ids.extend(data.mailboxes.iter().map(|m| {
+                                        debug_assert!(m.uid != 0);
+                                        Id::from(m.mailbox_id)
+                                    }));
+                                }
                             }
                         }
-                    } else {
-                        match DataType::try_from(collection) {
-                            Ok(data_type) if type_names.contains(&data_type) => {
-                                matched_ids.append(data_type, vec![Id::from(*document_id)]);
+                        collection => {
+                            if let Ok(data_type) = DataType::try_from(collection)
+                                && let Some(ids) = matched_ids.get_mut(&data_type)
+                            {
+                                ids.push(Id::from(*document_id));
                             }
-                            _ => (),
                         }
+                    }
+                }
+                BlobClass::Embedded {
+                    account_id,
+                    collection,
+                    document_id,
+                } if *account_id == req_account_id
+                    && self
+                        .embedded_blob(&id)
+                        .await
+                        .caused_by(trc::location!())?
+                        .is_some() =>
+                {
+                    if let Ok(data_type) = DataType::try_from(Collection::from(*collection))
+                        && let Some(ids) = matched_ids.get_mut(&data_type)
+                    {
+                        ids.push(Id::from(*document_id));
                     }
                 }
                 BlobClass::Reserved { account_id, .. } if *account_id == req_account_id => {}

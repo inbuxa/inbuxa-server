@@ -10,12 +10,13 @@ use sieve::{FunctionMap, runtime::Variable};
 
 use super::PluginContext;
 
+
 pub fn register(plugin_id: u32, fnc_map: &mut FunctionMap) {
     fnc_map.set_external_function("llm_prompt", plugin_id, 3);
 }
 
 // inbuxa: AI-20 to AI-25, `llm_prompt(model, prompt, temperature)`
-pub async fn exec(ctx: PluginContext<'_>) -> trc::Result<Variable> {
+pub async fn exec(ctx: PluginContext<'_>) -> trc::Result<Variable<'static>> {
     Ok(crate::enterprise::llm::sieve_prompt(ctx)
         .await
         .map_or(Variable::from(false), Variable::from))

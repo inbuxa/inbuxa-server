@@ -3,10 +3,11 @@
     "a": true
   },
   "keywords": {
+    "$hasattachment": true,
     "tag": true
   },
   "size": 7477,
-  "receivedAt": "2206-12-09T08:26:40Z",
+  "receivedAt": "2106-02-07T06:28:15Z",
   "messageId": [
     "NDBBIAKOPKHFGPLCODIGKEKFCHAA.doug@example.com"
   ],
@@ -25,6 +26,7 @@
   "subject": "Test message from Microsoft Outlook 00",
   "sentAt": "2000-05-17T23:44:45Z",
   "bodyStructure": {
+    "size": 6965,
     "headers": [
       {
         "name": "From",
@@ -78,6 +80,7 @@
     "type": "multipart/related",
     "subParts": [
       {
+        "size": 2651,
         "headers": [
           {
             "name": "Content-Type",

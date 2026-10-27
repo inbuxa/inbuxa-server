@@ -75,17 +75,14 @@ pub async fn ai_calibration() {
             continue;
         };
         let subject = message.subject().unwrap_or_default().to_string();
-        let text = (0..message.text_body.len())
-            .filter_map(|i| message.body_text(i))
-            .collect::<Vec<_>>()
-            .join("\n\n");
+        let text = message.text_bodies().collect::<Vec<_>>().join("\n\n");
         let user = request::classification_text(&subject, &text, max_bytes, &request::nonce());
         let body = request::body(
             request::Kind::Chat,
             "calibration",
             Some(&system),
             &user,
-            0.5,
+            Some(0.5),
             request::CLASSIFY_MAX_TOKENS,
             false,
         );

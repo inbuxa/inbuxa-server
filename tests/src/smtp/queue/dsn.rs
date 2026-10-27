@@ -2,6 +2,8 @@
  * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
+ *
+ * Modified by Coffey Labs in 2026 for INBUXA.
  */
 
 use crate::utils::server::{TestServer, TestServerBuilder};
@@ -49,17 +51,17 @@ async fn generate_dsn() {
             return_path: "sender@foobar.org".into(),
             recipients: vec![Recipient {
                 address: "foobar@example.org".into(),
-                status: Status::PermanentFailure(ErrorDetails {
+                status: Status::PermanentFailure(Box::new(ErrorDetails {
                     entity: "mx.example.org".into(),
-                    details: Error::UnexpectedResponse(UnexpectedResponse {
+                    details: Error::UnexpectedResponse(Box::new(UnexpectedResponse {
                         command: "RCPT TO:<foobar@example.org>".into(),
                         response: Response {
                             code: 550,
                             esc: [5, 1, 2],
                             message: "User does not exist".into(),
                         },
-                    }),
-                }),
+                    })),
+                })),
                 flags: 0,
                 orcpt: None,
                 retry: Schedule::now(),
@@ -146,14 +148,14 @@ async fn generate_dsn() {
     // Success DSN
     message.message.recipients.push(Recipient {
         address: "jane@example.org".into(),
-        status: Status::Completed(HostResponse {
+        status: Status::Completed(Box::new(HostResponse {
             hostname: "mx2.example.org".into(),
             response: Response {
                 code: 250,
                 esc: [2, 1, 5],
                 message: "Message accepted for delivery".into(),
             },
-        }),
+        })),
         flags,
         orcpt: None,
         retry: Schedule::now(),
@@ -168,10 +170,10 @@ async fn generate_dsn() {
     // Delay DSN
     message.message.recipients.push(Recipient {
         address: "john.doe@example.org".into(),
-        status: Status::TemporaryFailure(ErrorDetails {
+        status: Status::TemporaryFailure(Box::new(ErrorDetails {
             entity: "mx.domain.org".into(),
             details: Error::ConnectionError("Connection timeout".into()),
-        }),
+        })),
         flags,
         orcpt: Some("jdoe@example.org".into()),
         retry: Schedule::now(),
@@ -199,17 +201,17 @@ async fn generate_dsn() {
     // A DSN that cannot be written is retried rather than marked as sent
     message.message.recipients = vec![Recipient {
         address: "carol@example.org".into(),
-        status: Status::PermanentFailure(ErrorDetails {
+        status: Status::PermanentFailure(Box::new(ErrorDetails {
             entity: "mx.example.org".into(),
-            details: Error::UnexpectedResponse(UnexpectedResponse {
+            details: Error::UnexpectedResponse(Box::new(UnexpectedResponse {
                 command: "RCPT TO:<carol@example.org>".into(),
                 response: Response {
                     code: 550,
                     esc: [5, 1, 2],
                     message: "User does not exist".into(),
                 },
-            }),
-        }),
+            })),
+        })),
         flags,
         orcpt: None,
         retry: Schedule::now(),

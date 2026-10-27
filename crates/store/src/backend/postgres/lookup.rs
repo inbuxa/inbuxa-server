@@ -6,7 +6,10 @@
  * Modified by Coffey Labs in 2026 for INBUXA.
  */
 
-use crate::{QueryResult, QueryType, backend::postgres::into_pool_error};
+use crate::{
+    QueryResult, QueryType,
+    backend::postgres::{bounded, into_pool_error},
+};
 
 use bytes::BytesMut;
 use futures::{TryStreamExt, pin_mut};
@@ -14,7 +17,7 @@ use tokio_postgres::types::{FromSql, ToSql, Type};
 
 use crate::IntoRows;
 
-use super::{PostgresStore, bounded, into_error};
+use super::{PostgresStore, into_error};
 
 impl PostgresStore {
     pub(crate) async fn sql_query<T: QueryResult>(

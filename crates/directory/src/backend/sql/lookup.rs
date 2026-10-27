@@ -5,13 +5,21 @@
  */
 
 use super::{SqlDirectory, SqlMappings};
-use crate::{Account, Credentials, Recipient, core::secret::verify_secret_hash};
+use crate::{
+    Account, Credentials, Recipient,
+    core::{secret::verify_secret_hash, verifier::PasswordVerifier},
+};
+use compact_str::CompactString;
 use store::{NamedRows, Rows, Value};
 use trc::AddContext;
 use utils::sanitize_email;
 
 impl SqlDirectory {
-    pub async fn authenticate(&self, credentials: &Credentials) -> trc::Result<Account> {
+    pub async fn authenticate(
+        &self,
+        credentials: &Credentials,
+        verifier: &PasswordVerifier,
+    ) -> trc::Result<Account> {
         let (username, secret) = match credentials {
             Credentials::Basic {
                 username, secret, ..
@@ -19,14 +27,14 @@ impl SqlDirectory {
             Credentials::Bearer { .. } => {
                 return Err(trc::AuthEvent::Error
                     .into_err()
-                    .details("Unsupported credentials type for SQL authentication"));
+                    .reason("Unsupported credentials type for SQL authentication"));
             }
         };
         if secret.is_empty() {
             return Err(trc::AuthEvent::Failed
                 .into_err()
-                .details("Empty secret rejected")
-                .ctx(trc::Key::AccountName, username.to_string()));
+                .reason("Empty secret rejected")
+                .ctx(trc::Key::AccountName, CompactString::from(username)));
         }
 
         let Recipient::Account(mut account) = self.mappings.row_to_account(
@@ -37,59 +45,27 @@ impl SqlDirectory {
         ) else {
             return Err(trc::AuthEvent::Failed
                 .into_err()
-                .details("SQL login query did not return an account")
-                .ctx(trc::Key::AccountName, username.to_string()));
+                .reason("SQL login query did not return an account")
+                .ctx(trc::Key::AccountName, CompactString::from(username)));
         };
 
         // Validate secret
         if let Some(account_secret) = &account.secret {
-            if !verify_secret_hash(account_secret, secret.as_bytes()).await? {
+            if !verify_secret_hash(verifier, account_secret, secret.as_bytes()).await? {
                 return Err(trc::AuthEvent::Failed
                     .into_err()
-                    .details("Invalid credentials")
-                    .ctx(trc::Key::AccountName, username.to_string()));
+                    .reason("Invalid credentials")
+                    .ctx(trc::Key::AccountName, CompactString::from(username)));
             }
         } else {
-            return Err(trc::AuthEvent::Error
+            return Err(trc::AuthEvent::Failed
                 .into_err()
-                .details("Account does not have a secret")
-                .ctx(trc::Key::AccountName, username.to_string()));
+                .reason("Account does not have a secret")
+                .ctx(trc::Key::AccountName, CompactString::from(username)));
         }
 
-        // Obtain members
-        if let Some(query) = &self.mappings.query_member_of {
-            let members = account.groups.get_or_insert_default();
-            for row in self
-                .sql_store
-                .sql_query::<Rows>(query, vec![username.into()])
-                .await
-                .caused_by(trc::location!())?
-                .rows
-            {
-                if let Some(Value::Text(address)) = row.values.first()
-                    && let Some(email) = sanitize_email(address)
-                {
-                    members.push(email);
-                }
-            }
-        }
-
-        // Obtain emails
-        if let Some(query) = &self.mappings.query_email_aliases {
-            account.email_aliases.extend(
-                self.sql_store
-                    .sql_query::<Rows>(query, vec![username.into()])
-                    .await
-                    .caused_by(trc::location!())?
-                    .rows
-                    .into_iter()
-                    .flat_map(|v| {
-                        v.values
-                            .into_iter()
-                            .filter_map(|v| sanitize_email(v.to_str().as_ref()))
-                    }),
-            );
-        }
+        let (members, aliases) = self.members_and_aliases(username).await?;
+        account.add_members_and_aliases(members, aliases);
 
         if account.email.is_empty() {
             account.email = sanitize_email(username).unwrap_or_else(|| username.to_lowercase());
@@ -108,45 +84,55 @@ impl SqlDirectory {
 
         match recipient {
             Recipient::Account(mut account) => {
-                // Obtain members
-                if let Some(query) = &self.mappings.query_member_of {
-                    let members = account.groups.get_or_insert_default();
-                    for row in self
-                        .sql_store
-                        .sql_query::<Rows>(query, vec![account.email.as_str().into()])
-                        .await
-                        .caused_by(trc::location!())?
-                        .rows
-                    {
-                        if let Some(Value::Text(address)) = row.values.first()
-                            && let Some(email) = sanitize_email(address)
-                        {
-                            members.push(email);
-                        }
-                    }
-                }
-
-                // Obtain emails
-                if let Some(query) = &self.mappings.query_email_aliases {
-                    account.email_aliases.extend(
-                        self.sql_store
-                            .sql_query::<Rows>(query, vec![account.email.as_str().into()])
-                            .await
-                            .caused_by(trc::location!())?
-                            .rows
-                            .into_iter()
-                            .flat_map(|v| {
-                                v.values
-                                    .into_iter()
-                                    .filter_map(|v| sanitize_email(v.to_str().as_ref()))
-                            }),
-                    );
-                }
-
+                let (members, aliases) = self.members_and_aliases(&account.email).await?;
+                account.add_members_and_aliases(members, aliases);
                 Ok(Recipient::Account(account))
             }
             Recipient::Group(group) => Ok(Recipient::Group(group)),
             Recipient::Invalid => Ok(Recipient::Invalid),
+        }
+    }
+
+    async fn members_and_aliases(&self, key: &str) -> trc::Result<(Option<Rows>, Option<Rows>)> {
+        let members = match &self.mappings.query_member_of {
+            Some(query) => Some(self.query_rows(query, key).await?),
+            None => None,
+        };
+        let aliases = match &self.mappings.query_email_aliases {
+            Some(query) => Some(self.query_rows(query, key).await?),
+            None => None,
+        };
+        Ok((members, aliases))
+    }
+
+    async fn query_rows(&self, query: &str, key: &str) -> trc::Result<Rows> {
+        self.sql_store
+            .sql_query::<Rows>(query, vec![key.into()])
+            .await
+            .caused_by(trc::location!())
+    }
+}
+
+impl Account {
+    fn add_members_and_aliases(&mut self, members: Option<Rows>, aliases: Option<Rows>) {
+        if let Some(members) = members {
+            let groups = self.groups.get_or_insert_default();
+            for row in members.rows {
+                if let Some(Value::Text(address)) = row.values.first()
+                    && let Some(email) = sanitize_email(address)
+                {
+                    groups.push(email);
+                }
+            }
+        }
+
+        if let Some(aliases) = aliases {
+            self.email_aliases
+                .extend(aliases.rows.into_iter().flat_map(|v| {
+                    v.values
+                        .into_iter()
+                        .filter_map(|v| sanitize_email(v.to_str().as_ref()))
+                }));
         }
     }
 }

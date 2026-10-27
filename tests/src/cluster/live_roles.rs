@@ -31,7 +31,7 @@ use std::time::{Duration, Instant};
 use store::{
     Deserialize, IterateParams, ValueKey,
     registry::write::{RegistryWrite, RegistryWriteResult},
-    write::{AlignedBytes, Archive, BatchBuilder, QueueClass, TaskQueueClass, ValueClass},
+    write::{Archive, ArchiveBytes, BatchBuilder, QueueClass, TaskId, TaskQueueClass, ValueClass},
 };
 use types::id::Id;
 use utils::snowflake::SnowflakeIdGenerator;
@@ -218,7 +218,7 @@ async fn queue_work(server: &Server, name: &str) -> (String, u64) {
             status: TaskStatus::now(),
         }),
     );
-    server.store().write(batch.build_all()).await.unwrap();
+    server.store().write_batch(&mut batch).await.unwrap();
     server.notify_task_queue();
 
     (rcpt, task)
@@ -245,7 +245,7 @@ async fn queued_recipient(server: &Server, rcpt: &str) -> Option<(bool, u32)> {
                 ValueKey::from(ValueClass::Queue(QueueClass::Message(u64::MAX))),
             ),
             |_, value| {
-                let message = <Archive<AlignedBytes> as Deserialize>::deserialize(value)?
+                let message = <Archive<ArchiveBytes> as Deserialize>::deserialize(value)?
                     .deserialize::<Message>()?;
                 if let Some(recipient) = message
                     .recipients
@@ -271,7 +271,9 @@ async fn is_pending(server: &Server, id: u64) -> bool {
         server
             .store()
             .get_value::<Task>(ValueKey::from(ValueClass::TaskQueue(
-                TaskQueueClass::Task { id },
+                TaskQueueClass::Task {
+                    id: TaskId::Assigned(id),
+                },
             )))
             .await
             .unwrap()

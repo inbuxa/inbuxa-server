@@ -5,25 +5,55 @@
  */
 
 use super::{CustomContext, KafkaPubSub, LoggingConsumer};
-use crate::{Msg, PubSubStream};
+use crate::{Msg, Subscription};
+use futures::StreamExt;
 use rdkafka::{
-    Message,
-    consumer::{CommitMode, Consumer, StreamConsumer},
-    producer::FutureRecord,
+    consumer::{Consumer, MessageStream},
+    producer::{FutureProducer, FutureRecord},
 };
 use std::time::Duration;
 use trc::{ClusterEvent, Error, EventType};
 
-pub struct KafkaPubSubStream {
-    subs: LoggingConsumer,
+pub struct KafkaSubscription {
+    consumer: LoggingConsumer,
+}
+
+pub type KafkaStream<'x> = MessageStream<'x, CustomContext>;
+
+pub struct KafkaPublisher {
+    producer: FutureProducer,
+    topic: &'static str,
 }
 
 impl KafkaPubSub {
-    pub async fn publish(&self, topic: &'static str, message: Vec<u8>) -> trc::Result<()> {
+    pub(crate) fn publisher(&self, topic: &'static str) -> KafkaPublisher {
+        KafkaPublisher {
+            producer: self.producer.clone(),
+            topic,
+        }
+    }
+
+    pub async fn subscribe(&self, topic: &'static str) -> trc::Result<Subscription> {
+        let consumer: LoggingConsumer = self
+            .consumer_builder
+            .create_with_context(CustomContext)
+            .map_err(|err| {
+                Error::new(EventType::Cluster(ClusterEvent::SubscriberError)).reason(err)
+            })?;
+        consumer.subscribe(&[topic]).map_err(|err| {
+            Error::new(EventType::Cluster(ClusterEvent::SubscriberError)).reason(err)
+        })?;
+
+        Ok(Subscription::Kafka(KafkaSubscription { consumer }))
+    }
+}
+
+impl KafkaPublisher {
+    pub async fn publish(&mut self, payload: &[u8]) -> trc::Result<()> {
         self.producer
             .send(
-                FutureRecord::<(), [u8]>::to(topic).payload(message.as_slice()),
-                Duration::from_secs(0),
+                FutureRecord::<(), [u8]>::to(self.topic).payload(payload),
+                Duration::ZERO,
             )
             .await
             .map(|_| ())
@@ -31,26 +61,14 @@ impl KafkaPubSub {
                 Error::new(EventType::Cluster(ClusterEvent::PublisherError)).reason(err)
             })
     }
+}
 
-    pub async fn subscribe(&self, topic: &'static str) -> trc::Result<PubSubStream> {
-        let subs: StreamConsumer<CustomContext> = self
-            .consumer_builder
-            .create_with_context(CustomContext)
-            .map_err(|err| {
-                Error::new(EventType::Cluster(ClusterEvent::SubscriberError)).reason(err)
-            })?;
-        subs.subscribe(&[topic]).map_err(|err| {
-            Error::new(EventType::Cluster(ClusterEvent::SubscriberError)).reason(err)
-        })?;
-
-        Ok(PubSubStream::Kafka(KafkaPubSubStream { subs }))
+impl KafkaSubscription {
+    pub(crate) fn stream(&self) -> KafkaStream<'_> {
+        self.consumer.stream()
     }
 }
 
-impl KafkaPubSubStream {
-    pub async fn next(&mut self) -> Option<Msg> {
-        let msg = self.subs.recv().await.ok()?;
-        let _ = self.subs.commit_message(&msg, CommitMode::Async);
-        Msg::Kafka(msg.payload().unwrap_or_default().to_vec()).into()
-    }
+pub(crate) async fn kafka_next<'x>(stream: &mut KafkaStream<'x>) -> Option<Msg<'x>> {
+    stream.next().await?.ok().map(Msg::Kafka)
 }

@@ -6,118 +6,144 @@
  * Modified by Coffey Labs in 2026 for INBUXA.
  */
 
-use crate::task_manager::*;
+use crate::task_manager::LEASE_DURATION;
+use common::{KV_LOCK_TASK, Server};
+use std::future::Future;
+use store::{InMemoryStore, rand};
+use trc::TaskManagerEvent;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TaskLock {
+    id: u64,
+    lease: u64,
+}
 
 pub trait TaskLockManager: Sync + Send {
-    fn try_lock_task(&self, task: u64) -> impl Future<Output = bool> + Send;
-    fn remove_index_lock(&self, id: u64) -> impl Future<Output = ()> + Send;
+    fn lock_task(&self, id: u64) -> impl Future<Output = Option<TaskLock>> + Send;
+
+    fn renew_task_lock(&self, lock: TaskLock) -> impl Future<Output = bool> + Send;
+
+    fn unlock_task(&self, lock: TaskLock) -> impl Future<Output = ()> + Send;
+}
+
+impl TaskLock {
+    pub fn new(id: u64) -> Self {
+        TaskLock {
+            id,
+            lease: rand::random(),
+        }
+    }
+
+    pub fn id(&self) -> u64 {
+        self.id
+    }
+
+    pub async fn extend(self, store: &InMemoryStore) -> trc::Result<bool> {
+        let key = self.id.to_be_bytes();
+        let renewed = store
+            .renew_lease(KV_LOCK_TASK, &key, self.lease, LEASE_DURATION)
+            .await;
+        if matches!(renewed, Ok(true)) {
+            return Ok(true);
+        }
+
+        match store
+            .try_lease(KV_LOCK_TASK, &key, self.lease, LEASE_DURATION)
+            .await
+        {
+            Ok(acquired) => Ok(acquired),
+            Err(err) => renewed.and(Err(err)),
+        }
+    }
 }
 
 impl TaskLockManager for Server {
-    async fn try_lock_task(&self, id: u64) -> bool {
+    async fn lock_task(&self, id: u64) -> Option<TaskLock> {
         // inbuxa: a node that is stopping claims nothing new
         let locks = &self.inner.ipc.task_locks;
         if locks.is_stopping() {
-            return false;
+            return None;
         }
 
+        let lock = TaskLock::new(id);
         match self
             .in_memory_store()
-            .try_lock(KV_LOCK_TASK, &id.to_be_bytes(), locks.expiry())
+            .try_lease(KV_LOCK_TASK, &id.to_be_bytes(), lock.lease, LEASE_DURATION)
             .await
         {
-            Ok(result) => {
-                if result {
-                    locks.insert(id);
-                } else {
-                    trc::event!(
-                        TaskManager(TaskManagerEvent::TaskLocked),
-                        Id = id,
-                        Details = "Task details not available",
-                    );
-                }
-                result
+            Ok(true) => {
+                locks.insert(id, lock.lease);
+                Some(lock)
+            }
+            Ok(false) => {
+                trc::event!(
+                    TaskManager(TaskManagerEvent::TaskLocked),
+                    TaskId = id,
+                    Details = "Task is locked",
+                );
+                None
             }
             Err(err) => {
-                trc::error!(err.id(id).details("Failed to lock task"));
+                trc::error!(err.ctx(trc::Key::TaskId, id).details("Failed to lock task"));
+                None
+            }
+        }
+    }
 
+    async fn renew_task_lock(&self, lock: TaskLock) -> bool {
+        match lock.extend(self.in_memory_store()).await {
+            Ok(true) => true,
+            Ok(false) => {
+                trc::event!(
+                    TaskManager(TaskManagerEvent::TaskLocked),
+                    TaskId = lock.id,
+                    Details = "Task lease was lost while the task was running",
+                );
+                false
+            }
+            Err(err) => {
+                trc::error!(
+                    err.ctx(trc::Key::TaskId, lock.id)
+                        .details("Failed to renew task lease")
+                );
                 false
             }
         }
     }
 
-    async fn remove_index_lock(&self, id: u64) {
+    async fn unlock_task(&self, lock: TaskLock) {
+        self.inner.ipc.task_locks.remove(lock.id);
         if let Err(err) = self
             .in_memory_store()
-            .remove_lock(KV_LOCK_TASK, &id.to_be_bytes())
+            .release_lease(KV_LOCK_TASK, &lock.id.to_be_bytes(), lock.lease)
             .await
         {
             trc::error!(
                 err.details("Failed to unlock task")
-                    .ctx(trc::Key::Id, id)
+                    .ctx(trc::Key::TaskId, lock.id)
                     .caused_by(trc::location!())
             );
         }
-        self.inner.ipc.task_locks.remove(id);
     }
 }
 
 /// inbuxa: on a graceful stop, stops claiming tasks and releases every task
-/// lock this node holds, so the rest of the cluster can pick the tasks up at
-/// once instead of after the lock expires. Returns how many were released.
+/// lease this node holds, so the rest of the cluster can pick the tasks up at
+/// once instead of after the lease lapses. Returns how many were released.
 pub async fn release_task_locks(server: &Server) -> usize {
-    let ids = server.inner.ipc.task_locks.stop();
-    for id in &ids {
+    let leases = server.inner.ipc.task_locks.stop();
+    for (id, lease) in &leases {
         if let Err(err) = server
             .in_memory_store()
-            .remove_lock(KV_LOCK_TASK, &id.to_be_bytes())
+            .release_lease(KV_LOCK_TASK, &id.to_be_bytes(), *lease)
             .await
         {
             trc::error!(
                 err.details("Failed to release task lock on shutdown")
-                    .ctx(trc::Key::Id, *id)
+                    .ctx(trc::Key::TaskId, *id)
                     .caused_by(trc::location!())
             );
         }
     }
-    ids.len()
-}
-
-/// inbuxa: renews the lease on every task this node is running, so it stays
-/// claimed for as long as it runs while a node that dies loses its claims
-/// within one lock lifetime. Returns how many leases were renewed and how
-/// many were found lost (expired, perhaps taken by another node).
-pub async fn renew_task_locks(server: &Server) -> (usize, usize) {
-    let locks = &server.inner.ipc.task_locks;
-    let expiry = locks.expiry();
-    let (mut renewed, mut lost) = (0, 0);
-    for id in locks.held_ids() {
-        match server
-            .in_memory_store()
-            .renew_lock(KV_LOCK_TASK, &id.to_be_bytes(), expiry)
-            .await
-        {
-            Ok(true) => renewed += 1,
-            Ok(false) => {
-                // Still held here as far as this node knows; the task
-                // finishes and its lock is removed as usual
-                if locks.is_held(id) {
-                    lost += 1;
-                    trc::event!(
-                        TaskManager(TaskManagerEvent::TaskLocked),
-                        Id = id,
-                        Details = "Task lock expired while the task was running",
-                    );
-                }
-            }
-            Err(err) => {
-                trc::error!(
-                    err.details("Failed to renew task lock")
-                        .ctx(trc::Key::Id, id)
-                        .caused_by(trc::location!())
-                );
-            }
-        }
-    }
-    (renewed, lost)
+    leases.len()
 }

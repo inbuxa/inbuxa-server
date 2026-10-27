@@ -3,6 +3,7 @@
     "a": true
   },
   "keywords": {
+    "$hasattachment": true,
     "tag": true
   },
   "size": 2651,
@@ -21,6 +22,7 @@
   ],
   "subject": "[Fwd: Map of Argentina with Description]",
   "bodyStructure": {
+    "size": 2381,
     "headers": [
       {
         "name": "From",

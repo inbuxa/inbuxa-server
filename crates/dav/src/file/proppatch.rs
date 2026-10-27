@@ -7,18 +7,20 @@
 use crate::{
     DavError, DavMethod, PropStatBuilder,
     common::{
-        ETag, ExtractETag,
+        ExtractETag,
+        dead::{DeadPatch, DeadTarget, DisplayName},
         lock::{LockRequestHandler, ResourceState},
+        propfind::requested_href,
         uri::DavUriResource,
     },
-    file::DavFileResource,
+    file::{DavFileResource, FileItemId, file_etag},
 };
-use common::{Server, auth::AccessToken, sharing::EffectiveAcl};
+use common::{Server, auth::AccessToken};
 use dav_proto::{
     RequestHeaders, Return,
     schema::{
         property::{DavProperty, DavValue, ResourceType, WebDavProperty},
-        request::{DavPropertyValue, PropertyUpdate},
+        request::{DavPropertyValue, PropertyUpdate, PropertyUpdateOp},
         response::{BaseCondition, MultiStatus, Response},
     },
 };
@@ -28,7 +30,7 @@ use hyper::StatusCode;
 use store::write::BatchBuilder;
 use store::{
     ValueKey,
-    write::{AlignedBytes, Archive},
+    write::{Archive, ArchiveBytes},
 };
 use trc::AddContext;
 use types::{
@@ -47,10 +49,9 @@ pub(crate) trait FilePropPatchRequestHandler: Sync + Send {
     fn apply_file_properties(
         &self,
         file: &mut FileNode,
-        is_update: bool,
-        properties: Vec<DavPropertyValue>,
+        properties: impl IntoIterator<Item = DavPropertyValue>,
         items: &mut PropStatBuilder,
-    ) -> bool;
+    );
 }
 
 impl FilePropPatchRequestHandler for Server {
@@ -65,17 +66,29 @@ impl FilePropPatchRequestHandler for Server {
             .validate_uri(access_token, headers.uri)
             .await?
             .into_owned_uri()?;
-        let uri = headers.uri;
+        let uri = headers.raw_uri;
         let account_id = resource_.account_id;
         let files = self
-            .fetch_dav_resources(
+            .fetch_groupware_resources(
                 access_token.account_id(),
                 account_id,
                 SyncCollection::FileNode,
             )
             .await
             .caused_by(trc::location!())?;
-        let resource = files.map_resource(&resource_)?;
+        if !access_token.is_member(account_id)
+            && let Some(path) = resource_.resource
+        {
+            files.hide_undiscoverable_for(
+                access_token,
+                path,
+                StatusCode::NOT_FOUND,
+                StatusCode::NOT_FOUND,
+            )?;
+        }
+        let resource = files.map_resource::<FileItemId>(&resource_)?;
+        let document_id = resource.resource.document_id;
+        let href = requested_href(uri, resource.resource.is_container);
 
         if !request.has_changes() {
             return Ok(HttpResponse::new(StatusCode::NO_CONTENT));
@@ -84,10 +97,10 @@ impl FilePropPatchRequestHandler for Server {
         // Fetch node
         let node_ = self
             .store()
-            .get_value::<Archive<AlignedBytes>>(ValueKey::archive(
+            .get_value::<Archive<ArchiveBytes>>(ValueKey::archive(
                 account_id,
                 Collection::FileNode,
-                resource.resource,
+                document_id,
             ))
             .await
             .caused_by(trc::location!())?
@@ -95,16 +108,27 @@ impl FilePropPatchRequestHandler for Server {
         let node = node_
             .to_unarchived::<FileNode>()
             .caused_by(trc::location!())?;
+        let current_etag = file_etag(node.inner);
 
         // Validate ACL
-        if !access_token.is_member(account_id)
-            && !node
-                .inner
-                .acls
-                .effective_acl(access_token)
-                .contains(Acl::Modify)
-        {
-            return Err(DavError::Code(StatusCode::FORBIDDEN));
+        if !access_token.is_member(account_id) {
+            let acl = files.file_acl(access_token, document_id);
+            let (mut content, mut properties) = (false, false);
+            for property in request.ops.iter().map(PropertyUpdateOp::property) {
+                if matches!(
+                    property,
+                    DavProperty::WebDav(WebDavProperty::GetContentType)
+                ) {
+                    content = true;
+                } else {
+                    properties = true;
+                }
+            }
+            if (content && !acl.contains(Acl::ModifyItems))
+                || (properties && !acl.contains(Acl::Modify))
+            {
+                return Err(DavError::Code(StatusCode::FORBIDDEN));
+            }
         }
 
         // Validate headers
@@ -114,8 +138,8 @@ impl FilePropPatchRequestHandler for Server {
             vec![ResourceState {
                 account_id,
                 collection: resource.collection,
-                document_id: resource.resource.into(),
-                etag: node_.etag().into(),
+                document_id: document_id.into(),
+                etag: current_etag.clone().into(),
                 path: resource_.resource.unwrap(),
                 ..Default::default()
             }],
@@ -124,91 +148,112 @@ impl FilePropPatchRequestHandler for Server {
         )
         .await?;
 
-        // Deserialize
+        // Apply live properties
+        let dead = DeadPatch::take(&mut request.ops, DisplayName::Stored);
+        let has_live_changes = !request.ops.is_empty();
         let mut new_node = node.deserialize::<FileNode>().caused_by(trc::location!())?;
-
-        // Remove properties
         let mut items = PropStatBuilder::default();
-        if !request.set_first && !request.remove.is_empty() {
-            remove_file_properties(
-                &mut new_node,
-                std::mem::take(&mut request.remove),
+        for op in request.ops {
+            match op {
+                PropertyUpdateOp::Set(value) => {
+                    self.apply_file_properties(&mut new_node, [value], &mut items)
+                }
+                PropertyUpdateOp::Remove(property) => {
+                    remove_file_properties(&mut new_node, [property], &mut items)
+                }
+            }
+        }
+
+        // Apply dead properties
+        let mut dead_write = dead
+            .apply(
+                self,
+                DeadTarget::item(
+                    account_id,
+                    Collection::FileNode,
+                    document_id,
+                    node.inner.metadata_kinds(),
+                ),
                 &mut items,
-            );
-        }
+            )
+            .await
+            .caused_by(trc::location!())?;
 
-        // Set properties
-        let is_success = self.apply_file_properties(&mut new_node, true, request.set, &mut items);
-
-        // Remove properties
-        if is_success && !request.remove.is_empty() {
-            remove_file_properties(&mut new_node, request.remove, &mut items);
-        }
-
+        let is_success = !items.has_errors();
         let etag = if is_success {
             let mut batch = BatchBuilder::new();
-            let etag = new_node
-                .update(
-                    access_token.account_tenant_ids(),
-                    node,
+            if let Some(write) = dead_write
+                .as_mut()
+                .and_then(|dead_write| dead_write.write.take())
+            {
+                write
+                    .build(document_id.into(), &mut batch)
+                    .caused_by(trc::location!())?;
+            }
+            if has_live_changes {
+                if let Some(dead_write) = &dead_write {
+                    new_node.set_presence(dead_write.file_presence);
+                }
+                new_node
+                    .update(
+                        access_token.changed_by(),
+                        node,
+                        account_id,
+                        document_id,
+                        false,
+                        &mut batch,
+                    )
+                    .caused_by(trc::location!())?;
+            } else if let Some(dead_write) = &dead_write {
+                FileNode::rewrite_presence(
+                    &node,
+                    dead_write.file_presence,
                     account_id,
-                    resource.resource,
-                    true,
+                    document_id,
                     &mut batch,
                 )
-                .caused_by(trc::location!())?
-                .etag();
-            self.commit_batch(batch).await.caused_by(trc::location!())?;
+                .caused_by(trc::location!())?;
+            }
+            let etag = batch.etag().unwrap_or(current_etag);
+            if !batch.is_empty() {
+                self.commit_batch(batch).await.caused_by(trc::location!())?;
+            }
             etag
         } else {
-            node_.etag().into()
+            items.fail_dependencies();
+            current_etag
         };
 
         if headers.ret != Return::Minimal || !is_success {
             Ok(HttpResponse::new(StatusCode::MULTI_STATUS)
                 .with_xml_body(
-                    MultiStatus::new(vec![Response::new_propstat(uri, items.build())]).to_string(),
+                    MultiStatus::new(vec![Response::new_propstat(href, items.build())]).to_string(),
                 )
-                .with_etag_opt(etag))
+                .with_etag(etag))
         } else {
-            Ok(HttpResponse::new(StatusCode::NO_CONTENT).with_etag_opt(etag))
+            Ok(HttpResponse::new(StatusCode::NO_CONTENT).with_etag(etag))
         }
     }
 
     fn apply_file_properties(
         &self,
         file: &mut FileNode,
-        is_update: bool,
-        properties: Vec<DavPropertyValue>,
+        properties: impl IntoIterator<Item = DavPropertyValue>,
         items: &mut PropStatBuilder,
-    ) -> bool {
-        let mut has_errors = false;
-
+    ) {
         for property in properties {
             match (&property.property, property.value) {
-                (DavProperty::WebDav(WebDavProperty::DisplayName), DavValue::String(name)) => {
-                    if name.len() <= self.core.groupware.live_property_size {
-                        file.display_name = Some(name);
-                        items.insert_ok(property.property);
-                    } else {
-                        items.insert_error_with_description(
-                            property.property,
-                            StatusCode::INSUFFICIENT_STORAGE,
-                            "Property value is too long",
-                        );
-
-                        has_errors = true;
-                    }
-                }
                 (DavProperty::WebDav(WebDavProperty::CreationDate), DavValue::Timestamp(dt)) => {
                     file.created = dt;
                     items.insert_ok(property.property);
                 }
                 (DavProperty::WebDav(WebDavProperty::GetContentType), DavValue::String(name))
-                    if file.file.is_some() =>
+                    if file.file().is_some() =>
                 {
                     if name.len() <= self.core.groupware.live_property_size {
-                        file.file.as_mut().unwrap().media_type = Some(name);
+                        if let Some(file) = file.file_mut() {
+                            file.media_type = Some(name);
+                        }
                         items.insert_ok(property.property);
                     } else {
                         items.insert_error_with_description(
@@ -216,43 +261,20 @@ impl FilePropPatchRequestHandler for Server {
                             StatusCode::INSUFFICIENT_STORAGE,
                             "Property value is too long",
                         );
-                        has_errors = true;
                     }
                 }
                 (
                     DavProperty::WebDav(WebDavProperty::ResourceType),
                     DavValue::ResourceTypes(types),
-                ) if file.file.is_none() => {
+                ) if file.is_directory() => {
                     if types.0.len() != 1 || types.0.first() != Some(&ResourceType::Collection) {
                         items.insert_precondition_failed(
                             property.property,
                             StatusCode::FORBIDDEN,
                             BaseCondition::ValidResourceType,
                         );
-                        has_errors = true;
                     } else {
                         items.insert_ok(property.property);
-                    }
-                }
-                (DavProperty::DeadProperty(dead), DavValue::DeadProperty(values))
-                    if self.core.groupware.dead_property_size.is_some() =>
-                {
-                    if is_update {
-                        file.dead_properties.remove_element(dead);
-                    }
-
-                    if file.dead_properties.size() + values.size() + dead.size()
-                        < self.core.groupware.dead_property_size.unwrap()
-                    {
-                        file.dead_properties.add_element(dead.clone(), values.0);
-                        items.insert_ok(property.property);
-                    } else {
-                        items.insert_error_with_description(
-                            property.property,
-                            StatusCode::INSUFFICIENT_STORAGE,
-                            "Property value is too long",
-                        );
-                        has_errors = true;
                     }
                 }
                 (_, DavValue::Null) => {
@@ -264,33 +286,24 @@ impl FilePropPatchRequestHandler for Server {
                         StatusCode::CONFLICT,
                         "Property cannot be modified",
                     );
-                    has_errors = true;
                 }
             }
         }
-
-        !has_errors
     }
 }
 
 fn remove_file_properties(
     node: &mut FileNode,
-    properties: Vec<DavProperty>,
+    properties: impl IntoIterator<Item = DavProperty>,
     items: &mut PropStatBuilder,
 ) {
     for property in properties {
         match &property {
-            DavProperty::WebDav(WebDavProperty::DisplayName) => {
-                node.display_name = None;
-                items.insert_with_status(property, StatusCode::NO_CONTENT);
-            }
-            DavProperty::WebDav(WebDavProperty::GetContentType) if node.file.is_some() => {
-                node.file.as_mut().unwrap().media_type = None;
-                items.insert_with_status(property, StatusCode::NO_CONTENT);
-            }
-            DavProperty::DeadProperty(dead) => {
-                node.dead_properties.remove_element(dead);
-                items.insert_with_status(property, StatusCode::NO_CONTENT);
+            DavProperty::WebDav(WebDavProperty::GetContentType) if node.file().is_some() => {
+                if let Some(file) = node.file_mut() {
+                    file.media_type = None;
+                }
+                items.insert_ok(property);
             }
             _ => {
                 items.insert_error_with_description(

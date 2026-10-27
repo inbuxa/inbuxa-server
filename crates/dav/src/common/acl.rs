@@ -8,10 +8,19 @@
 
 use super::ArchivedResource;
 use crate::{
-    DavError, DavErrorCondition, DavResourceName, common::uri::DavUriResource,
+    DavError, DavErrorCondition, DavResourceName,
+    common::{propfind::ExpandedPrincipals, uri::DavUriResource},
+    file::{DavFileResource, is_symlink},
     principal::propfind::PrincipalPropFind,
 };
-use common::{DavResources, Server, auth::AccessToken, sharing::EffectiveAcl};
+use common::{
+    Server,
+    auth::AccessToken,
+    sharing::{
+        EffectiveAcl,
+        grants::{ShareUpdate, ShareViolation},
+    },
+};
 use dav_proto::{
     RequestHeaders,
     schema::{
@@ -27,9 +36,9 @@ use hyper::StatusCode;
 use rkyv::vec::ArchivedVec;
 use store::{
     ValueKey,
-    write::{AlignedBytes, Archive},
+    write::{Archive, ArchiveBytes},
 };
-use store::{ahash::AHashSet, roaring::RoaringBitmap, write::BatchBuilder};
+use store::{roaring::RoaringBitmap, write::BatchBuilder};
 use trc::AddContext;
 use types::{
     acl::{Acl, AclGrant, ArchivedAclGrant},
@@ -55,6 +64,7 @@ pub(crate) trait DavAclHandler: Sync + Send {
     fn validate_and_map_aces(
         &self,
         access_token: &AccessToken,
+        owner_id: u32,
         acl: dav_proto::schema::request::Acl,
         collection: Collection,
     ) -> impl Future<Output = crate::Result<Vec<AclGrant>>> + Send;
@@ -64,18 +74,8 @@ pub(crate) trait DavAclHandler: Sync + Send {
         access_token: &AccessToken,
         account_id: u32,
         grants: &ArchivedVec<ArchivedAclGrant>,
-        expand: Option<&PropFind>,
+        expand: Option<(&PropFind, &mut ExpandedPrincipals)>,
     ) -> impl Future<Output = crate::Result<Vec<Ace>>> + Send;
-}
-
-pub(crate) trait ResourceAcl {
-    fn validate_and_map_parent_acl(
-        &self,
-        access_token: &AccessToken,
-        is_member: bool,
-        parent_id: Option<u32>,
-        check_acls: impl Into<Bitmap<Acl>> + Send,
-    ) -> crate::Result<u32>;
 }
 
 impl DavAclHandler for Server {
@@ -100,21 +100,27 @@ impl DavAclHandler for Server {
             return Err(DavError::Code(StatusCode::FORBIDDEN));
         }
         let resources = self
-            .fetch_dav_resources(access_token.account_id(), account_id, collection.into())
+            .fetch_groupware_resources(access_token.account_id(), account_id, collection.into())
             .await
             .caused_by(trc::location!())?;
         let resource = resource_
             .resource
             .and_then(|r| resources.by_path(r))
+            .filter(|r| {
+                collection != Collection::FileNode
+                    || (!is_symlink(r)
+                        && (access_token.is_member(account_id)
+                            || resources.file_discoverable(access_token, r.document_id())))
+            })
             .ok_or(DavError::Code(StatusCode::NOT_FOUND))?;
-        if !resource.resource.is_container() && !matches!(collection, Collection::FileNode) {
+        if !resource.resource.is_container() {
             return Err(DavError::Code(StatusCode::FORBIDDEN));
         }
 
         // Fetch node
         let archive = self
             .store()
-            .get_value::<Archive<AlignedBytes>>(ValueKey::archive(
+            .get_value::<Archive<ArchiveBytes>>(ValueKey::archive(
                 account_id,
                 collection,
                 resource.document_id(),
@@ -123,14 +129,21 @@ impl DavAclHandler for Server {
             .caused_by(trc::location!())?
             .ok_or(DavError::Code(StatusCode::NOT_FOUND))?;
 
-        let container =
-            ArchivedResource::from_archive(&archive, collection).caused_by(trc::location!())?;
+        let container = ArchivedResource::from_archive(&archive, None, collection)
+            .caused_by(trc::location!())?;
 
         // Validate ACL
-        let acls = container.acls().unwrap();
-        if !access_token.is_member(account_id)
-            && !acls.effective_acl(access_token).contains(Acl::Share)
-        {
+        let acls = container
+            .acls()
+            .ok_or(DavError::Code(StatusCode::FORBIDDEN))?;
+        let actor = (!access_token.is_member(account_id)).then(|| {
+            if collection == Collection::FileNode {
+                resources.file_acl(access_token, resource.document_id())
+            } else {
+                acls.effective_acl(access_token)
+            }
+        });
+        if actor.is_some_and(|actor| !actor.contains(Acl::Share)) {
             return Err(DavError::Code(StatusCode::FORBIDDEN));
         }
         // inbuxa: MA-D0: a group's members don't share what it owns on.
@@ -140,8 +153,26 @@ impl DavAclHandler for Server {
 
         // Validate ACEs
         let grants = self
-            .validate_and_map_aces(access_token, request, collection)
+            .validate_and_map_aces(access_token, account_id, request, collection)
             .await?;
+        ShareUpdate {
+            collection,
+            owner_id: account_id,
+            actor,
+            current: acls,
+            max_shares: self.core.groupware.max_shares_per_item,
+        }
+        .validate(&grants)
+        .map_err(|violation| {
+            DavError::Condition(DavErrorCondition::new(
+                StatusCode::FORBIDDEN,
+                match violation {
+                    ShareViolation::TooManyShares(_) => BaseCondition::LimitedNumberOfAces,
+                    ShareViolation::OwnerShared => BaseCondition::AllowedPrincipal,
+                    ShareViolation::RightNotHeld => BaseCondition::NoAceConflict,
+                },
+            ))
+        })?;
 
         // inbuxa: MT-3: grants stay within the owner's tenant
         let tenant_id = self
@@ -164,11 +195,6 @@ impl DavAclHandler for Server {
         }
 
         if grants.len() != acls.len() || acls.iter().zip(grants.iter()).any(|(a, b)| a != b) {
-            // Refresh ACLs
-            self.refresh_archived_acls(&grants, acls)
-                .await
-                .caused_by(trc::location!())?;
-
             let mut batch = BatchBuilder::new();
             match container {
                 ArchivedResource::Calendar(calendar) => {
@@ -178,7 +204,7 @@ impl DavAclHandler for Server {
                     new_calendar.acls = grants;
                     new_calendar
                         .update(
-                            access_token.account_tenant_ids(),
+                            access_token.changed_by(),
                             calendar,
                             account_id,
                             resource.document_id(),
@@ -193,7 +219,7 @@ impl DavAclHandler for Server {
                     new_book.acls = grants;
                     new_book
                         .update(
-                            access_token.account_tenant_ids(),
+                            access_token.changed_by(),
                             book,
                             account_id,
                             resource.document_id(),
@@ -207,7 +233,7 @@ impl DavAclHandler for Server {
                     new_node.acls = grants;
                     new_node
                         .update(
-                            access_token.account_tenant_ids(),
+                            access_token.changed_by(),
                             node,
                             account_id,
                             resource.document_id(),
@@ -215,6 +241,9 @@ impl DavAclHandler for Server {
                             &mut batch,
                         )
                         .caused_by(trc::location!())?;
+                    if resource.is_container() {
+                        resources.log_descendant_updates(&mut batch, account_id, resource.path());
+                    }
                 }
                 _ => unreachable!(),
             }
@@ -250,7 +279,7 @@ impl DavAclHandler for Server {
 
         let archive = self
             .store()
-            .get_value::<Archive<AlignedBytes>>(ValueKey::archive(
+            .get_value::<Archive<ArchiveBytes>>(ValueKey::archive(
                 uri.account_id,
                 uri.collection,
                 uri.resource,
@@ -312,12 +341,20 @@ impl DavAclHandler for Server {
         Ok(HttpResponse::new(StatusCode::MULTI_STATUS).with_xml_body(response.to_string()))
     }
 
+    #[cfg_attr(not(feature = "enterprise"), allow(unused_variables))]
     async fn validate_and_map_aces(
         &self,
         access_token: &AccessToken,
+        owner_id: u32,
         acl: dav_proto::schema::request::Acl,
         collection: Collection,
     ) -> crate::Result<Vec<AclGrant>> {
+        if acl.aces.len() > self.core.groupware.max_shares_per_item {
+            return Err(DavError::Condition(DavErrorCondition::new(
+                StatusCode::FORBIDDEN,
+                BaseCondition::LimitedNumberOfAces,
+            )));
+        }
         let mut grants = Vec::with_capacity(acl.aces.len());
         for ace in acl.aces {
             if ace.invert {
@@ -346,7 +383,7 @@ impl DavAclHandler for Server {
             };
 
             let mut acls = Bitmap::<Acl>::default();
-            for privilege in privileges {
+            for privilege in &privileges {
                 match privilege {
                     Privilege::Read => {
                         acls.insert(Acl::Read);
@@ -354,23 +391,23 @@ impl DavAclHandler for Server {
                     }
                     Privilege::Write => {
                         acls.insert(Acl::Modify);
-                        acls.insert(Acl::Delete);
                         acls.insert(Acl::AddItems);
                         acls.insert(Acl::ModifyItems);
                         acls.insert(Acl::RemoveItems);
                     }
                     Privilege::WriteContent => {
-                        acls.insert(Acl::AddItems);
-                        acls.insert(Acl::Modify);
                         acls.insert(Acl::ModifyItems);
                     }
                     Privilege::WriteProperties => {
                         acls.insert(Acl::Modify);
                     }
-                    Privilege::ReadCurrentUserPrivilegeSet
-                    | Privilege::Unlock
-                    | Privilege::Bind
-                    | Privilege::Unbind => {}
+                    Privilege::Bind => {
+                        acls.insert(Acl::AddItems);
+                    }
+                    Privilege::Unbind => {
+                        acls.insert(Acl::RemoveItems);
+                    }
+                    Privilege::ReadCurrentUserPrivilegeSet | Privilege::Unlock => {}
                     Privilege::All => {
                         return Err(DavError::Condition(DavErrorCondition::new(
                             StatusCode::FORBIDDEN,
@@ -449,24 +486,18 @@ impl DavAclHandler for Server {
                     ))
                 })?;
 
-            // Verify that the principal is a valid principal
-            /*let principal = self
-                .directory()
-                .query(QueryParams::id(principal_id).with_return_member_of(false))
+            #[cfg_attr(not(feature = "enterprise"), allow(unused_variables))]
+            let grantee = self
+                .try_account(principal_id)
                 .await
                 .caused_by(trc::location!())?
                 .ok_or_else(|| {
                     DavError::Condition(DavErrorCondition::new(
                         StatusCode::FORBIDDEN,
-                        BaseCondition::AllowedPrincipal,
+                        BaseCondition::RecognizedPrincipal,
                     ))
                 })?;
-            if !matches!(principal.typ(), Type::Individual | Type::Group) {
-                return Err(DavError::Condition(DavErrorCondition::new(
-                    StatusCode::FORBIDDEN,
-                    BaseCondition::AllowedPrincipal,
-                )));
-            }*/
+
 
             grants.push(AclGrant {
                 account_id: principal_id,
@@ -482,16 +513,21 @@ impl DavAclHandler for Server {
         access_token: &AccessToken,
         account_id: u32,
         grants: &ArchivedVec<ArchivedAclGrant>,
-        expand: Option<&PropFind>,
+        mut expand: Option<(&PropFind, &mut ExpandedPrincipals)>,
     ) -> crate::Result<Vec<Ace>> {
         let mut aces = Vec::with_capacity(grants.len());
         if access_token.is_member(account_id)
             || grants.effective_acl(access_token).contains(Acl::Share)
         {
             for grant in grants.iter() {
+                let privileges = current_user_privilege_set(Bitmap::<Acl>::from(&grant.grants));
+                if privileges.is_empty() {
+                    continue;
+                }
                 let grant_account_id = u32::from(grant.account_id);
-                let principal = if let Some(expand) = expand {
-                    self.expand_principal(access_token, grant_account_id, expand)
+                let principal = if let Some((propfind, principals)) = &mut expand {
+                    principals
+                        .expand(self, access_token, grant_account_id, propfind)
                         .await?
                         .map(Principal::Response)
                         .unwrap_or_else(|| {
@@ -500,56 +536,28 @@ impl DavAclHandler for Server {
                                 DavResourceName::Principal.base_path(),
                             )))
                         })
-                } else {
-                    let grant_account = self
-                        .account(grant_account_id)
-                        .await
-                        .caused_by(trc::location!())?;
-
+                } else if let Some(grant_account) = self
+                    .try_account(grant_account_id)
+                    .await
+                    .caused_by(trc::location!())?
+                {
                     Principal::Href(Href(format!(
                         "{}/{}/",
                         DavResourceName::Principal.base_path(),
                         percent_encoding::utf8_percent_encode(grant_account.name(), RFC_3986),
                     )))
+                } else {
+                    Principal::Href(Href(format!(
+                        "{}/_{grant_account_id}/",
+                        DavResourceName::Principal.base_path(),
+                    )))
                 };
 
-                aces.push(Ace::new(
-                    principal,
-                    GrantDeny::grant(current_user_privilege_set(Bitmap::<Acl>::from(
-                        &grant.grants,
-                    ))),
-                ));
+                aces.push(Ace::new(principal, GrantDeny::grant(privileges)));
             }
         }
 
         Ok(aces)
-    }
-}
-
-impl ResourceAcl for DavResources {
-    fn validate_and_map_parent_acl(
-        &self,
-        access_token: &AccessToken,
-        is_member: bool,
-        parent_id: Option<u32>,
-        check_acls: impl Into<Bitmap<Acl>> + Send,
-    ) -> crate::Result<u32> {
-        match parent_id {
-            Some(parent_id) => {
-                if is_member || self.has_access_to_container(access_token, parent_id, check_acls) {
-                    Ok(parent_id + 1)
-                } else {
-                    Err(DavError::Code(StatusCode::FORBIDDEN))
-                }
-            }
-            None => {
-                if is_member {
-                    Ok(0)
-                } else {
-                    Err(DavError::Code(StatusCode::FORBIDDEN))
-                }
-            }
-        }
     }
 }
 
@@ -584,31 +592,46 @@ impl Privileges for AccessToken {
 }
 
 pub(crate) fn current_user_privilege_set(acl_bitmap: Bitmap<Acl>) -> Vec<Privilege> {
-    let mut acls = AHashSet::with_capacity(16);
-    for grant in acl_bitmap {
-        match grant {
-            Acl::Read | Acl::ReadItems => {
-                acls.insert(Privilege::Read);
-                acls.insert(Privilege::ReadCurrentUserPrivilegeSet);
-            }
-            Acl::Modify => {
-                acls.insert(Privilege::WriteProperties);
-            }
-            Acl::ModifyItems => {
-                acls.insert(Privilege::WriteContent);
-            }
-            Acl::Delete | Acl::RemoveItems => {
-                acls.insert(Privilege::Write);
-            }
-            Acl::Share => {
-                acls.insert(Privilege::ReadAcl);
-                acls.insert(Privilege::WriteAcl);
-            }
-            Acl::SchedulingReadFreeBusy => {
-                acls.insert(Privilege::ReadFreeBusy);
-            }
-            _ => {}
+    let mut privileges = Vec::with_capacity(13);
+    if acl_bitmap.contains(Acl::Read) || acl_bitmap.contains(Acl::ReadItems) {
+        privileges.push(Privilege::Read);
+        privileges.push(Privilege::ReadCurrentUserPrivilegeSet);
+    }
+    let mut write = true;
+    for (acl, privilege) in [
+        (Acl::Modify, Privilege::WriteProperties),
+        (Acl::ModifyItems, Privilege::WriteContent),
+        (Acl::AddItems, Privilege::Bind),
+        (Acl::RemoveItems, Privilege::Unbind),
+    ] {
+        if acl_bitmap.contains(acl) {
+            privileges.push(privilege);
+        } else {
+            write = false;
         }
     }
-    acls.into_iter().collect()
+    if write {
+        privileges.push(Privilege::Write);
+    }
+    if acl_bitmap.contains(Acl::Share) {
+        privileges.push(Privilege::ReadAcl);
+        privileges.push(Privilege::WriteAcl);
+    }
+    let free_busy = acl_bitmap.contains(Acl::SchedulingReadFreeBusy);
+    let invite = acl_bitmap.contains(Acl::SchedulingInvite);
+    let reply = acl_bitmap.contains(Acl::SchedulingReply);
+    if free_busy {
+        privileges.push(Privilege::ReadFreeBusy);
+    }
+    if invite {
+        privileges.push(Privilege::ScheduleDeliverInvite);
+    }
+    if reply {
+        privileges.push(Privilege::ScheduleDeliverReply);
+    }
+    if free_busy && invite && reply {
+        privileges.push(Privilege::ScheduleDeliver);
+    }
+    privileges
 }
+

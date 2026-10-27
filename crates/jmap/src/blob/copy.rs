@@ -4,16 +4,18 @@
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
  */
 
-use super::download::BlobDownload;
+use super::download::{BlobAccess, BlobDownload};
+use super::embedded::EmbeddedBlobs;
 use common::{Server, auth::AccessToken};
 use jmap_proto::{
-    error::set::{SetError, SetErrorType},
+    error::set::SetError,
     method::copy::{CopyBlobRequest, CopyBlobResponse},
+    object::blob::BlobProperty,
     request::MaybeInvalid,
 };
 use registry::schema::enums::Permission;
 use std::future::Future;
-use store::write::{BatchBuilder, BlobLink, BlobOp, now};
+use store::write::{BatchBuilder, BlobLink, BlobOp, blob::BlobLinkValue, now};
 use trc::AddContext;
 use types::blob::{BlobClass, BlobId};
 use utils::map::vec_map::VecMap;
@@ -44,16 +46,13 @@ impl BlobCopy for Server {
             let blob_id = match blob_id {
                 MaybeInvalid::Value(blob_id) => blob_id,
                 invalid => {
-                    response.not_copied.append(
-                        invalid,
-                        SetError::new(SetErrorType::BlobNotFound).with_description(
-                            "blobId does not exist or not enough permissions to access it.",
-                        ),
-                    );
+                    response.not_copied.append(invalid, not_found());
                     continue;
                 }
             };
-            if self.has_access_blob(&blob_id, access_token).await? {
+            if let BlobAccess::Allowed { size } =
+                self.has_access_blob(&blob_id, access_token).await?
+            {
                 // Enforce quota
                 if !access_token.has_permission(Permission::UnlimitedUploads)
                     && !self
@@ -73,6 +72,26 @@ impl BlobCopy for Server {
                     continue;
                 }
 
+                if matches!(blob_id.class, BlobClass::Embedded { .. }) {
+                    match self
+                        .embedded_blob(&blob_id)
+                        .await
+                        .caused_by(trc::location!())?
+                    {
+                        Some(data) => {
+                            let dest_blob_id = self
+                                .put_jmap_blob(account_id, &data)
+                                .await
+                                .caused_by(trc::location!())?;
+                            response.copied.append(blob_id, dest_blob_id);
+                        }
+                        None => {
+                            response.not_copied.append(blob_id, not_found());
+                        }
+                    }
+                    continue;
+                }
+
                 let mut batch = BatchBuilder::new();
                 let until = now() + self.core.jmap.upload_tmp_ttl;
                 batch.with_account_id(account_id).set(
@@ -80,10 +99,10 @@ impl BlobCopy for Server {
                         hash: blob_id.hash.clone(),
                         to: BlobLink::Temporary { until },
                     },
-                    vec![],
+                    BlobLinkValue::new(size.unwrap_or_default()),
                 );
                 self.store()
-                    .write(batch.build_all())
+                    .write_batch(&mut batch)
                     .await
                     .caused_by(trc::location!())?;
 
@@ -98,15 +117,15 @@ impl BlobCopy for Server {
 
                 response.copied.append(blob_id, dest_blob_id);
             } else {
-                response.not_copied.append(
-                    blob_id,
-                    SetError::new(SetErrorType::BlobNotFound).with_description(
-                        "blobId does not exist or not enough permissions to access it.",
-                    ),
-                );
+                response.not_copied.append(blob_id, not_found());
             }
         }
 
         Ok(response)
     }
+}
+
+fn not_found() -> SetError<BlobProperty> {
+    SetError::not_found()
+        .with_description("blobId does not exist or not enough permissions to access it.")
 }

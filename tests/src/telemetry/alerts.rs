@@ -2,6 +2,8 @@
  * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
+ *
+ * Modified by Coffey Labs in 2026 for INBUXA.
  */
 
 use crate::utils::server::TestServer;
@@ -15,7 +17,12 @@ use registry::{
     },
     types::map::Map,
 };
-use trc::{ClusterEvent, Collector, EventType, MetricType};
+use std::time::Duration;
+use tokio::sync::mpsc;
+use trc::{
+    ClusterEvent, Collector, EventType, Key, MetricType, TelemetryEvent,
+    ipc::subscriber::{EventBatch, Interests, SubscriberBuilder},
+};
 
 pub async fn test(test: &TestServer) {
     println!("Running Alerts tests...");
@@ -61,6 +68,7 @@ pub async fn test(test: &TestServer) {
         })
         .await;
     admin.reload_settings().await;
+    let mut alert_events = AlertEvents::listen();
 
     // Make sure the required metrics are set to 0
     assert_eq!(
@@ -68,7 +76,7 @@ pub async fn test(test: &TestServer) {
         0.0
     );
     assert_eq!(Collector::read_metric(MetricType::DomainCount), 1.0);
-    assert_eq!(Collector::read_metric(MetricType::TelemetryAlertEvent), 0.0);
+    assert_eq!(alert_events.received().await, Vec::<String>::new());
 
     // Increment metrics to trigger alerts
     Collector::update_event_counter(EventType::Cluster(ClusterEvent::PublisherError), 5);
@@ -105,11 +113,62 @@ pub async fn test(test: &TestServer) {
     );
     assert!(body.contains("To: <jdoe@example.com>"), "{body:?}");
 
-    // Make sure the event was triggered
-    assert_eq!(Collector::read_metric(MetricType::TelemetryAlertEvent), 1.0);
+    // Make sure the event was triggered, and only by the first alert
+    assert_eq!(
+        alert_events.received().await,
+        vec!["Yikes! Found 5 cluster errors!".to_string()]
+    );
+    alert_events.stop();
 
     // Cleanup
     admin.registry_destroy_all(ObjectType::Alert).await;
     admin.reload_settings().await;
     test.cleanup().await;
+}
+
+// inbuxa: 1.0 dropped the TelemetryAlertEvent metric, and an event's own
+// counter only runs while a metric asks for it, so nothing counts the alert
+// event any more. The test listens for the event itself instead.
+struct AlertEvents {
+    id: String,
+    rx: mpsc::Receiver<EventBatch>,
+}
+
+impl AlertEvents {
+    fn listen() -> Self {
+        let mut interests = Interests::default();
+        interests.set(EventType::Telemetry(TelemetryEvent::AlertEvent));
+        let id = "alert-events-test".to_string();
+        let (_, rx, _) = SubscriberBuilder::new(id.clone())
+            .with_interests(interests.clone())
+            .with_lossy(false)
+            .register();
+        Collector::union_interests(interests);
+        Collector::reload();
+        AlertEvents { id, rx }
+    }
+
+    /// The details of the alert events received until none came for a second.
+    async fn received(&mut self) -> Vec<String> {
+        let mut details = Vec::new();
+        while let Ok(Some(batch)) =
+            tokio::time::timeout(Duration::from_secs(1), self.rx.recv()).await
+        {
+            for event in batch {
+                if event.inner.typ == EventType::Telemetry(TelemetryEvent::AlertEvent) {
+                    details.push(
+                        event
+                            .value_as_str(Key::Details)
+                            .unwrap_or_default()
+                            .to_string(),
+                    );
+                }
+            }
+        }
+        details
+    }
+
+    fn stop(self) {
+        Collector::remove_subscriber(self.id);
+    }
 }

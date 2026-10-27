@@ -2,6 +2,8 @@
  * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
+ *
+ * Modified by Coffey Labs in 2026 for INBUXA.
  */
 
 use crate::{
@@ -11,7 +13,10 @@ use crate::{
 use ::email::{
     cache::MessageCacheFetch,
     mailbox::INBOX_ID,
-    message::ingest::{EmailIngest, IngestEmail, IngestSource},
+    message::{
+        delivery::SenderAuthentication,
+        ingest::{EmailIngest, IngestEmail, IngestSource},
+    },
 };
 use common::auth::AccessToken;
 use jmap_client::{email, mailbox::Role};
@@ -232,9 +237,11 @@ async fn test_multi_thread(test: &TestServer) {
                         received_at: None,
                         source: IngestSource::Smtp {
                             deliver_to: "test@domain.org",
-                            is_sender_authenticated: true,
+                            envelope_from: "",
+                            sender_authentication: SenderAuthentication::DmarcPass,
                             is_spam: false,
                         },
+                        metadata: None,
                         session_id: 0,
                     })
                     .await
@@ -267,7 +274,6 @@ async fn test_multi_thread(test: &TestServer) {
             .await
             .unwrap()
             .emails
-            .items
             .len(),
     );
     println!("Deleting all messages...");

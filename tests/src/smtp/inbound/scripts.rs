@@ -2,6 +2,8 @@
  * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
+ *
+ * Modified by Coffey Labs in 2026 for INBUXA.
  */
 
 use crate::{
@@ -66,7 +68,6 @@ async fn sieve_scripts() {
                 else_: "'foobar.org'".into(),
                 ..Default::default()
             },
-            duplicate_expiry: (86_400u64 * 100 * 7).into(),
             max_cpu_cycles: 10000,
             max_nested_includes: 5,
             max_out_messages: 5,
@@ -80,7 +81,7 @@ async fn sieve_scripts() {
             namespace: "sql".into(),
             store: LookupStore::Sqlite(SqliteStore {
                 path: format!("{}/smtp_sieve.db", test.tmp_dir()),
-                pool_max_connections: 10,
+                pool_max_connections: Some(10),
                 pool_workers: None,
             }),
         })
@@ -209,7 +210,6 @@ async fn sieve_scripts() {
         if name.starts_with("stage_") || name.ends_with("_include") {
             continue;
         }
-        let script = script.clone();
         let params = session
             .build_script_parameters("data")
             .set_variable("from", "john.doe@example.org")
@@ -258,7 +258,7 @@ async fn sieve_scripts() {
 
         match test
             .server
-            .run_script("spamtest_include".into(), spamtest_script.clone(), params)
+            .run_script("spamtest_include".into(), &spamtest_script, params)
             .await
         {
             ScriptResult::Reject(message) => {

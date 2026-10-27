@@ -8,14 +8,20 @@
 
 use crate::{
     Server,
+    auth::oauth::client::{AppOriginPolicy, ApplicationClient},
     manager::{
-        defaults::{WEBUI_LATEST_URL, WEBUI_MAX_MAJOR_VERSION, WEBUI_PINNED_URL},
+        app_client::{
+            APP_CLIENT_DOCUMENT, AppClientId, AppClientTemplate, app_base, normalize_url_prefix,
+        },
         fetch_resource,
     },
 };
 use ahash::AHashMap;
 use arc_swap::ArcSwap;
+use bytes::Bytes;
+use compact_str::{CompactString, format_compact};
 use registry::schema::{enums::CompressionAlgo, structs::Application};
+use serde::Deserialize;
 use std::{
     borrow::Cow,
     io::{self, Cursor, Read, Seek},
@@ -28,19 +34,40 @@ use std::{
 };
 use store::{
     registry::{RegistryObject, bootstrap::Bootstrap},
-    write::{BatchBuilder, BlobLink, BlobOp, now},
+    write::{BatchBuilder, BlobLink, BlobOp, blob::BlobLinkValue, now},
 };
 use trc::{AddContext, Key};
-use types::{blob_hash::BlobHash, id::Id};
+use types::{blob_hash::BlobHash, id::Id, semver::Semver};
+use zip::{ZipArchive, result::ZipError};
 
 const APP_BLOB_PREFIX: &str = "STALWART_APP_";
 const MAX_APP_SIZE: usize = 100 * 1024 * 1024;
+const INDEX_PAGE: &str = "index.html";
 const BASE_HREF: &str = "<base href=\"/\"";
 const OAUTH_CLIENT_ID: &str = "<meta name=\"oauth-client-id\" content=\"\"";
+const APP_MANIFEST: &str = "inbuxa-app.json";
+// inbuxa: bundles built for upstream carry the manifest under its old name
+const LEGACY_APP_MANIFEST: &str = "stalwart-app.json";
+const MAX_APP_MANIFEST_SIZE: u64 = 4 * 1024;
+
+#[derive(Deserialize)]
+struct AppManifest<'x> {
+    id: &'x str,
+    version: &'x str,
+    #[serde(rename = "minServerVersion")]
+    min_server_version: Option<&'x str>,
+}
 
 enum IndexEdit<'x> {
     BaseHref(&'x str),
     OAuthClientId(&'x str),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AppClientDocument {
+    NotShipped,
+    Untrusted,
+    Document(Vec<u8>),
 }
 
 #[allow(clippy::type_complexity)]
@@ -52,7 +79,8 @@ pub struct WebApplications {
 
 pub struct AppRoutes {
     resources: AHashMap<String, Resource<PathBuf>>,
-    oauth_client_id_meta: Option<String>,
+    index_pages: AHashMap<String, Bytes>,
+    oauth_client: Option<AppClientTemplate>,
     _bundle_dir: TempDir,
 }
 
@@ -83,7 +111,7 @@ impl<T> Resource<T> {
 }
 
 pub struct AppResource {
-    pub resource: Resource<Vec<u8>>,
+    pub resource: Resource<Bytes>,
     pub no_cache: bool,
 }
 
@@ -96,26 +124,136 @@ impl WebApplications {
         }
     }
 
+    pub fn has_prefix(&self, prefix: &str) -> bool {
+        self.routes.load().contains_key(prefix)
+    }
+
+    pub fn is_first_party_client(
+        &self,
+        client_id: &str,
+        policy: Option<AppOriginPolicy<'_>>,
+    ) -> bool {
+        if self
+            .applications
+            .load()
+            .iter()
+            .any(|app| app.oauth_client_id.as_deref() == Some(client_id))
+        {
+            return true;
+        }
+        let (Some(policy), Some(client_id)) = (policy, AppClientId::parse(client_id)) else {
+            return false;
+        };
+        if !policy.accepts(client_id.is_tls, client_id.authority) {
+            return false;
+        }
+        let routes = self.routes.load();
+
+        #[cfg(feature = "dev_mode")]
+        if client_id.prefix.is_empty() {
+            return routes.values().any(|app| app.oauth_client.is_some());
+        }
+
+        routes
+            .get(client_id.prefix)
+            .is_some_and(|app| app.oauth_client.is_some())
+    }
+
+    pub fn recognize_client(
+        &self,
+        client_id: &str,
+        policy: AppOriginPolicy<'_>,
+    ) -> Option<ApplicationClient> {
+        self.with_client_template(client_id, policy, |template, client_id| {
+            template.client(&client_id.base())
+        })
+    }
+
+    pub fn post_logout_redirect_uri_matches(
+        &self,
+        client_id: &str,
+        policy: AppOriginPolicy<'_>,
+        uri: &str,
+    ) -> Option<bool> {
+        self.with_client_template(client_id, policy, |template, client_id| {
+            template.post_logout_redirect_uri_matches(client_id, uri)
+        })
+    }
+
+    fn with_client_template<T>(
+        &self,
+        client_id: &str,
+        policy: AppOriginPolicy<'_>,
+        f: impl FnOnce(&AppClientTemplate, &AppClientId<'_>) -> T,
+    ) -> Option<T> {
+        let client_id = AppClientId::parse(client_id)?;
+        if !policy.accepts(client_id.is_tls, client_id.authority) {
+            return None;
+        }
+        let routes = self.routes.load();
+
+        #[cfg(feature = "dev_mode")]
+        if client_id.prefix.is_empty() {
+            return routes
+                .iter()
+                .filter_map(|(prefix, app)| Some((prefix, app.oauth_client.as_ref()?)))
+                .min_by_key(|(prefix, _)| prefix.as_str())
+                .map(|(_, template)| f(template, &client_id));
+        }
+
+        routes
+            .get(client_id.prefix)?
+            .oauth_client
+            .as_ref()
+            .map(|template| f(template, &client_id))
+    }
+
+    pub fn client_document(
+        &self,
+        prefix: &str,
+        is_tls: bool,
+        authority: &str,
+        policy: AppOriginPolicy<'_>,
+    ) -> AppClientDocument {
+        match self
+            .routes
+            .load()
+            .get(prefix)
+            .and_then(|routes| routes.oauth_client.as_ref())
+        {
+            Some(template) if policy.accepts(is_tls, authority) => {
+                AppClientDocument::Document(template.document(&app_base(is_tls, authority, prefix)))
+            }
+            Some(_) => AppClientDocument::Untrusted,
+            None => AppClientDocument::NotShipped,
+        }
+    }
+
     pub async fn serve(&self, prefix: &str, path: &str) -> trc::Result<Option<AppResource>> {
         if let Some(routes) = self.routes.load().get(prefix)
             && let Some((is_index, resource)) = routes
                 .resources
                 .get(path)
-                .map(|res| (path == "index.html", res))
-                .or_else(|| routes.resources.get("index.html").map(|res| (true, res)))
+                .map(|res| (path == INDEX_PAGE, res))
+                .or_else(|| routes.resources.get(INDEX_PAGE).map(|res| (true, res)))
         {
+            if is_index && let Some(page) = routes.index_pages.get(prefix) {
+                return Ok(Some(AppResource {
+                    resource: Resource {
+                        content_type: resource.content_type.clone(),
+                        contents: page.clone(),
+                    },
+                    no_cache: true,
+                }));
+            }
+
             tokio::fs::read(&resource.contents)
                 .await
-                .map(|mut contents| {
-                    if is_index && let Ok(html) = std::str::from_utf8(&contents) {
-                        contents =
-                            rewrite_index(html, prefix, routes.oauth_client_id_meta.as_deref());
-                    }
-
+                .map(|contents| {
                     Some(AppResource {
                         resource: Resource {
                             content_type: resource.content_type.clone(),
-                            contents,
+                            contents: contents.into(),
                         },
                         no_cache: is_index,
                     })
@@ -123,7 +261,7 @@ impl WebApplications {
                 .map_err(|err| {
                     trc::ResourceEvent::Error
                         .reason(err)
-                        .ctx(trc::Key::Path, path.to_string())
+                        .ctx(trc::Key::Path, CompactString::from(path))
                         .caused_by(trc::location!())
                 })
         } else {
@@ -134,7 +272,7 @@ impl WebApplications {
     pub async fn reload(&self, bp: &mut Bootstrap) {
         let mut apps = Vec::new();
         for app in bp.list_infallible::<Application>().await {
-            if app.object.enabled {
+            if app.object.enable {
                 apps.push(WebApplicationManager::new(app));
             }
         }
@@ -171,7 +309,7 @@ impl WebApplications {
                         Resource(trc::ResourceEvent::Error),
                         Reason = err,
                         Url = app.url.clone(),
-                        Details = format!(
+                        Details = format_compact!(
                             "Failed to unpack application for prefixes: {}, {}",
                             app.prefixes.join(", "),
                             if is_retained {
@@ -205,24 +343,15 @@ impl WebApplicationManager {
         Self {
             base_path,
             blob_key: BlobHash::generate(format!("{}{}", APP_BLOB_PREFIX, app.id.id()).as_bytes()),
-            url: if app.object.resource_url == WEBUI_LATEST_URL {
-                WEBUI_PINNED_URL.to_string()
-            } else {
-                app.object.resource_url
-            },
+            url: app.object.resource_url,
             description: app.object.description,
-            expiry: app.object.auto_update_frequency.as_secs(),
+            expiry: app.object.auto_update_interval.as_secs(),
             oauth_client_id: app.object.oauth_client_id,
             prefixes: app
                 .object
                 .url_prefix
                 .iter()
-                .map(|prefix| {
-                    prefix
-                        .trim_end_matches('/')
-                        .trim_start_matches('/')
-                        .to_string()
-                })
+                .map(|prefix| normalize_url_prefix(prefix).to_string())
                 .collect(),
         }
     }
@@ -265,74 +394,112 @@ impl WebApplicationManager {
 
         let url = self.url.clone();
         let bundle_path = staging.path.clone();
-        let (resources, bundle) = tokio::task::spawn_blocking(move || -> trc::Result<_> {
-            let mut archive = zip::ZipArchive::new(Cursor::new(bundle)).map_err(|err| {
-                trc::ResourceEvent::Error
-                    .caused_by(trc::location!())
-                    .reason(err)
-                    .ctx(Key::Url, url.clone())
-                    .details("Failed to decompress application bundle")
-            })?;
-            if let Some(version) = unsupported_bundle_version(&mut archive) {
-                return Err(trc::ResourceEvent::Error
-                    .caused_by(trc::location!())
-                    .ctx(Key::Url, url.clone())
-                    .details(format!(
-                        "Application bundle version {version} is for a newer server, set the resource URL to {WEBUI_PINNED_URL}"
-                    )));
-            }
-
-            let mut resources = AHashMap::with_capacity(archive.len());
-            for i in 0..archive.len() {
-                let mut file = archive.by_index(i).map_err(|err| {
+        let max_prefix_len = self
+            .prefixes
+            .iter()
+            .map(String::len)
+            .max()
+            .unwrap_or_default();
+        let (resources, index, oauth_client, bundle) =
+            tokio::task::spawn_blocking(move || -> trc::Result<_> {
+                let mut archive = ZipArchive::new(Cursor::new(bundle)).map_err(|err| {
                     trc::ResourceEvent::Error
                         .caused_by(trc::location!())
                         .reason(err)
-                        .details("Failed to read file from application bundle")
+                        .ctx(Key::Url, url.clone())
+                        .details("Failed to decompress application bundle")
                 })?;
-                if file.is_dir() {
-                    continue;
-                }
-
-                let mut contents = Vec::new();
-                file.read_to_end(&mut contents).map_err(unpack_error)?;
-                let file_name = file.name().to_string();
-                drop(file);
-
-                let path = bundle_path.join(format!("{i:02}"));
-                std::fs::write(&path, contents).map_err(unpack_error)?;
-
-                let resource = Resource {
-                    content_type: match file_name
-                        .rsplit_once('.')
-                        .map(|(_, ext)| ext)
-                        .unwrap_or_default()
-                    {
-                        "html" => "text/html",
-                        "css" => "text/css",
-                        "wasm" => "application/wasm",
-                        "js" => "application/javascript",
-                        "json" => "application/json",
-                        "png" => "image/png",
-                        "svg" => "image/svg+xml",
-                        "ico" => "image/x-icon",
-                        _ => "application/octet-stream",
+                verify_manifest(&mut archive, &url)?;
+                let mut resources = AHashMap::with_capacity(archive.len());
+                let mut index = None;
+                let mut client_document = None;
+                for i in 0..archive.len() {
+                    let mut file = archive.by_index(i).map_err(|err| {
+                        trc::ResourceEvent::Error
+                            .caused_by(trc::location!())
+                            .reason(err)
+                            .details("Failed to read file from application bundle")
+                    })?;
+                    if file.is_dir() {
+                        continue;
                     }
-                    .into(),
-                    contents: path,
-                };
 
-                resources.insert(file_name, resource);
-            }
-            Ok((resources, archive.into_inner().into_inner()))
-        })
-        .await
-        .map_err(|err| {
-            trc::ResourceEvent::Error
-                .caused_by(trc::location!())
-                .reason(err)
-                .details("Bundle unpack task panicked")
-        })??;
+                    let mut contents = Vec::new();
+                    file.read_to_end(&mut contents).map_err(unpack_error)?;
+                    let file_name = file
+                        .name()
+                        .map_err(|err| {
+                            trc::ResourceEvent::Error
+                                .caused_by(trc::location!())
+                                .reason(err)
+                                .details("Failed to read file name from application bundle")
+                        })?
+                        .into_owned();
+                    drop(file);
+
+                    if file_name == APP_CLIENT_DOCUMENT {
+                        client_document = Some(contents);
+                        continue;
+                    }
+                    if file_name == APP_MANIFEST || file_name == LEGACY_APP_MANIFEST {
+                        continue;
+                    }
+
+                    let path = bundle_path.join(format!("{i:02}"));
+                    std::fs::write(&path, &contents).map_err(unpack_error)?;
+                    if file_name == INDEX_PAGE {
+                        index = Some(contents);
+                    }
+
+                    let resource = Resource {
+                        content_type: match file_name
+                            .rsplit_once('.')
+                            .map(|(_, ext)| ext)
+                            .unwrap_or_default()
+                        {
+                            "html" => "text/html",
+                            "css" => "text/css",
+                            "wasm" => "application/wasm",
+                            "js" => "application/javascript",
+                            "json" => "application/json",
+                            "png" => "image/png",
+                            "svg" => "image/svg+xml",
+                            "ico" => "image/x-icon",
+                            _ => "application/octet-stream",
+                        }
+                        .into(),
+                        contents: path,
+                    };
+
+                    resources.insert(file_name, resource);
+                }
+                let oauth_client = client_document
+                    .map(|document| {
+                        AppClientTemplate::parse(&document, max_prefix_len, |path| {
+                            resources.contains_key(path)
+                        })
+                        .map_err(|err| {
+                            trc::ResourceEvent::Error
+                                .caused_by(trc::location!())
+                                .ctx(Key::Url, url.clone())
+                                .details(err)
+                        })
+                    })
+                    .transpose()?;
+                Ok((
+                    resources,
+                    index,
+                    oauth_client,
+                    archive.into_inner().into_inner(),
+                ))
+            })
+            .await
+            .map_err(|err| {
+                trc::ResourceEvent::Error
+                    .caused_by(trc::location!())
+                    .reason(err)
+                    .details("Bundle unpack task panicked")
+            })??;
 
         if !is_cached && let Err(err) = self.cache(server, &bundle).await {
             trc::event!(
@@ -350,26 +517,35 @@ impl WebApplicationManager {
         trc::event!(
             Resource(trc::ResourceEvent::ApplicationUnpacked),
             Url = self.url.clone(),
-            Path = staging.path.to_string_lossy().into_owned(),
+            Path = CompactString::from(staging.path.to_string_lossy()),
         );
 
         Ok(AppRoutes {
             resources,
-            oauth_client_id_meta: self.oauth_client_id.as_deref().map(oauth_client_id_meta),
+            index_pages: index
+                .map(|index| index_pages(&index, &self.prefixes, self.oauth_client_id.as_deref()))
+                .unwrap_or_default(),
+            oauth_client,
             _bundle_dir: staging,
         })
     }
 
     async fn fetch(&self) -> trc::Result<Vec<u8>> {
-        fetch_resource(&self.url, None, Duration::from_secs(60), MAX_APP_SIZE)
-            .await
-            .map_err(|err| {
-                trc::ResourceEvent::Error
-                    .caused_by(trc::location!())
-                    .ctx(Key::Url, self.url.clone())
-                    .reason(err)
-                    .details("Failed to fetch application bundle")
-            })
+        fetch_resource(
+            &self.url,
+            None,
+            Duration::from_secs(60),
+            MAX_APP_SIZE,
+            false,
+        )
+        .await
+        .map_err(|err| {
+            trc::ResourceEvent::Error
+                .caused_by(trc::location!())
+                .ctx(Key::Url, self.url.clone())
+                .reason(err)
+                .details("Failed to fetch application bundle")
+        })
     }
 
     async fn cache(&self, server: &Server, bundle: &[u8]) -> trc::Result<()> {
@@ -388,7 +564,7 @@ impl WebApplicationManager {
                         until: now() + self.expiry,
                     },
                 },
-                vec![],
+                BlobLinkValue::new(bundle.len()),
             )
             .set(
                 BlobOp::Commit {
@@ -398,7 +574,7 @@ impl WebApplicationManager {
             );
         server
             .store()
-            .write(batch.build_all())
+            .write_batch(&mut batch)
             .await
             .caused_by(trc::location!())?;
 
@@ -447,7 +623,14 @@ impl TempDir {
 
 impl Drop for TempDir {
     fn drop(&mut self) {
-        let _ = std::fs::remove_dir_all(&self.path);
+        let path = std::mem::take(&mut self.path);
+        if let Ok(handle) = tokio::runtime::Handle::try_current() {
+            handle.spawn_blocking(move || {
+                let _ = std::fs::remove_dir_all(path);
+            });
+        } else {
+            let _ = std::fs::remove_dir_all(path);
+        }
     }
 }
 
@@ -470,6 +653,86 @@ async fn remove_siblings(base_path: &Path, keep: &Path) {
     }
 }
 
+fn verify_manifest<R: Read + Seek>(archive: &mut ZipArchive<R>, url: &str) -> trc::Result<()> {
+    let manifest_error = || {
+        trc::ResourceEvent::Error
+            .caused_by(trc::location!())
+            .ctx(Key::Url, url.to_string())
+    };
+
+    let name = if archive.index_for_name(APP_MANIFEST).is_some() {
+        APP_MANIFEST
+    } else {
+        LEGACY_APP_MANIFEST
+    };
+    let file = archive.by_name(name).map_err(|err| match err {
+        ZipError::FileNotFound => {
+            manifest_error().details("Application bundle does not contain a manifest")
+        }
+        err => manifest_error()
+            .reason(err)
+            .details("Failed to read application manifest"),
+    })?;
+    if file.size() > MAX_APP_MANIFEST_SIZE {
+        return Err(manifest_error().details("Application manifest is too large"));
+    }
+    let mut contents = Vec::new();
+    file.take(MAX_APP_MANIFEST_SIZE + 1)
+        .read_to_end(&mut contents)
+        .map_err(|err| {
+            manifest_error()
+                .reason(err)
+                .details("Failed to read application manifest")
+        })?;
+    if contents.len() as u64 > MAX_APP_MANIFEST_SIZE {
+        return Err(manifest_error().details("Application manifest is too large"));
+    }
+
+    let manifest = serde_json::from_slice::<AppManifest<'_>>(&contents).map_err(|err| {
+        manifest_error()
+            .reason(err)
+            .details("Invalid application manifest")
+    })?;
+    let manifest_error = || {
+        manifest_error()
+            .ctx(Key::Id, manifest.id.to_string())
+            .ctx(Key::Version, manifest.version.to_string())
+    };
+    let semver = parse_version(manifest.version)
+        .ok_or_else(|| manifest_error().details("Invalid application manifest version"))?;
+
+    if let Some(min_server_version) = manifest.min_server_version {
+        let min_server_semver = parse_version(min_server_version).ok_or_else(|| {
+            manifest_error().details("Invalid application manifest minimum server version")
+        })?;
+        let server_semver = Semver::current();
+        if min_server_semver > server_semver {
+            return Err(manifest_error().details(format_compact!(
+                "Incompatible application bundle: {} version {} requires server {min_server_semver} or later, running {server_semver}",
+                manifest.id,
+                manifest.version
+            )));
+        }
+    }
+
+    match hashify::map!(manifest.id.as_bytes(), u16, "webui" => 2) {
+        Some(&major) if semver.major() != major => Err(manifest_error().details(format_compact!(
+            "Incompatible application bundle: {} version {} found, major version {major} is required",
+            manifest.id,
+            manifest.version
+        ))),
+        _ => Ok(()),
+    }
+}
+
+fn parse_version(version: &str) -> Option<Semver> {
+    let version = version.trim();
+    let version = version
+        .split_once(['-', '+'])
+        .map_or(version, |(version, _)| version);
+    Semver::try_from(version).ok()
+}
+
 fn unpack_error(err: std::io::Error) -> trc::Error {
     trc::ResourceEvent::Error
         .reason(err)
@@ -480,6 +743,25 @@ impl Default for WebApplications {
     fn default() -> Self {
         Self::new()
     }
+}
+
+fn index_pages(
+    index: &[u8],
+    prefixes: &[String],
+    oauth_client_id: Option<&str>,
+) -> AHashMap<String, Bytes> {
+    let client_id_meta = oauth_client_id.map(oauth_client_id_meta);
+    let html = std::str::from_utf8(index).ok();
+    prefixes
+        .iter()
+        .map(|prefix| {
+            let page = match html {
+                Some(html) => rewrite_index(html, prefix, client_id_meta.as_deref()),
+                None => index.to_vec(),
+            };
+            (prefix.clone(), Bytes::from(page))
+        })
+        .collect()
 }
 
 fn rewrite_index(html: &str, prefix: &str, oauth_client_id_meta: Option<&str>) -> Vec<u8> {
@@ -517,19 +799,6 @@ fn rewrite_index(html: &str, prefix: &str, oauth_client_id_meta: Option<&str>) -
     out.into_bytes()
 }
 
-fn unsupported_bundle_version<R: Read + Seek>(archive: &mut zip::ZipArchive<R>) -> Option<String> {
-    let file = archive.by_name("VERSION").ok()?;
-    let mut version = String::new();
-    let is_supported = file.take(32).read_to_string(&mut version).is_ok()
-        && version
-            .trim()
-            .split('.')
-            .next()
-            .and_then(|major| major.parse::<u32>().ok())
-            .is_some_and(|major| major <= WEBUI_MAX_MAJOR_VERSION);
-    (!is_supported).then(|| version.trim().to_string())
-}
-
 fn oauth_client_id_meta(client_id: &str) -> String {
     let mut meta = String::with_capacity(OAUTH_CLIENT_ID.len() + client_id.len());
     meta.push_str("<meta name=\"oauth-client-id\" content=\"");
@@ -546,276 +815,3 @@ fn oauth_client_id_meta(client_id: &str) -> String {
     meta
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    const INDEX: &str = concat!(
-        "<!doctype html>\n<html lang=\"en\">\n\n<head>\n  <meta charset=\"UTF-8\" />\n",
-        "  <base href=\"/\" />\n  <meta name=\"oauth-client-id\" content=\"\" />\n",
-        "  <title>Portal</title>\n</head>\n\n<body></body>\n\n</html>\n"
-    );
-
-    #[test]
-    fn index_is_rewritten_with_the_prefix_and_client_id() {
-        let meta = oauth_client_id_meta("inbuxa-webui");
-        let html = String::from_utf8(rewrite_index(INDEX, "admin", Some(&meta))).unwrap();
-
-        assert!(html.contains("<base href=\"/admin/\" />"), "{html}");
-        assert!(
-            html.contains("<meta name=\"oauth-client-id\" content=\"inbuxa-webui\" />"),
-            "{html}"
-        );
-        assert!(html.contains("<title>Portal</title>"), "{html}");
-        assert!(html.starts_with("<!doctype html>"), "{html}");
-        assert!(html.ends_with("</html>\n"), "{html}");
-    }
-
-    #[test]
-    fn index_keeps_the_empty_placeholder_when_no_client_id_is_configured() {
-        let html = String::from_utf8(rewrite_index(INDEX, "account", None)).unwrap();
-
-        assert!(html.contains("<base href=\"/account/\" />"), "{html}");
-        assert!(
-            html.contains("<meta name=\"oauth-client-id\" content=\"\" />"),
-            "{html}"
-        );
-    }
-
-    #[test]
-    fn index_without_a_placeholder_is_left_alone() {
-        let bundle = "<head>\n  <base href=\"/\" />\n</head>";
-        let meta = oauth_client_id_meta("inbuxa-webui");
-        let html = String::from_utf8(rewrite_index(bundle, "admin", Some(&meta))).unwrap();
-
-        assert_eq!(html, "<head>\n  <base href=\"/admin/\" />\n</head>");
-    }
-
-    #[test]
-    fn edits_are_applied_in_document_order() {
-        let bundle = concat!(
-            "<head><meta name=\"oauth-client-id\" content=\"\" />",
-            "<base href=\"/\" /></head>"
-        );
-        let meta = oauth_client_id_meta("app");
-        let html = String::from_utf8(rewrite_index(bundle, "admin", Some(&meta))).unwrap();
-
-        assert_eq!(
-            html,
-            concat!(
-                "<head><meta name=\"oauth-client-id\" content=\"app\" />",
-                "<base href=\"/admin/\" /></head>"
-            )
-        );
-    }
-
-    #[test]
-    fn client_ids_are_escaped_for_the_attribute() {
-        let meta = oauth_client_id_meta("a\"b&c<d>");
-
-        assert_eq!(
-            meta,
-            "<meta name=\"oauth-client-id\" content=\"a&quot;b&amp;c&lt;d&gt;\""
-        );
-    }
-
-    async fn fixture(name: &str, client_id: Option<&str>) -> WebApplications {
-        let dir = TempDir::new(std::env::temp_dir().join(format!("inbuxa-app-{name}")));
-        dir.create().await.unwrap();
-        tokio::fs::write(dir.path.join("index.html"), INDEX)
-            .await
-            .unwrap();
-        tokio::fs::write(dir.path.join("app.js"), "export const x = 1;\n")
-            .await
-            .unwrap();
-
-        let mut resources = AHashMap::new();
-        resources.insert(
-            "index.html".to_string(),
-            Resource::new("text/html", dir.path.join("index.html")),
-        );
-        resources.insert(
-            "app.js".to_string(),
-            Resource::new("text/javascript", dir.path.join("app.js")),
-        );
-
-        let routes = Arc::new(AppRoutes {
-            resources,
-            oauth_client_id_meta: client_id.map(oauth_client_id_meta),
-            _bundle_dir: dir,
-        });
-
-        let mut map = AHashMap::new();
-        map.insert("admin".to_string(), routes.clone());
-        map.insert("account".to_string(), routes);
-
-        let apps = WebApplications::new();
-        apps.routes.store(Arc::new(map));
-
-        apps
-    }
-
-    async fn serve_html(apps: &WebApplications, prefix: &str, path: &str) -> String {
-        let served = apps.serve(prefix, path).await.unwrap().unwrap();
-        assert!(served.no_cache, "index responses must not be cached");
-        assert_eq!(served.resource.content_type.as_ref(), "text/html");
-        String::from_utf8(served.resource.contents).unwrap()
-    }
-
-    #[tokio::test]
-    async fn serving_index_injects_the_prefix_and_client_id() {
-        let apps = fixture("serve-configured", Some("pocket-id-client")).await;
-
-        let html = serve_html(&apps, "admin", "index.html").await;
-        assert!(html.contains("<base href=\"/admin/\" />"), "{html}");
-        assert!(
-            html.contains("<meta name=\"oauth-client-id\" content=\"pocket-id-client\" />"),
-            "{html}"
-        );
-
-        let html = serve_html(&apps, "account", "index.html").await;
-        assert!(html.contains("<base href=\"/account/\" />"), "{html}");
-        assert!(
-            html.contains("<meta name=\"oauth-client-id\" content=\"pocket-id-client\" />"),
-            "{html}"
-        );
-    }
-
-    #[tokio::test]
-    async fn unknown_paths_fall_back_to_a_rewritten_index() {
-        let apps = fixture("serve-fallback", Some("pocket-id-client")).await;
-
-        let html = serve_html(&apps, "admin", "settings/directory").await;
-        assert!(html.contains("<base href=\"/admin/\" />"), "{html}");
-        assert!(
-            html.contains("<meta name=\"oauth-client-id\" content=\"pocket-id-client\" />"),
-            "{html}"
-        );
-    }
-
-    #[tokio::test]
-    async fn assets_and_unknown_prefixes_are_untouched() {
-        let apps = fixture("serve-assets", Some("pocket-id-client")).await;
-
-        let served = apps.serve("admin", "app.js").await.unwrap().unwrap();
-        assert_eq!(served.resource.contents, b"export const x = 1;\n");
-        assert_eq!(served.resource.content_type.as_ref(), "text/javascript");
-        assert!(!served.no_cache);
-
-        assert!(apps.serve("unknown", "index.html").await.unwrap().is_none());
-    }
-
-    #[tokio::test]
-    async fn serving_index_without_a_client_id_keeps_the_placeholder() {
-        let apps = fixture("serve-unconfigured", None).await;
-
-        let html = serve_html(&apps, "admin", "index.html").await;
-        assert!(html.contains("<base href=\"/admin/\" />"), "{html}");
-        assert!(
-            html.contains("<meta name=\"oauth-client-id\" content=\"\" />"),
-            "{html}"
-        );
-    }
-
-    #[test]
-    fn an_unmodified_document_is_returned_verbatim() {
-        let bundle = "<head><title>x</title></head>";
-
-        assert_eq!(rewrite_index(bundle, "admin", None), bundle.as_bytes());
-    }
-    #[tokio::test]
-    async fn missing_parent_directories_are_created() {
-        let base = std::env::temp_dir().join("inbuxa-app-nested");
-        let _ = tokio::fs::remove_dir_all(&base).await;
-
-        let dir = TempDir::new(base.join("webui").join("0"));
-        dir.create().await.unwrap();
-
-        assert!(tokio::fs::metadata(&dir.path).await.is_ok());
-
-        drop(dir);
-        let _ = tokio::fs::remove_dir_all(&base).await;
-    }
-
-    #[tokio::test]
-    async fn dropping_the_routes_removes_the_bundle_directory() {
-        let apps = fixture("drop-guard", None).await;
-        let path = apps
-            .routes
-            .load()
-            .get("admin")
-            .unwrap()
-            ._bundle_dir
-            .path
-            .clone();
-
-        assert!(tokio::fs::metadata(&path).await.is_ok());
-
-        apps.routes.store(Arc::new(AHashMap::new()));
-
-        assert!(tokio::fs::metadata(&path).await.is_err());
-    }
-
-    #[tokio::test]
-    async fn sweeping_orphans_spares_the_current_generation() {
-        let base = std::env::temp_dir().join("inbuxa-app-sweep");
-        let _ = tokio::fs::remove_dir_all(&base).await;
-
-        let current = TempDir::new(base.join("1"));
-        current.create().await.unwrap();
-        let orphan = base.join("0");
-        tokio::fs::create_dir_all(&orphan).await.unwrap();
-        let stray = base.join("webui.zip");
-        tokio::fs::write(&stray, b"not a bundle").await.unwrap();
-
-        remove_siblings(&base, &current.path).await;
-
-        assert!(tokio::fs::metadata(&current.path).await.is_ok());
-        assert!(tokio::fs::metadata(&orphan).await.is_err());
-        assert!(tokio::fs::metadata(&stray).await.is_err());
-
-        drop(current);
-        let _ = tokio::fs::remove_dir_all(&base).await;
-    }
-
-    #[test]
-    fn generations_never_repeat() {
-        let apps = WebApplications::new();
-
-        assert_ne!(apps.next_generation(), apps.next_generation());
-    }
-
-    fn bundle(version: Option<&str>) -> zip::ZipArchive<Cursor<Vec<u8>>> {
-        let mut writer = zip::ZipWriter::new(Cursor::new(Vec::new()));
-        let options = zip::write::SimpleFileOptions::default();
-        writer.start_file("index.html", options).unwrap();
-        io::Write::write_all(&mut writer, INDEX.as_bytes()).unwrap();
-        if let Some(version) = version {
-            writer.start_file("VERSION", options).unwrap();
-            io::Write::write_all(&mut writer, version.as_bytes()).unwrap();
-        }
-        zip::ZipArchive::new(writer.finish().unwrap()).unwrap()
-    }
-
-    #[test]
-    fn bundles_newer_than_the_supported_major_version_are_rejected() {
-        // Bundles without VERSION or with a 1.x VERSION are accepted, anything else is rejected
-        assert_eq!(unsupported_bundle_version(&mut bundle(None)), None);
-        assert_eq!(
-            unsupported_bundle_version(&mut bundle(Some("1.0.12\n"))),
-            None
-        );
-        assert_eq!(
-            unsupported_bundle_version(&mut bundle(Some("2.0.0\n"))),
-            Some("2.0.0".to_string())
-        );
-        assert_eq!(
-            unsupported_bundle_version(&mut bundle(Some("10.1.0"))),
-            Some("10.1.0".to_string())
-        );
-        assert_eq!(
-            unsupported_bundle_version(&mut bundle(Some("garbage"))),
-            Some("garbage".to_string())
-        );
-    }
-}

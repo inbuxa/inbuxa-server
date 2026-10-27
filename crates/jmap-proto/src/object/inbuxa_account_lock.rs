@@ -67,15 +67,16 @@ impl Property for AccountLockProperty {
 
 impl AccountLockProperty {
     fn parse(value: &str) -> Option<Self> {
-        hashify::tiny_map!(value.as_bytes(),
-            b"id" => AccountLockProperty::Id,
-            b"accountId" => AccountLockProperty::AccountId,
-            b"name" => AccountLockProperty::Name,
-            b"kind" => AccountLockProperty::Kind,
-            b"reason" => AccountLockProperty::Reason,
-            b"lockedAt" => AccountLockProperty::LockedAt,
-            b"lockedBy" => AccountLockProperty::LockedBy,
-            b"delegates" => AccountLockProperty::Delegates,
+        hashify::fnc_map!(value.as_bytes(),
+            b"id" => Some(AccountLockProperty::Id),
+            b"accountId" => Some(AccountLockProperty::AccountId),
+            b"name" => Some(AccountLockProperty::Name),
+            b"kind" => Some(AccountLockProperty::Kind),
+            b"reason" => Some(AccountLockProperty::Reason),
+            b"lockedAt" => Some(AccountLockProperty::LockedAt),
+            b"lockedBy" => Some(AccountLockProperty::LockedBy),
+            b"delegates" => Some(AccountLockProperty::Delegates),
+            _ => None,
         )
     }
 }

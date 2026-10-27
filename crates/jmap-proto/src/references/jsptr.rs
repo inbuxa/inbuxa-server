@@ -9,9 +9,12 @@ use crate::{
         PropertyWrapper,
         availability::{BusyPeriod, GetAvailabilityResponse},
         changes::ChangesResponse,
+        copy::CopyResponse,
         get::GetResponse,
+        import::ImportEmailResponse,
         query::QueryResponse,
         query_changes::{AddedItem, QueryChangesResponse},
+        set::SetResponse,
     },
     object::{
         AnyId, JmapObject, JmapObjectId,
@@ -105,6 +108,7 @@ where
                 }
                 _ => {}
             },
+            Some(JsonPointerItem::Invalid(_)) => return false,
             Some(JsonPointerItem::Root) | None => match self {
                 Value::Element(e) => {
                     if let Some(id) = e.as_any_id() {
@@ -125,6 +129,41 @@ where
         }
 
         true
+    }
+}
+
+impl<T: ResponsePtr> ResponsePtr for Option<T> {
+    fn eval_jptr(&self, pointer: JsonPointerIter<'_, Null>, results: &mut EvalResults) -> bool {
+        if let Some(value) = self {
+            value.eval_jptr(pointer, results);
+        }
+        true
+    }
+}
+
+fn eval_map_jptr<'a, V: ResponsePtr + 'a>(
+    mut pointer: JsonPointerIter<'_, Null>,
+    results: &mut EvalResults,
+    get: impl FnOnce(&str) -> Option<&'a V>,
+    values: impl Iterator<Item = &'a V>,
+) {
+    match pointer.next() {
+        Some(JsonPointerItem::Key(key)) => {
+            if let Some(value) = key.as_string_key().and_then(get) {
+                value.eval_jptr(pointer, results);
+            }
+        }
+        Some(JsonPointerItem::Number(n)) => {
+            if let Some(value) = get(&n.to_string()) {
+                value.eval_jptr(pointer, results);
+            }
+        }
+        Some(JsonPointerItem::Wildcard) => {
+            for value in values {
+                value.eval_jptr(pointer.clone(), results);
+            }
+        }
+        _ => {}
     }
 }
 
@@ -188,6 +227,70 @@ impl<T: JmapObject> ResponsePtr for ChangesResponse<T> {
     }
 }
 
+impl<T: JmapObject> ResponsePtr for SetResponse<T> {
+    fn eval_jptr(&self, mut pointer: JsonPointerIter<'_, Null>, results: &mut EvalResults) -> bool {
+        match pointer.next().and_then(|item| item.as_string_key()) {
+            Some("created") => {
+                eval_map_jptr(
+                    pointer,
+                    results,
+                    |key| self.created.get(key),
+                    self.created.values(),
+                );
+                true
+            }
+            Some("updated") => {
+                eval_map_jptr(
+                    pointer,
+                    results,
+                    |key| Id::from_str(key).ok().and_then(|id| self.updated.get(&id)),
+                    self.updated.values(),
+                );
+                true
+            }
+            Some("destroyed") => {
+                self.destroyed.eval_jptr(pointer, results);
+                true
+            }
+            _ => false,
+        }
+    }
+}
+
+impl<T: JmapObject> ResponsePtr for CopyResponse<T> {
+    fn eval_jptr(&self, mut pointer: JsonPointerIter<'_, Null>, results: &mut EvalResults) -> bool {
+        match pointer.next().and_then(|item| item.as_string_key()) {
+            Some("created") => {
+                eval_map_jptr(
+                    pointer,
+                    results,
+                    |key| self.created.get(key),
+                    self.created.values(),
+                );
+                true
+            }
+            _ => false,
+        }
+    }
+}
+
+impl ResponsePtr for ImportEmailResponse {
+    fn eval_jptr(&self, mut pointer: JsonPointerIter<'_, Null>, results: &mut EvalResults) -> bool {
+        match pointer.next().and_then(|item| item.as_string_key()) {
+            Some("created") => {
+                eval_map_jptr(
+                    pointer,
+                    results,
+                    |key| self.created.get(key),
+                    self.created.values(),
+                );
+                true
+            }
+            _ => false,
+        }
+    }
+}
+
 impl ResponsePtr for QueryResponse {
     fn eval_jptr(&self, mut pointer: JsonPointerIter<'_, Null>, results: &mut EvalResults) -> bool {
         match pointer.next().and_then(|item| item.as_string_key()) {
@@ -244,13 +347,13 @@ impl ResponsePtr for CalendarEventNotificationObject {
                 true
             }
             Some("calendarEventId") => {
-                if let Some(id) = &self.calendar_event_id {
+                if let Some(id) = self.calendar_event_id.value() {
                     results.0.push(EvalResult::Id(AnyId::Id(*id)));
                 }
                 true
             }
             Some("event") => {
-                if let Some(event) = &self.event {
+                if let Some(event) = self.event.value() {
                     event.0.eval_jptr(pointer, results);
                 }
                 true

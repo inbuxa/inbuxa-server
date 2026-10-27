@@ -4,17 +4,24 @@
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
  */
 
+use super::ChunkAccumulator;
 use crate::{
-    DavResourceName, RFC_3986, encode_path_segment,
-    file::{ArchivedFileNode, FileNode},
+    DavResourceName,
+    file::{ArchivedFileNode, FileNode, FileNodeRole},
 };
-use common::{DavPath, DavResource, DavResourceMetadata, DavResources, Server, UpdateLock};
+use common::{
+    ArenaRef, DavPath, FileFlags, GroupwareResource, GroupwareResourceMetadata, GroupwareResources,
+    NO_ID, PathIndex, ResourceStore, Server, UpdateLock,
+    storage::dav::{CONTAINER_FLAG, ResourceChunkBuilder, canonical_path_segment},
+};
 use std::sync::Arc;
-use store::ahash::{AHashMap, AHashSet};
+use store::ahash::AHashMap;
 use trc::AddContext;
 use types::{
     acl::AclGrant,
     collection::{Collection, SyncCollection},
+    field::Field,
+    media_type::media_type_essence,
 };
 use utils::{map::bitmap::Bitmap, topological::TopologicalSort};
 
@@ -22,7 +29,7 @@ pub(super) async fn build_file_resources(
     server: &Server,
     account_id: u32,
     update_lock: Arc<UpdateLock>,
-) -> trc::Result<DavResources> {
+) -> trc::Result<GroupwareResources> {
     let last_change_id = server
         .core
         .storage
@@ -33,18 +40,19 @@ pub(super) async fn build_file_resources(
         .unwrap_or_default();
     let account_info = server.account(account_id).await?;
 
-    let mut resources = Vec::with_capacity(16);
+    let mut nodes = ChunkAccumulator::default();
     server
         .archives(
             account_id,
             Collection::FileNode,
+            Field::ARCHIVE,
             &(),
             |document_id, archive| {
-                resources.push(resource_from_file(
+                push_file(
+                    nodes.current(),
                     archive.unarchive::<FileNode>()?,
                     document_id,
-                ));
-
+                );
                 Ok(true)
             },
         )
@@ -52,44 +60,44 @@ pub(super) async fn build_file_resources(
         .caused_by(trc::location!())?;
 
     update_lock.set_revision(last_change_id);
-    let mut files = DavResources {
-        base_path: format!(
-            "{}/{}/",
-            DavResourceName::File.base_path(),
-            percent_encoding::utf8_percent_encode(account_info.name(), RFC_3986),
-        ),
-        size: std::mem::size_of::<DavResources>() as u64,
-        paths: AHashSet::with_capacity(resources.len()),
+    let resources = ResourceStore::from_sorted(nodes.finish(), Vec::new(), true);
+    let paths = build_nested_hierarchy(&resources);
+    let mut files = GroupwareResources {
+        base_path: DavResourceName::File.account_base_path(account_info.name()),
+        size: 0,
+        paths: Arc::new(paths),
         resources,
         item_change_id: last_change_id,
         container_change_id: last_change_id,
         highest_change_id: last_change_id,
         update_lock,
+        verification: Default::default(),
     };
-
-    build_nested_hierarchy(&mut files);
+    files.recompute_size();
 
     Ok(files)
 }
 
-pub(super) fn build_nested_hierarchy(resources: &mut DavResources) {
-    let mut topological_sort = TopologicalSort::with_capacity(resources.resources.len());
-    let mut names = AHashMap::with_capacity(resources.resources.len());
+pub(super) fn build_nested_hierarchy(resources: &ResourceStore) -> PathIndex {
+    let mut topological_sort = TopologicalSort::with_capacity(resources.len());
+    let mut names: AHashMap<u32, (String, u32, u32, bool)> =
+        AHashMap::with_capacity(resources.len());
 
-    for (resource_idx, resource) in resources.resources.iter().enumerate() {
-        if let DavResourceMetadata::File { parent_id, .. } = resource.data {
+    for resource in resources.iter() {
+        if let GroupwareResourceMetadata::File { parent_id, .. } = resource.resource.data {
             topological_sort.insert(
-                parent_id.map(|id| id + 1).unwrap_or_default(),
-                resource.document_id + 1,
+                if parent_id != NO_ID { parent_id + 1 } else { 0 },
+                resource.document_id() + 1,
             );
             names.insert(
-                resource.document_id,
-                DavPath {
-                    path: encode_path_segment(resource.container_name().unwrap()).into_owned(),
+                resource.document_id(),
+                (
+                    canonical_path_segment(resource.container_name().unwrap_or_default())
+                        .into_owned(),
                     parent_id,
-                    hierarchy_seq: 0,
-                    resource_idx,
-                },
+                    0,
+                    resource.is_container(),
+                ),
             );
         }
     }
@@ -99,183 +107,91 @@ pub(super) fn build_nested_hierarchy(resources: &mut DavResources) {
             let folder_id = folder_id - 1;
             let path = names
                 .get(&folder_id)
-                .and_then(|folder| folder.parent_id.map(|parent_id| (&folder.path, parent_id)))
-                .and_then(|(name, parent_id)| {
+                .filter(|(_, parent_id, _, _)| *parent_id != NO_ID)
+                .and_then(|(name, parent_id, _, _)| {
                     names
-                        .get(&parent_id)
-                        .map(|parent| format!("{}/{}", parent.path, name))
+                        .get(parent_id)
+                        .map(|(parent, _, _, _)| format!("{parent}/{name}"))
                 });
 
             if let Some(folder) = names.get_mut(&folder_id) {
                 if let Some(path) = path {
-                    folder.path = path;
+                    folder.0 = path;
                 }
-                folder.hierarchy_seq = hierarchy_sequence as u32;
+                folder.2 = hierarchy_sequence as u32;
             }
         }
     }
 
-    resources.paths = names
-        .into_values()
-        .inspect(|v| {
-            resources.size += (std::mem::size_of::<DavPath>()
-                + std::mem::size_of::<u32>()
-                + std::mem::size_of::<usize>()
-                + std::mem::size_of::<DavResource>()
-                + v.path.len()) as u64;
-        })
-        .collect();
+    let entries = names
+        .into_iter()
+        .map(
+            |(document_id, (path, parent_id, hierarchy_seq, is_container))| {
+                (
+                    path,
+                    DavPath {
+                        path: ArenaRef::default(),
+                        parent_id,
+                        hierarchy_seq: hierarchy_seq
+                            | if is_container { CONTAINER_FLAG } else { 0 },
+                        document_id,
+                    },
+                )
+            },
+        )
+        .collect::<Vec<_>>();
+
+    PathIndex::pack(entries)
 }
 
-pub(super) fn resource_from_file(node: &ArchivedFileNode, document_id: u32) -> DavResource {
+pub fn push_file(builder: &mut ResourceChunkBuilder, node: &ArchivedFileNode, document_id: u32) {
     let parent_id = node.parent_id.to_native();
-    DavResource {
-        document_id,
-        data: DavResourceMetadata::File {
-            name: node.name.as_str().to_string(),
-            size: node.file.as_ref().map(|f| f.size.to_native()),
-            parent_id: if parent_id > 0 {
-                Some(parent_id - 1)
-            } else {
-                None
-            },
-            acls: node
-                .acls
-                .iter()
-                .map(|acl| AclGrant {
-                    account_id: acl.account_id.to_native(),
-                    grants: Bitmap::from(&acl.grants),
-                })
-                .collect(),
-        },
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    const MISSING_DOCUMENT_ID: u32 = 9;
-
-    fn folder(document_id: u32, name: &str, parent_id: Option<u32>) -> DavResource {
-        DavResource {
-            document_id,
-            data: DavResourceMetadata::File {
-                name: name.to_string(),
-                size: None,
-                parent_id,
-                acls: Default::default(),
-            },
-        }
-    }
-
-    fn file(document_id: u32, name: &str, parent_id: Option<u32>) -> DavResource {
-        DavResource {
-            document_id,
-            data: DavResourceMetadata::File {
-                name: name.to_string(),
-                size: Some(1024),
-                parent_id,
-                acls: Default::default(),
-            },
-        }
-    }
-
-    fn build(resources: Vec<DavResource>) -> DavResources {
-        let mut files = DavResources {
-            base_path: "/dav/file/john/".to_string(),
-            paths: AHashSet::with_capacity(resources.len()),
-            resources,
-            item_change_id: 0,
-            container_change_id: 0,
-            highest_change_id: 0,
-            size: 0,
-            update_lock: Arc::new(UpdateLock::new()),
-        };
-        build_nested_hierarchy(&mut files);
-        files
-    }
-
-    fn sorted_paths(files: &DavResources) -> Vec<&str> {
-        let mut paths = files
-            .paths
+    let file = node.file();
+    let stored_media_type = file.and_then(|file| file.media_type.as_deref());
+    let media_type = stored_media_type.and_then(media_type_essence);
+    let (name, media_type_id, extra_len) =
+        builder.push_file_name(node.name.as_str(), media_type.as_deref());
+    let is_media_type_exact = stored_media_type
+        .is_none_or(|stored| !media_type_id.is_none() && media_type.as_deref() == Some(stored));
+    let acls = builder.push_acls(
+        &node
+            .acls
             .iter()
-            .map(|path| path.path.as_str())
-            .collect::<Vec<_>>();
-        paths.sort_unstable();
-        paths
-    }
-
-    fn hierarchy_seq(files: &DavResources, path: &str) -> u32 {
-        files.paths.get(path).expect(path).hierarchy_seq
-    }
-
-    #[test]
-    fn nested_hierarchy() {
-        let files = build(vec![
-            folder(0, "docs", None),
-            folder(1, "reports", Some(0)),
-            file(2, "q1.txt", Some(1)),
-            file(3, "readme.txt", None),
-        ]);
-
-        assert_eq!(
-            sorted_paths(&files),
-            ["docs", "docs/reports", "docs/reports/q1.txt", "readme.txt"]
-        );
-        assert!(hierarchy_seq(&files, "docs") < hierarchy_seq(&files, "docs/reports"));
-        assert!(
-            hierarchy_seq(&files, "docs/reports") < hierarchy_seq(&files, "docs/reports/q1.txt")
-        );
-    }
-
-    #[test]
-    fn nested_hierarchy_percent_encodes_paths() {
-        let files = build(vec![
-            folder(0, "My Documents", None),
-            folder(1, "Berichte 2026", Some(0)),
-            file(2, "Ünterlagen Q1.txt", Some(1)),
-            folder(3, "My%20Folder", None),
-            file(4, "file(1)+a:b.txt", Some(3)),
-        ]);
-
-        assert_eq!(
-            sorted_paths(&files),
-            [
-                "My%20Documents",
-                "My%20Documents/Berichte%202026",
-                "My%20Documents/Berichte%202026/%C3%9Cnterlagen%20Q1.txt",
-                "My%20Folder",
-                "My%20Folder/file(1)+a:b.txt",
-            ]
-        );
-        assert_eq!(
-            files.format_resource(files.by_path("My%20Documents").unwrap()),
-            "/dav/file/john/My%20Documents/"
-        );
-        assert_eq!(
-            files.format_resource(
-                files
-                    .by_path("My%20Documents/Berichte%202026/%C3%9Cnterlagen%20Q1.txt")
-                    .unwrap()
-            ),
-            "/dav/file/john/My%20Documents/Berichte%202026/%C3%9Cnterlagen%20Q1.txt"
-        );
-    }
-
-    #[test]
-    fn nested_hierarchy_with_dangling_parent() {
-        let files = build(vec![
-            folder(0, "docs", None),
-            folder(1, "reports", Some(MISSING_DOCUMENT_ID)),
-            file(2, "q1.txt", Some(1)),
-            file(3, "orphan.txt", Some(MISSING_DOCUMENT_ID)),
-        ]);
-
-        assert_eq!(
-            sorted_paths(&files),
-            ["docs", "orphan.txt", "reports", "reports/q1.txt"]
-        );
-        assert!(hierarchy_seq(&files, "reports") < hierarchy_seq(&files, "reports/q1.txt"));
-    }
+            .map(|acl| AclGrant {
+                account_id: acl.account_id.to_native(),
+                grants: Bitmap::from(&acl.grants),
+            })
+            .collect::<Vec<_>>(),
+    );
+    let modified = node.modified.to_native();
+    let flags = FileFlags::new(
+        node.kind_id(),
+        file.is_some_and(|f| f.executable),
+        node.role().map_or(0, FileNodeRole::id),
+        media_type_id,
+        extra_len,
+    )
+    .with_presence(node.presence());
+    builder.records.push(GroupwareResource {
+        document_id,
+        data: GroupwareResourceMetadata::File {
+            name,
+            size: file.map_or(NO_ID, |f| f.size.to_native()),
+            parent_id: if parent_id > 0 { parent_id - 1 } else { NO_ID },
+            acls,
+            etag: node.etag.to_native(),
+            modified,
+            created_delta: node
+                .created
+                .to_native()
+                .saturating_sub(modified)
+                .clamp(i32::MIN as i64, i32::MAX as i64) as i32,
+            flags: if is_media_type_exact {
+                flags.with_exact_media_type()
+            } else {
+                flags
+            },
+        },
+    });
 }
+

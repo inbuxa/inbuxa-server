@@ -13,7 +13,7 @@
 //! report holds facts; the console grades them.
 
 use common::{
-    BuildServer, Inner, Server, config::smtp::auth::Dkim1Signer, expr::functions::EmptyResolver,
+    BuildServer, Inner, Server, config::smtp::auth::Dkim1Signer, expr::{Bump, functions::EmptyResolver},
 };
 use futures::future::join_all;
 use inbuxa_features::deliverability::{
@@ -23,9 +23,9 @@ use inbuxa_features::deliverability::{
 };
 use mail_auth::{
     AuthenticatedMessage, DkimResult, DnsError, Error, SpfResult as Spf,
-    common::headers::HeaderWriter,
+    headers::HeaderWriter,
     dmarc::{self, Alignment},
-    mta_sts::{MtaSts as MtaStsRecord, TlsRpt},
+    mta_sts::{MtaStsRecord, TlsRptRecord as TlsRpt},
     spf::verify::SpfParameters,
 };
 use registry::schema::{prelude::ObjectType, structs::Domain};
@@ -158,7 +158,7 @@ async fn addresses(server: &Server, settings: &Settings) -> Vec<Address> {
     // The strategy the scheduler picks for a message it knows nothing about:
     // what an expression on the node's own name, as a cluster uses, gives.
     let strategy = server
-        .eval_if::<String, _>(&queue.connection, &EmptyResolver, 0)
+        .eval_if::<String, _>(&queue.connection, &EmptyResolver, &mut Bump::new(), 0)
         .await
         .unwrap_or_else(|| "default".to_string());
     let connection = server.get_connection_or_default(&strategy, 0);
@@ -208,10 +208,10 @@ async fn resolve_name(server: &Server, name: &str) -> Vec<IpAddr> {
     let fqdn = fqdn(name);
     let mut ips = Vec::new();
     if let Some(Ok(v4)) = timed(dns.ipv4_lookup(fqdn.as_str(), Some(&cache.dns_ipv4))).await {
-        ips.extend(v4.rrset.iter().copied().map(IpAddr::V4));
+        ips.extend(v4.records.iter().copied().map(IpAddr::V4));
     }
     if let Some(Ok(v6)) = timed(dns.ipv6_lookup(fqdn.as_str(), Some(&cache.dns_ipv6))).await {
-        ips.extend(v6.rrset.iter().copied().map(IpAddr::V6));
+        ips.extend(v6.records.iter().copied().map(IpAddr::V6));
     }
     ips
 }
@@ -222,7 +222,7 @@ async fn reverse_dns(server: &Server, ip: IpAddr, ehlo: &str, address: &mut Addr
     let dns = &server.core.smtp.resolvers.dns;
     match timed(dns.ptr_lookup(ip, Some(&server.inner.cache.dns_ptr))).await {
         Some(Ok(names)) => {
-            address.ptr = names.rrset.iter().map(|n| bare(n)).collect();
+            address.ptr = names.records.iter().map(|n| bare(n)).collect();
         }
         Some(Err(Error::Dns(DnsError::RecordNotFound(_)))) => {}
         Some(Err(err)) => address.ptr_error = Some(err.to_string()),
@@ -273,7 +273,7 @@ async fn ask(server: &Server, list: &BlockList, name: &str) -> Listing {
     };
     match timed(dns.ipv4_lookup(name, Some(&server.inner.cache.dns_ipv4))).await {
         Some(Ok(answer)) => {
-            let Some(code) = answer.rrset.first().copied() else {
+            let Some(code) = answer.records.first().copied() else {
                 return listing;
             };
             listing.code = Some(code.to_string());
@@ -350,7 +350,7 @@ async fn check_domain(
 
     // DL-9: what DMARC asks of alignment; the console works it out
     if let Some(Ok(record)) =
-        timed(dns.txt_lookup::<dmarc::Dmarc>(format!("_dmarc.{name}."), Some(&cache.dns_txt))).await
+        timed(dns.txt_lookup::<dmarc::DmarcRecord>(format!("_dmarc.{name}."), Some(&cache.dns_txt))).await
     {
         report.dmarc = Some(Dmarc {
             policy: match record.p {
@@ -463,7 +463,7 @@ async fn mta_sts(server: &Server, domain: &str) -> MtaSts {
             );
             out.max_age = Some(policy.max_age);
             if let Some(Ok(mxs)) = timed(dns.mx_lookup(domain, Some(&cache.dns_mx))).await {
-                for mx in mxs.rrset.iter() {
+                for mx in mxs.records.iter() {
                     for exchange in mx.exchanges.iter() {
                         let host = bare(exchange);
                         if !policy.verify(&host) && !out.mx_not_covered.contains(&host) {

@@ -88,7 +88,11 @@ jobs:
       - run: cargo build -p inbuxa --locked
       # --no-run: the workflow compiled every test target without running them,
       # which catches a test that no longer builds without paying for the suite.
+      # The test helpers sit behind `--cfg inbuxa_tests`, never set for a
+      # release build; the flag rebuilds the workspace once more.
       - run: cargo test --workspace --locked --no-run
+        env:
+          RUSTFLAGS: --cfg inbuxa_tests
       # The release profile, on main only. It is the profile the image is
       # built with, and it fails in ways the dev profile does not: v2026.9.24
       # was tagged on a commit whose CI was green and whose release build

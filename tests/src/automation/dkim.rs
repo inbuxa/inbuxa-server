@@ -24,11 +24,15 @@ use registry::{
     types::{duration::Duration, map::Map},
 };
 use serde_json::json;
-use store::write::now;
+use store::write::{BatchBuilder, TaskId, TaskQueueClass, ValueClass, now};
 use types::id::Id;
 
 const SHORT_ROTATION_MS: u64 = 6_000;
 const LONG_ROTATION_MS: u64 = 3_600_000;
+// inbuxa: upstream's 2s left no room for a debug build's RSA key, which
+// takes from under a second to several: a stage could pass before the test
+// saw it (three keys where it waited for two)
+const MANAGEMENT_PERIOD_MS: u64 = 8_000;
 
 pub async fn test(test: &TestServer) {
     fast_retry_tests(test).await;
@@ -61,17 +65,18 @@ pub async fn test(test: &TestServer) {
     account.dkim_signatures().await.assert_total(0, 0);
 
     // Create a domain and trigger DKIM key generation
-    let now = now();
-    let selector_rsa = format!("dummy-v1-rsa-{}", now);
-    let selector_ed = format!("dummy-v1-ed25519-{}", now);
+    // inbuxa: each key's {epoch} is taken when that key is generated, and a
+    // debug build's RSA key can take a second or more, so the selectors may
+    // carry any epoch between the domain's creation and the keys' arrival
+    let created = now();
     let domain_id = account
         .registry_create_object(Domain {
             name: "dkim.org".to_string(),
             certificate_management: CertificateManagement::Manual,
             dkim_management: DkimManagement::Automatic(DkimManagementProperties {
-                delete_after: Duration::from_millis(2_000),
-                retire_after: Duration::from_millis(2_000),
-                rotate_after: Duration::from_millis(2_000),
+                delete_after: Duration::from_millis(MANAGEMENT_PERIOD_MS),
+                retire_after: Duration::from_millis(MANAGEMENT_PERIOD_MS),
+                rotate_after: Duration::from_millis(MANAGEMENT_PERIOD_MS),
                 selector_template: "dummy-v{version}-{algorithm}-{epoch}".to_string(),
                 ..Default::default()
             }),
@@ -89,24 +94,39 @@ pub async fn test(test: &TestServer) {
         .await
         .assert_total(1, 1)
         .assert_stage_count(DkimRotationStage::Active, 2);
+    let arrived = now();
+    for (selector, prefix) in [
+        (&rot1_signatures.v1_rsa[0].selector, "dummy-v1-rsa-"),
+        (&rot1_signatures.v1_ed25519[0].selector, "dummy-v1-ed25519-"),
+    ] {
+        assert!(
+            selector
+                .strip_prefix(prefix)
+                .and_then(|epoch| epoch.parse::<u64>().ok())
+                .is_some_and(|epoch| (created..=arrived).contains(&epoch)),
+            "Unexpected selector: {selector} (expected {prefix}{created}..={arrived})"
+        );
+    }
+    // inbuxa: the rotation falls due rotateAfter after the run that made the
+    // keys started; createdAt is stamped when each key is stored, after its
+    // generation, so a slow RSA key can carry a later createdAt
+    let transition = rot1_signatures.v1_rsa[0]
+        .next_transition_at
+        .unwrap()
+        .timestamp();
     assert_eq!(
-        rot1_signatures.v1_rsa[0].selector, selector_rsa,
-        "Unexpected RSA selector: {}",
-        rot1_signatures.v1_rsa[0].selector
-    );
-    assert_eq!(
-        rot1_signatures.v1_ed25519[0].selector, selector_ed,
-        "Unexpected Ed25519 selector: {}",
-        rot1_signatures.v1_ed25519[0].selector
-    );
-    assert_eq!(
-        rot1_signatures.v1_rsa[0]
+        transition,
+        rot1_signatures.v1_ed25519[0]
             .next_transition_at
             .unwrap()
             .timestamp()
-            - rot1_signatures.v1_rsa[0].created_at.timestamp(),
-        2
     );
+    let period = (MANAGEMENT_PERIOD_MS / 1000) as i64;
+    assert!(
+        (created as i64 + period..=arrived as i64 + period).contains(&transition),
+        "rotation due at {transition}, keys made between {created} and {arrived}"
+    );
+    assert!(transition - rot1_signatures.v1_rsa[0].created_at.timestamp() <= period);
     test.assert_has_signers(
         "dkim.org",
         &[
@@ -261,12 +281,13 @@ async fn fast_retry_tests(test: &TestServer) {
     // Retry failed tasks every second
     account
         .registry_update_setting(
+            // inbuxa: 1.0 dropped maxAttempts and totalDeadline; failed
+            // tasks are retried until they succeed
             TaskManager {
-                max_attempts: 100,
                 strategy: TaskRetryStrategy::FixedDelay(TaskRetryStrategyFixed {
                     delay: 1_000u64.into(),
                 }),
-                total_deadline: 86_400_000u64.into(),
+                ..Default::default()
             },
             &[],
         )
@@ -559,7 +580,25 @@ async fn orphaned_keys_test(test: &TestServer) {
     account.wait_for_dkim_task_count(domain_id, 1).await;
 
     // Orphan the keys: no task and no schedule
-    account.registry_destroy_all(ObjectType::Task).await;
+    // inbuxa: 1.0 refuses to destroy the DKIM task of an automatic domain
+    // over JMAP, so the orphan (data from before scheduling existed) is
+    // made in the store
+    let mut batch = BatchBuilder::new();
+    for task in account.tasks().await.unwrap() {
+        if matches!(&task.task, Task::DkimManagement(t) if t.domain_id == domain_id) {
+            let id = task.id.id();
+            batch
+                .clear(ValueClass::TaskQueue(TaskQueueClass::Task {
+                    id: TaskId::Assigned(id),
+                }))
+                .clear(ValueClass::TaskQueue(TaskQueueClass::Due {
+                    id: TaskId::Assigned(id),
+                    typ: task.task.object_type(),
+                    due: task.task.due_timestamp(),
+                }));
+        }
+    }
+    test.server.store().write_batch(&mut batch).await.unwrap();
     for (id, _) in account.registry_get_all::<DkimSignature>().await {
         account
             .registry_update_object(
@@ -826,7 +865,8 @@ impl Account {
         expected_total: usize,
     ) -> DkimSignatures {
         let mut signatures = self.dkim_signatures().await;
-        for _ in 0..10 {
+        // inbuxa: one management period plus a slow RSA key
+        for _ in 0..50 {
             if signatures != *last_signatures
                 && signatures.v1_rsa.len() + signatures.v1_ed25519.len() == expected_total
             {
@@ -863,7 +903,8 @@ impl Account {
         is_expected: impl Fn(&DkimSignatures) -> bool,
     ) -> DkimSignatures {
         let mut signatures = self.dkim_signatures().await;
-        for _ in 0..50 {
+        // inbuxa: 40s, room for a debug build's slow RSA keys
+        for _ in 0..160 {
             if is_expected(&signatures) {
                 return signatures;
             }
@@ -974,7 +1015,9 @@ impl Account {
             match signature {
                 DkimSignature::Dkim1RsaSha256(sig) => v1_rsa.push(sig),
                 DkimSignature::Dkim1Ed25519Sha256(sig) => v1_ed25519.push(sig),
-                DkimSignature::Dkim2Ed25519Sha256(_) | DkimSignature::Dkim2RsaSha256(_) => todo!(),
+                DkimSignature::Dkim2Ed25519Sha256(_)
+                | DkimSignature::Dkim2RsaSha256(_)
+                | DkimSignature::Dkim2MlDsa44Ed25519Sha512(_) => todo!(),
             }
         }
 
@@ -1087,8 +1130,8 @@ impl TestServer {
                 .dkim1
                 .iter()
                 .map(|s| match s {
-                    Dkim1Signer::RsaSha256(s) => s.template.s.as_str(),
-                    Dkim1Signer::Ed25519Sha256(s) => s.template.s.as_str(),
+                    Dkim1Signer::RsaSha256(s) => s.template().s.as_str(),
+                    Dkim1Signer::Ed25519Sha256(s) => s.template().s.as_str(),
                 })
                 .collect::<AHashSet<_>>(),
             selectors.iter().copied().collect::<AHashSet<_>>()

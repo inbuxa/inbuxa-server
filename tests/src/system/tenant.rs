@@ -382,7 +382,7 @@ pub async fn test(test: &mut TestServer) {
     let m_domain = admin
         .registry_create_object(Domain {
             name: "m.example.org".to_string(),
-            is_enabled: true,
+            enable: true,
             certificate_management: CertificateManagement::Manual,
             dns_management: DnsManagement::Manual,
             ..Default::default()
@@ -450,7 +450,7 @@ pub async fn test(test: &mut TestServer) {
     let k_domain = admin
         .registry_create_object(Domain {
             name: "k.example.org".to_string(),
-            is_enabled: true,
+            enable: true,
             member_tenant_id: Some(t_id),
             certificate_management: CertificateManagement::Manual,
             dns_management: DnsManagement::Manual,
@@ -565,7 +565,9 @@ pub async fn test(test: &mut TestServer) {
             .await
             .method_response()
             .text_field("type"),
-        "forbidden",
+        // inbuxa: 1.0 answers an account the caller can't reach with
+        // accountNotFound (RFC 8620 3.6.2), not forbidden
+        "accountNotFound",
         "MT-1: no reach into another account's mail"
     );
     admin
@@ -722,7 +724,7 @@ pub async fn test(test: &mut TestServer) {
     admin
         .registry_create_object_expect_err(Domain {
             name: "keys.example.org".to_string(),
-            is_enabled: true,
+            enable: true,
             member_tenant_id: Some(q_id),
             certificate_management: CertificateManagement::Manual,
             dns_management: DnsManagement::Manual,
@@ -1038,7 +1040,7 @@ impl TestServer {
             .core
             .storage
             .data
-            .write(batch.build_all())
+            .write_batch(&mut batch)
             .await
             .unwrap();
     }
@@ -1056,7 +1058,7 @@ impl Account {
     async fn create_tenant_domain(&self, name: &str, tenant_id: Option<Id>) -> Id {
         self.registry_create_object(Domain {
             name: name.to_string(),
-            is_enabled: true,
+            enable: true,
             member_tenant_id: tenant_id,
             certificate_management: CertificateManagement::Manual,
             dns_management: DnsManagement::Manual,

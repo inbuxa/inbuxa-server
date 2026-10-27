@@ -59,15 +59,16 @@ impl Property for ReportExportProperty {
 
 impl ReportExportProperty {
     fn parse(value: &str) -> Option<Self> {
-        hashify::tiny_map!(value.as_bytes(),
-            b"id" => ReportExportProperty::Id,
-            b"reportId" => ReportExportProperty::ReportId,
-            b"from" => ReportExportProperty::From,
-            b"to" => ReportExportProperty::To,
-            b"blobId" => ReportExportProperty::BlobId,
-            b"size" => ReportExportProperty::Size,
-            b"sha256" => ReportExportProperty::Sha256,
-            b"files" => ReportExportProperty::Files,
+        hashify::fnc_map!(value.as_bytes(),
+            b"id" => Some(ReportExportProperty::Id),
+            b"reportId" => Some(ReportExportProperty::ReportId),
+            b"from" => Some(ReportExportProperty::From),
+            b"to" => Some(ReportExportProperty::To),
+            b"blobId" => Some(ReportExportProperty::BlobId),
+            b"size" => Some(ReportExportProperty::Size),
+            b"sha256" => Some(ReportExportProperty::Sha256),
+            b"files" => Some(ReportExportProperty::Files),
+            _ => None,
         )
     }
 }

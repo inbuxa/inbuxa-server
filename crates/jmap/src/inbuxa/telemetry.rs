@@ -441,7 +441,7 @@ pub(crate) async fn trace_query(
             Some(queue_id) => {
                 search.extend([
                     SearchFilter::Or,
-                    SearchFilter::eq(TracingSearchField::QueueId, queue_id),
+                    SearchFilter::integer_eq(TracingSearchField::QueueId, queue_id),
                     SearchFilter::has_text(
                         TracingSearchField::Keywords,
                         queue_id.to_string(),
@@ -519,14 +519,18 @@ pub(crate) async fn trace_set(
         }
         let mut batch = BatchBuilder::new();
         batch.clear(ValueClass::Telemetry(TelemetryClass::Span(id.id())));
-        server.tracing_store().write(batch.build_all()).await?;
-        server
-            .search_store()
-            .unindex(
-                SearchQuery::new(SearchIndex::Tracing)
-                    .with_filter(SearchFilter::eq(store::search::SearchField::Id, id.id())),
-            )
-            .await?;
+        server.tracing_store().write_batch(&mut batch).await?;
+        // The built-in index (1.0) drops traces only in whole id buckets, at
+        // retention; until then x:Trace/query skips the stale document, as
+        // it only returns ids that still have a stored trace.
+        if server.search_store().internal_fts().is_none() {
+            server
+                .search_store()
+                .unindex(SearchQuery::new(SearchIndex::Tracing).with_filter(
+                    SearchFilter::integer_eq(store::search::SearchField::Id, id.id()),
+                ))
+                .await?;
+        }
         set.response.destroyed.push(id);
     }
     Ok(set)

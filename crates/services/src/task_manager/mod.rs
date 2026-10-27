@@ -6,44 +6,49 @@
  * Modified by Coffey Labs in 2026 for INBUXA.
  */
 
-use common::{KV_LOCK_TASK, Server};
 use registry::schema::enums::TaskType;
 use registry::schema::structs::Task;
 use registry::types::EnumImpl;
-use std::future::Future;
-use std::time::Instant;
+use std::time::{Duration, Instant};
+use store::Deserialize;
 use store::ahash::AHashMap;
-use store::write::Operation;
+use store::xxhash_rust::xxh3::xxh3_64;
 use tokio::sync::mpsc;
-use trc::TaskManagerEvent;
 
-pub mod acme;
-pub mod alarm;
-pub mod destroy_account;
-pub mod dkim;
-pub mod dns;
+use lock::TaskLock;
+
 pub mod domain_check; // inbuxa: re-queue missing DKIM/ACME tasks
-pub mod imip;
 pub mod inbuxa_restore; // inbuxa: undelete
-pub mod index;
 pub mod lock;
-pub mod maintenance;
 pub mod manager;
-pub mod merge_threads;
-pub mod report;
-pub mod restore_item;
+pub mod outcome;
+pub mod reconcile;
 pub mod scheduler;
-pub mod spam_classifier;
+pub mod tasks;
+mod worker;
 
-const QUEUE_REFRESH_INTERVAL: u64 = 60 * 5; // 5 minutes
-// inbuxa: the lock lifetime (one hour) lives in common::ipc::TaskLocks, per
-// server, so a graceful stop can release the locks and the tests can shorten it
-const CLAIM_RECHECK_INTERVAL: u64 = 60 * 5; // 5 minutes
+const QUEUE_REFRESH_INTERVAL: u64 = 60 * 5;
+const DEFAULT_LOCK_EXPIRY: u64 = 60 * 60;
+pub const LEASE_DURATION: u64 = 60 * 5;
+const LEASE_RENEW_INTERVAL: Duration = Duration::from_secs(LEASE_DURATION / 3);
 
 pub(crate) struct TaskManagerIpc {
-    txs: [mpsc::Sender<TaskJob>; TaskType::COUNT],
-    locked: AHashMap<u64, Locked>,
+    queues: Box<[TaskTypeQueue]>,
+    candidates: Vec<TaskJob>,
     revision: u64,
+}
+
+#[derive(Debug)]
+pub(crate) struct TaskTypeQueue {
+    typ: TaskType,
+    tx: mpsc::Sender<Dispatch>,
+    locked: AHashMap<u64, Locked>,
+    next_due: u64,
+    has_more: bool,
+    is_stale: bool,
+    has_sent: bool,
+    scanned_at: Instant,
+    wake_at: Instant,
 }
 
 #[derive(Debug)]
@@ -51,40 +56,53 @@ pub(crate) struct Locked {
     expires: Instant,
     due: u64,
     revision: u64,
+    state: LockState,
 }
 
-#[derive(Debug)]
-pub(crate) struct TaskDetails {
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum LockState {
+    InFlight {
+        dispatch_revision: u64,
+        has_pending_due: bool,
+    },
+    Parked,
+}
+
+pub(crate) struct StoredTask {
     task: Task,
-    info: TaskJob,
+    hash: u64,
 }
 
-#[derive(Debug)]
+impl Deserialize for StoredTask {
+    fn deserialize(bytes: &[u8]) -> trc::Result<Self> {
+        Task::deserialize(bytes).map(|task| StoredTask {
+            task,
+            hash: xxh3_64(bytes),
+        })
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
 pub(crate) struct TaskJob {
     id: u64,
     due: u64,
     typ: TaskType,
+    dispatch_revision: u64,
 }
 
-#[derive(Debug, PartialEq, Eq)]
-pub(crate) enum TaskResult {
-    Success(Vec<Task>),
-    Update([Operation; 2]),
-    Failure {
-        typ: TaskFailureType,
-        message: String,
-        max_attempts: Option<u64>,
-    },
-    Ignored,
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct Dispatch {
+    job: TaskJob,
+    lock: TaskLock,
+    dispatched_at: Instant,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-#[allow(dead_code)]
-pub(crate) enum TaskFailureType {
-    Retry(u64),
-    Temporary,
-    Perpetual,
-    Permanent,
+#[derive(Debug)]
+pub(crate) struct TaskDone {
+    id: u64,
+    typ: TaskType,
+    dispatch_revision: u64,
+    is_committed: bool,
 }
 
 pub(crate) trait TaskInfo {
@@ -93,67 +111,71 @@ pub(crate) trait TaskInfo {
 
 impl TaskInfo for Task {
     fn name(&self) -> &'static str {
+        self.object_type().as_str()
+    }
+}
+
+impl TaskJob {
+    fn done(&self, is_committed: bool) -> TaskDone {
+        TaskDone {
+            id: self.id,
+            typ: self.typ,
+            dispatch_revision: self.dispatch_revision,
+            is_committed,
+        }
+    }
+}
+
+pub(crate) trait TaskTypeLimits {
+    fn channel_capacity(self) -> usize;
+
+    fn concurrency(self) -> usize;
+}
+
+impl TaskTypeLimits for TaskType {
+    fn channel_capacity(self) -> usize {
         match self {
-            Task::IndexDocument(_) => "IndexDocument",
-            Task::UnindexDocument(_) => "UnindexDocument",
-            Task::IndexTrace(_) => "IndexTrace",
-            Task::CalendarAlarmEmail(_) => "CalendarAlarmEmail",
-            Task::CalendarAlarmNotification(_) => "CalendarAlarmNotification",
-            Task::CalendarItipMessage(_) => "CalendarItipMessage",
-            Task::MergeThreads(_) => "MergeThreads",
-            Task::DmarcReport(_) => "DmarcReport",
-            Task::TlsReport(_) => "TlsReport",
-            Task::RestoreArchivedItem(_) => "RestoreArchivedItem",
-            Task::DestroyAccount(_) => "DestroyAccount",
-            Task::AccountMaintenance(_) => "AccountMaintenance",
-            Task::StoreMaintenance(_) => "StoreMaintenance",
-            Task::SpamFilterMaintenance(_) => "SpamFilterMaintenance",
-            Task::AcmeRenewal(_) => "AcmeRenewal",
-            Task::DkimManagement(_) => "DkimManagement",
-            Task::DnsManagement(_) => "DnsManagement",
-            Task::TenantMaintenance(_) => "TenantMaintenance",
-        }
-    }
-}
-
-impl TaskResult {
-    pub fn permanent(message: impl Into<String>) -> Self {
-        TaskResult::Failure {
-            typ: TaskFailureType::Permanent,
-            message: message.into(),
-            max_attempts: None,
+            TaskType::DestroyAccount
+            | TaskType::AccountMaintenance
+            | TaskType::TenantMaintenance
+            | TaskType::StoreMaintenance => 1,
+            TaskType::SpamFilterMaintenance => 2,
+            TaskType::CalendarAlarmEmail
+            | TaskType::CalendarAlarmNotification
+            | TaskType::CalendarItipMessage
+            | TaskType::MergeThreads
+            | TaskType::DmarcReport
+            | TaskType::TlsReport
+            | TaskType::DmarcReportWindow
+            | TaskType::TlsReportWindow
+            | TaskType::AcmeRenewal
+            | TaskType::DkimManagement
+            | TaskType::DnsManagement
+            | TaskType::ShareRevokeCleanup
+            | TaskType::RestoreArchivedItem => manager::TASK_QUEUE_BUFFER,
         }
     }
 
-    pub fn temporary(message: impl Into<String>) -> Self {
-        TaskResult::Failure {
-            typ: TaskFailureType::Temporary,
-            message: message.into(),
-            max_attempts: None,
+    fn concurrency(self) -> usize {
+        match self {
+            TaskType::DestroyAccount
+            | TaskType::AccountMaintenance
+            | TaskType::TenantMaintenance
+            | TaskType::StoreMaintenance
+            | TaskType::SpamFilterMaintenance => 1,
+            TaskType::MergeThreads
+            | TaskType::DmarcReport
+            | TaskType::TlsReport
+            | TaskType::DmarcReportWindow
+            | TaskType::TlsReportWindow
+            | TaskType::AcmeRenewal
+            | TaskType::DkimManagement
+            | TaskType::DnsManagement
+            | TaskType::ShareRevokeCleanup
+            | TaskType::RestoreArchivedItem => 2,
+            TaskType::CalendarAlarmEmail
+            | TaskType::CalendarAlarmNotification
+            | TaskType::CalendarItipMessage => 4,
         }
     }
-
-    pub fn perpetual(message: impl Into<String>) -> Self {
-        TaskResult::Failure {
-            typ: TaskFailureType::Perpetual,
-            message: message.into(),
-            max_attempts: None,
-        }
-    }
-
-    pub fn deferred(retry_at: Option<u64>, message: impl Into<String>) -> Self {
-        match retry_at {
-            Some(retry_at) => TaskResult::Failure {
-                typ: TaskFailureType::Retry(retry_at),
-                message: message.into(),
-                max_attempts: None,
-            },
-            None => TaskResult::temporary(message),
-        }
-    }
-}
-
-pub(crate) fn deferred_retry_time(err: &trc::Error) -> Option<u64> {
-    err.value(trc::Key::NextRetry)
-        .and_then(|value| value.to_uint())
 }

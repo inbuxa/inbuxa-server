@@ -217,7 +217,10 @@ impl Member {
     /// A person's account as the registry stores it; `None` for a group,
     /// whose own data is held through its members.
     pub fn of(account_id: u32, object: &ObjectInner) -> Option<Member> {
-        let ObjectInner::Account(Account::User(user)) = object else {
+        let ObjectInner::Account(account) = object else {
+            return None;
+        };
+        let Account::User(user) = account.as_ref() else {
             return None;
         };
         let mut domains = vec![user.domain_id.document_id()];
@@ -435,7 +438,7 @@ pub async fn set_original_deadline(data: &Store, item_id: u64, until: Option<u64
         Some(until) => batch.set(original_class(item_id), until.to_be_bytes().to_vec()),
         None => batch.clear(original_class(item_id)),
     };
-    data.write(batch.build_all())
+    data.write_batch(&mut batch)
         .await
         .caused_by(trc::location!())
         .map(|_| ())
@@ -482,7 +485,7 @@ pub async fn create_export(data: &Store, export: &Export) -> trc::Result<u32> {
         let mut batch = BatchBuilder::new();
         batch.assert_value(export_class(id), AssertValue::None);
         batch.set(export_class(id), Json(&stored).serialize()?);
-        match data.write(batch.build_all()).await {
+        match data.write_batch(&mut batch).await {
             Ok(_) => return Ok(id),
             Err(err)
                 if attempt < CREATE_ATTEMPTS
@@ -499,7 +502,7 @@ pub async fn create_export(data: &Store, export: &Export) -> trc::Result<u32> {
 pub async fn update_export(data: &Store, export: &Export) -> trc::Result<()> {
     let mut batch = BatchBuilder::new();
     batch.set(export_class(export.id), Json(export).serialize()?);
-    data.write(batch.build_all())
+    data.write_batch(&mut batch)
         .await
         .caused_by(trc::location!())
         .map(|_| ())
@@ -547,7 +550,7 @@ pub async fn create(data: &Store, hold: &Hold) -> trc::Result<u32> {
         let mut batch = BatchBuilder::new();
         batch.assert_value(class(id), AssertValue::None);
         batch.set(class(id), Json(&stored).serialize()?);
-        match data.write(batch.build_all()).await {
+        match data.write_batch(&mut batch).await {
             Ok(_) => return Ok(id),
             Err(err)
                 if attempt < CREATE_ATTEMPTS
@@ -604,7 +607,7 @@ pub async fn pin_account(data: &Store, member: &Member) -> trc::Result<()> {
 pub async fn update(data: &Store, hold: &Hold) -> trc::Result<()> {
     let mut batch = BatchBuilder::new();
     batch.set(class(hold.id), Json(hold).serialize()?);
-    data.write(batch.build_all())
+    data.write_batch(&mut batch)
         .await
         .caused_by(trc::location!())
         .map(|_| ())

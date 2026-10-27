@@ -2,6 +2,9 @@
 
 Status: 2026-09-19.
 
+Every command here runs with `RUSTFLAGS="--cfg inbuxa_tests"` set, which
+compiles in the test helpers (see `CONTRIBUTING.md`).
+
 `cargo test -p tests` runs everything that needs nothing but a store on
 disk. The fork's own feature suites are `#[ignore]`d on top of that,
 because each one needs something the plain run hasn't got: a container, a

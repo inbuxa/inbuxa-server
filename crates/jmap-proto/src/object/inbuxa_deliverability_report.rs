@@ -58,14 +58,15 @@ impl Property for DeliverabilityReportProperty {
 
 impl DeliverabilityReportProperty {
     fn parse(value: &str) -> Option<Self> {
-        hashify::tiny_map!(value.as_bytes(),
-            b"id" => DeliverabilityReportProperty::Id,
-            b"nodeId" => DeliverabilityReportProperty::NodeId,
-            b"hostname" => DeliverabilityReportProperty::Hostname,
-            b"checkedAt" => DeliverabilityReportProperty::CheckedAt,
-            b"addresses" => DeliverabilityReportProperty::Addresses,
-            b"domains" => DeliverabilityReportProperty::Domains,
-            b"certificates" => DeliverabilityReportProperty::Certificates,
+        hashify::fnc_map!(value.as_bytes(),
+            b"id" => Some(DeliverabilityReportProperty::Id),
+            b"nodeId" => Some(DeliverabilityReportProperty::NodeId),
+            b"hostname" => Some(DeliverabilityReportProperty::Hostname),
+            b"checkedAt" => Some(DeliverabilityReportProperty::CheckedAt),
+            b"addresses" => Some(DeliverabilityReportProperty::Addresses),
+            b"domains" => Some(DeliverabilityReportProperty::Domains),
+            b"certificates" => Some(DeliverabilityReportProperty::Certificates),
+            _ => None,
         )
     }
 }

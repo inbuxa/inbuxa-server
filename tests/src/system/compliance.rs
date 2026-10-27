@@ -150,7 +150,7 @@ pub async fn test(test: &mut TestServer) {
     admin
         .registry_create_object(Domain {
             name: "tenant-compliance.example.org".to_string(),
-            is_enabled: true,
+            enable: true,
             member_tenant_id: Some(tenant),
             certificate_management: CertificateManagement::Manual,
             dns_management: DnsManagement::Manual,

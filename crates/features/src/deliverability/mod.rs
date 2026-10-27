@@ -311,7 +311,7 @@ pub async fn put_report(data: &Store, report: &Report) -> trc::Result<()> {
         class(KIND_REPORT, Some(report.node_id)),
         Json(report).serialize()?,
     );
-    data.write(batch.build_all())
+    data.write_batch(&mut batch)
         .await
         .caused_by(trc::location!())?;
     Ok(())
@@ -329,7 +329,7 @@ pub async fn settings(data: &Store) -> trc::Result<Settings> {
 pub async fn put_settings(data: &Store, settings: &Settings) -> trc::Result<()> {
     let mut batch = BatchBuilder::new();
     batch.set(class(KIND_SETTINGS, None), Json(settings).serialize()?);
-    data.write(batch.build_all())
+    data.write_batch(&mut batch)
         .await
         .caused_by(trc::location!())?;
     Ok(())

@@ -19,6 +19,10 @@ impl<const N: usize> Bitset<N> {
         Self([usize::MAX; N])
     }
 
+    pub const fn insert(&mut self, index: usize) {
+        self.0[index / USIZE_BITS] |= 1 << (index & USIZE_BITS_MASK);
+    }
+
     #[inline(always)]
     pub fn set(&mut self, index: impl Into<usize>) {
         let index = index.into();

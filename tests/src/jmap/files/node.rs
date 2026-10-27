@@ -2,6 +2,8 @@
  * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
+ *
+ * Modified by Coffey Labs in 2026 for INBUXA.
  */
 
 use crate::utils::{
@@ -12,6 +14,8 @@ use ahash::AHashSet;
 use jmap_proto::{object::file_node::FileNodeProperty, request::method::MethodObject};
 use serde_json::json;
 
+// inbuxa: 1.0 FileNode needs "@type" ("Directory", "File", "SymLink") on
+// creation, and the media type moved from "type" to "mediaType".
 pub async fn test(test: &TestServer) {
     println!("Running File Storage tests...");
     let account = test.account("jdoe@example.com");
@@ -39,14 +43,17 @@ pub async fn test(test: &TestServer) {
             MethodObject::FileNode,
             [
                 json!({
+                    "@type": "Directory",
                     "name": "Root Folder",
                     "parentId": null,
                 }),
                 json!({
+                    "@type": "Directory",
                     "name": "Sub Folder",
                     "parentId": "#i0",
                 }),
                 json!({
+                    "@type": "Directory",
                     "name": "Sub-sub Folder",
                     "parentId": "#i1",
                 }),
@@ -90,16 +97,19 @@ pub async fn test(test: &TestServer) {
     assert_eq!(list.len(), 3);
     list[0].assert_is_equal(json!({
         "id": &root_folder_id,
+        "@type": "Directory",
         "name": "Root Folder",
         "parentId": null,
     }));
     list[1].assert_is_equal(json!({
         "id": &sub_folder_id,
+        "@type": "Directory",
         "name": "Sub Folder",
         "parentId": &root_folder_id,
     }));
     list[2].assert_is_equal(json!({
         "id": &sub_sub_folder_id,
+        "@type": "Directory",
         "name": "Sub-sub Folder",
         "parentId": &sub_folder_id,
     }));
@@ -129,10 +139,11 @@ pub async fn test(test: &TestServer) {
             "accountId": account.id_string(),
             "create": {
               "i0": {
+                "@type": "File",
                 "name": "hello.txt",
                 "parentId": &root_folder_id,
                 "blobId": "#hello",
-                "type": "text/plain",
+                "mediaType": "text/plain",
               }
             }
           },
@@ -156,6 +167,7 @@ pub async fn test(test: &TestServer) {
                 FileNodeProperty::Name,
                 FileNodeProperty::ParentId,
                 FileNodeProperty::Type,
+                FileNodeProperty::MediaType,
                 FileNodeProperty::Size,
             ],
             [&file_id],
@@ -166,7 +178,8 @@ pub async fn test(test: &TestServer) {
         "id": &file_id,
         "name": "hello.txt",
         "parentId": &root_folder_id,
-        "type": "text/plain",
+        "@type": "File",
+        "mediaType": "text/plain",
         "size": 11,
         "blobId": &blob_id,
     }));
@@ -185,20 +198,25 @@ pub async fn test(test: &TestServer) {
             MethodObject::FileNode,
             [
                 json!({
+                    "@type": "Directory",
                     "name": "Sub Folder",
                     "parentId": &root_folder_id,
                 }),
                 json!({
+                    "@type": "Directory",
                     "name": "Folder under file",
                     "parentId": &file_id,
                 }),
                 json!({
+                    "@type": "Directory",
                     "name": "My/Sub/Folder",
                 }),
                 json!({
+                    "@type": "Directory",
                     "name": ".",
                 }),
                 json!({
+                    "@type": "Directory",
                     "name": "..",
                 }),
             ],
@@ -283,11 +301,13 @@ pub async fn test(test: &TestServer) {
     assert_eq!(list.len(), 2);
     list[0].assert_is_equal(json!({
         "id": &sub_folder_id,
+        "@type": "Directory",
         "name": "Renamed Sub Folder",
         "parentId": &root_folder_id,
     }));
     list[1].assert_is_equal(json!({
         "id": &file_id,
+        "@type": "File",
         "name": "renamed-hello.txt",
         "parentId": &root_folder_id,
     }));
@@ -343,9 +363,9 @@ pub async fn test(test: &TestServer) {
         .jmap_create(
             MethodObject::FileNode,
             [
-                json!({"name": "fp-root"}),
-                json!({"name": "fp-sub", "parentId": "#i0"}),
-                json!({"name": "fp-leaf", "parentId": "#i1"}),
+                json!({"@type": "Directory", "name": "fp-root"}),
+                json!({"@type": "Directory", "name": "fp-sub", "parentId": "#i0"}),
+                json!({"@type": "Directory", "name": "fp-leaf", "parentId": "#i1"}),
             ],
             Vec::<(&str, &str)>::new(),
         )
@@ -395,7 +415,7 @@ pub async fn test(test: &TestServer) {
     let response = account
         .jmap_create(
             MethodObject::FileNode,
-            [json!({"name": "dupe.txt", "parentId": null, "blobId": null})],
+            [json!({"@type": "Directory", "name": "dupe.txt", "parentId": null})],
             Vec::<(&str, &str)>::new(),
         )
         .await;
@@ -403,7 +423,7 @@ pub async fn test(test: &TestServer) {
     let response = account
         .jmap_create(
             MethodObject::FileNode,
-            [json!({"name": "dupe.txt"})],
+            [json!({"@type": "Directory", "name": "dupe.txt"})],
             [("onExists", "rename")],
         )
         .await;
@@ -415,7 +435,7 @@ pub async fn test(test: &TestServer) {
     let response = account
         .jmap_create(
             MethodObject::FileNode,
-            [json!({"name": "dupe.txt"})],
+            [json!({"@type": "Directory", "name": "dupe.txt"})],
             Vec::<(&str, &str)>::new(),
         )
         .await;
@@ -427,7 +447,7 @@ pub async fn test(test: &TestServer) {
     let response = account
         .jmap_create(
             MethodObject::FileNode,
-            [json!({"name": "dupe.txt"})],
+            [json!({"@type": "Directory", "name": "dupe.txt"})],
             [("onExists", "replace")],
         )
         .await;
@@ -451,7 +471,7 @@ pub async fn test(test: &TestServer) {
     let response = account
         .jmap_create(
             MethodObject::FileNode,
-            [json!({"name": "CASE"})],
+            [json!({"@type": "Directory", "name": "CASE"})],
             Vec::<(&str, &str)>::new(),
         )
         .await;
@@ -459,7 +479,7 @@ pub async fn test(test: &TestServer) {
     let response = account
         .jmap_create(
             MethodObject::FileNode,
-            [json!({"name": "case"})],
+            [json!({"@type": "Directory", "name": "case"})],
             [("compareCaseInsensitively", true)],
         )
         .await;
@@ -481,8 +501,8 @@ pub async fn test(test: &TestServer) {
         .jmap_create(
             MethodObject::FileNode,
             [
-                json!({"name": "twin-reject"}),
-                json!({"name": "twin-reject"}),
+                json!({"@type": "Directory", "name": "twin-reject"}),
+                json!({"@type": "Directory", "name": "twin-reject"}),
             ],
             Vec::<(&str, &str)>::new(),
         )
@@ -490,9 +510,11 @@ pub async fn test(test: &TestServer) {
     let twin_first = response.created(0).id().to_string();
     let err = response.not_created(1);
     assert_eq!(err.typ(), "alreadyExists");
-    assert!(
-        err.pointer("/existingId").is_none(),
-        "Pending Create collision has no committed existingId, got {err:?}"
+    // inbuxa: 1.0 names the node created earlier in the same batch
+    assert_eq!(
+        err.text_field("existingId"),
+        twin_first.as_str(),
+        "Pending Create collision names the in-batch node, got {err:?}"
     );
     account
         .jmap_destroy(
@@ -509,8 +531,8 @@ pub async fn test(test: &TestServer) {
         .jmap_create(
             MethodObject::FileNode,
             [
-                json!({"name": "twin-rename"}),
-                json!({"name": "twin-rename"}),
+                json!({"@type": "Directory", "name": "twin-rename"}),
+                json!({"@type": "Directory", "name": "twin-rename"}),
             ],
             [("onExists", "rename")],
         )
@@ -534,8 +556,8 @@ pub async fn test(test: &TestServer) {
         .jmap_create(
             MethodObject::FileNode,
             [
-                json!({"name": "twin-replace"}),
-                json!({"name": "twin-replace"}),
+                json!({"@type": "Directory", "name": "twin-replace"}),
+                json!({"@type": "Directory", "name": "twin-replace"}),
             ],
             [("onExists", "replace")],
         )
@@ -543,9 +565,11 @@ pub async fn test(test: &TestServer) {
     let twin_survivor = response.created(0).id().to_string();
     let err = response.not_created(1);
     assert_eq!(err.typ(), "alreadyExists");
-    assert!(
-        err.pointer("/existingId").is_none(),
-        "Pending Create + Replace returns alreadyExists with no existingId, got {err:?}"
+    // inbuxa: 1.0 names the node created earlier in the same batch
+    assert_eq!(
+        err.text_field("existingId"),
+        twin_survivor.as_str(),
+        "Pending Create + Replace names the in-batch node, got {err:?}"
     );
     account
         .jmap_destroy(
@@ -562,8 +586,8 @@ pub async fn test(test: &TestServer) {
         .jmap_create(
             MethodObject::FileNode,
             [
-                json!({"name": "twin-newest", "modified": "2020-01-01T00:00:00Z"}),
-                json!({"name": "twin-newest", "modified": "2040-01-01T00:00:00Z"}),
+                json!({"@type": "Directory", "name": "twin-newest", "modified": "2020-01-01T00:00:00Z"}),
+                json!({"@type": "Directory", "name": "twin-newest", "modified": "2040-01-01T00:00:00Z"}),
             ],
             [("onExists", "newest")],
         )
@@ -585,7 +609,7 @@ pub async fn test(test: &TestServer) {
     let setup = account
         .jmap_create(
             MethodObject::FileNode,
-            [json!({"name": "lhs"})],
+            [json!({"@type": "Directory", "name": "lhs"})],
             Vec::<(&str, &str)>::new(),
         )
         .await;
@@ -596,7 +620,7 @@ pub async fn test(test: &TestServer) {
             {
                 "accountId": account.id_string(),
                 "update": { &lhs_id: { "name": "merged" } },
-                "create": { "new1": { "name": "merged" } }
+                "create": { "new1": { "@type": "Directory", "name": "merged" } }
             },
             "0"
         ]]))
@@ -609,9 +633,11 @@ pub async fn test(test: &TestServer) {
         .pointer(&format!("/methodResponses/0/1/notUpdated/{lhs_id}"))
         .expect("update should fail");
     assert_eq!(upd_err.typ(), "alreadyExists");
-    assert!(
-        upd_err.pointer("/existingId").is_none(),
-        "Pending-from-Create collision has no existingId, got {upd_err:?}"
+    // inbuxa: 1.0 names the node created earlier in the same batch
+    assert_eq!(
+        upd_err.text_field("existingId"),
+        new1_id.as_str(),
+        "Pending-from-Create collision names the in-batch node, got {upd_err:?}"
     );
     account
         .jmap_destroy(
@@ -627,7 +653,7 @@ pub async fn test(test: &TestServer) {
     let response = account
         .jmap_create(
             MethodObject::FileNode,
-            [json!({"name": "FOO"}), json!({"name": "foo"})],
+            [json!({"@type": "Directory", "name": "FOO"}), json!({"@type": "Directory", "name": "foo"})],
             [("compareCaseInsensitively", true)],
         )
         .await;
@@ -647,7 +673,7 @@ pub async fn test(test: &TestServer) {
     let response = account
         .jmap_create(
             MethodObject::FileNode,
-            [json!({"name": "stamped", "modified": "2030-01-01T00:00:00Z"})],
+            [json!({"@type": "Directory", "name": "stamped", "modified": "2030-01-01T00:00:00Z"})],
             Vec::<(&str, &str)>::new(),
         )
         .await;
@@ -655,7 +681,7 @@ pub async fn test(test: &TestServer) {
     let older_attempt = account
         .jmap_create(
             MethodObject::FileNode,
-            [json!({"name": "stamped", "modified": "2020-01-01T00:00:00Z"})],
+            [json!({"@type": "Directory", "name": "stamped", "modified": "2020-01-01T00:00:00Z"})],
             [("onExists", "newest")],
         )
         .await;
@@ -665,7 +691,7 @@ pub async fn test(test: &TestServer) {
     let newer_attempt = account
         .jmap_create(
             MethodObject::FileNode,
-            [json!({"name": "stamped", "modified": "2040-01-01T00:00:00Z"})],
+            [json!({"@type": "Directory", "name": "stamped", "modified": "2040-01-01T00:00:00Z"})],
             [("onExists", "newest")],
         )
         .await;
@@ -692,8 +718,8 @@ pub async fn test(test: &TestServer) {
         .jmap_create(
             MethodObject::FileNode,
             [
-                json!({"name": "Ünterlagen 2026", "parentId": null}),
-                json!({"name": "Q1 & Q2 (final)", "parentId": "#i0"}),
+                json!({"@type": "Directory", "name": "Ünterlagen 2026", "parentId": null}),
+                json!({"@type": "Directory", "name": "Q1 & Q2 (final)", "parentId": "#i0"}),
             ],
             Vec::<(&str, &str)>::new(),
         )
@@ -703,17 +729,26 @@ pub async fn test(test: &TestServer) {
     let dav_parent_path = "/dav/file/jdoe%40example.com/%C3%9Cnterlagen%202026";
     let dav_child_path =
         "/dav/file/jdoe%40example.com/%C3%9Cnterlagen%202026/Q1%20%26%20Q2%20%28final%29";
+    // inbuxa: 1.0 leaves the RFC 3986 sub-delims "&", "(" and ")" as they
+    // are in file hrefs; spaces and non-ASCII are still percent-encoded.
+    let dav_child_href = "/dav/file/jdoe%40example.com/%C3%9Cnterlagen%202026/Q1%20&%20Q2%20(final)";
     dav_client
         .propfind(dav_parent_path, ["D:getetag"])
         .await
         .with_hrefs([
             format!("{dav_parent_path}/").as_str(),
-            format!("{dav_child_path}/").as_str(),
+            format!("{dav_child_href}/").as_str(),
         ]);
+    // A request for the fully encoded path echoes that form back, so check
+    // the server's own listing href round-trips instead.
     dav_client
         .propfind(dav_child_path, ["D:getetag"])
         .await
         .with_hrefs([format!("{dav_child_path}/").as_str()]);
+    dav_client
+        .propfind(dav_child_href, ["D:getetag"])
+        .await
+        .with_hrefs([format!("{dav_child_href}/").as_str()]);
     account
         .jmap_destroy(
             MethodObject::FileNode,

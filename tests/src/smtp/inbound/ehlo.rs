@@ -2,13 +2,15 @@
  * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
+ *
+ * Modified by Coffey Labs in 2026 for INBUXA.
  */
 
 use crate::{
     smtp::session::{TestSession, VerifyResponse},
     utils::{dns::DnsCache, server::TestServerBuilder},
 };
-use mail_auth::{SpfResult, common::parse::TxtRecordParser, spf::Spf};
+use mail_auth::{SpfResult, dns::TxtRecordParser, spf::SpfRecord};
 use mail_parser::DateTime;
 use registry::{
     schema::structs::{
@@ -100,12 +102,12 @@ async fn ehlo() {
 
     test.server.txt_add(
         "mx1.foobar.org",
-        Spf::parse(b"v=spf1 ip4:10.0.0.1 -all").unwrap(),
+        SpfRecord::parse(b"v=spf1 ip4:10.0.0.1 -all").unwrap(),
         Instant::now() + Duration::from_secs(5),
     );
     test.server.txt_add(
         "mx2.foobar.org",
-        Spf::parse(b"v=spf1 ip4:10.0.0.2 -all").unwrap(),
+        SpfRecord::parse(b"v=spf1 ip4:10.0.0.2 -all").unwrap(),
         Instant::now() + Duration::from_secs(5),
     );
 

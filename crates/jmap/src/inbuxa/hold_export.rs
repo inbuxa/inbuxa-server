@@ -13,12 +13,12 @@
 //! with the reason, never silently left out; the file is always there, so an
 //! empty one says nothing was missed.
 
-use common::{Server, hold::kept_member};
-use email::{
-    cache::MessageCacheFetch,
-    message::metadata::{MESSAGE_RECEIVED_MASK, MessageMetadata},
+use common::{GroupwareResourceMetadata as M, NO_ID, Server, hold::kept_member};
+use email::{cache::MessageCacheFetch, message::metadata::MessageMetadata};
+use groupware::{
+    cache::GroupwareCache, calendar::CalendarEventContent, contact::ContactCardContent,
+    file::FileNode,
 };
-use groupware::{cache::GroupwareCache, calendar::CalendarEvent, contact::ContactCard, file::FileNode};
 use inbuxa_features::{
     hold::{Hold, Keeping, is_held_until},
     undelete::records,
@@ -29,12 +29,12 @@ use std::io::{Cursor, Write};
 use store::{
     ValueKey,
     registry::RegistryQuery,
-    write::{AlignedBytes, Archive},
+    write::{ArchiveBytes, Archive},
 };
 use trc::AddContext;
 use types::{
     collection::{Collection, SyncCollection},
-    field::EmailField,
+    field::{CalendarEventField, ContactField, EmailField},
     id::Id,
 };
 use zip::{CompressionMethod, ZipWriter, write::SimpleFileOptions};
@@ -292,40 +292,48 @@ pub async fn build(server: &Server, hold: &Hold, asked: &[u32]) -> trc::Result<(
                 .get_cached_messages(account_id)
                 .await
                 .caused_by(trc::location!())?;
-            for message in cache.emails.items.iter() {
+            for message in cache.emails.iter() {
+                let document_id = message.document_id();
                 let mail_path = |folder: &str| {
                     format!(
                         "{base}mail/{}/{}.eml",
                         folder.split('/').map(segment).collect::<Vec<_>>().join("/"),
-                        Id::from(message.document_id)
+                        Id::from(document_id)
                     )
                 };
+                let received = message.received_at();
+                if !keeping.covers(Some(received)) {
+                    continue;
+                }
                 let folder = message
-                    .mailboxes
+                    .mailboxes()
                     .first()
                     .and_then(|m| cache.mailboxes.items.iter().find(|b| b.document_id == m.mailbox_id))
-                    .map(|b| b.path.clone())
+                    .map(|b| b.path.to_string())
                     .unwrap_or_default();
                 let Some(metadata_) = data
-                    .get_value::<Archive<AlignedBytes>>(ValueKey::property(
+                    .get_value::<Archive<ArchiveBytes>>(ValueKey::property(
                         account_id,
                         Collection::Email,
-                        message.document_id,
+                        document_id,
                         EmailField::Metadata,
                     ))
                     .await?
                 else {
-                    // No date to check against the hold's range, so it's listed
-                    out.missing(mail_path(&folder), &address, "email", &folder, None, false, NO_RECORD);
+                    out.missing(
+                        mail_path(&folder),
+                        &address,
+                        "email",
+                        &folder,
+                        Some(received as i64),
+                        false,
+                        NO_RECORD,
+                    );
                     continue;
                 };
                 let metadata = metadata_
                     .unarchive::<MessageMetadata>()
                     .caused_by(trc::location!())?;
-                let received = metadata.rcvd_attach.to_native() & MESSAGE_RECEIVED_MASK;
-                if !keeping.covers(Some(received)) {
-                    continue;
-                }
                 let hash = types::blob_hash::BlobHash::from(&metadata.blob_hash);
                 match blob(server, hash.as_slice()).await? {
                     Some(bytes) => {
@@ -350,14 +358,14 @@ pub async fn build(server: &Server, hold: &Hold, asked: &[u32]) -> trc::Result<(
                 (SyncCollection::FileNode, "file"),
             ] {
                 let resources = server
-                    .fetch_dav_resources(account_id, account_id, sync)
+                    .fetch_groupware_resources(account_id, account_id, sync)
                     .await
                     .caused_by(trc::location!())?;
-                for path in resources.paths.iter() {
-                    let Some(resource) = resources.resources.get(path.resource_idx) else {
-                        continue;
-                    };
-                    let folder = path.path.rsplit_once('/').map(|(f, _)| f).unwrap_or_default();
+                for path in resources.tree_with_depth(usize::MAX) {
+                    let document_id = path.document_id();
+                    let resource = path.resource;
+                    let path = path.path();
+                    let folder = path.rsplit_once('/').map(|(f, _)| f).unwrap_or_default();
                     let zip_path = |ext: Option<&str>| {
                         let mut p = format!(
                             "{base}{}/{}",
@@ -366,7 +374,7 @@ pub async fn build(server: &Server, hold: &Hold, asked: &[u32]) -> trc::Result<(
                                 "contact" => "contacts",
                                 _ => "files",
                             },
-                            path.path.split('/').map(segment).collect::<Vec<_>>().join("/")
+                            path.split('/').map(segment).collect::<Vec<_>>().join("/")
                         );
                         if let Some(ext) = ext
                             && !p.ends_with(ext)
@@ -375,50 +383,56 @@ pub async fn build(server: &Server, hold: &Hold, asked: &[u32]) -> trc::Result<(
                         }
                         p
                     };
-                    use common::DavResourceMetadata as M;
-                    match &resource.data {
+                    match &resource.resource.data {
                         M::CalendarEvent { start, .. } => {
                             if !keeping.covers_event(Some((*start).max(0) as u64)) {
                                 continue;
                             }
                             let Some(event_) = data
-                                .get_value::<Archive<AlignedBytes>>(ValueKey::archive(
+                                .get_value::<Archive<ArchiveBytes>>(ValueKey::property(
                                     account_id,
                                     Collection::CalendarEvent,
-                                    resource.document_id,
+                                    document_id,
+                                    CalendarEventField::Content,
                                 ))
                                 .await?
                             else {
                                 out.missing(zip_path(Some(".ics")), &address, kind, folder, Some(*start), false, NO_RECORD);
                                 continue;
                             };
-                            let event = event_.unarchive::<CalendarEvent>().caused_by(trc::location!())?;
-                            let text = event.data.event.to_string();
+                            let event = event_
+                                .unarchive::<CalendarEventContent>()
+                                .caused_by(trc::location!())?;
+                            let mut text = String::with_capacity(256);
+                            let _ = event.data.event.write_to(&mut text);
                             out.add(zip_path(Some(".ics")), text.as_bytes(), &address, kind, folder, Some(*start), false)?;
                         }
                         M::ContactCard { .. } => {
                             let Some(card_) = data
-                                .get_value::<Archive<AlignedBytes>>(ValueKey::archive(
+                                .get_value::<Archive<ArchiveBytes>>(ValueKey::property(
                                     account_id,
                                     Collection::ContactCard,
-                                    resource.document_id,
+                                    document_id,
+                                    ContactField::Content,
                                 ))
                                 .await?
                             else {
                                 out.missing(zip_path(Some(".vcf")), &address, kind, folder, None, false, NO_RECORD);
                                 continue;
                             };
-                            let card = card_.unarchive::<ContactCard>().caused_by(trc::location!())?;
+                            let card = card_
+                                .unarchive::<ContactCardContent>()
+                                .caused_by(trc::location!())?;
                             let mut text = String::with_capacity(256);
                             let _ = card.card.write_to(&mut text, server.core.groupware.vcard_version);
                             out.add(zip_path(Some(".vcf")), text.as_bytes(), &address, kind, folder, None, false)?;
                         }
-                        M::File { size: Some(_), .. } => {
+                        M::File { size, .. } if *size != NO_ID => {
                             let Some(file_) = data
-                                .get_value::<Archive<AlignedBytes>>(ValueKey::archive(
+                                .get_value::<Archive<ArchiveBytes>>(ValueKey::archive(
                                     account_id,
                                     Collection::FileNode,
-                                    resource.document_id,
+                                    document_id,
                                 ))
                                 .await?
                             else {
@@ -426,7 +440,7 @@ pub async fn build(server: &Server, hold: &Hold, asked: &[u32]) -> trc::Result<(
                                 continue;
                             };
                             let file = file_.unarchive::<FileNode>().caused_by(trc::location!())?;
-                            let Some(props) = file.file.as_ref() else {
+                            let Some(props) = file.file() else {
                                 out.missing(zip_path(None), &address, kind, folder, None, false, NO_RECORD);
                                 continue;
                             };

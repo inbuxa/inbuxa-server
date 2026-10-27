@@ -2,6 +2,8 @@
  * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
+ *
+ * Modified by Coffey Labs in 2026 for INBUXA.
  */
 
 use super::{AssertResult, ImapConnection, Type};
@@ -23,9 +25,11 @@ pub async fn test(imap: &mut ImapConnection, imap_check: &mut ImapConnection) {
         "RFC822.SIZE UID ENVELOPE BODYSTRUCTURE)"
     ))
     .await;
+    // inbuxa: 1.0 lists the server-set $hasattachment keyword and keeps
+    // custom keywords in lowercase (keywords are case-insensitive)
     imap.assert_read(Type::Tagged, ResponseType::Ok)
         .await
-        .assert_contains("FLAGS (Flag_009)")
+        .assert_contains("FLAGS ($hasattachment flag_009)")
         .assert_contains("RFC822.SIZE 1457")
         .assert_contains("UID 10")
         .assert_contains("INTERNALDATE")
@@ -46,21 +50,24 @@ pub async fn test(imap: &mut ImapConnection, imap_check: &mut ImapConnection) {
             "(\"John Smîth\" NIL \"john\" \"example.com\")",
             "(NIL NIL NIL NIL)) NIL NIL NIL NIL)"
         ))
+        // inbuxa: 1.0 sends body MD5 only from a Content-MD5 header (NIL
+        // here), the default "7bit" encoding of a message/rfc822 part and its
+        // line count (RFC 3501 7.4.2)
         .assert_contains(concat!(
             "BODYSTRUCTURE ((\"text\" \"html\" (\"charset\" \"us-ascii\") NIL NIL ",
-            "\"base64\" 239 3 \"07aab44e51c5f1833a5d19f2e1804c4b\" NIL NIL NIL)",
-            "(\"message\" \"rfc822\" NIL NIL NIL NIL 723 ",
+            "\"base64\" 239 3 NIL NIL NIL NIL)",
+            "(\"message\" \"rfc822\" NIL NIL NIL \"7bit\" 723 ",
             "(NIL \"Exporting my book about coffee tables\" ",
             "((\"Cosmo Kramer\" NIL \"kramer\" \"kramerica.com\")) ",
             "((\"Cosmo Kramer\" NIL \"kramer\" \"kramerica.com\")) ",
             "((\"Cosmo Kramer\" NIL \"kramer\" \"kramerica.com\")) ",
             "NIL NIL NIL NIL NIL) ",
             "((\"text\" \"plain\" (\"charset\" \"utf-16\") NIL NIL ",
-            "\"quoted-printable\" 228 3 \"3a942a99cdd8a099ae107d3867ec20fb\" NIL NIL NIL)",
+            "\"quoted-printable\" 228 3 NIL NIL NIL NIL)",
             "(\"image\" \"gif\" (\"name\" \"Book about ☕ tables.gif\") ",
-            "NIL NIL \"Base64\" 56 \"d40fa7f401e9dc2df56cbb740d65ff52\" ",
+            "NIL NIL \"Base64\" 56 NIL ",
             "(\"attachment\" NIL) NIL NIL) \"mixed\" (\"boundary\" \"giddyup\") NIL NIL NIL)",
-            " 0 \"cdb0382a03a15601fb1b3c7422521620\" NIL NIL NIL) ",
+            " 19 NIL NIL NIL NIL) ",
             "\"mixed\" (\"boundary\" \"festivus\") NIL NIL NIL)"
         ));
 
@@ -79,7 +86,7 @@ pub async fn test(imap: &mut ImapConnection, imap_check: &mut ImapConnection) {
     // Fetch bodyparts
     imap.send(concat!(
         "UID FETCH 10 (BINARY[1] BINARY.SIZE[1] BODY[1.TEXT] BODY[2.1.HEADER] ",
-        "BINARY[2.1] BODY[MIME] BODY[HEADER.FIELDS (From)]<10.8>)"
+        "BINARY[2.1] BODY[1.MIME] BODY[HEADER.FIELDS (From)]<10.8>)"
     ))
     .await;
     imap.assert_read(Type::Tagged, ResponseType::Ok)
@@ -89,7 +96,7 @@ pub async fn test(imap: &mut ImapConnection, imap_check: &mut ImapConnection) {
         .assert_contains("BODY[1.TEXT] {239}")
         .assert_contains("BODY[2.1.HEADER] {88}")
         .assert_contains("BINARY[2.1] ~{108}")
-        .assert_contains("BODY[MIME] {54}")
+        .assert_contains("BODY[1.MIME] {79}")
         .assert_contains("BODY[HEADER.FIELDS (FROM)]<10> {8}")
         .assert_contains("&ldquo;exporting&rdquo;")
         .assert_contains("PGh0bWw+PHA+")
@@ -101,11 +108,16 @@ pub async fn test(imap: &mut ImapConnection, imap_check: &mut ImapConnection) {
         .collect();
     imap.assert_last_contains_bytes(&fraktur_utf16_le);
 
+    // inbuxa: 1.0 follows RFC 3501, where MIME needs a part number, so the
+    // bare BODY[MIME] above became BODY[1.MIME] and is now refused
+    imap.send("UID FETCH 10 (BODY[MIME])").await;
+    imap.assert_read(Type::Tagged, ResponseType::Bad).await;
+
     // We are in EXAMINE mode, fetching body should not set \Seen
     imap.send("UID FETCH 10 (FLAGS)").await;
     imap.assert_read(Type::Tagged, ResponseType::Ok)
         .await
-        .assert_contains("FLAGS (Flag_009)");
+        .assert_contains("FLAGS ($hasattachment flag_009)");
 
     // Switch to SELECT mode
     imap.send("SELECT INBOX").await;
@@ -124,7 +136,7 @@ pub async fn test(imap: &mut ImapConnection, imap_check: &mut ImapConnection) {
     imap.send("UID FETCH 10 (FLAGS)").await;
     imap.assert_read(Type::Tagged, ResponseType::Ok)
         .await
-        .assert_contains("FLAGS (Flag_009)");
+        .assert_contains("FLAGS ($hasattachment flag_009)");
 
     // Fetching a body section should set the \Seen flag
     imap.send("UID FETCH 10 (BODY[1.TEXT])").await;
@@ -176,8 +188,13 @@ pub async fn test(imap: &mut ImapConnection, imap_check: &mut ImapConnection) {
         "_x FETCH 1 (UID)\r\n"
     ))
     .await;
-    imap.assert_read(Type::Tagged, ResponseType::Ok)
-        .await
+    // inbuxa: 1.0 runs pipelined read-only commands concurrently (RFC 9051
+    // 5.5), so _p's BAD may arrive after _x's completion; wait for both
+    let mut lines = imap.assert_read(Type::Tagged, ResponseType::Ok).await;
+    if !lines.iter().any(|line| line.starts_with("_p ")) {
+        lines.extend(imap.read_until_tag("_p ").await);
+    }
+    lines
         .assert_contains("_p BAD")
         .assert_contains("* 1 FETCH (UID 1");
 }

@@ -93,7 +93,7 @@ impl Account {
     async fn create_audit_domain(&self, name: &str, tenant: Option<Id>) -> Id {
         self.registry_create_object(Domain {
             name: name.to_string(),
-            is_enabled: true,
+            enable: true,
             member_tenant_id: tenant,
             certificate_management: CertificateManagement::Manual,
             dns_management: DnsManagement::Manual,
@@ -147,7 +147,7 @@ pub async fn test(test: &mut TestServer) {
         .registry_update_object(
             ObjectType::Domain,
             domain,
-            json!({Property::IsEnabled: false}),
+            json!({Property::Enable: false}),
         )
         .await;
     let updated = admin
@@ -155,7 +155,7 @@ pub async fn test(test: &mut TestServer) {
         .await;
     assert_eq!(updated.len(), 1, "test 1: {updated:?}");
     assert_eq!(
-        changed(&updated[0], "isEnabled"),
+        changed(&updated[0], "enable"),
         Some((json!(true), json!(false))),
         "test 1: {}",
         updated[0]
@@ -547,7 +547,7 @@ pub async fn test(test: &mut TestServer) {
         async move {
             let mut batch = BatchBuilder::new();
             batch.set(key.class, bytes);
-            store.write(batch.build_all()).await.unwrap();
+            store.write_batch(&mut batch).await.unwrap();
         }
     };
     write(edited.into_bytes()).await;
@@ -586,13 +586,13 @@ pub async fn test(test: &mut TestServer) {
         .0;
     let mut batch = BatchBuilder::new();
     batch.set(head.class.clone(), b"bad".to_vec());
-    store.write(batch.build_all()).await.unwrap();
+    store.write_batch(&mut batch).await.unwrap();
     let (name, response) = admin
         .audit_call(
             "x:Domain/set",
             json!({"accountId": admin_id, "create": {"d": {
                 "name": "refused.example.org",
-                "isEnabled": true,
+                "enable": true,
                 "certificateManagement": {"@type": "Manual"},
                 "dnsManagement": {"@type": "Manual"},
                 "dkimManagement": {"@type": "Manual"}
@@ -602,7 +602,7 @@ pub async fn test(test: &mut TestServer) {
     assert_eq!(name, "error", "test 2: the change went ahead: {response}");
     let mut batch = BatchBuilder::new();
     batch.set(head.class, head_bytes);
-    store.write(batch.build_all()).await.unwrap();
+    store.write_batch(&mut batch).await.unwrap();
     assert!(
         admin
             .registry_query_ids(
@@ -627,7 +627,7 @@ pub async fn test(test: &mut TestServer) {
         .registry_update_object(
             ObjectType::Domain,
             domain,
-            json!({Property::IsEnabled: true}),
+            json!({Property::Enable: true}),
         )
         .await;
     assert_eq!(

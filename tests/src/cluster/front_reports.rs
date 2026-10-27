@@ -13,11 +13,7 @@
 
 use crate::{smtp::inbound::TestMessage, utils::server::TestServerBuilder};
 use common::{Server, config::smtp::report::AggregateFrequency, ipc::DmarcEvent};
-use mail_auth::{
-    common::parse::TxtRecordParser,
-    dmarc::Dmarc,
-    report::{ActionDisposition, DmarcResult, Record, Report},
-};
+use mail_auth::{dmarc::DmarcRecord, dns::TxtRecordParser};
 use registry::{
     schema::{
         enums::ClusterTaskType,
@@ -31,6 +27,7 @@ use registry::{
     types::{EnumImpl, map::Map},
 };
 use smtp::reporting::{dmarc::DmarcReporting, send::MtaReportSend};
+use smtp_report::dmarc::{AggregateReport, Disposition, DmarcStatus, Record};
 use std::{
     collections::BTreeSet,
     net::IpAddr,
@@ -40,7 +37,7 @@ use std::{
 use store::{
     ValueKey,
     registry::{RegistryFilter, RegistryFilterValue, RegistryQuery},
-    write::{BatchBuilder, RegistryClass, TaskQueueClass, ValueClass, now},
+    write::{BatchBuilder, RegistryClass, TaskId, TaskQueueClass, ValueClass, now},
 };
 use types::id::Id;
 
@@ -69,7 +66,7 @@ pub async fn front_node_report_tests() {
     seed.insert_object(role(MTA_ROLE, &[ClusterTaskType::OutboundMta]))
         .await;
     seed.insert_object(DmarcReportSettings {
-        aggregate_max_report_size: Expression {
+        max_aggregate_report_size: Expression {
             else_: "1048576".into(),
             ..Default::default()
         },
@@ -153,12 +150,13 @@ pub async fn front_node_report_tests() {
     move_task(&mta_server, report_id, TaskStatus::now()).await;
     let message = mta.expect_message().await;
     let report =
-        Report::parse_rfc5322(message.read_message(&mta).await.as_bytes(), usize::MAX).unwrap();
-    assert_eq!(report.domain(), DOMAIN);
+        AggregateReport::parse_rfc5322(message.read_message(&mta).await.as_bytes(), usize::MAX)
+            .unwrap();
+    assert_eq!(report.policy_published.domain, DOMAIN);
     let sent: BTreeSet<IpAddr> = report
-        .records()
+        .records
         .iter()
-        .map(|r| r.source_ip().unwrap())
+        .map(|r| r.row.source_ip.unwrap())
         .collect();
     let expected: BTreeSet<IpAddr> = ["192.0.2.1", "192.0.2.2"]
         .into_iter()
@@ -192,18 +190,21 @@ fn role(name: &str, tasks: &[ClusterTaskType]) -> ClusterRole {
 }
 
 fn event(ip: &str) -> DmarcEvent {
+    let mut report_record = Record::default();
+    report_record.row.source_ip = Some(ip.parse().unwrap());
+    report_record.row.policy_evaluated.disposition = Disposition::Pass;
+    report_record.row.policy_evaluated.dkim = DmarcStatus::Pass;
+    report_record.row.policy_evaluated.spf = DmarcStatus::Pass;
+    report_record.identifiers.envelope_from = "sender.example".to_string();
+    report_record.identifiers.header_from = "sender.example".to_string();
     DmarcEvent {
         domain: DOMAIN.to_string(),
-        report_record: Record::new()
-            .with_source_ip(ip.parse().unwrap())
-            .with_action_disposition(ActionDisposition::Pass)
-            .with_dmarc_dkim_result(DmarcResult::Pass)
-            .with_dmarc_spf_result(DmarcResult::Pass)
-            .with_envelope_from("sender.example")
-            .with_header_from("sender.example"),
+        report_record,
         dmarc_record: Arc::new(
-            Dmarc::parse(format!("v=DMARC1; p=reject; rua=mailto:reports@{DOMAIN}").as_bytes())
-                .unwrap(),
+            DmarcRecord::parse(
+                format!("v=DMARC1; p=reject; rua=mailto:reports@{DOMAIN}").as_bytes(),
+            )
+            .unwrap(),
         ),
         interval: AggregateFrequency::Daily,
         span_id: 0,
@@ -267,7 +268,9 @@ async fn move_task(server: &Server, id: u64, status: TaskStatus) {
     let task = server
         .store()
         .get_value::<Task>(ValueKey::from(ValueClass::TaskQueue(
-            TaskQueueClass::Task { id },
+            TaskQueueClass::Task {
+                id: TaskId::Assigned(id),
+            },
         )))
         .await
         .unwrap()
@@ -275,7 +278,8 @@ async fn move_task(server: &Server, id: u64, status: TaskStatus) {
     let mut batch = BatchBuilder::new();
     batch
         .clear(ValueClass::TaskQueue(TaskQueueClass::Due {
-            id,
+            id: TaskId::Assigned(id),
+            typ: task.object_type(),
             due: task.due_timestamp(),
         }))
         .schedule_task_with_id(
@@ -285,7 +289,7 @@ async fn move_task(server: &Server, id: u64, status: TaskStatus) {
                 status,
             }),
         );
-    server.store().write(batch.build_all()).await.unwrap();
+    server.store().write_batch(&mut batch).await.unwrap();
     server.notify_task_queue();
 }
 
@@ -293,7 +297,9 @@ async fn task_exists(server: &Server, id: u64) -> bool {
     server
         .store()
         .get_value::<Task>(ValueKey::from(ValueClass::TaskQueue(
-            TaskQueueClass::Task { id },
+            TaskQueueClass::Task {
+                id: TaskId::Assigned(id),
+            },
         )))
         .await
         .unwrap()

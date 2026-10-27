@@ -20,6 +20,7 @@ pub struct QueryResponseBuilder {
     pub has_anchor: bool,
     pub anchor_found: bool,
     index: i32,
+    position_override: Option<usize>,
 
     pub response: QueryResponse,
 }
@@ -31,15 +32,9 @@ impl QueryResponseBuilder {
         query_state: State,
         request: &QueryRequest<T>,
     ) -> Self {
-        let (limit_total, limit) = if let Some(limit) = request.limit {
-            if limit > 0 {
-                let limit = std::cmp::min(limit, max_results);
-                (std::cmp::min(limit, total_results), limit)
-            } else {
-                (0, 0)
-            }
-        } else {
-            (std::cmp::min(max_results, total_results), max_results)
+        let limit_total = match request.limit {
+            Some(limit) => limit.min(max_results).min(total_results),
+            None => max_results.min(total_results),
         };
 
         QueryResponseBuilder {
@@ -51,6 +46,7 @@ impl QueryResponseBuilder {
             anchor_offset: request.anchor_offset.unwrap_or(0),
             anchor_found: false,
             index: 0,
+            position_override: None,
             response: QueryResponse {
                 account_id: request.account_id,
                 query_state,
@@ -62,11 +58,11 @@ impl QueryResponseBuilder {
                 } else {
                     None
                 },
-                limit: if total_results > limit {
-                    Some(limit)
-                } else {
-                    None
-                },
+                limit: match request.limit {
+                    Some(requested) => requested > max_results,
+                    None => total_results > max_results,
+                }
+                .then_some(max_results),
             },
         }
     }
@@ -84,11 +80,13 @@ impl QueryResponseBuilder {
             if self.position >= 0 {
                 if self.position > 0 {
                     self.position -= 1;
-                } else {
+                } else if self.response.ids.len() < self.limit {
                     self.response.ids.push(id);
                     if self.response.ids.len() == self.limit {
                         return false;
                     }
+                } else {
+                    return false;
                 }
             } else {
                 self.response.ids.push(id);
@@ -104,15 +102,17 @@ impl QueryResponseBuilder {
 
             if self.anchor_offset >= 0 {
                 if self.anchor_found && current_index >= self.position {
+                    if self.response.ids.len() >= self.limit {
+                        return false;
+                    }
                     self.response.ids.push(id);
-                    if self.limit > 0 && self.response.ids.len() == self.limit {
+                    if self.response.ids.len() == self.limit {
                         return false;
                     }
                 }
             } else {
                 self.response.ids.push(id);
                 if self.anchor_found
-                    && self.limit > 0
                     && self.response.ids.len() >= self.position as usize + self.limit
                 {
                     return false;
@@ -128,6 +128,11 @@ impl QueryResponseBuilder {
     }
 
     pub fn build(mut self) -> trc::Result<QueryResponse> {
+        if let Some(position) = self.position_override {
+            self.response.position = i32::try_from(position).unwrap_or(i32::MAX);
+            return Ok(self.response);
+        }
+
         if self.has_anchor {
             if !self.anchor_found {
                 return Err(trc::JmapEvent::AnchorNotFound.into_err());
@@ -136,11 +141,7 @@ impl QueryResponseBuilder {
             let start = self.position.max(0) as usize;
             if self.anchor_offset < 0 {
                 let start = start.min(self.response.ids.len());
-                let end = if self.limit > 0 {
-                    std::cmp::min(start + self.limit, self.response.ids.len())
-                } else {
-                    self.response.ids.len()
-                };
+                let end = std::cmp::min(start + self.limit, self.response.ids.len());
                 self.response.ids = self.response.ids[start..end].to_vec();
             }
             self.response.position = start as i32;
@@ -162,15 +163,64 @@ impl QueryResponseBuilder {
                 0
             };
             self.response.position = start_offset as i32;
-            let end_offset = if self.limit > 0 {
-                std::cmp::min(start_offset + self.limit, self.response.ids.len())
-            } else {
-                self.response.ids.len()
-            };
+            let end_offset = std::cmp::min(start_offset + self.limit, self.response.ids.len());
 
             self.response.ids = self.response.ids[start_offset..end_offset].to_vec();
         }
 
         Ok(self.response)
+    }
+}
+
+impl QueryResponseBuilder {
+    pub fn with_position(mut self, position: usize) -> Self {
+        self.position_override = Some(position);
+        self
+    }
+}
+
+impl QueryResponseBuilder {
+    pub fn new_streaming<T: JmapObject + Sync + Send>(
+        max_results: usize,
+        query_state: State,
+        request: &QueryRequest<T>,
+    ) -> Self {
+        let limit = request
+            .limit
+            .map_or(max_results, |limit| limit.min(max_results));
+
+        QueryResponseBuilder {
+            requested_position: request.position.unwrap_or(0),
+            position: request.position.unwrap_or(0),
+            limit,
+            has_anchor: request.anchor.is_some(),
+            anchor: request.anchor.map(|anchor| anchor.id()).unwrap_or(0),
+            anchor_offset: request.anchor_offset.unwrap_or(0),
+            anchor_found: false,
+            index: 0,
+            position_override: None,
+            response: QueryResponse {
+                account_id: request.account_id,
+                query_state,
+                can_calculate_changes: true,
+                position: 0,
+                ids: vec![],
+                total: request.calculate_total.unwrap_or(false).then_some(0),
+                limit: request
+                    .limit
+                    .is_none_or(|limit| limit > max_results)
+                    .then_some(max_results),
+            },
+        }
+    }
+
+    pub fn wants_total(&self) -> bool {
+        self.response.total.is_some()
+    }
+
+    pub fn finish(mut self, total: Option<usize>) -> trc::Result<QueryResponse> {
+        debug_assert_eq!(self.response.total.is_some(), total.is_some());
+        self.response.total = self.response.total.and(total);
+        self.build()
     }
 }

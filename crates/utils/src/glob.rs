@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
  */
 
+use crate::text::{ConstNeedle, IgnoreCaseNeedle, lowercase};
 use ahash::{AHashMap, AHashSet};
 use serde::Deserialize;
 use std::borrow::Cow;
@@ -17,10 +18,17 @@ pub enum MatchType {
     All,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 pub struct GlobPattern {
     pattern: Vec<PatternChar>,
     to_lower: bool,
+    literal: Option<Box<Literal>>,
+}
+
+#[derive(Debug, Clone)]
+enum Literal {
+    Contains(ConstNeedle),
+    ContainsIgnoreCase(IgnoreCaseNeedle),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -69,6 +77,7 @@ impl GlobPattern {
         }
 
         GlobPattern {
+            literal: Literal::classify(&chars, to_lower).map(Box::new),
             pattern: chars,
             to_lower,
         }
@@ -104,40 +113,47 @@ impl GlobPattern {
         }
     }
 
-    // Credits: Algorithm ported from https://research.swtch.com/glob
     pub fn matches(&self, value: &str) -> bool {
-        let value = if self.to_lower {
-            value.to_lowercase().chars().collect::<Vec<_>>()
-        } else {
-            value.chars().collect::<Vec<_>>()
-        };
+        match self.literal.as_deref() {
+            Some(Literal::Contains(needle)) => needle.contains(value),
+            Some(Literal::ContainsIgnoreCase(needle)) => needle.contains(value),
+            None if !self.to_lower => self.matches_chars(value, identity),
+            None if value.is_ascii() => self.matches_chars(value, char::to_ascii_lowercase),
+            None => self.matches_chars(&lowercase(value), identity),
+        }
+    }
 
+    // Credits: Algorithm ported from https://research.swtch.com/glob
+    fn matches_chars(&self, value: &str, fold: impl Fn(&char) -> char) -> bool {
         let mut px = 0;
         let mut nx = 0;
         let mut next_px = 0;
         let mut next_nx = 0;
 
         while px < self.pattern.len() || nx < value.len() {
+            let next = value.get(nx..).and_then(|rest| rest.chars().next());
             match self.pattern.get(px) {
                 Some(PatternChar::Char { char, .. }) => {
-                    if matches!(value.get(nx), Some(nc) if nc == char ) {
+                    if let Some(next) = next.filter(|next| fold(next) == *char) {
                         px += 1;
-                        nx += 1;
+                        nx += next.len_utf8();
                         continue;
                     }
                 }
-                Some(PatternChar::WildcardSingle { .. }) if nx < value.len() => {
-                    px += 1;
-                    nx += 1;
-                    continue;
+                Some(PatternChar::WildcardSingle { .. }) => {
+                    if let Some(next) = next {
+                        px += 1;
+                        nx += next.len_utf8();
+                        continue;
+                    }
                 }
                 Some(PatternChar::WildcardMany { .. }) => {
                     next_px = px;
-                    next_nx = nx + 1;
+                    next_nx = nx + next.map_or(1, char::len_utf8);
                     px += 1;
                     continue;
                 }
-                _ => (),
+                None => (),
             }
             if 0 < next_nx && next_nx <= value.len() {
                 px = next_px;
@@ -148,6 +164,45 @@ impl GlobPattern {
         }
         true
     }
+}
+
+impl Literal {
+    fn classify(pattern: &[PatternChar], to_lower: bool) -> Option<Self> {
+        let [
+            PatternChar::WildcardMany { .. },
+            middle @ ..,
+            PatternChar::WildcardMany { .. },
+        ] = pattern
+        else {
+            return None;
+        };
+        let literal = middle
+            .iter()
+            .map(|item| match item {
+                PatternChar::Char { char, .. } => Some(*char),
+                _ => None,
+            })
+            .collect::<Option<String>>()?;
+        if !to_lower {
+            Some(Literal::Contains(ConstNeedle::new(&literal)))
+        } else if literal.is_ascii() {
+            Some(Literal::ContainsIgnoreCase(IgnoreCaseNeedle::new(&literal)))
+        } else {
+            None
+        }
+    }
+}
+
+impl PartialEq for GlobPattern {
+    fn eq(&self, other: &Self) -> bool {
+        self.pattern == other.pattern && self.to_lower == other.to_lower
+    }
+}
+
+impl Eq for GlobPattern {}
+
+fn identity(char: &char) -> char {
+    *char
 }
 
 #[derive(Debug, Clone, Default)]
@@ -262,3 +317,4 @@ impl<'de> Deserialize<'de> for GlobPattern {
         ))
     }
 }
+

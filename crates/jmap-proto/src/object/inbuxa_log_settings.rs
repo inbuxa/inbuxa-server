@@ -43,9 +43,10 @@ impl Property for LogSettingsProperty {
 
 impl LogSettingsProperty {
     fn parse(value: &str) -> Option<Self> {
-        hashify::tiny_map!(value.as_bytes(),
-            b"id" => LogSettingsProperty::Id,
-            b"keepForDays" => LogSettingsProperty::KeepForDays,
+        hashify::fnc_map!(value.as_bytes(),
+            b"id" => Some(LogSettingsProperty::Id),
+            b"keepForDays" => Some(LogSettingsProperty::KeepForDays),
+            _ => None,
         )
     }
 }

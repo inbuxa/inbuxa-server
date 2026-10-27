@@ -25,9 +25,26 @@ pub async fn test(test: &TestServer) {
 
     // Validate session object capabilities
     let response = john.jmap_session_object().await.into_inner();
+    // inbuxa: the Principal's Account object (new in 1.0) is built without
+    // the fork's own account capabilities, so they are left out there
+    let mut john_account_capabilities =
+        response["accounts"][john_id]["accountCapabilities"].clone();
+    if let Some(capabilities) = john_account_capabilities.as_object_mut() {
+        capabilities.remove("urn:inbuxa:jmap");
+        capabilities.remove("https://www.fastmail.com/dev/maskedemail");
+    }
     let application_server_key =
         response["capabilities"]["urn:ietf:params:jmap:webpush-vapid"]["applicationServerKey"]
             .clone();
+    // inbuxa: 1.0 adds JMAP Metadata, the principals:owner account
+    // capability, real per-object limits, more blob types and FileNode sort
+    // options, and no longer offers imapsieve to user scripts
+    let metadata_type = json!({
+      "namespaces": [],
+      "supportsVendorNamespaces": true,
+      "supportsPrivate": true,
+      "maxDepth": 8
+    });
     response.assert_is_equal(json!({
       "capabilities": {
         "urn:ietf:params:jmap:core": {
@@ -60,6 +77,7 @@ pub async fn test(test: &TestServer) {
         },
         "urn:ietf:params:jmap:blob": {},
         "urn:ietf:params:jmap:quota": {},
+        "urn:ietf:params:jmap:metadata": {},
         "urn:ietf:params:jmap:webpush-vapid": {
           "applicationServerKey": application_server_key
         },
@@ -79,7 +97,7 @@ pub async fn test(test: &TestServer) {
           "isReadOnly": false,
           "accountCapabilities": {
             "urn:ietf:params:jmap:mail": {
-              "maxMailboxesPerEmail": null,
+              "maxMailboxesPerEmail": 100,
               "maxMailboxDepth": 10,
               "maxSizeMailboxName": 255,
               "maxSizeAttachmentsPerEmail": 50000000,
@@ -111,13 +129,13 @@ pub async fn test(test: &TestServer) {
             },
             "urn:ietf:params:jmap:vacationresponse": {},
             "urn:ietf:params:jmap:contacts": {
-              "maxAddressBooksPerCard": null,
+              "maxAddressBooksPerCard": 10,
               "mayCreateAddressBook": true
             },
             "urn:ietf:params:jmap:contacts:parse": {},
             "urn:ietf:params:jmap:emailpush": {},
             "urn:ietf:params:jmap:calendars": {
-              "maxCalendarsPerEvent": null,
+              "maxCalendarsPerEvent": 10,
               "minDateTime": "0001-01-01T00:00:00Z",
               "maxDateTime": "9999-12-31T23:59:59Z",
               "maxExpandedQueryDuration": "P52W1D",
@@ -157,7 +175,6 @@ pub async fn test(test: &TestServer) {
                 "foreverypart",
                 "ihave",
                 "imap4flags",
-                "imapsieve",
                 "include",
                 "index",
                 "mailbox",
@@ -191,7 +208,9 @@ pub async fn test(test: &TestServer) {
               "supportedTypeNames": [
                 "Email",
                 "Thread",
-                "SieveScript"
+                "SieveScript",
+                "CalendarEvent",
+                "ContactCard"
               ],
               "supportedDigestAlgorithms": [
                 "sha",
@@ -207,7 +226,8 @@ pub async fn test(test: &TestServer) {
               "maxAvailabilityDuration": "P52W1D",
             },
             "urn:ietf:params:jmap:filenode": {
-              "maxFileNodeDepth": null,
+              "maxFileNodeDepth": 64,
+              "supportedNodeTypes": ["Directory", "File", "SymLink"],
               "maxSizeFileNodeName": 255,
               "forbiddenNameChars": "/<>:\"\\|?*",
               "forbiddenNodeNames": [
@@ -241,7 +261,11 @@ pub async fn test(test: &TestServer) {
               "fileNodeQuerySortOptions": [
                 "name",
                 "size",
-                "nodeType"
+                "created",
+                "modified",
+                "mediaType",
+                "nodeType",
+                "tree"
               ],
               "mayCreateTopLevelFileNode": true,
               "caseInsensitiveNames": false,
@@ -251,6 +275,22 @@ pub async fn test(test: &TestServer) {
             },
             "urn:ietf:params:jmap:mail:share": {},
             "urn:inbuxa:jmap:registry": {},
+            "urn:ietf:params:jmap:metadata": {
+              "dataTypes": {
+                "Email": metadata_type,
+                "Mailbox": metadata_type,
+                "SieveScript": metadata_type,
+                "Calendar": metadata_type,
+                "CalendarEvent": metadata_type,
+                "AddressBook": metadata_type,
+                "ContactCard": metadata_type,
+                "FileNode": metadata_type
+              }
+            },
+            "urn:ietf:params:jmap:principals:owner": {
+              "accountIdForPrincipal": john_id,
+              "principalId": john_id
+            },
             // inbuxa: MT-22, the logo that applies to the account, and
             // LP-19, whether the legacy protocols are open to it, and
             // ai-explain EX-1, whether Explain can be offered
@@ -277,6 +317,7 @@ pub async fn test(test: &TestServer) {
         "urn:ietf:params:jmap:filenode": john_id,
         "urn:ietf:params:jmap:mail:share": john_id,
         "urn:inbuxa:jmap:registry": john_id,
+        "urn:ietf:params:jmap:metadata": john_id,
         "https://www.fastmail.com/dev/maskedemail": john_id
       },
       "username": "jdoe@example.com",
@@ -348,36 +389,36 @@ pub async fn test(test: &TestServer) {
     let list = response.list();
     assert_eq!(list.len(), 4);
 
+    // inbuxa: in 1.0 "timeZone" is camel-cased, the calendars capability
+    // sits on the principal (accountId only where the caller can reach the
+    // account, mayShareWith false for oneself), and "accounts" holds full
+    // Account objects for the accounts the caller can reach, else null
+
     list[0].assert_is_equal(json!({
       "id": john_id,
       "type": "individual",
       "email": "jdoe@example.com",
       "description": "John Doe",
       "name": "jdoe@example.com",
-      "timezone": null,
+      "timeZone": null,
       "capabilities": {
         "urn:ietf:params:jmap:mail": {},
         "urn:ietf:params:jmap:contacts": {},
-        "urn:ietf:params:jmap:calendars": {},
+        "urn:ietf:params:jmap:calendars": {
+          "accountId": john_id,
+          "mayGetAvailability": true,
+          "mayShareWith": false,
+          "calendarAddress": "mailto:jdoe@example.com"
+        },
         "urn:ietf:params:jmap:filenode": {},
         "urn:ietf:params:jmap:principals": {}
       },
       "accounts": {
         john_id: {
-          "urn:ietf:params:jmap:mail": {},
-          "urn:ietf:params:jmap:contacts": {},
-          "urn:ietf:params:jmap:calendars": {
-            "accountId": john_id,
-            "mayGetAvailability": true,
-            "mayShareWith": true,
-            "calendarAddress": "mailto:jdoe@example.com"
-          },
-          "urn:ietf:params:jmap:filenode": {},
-          "urn:ietf:params:jmap:principals": {},
-          "urn:ietf:params:jmap:principals:owner": {
-            "accountIdForPrincipal": john_id,
-            "principalId": john_id
-          }
+          "name": "jdoe@example.com",
+          "isPersonal": true,
+          "isReadOnly": false,
+          "accountCapabilities": john_account_capabilities
         }
       }
     }));
@@ -387,32 +428,20 @@ pub async fn test(test: &TestServer) {
       "email": "jane.smith@example.com",
       "description": "Jane Smith",
       "name": "jane.smith@example.com",
-      "timezone": null,
+      "timeZone": null,
       "capabilities": {
         "urn:ietf:params:jmap:mail": {},
         "urn:ietf:params:jmap:contacts": {},
-        "urn:ietf:params:jmap:calendars": {},
+        "urn:ietf:params:jmap:calendars": {
+          "accountId": null,
+          "mayGetAvailability": true,
+          "mayShareWith": true,
+          "calendarAddress": "mailto:jane.smith@example.com"
+        },
         "urn:ietf:params:jmap:filenode": {},
         "urn:ietf:params:jmap:principals": {}
       },
-      "accounts": {
-        jane_id: {
-          "urn:ietf:params:jmap:mail": {},
-          "urn:ietf:params:jmap:contacts": {},
-          "urn:ietf:params:jmap:calendars": {
-            "accountId": jane_id,
-            "mayGetAvailability": true,
-            "mayShareWith": true,
-            "calendarAddress": "mailto:jane.smith@example.com"
-          },
-          "urn:ietf:params:jmap:filenode": {},
-          "urn:ietf:params:jmap:principals": {},
-          "urn:ietf:params:jmap:principals:owner": {
-            "accountIdForPrincipal": jane_id,
-            "principalId": jane_id
-          }
-        }
-      }
+      "accounts": null
     }));
     list[2].assert_is_equal(json!({
       "id": bill_id,
@@ -420,32 +449,20 @@ pub async fn test(test: &TestServer) {
       "email": "bill@example.com",
       "description": "Bill Foobar",
       "name": "bill@example.com",
-      "timezone": null,
+      "timeZone": null,
       "capabilities": {
         "urn:ietf:params:jmap:mail": {},
         "urn:ietf:params:jmap:contacts": {},
-        "urn:ietf:params:jmap:calendars": {},
+        "urn:ietf:params:jmap:calendars": {
+          "accountId": null,
+          "mayGetAvailability": true,
+          "mayShareWith": true,
+          "calendarAddress": "mailto:bill@example.com"
+        },
         "urn:ietf:params:jmap:filenode": {},
         "urn:ietf:params:jmap:principals": {}
       },
-      "accounts": {
-        bill_id: {
-          "urn:ietf:params:jmap:mail": {},
-          "urn:ietf:params:jmap:contacts": {},
-          "urn:ietf:params:jmap:calendars": {
-            "accountId": bill_id,
-            "mayGetAvailability": true,
-            "mayShareWith": true,
-            "calendarAddress": "mailto:bill@example.com"
-          },
-          "urn:ietf:params:jmap:filenode": {},
-          "urn:ietf:params:jmap:principals": {},
-          "urn:ietf:params:jmap:principals:owner": {
-            "accountIdForPrincipal": bill_id,
-            "principalId": bill_id
-          }
-        }
-      }
+      "accounts": null
     }));
     list[3].assert_is_equal(json!({
       "id": sales_id,
@@ -453,31 +470,19 @@ pub async fn test(test: &TestServer) {
       "email": "sales@example.com",
       "description": "Sales Group",
       "name": "sales@example.com",
-      "timezone": null,
+      "timeZone": null,
       "capabilities": {
         "urn:ietf:params:jmap:mail": {},
         "urn:ietf:params:jmap:contacts": {},
-        "urn:ietf:params:jmap:calendars": {},
+        "urn:ietf:params:jmap:calendars": {
+          "accountId": null,
+          "mayGetAvailability": true,
+          "mayShareWith": true,
+          "calendarAddress": "mailto:sales@example.com"
+        },
         "urn:ietf:params:jmap:filenode": {},
         "urn:ietf:params:jmap:principals": {}
       },
-      "accounts": {
-        sales_id: {
-          "urn:ietf:params:jmap:mail": {},
-          "urn:ietf:params:jmap:contacts": {},
-          "urn:ietf:params:jmap:calendars": {
-            "accountId": sales_id,
-            "mayGetAvailability": true,
-            "mayShareWith": true,
-            "calendarAddress": "mailto:sales@example.com"
-          },
-          "urn:ietf:params:jmap:filenode": {},
-          "urn:ietf:params:jmap:principals": {},
-          "urn:ietf:params:jmap:principals:owner": {
-            "accountIdForPrincipal": sales_id,
-            "principalId": sales_id
-          }
-        }
-      }
+      "accounts": null
     }));
 }

@@ -10,7 +10,7 @@
 
 use crate::{
     Server,
-    expr::{functions::EmptyResolver, if_block::BootstrapExprExt},
+    expr::{Bump, functions::EmptyResolver, if_block::BootstrapExprExt},
 };
 use ahash::AHashSet;
 use mail_builder::{
@@ -209,8 +209,9 @@ impl Server {
                 );
                 continue;
             }
+            let mut arena = Bump::new();
             let holds = self
-                .eval_if::<bool, _>(&if_block, &EmptyResolver, 0)
+                .eval_if::<bool, _>(&if_block, &EmptyResolver, &mut arena, 0)
                 .await
                 .unwrap_or(false);
             if !holds {

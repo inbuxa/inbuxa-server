@@ -11,7 +11,8 @@ use common::{
     Inner, Server,
     auth::{AccessToken, AccountInfo},
     config::smtp::auth::VerifyStrategy,
-    network::{ServerInstance, asn::AsnGeoLookupResult},
+    expr::{Bump, Variable, if_block::IfBlock},
+    network::{ServerInstance, SessionStream, asn::AsnGeoLookupResult, memory::MemoryReservation},
 };
 use email::message::delivery::ORCPT_ADDR_TYPE;
 use mail_auth::{IprevOutput, SpfOutput};
@@ -43,13 +44,22 @@ impl SmtpSessionManager {
 
 pub enum State {
     Request(RequestReceiver),
-    Bdat(BdatReceiver),
+    Bdat {
+        receiver: BdatReceiver,
+        bytes_left: usize,
+    },
     Data(DataReceiver),
     Sasl(LineReceiver<SaslToken>),
-    SkipData(DummyDataReceiver, &'static [u8]),
+    SkipData(DummyDataReceiver, &'static [u8], DataFailure),
     RequestTooLarge(DummyLineReceiver),
     Accepted(QueueId),
     None,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DataFailure {
+    Chunk,
+    Transaction,
 }
 
 pub struct Session<T: AsyncWrite + AsyncRead> {
@@ -78,6 +88,8 @@ pub struct SessionData {
     pub rcpt_errors: usize,
     pub rcpt_oks: usize,
     pub message: Vec<u8>,
+    pub message_size: usize,
+    pub message_memory: Option<MemoryReservation>,
 
     pub authenticated_as: Option<AccountInfo>,
     // inbuxa: MA-S, AL-8: the signed-in token, for its delegations' sendAs
@@ -184,6 +196,8 @@ impl SessionData {
             rcpt_errors: 0,
             rcpt_oks: 0,
             message: Vec::with_capacity(0),
+            message_size: 0,
+            message_memory: None,
             auth_errors: 0,
             messages_sent: 0,
             bytes_left: 0,
@@ -235,6 +249,18 @@ impl Ord for SessionAddress {
 impl PartialOrd for SessionAddress {
     fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
         Some(self.cmp(other))
+    }
+}
+
+impl<T: SessionStream> Session<T> {
+    pub async fn eval_if<R>(&self, if_block: &IfBlock) -> Option<R>
+    where
+        R: for<'b> TryFrom<Variable<'b>>,
+    {
+        let mut arena = Bump::new();
+        self.server
+            .eval_if(if_block, self, &mut arena, self.data.session_id)
+            .await
     }
 }
 
@@ -310,6 +336,8 @@ impl SessionData {
             rcpt_errors: 0,
             rcpt_oks: 0,
             message,
+            message_size: 0,
+            message_memory: None,
             authenticated_as: Some(authenticated_as),
             auth_errors: 0,
             priority: 0,
@@ -349,8 +377,14 @@ impl SessionAddress {
     }
 
     pub fn orcpt_parameter(&self) -> Option<String> {
-        self.dsn_info
-            .as_deref()
-            .map(|orcpt| format!("{ORCPT_ADDR_TYPE}{}", orcpt.to_lowercase()))
+        self.dsn_info.as_deref().map(|orcpt| {
+            if orcpt.is_ascii() {
+                let mut parameter = format!("{ORCPT_ADDR_TYPE}{orcpt}");
+                parameter.make_ascii_lowercase();
+                parameter
+            } else {
+                format!("{ORCPT_ADDR_TYPE}{}", orcpt.to_lowercase())
+            }
+        })
     }
 }

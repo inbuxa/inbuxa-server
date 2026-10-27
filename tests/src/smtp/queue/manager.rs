@@ -2,6 +2,8 @@
  * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
+ *
+ * Modified by Coffey Labs in 2026 for INBUXA.
  */
 
 use crate::{
@@ -57,6 +59,7 @@ async fn queue_due() {
                 .server
                 .read_message(queue_event.queue_id, QueueName::default())
                 .await
+                .unwrap()
             {
                 message.message.rcpt(domain);
                 message.remove(&local.server, queue_event.due.into()).await;
@@ -125,10 +128,10 @@ fn delivery_events() {
         }
     }
 
-    message.rcpt_mut("a").status = Status::PermanentFailure(ErrorDetails {
+    message.rcpt_mut("a").status = Status::PermanentFailure(Box::new(ErrorDetails {
         entity: "localhost".into(),
         details: Error::ConcurrencyLimited,
-    });
+    }));
     assert_eq!(
         message.next_event(None).unwrap(),
         message.rcpt("b").retry.due
@@ -138,10 +141,10 @@ fn delivery_events() {
         message.rcpt("b").retry.due
     );
 
-    message.rcpt_mut("b").status = Status::PermanentFailure(ErrorDetails {
+    message.rcpt_mut("b").status = Status::PermanentFailure(Box::new(ErrorDetails {
         entity: "localhost".into(),
         details: Error::ConcurrencyLimited,
-    });
+    }));
     assert_eq!(
         message.next_event(None).unwrap(),
         message.rcpt("c").retry.due
@@ -151,10 +154,10 @@ fn delivery_events() {
         message.rcpt("c").retry.due
     );
 
-    message.rcpt_mut("c").status = Status::PermanentFailure(ErrorDetails {
+    message.rcpt_mut("c").status = Status::PermanentFailure(Box::new(ErrorDetails {
         entity: "localhost".into(),
         details: Error::ConcurrencyLimited,
-    });
+    }));
     assert!(message.next_event(None).is_none());
 }
 

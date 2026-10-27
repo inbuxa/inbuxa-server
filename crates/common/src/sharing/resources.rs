@@ -6,12 +6,31 @@
  * Modified by Coffey Labs in 2026 for INBUXA.
  */
 
-use crate::{DavResources, auth::AccessToken};
+use crate::{
+    DavResourcePath, GroupwareResourceRef, GroupwareResources, auth::AccessToken,
+    storage::dav::CachedUid,
+};
 use store::roaring::RoaringBitmap;
-use types::acl::Acl;
+use types::acl::{Acl, AclGrant};
 use utils::map::bitmap::Bitmap;
 
-impl DavResources {
+fn grant_matches(
+    access_token: &AccessToken,
+    acl: &AclGrant,
+    check_acls: &Bitmap<Acl>,
+    match_any: bool,
+) -> bool {
+    // inbuxa: AU-1.6: a grant matches the token's own account and its groups,
+    // not every account an Impersonate holder can reach (GHSA-m992-gp7g-wc2j)
+    if !access_token.is_member_directly(acl.account_id) {
+        return false;
+    }
+    let mut grants = acl.grants;
+    grants.intersection(check_acls);
+    grants == *check_acls || (match_any && !grants.is_empty())
+}
+
+impl GroupwareResources {
     pub fn shared_containers(
         &self,
         access_token: &AccessToken,
@@ -21,21 +40,36 @@ impl DavResources {
         let check_acls = Bitmap::<Acl>::from_iter(check_acls);
         let mut document_ids = RoaringBitmap::new();
 
-        for resource in &self.resources {
-            if let Some(acls) = resource.acls() {
-                for acl in acls {
-                    if access_token.is_member_directly(acl.account_id) {
-                        let mut grants = acl.grants;
-                        grants.intersection(&check_acls);
-                        if grants == check_acls || (match_any && !grants.is_empty()) {
-                            document_ids.insert(resource.document_id);
-                        }
-                    }
-                }
+        for resource in self.resources_with_acls() {
+            if resource
+                .acls()
+                .iter()
+                .any(|acl| grant_matches(access_token, acl, &check_acls, match_any))
+            {
+                document_ids.insert(resource.document_id());
             }
         }
 
         document_ids
+    }
+
+    pub fn is_shared_item(
+        &self,
+        item: &GroupwareResourceRef<'_>,
+        access_token: &AccessToken,
+        check_acls: &Bitmap<Acl>,
+        match_any: bool,
+    ) -> bool {
+        item.child_names().iter().any(|name| {
+            self.resources
+                .find(name.parent_id, true)
+                .is_some_and(|container| {
+                    container
+                        .acls()
+                        .iter()
+                        .any(|acl| grant_matches(access_token, acl, check_acls, match_any))
+                })
+        })
     }
 
     pub fn shared_items(
@@ -44,50 +78,10 @@ impl DavResources {
         check_acls: impl IntoIterator<Item = Acl>,
         match_any: bool,
     ) -> RoaringBitmap {
-        let shared_containers = self.shared_containers(access_token, check_acls, match_any);
-
-        if !shared_containers.is_empty() {
-            let mut document_ids = RoaringBitmap::new();
-
-            for resource in &self.resources {
-                if !resource.is_container() && shared_containers.contains(resource.document_id) {
-                    document_ids.insert(resource.document_id);
-                }
-            }
-
-            for path in &self.paths {
-                if let Some(parent_id) = path.parent_id
-                    && shared_containers.contains(parent_id)
-                {
-                    document_ids.insert(self.resources[path.resource_idx].document_id);
-                }
-            }
-
-            document_ids
-        } else {
-            shared_containers
+        let mut document_ids = RoaringBitmap::new();
+        for container_id in &self.shared_containers(access_token, check_acls, match_any) {
+            document_ids.extend(self.children_ids(container_id));
         }
-    }
-
-    pub fn shared_documents(
-        &self,
-        access_token: &AccessToken,
-        check_acls: impl IntoIterator<Item = Acl>,
-        match_any: bool,
-    ) -> RoaringBitmap {
-        let shared_containers = self.shared_containers(access_token, check_acls, match_any);
-        let mut document_ids = shared_containers.clone();
-
-        if !shared_containers.is_empty() {
-            for path in &self.paths {
-                if let Some(parent_id) = path.parent_id
-                    && shared_containers.contains(parent_id)
-                {
-                    document_ids.insert(self.resources[path.resource_idx].document_id);
-                }
-            }
-        }
-
         document_ids
     }
 
@@ -97,64 +91,87 @@ impl DavResources {
         document_id: u32,
         check_acls: impl Into<Bitmap<Acl>>,
     ) -> bool {
-        let check_acls = check_acls.into();
-
-        for resource in &self.resources {
-            if resource.document_id == document_id
-                && let Some(acls) = resource.acls()
-            {
-                for acl in acls {
-                    if access_token.is_member_directly(acl.account_id) {
-                        let mut grants = acl.grants;
-                        grants.intersection(&check_acls);
-                        return !grants.is_empty();
-                    }
-                }
-                break;
-            }
-        }
-
-        false
+        let mut grants = self.container_acl(access_token, document_id);
+        grants.intersection(&check_acls.into());
+        !grants.is_empty()
     }
 
     pub fn container_acl(&self, access_token: &AccessToken, document_id: u32) -> Bitmap<Acl> {
         let mut account_acls = Bitmap::<Acl>::new();
 
-        for resource in &self.resources {
-            if resource.document_id == document_id
-                && let Some(acls) = resource.acls()
-            {
-                for acl in acls {
-                    if access_token.is_member_directly(acl.account_id) {
-                        account_acls.union(&acl.grants);
-                    }
+        if let Some(resource) = self.resources.find_any(document_id) {
+            for acl in resource.acls() {
+                // inbuxa: AU-1.6, as in grant_matches
+                if access_token.is_member_directly(acl.account_id) {
+                    account_acls.union(&acl.grants);
                 }
-                break;
             }
         }
 
         account_acls
     }
 
-    pub fn document_ids(&self, is_container: bool) -> impl Iterator<Item = u32> {
-        self.resources.iter().filter_map(move |resource| {
-            if resource.is_container() == is_container {
-                Some(resource.document_id)
-            } else {
-                None
+    pub fn uid_matches(&self, uid: &str) -> RoaringBitmap {
+        self.resources
+            .find_by_uid(uid.cached_uid())
+            .map(|resource| resource.document_id())
+            .collect()
+    }
+
+    pub fn children_with_uid<'x>(
+        &'x self,
+        container_id: u32,
+        uid: &'x str,
+    ) -> impl Iterator<Item = DavResourcePath<'x>> + 'x {
+        self.resources
+            .find_by_uid(uid.cached_uid())
+            .filter(move |resource| {
+                resource
+                    .child_names()
+                    .iter()
+                    .any(|name| name.parent_id == container_id)
+            })
+            .filter_map(move |resource| self.child_path(resource.document_id(), container_id))
+    }
+
+    pub fn event_ids_with_flags(&self, mask: u16) -> RoaringBitmap {
+        let [document_ids] = self.event_ids_with_flag_masks([mask]);
+        document_ids
+    }
+
+    pub fn event_ids_with_flag_masks<const N: usize>(&self, masks: [u16; N]) -> [RoaringBitmap; N] {
+        let mut document_ids = std::array::from_fn(|_| RoaringBitmap::new());
+        for resource in self.resources.iter_run(false) {
+            if let Some(flags) = resource.event_flags() {
+                let document_id = resource.document_id();
+                for (mask, document_ids) in masks.iter().zip(document_ids.iter_mut()) {
+                    if flags & *mask != 0 {
+                        document_ids.insert(document_id);
+                    }
+                }
             }
-        })
+        }
+        document_ids
+    }
+
+    pub fn document_ids(&self, is_container: bool) -> impl Iterator<Item = u32> {
+        self.resources
+            .iter_run(is_container)
+            .filter_map(move |resource| {
+                if resource.is_container() == is_container {
+                    Some(resource.document_id())
+                } else {
+                    None
+                }
+            })
     }
 
     pub fn has_container_id(&self, id: &u32) -> bool {
-        self.resources
-            .iter()
-            .any(|r| r.document_id == *id && r.is_container())
+        self.resources.find(*id, true).is_some()
     }
 
     pub fn has_item_id(&self, id: &u32) -> bool {
-        self.resources
-            .iter()
-            .any(|r| r.document_id == *id && !r.is_container())
+        self.resources.find(*id, false).is_some()
     }
 }
+

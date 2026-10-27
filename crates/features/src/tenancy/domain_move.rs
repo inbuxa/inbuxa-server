@@ -111,7 +111,9 @@ pub async fn plan(
                 blocking.push(referrer);
             } else {
                 let kind = match &object.inner {
-                    ObjectInner::Account(Account::Group(_)) => Some(1),
+                    ObjectInner::Account(account) if matches!(account.as_ref(), Account::Group(_)) => {
+                        Some(1)
+                    }
                     _ => None,
                 };
                 if let Some(quota) = quota::limit_for_id(referrer, kind) {
@@ -203,21 +205,18 @@ pub async fn apply(
 /// Sets or clears the tenant of an object that moves with its domain.
 fn set_tenant(object: &mut ObjectInner, tenant: Option<Id>) {
     match object {
-        ObjectInner::Account(Account::User(obj)) => obj.member_tenant_id = tenant,
-        ObjectInner::Account(Account::Group(obj)) => obj.member_tenant_id = tenant,
+        ObjectInner::Account(account) => match account.as_mut() {
+            Account::User(obj) => obj.member_tenant_id = tenant,
+            Account::Group(obj) => obj.member_tenant_id = tenant,
+        },
         ObjectInner::MailingList(obj) => obj.member_tenant_id = tenant,
-        ObjectInner::DkimSignature(DkimSignature::Dkim1Ed25519Sha256(obj)) => {
-            obj.member_tenant_id = tenant
-        }
-        ObjectInner::DkimSignature(DkimSignature::Dkim1RsaSha256(obj)) => {
-            obj.member_tenant_id = tenant
-        }
-        ObjectInner::DkimSignature(DkimSignature::Dkim2Ed25519Sha256(obj)) => {
-            obj.member_tenant_id = tenant
-        }
-        ObjectInner::DkimSignature(DkimSignature::Dkim2RsaSha256(obj)) => {
-            obj.member_tenant_id = tenant
-        }
+        ObjectInner::DkimSignature(dkim) => match dkim.as_mut() {
+            DkimSignature::Dkim1Ed25519Sha256(obj) => obj.member_tenant_id = tenant,
+            DkimSignature::Dkim1RsaSha256(obj) => obj.member_tenant_id = tenant,
+            DkimSignature::Dkim2Ed25519Sha256(obj) => obj.member_tenant_id = tenant,
+            DkimSignature::Dkim2RsaSha256(obj) => obj.member_tenant_id = tenant,
+            DkimSignature::Dkim2MlDsa44Ed25519Sha512(obj) => obj.member_tenant_id = tenant,
+        },
         _ => {}
     }
 }

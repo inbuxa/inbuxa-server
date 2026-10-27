@@ -13,6 +13,8 @@ use registry::schema::{prelude::ObjectType, structs};
 impl InMemoryStore {
     pub async fn build(bp: &mut Bootstrap) -> Option<Self> {
         let result = match bp.setting_infallible::<structs::InMemoryStore>().await {
+            // inbuxa: the default keeps in-memory data in the data store, as
+            // 0.16 did, so a cluster sharing that store needs nothing more
             structs::InMemoryStore::Default => {
                 return Some(InMemoryStore::Store(bp.data_store.clone()));
             }

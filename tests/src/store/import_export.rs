@@ -25,16 +25,28 @@ use store::{
     rand,
     write::{
         AnyClass, AnyKey, BatchBuilder, BlobLink, BlobOp, Operation, QueueClass, QueueEvent,
-        RegistryClass, TaskQueueClass, ValueClass,
-        key::{DeserializeBigEndian, KeySerializer},
+        RegistryClass, TaskId, TaskQueueClass, ValueClass,
+        blob::BlobLinkValue,
+        key::{DeserializeBigEndian, KeySerializer, SystemKind},
     },
     *,
 };
 use types::{
     blob_hash::BlobHash,
     collection::{Collection, SyncCollection},
-    field::{Field, MailboxField},
+    field::{EmailField, Field},
 };
+
+// inbuxa: subspaces the test data must reach and the export must carry. 1.0
+// keeps archived items in the registry subspace (0.16 had them in
+// DeletedItems, which 1.0 no longer writes); accounts go to Directory.
+const DATA_SUBSPACES: [Subspace; 5] = [
+    Subspace::Registry,
+    Subspace::Directory,
+    Subspace::SpamSamples,
+    Subspace::Immutable,
+    SUBSPACE_INBUXA,
+];
 
 pub async fn test(test: &TestServer) {
     // Make sure the store is empty
@@ -44,10 +56,11 @@ pub async fn test(test: &TestServer) {
     // Create blobs
     println!("Creating blobs...");
     let mut batch = BatchBuilder::new();
+    // inbuxa: 1.0 keeps the schema version in the system subspace
     batch.set(
         ValueClass::Any(AnyClass {
-            subspace: SUBSPACE_PROPERTY,
-            key: vec![0u8],
+            subspace: Subspace::System,
+            key: vec![SystemKind::SchemaVersion as u8],
         }),
         DATABASE_SCHEMA_VERSION.serialize(),
     );
@@ -63,7 +76,7 @@ pub async fn test(test: &TestServer) {
             .unwrap();
         batch.set(ValueClass::Blob(BlobOp::Commit { hash }), vec![]);
     }
-    db.write(batch.build_all()).await.unwrap();
+    db.write_batch(&mut batch).await.unwrap();
 
     // Create account data
     println!("Creating account data...");
@@ -89,10 +102,15 @@ pub async fn test(test: &TestServer) {
                             ValueClass::Property(Field::ARCHIVE.into()),
                             random_bytes(10),
                         )
-                        .add(
-                            ValueClass::Property(MailboxField::UidCounter.into()),
-                            rand::random(),
-                        );
+                        .add(ValueClass::MailboxUid, rand::random());
+                }
+
+                // inbuxa: 1.0 keeps message metadata in its own subspace
+                if collection == Collection::Email {
+                    batch.set(
+                        ValueClass::Immutable(EmailField::Metadata.into()),
+                        random_bytes(64),
+                    );
                 }
 
                 for (idx, value_size) in [16, 128, 1024, 2056, 102400].into_iter().enumerate() {
@@ -114,7 +132,7 @@ pub async fn test(test: &TestServer) {
                             hash: hash.clone(),
                             to: BlobLink::Document,
                         }),
-                        vec![],
+                        BlobLinkValue::new(0u32),
                     );
                 }
 
@@ -130,7 +148,7 @@ pub async fn test(test: &TestServer) {
             }
         }
 
-        db.write(batch.build_all()).await.unwrap();
+        db.write_batch(&mut batch).await.unwrap();
     }
 
     // Create queue, config and lookup data
@@ -175,11 +193,12 @@ pub async fn test(test: &TestServer) {
             );
         }
     }
-    db.write(batch.build_all()).await.unwrap();
+    db.write_batch(&mut batch).await.unwrap();
 
-    // inbuxa: registry objects kept outside the registry subspace (archived
-    // items for undelete, spam training samples, directory entries) and the
-    // fork's own subspace. Exports used to leave the first two behind.
+    // inbuxa: registry objects (archived items for undelete, spam training
+    // samples, directory entries) and the fork's own subspace. 0.16 kept the
+    // first two outside the registry subspace and exports used to leave them
+    // behind.
     println!("Creating archived items, spam samples and fork data...");
     let mut batch = BatchBuilder::new();
     for item_id in [1u64, 2, 3] {
@@ -207,7 +226,7 @@ pub async fn test(test: &TestServer) {
             random_bytes(32),
         );
     }
-    db.write(batch.build_all()).await.unwrap();
+    db.write_batch(&mut batch).await.unwrap();
 
     // inbuxa: the trained spam classifier lives in blobs with fixed names
     let mut named_blobs = Vec::new();
@@ -233,21 +252,17 @@ pub async fn test(test: &TestServer) {
             .with_document(account_id)
             .add(ValueClass::Quota, account_id as i64 * 1000);
     }
-    db.write(batch.build_all()).await.unwrap();
+    db.write_batch(&mut batch).await.unwrap();
 
     // Obtain store hash
     println!("Calculating store hash...");
     let snapshot = Snapshot::new(&db).await;
     assert!(!snapshot.keys.is_empty(), "Store hash counts are empty",);
-    for subspace in [
-        SUBSPACE_DELETED_ITEMS,
-        SUBSPACE_SPAM_SAMPLES,
-        SUBSPACE_INBUXA,
-    ] {
+    for subspace in DATA_SUBSPACES {
         assert!(
             snapshot.keys.iter().any(|k| k.subspace == subspace),
             "No test data in subspace {}",
-            char::from(subspace)
+            char::from(subspace.byte())
         );
     }
 
@@ -274,23 +289,19 @@ pub async fn test(test: &TestServer) {
             .write("localhost")
             .finalize(),
     );
-    db.write(batch.build_all()).await.unwrap();
+    db.write_batch(&mut batch).await.unwrap();
     for (key, _) in &named_blobs {
         test.server.blob_store().delete_blob(key).await.unwrap();
     }
     let imported = test.server.core.restore(temp_dir.path.clone()).await;
     let mut batch = BatchBuilder::new();
     batch.clear(ValueClass::NodeId(0));
-    db.write(batch.build_all()).await.unwrap();
-    for subspace in [
-        SUBSPACE_DELETED_ITEMS,
-        SUBSPACE_SPAM_SAMPLES,
-        SUBSPACE_INBUXA,
-    ] {
+    db.write_batch(&mut batch).await.unwrap();
+    for subspace in DATA_SUBSPACES {
         assert!(
             imported.contains(&subspace),
             "Subspace {} was not exported",
-            char::from(subspace)
+            char::from(subspace.byte())
         );
     }
 
@@ -350,7 +361,8 @@ async fn cross_backend(
     Snapshot::new_portable(source)
         .await
         .assert_is_eq(&Snapshot::new_portable(&target).await);
-    for subspace in [SUBSPACE_COUNTER, SUBSPACE_QUOTA] {
+    // inbuxa: 1.0 keeps quotas with the other counters
+    for subspace in [Subspace::Counter] {
         let mut keys = Vec::new();
         source
             .iterate(
@@ -383,7 +395,7 @@ async fn cross_backend(
                 source.get_counter(class()).await.unwrap(),
                 target.get_counter(class()).await.unwrap(),
                 "Counter mismatch in {} for {key:?}",
-                char::from(subspace)
+                char::from(subspace.byte())
             );
         }
     }
@@ -402,18 +414,18 @@ async fn cross_backend(
         .iterate(
             IterateParams::new(
                 AnyKey {
-                    subspace: SUBSPACE_TASK_QUEUE,
+                    subspace: Subspace::TaskQueue,
                     key: vec![0u8],
                 },
                 AnyKey {
-                    subspace: SUBSPACE_TASK_QUEUE,
+                    subspace: Subspace::TaskQueue,
                     key: vec![u8::MAX; 20],
                 },
             )
             .no_values(),
             |key, _| {
-                if key.deserialize_be_u64(0)? == 0 {
-                    task_ids.push(key.deserialize_be_u64(U64_LEN)?);
+                if key.first() == Some(&TaskQueueClass::KIND_TASK) {
+                    task_ids.push(key.deserialize_be_u64(1)?);
                 }
                 Ok(true)
             },
@@ -424,7 +436,9 @@ async fn cross_backend(
     for id in task_ids {
         match target
             .get_value::<Task>(ValueKey::from(ValueClass::TaskQueue(
-                TaskQueueClass::Task { id },
+                TaskQueueClass::Task {
+                    id: TaskId::Assigned(id),
+                },
             )))
             .await
             .unwrap()
@@ -464,7 +478,7 @@ struct Snapshot {
 
 #[derive(Debug, PartialEq, Eq, Hash)]
 struct KeyValue {
-    subspace: u8,
+    subspace: Subspace,
     key: Vec<u8>,
     value: Vec<u8>,
 }
@@ -487,31 +501,34 @@ impl Snapshot {
 
         let mut keys = AHashSet::new();
 
+        // inbuxa: 1.0's subspaces; quotas are counters now, and message
+        // metadata and indexed properties have subspaces of their own
         for (subspace, with_values) in [
-            (SUBSPACE_ACL, true),
-            (SUBSPACE_TASK_QUEUE, true),
-            (SUBSPACE_INDEXES, false),
-            (SUBSPACE_DELETED_ITEMS, true),
-            (SUBSPACE_SPAM_SAMPLES, true),
-            (SUBSPACE_BLOB_LINK, true),
-            (SUBSPACE_BLOBS, true),
-            (SUBSPACE_LOGS, true),
-            (SUBSPACE_COUNTER, !is_sql),
-            (SUBSPACE_IN_MEMORY_COUNTER, !is_sql),
-            (SUBSPACE_IN_MEMORY_VALUE, true),
-            (SUBSPACE_PROPERTY, true),
-            (SUBSPACE_REGISTRY, true),
-            (SUBSPACE_REGISTRY_IDX, !is_sql),
-            (SUBSPACE_REGISTRY_PK, true),
-            (SUBSPACE_QUEUE_MESSAGE, true),
-            (SUBSPACE_QUEUE_EVENT, true),
-            (SUBSPACE_QUOTA, !is_sql),
-            (SUBSPACE_REPORT_OUT, true),
-            (SUBSPACE_REPORT_IN, true),
-            (SUBSPACE_DIRECTORY, true),
+            (Subspace::Acl, true),
+            (Subspace::TaskQueue, true),
+            (Subspace::Indexes, false),
+            (Subspace::DeletedItems, true),
+            (Subspace::SpamSamples, true),
+            (Subspace::BlobLink, true),
+            (Subspace::Blobs, true),
+            (Subspace::Logs, true),
+            (Subspace::Counter, !is_sql),
+            (Subspace::InMemoryCounter, !is_sql),
+            (Subspace::InMemoryValue, true),
+            (Subspace::Property, true),
+            (Subspace::Immutable, true),
+            (Subspace::IndexProperty, true),
+            (Subspace::Registry, true),
+            (Subspace::RegistryIndex, !is_sql),
+            (Subspace::RegistryPrimaryKey, true),
+            (Subspace::QueueMessage, true),
+            (Subspace::QueueEvent, true),
+            (Subspace::ReportOut, true),
+            (Subspace::ReportIn, true),
+            (Subspace::Directory, true),
             (SUBSPACE_INBUXA, true),
         ] {
-            if subspace == SUBSPACE_BLOBS && !with_blobs {
+            if subspace == Subspace::Blobs && !with_blobs {
                 continue;
             }
             let from_key = AnyKey {
@@ -548,7 +565,7 @@ impl Snapshot {
             if !other.keys.contains(key) {
                 println!(
                     "Subspace {}, Key {:?} not found in restored snapshot",
-                    char::from(key.subspace),
+                    char::from(key.subspace.byte()),
                     key.key,
                 );
                 is_err = true;
@@ -558,7 +575,7 @@ impl Snapshot {
             if !self.keys.contains(key) {
                 println!(
                     "Subspace {}, Key {:?} not found in original snapshot",
-                    char::from(key.subspace),
+                    char::from(key.subspace.byte()),
                     key.key,
                 );
                 is_err = true;

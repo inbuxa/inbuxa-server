@@ -10,9 +10,10 @@ use crate::{
     api::query::QueryResponseBuilder,
     registry::{
         mapping::{RegistryGetResponse, RegistryQueryResponse, RegistrySetResponse},
-        query::RegistryQueryFilters,
+        query::{RegistryQueryFilters, with_page_position},
     },
 };
+use compact_str::format_compact;
 use jmap_proto::{error::set::SetError, types::state::State};
 use jmap_tools::{Key, Value};
 use registry::{
@@ -23,13 +24,19 @@ use registry::{
     },
     types::{EnumImpl, datetime::UTCDateTime},
 };
-use services::task_manager::lock::TaskLockManager;
-use smtp::reporting::index::{ExternalReportIndex, InternalReportIndex};
+use services::task_manager::lock::{TaskLock, TaskLockManager};
+use smtp::reporting::{
+    aggregate::{ReportItem, read_dmarc_records, read_tls_policies},
+    index::{ExternalReportIndex, InternalReportIndex},
+};
 use std::str::FromStr;
 use store::{
     U64_LEN, ValueKey,
     registry::{RegistryFilter, RegistryFilterValue, RegistryQuery},
-    write::{BatchBuilder, RegistryClass, TaskQueueClass, ValueClass, key::KeySerializer},
+    write::{
+        BatchBuilder, RegistryClass, TaskId, TaskQueueClass, ValueClass, assert::AssertValue,
+        key::KeySerializer,
+    },
 };
 use trc::AddContext;
 use types::id::Id;
@@ -43,15 +50,15 @@ pub(crate) async fn report_set(
     let server = set.server;
     let mut locked_tasks = Vec::new();
     let result = report_set_locked(set, &mut locked_tasks).await;
-    for task_id in locked_tasks {
-        server.remove_index_lock(task_id).await;
+    for lock in locked_tasks {
+        server.unlock_task(lock).await;
     }
     result
 }
 
 async fn report_set_locked<'x>(
     mut set: RegistrySetResponse<'x>,
-    locked_tasks: &mut Vec<u64>,
+    locked_tasks: &mut Vec<TaskLock>,
 ) -> trc::Result<RegistrySetResponse<'x>> {
     let object_id = set.object_type.to_id();
 
@@ -114,7 +121,7 @@ async fn report_set_locked<'x>(
                 // inbuxa: the report's task shares its id. Hold the task
                 // while its queue rows move, as x:Task/set does, and move the
                 // row the task is actually queued under
-                if !set.server.try_lock_task(item_id).await {
+                let Some(lock) = set.server.lock_task(item_id).await else {
                     set.response.not_updated.append(
                         id,
                         SetError::forbidden().with_description(
@@ -122,13 +129,15 @@ async fn report_set_locked<'x>(
                         ),
                     );
                     continue;
-                }
-                locked_tasks.push(item_id);
+                };
+                locked_tasks.push(lock);
                 let queued = set
                     .server
                     .store()
                     .get_value::<Task>(ValueKey::from(ValueClass::TaskQueue(
-                        TaskQueueClass::Task { id: item_id },
+                        TaskQueueClass::Task {
+                            id: TaskId::Assigned(item_id),
+                        },
                     )))
                     .await?;
 
@@ -166,19 +175,22 @@ async fn report_set_locked<'x>(
     }
 
     // Process reports to destroy
+    // inbuxa: MT: tenant scoping, kept from 0.16
     let tenant_id = set.access_token.tenant_id().map(Id::from);
+    let mut closed = Vec::new();
     for id in set.destroy.drain(..) {
         let item_id = id.id();
         let key = ValueClass::Registry(RegistryClass::Item { object_id, item_id });
-        if let Some(report) = set
+        let report = set
             .server
             .store()
-            .get_value::<Object>(ValueKey::from(key))
+            .get_value::<Object>(ValueKey::from(key.clone()))
             .await?
+            // inbuxa: MT: tenant scoping, kept from 0.16
             .filter(|report| {
                 !set.is_tenant_filtered || report.inner.member_tenant_id() == tenant_id
-            })
-        {
+            });
+        if let Some(report) = report {
             match &report.inner {
                 ObjectInner::DmarcExternalReport(report) => {
                     report.write_ops(&mut batch, item_id, false);
@@ -189,11 +201,19 @@ async fn report_set_locked<'x>(
                 ObjectInner::ArfExternalReport(report) => {
                     report.write_ops(&mut batch, item_id, false);
                 }
-                ObjectInner::DmarcInternalReport(report) => {
-                    report.write_ops(&mut batch, item_id, false);
+                ObjectInner::DmarcInternalReport(inner) => {
+                    let item = ReportItem::new(ObjectType::DmarcInternalReport, item_id);
+                    batch.assert_value(key, AssertValue::Hash(report.revision));
+                    inner.write_ops(&mut batch, item_id, false);
+                    item.clear(&mut batch);
+                    closed.push(item);
                 }
-                ObjectInner::TlsInternalReport(report) => {
-                    report.write_ops(&mut batch, item_id, false);
+                ObjectInner::TlsInternalReport(inner) => {
+                    let item = ReportItem::new(ObjectType::TlsInternalReport, item_id);
+                    batch.assert_value(key, AssertValue::Hash(report.revision));
+                    inner.write_ops(&mut batch, item_id, false);
+                    item.clear(&mut batch);
+                    closed.push(item);
                 }
                 _ => {}
             }
@@ -207,13 +227,17 @@ async fn report_set_locked<'x>(
 
     if !batch.is_empty() {
         set.server
-            .store()
-            .write(batch.build_all())
+            .commit_batch(batch)
             .await
             .caused_by(trc::location!())?;
         // inbuxa: a rescheduled report may now be due sooner than the task
         // manager's next scan
         set.server.notify_task_queue();
+    }
+    for item in closed {
+        if let Err(err) = item.clear_orphans(set.server.store()).await {
+            trc::error!(err.details("Failed to clear orphaned report rows"));
+        }
     }
 
     Ok(set)
@@ -223,6 +247,13 @@ pub(crate) async fn report_get(
     mut get: RegistryGetResponse<'_>,
 ) -> trc::Result<RegistryGetResponse<'_>> {
     let object_id = get.object_type.to_id();
+    let external_query = RegistryQuery::new(get.object_type);
+    // inbuxa: MT: tenant scoping, kept from 0.16
+    let external_query = if get.is_tenant_filtered {
+        external_query.with_tenant(get.access_token.tenant_id())
+    } else {
+        external_query.greater_than(Property::ExpiresAt, 0u64)
+    };
     let ids = if let Some(ids) = get.ids.take() {
         ids
     } else if matches!(
@@ -231,20 +262,10 @@ pub(crate) async fn report_get(
             | ObjectType::TlsExternalReport
             | ObjectType::ArfExternalReport
     ) {
-        if get.is_tenant_filtered {
-            get.server.registry().query::<Vec<Id>>(
-                RegistryQuery::new(get.object_type)
-                    .with_tenant(get.access_token.tenant_id())
-                    .with_limit(get.server.core.jmap.get_max_objects),
-            )
-        } else {
-            get.server.registry().query::<Vec<Id>>(
-                RegistryQuery::new(get.object_type)
-                    .greater_than(Property::ExpiresAt, 0u64)
-                    .with_limit(get.server.core.jmap.get_max_objects),
-            )
-        }
-        .await?
+        get.server
+            .registry()
+            .query::<Vec<Id>>(external_query.with_limit(get.server.core.jmap.get_max_objects))
+            .await?
     } else {
         get.server
             .registry()
@@ -260,9 +281,10 @@ pub(crate) async fn report_get(
             .await?
     };
 
+    // inbuxa: MT: tenant scoping, kept from 0.16
     let tenant_id = get.access_token.tenant_id().map(Id::from);
     for id in ids {
-        if let Some(report) = get
+        let report = get
             .server
             .store()
             .get_value::<Object>(ValueKey::from(ValueClass::Registry(RegistryClass::Item {
@@ -270,10 +292,20 @@ pub(crate) async fn report_get(
                 item_id: id.id(),
             })))
             .await?
+            // inbuxa: MT: tenant scoping, kept from 0.16
             .filter(|report| {
                 !get.is_tenant_filtered || report.inner.member_tenant_id() == tenant_id
-            })
-        {
+            });
+        if let Some(mut report) = report {
+            match &mut report.inner {
+                ObjectInner::DmarcInternalReport(report) => {
+                    read_dmarc_records(get.server.store(), id.id(), report, usize::MAX).await?;
+                }
+                ObjectInner::TlsInternalReport(report) => {
+                    read_tls_policies(get.server.store(), id.id(), report, usize::MAX).await?;
+                }
+                _ => {}
+            }
             get.insert(id, report.into_value());
         } else {
             get.not_found(id);
@@ -286,6 +318,7 @@ pub(crate) async fn report_get(
 pub(crate) async fn report_query(
     mut req: RegistryQueryResponse<'_>,
 ) -> trc::Result<QueryResponseBuilder> {
+    // inbuxa: MT: tenant scoping, kept from 0.16
     let mut query = store::registry::RegistryQuery::new(req.object_type)
         .with_tenant(req.access_token.tenant_id());
     let is_internal = matches!(
@@ -295,41 +328,25 @@ pub(crate) async fn report_query(
 
     req.request
         .extract_filters(|property, op, value| match property {
-            Property::Domain => {
+            Property::Domain if is_internal => {
                 if let serde_json::Value::String(value) = value {
-                    match req.object_type {
-                        ObjectType::DmarcInternalReport => {
-                            query.filters.push(RegistryFilter::greater_than_or_equal(
-                                property,
-                                RegistryFilterValue::Bytes(
-                                    KeySerializer::new(value.len() + U64_LEN)
-                                        .write(value.as_str())
-                                        .write(0u64)
-                                        .finalize(),
-                                ),
-                                true,
-                            ));
-                            query.filters.push(RegistryFilter::less_than_or_equal(
-                                property,
-                                RegistryFilterValue::Bytes(
-                                    KeySerializer::new(value.len() + U64_LEN)
-                                        .write(value.as_str())
-                                        .write(u64::MAX)
-                                        .finalize(),
-                                ),
-                                true,
-                            ));
-
-                            true
-                        }
-                        ObjectType::TlsInternalReport => {
-                            query
-                                .filters
-                                .push(RegistryFilter::equal(property, value, true));
-                            true
-                        }
-                        _ => false,
-                    }
+                    let from = KeySerializer::new(value.len() + 1 + (U64_LEN * 2))
+                        .write(value.as_str())
+                        .write(0u8)
+                        .finalize();
+                    let mut to = from.clone();
+                    to.extend_from_slice(&[u8::MAX; U64_LEN * 2]);
+                    query.filters.push(RegistryFilter::greater_than_or_equal(
+                        property,
+                        RegistryFilterValue::Bytes(from),
+                        true,
+                    ));
+                    query.filters.push(RegistryFilter::less_than_or_equal(
+                        property,
+                        RegistryFilterValue::Bytes(to),
+                        true,
+                    ));
+                    true
                 } else {
                     false
                 }
@@ -342,6 +359,7 @@ pub(crate) async fn report_query(
                     false
                 }
             }
+            // inbuxa: MT: tenant scoping, kept from 0.16
             Property::MemberTenantId if !is_internal => {
                 if req.access_token.tenant_id().is_none()
                     && let Some(id) = value.as_str().and_then(|s| Id::from_str(s).ok())
@@ -405,20 +423,17 @@ pub(crate) async fn report_query(
             ));
         }
     }
-    if let Some(limit) = params.limit {
-        query = query.with_limit(limit);
-        if let Some(anchor) = params.anchor {
-            query = query.with_anchor(anchor);
-        } else if let Some(position) = params.position {
-            query = query.with_index_start(position);
-        }
-    }
-
-    let matches = req.server.registry().query::<Vec<Id>>(query).await?;
+    let page = req
+        .server
+        .registry()
+        .query_page::<Vec<Id>>(params.paged(query))
+        .await?;
+    let position = params.page_position(page.position)?;
+    let matches = page.ids;
     let results = match params.sort_by {
         Property::Id => {
             let mut results = matches;
-            if !params.sort_ascending {
+            if params.needs_reversal() {
                 results.sort_unstable_by(|a, b| b.cmp(a));
             }
             results
@@ -454,19 +469,24 @@ pub(crate) async fn report_query(
             }
         }
         property => {
-            return Err(trc::JmapEvent::UnsupportedSort.into_err().details(format!(
-                "Property {} is not supported for sorting",
-                property
-            )));
+            return Err(trc::JmapEvent::UnsupportedSort
+                .into_err()
+                .details(format_compact!(
+                    "Property {} is not supported for sorting",
+                    property
+                )));
         }
     };
 
     // Build response
-    let mut response = QueryResponseBuilder::new(
-        results.len(),
-        req.server.core.jmap.query_max_results,
-        State::Initial,
-        &req.request,
+    let mut response = with_page_position(
+        QueryResponseBuilder::new(
+            results.len(),
+            req.server.core.jmap.query_max_results,
+            State::Initial,
+            &req.request,
+        ),
+        position,
     );
 
     for id in results {

@@ -5,5 +5,7 @@
  */
 
 pub mod get;
+pub mod page;
 pub mod query;
 pub mod state;
+

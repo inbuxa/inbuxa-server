@@ -7,7 +7,7 @@
 use crate::{
     object::JmapObject,
     request::{
-        MaybeInvalid,
+        IntoValid, MaybeInvalid,
         deserialize::{DeserializeArguments, deserialize_request},
         reference::{MaybeIdReference, MaybeResultReference, ResultReference},
     },
@@ -16,6 +16,41 @@ use crate::{
 use jmap_tools::Value;
 use serde::{Deserialize, Deserializer};
 use types::id::Id;
+
+const LINEAR_DEDUP_LIMIT: usize = 16;
+
+pub fn unique_properties<P: Ord>(properties: impl Iterator<Item = P>) -> Vec<P> {
+    let len = properties.size_hint().1.unwrap_or(usize::MAX);
+    if len <= LINEAR_DEDUP_LIMIT {
+        let mut unique = Vec::with_capacity(len);
+        for property in properties {
+            if !unique.contains(&property) {
+                unique.push(property);
+            }
+        }
+        unique
+    } else {
+        let mut indexed = properties
+            .enumerate()
+            .map(|(position, property)| (property, position))
+            .collect::<Vec<_>>();
+        indexed.sort_unstable();
+        indexed.dedup_by(|next, first| next.0 == first.0);
+        indexed.sort_unstable_by_key(|(_, position)| *position);
+        indexed.into_iter().map(|(property, _)| property).collect()
+    }
+}
+
+pub fn all_ids<V>(ids: impl Iterator<Item = V>, max_objects_in_get: usize) -> trc::Result<Vec<V>> {
+    let ids = ids
+        .take(max_objects_in_get.saturating_add(1))
+        .collect::<Vec<_>>();
+    if ids.len() <= max_objects_in_get {
+        Ok(ids)
+    } else {
+        Err(trc::JmapEvent::RequestTooLarge.into_err())
+    }
+}
 
 #[derive(Debug, Clone)]
 pub struct GetRequest<T: JmapObject> {
@@ -98,24 +133,11 @@ impl<T: JmapObject> Default for GetRequest<T> {
 
 impl<T: JmapObject> GetRequest<T> {
     pub fn unwrap_properties(&mut self, default: &[T::Property]) -> Vec<T::Property> {
-        if let Some(properties_) = self.properties.take().map(|p| p.unwrap()) {
-            let mut properties = Vec::with_capacity(properties_.len());
-            let id_prop = T::ID_PROPERTY;
-            let mut has_id = false;
-
-            for prop in properties_ {
-                if let MaybeInvalid::Value(p) = prop {
-                    if p == id_prop {
-                        has_id = true;
-                    }
-                    properties.push(p);
-                }
+        if let Some(properties) = self.properties.take().map(|p| p.unwrap()) {
+            let mut properties = unique_properties(properties.into_valid());
+            if !properties.contains(&T::ID_PROPERTY) {
+                properties.push(T::ID_PROPERTY);
             }
-
-            if !has_id {
-                properties.push(id_prop);
-            }
-
             properties
         } else {
             default.to_vec()
@@ -149,3 +171,4 @@ impl<T: JmapObject> GetRequest<T> {
         }
     }
 }
+

@@ -6,6 +6,7 @@
 
 use super::PluginContext;
 use crate::scripts::into_sieve_value;
+use compact_str::CompactString;
 use sieve::{FunctionMap, runtime::Variable};
 use store::{Deserialize, Value, dispatch::lookup::KeyValue};
 
@@ -25,14 +26,17 @@ pub fn register_local_domain(plugin_id: u32, fnc_map: &mut FunctionMap) {
     fnc_map.set_external_function("is_local_domain", plugin_id, 1);
 }
 
-pub async fn exec(ctx: PluginContext<'_>) -> trc::Result<Variable> {
+pub async fn exec(ctx: PluginContext<'_>) -> trc::Result<Variable<'static>> {
     let store = match &ctx.arguments[0] {
-        Variable::String(v) if !v.is_empty() => ctx.server.get_lookup_store(v.as_str()),
+        Variable::String(v) if !v.is_empty() => ctx.server.get_lookup_store(v.as_ref()),
         _ => Some(ctx.server.core.storage.memory.clone()),
     }
     .ok_or_else(|| {
         trc::SieveEvent::RuntimeError
-            .ctx(trc::Key::Id, ctx.arguments[0].to_string().into_owned())
+            .ctx(
+                trc::Key::Name,
+                CompactString::from(ctx.arguments[0].to_string()),
+            )
             .details("Unknown store")
     })?;
 
@@ -51,14 +55,17 @@ pub async fn exec(ctx: PluginContext<'_>) -> trc::Result<Variable> {
     .into())
 }
 
-pub async fn exec_get(ctx: PluginContext<'_>) -> trc::Result<Variable> {
+pub async fn exec_get(ctx: PluginContext<'_>) -> trc::Result<Variable<'static>> {
     match &ctx.arguments[0] {
-        Variable::String(v) if !v.is_empty() => ctx.server.get_lookup_store(v.as_str()),
+        Variable::String(v) if !v.is_empty() => ctx.server.get_lookup_store(v.as_ref()),
         _ => Some(ctx.server.core.storage.memory.clone()),
     }
     .ok_or_else(|| {
         trc::SieveEvent::RuntimeError
-            .ctx(trc::Key::Id, ctx.arguments[0].to_string().into_owned())
+            .ctx(
+                trc::Key::Name,
+                CompactString::from(ctx.arguments[0].to_string()),
+            )
             .details("Unknown store")
     })?
     .key_get::<VariableWrapper>(ctx.arguments[1].to_string())
@@ -66,7 +73,7 @@ pub async fn exec_get(ctx: PluginContext<'_>) -> trc::Result<Variable> {
     .map(|v| v.map(|v| v.into_inner()).unwrap_or_default())
 }
 
-pub async fn exec_set(ctx: PluginContext<'_>) -> trc::Result<Variable> {
+pub async fn exec_set(ctx: PluginContext<'_>) -> trc::Result<Variable<'static>> {
     let expires = match &ctx.arguments[3] {
         Variable::Integer(v) => Some(*v as u64),
         Variable::Float(v) => Some(*v as u64),
@@ -74,12 +81,15 @@ pub async fn exec_set(ctx: PluginContext<'_>) -> trc::Result<Variable> {
     };
 
     match &ctx.arguments[0] {
-        Variable::String(v) if !v.is_empty() => ctx.server.get_lookup_store(v.as_str()),
+        Variable::String(v) if !v.is_empty() => ctx.server.get_lookup_store(v.as_ref()),
         _ => Some(ctx.server.core.storage.memory.clone()),
     }
     .ok_or_else(|| {
         trc::SieveEvent::RuntimeError
-            .ctx(trc::Key::Id, ctx.arguments[0].to_string().into_owned())
+            .ctx(
+                trc::Key::Name,
+                CompactString::from(ctx.arguments[0].to_string()),
+            )
             .details("Unknown store")
     })?
     .key_set(
@@ -98,7 +108,7 @@ pub async fn exec_set(ctx: PluginContext<'_>) -> trc::Result<Variable> {
     .map(|_| true.into())
 }
 
-pub async fn exec_local_domain(ctx: PluginContext<'_>) -> trc::Result<Variable> {
+pub async fn exec_local_domain(ctx: PluginContext<'_>) -> trc::Result<Variable<'static>> {
     let domain = ctx.arguments[0].to_string();
 
     if !domain.is_empty() {
@@ -112,16 +122,19 @@ pub async fn exec_local_domain(ctx: PluginContext<'_>) -> trc::Result<Variable> 
 }
 
 #[derive(Debug, PartialEq, Eq)]
-pub struct VariableWrapper(Variable);
+pub struct VariableWrapper(Variable<'static>);
 
 impl Deserialize for VariableWrapper {
     fn deserialize(bytes: &[u8]) -> trc::Result<Self> {
         Ok(VariableWrapper(
-            bincode::serde::decode_from_slice::<Variable, _>(bytes, bincode::config::standard())
-                .map(|v| v.0)
-                .unwrap_or_else(|_| {
-                    Variable::String(String::from_utf8_lossy(bytes).into_owned().into())
-                }),
+            bincode::serde::decode_from_slice::<Variable<'static>, _>(
+                bytes,
+                bincode::config::standard(),
+            )
+            .map(|v| v.0)
+            .unwrap_or_else(|_| {
+                Variable::String(String::from_utf8_lossy(bytes).into_owned().into())
+            }),
         ))
     }
 }
@@ -133,7 +146,7 @@ impl From<i64> for VariableWrapper {
 }
 
 impl VariableWrapper {
-    pub fn into_inner(self) -> Variable {
+    pub fn into_inner(self) -> Variable<'static> {
         self.0
     }
 }

@@ -34,7 +34,7 @@ use serde_json::{Value, json};
 use store::{
     Deserialize, IterateParams, ValueKey,
     query::acl::AclQuery,
-    write::{TaskQueueClass, ValueClass},
+    write::{TaskId, TaskQueueClass, ValueClass},
 };
 use types::id::Id;
 
@@ -179,7 +179,9 @@ pub async fn test(test: &mut TestServer) {
     );
     assert_eq!(
         restored["keywords"],
-        json!({"$seen": true, "$flagged": true}),
+        // inbuxa: 1.0 also sets $hasnoattachment on every message without
+        // attachments (a server-set keyword), so the restored copy has it
+        json!({"$seen": true, "$flagged": true, "$hasnoattachment": true}),
         "test 4"
     );
     // Acceptance test 7: a new id, and the record is gone (UD-9)
@@ -463,8 +465,9 @@ pub async fn test(test: &mut TestServer) {
     let mut lmtp = SmtpConnection::connect().await;
     lmtp.mail_from("sender@remote.example.org", 2).await;
     let reply = lmtp.rcpt_to("gone@example.org", 5).await;
+    // inbuxa: 1.0 refuses an unknown mailbox with 5.1.1 (0.16: 5.1.2)
     assert!(
-        reply.iter().any(|line| line.starts_with("550 5.1.2")),
+        reply.iter().any(|line| line.starts_with("550 5.1.1")),
         "test 14: mail refused, {reply:?}"
     );
     assert!(!has_access(test, user.id(), gone_id).await, "test 14: suspended");
@@ -746,8 +749,10 @@ async fn pending_destroy(test: &TestServer, account: Id) -> bool {
         .store()
         .iterate(
             IterateParams::new(
-                ValueKey::from(ValueClass::TaskQueue(TaskQueueClass::Task { id: 0 })),
-                ValueKey::from(ValueClass::TaskQueue(TaskQueueClass::Task { id: u64::MAX })),
+                ValueKey::from(ValueClass::TaskQueue(TaskQueueClass::Task { id: TaskId::Assigned(0) })),
+                ValueKey::from(ValueClass::TaskQueue(TaskQueueClass::Task {
+                    id: TaskId::Assigned(u64::MAX),
+                })),
             )
             .ascending(),
             |_, value| {

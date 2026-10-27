@@ -60,7 +60,8 @@ pub async fn test(test: &TestServer) {
     );
     let change_id = response.state();
 
-    // Create Calendar
+    // Create Calendar (inbuxa: 1.0 wants default alert ids unique across
+    // the account, both lists included, so they are prefixed t/d)
     let calendar_id = account
         .jmap_create(
             MethodObject::Calendar,
@@ -74,14 +75,14 @@ pub async fn test(test: &TestServer) {
                 "isVisible": false,
                 "includeInAvailability": "attending",
                 "defaultAlertsWithTime": {
-                    "0": {
+                    "t0": {
                         "action": "display",
                         "trigger": {
                             "relativeTo": "start",
                             "offset": "PT15M"
                         }
                     },
-                    "1": {
+                    "t1": {
                         "action": "email",
                         "trigger": {
                             "relativeTo": "end",
@@ -90,14 +91,14 @@ pub async fn test(test: &TestServer) {
                     }
                 },
                 "defaultAlertsWithoutTime": {
-                    "0": {
+                    "d0": {
                         "action": "display",
                         "trigger": {
                             "relativeTo": "start",
                             "offset": "P1D"
                         }
                     },
-                    "1": {
+                    "d1": {
                         "action": "email",
                         "trigger": {
                             "relativeTo": "end",
@@ -156,7 +157,7 @@ pub async fn test(test: &TestServer) {
         "timeZone": "Indian/Christmas",
         "includeInAvailability": "attending",
         "defaultAlertsWithTime": {
-            "0": {
+            "t0": {
                 "@type": "Alert",
                 "action": "display",
                 "trigger": {
@@ -165,7 +166,7 @@ pub async fn test(test: &TestServer) {
                     "offset": "PT15M"
                 }
             },
-            "1": {
+            "t1": {
                 "@type": "Alert",
                 "action": "email",
                 "trigger": {
@@ -176,7 +177,7 @@ pub async fn test(test: &TestServer) {
             }
         },
         "defaultAlertsWithoutTime": {
-            "0": {
+            "d0": {
                 "@type": "Alert",
                 "action": "display",
                 "trigger": {
@@ -185,7 +186,7 @@ pub async fn test(test: &TestServer) {
                     "offset": "P1D"
                 }
             },
-            "1": {
+            "d1": {
                 "@type": "Alert",
                 "action": "email",
                 "trigger": {
@@ -214,7 +215,7 @@ pub async fn test(test: &TestServer) {
                     "color": null,
                     "includeInAvailability": "none",
                     "defaultAlertsWithTime": {
-                        "0": {
+                        "t0": {
                             "action": "email",
                             "trigger": {
                                 "relativeTo": "start",
@@ -222,15 +223,15 @@ pub async fn test(test: &TestServer) {
                             }
                         }
                     },
-                    "defaultAlertsWithoutTime/0": {
+                    "defaultAlertsWithoutTime/d0": {
                         "action": "email",
                         "trigger": {
                             "relativeTo": "start",
                             "offset": "P3D"
                         }
                     },
-                    "defaultAlertsWithoutTime/1": null,
-                    "defaultAlertsWithoutTime/2": {
+                    "defaultAlertsWithoutTime/d1": null,
+                    "defaultAlertsWithoutTime/d2": {
                         "action": "display",
                         "trigger": {
                             "relativeTo": "end",
@@ -277,7 +278,7 @@ pub async fn test(test: &TestServer) {
         "isVisible": true,
         "includeInAvailability": "none",
         "defaultAlertsWithTime": {
-            "0": {
+            "t0": {
                 "@type": "Alert",
                 "action": "email",
                 "trigger": {
@@ -288,7 +289,7 @@ pub async fn test(test: &TestServer) {
             }
         },
         "defaultAlertsWithoutTime": {
-            "0": {
+            "d0": {
                 "@type": "Alert",
                 "action": "email",
                 "trigger": {
@@ -297,7 +298,7 @@ pub async fn test(test: &TestServer) {
                     "offset": "P3D"
                 }
             },
-            "2": {
+            "d2": {
                 "@type": "Alert",
                 "action": "display",
                 "trigger": {

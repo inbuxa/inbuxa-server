@@ -17,6 +17,7 @@ use registry::{
         prelude::{ObjectInner, ObjectType},
         structs::{DataRetention, Metric, MetricCount, MetricSum},
     },
+    types::datetime::UTCDateTime,
 };
 use std::{future::Future, sync::Mutex, time::Duration};
 use store::{
@@ -42,21 +43,22 @@ pub trait MetricsStore: Sync + Send {
 impl MetricsStore for Store {
     async fn write_metrics(&self, samples: Vec<Metric>, timestamp: u64) -> trc::Result<()> {
         let mut batch = BatchBuilder::new();
-        for sample in samples {
+        for mut sample in samples {
             let Some(id) = SnowflakeIdGenerator::global_id_from_timestamp(timestamp) else {
                 continue;
             };
+            stamp(&mut sample, id);
             batch.set(
                 ValueClass::Telemetry(TelemetryClass::Metric(id)),
-                ObjectInner::Metric(sample).to_pickled_vec(),
+                ObjectInner::Metric(Box::new(sample)).to_pickled_vec(),
             );
             if batch.is_large_batch() {
-                self.write(batch.build_all()).await?;
+                self.write_batch(&mut batch).await?;
                 batch = BatchBuilder::new();
             }
         }
         if !batch.is_empty() {
-            self.write(batch.build_all()).await?;
+            self.write_batch(&mut batch).await?;
         }
         Ok(())
     }
@@ -74,13 +76,29 @@ impl MetricsStore for Store {
     }
 }
 
+/// 1.0 keeps the node and time on the sample too; both come from its id.
+fn stamp(sample: &mut Metric, id: u64) {
+    let node = SnowflakeIdGenerator::to_node_id(id);
+    let time = UTCDateTime::from_timestamp(SnowflakeIdGenerator::to_timestamp(id) as i64);
+    match sample {
+        Metric::Counter(m) | Metric::Gauge(m) => {
+            m.node_id = node;
+            m.timestamp = time;
+        }
+        Metric::Histogram(m) => {
+            m.node_id = node;
+            m.timestamp = time;
+        }
+    }
+}
+
 /// Decodes a stored sample. Records in any other encoding (INBUXA's history
 /// from before the fork) read as `None` and are skipped.
 pub fn decode_metric(bytes: &[u8]) -> Option<Metric> {
     PickledStream::new(bytes)
         .and_then(|mut stream| ObjectInner::unpickle(ObjectType::Metric, &mut stream))
         .and_then(|inner| match inner {
-            ObjectInner::Metric(metric) => Some(metric),
+            ObjectInner::Metric(metric) => Some(*metric),
             _ => None,
         })
 }
@@ -139,12 +157,16 @@ pub fn sample(calculates: bool) -> Vec<Metric> {
             continue;
         };
         let total = counter.value();
-        let previous = last.insert(metric, (total, 0)).map_or(0, |(count, _)| count);
+        let previous = last
+            .insert(metric, (total, 0))
+            .map_or(0, |(count, _)| count);
         let increase = total.saturating_sub(previous);
         if increase > 0 {
             samples.push(Metric::Counter(MetricCount {
                 count: increase,
                 metric,
+                node_id: 0,
+                timestamp: UTCDateTime::from_timestamp(0),
             }));
         }
     }
@@ -157,6 +179,8 @@ pub fn sample(calculates: bool) -> Vec<Metric> {
         samples.push(Metric::Gauge(MetricCount {
             count: gauge.get(),
             metric: gauge.id(),
+            node_id: 0,
+            timestamp: UTCDateTime::from_timestamp(0),
         }));
     }
 
@@ -169,6 +193,8 @@ pub fn sample(calculates: bool) -> Vec<Metric> {
                 count: current.0,
                 sum: current.1,
                 metric,
+                node_id: 0,
+                timestamp: UTCDateTime::from_timestamp(0),
             }));
         }
     }
@@ -259,7 +285,7 @@ impl Server {
 
     /// Test data for the shared metrics suite: 90 days of hourly ticks, a
     /// counter, a gauge and a histogram each.
-    #[cfg(feature = "test_mode")]
+    #[cfg(inbuxa_tests)]
     pub async fn insert_test_metrics(&self) {
         let now = now();
         for hour in (0..90 * 24u64).rev() {
@@ -267,15 +293,21 @@ impl Server {
                 Metric::Counter(MetricCount {
                     count: 1 + hour % 7,
                     metric: MetricType::AuthSuccess,
+                    node_id: 0,
+                    timestamp: UTCDateTime::from_timestamp(0),
                 }),
                 Metric::Gauge(MetricCount {
                     count: 20 + hour % 11,
                     metric: MetricType::QueueCount,
+                    node_id: 0,
+                    timestamp: UTCDateTime::from_timestamp(0),
                 }),
                 Metric::Histogram(MetricSum {
                     count: 100 + hour,
                     sum: 1000 + hour * 10,
                     metric: MetricType::DeliveryTotalTime,
+                    node_id: 0,
+                    timestamp: UTCDateTime::from_timestamp(0),
                 }),
             ];
             self.metrics_store()

@@ -45,7 +45,7 @@ fn account_key(account_id: u32) -> ValueClass {
     let mut key = b"Rt".to_vec();
     key.extend_from_slice(&account_id.to_be_bytes());
     ValueClass::Any(AnyClass {
-        subspace: store::SUBSPACE_PROPERTY,
+        subspace: store::Subspace::Property,
         key,
     })
 }
@@ -108,15 +108,10 @@ pub async fn replica_cluster_tests() {
         .with_collection(Collection::Email)
         .log_container_insert(SyncCollection::Email)
         .set(account_key(account_id), value.serialize());
-    node_a
-        .server
-        .store()
-        .write(batch.build_all())
-        .await
-        .unwrap();
+    node_a.server.store().write_batch(&mut batch).await.unwrap();
 
     // Node B reads it straight away, in a scope that may use the replica
-    let read = replica_read([(account_id, 0)], async {
+    let read = replica_read([account_id], async {
         node_b
             .get_value::<u64>(ValueKey::from(account_key(account_id)))
             .await

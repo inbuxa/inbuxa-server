@@ -42,7 +42,7 @@ pub async fn test(test: &TestServer, scim: &ScimTest) {
     let admin = test.account("admin");
     let closed_id = admin
         .registry_create_object(Domain {
-            is_enabled: true,
+            enable: true,
             name: CLOSED.to_string(),
             certificate_management: CertificateManagement::Manual,
             dns_management: DnsManagement::Manual,
@@ -1405,7 +1405,7 @@ async fn tenants(test: &TestServer, scim: &ScimTest) {
         let domain_name = format!("{name}.example.com");
         let domain = admin
             .registry_create_object(Domain {
-                is_enabled: true,
+                enable: true,
                 name: domain_name.clone(),
                 certificate_management: CertificateManagement::Manual,
                 dns_management: DnsManagement::Manual,

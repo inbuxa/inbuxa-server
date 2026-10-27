@@ -4,12 +4,9 @@
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
  */
 
-use base64::{
-    Engine, alphabet,
-    engine::{DecodePaddingMode, GeneralPurpose, GeneralPurposeConfig},
-};
-use common::{Server, auth::AccessToken, ipc::PushEvent, network::is_global_ip};
+use common::{Server, auth::AccessToken, ipc::PushEvent};
 use email::push::{EmailPush, Keys, PushSubscription, PushSubscriptions, Urgency};
+use encodify::base64::{Base64, Padding, URL_SAFE};
 use jmap_proto::{
     error::set::{SetError, SetErrorType},
     method::{
@@ -29,25 +26,23 @@ use jmap_proto::{
 use jmap_tools::{Key, Map, Property, Value};
 use rand::distr::Alphanumeric;
 use registry::schema::enums::StorageQuota;
-use reqwest::Url;
 use std::future::Future;
-use std::net::IpAddr;
 use std::str::FromStr;
 use store::{
     Serialize, ValueKey,
     rand::{RngExt, rng},
-    write::{AlignedBytes, Archive, Archiver, BatchBuilder, now},
+    write::{Archive, ArchiveBytes, Archiver, BatchBuilder, now},
 };
 use trc::{AddContext, ServerEvent};
 use types::{collection::Collection, field::PrincipalField, id::Id};
-use utils::map::bitmap::Bitmap;
+use utils::{
+    map::bitmap::Bitmap,
+    outbound::{OutboundError, OutboundPolicy},
+};
 
 const EXPIRES_MAX: i64 = 7 * 24 * 3600; // 7 days
 const VERIFICATION_CODE_LEN: usize = 32;
-const URL_SAFE_INDIFFERENT: GeneralPurpose = GeneralPurpose::new(
-    &alphabet::URL_SAFE,
-    GeneralPurposeConfig::new().with_decode_padding_mode(DecodePaddingMode::Indifferent),
-);
+const URL_SAFE_INDIFFERENT: Base64 = URL_SAFE.with_padding(Padding::Optional);
 
 pub trait PushSubscriptionSet: Sync + Send {
     fn push_subscription_set(
@@ -67,7 +62,7 @@ impl PushSubscriptionSet for Server {
         let account_id = access_token.account_id();
         let subscriptions_archive = self
             .store()
-            .get_value::<Archive<AlignedBytes>>(ValueKey::property(
+            .get_value::<Archive<ArchiveBytes>>(ValueKey::property(
                 account_id,
                 Collection::Principal,
                 0,
@@ -122,6 +117,8 @@ impl PushSubscriptionSet for Server {
                     continue 'create;
                 }
             }
+
+            access_token.restrict_data_types(&mut push.types);
 
             if push.device_client_id.is_empty() || push.url.is_empty() {
                 response.not_created.append(
@@ -277,7 +274,6 @@ impl PushSubscriptionSet for Server {
                 .inner
                 .ipc
                 .push_tx
-                .clone()
                 .send(PushEvent::PushServerUpdate {
                     account_id,
                     broadcast: true,
@@ -318,10 +314,10 @@ fn validate_push_value(
             push.device_client_id = value.into_owned();
         }
         (PushSubscriptionProperty::Url, Value::Str(value)) if is_create && value.len() < 512 => {
-            validate_push_url(value.as_ref()).map_err(|description| {
+            validate_push_url(value.as_ref()).map_err(|err| {
                 SetError::invalid_properties()
                     .with_property(property.clone())
-                    .with_description(description)
+                    .with_description(err.as_str())
             })?;
             push.url = value.into_owned();
         }
@@ -330,11 +326,11 @@ fn validate_push_value(
                 value
                     .get(&Key::Property(PushSubscriptionProperty::Auth))
                     .and_then(|v| v.as_str())
-                    .and_then(|v| URL_SAFE_INDIFFERENT.decode(v.as_ref()).ok()),
+                    .and_then(|v| URL_SAFE_INDIFFERENT.decode(v.as_bytes()).ok()),
                 value
                     .get(&Key::Property(PushSubscriptionProperty::P256dh))
                     .and_then(|v| v.as_str())
-                    .and_then(|v| URL_SAFE_INDIFFERENT.decode(v.as_ref()).ok()),
+                    .and_then(|v| URL_SAFE_INDIFFERENT.decode(v.as_bytes()).ok()),
             ) {
                 if p256::PublicKey::from_sec1_bytes(&p256dh).is_err() {
                     return Err(SetError::invalid_properties()
@@ -377,6 +373,10 @@ fn validate_push_value(
                         .with_description("Invalid data type."));
                 }
             }
+
+            if !is_create {
+                access_token.restrict_data_types(&mut push.types);
+            }
         }
         (PushSubscriptionProperty::VerificationCode, Value::Str(value)) if !is_create => {
             if push.verification_code == value {
@@ -392,6 +392,9 @@ fn validate_push_value(
         }
         (PushSubscriptionProperty::Types, Value::Null) => {
             push.types = Bitmap::all();
+            if !is_create {
+                access_token.restrict_data_types(&mut push.types);
+            }
         }
         (PushSubscriptionProperty::VerificationCode, Value::Null) => {}
         (PushSubscriptionProperty::EmailPush, Value::Null) => {
@@ -421,38 +424,8 @@ fn validate_push_value(
     Ok(())
 }
 
-fn validate_push_url(url: &str) -> Result<(), &'static str> {
-    let url = Url::parse(url).map_err(|_| "Invalid push subscription URL.")?;
-
-    if url.scheme() != "https" {
-        return Err("Push subscription URLs must use the https scheme.");
-    }
-
-    if !url.username().is_empty() || url.password().is_some() {
-        return Err("Push subscription URLs must not contain credentials.");
-    }
-
-    let Some(host) = url.host_str() else {
-        return Err("Push subscription URLs must contain a host.");
-    };
-
-    let host = host
-        .strip_prefix('[')
-        .and_then(|host| host.strip_suffix(']'))
-        .unwrap_or(host);
-
-    if let Ok(ip) = host.parse::<IpAddr>() {
-        #[cfg(feature = "test_mode")]
-        if ip.is_loopback() {
-            return Ok(());
-        }
-
-        if !is_global_ip(&ip) {
-            return Err("Push subscription URLs must not point to a local or reserved IP address.");
-        }
-    }
-
-    Ok(())
+fn validate_push_url(url: &str) -> Result<(), OutboundError> {
+    OutboundPolicy::PublicOnly.parse_url(url).map(|_| ())
 }
 
 fn parse_email_push(
@@ -520,12 +493,13 @@ fn parse_urgency(
     value
         .as_str()
         .and_then(|value| {
-            hashify::tiny_map!(value.as_bytes(),
+            hashify::map!(value.as_bytes(), Urgency,
                 "very-low" => Urgency::VeryLow,
                 "low" => Urgency::Low,
                 "normal" => Urgency::Normal,
                 "high" => Urgency::High,
             )
+            .copied()
         })
         .ok_or_else(|| email_push_error("Invalid urgency value."))
 }
@@ -536,61 +510,3 @@ fn email_push_error(description: &'static str) -> SetError<PushSubscriptionPrope
         .with_description(description)
 }
 
-#[cfg(test)]
-mod tests {
-    use super::validate_push_url;
-
-    #[test]
-    fn push_url_validation() {
-        for url in [
-            "https://push.example.org/subscription/123",
-            "https://push.example.org:8443/subscription/123",
-            "HTTPS://push.example.org/subscription/123",
-            "https://8.8.8.8/push",
-            "https://[2606:4700::1111]/push",
-            "https://[64:ff9b::808:808]/push",
-        ] {
-            assert!(validate_push_url(url).is_ok(), "expected {url} to be valid");
-        }
-
-        for url in [
-            "http://push.example.org/push",
-            "ftp://push.example.org/push",
-            "https://user:pass@push.example.org/push",
-            "not a url",
-            "https://",
-            "https://10.0.0.1/push",
-            "https://192.168.1.1/push",
-            "https://169.254.169.254/latest/meta-data/",
-            "https://100.100.100.200/push",
-            "https://[fd00::1]/push",
-            "https://[fe80::1]/push",
-            "https://[::ffff:127.0.0.1]/push",
-            "https://[64:ff9b::7f00:1]/push",
-        ] {
-            assert!(
-                validate_push_url(url).is_err(),
-                "expected {url} to be rejected"
-            );
-        }
-
-        for url in [
-            "https://127.0.0.1/push",
-            "https://0177.0.0.1/push",
-            "https://2130706433/push",
-            "https://0x7f000001/push",
-            "https://[::1]/push",
-        ] {
-            let result = validate_push_url(url);
-
-            if cfg!(feature = "test_mode") {
-                assert!(
-                    result.is_ok(),
-                    "expected {url} to be allowed under test_mode"
-                );
-            } else {
-                assert!(result.is_err(), "expected {url} to be rejected");
-            }
-        }
-    }
-}

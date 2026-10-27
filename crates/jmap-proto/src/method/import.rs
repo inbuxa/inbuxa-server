@@ -16,7 +16,10 @@ use crate::{
         reference::{MaybeIdReference, MaybeResultReference, ResultReference},
     },
     response::Response,
-    types::{date::UTCDate, state::State},
+    types::{
+        date::UTCDate,
+        state::{ExpectedState, State},
+    },
 };
 use jmap_tools::{Key, Value};
 use serde::{Deserialize, Deserializer};
@@ -69,7 +72,7 @@ impl<'de> DeserializeArguments<'de> for ImportEmailRequest {
                 self.account_id = crate::request::deserialize_account_id(map)?;
             },
             b"ifInState" => {
-                self.if_in_state = map.next_value()?;
+                self.if_in_state = map.next_value::<ExpectedState>()?.0;
             },
             b"emails" => {
                 self.emails = map.next_value()?;

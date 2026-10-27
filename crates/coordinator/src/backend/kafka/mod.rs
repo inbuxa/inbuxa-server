@@ -25,30 +25,38 @@ pub struct KafkaPubSub {
 }
 
 impl KafkaPubSub {
-    pub async fn open(config: KafkaCoordinator) -> Result<Coordinator, String> {
-        if config.brokers.is_empty() {
-            return Err("No Kafka brokers specified".to_string());
+    pub async fn open(config: KafkaCoordinator, node_id: u16) -> Result<Coordinator, String> {
+        if config.hosts.is_empty() {
+            return Err("No Kafka hosts specified".to_string());
         }
 
-        let brokers = config.brokers.into_inner().join(",");
-        let mut consumer_builder = ClientConfig::new();
+        let mut client_config = ClientConfig::new();
+        client_config.set("bootstrap.servers", config.hosts.into_inner().join(","));
+        if config.use_tls {
+            client_config.set("security.protocol", "ssl");
+            if config.allow_invalid_certs {
+                client_config.set("enable.ssl.certificate.verification", "false");
+            }
+        }
 
+        let mut consumer_builder = client_config.clone();
         consumer_builder
-            .set("group.id", config.group_id)
-            .set("bootstrap.servers", &brokers)
+            .set("group.id", format!("{}-{node_id}", config.group_id))
+            .set("auto.offset.reset", "latest")
             .set("enable.partition.eof", "false")
             .set(
                 "session.timeout.ms",
-                config.timeout_session.as_millis().to_string(),
+                config.session_timeout.as_millis().to_string(),
             )
-            .set("enable.auto.commit", "true");
+            .set("enable.auto.commit", "true")
+            .set("auto.commit.interval.ms", "100");
 
-        let producer = ClientConfig::new()
-            .set("bootstrap.servers", brokers)
+        let producer = client_config
             .set(
                 "message.timeout.ms",
-                config.timeout_message.as_millis().to_string(),
+                config.message_timeout.as_millis().to_string(),
             )
+            .set("linger.ms", "0")
             .create()
             .map_err(|err| format!("Failed to create Kafka producer: {}", err))?;
 
@@ -65,7 +73,7 @@ impl std::fmt::Debug for KafkaPubSub {
     }
 }
 
-pub(super) struct CustomContext;
+pub struct CustomContext;
 
 impl ClientContext for CustomContext {}
 
@@ -76,3 +84,4 @@ impl ConsumerContext for CustomContext {
 
     fn commit_callback(&self, _: KafkaResult<()>, _: &TopicPartitionList) {}
 }
+

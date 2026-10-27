@@ -58,13 +58,14 @@ impl Property for SharingPolicyProperty {
 
 impl SharingPolicyProperty {
     fn parse(value: &str) -> Option<Self> {
-        hashify::tiny_map!(value.as_bytes(),
-            b"id" => SharingPolicyProperty::Id,
-            b"tenantId" => SharingPolicyProperty::TenantId,
-            b"mailSharing" => SharingPolicyProperty::MailSharing,
-            b"addAccounts" => SharingPolicyProperty::AddAccounts,
-            b"changedAt" => SharingPolicyProperty::ChangedAt,
-            b"changedBy" => SharingPolicyProperty::ChangedBy,
+        hashify::fnc_map!(value.as_bytes(),
+            b"id" => Some(SharingPolicyProperty::Id),
+            b"tenantId" => Some(SharingPolicyProperty::TenantId),
+            b"mailSharing" => Some(SharingPolicyProperty::MailSharing),
+            b"addAccounts" => Some(SharingPolicyProperty::AddAccounts),
+            b"changedAt" => Some(SharingPolicyProperty::ChangedAt),
+            b"changedBy" => Some(SharingPolicyProperty::ChangedBy),
+            _ => None,
         )
     }
 }

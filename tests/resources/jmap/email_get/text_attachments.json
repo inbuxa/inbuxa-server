@@ -3,6 +3,7 @@
     "a": true
   },
   "keywords": {
+    "$hasattachment": true,
     "tag": true
   },
   "size": 1198,
@@ -22,6 +23,7 @@
   "subject": "Project sync",
   "sentAt": "2025-04-15T09:12:33Z",
   "bodyStructure": {
+    "size": 1003,
     "headers": [
       {
         "name": "From",

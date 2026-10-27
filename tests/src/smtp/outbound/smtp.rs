@@ -2,6 +2,8 @@
  * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
+ *
+ * Modified by Coffey Labs in 2026 for INBUXA.
  */
 
 use crate::{
@@ -12,7 +14,7 @@ use crate::{
     utils::{dns::DnsCache, server::TestServerBuilder},
 };
 use common::{config::smtp::queue::QueueName, ipc::QueueEvent};
-use mail_auth::{DnssecStatus, MX};
+use mail_auth::{DnssecStatus, Mx};
 use registry::{
     schema::{
         enums::NetworkListenerProtocol,
@@ -216,7 +218,7 @@ async fn smtp_delivery() {
     for domain in ["foobar.org", "foobar.net", "foobar.com"] {
         local.server.mx_add(
             domain,
-            vec![MX {
+            vec![Mx {
                 exchanges: vec![
                     format!("mx1.{domain}").into(),
                     format!("mx2.{domain}").into(),
@@ -270,7 +272,7 @@ async fn smtp_delivery() {
     let mut rcpt_retries = vec![0; num_recipients];
     loop {
         match local.try_read_event().await {
-            Some(QueueEvent::Refresh | QueueEvent::WorkerDone { .. }) => {}
+            Some(QueueEvent::Refresh(_) | QueueEvent::WorkerDone { .. }) => {}
             Some(QueueEvent::Paused(_)) | Some(QueueEvent::ReloadSettings) => unreachable!(),
             None | Some(QueueEvent::Stop) => {
                 break;
@@ -292,6 +294,7 @@ async fn smtp_delivery() {
                 .server
                 .read_message(event.queue_id, QueueName::default())
                 .await
+                .unwrap()
                 .unwrap();
             if message.message.return_path.is_empty() {
                 message

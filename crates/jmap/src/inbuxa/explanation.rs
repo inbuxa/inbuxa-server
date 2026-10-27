@@ -15,7 +15,7 @@ use common::{
     Server,
     auth::AccessToken,
     config::mailstore::spamfilter::SpamFilterAction,
-    enterprise::llm::{Call, Explain, Failure},
+    enterprise::llm::{AiModelExt, Call, Explain, Failure},
 };
 use inbuxa_features::ai::{
     explain::{
@@ -35,7 +35,7 @@ use jmap_proto::{
     request::IntoValid,
 };
 use jmap_tools::{Key, Map, Value};
-use mail_auth::flate2::read::GzDecoder;
+use flate2::read::GzDecoder;
 use registry::{
     jmap::IntoValue,
     schema::{
@@ -295,7 +295,7 @@ pub async fn answer(
     }
 
     // EX-24, EX-25: the same question, answered before on this node
-    let key = memory::key(kind, &facts, &format!("{}@{}", model.name, model_id));
+    let key = memory::key(kind, &facts, &format!("{}@{}", model.name(), model_id));
     if let Some(remembered) = Memory::global().get(key) {
         return Ok(Answer {
             text: remembered.text,
@@ -319,10 +319,10 @@ pub async fn answer(
             account_id: Some(access_token.account_id()),
             system: Some(&system),
             user: &user,
-            temperature: model.temperature.into_inner(),
+            temperature: model.temperature(),
             max_tokens: explain::MAX_TOKENS,
             // EX-13
-            timeout: model.timeout.into_inner().min(limits.explain_ceiling.into_inner()),
+            timeout: model.timeout().min(limits.explain_ceiling.into_inner()),
             explain: Some(Explain {
                 calls_per_hour: limits.explain_calls_per_hour.min(u32::MAX as u64) as u32,
                 subject: subject.type_name(),
@@ -353,7 +353,7 @@ pub async fn answer(
         key,
         Remembered {
             text: text.clone(),
-            model: model.name.clone(),
+            model: model.name().to_string(),
             node: node.clone(),
             answered_at: now(),
             grounded: facts.grounded.clone(),
@@ -361,7 +361,7 @@ pub async fn answer(
     );
     Ok(Answer {
         text,
-        model: model.name.clone(),
+        model: model.name().to_string(),
         node,
         elapsed_ms: elapsed.as_millis() as u64,
         grounded: facts.grounded,
@@ -943,7 +943,7 @@ mod tests {
                                 &model,
                                 Some(&system),
                                 &user,
-                                0.2,
+                                Some(0.2),
                                 explain::MAX_TOKENS,
                                 false,
                             );
@@ -996,9 +996,9 @@ mod tests {
             "promptVersion": prompts::PROMPT_VERSION,
             "answers": sorted.into_iter().map(|(k, v)| (k, serde_json::Value::String(v))).collect::<serde_json::Map<_, _>>(),
         });
-        let mut gz = mail_auth::flate2::write::GzEncoder::new(
+        let mut gz = flate2::write::GzEncoder::new(
             std::fs::File::create(path).unwrap(),
-            mail_auth::flate2::Compression::best(),
+            flate2::Compression::best(),
         );
         gz.write_all(serde_json::to_string_pretty(&json).unwrap().as_bytes())
             .unwrap();

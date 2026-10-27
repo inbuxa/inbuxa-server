@@ -2,6 +2,8 @@
  * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
+ *
+ * Modified by Coffey Labs in 2026 for INBUXA.
  */
 
 use crate::{
@@ -11,15 +13,13 @@ use crate::{
     },
     utils::{account::Account, dns::DnsCache, server::TestServerBuilder},
 };
-use mail_auth::{
-    common::{parse::TxtRecordParser, verify::DomainKey},
-    spf::Spf,
-};
+use mail_auth::{dkim::DomainKey, dns::TxtRecordParser, spf::SpfRecord};
 use registry::schema::{
     enums::{DkimCanonicalization, DkimRotationStage},
+    prelude::Property,
     structs::{
         CertificateManagement, Dkim1Signature, DkimManagement, DkimSignature, DnsManagement,
-        Domain, Expression, SecretText, SecretTextValue, SenderAuth,
+        Domain, Expression, MtaStageData, SecretText, SecretTextValue, SenderAuth,
     },
 };
 use std::time::{Duration, Instant};
@@ -73,16 +73,25 @@ async fn sign_and_seal() {
                 else_: "strict".into(),
                 ..Default::default()
             },
-            dkim_sign_domain: Expression {
-                else_: "'example.com'".into(),
-                ..Default::default()
-            },
             dkim_verify: Expression {
                 else_: "relaxed".into(),
                 ..Default::default()
             },
             dkim_strict: false,
         })
+        .await;
+    // inbuxa: 1.0 moved the signing domain to the DATA stage
+    admin
+        .registry_update_setting(
+            MtaStageData {
+                dkim_sign_domain: Expression {
+                    else_: "'example.com'".into(),
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+            &[Property::DkimSignDomain],
+        )
         .await;
     admin.reload_settings().await;
     test.reload_core();
@@ -91,12 +100,12 @@ async fn sign_and_seal() {
     // Add SPF, DKIM and DMARC records
     test.server.txt_add(
         "mx.example.com",
-        Spf::parse(b"v=spf1 ip4:10.0.0.1 ip4:10.0.0.2 -all").unwrap(),
+        SpfRecord::parse(b"v=spf1 ip4:10.0.0.1 ip4:10.0.0.2 -all").unwrap(),
         Instant::now() + Duration::from_secs(5),
     );
     test.server.txt_add(
         "example.com",
-        Spf::parse(b"v=spf1 ip4:10.0.0.1 -all").unwrap(),
+        SpfRecord::parse(b"v=spf1 ip4:10.0.0.1 -all").unwrap(),
         Instant::now() + Duration::from_secs(5),
     );
     test.server.txt_add(

@@ -105,11 +105,12 @@ impl From<f64> for Float {
 
 impl Pickle for Float {
     fn pickle(&self, out: &mut Vec<u8>) {
-        self.0.to_bits().pickle(out);
+        out.extend_from_slice(&self.0.to_le_bytes());
     }
 
     fn unpickle(data: &mut PickledStream<'_>) -> Option<Self> {
-        u64::unpickle(data).map(|bits| Float(f64::from_bits(bits)))
+        data.read_array::<8>()
+            .map(|bytes| Float(f64::from_le_bytes(bytes)))
     }
 }
 

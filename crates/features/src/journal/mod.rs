@@ -305,7 +305,7 @@ pub async fn create(data: &Store, journal: &Journal) -> trc::Result<u32> {
         let mut batch = BatchBuilder::new();
         batch.assert_value(class(id), AssertValue::None);
         batch.set(class(id), Json(&stored).serialize()?);
-        match data.write(batch.build_all()).await {
+        match data.write_batch(&mut batch).await {
             Ok(_) => {
                 invalidate();
                 return Ok(id);
@@ -325,7 +325,7 @@ pub async fn create(data: &Store, journal: &Journal) -> trc::Result<u32> {
 pub async fn update(data: &Store, journal: &Journal) -> trc::Result<()> {
     let mut batch = BatchBuilder::new();
     batch.set(class(journal.id), Json(journal).serialize()?);
-    data.write(batch.build_all())
+    data.write_batch(&mut batch)
         .await
         .caused_by(trc::location!())?;
     invalidate();
@@ -336,7 +336,7 @@ pub async fn update(data: &Store, journal: &Journal) -> trc::Result<()> {
 pub async fn delete(data: &Store, id: u32) -> trc::Result<()> {
     let mut batch = BatchBuilder::new();
     batch.clear(class(id));
-    data.write(batch.build_all())
+    data.write_batch(&mut batch)
         .await
         .caused_by(trc::location!())?;
     invalidate();

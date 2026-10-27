@@ -299,7 +299,7 @@ pub async fn append(data: &Store, node: u64, entry: &Entry) -> trc::Result<Entry
                 vec![],
             )
             .set(BlobOp::Commit { hash: blob.clone() }, vec![]);
-        match data.write(batch.build_all()).await {
+        match data.write_batch(&mut batch).await {
             Ok(_) => return Ok(EntryId { node, seq }),
             Err(err)
                 if attempt < APPEND_ATTEMPTS
@@ -540,7 +540,7 @@ pub async fn purge(
             purged.removed += 1;
         }
         if !batch.is_empty() {
-            data.write(batch.build_all())
+            data.write_batch(&mut batch)
                 .await
                 .caused_by(trc::location!())?;
         }
@@ -599,7 +599,7 @@ async fn advance_floor(data: &Store, node: u64) -> trc::Result<()> {
     // the next run clears, never a chain that looks broken
     let mut batch = BatchBuilder::new();
     batch.set(class(KIND_FLOOR, &[node]), Json(&next).serialize()?);
-    data.write(batch.build_all())
+    data.write_batch(&mut batch)
         .await
         .caused_by(trc::location!())?;
     for chunk in cleared.chunks(PURGE_BATCH) {
@@ -609,7 +609,7 @@ async fn advance_floor(data: &Store, node: u64) -> trc::Result<()> {
                 .clear(class(KIND_LINK, &[node, *seq]))
                 .clear(class(KIND_PURGED, &[node, *seq]));
         }
-        data.write(batch.build_all())
+        data.write_batch(&mut batch)
             .await
             .caused_by(trc::location!())?;
     }
@@ -777,7 +777,7 @@ mod tests {
             panic!()
         };
         assert_eq!(parse_key(&any.key, KIND_EXPIRY, 3), Some(vec![5, 3, 9]));
-        let mut with_subspace = vec![SUBSPACE_INBUXA];
+        let mut with_subspace = vec![SUBSPACE_INBUXA.byte()];
         with_subspace.extend_from_slice(&any.key);
         assert_eq!(
             parse_key(&with_subspace, KIND_EXPIRY, 3),

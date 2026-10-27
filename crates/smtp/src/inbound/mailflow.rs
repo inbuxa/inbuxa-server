@@ -26,7 +26,7 @@ use inbuxa_features::{
         rules::{Action as RuleAction, Kind},
     },
 };
-use mail_parser::{Message, MessageParser, MimeHeaders, PartType};
+use mail_parser::{MessageParser, MessageRef};
 use std::{borrow::Cow, time::SystemTime};
 
 /// How much text one message is read for; past it, the rest counts as
@@ -122,7 +122,7 @@ fn refusal(blocked: bool, rules: &[RuleRef]) -> DlpRefusal {
 }
 
 /// A message and the messages attached to it, one level down.
-fn collect<'x>(message: &'x Message<'x>, content: &mut Content<'x>, budget: &mut usize, depth: u8) {
+fn collect<'x>(message: MessageRef<'x>, content: &mut Content<'x>, budget: &mut usize, depth: u8) {
     let add = |text: Cow<'x, str>, content: &mut Content<'x>, budget: &mut usize| {
         if *budget == 0 {
             content.truncated = true;
@@ -143,19 +143,11 @@ fn collect<'x>(message: &'x Message<'x>, content: &mut Content<'x>, budget: &mut
     };
     // The text version of each body (an HTML-only one converted), not both
     // versions of the same alternative, so words aren't counted twice
-    for part in message.text_bodies() {
-        match &part.body {
-            PartType::Text(text) => add(Cow::Borrowed(text.as_ref()), content, budget),
-            PartType::Html(html) => add(
-                Cow::Owned(mail_parser::decoders::html::html_to_text(html)),
-                content,
-                budget,
-            ),
-            _ => {}
-        }
+    for text in message.text_bodies() {
+        add(text, content, budget);
     }
     for part in message.attachments() {
-        if let (Some(inner), true) = (part.message(), depth == 0) {
+        if let (Some(inner), true) = (part.nested(), depth == 0) {
             if let Some(subject) = inner.subject() {
                 add(Cow::Borrowed(subject), content, budget);
             }
@@ -169,11 +161,11 @@ fn collect<'x>(message: &'x Message<'x>, content: &mut Content<'x>, budget: &mut
                 None => ct.ctype().to_string(),
             })
             .unwrap_or_default();
-        let bytes = part.contents();
+        let bytes = part.decoded();
         let mut extracted = extract::extract(
             &content_type,
             part.attachment_name(),
-            bytes,
+            &bytes,
             &Limits::default(),
         );
         if let Extracted::Text(text) = &extracted {
@@ -250,9 +242,9 @@ impl<T: SessionStream> Session<T> {
                 content.headers = parsed
                     .headers()
                     .iter()
-                    .filter_map(|h| h.value.as_text().map(|v| (h.name.as_str(), v)))
+                    .filter_map(|h| h.value().as_text().map(|v| (h.raw_name(), v)))
                     .collect();
-                collect(parsed, &mut content, &mut budget, 0);
+                collect(parsed.root(), &mut content, &mut budget, 0);
             }
             // Nothing a rule could read: say so, rather than pass it
             None => content.truncated = true,

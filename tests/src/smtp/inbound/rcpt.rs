@@ -134,7 +134,7 @@ async fn rcpt() {
 
     // Relaying is disabled for 10.0.0.1
     session.mail_from("john@example.net", "250").await;
-    session.rcpt_to("external@domain.com", "550 5.1.2").await;
+    session.rcpt_to("external@domain.com", "550 5.7.1").await;
 
     // DSN is disabled for 10.0.0.1
     session
@@ -144,7 +144,7 @@ async fn rcpt() {
     session.response().assert_code("501 5.5.4");
 
     // Send to non-existing user
-    session.rcpt_to("tom@foobar.org", "550 5.1.2").await;
+    session.rcpt_to("tom@foobar.org", "550 5.1.1").await;
 
     // Exceeding max number of errors
     session
@@ -213,8 +213,8 @@ async fn rcpt() {
     session.eval_session_params().await;
     session.ehlo("mx1.foobar.org").await;
     session.mail_from("idn2@example.net", "250").await;
-    session.rcpt_to("nobody@straß6.de", "550 5.1.2").await;
+    session.rcpt_to("nobody@straß6.de", "550 5.1.1").await;
     session
-        .rcpt_to("nobody@xn--stra6-oqa.de", "550 5.1.2")
+        .rcpt_to("nobody@xn--stra6-oqa.de", "550 5.1.1")
         .await;
 }

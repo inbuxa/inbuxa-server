@@ -5,8 +5,13 @@
  */
 
 use crate::scheduling::{
-    ItipError, ItipMessage, attendee::attendee_handle_update, event_cancel::itip_cancel,
-    itip::itip_finalize, organizer::organizer_handle_update, snapshot::itip_snapshot,
+    ItipError, ItipMessage,
+    attendee::{OrganizerSequences, attendee_handle_update},
+    event_cancel::itip_cancel,
+    itip::itip_finalize,
+    organizer::organizer_handle_update,
+    recipient::{RecipientPolicy, itip_messages_per_recipient},
+    snapshot::itip_snapshot,
 };
 use calcard::icalendar::ICalendar;
 
@@ -14,6 +19,7 @@ pub fn itip_update(
     ical: &mut ICalendar,
     old_ical: &ICalendar,
     account_emails: &[String],
+    policy: RecipientPolicy,
 ) -> Result<Vec<ItipMessage<ICalendar>>, ItipError> {
     let old_itip = itip_snapshot(old_ical, account_emails, false)?;
     match itip_snapshot(ical, account_emails, false) {
@@ -24,8 +30,17 @@ pub fn itip_update(
                 Err(ItipError::OrganizerMismatch)
             } else if old_itip.organizer.email.is_local {
                 organizer_handle_update(old_ical, ical, old_itip, new_itip, &mut sequences)
+                    .and_then(|messages| itip_messages_per_recipient(messages, policy))
             } else {
-                attendee_handle_update(ical, old_itip, new_itip)
+                let organizer_sequences = OrganizerSequences::of(&old_itip, &new_itip);
+                if organizer_sequences.is_empty() {
+                    attendee_handle_update(ical, old_itip, new_itip)
+                } else {
+                    drop(new_itip);
+                    organizer_sequences.restore(ical);
+                    itip_snapshot(ical, account_emails, false)
+                        .and_then(|new_itip| attendee_handle_update(ical, old_itip, new_itip))
+                }
             }
             .inspect(|_| {
                 itip_finalize(ical, &sequences);
@@ -39,7 +54,7 @@ pub fn itip_update(
                 | ItipError::OtherSchedulingAgent => {
                     if old_itip.organizer.email.is_local {
                         // RFC 6638 does not support replacing the organizer, so we cancel the event
-                        itip_cancel(old_ical, account_emails, false).map(|message| vec![message])
+                        itip_cancel(old_ical, account_emails, false, policy)
                     } else {
                         Err(ItipError::CannotModifyAddress)
                     }

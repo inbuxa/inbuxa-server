@@ -34,16 +34,18 @@ pub trait EnumImpl: Sized + Debug + PartialEq + Eq {
     fn to_id(&self) -> u16;
 }
 
-pub trait ObjectImpl:
-    Pickle + Serialize + DeserializeOwned + Default + Clone + Send + Sync
-{
+pub trait ObjectImpl: Serialize + DeserializeOwned + Default + Clone + Send + Sync {
     const FLAGS: u64;
     const OBJECT: ObjectType;
     const VERSION: u8;
 
     fn validate(&self, errors: &mut Vec<ValidationError>) -> bool;
+    fn validate_inline_secrets(&self, _errors: &mut Vec<ValidationError>) {}
     fn index<'x>(&'x self, builder: &mut IndexBuilder<'x>);
-    fn to_pickled_vec(&self) -> Vec<u8> {
+    fn to_pickled_vec(&self) -> Vec<u8>
+    where
+        Self: Pickle,
+    {
         let mut out = Vec::with_capacity(256);
         out.push(Self::VERSION);
         self.pickle(&mut out);

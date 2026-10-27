@@ -212,8 +212,12 @@ pub async fn set(
                     }
                     Value::Str(s) if s.len() >= 32 => {
                         next.webmail_secret_hash = Some(
-                            hash_secret(PasswordHashAlgorithm::Argon2id, s.as_bytes().to_vec())
-                                .await?,
+                            hash_secret(
+                                &server.inner.data.password_verifier,
+                                PasswordHashAlgorithm::Argon2id,
+                                s.as_bytes().to_vec(),
+                            )
+                            .await?,
                         );
                         Ok(())
                     }

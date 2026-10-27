@@ -6,35 +6,62 @@
  * Modified by Coffey Labs in 2026 for INBUXA.
  */
 
-use crate::broadcast::{BROADCAST_TOPIC, BroadcastBatch};
+use crate::broadcast::{BROADCAST_TOPIC, BroadcastBatch, RETRY_INITIAL, RETRY_MAX};
 use common::{
-    BuildServer, Inner,
-    ipc::{BroadcastEvent, PushEvent, PushNotification, QueueEvent, RegistryChange},
+    BuildServer, IPC_CHANNEL_BUFFER, Inner,
+    ipc::{BroadcastEvent, PushEvent, PushNotification, QueueEvent, QueueRefresh, RegistryChange},
 };
+use compact_str::format_compact;
 use registry::{schema::prelude::ObjectType, types::EnumImpl};
-use std::{sync::Arc, time::Duration};
-use tokio::sync::watch;
+use std::{
+    sync::Arc,
+    time::{Duration, Instant},
+};
+use store::{
+    ahash::AHashSet,
+    rand::{self, RngExt},
+    write::TaskTypes,
+};
+use tokio::sync::{mpsc, watch};
 use trc::{ClusterEvent, ServerEvent};
+use types::collection::{Collection, SyncCollection};
+
+const STABLE_SUBSCRIPTION: Duration = Duration::from_secs(1);
+
+struct BroadcastReceiver {
+    inner: Arc<Inner>,
+    node_id: u16,
+    registry_tx: mpsc::Sender<RegistryChange>,
+}
 
 pub fn spawn_broadcast_subscriber(inner: Arc<Inner>, mut shutdown_rx: watch::Receiver<bool>) {
-    let this_node_id = {
-        let _core = inner.shared_core.load();
-        if _core.storage.coordinator.is_none() || _core.storage.registry.is_recovery_mode() {
+    let node_id = {
+        let core = inner.shared_core.load();
+        if core.storage.coordinator.is_none() || core.storage.registry.is_recovery_mode() {
             return;
         }
-        _core.network.node_id as u16
+        core.network.node_id as u16
     };
 
     tokio::spawn(async move {
-        let mut retry_count: u32 = 0;
-        // inbuxa: whether events may have been published while this node
-        // had no subscription
-        let mut lost_events = false;
+        let receiver = BroadcastReceiver {
+            registry_tx: spawn_registry_worker(inner.clone()),
+            inner,
+            node_id,
+        };
+        let mut retry_count = 0;
+        let mut is_resubscribe = false;
 
         trc::event!(Cluster(ClusterEvent::SubscriberStart));
 
         'subscribe: loop {
-            let coordinator = inner.shared_core.load().storage.coordinator.clone();
+            let coordinator = receiver
+                .inner
+                .shared_core
+                .load()
+                .storage
+                .coordinator
+                .clone();
             if coordinator.is_none() {
                 trc::event!(
                     Cluster(ClusterEvent::SubscriberError),
@@ -43,13 +70,54 @@ pub fn spawn_broadcast_subscriber(inner: Arc<Inner>, mut shutdown_rx: watch::Rec
                 break;
             }
 
-            let mut stream = match coordinator.subscribe(BROADCAST_TOPIC).await {
-                Ok(stream) => {
-                    retry_count = 0;
-                    if std::mem::take(&mut lost_events) {
-                        recover_missed_events(&inner, "Subscribed again").await;
+            match coordinator.subscribe(BROADCAST_TOPIC).await {
+                Ok(mut subscription) => {
+                    if std::mem::replace(&mut is_resubscribe, true) {
+                        receiver.catch_up("Subscribed again").await;
                     }
-                    stream
+                    // inbuxa: the client subscribes again by itself after a
+                    // reconnection, but core NATS delivers at most once, so what the
+                    // cluster published meanwhile never arrives
+                    let mut reconnects = coordinator.reconnects();
+                    if let Some(reconnects) = &mut reconnects {
+                        reconnects.mark_unchanged();
+                    }
+                    let subscribed_at = Instant::now();
+                    let mut has_received = false;
+                    let mut stream = subscription.stream();
+                    loop {
+                        tokio::select! {
+                            changed = async {
+                                match &mut reconnects {
+                                    Some(reconnects) => reconnects.changed().await.is_ok(),
+                                    None => std::future::pending().await,
+                                }
+                            } => {
+                                if changed {
+                                    receiver.catch_up("Reconnected to the coordinator").await;
+                                } else {
+                                    reconnects = None;
+                                }
+                            },
+                            message = stream.next() => match message {
+                                Some(message) => {
+                                    has_received = true;
+                                    receiver.receive(message.payload()).await;
+                                }
+                                None => {
+                                    trc::event!(Cluster(ClusterEvent::SubscriberDisconnected));
+                                    break;
+                                }
+                            },
+                            _ = shutdown_rx.changed() => {
+                                break 'subscribe;
+                            }
+                        }
+                    }
+                    if has_received || subscribed_at.elapsed() >= STABLE_SUBSCRIPTION {
+                        retry_count = 0;
+                        continue;
+                    }
                 }
                 Err(err) => {
                     trc::event!(
@@ -57,218 +125,12 @@ pub fn spawn_broadcast_subscriber(inner: Arc<Inner>, mut shutdown_rx: watch::Rec
                         CausedBy = err,
                         Details = "Failed to subscribe to channel"
                     );
-
-                    match tokio::time::timeout(
-                        subscribe_retry_delay(retry_count),
-                        shutdown_rx.changed(),
-                    )
-                    .await
-                    {
-                        Ok(_) => {
-                            break;
-                        }
-                        Err(_) => {
-                            retry_count = retry_count.saturating_add(1);
-                            continue;
-                        }
-                    }
                 }
-            };
-
-            // inbuxa: the client subscribes again by itself after a
-            // reconnection, but core NATS delivers at most once, so what the
-            // cluster published meanwhile never arrives
-            let mut reconnects = coordinator.reconnects();
-            if let Some(reconnects) = &mut reconnects {
-                reconnects.mark_unchanged();
             }
 
-            loop {
-                tokio::select! {
-                    changed = async {
-                        match &mut reconnects {
-                            Some(reconnects) => reconnects.changed().await.is_ok(),
-                            None => std::future::pending().await,
-                        }
-                    } => {
-                        if changed {
-                            recover_missed_events(&inner, "Reconnected to the coordinator").await;
-                        } else {
-                            reconnects = None;
-                        }
-                    },
-                    message = stream.next() => {
-                        match message {
-                            Some(message) => {
-                                let mut batch = BroadcastBatch::new(message.payload().iter());
-                                let node_id = match batch.node_id() {
-                                    Some(node_id) => {
-                                        if node_id != this_node_id {
-                                            node_id
-                                        } else {
-                                            trc::event!(
-                                                Cluster(ClusterEvent::MessageSkipped),
-                                                Details = message.payload()
-                                            );
-                                            continue;
-                                        }
-                                    }
-                                    None => {
-                                        trc::event!(
-                                            Cluster(ClusterEvent::MessageInvalid),
-                                            Details = message.payload()
-                                        );
-                                        continue;
-                                    }
-                                };
-
-                                inner
-                                    .shared_core
-                                    .load()
-                                    .storage
-                                    .data
-                                    .invalidate_read_snapshot();
-
-                                loop {
-                                    match batch.next_event() {
-                                        Ok(Some(event)) => {
-                                            trc::event!(
-                                                Cluster(ClusterEvent::MessageReceived),
-                                                From = node_id,
-                                                To = this_node_id,
-                                                Details = log_event(&event),
-                                            );
-                                            match event {
-                                                BroadcastEvent::PushNotification(notification) => {
-                                                    // inbuxa: ST-7: another node's change raises this
-                                                    // node's high-water mark for the account
-                                                    match &notification {
-                                                        common::ipc::PushNotification::StateChange(change) => inner
-                                                            .build_server()
-                                                            .core
-                                                            .storage
-                                                            .data
-                                                            .note_change(change.account_id, change.change_id),
-                                                        common::ipc::PushNotification::EmailPush(push) => inner
-                                                            .build_server()
-                                                            .core
-                                                            .storage
-                                                            .data
-                                                            .note_change(push.account_id, push.change_id),
-                                                        _ => {}
-                                                    }
-                                                    if inner
-                                                        .ipc
-                                                        .push_tx
-                                                        .send(PushEvent::Publish {
-                                                            notification,
-                                                            broadcast: false,
-                                                        })
-                                                        .await
-                                                        .is_err()
-                                                    {
-                                                        trc::event!(
-                                                            Server(ServerEvent::ThreadError),
-                                                            Details = "Error sending push notification.",
-                                                            CausedBy = trc::location!()
-                                                        );
-                                                    }
-                                                }
-                                                BroadcastEvent::PushServerUpdate(account_id) => {
-                                                    if inner
-                                                        .ipc
-                                                        .push_tx
-                                                        .send(PushEvent::PushServerUpdate { account_id, broadcast: false })
-                                                        .await
-                                                        .is_err()
-                                                    {
-                                                        trc::event!(
-                                                            Server(ServerEvent::ThreadError),
-                                                            Details = "Error sending reload request.",
-                                                            CausedBy = trc::location!()
-                                                        );
-                                                    }
-                                                }
-                                                BroadcastEvent::CacheInvalidate(changes) => {
-                                                    inner.build_server().invalidate_local_caches(&changes).await;
-
-                                                }
-                                                BroadcastEvent::CacheInvalidateAll => {
-                                                    inner.build_server().invalidate_all_local_caches();
-                                                }
-                                                BroadcastEvent::CacheInvalidateNegative => {
-                                                    inner.build_server().invalidate_all_local_negative_caches();
-                                                }
-                                                BroadcastEvent::MtaQueueStatus { is_running } => {
-                                                    let _ = inner
-                                                            .ipc
-                                                            .queue_tx
-                                                            .send(QueueEvent::Paused(!is_running))
-                                                            .await;
-                                                }
-                                                // inbuxa: AL-3: sessions an account has
-                                                // open here end too
-                                                BroadcastEvent::EndSessions(account_id) => {
-                                                    let _ = inner
-                                                        .ipc
-                                                        .push_tx
-                                                        .send(PushEvent::Revoke { account_id })
-                                                        .await;
-                                                }
-                                                // inbuxa: DL-15: this node checks
-                                                // itself too
-                                                BroadcastEvent::DeliverabilityCheck => {
-                                                    crate::inbuxa_deliverability::CHECK_NOW
-                                                        .notify_one();
-                                                }
-                                                BroadcastEvent::QueueRefresh => {
-                                                    if inner.shared_core.load().network.roles.outbound_mta {
-                                                        let _ = inner
-                                                                .ipc
-                                                                .queue_tx
-                                                                .send(QueueEvent::Refresh)
-                                                                .await;
-                                                    }
-                                                }
-                                                BroadcastEvent::RegistryChange(change) => {
-                                                    match Box::pin(inner.build_server().reload_registry(change)).await {
-                                                        Ok(result) => {
-                                                            result.log();
-                                                        }
-                                                        Err(err) => {
-                                                            trc::error!(
-                                                                err.details("Failed to reload settings")
-                                                                    .caused_by(trc::location!())
-                                                            );
-                                                        }
-                                                    }
-                                                }
-                                            }
-                                        }
-                                        Ok(None) => break,
-                                        Err(_) => {
-                                            trc::event!(
-                                                Cluster(ClusterEvent::MessageInvalid),
-                                                Details = message.payload()
-                                            );
-                                            break;
-                                        }
-                                    }
-                                }
-                            }
-                            None => {
-                                trc::event!(
-                                    Cluster(ClusterEvent::SubscriberDisconnected),
-                                );
-                                lost_events = true;
-                                break;
-                            }
-                        }
-                    },
-                    _ = shutdown_rx.changed() => {
-                        break 'subscribe;
-                    }
-                };
+            match tokio::time::timeout(retry_delay(retry_count), shutdown_rx.changed()).await {
+                Ok(_) => break,
+                Err(_) => retry_count += 1,
             }
         }
 
@@ -276,40 +138,234 @@ pub fn spawn_broadcast_subscriber(inner: Arc<Inner>, mut shutdown_rx: watch::Rec
     });
 }
 
-/// inbuxa: after a gap in which cluster events may have been missed, drops
-/// every local cache that only those events keep fresh and rebuilds the
-/// settings, certificates and blocked addresses from the registry, as the
-/// missed events would have. The message caches check the change log on
-/// each use and need nothing.
-async fn recover_missed_events(inner: &Arc<Inner>, why: &str) {
-    let server = inner.build_server();
-    server.invalidate_all_local_caches();
-    for object in [
-        ObjectType::ClusterRole,
-        ObjectType::Certificate,
-        ObjectType::BlockedIp,
-    ] {
-        match Box::pin(server.reload_registry(RegistryChange::Reload(object))).await {
-            Ok(result) => result.log(),
-            Err(err) => {
-                trc::error!(
-                    err.details("Failed to reload settings after the coordinator came back")
-                        .caused_by(trc::location!())
-                );
+fn retry_delay(retry_count: u32) -> Duration {
+    (RETRY_INITIAL * 4 * (1 << retry_count.min(6)))
+        .min(RETRY_MAX)
+        .mul_f64(rand::rng().random_range(0.75..=1.0))
+}
+
+impl BroadcastReceiver {
+    async fn catch_up(&self, why: &str) {
+        let inner = &self.inner;
+        let server = inner.build_server();
+        server.invalidate_all_local_caches();
+        // inbuxa: rebuild the settings, certificates and blocked addresses
+        // from the registry, as the missed events would have
+        for object in [
+            ObjectType::ClusterRole,
+            ObjectType::Certificate,
+            ObjectType::BlockedIp,
+        ] {
+            match Box::pin(server.reload_registry(RegistryChange::Reload(object))).await {
+                Ok(result) => result.log(),
+                Err(err) => {
+                    trc::error!(
+                        err.details("Failed to reload settings after the coordinator came back")
+                            .caused_by(trc::location!())
+                    );
+                }
+            }
+        }
+        trc::event!(
+            Cluster(ClusterEvent::CoordinatorConnected),
+            Details = format!(
+                "{why}: events may have been missed; local caches dropped and settings reloaded"
+            ),
+        );
+        inner.ipc.task_tx.notify(TaskTypes::ALL);
+        inner.ipc.index_tx.notify_one();
+        if inner.shared_core.load().network.roles.outbound_mta {
+            let _ = inner
+                .ipc
+                .queue_tx
+                .send(QueueEvent::Refresh(QueueRefresh::All))
+                .await;
+        }
+    }
+
+    async fn receive(&self, payload: &[u8]) {
+        let mut batch = BroadcastBatch::new(payload);
+        let node_id = match (batch.node_id(), batch.read_version()) {
+            (Some(node_id), Some(read_version)) if node_id != self.node_id => {
+                let core = self.inner.shared_core.load();
+                match read_version {
+                    Some(version) => core.storage.data.advance_read_snapshot(version),
+                    None => core.storage.data.invalidate_read_snapshot(),
+                }
+                node_id
+            }
+            (Some(_), Some(_)) => {
+                trc::event!(Cluster(ClusterEvent::MessageSkipped), Contents = payload);
+                return;
+            }
+            _ => {
+                trc::event!(Cluster(ClusterEvent::MessageInvalid), Contents = payload);
+                return;
+            }
+        };
+
+        loop {
+            match batch.next_event() {
+                Ok(Some(event)) => {
+                    trc::event!(
+                        Cluster(ClusterEvent::MessageReceived),
+                        RemoteNodeId = node_id,
+                        NodeId = self.node_id,
+                        Contents = log_event(&event),
+                    );
+                    self.apply(event).await;
+                    tokio::task::consume_budget().await;
+                }
+                Ok(None) => break,
+                Err(_) => {
+                    trc::event!(Cluster(ClusterEvent::MessageInvalid), Contents = payload);
+                    break;
+                }
             }
         }
     }
-    trc::event!(
-        Cluster(ClusterEvent::CoordinatorConnected),
-        Details = format!(
-            "{why}: events may have been missed; local caches dropped and settings reloaded"
-        ),
-    );
+
+    async fn apply(&self, event: BroadcastEvent) {
+        let inner = &self.inner;
+        match event {
+            BroadcastEvent::PushNotification(notification) => {
+                // inbuxa: ST-7: another node's change raises this node's
+                // high-water mark for the account
+                match &notification {
+                    PushNotification::StateChange(change) => {
+                        let core = inner.shared_core.load();
+                        let mut groups = Vec::with_capacity(2);
+                        for data_type in change.types.into_iter() {
+                            if let Ok(collection) = Collection::try_from(data_type) {
+                                let group = collection.change_group();
+                                if !groups.contains(&group) {
+                                    groups.push(group);
+                                    core.storage.data.note_change(
+                                        change.account_id,
+                                        group,
+                                        change.change_id,
+                                    );
+                                }
+                            }
+                        }
+                    }
+                    PushNotification::EmailPush(push) => {
+                        inner.shared_core.load().storage.data.note_change(
+                            push.account_id,
+                            SyncCollection::Email.change_group(),
+                            push.change_id,
+                        )
+                    }
+                    _ => {}
+                }
+                inner.mark_caches_stale_for(&notification);
+                inner.publish_push_notification(notification).await;
+            }
+            BroadcastEvent::PushServerUpdate(account_id) => {
+                if inner
+                    .ipc
+                    .push_tx
+                    .send(PushEvent::PushServerUpdate {
+                        account_id,
+                        broadcast: false,
+                    })
+                    .await
+                    .is_err()
+                {
+                    trc::event!(
+                        Server(ServerEvent::ThreadError),
+                        Details = "Error sending reload request.",
+                        CausedBy = trc::location!()
+                    );
+                }
+            }
+            BroadcastEvent::CacheInvalidate(changes) => {
+                inner.build_server().invalidate_local_caches(&changes);
+            }
+            BroadcastEvent::CacheInvalidateAll => {
+                inner.build_server().invalidate_all_local_caches();
+            }
+            BroadcastEvent::CacheInvalidateNegative => {
+                inner.build_server().invalidate_all_local_negative_caches();
+            }
+            BroadcastEvent::MtaQueueStatus { is_running } => {
+                let _ = inner
+                    .ipc
+                    .queue_tx
+                    .send(QueueEvent::Paused(!is_running))
+                    .await;
+            }
+            BroadcastEvent::QueueRefresh(queues) => {
+                if inner.shared_core.load().network.roles.outbound_mta {
+                    let _ = inner
+                        .ipc
+                        .queue_tx
+                        .send(QueueEvent::Refresh(QueueRefresh::Queues(queues)))
+                        .await;
+                }
+            }
+            BroadcastEvent::TaskQueueRefresh(task_types) => {
+                inner.ipc.task_tx.notify(task_types);
+            }
+            BroadcastEvent::IndexQueueRefresh => {
+                inner.ipc.index_tx.notify_one();
+            }
+            // inbuxa: AL-3: sessions an account has open here end too
+            BroadcastEvent::EndSessions(account_id) => {
+                let _ = inner
+                    .ipc
+                    .push_tx
+                    .send(PushEvent::Revoke { account_id })
+                    .await;
+            }
+            // inbuxa: DL-15: this node checks itself too
+            BroadcastEvent::DeliverabilityCheck => {
+                crate::inbuxa_deliverability::CHECK_NOW.notify_one();
+            }
+            BroadcastEvent::RegistryChange(change) => {
+                if self.registry_tx.send(change).await.is_err() {
+                    trc::event!(
+                        Server(ServerEvent::ThreadError),
+                        Details = "Error sending registry change.",
+                        CausedBy = trc::location!()
+                    );
+                }
+            }
+        }
+    }
 }
 
-/// Delay before the next subscribe attempt: 1 s, 2 s, 4 s ... capped at 64 s.
-fn subscribe_retry_delay(retry_count: u32) -> Duration {
-    Duration::from_secs(1u64 << retry_count.min(6))
+fn spawn_registry_worker(inner: Arc<Inner>) -> mpsc::Sender<RegistryChange> {
+    let (registry_tx, mut registry_rx) = mpsc::channel::<RegistryChange>(IPC_CHANNEL_BUFFER);
+
+    tokio::spawn(async move {
+        let mut changes = Vec::new();
+        let mut applied = AHashSet::new();
+        while registry_rx
+            .recv_many(&mut changes, IPC_CHANNEL_BUFFER)
+            .await
+            > 0
+        {
+            for change in changes.drain(..) {
+                if applied.insert(change) {
+                    match inner.build_server().reload_registry(change).await {
+                        Ok(result) => {
+                            result.log();
+                        }
+                        Err(err) => {
+                            trc::error!(
+                                err.details("Failed to reload settings")
+                                    .caused_by(trc::location!())
+                            );
+                        }
+                    }
+                }
+            }
+            applied.clear();
+        }
+    });
+
+    registry_tx
 }
 
 fn log_event(event: &BroadcastEvent) -> trc::Value {
@@ -320,6 +376,13 @@ fn log_event(event: &BroadcastEvent) -> trc::Value {
                 state_change.account_id.into(),
                 state_change.change_id.into(),
                 (*state_change.types.as_ref()).into(),
+            ]),
+            PushNotification::ViewerStateChange(viewer_change) => trc::Value::Array(vec![
+                "ViewerStateChange".into(),
+                viewer_change.change.account_id.into(),
+                viewer_change.viewer_id.into(),
+                viewer_change.change.change_id.into(),
+                (*viewer_change.change.types.as_ref()).into(),
             ]),
             PushNotification::CalendarAlert(calendar_alert) => trc::Value::Array(vec![
                 "CalendarAlert".into(),
@@ -339,10 +402,6 @@ fn log_event(event: &BroadcastEvent) -> trc::Value {
         BroadcastEvent::PushServerUpdate(account_id) => {
             trc::Value::Array(vec!["PushServerUpdate".into(), (*account_id).into()])
         }
-        BroadcastEvent::EndSessions(account_id) => {
-            trc::Value::Array(vec!["EndSessions".into(), (*account_id).into()])
-        }
-        BroadcastEvent::DeliverabilityCheck => "DeliverabilityCheck".into(),
         BroadcastEvent::RegistryChange(change) => match change {
             RegistryChange::Insert(id) => trc::Value::Array(vec![
                 "RegistryInsert".into(),
@@ -362,7 +421,7 @@ fn log_event(event: &BroadcastEvent) -> trc::Value {
             let mut array = Vec::with_capacity(items.len() + 1);
             array.push("CacheInvalidation".into());
             for item in items {
-                array.push(format!("{:?}", item).into());
+                array.push(format_compact!("{:?}", item).into());
             }
             trc::Value::Array(array)
         }
@@ -375,22 +434,12 @@ fn log_event(event: &BroadcastEvent) -> trc::Value {
                 "MtaQueuePaused".into()
             }
         }
-        BroadcastEvent::QueueRefresh => "QueueRefresh".into(),
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::subscribe_retry_delay;
-    use std::time::Duration;
-
-    #[test]
-    fn subscribe_retry_backoff_grows_then_caps() {
-        let schedule: Vec<u64> = (0..10)
-            .map(|n| subscribe_retry_delay(n).as_secs())
-            .collect();
-        assert_eq!(schedule, vec![1, 2, 4, 8, 16, 32, 64, 64, 64, 64]);
-        // No shift overflow at the top of the range.
-        assert_eq!(subscribe_retry_delay(u32::MAX), Duration::from_secs(64));
+        BroadcastEvent::QueueRefresh(_) => "QueueRefresh".into(),
+        BroadcastEvent::TaskQueueRefresh(_) => "TaskQueueRefresh".into(),
+        BroadcastEvent::IndexQueueRefresh => "IndexQueueRefresh".into(),
+        BroadcastEvent::EndSessions(account_id) => {
+            trc::Value::Array(vec!["EndSessions".into(), (*account_id).into()])
+        }
+        BroadcastEvent::DeliverabilityCheck => "DeliverabilityCheck".into(),
     }
 }

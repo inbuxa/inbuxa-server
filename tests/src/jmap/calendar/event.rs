@@ -2,6 +2,8 @@
  * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
+ *
+ * Modified by Coffey Labs in 2026 for INBUXA.
  */
 
 use crate::utils::{
@@ -149,18 +151,21 @@ pub async fn test(test: &TestServer) {
         event_1
             .with_property(JSCalendarProperty::<Id>::Id, event_1_id.as_str())
             .with_property(JSCalendarProperty::<Id>::IsDraft, true)
-            .with_property(JSCalendarProperty::<Id>::IsOrigin, true),
+            .with_property(JSCalendarProperty::<Id>::IsOrigin, true)
+            .with_v1_defaults([true, true, true, false]),
     );
     assert_eq_ignoring_updated(
         &response.list()[1],
-        event_2
+        without_override_durations(event_2)
+            .with_v1_defaults([false, false, false, true])
             .with_property(JSCalendarProperty::<Id>::Id, event_2_id.as_str())
             .with_property(JSCalendarProperty::<Id>::IsDraft, false)
             .with_property(JSCalendarProperty::<Id>::IsOrigin, true)
             .with_property(
                 JSCalendarProperty::<Id>::Alerts,
+                // inbuxa: 1.0 keeps the calendar's default alert id
                 json!({
-                  "k1": {
+                  "abc": {
                     "action": "display",
                     "trigger": {
                       "@type": "OffsetTrigger",
@@ -176,8 +181,13 @@ pub async fn test(test: &TestServer) {
         event_3
             .with_property(JSCalendarProperty::<Id>::Id, event_3_id.as_str())
             .with_property(JSCalendarProperty::<Id>::IsDraft, false)
-            .with_property(JSCalendarProperty::<Id>::IsOrigin, false),
+            .with_property(JSCalendarProperty::<Id>::IsOrigin, false)
+            .with_v1_defaults([false, false, false, false]),
     );
+
+    // (inbuxa: 1.0 leaves an override's duration out when it matches the
+    // main event's, and lists the server-set fields with the default
+    // properties.)
 
     // Verify JMAP for Calendars properties
     let response = account
@@ -251,8 +261,7 @@ pub async fn test(test: &TestServer) {
               "2006-01-06T12:00:00": {
                 "updated": "2006-02-06T00:11:21Z",
                 "start": "2006-01-06T14:00:00",
-                "title": "Event #2 bis bis",
-                "duration": "PT1H"
+                "title": "Event #2 bis bis"
               }
             },
             "id": "c"
@@ -260,11 +269,15 @@ pub async fn test(test: &TestServer) {
           {
             "title": "Event #3",
             "participants": {
+              // inbuxa: 1.0 reduces the participant list, not the
+              // participant's own properties
               "3f5bc8c0-c722-5345-b7d9-5a899db08a30": {
                 "calendarAddress": "mailto:cyrus@example.com",
                 "@type": "Participant",
+                "participationStatus": "accepted",
                 "roles": {
-                  "owner": true
+                  "owner": true,
+                  "chair": true
                 }
               }
             },
@@ -448,13 +461,11 @@ pub async fn test(test: &TestServer) {
                 "2006-01-04T12:00:00": {
                     "title": "Event two overridden",
                     "start": "2006-01-04T14:00:00",
-                    "duration": "PT1H",
                     "updated": "2006-02-06T00:11:21Z"
                 },
                 "2006-01-06T12:00:00": {
                     "title": "Event two overridden twice",
                     "start": "2006-01-06T14:00:00",
-                    "duration": "PT1H",
                     "updated": "2006-02-06T00:11:21Z"
                 }
             },
@@ -558,8 +569,10 @@ pub async fn test(test: &TestServer) {
             "title": "Event one",
             "start": "2006-01-02T10:00:00",
             "timeZone": "US/Eastern",
-            "id": &ids[0],
-            "baseEventId": &event_1_id
+            "id": &event_1_id,
+            // inbuxa: 1.0 returns a non-recurring event itself, not a
+            // synthetic instance, so it has no baseEventId
+            "baseEventId": null
           },
           {
             "recurrenceId": "2006-01-02T12:00:00",
@@ -584,8 +597,8 @@ pub async fn test(test: &TestServer) {
             "timeZone": "US/Eastern",
             "duration": "PT2H",
             "title": "Event three",
-            "id": &ids[3],
-            "baseEventId": &event_3_id
+            "id": &event_3_id,
+            "baseEventId": null
           },
           {
             "recurrenceId": "2006-01-04T12:00:00",
@@ -703,7 +716,14 @@ END:VCALENDAR
       "CONFERENCE": true
     },
     "organizerCalendarAddress": "mailto:jsmith@example.com",
-    "duration": "P2DT7H30M"
+    "duration": "P2DT7H30M",
+    // inbuxa: 1.0 returns the JMAP-only properties of a parsed event as null
+    "version": "2.0",
+    "id": null,
+    "baseEventId": null,
+    "calendarIds": null,
+    "isDraft": null,
+    "isOrigin": null
   }
 ]));
 
@@ -729,18 +749,17 @@ END:VCALENDAR
     let dav_client = account.webdav_client();
     let resources = test
         .server
-        .fetch_dav_resources(account_id, account_id, SyncCollection::Calendar)
+        .fetch_groupware_resources(account_id, account_id, SyncCollection::Calendar)
         .await
         .unwrap();
     let path = format!(
         "{}{}",
         resources.base_path,
         resources
-            .paths
-            .iter()
-            .find(|v| v.parent_id.is_some())
+            .tree_with_depth(usize::MAX)
+            .find(|v| v.parent_id().is_some())
             .unwrap()
-            .path
+            .path()
     );
 
     let ical = dav_client
@@ -749,11 +768,16 @@ END:VCALENDAR
         .with_status(StatusCode::OK)
         .expect_body()
         .lines()
-        .filter(|line| !line.starts_with("DTSTAMP"))
+        .filter(|line| !line.starts_with("DTSTAMP") && !line.starts_with("CREATED"))
         .map(String::from)
         .collect::<AHashSet<_>>();
+    // inbuxa: 1.0 serves the event with its server PRODID, the bumped
+    // SEQUENCE, a VTIMEZONE for every TZID and the calendar's default alert
+    // (useDefaultAlerts is on and the event is now in calendar 2) as a
+    // VALARM; CREATED is server-set, so it is skipped like DTSTAMP.
     let expected_ical = TEST_ICAL_1
         .lines()
+        .chain(TEST_ICAL_1_V1_EXTRA.lines())
         .filter(|line| !line.starts_with("DTSTAMP"))
         .map(String::from)
         .collect::<AHashSet<_>>();
@@ -1071,8 +1095,47 @@ fn test_jscalendar_participants(uid: &str, organizer: Option<&str>) -> Value {
     event
 }
 
+#[track_caller]
 pub fn assert_eq_ignoring_updated(got: &Value, expected: Value) {
-    strip_updated(got.clone()).assert_is_equal(strip_updated(expected));
+    // inbuxa: 1.0 sets "created" on new events; skip it unless expected
+    let mut got = got.clone();
+    if let (Value::Object(got), Value::Object(expected)) = (&mut got, &expected)
+        && !expected.contains_key("created")
+    {
+        got.remove("created");
+    }
+    strip_updated(got).assert_is_equal(strip_updated(expected));
+}
+
+// inbuxa: the properties 1.0 includes in a default CalendarEvent/get:
+// [mayInviteSelf, mayInviteOthers, hideAttendees, useDefaultAlerts]
+trait WithV1Defaults {
+    fn with_v1_defaults(self, flags: [bool; 4]) -> Self;
+}
+
+impl WithV1Defaults for Value {
+    fn with_v1_defaults(self, flags: [bool; 4]) -> Self {
+        self.with_property(JSCalendarProperty::<Id>::MayInviteSelf, flags[0])
+            .with_property(JSCalendarProperty::<Id>::MayInviteOthers, flags[1])
+            .with_property(JSCalendarProperty::<Id>::HideAttendees, flags[2])
+            .with_property(JSCalendarProperty::<Id>::UseDefaultAlerts, flags[3])
+            .with_property("version", "2.0")
+    }
+}
+
+// inbuxa: 1.0 omits an override's duration when it equals the main event's
+fn without_override_durations(mut event: Value) -> Value {
+    let duration = event.get("duration").cloned();
+    if let Some(Value::Object(overrides)) = event.get_mut("recurrenceOverrides") {
+        for patch in overrides.values_mut() {
+            if let Value::Object(patch) = patch
+                && patch.get("duration") == duration.as_ref()
+            {
+                patch.remove("duration");
+            }
+        }
+    }
+    event
 }
 
 fn strip_updated(mut value: Value) -> Value {
@@ -1191,4 +1254,33 @@ DTSTAMP:20060206T001102Z
 CATEGORIES:work
 END:VEVENT
 END:VCALENDAR
+"#;
+
+// Compared as a set of lines, so repeated VTIMEZONE lines appear once.
+const TEST_ICAL_1_V1_EXTRA: &str = r#"PRODID:-//inbuxa//inbuxa Server//EN
+SEQUENCE:1
+BEGIN:VALARM
+JSID:abc
+ACTION:DISPLAY
+DESCRIPTION:Event one
+TRIGGER:PT15M
+END:VALARM
+BEGIN:VTIMEZONE
+TZID:US/Eastern
+BEGIN:STANDARD
+DTSTART:20051230T190000
+DTSTART:20061029T020000
+DTSTART:20071104T020000
+TZOFFSETFROM:-0400
+TZOFFSETTO:-0500
+TZNAME:EST
+END:STANDARD
+BEGIN:DAYLIGHT
+DTSTART:20060402T020000
+DTSTART:20070311T020000
+TZOFFSETFROM:-0500
+TZOFFSETTO:-0400
+TZNAME:EDT
+END:DAYLIGHT
+END:VTIMEZONE
 "#;

@@ -20,7 +20,7 @@
 [vocabulary]
 categories = ["identifier", "contact", "network", "content", "metadata", "credential"]
 whose = ["holder", "correspondent", "administrator"]
-where = ["data-store", "blob-store", "search-store", "in-memory-store", "memory", "log-file", "external"]
+where = ["data-store", "blob-store", "search-store", "in-memory-store", "memory", "log-file", "local-file", "external"]
 scope = ["tenant", "server"]
 retention = ["unbounded", "object-life", "receiver"]
 
@@ -360,7 +360,7 @@ retention = "object-life"
 enabled_by = ["x:Search.indexEmail", "x:Search.indexCalendar", "x:Search.indexContacts"]
 captures = ["x:Search.indexEmailFields", "x:Search.indexCalendarFields", "x:Search.indexContactFields"]
 leaves_host = false
-written_by = ["crates/services/src/task_manager/index.rs"]
+written_by = ["crates/services/src/index_queue/index.rs", "crates/store/src/search/index.rs"]
 
 [source."trace-index"]
 categories = ["network", "identifier", "metadata"]
@@ -369,9 +369,8 @@ where = ["search-store"]
 scope = "server"
 retention = { setting = "x:DataRetention.holdTracesFor" }
 enabled_by = ["x:Search.indexTelemetry"]
-captures = ["x:Search.indexTracingFields"]
 leaves_host = false
-written_by = ["crates/services/src/task_manager/index.rs"]
+written_by = ["crates/services/src/index_queue/index.rs", "crates/store/src/search/index.rs"]
 
 [source."log-file"]
 categories = ["network", "identifier", "metadata"]
@@ -434,10 +433,26 @@ whose = ["correspondent"]
 where = ["external"]
 scope = "server"
 retention = "receiver"
-enabled_by = ["x:SpamLlmProperties.modelId"]
-captures = ["inbuxa:AiLimits.maxContentBytes"]
+enabled_by = ["x:SpamAiProperties.tiers"]
+captures = ["x:SpamAiProperties.maxInputChars", "x:SpamAiProperties.includeAttachments", "x:SpamAiProperties.includeLinks", "x:SpamAiProperties.includeAuth", "inbuxa:AiLimits.maxContentBytes"]
 leaves_host = true
 written_by = ["crates/spam-filter/src/analysis/llm.rs", "crates/common/src/enterprise/llm.rs"]
+
+# Account cache snapshots (1.0): message ids, keywords, thread ids, and the
+# names of mailboxes and other containers, rebuilt from the data store when
+# missing. Off unless x:Cache.swap names a backend. A snapshot is rewritten
+# while the account is in use; the blob store and Redis backends drop one
+# left alone for their `retention`, a local file stays until the account is
+# removed.
+[source."cache-swap"]
+categories = ["identifier", "content", "metadata"]
+whose = ["holder"]
+where = ["blob-store", "in-memory-store", "local-file"]
+scope = "tenant"
+retention = "unbounded"
+enabled_by = ["x:Cache.swap"]
+leaves_host = false
+written_by = ["crates/common/src/cache/swap/writer.rs"]
 
 [source."explain-cache"]
 categories = ["identifier", "network", "metadata"]
@@ -676,10 +691,30 @@ eabKeyId = ["credential"]
 [object."x:AddressBook"]
 default = "none"
 
-[object."x:AiModel"]
+[object."x:AiModelAnthropic"]
 default = "none"
-[object."x:AiModel".properties]
-httpAuth = ["credential"]
+[object."x:AiModelAnthropic".properties]
+apiKey = ["credential"]
+
+[object."x:AiModelGemini"]
+default = "none"
+[object."x:AiModelGemini".properties]
+apiKey = ["credential"]
+
+[object."x:AiModelOllama"]
+default = "none"
+[object."x:AiModelOllama".properties]
+apiKey = ["credential"]
+
+[object."x:AiModelOpenAi"]
+default = "none"
+[object."x:AiModelOpenAi".properties]
+apiKey = ["credential"]
+
+[object."x:AiModelTypeSafe"]
+default = "none"
+[object."x:AiModelTypeSafe".properties]
+apiKey = ["credential"]
 
 [object."x:Alert"]
 default = "none"
@@ -804,7 +839,7 @@ retention = { setting = "x:DataRetention.archiveDeletedItemsFor" }
 archivedAt = ["metadata"]
 archivedUntil = ["metadata"]
 blobId = ["content"]
-content = ["content"]
+contents = ["content"]
 createdAt = ["metadata"]
 name = ["content"]
 
@@ -851,11 +886,33 @@ httpAuth = ["credential"]
 [object."x:Authentication"]
 default = "none"
 
+[object."x:AzureAuthClientSecret"]
+default = "none"
+[object."x:AzureAuthClientSecret".properties]
+clientSecret = ["credential"]
+
+[object."x:AzureAuthManagedIdentity"]
+default = "none"
+
+[object."x:AzureAuthSasToken"]
+default = "none"
+[object."x:AzureAuthSasToken".properties]
+sasToken = ["credential"]
+
+[object."x:AzureAuthSharedKey"]
+default = "none"
+[object."x:AzureAuthSharedKey".properties]
+accountKey = ["credential"]
+
+[object."x:AzureAuthWorkloadIdentity"]
+default = "none"
+
 [object."x:AzureStore"]
 default = "none"
-[object."x:AzureStore".properties]
-accessKey = ["credential"]
-sasToken = ["credential"]
+
+
+[object."x:BlobStoreSwap"]
+default = "none"
 
 [object."x:BlockedIp"]
 default = "none"
@@ -893,7 +950,7 @@ where = ["data-store"]
 scope = "server"
 retention = "object-life"
 [object."x:CalendarAlarm".properties]
-fromEmail = ["contact"]
+fromAddress = ["contact"]
 fromName = ["contact"]
 
 [object."x:CalendarScheduling"]
@@ -1028,8 +1085,8 @@ ehloDomain = ["network"]
 ipRevPtr = ["network"]
 mailFrom = ["identifier"]
 message = ["content"]
+rcptTo = ["identifier"]
 remoteIp = ["network"]
-to = ["identifier"]
 
 [object."x:DmarcTroubleshootDetails"]
 default = "none"
@@ -1055,7 +1112,7 @@ default = "none"
 default = "none"
 [object."x:DnsServerAlidns".properties]
 secretKey = ["credential"]
-securityToken = ["credential"]
+sessionToken = ["credential"]
 
 [object."x:DnsServerAutodns"]
 default = "none"
@@ -1110,8 +1167,7 @@ secret = ["credential"]
 [object."x:DnsServerDnsimple"]
 default = "none"
 [object."x:DnsServerDnsimple".properties]
-authToken = ["credential"]
-secret = ["credential"]
+token = ["credential"]
 
 [object."x:DnsServerDomeneshop"]
 default = "none"
@@ -1179,13 +1235,13 @@ default = "none"
 [object."x:DnsServerLightsail"]
 default = "none"
 [object."x:DnsServerLightsail".properties]
-secretAccessKey = ["credential"]
+secretKey = ["credential"]
 sessionToken = ["credential"]
 
 [object."x:DnsServerLuaDns"]
 default = "none"
 [object."x:DnsServerLuaDns".properties]
-authToken = ["credential"]
+token = ["credential"]
 
 [object."x:DnsServerMythicBeasts"]
 default = "none"
@@ -1195,7 +1251,7 @@ password = ["credential"]
 [object."x:DnsServerNameDotCom"]
 default = "none"
 [object."x:DnsServerNameDotCom".properties]
-authToken = ["credential"]
+token = ["credential"]
 
 [object."x:DnsServerNamecheap"]
 default = "none"
@@ -1233,7 +1289,6 @@ apiKey = ["credential"]
 default = "none"
 [object."x:DnsServerPorkbun".properties]
 secret = ["credential"]
-secretApiKey = ["credential"]
 
 [object."x:DnsServerPowerDns"]
 default = "none"
@@ -1243,7 +1298,7 @@ apiKey = ["credential"]
 [object."x:DnsServerRoute53"]
 default = "none"
 [object."x:DnsServerRoute53".properties]
-secretAccessKey = ["credential"]
+secretKey = ["credential"]
 sessionToken = ["credential"]
 
 [object."x:DnsServerSpaceship"]
@@ -1276,7 +1331,7 @@ password = ["credential"]
 [object."x:DnsServerVercel"]
 default = "none"
 [object."x:DnsServerVercel".properties]
-authToken = ["credential"]
+token = ["credential"]
 
 [object."x:DnsServerVolcengine"]
 default = "none"
@@ -1401,6 +1456,8 @@ deliverTo = ["contact"]
 
 [object."x:HttpLookup"]
 default = "none"
+[object."x:HttpLookup".properties]
+httpAuth = ["credential"]
 
 [object."x:HttpLookupCsv"]
 default = "none"
@@ -1411,6 +1468,12 @@ default = "none"
 secret = ["credential"]
 
 [object."x:Imap"]
+default = "none"
+
+[object."x:IndexQueueStatus"]
+default = "none"
+
+[object."x:IndexStatusFailed"]
 default = "none"
 
 [object."x:Jmap"]
@@ -1435,6 +1498,9 @@ default = "none"
 default = "none"
 [object."x:LdapDirectory".properties]
 bindSecret = ["credential"]
+
+[object."x:LocalFileSwap"]
+default = "none"
 
 [object."x:Log"]
 default = "none"
@@ -1503,6 +1569,9 @@ retention = "object-life"
 key = ["identifier"]
 value = ["identifier"]
 
+[object."x:Metadata"]
+default = "none"
+
 [object."x:MetricCount"]
 default = "none"
 
@@ -1528,7 +1597,7 @@ authSecret = ["credential"]
 [object."x:MtaConnectionIpHost"]
 default = "none"
 [object."x:MtaConnectionIpHost".properties]
-sourceIp = ["network"]
+localIp = ["network"]
 
 [object."x:MtaConnectionStrategy"]
 default = "none"
@@ -1647,8 +1716,22 @@ expiresAt = ["metadata"]
 redirectUris = ["identifier"]
 secret = ["credential"]
 
+[object."x:OAuthGrant"]
+default = "none"
+whose = ["holder"]
+where = ["data-store"]
+scope = "tenant"
+retention = "object-life"
+[object."x:OAuthGrant".properties]
+accountId = ["identifier"]
+createdAt = ["metadata"]
+lastUsedAt = ["metadata"]
+remoteIp = ["network"]
+
 [object."x:OidcDirectory"]
 default = "none"
+[object."x:OidcDirectory".properties]
+introspectionClientSecret = ["credential"]
 
 [object."x:OidcProvider"]
 default = "none"
@@ -1675,7 +1758,7 @@ retention = "object-life"
 [object."x:PasswordCredential".properties]
 allowedIps = ["network"]
 expiresAt = ["metadata"]
-otpAuth = ["credential"]
+otpUrl = ["credential"]
 secret = ["credential"]
 
 [object."x:PermissionsList"]
@@ -1758,6 +1841,12 @@ sentinelSecret = ["credential"]
 [object."x:RedisStore"]
 default = "none"
 
+[object."x:RedisSwap"]
+default = "none"
+
+[object."x:ReloadSettingsResult"]
+default = "none"
+
 [object."x:ReportSettings"]
 default = "none"
 
@@ -1771,7 +1860,6 @@ default = "none"
 default = "none"
 [object."x:S3Store".properties]
 secretKey = ["credential"]
-securityToken = ["credential"]
 sessionToken = ["credential"]
 
 [object."x:S3StoreCustomRegion"]
@@ -1850,6 +1938,21 @@ contents = ["content"]
 description = ["content"]
 name = ["content"]
 
+[object."x:SpamAiCategory"]
+default = "none"
+
+[object."x:SpamAiLearnProperties"]
+default = "none"
+
+[object."x:SpamAiProperties"]
+default = "none"
+
+[object."x:SpamAiSignal"]
+default = "none"
+
+[object."x:SpamAiTier"]
+default = "none"
+
 [object."x:SpamClassifier"]
 default = "none"
 
@@ -1868,9 +1971,9 @@ retention = "object-life"
 [object."x:SpamClassify".properties]
 authenticatedAs = ["identifier"]
 ehloDomain = ["network"]
-envFrom = ["identifier"]
-envRcptTo = ["identifier"]
+mailFrom = ["identifier"]
 message = ["content"]
+rcptTo = ["identifier"]
 remoteIp = ["network"]
 
 [object."x:SpamClassifyTag"]
@@ -1901,9 +2004,6 @@ default = "none"
 default = "none"
 
 [object."x:SpamFileExtension"]
-default = "none"
-
-[object."x:SpamLlmProperties"]
 default = "none"
 
 [object."x:SpamPyzor"]
@@ -2013,12 +2113,6 @@ default = "none"
 [object."x:TaskDomainManagement"]
 default = "none"
 
-[object."x:TaskIndexDocument"]
-default = "none"
-
-[object."x:TaskIndexTrace"]
-default = "none"
-
 [object."x:TaskManager"]
 default = "none"
 
@@ -2032,6 +2126,9 @@ retention = "object-life"
 messageIds = ["metadata"]
 threadName = ["content"]
 
+[object."x:TaskReportWindow"]
+default = "none"
+
 [object."x:TaskRestoreArchivedItem"]
 default = "none"
 
@@ -2039,6 +2136,9 @@ default = "none"
 default = "none"
 
 [object."x:TaskRetryStrategyFixed"]
+default = "none"
+
+[object."x:TaskShareRevokeCleanup"]
 default = "none"
 
 [object."x:TaskSpamFilterMaintenance"]
@@ -2224,18 +2324,18 @@ path = ["metadata"]
 default = "none"
 
 [object."x:TracerOtelGrpc".properties]
-endpoint = ["network"]
 httpAuth = ["credential"]
 httpHeaders = ["credential"]
+url = ["network"]
 
 [object."x:TracerOtelHttp"]
 # Configuration: the "webhooks" and "otel-tracer" sources carry what it sends
 default = "none"
 
 [object."x:TracerOtelHttp".properties]
-endpoint = ["network"]
 httpAuth = ["credential"]
 httpHeaders = ["credential"]
+url = ["network"]
 
 [object."x:TracerStdout"]
 default = "none"

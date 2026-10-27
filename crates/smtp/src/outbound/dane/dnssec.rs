@@ -12,8 +12,8 @@ use common::{
 };
 pub use mail_auth::DnssecStatus;
 use mail_auth::{
-    MX, RecordSet,
-    common::resolver::ToFqdn,
+    Mx, Negative, RecordSet,
+    dns::ToFqdn,
     hickory_resolver::{
         TokioResolver,
         lookup::Lookup,
@@ -39,7 +39,7 @@ pub trait TlsaLookup: Sync + Send {
     fn mx_lookup(
         &self,
         key: impl ToFqdn + Sync + Send,
-    ) -> impl Future<Output = mail_auth::Result<RecordSet<MX>>> + Send;
+    ) -> impl Future<Output = mail_auth::Result<RecordSet<Mx>>> + Send;
 
     fn tlsa_lookup(
         &self,
@@ -64,7 +64,7 @@ pub enum TlsaResult {
 }
 
 impl TlsaLookup for Server {
-    async fn mx_lookup(&self, key: impl ToFqdn + Sync + Send) -> mail_auth::Result<RecordSet<MX>> {
+    async fn mx_lookup(&self, key: impl ToFqdn + Sync + Send) -> mail_auth::Result<RecordSet<Mx>> {
         if !self.core.smtp.resolvers.dnssec_available {
             return self
                 .core
@@ -75,16 +75,14 @@ impl TlsaLookup for Server {
                 .await;
         }
 
-        let key = key.to_fqdn().into_owned().into_boxed_str();
-        if let Some(value) = self.inner.cache.dns_mx.get::<str>(key.as_ref())
-            && value.dnssec_status != DnssecStatus::Indeterminate
-        {
+        let key = key.to_fqdn();
+        if let Some(value) = validated_entry(self.inner.cache.dns_mx.get::<str>(key.as_ref())) {
             return Ok(value);
         }
 
-        #[cfg(any(test, feature = "test_mode"))]
+        #[cfg(any(test, inbuxa_tests))]
         if true {
-            return mail_auth::common::resolver::mock_resolve(key.as_ref());
+            return mail_auth::dns::mock_resolve(key.as_ref());
         }
 
         let (mx_lookup, forced_insecure) = match validated_lookup(
@@ -101,13 +99,13 @@ impl TlsaLookup for Server {
                     && denial.response_code == ResponseCode::NoError
                 {
                     let records = RecordSet {
-                        rrset: Arc::new([]),
+                        records: Arc::new([]),
                         dnssec_status: denial.dnssec_status,
                     };
                     if let Some(valid_until) = denial.valid_until {
                         self.inner.cache.dns_mx.insert_with_expiry(
-                            key,
-                            records.clone(),
+                            key.into_owned().into_boxed_str(),
+                            Ok(records.clone()),
                             valid_until,
                         );
                     }
@@ -138,15 +136,15 @@ impl TlsaLookup for Server {
         }
 
         records.sort_unstable_by_key(|a| a.0);
-        let rrset: Arc<[MX]> = records
+        let rrset: Arc<[Mx]> = records
             .into_iter()
-            .map(|(preference, exchanges)| MX {
+            .map(|(preference, exchanges)| Mx {
                 preference,
                 exchanges: exchanges.into_boxed_slice(),
             })
-            .collect::<Arc<[MX]>>();
+            .collect::<Arc<[Mx]>>();
         let records = RecordSet {
-            rrset,
+            records: rrset,
             dnssec_status: if forced_insecure {
                 DnssecStatus::Insecure
             } else {
@@ -154,33 +152,37 @@ impl TlsaLookup for Server {
             },
         };
 
-        self.inner
-            .cache
-            .dns_mx
-            .insert_with_expiry(key, records.clone(), mx_lookup.valid_until());
+        self.inner.cache.dns_mx.insert_with_expiry(
+            key.into_owned().into_boxed_str(),
+            Ok(records.clone()),
+            mx_lookup.valid_until(),
+        );
 
         Ok(records)
     }
 
     async fn tlsa_lookup(&self, key: impl ToFqdn + Sync + Send) -> mail_auth::Result<TlsaResult> {
-        let key = key.to_fqdn().into_owned().into_boxed_str();
+        let key = key.to_fqdn();
         if let Some(value) = self.inner.cache.dns_tlsa.get(key.as_ref()) {
-            return Ok(TlsaResult::Secure(value));
+            return Ok(match value {
+                Some(tlsa) => TlsaResult::Secure(tlsa),
+                None => TlsaResult::Missing,
+            });
         }
 
-        #[cfg(any(test, feature = "test_mode"))]
+        #[cfg(any(test, inbuxa_tests))]
         if true {
             if key.as_ref().contains("_dnssec_bogus.") {
                 return Ok(TlsaResult::Bogus);
             }
-            return mail_auth::common::resolver::mock_resolve(key.as_ref());
+            return mail_auth::dns::mock_resolve(key.as_ref());
         }
 
-        // Through `validated_lookup`, like the MX and address lookups: a TLSA
-        // name that is a signed CNAME to a name with no TLSA record (seen at
-        // `_25._tcp.mail.usefulinsight.com`, behind Hetzner's resolvers) is
-        // otherwise called bogus, and the message waits on it until it
-        // expires.
+        // inbuxa: through `validated_lookup`, like the MX and address lookups:
+        // a TLSA name that is a signed CNAME to a name with no TLSA record
+        // (seen at `_25._tcp.mail.usefulinsight.com`, behind Hetzner's
+        // resolvers) is otherwise called bogus, and the message waits on it
+        // until it expires.
         let tlsa_lookup = match validated_lookup(
             &self.core.smtp.resolvers.dnssec.resolver,
             self.core.smtp.resolvers.dns.resolver(),
@@ -195,11 +197,11 @@ impl TlsaLookup for Server {
             Ok(validated) => validated.lookup,
             Err(err) => {
                 if let Some(denial) = NegativeAnswer::from_error(&err) {
-                    return Ok(if denial.dnssec_status == DnssecStatus::Bogus {
-                        TlsaResult::Bogus
-                    } else {
-                        TlsaResult::Missing
-                    });
+                    if denial.dnssec_status == DnssecStatus::Bogus {
+                        return Ok(TlsaResult::Bogus);
+                    }
+                    self.cache_missing_tlsa(key.into_owned().into_boxed_str(), denial.valid_until);
+                    return Ok(TlsaResult::Missing);
                 }
                 return Err(err.into());
             }
@@ -261,14 +263,20 @@ impl TlsaLookup for Server {
                 });
 
                 self.inner.cache.dns_tlsa.insert_with_expiry(
-                    key,
-                    tlsa.clone(),
+                    key.into_owned().into_boxed_str(),
+                    Some(tlsa.clone()),
                     tlsa_lookup.valid_until(),
                 );
 
                 Ok(TlsaResult::Secure(tlsa))
             }
-            _ => Ok(TlsaResult::Missing),
+            _ => {
+                self.cache_missing_tlsa(
+                    key.into_owned().into_boxed_str(),
+                    Some(tlsa_lookup.valid_until()),
+                );
+                Ok(TlsaResult::Missing)
+            }
         }
     }
 
@@ -286,16 +294,14 @@ impl TlsaLookup for Server {
                 .await;
         }
 
-        let key = key.to_fqdn().into_owned().into_boxed_str();
-        if let Some(value) = self.inner.cache.dns_ipv4.get::<str>(key.as_ref())
-            && value.dnssec_status != DnssecStatus::Indeterminate
-        {
+        let key = key.to_fqdn();
+        if let Some(value) = validated_entry(self.inner.cache.dns_ipv4.get::<str>(key.as_ref())) {
             return Ok(value);
         }
 
-        #[cfg(any(test, feature = "test_mode"))]
+        #[cfg(any(test, inbuxa_tests))]
         if true {
-            return mail_auth::common::resolver::mock_resolve(key.as_ref());
+            return mail_auth::dns::mock_resolve(key.as_ref());
         }
 
         let name = Name::from_str_relaxed::<&str>(key.as_ref())?;
@@ -313,13 +319,13 @@ impl TlsaLookup for Server {
                     && denial.response_code == ResponseCode::NoError
                 {
                     let records = RecordSet {
-                        rrset: Arc::new([]),
+                        records: Arc::new([]),
                         dnssec_status: denial.dnssec_status,
                     };
                     if let Some(valid_until) = denial.valid_until {
                         self.inner.cache.dns_ipv4.insert_with_expiry(
-                            key,
-                            records.clone(),
+                            key.into_owned().into_boxed_str(),
+                            Ok(records.clone()),
                             valid_until,
                         );
                     }
@@ -331,7 +337,7 @@ impl TlsaLookup for Server {
 
         let answers = lookup.answers();
         let records = RecordSet {
-            rrset: answers
+            records: answers
                 .iter()
                 .filter_map(|record| match &record.data {
                     RData::A(addr) => Some(addr.0),
@@ -345,10 +351,11 @@ impl TlsaLookup for Server {
             },
         };
 
-        self.inner
-            .cache
-            .dns_ipv4
-            .insert_with_expiry(key, records.clone(), lookup.valid_until());
+        self.inner.cache.dns_ipv4.insert_with_expiry(
+            key.into_owned().into_boxed_str(),
+            Ok(records.clone()),
+            lookup.valid_until(),
+        );
 
         Ok(records)
     }
@@ -367,16 +374,14 @@ impl TlsaLookup for Server {
                 .await;
         }
 
-        let key = key.to_fqdn().into_owned().into_boxed_str();
-        if let Some(value) = self.inner.cache.dns_ipv6.get::<str>(key.as_ref())
-            && value.dnssec_status != DnssecStatus::Indeterminate
-        {
+        let key = key.to_fqdn();
+        if let Some(value) = validated_entry(self.inner.cache.dns_ipv6.get::<str>(key.as_ref())) {
             return Ok(value);
         }
 
-        #[cfg(any(test, feature = "test_mode"))]
+        #[cfg(any(test, inbuxa_tests))]
         if true {
-            return mail_auth::common::resolver::mock_resolve(key.as_ref());
+            return mail_auth::dns::mock_resolve(key.as_ref());
         }
 
         let name = Name::from_str_relaxed::<&str>(key.as_ref())?;
@@ -394,13 +399,13 @@ impl TlsaLookup for Server {
                     && denial.response_code == ResponseCode::NoError
                 {
                     let records = RecordSet {
-                        rrset: Arc::new([]),
+                        records: Arc::new([]),
                         dnssec_status: denial.dnssec_status,
                     };
                     if let Some(valid_until) = denial.valid_until {
                         self.inner.cache.dns_ipv6.insert_with_expiry(
-                            key,
-                            records.clone(),
+                            key.into_owned().into_boxed_str(),
+                            Ok(records.clone()),
                             valid_until,
                         );
                     }
@@ -412,7 +417,7 @@ impl TlsaLookup for Server {
 
         let answers = lookup.answers();
         let records = RecordSet {
-            rrset: answers
+            records: answers
                 .iter()
                 .filter_map(|record| match &record.data {
                     RData::AAAA(addr) => Some(addr.0),
@@ -426,10 +431,11 @@ impl TlsaLookup for Server {
             },
         };
 
-        self.inner
-            .cache
-            .dns_ipv6
-            .insert_with_expiry(key, records.clone(), lookup.valid_until());
+        self.inner.cache.dns_ipv6.insert_with_expiry(
+            key.into_owned().into_boxed_str(),
+            Ok(records.clone()),
+            lookup.valid_until(),
+        );
 
         Ok(records)
     }
@@ -547,6 +553,20 @@ fn apex_status(zone: &Name, answers: &[Record]) -> Option<DnssecStatus> {
         .reduce(least_secure)
 }
 
+trait TlsaNegativeCache {
+    fn cache_missing_tlsa(&self, key: Box<str>, valid_until: Option<Instant>);
+}
+
+impl TlsaNegativeCache for Server {
+    fn cache_missing_tlsa(&self, key: Box<str>, valid_until: Option<Instant>) {
+        self.inner.cache.dns_tlsa.insert_with_expiry(
+            key,
+            None,
+            valid_until.unwrap_or_else(|| Instant::now() + self.inner.cache.negative_cache_ttl),
+        );
+    }
+}
+
 struct NegativeAnswer {
     response_code: ResponseCode,
     dnssec_status: DnssecStatus,
@@ -580,6 +600,13 @@ impl NegativeAnswer {
             }),
             _ => None,
         }
+    }
+}
+
+fn validated_entry<T>(entry: Option<Result<RecordSet<T>, Negative>>) -> Option<RecordSet<T>> {
+    match entry {
+        Some(Ok(records)) if records.dnssec_status != DnssecStatus::Indeterminate => Some(records),
+        _ => None,
     }
 }
 
@@ -939,4 +966,3 @@ mod tests {
     }
 
 }
-

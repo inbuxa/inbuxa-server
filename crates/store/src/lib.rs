@@ -34,6 +34,7 @@ use std::{
     path::PathBuf,
     sync::{Arc, atomic::AtomicU16},
 };
+use types::collection::SyncCollection;
 use write::ValueClass;
 
 pub trait Deserialize: Sized + Sync + Send {
@@ -67,8 +68,16 @@ pub trait SerializeInfallible {
 pub(crate) const WITH_SUBSPACE: u32 = 1;
 
 pub trait Key: Sync + Send + Clone {
-    fn serialize(&self, flags: u32) -> Vec<u8>;
-    fn subspace(&self) -> u8;
+    fn serialize_into(&self, buf: &mut Vec<u8>, flags: u32);
+    fn key_len_hint(&self) -> usize;
+    fn subspace(&self) -> Subspace;
+
+    #[inline]
+    fn serialize(&self, flags: u32) -> Vec<u8> {
+        let mut buf = Vec::with_capacity(self.key_len_hint() + 1);
+        self.serialize_into(&mut buf, flags);
+        buf
+    }
 }
 
 /// inbuxa: how many keys a caller hands `Store::get_values` at once. Bounds
@@ -106,50 +115,286 @@ pub struct LogKey {
     pub change_id: u64,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct PrivateLogKey {
+    pub account_id: u32,
+    pub collection: SyncCollection,
+    pub viewer: u32,
+    pub change_id: u64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum ChangeLogKey {
+    Shared(LogKey),
+    Private(PrivateLogKey),
+}
+
+pub const U128_LEN: usize = std::mem::size_of::<u128>();
 pub const U64_LEN: usize = std::mem::size_of::<u64>();
 pub const U32_LEN: usize = std::mem::size_of::<u32>();
 pub const U16_LEN: usize = std::mem::size_of::<u16>();
 
-pub const SUBSPACE_ACL: u8 = b'a';
-pub const SUBSPACE_TASK_QUEUE: u8 = b'f';
-pub const SUBSPACE_INDEXES: u8 = b'i';
-pub const SUBSPACE_BLOB_LINK: u8 = b'k';
-pub const SUBSPACE_BLOBS: u8 = b't';
-pub const SUBSPACE_LOGS: u8 = b'l';
-pub const SUBSPACE_COUNTER: u8 = b'n';
-pub const SUBSPACE_IN_MEMORY_VALUE: u8 = b'm';
-pub const SUBSPACE_IN_MEMORY_COUNTER: u8 = b'y';
-pub const SUBSPACE_PROPERTY: u8 = b'p';
-pub const SUBSPACE_REGISTRY: u8 = b's';
-pub const SUBSPACE_REGISTRY_IDX: u8 = b'b';
-pub const SUBSPACE_REGISTRY_PK: u8 = b'g';
-pub const SUBSPACE_DIRECTORY: u8 = b'd';
-pub const SUBSPACE_QUEUE_MESSAGE: u8 = b'e';
-pub const SUBSPACE_QUEUE_EVENT: u8 = b'q';
-pub const SUBSPACE_QUOTA: u8 = b'u';
-pub const SUBSPACE_REPORT_OUT: u8 = b'h';
-pub const SUBSPACE_REPORT_IN: u8 = b'r';
-pub const SUBSPACE_TELEMETRY_SPAN: u8 = b'o';
-pub const SUBSPACE_TELEMETRY_METRIC: u8 = b'x';
-pub const SUBSPACE_SEARCH_INDEX: u8 = b'z';
-pub const SUBSPACE_DELETED_ITEMS: u8 = b'j';
-pub const SUBSPACE_SPAM_SAMPLES: u8 = b'w';
-// inbuxa: the fork's own data (masked email ME-*). Not a letter: SQL tables are
-// named after the byte, unquoted, and upstream uses every lowercase letter.
-pub const SUBSPACE_INBUXA: u8 = b'_';
+const _: () = {
+    let mut index = 0;
+    while index < Subspace::ALL.len() {
+        assert!(Subspace::ALL[index].index() == index);
+        index += 1;
+    }
+};
 
-// TODO: Remove in v1.0
-pub const LEGACY_SUBSPACE_BITMAP_TEXT: u8 = b'v';
-pub const LEGACY_SUBSPACE_BITMAP_TAG: u8 = b'c';
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[repr(u8)]
+pub enum Subspace {
+    Acl = b'a',
+    RegistryIndex = b'b',
+    Immutable = b'c',
+    Directory = b'd',
+    QueueMessage = b'e',
+    TaskQueue = b'f',
+    RegistryPrimaryKey = b'g',
+    ReportOut = b'h',
+    Indexes = b'i',
+    DeletedItems = b'j',
+    BlobLink = b'k',
+    Logs = b'l',
+    Counter = b'n',
+    TelemetrySpan = b'o',
+    Property = b'p',
+    QueueEvent = b'q',
+    ReportIn = b'r',
+    Registry = b's',
+    Blobs = b't',
+    IndexProperty = b'v',
+    SpamSamples = b'w',
+    TelemetryMetric = b'x',
+    SearchTerm = b'z',
+    SearchDocument = b'm',
+    SearchQueue = b'y',
+    System = b'u',
+    // inbuxa: the fork's own data (masked email ME-*, undelete, journal and
+    // the rest). Not a letter: SQL tables are named after the byte,
+    // unquoted, and upstream uses every lowercase letter.
+    Inbuxa = b'_',
+    // inbuxa: the in-memory store kept in the data store (0.16 had it; 1.0
+    // dropped it). Upper-case bytes are free; the tables are "_m" and "_y".
+    InMemoryValue = b'M',
+    InMemoryCounter = b'Y',
+}
+
+/// inbuxa: the fork's subspace under the name its code has always used.
+pub const SUBSPACE_INBUXA: Subspace = Subspace::Inbuxa;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Shape {
+    Value,
+    Presence,
+    Counter,
+}
+
+impl Subspace {
+    pub const ALL: &'static [Subspace] = &[
+        Subspace::Acl,
+        Subspace::RegistryIndex,
+        Subspace::Immutable,
+        Subspace::Directory,
+        Subspace::QueueMessage,
+        Subspace::TaskQueue,
+        Subspace::RegistryPrimaryKey,
+        Subspace::ReportOut,
+        Subspace::Indexes,
+        Subspace::DeletedItems,
+        Subspace::BlobLink,
+        Subspace::Logs,
+        Subspace::Counter,
+        Subspace::TelemetrySpan,
+        Subspace::Property,
+        Subspace::QueueEvent,
+        Subspace::ReportIn,
+        Subspace::Registry,
+        Subspace::Blobs,
+        Subspace::IndexProperty,
+        Subspace::SpamSamples,
+        Subspace::TelemetryMetric,
+        Subspace::SearchTerm,
+        Subspace::SearchDocument,
+        Subspace::SearchQueue,
+        Subspace::System,
+        Subspace::Inbuxa,
+        Subspace::InMemoryValue,
+        Subspace::InMemoryCounter,
+    ];
+
+    #[inline(always)]
+    pub const fn byte(self) -> u8 {
+        self as u8
+    }
+
+    #[inline(always)]
+    pub const fn index(self) -> usize {
+        match self {
+            Subspace::Acl => 0,
+            Subspace::RegistryIndex => 1,
+            Subspace::Immutable => 2,
+            Subspace::Directory => 3,
+            Subspace::QueueMessage => 4,
+            Subspace::TaskQueue => 5,
+            Subspace::RegistryPrimaryKey => 6,
+            Subspace::ReportOut => 7,
+            Subspace::Indexes => 8,
+            Subspace::DeletedItems => 9,
+            Subspace::BlobLink => 10,
+            Subspace::Logs => 11,
+            Subspace::Counter => 12,
+            Subspace::TelemetrySpan => 13,
+            Subspace::Property => 14,
+            Subspace::QueueEvent => 15,
+            Subspace::ReportIn => 16,
+            Subspace::Registry => 17,
+            Subspace::Blobs => 18,
+            Subspace::IndexProperty => 19,
+            Subspace::SpamSamples => 20,
+            Subspace::TelemetryMetric => 21,
+            Subspace::SearchTerm => 22,
+            Subspace::SearchDocument => 23,
+            Subspace::SearchQueue => 24,
+            Subspace::System => 25,
+            Subspace::Inbuxa => 26,
+            Subspace::InMemoryValue => 27,
+            Subspace::InMemoryCounter => 28,
+        }
+    }
+
+    pub const fn try_from_byte(byte: u8) -> Option<Self> {
+        Some(match byte {
+            b'a' => Subspace::Acl,
+            b'b' => Subspace::RegistryIndex,
+            b'c' => Subspace::Immutable,
+            b'd' => Subspace::Directory,
+            b'e' => Subspace::QueueMessage,
+            b'f' => Subspace::TaskQueue,
+            b'g' => Subspace::RegistryPrimaryKey,
+            b'h' => Subspace::ReportOut,
+            b'i' => Subspace::Indexes,
+            b'j' => Subspace::DeletedItems,
+            b'k' => Subspace::BlobLink,
+            b'l' => Subspace::Logs,
+            b'n' => Subspace::Counter,
+            b'o' => Subspace::TelemetrySpan,
+            b'p' => Subspace::Property,
+            b'q' => Subspace::QueueEvent,
+            b'r' => Subspace::ReportIn,
+            b's' => Subspace::Registry,
+            b't' => Subspace::Blobs,
+            b'v' => Subspace::IndexProperty,
+            b'w' => Subspace::SpamSamples,
+            b'x' => Subspace::TelemetryMetric,
+            b'z' => Subspace::SearchTerm,
+            b'm' => Subspace::SearchDocument,
+            b'y' => Subspace::SearchQueue,
+            b'u' => Subspace::System,
+            b'_' => Subspace::Inbuxa,
+            b'M' => Subspace::InMemoryValue,
+            b'Y' => Subspace::InMemoryCounter,
+            _ => return None,
+        })
+    }
+
+    pub const fn name(self) -> &'static str {
+        match self {
+            Subspace::Acl => "a",
+            Subspace::RegistryIndex => "b",
+            Subspace::Immutable => "c",
+            Subspace::Directory => "d",
+            Subspace::QueueMessage => "e",
+            Subspace::TaskQueue => "f",
+            Subspace::RegistryPrimaryKey => "g",
+            Subspace::ReportOut => "h",
+            Subspace::Indexes => "i",
+            Subspace::DeletedItems => "j",
+            Subspace::BlobLink => "k",
+            Subspace::Logs => "l",
+            Subspace::Counter => "n",
+            Subspace::TelemetrySpan => "o",
+            Subspace::Property => "p",
+            Subspace::QueueEvent => "q",
+            Subspace::ReportIn => "r",
+            Subspace::Registry => "s",
+            Subspace::Blobs => "t",
+            Subspace::IndexProperty => "v",
+            Subspace::SpamSamples => "w",
+            Subspace::TelemetryMetric => "x",
+            Subspace::SearchTerm => "z",
+            Subspace::SearchDocument => "m",
+            Subspace::SearchQueue => "y",
+            Subspace::System => "u",
+            Subspace::Inbuxa => "_",
+            Subspace::InMemoryValue => "_m",
+            Subspace::InMemoryCounter => "_y",
+        }
+    }
+
+    pub const fn shape(self) -> Shape {
+        match self {
+            Subspace::Indexes | Subspace::RegistryIndex => Shape::Presence,
+            Subspace::Counter | Subspace::InMemoryCounter => Shape::Counter,
+            Subspace::Acl
+            | Subspace::Immutable
+            | Subspace::Directory
+            | Subspace::QueueMessage
+            | Subspace::TaskQueue
+            | Subspace::RegistryPrimaryKey
+            | Subspace::ReportOut
+            | Subspace::DeletedItems
+            | Subspace::BlobLink
+            | Subspace::Logs
+            | Subspace::TelemetrySpan
+            | Subspace::Property
+            | Subspace::QueueEvent
+            | Subspace::ReportIn
+            | Subspace::Registry
+            | Subspace::Blobs
+            | Subspace::IndexProperty
+            | Subspace::SpamSamples
+            | Subspace::TelemetryMetric
+            | Subspace::SearchTerm
+            | Subspace::SearchDocument
+            | Subspace::SearchQueue
+            | Subspace::System
+            | Subspace::Inbuxa
+            | Subspace::InMemoryValue => Shape::Value,
+        }
+    }
+
+    pub const fn is_internal_fts(self) -> bool {
+        matches!(self, Subspace::SearchTerm | Subspace::SearchDocument)
+    }
+}
+
+impl From<Subspace> for u8 {
+    #[inline(always)]
+    fn from(subspace: Subspace) -> Self {
+        subspace as u8
+    }
+}
+
+#[derive(Clone, Copy, Default, PartialEq, Eq, Debug)]
+pub(crate) enum Fetch {
+    #[default]
+    All,
+    Expect(u32),
+    Limit(u32),
+}
 
 #[derive(Clone)]
 pub struct IterateParams<T: Key> {
     begin: T,
     end: T,
-    first: bool,
     ascending: bool,
     values: bool,
+    fetch: Fetch,
 }
+
+pub const ITERATE_BATCH_GROWTH: u32 = 4;
 
 #[derive(Clone, Default)]
 pub struct LookupStores {
@@ -190,13 +435,22 @@ pub enum BlobStore {
 #[derive(Clone)]
 pub enum SearchStore {
     Store(Store),
+    #[cfg(feature = "postgres")]
+    PostgreSQL(Arc<backend::postgres::PostgresStore>),
+    #[cfg(feature = "mysql")]
+    MySQL(Arc<backend::mysql::MysqlStore>),
     ElasticSearch(Arc<ElasticSearchStore>),
     MeiliSearch(Arc<MeiliSearchStore>),
+    // inbuxa: ST-5, ST-6, ST-12: an SQL primary with read replicas
+    Replicated(Arc<backend::scaleout::replica::ReplicatedStore>),
 }
 
 #[derive(Clone, Debug)]
 pub enum InMemoryStore {
+    // inbuxa: the in-memory store kept in the data store (0.16's default)
     Store(Store),
+    Sql(Store),
+    Local(Arc<backend::local::LocalStore>),
     #[cfg(feature = "redis")]
     Redis(Arc<backend::redis::RedisStore>),
     Http(Arc<HttpStore>),
@@ -278,6 +532,12 @@ impl From<MeiliSearchStore> for SearchStore {
     }
 }
 
+impl From<backend::local::LocalStore> for InMemoryStore {
+    fn from(store: backend::local::LocalStore) -> Self {
+        Self::Local(Arc::new(store))
+    }
+}
+
 #[cfg(feature = "redis")]
 impl From<backend::redis::RedisStore> for InMemoryStore {
     fn from(store: backend::redis::RedisStore) -> Self {
@@ -286,12 +546,6 @@ impl From<backend::redis::RedisStore> for InMemoryStore {
 }
 
 impl From<Store> for SearchStore {
-    fn from(store: Store) -> Self {
-        Self::Store(store)
-    }
-}
-
-impl From<Store> for InMemoryStore {
     fn from(store: Store) -> Self {
         Self::Store(store)
     }
@@ -311,7 +565,7 @@ impl Default for BlobStore {
 
 impl Default for InMemoryStore {
     fn default() -> Self {
-        Self::Store(Store::None)
+        Self::Sql(Store::None)
     }
 }
 
@@ -656,6 +910,14 @@ impl Store {
         !matches!(self, Self::None)
     }
 
+    pub fn chunk_size(&self) -> Option<usize> {
+        match self {
+            #[cfg(feature = "foundation")]
+            Store::FoundationDb(_) => Some(backend::foundationdb::MAX_VALUE_SIZE),
+            _ => None,
+        }
+    }
+
     pub fn is_same(&self, other: &Store) -> bool {
         match (self, other) {
             #[cfg(feature = "sqlite")]
@@ -714,6 +976,26 @@ impl Store {
     }
 
     #[inline(always)]
+    pub fn is_embedded(&self) -> bool {
+        match self {
+            #[cfg(feature = "rocks")]
+            Store::RocksDb(_) => true,
+            #[cfg(feature = "sqlite")]
+            Store::SQLite(_) => true,
+            _ => false,
+        }
+    }
+
+    #[inline(always)]
+    pub fn is_postgresql(&self) -> bool {
+        match self {
+            #[cfg(feature = "postgres")]
+            Store::PostgreSQL(_) => true,
+            _ => false,
+        }
+    }
+
+    #[inline(always)]
     pub fn is_ephemeral(&self) -> bool {
         matches!(self, Self::Ephemeral(_))
     }
@@ -761,3 +1043,4 @@ impl From<Value<'static>> for () {
         unreachable!()
     }
 }
+

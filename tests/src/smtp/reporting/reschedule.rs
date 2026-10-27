@@ -6,22 +6,20 @@
 
 //! Rescheduling an internal DMARC or TLS report over JMAP moves its task: the
 //! task runs at the new time, x:Task/get shows the new due, and tasks due
-//! after it still run. A task queue row whose type can't be read is logged
-//! and repaired rather than stopping every task due after it, including the
-//! rows an earlier reschedule wrote with the report's object type.
+//! after it still run. A task queue row that matches no task (a stale due,
+//! or no task at all) is removed rather than holding back the tasks due
+//! after it.
 
-use crate::utils::server::{TestServer, TestServerBuilder};
+use crate::{
+    smtp::reporting::{TestDmarcRecord, close_report_window},
+    utils::server::{TestServer, TestServerBuilder},
+};
 use common::{
     Server,
     config::smtp::report::AggregateFrequency,
     ipc::{DmarcEvent, PolicyType, TlsEvent},
 };
-use mail_auth::{
-    common::parse::TxtRecordParser,
-    dmarc::Dmarc,
-    mta_sts::TlsRpt,
-    report::{ActionDisposition, DmarcResult, Record},
-};
+use mail_auth::{dmarc::DmarcRecord, dns::TxtRecordParser, mta_sts::TlsRptRecord};
 use registry::{
     schema::{
         enums::{TaskStoreMaintenanceType, TaskType},
@@ -35,13 +33,14 @@ use registry::{
 };
 use serde_json::json;
 use smtp::reporting::{index::InternalReportIndex, send::MtaReportSend};
+use smtp_report::dmarc::{Disposition, DmarcStatus, Record};
 use std::{
     sync::Arc,
     time::{Duration, Instant},
 };
 use store::{
     SerializeInfallible, ValueKey,
-    write::{BatchBuilder, RegistryClass, TaskQueueClass, ValueClass, now},
+    write::{BatchBuilder, RegistryClass, TaskId, TaskQueueClass, ValueClass, now},
 };
 use types::id::Id;
 use utils::snowflake::SnowflakeIdGenerator;
@@ -69,7 +68,7 @@ async fn report_reschedule() {
         .await;
     admin
         .registry_create_object(DmarcReportSettings {
-            aggregate_max_report_size: Expression {
+            max_aggregate_report_size: Expression {
                 else_: "1024".into(),
                 ..Default::default()
             },
@@ -118,9 +117,12 @@ async fn report_reschedule() {
             at,
             "{object:?} task due not moved: {task:?}"
         );
-        assert_eq!(
-            queue_row(&test.server, id.id(), at).await,
-            Some(task_type.to_id().serialize()),
+        // inbuxa: 1.0 keys queue rows by task type, so the row being found
+        // under the task's type is what carries the type now
+        assert!(
+            queue_row(&test.server, id.id(), task_type, at)
+                .await
+                .is_some(),
             "{object:?} queue row"
         );
     }
@@ -141,45 +143,76 @@ async fn report_reschedule() {
             .is_empty()
     );
 
-    // Rows an earlier reschedule may have left in a store: one with the
-    // report's object type and the task left at its old due, and one that
-    // is unreadable and has no task behind it. Neither may hold back a task
-    // due after them.
+    // Rows that don't match a task: one at a due its task doesn't have, and
+    // one with no task behind it. Neither may hold back a task due after
+    // them.
+    // inbuxa: 0.16 tested here the row its old reschedule wrote (the
+    // report's object type in the value, the task left at its old due) and
+    // moved the task to that row's time. 1.0 keys queue rows by task type and
+    // never reads their value, so that row can't be misread any more; the
+    // closest 1.0 case is a stale due: the task manager drops the row and the
+    // task keeps its own due and row.
     schedule_dmarc(&test, "foobar.net").await;
     let dmarc_id = wait_for_report::<DmarcInternalReport>(&test, "foobar.net").await;
     let at = now() + 2;
-    let old_due = old_style_reschedule(&test.server, dmarc_id.id(), at).await;
+    let task_due = stale_queue_row(&test.server, dmarc_id.id(), at).await;
     let orphan = SnowflakeIdGenerator::global_id().unwrap();
     let mut batch = BatchBuilder::new();
     batch.set(
         ValueClass::TaskQueue(TaskQueueClass::Due {
-            id: orphan,
+            id: TaskId::Assigned(orphan),
+            typ: TaskType::StoreMaintenance,
             due: at,
         }),
         vec![0xff, 0xff],
     );
-    test.server.store().write(batch.build_all()).await.unwrap();
+    test.server.store().write_batch(&mut batch).await.unwrap();
     let later = marker_task(&test.server, at + 2).await;
 
-    wait_until_run(&test.server, &[dmarc_id.id(), later]).await;
+    wait_until_run(&test.server, &[later]).await;
+    wait_until_gone(&test.server, orphan, TaskType::StoreMaintenance, at).await;
+    wait_until_gone(&test.server, dmarc_id.id(), TaskType::DmarcReport, at).await;
+    assert!(task_due > at + 3600, "the report's own due is a day away");
+    let task = admin.registry_get::<Task>(dmarc_id).await;
+    assert_eq!(task.object_type(), TaskType::DmarcReport);
+    assert_eq!(task.due_timestamp(), task_due);
     assert!(
+        queue_row(&test.server, dmarc_id.id(), TaskType::DmarcReport, task_due)
+            .await
+            .is_some(),
+        "the report's task lost its queue row"
+    );
+    assert_eq!(
         admin
             .registry_get_all::<DmarcInternalReport>()
             .await
-            .is_empty()
+            .into_iter()
+            .map(|(id, _)| id)
+            .collect::<Vec<_>>(),
+        vec![dmarc_id]
     );
-    assert_eq!(queue_row(&test.server, orphan, at).await, None);
-    assert_eq!(queue_row(&test.server, dmarc_id.id(), at).await, None);
-    assert_eq!(queue_row(&test.server, dmarc_id.id(), old_due).await, None);
+    admin
+        .registry_destroy(ObjectType::DmarcInternalReport, vec![dmarc_id])
+        .await
+        .assert_destroyed(&[dmarc_id]);
+    assert!(!task_exists(&test.server, dmarc_id.id()).await);
+    assert_eq!(
+        queue_row(&test.server, dmarc_id.id(), TaskType::DmarcReport, task_due).await,
+        None
+    );
 
     // x:Task/query by type skips an unreadable row rather than failing
     let mut batch = BatchBuilder::new();
     let due = now() + 3600;
     batch.set(
-        ValueClass::TaskQueue(TaskQueueClass::Due { id: orphan, due }),
+        ValueClass::TaskQueue(TaskQueueClass::Due {
+            id: TaskId::Assigned(orphan),
+            typ: TaskType::DmarcReport,
+            due,
+        }),
         vec![0xff, 0xff],
     );
-    test.server.store().write(batch.build_all()).await.unwrap();
+    test.server.store().write_batch(&mut batch).await.unwrap();
     admin
         .registry_query_ids(
             ObjectType::Task,
@@ -189,10 +222,11 @@ async fn report_reschedule() {
         .await;
     let mut batch = BatchBuilder::new();
     batch.clear(ValueClass::TaskQueue(TaskQueueClass::Due {
-        id: orphan,
+        id: TaskId::Assigned(orphan),
+        typ: TaskType::DmarcReport,
         due,
     }));
-    test.server.store().write(batch.build_all()).await.unwrap();
+    test.server.store().write_batch(&mut batch).await.unwrap();
 
     if test.is_reset() {
         test.temp_dir.delete();
@@ -203,17 +237,19 @@ async fn schedule_dmarc(test: &TestServer, domain: &str) {
     test.server
         .schedule_report(DmarcEvent {
             domain: domain.to_string(),
-            report_record: Record::new()
+            report_record: Record::default()
                 .with_source_ip("192.168.1.2".parse().unwrap())
-                .with_action_disposition(ActionDisposition::Pass)
-                .with_dmarc_dkim_result(DmarcResult::Pass)
-                .with_dmarc_spf_result(DmarcResult::Fail)
+                .with_action_disposition(Disposition::Pass)
+                .with_dmarc_dkim_result(DmarcStatus::Pass)
+                .with_dmarc_spf_result(DmarcStatus::Fail)
                 .with_envelope_from("hello@example.org")
                 .with_envelope_to("other@example.org")
                 .with_header_from("bye@example.org"),
             dmarc_record: Arc::new(
-                Dmarc::parse(format!("v=DMARC1; p=reject; rua=mailto:reports@{domain}").as_bytes())
-                    .unwrap(),
+                DmarcRecord::parse(
+                    format!("v=DMARC1; p=reject; rua=mailto:reports@{domain}").as_bytes(),
+                )
+                .unwrap(),
             ),
             interval: AggregateFrequency::Daily,
             span_id: 0,
@@ -228,7 +264,7 @@ async fn schedule_tls(test: &TestServer, domain: &str) {
             policy: PolicyType::None,
             failure: None,
             tls_record: Arc::new(
-                TlsRpt::parse(format!("v=TLSRPTv1;rua=mailto:reports@{domain}").as_bytes())
+                TlsRptRecord::parse(format!("v=TLSRPTv1;rua=mailto:reports@{domain}").as_bytes())
                     .unwrap(),
             ),
             interval: AggregateFrequency::Daily,
@@ -256,6 +292,9 @@ impl ReportDomain for TlsInternalReport {
 async fn wait_for_report<T: ReportDomain>(test: &TestServer, domain: &str) -> Id {
     let admin = test.account("admin");
     for _ in 0..100 {
+        // inbuxa: 1.0 creates the report when its window closes. The window
+        // task may predate this report's rows, so close it until it shows
+        close_report_window(&test.server, T::OBJECT, AggregateFrequency::Daily).await;
         if let Some((id, _)) = admin
             .registry_get_all::<T>()
             .await
@@ -281,42 +320,36 @@ async fn marker_task(server: &Server, due: u64) -> u64 {
             status: TaskStatus::at(due as i64),
         }),
     );
-    server.store().write(batch.build_all()).await.unwrap();
+    server.store().write_batch(&mut batch).await.unwrap();
     server.notify_task_queue();
     id
 }
 
-/// What the reschedule before this fix wrote: the report's object type in
-/// the new queue row, and the task row left at its old due. Returns that
-/// old due.
-async fn old_style_reschedule(server: &Server, item_id: u64, at: u64) -> u64 {
+/// A queue row for the report's task at `at`, a due the task doesn't have.
+/// The value is what 0.16's reschedule wrote there (the report's object
+/// type); 1.0 doesn't read it. Returns the task's own due.
+async fn stale_queue_row(server: &Server, item_id: u64, at: u64) -> u64 {
     let object_id = ObjectType::DmarcInternalReport.to_id();
     let key = ValueClass::Registry(RegistryClass::Item { object_id, item_id });
-    let mut report = server
+    let report = server
         .store()
-        .get_value::<DmarcInternalReport>(ValueKey::from(key.clone()))
+        .get_value::<DmarcInternalReport>(ValueKey::from(key))
         .await
         .unwrap()
         .unwrap();
-    let old_due = report.deliver_at().timestamp() as u64;
-    report.set_deliver_at(UTCDateTime::from_timestamp(at as i64));
+    let task_due = report.deliver_at().timestamp() as u64;
     let mut batch = BatchBuilder::new();
-    batch
-        .clear(ValueClass::TaskQueue(TaskQueueClass::Due {
-            id: item_id,
-            due: old_due,
-        }))
-        .set(
-            ValueClass::TaskQueue(TaskQueueClass::Due {
-                id: item_id,
-                due: at,
-            }),
-            object_id.serialize(),
-        )
-        .set(key, report.to_pickled_vec());
-    server.store().write(batch.build_all()).await.unwrap();
+    batch.set(
+        ValueClass::TaskQueue(TaskQueueClass::Due {
+            id: TaskId::Assigned(item_id),
+            typ: TaskType::DmarcReport,
+            due: at,
+        }),
+        object_id.serialize(),
+    );
+    server.store().write_batch(&mut batch).await.unwrap();
     server.notify_task_queue();
-    old_due
+    task_due
 }
 
 struct RawValue(Vec<u8>);
@@ -327,11 +360,12 @@ impl store::Deserialize for RawValue {
     }
 }
 
-async fn queue_row(server: &Server, id: u64, due: u64) -> Option<Vec<u8>> {
+async fn queue_row(server: &Server, id: u64, typ: TaskType, due: u64) -> Option<Vec<u8>> {
     server
         .store()
         .get_value::<RawValue>(ValueKey::from(ValueClass::TaskQueue(TaskQueueClass::Due {
-            id,
+            id: TaskId::Assigned(id),
+            typ,
             due,
         })))
         .await
@@ -343,11 +377,23 @@ async fn task_exists(server: &Server, id: u64) -> bool {
     server
         .store()
         .get_value::<Task>(ValueKey::from(ValueClass::TaskQueue(
-            TaskQueueClass::Task { id },
+            TaskQueueClass::Task {
+                id: TaskId::Assigned(id),
+            },
         )))
         .await
         .unwrap()
         .is_some()
+}
+
+async fn wait_until_gone(server: &Server, id: u64, typ: TaskType, due: u64) {
+    let started = Instant::now();
+    while queue_row(server, id, typ, due).await.is_some() {
+        if started.elapsed() > Duration::from_secs(30) {
+            panic!("{typ:?} queue row {id} at {due} never went (now {})", now());
+        }
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
 }
 
 async fn wait_until_run(server: &Server, ids: &[u64]) {
@@ -363,7 +409,21 @@ async fn wait_until_run(server: &Server, ids: &[u64]) {
             return;
         }
         if started.elapsed() > Duration::from_secs(30) {
-            panic!("tasks {pending:?} never ran");
+            let mut tasks = Vec::new();
+            for id in &pending {
+                tasks.push(
+                    server
+                        .store()
+                        .get_value::<Task>(ValueKey::from(ValueClass::TaskQueue(
+                            TaskQueueClass::Task {
+                                id: TaskId::Assigned(*id),
+                            },
+                        )))
+                        .await
+                        .unwrap(),
+                );
+            }
+            panic!("tasks {pending:?} never ran: {tasks:?} (now {})", now());
         }
         tokio::time::sleep(Duration::from_millis(200)).await;
     }

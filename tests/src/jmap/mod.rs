@@ -96,8 +96,8 @@ pub async fn jmap_tests() {
     admin
         .registry_update_setting(
             Jmap {
-                set_max_objects: 100_000,
-                get_max_results: 100_000,
+                max_set_objects: 100_000,
+                max_get_results: 100_000,
                 event_source_throttle: 500u64.into(),
                 push_throttle: 500u64.into(),
                 websocket_throttle: 500u64.into(),
@@ -106,8 +106,8 @@ pub async fn jmap_tests() {
                 ..Default::default()
             },
             &[
-                Property::SetMaxObjects,
-                Property::GetMaxResults,
+                Property::MaxSetObjects,
+                Property::MaxGetResults,
                 Property::EventSourceThrottle,
                 Property::PushThrottle,
                 Property::WebsocketThrottle,
@@ -161,7 +161,7 @@ pub async fn jmap_tests() {
         .await;
     admin
         .registry_create_object(MtaRoute::Relay(MtaRouteRelay {
-            address: "127.0.0.1".into(),
+            host: "127.0.0.1".into(),
             port: 9999,
             allow_invalid_certs: true,
             implicit_tls: false,

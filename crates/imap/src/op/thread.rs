@@ -13,14 +13,12 @@ use common::network::SessionStream;
 use email::cache::{MessageCacheFetch, email::MessageCacheAccess};
 use imap_proto::{
     Command, StatusResponse,
-    protocol::{
-        ImapResponse,
-        thread::{Arguments, Response},
-    },
+    protocol::thread::{Arguments, Response},
     receiver::Request,
 };
 use registry::schema::enums::Permission;
 use std::{sync::Arc, time::Instant};
+use tokio::sync::OwnedSemaphorePermit;
 use trc::AddContext;
 
 impl<T: SessionStream> Session<T> {
@@ -28,6 +26,7 @@ impl<T: SessionStream> Session<T> {
         &mut self,
         request: Request<Command>,
         is_uid: bool,
+        permit: Option<OwnedSemaphorePermit>,
     ) -> trc::Result<()> {
         // Validate access
         self.assert_has_permission(Permission::ImapThread)?;
@@ -37,7 +36,7 @@ impl<T: SessionStream> Session<T> {
         let mut arguments = request.parse_thread()?;
         let (data, mailbox) = self.state.mailbox_state();
 
-        spawn_op!(data, {
+        spawn_op!(permit, data, {
             let tag = std::mem::take(&mut arguments.tag);
 
             match data.thread(arguments, mailbox, is_uid, op_start).await {
@@ -45,7 +44,7 @@ impl<T: SessionStream> Session<T> {
                     data.write_bytes(
                         StatusResponse::completed(command)
                             .with_tag(tag)
-                            .serialize(response.serialize()),
+                            .serialize_after(&response),
                     )
                     .await
                 }
@@ -63,44 +62,46 @@ impl<T: SessionStream> SessionData<T> {
         is_uid: bool,
         op_start: Instant,
     ) -> trc::Result<Response> {
+        let cache = self
+            .server
+            .get_cached_messages(mailbox.id.account_id)
+            .await
+            .caused_by(trc::location!())?;
+        self.sync_view(&mailbox, &cache, None)
+            .await
+            .caused_by(trc::location!())?;
+
         // Run query
         let (result_set, _) = self
-            .query(arguments.filter, vec![], &mailbox, &None)
+            .query(arguments.filter, vec![], &mailbox, &cache, &None)
             .await?;
 
-        // Synchronize mailbox
-        if !result_set.is_empty() {
-            self.synchronize_messages(&mailbox)
-                .await
-                .caused_by(trc::location!())?;
-        } else {
+        if result_set.is_empty() {
             return Ok(Response {
                 is_uid,
                 threads: vec![],
             });
         }
 
-        // Lock the cache
-        let cache = self
-            .server
-            .get_cached_messages(mailbox.id.account_id)
-            .await
-            .caused_by(trc::location!())?;
-
         // Group messages by thread
         let mut threads: AHashMap<u32, Vec<u32>> = AHashMap::new();
-        let state = mailbox.state.lock();
-        for document_id in result_set {
-            if let Some(item) = cache.email_by_id(&document_id)
-                && let Some((imap_id, _)) = state.map_result_id(document_id, is_uid)
-            {
-                threads.entry(item.thread_id).or_default().push(imap_id);
+        {
+            let view = mailbox.view.lock();
+            for document_id in result_set {
+                if let Some(item) = cache.email_by_id(&document_id)
+                    && let Some(resolved) = view.map_result(document_id)
+                {
+                    threads
+                        .entry(item.thread_id())
+                        .or_default()
+                        .push(resolved.imap_id(is_uid));
+                }
             }
         }
 
         let mut threads = threads
-            .into_iter()
-            .map(|(_, mut messages)| {
+            .into_values()
+            .map(|mut messages| {
                 messages.sort_unstable();
                 messages
             })

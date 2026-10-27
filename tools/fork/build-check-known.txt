@@ -5,17 +5,5 @@
 # what they call. Errors here are reported as expected; an error in any other
 # file fails the strip. One path per line.
 
-# OIDC directories: `main` has its own tests/src/directory/oidc.rs.
-tests/src/directory/mod.rs
-# Issuer-based directory routing (since v0.16.23), which `main` doesn't have
-# and doesn't carry the test for (DIR-2).
-tests/src/directory/issuer.rs
-# Tenants and archiving.
-tests/src/system/mod.rs
-# The LLM spam-filter classifier.
-tests/src/smtp/inbound/antispam.rs
-# Telemetry: alerts, stored metrics and traces, webhooks.
-tests/src/telemetry/alerts.rs
-tests/src/telemetry/metrics.rs
-tests/src/telemetry/tracing.rs
-tests/src/telemetry/webhooks.rs
+# Empty since v1.0.0: upstream ships no tests/ any more, so nothing in a
+# stripped tree fails to build.

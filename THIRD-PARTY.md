@@ -24,6 +24,9 @@ carry their own license files.
 | `crates/common/src/network/acme/directory.rs`, `crates/common/src/network/acme/jose.rs`, `crates/common/src/network/acme/order.rs` | [rustls-acme](https://github.com/FlorianUekermann/rustls-acme) (MIT or Apache-2.0) | Copyright (c) Florian Uekermann |
 | `crates/types/src/id.rs` | [crockford](https://github.com/archer884/crockford) (MIT or Apache-2.0) | Copyright (c) 2017 J/A <archer884@gmail.com> |
 | `crates/nlp/src/tokenizers/types.rs` | test cases from [linkify](https://github.com/robinst/linkify) (MIT or Apache-2.0) | Copyright (c) 2017 Robin Stocker |
+| `crates/calcard/src/datecalc/error.rs` | [rust-rrule](https://github.com/fmeringdal/rust-rrule) (MIT or Apache-2.0) | Copyright (c) 2021 Fredrik Meringdal, Ralph Bisschops |
+| `crates/calcard/src/datecalc/recurrence.rs`, `crates/calcard/src/datecalc/weekdate.rs` | [bttf](https://github.com/BurntSushi/bttf), by Andrew Gallant (MIT or Unlicense) | Copyright (c) 2025 Andrew Gallant <jamslam@gmail.com> |
+| `crates/jmap-tools/src/json/deserializer.rs`, `crates/jmap-tools/src/json/index.rs`, `crates/jmap-tools/src/json/key.rs`, `crates/jmap-tools/src/json/mod.rs`, `crates/jmap-tools/src/json/num.rs`, `crates/jmap-tools/src/json/object_vec.rs`, `crates/jmap-tools/src/json/ser.rs` | code by Pascal Seitz, apparently [serde_json_borrow](https://github.com/PSeitz/serde_json_borrow) (MIT or Apache-2.0); the files name the author, not the project | Copyright (c) 2021 Pascal Seitz <pascal.seitz@gmail.com> |
 | `resources/spam-filter/spam-filter-rules.json.gz` | the published rules of [spam-filter](https://github.com/stalwartlabs/spam-filter) v3.0.2, unmodified, built into the server as its default spam rules (MIT or Apache-2.0) | Copyright (C) 2024, Stalwart Labs LLC |
 
 Each notice above applies with this permission notice:
@@ -50,7 +53,7 @@ Each notice above applies with this permission notice:
 
 | Where | From | Notice |
 |---|---|---|
-| `crates/jmap-proto/src/types/date.rs`, `crates/registry/src/types/datetime.rs` | [upb](https://github.com/protocolbuffers/upb/blob/22182e6e/upb/json_decode.c), the date parsing marked in each file | Copyright (c) 2009-2011, Google Inc. All rights reserved. |
+| `crates/jmap-proto/src/types/date.rs`, `crates/registry/src/types/datetime.rs`, `crates/smtp-proto/src/request/parser.rs` | [upb](https://github.com/protocolbuffers/upb/blob/22182e6e/upb/json_decode.c), the date parsing marked in each file | Copyright (c) 2009-2011, Google Inc. All rights reserved. |
 
 ```text
 Copyright (c) 2009-2011, Google Inc.
@@ -86,8 +89,18 @@ These files implement published algorithms and credit their source. No code
 is copied, so there's no notice to carry. They're listed so the strip report
 doesn't flag them as new.
 
-- `crates/jmap-proto/src/types/date.rs`, `crates/registry/src/types/datetime.rs`:
+- `crates/jmap-proto/src/types/date.rs`, `crates/registry/src/types/datetime.rs`,
+  `crates/smtp-proto/src/response/generate.rs`:
   `civil_from_days`, from Howard Hinnant's
   [date algorithms](http://howardhinnant.github.io/date_algorithms.html)
 - `crates/utils/src/glob.rs`: Russ Cox's
   [glob matching](https://research.swtch.com/glob)
+
+## Upstream's own files under a permissive license
+
+Stalwart Labs' own code, released under a license other than the AGPL. No
+third-party notice applies; listed so the strip report doesn't flag them.
+
+- `crates/calcard/src/datecalc/rrule.rs` (Apache-2.0 or MIT)
+- `crates/smtp-report/src/lib.rs` (flagged only because its documentation
+  says an address "is taken from" a struct)

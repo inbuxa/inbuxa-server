@@ -22,13 +22,14 @@ pub struct HttpStoreConfig {
     pub id: String,
     pub url: String,
     pub retry: u64,
-    pub refresh: u64,
+    pub refresh_interval: u64,
     pub timeout: Duration,
     pub gzipped: bool,
     pub max_size: usize,
     pub max_entries: usize,
     pub max_entry_size: usize,
     pub format: HttpStoreFormat,
+    pub custom_user_agent: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -50,3 +51,4 @@ pub struct HttpStore {
     pub config: HttpStoreConfig,
     pub client: reqwest::Client,
 }
+

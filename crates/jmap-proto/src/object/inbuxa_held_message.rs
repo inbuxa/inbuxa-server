@@ -73,19 +73,20 @@ impl Property for HeldMessageProperty {
 
 impl HeldMessageProperty {
     fn parse(value: &str) -> Option<Self> {
-        hashify::tiny_map!(value.as_bytes(),
-            b"id" => HeldMessageProperty::Id,
-            b"sender" => HeldMessageProperty::Sender,
-            b"recipients" => HeldMessageProperty::Recipients,
-            b"subject" => HeldMessageProperty::Subject,
-            b"size" => HeldMessageProperty::Size,
-            b"rules" => HeldMessageProperty::Rules,
-            b"counts" => HeldMessageProperty::Counts,
-            b"heldAt" => HeldMessageProperty::HeldAt,
-            b"expiresAt" => HeldMessageProperty::ExpiresAt,
-            b"preview" => HeldMessageProperty::Preview,
-            b"decision" => HeldMessageProperty::Decision,
-            b"note" => HeldMessageProperty::Note,
+        hashify::fnc_map!(value.as_bytes(),
+            b"id" => Some(HeldMessageProperty::Id),
+            b"sender" => Some(HeldMessageProperty::Sender),
+            b"recipients" => Some(HeldMessageProperty::Recipients),
+            b"subject" => Some(HeldMessageProperty::Subject),
+            b"size" => Some(HeldMessageProperty::Size),
+            b"rules" => Some(HeldMessageProperty::Rules),
+            b"counts" => Some(HeldMessageProperty::Counts),
+            b"heldAt" => Some(HeldMessageProperty::HeldAt),
+            b"expiresAt" => Some(HeldMessageProperty::ExpiresAt),
+            b"preview" => Some(HeldMessageProperty::Preview),
+            b"decision" => Some(HeldMessageProperty::Decision),
+            b"note" => Some(HeldMessageProperty::Note),
+            _ => None,
         )
     }
 }

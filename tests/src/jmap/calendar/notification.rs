@@ -2,6 +2,8 @@
  * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
+ *
+ * Modified by Coffey Labs in 2026 for INBUXA.
  */
 
 use crate::utils::{
@@ -123,11 +125,17 @@ pub async fn test(test: &TestServer) {
         notification.assert_is_equal(json!({
           "id": &notification_id,
           "created": &notification.text_field("created"),
+          // inbuxa: 1.0 adds the person's calendarAddress, returns
+          // requested properties without a value as null, and the event
+          // carries its server-set created and version
           "changedBy": {
             "name": "John Doe",
             "email": "jdoe@example.com",
-            "principalId": &john_id
+            "principalId": &john_id,
+            "calendarAddress": "mailto:jdoe@example.com"
           },
+          "comment": null,
+          "eventPatch": null,
           "type": "created",
           "calendarEventId": event_id,
           "isDraft": false,
@@ -138,6 +146,12 @@ pub async fn test(test: &TestServer) {
                 notification
                     .text_field("event/updated")
             )
+            .with_property(
+                "created",
+                notification
+                    .text_field("event/created")
+            )
+            .with_property("version", "2.0")
         }));
 
         // Verify the event exists
@@ -212,18 +226,21 @@ pub async fn test(test: &TestServer) {
                 "name": "Jane Smith",
                 "email": "jane.smith@example.com",
                 "principalId": &jane_id,
+                "calendarAddress": "mailto:jane.smith@example.com",
             })
         } else {
             json!({
                 "name": "Bill Foobar",
                 "email": "bill@example.com",
                 "principalId": &bill_id,
+                "calendarAddress": "mailto:bill@example.com",
             })
         };
 
         response.list()[0].assert_is_equal(json!({
             "id": &notification_id,
             "changedBy": changed_by,
+            "comment": null,
             "type": "updated",
             "calendarEventId": &john_event_id,
             "isDraft": false
@@ -367,8 +384,10 @@ pub async fn test(test: &TestServer) {
         "changedBy": {
             "name": "John Doe",
             "email": "jdoe@example.com",
-            "principalId": &john_id
+            "principalId": &john_id,
+            "calendarAddress": "mailto:jdoe@example.com"
         },
+        "comment": null,
         "type": "updated",
         "calendarEventId": &bill_event_id,
         "isDraft": false

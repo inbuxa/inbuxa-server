@@ -9,6 +9,7 @@ use crate::{
     schema::prelude::Property,
     types::{EnumImpl, id::ObjectId},
 };
+use compact_str::ToCompactString;
 use std::{borrow::Cow, fmt::Display};
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -111,9 +112,9 @@ impl Warning {
     pub fn log(&self) {
         trc::event!(
             Registry(trc::RegistryEvent::BuildWarning),
-            Source = self.object_id.object().as_str(),
+            ObjectType = self.object_id.object().as_str(),
             Id = self.object_id.id().id(),
-            Key = self.property.map(|key| key.as_str()),
+            Property = self.property.map(|key| key.as_str()),
             Reason = self.message.clone(),
         );
     }
@@ -125,18 +126,18 @@ impl Error {
             Error::Validation { object_id, errors } => {
                 trc::event!(
                     Registry(trc::RegistryEvent::ValidationError),
-                    Source = object_id.object().as_str(),
+                    ObjectType = object_id.object().as_str(),
                     Id = object_id.id().id(),
                     Reason = errors
                         .iter()
-                        .map(|err| trc::Value::from(err.to_string()))
+                        .map(|err| trc::Value::from(err.to_compact_string()))
                         .collect::<Vec<_>>(),
                 );
             }
             Error::Build { object_id, message } => {
                 trc::event!(
                     Registry(trc::RegistryEvent::BuildError),
-                    Source = object_id.object().as_str(),
+                    ObjectType = object_id.object().as_str(),
                     Id = object_id.id().id(),
                     Reason = message.clone(),
                 );
@@ -144,7 +145,7 @@ impl Error {
             Error::Internal { object_id, error } => {
                 trc::event!(
                     Registry(trc::RegistryEvent::ReadError),
-                    Source = object_id.as_ref().map(|id| id.object().as_str()),
+                    ObjectType = object_id.as_ref().map(|id| id.object().as_str()),
                     Id = object_id.as_ref().map(|id| id.id().id()),
                     CausedBy = error.clone(),
                 );
@@ -152,7 +153,7 @@ impl Error {
             Error::NotFound { object_id } => {
                 trc::event!(
                     Registry(trc::RegistryEvent::BuildError),
-                    Source = object_id.object().as_str(),
+                    ObjectType = object_id.object().as_str(),
                     Id = object_id.id().id(),
                     Reason = "Object not found",
                 );

@@ -28,7 +28,7 @@ use jmap_proto::{
     types::date::UTCDate,
 };
 use jmap_tools::{Key, Map, Value};
-use mail_parser::{MessageParser, MimeHeaders, PartType};
+use mail_parser::MessageParser;
 use smtp::queue::spool::SmtpSpool;
 use std::borrow::Cow;
 use types::id::Id;
@@ -71,7 +71,7 @@ fn text(s: &str) -> HValue {
 /// The text a reviewer reads: the subject, each body as text, and the
 /// attachments' names; at most [`PREVIEW_LIMIT`].
 async fn preview(server: &Server, queue_id: u64) -> trc::Result<Option<String>> {
-    let Some(message) = server.read_message(queue_id, QueueName::default()).await else {
+    let Some(message) = server.read_message(queue_id, QueueName::default()).await? else {
         return Ok(None);
     };
     let Some(raw) = server
@@ -86,12 +86,9 @@ async fn preview(server: &Server, queue_id: u64) -> trc::Result<Option<String>> 
         ));
     };
     let mut out = String::new();
-    for part in parsed.text_bodies() {
-        match &part.body {
-            PartType::Text(text) => out.push_str(text),
-            PartType::Html(html) => out.push_str(&mail_parser::decoders::html::html_to_text(html)),
-            _ => {}
-        }
+    // HTML bodies come back as text
+    for body in parsed.text_bodies() {
+        out.push_str(&body);
         out.push_str("\n\n");
     }
     let attachments: Vec<&str> = parsed

@@ -2,11 +2,13 @@
  * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
+ *
+ * Modified by Coffey Labs in 2026 for INBUXA.
  */
 
 use crate::utils::server::TestServerBuilder;
 use ahash::AHashMap;
-use common::{DavResource, DavResources};
+use common::{GroupwareResource, GroupwareResources};
 use groupware::DavResourceName;
 use hyper::StatusCode;
 use registry::{
@@ -212,12 +214,12 @@ pub async fn webdav_tests() {
 }
 
 pub trait DavResourcesTest {
-    fn items(&self) -> Vec<DavResource>;
+    fn items(&self) -> Vec<GroupwareResource>;
 }
 
-impl DavResourcesTest for DavResources {
-    fn items(&self) -> Vec<DavResource> {
-        self.resources.clone()
+impl DavResourcesTest for GroupwareResources {
+    fn items(&self) -> Vec<GroupwareResource> {
+        self.resources.iter().map(|item| *item.resource).collect()
     }
 }
 

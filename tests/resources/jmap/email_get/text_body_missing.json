@@ -3,6 +3,7 @@
     "a": true
   },
   "keywords": {
+    "$hasattachment": true,
     "tag": true
   },
   "size": 2527,
@@ -161,5 +162,6 @@
       "disposition": "attachment"
     }
   ],
-  "hasAttachment": true
+  "hasAttachment": true,
+  "preview": ""
 }

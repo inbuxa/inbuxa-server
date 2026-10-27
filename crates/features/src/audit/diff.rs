@@ -170,9 +170,9 @@ mod tests {
 
     #[test]
     fn secrets_the_schema_knows() {
-        // x:AiModel's httpAuth holds a secret inside one of its variants
+        // x:AiModel's variants each hold their apiKey secret (1.0's shape)
         if schema::embedded().is_some() {
-            assert!(is_secret("x:AiModel", "httpAuth"));
+            assert!(is_secret("x:AiModel", "apiKey"));
             assert!(!is_secret("x:AiModel", "name"));
         }
     }

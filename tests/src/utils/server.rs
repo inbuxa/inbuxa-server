@@ -19,7 +19,7 @@ use crate::{
 };
 use ahash::AHashMap;
 use common::{
-    BuildServer, Caches, Core, Data, DavResources, Inner, Server,
+    BuildServer, Caches, Core, Data, GroupwareResources, Inner, Server,
     auth::RECOVERY_ADMIN_ID,
     config::{
         server::{Listeners, ServerProtocol},
@@ -33,7 +33,7 @@ use common::{
     },
     psl,
 };
-use email::message::metadata::MessageMetadata;
+use email::message::metadata::MetadataStructure;
 use groupware::cache::GroupwareCache;
 use http::HttpSessionManager;
 use imap::core::ImapSessionManager;
@@ -56,8 +56,9 @@ use smtp::{
     SpawnQueueManager,
     core::{Session, SmtpSessionManager},
     queue::{
-        manager::{Queue, SpawnQueue},
-        spool::{QueuedMessages, SmtpSpool},
+        QueuedMessage,
+        manager::SpawnQueue,
+        spool::QUEUE_REFRESH,
     },
     reporting::scheduler::SpawnReport,
 };
@@ -65,7 +66,7 @@ use std::{collections::VecDeque, path::PathBuf, str::FromStr, sync::Arc};
 use store::{
     RegistryStore, Store, ValueKey,
     registry::{RegistryQuery, bootstrap::Bootstrap, write::RegistryWrite},
-    write::{AlignedBytes, Archive, now},
+    write::{QueueClass, ValueClass, now},
 };
 use tokio::sync::{mpsc, watch};
 use trc::EventType;
@@ -201,7 +202,7 @@ impl TestServerBuilder {
         protocol: NetworkListenerProtocol,
         name: &str,
         port: u16,
-        tls_implicit: bool,
+        implicit_tls: bool,
     ) -> Self {
         if protocol == NetworkListenerProtocol::Http {
             self.http_listener_port = port;
@@ -226,7 +227,7 @@ impl TestServerBuilder {
                 name,
                 protocol,
                 use_tls: true,
-                tls_implicit,
+                implicit_tls,
                 ..Default::default()
             })
             .await;
@@ -374,24 +375,28 @@ impl TestServerBuilder {
         }
 
         // Parse telemetry
-        let telemetry = Telemetry::parse(&mut self.bootstrap, &storage).await;
+        let (ipc, mut ipc_rxs) = build_ipc(!storage.coordinator.is_none());
+        let telemetry =
+            Telemetry::parse(&mut self.bootstrap, &storage, ipc.index_queue_notify()).await;
 
         // Parse components
         let core = Box::pin(Core::parse(&mut self.bootstrap, storage)).await;
         let data = Data::parse(&mut self.bootstrap).await;
-        let cache = Caches::parse(&mut self.bootstrap).await;
+        let (cache, swap_rx) = Caches::parse(&mut self.bootstrap, &core.storage).await;
 
         // Enable telemetry
         telemetry.enable();
 
         // Build inner
-        let (ipc, mut ipc_rxs) = build_ipc(!core.storage.coordinator.is_none());
         let inner = Arc::new(Inner {
             shared_core: core.into_shared(),
             data,
             ipc,
             cache,
         });
+
+        // Start the cache swap tier writer, as boot does
+        common::cache::swap::SwapTier::start(&inner, swap_rx);
 
         // Parse TCP acceptors
         servers
@@ -569,19 +574,24 @@ impl TestServer {
         (Session::test_with_shutdown(self.server.clone(), rx), tx)
     }
 
-    pub async fn resources(&self, name: &'static str, collection: Collection) -> Arc<DavResources> {
+    pub async fn resources(
+        &self,
+        name: &'static str,
+        collection: Collection,
+    ) -> Arc<GroupwareResources> {
         let account_id = self.account(name).id().document_id();
         self.server
-            .fetch_dav_resources(account_id, account_id, collection.into())
+            .fetch_groupware_resources(account_id, account_id, collection.into())
             .await
             .unwrap()
     }
 
     pub async fn fetch_email(&self, account_id: u32, document_id: u32) -> Vec<u8> {
+        // inbuxa: 1.0 keeps an email's metadata under ValueClass::Immutable
         let metadata_ = self
             .server
             .store()
-            .get_value::<Archive<AlignedBytes>>(ValueKey::property(
+            .get_value::<MetadataStructure>(ValueKey::immutable(
                 account_id,
                 Collection::Email,
                 document_id,
@@ -594,7 +604,7 @@ impl TestServer {
             .blob_store()
             .get_blob(
                 metadata_
-                    .unarchive::<MessageMetadata>()
+                    .unarchive()
                     .unwrap()
                     .blob_hash
                     .0
@@ -606,13 +616,53 @@ impl TestServer {
             .unwrap()
     }
 
+    /// The messages due now, and when the next one is. 0.16's queue had
+    /// this scan; 1.0's manager keeps it to itself, so it's done here.
     pub async fn all_queued_messages(&self) -> QueuedMessages {
+        let now = now();
+        let mut events = QueuedMessages {
+            messages: Vec::new(),
+            next_refresh: now + QUEUE_REFRESH,
+        };
         self.server
-            .next_event(&mut Queue::new(
-                self.server.inner.clone(),
-                mpsc::channel(100).1,
-            ))
+            .store()
+            .iterate(
+                store::IterateParams::new(
+                    ValueKey::from(ValueClass::Queue(QueueClass::MessageEvent(store::write::QueueEvent {
+                        due: 0,
+                        queue_id: 0,
+                        queue_name: [0; 8],
+                    }))),
+                    ValueKey::from(ValueClass::Queue(QueueClass::MessageEvent(store::write::QueueEvent {
+                        due: u64::MAX,
+                        queue_id: u64::MAX,
+                        queue_name: [u8::MAX; 8],
+                    }))),
+                )
+                .ascending()
+                .no_values(),
+                |key, _| {
+                    let event = store::write::QueueEvent::deserialize(key)?;
+                    if event.queue_name == store::write::QueueEvent::TENANT_INDEX_QUEUE {
+                        return Ok(true);
+                    }
+                    if event.due <= now {
+                        events.messages.push(QueuedMessage {
+                            due: event.due,
+                            queue_id: event.queue_id,
+                            queue_name: common::config::smtp::queue::QueueName::from_bytes(&event.queue_name)
+                                .unwrap_or_default(),
+                        });
+                    } else if event.due < events.next_refresh {
+                        events.next_refresh = event.due;
+                    }
+                    Ok(true)
+                },
+            )
             .await
+            .unwrap();
+        events.messages.sort_by_key(|message| message.due);
+        events
     }
 
     pub async fn destroy_all_mailboxes(&self, account: &Account) {
@@ -630,7 +680,7 @@ impl TestServer {
                 shared_core: self.server.core.as_ref().clone().into_shared(),
                 data: Default::default(),
                 ipc,
-                cache: Caches::parse(&mut bp).await,
+                cache: Caches::parse(&mut bp, &self.server.core.storage).await.0,
             }
             .into(),
             ipc_rxs,
@@ -644,6 +694,11 @@ impl Account {
         client.set_default_account_id(Id::from(account_id));
         client.destroy_all_mailboxes().await;
     }
+}
+
+pub struct QueuedMessages {
+    pub messages: Vec<QueuedMessage>,
+    pub next_refresh: u64,
 }
 
 pub trait DestroyAllMailboxes {

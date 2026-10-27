@@ -1,6 +1,6 @@
 [package]
 name = "pop3"
-version = "0.16.27"
+version = "1.0.0"
 edition = "2024"
 
 [dependencies]
@@ -13,12 +13,15 @@ trc = { path = "../trc" }
 types = { path = "../types" }
 email = { path = "../email" }
 registry = { path = "../registry" }
-mail-parser = { version = "0.11", features = ["full_encoding"] } 
-tokio = { version = "1.53", features = ["full"] }
+encodify = "1.0"
+tokio = { version = "1.54", features = ["full"] }
 tokio-rustls = { version = "0.26", default-features = false, features = ["aws_lc_rs", "tls12"] }
+compact_str = "0.10.0"
+memchr = "2.8"
+itoa = "1"
 
 [features]
-test_mode = []
+enterprise = ["store/enterprise", "common/enterprise", "directory/enterprise", "imap/enterprise", "utils/enterprise", "trc/enterprise", "email/enterprise", "registry/enterprise"]
 
 [lints]
 workspace = true

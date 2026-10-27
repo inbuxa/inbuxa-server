@@ -198,7 +198,7 @@ pub async fn test(test: &mut TestServer) {
     admin
         .registry_create_object(Domain {
             name: "tenant-hold.example.org".to_string(),
-            is_enabled: true,
+            enable: true,
             member_tenant_id: Some(tenant),
             certificate_management: CertificateManagement::Manual,
             dns_management: DnsManagement::Manual,
@@ -240,7 +240,7 @@ pub async fn test(test: &mut TestServer) {
     let held_domain = admin
         .registry_create_object(Domain {
             name: "held.example.net".to_string(),
-            is_enabled: true,
+            enable: true,
             certificate_management: CertificateManagement::Manual,
             dns_management: DnsManagement::Manual,
             dkim_management: DkimManagement::Manual,
@@ -250,7 +250,7 @@ pub async fn test(test: &mut TestServer) {
     let elsewhere = admin
         .registry_create_object(Domain {
             name: "elsewhere.example.net".to_string(),
-            is_enabled: true,
+            enable: true,
             certificate_management: CertificateManagement::Manual,
             dns_management: DnsManagement::Manual,
             dkim_management: DkimManagement::Manual,
@@ -481,7 +481,7 @@ pub async fn test(test: &mut TestServer) {
     assert_eq!(export["size"].as_u64(), Some(bytes.len() as u64), "{export}");
     let mut zip = zip::ZipArchive::new(std::io::Cursor::new(bytes)).unwrap();
     let names = (0..zip.len())
-        .map(|i| zip.by_index(i).unwrap().name().to_string())
+        .map(|i| zip.by_index(i).unwrap().name().unwrap().to_string())
         .collect::<Vec<_>>();
     assert!(
         names.iter().any(|n| n.starts_with("frozen@example.com/mail/") && n.ends_with(".eml")),

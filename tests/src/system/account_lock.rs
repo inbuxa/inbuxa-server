@@ -706,7 +706,7 @@ pub async fn account_lock_tests() {
         .await;
     admin
         .registry_create_object(MtaRoute::Relay(MtaRouteRelay {
-            address: "127.0.0.1".into(),
+            host: "127.0.0.1".into(),
             port: 9999,
             allow_invalid_certs: true,
             implicit_tls: false,

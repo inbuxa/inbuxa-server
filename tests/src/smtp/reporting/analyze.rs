@@ -2,6 +2,8 @@
  * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
+ *
+ * Modified by Coffey Labs in 2026 for INBUXA.
  */
 
 use crate::{smtp::session::TestSession, utils::server::TestServerBuilder};
@@ -23,7 +25,7 @@ use registry::{
 };
 use std::{io::Write, time::Duration};
 
-const MAX_REPORT_SIZE: i64 = 65536;
+const MAX_REPORT_SIZE: u64 = 65536;
 
 const DMARC_REPORT: &str = concat!(
     r#"<?xml version="1.0" encoding="UTF-8"?><feedback><report_metadata>"#,
@@ -77,7 +79,7 @@ async fn report_analyze() {
                 "feedback@foobar.org".to_string(),
             ]),
             inbound_report_forwarding: false,
-            inbound_report_max_size: MAX_REPORT_SIZE,
+            max_inbound_report_size: MAX_REPORT_SIZE,
             ..Default::default()
         })
         .await;

@@ -85,12 +85,8 @@ impl Pickle for BlobId {
     }
 
     fn unpickle(stream: &mut PickledStream<'_>) -> Option<Self> {
-        stream.read_bytes(BLOB_HASH_LEN).map(|bytes| {
-            BlobId::new(
-                BlobHash::try_from_hash_slice(bytes).unwrap(),
-                BlobClass::default(),
-            )
-        })
+        let hash = BlobHash::try_from_hash_slice(stream.read_bytes(BLOB_HASH_LEN)?).ok()?;
+        Some(BlobId::new(hash, BlobClass::default()))
     }
 }
 

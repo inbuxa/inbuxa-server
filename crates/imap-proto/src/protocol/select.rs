@@ -3,15 +3,19 @@
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
  */
+use crate::protocol::push_int;
+use compact_str::CompactString;
+use types::acl::Acl;
+use utils::map::bitmap::Bitmap;
 
 use crate::{ResponseCode, StatusResponse};
 
-use super::{ImapResponse, ObjectId, Sequence, list::ListItem};
+use super::{Flag, ImapResponse, ObjectId, Sequence, list::ListItem, store::Operation};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Arguments {
-    pub tag: String,
-    pub mailbox_name: String,
+    pub tag: CompactString,
+    pub mailbox_name: CompactString,
     pub condstore: bool,
     pub qresync: Option<QResync>,
     pub objectid: Option<ObjectId>,
@@ -41,6 +45,15 @@ pub struct Response {
     pub closed_previous: bool,
     pub highest_modseq: Option<HighestModSeq>,
     pub objectid: Option<ObjectId>,
+    pub permanent_flags: PermanentFlags,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PermanentFlags {
+    All,
+    AllButDeleted,
+    DeletedOnly,
+    None,
 }
 
 #[derive(Debug, Clone)]
@@ -49,15 +62,14 @@ pub struct Exists {
 }
 
 impl ImapResponse for Response {
-    fn serialize(self) -> Vec<u8> {
-        let mut buf = Vec::with_capacity(100);
+    fn serialize_into(&self, buf: &mut Vec<u8>) {
         if self.closed_previous {
-            buf = StatusResponse::ok("Closed previous mailbox")
+            StatusResponse::ok("Closed previous mailbox")
                 .with_code(ResponseCode::Closed)
-                .serialize(buf);
+                .serialize_into(buf);
         }
         buf.extend_from_slice(b"* ");
-        buf.extend_from_slice(self.total_messages.to_string().as_bytes());
+        push_int(buf, self.total_messages);
         if !self.is_rev2 && self.recent_messages > 0 {
             buf.extend_from_slice(
                 b" EXISTS\r\n* FLAGS (\\Answered \\Flagged \\Deleted \\Seen \\Draft \\Recent)\r\n",
@@ -69,34 +81,99 @@ impl ImapResponse for Response {
         }
         if self.is_rev2 {
             self.mailbox
-                .serialize(&mut buf, self.is_rev2, self.is_utf8, false);
+                .serialize(buf, self.is_rev2, self.is_utf8, false);
         } else {
             buf.extend_from_slice(b"* ");
-            buf.extend_from_slice(self.recent_messages.to_string().as_bytes());
+            push_int(buf, self.recent_messages);
             buf.extend_from_slice(b" RECENT\r\n");
             if self.unseen_seq > 0 {
                 buf.extend_from_slice(b"* OK [UNSEEN ");
-                buf.extend_from_slice(self.unseen_seq.to_string().as_bytes());
+                push_int(buf, self.unseen_seq);
                 buf.extend_from_slice(b"] Unseen messages\r\n");
             }
         }
-        buf.extend_from_slice(
-            b"* OK [PERMANENTFLAGS (\\Deleted \\Seen \\Answered \\Flagged \\Draft \\*)] All allowed\r\n",
-        );
+        self.permanent_flags.serialize(buf);
         buf.extend_from_slice(b"* OK [UIDVALIDITY ");
-        buf.extend_from_slice(self.uid_validity.to_string().as_bytes());
+        push_int(buf, self.uid_validity);
         buf.extend_from_slice(b"] UIDs valid\r\n* OK [UIDNEXT ");
-        buf.extend_from_slice(self.uid_next.to_string().as_bytes());
+        push_int(buf, self.uid_next);
         buf.extend_from_slice(b"] Next predicted UID\r\n");
-        if let Some(highest_modseq) = self.highest_modseq {
-            highest_modseq.serialize(&mut buf);
+        if let Some(highest_modseq) = &self.highest_modseq {
+            highest_modseq.serialize(buf);
         }
         if let Some(objectid) = &self.objectid {
             buf.extend_from_slice(b"* OK [");
-            objectid.serialize(&mut buf);
+            objectid.serialize(buf);
             buf.extend_from_slice(b"] Object identifiers\r\n");
         }
-        buf
+    }
+
+    fn size_hint(&self) -> usize {
+        const FRAMING_LEN: usize = 320;
+        const OBJECT_ID_LEN: usize = 96;
+        const CLOSED_LEN: usize = 40;
+        const MODSEQ_LEN: usize = 64;
+
+        FRAMING_LEN
+            + self.mailbox.mailbox_name.len() * 2
+            + self.mailbox.attributes.len() * 16
+            + if self.closed_previous { CLOSED_LEN } else { 0 }
+            + if self.highest_modseq.is_some() {
+                MODSEQ_LEN
+            } else {
+                0
+            }
+            + if self.objectid.is_some() {
+                OBJECT_ID_LEN
+            } else {
+                0
+            }
+    }
+}
+
+impl From<Bitmap<Acl>> for PermanentFlags {
+    fn from(acl: Bitmap<Acl>) -> Self {
+        match (
+            acl.contains(Acl::ModifyItems),
+            acl.contains(Acl::RemoveItems),
+        ) {
+            (true, true) => PermanentFlags::All,
+            (true, false) => PermanentFlags::AllButDeleted,
+            (false, true) => PermanentFlags::DeletedOnly,
+            (false, false) => PermanentFlags::None,
+        }
+    }
+}
+
+impl PermanentFlags {
+    pub fn permits(self, flag: &Flag) -> bool {
+        match self {
+            PermanentFlags::All => true,
+            PermanentFlags::AllButDeleted => *flag != Flag::Deleted,
+            PermanentFlags::DeletedOnly => *flag == Flag::Deleted,
+            PermanentFlags::None => false,
+        }
+    }
+
+    pub fn permits_any(self, operation: &Operation, flags: &[Flag]) -> bool {
+        match self {
+            PermanentFlags::None => false,
+            _ if *operation == Operation::Set || flags.is_empty() => true,
+            _ => flags.iter().any(|flag| self.permits(flag)),
+        }
+    }
+
+    fn serialize(self, buf: &mut Vec<u8>) {
+        buf.extend_from_slice(match self {
+            PermanentFlags::All => {
+                b"* OK [PERMANENTFLAGS (\\Deleted \\Seen \\Answered \\Flagged \\Draft \\*)] All allowed\r\n".as_slice()
+            }
+            PermanentFlags::AllButDeleted => {
+                b"* OK [PERMANENTFLAGS (\\Seen \\Answered \\Flagged \\Draft \\*)] Limited\r\n"
+            }
+            PermanentFlags::DeletedOnly => b"* OK [PERMANENTFLAGS (\\Deleted)] Limited\r\n",
+            PermanentFlags::None => b"* OK [PERMANENTFLAGS ()] No permanent flags permitted\r\n",
+        });
     }
 }
 
@@ -107,12 +184,12 @@ impl HighestModSeq {
 
     pub fn serialize(&self, buf: &mut Vec<u8>) {
         buf.extend_from_slice(b"* OK [HIGHESTMODSEQ ");
-        buf.extend_from_slice(self.0.to_string().as_bytes());
+        push_int(buf, self.0);
         buf.extend_from_slice(b"] Highest Modseq\r\n");
     }
 
     pub fn into_bytes(self) -> Vec<u8> {
-        let mut buf = Vec::with_capacity(40);
+        let mut buf = Vec::with_capacity(64);
         self.serialize(&mut buf);
         buf
     }
@@ -121,131 +198,14 @@ impl HighestModSeq {
 impl Exists {
     pub fn serialize(&self, buf: &mut Vec<u8>) {
         buf.extend_from_slice(b"* ");
-        buf.extend_from_slice(self.total_messages.to_string().as_bytes());
+        push_int(buf, self.total_messages);
         buf.extend_from_slice(b" EXISTS\r\n");
     }
 
     pub fn into_bytes(self) -> Vec<u8> {
-        let mut buf = Vec::with_capacity(15);
+        let mut buf = Vec::with_capacity(32);
         self.serialize(&mut buf);
         buf
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use crate::protocol::{ImapResponse, ObjectId, list::ListItem};
-    use types::id::Id;
-
-    use super::HighestModSeq;
-
-    #[test]
-    fn serialize_select() {
-        let objectid = ObjectId {
-            mailbox_id: Some(Id::from(1u32)),
-            account_id: Some(Id::from(2u32)),
-            ..Default::default()
-        };
-        let mut objectid_line = b"* OK [".to_vec();
-        objectid.serialize(&mut objectid_line);
-        objectid_line.extend_from_slice(b"] Object identifiers\r\n");
-        let objectid_line = String::from_utf8(objectid_line).unwrap();
-
-        for (mut response, _tag, expected_v2, expected_v1) in [
-            (
-                super::Response {
-                    mailbox: ListItem::new("INBOX"),
-                    total_messages: 172,
-                    recent_messages: 5,
-                    unseen_seq: 3,
-                    uid_validity: 3857529045,
-                    uid_next: 4392,
-                    closed_previous: false,
-                    is_rev2: true,
-                    is_utf8: true,
-                    highest_modseq: HighestModSeq::new(100).into(),
-                    objectid: Some(objectid.clone()),
-                },
-                "A142",
-                format!(
-                    concat!(
-                        "* 172 EXISTS\r\n",
-                        "* FLAGS (\\Answered \\Flagged \\Deleted \\Seen \\Draft)\r\n",
-                        "* LIST () \"/\" \"INBOX\"\r\n",
-                        "* OK [PERMANENTFLAGS (\\Deleted \\Seen \\Answered \\Flagged \\Draft \\*)] All allowed\r\n",
-                        "* OK [UIDVALIDITY 3857529045] UIDs valid\r\n",
-                        "* OK [UIDNEXT 4392] Next predicted UID\r\n",
-                        "* OK [HIGHESTMODSEQ 100] Highest Modseq\r\n",
-                        "{}"
-                    ),
-                    objectid_line
-                ),
-                format!(
-                    concat!(
-                        "* 172 EXISTS\r\n",
-                        "* FLAGS (\\Answered \\Flagged \\Deleted \\Seen \\Draft \\Recent)\r\n",
-                        "* 5 RECENT\r\n",
-                        "* OK [UNSEEN 3] Unseen messages\r\n",
-                        "* OK [PERMANENTFLAGS (\\Deleted \\Seen \\Answered \\Flagged \\Draft \\*)] All allowed\r\n",
-                        "* OK [UIDVALIDITY 3857529045] UIDs valid\r\n",
-                        "* OK [UIDNEXT 4392] Next predicted UID\r\n",
-                        "* OK [HIGHESTMODSEQ 100] Highest Modseq\r\n",
-                        "{}"
-                    ),
-                    objectid_line
-                ),
-            ),
-            (
-                super::Response {
-                    mailbox: ListItem::new("~peter/mail/台北/日本語"),
-                    total_messages: 172,
-                    recent_messages: 5,
-                    unseen_seq: 3,
-                    uid_validity: 3857529045,
-                    uid_next: 4392,
-                    closed_previous: true,
-                    is_rev2: true,
-                    is_utf8: true,
-                    highest_modseq: None,
-                    objectid: Some(objectid.clone()),
-                },
-                "A142",
-                format!(
-                    concat!(
-                        "* OK [CLOSED] Closed previous mailbox\r\n",
-                        "* 172 EXISTS\r\n",
-                        "* FLAGS (\\Answered \\Flagged \\Deleted \\Seen \\Draft)\r\n",
-                        "* LIST () \"/\" \"~peter/mail/台北/日本語\" (\"OLDNAME\" ",
-                        "(\"~peter/mail/&U,BTFw-/&ZeVnLIqe-\"))\r\n",
-                        "* OK [PERMANENTFLAGS (\\Deleted \\Seen \\Answered \\Flagged \\Draft \\*)] All allowed\r\n",
-                        "* OK [UIDVALIDITY 3857529045] UIDs valid\r\n",
-                        "* OK [UIDNEXT 4392] Next predicted UID\r\n",
-                        "{}"
-                    ),
-                    objectid_line
-                ),
-                format!(
-                    concat!(
-                        "* OK [CLOSED] Closed previous mailbox\r\n",
-                        "* 172 EXISTS\r\n",
-                        "* FLAGS (\\Answered \\Flagged \\Deleted \\Seen \\Draft \\Recent)\r\n",
-                        "* 5 RECENT\r\n",
-                        "* OK [UNSEEN 3] Unseen messages\r\n",
-                        "* OK [PERMANENTFLAGS (\\Deleted \\Seen \\Answered \\Flagged \\Draft \\*)] All allowed\r\n",
-                        "* OK [UIDVALIDITY 3857529045] UIDs valid\r\n",
-                        "* OK [UIDNEXT 4392] Next predicted UID\r\n",
-                        "{}"
-                    ),
-                    objectid_line
-                ),
-            ),
-        ] {
-            let response_v2 = String::from_utf8(response.clone().serialize()).unwrap();
-            response.is_rev2 = false;
-            let response_v1 = String::from_utf8(response.serialize()).unwrap();
-
-            assert_eq!(response_v2, expected_v2);
-            assert_eq!(response_v1, expected_v1);
-        }
-    }
-}

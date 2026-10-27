@@ -6,48 +6,58 @@
  * Modified by Coffey Labs in 2026 for INBUXA.
  */
 
-use crate::changes::state::JmapCacheState;
-use common::{Server, auth::AccessToken};
+use crate::{
+    api::{
+        budget::GetBudget,
+        metadata::{MetadataDocuments, MetadataType, ObjectMetadata, select_properties},
+    },
+    changes::state::{JmapCacheState, MetadataStateManager},
+};
+use common::{
+    Server,
+    auth::AccessToken,
+    network::memory::MemoryReservation,
+    storage::batch::{DocumentBatch, Lookup, MAX_BATCH_BYTES, MAX_BATCH_DOCUMENTS},
+};
+use compact_str::format_compact;
 use email::{
-    cache::{MessageCacheFetch, email::MessageCacheAccess},
+    cache::{
+        MessageCacheFetch,
+        email::{MessageAccess, MessageCacheAccess},
+        mailbox::MailboxCacheAccess,
+    },
     message::{
-        body::{ToBodyPart, truncate_html, truncate_plain},
-        headers::{HeaderToValue, IntoForm},
-        metadata::{
-            ArchivedMetadataPartType, MESSAGE_HAS_ATTACHMENT, MESSAGE_RECEIVED_MASK,
-            MessageMetadata, MetadataHeaderName, PART_ENCODING_PROBLEM,
+        jmap::{
+            BodyValueOptions, EmailNeeds, EmailRender,
+            estimate::{EmailCost, EmailEstimate},
         },
+        messagedata::{EmailMessageData, MetadataForm},
     },
 };
 use jmap_proto::{
-    method::get::{GetRequest, GetResponse},
-    object::email::{Email, EmailProperty, EmailValue, HeaderForm},
-    request::IntoValid,
+    method::get::{GetRequest, GetResponse, all_ids, unique_properties},
+    object::email::{Email, EmailProperty, EmailValue},
+    request::{IntoValid, capability::CapabilityIds},
     types::date::UTCDate,
 };
-use jmap_tools::{Key, Map, Value};
-use mail_parser::HeaderValue;
+use jmap_tools::{Map, Value};
 use std::future::Future;
-use store::{
-    READ_BATCH_SIZE, ValueKey,
-    write::{AlignedBytes, Archive},
-};
 use trc::{AddContext, StoreEvent};
 use types::{
     acl::Acl,
     blob::{BlobClass, BlobId},
-    blob_hash::BlobHash,
     collection::Collection,
-    field::EmailField,
     id::Id,
+    keyword::HASATTACHMENT,
 };
-use utils::chained_bytes::ChainedBytes;
 
 pub trait EmailGet: Sync + Send {
     fn email_get(
         &self,
         request: GetRequest<Email>,
         access_token: &AccessToken,
+        using: CapabilityIds,
+        reservation: &mut MemoryReservation,
     ) -> impl Future<Output = trc::Result<GetResponse<Email>>> + Send;
 }
 
@@ -56,38 +66,54 @@ impl EmailGet for Server {
         &self,
         mut request: GetRequest<Email>,
         access_token: &AccessToken,
+        using: CapabilityIds,
+        reservation: &mut MemoryReservation,
     ) -> trc::Result<GetResponse<Email>> {
         let (ids, not_found_ids) = request.unwrap_ids(self.core.jmap.get_max_objects)?;
-        let properties = request.unwrap_properties(&[
-            EmailProperty::Id,
-            EmailProperty::BlobId,
-            EmailProperty::ThreadId,
-            EmailProperty::MailboxIds,
-            EmailProperty::Keywords,
-            EmailProperty::Size,
-            EmailProperty::ReceivedAt,
-            EmailProperty::MessageId,
-            EmailProperty::InReplyTo,
-            EmailProperty::References,
-            EmailProperty::Sender,
-            EmailProperty::From,
-            EmailProperty::To,
-            EmailProperty::Cc,
-            EmailProperty::Bcc,
-            EmailProperty::ReplyTo,
-            EmailProperty::Subject,
-            EmailProperty::SentAt,
-            EmailProperty::HasAttachment,
-            EmailProperty::Preview,
-            EmailProperty::BodyValues,
-            EmailProperty::TextBody,
-            EmailProperty::HtmlBody,
-            EmailProperty::Attachments,
-        ]);
+        let is_default = request.properties.is_none();
+        let (properties, selection) = select_properties(
+            &mut request,
+            &[
+                EmailProperty::Id,
+                EmailProperty::BlobId,
+                EmailProperty::ThreadId,
+                EmailProperty::MailboxIds,
+                EmailProperty::Keywords,
+                EmailProperty::Size,
+                EmailProperty::ReceivedAt,
+                EmailProperty::MessageId,
+                EmailProperty::InReplyTo,
+                EmailProperty::References,
+                EmailProperty::Sender,
+                EmailProperty::From,
+                EmailProperty::To,
+                EmailProperty::Cc,
+                EmailProperty::Bcc,
+                EmailProperty::ReplyTo,
+                EmailProperty::Subject,
+                EmailProperty::SentAt,
+                EmailProperty::HasAttachment,
+                EmailProperty::Preview,
+                EmailProperty::BodyValues,
+                EmailProperty::TextBody,
+                EmailProperty::HtmlBody,
+                EmailProperty::Attachments,
+            ],
+            using,
+        )?;
+        let object_metadata = ObjectMetadata::new(self, access_token, using, MetadataType::Email);
+        let metadata = if is_default {
+            None
+        } else {
+            object_metadata.get(selection)
+        };
+        let metadata_slots = metadata.as_ref().map_or(0, |get| {
+            usize::from(get.wants_shared()) + usize::from(get.wants_private())
+        });
         let body_properties = request
             .arguments
             .body_properties
-            .map(|v| v.into_valid().collect())
+            .map(|v| unique_properties(v.into_valid()))
             .unwrap_or_else(|| {
                 vec![
                     EmailProperty::PartId,
@@ -102,372 +128,283 @@ impl EmailGet for Server {
                     EmailProperty::Location,
                 ]
             });
-        let fetch_text_body_values = request.arguments.fetch_text_body_values.unwrap_or(false);
-        let fetch_html_body_values = request.arguments.fetch_html_body_values.unwrap_or(false);
-        let fetch_all_body_values = request.arguments.fetch_all_body_values.unwrap_or(false);
-        let max_body_value_bytes = request.arguments.max_body_value_bytes.unwrap_or(0);
+        let options = BodyValueOptions {
+            fetch_text: request.arguments.fetch_text_body_values.unwrap_or(false),
+            fetch_html: request.arguments.fetch_html_body_values.unwrap_or(false),
+            fetch_all: request.arguments.fetch_all_body_values.unwrap_or(false),
+            max_bytes: request.arguments.max_body_value_bytes.unwrap_or(0),
+        };
+        let mut needs_metadata = false;
+        for property in &properties {
+            let is_cached = matches!(
+                property,
+                EmailProperty::Id
+                    | EmailProperty::ThreadId
+                    | EmailProperty::MailboxIds
+                    | EmailProperty::Keywords
+                    | EmailProperty::Size
+                    | EmailProperty::ReceivedAt
+                    | EmailProperty::HasAttachment
+            );
+            if !is_cached && (!EmailRender::renders(property) || !property.is_allowed_form()) {
+                return Err(trc::JmapEvent::InvalidArguments
+                    .into_err()
+                    .details(format_compact!("Invalid property {property:?}")));
+            }
+            needs_metadata |= !is_cached;
+        }
+        if let Some(property) = body_properties
+            .iter()
+            .find(|property| !property.is_allowed_form())
+        {
+            return Err(trc::JmapEvent::InvalidArguments
+                .into_err()
+                .details(format_compact!("Invalid property {property:?}")));
+        }
+        let needs = EmailNeeds::new(&properties, &body_properties, &options);
+        let estimate = EmailEstimate::new(&properties, &body_properties, &options);
+        let mut budget = GetBudget::new(reservation);
 
         let account_id = request.account_id.document_id();
+        let sampled = self
+            .viewer_change_id(
+                object_metadata.state_viewer(),
+                account_id,
+                Collection::Email,
+            )
+            .await?;
         let cache = self
             .get_cached_messages(account_id)
             .await
             .caused_by(trc::location!())?;
-        let message_ids = if access_token.reads_as_owner(account_id) {
-            cache.email_document_ids()
+        // inbuxa: #186: reads in a sharing account go through the share
+        let access = if access_token.reads_as_owner(account_id) {
+            MessageAccess::All
         } else {
-            cache.shared_messages(access_token, Acl::ReadItems)
+            MessageAccess::Mailboxes(cache.shared_mailboxes(access_token, Acl::ReadItems))
         };
 
         let ids = if let Some(ids) = ids {
             ids
         } else {
-            cache
-                .emails
-                .items
-                .iter()
-                .take(self.core.jmap.get_max_objects)
-                .map(|item| Id::from_parts(item.thread_id, item.document_id))
-                .collect()
+            all_ids(
+                cache
+                    .emails
+                    .iter()
+                    .filter(|item| access.allows(*item))
+                    .map(|item| Id::from_parts(item.thread_id(), item.document_id())),
+                self.core.jmap.get_max_objects,
+            )?
         };
         let mut response = GetResponse {
             account_id: request.account_id.into(),
-            state: cache.get_state(false).into(),
+            state: sampled.state(cache.get_state(false)).into(),
             list: Vec::with_capacity(ids.len()),
             not_found: not_found_ids,
         };
-
-        // Check if we need to fetch the raw headers or body
-        let mut needs_body = false;
-        for property in &properties {
-            if matches!(
-                property,
-                EmailProperty::BodyValues
-                    | EmailProperty::TextBody
-                    | EmailProperty::HtmlBody
-                    | EmailProperty::Attachments
-                    | EmailProperty::BodyStructure
-            ) {
-                needs_body = true;
-                break;
-            }
-        }
-
-        for ids in ids.chunks(READ_BATCH_SIZE) {
-            // inbuxa: the metadata of a batch of messages in one round trip
-            let keys = ids
-                .iter()
-                .filter(|id| message_ids.contains(id.document_id()))
-                .map(|id| {
-                    ValueKey::property(
-                        account_id,
-                        Collection::Email,
-                        id.document_id(),
-                        EmailField::Metadata,
-                    )
-                })
-                .collect::<Vec<_>>();
-            let mut metadatas = self
-                .store()
-                .get_values::<Archive<AlignedBytes>>(&keys)
-                .await?
-                .into_iter();
-
-            for &id in ids {
-                // Obtain the email object
-                if !message_ids.contains(id.document_id()) {
-                    response.push_not_found(id);
-                    continue;
-                }
-                let metadata_ = match metadatas.next().flatten() {
-                    Some(metadata) => metadata,
-                    None => {
-                        response.push_not_found(id);
-                        continue;
+        let mut metadata_values = match &metadata {
+            Some(metadata) => {
+                let mut documents = MetadataDocuments::default();
+                for document_id in ids.iter().map(Id::document_id) {
+                    if let Some(email) = cache
+                        .email_by_id(&document_id)
+                        .filter(|email| access.allows(*email))
+                    {
+                        documents.insert(document_id, cache.metadata_kinds(email));
                     }
-                };
-                let metadata = metadata_
-                    .unarchive::<MessageMetadata>()
+                }
+                Some(
+                    object_metadata
+                        .load::<EmailProperty, EmailValue>(self, account_id, metadata, &documents)
+                        .await?,
+                )
+            }
+            None => None,
+        };
+
+        let form = if needs.headers {
+            MetadataForm::Row
+        } else {
+            MetadataForm::Structure
+        };
+        let mut batch = DocumentBatch::new(MAX_BATCH_BYTES);
+        for chunk in ids.chunks(MAX_BATCH_DOCUMENTS) {
+            batch.reset();
+            if needs_metadata {
+                for id in chunk {
+                    if cache
+                        .email_by_id(&id.document_id())
+                        .is_some_and(|data| access.allows(data))
+                    {
+                        batch.request(id.document_id());
+                    }
+                }
+            }
+
+            loop {
+                self.read_metadata_batch(account_id, form, &mut batch)
+                    .await
                     .caused_by(trc::location!())?;
 
-                // Obtain message data
-                let data = match cache.email_by_id(&id.document_id()) {
-                    Some(data) => data,
-                    None => {
-                        response.push_not_found(id);
+                for &id in chunk {
+                    let Some(data) = cache
+                        .email_by_id(&id.document_id())
+                        .filter(|data| access.allows(*data))
+                    else {
+                        if batch.is_first_round() {
+                            response.push_not_found(id);
+                        }
                         continue;
-                    }
-                };
-
-                // Retrieve raw message if needed
-                let blob_hash = BlobHash::from(&metadata.blob_hash);
-                let raw_body;
-                let mut raw_message = ChainedBytes::new(metadata.raw_headers.as_ref());
-                if needs_body {
-                    raw_body = self
-                        .get_message_blob(blob_hash.as_slice(), 0..usize::MAX)
-                        .await?;
-
-                    if let Some(raw_body) = &raw_body {
-                        raw_message.append(
-                            raw_body
-                                .get(metadata.blob_body_offset.to_native() as usize..)
-                                .unwrap_or_default(),
-                        );
+                    };
+                    let metadata = if needs_metadata {
+                        match batch.lookup(id.document_id()) {
+                            Lookup::Found(metadata) => Some(metadata),
+                            Lookup::Missing => {
+                                response.push_not_found(id);
+                                continue;
+                            }
+                            Lookup::Skip => continue,
+                        }
+                    } else if batch.is_first_round() {
+                        None
                     } else {
-                        trc::event!(
-                            Store(StoreEvent::NotFound),
-                            AccountId = account_id,
-                            DocumentId = id.document_id(),
-                            Collection = Collection::Email,
-                            BlobId = blob_hash.to_hex(),
-                            Details = "Blob not found.",
-                            CausedBy = trc::location!(),
-                        );
-
-                        response.push_not_found(id);
                         continue;
-                    }
-                }
-                let blob_id = BlobId {
-                    hash: blob_hash,
-                    class: BlobClass::Linked {
-                        account_id,
-                        collection: Collection::Email.into(),
-                        document_id: id.document_id(),
-                    },
-                    section: None,
-                };
+                    };
 
-                // Prepare response
-                let mut email: Map<'_, EmailProperty, EmailValue> =
-                    Map::with_capacity(properties.len());
-                let contents = &metadata.contents[0];
-                let root_part = &contents.parts[0];
-                let blob_body_offset = metadata.blob_body_offset.to_native() as isize
-                    - root_part.offset_body.to_native() as isize;
-                for property in &properties {
-                    match property {
-                        EmailProperty::Id => {
-                            email.insert_unchecked(EmailProperty::Id, Id::from(*id));
-                        }
-                        EmailProperty::ThreadId => {
-                            email.insert_unchecked(
-                                EmailProperty::ThreadId,
-                                Id::from(id.prefix_id()),
-                            );
-                        }
-                        EmailProperty::BlobId => {
-                            email.insert_unchecked(EmailProperty::BlobId, blob_id.clone());
-                        }
-                        EmailProperty::MailboxIds => {
-                            let mut obj = Map::with_capacity(data.mailboxes.len());
-                            for id in data.mailboxes.iter() {
-                                debug_assert!(id.uid != 0);
-                                obj.insert_unchecked(
-                                    EmailProperty::IdValue(Id::from(id.mailbox_id)),
-                                    true,
+                    let raw_headers;
+                    let mut blob = None;
+                    let mut cost = EmailCost::default();
+                    let render = if let Some(metadata) = metadata {
+                        raw_headers = metadata.raw_headers().caused_by(trc::location!())?;
+                        let metadata = metadata.unarchive().caused_by(trc::location!())?;
+                        cost = estimate.cost(metadata);
+                        budget.add(cost.bytes)?;
+                        budget.add_light(cost.light)?;
+                        let blob_hash = metadata.blob_hash();
+                        if needs.blob {
+                            let Some(value) = self
+                                .fetch_blob(&blob_hash, 0..usize::MAX, Some(metadata.size() as u64))
+                                .await?
+                            else {
+                                trc::event!(
+                                    Store(StoreEvent::NotFound),
+                                    AccountId = account_id,
+                                    DocumentId = id.document_id(),
+                                    Collection = Collection::Email,
+                                    BlobId = blob_hash.to_hex(),
+                                    Details = "Blob not found.",
+                                    CausedBy = trc::location!(),
                                 );
-                            }
 
-                            email.insert_unchecked(property.clone(), Value::Object(obj));
+                                response.push_not_found(id);
+                                continue;
+                            };
+                            blob = Some(value);
                         }
-                        EmailProperty::Keywords => {
-                            let mut obj = Map::with_capacity(2);
-                            for keyword in cache.expand_keywords(data) {
-                                obj.insert_unchecked(EmailProperty::Keyword(keyword), true);
+                        Some((
+                            metadata,
+                            raw_headers.as_deref(),
+                            BlobId {
+                                hash: blob_hash,
+                                class: BlobClass::Linked {
+                                    account_id,
+                                    collection: Collection::Email.into(),
+                                    document_id: id.document_id(),
+                                },
+                                section: None,
+                            },
+                        ))
+                    } else {
+                        None
+                    };
+                    let render = render.as_ref().map(|(metadata, headers, blob_id)| {
+                        EmailRender::new(
+                            metadata,
+                            *headers,
+                            blob.as_deref(),
+                            blob_id,
+                            &body_properties,
+                            &options,
+                        )
+                    });
+
+                    // Prepare response
+                    let mut email: Map<'_, EmailProperty, EmailValue> =
+                        Map::with_capacity(properties.len() + metadata_slots);
+                    for property in &properties {
+                        match property {
+                            EmailProperty::Id => {
+                                email.insert_unchecked(EmailProperty::Id, Id::from(*id));
                             }
-                            email.insert_unchecked(property.clone(), Value::Object(obj));
-                        }
-                        EmailProperty::Size => {
-                            email.insert_unchecked(EmailProperty::Size, data.size);
-                        }
-                        EmailProperty::ReceivedAt => {
-                            email.insert_unchecked(
-                                EmailProperty::ReceivedAt,
-                                EmailValue::Date(UTCDate::from_timestamp(
-                                    (metadata.rcvd_attach.to_native() & MESSAGE_RECEIVED_MASK)
-                                        as i64,
-                                )),
-                            );
-                        }
-                        EmailProperty::Preview => {
-                            if !metadata.preview.is_empty() {
+                            EmailProperty::ThreadId => {
                                 email.insert_unchecked(
-                                    EmailProperty::Preview,
-                                    metadata.preview.to_string(),
+                                    EmailProperty::ThreadId,
+                                    Id::from(id.prefix_id()),
                                 );
                             }
-                        }
-                        EmailProperty::HasAttachment => {
-                            email.insert_unchecked(
-                                EmailProperty::HasAttachment,
-                                (metadata.rcvd_attach.to_native() & MESSAGE_HAS_ATTACHMENT) != 0,
-                            );
-                        }
-                        EmailProperty::Subject => {
-                            email.insert_unchecked(
-                                EmailProperty::Subject,
-                                root_part
-                                    .header_value(&MetadataHeaderName::Subject)
-                                    .map(|value| {
-                                        HeaderValue::from(value).into_form(&HeaderForm::Text)
-                                    })
-                                    .unwrap_or_default(),
-                            );
-                        }
-                        EmailProperty::SentAt => {
-                            email.insert_unchecked(
-                                EmailProperty::SentAt,
-                                root_part
-                                    .header_value(&MetadataHeaderName::Date)
-                                    .map(|value| {
-                                        HeaderValue::from(value).into_form(&HeaderForm::Date)
-                                    })
-                                    .unwrap_or_default(),
-                            );
-                        }
-                        EmailProperty::MessageId
-                        | EmailProperty::InReplyTo
-                        | EmailProperty::References => {
-                            email.insert_unchecked(
-                                property.clone(),
-                                root_part
-                                    .header_value(&match property {
-                                        EmailProperty::MessageId => MetadataHeaderName::MessageId,
-                                        EmailProperty::InReplyTo => MetadataHeaderName::InReplyTo,
-                                        EmailProperty::References => MetadataHeaderName::References,
-                                        _ => unreachable!(),
-                                    })
-                                    .map(|value| {
-                                        HeaderValue::from(value).into_form(&HeaderForm::MessageIds)
-                                    })
-                                    .unwrap_or_default(),
-                            );
-                        }
-
-                        EmailProperty::Sender
-                        | EmailProperty::From
-                        | EmailProperty::To
-                        | EmailProperty::Cc
-                        | EmailProperty::Bcc
-                        | EmailProperty::ReplyTo => {
-                            email.insert_unchecked(
-                                property.clone(),
-                                root_part
-                                    .header_value(&match property {
-                                        EmailProperty::Sender => MetadataHeaderName::Sender,
-                                        EmailProperty::From => MetadataHeaderName::From,
-                                        EmailProperty::To => MetadataHeaderName::To,
-                                        EmailProperty::Cc => MetadataHeaderName::Cc,
-                                        EmailProperty::Bcc => MetadataHeaderName::Bcc,
-                                        EmailProperty::ReplyTo => MetadataHeaderName::ReplyTo,
-                                        _ => unreachable!(),
-                                    })
-                                    .map(|value| {
-                                        HeaderValue::from(value).into_form(&HeaderForm::Addresses)
-                                    })
-                                    .unwrap_or_default(),
-                            );
-                        }
-                        EmailProperty::Header(_) => {
-                            email.insert_unchecked(
-                                property.clone(),
-                                root_part.header_to_value(property, &raw_message),
-                            );
-                        }
-                        EmailProperty::Headers => {
-                            email.insert_unchecked(
-                                EmailProperty::Headers,
-                                root_part.headers_to_value(&raw_message),
-                            );
-                        }
-                        EmailProperty::TextBody
-                        | EmailProperty::HtmlBody
-                        | EmailProperty::Attachments => {
-                            let list = match property {
-                                EmailProperty::TextBody => &contents.text_body,
-                                EmailProperty::HtmlBody => &contents.html_body,
-                                EmailProperty::Attachments => &contents.attachments,
-                                _ => unreachable!(),
-                            }
-                            .iter();
-                            email.insert_unchecked(
-                                property.clone(),
-                                list.map(|part_id| {
-                                    contents.to_body_part(
-                                        u16::from(part_id) as u32,
-                                        &body_properties,
-                                        &raw_message,
-                                        &blob_id,
-                                        blob_body_offset,
-                                    )
-                                })
-                                .collect::<Vec<_>>(),
-                            );
-                        }
-                        EmailProperty::BodyStructure => {
-                            email.insert_unchecked(
-                                EmailProperty::BodyStructure,
-                                contents.to_body_part(
-                                    0,
-                                    &body_properties,
-                                    &raw_message,
-                                    &blob_id,
-                                    blob_body_offset,
-                                ),
-                            );
-                        }
-                        EmailProperty::BodyValues => {
-                            let mut body_values = Map::with_capacity(contents.parts.len());
-                            for (part_id, part) in contents.parts.iter().enumerate() {
-                                if part.is_text_mime_type()
-                                    && (fetch_all_body_values
-                                        || (fetch_html_body_values
-                                            && contents.is_html_part(part_id as u16))
-                                        || (fetch_text_body_values
-                                            && contents.is_text_part(part_id as u16)))
+                            EmailProperty::MailboxIds => {
+                                let mut obj = Map::with_capacity(data.mailboxes().len());
+                                for id in data
+                                    .mailboxes()
+                                    .iter()
+                                    .filter(|id| access.allows_mailbox(id.mailbox_id))
                                 {
-                                    let contents = part.decode_contents(&raw_message);
-
-                                    let (is_truncated, value) = match &part.body {
-                                        ArchivedMetadataPartType::Text => {
-                                            truncate_plain(contents.as_str(), max_body_value_bytes)
-                                        }
-                                        ArchivedMetadataPartType::Html => {
-                                            truncate_html(contents.as_str(), max_body_value_bytes)
-                                        }
-                                        _ => unreachable!(),
-                                    };
-
-                                    body_values.insert_unchecked(
-                                        Key::Owned(part_id.to_string()),
-                                        Map::with_capacity(3)
-                                            .with_key_value(
-                                                EmailProperty::IsEncodingProblem,
-                                                (part.flags & PART_ENCODING_PROBLEM) != 0,
-                                            )
-                                            .with_key_value(
-                                                EmailProperty::IsTruncated,
-                                                is_truncated,
-                                            )
-                                            .with_key_value(EmailProperty::Value, value),
+                                    debug_assert!(id.uid != 0);
+                                    obj.insert_unchecked(
+                                        EmailProperty::IdValue(Id::from(id.mailbox_id)),
+                                        true,
                                     );
                                 }
-                            }
-                            email.insert_unchecked(EmailProperty::BodyValues, body_values);
-                        }
 
-                        _ => {
-                            return Err(trc::JmapEvent::InvalidArguments
-                                .into_err()
-                                .details(format!("Invalid property {property:?}")));
+                                email.insert_unchecked(property.clone(), Value::Object(obj));
+                            }
+                            EmailProperty::Keywords => {
+                                let mut obj = Map::with_capacity(2);
+                                for keyword in cache.expand_keywords(data) {
+                                    obj.insert_unchecked(EmailProperty::Keyword(keyword), true);
+                                }
+                                email.insert_unchecked(property.clone(), Value::Object(obj));
+                            }
+                            EmailProperty::Size => {
+                                email.insert_unchecked(EmailProperty::Size, data.size());
+                            }
+                            EmailProperty::ReceivedAt => {
+                                email.insert_unchecked(
+                                    EmailProperty::ReceivedAt,
+                                    EmailValue::Date(UTCDate::from_timestamp(
+                                        data.received_at() as i64
+                                    )),
+                                );
+                            }
+                            EmailProperty::HasAttachment => {
+                                email.insert_unchecked(
+                                    EmailProperty::HasAttachment,
+                                    (data.keywords() & 1 << HASATTACHMENT) != 0,
+                                );
+                            }
+                            _ => {
+                                if let Some(value) =
+                                    render.as_ref().and_then(|render| render.value(property))
+                                {
+                                    email.insert_unchecked(property.clone(), value);
+                                }
+                            }
                         }
                     }
+                    if let Some(metadata_values) = &mut metadata_values {
+                        metadata_values.insert_into(id.document_id(), &mut email);
+                    }
+                    budget.add(estimate.overrun(&email, &cost))?;
+                    response.list.push(Value::Object(email).into_owned());
                 }
-                response.list.push(email.into());
+
+                if !batch.next_round() {
+                    break;
+                }
             }
         }
 
+        budget.commit();
         Ok(response)
     }
 }

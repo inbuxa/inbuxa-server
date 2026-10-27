@@ -85,7 +85,7 @@ pub async fn suspend_shares(data: &Store, account_id: u32) -> trc::Result<Vec<Sh
     for chunk in shares.chunks(1000) {
         let mut batch = BatchBuilder::new();
         write_shares(&mut batch, chunk.iter(), false);
-        data.write(batch.build_all())
+        data.write_batch(&mut batch)
             .await
             .caused_by(trc::location!())?;
     }
@@ -114,7 +114,7 @@ pub async fn reinstate_shares(
     for chunk in shares.chunks(1000) {
         let mut batch = BatchBuilder::new();
         write_shares(&mut batch, chunk.iter().copied(), true);
-        data.write(batch.build_all())
+        data.write_batch(&mut batch)
             .await
             .caused_by(trc::location!())?;
     }
@@ -134,7 +134,7 @@ pub async fn forget(data: &Store, registry: &RegistryStore, account_id: u32) -> 
     if let Some(kept) = data::kept_account(data, account_id).await? {
         let mut batch = BatchBuilder::new();
         data::clear_kept_account(&mut batch, account_id, &kept);
-        data.write(batch.build_all())
+        data.write_batch(&mut batch)
             .await
             .caused_by(trc::location!())?;
     }

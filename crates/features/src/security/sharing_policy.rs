@@ -136,7 +136,7 @@ pub async fn set(data: &Store, tenant_id: Option<u32>, policy: &SharingPolicy) -
     })?;
     let mut batch = BatchBuilder::new();
     batch.set(key(tenant_id), bytes);
-    data.write(batch.build_all())
+    data.write_batch(&mut batch)
         .await
         .caused_by(trc::location!())
         .map(|_| ())

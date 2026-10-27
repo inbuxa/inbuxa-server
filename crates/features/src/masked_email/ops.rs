@@ -65,7 +65,7 @@ pub async fn load(data: &Store, registry: &RegistryStore, id: Id) -> trc::Result
     let record = data::record(data, id).await?;
     let state = record
         .map(|r| r.state)
-        .unwrap_or_else(|| State::from_upstream(object.enabled));
+        .unwrap_or_else(|| State::from_upstream(object.enable));
     let now = now();
 
     if state == State::Pending
@@ -162,7 +162,7 @@ pub async fn resolve(
                 },
             )?;
             data::clear_record(&mut batch, entry.mask_id);
-            data.write(batch.build_all()).await?;
+            data.write_batch(&mut batch).await?;
             Ok(None)
         }
     }
@@ -193,7 +193,7 @@ pub async fn delivered(data: &Store, registry: &RegistryStore, mask: &Mask) -> t
         mask.id,
         Change::Updated,
     );
-    data.write(batch.build_all()).await.map(|_| ())
+    data.write_batch(&mut batch).await.map(|_| ())
 }
 
 /// Records a new mask: its state, its address and the change (ME-7a, ME-8).
@@ -230,7 +230,7 @@ pub async fn created(
         id,
         Change::Created,
     );
-    data.write(batch.build_all()).await.map(|_| ())
+    data.write_batch(&mut batch).await.map(|_| ())
 }
 
 /// Records a changed mask, and its new state if it has one (ME-1, ME-2).
@@ -263,7 +263,7 @@ pub async fn updated(
         mask.id,
         Change::Updated,
     );
-    data.write(batch.build_all()).await.map(|_| ())
+    data.write_batch(&mut batch).await.map(|_| ())
 }
 
 /// Records a destroyed mask: its address becomes a tombstone (ME-3).
@@ -291,7 +291,7 @@ pub async fn destroyed(
         id,
         Change::Destroyed,
     );
-    data.write(batch.build_all()).await.map(|_| ())
+    data.write_batch(&mut batch).await.map(|_| ())
 }
 
 /// Removes a mask and tombstones its address (ME-8).
@@ -341,11 +341,11 @@ pub async fn ensure_indexed(data: &Store, registry: &RegistryStore) -> trc::Resu
             )?;
         }
         if batch.is_large_batch() {
-            data.write(std::mem::take(&mut batch).build_all()).await?;
+            data.write_batch(&mut std::mem::take(&mut batch)).await?;
         }
     }
     data::set_indexed(&mut batch);
-    data.write(batch.build_all()).await.map(|_| ())
+    data.write_batch(&mut batch).await.map(|_| ())
 }
 
 /// Whether an account may send as an address because it's one of the

@@ -4,28 +4,36 @@
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
  */
 
-use common::Server;
-
-use mail_auth::DmarcResult;
-use mail_parser::{HeaderName, PartType, parsers::fields::thread::thread_name};
-use nlp::tokenizers::types::{TokenType, TypesTokenizer};
-
-use crate::{
-    Email, Hostname, IpParts, Recipient, SpamFilterContext, SpamFilterInput, SpamFilterOutput,
-    SpamFilterResult, TextPart,
-    modules::html::{HEAD, HtmlToken, html_to_tokens},
-};
-
 use super::url::UrlParts;
+use crate::{
+    ContextToken, Email, Hostname, IpParts, Recipient, SpamFilterContext, SpamFilterInput,
+    SpamFilterOutput, SpamFilterResult, TextPart, modules::html::html_to_tokens,
+};
+use common::{Server, expr::Bump};
+use mail_auth::DmarcResult;
+use mail_parser::{HeaderName, Mailbox, PartKind, thread_name};
+use nlp::tokenizers::types::{TokenType, TypesTokenizer};
+use std::borrow::Cow;
+use store::ahash::AHashSet;
+use sync_wrapper::SyncWrapper;
 
 pub trait SpamFilterInit {
     fn spam_filter_init<'x>(&self, input: SpamFilterInput<'x>) -> SpamFilterContext<'x>;
 }
 
 const POSTMASTER_ADDRESSES: [&str; 3] = ["postmaster", "mailer-daemon", "root"];
+const BYTES_PER_TOKEN: usize = 3;
+const MAX_RESERVED_TOKENS: usize = 1 << 16;
+const TAG_CAPACITY: usize = 64;
 
 impl SpamFilterInit for Server {
-    fn spam_filter_init<'x>(&self, mut input: SpamFilterInput<'x>) -> SpamFilterContext<'x> {
+    fn spam_filter_init<'x>(&self, input: SpamFilterInput<'x>) -> SpamFilterContext<'x> {
+        SpamFilterContext::new(input)
+    }
+}
+
+impl<'x> SpamFilterContext<'x> {
+    pub fn new(mut input: SpamFilterInput<'x>) -> Self {
         let mut subject = "";
         let mut from = None;
         let mut reply_to = None;
@@ -35,29 +43,16 @@ impl SpamFilterInit for Server {
         let mut found_spam_status = false;
 
         for header in input.message.headers() {
-            match &header.name {
+            let name = header.name();
+            match name {
                 HeaderName::To | HeaderName::Cc | HeaderName::Bcc => {
-                    if let Some(addrs) = header.value().as_address() {
-                        for addr in addrs.iter() {
-                            let rcpt = Recipient {
-                                email: Email::new(addr.address().unwrap_or_default()),
-                                name: addr.name().and_then(|s| {
-                                    let s = s.trim();
-                                    if !s.is_empty() {
-                                        Some(s.to_lowercase())
-                                    } else {
-                                        None
-                                    }
-                                }),
-                            };
-                            if header.name == HeaderName::To {
-                                recipients_to.push(rcpt);
-                            } else if header.name == HeaderName::Cc {
-                                recipients_cc.push(rcpt);
-                            } else {
-                                recipients_bcc.push(rcpt);
-                            }
-                        }
+                    let recipients = match name {
+                        HeaderName::To => &mut recipients_to,
+                        HeaderName::Cc => &mut recipients_cc,
+                        _ => &mut recipients_bcc,
+                    };
+                    if let Some(addresses) = header.value().as_address() {
+                        recipients.extend(addresses.mailboxes().map(Recipient::from));
                     }
                 }
                 HeaderName::ReplyTo => {
@@ -68,14 +63,7 @@ impl SpamFilterInit for Server {
                         .and_then(|addr| {
                             Some(Recipient {
                                 email: Email::new(addr.address()?),
-                                name: addr.name().and_then(|s| {
-                                    let s = s.trim();
-                                    if !s.is_empty() {
-                                        Some(s.to_lowercase())
-                                    } else {
-                                        None
-                                    }
-                                }),
+                                name: addr.name().and_then(trimmed_name),
                             })
                         });
                 }
@@ -85,9 +73,7 @@ impl SpamFilterInit for Server {
                 HeaderName::From => {
                     from = header.value().as_address().and_then(|addrs| addrs.first());
                 }
-                HeaderName::Other(name)
-                    if input.is_train && !found_spam_status && name.eq("X-Spam-Result") =>
-                {
+                HeaderName::XSpamResult if input.is_train && !found_spam_status => {
                     for token in header
                         .value()
                         .as_text()
@@ -115,153 +101,33 @@ impl SpamFilterInit for Server {
         }
 
         // Tokenize subject
-        let subject_tokens = TypesTokenizer::new(subject)
-            .tokenize_numbers(false)
-            .tokenize_urls(true)
-            .tokenize_urls_without_scheme(true)
-            .tokenize_emails(true)
-            .map(|t| match t.word {
-                TokenType::Alphabetic(s) => TokenType::Alphabetic(s.into()),
-                TokenType::Alphanumeric(s) => TokenType::Alphanumeric(s.into()),
-                TokenType::Integer(s) => TokenType::Integer(s.into()),
-                TokenType::Other(s) => TokenType::Other(s),
-                TokenType::Punctuation(s) => TokenType::Punctuation(s),
-                TokenType::Space => TokenType::Space,
-                TokenType::Url(url) => TokenType::Url(UrlParts::new(url)),
-                TokenType::UrlNoHost(s) => TokenType::UrlNoHost(s.into()),
-                TokenType::UrlNoScheme(s) => TokenType::UrlNoScheme(UrlParts::no_scheme(s)),
-                TokenType::IpAddr(i) => TokenType::IpAddr(IpParts::new(i)),
-                TokenType::Email(e) => TokenType::Email(Email::new(e)),
-                TokenType::Float(s) => TokenType::Float(s.into()),
-            })
-            .collect::<Vec<_>>();
+        let subject_tokens = tokenize(subject);
 
         // Tokenize and convert text parts
-        let mut text_parts = Vec::new();
-        let mut text_parts_nested = Vec::new();
-        let mut message_stack = Vec::new();
-        let mut message_iter = input.message.parts.iter();
-
-        loop {
-            while let Some(part) = message_iter.next() {
-                let is_main_message = message_stack.is_empty();
-                let text_part = match &part.body {
-                    PartType::Text(text) => TextPart::Plain {
-                        text_body: text.as_ref(),
-                        tokens: TypesTokenizer::new(text.as_ref())
-                            .tokenize_numbers(false)
-                            .tokenize_urls(true)
-                            .tokenize_urls_without_scheme(true)
-                            .tokenize_emails(true)
-                            .map(|t| match t.word {
-                                TokenType::Alphabetic(s) => TokenType::Alphabetic(s.into()),
-                                TokenType::Alphanumeric(s) => TokenType::Alphanumeric(s.into()),
-                                TokenType::Integer(s) => TokenType::Integer(s.into()),
-                                TokenType::Other(s) => TokenType::Other(s),
-                                TokenType::Punctuation(s) => TokenType::Punctuation(s),
-                                TokenType::Space => TokenType::Space,
-                                TokenType::Url(url) => TokenType::Url(UrlParts::new(url)),
-                                TokenType::UrlNoHost(s) => TokenType::UrlNoHost(s.into()),
-                                TokenType::UrlNoScheme(s) => {
-                                    TokenType::UrlNoScheme(UrlParts::no_scheme(s))
-                                }
-                                TokenType::IpAddr(i) => TokenType::IpAddr(IpParts::new(i)),
-                                TokenType::Email(e) => TokenType::Email(Email::new(e)),
-                                TokenType::Float(s) => TokenType::Float(s.into()),
-                            })
-                            .collect::<Vec<_>>(),
-                    },
-                    PartType::Html(html) => {
-                        let html_tokens = html_to_tokens(html);
-                        let text_body_len = html_tokens
-                            .iter()
-                            .filter_map(|t| match t {
-                                HtmlToken::Text { text } => text.len().into(),
-                                _ => None,
-                            })
-                            .sum();
-                        let mut text_body = String::with_capacity(text_body_len);
-                        let mut in_head = false;
-                        for token in &html_tokens {
-                            match token {
-                                HtmlToken::StartTag { name: HEAD, .. } => {
-                                    in_head = true;
-                                }
-                                HtmlToken::EndTag { name: HEAD } => {
-                                    in_head = false;
-                                }
-                                HtmlToken::Text { text } if !in_head => {
-                                    if !text_body.is_empty()
-                                        && !text_body.ends_with(' ')
-                                        && !text.starts_with(' ')
-                                    {
-                                        text_body.push(' ');
-                                    }
-                                    text_body.push_str(text)
-                                }
-                                _ => {}
-                            }
-                        }
-
-                        TextPart::Html {
-                            tokens: TypesTokenizer::new(&text_body)
-                                .tokenize_numbers(false)
-                                .tokenize_urls(true)
-                                .tokenize_urls_without_scheme(true)
-                                .tokenize_emails(true)
-                                .map(|t| match t.word {
-                                    TokenType::Alphabetic(s) => {
-                                        TokenType::Alphabetic(s.to_string().into())
-                                    }
-                                    TokenType::Alphanumeric(s) => {
-                                        TokenType::Alphanumeric(s.to_string().into())
-                                    }
-                                    TokenType::Integer(s) => {
-                                        TokenType::Integer(s.to_string().into())
-                                    }
-                                    TokenType::Other(s) => TokenType::Other(s),
-                                    TokenType::Punctuation(s) => TokenType::Punctuation(s),
-                                    TokenType::Space => TokenType::Space,
-                                    TokenType::Url(url) => {
-                                        TokenType::Url(UrlParts::new(url.to_string()))
-                                    }
-                                    TokenType::UrlNoHost(s) => {
-                                        TokenType::UrlNoHost(s.to_string().into())
-                                    }
-                                    TokenType::UrlNoScheme(s) => {
-                                        TokenType::UrlNoScheme(UrlParts::no_scheme(s.to_string()))
-                                    }
-                                    TokenType::IpAddr(i) => TokenType::IpAddr(IpParts::new(i)),
-                                    TokenType::Email(e) => TokenType::Email(Email::new(e)),
-                                    TokenType::Float(s) => TokenType::Float(s.to_string().into()),
-                                })
-                                .collect::<Vec<_>>(),
+        let texts = input.texts;
+        let text_parts = input
+            .message
+            .parts()
+            .map(|part| match (part.kind(), texts.get(part.id())) {
+                (PartKind::Text, Some(text)) => TextPart::Plain {
+                    text_body: text,
+                    tokens: tokenize(text),
+                },
+                (PartKind::Html, Some(html)) => {
+                    let html_tokens = html_to_tokens(html);
+                    match texts.html_text(part.id(), &html_tokens) {
+                        Some(text) => TextPart::Html {
+                            tokens: tokenize(&text.visible),
+                            hidden_tokens: tokenize_addresses(&text.hidden),
                             html_tokens,
-                            text_body,
-                        }
+                            text_body: &text.visible,
+                        },
+                        None => TextPart::None,
                     }
-                    PartType::Message(message) => {
-                        message_stack.push(message_iter);
-                        message_iter = message.parts.iter();
-                        TextPart::None
-                    }
-                    _ => TextPart::None,
-                };
-
-                if is_main_message {
-                    text_parts.push(text_part);
-                } else if !matches!(text_part, TextPart::None) {
-                    text_parts_nested.push(text_part);
                 }
-            }
-
-            if let Some(iter) = message_stack.pop() {
-                message_iter = iter;
-            } else {
-                break;
-            }
-        }
-        text_parts.extend(text_parts_nested);
+                _ => TextPart::None,
+            })
+            .collect();
 
         let subject_thread = thread_name(subject).to_string();
         let env_from_addr = Email::new(input.env_from);
@@ -279,11 +145,6 @@ impl SpamFilterInit for Server {
                 env_from_addr,
                 env_to_orig_addr: input
                     .env_rcpt_orig_to
-                    .iter()
-                    .map(|rcpt| Email::new(rcpt))
-                    .collect(),
-                env_to_rewritten_addr: input
-                    .env_rcpt_rewritten_to
                     .iter()
                     .map(|rcpt| Email::new(rcpt))
                     .collect(),
@@ -307,7 +168,79 @@ impl SpamFilterInit for Server {
                 domains: Default::default(),
             },
             input,
-            result: SpamFilterResult::default(),
+            result: SpamFilterResult {
+                tags: AHashSet::with_capacity(TAG_CAPACITY),
+                ..Default::default()
+            },
+            arena: SyncWrapper::new(Bump::new()),
         }
     }
 }
+
+pub(crate) fn tokenize(text: &str) -> Vec<ContextToken<'_>> {
+    let mut tokens = Vec::with_capacity((text.len() / BYTES_PER_TOKEN).min(MAX_RESERVED_TOKENS));
+    tokens.extend(types_tokenizer(text).map(|token| context_token(token.word)));
+    tokens
+}
+
+fn tokenize_addresses(text: &str) -> Vec<ContextToken<'_>> {
+    if text.is_empty() {
+        return Vec::new();
+    }
+    types_tokenizer(text)
+        .filter(|token| {
+            matches!(
+                token.word,
+                TokenType::Url(_)
+                    | TokenType::UrlNoScheme(_)
+                    | TokenType::IpAddr(_)
+                    | TokenType::Email(_)
+            )
+        })
+        .map(|token| context_token(token.word))
+        .collect()
+}
+
+fn types_tokenizer(text: &str) -> TypesTokenizer<'_> {
+    TypesTokenizer::new(text)
+        .tokenize_numbers(false)
+        .tokenize_urls(true)
+        .tokenize_urls_without_scheme(true)
+        .tokenize_emails(true)
+}
+
+fn context_token<'x>(word: TokenType<&'x str, &'x str, &'x str, &'x str>) -> ContextToken<'x> {
+    match word {
+        TokenType::Alphabetic(s) => TokenType::Alphabetic(Cow::Borrowed(s)),
+        TokenType::Alphanumeric(s) => TokenType::Alphanumeric(Cow::Borrowed(s)),
+        TokenType::Integer(s) => TokenType::Integer(Cow::Borrowed(s)),
+        TokenType::Other(s) => TokenType::Other(s),
+        TokenType::Punctuation(s) => TokenType::Punctuation(s),
+        TokenType::Space => TokenType::Space,
+        TokenType::Url(url) => TokenType::Url(Box::new(UrlParts::new(url))),
+        TokenType::UrlNoHost(s) => TokenType::UrlNoHost(Cow::Borrowed(s)),
+        TokenType::UrlNoScheme(s) => TokenType::UrlNoScheme(Box::new(UrlParts::no_scheme(s))),
+        TokenType::IpAddr(i) => TokenType::IpAddr(IpParts::new(i)),
+        TokenType::Email(e) => TokenType::Email(Box::new(Email::new(e))),
+        TokenType::Float(s) => TokenType::Float(Cow::Borrowed(s)),
+    }
+}
+
+impl From<Mailbox<'_>> for Recipient {
+    fn from(addr: Mailbox<'_>) -> Self {
+        Recipient {
+            email: Email::new(addr.address().unwrap_or_default()),
+            name: addr.name().and_then(trimmed_name),
+        }
+    }
+}
+
+fn trimmed_name(name: &str) -> Option<String> {
+    let name = name.trim();
+    if !name.is_empty() {
+        Some(name.to_lowercase())
+    } else {
+        None
+    }
+}
+

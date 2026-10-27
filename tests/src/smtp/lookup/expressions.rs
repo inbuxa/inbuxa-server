@@ -2,11 +2,13 @@
  * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
+ *
+ * Modified by Coffey Labs in 2026 for INBUXA.
  */
 
 use crate::utils::{dns::DnsCache, server::TestServerBuilder};
-use common::expr::{tokenizer::TokenMap, *};
-use mail_auth::{DnssecStatus, MX};
+use common::expr::{if_block::IfBlock, tokenizer::TokenMap, *};
+use mail_auth::{DnssecStatus, Mx};
 use registry::schema::{
     enums::ExpressionVariable,
     prelude::{ObjectType, Property},
@@ -15,14 +17,16 @@ use registry::schema::{
 use smtp::queue::RecipientDomain;
 use std::time::{Duration, Instant};
 
+// inbuxa: 1.0 keeps keys and counters in in-memory stores only (an SQL
+// lookup store answers NotSupported), so those calls use the default one
 const TESTS: &[(&str, &str)] = &[
     ("dns_query(rcpt_domain, 'mx')[0]", "mx.foobar.org"),
     (
-        "key_get('sql', 'hello') + '-' + key_exists('sql', 'hello') + '-' + key_set('sql', 'hello', 'world') + '-' + key_get('sql', 'hello') + '-' + key_exists('sql', 'hello')",
+        "key_get('*', 'hello') + '-' + key_exists('*', 'hello') + '-' + key_set('*', 'hello', 'world') + '-' + key_get('*', 'hello') + '-' + key_exists('*', 'hello')",
         "-0-1-world-1",
     ),
     (
-        "counter_get('sql', 'county') + '-' + counter_incr('sql', 'county', 1) + '-' + counter_incr('sql', 'county', 1) + '-' + counter_get('sql', 'county')",
+        "counter_get('*', 'county') + '-' + counter_incr('*', 'county', 1) + '-' + counter_incr('*', 'county', 1) + '-' + counter_get('*', 'county')",
         "0-1-2-2",
     ),
     (
@@ -69,7 +73,7 @@ async fn expressions() {
             namespace: "sql".into(),
             store: LookupStore::Sqlite(SqliteStore {
                 path: format!("{}/smtp_sql.db", test.tmp_dir()),
-                pool_max_connections: 10,
+                pool_max_connections: Some(10),
                 pool_workers: None,
             }),
         })
@@ -79,7 +83,7 @@ async fn expressions() {
 
     test.server.mx_add(
         "test.org",
-        vec![MX {
+        vec![Mx {
             exchanges: vec!["mx.foobar.org".into()].into_boxed_slice(),
             preference: 10,
         }],
@@ -119,18 +123,19 @@ async fn expressions() {
         ExpressionVariable::Priority,
     ]);
     for (expr, expected) in TESTS {
-        let e = Expression::parse(&token_map, expr);
+        // inbuxa: 1.0 evaluates compiled if-blocks only, so the expression
+        // becomes the default of an otherwise empty block
+        let e = IfBlock::new(
+            ObjectType::Account.singleton(),
+            Property::AccountName,
+            Box::default(),
+            Expression::parse(&token_map, expr).unwrap(),
+        );
         assert_eq!(
             test.server
-                .eval_expr::<String, _>(
-                    &e,
-                    &RecipientDomain::new("test.org"),
-                    ObjectType::Account.singleton(),
-                    Property::AccountName,
-                    0
-                )
+                .eval_if::<String, _>(&e, &RecipientDomain::new("test.org"), &mut Bump::new(), 0)
                 .await
-                .unwrap(),
+                .unwrap_or_else(|| panic!("no result for '{expr}'")),
             *expected,
             "failed for '{}'",
             expr

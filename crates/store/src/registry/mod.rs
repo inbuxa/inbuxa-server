@@ -23,11 +23,8 @@ use crate::{
 use registry::{
     pickle::{Pickle, PickledStream},
     schema::{
-        prelude::{Object, ObjectInner, ObjectType, Property},
-        structs::{
-            ArchivedItem, DmarcInternalReport, Metric, SpamTrainingSample, Task, TlsInternalReport,
-            Trace,
-        },
+        prelude::{OBJ_NOT_STORED, Object, ObjectInner, ObjectType, Property},
+        structs::{DmarcInternalReport, SpamTrainingSample, Task, TlsInternalReport},
     },
     types::{EnumImpl, ObjectImpl, id::ObjectId},
 };
@@ -45,6 +42,7 @@ pub struct RegistryQuery {
     pub filters: Vec<RegistryFilter>,
     pub(crate) start: RegistryQueryStart,
     pub(crate) limit: Option<usize>,
+    pub(crate) order: RegistryOrder,
 }
 
 #[derive(Debug, Clone, Copy, Default)]
@@ -55,6 +53,20 @@ pub(crate) enum RegistryQueryStart {
     Index(u64),
     Anchor(u64),
     None,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) enum RegistryOrder {
+    #[default]
+    Any,
+    Ascending,
+    Descending,
+}
+
+#[derive(Debug)]
+pub struct RegistryPage<T> {
+    pub ids: T,
+    pub position: Option<usize>,
 }
 
 #[derive(Debug)]
@@ -94,6 +106,7 @@ impl Deserialize for Object {
     fn deserialize_with_key(key: &[u8], bytes: &[u8]) -> trc::Result<Self> {
         let revision = xxhash_rust::xxh3::xxh3_64(bytes);
         ObjectType::from_id(key.deserialize_be_u16(0)?)
+            .filter(|object_type| object_type.flags() & OBJ_NOT_STORED == 0)
             .and_then(|object_id| ObjectInner::unpickle(object_id, &mut PickledStream::new(bytes)?))
             .map(|inner| Object { revision, inner })
             .ok_or_else(|| {
@@ -135,18 +148,6 @@ impl Deserialize for SpamTrainingSample {
     }
 }
 
-impl Deserialize for ArchivedItem {
-    fn deserialize(bytes: &[u8]) -> trc::Result<Self> {
-        PickledStream::new(bytes)
-            .and_then(|mut stream| Self::unpickle(&mut stream))
-            .ok_or_else(|| {
-                trc::EventType::Registry(trc::RegistryEvent::DeserializationError)
-                    .into_err()
-                    .caused_by(trc::location!())
-                    .ctx(trc::Key::Value, bytes)
-            })
-    }
-}
 
 impl Deserialize for TlsInternalReport {
     fn deserialize(bytes: &[u8]) -> trc::Result<Self> {
@@ -217,28 +218,3 @@ impl Deserialize for ObjectIdVersioned {
     }
 }
 
-impl Deserialize for Trace {
-    fn deserialize(bytes: &[u8]) -> trc::Result<Self> {
-        PickledStream::new(bytes)
-            .and_then(|mut stream| Self::unpickle(&mut stream))
-            .ok_or_else(|| {
-                trc::EventType::Registry(trc::RegistryEvent::DeserializationError)
-                    .into_err()
-                    .caused_by(trc::location!())
-                    .ctx(trc::Key::Value, bytes)
-            })
-    }
-}
-
-impl Deserialize for Metric {
-    fn deserialize(bytes: &[u8]) -> trc::Result<Self> {
-        PickledStream::new(bytes)
-            .and_then(|mut stream| Self::unpickle(&mut stream))
-            .ok_or_else(|| {
-                trc::EventType::Registry(trc::RegistryEvent::DeserializationError)
-                    .into_err()
-                    .caused_by(trc::location!())
-                    .ctx(trc::Key::Value, bytes)
-            })
-    }
-}

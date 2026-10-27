@@ -21,7 +21,7 @@ use groupware::inbuxa_lock::{apply_dav_grants, invalidate, same_replaced};
 use inbuxa_features::lock::{self, Lock, Replaced};
 use store::{
     ValueKey,
-    write::{AlignedBytes, Archive, BatchBuilder, now},
+    write::{ArchiveBytes, Archive, BatchBuilder, now},
 };
 use trc::AddContext;
 use types::{collection::Collection, special_use::SpecialUse};
@@ -62,7 +62,7 @@ pub async fn apply_grants(
         };
         let Some(archive) = server
             .store()
-            .get_value::<Archive<AlignedBytes>>(ValueKey::archive(
+            .get_value::<Archive<ArchiveBytes>>(ValueKey::archive(
                 account_id,
                 Collection::Mailbox,
                 mailbox.document_id,

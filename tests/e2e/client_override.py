@@ -169,7 +169,7 @@ def main():
     got = jmap("admin", recovery, [["x:Bootstrap/get", {"ids": None}, "0"]])
     singleton = got[0][1]["list"][0]["id"]
     res = jmap("admin", recovery, [["x:Bootstrap/set", {"update": {singleton: {
-        "serverHostname": "mail.override.test", "defaultDomain": "override.test",
+        "defaultHostname": "mail.override.test", "defaultDomain": "override.test",
         "requestTlsCertificate": False}}}, "0"]])
     updated = res[0][1].get("updated", {}).get(singleton)
     check(bool(updated), "bootstrap completed")

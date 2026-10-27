@@ -462,7 +462,7 @@ impl AuditLog {
                 }
             }
             batch.set(class(KIND_HEAD, &[node]), new_head.to_bytes());
-            match data.write(batch.build_all()).await {
+            match data.write_batch(&mut batch).await {
                 Ok(_) => return Ok(EntryId { node, seq }),
                 Err(err)
                     if attempt < APPEND_ATTEMPTS
@@ -648,7 +648,7 @@ pub async fn settings(data: &Store) -> trc::Result<Settings> {
 pub async fn set_settings(data: &Store, settings: &Settings) -> trc::Result<()> {
     let mut batch = BatchBuilder::new();
     batch.set(class(KIND_SETTINGS, &[]), Json(settings).serialize()?);
-    data.write(batch.build_all())
+    data.write_batch(&mut batch)
         .await
         .caused_by(trc::location!())
         .map(|_| ())
@@ -742,7 +742,7 @@ pub async fn purge(
         // which the next run clears, never a chain that looks broken
         let mut batch = BatchBuilder::new();
         batch.set(class(KIND_FLOOR, &[node]), Json(&new_floor).serialize()?);
-        data.write(batch.build_all())
+        data.write_batch(&mut batch)
             .await
             .caused_by(trc::location!())?;
 
@@ -759,7 +759,7 @@ pub async fn purge(
                     Entry::Outcome { .. } => {}
                 }
             }
-            data.write(batch.build_all())
+            data.write_batch(&mut batch)
                 .await
                 .caused_by(trc::location!())?;
             removed += chunk.len();
@@ -875,7 +875,7 @@ mod tests {
             panic!()
         };
         assert_eq!(parse_key(&any.key, KIND_TIME, 3), Some(vec![5, 3, 9]));
-        let mut with_subspace = vec![SUBSPACE_INBUXA];
+        let mut with_subspace = vec![SUBSPACE_INBUXA.byte()];
         with_subspace.extend_from_slice(&any.key);
         assert_eq!(parse_key(&with_subspace, KIND_TIME, 3), Some(vec![5, 3, 9]));
         assert_eq!(parse_key(&any.key, KIND_ENTRY, 3), None);

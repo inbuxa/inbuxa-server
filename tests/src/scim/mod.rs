@@ -342,7 +342,7 @@ impl ScimTest {
         let admin = test.account("admin");
         let domain_id = admin
             .registry_create_object(Domain {
-                is_enabled: true,
+                enable: true,
                 name: SCIM_DOMAIN.to_string(),
                 certificate_management: CertificateManagement::Manual,
                 dns_management: DnsManagement::Manual,

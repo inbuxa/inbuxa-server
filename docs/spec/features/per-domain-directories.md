@@ -248,7 +248,9 @@ directory" means the directory DIR-1 picks for a domain.
   always gets the server's own. The PACC DNS record for a domain carries the
   domain's provider issuer when its effective directory is OIDC, and the
   server's own URL otherwise. Both work this way today, but only for the
-  server default.
+  server default. Since 1.0 the PACC record carries a provider's issuer only
+  if the provider passes the OAuth public-client checks (an https issuer
+  among them); otherwise it's the password-only record.
 
 ### External accounts
 
@@ -469,7 +471,9 @@ data.
 9. Mail to an LDAP domain with LDAP stopped gets a `4xx` (DIR-11). *LDAP.*
 10. `/api/discover` for a user on A (provider 1) and a user on B (provider 2)
     returns each provider's document. The PACC record differs likewise
-    (DIR-12). *Two Keycloak realms.*
+    (DIR-12); with the http test realms it's the password-only record, and
+    the server's own issuer for a domain on the internal directory.
+    *Two Keycloak realms.*
 11. A password change on an external-directory account: `forbidden`. It's
     allowed again after the domain moves to the internal directory (DIR-13,
     DIR-20). *LDAP.*

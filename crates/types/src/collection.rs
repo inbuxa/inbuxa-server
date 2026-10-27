@@ -12,6 +12,43 @@ use std::{
 };
 use utils::map::bitmap::BitmapItem;
 
+#[derive(Debug, Clone, Copy, Hash, PartialEq, Eq, PartialOrd, Ord, Default)]
+#[repr(transparent)]
+pub struct ChangeGroup(u8);
+
+impl ChangeGroup {
+    #[inline(always)]
+    pub const fn from_u8(group: u8) -> Self {
+        ChangeGroup(group)
+    }
+
+    #[inline(always)]
+    pub const fn to_u8(self) -> u8 {
+        self.0
+    }
+}
+
+impl From<SyncCollection> for ChangeGroup {
+    #[inline(always)]
+    fn from(collection: SyncCollection) -> Self {
+        collection.change_group()
+    }
+}
+
+impl From<Collection> for ChangeGroup {
+    #[inline(always)]
+    fn from(collection: Collection) -> Self {
+        collection.change_group()
+    }
+}
+
+impl From<VanishedCollection> for ChangeGroup {
+    #[inline(always)]
+    fn from(collection: VanishedCollection) -> Self {
+        collection.change_group()
+    }
+}
+
 #[derive(
     rkyv::Archive,
     rkyv::Deserialize,
@@ -40,8 +77,9 @@ pub enum Collection {
     ContactCard = 11,
     FileNode = 12,
     CalendarEventNotification = 13,
+    Metadata = 14,
     #[default]
-    None = 14,
+    None = 15,
 }
 
 #[derive(Debug, Clone, Copy, Hash, PartialEq, Eq, Default)]
@@ -70,6 +108,30 @@ pub enum VanishedCollection {
     FileNode = 254,
 }
 
+impl VanishedCollection {
+    pub fn is_named(&self) -> bool {
+        match self {
+            VanishedCollection::Email => false,
+            VanishedCollection::Calendar
+            | VanishedCollection::AddressBook
+            | VanishedCollection::FileNode => true,
+        }
+    }
+
+    pub const fn sync_collection(&self) -> SyncCollection {
+        match self {
+            VanishedCollection::Email => SyncCollection::Email,
+            VanishedCollection::Calendar => SyncCollection::Calendar,
+            VanishedCollection::AddressBook => SyncCollection::AddressBook,
+            VanishedCollection::FileNode => SyncCollection::FileNode,
+        }
+    }
+
+    pub const fn change_group(&self) -> ChangeGroup {
+        self.sync_collection().change_group()
+    }
+}
+
 impl Collection {
     pub const MAX: usize = Collection::None as usize;
 
@@ -91,6 +153,10 @@ impl Collection {
             Collection::CalendarEventNotification => Some(Collection::CalendarEventNotification),
             _ => None,
         }
+    }
+
+    pub fn change_group(&self) -> ChangeGroup {
+        SyncCollection::from(*self).change_group()
     }
 
     pub fn child_collection(&self) -> Option<Collection> {
@@ -148,6 +214,19 @@ impl SyncCollection {
             _ => None,
         }
     }
+
+    pub fn is_prefixed(&self) -> bool {
+        matches!(self, SyncCollection::Email)
+    }
+
+    pub const fn change_group(&self) -> ChangeGroup {
+        match self {
+            SyncCollection::Thread => ChangeGroup(SyncCollection::Email as u8),
+            other => ChangeGroup(*other as u8),
+        }
+    }
+
+    pub const MAX_CHANGE_GROUP: u8 = SyncCollection::None as u8;
 }
 
 impl From<Collection> for SyncCollection {
@@ -189,6 +268,7 @@ impl From<u8> for Collection {
             11 => Collection::ContactCard,
             12 => Collection::FileNode,
             13 => Collection::CalendarEventNotification,
+            14 => Collection::Metadata,
             _ => Collection::None,
         }
     }
@@ -247,6 +327,7 @@ impl From<u64> for Collection {
             11 => Collection::ContactCard,
             12 => Collection::FileNode,
             13 => Collection::CalendarEventNotification,
+            14 => Collection::Metadata,
             _ => Collection::None,
         }
     }
@@ -353,6 +434,7 @@ impl Collection {
             Collection::ContactCard => "contactCard",
             Collection::FileNode => "fileNode",
             Collection::CalendarEventNotification => "calendarEventNotification",
+            Collection::Metadata => "metadata",
             Collection::None => "",
         }
     }
@@ -373,6 +455,7 @@ impl Collection {
             Collection::ContactCard => "contact-card",
             Collection::FileNode => "file-node",
             Collection::CalendarEventNotification => "calendar-event-notification",
+            Collection::Metadata => "metadata",
             Collection::None => "",
         }
     }
@@ -382,7 +465,7 @@ impl FromStr for Collection {
     type Err = ();
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
-        hashify::tiny_map!(s.as_bytes(),
+        hashify::map!(s.as_bytes(), Collection,
             "pushSubscription" => Collection::PushSubscription,
             "email" => Collection::Email,
             "mailbox" => Collection::Mailbox,
@@ -397,7 +480,9 @@ impl FromStr for Collection {
             "contactCard" => Collection::ContactCard,
             "fileNode" => Collection::FileNode,
             "calendarEventNotification" => Collection::CalendarEventNotification,
+            "metadata" => Collection::Metadata,
         )
+        .copied()
         .ok_or(())
     }
 }

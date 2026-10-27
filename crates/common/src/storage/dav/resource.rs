@@ -1,0 +1,680 @@
+/*
+ * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
+ *
+ * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
+ */
+
+use crate::{
+    ArchivedDavName, ArenaRef, CachedName, DavName, DavPath, DavResourcePath, GroupwareResource,
+    GroupwareResourceMetadata, GroupwareResourceRef, GroupwareResources, NO_ID, PathChunk,
+    TinyCalendarPreferences,
+};
+use store::rand::{RngExt, distr::Alphanumeric};
+use types::{acl::AclGrant, metadata::MetadataKinds};
+
+use super::{CONTAINER_FLAG, FILE_KIND_FILE, PresenceBits, SCHEDULE_INBOX_ID};
+
+impl<'x> GroupwareResourceRef<'x> {
+    #[inline(always)]
+    pub fn document_id(&self) -> u32 {
+        self.resource.document_id
+    }
+
+    #[inline(always)]
+    pub fn is_container(&self) -> bool {
+        self.resource.is_container()
+    }
+
+    #[inline(always)]
+    pub fn size(&self) -> Option<u32> {
+        self.resource.size()
+    }
+
+    #[inline(always)]
+    pub fn is_child_of(&self, parent_id: u32) -> bool {
+        self.resource.is_child_of(parent_id)
+    }
+
+    #[inline(always)]
+    pub fn parent_id(&self) -> Option<u32> {
+        self.resource.parent_id()
+    }
+
+    #[inline(always)]
+    pub fn event_time_range(&self) -> Option<(i64, i64)> {
+        self.resource.event_time_range()
+    }
+
+    #[inline(always)]
+    pub fn event_flags(&self) -> Option<u16> {
+        self.resource.event_flags()
+    }
+
+    #[inline(always)]
+    pub fn created_at(&self) -> Option<i64> {
+        self.resource.created_at()
+    }
+
+    #[inline(always)]
+    pub fn modified_at(&self) -> Option<i64> {
+        self.resource.modified_at()
+    }
+
+    #[inline(always)]
+    pub fn event_id(&self) -> Option<u32> {
+        self.resource.event_id()
+    }
+
+    #[inline(always)]
+    pub fn etag(&self) -> u32 {
+        self.resource.etag()
+    }
+
+    #[inline(always)]
+    pub fn metadata_kinds(&self) -> MetadataKinds {
+        self.resource.metadata_kinds()
+    }
+
+    #[inline(always)]
+    pub fn uid(&self) -> Option<&'x str> {
+        match &self.resource.data {
+            GroupwareResourceMetadata::CalendarEvent { uid, .. }
+            | GroupwareResourceMetadata::ContactCard { uid, .. } => Some(self.chunk.str_at(*uid)),
+            _ => None,
+        }
+    }
+
+    #[inline(always)]
+    pub fn has_cached_uid(&self, cached_uid: &[u8]) -> bool {
+        match &self.resource.data {
+            GroupwareResourceMetadata::CalendarEvent { uid, .. }
+            | GroupwareResourceMetadata::ContactCard { uid, .. } => {
+                self.chunk.bytes_at(*uid) == cached_uid
+            }
+            _ => false,
+        }
+    }
+
+    #[inline(always)]
+    pub fn container_name(&self) -> Option<&'x str> {
+        match &self.resource.data {
+            GroupwareResourceMetadata::File { name, .. }
+            | GroupwareResourceMetadata::Calendar { name, .. }
+            | GroupwareResourceMetadata::AddressBook { name, .. } => Some(self.chunk.str_at(*name)),
+            GroupwareResourceMetadata::CalendarEventNotification { names, .. }
+                if names.is_empty() =>
+            {
+                Some(if self.resource.document_id == SCHEDULE_INBOX_ID {
+                    "inbox"
+                } else {
+                    "outbox"
+                })
+            }
+            _ => None,
+        }
+    }
+
+    #[inline(always)]
+    pub fn child_names(&self) -> &[CachedName] {
+        match self.resource.names_ref() {
+            Some(names) => self.chunk.names_at(names),
+            None => &[],
+        }
+    }
+
+    #[inline(always)]
+    pub fn child_name_at(&self, name: &CachedName) -> &str {
+        self.chunk.str_at(name.name)
+    }
+
+    #[inline(always)]
+    pub fn acls(&self) -> &'x [AclGrant] {
+        match self.resource.acls_ref() {
+            Some(acls) => self.chunk.acls_at(acls),
+            None => &[],
+        }
+    }
+
+    #[inline(always)]
+    pub fn has_acls(&self) -> bool {
+        self.resource
+            .acls_ref()
+            .is_some_and(|acls| !acls.is_empty())
+    }
+
+    pub fn notification(&self) -> Option<NotificationRef<'_>> {
+        match &self.resource.data {
+            GroupwareResourceMetadata::CalendarEventNotification {
+                changed_by,
+                principals,
+                calendar_ids_len,
+                flags,
+                ..
+            } => {
+                let ids = self.chunk.principals_at(*principals);
+                let (calendar_ids, dismissed_by) =
+                    ids.split_at((*calendar_ids_len as usize).min(ids.len()));
+                Some(NotificationRef {
+                    changed_by: *changed_by,
+                    calendar_ids,
+                    dismissed_by,
+                    flags: *flags,
+                })
+            }
+            _ => None,
+        }
+    }
+
+    pub fn personal_calendar_preferences(
+        &self,
+        account_id: u32,
+    ) -> Option<&TinyCalendarPreferences> {
+        match &self.resource.data {
+            GroupwareResourceMetadata::Calendar { preferences, .. } => self
+                .chunk
+                .prefs_at(*preferences)
+                .iter()
+                .find(|pref| pref.account_id == account_id),
+            _ => None,
+        }
+    }
+
+    pub fn all_calendar_preferences(&self) -> &'x [TinyCalendarPreferences] {
+        match &self.resource.data {
+            GroupwareResourceMetadata::Calendar { preferences, .. } => {
+                self.chunk.prefs_at(*preferences)
+            }
+            _ => &[],
+        }
+    }
+
+    pub fn calendar_preferences(&self, account_id: u32) -> Option<&TinyCalendarPreferences> {
+        match &self.resource.data {
+            GroupwareResourceMetadata::Calendar { preferences, .. } => {
+                let prefs = self.chunk.prefs_at(*preferences);
+                prefs
+                    .iter()
+                    .find(|pref| pref.account_id == account_id)
+                    .or_else(|| prefs.first())
+            }
+            _ => None,
+        }
+    }
+
+    pub fn has_hierarchy_changes(&self, other: &GroupwareResourceRef<'_>) -> bool {
+        match (&self.resource.data, &other.resource.data) {
+            (
+                GroupwareResourceMetadata::File {
+                    name: a,
+                    parent_id: c,
+                    ..
+                },
+                GroupwareResourceMetadata::File {
+                    name: b,
+                    parent_id: d,
+                    ..
+                },
+            ) => c != d || self.chunk.str_at(*a) != other.chunk.str_at(*b),
+            (
+                GroupwareResourceMetadata::Calendar { name: a, .. },
+                GroupwareResourceMetadata::Calendar { name: b, .. },
+            )
+            | (
+                GroupwareResourceMetadata::AddressBook { name: a, .. },
+                GroupwareResourceMetadata::AddressBook { name: b, .. },
+            ) => self.chunk.str_at(*a) != other.chunk.str_at(*b),
+            _ => {
+                let a = self.child_names();
+                let b = other.child_names();
+                a.len() != b.len()
+                    || a.iter().zip(b.iter()).any(|(x, y)| {
+                        x.parent_id != y.parent_id
+                            || self.chunk.str_at(x.name) != other.chunk.str_at(y.name)
+                    })
+            }
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct NotificationRef<'x> {
+    pub changed_by: u32,
+    pub calendar_ids: &'x [u32],
+    pub dismissed_by: &'x [u32],
+    pub flags: u16,
+}
+
+impl GroupwareResource {
+    #[inline(always)]
+    pub fn uid_ref(&self) -> Option<ArenaRef> {
+        match &self.data {
+            GroupwareResourceMetadata::CalendarEvent { uid, .. }
+            | GroupwareResourceMetadata::ContactCard { uid, .. } => Some(*uid),
+            _ => None,
+        }
+    }
+
+    #[inline(always)]
+    pub fn names_ref(&self) -> Option<ArenaRef> {
+        match &self.data {
+            GroupwareResourceMetadata::CalendarEvent { names, .. }
+            | GroupwareResourceMetadata::ContactCard { names, .. }
+            | GroupwareResourceMetadata::CalendarEventNotification { names, .. } => Some(*names),
+            _ => None,
+        }
+    }
+
+    #[inline(always)]
+    pub fn acls_ref(&self) -> Option<ArenaRef> {
+        match &self.data {
+            GroupwareResourceMetadata::File { acls, .. }
+            | GroupwareResourceMetadata::Calendar { acls, .. }
+            | GroupwareResourceMetadata::AddressBook { acls, .. } => Some(*acls),
+            _ => None,
+        }
+    }
+
+    #[inline(always)]
+    pub fn is_container(&self) -> bool {
+        match &self.data {
+            GroupwareResourceMetadata::File { flags, .. } => flags.is_directory(),
+            GroupwareResourceMetadata::Calendar { .. }
+            | GroupwareResourceMetadata::AddressBook { .. } => true,
+            GroupwareResourceMetadata::CalendarEventNotification { names, .. } => names.is_empty(),
+            _ => false,
+        }
+    }
+
+    #[inline(always)]
+    pub fn size(&self) -> Option<u32> {
+        match &self.data {
+            GroupwareResourceMetadata::File { size, flags, .. }
+                if flags.kind() == FILE_KIND_FILE =>
+            {
+                Some(*size)
+            }
+            _ => None,
+        }
+    }
+
+    #[inline(always)]
+    pub fn parent_id(&self) -> Option<u32> {
+        match &self.data {
+            GroupwareResourceMetadata::File { parent_id, .. } if *parent_id != NO_ID => {
+                Some(*parent_id)
+            }
+            GroupwareResourceMetadata::CalendarEventNotification { names, .. }
+                if names.is_empty() =>
+            {
+                Some(SCHEDULE_INBOX_ID)
+            }
+            _ => None,
+        }
+    }
+
+    #[inline(always)]
+    pub fn event_time_range(&self) -> Option<(i64, i64)> {
+        match &self.data {
+            GroupwareResourceMetadata::CalendarEvent {
+                start, duration, ..
+            } => Some((*start, start.saturating_add(*duration as i64))),
+            _ => None,
+        }
+    }
+
+    #[inline(always)]
+    pub fn event_flags(&self) -> Option<u16> {
+        match &self.data {
+            GroupwareResourceMetadata::CalendarEvent { flags, .. } => Some(*flags),
+            _ => None,
+        }
+    }
+
+    #[inline(always)]
+    pub fn created_at(&self) -> Option<i64> {
+        match &self.data {
+            GroupwareResourceMetadata::CalendarEvent { created_at, .. }
+            | GroupwareResourceMetadata::ContactCard { created_at, .. }
+            | GroupwareResourceMetadata::CalendarEventNotification { created_at, .. } => {
+                Some(*created_at)
+            }
+            GroupwareResourceMetadata::File {
+                modified,
+                created_delta,
+                ..
+            } => modified.checked_add(*created_delta as i64),
+            _ => None,
+        }
+    }
+
+    #[inline(always)]
+    pub fn modified_at(&self) -> Option<i64> {
+        match &self.data {
+            GroupwareResourceMetadata::CalendarEvent {
+                created_at,
+                modified_at,
+                ..
+            }
+            | GroupwareResourceMetadata::ContactCard {
+                created_at,
+                modified_at,
+                ..
+            } => Some(*created_at + *modified_at as i64),
+            GroupwareResourceMetadata::File { modified, .. } => Some(*modified),
+            _ => None,
+        }
+    }
+
+    #[inline(always)]
+    pub fn event_id(&self) -> Option<u32> {
+        match &self.data {
+            GroupwareResourceMetadata::CalendarEventNotification { event_id, .. } => {
+                Some(*event_id)
+            }
+            _ => None,
+        }
+    }
+
+    #[inline(always)]
+    pub fn etag(&self) -> u32 {
+        match &self.data {
+            GroupwareResourceMetadata::File { etag, .. }
+            | GroupwareResourceMetadata::Calendar { etag, .. }
+            | GroupwareResourceMetadata::CalendarEvent { etag, .. }
+            | GroupwareResourceMetadata::CalendarEventNotification { etag, .. }
+            | GroupwareResourceMetadata::AddressBook { etag, .. }
+            | GroupwareResourceMetadata::ContactCard { etag, .. } => *etag,
+        }
+    }
+
+    #[inline(always)]
+    pub fn metadata_kinds(&self) -> MetadataKinds {
+        match &self.data {
+            GroupwareResourceMetadata::File { flags, .. } => flags.metadata_kinds(),
+            GroupwareResourceMetadata::Calendar { metadata, .. }
+            | GroupwareResourceMetadata::AddressBook { metadata, .. } => *metadata,
+            GroupwareResourceMetadata::CalendarEvent { flags, .. } => {
+                PresenceBits::CALENDAR_EVENT.kinds(*flags)
+            }
+            GroupwareResourceMetadata::ContactCard { flags, .. } => {
+                PresenceBits::CONTACT_CARD.kinds(*flags)
+            }
+            GroupwareResourceMetadata::CalendarEventNotification { .. } => MetadataKinds::NONE,
+        }
+    }
+
+    pub fn is_child_of(&self, parent_id: u32) -> bool {
+        match &self.data {
+            GroupwareResourceMetadata::File { parent_id: id, .. } => *id == parent_id,
+            GroupwareResourceMetadata::CalendarEventNotification { names, .. } => {
+                names.is_empty() && parent_id == SCHEDULE_INBOX_ID
+            }
+            _ => false,
+        }
+    }
+}
+
+impl DavResourcePath<'_> {
+    #[inline(always)]
+    pub fn document_id(&self) -> u32 {
+        self.path.document_id
+    }
+
+    #[inline(always)]
+    pub fn parent_id(&self) -> Option<u32> {
+        (self.path.parent_id != NO_ID).then_some(self.path.parent_id)
+    }
+
+    #[inline(always)]
+    pub fn path(&self) -> &str {
+        std::str::from_utf8(&self.path_chunk.bytes[self.path.path.range()]).unwrap_or_default()
+    }
+
+    #[inline(always)]
+    pub fn is_container(&self) -> bool {
+        self.resource.is_container()
+    }
+
+    #[inline(always)]
+    pub fn hierarchy_seq(&self) -> u32 {
+        self.path.hierarchy_seq & !CONTAINER_FLAG
+    }
+
+    #[inline(always)]
+    pub fn size(&self) -> u32 {
+        self.resource.size().unwrap_or_default()
+    }
+}
+
+impl DavName {
+    pub fn new(name: String, parent_id: u32) -> Self {
+        Self { name, parent_id }
+    }
+
+    pub fn new_with_rand_name(parent_id: u32) -> Self {
+        Self {
+            name: store::rand::rng()
+                .sample_iter(Alphanumeric)
+                .take(10)
+                .map(char::from)
+                .collect::<String>(),
+            parent_id,
+        }
+    }
+
+    #[inline(always)]
+    pub fn parent_id(&self) -> u32 {
+        self.parent_id
+    }
+}
+
+impl ArchivedDavName {
+    #[inline(always)]
+    pub fn parent_id(&self) -> u32 {
+        self.parent_id.to_native()
+    }
+}
+
+impl GroupwareResources {
+    fn pair<'x>(&'x self, entry: (&'x PathChunk, &'x DavPath)) -> Option<DavResourcePath<'x>> {
+        let (path_chunk, path) = entry;
+        let want_container = path.hierarchy_seq & CONTAINER_FLAG != 0;
+        self.resources
+            .find(path.document_id, want_container)
+            .map(|resource| DavResourcePath {
+                path,
+                path_chunk,
+                resource,
+            })
+    }
+
+    pub fn by_path(&self, name: &str) -> Option<DavResourcePath<'_>> {
+        self.paths.get(name).and_then(|entry| self.pair(entry))
+    }
+
+    pub fn container_resource_by_id(&self, id: u32) -> Option<GroupwareResourceRef<'_>> {
+        self.resources.find(id, true)
+    }
+
+    pub fn item_by_id(&self, id: u32) -> Option<GroupwareResourceRef<'_>> {
+        self.resources.find(id, false)
+    }
+
+    fn derived_path_entries(&self, document_id: u32) -> Option<Vec<(&PathChunk, &DavPath)>> {
+        let mut entries = Vec::with_capacity(2);
+
+        let found = if self.resources.unified_id_space {
+            [self.resources.find_any(document_id), None]
+        } else {
+            [
+                self.resources.find(document_id, true),
+                self.resources.find(document_id, false),
+            ]
+        };
+
+        for resource in found.into_iter().flatten() {
+            for (path, _) in self.materialized_paths(&resource)? {
+                let entry = self.paths.get(&path)?;
+                if entry.1.document_id != document_id {
+                    return None;
+                }
+                entries.push(entry);
+            }
+        }
+
+        Some(entries)
+    }
+
+    fn path_entries_by_id(&self, document_id: u32) -> Vec<(&PathChunk, &DavPath)> {
+        self.derived_path_entries(document_id).unwrap_or_else(|| {
+            self.paths
+                .iter()
+                .filter(|(_, path)| path.document_id == document_id)
+                .collect()
+        })
+    }
+
+    pub(crate) fn child_path(
+        &self,
+        document_id: u32,
+        parent_id: u32,
+    ) -> Option<DavResourcePath<'_>> {
+        self.path_entries_by_id(document_id)
+            .into_iter()
+            .find(|(_, path)| path.parent_id == parent_id)
+            .and_then(|entry| self.pair(entry))
+    }
+
+    pub fn container_resource_path_by_id(&self, id: u32) -> Option<DavResourcePath<'_>> {
+        let container = self.resources.find(id, true)?;
+        self.container_path_entry_of(&container)
+            .or_else(|| {
+                self.paths.iter().find(|(_, path)| {
+                    path.document_id == id && path.hierarchy_seq & CONTAINER_FLAG != 0
+                })
+            })
+            .and_then(|entry| self.pair(entry))
+    }
+
+    pub fn any_resource_path_by_id(&self, id: u32) -> Option<DavResourcePath<'_>> {
+        self.path_entries_by_id(id)
+            .into_iter()
+            .next()
+            .and_then(|entry| self.pair(entry))
+    }
+
+    pub fn subtree(&self, search_path: &str) -> impl Iterator<Item = DavResourcePath<'_>> {
+        self.by_path(search_path).into_iter().chain(
+            self.paths
+                .range(format!("{search_path}/"))
+                .filter_map(move |entry| self.pair(entry)),
+        )
+    }
+
+    pub fn subtree_with_depth(
+        &self,
+        search_path: &str,
+        depth: usize,
+    ) -> impl Iterator<Item = DavResourcePath<'_>> {
+        let prefix = format!("{search_path}/");
+        let cut = prefix.len();
+        self.by_path(search_path)
+            .into_iter()
+            .chain(self.paths.range(prefix).filter_map(move |entry| {
+                (count_separators(entry.0.path_bytes(entry.1).get(cut..).unwrap_or_default())
+                    < depth)
+                    .then(|| self.pair(entry))
+                    .flatten()
+            }))
+    }
+
+    pub fn tree_with_depth(&self, depth: usize) -> impl Iterator<Item = DavResourcePath<'_>> {
+        self.paths.iter().filter_map(move |entry| {
+            (count_separators(entry.0.path_bytes(entry.1)) <= depth)
+                .then(|| self.pair(entry))
+                .flatten()
+        })
+    }
+
+    fn child_entries(&self, parent_id: u32) -> impl Iterator<Item = (&PathChunk, &DavPath)> {
+        let prefix = self.resources.find(parent_id, true).map(|container| {
+            match self.container_path_entry_of(&container) {
+                Some((chunk, path)) => format!("{}/", chunk.path_str(path)),
+                None => String::new(),
+            }
+        });
+        prefix
+            .into_iter()
+            .flat_map(move |prefix| self.paths.range(prefix))
+            .filter(move |(_, path)| path.parent_id == parent_id)
+    }
+
+    pub fn children(&self, parent_id: u32) -> impl Iterator<Item = DavResourcePath<'_>> {
+        self.child_entries(parent_id)
+            .filter_map(move |entry| self.pair(entry))
+    }
+
+    pub fn children_ids(&self, parent_id: u32) -> impl Iterator<Item = u32> {
+        self.child_entries(parent_id)
+            .map(|(_, path)| path.document_id)
+    }
+
+    pub fn format_resource(&self, resource: DavResourcePath<'_>) -> String {
+        if resource.is_container() {
+            format!("{}{}/", self.base_path, resource.path())
+        } else {
+            format!("{}{}", self.base_path, resource.path())
+        }
+    }
+
+    pub fn format_resource_paths_by_id(&self, document_id: u32) -> std::vec::IntoIter<String> {
+        self.path_entries_by_id(document_id)
+            .into_iter()
+            .filter_map(|entry| self.pair(entry))
+            .map(|resource| self.format_resource(resource))
+            .collect::<Vec<_>>()
+            .into_iter()
+    }
+
+    pub fn format_resource_path_by_parent(
+        &self,
+        document_id: u32,
+        parent_id: u32,
+    ) -> Option<String> {
+        self.path_entries_by_id(document_id)
+            .into_iter()
+            .find(|(_, path)| path.parent_id == parent_id)
+            .and_then(|entry| self.pair(entry))
+            .map(|resource| self.format_resource(resource))
+    }
+
+    pub fn format_collection(&self, name: &str) -> String {
+        format!("{}{name}/", self.base_path)
+    }
+
+    pub fn format_item(&self, name: &str) -> String {
+        format!("{}{}", self.base_path, name)
+    }
+
+    #[inline(always)]
+    pub fn containers(&self) -> impl Iterator<Item = GroupwareResourceRef<'_>> + '_ {
+        self.resources.iter_run(true).filter(|r| r.is_container())
+    }
+
+    #[inline(always)]
+    pub fn resources_with_acls(&self) -> impl Iterator<Item = GroupwareResourceRef<'_>> + '_ {
+        self.resources.iter_with_acls()
+    }
+
+    pub fn recompute_size(&mut self) {
+        self.size = std::mem::size_of::<GroupwareResources>() as u64
+            + self.base_path.len() as u64
+            + self.resources.heap_size()
+            + self.paths.heap_size();
+    }
+}
+
+#[inline(always)]
+fn count_separators(path: &[u8]) -> usize {
+    path.iter().filter(|&&byte| byte == b'/').count()
+}

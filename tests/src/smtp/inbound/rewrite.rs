@@ -2,6 +2,8 @@
  * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
+ *
+ * Modified by Coffey Labs in 2026 for INBUXA.
  */
 
 use crate::{smtp::session::TestSession, utils::server::TestServerBuilder};
@@ -103,7 +105,6 @@ pub async fn address_rewrite() {
                 ..Default::default()
             },
             message_id_hostname: Some("'mx.foobar.org'".into()),
-            duplicate_expiry: (86_400u64 * 100 * 7).into(),
             max_cpu_cycles: 10000,
             max_nested_includes: 5,
             max_out_messages: 5,

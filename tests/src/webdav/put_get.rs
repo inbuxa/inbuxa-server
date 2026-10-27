@@ -2,6 +2,8 @@
  * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
+ *
+ * Modified by Coffey Labs in 2026 for INBUXA.
  */
 
 use types::collection::Collection;
@@ -198,24 +200,29 @@ pub async fn test(test: &TestServer) {
     }
 
     // PUT under resources should fail
-    for (path, contents) in [
+    // inbuxa: 1.0 answers 409 Conflict for a file whose parent is not a
+    // collection (no valid parent collection, RFC 4918 9.7.1)
+    for (path, contents, status) in [
         (
             "/dav/file/john%40example.com/file1.txt/other-file.txt",
             TEST_FILE_1,
+            StatusCode::CONFLICT,
         ),
         (
             "/dav/card/john%40example.com/default/card1.vcf/other-file.vcf",
             TEST_VCARD_1,
+            StatusCode::METHOD_NOT_ALLOWED,
         ),
         (
             "/dav/cal/john%40example.com/default/event1.ics/other-file.ical",
             TEST_ICAL_1,
+            StatusCode::METHOD_NOT_ALLOWED,
         ),
     ] {
         client
             .request("PUT", path, contents)
             .await
-            .with_status(StatusCode::METHOD_NOT_ALLOWED);
+            .with_status(status);
     }
 
     // PUT a non-vCard/iCalendar file should fail
@@ -304,13 +311,24 @@ pub async fn test(test: &TestServer) {
             let response = mike_noquota
                 .request_with_headers("PUT", &format!("{path}file{i}"), [], &content)
                 .await;
-            if available > content.len() as u64 {
+            // inbuxa: 1.0 enforces the quota when the write commits, on the
+            // size the object is charged (content plus its metadata), so a
+            // PUT can fail while more than its length is still available; an
+            // exceeded quota is 507 Insufficient Storage (RFC 4331), 0.16
+            // sent 412.
+            if response.status == StatusCode::CREATED {
+                assert!(
+                    available > content.len() as u64,
+                    "{resource_type:?}: PUT of {} bytes succeeded with {available} available",
+                    content.len()
+                );
                 num_success += 1;
-                response.with_status(StatusCode::CREATED);
             } else {
                 response
-                    .with_status(StatusCode::PRECONDITION_FAILED)
+                    .with_status(StatusCode::INSUFFICIENT_STORAGE)
                     .with_failed_precondition("D:quota-not-exceeded", "");
+                // A refused PUT charges nothing
+                assert_eq!(mike_noquota.available_quota(&path).await, available);
                 did_fail = true;
                 break;
             }
@@ -448,6 +466,9 @@ pub async fn test(test: &TestServer) {
     }
 
     // PUT requests require unique UIDs
+    // inbuxa: 1.0 answers a UID conflict with 403 Forbidden plus the
+    // no-uid-conflict precondition (RFC 4791, RFC 6352);
+    // 0.16 sent 412
     for (path, ct, content, precond_key, precond_value) in [
         (
             "/dav/card/john%40example.com/default/card5.vcf",
@@ -472,7 +493,7 @@ pub async fn test(test: &TestServer) {
                 content,
             )
             .await
-            .with_status(StatusCode::PRECONDITION_FAILED)
+            .with_status(StatusCode::FORBIDDEN)
             .with_failed_precondition(precond_key, precond_value);
     }
 

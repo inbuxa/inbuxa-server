@@ -27,8 +27,10 @@ use types::id::Id;
 /// The count limit that applies to an object, if any (MT-17).
 pub fn limit_for(object: &ObjectInner) -> Option<TenantStorageQuota> {
     Some(match object {
-        ObjectInner::Account(Account::User(_)) => TenantStorageQuota::MaxAccounts,
-        ObjectInner::Account(Account::Group(_)) => TenantStorageQuota::MaxGroups,
+        ObjectInner::Account(account) => match account.as_ref() {
+            Account::User(_) => TenantStorageQuota::MaxAccounts,
+            Account::Group(_) => TenantStorageQuota::MaxGroups,
+        },
         ObjectInner::Domain(_) => TenantStorageQuota::MaxDomains,
         ObjectInner::MailingList(_) => TenantStorageQuota::MaxMailingLists,
         ObjectInner::Role(_) => TenantStorageQuota::MaxRoles,
@@ -176,7 +178,7 @@ pub async fn recalculate(
     if stored != total {
         let mut batch = BatchBuilder::new();
         batch.add(ValueClass::TenantQuota(tenant_id), total - stored);
-        data.write(batch.build_all())
+        data.write_batch(&mut batch)
             .await
             .caused_by(trc::location!())?;
     }

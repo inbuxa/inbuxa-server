@@ -499,7 +499,7 @@ pub async fn set(data: &Store, lock: &Lock, previous: Option<&Lock>) -> trc::Res
         );
     }
     batch.set(class(KIND_LOCK, &[lock.account_id]), Json(lock).serialize()?);
-    data.write(batch.build_all())
+    data.write_batch(&mut batch)
         .await
         .caused_by(trc::location!())?;
     UNTIL_CHANGED.notify_one();
@@ -513,7 +513,7 @@ pub async fn remove(data: &Store, lock: &Lock) -> trc::Result<()> {
         batch.clear(class(KIND_DELEGATE, &[delegate.account_id, lock.account_id]));
     }
     batch.clear(class(KIND_LOCK, &[lock.account_id]));
-    data.write(batch.build_all())
+    data.write_batch(&mut batch)
         .await
         .caused_by(trc::location!())
         .map(|_| ())
@@ -545,7 +545,7 @@ mod tests {
             panic!()
         };
         assert_eq!(parse_key(&any.key, KIND_DELEGATE, 2), Some(vec![7, 9]));
-        let mut with_subspace = vec![SUBSPACE_INBUXA];
+        let mut with_subspace = vec![SUBSPACE_INBUXA.byte()];
         with_subspace.extend_from_slice(&any.key);
         assert_eq!(parse_key(&with_subspace, KIND_DELEGATE, 2), Some(vec![7, 9]));
         assert_eq!(parse_key(&any.key, KIND_LOCK, 2), None);

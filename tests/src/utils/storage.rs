@@ -26,8 +26,8 @@ use registry::{
 };
 use store::write::now;
 use store::{
-    Deserialize, IterateParams, ValueKey,
-    write::{TaskQueueClass, ValueClass},
+    Deserialize, IterateParams, Subspace, U32_LEN, U64_LEN, ValueKey,
+    write::{AnyKey, TaskId, TaskQueueClass, ValueClass},
 };
 use store::{RegistryStore, registry::write::RegistryWrite};
 
@@ -197,13 +197,13 @@ async fn build_blob_store(typ: BlobStoreType, path: &str) -> BlobStore {
         BlobStoreType::S3 => {
             crate::utils::containers::ensure_minio().await;
             BlobStore::S3(S3Store {
-                access_key: PublicStringOptional::Value(PublicStringValue {
+                access_key_id: PublicStringOptional::Value(PublicStringValue {
                     value: "minioadmin".into(),
                 }),
                 bucket: "stalwart".into(),
                 region: S3StoreRegion::Custom(S3StoreCustomRegion {
-                    custom_endpoint: "http://localhost:9000".into(),
-                    custom_region: "eu-central-1".into(),
+                    url: "http://localhost:9000".into(),
+                    region: "eu-central-1".into(),
                 }),
                 secret_key: SecretKeyOptional::Value(SecretKeyValue {
                     secret: "minioadmin".into(),
@@ -305,8 +305,12 @@ pub async fn wait_for_tasks(server: &Server, skip_not_due: bool, skip_permanent_
             .data
             .iterate(
                 IterateParams::new(
-                    ValueKey::from(ValueClass::TaskQueue(TaskQueueClass::Task { id: 0 })),
-                    ValueKey::from(ValueClass::TaskQueue(TaskQueueClass::Task { id: u64::MAX })),
+                    ValueKey::from(ValueClass::TaskQueue(TaskQueueClass::Task {
+                        id: TaskId::Assigned(0),
+                    })),
+                    ValueKey::from(ValueClass::TaskQueue(TaskQueueClass::Task {
+                        id: TaskId::Assigned(u64::MAX),
+                    })),
                 )
                 .ascending(),
                 |_, value| {
@@ -325,6 +329,16 @@ pub async fn wait_for_tasks(server: &Server, skip_not_due: bool, skip_permanent_
             .await
             .unwrap();
 
+        // inbuxa: 1.0 indexes through a queue of its own, not tasks
+        if has_index_tasks.is_none() && !compat && search_queue_len(server).await > 0 {
+            count += 1;
+            if count % 10 == 0 {
+                println!("Waiting for the search index queue...");
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+            continue;
+        }
+
         if let Some(task) = has_index_tasks {
             count += 1;
             if count % 10 == 0 {
@@ -341,6 +355,39 @@ pub async fn wait_for_tasks(server: &Server, skip_not_due: bool, skip_permanent_
             break;
         }
     }
+}
+
+/// Documents waiting in the search index queue. Its control keys, one
+/// cursor per partition, are shorter and aren't counted.
+async fn search_queue_len(server: &Server) -> usize {
+    const QUEUE_ITEM_LEN: usize = 1 + (2 * U32_LEN) + U64_LEN;
+    let mut pending = 0;
+    server
+        .core
+        .storage
+        .data
+        .iterate(
+            IterateParams::new(
+                AnyKey {
+                    subspace: Subspace::SearchQueue,
+                    key: vec![0u8],
+                },
+                AnyKey {
+                    subspace: Subspace::SearchQueue,
+                    key: vec![u8::MAX; 16],
+                },
+            )
+            .no_values(),
+            |key, _| {
+                if key.len() == QUEUE_ITEM_LEN {
+                    pending += 1;
+                }
+                Ok(true)
+            },
+        )
+        .await
+        .unwrap();
+    pending
 }
 
 pub async fn assert_is_empty(server: &Server, include_registry: bool) {

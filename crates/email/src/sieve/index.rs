@@ -5,8 +5,12 @@
  */
 
 use super::{ArchivedSieveScript, SieveScript};
-use common::storage::index::{IndexValue, IndexableAndSerializableObject, IndexableObject};
-use types::{collection::SyncCollection, field::SieveField};
+use common::storage::index::{
+    IndexValue, IndexableAndSerializableObject, IndexableObject, SerializableObject,
+    serialize_object,
+};
+use store::write::{ArchiveCompression, BatchBuilder, Compression, Dictionary, Slot};
+use types::{collection::SyncCollection, field::SieveField, metadata::MetadataKinds};
 
 impl IndexableObject for SieveScript {
     fn index_values(&self) -> impl Iterator<Item = IndexValue<'_>> {
@@ -17,6 +21,7 @@ impl IndexableObject for SieveScript {
             },
             IndexValue::Blob {
                 value: self.blob_hash.clone(),
+                size: u64::from(self.size),
             },
             IndexValue::LogItem {
                 sync_collection: SyncCollection::SieveScript,
@@ -25,6 +30,10 @@ impl IndexableObject for SieveScript {
             IndexValue::Quota { used: self.size },
         ]
         .into_iter()
+    }
+
+    fn metadata_kinds(&self) -> MetadataKinds {
+        SieveScript::metadata_kinds(self)
     }
 }
 
@@ -43,6 +52,7 @@ impl IndexableObject for &ArchivedSieveScript {
             },
             IndexValue::Blob {
                 value: (&self.blob_hash).into(),
+                size: u64::from(self.size.to_native()),
             },
             IndexValue::LogItem {
                 sync_collection: SyncCollection::SieveScript,
@@ -53,5 +63,19 @@ impl IndexableObject for &ArchivedSieveScript {
             },
         ]
         .into_iter()
+    }
+
+    fn metadata_kinds(&self) -> MetadataKinds {
+        ArchivedSieveScript::metadata_kinds(self)
+    }
+}
+
+impl ArchiveCompression for SieveScript {
+    const COMPRESSION: Compression = Compression::Zstd(Some(Dictionary::Sieve));
+}
+
+impl SerializableObject for SieveScript {
+    fn serialize_into(self, batch: &mut BatchBuilder, pending_id: Option<Slot>) -> trc::Result<()> {
+        serialize_object(self, batch, pending_id)
     }
 }

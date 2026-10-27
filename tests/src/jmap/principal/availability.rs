@@ -2,6 +2,8 @@
  * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
+ *
+ * Modified by Coffey Labs in 2026 for INBUXA.
  */
 
 use crate::{
@@ -108,7 +110,8 @@ pub async fn test(test: &TestServer) {
     .await
     .updated(&calendar1_id);
 
-    // Jane should see John's availability now
+    // Jane should see John's availability now (inbuxa: 1.0 adds accountId
+    // to each busy period and reports the tentative event 3 as tentative)
     let response = jane
         .jmap_method_calls(json!([[
             "Principal/getAvailability",
@@ -126,43 +129,50 @@ pub async fn test(test: &TestServer) {
         "utcStart": "2006-01-02T15:00:00Z",
         "utcEnd": "2006-01-02T16:00:00Z",
         "busyStatus": "confirmed",
-        "event": null
+        "event": null,
+        "accountId": null
       },
       {
         "utcStart": "2006-01-02T17:00:00Z",
         "utcEnd": "2006-01-02T18:00:00Z",
         "busyStatus": "confirmed",
-        "event": null
+        "event": null,
+        "accountId": null
       },
       {
         "utcStart": "2006-01-03T17:00:00Z",
         "utcEnd": "2006-01-03T18:00:00Z",
         "busyStatus": "confirmed",
-        "event": null
+        "event": null,
+        "accountId": null
       },
       {
         "utcStart": "2006-01-04T15:00:00Z",
         "utcEnd": "2006-01-04T16:00:00Z",
-        "busyStatus": "confirmed",
-        "event": null
+        "busyStatus": "tentative",
+        "event": null,
+        "accountId": null
       },
       {
         "utcStart": "2006-01-04T19:00:00Z",
         "utcEnd": "2006-01-04T20:00:00Z",
         "busyStatus": "confirmed",
-        "event": null
+        "event": null,
+        "accountId": null
       },
       {
         "utcStart": "2006-01-05T17:00:00Z",
         "utcEnd": "2006-01-05T18:00:00Z",
         "busyStatus": "confirmed",
-        "event": null
+        "event": null,
+        "accountId": null
       },
       {
         "utcStart": "2006-01-06T19:00:00Z",
         "utcEnd": "2006-01-06T20:00:00Z",
         "busyStatus": "confirmed",
-        "event": null
+        "event": null,
+        "accountId": null
       }
     ]));
 
@@ -226,8 +236,9 @@ pub async fn test(test: &TestServer) {
       {
         "utcStart": "2006-01-04T15:00:00Z",
         "utcEnd": "2006-01-04T16:00:00Z",
-        "busyStatus": "confirmed",
-        "event": null
+        "busyStatus": "tentative",
+        "event": null,
+        "accountId": null
       }
     ]));
 

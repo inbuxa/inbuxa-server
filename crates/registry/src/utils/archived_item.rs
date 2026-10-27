@@ -38,6 +38,16 @@ impl ArchivedItem {
         }
     }
 
+    pub fn size(&self) -> Option<u64> {
+        match self {
+            ArchivedItem::Email(i) => Some(i.size),
+            ArchivedItem::FileNode(_)
+            | ArchivedItem::CalendarEvent(_)
+            | ArchivedItem::ContactCard(_)
+            | ArchivedItem::SieveScript(_) => None,
+        }
+    }
+
     pub fn created_at(&self) -> UTCDateTime {
         match self {
             ArchivedItem::Email(i) => i.received_at,

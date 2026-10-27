@@ -48,10 +48,11 @@ impl Property for ScheduledReportSettingsProperty {
 
 impl ScheduledReportSettingsProperty {
     fn parse(value: &str) -> Option<Self> {
-        hashify::tiny_map!(value.as_bytes(),
-            b"id" => ScheduledReportSettingsProperty::Id,
-            b"fromName" => ScheduledReportSettingsProperty::FromName,
-            b"fromAddress" => ScheduledReportSettingsProperty::FromAddress,
+        hashify::fnc_map!(value.as_bytes(),
+            b"id" => Some(ScheduledReportSettingsProperty::Id),
+            b"fromName" => Some(ScheduledReportSettingsProperty::FromName),
+            b"fromAddress" => Some(ScheduledReportSettingsProperty::FromAddress),
+            _ => None,
         )
     }
 }

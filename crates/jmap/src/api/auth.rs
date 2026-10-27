@@ -16,7 +16,10 @@ use jmap_proto::{
         reference::MaybeResultReference,
     },
 };
-use registry::schema::enums::Permission;
+use registry::schema::{
+    enums::Permission,
+    prelude::{OBJ_NO_CREATE, OBJ_NO_DESTROY, OBJ_NO_UPDATE, ObjectType},
+};
 use types::{collection::Collection, id::Id};
 
 pub trait JmapAuthorization {
@@ -30,6 +33,11 @@ pub trait JmapAuthorization {
     ) -> trc::Result<()>;
     fn assert_has_access(&self, to_account_id: Id, to_collection: Collection)
     -> trc::Result<&Self>;
+    fn assert_has_source_access(
+        &self,
+        from_account_id: Id,
+        from_collection: Collection,
+    ) -> trc::Result<&Self>;
 }
 
 impl JmapAuthorization for AccessToken {
@@ -45,12 +53,11 @@ impl JmapAuthorization for AccessToken {
     }
 
     fn assert_is_member(&self, account_id: Id) -> trc::Result<&Self> {
-        if self.is_member(account_id.document_id()) {
+        let document_id = account_id.document_id();
+        if self.is_member(document_id) {
             Ok(self)
         } else {
-            Err(trc::JmapEvent::Forbidden
-                .into_err()
-                .details(format!("You are not an owner of account {}", account_id)))
+            Err(account_error(self, document_id))
         }
     }
 
@@ -59,13 +66,24 @@ impl JmapAuthorization for AccessToken {
         to_account_id: Id,
         to_collection: Collection,
     ) -> trc::Result<&Self> {
-        if self.has_access(to_account_id.document_id(), to_collection) {
+        let document_id = to_account_id.document_id();
+        if self.has_access(document_id, to_collection) {
             Ok(self)
         } else {
-            Err(trc::JmapEvent::Forbidden.into_err().details(format!(
-                "You do not have access to account {}",
-                to_account_id
-            )))
+            Err(account_error(self, document_id))
+        }
+    }
+
+    fn assert_has_source_access(
+        &self,
+        from_account_id: Id,
+        from_collection: Collection,
+    ) -> trc::Result<&Self> {
+        let document_id = from_account_id.document_id();
+        if self.has_access(document_id, from_collection) {
+            Ok(self)
+        } else {
+            Err(source_account_error(self, document_id))
         }
     }
 
@@ -89,7 +107,7 @@ impl JmapAuthorization for AccessToken {
                 // inbuxa: deleted accounts (UD-17)
                 GetRequestMethod::DeletedAccount(_) => Permission::SysAccountGet,
                 // inbuxa: AI call limits, with the classifier's permissions
-                GetRequestMethod::AiLimits(_) => Permission::SysSpamLlmGet,
+                GetRequestMethod::AiLimits(_) => Permission::SysSpamAiGet,
                 // inbuxa: log file retention, with the tracers' permissions
                 GetRequestMethod::LogSettings(_) => Permission::SysTracerGet,
                 GetRequestMethod::DlpSettings(_) => Permission::SysDlpPolicyGet,
@@ -238,9 +256,9 @@ impl JmapAuthorization for AccessToken {
                     SetRequestMethod::AiLimits(s) => validate_set(
                         s,
                         self,
-                        Permission::SysSpamLlmUpdate,
-                        Permission::SysSpamLlmUpdate,
-                        Permission::SysSpamLlmUpdate,
+                        Permission::SysSpamAiUpdate,
+                        Permission::SysSpamAiUpdate,
+                        Permission::SysSpamAiUpdate,
                     ),
                     // inbuxa: log file retention, with the tracers' permissions
                     SetRequestMethod::LogSettings(s) => validate_set(
@@ -515,14 +533,7 @@ impl JmapAuthorization for AccessToken {
                             self,
                             inbuxa_features::tenancy::reach::can_write(object_type),
                         )?;
-                        let set_permissions = object_type.set_permission();
-                        validate_set(
-                            s,
-                            self,
-                            set_permissions[0],
-                            set_permissions[1],
-                            set_permissions[2],
-                        )
+                        validate_registry_set(s, self, object_type)
                     }
                 };
             }
@@ -680,6 +691,22 @@ fn assert_tenant_reach(access_token: &AccessToken, reachable: bool) -> trc::Resu
     }
 }
 
+fn account_error(access_token: &AccessToken, account_id: u32) -> trc::Error {
+    if access_token.has_account_access(account_id) {
+        trc::JmapEvent::AccountNotSupportedByMethod.into_err()
+    } else {
+        trc::JmapEvent::AccountNotFound.into_err()
+    }
+}
+
+fn source_account_error(access_token: &AccessToken, account_id: u32) -> trc::Error {
+    if access_token.has_account_access(account_id) {
+        trc::JmapEvent::FromAccountNotSupportedByMethod.into_err()
+    } else {
+        trc::JmapEvent::FromAccountNotFound.into_err()
+    }
+}
+
 fn validate_set<T: JmapObject>(
     set: &SetRequest<'_, T>,
     access_token: &AccessToken,
@@ -687,10 +714,36 @@ fn validate_set<T: JmapObject>(
     update_permission: Permission,
     destroy_permission: Permission,
 ) -> trc::Result<()> {
-    let can_create = access_token.has_permission(create_permission);
-    let can_update = access_token.has_permission(update_permission);
-    let can_destroy = access_token.has_permission(destroy_permission);
+    check_set(
+        set,
+        access_token.has_permission(create_permission),
+        access_token.has_permission(update_permission),
+        access_token.has_permission(destroy_permission),
+    )
+}
 
+fn validate_registry_set<T: JmapObject>(
+    set: &SetRequest<'_, T>,
+    access_token: &AccessToken,
+    object_type: ObjectType,
+) -> trc::Result<()> {
+    let flags = object_type.flags();
+    let can_create =
+        flags & OBJ_NO_CREATE == 0 && access_token.has_permission(object_type.create_permission());
+    let can_update =
+        flags & OBJ_NO_UPDATE == 0 && access_token.has_permission(object_type.update_permission());
+    let can_destroy = flags & OBJ_NO_DESTROY == 0
+        && access_token.has_permission(object_type.destroy_permission());
+
+    check_set(set, can_create, can_update, can_destroy)
+}
+
+fn check_set<T: JmapObject>(
+    set: &SetRequest<'_, T>,
+    can_create: bool,
+    can_update: bool,
+    can_destroy: bool,
+) -> trc::Result<()> {
     if can_create && can_update && can_destroy {
         Ok(())
     } else if !can_create && !can_update && !can_destroy {

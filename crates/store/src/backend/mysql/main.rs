@@ -8,10 +8,10 @@
 
 use super::{MysqlStore, bounded, into_error};
 use crate::{
-    backend::mysql::MysqlSearchField,
+    backend::mysql::{MysqlSearchField, sql::SqlStatements},
     search::{
-        CalendarSearchField, ContactSearchField, EmailSearchField, SearchableField,
-        TracingSearchField,
+        CalendarSearchField, ContactSearchField, EmailSearchField, FileSearchField,
+        SearchableField, TracingSearchField,
     },
     *,
 };
@@ -19,6 +19,12 @@ use ::registry::schema::structs;
 use mysql_async::{
     Conn, OptsBuilder, Pool, PoolConstraints, PoolOpts, SslOpts, prelude::Queryable,
 };
+
+const STMT_CACHE_SIZE: usize = 64;
+/// inbuxa: idle time before TCP keepalive probes start.
+const POOL_KEEPALIVE_IDLE: std::time::Duration = std::time::Duration::from_secs(60);
+const SESSION_SETUP: &str =
+    "SET SESSION TRANSACTION ISOLATION LEVEL READ COMMITTED; SET SESSION autocommit = 1";
 
 impl MysqlStore {
     pub async fn open(config: structs::MySqlStore) -> Result<Store, String> {
@@ -34,11 +40,13 @@ impl MysqlStore {
             .pass(config.auth_secret.secret().await?.map(|v| v.into_owned()))
             .db_name(Some(config.database))
             .max_allowed_packet(config.max_allowed_packet.map(|v| v as usize))
-            .wait_timeout(config.timeout.map(|t| t.as_secs() as usize))
+            .wait_timeout(config.idle_timeout.map(|t| t.as_secs() as usize))
+            .stmt_cache_size(STMT_CACHE_SIZE)
             .client_found_rows(true)
+            .setup(vec![SESSION_SETUP])
             // inbuxa: notice a server that went away without closing the
             // connection in minutes, not the system default of two hours
-            .tcp_keepalive(Some(super::POOL_KEEPALIVE_IDLE))
+            .tcp_keepalive(Some(POOL_KEEPALIVE_IDLE))
             .tcp_port(config.port as u16);
 
         if config.use_tls {
@@ -49,18 +57,17 @@ impl MysqlStore {
             ));
         }
 
-        // Configure connection pool
-        let mut pool_min = PoolConstraints::default().min();
-        let mut pool_max = PoolConstraints::default().max();
-        if let Some(n_size) = config.pool_min_connections {
-            pool_min = n_size as usize;
-        }
-        if let Some(n_size) = config.pool_max_connections {
-            pool_max = n_size as usize;
-        }
         opts = opts.pool_opts(
-            PoolOpts::default().with_constraints(PoolConstraints::new(pool_min, pool_max).unwrap()),
+            PoolOpts::default()
+                .with_constraints(pool_constraints(
+                    config.pool_max_connections,
+                    config.pool_min_connections,
+                    backend::default_pool_max_connections,
+                )?)
+                .with_reset_connection(false),
         );
+
+        let sql = Arc::new(SqlStatements::new());
 
         // inbuxa: ST-5 to ST-15: each replica inherits the primary's settings
         // except where it is and how to sign in
@@ -76,6 +83,7 @@ impl MysqlStore {
                             .db_name(Some(replica.database.clone()))
                             .tcp_port(replica.port as u16),
                     ),
+                    sql: sql.clone(),
                     timeouts: Default::default(),
                 })),
                 replica.host,
@@ -86,6 +94,7 @@ impl MysqlStore {
 
         let primary = Store::MySQL(Arc::new(MysqlStore {
             conn_pool: Pool::new(opts),
+            sql,
             timeouts: Default::default(),
         }));
 
@@ -107,69 +116,33 @@ impl MysqlStore {
         let mut conn = self.conn().await?;
         let limit = self.timeouts.maintenance;
         let result = tokio::time::timeout(limit, async {
-            for table in [
-                SUBSPACE_ACL,
-                SUBSPACE_TASK_QUEUE,
-                SUBSPACE_DELETED_ITEMS,
-                SUBSPACE_SPAM_SAMPLES,
-                crate::SUBSPACE_INBUXA, // inbuxa: masked email
-                SUBSPACE_BLOB_LINK,
-                SUBSPACE_IN_MEMORY_VALUE,
-                SUBSPACE_PROPERTY,
-                SUBSPACE_REGISTRY,
-                SUBSPACE_REGISTRY_PK,
-                SUBSPACE_DIRECTORY,
-                SUBSPACE_QUEUE_MESSAGE,
-                SUBSPACE_QUEUE_EVENT,
-                SUBSPACE_REPORT_OUT,
-                SUBSPACE_REPORT_IN,
-                SUBSPACE_LOGS,
-                SUBSPACE_TELEMETRY_SPAN,
-                SUBSPACE_TELEMETRY_METRIC,
-            ] {
-                let table = char::from(table);
-                conn.query_drop(format!(
-                    "CREATE TABLE IF NOT EXISTS {table} (
-                        k VARBINARY(255) NOT NULL,
-                        v MEDIUMBLOB NOT NULL,
-                        PRIMARY KEY (k)
-                    ) ENGINE=InnoDB"
-                ))
-                .await
-                .map_err(into_error)?;
-            }
+            check_prepared_statement_budget(&mut conn).await;
 
-            conn.query_drop(format!(
-                "CREATE TABLE IF NOT EXISTS {} (
-                    k VARBINARY(255) NOT NULL,
-                    v LONGBLOB NOT NULL,
-                    PRIMARY KEY (k)
-                ) ENGINE=InnoDB",
-                char::from(SUBSPACE_BLOBS),
-            ))
-            .await
-            .map_err(into_error)?;
+            for subspace in Subspace::ALL
+                .iter()
+                .copied()
+                .filter(|subspace| !subspace.is_internal_fts())
+            {
+                let table = subspace.name();
+                let columns = match subspace.shape() {
+                    Shape::Value => {
+                        let value_type = match subspace {
+                            Subspace::Blobs | Subspace::Immutable => "LONGBLOB",
+                            _ => "MEDIUMBLOB",
+                        };
+                        format!(
+                            "k VARBINARY(255) NOT NULL, v {value_type} NOT NULL, PRIMARY KEY (k)"
+                        )
+                    }
+                    Shape::Presence => "k VARBINARY(767) NOT NULL, PRIMARY KEY (k)".to_string(),
+                    Shape::Counter => {
+                        "k VARBINARY(255) NOT NULL, v BIGINT NOT NULL DEFAULT 0, PRIMARY KEY (k)"
+                            .to_string()
+                    }
+                };
 
-            for table in [SUBSPACE_INDEXES, SUBSPACE_REGISTRY_IDX] {
-                let table = char::from(table);
                 conn.query_drop(format!(
-                    "CREATE TABLE IF NOT EXISTS {table} (
-                        k BLOB,
-                        PRIMARY KEY (k(400))
-                    ) ENGINE=InnoDB"
-                ))
-                .await
-                .map_err(into_error)?;
-            }
-
-            for table in [SUBSPACE_COUNTER, SUBSPACE_QUOTA, SUBSPACE_IN_MEMORY_COUNTER] {
-                conn.query_drop(format!(
-                    "CREATE TABLE IF NOT EXISTS {} (
-                    k VARBINARY(255) NOT NULL,
-                    v BIGINT NOT NULL DEFAULT 0,
-                    PRIMARY KEY (k)
-                ) ENGINE=InnoDB",
-                    char::from(table)
+                    "CREATE TABLE IF NOT EXISTS {table} ({columns}) ENGINE=InnoDB"
                 ))
                 .await
                 .map_err(into_error)?;
@@ -188,13 +161,46 @@ impl MysqlStore {
             create_search_tables::<EmailSearchField>(&mut conn).await?;
             create_search_tables::<CalendarSearchField>(&mut conn).await?;
             create_search_tables::<ContactSearchField>(&mut conn).await?;
-            //create_search_tables::<FileSearchField>(&mut conn).await?;
+            create_search_tables::<FileSearchField>(&mut conn).await?;
             create_search_tables::<TracingSearchField>(&mut conn).await?;
 
             Ok(())
         })
         .await;
         bounded(conn, result, limit)
+    }
+}
+
+fn pool_constraints(
+    max: Option<u64>,
+    min: Option<u64>,
+    default_max: impl FnOnce() -> usize,
+) -> Result<PoolConstraints, String> {
+    let min = min.map_or_else(|| PoolConstraints::default().min(), |min| min as usize);
+    let max = max.map_or_else(|| default_max().max(min), |max| max as usize);
+    PoolConstraints::new(min.min(max), max)
+        .ok_or_else(|| format!("Invalid MySQL poolMaxConnections {max}: must be at least 1"))
+}
+
+async fn check_prepared_statement_budget(conn: &mut Conn) {
+    let opts = conn.opts();
+    let statements = opts
+        .pool_opts()
+        .constraints()
+        .max()
+        .saturating_mul(opts.stmt_cache_size()) as u64;
+    if let Ok(Some(limit)) = conn
+        .query_first::<u64, _>("SELECT @@GLOBAL.max_prepared_stmt_count")
+        .await
+        && statements > limit
+    {
+        trc::event!(
+            Registry(trc::RegistryEvent::BuildWarning),
+            Property = "poolMaxConnections",
+            Reason = "Prepared statements cached by this node can exceed the server's max_prepared_stmt_count",
+            Total = statements,
+            Limit = limit,
+        );
     }
 }
 

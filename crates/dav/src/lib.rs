@@ -22,9 +22,8 @@ use dav_proto::schema::{
     request::DavPropertyValue,
     response::{Condition, List, Prop, PropStat, ResponseDescription, Status},
 };
-use groupware::{DavResourceName, RFC_3986, is_uri_segment};
+use groupware::DavResourceName;
 use hyper::{Method, StatusCode};
-use std::borrow::Cow;
 use store::ahash::AHashMap;
 pub(crate) type Result<T> = std::result::Result<T, DavError>;
 
@@ -127,24 +126,41 @@ impl DavMethod {
             Method::POST => Some(DavMethod::POST),
             Method::PATCH => Some(DavMethod::PATCH),
             Method::HEAD => Some(DavMethod::HEAD),
-            _ => {
-                hashify::tiny_map!(method.as_str().as_bytes(),
-                    "PROPFIND" => DavMethod::PROPFIND,
-                    "PROPPATCH" => DavMethod::PROPPATCH,
-                    "REPORT" => DavMethod::REPORT,
-                    "MKCOL" => DavMethod::MKCOL,
-                    "MKCALENDAR" => DavMethod::MKCALENDAR,
-                    "COPY" => DavMethod::COPY,
-                    "MOVE" => DavMethod::MOVE,
-                    "LOCK" => DavMethod::LOCK,
-                    "UNLOCK" => DavMethod::UNLOCK,
-                    "ACL" => DavMethod::ACL
-                )
-            }
+            _ => hashify::map!(method.as_str().as_bytes(), DavMethod,
+                "PROPFIND" => DavMethod::PROPFIND,
+                "PROPPATCH" => DavMethod::PROPPATCH,
+                "REPORT" => DavMethod::REPORT,
+                "MKCOL" => DavMethod::MKCOL,
+                "MKCALENDAR" => DavMethod::MKCALENDAR,
+                "COPY" => DavMethod::COPY,
+                "MOVE" => DavMethod::MOVE,
+                "LOCK" => DavMethod::LOCK,
+                "UNLOCK" => DavMethod::UNLOCK,
+                "ACL" => DavMethod::ACL
+            )
+            .copied(),
         }
     }
 
     #[inline]
+    pub fn is_write(self) -> bool {
+        matches!(
+            self,
+            DavMethod::PUT
+                | DavMethod::POST
+                | DavMethod::PATCH
+                | DavMethod::DELETE
+                | DavMethod::PROPPATCH
+                | DavMethod::MKCOL
+                | DavMethod::MKCALENDAR
+                | DavMethod::COPY
+                | DavMethod::MOVE
+                | DavMethod::LOCK
+                | DavMethod::UNLOCK
+                | DavMethod::ACL
+        )
+    }
+
     pub fn has_body(self) -> bool {
         matches!(
             self,
@@ -227,6 +243,33 @@ impl PropStatBuilder {
         self
     }
 
+    pub fn has_errors(&self) -> bool {
+        self.propstats
+            .keys()
+            .any(|(status, _, _)| !status.is_success())
+    }
+
+    pub fn fail_dependencies(&mut self) {
+        let succeeded = self
+            .propstats
+            .keys()
+            .filter(|(status, _, _)| status.is_success())
+            .cloned()
+            .collect::<Vec<_>>();
+        let mut failed = Vec::new();
+        for key in succeeded {
+            if let Some(props) = self.propstats.remove(&key) {
+                failed.extend(props);
+            }
+        }
+        if !failed.is_empty() {
+            self.propstats
+                .entry((StatusCode::FAILED_DEPENDENCY, None, None))
+                .or_default()
+                .extend(failed);
+        }
+    }
+
     pub fn build(self) -> Vec<PropStat> {
         self.propstats
             .into_iter()
@@ -240,23 +283,3 @@ impl PropStatBuilder {
     }
 }
 
-// Workaround for Apple bug with missing percent encoding in paths
-pub(crate) fn fix_percent_encoding(path: &'_ str) -> Cow<'_, str> {
-    let (parent, name) = if let Some((parent, name)) = path.rsplit_once('/') {
-        (Some(parent), name)
-    } else {
-        (None, path)
-    };
-
-    if is_uri_segment(name) {
-        path.into()
-    } else {
-        let name = percent_encoding::utf8_percent_encode(name, RFC_3986);
-
-        if let Some(parent) = parent {
-            Cow::Owned(format!("{parent}/{name}"))
-        } else {
-            Cow::Owned(name.to_string())
-        }
-    }
-}

@@ -6,8 +6,29 @@
  * Modified by Coffey Labs in 2026 for INBUXA.
  */
 
+use crate::{Inner, network::memory::MemoryClass};
+use trc::{Collector, MetricType};
+
 pub mod otel;
 pub mod prometheus;
 pub mod store; // inbuxa: monitoring history (MON-4 to MON-9)
 
 
+
+impl Inner {
+    pub fn refresh_live_gauges(&self) {
+        let budget = &self.data.memory_budget;
+        Collector::update_gauge(
+            MetricType::ServerBufferedMemorySmtp,
+            budget.used(MemoryClass::SmtpInbound),
+        );
+        Collector::update_gauge(
+            MetricType::ServerBufferedMemoryRead,
+            budget.used(MemoryClass::Read),
+        );
+        Collector::update_gauge(
+            MetricType::CacheSwapPending,
+            self.cache.swap.pending_targets(),
+        );
+    }
+}

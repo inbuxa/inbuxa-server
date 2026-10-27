@@ -69,20 +69,21 @@ impl Property for ScheduledReportProperty {
 
 impl ScheduledReportProperty {
     fn parse(value: &str) -> Option<Self> {
-        hashify::tiny_map!(value.as_bytes(),
-            b"id" => ScheduledReportProperty::Id,
-            b"name" => ScheduledReportProperty::Name,
-            b"enabled" => ScheduledReportProperty::Enabled,
-            b"builtIn" => ScheduledReportProperty::BuiltIn,
-            b"sections" => ScheduledReportProperty::Sections,
-            b"schedule" => ScheduledReportProperty::Schedule,
-            b"recipients" => ScheduledReportProperty::Recipients,
-            b"attachCsv" => ScheduledReportProperty::AttachCsv,
-            b"memberTenantId" => ScheduledReportProperty::MemberTenantId,
-            b"createdAt" => ScheduledReportProperty::CreatedAt,
-            b"nextRunAt" => ScheduledReportProperty::NextRunAt,
-            b"runs" => ScheduledReportProperty::Runs,
-            b"sendNow" => ScheduledReportProperty::SendNow,
+        hashify::fnc_map!(value.as_bytes(),
+            b"id" => Some(ScheduledReportProperty::Id),
+            b"name" => Some(ScheduledReportProperty::Name),
+            b"enabled" => Some(ScheduledReportProperty::Enabled),
+            b"builtIn" => Some(ScheduledReportProperty::BuiltIn),
+            b"sections" => Some(ScheduledReportProperty::Sections),
+            b"schedule" => Some(ScheduledReportProperty::Schedule),
+            b"recipients" => Some(ScheduledReportProperty::Recipients),
+            b"attachCsv" => Some(ScheduledReportProperty::AttachCsv),
+            b"memberTenantId" => Some(ScheduledReportProperty::MemberTenantId),
+            b"createdAt" => Some(ScheduledReportProperty::CreatedAt),
+            b"nextRunAt" => Some(ScheduledReportProperty::NextRunAt),
+            b"runs" => Some(ScheduledReportProperty::Runs),
+            b"sendNow" => Some(ScheduledReportProperty::SendNow),
+            _ => None,
         )
     }
 }

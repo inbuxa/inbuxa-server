@@ -6,8 +6,9 @@
  * Modified by Coffey Labs in 2026 for INBUXA.
  */
 
-use crate::backend::query_timeout::QueryTimeouts;
+use self::pooled::PooledConn;
 use crate::{
+    backend::query_timeout::QueryTimeouts,
     search::{
         CalendarSearchField, ContactSearchField, EmailSearchField, FileSearchField, SearchField,
         TracingSearchField,
@@ -15,17 +16,22 @@ use crate::{
     write::SearchIndex,
 };
 use mysql_async::Pool;
-use std::{fmt::Display, time::Duration};
+use std::{fmt::Display, sync::Arc, time::Duration};
+
+use self::sql::SqlStatements;
 
 pub mod blob;
 pub mod lookup;
 pub mod main;
+mod pooled;
 pub mod read;
 pub mod search;
+pub mod sql;
 pub mod write;
 
 pub struct MysqlStore {
     pub(crate) conn_pool: Pool,
+    pub(crate) sql: Arc<SqlStatements>,
     /// inbuxa: client-side query limits (see backend::query_timeout)
     pub(crate) timeouts: QueryTimeouts,
 }
@@ -33,9 +39,7 @@ pub struct MysqlStore {
 /// inbuxa: how long a request waits for a pooled connection (including
 /// opening one). mysql_async's pool has no wait timeout, so upstream waited
 /// forever when the server stopped answering.
-pub(crate) const POOL_WAIT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
-/// inbuxa: idle time before TCP keepalive probes start.
-pub(crate) const POOL_KEEPALIVE_IDLE: std::time::Duration = std::time::Duration::from_secs(60);
+pub(crate) const POOL_WAIT_TIMEOUT: Duration = Duration::from_secs(30);
 
 impl MysqlStore {
     /// inbuxa: a pooled connection, or an error once POOL_WAIT_TIMEOUT has
@@ -45,10 +49,7 @@ impl MysqlStore {
     }
 }
 
-pub(crate) async fn pool_conn(
-    pool: &Pool,
-    wait: std::time::Duration,
-) -> trc::Result<mysql_async::Conn> {
+pub(crate) async fn pool_conn(pool: &Pool, wait: Duration) -> trc::Result<mysql_async::Conn> {
     match tokio::time::timeout(wait, pool.get_conn()).await {
         Ok(result) => result.map_err(into_error),
         Err(_) => Err(trc::StoreEvent::MysqlError
@@ -68,30 +69,27 @@ pub(crate) fn query_timeout_error(limit: Duration) -> trc::Error {
 }
 
 /// inbuxa: ends an operation run on `conn` under `limit`. When it ran out,
-/// the connection is closed rather than returned to the pool: a query may
-/// still be in flight on it, or a transaction open. Conn::disconnect marks
-/// the connection closed before it sends anything, so even when the server
-/// doesn't answer and the attempt is dropped, the pool discards it instead
-/// of waiting to clean it up.
-pub(crate) fn bounded<T>(
-    conn: mysql_async::Conn,
+/// the connection is closed rather than returned to the pool (see stalled).
+fn bounded<T>(
+    conn: impl Into<PooledConn>,
     result: Result<trc::Result<T>, tokio::time::error::Elapsed>,
     limit: Duration,
 ) -> trc::Result<T> {
     match result {
         Ok(result) => result,
-        Err(_) => {
-            discard(conn);
-            Err(query_timeout_error(limit))
-        }
+        Err(_) => Err(stalled(&mut conn.into(), limit)),
     }
 }
 
-/// inbuxa: closes a connection whose state is unknown (see bounded).
-pub(crate) fn discard(conn: mysql_async::Conn) {
-    tokio::spawn(async move {
-        let _ = tokio::time::timeout(Duration::from_secs(1), conn.disconnect()).await;
-    });
+/// inbuxa: a wait on `conn` ran past `limit`. A query may still be in
+/// flight on it, or a transaction open, so it can't be handed to the next
+/// caller: it is closed when dropped instead of going back to the pool.
+/// Conn::disconnect marks the connection closed before it sends anything, so
+/// even when the server doesn't answer, the pool discards it instead of
+/// waiting to clean it up.
+fn stalled(conn: &mut PooledConn, limit: Duration) -> trc::Error {
+    conn.set_detach(true);
+    query_timeout_error(limit)
 }
 
 #[inline(always)]
@@ -99,15 +97,19 @@ pub(crate) fn into_error(err: impl Display) -> trc::Error {
     trc::StoreEvent::MysqlError.reason(err)
 }
 
+const ER_DUP_ENTRY: u16 = 1062;
 const ER_UNKNOWN_ERROR: u16 = 1105;
 const ER_TRANS_CACHE_FULL: u16 = 1197;
 const ER_LOCK_WAIT_TIMEOUT: u16 = 1205;
+const ER_LOCK_DEADLOCK: u16 = 1213;
 const ER_LOCK_TABLE_FULL: u16 = 1206;
 const ER_STATEMENT_TIMEOUT: u16 = 1969;
 const ER_QUERY_TIMEOUT: u16 = 3024;
 
 pub(crate) const DELETE_CHUNK_SIZE: usize = 1000;
 pub(crate) const MIN_DELETE_CHUNK_SIZE: usize = 10;
+pub(crate) const ITERATE_CHUNK_SIZE: usize = 1000;
+pub(crate) const MIN_ITERATE_CHUNK_SIZE: usize = 10;
 
 #[inline(always)]
 pub(crate) fn is_timeout_error(err: &mysql_async::Error) -> bool {
@@ -158,19 +160,12 @@ impl MysqlSearchField for EmailSearchField {
             EmailSearchField::Subject => "subj",
             EmailSearchField::Body => "body",
             EmailSearchField::Attachment => "atta",
-            EmailSearchField::ReceivedAt => "rcvd",
-            EmailSearchField::SentAt => "sent",
-            EmailSearchField::Size => "size",
-            EmailSearchField::HasAttachment => "hatt",
             EmailSearchField::Headers => "hdrs",
         }
     }
 
     fn column_type(&self) -> &'static str {
         match self {
-            EmailSearchField::ReceivedAt | EmailSearchField::SentAt => "BIGINT",
-            EmailSearchField::Size => "INT",
-            EmailSearchField::HasAttachment => "BOOLEAN",
             EmailSearchField::Headers => "JSON",
             EmailSearchField::From => "TEXT",
             EmailSearchField::To => "TEXT",
@@ -191,16 +186,11 @@ impl MysqlSearchField for CalendarSearchField {
             CalendarSearchField::Location => "locn",
             CalendarSearchField::Owner => "ownr",
             CalendarSearchField::Attendee => "atnd",
-            CalendarSearchField::Start => "strt",
-            CalendarSearchField::Uid => "uid",
         }
     }
 
     fn column_type(&self) -> &'static str {
-        match self {
-            CalendarSearchField::Start => "BIGINT NOT NULL",
-            _ => "TEXT",
-        }
+        "TEXT"
     }
 }
 
@@ -217,13 +207,12 @@ impl MysqlSearchField for ContactSearchField {
             ContactSearchField::Address => "addr",
             ContactSearchField::Note => "note",
             ContactSearchField::Kind => "kind",
-            ContactSearchField::Uid => "uid",
         }
     }
 
     fn column_type(&self) -> &'static str {
         match self {
-            ContactSearchField::Kind | ContactSearchField::Uid => "TEXT",
+            ContactSearchField::Kind => "TEXT",
             _ => "TEXT",
         }
     }
@@ -232,14 +221,12 @@ impl MysqlSearchField for ContactSearchField {
 impl MysqlSearchField for FileSearchField {
     fn column(&self) -> &'static str {
         match self {
-            FileSearchField::Name => "name",
             FileSearchField::Content => "body",
         }
     }
 
     fn column_type(&self) -> &'static str {
         match self {
-            FileSearchField::Name => "TEXT",
             FileSearchField::Content => "MEDIUMTEXT",
         }
     }

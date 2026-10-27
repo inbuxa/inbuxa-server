@@ -2,6 +2,8 @@
  * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
+ *
+ * Modified by Coffey Labs in 2026 for INBUXA.
  */
 
 use crate::utils::{
@@ -66,44 +68,38 @@ pub async fn lookup_tests() {
 
     // Test counter
     let key = "abc".as_bytes().to_vec();
+    store.key_incr(KeyValue::new(key.clone(), 1)).await.unwrap();
+    assert_eq!(1, counter_get(&store, key.clone()).await);
+    store.key_incr(KeyValue::new(key.clone(), 2)).await.unwrap();
+    assert_eq!(3, counter_get(&store, key.clone()).await);
     store
-        .counter_incr(KeyValue::new(key.clone(), 1), true)
+        .key_incr(KeyValue::new(key.clone(), -3))
         .await
         .unwrap();
-    assert_eq!(1, store.counter_get(key.clone()).await.unwrap());
-    store
-        .counter_incr(KeyValue::new(key.clone(), 2), true)
-        .await
-        .unwrap();
-    assert_eq!(3, store.counter_get(key.clone()).await.unwrap());
-    store
-        .counter_incr(KeyValue::new(key.clone(), -3), false)
-        .await
-        .unwrap();
-    assert_eq!(0, store.counter_get(key.clone()).await.unwrap());
+    assert_eq!(0, counter_get(&store, key.clone()).await);
 
     // Test counter expiry
     let key = "fgh".as_bytes().to_vec();
     store
-        .counter_incr(KeyValue::new(key.clone(), 1).expires(1), false)
+        .key_incr(KeyValue::new(key.clone(), 1).expires(1))
         .await
         .unwrap();
-    assert_eq!(1, store.counter_get(key.clone()).await.unwrap());
+    assert_eq!(1, counter_get(&store, key.clone()).await);
     tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
     store.purge_in_memory_store().await.unwrap();
-    assert_eq!(0, store.counter_get(key.clone()).await.unwrap());
+    assert_eq!(0, counter_get(&store, key.clone()).await);
 
     // Test rate limiter
     assert!(
         store
-            .is_rate_allowed(0, "rate".as_bytes(), &rate, false)
+            .is_rate_allowed(0, "rate".as_bytes(), &rate)
             .await
             .unwrap()
             .is_none()
     );
     assert!(
         store
-            .is_rate_allowed(0, "rate".as_bytes(), &rate, false)
+            .is_rate_allowed(0, "rate".as_bytes(), &rate)
             .await
             .unwrap()
             .is_some()
@@ -111,7 +107,7 @@ pub async fn lookup_tests() {
     tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
     assert!(
         store
-            .is_rate_allowed(0, "rate".as_bytes(), &rate, false)
+            .is_rate_allowed(0, "rate".as_bytes(), &rate)
             .await
             .unwrap()
             .is_none()
@@ -181,10 +177,7 @@ pub async fn lookup_tests() {
             .await
             .unwrap();
         store
-            .counter_incr(
-                KeyValue::with_prefix(0, pack_u32(1, v), 123).expires(3600),
-                false,
-            )
+            .key_incr(KeyValue::with_prefix(0, pack_u32(1, v), 123).expires(3600))
             .await
             .unwrap();
     }
@@ -211,10 +204,7 @@ pub async fn lookup_tests() {
     for v in [0, 1000, 1001, 2000, 2001] {
         assert_ne!(
             0,
-            store
-                .counter_get(KeyValue::<()>::build_key(0, pack_u32(1, v)))
-                .await
-                .unwrap()
+            counter_get(&store, KeyValue::<()>::build_key(0, pack_u32(1, v))).await
         );
     }
 
@@ -246,10 +236,7 @@ pub async fn lookup_tests() {
     for v in [0, 1000, 1001, 2000, 2001] {
         assert_eq!(
             0,
-            store
-                .counter_get(KeyValue::<()>::build_key(0, pack_u32(1, v)))
-                .await
-                .unwrap()
+            counter_get(&store, KeyValue::<()>::build_key(0, pack_u32(1, v))).await
         );
     }
 
@@ -293,6 +280,12 @@ pub async fn lookup_tests() {
     if let InMemoryStore::Store(store) = &store {
         store_assert_is_empty(store, store.clone().into(), false).await;
     }
+}
+
+// inbuxa: 1.0 has no counter read; adding zero returns the counter, and an
+// expired or missing counter reads as zero as before.
+async fn counter_get(store: &InMemoryStore, key: Vec<u8>) -> i64 {
+    store.key_incr(KeyValue::new(key, 0)).await.unwrap()
 }
 
 fn pack_u32(a: u32, b: u32) -> Vec<u8> {

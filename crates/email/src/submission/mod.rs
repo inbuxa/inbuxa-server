@@ -4,6 +4,11 @@
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
  */
 
+use store::{
+    ValueKey,
+    write::{ArchiveCompression, BatchBuilder, Compression, IndexPropertyClass, ValueClass},
+};
+use types::{collection::Collection, field::EmailSubmissionField};
 use utils::map::vec_map::VecMap;
 
 pub mod index;
@@ -47,6 +52,18 @@ pub struct DeliveryStatus {
     pub displayed: bool,
 }
 
+pub const QUEUED_REPLY: &str = "250 2.1.5 Queued";
+
+#[derive(rkyv::Archive, rkyv::Deserialize, rkyv::Serialize, Debug, Clone, PartialEq, Eq)]
+pub struct DeliveryResults(pub Box<[DeliveryResult]>);
+
+#[derive(rkyv::Archive, rkyv::Deserialize, rkyv::Serialize, Debug, Clone, PartialEq, Eq)]
+pub struct DeliveryResult {
+    pub address: Box<str>,
+    pub delivered: Delivered,
+    pub smtp_reply: Box<str>,
+}
+
 #[derive(
     rkyv::Archive, rkyv::Deserialize, rkyv::Serialize, Debug, Default, Clone, PartialEq, Eq,
 )]
@@ -70,11 +87,12 @@ pub enum UndoStatus {
 
 impl UndoStatus {
     pub fn parse(s: &str) -> Option<Self> {
-        hashify::tiny_map!(s.as_bytes(),
-            "pending" => UndoStatus::Pending,
-            "final" => UndoStatus::Final,
-            "canceled" => UndoStatus::Canceled,
-            "cancelled" => UndoStatus::Canceled,
+        hashify::fnc_map!(s.as_bytes(),
+            "pending" => Some(UndoStatus::Pending),
+            "final" => Some(UndoStatus::Final),
+            "canceled" => Some(UndoStatus::Canceled),
+            "cancelled" => Some(UndoStatus::Canceled),
+            _ => None,
         )
     }
 
@@ -113,16 +131,84 @@ impl ArchivedUndoStatus {
     }
 }
 
+impl DeliveryResults {
+    pub fn key(account_id: u32, queue_id: u64) -> ValueKey<ValueClass> {
+        Self::key_at(account_id, queue_id, 0)
+    }
+
+    pub fn write(batch: &mut BatchBuilder, account_id: u32, queue_id: u64, value: Vec<u8>) {
+        batch
+            .with_account_id(account_id)
+            .with_collection(Collection::EmailSubmission)
+            .with_document(0)
+            .set(Self::class(queue_id), value);
+    }
+
+    pub fn clear(batch: &mut BatchBuilder, account_id: u32, queue_id: u64) {
+        batch
+            .with_account_id(account_id)
+            .with_collection(Collection::EmailSubmission)
+            .with_document(0)
+            .clear(Self::class(queue_id));
+    }
+
+    pub fn range(
+        account_id: u32,
+        max_queue_id: u64,
+    ) -> (ValueKey<ValueClass>, ValueKey<ValueClass>) {
+        (
+            Self::key_at(account_id, 0, 0),
+            Self::key_at(account_id, max_queue_id, u32::MAX),
+        )
+    }
+
+    fn key_at(account_id: u32, queue_id: u64, document_id: u32) -> ValueKey<ValueClass> {
+        ValueKey {
+            account_id,
+            collection: Collection::EmailSubmission.into(),
+            document_id,
+            class: Self::class(queue_id),
+        }
+    }
+
+    fn class(queue_id: u64) -> ValueClass {
+        ValueClass::IndexProperty(IndexPropertyClass::Integer {
+            property: EmailSubmissionField::DeliveryResult.into(),
+            value: queue_id,
+        })
+    }
+}
+
+impl ArchiveCompression for DeliveryResults {
+    const COMPRESSION: Compression = Compression::None;
+}
+
+impl From<&ArchivedDeliveryResult> for DeliveryStatus {
+    fn from(value: &ArchivedDeliveryResult) -> Self {
+        DeliveryStatus {
+            smtp_reply: value.smtp_reply.to_string(),
+            delivered: Delivered::from(&value.delivered),
+            displayed: false,
+        }
+    }
+}
+
+impl From<&ArchivedDelivered> for Delivered {
+    fn from(value: &ArchivedDelivered) -> Self {
+        match value {
+            ArchivedDelivered::Queued => Delivered::Queued,
+            ArchivedDelivered::Yes => Delivered::Yes,
+            ArchivedDelivered::No => Delivered::No,
+            ArchivedDelivered::Unknown => Delivered::Unknown,
+        }
+    }
+}
+
 impl From<&ArchivedDeliveryStatus> for DeliveryStatus {
     fn from(value: &ArchivedDeliveryStatus) -> Self {
         DeliveryStatus {
             smtp_reply: value.smtp_reply.to_string(),
-            delivered: match value.delivered {
-                ArchivedDelivered::Queued => Delivered::Queued,
-                ArchivedDelivered::Yes => Delivered::Yes,
-                ArchivedDelivered::No => Delivered::No,
-                ArchivedDelivered::Unknown => Delivered::Unknown,
-            },
+            delivered: Delivered::from(&value.delivered),
             displayed: value.displayed,
         }
     }

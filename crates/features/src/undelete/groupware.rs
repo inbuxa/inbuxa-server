@@ -93,7 +93,7 @@ pub async fn take(
     };
     let mut batch = BatchBuilder::new();
     batch.clear(class);
-    data.write(batch.build_all()).await?;
+    data.write_batch(&mut batch).await?;
     Ok(Some(note))
 }
 
@@ -115,7 +115,7 @@ pub async fn peek(
 pub async fn clear(data: &Store, kind: Kind, account_id: u32, document_id: u32) -> trc::Result<()> {
     let mut batch = BatchBuilder::new();
     batch.clear(note_class(kind, account_id, document_id));
-    data.write(batch.build_all()).await.map(|_| ())
+    data.write_batch(&mut batch).await.map(|_| ())
 }
 
 /// An event's start, for a hold's range (LH-3). None for a recurring event,
@@ -297,7 +297,7 @@ pub async fn archive_sieve(
     let item = ArchivedItem::SieveScript(registry::schema::structs::ArchivedSieveScript {
         name: name.to_string(),
         created_at: UTCDateTime::from_timestamp(archived_at as i64),
-        content,
+        contents: content,
         account_id: types::id::Id::from(account_id),
         archived_at: UTCDateTime::from_timestamp(archived_at as i64),
         archived_until: UTCDateTime::from_timestamp((archived_at + retention) as i64),

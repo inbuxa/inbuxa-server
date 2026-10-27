@@ -2,6 +2,8 @@
  * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
+ *
+ * Modified by Coffey Labs in 2026 for INBUXA.
  */
 
 use crate::{Store, registry::bootstrap::Bootstrap};
@@ -33,6 +35,7 @@ impl Store {
         }
     }
 
+    // inbuxa: MON-10: the trace and metric history stores, which 1.0 dropped
     pub async fn build_tracing(bp: &mut Bootstrap) -> Option<Self> {
         let result = match bp.setting_infallible::<TracingStore>().await {
             TracingStore::Disabled => Ok(None),

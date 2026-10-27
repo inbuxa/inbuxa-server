@@ -245,7 +245,7 @@ async fn request_restore(
         id,
         undelete::data::Change::Updated,
     );
-    server.store().write(batch.build_all()).await?;
+    server.store().write_batch(&mut batch).await?;
     server.notify_task_queue();
     Ok(())
 }

@@ -4,12 +4,15 @@
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
  */
 
-use http_proto::{HttpRequest, request::fetch_body};
-use hyper::header::CONTENT_TYPE;
+use common::auth::oauth::client::RequestOrigin;
+use http_proto::{HttpRequest, HttpSessionData, request::fetch_body};
+use hyper::header::{CONTENT_TYPE, HOST};
 use serde::{Deserialize, Serialize};
 use utils::map::vec_map::VecMap;
 
 pub mod auth;
+pub mod authorize;
+pub mod logout;
 pub mod openid;
 pub mod registration;
 pub mod token;
@@ -31,9 +34,12 @@ pub enum OAuthStatus {
     Authorized,
     TokenIssued,
     Pending,
+    Denied,
 }
 
 const MAX_POST_LEN: usize = 2048;
+pub(crate) const TOKEN_ENDPOINT_AUTH_METHODS: &[&str] =
+    &["none", "client_secret_post", "client_secret_basic"];
 
 pub struct OAuth {
     pub key: String,
@@ -50,12 +56,12 @@ pub struct OAuth {
 pub struct OAuthCode {
     pub status: OAuthStatus,
     pub account_id: u32,
+    pub credential_version: u64,
     pub client_id: String,
     pub nonce: Option<String>,
     pub params: String,
     pub code_challenge: PkceCodeChallenge,
     pub scope: Option<String>,
-    pub resources: Vec<String>,
 }
 
 #[derive(
@@ -73,7 +79,6 @@ pub struct OAuthCode {
 pub enum PkceCodeChallenge {
     None,
     S256(String),
-    Plain(String),
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -143,13 +148,13 @@ pub struct OAuthResponse {
     pub expires_in: u64,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub refresh_token: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub scope: Option<String>,
+    pub scope: String,
+    pub username: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub id_token: Option<String>,
 }
 
-#[derive(Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 pub enum ErrorType {
     #[serde(rename = "invalid_grant")]
     InvalidGrant,
@@ -171,6 +176,29 @@ pub enum ErrorType {
     AccessDenied,
     #[serde(rename = "expired_token")]
     ExpiredToken,
+    #[serde(rename = "invalid_target")]
+    InvalidTarget,
+    #[serde(rename = "unsupported_response_type")]
+    UnsupportedResponseType,
+}
+
+impl ErrorType {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            ErrorType::InvalidGrant => "invalid_grant",
+            ErrorType::InvalidClient => "invalid_client",
+            ErrorType::InvalidScope => "invalid_scope",
+            ErrorType::InvalidRequest => "invalid_request",
+            ErrorType::UnauthorizedClient => "unauthorized_client",
+            ErrorType::UnsupportedGrantType => "unsupported_grant_type",
+            ErrorType::AuthorizationPending => "authorization_pending",
+            ErrorType::SlowDown => "slow_down",
+            ErrorType::AccessDenied => "access_denied",
+            ErrorType::ExpiredToken => "expired_token",
+            ErrorType::InvalidTarget => "invalid_target",
+            ErrorType::UnsupportedResponseType => "unsupported_response_type",
+        }
+    }
 }
 
 impl TokenResponse {
@@ -239,4 +267,20 @@ impl FormData {
     pub fn fields(&self) -> impl Iterator<Item = (&String, &String)> {
         self.fields.iter()
     }
+}
+
+pub fn request_origin<'x>(req: &'x HttpRequest, session: &HttpSessionData) -> RequestOrigin<'x> {
+    RequestOrigin {
+        is_tls: session.is_tls,
+        authority: req
+            .headers()
+            .get(HOST)
+            .and_then(|host| host.to_str().ok())
+            .or_else(|| req.uri().authority().map(|authority| authority.as_str()))
+            .unwrap_or_default(),
+    }
+}
+
+impl store::write::ArchiveCompression for OAuthCode {
+    const COMPRESSION: store::write::Compression = store::write::Compression::None;
 }

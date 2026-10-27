@@ -241,26 +241,14 @@ impl Pickle for IpAddrOrMask {
 
     fn unpickle(data: &mut PickledStream<'_>) -> Option<Self> {
         match data.read()? {
-            4 => {
-                let mut addr_arr = [0u8; 4];
-                addr_arr.copy_from_slice(data.read_bytes(4)?);
-                let mut mask_arr = [0u8; 4];
-                mask_arr.copy_from_slice(data.read_bytes(4)?);
-                Some(IpAddrOrMask::V4 {
-                    addr: Ipv4Addr::from(addr_arr),
-                    mask: u32::from_be_bytes(mask_arr),
-                })
-            }
-            6 => {
-                let mut addr_arr = [0u8; 16];
-                addr_arr.copy_from_slice(data.read_bytes(16)?);
-                let mut mask_arr = [0u8; 16];
-                mask_arr.copy_from_slice(data.read_bytes(16)?);
-                Some(IpAddrOrMask::V6 {
-                    addr: Ipv6Addr::from(addr_arr),
-                    mask: u128::from_be_bytes(mask_arr),
-                })
-            }
+            4 => Some(IpAddrOrMask::V4 {
+                addr: Ipv4Addr::from(data.read_array::<4>()?),
+                mask: u32::from_be_bytes(data.read_array::<4>()?),
+            }),
+            6 => Some(IpAddrOrMask::V6 {
+                addr: Ipv6Addr::from(data.read_array::<16>()?),
+                mask: u128::from_be_bytes(data.read_array::<16>()?),
+            }),
             _ => None,
         }
     }
@@ -298,29 +286,3 @@ impl IntoValue for IpAddrOrMask {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_ipaddrmask() {
-        for (mask, ip) in [
-            ("10.0.0.0/8", "10.30.20.11"),
-            ("10.0.0.0/8", "10.0.13.73"),
-            ("192.168.1.1", "192.168.1.1"),
-        ] {
-            let mask = IpAddrOrMask::from_str(mask).unwrap();
-            let ip = ip.parse::<IpAddr>().unwrap();
-            assert!(mask.matches(&ip));
-        }
-
-        for (mask, ip) in [
-            ("10.0.0.0/8", "11.30.20.11"),
-            ("192.168.1.1", "193.168.1.1"),
-        ] {
-            let mask = IpAddrOrMask::from_str(mask).unwrap();
-            let ip = ip.parse::<IpAddr>().unwrap();
-            assert!(!mask.matches(&ip));
-        }
-    }
-}

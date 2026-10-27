@@ -48,6 +48,6 @@ VOLUME ["/etc/inbuxa", "/var/lib/inbuxa"]
 EXPOSE	443 25 110 587 465 143 993 995 4190 8080
 ENV INBUXA_HEALTHCHECK_URL=https://127.0.0.1:443/healthz/live
 HEALTHCHECK --interval=30s --timeout=5s --start-period=30s --retries=3 \
-    CMD curl -fsSk -H "X-Forwarded-For: 127.0.0.1" "$INBUXA_HEALTHCHECK_URL" || curl -fsS -H "X-Forwarded-For: 127.0.0.1" http://127.0.0.1:8080/healthz/live || exit 1
+    CMD curl -fsSk "$INBUXA_HEALTHCHECK_URL" || curl -fsS http://127.0.0.1:8080/healthz/live || exit 1
 ENTRYPOINT ["/usr/local/bin/inbuxa"]
 CMD ["--config", "/etc/inbuxa/config.json"]

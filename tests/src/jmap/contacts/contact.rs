@@ -2,6 +2,8 @@
  * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
+ *
+ * Modified by Coffey Labs in 2026 for INBUXA.
  */
 
 use crate::utils::{
@@ -478,18 +480,17 @@ END:VCARD"#
     let dav_client = account.webdav_client();
     let resources = test
         .server
-        .fetch_dav_resources(account_id, account_id, SyncCollection::AddressBook)
+        .fetch_groupware_resources(account_id, account_id, SyncCollection::AddressBook)
         .await
         .unwrap();
     let path = format!(
         "{}{}",
         resources.base_path,
         resources
-            .paths
-            .iter()
-            .find(|v| v.parent_id.is_some())
+            .tree_with_depth(usize::MAX)
+            .find(|v| v.parent_id().is_some())
             .unwrap()
-            .path
+            .path()
     );
     let vcard = dav_client
         .request("GET", &path, "")
@@ -1324,6 +1325,8 @@ fn test_jscontact_4() -> Value {
     }})
 }
 
+// inbuxa: 1.0 writes a newline in a parameter value as ^n (RFC 6868) and
+// quotes a JSPTR value holding '/'
 const TEST_VCARD_1: &str = r#"BEGIN:VCARD
 VERSION:4.0
 UID:urn:uuid:f81d4fae-7dec-11d0-a765-00a0c91e6bf6
@@ -1344,14 +1347,14 @@ EMAIL;TYPE=HOME,PREF;PROP-ID=k2:sarahjpersonal@example.com
 TEL;TYPE=PREF,CELL,VOICE;PROP-ID=k1:+1-555-123-4567
 TEL;TYPE=WORK,VOICE;PROP-ID=k2:+1-555-987-6543
 TEL;TYPE=HOME,VOICE;PROP-ID=k3:+1-555-456-7890
-ADR;TYPE=WORK;LABEL="123 Business Ave\nSuite 400\nNew York, NY 10001\nUSA";
+ADR;TYPE=WORK;LABEL="123 Business Ave^nSuite 400^nNew York, NY 10001^nUSA";
  TZ=Etc/GMT+5;GEO="40.7128;-74.0060";PROP-ID=k1;JSCOMPS=";11;3;4;5;6":;;123
   Business Ave;New York;NY;10001;USA;;;;;123 Business Ave;;;;;;
-ADR;TYPE=HOME,PREF;LABEL="456 Residential St\nApt 7B\nBrooklyn, NY 11201\nU
+ADR;TYPE=HOME,PREF;LABEL="456 Residential St^nApt 7B^nBrooklyn, NY 11201^nU
  SA";PROP-ID=k2;JSCOMPS=";11;3;4;5;6":;;456 Residential St;Brooklyn;NY;1120
  1;USA;;;;;456 Residential St;;;;;;
 TITLE;PROP-ID=k1:Senior Research Scientist
-JSPROP;JSPTR=titles/k2/organizationId:"k1"
+JSPROP;JSPTR="titles/k2/organizationId":"k1"
 ROLE;PROP-ID=k2:Team Lead
 NICKNAME;PROP-ID=k1:Sadie
 NOTE;PROP-ID=k1:Sarah prefers video calls over phone calls. Available Mon-T

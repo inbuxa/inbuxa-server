@@ -15,17 +15,59 @@ use crate::{
         },
     },
     search::{
-        IndexDocument, SearchComparator, SearchDocumentId, SearchField, SearchFilter,
-        SearchOperator, SearchQuery, SearchValue,
+        IndexDocument, KeyValueMatch, SearchField, SearchFilter, SearchQuery, SearchResults,
+        SearchValue, TextMatch, TracingSearchField,
     },
     write::SearchIndex,
 };
+use futures::{TryStreamExt, pin_mut};
 use nlp::{language::Language, tokenizers::space::SpaceTokenizer};
-use std::fmt::Write;
+use roaring::RoaringBitmap;
+use std::{cmp::Ordering, fmt::Write};
 use tokio_postgres::{
-    IsolationLevel,
-    types::{FromSql, ToSql, Type, WrongType},
+    RowStream,
+    types::{FromSql, IsNull, ToSql, Type, WrongType},
 };
+
+const MAX_TSVECTOR_CHARS: usize = 250_000;
+const MAX_KEYWORD_CHARS: usize = 512;
+pub const DENSE_ACCOUNT_DOCUMENTS: u64 = 32_768;
+const ACCOUNT_FIRST_DOCUMENTS: u64 = 4_096;
+const ACCOUNT_FIRST_COLUMNS_CAPACITY: usize = 8;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TsQueryForm {
+    Inline,
+    InitPlan,
+    DenseInitPlan,
+}
+
+impl TsQueryForm {
+    fn of(documents: u64) -> Self {
+        if documents >= DENSE_ACCOUNT_DOCUMENTS {
+            TsQueryForm::DenseInitPlan
+        } else {
+            TsQueryForm::InitPlan
+        }
+    }
+
+    fn open(self) -> &'static str {
+        match self {
+            TsQueryForm::Inline => " @@ ",
+            TsQueryForm::InitPlan | TsQueryForm::DenseInitPlan => " @@ (SELECT ",
+        }
+    }
+
+    fn close(self) -> &'static str {
+        match self {
+            TsQueryForm::Inline => "",
+            TsQueryForm::InitPlan | TsQueryForm::DenseInitPlan => ")",
+        }
+    }
+}
+
+#[cfg(inbuxa_tests)]
+pub static QUERY_LOG: std::sync::Mutex<Vec<(String, usize)>> = std::sync::Mutex::new(Vec::new());
 
 impl PostgresStore {
     fn ts_config(&self, language: &Language) -> &'static str {
@@ -34,213 +76,221 @@ impl PostgresStore {
             .unwrap_or(PG_UNSTEMMED_LANG)
     }
 
-    pub async fn index(&self, documents: Vec<IndexDocument>) -> trc::Result<()> {
-        let mut conn = self.conn_pool.get().await.map_err(into_pool_error)?;
+    pub async fn index(&self, mut documents: Vec<IndexDocument>) -> trc::Result<()> {
+        let mut buffer = String::new();
+        for document in &mut documents {
+            document.split_identifiers(&mut buffer);
+            // inbuxa: the other keyword text is split into words and language
+            // text gets the word parts of its URLs, see split_terms()
+            split_terms(document);
+        }
+        documents.sort_by_key(DocumentKey::of);
+        documents.dedup_by(|later, kept| {
+            let is_duplicate = DocumentKey::of(later) == DocumentKey::of(kept);
+            if is_duplicate {
+                std::mem::swap(later, kept);
+            }
+            is_duplicate
+        });
+        let conn = self.conn_pool.get().await.map_err(into_pool_error)?;
         let limit = self.timeouts.query;
         let result = tokio::time::timeout(limit, async {
-            let trx = conn
-                .build_transaction()
-                .isolation_level(IsolationLevel::ReadCommitted)
-                .start()
-                .await
-                .map_err(into_error)?;
-
-            for document in documents {
-                let index = document.index;
-                let primary_keys = index.primary_keys();
-                let all_fields = index.all_fields();
-                let fields = document.fields;
-                // inbuxa: keyword text (addresses, contact fields, ...) is split into
-                // words before it reaches the text parser, see keyword_terms();
-                // language text gets the words inside its URLs, host names and
-                // file names added, see url_terms().
-                let keywords = primary_keys
-                    .iter()
-                    .chain(all_fields)
-                    .map(|field| match fields.get(field) {
-                        Some(SearchValue::Text {
-                            value,
-                            language: Language::None,
-                        }) if field.is_text() => Some(keyword_terms(value)),
-                        Some(SearchValue::Text { value, .. }) if field.is_text() => {
-                            url_terms(value)
-                        }
-                        _ => None,
-                    })
-                    .collect::<Vec<_>>();
-                let mut values = Vec::with_capacity(fields.len() + 2);
-                let mut query = format!("INSERT INTO {} (", index.psql_table());
-
-                for (i, field) in primary_keys.iter().chain(all_fields).enumerate() {
-                    if i > 0 {
-                        query.push(',');
-                    }
-                    query.push_str(field.column());
-
-                    if let Some(sort_column) = field.sort_column() {
-                        query.push(',');
-                        query.push_str(sort_column);
-                    }
-                }
-
-                query.push_str(") VALUES (");
-
-                for (i, field) in primary_keys.iter().chain(all_fields).enumerate() {
-                    if i > 0 {
-                        query.push(',');
-                    }
-
-                    if let Some(value) = fields.get(field) {
-                        let value_ref = format!("${}", values.len() + 1);
-                        let (text_len, language) =
-                            if let SearchValue::Text { value, language } = value {
-                                (value.len(), self.ts_config(language))
-                            } else {
-                                (0, PG_UNSTEMMED_LANG)
-                            };
-
-                        if let Some(keywords) = &keywords[i] {
-                            let _ = write!(&mut query, "to_tsvector('{language}',{value_ref})");
-                            values.push(keywords as &(dyn ToSql + Sync));
-                            if field.sort_column().is_some() {
-                                let value_ref = format!("${}", values.len() + 1);
-                                if text_len > 255 {
-                                    let _ = write!(&mut query, ",left({value_ref},255)");
-                                } else {
-                                    let _ = write!(&mut query, ",{value_ref}");
-                                }
-                                values.push(value as &(dyn ToSql + Sync));
-                            }
-                            continue;
-                        } else if field.is_text() {
-                            let _ = write!(&mut query, "to_tsvector('{language}',{value_ref})");
-                        } else if text_len > 512 {
-                            query.push_str("left(");
-                            query.push_str(&value_ref);
-                            query.push_str(",512)");
-                        } else {
-                            query.push_str(&value_ref);
-                        }
-
-                        if field.sort_column().is_some() {
-                            if text_len > 255 {
-                                query.push_str(",left(");
-                                query.push_str(&value_ref);
-                                query.push_str(",255)");
-                            } else {
-                                query.push(',');
-                                query.push_str(&value_ref);
-                            }
-                        }
-
-                        values.push(value as &(dyn ToSql + Sync));
-                    } else {
-                        query.push_str("NULL");
-                        if field.sort_column().is_some() {
-                            query.push_str(",NULL");
-                        }
-                    }
-                }
-
-                query.push_str(") ON CONFLICT (");
-                for (i, pkey) in primary_keys.iter().enumerate() {
-                    if i > 0 {
-                        query.push(',');
-                    }
-                    query.push_str(pkey.column());
-                }
-                query.push_str(") DO UPDATE SET ");
-                for (i, field) in all_fields.iter().enumerate() {
-                    if i > 0 {
-                        query.push(',');
-                    }
-                    let column = field.column();
-                    let _ = write!(&mut query, "{column} = EXCLUDED.{column}");
-                }
-
-                trx.execute(&query, &values).await.map_err(into_error)?;
+            for documents in documents.chunk_by(|a, b| a.index == b.index) {
+                let Some(index) = documents.first().map(|document| document.index) else {
+                    continue;
+                };
+                let statement = conn
+                    .prepare_cached(&upsert_statement(index))
+                    .await
+                    .map_err(into_error)?;
+                let params = self.upsert_params(index, documents);
+                conn.execute_raw(&statement, params.iter())
+                    .await
+                    .map_err(into_error)?;
             }
 
-            trx.commit().await.map_err(into_error)
+            Ok(())
         })
         .await;
         bounded(conn, result, limit)
     }
 
-    pub async fn query<R: SearchDocumentId>(
+    fn upsert_params<'x>(
+        &self,
+        index: SearchIndex,
+        documents: &'x [IndexDocument],
+    ) -> Vec<UpsertParam<'x>> {
+        let (primary_keys, all_fields) = (index.primary_keys(), index.all_fields());
+        let mut params = Vec::with_capacity(2 * (primary_keys.len() + all_fields.len()));
+
+        for field in primary_keys.iter().chain(all_fields) {
+            let values = documents.iter().map(|document| document.fields.get(field));
+            if field.is_text() {
+                let (values, configs) = values
+                    .map(|value| {
+                        let config = match value {
+                            Some(SearchValue::Text { language, .. }) => self.ts_config(language),
+                            _ => PG_UNSTEMMED_LANG,
+                        };
+                        (value, config)
+                    })
+                    .unzip();
+                params.push(UpsertParam::Values(values));
+                params.push(UpsertParam::Configs(configs));
+            } else {
+                params.push(UpsertParam::Values(values.collect()));
+            }
+        }
+
+        params
+    }
+
+    pub async fn query<R: SearchResults>(
         &self,
         index: SearchIndex,
         filters: &[SearchFilter],
-        sort: &[SearchComparator],
-    ) -> trc::Result<Vec<R>> {
+    ) -> trc::Result<R> {
         let mut query = format!("SELECT {} FROM {}", R::field().column(), index.psql_table());
-        let params = self.build_filter(&mut query, filters);
-        let params = params.iter().map(SqlParam::as_sql).collect::<Vec<_>>();
-        if !sort.is_empty() {
-            build_sort(&mut query, sort);
-        }
-        let conn = self.conn_pool.get().await.map_err(into_pool_error)?;
-        let limit = self.timeouts.query;
-        let result = tokio::time::timeout(limit, async {
-            let s = conn.prepare_cached(&query).await.map_err(into_error)?;
-
-            conn.query(&s, params.as_slice())
-                .await
-                .and_then(|rows| {
-                    rows.into_iter()
-                        .map(|row| row.try_get::<_, DocId>(0).map(|v| R::from_u64(v.0)))
-                        .collect::<Result<Vec<R>, _>>()
-                })
-                .map_err(into_error)
-        })
-        .await;
-        bounded(conn, result, limit)
+        let params = self.build_filter(&mut query, filters, TsQueryForm::Inline);
+        self.select(query, &params, TsQueryForm::Inline).await
     }
 
-    /// inbuxa: every document's value of one unsigned field in an account,
-    /// in one round trip. Feeds the message cache's received dates so
-    /// sorting by receivedAt needs no query at all.
-    pub async fn unsigned_values(
+    pub async fn query_account<R: SearchResults>(
         &self,
         index: SearchIndex,
-        field: SearchField,
-        account_id: u32,
-    ) -> trc::Result<Vec<(u32, u64)>> {
-        let query = format!(
-            "SELECT {}, {} FROM {} WHERE {} = $1",
-            SearchField::DocumentId.column(),
-            field.column(),
+        filters: &[SearchFilter],
+        mask: &RoaringBitmap,
+    ) -> trc::Result<R> {
+        if index.reads_account_first()
+            && let Some((first_id, last_id)) = mask.min().zip(mask.max())
+            && u64::from(last_id - first_id) < ACCOUNT_FIRST_DOCUMENTS
+            && IntegerColumn::Int4.binds(last_id.into())
+            && let Some(account_id) = account_filter(filters)
+            && let Some(columns) = account_first_columns(R::field(), filters)
+        {
+            return self
+                .query_account_first(index, filters, &columns, account_id, first_id, last_id)
+                .await;
+        }
+
+        let mut query = format!("SELECT {} FROM {}", R::field().column(), index.psql_table());
+        let form = TsQueryForm::of(mask.len());
+        let params = self.build_filter(&mut query, filters, form);
+        self.select(query, &params, form).await
+    }
+
+    async fn query_account_first<R: SearchResults>(
+        &self,
+        index: SearchIndex,
+        filters: &[SearchFilter],
+        columns: &[&str],
+        account_id: u64,
+        first_id: u32,
+        last_id: u32,
+    ) -> trc::Result<R> {
+        let mut where_clause = String::new();
+        let mut params = self.build_filter(&mut where_clause, filters, TsQueryForm::Inline);
+
+        let mut query = String::with_capacity(where_clause.len() + 160);
+        let _ = write!(query, "SELECT {} FROM (SELECT ", R::field().column());
+        for (pos, column) in columns.iter().enumerate() {
+            if pos > 0 {
+                query.push_str(", ");
+            }
+            query.push_str(column);
+        }
+        let document_column = SearchField::DocumentId.column();
+        let _ = write!(
+            query,
+            " FROM {} WHERE {} = ${} AND {document_column} >= ${} AND {document_column} <= ${} \
+             OFFSET 0) c{where_clause}",
             index.psql_table(),
-            SearchField::AccountId.column()
+            SearchField::AccountId.column(),
+            params.len() + 1,
+            params.len() + 2,
+            params.len() + 3,
         );
-        let conn = self.conn_pool.get().await.map_err(into_pool_error)?;
+        params.push(FilterParam::Integer(account_id, IntegerColumn::Int4));
+        params.push(FilterParam::Integer(first_id.into(), IntegerColumn::Int4));
+        params.push(FilterParam::Integer(last_id.into(), IntegerColumn::Int4));
+        self.select(query, &params, TsQueryForm::Inline).await
+    }
+
+    pub async fn filter_candidates(
+        &self,
+        index: SearchIndex,
+        filters: &[SearchFilter],
+        candidates: &[u32],
+    ) -> trc::Result<RoaringBitmap> {
+        let mut query = format!("SELECT docid FROM {}", index.psql_table());
+        let mut params = self.build_filter(&mut query, filters, TsQueryForm::Inline);
+        let candidates = candidates
+            .iter()
+            .map(|document_id| document_id.cast_signed())
+            .collect::<Vec<_>>();
+        let _ = write!(
+            query,
+            "{} docid = ANY(${}::int4[])",
+            if filters.is_empty() { " WHERE" } else { " AND" },
+            params.len() + 1
+        );
+        params.push(FilterParam::Ids(&candidates));
+        self.select(query, &params, TsQueryForm::Inline).await
+    }
+
+    async fn select<R: SearchResults>(
+        &self,
+        query: String,
+        params: &[FilterParam<'_>],
+        form: TsQueryForm,
+    ) -> trc::Result<R> {
+        let mut conn = self.conn_pool.get().await.map_err(into_pool_error)?;
         let limit = self.timeouts.query;
         let result = tokio::time::timeout(limit, async {
-            let s = conn.prepare_cached(&query).await.map_err(into_error)?;
-            conn.query(&s, &[&(account_id as i32)])
-                .await
-                .and_then(|rows| {
-                    rows.into_iter()
-                        .map(|row| {
-                            Ok((
-                                row.try_get::<_, i32>(0)? as u32,
-                                row.try_get::<_, i64>(1)? as u64,
-                            ))
-                        })
-                        .collect::<Result<Vec<_>, _>>()
-                })
-                .map_err(into_error)
+            let typed = params.iter().map(|param| (param, param.sql_type()));
+            Ok(match form {
+                TsQueryForm::Inline | TsQueryForm::InitPlan => {
+                    collect_ids::<R>(
+                        conn.query_typed_raw(&query, typed)
+                            .await
+                            .map_err(into_error)?,
+                    )
+                    .await?
+                }
+                TsQueryForm::DenseInitPlan => {
+                    let trx = conn.transaction().await.map_err(into_error)?;
+                    trx.batch_execute("SET LOCAL jit = off")
+                        .await
+                        .map_err(into_error)?;
+                    let results = collect_ids::<R>(
+                        trx.query_typed_raw(&query, typed)
+                            .await
+                            .map_err(into_error)?,
+                    )
+                    .await?;
+                    trx.commit().await.map_err(into_error)?;
+                    results
+                }
+            })
         })
         .await;
-        bounded(conn, result, limit)
+        let (results, num_rows) = bounded(conn, result, limit)?;
+
+        #[cfg(inbuxa_tests)]
+        if let Ok(mut log) = QUERY_LOG.lock() {
+            log.push((query, num_rows));
+        }
+        #[cfg(not(inbuxa_tests))]
+        let _ = num_rows;
+
+        Ok(results)
     }
 
     pub async fn unindex(&self, filter: SearchQuery) -> trc::Result<u64> {
         debug_assert!(!filter.filters.is_empty());
         let table = filter.index.psql_table();
         let mut where_clause = String::new();
-        let params = self.build_filter(&mut where_clause, &filter.filters);
-        let params = params.iter().map(SqlParam::as_sql).collect::<Vec<_>>();
+        let params = self.build_filter(&mut where_clause, &filter.filters, TsQueryForm::Inline);
         let conn = self.conn_pool.get().await.map_err(into_pool_error)?;
         let limit = self.timeouts.maintenance;
         let result = tokio::time::timeout(limit, async {
@@ -255,7 +305,7 @@ impl PostgresStore {
                 .await
                 .map_err(into_error)?;
 
-            match conn.execute(&s, params.as_slice()).await {
+            match conn.execute_raw(&s, params.iter()).await {
                 Ok(deleted) => return Ok(deleted),
                 Err(err) if is_timeout_error(&err) => (),
                 Err(err) => return Err(into_error(err)),
@@ -273,7 +323,7 @@ impl PostgresStore {
                     .map_err(into_error)?;
 
                 loop {
-                    match conn.execute(&s, params.as_slice()).await {
+                    match conn.execute_raw(&s, params.iter()).await {
                         Ok(0) => return Ok(deleted),
                         Ok(affected) => deleted += affected,
                         Err(err) if is_timeout_error(&err) && chunk_size > MIN_DELETE_CHUNK_SIZE => {
@@ -293,7 +343,8 @@ impl PostgresStore {
         &self,
         query: &mut String,
         filters: &'x [SearchFilter],
-    ) -> Vec<SqlParam<'x>> {
+        form: TsQueryForm,
+    ) -> Vec<FilterParam<'x>> {
         if filters.is_empty() {
             return Vec::new();
         }
@@ -305,7 +356,12 @@ impl PostgresStore {
 
         for filter in filters {
             match filter {
-                SearchFilter::Operator { field, op, value } => {
+                SearchFilter::Text {
+                    field,
+                    op,
+                    value,
+                    language,
+                } => {
                     if !is_first {
                         match operator {
                             SearchFilter::And => query.push_str(" AND "),
@@ -316,81 +372,135 @@ impl PostgresStore {
                         is_first = false;
                     }
                     let value_pos = values.len() + 1;
-                    if field.is_text()
-                        && matches!(op, SearchOperator::Equal | SearchOperator::Contains)
-                    {
-                        query.push_str(field.column());
-                        query.push(' ');
+                    // inbuxa: keyword text is matched by its words, as it is
+                    // indexed, see keyword_terms()
+                    let value_param = match language {
+                        Language::None if field.is_text() => {
+                            FilterParam::Owned(keyword_terms(value))
+                        }
+                        _ => FilterParam::Text(value),
+                    };
+                    let mut parts_param = None;
+                    query.push_str(field.column());
+                    if field.is_text() {
+                        query.push_str(form.open());
+                        let config = self.ts_config(language);
+                        match op {
+                            TextMatch::Exact | TextMatch::Standard => {
+                                let method = if matches!(op, TextMatch::Exact) {
+                                    "phraseto_tsquery"
+                                } else {
+                                    "plainto_tsquery"
+                                };
 
-                        let language = match &value {
-                            SearchValue::Text { language, .. } => *language,
-                            _ => Language::None,
-                        };
-                        let config = self.ts_config(&language);
-                        let method = match op {
-                            SearchOperator::Equal => "phraseto_tsquery",
-                            _ => "plainto_tsquery",
-                        };
-
-                        if matches!(language, Language::None) {
-                            let _ = write!(query, "@@ {method}('{config}', ${value_pos})");
-                            if let SearchValue::Text { value, .. } = value {
-                                values.push(SqlParam::Owned(keyword_terms(value)));
-                                continue;
-                            }
-                        } else {
-                            // inbuxa: a query word written as a URL, host,
-                            // file or hyphenated word also matches as its word
-                            // parts, which url_terms() indexes
-                            let parts = match value {
-                                SearchValue::Text { value, .. } => query_url_terms(value),
-                                _ => None,
-                            };
-                            let parts_pos = value_pos + 1;
-                            let _ = write!(query, "@@ ({method}('{config}', ${value_pos})");
-                            if parts.is_some() {
-                                let _ = write!(query, " || {method}('{config}', ${parts_pos})");
-                            }
-                            for fallback in [PG_FALLBACK_LANG, PG_UNSTEMMED_LANG] {
-                                if fallback != config && self.ts_configs.contains(fallback) {
-                                    let _ =
-                                        write!(query, " || {method}('{fallback}', ${value_pos})");
+                                if matches!(language, Language::None) {
+                                    let _ = write!(query, "{method}('{config}', ${value_pos})");
+                                } else {
+                                    // inbuxa: a query word written as a URL,
+                                    // host, file or hyphenated word also
+                                    // matches as its word parts, which
+                                    // url_terms() indexes
+                                    let parts = query_url_terms(value);
+                                    let parts_pos = value_pos + 1;
+                                    let _ = write!(query, "({method}('{config}', ${value_pos})");
                                     if parts.is_some() {
-                                        let _ = write!(
-                                            query,
-                                            " || {method}('{fallback}', ${parts_pos})"
-                                        );
+                                        let _ =
+                                            write!(query, " || {method}('{config}', ${parts_pos})");
                                     }
+                                    for fallback in [PG_FALLBACK_LANG, PG_UNSTEMMED_LANG] {
+                                        if fallback != config && self.ts_configs.contains(fallback)
+                                        {
+                                            let _ = write!(
+                                                query,
+                                                " || {method}('{fallback}', ${value_pos})"
+                                            );
+                                            if parts.is_some() {
+                                                let _ = write!(
+                                                    query,
+                                                    " || {method}('{fallback}', ${parts_pos})"
+                                                );
+                                            }
+                                        }
+                                    }
+                                    query.push(')');
+                                    parts_param = parts.map(FilterParam::Owned);
                                 }
                             }
-                            query.push(')');
-                            values.push(SqlParam::Ref(value));
-                            if let Some(parts) = parts {
-                                values.push(SqlParam::Owned(parts));
+                            TextMatch::Prefix => {
+                                let _ = write!(
+                                    query,
+                                    "to_tsquery('{PG_UNSTEMMED_LANG}', coalesce(nullif(array_to_string(tsvector_to_array(to_tsvector('{PG_UNSTEMMED_LANG}', ${value_pos})), ':* & '), '') || ':*', ''))"
+                                );
                             }
-                            continue;
                         }
-                        values.push(SqlParam::Ref(value));
-                    } else if let SearchValue::KeyValues(kv) = value {
-                        query.push_str(field.column());
-                        query.push(' ');
-
-                        let (key, value) = kv.iter().next().unwrap();
-                        values.push(SqlParam::Ref(key));
-
-                        if !value.is_empty() {
-                            let _ = write!(query, "->> ${value_pos} ");
-                            op.write_pqsql(query, values.len() + 1);
-                            values.push(SqlParam::Ref(value));
-                        } else {
-                            let _ = write!(query, " ? ${value_pos}");
+                        query.push_str(form.close());
+                    } else {
+                        match op {
+                            TextMatch::Prefix => {
+                                let _ = write!(query, " LIKE ${value_pos} || '%'");
+                            }
+                            _ => {
+                                let _ = write!(query, " = ${value_pos}");
+                            }
+                        }
+                    }
+                    values.push(value_param);
+                    values.extend(parts_param);
+                }
+                SearchFilter::KeyValue { field, key, op } => {
+                    if !is_first {
+                        match operator {
+                            SearchFilter::And => query.push_str(" AND "),
+                            SearchFilter::Or => query.push_str(" OR "),
+                            _ => (),
                         }
                     } else {
-                        query.push_str(field.sort_column().unwrap_or(field.column()));
-                        query.push(' ');
-
-                        op.write_pqsql(query, value_pos);
-                        values.push(SqlParam::Ref(value));
+                        is_first = false;
+                    }
+                    query.push_str(field.column());
+                    query.push(' ');
+                    let key_pos = values.len() + 1;
+                    values.push(FilterParam::Text(key));
+                    match op {
+                        KeyValueMatch::Equals(value) => {
+                            let value_pos = values.len() + 1;
+                            let _ = write!(query, "->> ${key_pos} = ${value_pos}");
+                            values.push(FilterParam::Text(value));
+                        }
+                        KeyValueMatch::Contains(value) => {
+                            let value_pos = values.len() + 1;
+                            let _ =
+                                write!(query, "->> ${key_pos} ILIKE '%' || ${value_pos} || '%'");
+                            values.push(FilterParam::Text(value));
+                        }
+                        KeyValueMatch::Exists => {
+                            let _ = write!(query, " ? ${key_pos}");
+                        }
+                    }
+                }
+                SearchFilter::Integer { field, op, value } => {
+                    if !is_first {
+                        match operator {
+                            SearchFilter::And => query.push_str(" AND "),
+                            SearchFilter::Or => query.push_str(" OR "),
+                            _ => (),
+                        }
+                    } else {
+                        is_first = false;
+                    }
+                    let cmp = match op {
+                        Ordering::Less => "<",
+                        Ordering::Equal => "=",
+                        Ordering::Greater => ">",
+                    };
+                    match IntegerColumn::of(field).filter(|column| column.binds(*value)) {
+                        Some(column) => {
+                            let _ = write!(query, "{} {cmp} ${}", field.column(), values.len() + 1);
+                            values.push(FilterParam::Integer(*value, column));
+                        }
+                        None => {
+                            let _ = write!(query, "{} {cmp} {value}", field.column());
+                        }
                     }
                 }
                 SearchFilter::And | SearchFilter::Or => {
@@ -421,7 +531,7 @@ impl PostgresStore {
                     }
 
                     operator_stack.push((operator, is_first));
-                    operator = &SearchFilter::And;
+                    operator = &SearchFilter::Or;
                     is_first = true;
                     query.push_str("NOT (");
                 }
@@ -441,6 +551,132 @@ impl PostgresStore {
         }
 
         values
+    }
+}
+
+impl ToSql for SearchValue {
+    fn to_sql(
+        &self,
+        ty: &tokio_postgres::types::Type,
+        out: &mut bytes::BytesMut,
+    ) -> Result<tokio_postgres::types::IsNull, Box<dyn std::error::Error + Sync + Send>>
+    where
+        Self: Sized,
+    {
+        match self {
+            SearchValue::Text { value, .. } => {
+                // Truncate large text fields to avoid Postgres errors (see https://www.postgresql.org/docs/current/textsearch-limitations.html)
+
+                if value.len() > 650_000 {
+                    (&value[..value.floor_char_boundary(650_000)]).to_sql(ty, out)
+                } else {
+                    value.to_sql(ty, out)
+                }
+            }
+            SearchValue::Int(v) => match *ty {
+                Type::INT4 => (*v as i32).to_sql(ty, out),
+                _ => v.to_sql(ty, out),
+            },
+            SearchValue::Uint(v) => match *ty {
+                Type::INT4 => (*v as i32).to_sql(ty, out),
+                _ => (*v as i64).to_sql(ty, out),
+            },
+            SearchValue::Boolean(v) => v.to_sql(ty, out),
+            SearchValue::KeyValues(kv) => {
+                serde_json::to_value(kv).unwrap_or_default().to_sql(ty, out)
+            }
+        }
+    }
+
+    fn accepts(_: &tokio_postgres::types::Type) -> bool
+    where
+        Self: Sized,
+    {
+        true
+    }
+
+    fn to_sql_checked(
+        &self,
+        ty: &tokio_postgres::types::Type,
+        out: &mut bytes::BytesMut,
+    ) -> Result<tokio_postgres::types::IsNull, Box<dyn std::error::Error + Sync + Send>> {
+        match self {
+            SearchValue::Text { value, .. } => {
+                // Truncate large text fields to avoid Postgres errors (see https://www.postgresql.org/docs/current/textsearch-limitations.html)
+
+                if value.len() > 650_000 {
+                    (&value[..value.floor_char_boundary(650_000)]).to_sql_checked(ty, out)
+                } else {
+                    value.to_sql_checked(ty, out)
+                }
+            }
+            SearchValue::Int(v) => match *ty {
+                Type::INT4 => (*v as i32).to_sql_checked(ty, out),
+                _ => v.to_sql_checked(ty, out),
+            },
+            SearchValue::Uint(v) => match *ty {
+                Type::INT4 => (*v as i32).to_sql_checked(ty, out),
+                _ => (*v as i64).to_sql_checked(ty, out),
+            },
+            SearchValue::Boolean(v) => v.to_sql_checked(ty, out),
+            SearchValue::KeyValues(kv) => serde_json::to_value(kv)
+                .unwrap_or_default()
+                .to_sql_checked(ty, out),
+        }
+    }
+}
+
+#[derive(Debug, PartialEq, Eq, PartialOrd, Ord)]
+struct DocumentKey(u8, u64, u64);
+
+impl DocumentKey {
+    fn of(document: &IndexDocument) -> Self {
+        let mut keys =
+            document
+                .index
+                .primary_keys()
+                .iter()
+                .map(|field| match document.fields.get(field) {
+                    Some(SearchValue::Uint(value)) => *value,
+                    Some(SearchValue::Int(value)) => value.cast_unsigned(),
+                    _ => 0,
+                });
+        DocumentKey(
+            document.index as u8,
+            keys.next().unwrap_or_default(),
+            keys.next().unwrap_or_default(),
+        )
+    }
+}
+
+async fn collect_ids<R: SearchResults>(rows: RowStream) -> trc::Result<(R, usize)> {
+    pin_mut!(rows);
+    let mut results = R::default();
+    let mut num_rows = 0;
+    while let Some(row) = rows.try_next().await.map_err(into_error)? {
+        results.insert(row.try_get::<_, DocId>(0).map_err(into_error)?.0);
+        num_rows += 1;
+    }
+    Ok((results, num_rows))
+}
+
+/// inbuxa: rewrites a document's text for the text parser before it is
+/// indexed. Keyword text other than the identifiers split_identifiers()
+/// already handles (addresses, contact and tracing keywords) becomes its
+/// words, see keyword_terms(); language text gets the word parts of its URLs,
+/// host names and file names added, see url_terms().
+fn split_terms(document: &mut IndexDocument) {
+    for (field, value) in document.fields.iter_mut() {
+        if !field.is_text() || field.is_identifier() {
+            continue;
+        }
+        if let SearchValue::Text { value, language } = value {
+            if matches!(language, Language::None) {
+                *value = keyword_terms(value);
+            } else if let Some(terms) = url_terms(value) {
+                *value = terms;
+            }
+        }
     }
 }
 
@@ -531,113 +767,241 @@ pub(crate) fn query_url_terms(value: &str) -> Option<String> {
     changed.then_some(terms)
 }
 
-pub(super) enum SqlParam<'x> {
-    Ref(&'x (dyn ToSql + Sync)),
-    Owned(String),
-}
+fn upsert_statement(index: SearchIndex) -> String {
+    let primary_keys = index.primary_keys();
+    let all_fields = index.all_fields();
+    let mut columns = String::with_capacity(128);
+    let mut values = String::with_capacity(512);
+    let mut arrays = String::with_capacity(256);
+    let mut aliases = String::with_capacity(128);
+    let mut param = 0;
 
-impl SqlParam<'_> {
-    fn as_sql(&self) -> &(dyn ToSql + Sync) {
-        match self {
-            SqlParam::Ref(value) => *value,
-            SqlParam::Owned(value) => value,
+    for (pos, field) in primary_keys.iter().chain(all_fields).enumerate() {
+        if pos > 0 {
+            columns.push(',');
+            values.push(',');
+            arrays.push(',');
+            aliases.push(',');
         }
-    }
-}
+        param += 1;
+        columns.push_str(field.column());
+        let _ = write!(aliases, "v{pos}");
 
-fn build_sort(query: &mut String, sort: &[SearchComparator]) {
-    query.push_str(" ORDER BY ");
-    for (i, comparator) in sort.iter().enumerate() {
-        if i > 0 {
-            query.push_str(", ");
-        }
-        match comparator {
-            SearchComparator::Field { field, ascending } => {
-                query.push_str(field.sort_column().unwrap_or(field.column()));
-                if *ascending {
-                    query.push_str(" ASC");
-                } else {
-                    query.push_str(" DESC");
+        if field.is_text() {
+            let _ = write!(arrays, "${param}::text[],${}::text[]", param + 1);
+            let _ = write!(
+                values,
+                "to_tsvector(c{pos}::regconfig,left(v{pos},{MAX_TSVECTOR_CHARS}))"
+            );
+            let _ = write!(aliases, ",c{pos}");
+            param += 1;
+        } else {
+            let (array_type, value) = match IntegerColumn::of(field) {
+                Some(column) => (column.type_name(), None),
+                None if field.is_json() => ("jsonb", None),
+                None => ("text", Some(MAX_KEYWORD_CHARS)),
+            };
+            let _ = write!(arrays, "${param}::{array_type}[]");
+            match value {
+                Some(max_chars) => {
+                    let _ = write!(values, "left(v{pos},{max_chars})");
+                }
+                None => {
+                    let _ = write!(values, "v{pos}");
                 }
             }
-            SearchComparator::DocumentSet { .. } | SearchComparator::SortedSet { .. } => {
-                debug_assert!(
-                    false,
-                    "DocumentSet and SortedSet comparators are not supported "
-                );
-            }
+        }
+    }
+
+    let mut statement = format!(
+        "INSERT INTO {} ({columns}) SELECT {values} FROM unnest({arrays}) AS u({aliases}) ON CONFLICT (",
+        index.psql_table()
+    );
+    for (pos, field) in primary_keys.iter().enumerate() {
+        if pos > 0 {
+            statement.push(',');
+        }
+        statement.push_str(field.column());
+    }
+    statement.push_str(") DO UPDATE SET ");
+    for (pos, field) in all_fields.iter().enumerate() {
+        if pos > 0 {
+            statement.push(',');
+        }
+        let column = field.column();
+        let _ = write!(statement, "{column} = EXCLUDED.{column}");
+    }
+    statement
+}
+
+enum UpsertParam<'x> {
+    Values(Vec<Option<&'x SearchValue>>),
+    Configs(Vec<&'static str>),
+}
+
+impl std::fmt::Debug for UpsertParam<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            UpsertParam::Values(values) => write!(f, "Values({})", values.len()),
+            UpsertParam::Configs(configs) => write!(f, "Configs({configs:?})"),
         }
     }
 }
 
-impl ToSql for SearchValue {
+impl ToSql for UpsertParam<'_> {
     fn to_sql(
         &self,
-        ty: &tokio_postgres::types::Type,
+        ty: &Type,
         out: &mut bytes::BytesMut,
-    ) -> Result<tokio_postgres::types::IsNull, Box<dyn std::error::Error + Sync + Send>>
-    where
-        Self: Sized,
-    {
+    ) -> Result<IsNull, Box<dyn std::error::Error + Sync + Send>> {
         match self {
-            SearchValue::Text { value, .. } => {
-                // Truncate large text fields to avoid Postgres errors (see https://www.postgresql.org/docs/current/textsearch-limitations.html)
-
-                if value.len() > 650_000 {
-                    (&value[..value.floor_char_boundary(650_000)]).to_sql(ty, out)
-                } else {
-                    value.to_sql(ty, out)
-                }
-            }
-            SearchValue::Int(v) => match *ty {
-                Type::INT4 => (*v as i32).to_sql(ty, out),
-                _ => v.to_sql(ty, out),
-            },
-            SearchValue::Uint(v) => match *ty {
-                Type::INT4 => (*v as i32).to_sql(ty, out),
-                _ => (*v as i64).to_sql(ty, out),
-            },
-            SearchValue::Boolean(v) => v.to_sql(ty, out),
-            SearchValue::KeyValues(kv) => {
-                serde_json::to_value(kv).unwrap_or_default().to_sql(ty, out)
-            }
+            UpsertParam::Values(values) => values.to_sql(ty, out),
+            UpsertParam::Configs(configs) => configs.to_sql(ty, out),
         }
     }
 
-    fn accepts(_: &tokio_postgres::types::Type) -> bool
-    where
-        Self: Sized,
-    {
+    fn accepts(_: &Type) -> bool {
         true
     }
 
     fn to_sql_checked(
         &self,
-        ty: &tokio_postgres::types::Type,
+        ty: &Type,
         out: &mut bytes::BytesMut,
-    ) -> Result<tokio_postgres::types::IsNull, Box<dyn std::error::Error + Sync + Send>> {
+    ) -> Result<IsNull, Box<dyn std::error::Error + Sync + Send>> {
         match self {
-            SearchValue::Text { value, .. } => {
-                // Truncate large text fields to avoid Postgres errors (see https://www.postgresql.org/docs/current/textsearch-limitations.html)
+            UpsertParam::Values(values) => values.to_sql_checked(ty, out),
+            UpsertParam::Configs(configs) => configs.to_sql_checked(ty, out),
+        }
+    }
+}
 
-                if value.len() > 650_000 {
-                    (&value[..value.floor_char_boundary(650_000)]).to_sql_checked(ty, out)
-                } else {
-                    value.to_sql_checked(ty, out)
-                }
+fn account_first_columns(
+    result: SearchField,
+    filters: &[SearchFilter],
+) -> Option<Vec<&'static str>> {
+    let mut columns = Vec::with_capacity(ACCOUNT_FIRST_COLUMNS_CAPACITY);
+    columns.push(result.column());
+    for filter in filters {
+        if let SearchFilter::Text { field, .. }
+        | SearchFilter::KeyValue { field, .. }
+        | SearchFilter::Integer { field, .. } = filter
+        {
+            if field.holds_long_text() {
+                return None;
             }
-            SearchValue::Int(v) => match *ty {
-                Type::INT4 => (*v as i32).to_sql_checked(ty, out),
-                _ => v.to_sql_checked(ty, out),
+            if !columns.contains(&field.column()) {
+                columns.push(field.column());
+            }
+        }
+    }
+    Some(columns)
+}
+
+fn account_filter(filters: &[SearchFilter]) -> Option<u64> {
+    let mut depth = 0usize;
+    for filter in filters {
+        match filter {
+            SearchFilter::And | SearchFilter::Or | SearchFilter::Not => depth += 1,
+            SearchFilter::End => depth = depth.saturating_sub(1),
+            SearchFilter::Integer {
+                field: SearchField::AccountId,
+                op: Ordering::Equal,
+                value,
+            } if depth == 0 && IntegerColumn::Int4.binds(*value) => return Some(*value),
+            _ => {}
+        }
+    }
+    None
+}
+
+#[derive(Debug, Clone, Copy)]
+enum IntegerColumn {
+    Int4,
+    Int8,
+}
+
+impl IntegerColumn {
+    fn of(field: &SearchField) -> Option<Self> {
+        match field {
+            SearchField::AccountId | SearchField::DocumentId => Some(IntegerColumn::Int4),
+            SearchField::Id
+            | SearchField::Tracing(TracingSearchField::EventType | TracingSearchField::QueueId) => {
+                Some(IntegerColumn::Int8)
+            }
+            _ => None,
+        }
+    }
+
+    fn type_name(self) -> &'static str {
+        match self {
+            IntegerColumn::Int4 => "int4",
+            IntegerColumn::Int8 => "int8",
+        }
+    }
+
+    fn binds(self, value: u64) -> bool {
+        match self {
+            IntegerColumn::Int4 => i32::try_from(value).is_ok(),
+            IntegerColumn::Int8 => i64::try_from(value).is_ok(),
+        }
+    }
+}
+
+#[derive(Debug)]
+enum FilterParam<'x> {
+    Text(&'x str),
+    /// inbuxa: query text rewritten for the index, see keyword_terms()
+    Owned(String),
+    Integer(u64, IntegerColumn),
+    Ids(&'x [i32]),
+}
+
+impl FilterParam<'_> {
+    fn sql_type(&self) -> Type {
+        match self {
+            FilterParam::Text(_) | FilterParam::Owned(_) => Type::TEXT,
+            FilterParam::Integer(_, IntegerColumn::Int4) => Type::INT4,
+            FilterParam::Integer(_, IntegerColumn::Int8) => Type::INT8,
+            FilterParam::Ids(_) => Type::INT4_ARRAY,
+        }
+    }
+}
+
+impl ToSql for FilterParam<'_> {
+    fn to_sql(
+        &self,
+        ty: &Type,
+        out: &mut bytes::BytesMut,
+    ) -> Result<IsNull, Box<dyn std::error::Error + Sync + Send>> {
+        match self {
+            FilterParam::Text(value) => value.to_sql(ty, out),
+            FilterParam::Owned(value) => value.to_sql(ty, out),
+            FilterParam::Integer(value, _) => match *ty {
+                Type::INT4 => i32::try_from(*value)?.to_sql(ty, out),
+                _ => i64::try_from(*value)?.to_sql(ty, out),
             },
-            SearchValue::Uint(v) => match *ty {
-                Type::INT4 => (*v as i32).to_sql_checked(ty, out),
-                _ => (*v as i64).to_sql_checked(ty, out),
+            FilterParam::Ids(ids) => ids.to_sql(ty, out),
+        }
+    }
+
+    fn accepts(_: &Type) -> bool {
+        true
+    }
+
+    fn to_sql_checked(
+        &self,
+        ty: &Type,
+        out: &mut bytes::BytesMut,
+    ) -> Result<IsNull, Box<dyn std::error::Error + Sync + Send>> {
+        match self {
+            FilterParam::Text(value) => value.to_sql_checked(ty, out),
+            FilterParam::Owned(value) => value.to_sql_checked(ty, out),
+            FilterParam::Integer(value, _) => match *ty {
+                Type::INT4 => i32::try_from(*value)?.to_sql_checked(ty, out),
+                _ => i64::try_from(*value)?.to_sql_checked(ty, out),
             },
-            SearchValue::Boolean(v) => v.to_sql_checked(ty, out),
-            SearchValue::KeyValues(kv) => serde_json::to_value(kv)
-                .unwrap_or_default()
-                .to_sql_checked(ty, out),
+            FilterParam::Ids(ids) => ids.to_sql_checked(ty, out),
         }
     }
 }
@@ -658,31 +1022,6 @@ impl FromSql<'_> for DocId {
 
     fn accepts(typ: &Type) -> bool {
         matches!(typ, &Type::INT4 | &Type::INT8 | &Type::OID)
-    }
-}
-
-impl SearchOperator {
-    fn write_pqsql(&self, query: &mut String, value_pos: usize) {
-        match self {
-            SearchOperator::LowerThan => {
-                let _ = write!(query, "< ${value_pos}");
-            }
-            SearchOperator::LowerEqualThan => {
-                let _ = write!(query, "<= ${value_pos}");
-            }
-            SearchOperator::GreaterThan => {
-                let _ = write!(query, "> ${value_pos}");
-            }
-            SearchOperator::GreaterEqualThan => {
-                let _ = write!(query, ">= ${value_pos}");
-            }
-            SearchOperator::Equal => {
-                let _ = write!(query, "= ${value_pos}");
-            }
-            SearchOperator::Contains => {
-                let _ = write!(query, "LIKE '%' || ${value_pos} || '%'");
-            }
-        }
     }
 }
 

@@ -2,6 +2,8 @@
  * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
+ *
+ * Modified by Coffey Labs in 2026 for INBUXA.
  */
 
 use crate::{
@@ -13,19 +15,23 @@ use crate::{
 };
 use common::config::smtp::report::AggregateFrequency;
 use mail_auth::{
-    common::{parse::TxtRecordParser, verify::DomainKey},
-    dkim::DomainKeyReport,
-    dmarc::Dmarc,
-    report::DmarcResult,
-    spf::Spf,
+    dkim::{DkimReportRecord, DomainKey},
+    dmarc::DmarcRecord,
+    dns::TxtRecordParser,
+    spf::SpfRecord,
 };
 use registry::{
-    schema::structs::{
-        CertificateManagement, DkimManagement, DkimReportSettings, DmarcReportSettings,
-        DnsManagement, Domain, Expression, ExpressionMatch, SenderAuth, SpfReportSettings,
+    schema::{
+        prelude::Property,
+        structs::{
+            CertificateManagement, DkimManagement, DkimReportSettings, DmarcReportSettings,
+            DnsManagement, Domain, Expression, ExpressionMatch, MtaStageData, SenderAuth,
+            SpfReportSettings,
+        },
     },
     types::list::List,
 };
+use smtp_report::dmarc::DmarcStatus;
 use std::time::{Duration, Instant};
 
 #[tokio::test]
@@ -83,10 +89,6 @@ async fn dmarc() {
                 else_: "strict".into(),
                 ..Default::default()
             },
-            dkim_sign_domain: Expression {
-                else_: "'localdomain.org'".into(),
-                ..Default::default()
-            },
             dkim_verify: Expression {
                 match_: List::from_iter([
                     ExpressionMatch {
@@ -106,6 +108,19 @@ async fn dmarc() {
             },
             dkim_strict: false,
         })
+        .await;
+    // inbuxa: 1.0 moved the signing domain to the DATA stage
+    admin
+        .registry_update_setting(
+            MtaStageData {
+                dkim_sign_domain: Expression {
+                    else_: "'localdomain.org'".into(),
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+            &[Property::DkimSignDomain],
+        )
         .await;
     admin
         .registry_create_object(DkimReportSettings {
@@ -157,17 +172,17 @@ async fn dmarc() {
     // Add SPF, DKIM and DMARC records
     test.server.txt_add(
         "mx.example.com",
-        Spf::parse(b"v=spf1 ip4:10.0.0.1 ip4:10.0.0.2 -all").unwrap(),
+        SpfRecord::parse(b"v=spf1 ip4:10.0.0.1 ip4:10.0.0.2 -all").unwrap(),
         Instant::now() + Duration::from_secs(5),
     );
     test.server.txt_add(
         "example.com",
-        Spf::parse(b"v=spf1 ip4:10.0.0.1 -all ra=spf-failures rr=e:f:s:n").unwrap(),
+        SpfRecord::parse(b"v=spf1 ip4:10.0.0.1 -all ra=spf-failures rr=e:f:s:n").unwrap(),
         Instant::now() + Duration::from_secs(5),
     );
     test.server.txt_add(
         "foobar.com",
-        Spf::parse(b"v=spf1 ip4:10.0.0.1 -all").unwrap(),
+        SpfRecord::parse(b"v=spf1 ip4:10.0.0.1 -all").unwrap(),
         Instant::now() + Duration::from_secs(5),
     );
     test.server.txt_add(
@@ -199,12 +214,12 @@ async fn dmarc() {
     );
     test.server.txt_add(
         "_report._domainkey.example.com",
-        DomainKeyReport::parse(b"ra=dkim-failures; rp=100; rr=d:o:p:s:u:v:x;").unwrap(),
+        DkimReportRecord::parse(b"ra=dkim-failures; rp=100; rr=d:o:p:s:u:v:x;").unwrap(),
         Instant::now() + Duration::from_secs(5),
     );
     test.server.txt_add(
         "_dmarc.example.com",
-        Dmarc::parse(
+        DmarcRecord::parse(
             concat!(
                 "v=DMARC1; p=reject; sp=quarantine; np=None; aspf=s; adkim=s; fo=1;",
                 "rua=mailto:dmarc-feedback@example.com;",
@@ -234,7 +249,7 @@ async fn dmarc() {
         .read_lines(&test)
         .await
         .assert_contains("DKIM-Signature: v=1; a=rsa-sha256; s=rsa; d=localdomain.org;")
-        .assert_contains("To: spf-failures@example.com")
+        .assert_contains("To: <spf-failures@example.com>") // inbuxa: 1.0 brackets the address
         .assert_contains("Feedback-Type: auth-failure")
         .assert_contains("Auth-Failure: spf");
 
@@ -265,7 +280,7 @@ async fn dmarc() {
         .read_lines(&test)
         .await
         .assert_contains("DKIM-Signature: v=1; a=rsa-sha256; s=rsa; d=localdomain.org;")
-        .assert_contains("To: dkim-failures@example.com")
+        .assert_contains("To: <dkim-failures@example.com>") // inbuxa: 1.0 brackets the address
         .assert_contains("Feedback-Type: auth-failure")
         .assert_contains("Auth-Failure: bodyhash");
 
@@ -294,7 +309,7 @@ async fn dmarc() {
     // Unaligned DMARC should be rejected
     test.server.txt_add(
         "test.net",
-        Spf::parse(b"v=spf1 -all").unwrap(),
+        SpfRecord::parse(b"v=spf1 -all").unwrap(),
         Instant::now() + Duration::from_secs(5),
     );
     session
@@ -316,7 +331,7 @@ async fn dmarc() {
         .read_lines(&test)
         .await
         .assert_contains("DKIM-Signature: v=1; a=rsa-sha256; s=rsa; d=localdomain.org;")
-        .assert_contains("To: dmarc-failures@example.com")
+        .assert_contains("To: <dmarc-failures@example.com>") // inbuxa: 1.0 brackets the address
         .assert_contains("Feedback-Type: auth-failure")
         .assert_contains("Auth-Failure: dmarc")
         .assert_contains("dmarc=3Dfail");
@@ -326,7 +341,10 @@ async fn dmarc() {
     assert_eq!(report.domain, "example.com");
     assert_eq!(report.interval, AggregateFrequency::Daily);
     assert_eq!(report.dmarc_record.rua().len(), 1);
-    assert_eq!(report.report_record.dmarc_spf_result(), DmarcResult::Fail);
+    assert_eq!(
+        report.report_record.row.policy_evaluated.spf,
+        DmarcStatus::Fail
+    );
 
     // Second DMARC failure report should be rate limited
     session
@@ -360,7 +378,7 @@ async fn dmarc() {
     // A mechanism that authenticates an unaligned identity is reported as failed
     test.server.txt_add(
         "_dmarc.example.com",
-        Dmarc::parse(
+        DmarcRecord::parse(
             concat!(
                 "v=DMARC1; p=reject; sp=quarantine; np=None; aspf=s; adkim=s; fo=1;",
                 "rua=mailto:dmarc-feedback@example.com;",
@@ -385,7 +403,7 @@ async fn dmarc() {
     );
     test.server.txt_add(
         "_report._domainkey.example.com",
-        DomainKeyReport::parse(b"ra=dkim-failures; rp=0; rr=d:o:p:s:u:v:x;").unwrap(),
+        DkimReportRecord::parse(b"ra=dkim-failures; rp=0; rr=d:o:p:s:u:v:x;").unwrap(),
         Instant::now() + Duration::from_secs(5),
     );
     session
@@ -422,12 +440,12 @@ async fn dmarc() {
     // Aggregate reports identify an IDN author domain by its A-label
     test.server.txt_add(
         "xn--eebajf.xn--9dbq2a",
-        Spf::parse(b"v=spf1 ip4:10.0.0.1 -all").unwrap(),
+        SpfRecord::parse(b"v=spf1 ip4:10.0.0.1 -all").unwrap(),
         Instant::now() + Duration::from_secs(5),
     );
     test.server.txt_add(
         "_dmarc.xn--eebajf.xn--9dbq2a",
-        Dmarc::parse(
+        DmarcRecord::parse(
             concat!(
                 "v=DMARC1; p=none; aspf=s; adkim=s; fo=1;",
                 "rua=mailto:dmarc-feedback@xn--eebajf.xn--9dbq2a"
@@ -459,16 +477,19 @@ async fn dmarc() {
         }
     }
     let report = idn_report.expect("no aggregate report for the IDN author domain");
-    assert_eq!(report.report_record.header_from(), "xn--eebajf.xn--9dbq2a");
     assert_eq!(
-        report.report_record.envelope_from(),
+        report.report_record.identifiers.header_from,
+        "xn--eebajf.xn--9dbq2a"
+    );
+    assert_eq!(
+        report.report_record.identifiers.envelope_from,
         "xn--eebajf.xn--9dbq2a"
     );
 
     // An aligned SPF temperror under p=reject is temporarily rejected in strict mode
     test.server.txt_add(
         "_dmarc.tmp._dns_error.test",
-        Dmarc::parse(b"v=DMARC1; p=reject; psd=n").unwrap(),
+        DmarcRecord::parse(b"v=DMARC1; p=reject; psd=n").unwrap(),
         Instant::now() + Duration::from_secs(5),
     );
     session

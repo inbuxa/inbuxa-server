@@ -2,6 +2,8 @@
  * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
+ *
+ * Modified by Coffey Labs in 2026 for INBUXA.
  */
 
 use std::{net::Ipv4Addr, time::Duration as StdDuration};
@@ -172,7 +174,7 @@ fn dns_server(protocol: IpProtocol) -> DnsServer {
         member_tenant_id: None,
         timeout: Duration::from_millis(10_000),
         ttl: Duration::from_millis(60_000),
-        polling_interval: Duration::from_millis(100),
+        poll_interval: Duration::from_millis(100),
         propagation_timeout: Duration::from_millis(10_000),
         propagation_delay: None,
     })

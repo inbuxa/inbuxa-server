@@ -2,6 +2,8 @@
  * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
+ *
+ * Modified by Coffey Labs in 2026 for INBUXA.
  */
 
 use crate::{
@@ -154,7 +156,6 @@ pub async fn test() {
                 .await
                 .unwrap()
                 .emails
-                .index
                 .len(),
             1
         );
@@ -185,7 +186,6 @@ pub async fn test() {
                 .await
                 .unwrap()
                 .emails
-                .index
                 .len(),
             1
         );
@@ -210,11 +210,11 @@ pub async fn test() {
         ))
         .await
         .unwrap_or_else(|err| panic!("Failed to impersonate multi.mail@example.org: {err:?}"));
-    assert_ne!(access_token.account_id(), RECOVERY_ADMIN_ID);
+    assert_ne!(access_token.access_token.account_id(), RECOVERY_ADMIN_ID);
     assert_eq!(
         test.server
             .registry()
-            .object::<Account>(access_token.account_id().into())
+            .object::<Account>(access_token.access_token.account_id().into())
             .await
             .unwrap()
             .and_then(|account| account.into_user())

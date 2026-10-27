@@ -2,6 +2,8 @@
  * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
+ *
+ * Modified by Coffey Labs in 2026 for INBUXA.
  */
 
 use crate::{
@@ -59,6 +61,7 @@ impl<'x> JsonPointerPatch<'x> {
         self
     }
 
+    // inbuxa: MT
     pub fn with_can_set_tenant(mut self, can_set_tenant: bool) -> Self {
         self.can_set_tenant = can_set_tenant;
         self
@@ -127,6 +130,7 @@ impl<'x> JsonPointerPatch<'x> {
         ))
     }
 
+    // inbuxa: MT
     pub fn assert_can_set_tenant(self) -> Result<Self, PatchError> {
         if self.can_set_tenant {
             Ok(self)

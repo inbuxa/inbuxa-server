@@ -268,8 +268,8 @@ upstream import:
    nothing upstream adds can collide with them.
 3. The upgrade wraps upstream's default-build tool, unmodified: take our
    permissions out of the roles (recording them), run the copy, copy `_`
-   across, put the permissions back under their new numbers, then set the
-   edition flag our build expects.
+   across, put the permissions back under their new numbers. The edition
+   flag stays as the copy wrote it: the INBUXA build opens either.
 4. The rehearsal compares the audit chain and the hold, journal and
    deliverability records as well as the mail, before and after.
 
@@ -279,7 +279,15 @@ the check relaxed refuses it. With the check relaxed, user data read back
 identical, but the roles failed to load: they hold permissions that exist
 only in the Enterprise build's enum (cause inferred, not traced). So the
 INBUXA build accepts both flags and keeps those enum values, unused, so a
-role naming them still decodes. Singleton settings and Enterprise data from
+role naming them still decodes.
+
+**Built (27.1 merge):** a start accepts schema version 7 with either flag
+and leaves the flag alone. Beside it the store carries INBUXA's own format
+number (`System` key `0x80`, `INBUXA_STORE_VERSION`, 1 for 27.1). A store
+without it, from an upstream build or straight out of the copy, gets it on
+the first start; a store with a higher number was written by a later INBUXA
+line and is refused. Backups restore and bootstrap treats a store as in use
+under the same rule (`common::is_current_schema`). Singleton settings and Enterprise data from
 a licensed install weren't tested.
 
 **Sieve.** Scripts written for upstream `require "vnd.stalwart.while"` or

@@ -14,8 +14,11 @@ use crate::{
     BuildServer, Inner, Server,
     config::server::{Listener, Listeners, ServerProtocol, TcpListener},
 };
+use compact_str::{ToCompactString, format_compact};
 use proxy_header::io::ProxiedStream;
+use registry::types::id::ObjectId;
 use rustls::crypto::aws_lc_rs::cipher_suite::TLS13_AES_128_GCM_SHA256;
+use socket2::{SockRef, TcpKeepalive};
 use std::{
     io,
     net::{IpAddr, SocketAddr},
@@ -141,8 +144,8 @@ impl Listener {
                                         opts.apply(&stream);
 
                                         tokio::spawn(async move {
-                                            match ProxiedStream::create_from_tokio(stream, Default::default()).await {
-                                                Ok(stream) =>{
+                                            match timeout(instance.tls_timeout, ProxiedStream::create_from_tokio(stream, Default::default())).await {
+                                                Ok(Ok(stream)) =>{
                                                     let (remote_addr, local_addr) = stream.proxy_header()
                                                                             .proxied_address()
                                                                             .map(|addr| {
@@ -162,14 +165,27 @@ impl Listener {
                                                         manager.spawn(session, is_tls, enable_acme, span_start, span_end);
                                                     }
                                                 }
-                                                Err(err) => {
+                                                Err(_) => {
+                                                    trc::event!(
+                                                        Network(trc::NetworkEvent::Timeout),
+                                                        ListenerId = instance.id.clone(),
+                                                        LocalIp = local_addr.ip(),
+                                                        LocalPort = local_addr.port(),
+                                                        RemoteIp = remote_addr.ip(),
+                                                        Tls = is_tls,
+                                                        Reason = "PROXY protocol header timeout",
+                                                    );
+                                                }
+                                                Ok(Err(err)) => {
                                                     trc::event!(
                                                         Network(trc::NetworkEvent::ProxyError),
                                                         ListenerId = instance.id.clone(),
                                                         LocalIp = local_addr.ip(),
                                                         LocalPort = local_addr.port(),
+                                                        RemoteIp = remote_addr.ip(),
+                                                        RemotePort = remote_addr.port(),
                                                         Tls = is_tls,
-                                                        Reason = err.to_string(),
+                                                        Reason = err.to_compact_string(),
                                                     );
                                                 }
                                             }
@@ -198,7 +214,7 @@ impl Listener {
                                         LocalIp = local_addr.ip(),
                                         LocalPort = local_addr.port(),
                                         Tls = is_tls,
-                                        Reason = err.to_string(),
+                                        Reason = err.to_compact_string(),
                                     );
 
                                     tokio::select! {
@@ -305,14 +321,48 @@ pub struct SocketOpts {
     pub ttl: Option<u32>,
 }
 
+const KEEPALIVE_IDLE: Duration = Duration::from_secs(300);
+#[cfg(any(
+    target_os = "linux",
+    target_os = "macos",
+    target_os = "freebsd",
+    windows
+))]
+const KEEPALIVE_INTERVAL: Duration = Duration::from_secs(30);
+#[cfg(any(target_os = "linux", target_os = "macos", target_os = "freebsd"))]
+const KEEPALIVE_RETRIES: u32 = 4;
+#[cfg(any(target_os = "linux", target_os = "macos", target_os = "freebsd"))]
+const KEEPALIVE: TcpKeepalive = TcpKeepalive::new()
+    .with_time(KEEPALIVE_IDLE)
+    .with_interval(KEEPALIVE_INTERVAL)
+    .with_retries(KEEPALIVE_RETRIES);
+#[cfg(windows)]
+const KEEPALIVE: TcpKeepalive = TcpKeepalive::new()
+    .with_time(KEEPALIVE_IDLE)
+    .with_interval(KEEPALIVE_INTERVAL);
+#[cfg(not(any(
+    target_os = "linux",
+    target_os = "macos",
+    target_os = "freebsd",
+    windows
+)))]
+const KEEPALIVE: TcpKeepalive = TcpKeepalive::new().with_time(KEEPALIVE_IDLE);
+
 impl SocketOpts {
     pub fn apply(&self, stream: &TcpStream) {
         // Set TCP options
         if let Err(err) = stream.set_nodelay(self.nodelay) {
             trc::event!(
                 Network(trc::NetworkEvent::SetOptError),
-                Reason = err.to_string(),
+                Reason = err.to_compact_string(),
                 Details = "Failed to set TCP_NODELAY",
+            );
+        }
+        if let Err(err) = SockRef::from(stream).set_tcp_keepalive(&KEEPALIVE) {
+            trc::event!(
+                Network(trc::NetworkEvent::SetOptError),
+                Reason = err.to_compact_string(),
+                Details = "Failed to set TCP keepalive",
             );
         }
         if let Some(ttl) = self.ttl
@@ -320,7 +370,7 @@ impl SocketOpts {
         {
             trc::event!(
                 Network(trc::NetworkEvent::SetOptError),
-                Reason = err.to_string(),
+                Reason = err.to_compact_string(),
                 Details = "Failed to set TTL",
             );
         }
@@ -328,27 +378,7 @@ impl SocketOpts {
 }
 
 impl Listeners {
-    /// Binds every socket, reporting each failure against its listener.
-    ///
-    /// Split out of [`Listeners::bind_and_drop_priv`] so a listener can be
-    /// bound again at runtime, when the legacy-protocols switch puts one back
-    /// (LP-5), without dropping privileges a second time. A port below 1024
-    /// will fail here once privileges are gone, which is one of the cases
-    /// LP-5 expects and reports rather than hides.
-    pub fn bind(&self, bp: &mut Bootstrap) {
-        for server in &self.servers {
-            for listener in &server.listeners {
-                if let Err(err) = listener.socket.bind(listener.addr) {
-                    bp.build_error(
-                        server.registry_id,
-                        format!("Failed to bind to {}: {}", listener.addr, err),
-                    );
-                }
-            }
-        }
-    }
-
-    pub fn bind_and_drop_priv(&self, bp: &mut Bootstrap) {
+    pub fn bind_and_drop_priv(&mut self, bp: &mut Bootstrap) {
         // Bind as root
         self.bind(bp);
 
@@ -367,6 +397,44 @@ impl Listeners {
                 pd.apply().failed("Failed to drop privileges");
             }
         }
+    }
+
+    /// Binds every socket, reporting each failure against its listener and
+    /// dropping that listener.
+    ///
+    /// inbuxa: public so a listener can be bound again at runtime, when the
+    /// legacy-protocols switch puts one back (LP-5), without dropping
+    /// privileges a second time. A port below 1024 will fail here once
+    /// privileges are gone, which is one of the cases LP-5 expects and
+    /// reports rather than hides.
+    pub fn bind(&mut self, bp: &mut Bootstrap) {
+        self.bind_each(|registry_id, addr, err| {
+            bp.build_error(registry_id, format!("Failed to bind to {addr}: {err}"));
+        });
+    }
+
+    fn bind_each(&mut self, mut on_error: impl FnMut(ObjectId, SocketAddr, io::Error)) {
+        for server in &mut self.servers {
+            let registry_id = server.registry_id;
+            let server_id = &server.id;
+            server
+                .listeners
+                .retain(|listener| match listener.socket.bind(listener.addr) {
+                    Ok(()) => true,
+                    Err(err) => {
+                        trc::event!(
+                            Network(trc::NetworkEvent::ListenError),
+                            ListenerId = server_id.clone(),
+                            LocalIp = listener.addr.ip(),
+                            LocalPort = listener.addr.port(),
+                            Reason = err.to_compact_string(),
+                        );
+                        on_error(registry_id, listener.addr, err);
+                        false
+                    }
+                });
+        }
+        self.servers.retain(|server| !server.listeners.is_empty());
     }
 
     pub fn spawn(
@@ -421,18 +489,26 @@ impl Listeners {
 
 impl TcpListener {
     pub fn listen(self) -> Result<tokio::net::TcpListener, String> {
-        // inbuxa: a socket whose bind failed is still unbound, and listen()
-        // on it makes the kernel pick a random port on every interface
-        if !self
-            .socket
-            .local_addr()
-            .is_ok_and(|bound| bound.port() != 0)
-        {
-            return Err(format!("Not listening on {}: it isn't bound", self.addr));
+        match self.socket.local_addr() {
+            Ok(local_addr) if self.is_bound_to(local_addr) => self
+                .socket
+                .listen(self.backlog.unwrap_or(1024))
+                .map_err(|err| format!("Failed to listen on {}: {}", self.addr, err)),
+            Ok(local_addr) => Err(format!(
+                "Refusing to listen on {}: socket is bound to {local_addr}",
+                self.addr
+            )),
+            Err(err) => Err(format!(
+                "Refusing to listen on {}: socket is not bound: {err}",
+                self.addr
+            )),
         }
-        self.socket
-            .listen(self.backlog.unwrap_or(1024))
-            .map_err(|err| format!("Failed to listen on {}: {}", self.addr, err))
+    }
+
+    fn is_bound_to(&self, local_addr: SocketAddr) -> bool {
+        local_addr.ip() == self.addr.ip()
+            && local_addr.port() != 0
+            && (self.addr.port() == 0 || local_addr.port() == self.addr.port())
     }
 }
 
@@ -453,7 +529,7 @@ impl ServerInstance {
                             Tls(trc::TlsEvent::Handshake),
                             ListenerId = self.id.clone(),
                             SpanId = session_id,
-                            Version = format!(
+                            Version = format_compact!(
                                 "{:?}",
                                 stream
                                     .get_ref()
@@ -461,7 +537,7 @@ impl ServerInstance {
                                     .protocol_version()
                                     .unwrap_or(rustls::ProtocolVersion::TLSv1_3)
                             ),
-                            Details = format!(
+                            Cipher = format_compact!(
                                 "{:?}",
                                 stream
                                     .get_ref()
@@ -477,7 +553,7 @@ impl ServerInstance {
                             Tls(trc::TlsEvent::HandshakeError),
                             ListenerId = self.id.clone(),
                             SpanId = session_id,
-                            Reason = err.to_string(),
+                            Reason = err.to_compact_string(),
                         );
                         Err(())
                     }
@@ -515,7 +591,7 @@ mod tests {
         // What a failed bind leaves behind: listening would pick a random port
         let socket = TcpSocket::new_v4().unwrap();
         let err = listener(socket, "0.0.0.0:25").listen().unwrap_err();
-        assert!(err.contains("isn't bound"), "{err}");
+        assert!(err.contains("Refusing to listen"), "{err}");
     }
 
     #[tokio::test]

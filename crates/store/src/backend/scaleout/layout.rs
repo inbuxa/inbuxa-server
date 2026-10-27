@@ -98,7 +98,7 @@ pub async fn check(
     if write {
         let mut batch = BatchBuilder::new();
         batch.set(class, serde_json::to_vec(current).unwrap_or_default());
-        data.write(batch.build_all()).await?;
+        data.write_batch(&mut batch).await?;
     }
     Ok(comparison)
 }

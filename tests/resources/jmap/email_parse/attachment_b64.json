@@ -19,6 +19,7 @@
   "subject": "HTML test",
   "sentAt": "2021-12-14T10:48:25Z",
   "bodyStructure": {
+    "size": 553,
     "headers": [
       {
         "name": "To",

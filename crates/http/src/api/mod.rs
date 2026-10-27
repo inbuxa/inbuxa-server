@@ -9,9 +9,11 @@
 pub mod diagnose;
 
 use crate::{
-    api::diagnose::{DeliveryStage, spawn_delivery_diagnose},
+    api::diagnose::{DeliveryStage, DeliveryTarget, spawn_delivery_diagnose},
     auth::{
-        authenticate::Authenticator, oauth::auth::OAuthApiHandler, permissions::AccountApiHandler,
+        authenticate::{Authenticator, HttpAuthenticated},
+        oauth::{auth::OAuthApiHandler, request_origin},
+        permissions::AccountApiHandler,
     },
 };
 use common::{
@@ -68,10 +70,21 @@ impl ManagementApi for Server {
             "auth" if is_post => {
                 self.is_http_anonymous_request_allowed(session.remote_ip)
                     .await?;
-                Box::pin(self.handle_login_request(
+                self.handle_login_request(
                     session,
+                    request_origin(req, session),
                     body.ok_or_else(|| trc::LimitEvent::SizeRequest.into_err())?,
-                ))
+                )
+                .await
+            }
+            "auth" if path.get(1).copied() == Some("client") => {
+                self.is_http_anonymous_request_allowed(session.remote_ip)
+                    .await?;
+                self.handle_client_info_request(
+                    session,
+                    request_origin(req, session),
+                    req.uri().query().unwrap_or_default(),
+                )
                 .await
             }
             "calendar"
@@ -97,15 +110,23 @@ impl ManagementApi for Server {
                 if let Some(email) = path.get(1).copied() {
                     self.is_http_anonymous_request_allowed(session.remote_ip)
                         .await?;
-                    self.handle_discover_request(session, decode_path_element(email).as_ref())
-                        .await
+                    self.handle_discover_request(
+                        session,
+                        request_origin(req, session),
+                        decode_path_element(email).as_ref(),
+                    )
+                    .await
                 } else {
                     Err(trc::ResourceEvent::NotFound.into_err())
                 }
             }
             // inbuxa: EX-23, "Explain this", streamed as the model writes
             "explain" if is_post => {
-                let (in_flight, access_token) = self.authenticate_headers(req, session).await?;
+                let HttpAuthenticated {
+                    in_flight,
+                    access_token,
+                    ..
+                } = self.authenticate_headers(req, session).await?;
                 jmap::inbuxa::explanation::assert_allowed(&access_token)?;
                 let subject = body
                     .as_deref()
@@ -118,11 +139,17 @@ impl ManagementApi for Server {
                     })?;
                 let question =
                     jmap::inbuxa::explanation::question(self, &access_token, &subject).await?;
-                Ok(explain_stream(self.clone(), access_token, question, in_flight))
+                Ok(explain_stream(
+                    self.clone(),
+                    access_token,
+                    question,
+                    in_flight,
+                ))
             }
             // inbuxa: try a saved directory before anything signs in through it
             "directory" if is_post && path.get(1).copied() == Some("test") => {
-                let (_in_flight, access_token) = self.authenticate_headers(req, session).await?;
+                let HttpAuthenticated { access_token, .. } =
+                    self.authenticate_headers(req, session).await?;
                 jmap::inbuxa::directory_test::assert_allowed(&access_token)?;
                 let request = body
                     .as_deref()
@@ -133,7 +160,8 @@ impl ManagementApi for Server {
             }
             // inbuxa: send one sample event to a saved webhook
             "webhook" if is_post && path.get(1).copied() == Some("test") => {
-                let (_in_flight, access_token) = self.authenticate_headers(req, session).await?;
+                let HttpAuthenticated { access_token, .. } =
+                    self.authenticate_headers(req, session).await?;
                 jmap::inbuxa::webhook_test::assert_allowed(&access_token)?;
                 let request = body
                     .as_deref()
@@ -144,7 +172,8 @@ impl ManagementApi for Server {
             }
             // inbuxa: whether the outside world reaches each node's ports
             "ports" if path.get(1).copied() == Some("check") => {
-                let (_in_flight, access_token) = self.authenticate_headers(req, session).await?;
+                let HttpAuthenticated { access_token, .. } =
+                    self.authenticate_headers(req, session).await?;
                 if access_token.tenant_id().is_some() {
                     return Err(trc::JmapEvent::Forbidden
                         .into_err()
@@ -156,12 +185,22 @@ impl ManagementApi for Server {
             }
             "account" => {
                 // Authenticate request
-                let (_in_flight, access_token) = self.authenticate_headers(req, session).await?;
+                let HttpAuthenticated {
+                    in_flight: _in_flight,
+                    access_token,
+                    ..
+                } = self.authenticate_headers(req, session).await?;
                 self.handle_account_request(&access_token).await
             }
             "schema" => {
                 // Authenticate request
-                let (_in_flight, access_token) = self.authenticate_headers(req, session).await?;
+                let HttpAuthenticated {
+                    in_flight: _in_flight,
+                    access_token,
+                    ..
+                } = self.authenticate_headers(req, session).await?;
+
+                // inbuxa: one schema, ours, whatever the features
                 static SCHEMA_JSON: &[u8] =
                     include_bytes!("../../../../resources/schema/schema.json.gz");
                 const SCHEMA_HASH: &str =
@@ -172,7 +211,7 @@ impl ManagementApi for Server {
                     // authenticate_headers and its CORS headers vary by
                     // Origin, so a shared or origin-agnostic cache entry is
                     // wrong -- and, being immutable, wrong for a year.
-                    Ok(Resource::new("application/json", SCHEMA_JSON.to_vec())
+                    Ok(Resource::new("application/json", SCHEMA_JSON)
                         .into_http_response()
                         .with_private_immutable_cache()
                         .with_header(CONTENT_ENCODING, "gzip"))
@@ -266,11 +305,13 @@ impl ManagementApi for Server {
                                 .unwrap_or(30),
                         );
 
-                        let mut rx = spawn_delivery_diagnose(
-                            self.clone(),
-                            decode_path_element(target).to_lowercase(),
-                            timeout,
-                        );
+                        let target = DeliveryTarget::parse(&decode_path_element(target))
+                            .ok_or_else(|| {
+                                trc::ResourceEvent::BadParameters
+                                    .into_err()
+                                    .details("Invalid delivery target")
+                            })?;
+                        let mut rx = spawn_delivery_diagnose(self.clone(), target, timeout);
 
                         Ok(HttpResponse::new(StatusCode::OK)
                             .with_content_type("text/event-stream")
@@ -334,26 +375,37 @@ impl ManagementApi for Server {
             } else {
                 self.authenticate_headers(req, session)
                     .await
-                    .map(|(_, token)| token)
+                    .map(|auth| auth.access_token)
             }
         } else {
             self.authenticate_headers(req, session)
                 .await
-                .map(|(_, token)| token)
+                .map(|auth| auth.access_token)
         }
     }
 }
 
 pub trait ToManageHttpResponse {
-    fn into_http_response(self, challenge: AuthChallenge) -> HttpResponse;
+    fn into_http_response(
+        self,
+        challenge: AuthChallenge,
+        resource_metadata: impl FnOnce() -> String,
+    ) -> HttpResponse;
 }
 
 impl ToManageHttpResponse for &trc::Error {
-    fn into_http_response(self, challenge: AuthChallenge) -> HttpResponse {
+    fn into_http_response(
+        self,
+        challenge: AuthChallenge,
+        resource_metadata: impl FnOnce() -> String,
+    ) -> HttpResponse {
         match self.as_ref() {
             trc::EventType::Auth(
-                trc::AuthEvent::Failed | trc::AuthEvent::Error | trc::AuthEvent::TokenExpired,
-            ) => HttpResponse::unauthorized(challenge),
+                trc::AuthEvent::Failed
+                | trc::AuthEvent::Error
+                | trc::AuthEvent::TokenExpired
+                | trc::AuthEvent::CredentialExpired,
+            ) => HttpResponse::unauthorized(challenge, &resource_metadata()),
             _ => self.to_request_error().into_http_response(),
         }
     }
@@ -371,11 +423,7 @@ pub fn accept_language(req: &HttpRequest) -> &str {
         .unwrap_or("en")
 }
 
-const BEARER_CHALLENGE: &str = concat!(
-    concat!("Bearer realm=\"", types::brand_server!(), "\", "),
-    "resource_metadata=\"/.well-known/oauth-protected-resource\""
-);
-const BASIC_CHALLENGE: &str = concat!("Basic realm=\"", types::brand_server!(), "\"");
+pub(crate) const BASIC_CHALLENGE: &str = concat!("Basic realm=\"", types::brand_server!(), "\"");
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AuthChallenge {
@@ -384,13 +432,18 @@ pub enum AuthChallenge {
 }
 
 pub trait UnauthorizedResponse {
-    fn unauthorized(challenge: AuthChallenge) -> Self;
+    fn unauthorized(challenge: AuthChallenge, resource_metadata: &str) -> Self;
 }
 
 impl UnauthorizedResponse for HttpResponse {
-    fn unauthorized(challenge: AuthChallenge) -> Self {
-        let response = HttpResponse::new(StatusCode::UNAUTHORIZED)
-            .with_header(header::WWW_AUTHENTICATE, BEARER_CHALLENGE);
+    fn unauthorized(challenge: AuthChallenge, resource_metadata: &str) -> Self {
+        let response = HttpResponse::new(StatusCode::UNAUTHORIZED).with_header(
+            header::WWW_AUTHENTICATE,
+            format!(
+                "Bearer realm=\"{}\", resource_metadata=\"{resource_metadata}\"",
+                types::brand_server!()
+            ),
+        );
 
         if challenge == AuthChallenge::BearerAndBasic {
             response.with_header(header::WWW_AUTHENTICATE, BASIC_CHALLENGE)

@@ -15,7 +15,7 @@ use registry::schema::prelude::{Object, ObjectInner, Property};
 /// The logo and template fields an object carries, with their checks.
 fn fields(inner: &ObjectInner) -> Vec<(Property, Option<&str>, fn(&str) -> Result<(), String>)> {
     match inner {
-        ObjectInner::Enterprise(o) => vec![(Property::LogoUrl, o.logo_url.as_deref(), logo::check)],
+        ObjectInner::Enterprise(o) => vec![(Property::Logo, o.logo.as_deref(), logo::check)],
         ObjectInner::Domain(o) => vec![(Property::Logo, o.logo.as_deref(), logo::check)],
         ObjectInner::Tenant(o) => vec![(Property::Logo, o.logo.as_deref(), logo::check)],
         ObjectInner::OAuthClient(o) => vec![(Property::Logo, o.logo.as_deref(), logo::check)],

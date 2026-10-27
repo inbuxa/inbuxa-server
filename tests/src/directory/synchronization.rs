@@ -2,6 +2,8 @@
  * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
+ *
+ * Modified by Coffey Labs in 2026 for INBUXA.
  */
 
 use crate::utils::server::TestServerBuilder;
@@ -88,7 +90,7 @@ pub async fn test() {
         &EmailAlias {
             description: None,
             domain_id,
-            enabled: true,
+            enable: true,
             name: "john.doe".to_string(),
         }
     );
@@ -97,7 +99,7 @@ pub async fn test() {
         &EmailAlias {
             description: None,
             domain_id,
-            enabled: true,
+            enable: true,
             name: "j.doe".to_string(),
         }
     );
@@ -200,7 +202,7 @@ pub async fn test() {
         &EmailAlias {
             description: None,
             domain_id,
-            enabled: true,
+            enable: true,
             name: "johnny".to_string(),
         }
     );
@@ -290,7 +292,7 @@ pub async fn test() {
         &EmailAlias {
             description: None,
             domain_id,
-            enabled: true,
+            enable: true,
             name: "everyone".to_string(),
         }
     );

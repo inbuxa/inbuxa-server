@@ -51,13 +51,14 @@ impl Property for DataInventoryProperty {
 
 impl DataInventoryProperty {
     fn parse(value: &str) -> Option<Self> {
-        hashify::tiny_map!(value.as_bytes(),
-            b"id" => DataInventoryProperty::Id,
-            b"evaluatedAt" => DataInventoryProperty::EvaluatedAt,
-            b"catalogVersion" => DataInventoryProperty::CatalogVersion,
-            b"summary" => DataInventoryProperty::Summary,
-            b"items" => DataInventoryProperty::Items,
-            b"processors" => DataInventoryProperty::Processors,
+        hashify::fnc_map!(value.as_bytes(),
+            b"id" => Some(DataInventoryProperty::Id),
+            b"evaluatedAt" => Some(DataInventoryProperty::EvaluatedAt),
+            b"catalogVersion" => Some(DataInventoryProperty::CatalogVersion),
+            b"summary" => Some(DataInventoryProperty::Summary),
+            b"items" => Some(DataInventoryProperty::Items),
+            b"processors" => Some(DataInventoryProperty::Processors),
+            _ => None,
         )
     }
 }

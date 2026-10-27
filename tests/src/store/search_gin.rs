@@ -36,7 +36,11 @@ pub async fn postgres_gin_fastupdate() {
     let store = Store::build(DataStore::PostgreSql(config))
         .await
         .expect("Failed to connect to PostgreSQL");
-    let search = SearchStore::Store(store.clone());
+    // inbuxa: 1.0 has a search store variant per SQL backend
+    let Store::PostgreSQL(pg) = &store else {
+        panic!("not a PostgreSQL store")
+    };
+    let search = SearchStore::PostgreSQL(pg.clone());
 
     // A fresh schema
     search.create_indexes().await.unwrap();

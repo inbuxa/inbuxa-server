@@ -10,7 +10,7 @@
 
 use crate::queue::{
     MessageSource,
-    spool::{QueueParams, SmtpSpool},
+    spool::{QueueOutcome, QueueParams, SmtpSpool},
 };
 use common::Server;
 
@@ -37,6 +37,7 @@ pub async fn send_signed(
     if message
         .queue(QueueParams::new(raw, 0, server).with_dkim_signers(Some(signers)))
         .await
+        == QueueOutcome::Queued
     {
         Ok(())
     } else {

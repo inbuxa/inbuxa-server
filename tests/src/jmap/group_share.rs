@@ -36,15 +36,23 @@ pub async fn test(test: &TestServer) {
         (MethodObject::AddressBook, "mayRead"),
         (MethodObject::FileNode, "mayRead"),
     ] {
+        // A FileNode is created with its "@type" (1.0)
+        let new_object = |mut value: serde_json::Value| {
+            if matches!(object, MethodObject::FileNode) {
+                value["@type"] = json!("Directory");
+            }
+            value
+        };
+
         // Made with a share: refused
         let response = bill
             .jmap_create_account(
                 sales,
                 object,
-                [json!({
+                [new_object(json!({
                     "name": "Shared on",
                     "shareWith": {&robert_id: {read: true}}
-                })],
+                }))],
                 Vec::<(&str, &str)>::new(),
             )
             .await;
@@ -60,7 +68,7 @@ pub async fn test(test: &TestServer) {
             .jmap_create_account(
                 sales,
                 object,
-                [json!({"name": "The group's"})],
+                [new_object(json!({"name": "The group's"}))],
                 Vec::<(&str, &str)>::new(),
             )
             .await
@@ -72,18 +80,21 @@ pub async fn test(test: &TestServer) {
             .await
             .list()[0]["myRights"]
             .clone();
-        assert_eq!(rights["mayShare"], false, "MA-D0: {object} myRights {rights}");
-        assert_eq!(rights["mayDelete"], true, "MA-D0: {object} myRights {rights}");
+        assert_eq!(
+            rights["mayShare"], false,
+            "MA-D0: {object} myRights {rights}"
+        );
+        assert_eq!(
+            rights["mayDelete"], true,
+            "MA-D0: {object} myRights {rights}"
+        );
 
         // Shared afterwards: refused
         let response = bill
             .jmap_update_account(
                 sales,
                 object,
-                [(
-                    &id,
-                    json!({format!("shareWith/{robert_id}"): {read: true}}),
-                )],
+                [(&id, json!({format!("shareWith/{robert_id}"): {read: true}}))],
                 Vec::<(&str, &str)>::new(),
             )
             .await;
@@ -101,7 +112,8 @@ pub async fn test(test: &TestServer) {
                 .await
                 .method_response()
                 .typ(),
-            "forbidden",
+            // 1.0 answers accountNotFound when there is no access at all
+            "accountNotFound",
             "MA-D0: {object} reached from outside"
         );
 

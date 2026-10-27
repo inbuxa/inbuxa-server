@@ -2,6 +2,8 @@
  * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
+ *
+ * Modified by Coffey Labs in 2026 for INBUXA.
  */
 
 use crate::{
@@ -123,7 +125,7 @@ pub async fn test(test: &TestServer) {
                 name: "mock-push".into(),
                 bind: Map::new(vec![SocketAddr::from_str("127.0.0.1:19000").unwrap()]),
                 protocol: NetworkListenerProtocol::Http,
-                tls_implicit: true,
+                implicit_tls: true,
                 use_tls: true,
                 socket_reuse_address: true,
                 socket_reuse_port: true,
@@ -172,6 +174,19 @@ pub async fn test(test: &TestServer) {
         .take_id();
 
     assert_state(&mut event_rx, account.id(), &[DataType::Mailbox]).await;
+    // inbuxa: creating a mailbox writes two changes in 1.0; the second is
+    // held by the push throttle and may follow, still as a Mailbox state
+    if let Ok(Some(push)) = tokio::time::timeout(Duration::from_secs(3), event_rx.recv()).await {
+        assert_eq!(
+            push.unwrap_state_change()
+                .get(&account.id())
+                .unwrap()
+                .iter()
+                .map(|x| x.0)
+                .collect::<AHashSet<&DataType>>(),
+            [DataType::Mailbox].iter().collect::<AHashSet<&DataType>>()
+        );
+    }
 
     // Receive states just for the requested types
     client

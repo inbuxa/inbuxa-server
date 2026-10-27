@@ -1,0 +1,403 @@
+/*
+ * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
+ *
+ * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
+ */
+
+use super::{
+    Handler, MAX_ENTITY, MAX_NAME, MAX_TAG_CARRY, Tag, Text,
+    attr::{resolve_entity, split_entity},
+};
+use crate::{output::Output, utf8::LazyUtf8};
+use memchr::{memchr2, memmem};
+
+const CDATA_OPEN: &[u8] = b"<![CDATA[";
+const COMMENT_OPEN: &[u8] = b"<!--";
+
+#[derive(Clone, Copy)]
+enum State {
+    Text,
+    Comment,
+    CData,
+    Instruction,
+    Declaration { depth: u32, quote: u8 },
+    LongTag(LongTag),
+}
+
+#[derive(Clone, Copy)]
+struct LongTag {
+    closing: bool,
+    quote: u8,
+    previous: u8,
+    name: [u8; MAX_NAME],
+    name_len: usize,
+}
+
+impl LongTag {
+    fn new(closing: bool, name: &[u8]) -> Self {
+        let mut stored = [0u8; MAX_NAME];
+        let name_len = match stored.get_mut(..name.len()) {
+            Some(slot) => {
+                slot.copy_from_slice(name);
+                name.len()
+            }
+            None => 0,
+        };
+        LongTag {
+            closing,
+            quote: 0,
+            previous: 0,
+            name: stored,
+            name_len,
+        }
+    }
+
+    fn name(&self) -> &[u8] {
+        self.name.get(..self.name_len).unwrap_or_default()
+    }
+}
+
+pub(crate) struct Scanner {
+    state: State,
+}
+
+impl Default for Scanner {
+    fn default() -> Self {
+        Scanner { state: State::Text }
+    }
+}
+
+struct Input<'a> {
+    len: usize,
+    utf8: LazyUtf8<'a>,
+}
+
+impl<'a> Input<'a> {
+    #[inline]
+    fn text(&mut self, rest: &'a [u8], len: usize) -> Text<'a> {
+        match self.utf8.get(self.len - rest.len(), len) {
+            Some(valid) => Text::valid(valid),
+            None => Text::raw(rest.get(..len).unwrap_or_default()),
+        }
+    }
+}
+
+impl Scanner {
+    pub(crate) fn feed<H: Handler>(
+        &mut self,
+        bytes: &[u8],
+        last: bool,
+        handler: &mut H,
+        out: &mut Output<'_>,
+    ) -> usize {
+        let input_len = bytes.len();
+        let mut input = Input {
+            len: input_len,
+            utf8: LazyUtf8::new(bytes),
+        };
+        let mut rest = bytes;
+        while !out.is_full() && !handler.aborted() {
+            match self.state {
+                State::Text => match if rest.first() == Some(&b'<') {
+                    Some(0)
+                } else {
+                    memchr2(b'<', b'&', rest)
+                } {
+                    None => {
+                        let keep = if last { 0 } else { incomplete_utf8_tail(rest) };
+                        let len = rest.len() - keep;
+                        if len > 0 {
+                            handler.text(input.text(rest, len), out);
+                        }
+                        return input_len - keep;
+                    }
+                    Some(at) => {
+                        let markup = rest.get(at..).unwrap_or_default();
+                        if at > 0 {
+                            let text = input.text(rest, at);
+                            handler.text(text.closed_by_tag(markup.first() == Some(&b'<')), out);
+                        }
+                        let step = if markup.first() == Some(&b'&') {
+                            entity(markup, last, handler, out)
+                        } else {
+                            self.markup(markup, last, handler, out)
+                        };
+                        match step {
+                            Some(consumed) => rest = markup.get(consumed..).unwrap_or_default(),
+                            None => return input_len - markup.len(),
+                        }
+                    }
+                },
+                State::Comment => match memmem::find(rest, b"-->") {
+                    Some(at) => {
+                        self.state = State::Text;
+                        rest = rest.get(at + 3..).unwrap_or_default();
+                    }
+                    None => return input_len - if last { 0 } else { rest.len().min(2) },
+                },
+                State::Instruction => match memmem::find(rest, b"?>") {
+                    Some(at) => {
+                        self.state = State::Text;
+                        rest = rest.get(at + 2..).unwrap_or_default();
+                    }
+                    None => return input_len - if last { 0 } else { rest.len().min(1) },
+                },
+                State::CData => match memmem::find(rest, b"]]>") {
+                    Some(at) => {
+                        if at > 0 {
+                            handler.text(input.text(rest, at), out);
+                        }
+                        self.state = State::Text;
+                        rest = rest.get(at + 3..).unwrap_or_default();
+                    }
+                    None => {
+                        let mut end = if last {
+                            rest.len()
+                        } else {
+                            rest.len().saturating_sub(2)
+                        };
+                        if !last {
+                            end -= incomplete_utf8_tail(rest.get(..end).unwrap_or_default());
+                        }
+                        if end > 0 {
+                            handler.text(input.text(rest, end), out);
+                        }
+                        return input_len - (rest.len() - end);
+                    }
+                },
+                State::Declaration { depth, quote } => match skip_declaration(rest, depth, quote) {
+                    Ok(consumed) => {
+                        self.state = State::Text;
+                        rest = rest.get(consumed..).unwrap_or_default();
+                    }
+                    Err((depth, quote)) => {
+                        self.state = State::Declaration { depth, quote };
+                        return input_len;
+                    }
+                },
+                State::LongTag(mut long) => match find_tag_end(rest, &mut long.quote) {
+                    Some(at) => {
+                        let self_closing = match at.checked_sub(1) {
+                            Some(before) => rest.get(before) == Some(&b'/'),
+                            None => long.previous == b'/',
+                        };
+                        let name = long.name();
+                        if long.closing {
+                            handler.end(name, out);
+                        } else {
+                            handler.start(&Tag { name, attrs: None }, out);
+                            if self_closing {
+                                handler.end(name, out);
+                            }
+                        }
+                        self.state = State::Text;
+                        rest = rest.get(at + 1..).unwrap_or_default();
+                    }
+                    None => {
+                        if let Some(&previous) = rest.last() {
+                            long.previous = previous;
+                        }
+                        self.state = State::LongTag(long);
+                        return input_len;
+                    }
+                },
+            }
+        }
+        input_len
+    }
+
+    fn markup<H: Handler>(
+        &mut self,
+        rest: &[u8],
+        last: bool,
+        handler: &mut H,
+        out: &mut Output<'_>,
+    ) -> Option<usize> {
+        match rest {
+            [b'<', b'/', tail @ ..] => match tail.iter().position(|&byte| byte == b'>') {
+                Some(gt) => {
+                    handler.end(tail.get(..gt).unwrap_or_default().trim_ascii_end(), out);
+                    Some(gt + 3)
+                }
+                None if !last && rest.len() < MAX_TAG_CARRY => None,
+                None => {
+                    let name_len = tail
+                        .iter()
+                        .position(|byte| byte.is_ascii_whitespace())
+                        .unwrap_or(tail.len());
+                    self.state = State::LongTag(LongTag::new(
+                        true,
+                        tail.get(..name_len).unwrap_or_default(),
+                    ));
+                    Some(rest.len())
+                }
+            },
+            [b'<', b'!', b'-', b'-', ..] => {
+                self.state = State::Comment;
+                Some(COMMENT_OPEN.len())
+            }
+            [b'<', b'!', ..] if rest.starts_with(CDATA_OPEN) => {
+                self.state = State::CData;
+                Some(CDATA_OPEN.len())
+            }
+            [b'<', b'!', ..]
+                if !last && (CDATA_OPEN.starts_with(rest) || COMMENT_OPEN.starts_with(rest)) =>
+            {
+                None
+            }
+            [b'<', b'!', ..] => {
+                self.state = State::Declaration { depth: 0, quote: 0 };
+                Some(2)
+            }
+            [b'<', b'?', ..] => {
+                self.state = State::Instruction;
+                Some(2)
+            }
+            [b'<', first, ..] if is_name_start(*first) => self.start_tag(rest, last, handler, out),
+            [b'<'] if !last => None,
+            _ => {
+                handler.text(Text::valid("<"), out);
+                Some(1)
+            }
+        }
+    }
+
+    fn start_tag<H: Handler>(
+        &mut self,
+        rest: &[u8],
+        last: bool,
+        handler: &mut H,
+        out: &mut Output<'_>,
+    ) -> Option<usize> {
+        let body = rest.get(1..).unwrap_or_default();
+        let name_len = body
+            .iter()
+            .position(|&byte| byte.is_ascii_whitespace() || byte == b'/' || byte == b'>');
+        let mut quote = 0;
+        let end = name_len.and_then(|name_len| {
+            find_tag_end(body.get(name_len..)?, &mut quote).map(|at| name_len + at)
+        });
+        match (name_len, end) {
+            (Some(name_len), Some(at)) => {
+                let (name, _) = body.split_at(name_len);
+                let self_closing = at > name_len && body.get(at - 1) == Some(&b'/');
+                let attrs_end = if self_closing { at - 1 } else { at };
+                handler.start(
+                    &Tag {
+                        name,
+                        attrs: body.get(name_len..attrs_end.max(name_len)),
+                    },
+                    out,
+                );
+                if self_closing {
+                    handler.end(name, out);
+                }
+                Some(at + 2)
+            }
+            _ if !last && rest.len() < MAX_TAG_CARRY => None,
+            (name_len, _) => {
+                let name_len = name_len.unwrap_or(body.len());
+                let mut long = LongTag::new(false, body.get(..name_len).unwrap_or_default());
+                long.quote = quote;
+                long.previous = rest.last().copied().unwrap_or(0);
+                self.state = State::LongTag(long);
+                Some(rest.len())
+            }
+        }
+    }
+}
+
+fn entity<H: Handler>(
+    rest: &[u8],
+    last: bool,
+    handler: &mut H,
+    out: &mut Output<'_>,
+) -> Option<usize> {
+    match split_entity(rest) {
+        Some((body, after)) => {
+            match resolve_entity(body) {
+                Some(ch) => {
+                    let mut encoded = [0u8; 4];
+                    handler.text(Text::valid(ch.encode_utf8(&mut encoded)), out);
+                }
+                None if body.first() == Some(&b'#') => (),
+                None if !body.is_empty() && body.iter().all(u8::is_ascii_alphanumeric) => {
+                    handler.entity(body, out);
+                }
+                None => {
+                    handler.text(Text::valid("&"), out);
+                    return Some(1);
+                }
+            }
+            Some(rest.len() - after.len())
+        }
+        None if !last && rest.len() < MAX_ENTITY => None,
+        None => {
+            handler.text(Text::valid("&"), out);
+            Some(1)
+        }
+    }
+}
+
+fn find_tag_end(bytes: &[u8], quote: &mut u8) -> Option<usize> {
+    let mut cursor = 0;
+    loop {
+        let tail = bytes.get(cursor..)?;
+        if *quote != 0 {
+            cursor += tail.iter().position(|&byte| byte == *quote)? + 1;
+            *quote = 0;
+            continue;
+        }
+        let at = tail
+            .iter()
+            .position(|&byte| byte == b'>' || byte == b'"' || byte == b'\'')?;
+        match tail.get(at) {
+            Some(b'>') => return Some(cursor + at),
+            Some(&found) => {
+                *quote = found;
+                cursor += at + 1;
+            }
+            None => return None,
+        }
+    }
+}
+
+fn skip_declaration(bytes: &[u8], mut depth: u32, mut quote: u8) -> Result<usize, (u32, u8)> {
+    for (at, &byte) in bytes.iter().enumerate() {
+        if quote != 0 {
+            if byte == quote {
+                quote = 0;
+            }
+            continue;
+        }
+        match byte {
+            b'"' | b'\'' => quote = byte,
+            b'[' => depth = depth.saturating_add(1),
+            b']' => depth = depth.saturating_sub(1),
+            b'>' if depth == 0 => return Ok(at + 1),
+            _ => {}
+        }
+    }
+    Err((depth, quote))
+}
+
+#[inline]
+fn is_name_start(byte: u8) -> bool {
+    byte.is_ascii_alphabetic() || byte == b'_' || byte == b':' || byte >= 0x80
+}
+
+pub(crate) fn incomplete_utf8_tail(bytes: &[u8]) -> usize {
+    for (back, &byte) in bytes.iter().rev().take(3).enumerate() {
+        if byte & 0xC0 != 0x80 {
+            let needed = match byte {
+                0xF0.. => 4,
+                0xE0.. => 3,
+                0xC0.. => 2,
+                _ => 1,
+            };
+            return if needed > back + 1 { back + 1 } else { 0 };
+        }
+    }
+    0
+}
+

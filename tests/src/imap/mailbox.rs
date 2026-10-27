@@ -2,6 +2,8 @@
  * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
+ *
+ * Modified by Coffey Labs in 2026 for INBUXA.
  */
 
 use imap::op::list::matches_pattern;
@@ -250,6 +252,10 @@ pub async fn test(
         );
 
     // Recursive match including children
+    // inbuxa: 1.0 suppresses redundant CHILDINFO (RFC 5258 3.5): with "*"
+    // the subscribed child is listed itself, so its parents are left out;
+    // with "%" the child isn't matched and the top-level parent carries
+    // CHILDINFO
     imap.send("LIST (SUBSCRIBED RECURSIVEMATCH) \"\" \"*\" RETURN (CHILDREN)")
         .await;
     imap.assert_read(Type::Tagged, ResponseType::Ok)
@@ -261,14 +267,16 @@ pub async fn test(
                     "Vehicles/Electric/4 doors/Red",
                     ["Subscribed", "HasNoChildren"],
                 ),
-                (
-                    "Vehicles/Electric/4 doors",
-                    ["\"CHILDINFO\" (\"SUBSCRIBED\")", "HasChildren"],
-                ),
-                (
-                    "Vehicles/Electric",
-                    ["\"CHILDINFO\" (\"SUBSCRIBED\")", "HasChildren"],
-                ),
+            ],
+            true,
+        );
+    imap.send("LIST (SUBSCRIBED RECURSIVEMATCH) \"\" \"%\" RETURN (CHILDREN)")
+        .await;
+    imap.assert_read(Type::Tagged, ResponseType::Ok)
+        .await
+        .assert_folders(
+            [
+                ("INBOX", ["Subscribed", "HasNoChildren"]),
                 (
                     "Vehicles",
                     ["\"CHILDINFO\" (\"SUBSCRIBED\")", "HasChildren"],

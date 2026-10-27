@@ -6,23 +6,26 @@
  * Modified by Coffey Labs in 2026 for INBUXA.
  */
 
-use super::{PostgresStore, bounded, into_error};
+use super::{PostgresStore, into_error};
 use crate::{
     backend::postgres::{
-        PsqlSearchField, into_pool_error,
+        PsqlSearchField, bounded, into_pool_error,
+        pool::{PgManager, PgObject, PgPool},
         search::{PG_FALLBACK_LANG, PG_LANGS, PG_UNSTEMMED_LANG},
+        sql::SqlStatements,
         tls::MakeRustlsConnect,
     },
     search::{
-        CalendarSearchField, ContactSearchField, EmailSearchField, SearchField, SearchableField,
-        TracingSearchField,
+        CalendarSearchField, ContactSearchField, EmailSearchField, FileSearchField,
+        SearchableField, TracingSearchField,
     },
     *,
 };
 use ::registry::schema::{enums::PostgreSqlRecyclingMethod, structs};
 use ahash::AHashSet;
+use compact_str::ToCompactString;
 use deadpool_postgres::{
-    Config, ManagerConfig, Object, Pool, PoolConfig, RecyclingMethod, Runtime, Timeouts,
+    Config, Manager, ManagerConfig, PoolConfig, RecyclingMethod, Runtime, Timeouts,
 };
 use std::time::Duration;
 use tokio_postgres::NoTls;
@@ -64,7 +67,7 @@ impl PostgresStore {
         cfg.user = config.auth_username;
         cfg.password = config.auth_secret.secret().await?.map(|v| v.into_owned());
         cfg.port = (config.port as u16).into();
-        cfg.connect_timeout = config.timeout.map(|t| t.into_inner());
+        cfg.connect_timeout = config.connect_timeout.map(|t| t.into_inner());
         cfg.options = config.options;
         cfg.manager = Some(ManagerConfig {
             recycling_method: match config.pool_recycling_method {
@@ -73,14 +76,15 @@ impl PostgresStore {
                 PostgreSqlRecyclingMethod::Clean => RecyclingMethod::Clean,
             },
         });
+        let mut pool = PoolConfig::new(
+            config
+                .pool_max_connections
+                .map_or_else(backend::default_pool_max_connections, |max| max as usize),
+        );
         // inbuxa: upstream set no pool timeouts, so a request waited for a
         // free connection, or for one to be made or recycled, for as long as
         // it took: forever when the server stopped answering. A worker now
         // gets an error instead and the task or request is retried.
-        let mut pool = config
-            .pool_max_connections
-            .map(|max_conn| PoolConfig::new(max_conn as usize))
-            .unwrap_or_default();
         pool.timeouts = pool_timeouts(cfg.connect_timeout);
         cfg.pool = pool.into();
         // Notice a server that went away without closing the connection in
@@ -88,16 +92,9 @@ impl PostgresStore {
         cfg.keepalives = true.into();
         cfg.keepalives_idle = POOL_KEEPALIVE_IDLE.into();
 
-        let primary_pool = if config.use_tls {
-            cfg.create_pool(
-                Some(Runtime::Tokio1),
-                MakeRustlsConnect::new(rustls_client_config(config.allow_invalid_certs)?),
-            )
-        } else {
-            cfg.create_pool(Some(Runtime::Tokio1), NoTls)
-        }
-        .map_err(|e| format!("Failed to create connection pool: {e}"))?;
+        let primary_pool = create_pool(&cfg, config.use_tls, config.allow_invalid_certs)?;
         let ts_configs = discover_ts_configs(&primary_pool).await;
+        let sql = Arc::new(SqlStatements::new());
 
         // inbuxa: ST-5 to ST-15: each replica inherits the primary's settings
         // except where it is and how to sign in
@@ -110,19 +107,11 @@ impl PostgresStore {
             cfg.password = replica.auth_secret.secret().await?.map(|v| v.into_owned());
             cfg.port = (replica.port as u16).into();
             cfg.options = replica.options;
-            let pool = if config.use_tls {
-                cfg.create_pool(
-                    Some(Runtime::Tokio1),
-                    MakeRustlsConnect::new(rustls_client_config(config.allow_invalid_certs)?),
-                )
-            } else {
-                cfg.create_pool(Some(Runtime::Tokio1), NoTls)
-            }
-            .map_err(|e| format!("Failed to create connection pool: {e}"))?;
             replicas.push(crate::backend::scaleout::replica::Replica::new(
                 Store::PostgreSQL(Arc::new(PostgresStore {
-                    conn_pool: pool,
+                    conn_pool: create_pool(&cfg, config.use_tls, config.allow_invalid_certs)?,
                     ts_configs: ts_configs.clone(),
+                    sql: sql.clone(),
                     timeouts: Default::default(),
                 })),
                 replica.host,
@@ -134,6 +123,7 @@ impl PostgresStore {
         let primary = Store::PostgreSQL(Arc::new(PostgresStore {
             conn_pool: primary_pool,
             ts_configs,
+            sql,
             timeouts: Default::default(),
         }));
 
@@ -155,64 +145,26 @@ impl PostgresStore {
         let conn = self.conn_pool.get().await.map_err(into_pool_error)?;
         let limit = self.timeouts.maintenance;
         let result = tokio::time::timeout(limit, async {
-            for table in [
-                SUBSPACE_ACL,
-                SUBSPACE_TASK_QUEUE,
-                SUBSPACE_DELETED_ITEMS,
-                SUBSPACE_SPAM_SAMPLES,
-                crate::SUBSPACE_INBUXA, // inbuxa: masked email
-                SUBSPACE_BLOB_LINK,
-                SUBSPACE_IN_MEMORY_VALUE,
-                SUBSPACE_PROPERTY,
-                SUBSPACE_REGISTRY,
-                SUBSPACE_REGISTRY_PK,
-                SUBSPACE_QUEUE_MESSAGE,
-                SUBSPACE_QUEUE_EVENT,
-                SUBSPACE_REPORT_OUT,
-                SUBSPACE_REPORT_IN,
-                SUBSPACE_LOGS,
-                SUBSPACE_BLOBS,
-                SUBSPACE_DIRECTORY,
-                SUBSPACE_TELEMETRY_SPAN,
-                SUBSPACE_TELEMETRY_METRIC,
-            ] {
-                let table = char::from(table);
-                conn.execute(
-                    &format!(
-                        "CREATE TABLE IF NOT EXISTS {table} (
-                            k BYTEA PRIMARY KEY,
-                            v BYTEA NOT NULL
-                        )"
+            for subspace in Subspace::ALL
+                .iter()
+                .copied()
+                .filter(|subspace| !subspace.is_internal_fts())
+            {
+                let table = subspace.name();
+                let (columns, storage) = match subspace.shape() {
+                    Shape::Value => (
+                        "k BYTEA PRIMARY KEY, v BYTEA NOT NULL",
+                        " WITH (fillfactor = 85)",
                     ),
-                    &[],
-                )
-                .await
-                .map_err(into_error)?;
-            }
+                    Shape::Presence => ("k BYTEA PRIMARY KEY", ""),
+                    Shape::Counter => (
+                        "k BYTEA PRIMARY KEY, v BIGINT NOT NULL DEFAULT 0",
+                        " WITH (fillfactor = 60)",
+                    ),
+                };
 
-            for table in [SUBSPACE_INDEXES, SUBSPACE_REGISTRY_IDX] {
-                let table = char::from(table);
                 conn.execute(
-                    &format!(
-                        "CREATE TABLE IF NOT EXISTS {table} (
-                            k BYTEA PRIMARY KEY
-                        )"
-                    ),
-                    &[],
-                )
-                .await
-                .map_err(into_error)?;
-            }
-
-            for table in [SUBSPACE_COUNTER, SUBSPACE_QUOTA, SUBSPACE_IN_MEMORY_COUNTER] {
-                conn.execute(
-                    &format!(
-                        "CREATE TABLE IF NOT EXISTS {} (
-                        k BYTEA PRIMARY KEY,
-                        v BIGINT NOT NULL DEFAULT 0
-                    )",
-                        char::from(table)
-                    ),
+                    &format!("CREATE TABLE IF NOT EXISTS {table} ({columns}){storage}"),
                     &[],
                 )
                 .await
@@ -232,7 +184,7 @@ impl PostgresStore {
             create_search_tables::<EmailSearchField>(&conn).await?;
             create_search_tables::<CalendarSearchField>(&conn).await?;
             create_search_tables::<ContactSearchField>(&conn).await?;
-            //create_search_tables::<FileSearchField>(&conn).await?;
+            create_search_tables::<FileSearchField>(&conn).await?;
             create_search_tables::<TracingSearchField>(&conn).await?;
 
             Ok(())
@@ -243,7 +195,7 @@ impl PostgresStore {
 }
 
 async fn create_search_tables<T: SearchableField + PsqlSearchField + 'static>(
-    conn: &Object,
+    conn: &PgObject,
 ) -> trc::Result<()> {
     let table_name = T::index().psql_table();
     let mut query = format!("CREATE TABLE IF NOT EXISTS {} (", table_name);
@@ -256,11 +208,7 @@ async fn create_search_tables<T: SearchableField + PsqlSearchField + 'static>(
 
     // Add other columns
     for field in T::all_fields() {
-        query.push_str(&format!("{} {}", field.column(), field.column_type()));
-        if let Some(sort_type) = field.sort_column_type() {
-            query.push_str(&format!(", {} {}", field.sort_column().unwrap(), sort_type));
-        }
-        query.push_str(", ");
+        query.push_str(&format!("{} {}, ", field.column(), field.column_type()));
     }
 
     // Add primary key constraint
@@ -297,26 +245,13 @@ async fn create_search_tables<T: SearchableField + PsqlSearchField + 'static>(
         }
 
         if field.is_indexed() {
-            let column_name = field.sort_column().unwrap_or(field.column());
+            let column_name = field.column();
             let create_index_query = format!(
                 "CREATE INDEX IF NOT EXISTS idx_{table_name}_{column_name} ON {table_name}({column_name})",
             );
             conn.execute(&create_index_query, &[])
                 .await
                 .map_err(into_error)?;
-            // inbuxa: every sorted query is for one account, so an index led
-            // by the account column answers "this account, in this order"
-            // with an ordered scan instead of sorting the account's rows.
-            // The tracing table has no account column.
-            if T::primary_keys().contains(&SearchField::AccountId) {
-                let account_column = SearchField::AccountId.column();
-                let create_index_query = format!(
-                    "CREATE INDEX IF NOT EXISTS idx_{table_name}_{account_column}_{column_name} ON {table_name}({account_column}, {column_name})",
-                );
-                conn.execute(&create_index_query, &[])
-                    .await
-                    .map_err(into_error)?;
-            }
         }
     }
 
@@ -328,7 +263,7 @@ async fn create_search_tables<T: SearchableField + PsqlSearchField + 'static>(
 /// has the option is left alone, so this costs one catalog read per index at
 /// startup. A failure is logged and startup goes on, since search still works,
 /// only slower.
-async fn disable_gin_fastupdate(conn: &Object, index_name: &str) {
+async fn disable_gin_fastupdate(conn: &PgObject, index_name: &str) {
     if let Err(err) = try_disable_gin_fastupdate(conn, index_name).await {
         trc::event!(
             Store(trc::StoreEvent::PostgresqlError),
@@ -338,7 +273,7 @@ async fn disable_gin_fastupdate(conn: &Object, index_name: &str) {
     }
 }
 
-async fn try_disable_gin_fastupdate(conn: &Object, index_name: &str) -> trc::Result<()> {
+async fn try_disable_gin_fastupdate(conn: &PgObject, index_name: &str) -> trc::Result<()> {
     let options = conn
         .query_opt(
             "SELECT COALESCE(reloptions, '{}')::text[] FROM pg_class WHERE oid = to_regclass($1)",
@@ -386,7 +321,27 @@ fn gin_fastupdate_is_off(options: &[String]) -> bool {
     })
 }
 
-async fn discover_ts_configs(pool: &Pool) -> AHashSet<&'static str> {
+fn create_pool(cfg: &Config, use_tls: bool, allow_invalid_certs: bool) -> Result<PgPool, String> {
+    let pg_config = cfg
+        .get_pg_config()
+        .map_err(|e| format!("Failed to create connection pool: {e}"))?;
+    let manager = if use_tls {
+        Manager::from_config(
+            pg_config,
+            MakeRustlsConnect::new(rustls_client_config(allow_invalid_certs)?),
+            cfg.get_manager_config(),
+        )
+    } else {
+        Manager::from_config(pg_config, NoTls, cfg.get_manager_config())
+    };
+    PgPool::builder(PgManager::new(manager))
+        .config(cfg.get_pool_config())
+        .runtime(Runtime::Tokio1)
+        .build()
+        .map_err(|e| format!("Failed to create connection pool: {e}"))
+}
+
+async fn discover_ts_configs(pool: &PgPool) -> AHashSet<&'static str> {
     let mut ts_configs = AHashSet::from_iter([PG_FALLBACK_LANG, PG_UNSTEMMED_LANG]);
 
     match probe_ts_configs(pool).await {
@@ -401,7 +356,7 @@ async fn discover_ts_configs(pool: &Pool) -> AHashSet<&'static str> {
             trc::event!(
                 Store(trc::StoreEvent::PostgresqlError),
                 Details = "Failed to query pg_ts_config, assuming english only",
-                Reason = err.to_string(),
+                Reason = err.to_compact_string(),
             );
         }
     }
@@ -409,7 +364,7 @@ async fn discover_ts_configs(pool: &Pool) -> AHashSet<&'static str> {
     ts_configs
 }
 
-async fn probe_ts_configs(pool: &Pool) -> trc::Result<Vec<String>> {
+async fn probe_ts_configs(pool: &PgPool) -> trc::Result<Vec<String>> {
     let conn = pool.get().await.map_err(into_pool_error)?;
 
     conn.query("SELECT cfgname::text FROM pg_ts_config", &[])

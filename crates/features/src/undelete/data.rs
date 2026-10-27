@@ -131,6 +131,11 @@ pub struct EmailNote {
     /// The undelete deadline for when no range covers it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub otherwise_until: Option<u64>,
+    /// Its received date, as a Unix timestamp. The message's stored
+    /// metadata no longer carries it, so it's taken at deletion; notes made
+    /// before that fall back to the message's Date header.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub received_at: Option<u64>,
 }
 
 /// What restore needs beyond the kept copy (UD-4, UD-8).
@@ -472,6 +477,7 @@ mod tests {
             keywords: vec![],
             held_ranges: vec![(Some(10), None)],
             otherwise_until: Some(20),
+            received_at: Some(5),
         };
         let bytes = Json(&note).serialize().unwrap();
         assert_eq!(Json::<EmailNote>::deserialize(&bytes).unwrap().0, note);
@@ -480,5 +486,6 @@ mod tests {
         let old = br#"{"archived_at":1,"archived_until":2,"size":3,"mailboxes":[1],"keywords":[]}"#;
         let read = Json::<EmailNote>::deserialize(old).unwrap().0;
         assert!(read.held_ranges.is_empty() && read.otherwise_until.is_none());
+        assert!(read.received_at.is_none());
     }
 }

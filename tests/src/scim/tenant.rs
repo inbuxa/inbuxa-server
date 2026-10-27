@@ -2,6 +2,8 @@
  * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
+ *
+ * Modified by Coffey Labs in 2026 for INBUXA.
  */
 
 use crate::{
@@ -67,7 +69,7 @@ impl TenantFixture {
 
         let domain_id = admin
             .registry_create_object(Domain {
-                is_enabled: true,
+                enable: true,
                 name: TENANT_DOMAIN.to_string(),
                 certificate_management: CertificateManagement::Manual,
                 dns_management: DnsManagement::Manual,

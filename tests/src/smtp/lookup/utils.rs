@@ -2,16 +2,21 @@
  * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
+ *
+ * Modified by Coffey Labs in 2026 for INBUXA.
  */
 
 use crate::utils::server::TestServerBuilder;
 use ::smtp::outbound::NextHop;
-use common::config::smtp::{
-    queue::{MxConfig, QueueExpiry, QueueName},
-    report::AggregateFrequency,
-    resolver::{Mode, MxPattern, Policy},
+use common::{
+    config::smtp::{
+        queue::{MxConfig, QueueExpiry, QueueName},
+        report::AggregateFrequency,
+        resolver::{Mode, MxPattern, Policy},
+    },
+    expr::Bump,
 };
-use mail_auth::{DnssecStatus, IpLookupStrategy, MX, RecordSet};
+use mail_auth::{DnssecStatus, IpLookupStrategy, Mx, RecordSet};
 use mail_parser::DateTime;
 use registry::{
     schema::{
@@ -81,38 +86,38 @@ async fn strategies() {
             name: "test".into(),
             ehlo_hostname: "test.example.com".to_string().into(),
             connect_timeout: 10_000u64.into(),
-            source_ips: List::from_iter([
+            local_ips: List::from_iter([
                 MtaConnectionIpHost {
                     ehlo_hostname: "test1.example.com".to_string().into(),
-                    source_ip: IpAddr::from_str("10.0.0.1").unwrap(),
+                    local_ip: IpAddr::from_str("10.0.0.1").unwrap(),
                 },
                 MtaConnectionIpHost {
                     ehlo_hostname: "test2.example.com".to_string().into(),
-                    source_ip: IpAddr::from_str("10.0.0.2").unwrap(),
+                    local_ip: IpAddr::from_str("10.0.0.2").unwrap(),
                 },
                 MtaConnectionIpHost {
                     ehlo_hostname: "test3.example.com".to_string().into(),
-                    source_ip: IpAddr::from_str("10.0.0.3").unwrap(),
+                    local_ip: IpAddr::from_str("10.0.0.3").unwrap(),
                 },
                 MtaConnectionIpHost {
                     ehlo_hostname: "test4.example.com".to_string().into(),
-                    source_ip: IpAddr::from_str("10.0.0.4").unwrap(),
+                    local_ip: IpAddr::from_str("10.0.0.4").unwrap(),
                 },
                 MtaConnectionIpHost {
                     ehlo_hostname: "test5.example.com".to_string().into(),
-                    source_ip: IpAddr::from_str("a:b::1").unwrap(),
+                    local_ip: IpAddr::from_str("a:b::1").unwrap(),
                 },
                 MtaConnectionIpHost {
                     ehlo_hostname: "test6.example.com".to_string().into(),
-                    source_ip: IpAddr::from_str("a:b::2").unwrap(),
+                    local_ip: IpAddr::from_str("a:b::2").unwrap(),
                 },
                 MtaConnectionIpHost {
                     ehlo_hostname: "test7.example.com".to_string().into(),
-                    source_ip: IpAddr::from_str("a:b::3").unwrap(),
+                    local_ip: IpAddr::from_str("a:b::3").unwrap(),
                 },
                 MtaConnectionIpHost {
                     ehlo_hostname: "test8.example.com".to_string().into(),
-                    source_ip: IpAddr::from_str("a:b::4").unwrap(),
+                    local_ip: IpAddr::from_str("a:b::4").unwrap(),
                 },
             ]),
             ..Default::default()
@@ -196,10 +201,10 @@ async fn strategies() {
             notify: Schedule::now(),
             expires: QueueExpiry::Ttl(3600),
             queue: QueueName::new("test").unwrap(),
-            status: Status::TemporaryFailure(ErrorDetails {
+            status: Status::TemporaryFailure(Box::new(ErrorDetails {
                 entity: "test.example.com".into(),
                 details: Error::TlsError("TLS handshake failed".into()),
-            }),
+            })),
             flags: 0,
             orcpt: None,
         }],
@@ -215,6 +220,7 @@ async fn strategies() {
             .eval_if::<String, _>(
                 &test.server.core.smtp.queue.queue,
                 &QueueEnvelope::new(&message, &message.recipients[0]),
+                &mut Bump::new(),
                 0,
             )
             .await
@@ -225,22 +231,22 @@ async fn strategies() {
 
 #[test]
 fn to_remote_hosts() {
-    let mx: RecordSet<MX> = RecordSet {
-        rrset: Arc::from(vec![
-            MX {
+    let mx: RecordSet<Mx> = RecordSet {
+        records: Arc::from(vec![
+            Mx {
                 exchanges: vec!["mx1".into(), "mx2".into()].into_boxed_slice(),
                 preference: 10,
             },
-            MX {
+            Mx {
                 exchanges: vec!["mx3".into(), "mx4".into(), "mx5".into(), "mx6".into()]
                     .into_boxed_slice(),
                 preference: 20,
             },
-            MX {
+            Mx {
                 exchanges: vec!["mx7".into(), "mx8".into()].into_boxed_slice(),
                 preference: 10,
             },
-            MX {
+            Mx {
                 exchanges: vec!["mx9".into(), "mxA".into()].into_boxed_slice(),
                 preference: 10,
             },
@@ -259,8 +265,8 @@ fn to_remote_hosts() {
             assert!((*host.as_bytes().last().unwrap() - b'0') <= 8);
         }
     }
-    let mx: RecordSet<MX> = RecordSet {
-        rrset: Arc::from(vec![MX {
+    let mx: RecordSet<Mx> = RecordSet {
+        records: Arc::from(vec![Mx {
             exchanges: vec![".".into()].into_boxed_slice(),
             preference: 0,
         }]),

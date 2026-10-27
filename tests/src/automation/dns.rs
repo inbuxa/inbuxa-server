@@ -24,6 +24,10 @@ use registry::{
 };
 use serde_json::json;
 
+// inbuxa: 1.0 publishes the _validation-persist TXT record only for a
+// DNS-PERSIST-01 provider (and only when its directory advertises
+// accountHashPrefix and issuerDomainNames); 0.16 published it for any ACME
+// provider, so this TLS-ALPN-01 zone no longer has one
 const EXPECTED_ZONE: &str = r#"example.org. IN CAA 0 iodef "mailto:postmaster@example.org"
 example.org. IN CAA 0 issue "pebble.letsencrypt.org"
 autoconfig.example.org. IN CNAME mail.example.org.
@@ -62,7 +66,6 @@ _dmarc.example.org. IN TXT "v=DMARC1; p=reject; rua=mailto:postmaster@example.or
 _mta-sts.example.org. IN TXT "v=STSv1; id=12942536112359691423"
 _smtp._tls.example.org. IN TXT "v=TLSRPTv1; rua=mailto:postmaster@example.org"
 _ua-auto-config.example.org. IN TXT "v=UAAC1; a=sha256; d=ZZ35kyyCO86LM5UUTecwutQ8B+0XdZ3wJnjoYXnH0Wk="
-_validation-persist.example.org. IN TXT "pebble.letsencrypt.org; accounturi=REDACTED"
 dummy-v1-ed25519._domainkey.example.org. IN TXT "v=DKIM1; k=ed25519; h=sha256; p=REDACTED"
 dummy-v1-rsa._domainkey.example.org. IN TXT "v=DKIM1; k=rsa; h=sha256; p=REDACTED"
 example.org. IN TXT "v=spf1 mx -all"
@@ -99,6 +102,8 @@ pub async fn test(test: &TestServer) {
         .await;
     let acme_provider_id = account
         .registry_create_object(AcmeProvider {
+            // inbuxa: 1.0 makes the description required
+            description: "Test ACME provider".to_string(),
             directory: "https://localhost:14000/dir".to_string(),
             contact: Map::new(vec!["mailto:hello@example.org".to_string()]),
             challenge_type: AcmeChallengeType::TlsAlpn01,

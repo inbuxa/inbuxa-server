@@ -7,24 +7,27 @@
 use crate::{
     DavError, DavMethod,
     common::{
-        ETag,
         lock::{LockRequestHandler, ResourceState},
         uri::DavUriResource,
     },
 };
 use common::{Server, auth::AccessToken};
 use dav_proto::{RequestHeaders, schema::property::Rfc1123DateTime};
-use groupware::{cache::GroupwareCache, contact::ContactCard};
+use groupware::{
+    cache::GroupwareCache,
+    contact::{ContactCard, ContactCardContent},
+};
 use http_proto::HttpResponse;
 use hyper::StatusCode;
 use store::{
     ValueKey,
-    write::{AlignedBytes, Archive},
+    write::{Archive, ArchiveBytes},
 };
 use trc::AddContext;
 use types::{
     acl::Acl,
     collection::{Collection, SyncCollection},
+    field::ContactField,
 };
 
 pub(crate) trait CardGetRequestHandler: Sync + Send {
@@ -50,7 +53,7 @@ impl CardGetRequestHandler for Server {
             .into_owned_uri()?;
         let account_id = resource_.account_id;
         let resources = self
-            .fetch_dav_resources(
+            .fetch_groupware_resources(
                 access_token.account_id(),
                 account_id,
                 SyncCollection::AddressBook,
@@ -80,22 +83,35 @@ impl CardGetRequestHandler for Server {
         }
 
         // Fetch card
-        let card_ = self
-            .store()
-            .get_value::<Archive<AlignedBytes>>(ValueKey::archive(
+        let (card_, prefetched) = if is_head || !headers.if_.is_empty() {
+            (
+                self.store()
+                    .get_value::<Archive<ArchiveBytes>>(ValueKey::archive(
+                        account_id,
+                        Collection::ContactCard,
+                        resource.document_id(),
+                    ))
+                    .await
+                    .caused_by(trc::location!())?,
+                None,
+            )
+        } else {
+            self.archive_and_field(
                 account_id,
                 Collection::ContactCard,
                 resource.document_id(),
-            ))
+                ContactField::Content.field(),
+            )
             .await
             .caused_by(trc::location!())?
-            .ok_or(DavError::Code(StatusCode::NOT_FOUND))?;
+        };
+        let card_ = card_.ok_or(DavError::Code(StatusCode::NOT_FOUND))?;
         let card = card_
             .unarchive::<ContactCard>()
             .caused_by(trc::location!())?;
 
         // Validate headers
-        let etag = card_.etag();
+        let etag = format!("\"{}\"", card.etag.to_native());
         self.validate_headers(
             access_token,
             headers,
@@ -117,13 +133,34 @@ impl CardGetRequestHandler for Server {
             .with_etag(etag)
             .with_last_modified(Rfc1123DateTime::new(i64::from(card.modified)).to_string());
 
-        let mut vcard = String::with_capacity(128);
-        let _ = card.card.write_to(
-            &mut vcard,
-            headers
-                .vcard_version
-                .unwrap_or(self.core.groupware.vcard_version),
-        );
+        let version = headers
+            .vcard_version
+            .unwrap_or(self.core.groupware.vcard_version);
+
+        if is_head && version == self.core.groupware.vcard_version {
+            return Ok(response.with_content_length(card.size.to_native() as usize));
+        }
+
+        let content_ = match prefetched {
+            Some(content) => content,
+            None => self
+                .store()
+                .get_value::<Archive<ArchiveBytes>>(ValueKey::property(
+                    account_id,
+                    Collection::ContactCard,
+                    resource.document_id(),
+                    ContactField::Content,
+                ))
+                .await
+                .caused_by(trc::location!())?
+                .ok_or(DavError::Code(StatusCode::NOT_FOUND))?,
+        };
+        let content = content_
+            .unarchive::<ContactCardContent>()
+            .caused_by(trc::location!())?;
+
+        let mut vcard = String::with_capacity(card.size.to_native() as usize);
+        let _ = content.card.write_to(&mut vcard, version);
 
         if !is_head {
             Ok(response.with_binary_body(vcard))

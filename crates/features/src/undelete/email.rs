@@ -38,6 +38,7 @@ pub fn note(
     account_id: u32,
     document_id: u32,
     size: u64,
+    received_at: u64,
     mailboxes: Vec<u32>,
     keywords: Vec<String>,
 ) -> trc::Result<()> {
@@ -59,6 +60,7 @@ pub fn note(
             keywords,
             held_ranges: keeping.ranges.clone(),
             otherwise_until: if keeping.is_held() { otherwise_until } else { None },
+            received_at: Some(received_at),
         },
     )
 }
@@ -77,7 +79,8 @@ pub struct Summary<'x> {
     pub blob_hash: BlobHash,
     pub from: Option<&'x str>,
     pub subject: Option<&'x str>,
-    pub received_at: u64,
+    /// The Date header, for notes that predate their own received date.
+    pub received_at: Option<u64>,
 }
 
 /// A message's data is being removed: if it was noted at deletion, it
@@ -93,6 +96,10 @@ pub async fn archive(
     let Some(mut note) = data::email_note(data, account_id, document_id).await? else {
         return Ok(false);
     };
+    let received_at = note
+        .received_at
+        .or(summary.received_at)
+        .unwrap_or(note.archived_at);
     // LH-3: a held note's range decides now that the date is known; outside
     // it, undelete's deadline, or nothing kept at all
     if !note.held_ranges.is_empty() {
@@ -100,13 +107,13 @@ pub async fn archive(
             retention: None,
             ranges: std::mem::take(&mut note.held_ranges),
         };
-        if !keeping.covers(Some(summary.received_at)) {
+        if !keeping.covers(Some(received_at)) {
             match note.otherwise_until {
                 Some(until) => note.archived_until = until,
                 None => {
                     let mut batch = BatchBuilder::new();
                     data::clear_email_note(&mut batch, account_id, document_id);
-                    return data.write(batch.build_all()).await.map(|_| false);
+                    return data.write_batch(&mut batch).await.map(|_| false);
                 }
             }
         }
@@ -114,7 +121,7 @@ pub async fn archive(
     let item = ArchivedItem::Email(ArchivedEmail {
         from: summary.from.unwrap_or_default().to_string(),
         subject: summary.subject.unwrap_or_default().to_string(),
-        received_at: UTCDateTime::from_timestamp(summary.received_at as i64),
+        received_at: UTCDateTime::from_timestamp(received_at as i64),
         size: note.size,
         account_id: types::id::Id::from(account_id),
         archived_at: UTCDateTime::from_timestamp(note.archived_at as i64),
@@ -134,7 +141,7 @@ pub async fn archive(
 
     let mut batch = BatchBuilder::new();
     data::clear_email_note(&mut batch, account_id, document_id);
-    data.write(batch.build_all()).await.map(|_| true)
+    data.write_batch(&mut batch).await.map(|_| true)
 }
 
 /// Where a restored message goes (UD-8): back into the mailboxes it was in

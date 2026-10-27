@@ -15,8 +15,11 @@ use crate::utils::{
 };
 use inbuxa_features::deliverability::{AddressSource, DkimState, ListingState};
 use mail_auth::{
-    DnssecStatus, MX, common::parse::TxtRecordParser, dmarc::Dmarc, mta_sts::MtaSts,
-    mta_sts::TlsRpt, spf::Spf,
+    DnssecStatus, Mx,
+    dmarc::DmarcRecord,
+    dns::TxtRecordParser,
+    mta_sts::{MtaStsRecord, TlsRptRecord},
+    spf::SpfRecord,
 };
 use registry::schema::{
     prelude::{ObjectType, Property},
@@ -58,7 +61,7 @@ async fn domain(admin: &Account, name: &str, tenant: Option<Id>) -> Id {
     admin
         .registry_create_object(Domain {
             name: name.to_string(),
-            is_enabled: true,
+            enable: true,
             member_tenant_id: tenant,
             certificate_management: CertificateManagement::Manual,
             dns_management: DnsManagement::Manual,
@@ -145,27 +148,27 @@ pub async fn test(test: &mut TestServer) {
     domain(&admin, "bad.example.org", None).await;
     server.txt_add(
         "good.example.org",
-        Spf::parse(b"v=spf1 ip4:192.0.2.10 -all").unwrap(),
+        SpfRecord::parse(b"v=spf1 ip4:192.0.2.10 -all").unwrap(),
         soon,
     );
     server.txt_add(
         "bad.example.org",
-        Spf::parse(b"v=spf1 ip4:198.51.100.1 -all").unwrap(),
+        SpfRecord::parse(b"v=spf1 ip4:198.51.100.1 -all").unwrap(),
         soon,
     );
     server.txt_add(
         "_dmarc.good.example.org",
-        Dmarc::parse(b"v=DMARC1; p=reject; adkim=s").unwrap(),
+        DmarcRecord::parse(b"v=DMARC1; p=reject; adkim=s").unwrap(),
         soon,
     );
     server.txt_add(
         "_smtp._tls.good.example.org",
-        TlsRpt::parse(b"v=TLSRPTv1; rua=mailto:tls@good.example.org").unwrap(),
+        TlsRptRecord::parse(b"v=TLSRPTv1; rua=mailto:tls@good.example.org").unwrap(),
         soon,
     );
     server.txt_add(
         "_mta-sts.good.example.org",
-        MtaSts::parse(b"v=STSv1; id=20261005").unwrap(),
+        MtaStsRecord::parse(b"v=STSv1; id=20261005").unwrap(),
         soon,
     );
     {
@@ -178,11 +181,11 @@ pub async fn test(test: &mut TestServer) {
     server.mx_add(
         "good.example.org",
         vec![
-            MX {
+            Mx {
                 exchanges: vec!["mx1.good.example.org.".into()].into_boxed_slice(),
                 preference: 10,
             },
-            MX {
+            Mx {
                 exchanges: vec!["mx2.good.example.org.".into()].into_boxed_slice(),
                 preference: 20,
             },

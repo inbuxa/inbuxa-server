@@ -2,6 +2,8 @@
  * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
+ *
+ * Modified by Coffey Labs in 2026 for INBUXA.
  */
 
 use crate::utils::server::TestServer;
@@ -28,6 +30,9 @@ pub async fn test(test: &TestServer) {
             .with_status(hyper::StatusCode::CREATED);
         hrefs.push(href);
     }
+    // inbuxa: 1.0 narrows addressbook-query with the search index, which is
+    // filled by a background task
+    test.wait_for_tasks().await;
     let uri_sarah = hrefs[0].as_str();
     let uri_carlos = hrefs[1].as_str();
     let uri_acme = hrefs[2].as_str();
@@ -120,7 +125,12 @@ END:VCARD
             properties: Default::default(),
             version: None,
         }))
-        .with_values([VCARD3.replace('\n', "\r\n").as_str()]);
+        // inbuxa: 1.0 writes a newline inside a parameter value as ^n
+        // (RFC 6868); VCARD3 only has them in LABEL parameters
+        .with_values([VCARD3
+            .replace("\\n", "^n")
+            .replace('\n', "\r\n")
+            .as_str()]);
 
     // Test 4: Search using limit
     client

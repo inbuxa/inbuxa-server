@@ -134,7 +134,7 @@ the harness now names its listeners `compat-jmap` and so on
 NO_INSERT=1 STORE=<backend> TMPDIR=/srv/compat \
 INBUXA_COMPAT_ADMIN='admin@example.org:<password>' \
 RUST_MIN_STACK=8388608 \
-cargo test -p tests --features <backends> <test name> -- --ignored --exact
+RUSTFLAGS="--cfg inbuxa_tests" cargo test -p tests --features <backends> <test name> -- --ignored --exact
 ```
 
 `<test name>` is the full path, such as `system::tenant::tenant_compat`.
@@ -147,7 +147,7 @@ Run them one at a time: each starts a server on fixed ports.
 | `system::tenant::tenant_compat` | 1, multi-tenancy | Tenants, their members and quotas read back unchanged, and each tenant administrator sees what it saw before (needs `INBUXA_COMPAT_EXPECTED`) |
 | `system::masked_email::masked_email_compat` | 2, masked email | Existing masked addresses still deliver, and their state reads back |
 | `system::undelete::undelete_compat` | 3, undelete | Archived items are still listed and restorable |
-| `system::branding::branding_compat` | 4, branding | Every domain's and tenant's logo, `logoUrl` and the three templates read back as stored |
+| `system::branding::branding_compat` | 4, branding | Every domain's and tenant's logo, `x:Enterprise.logo` and the three templates read back as stored |
 | `system::ai::ai_compat` | 5, AI spam | The twelve `LLM_*` tags and their scores |
 | `system::monitoring::monitoring_compat` | 6, monitoring | Retention, stores and `indexTelemetry` as observed; old history in the stripped encoding is skipped, not an error, and is gone after one purge (**deletes history**) |
 | `scim::scim_compat` | 7, SCIM | No domain open to SCIM, and no account with an `externalId`, as observed |

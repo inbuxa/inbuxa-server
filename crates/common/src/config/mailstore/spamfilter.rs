@@ -7,12 +7,14 @@
  */
 
 use crate::expr::{
-    Variable,
+    Bump, Constant, ExpressionItem, Variable,
     functions::ResolveVariable,
+    guard::ScopeRules,
     if_block::{BootstrapExprExt, IfBlock},
 };
 use ahash::AHashSet;
-use mail_auth::common::resolver::ToReverseName;
+use compact_str::{CompactString, ToCompactString};
+use mail_auth::dns::ToReverseName;
 use nlp::classifier::model::{CcfhClassifier, FhClassifier};
 use registry::schema::{
     enums::{ExpressionVariable, ModelSize},
@@ -23,12 +25,17 @@ use registry::schema::{
 };
 use sieve::SpamStatus;
 use std::{
+    mem::size_of,
     net::{IpAddr, SocketAddr},
-    sync::Arc,
+    sync::{Arc, OnceLock},
     time::{Duration, Instant},
 };
 use store::registry::{RegistryObject, bootstrap::Bootstrap};
-use utils::{cache::CacheItemWeight, glob::GlobMap};
+use utils::{
+    cache::CacheItemWeight,
+    glob::GlobMap,
+    outbound::{OutboundClient, OutboundPolicy, Redirects},
+};
 
 #[derive(rkyv::Archive, rkyv::Deserialize, rkyv::Serialize, Debug, Default)]
 pub enum SpamClassifier {
@@ -42,6 +49,10 @@ pub enum SpamClassifier {
     },
     #[default]
     Disabled,
+}
+
+impl store::write::ArchiveCompression for SpamClassifier {
+    const COMPRESSION: store::write::Compression = store::write::Compression::Zstd(None);
 }
 
 #[derive(Debug, Clone, Default)]
@@ -58,7 +69,22 @@ pub struct SpamFilterConfig {
     pub classifier: Option<ClassifierConfig>,
     pub scores: SpamFilterScoreConfig,
     pub spam_rules_url: Option<String>,
-    pub url_client: reqwest::Client,
+    pub url_client: OutboundClient,
+    pub url_redirect: UrlRedirectConfig,
+    pub text_limits: SpamTextLimits,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SpamTextLimits {
+    pub max_body: usize,
+    pub max_attachment: usize,
+    pub max_message: usize,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct UrlRedirectConfig {
+    pub max_urls: usize,
+    pub cache_ttl: Duration,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -140,7 +166,7 @@ pub struct ClassifierConfig {
     pub auto_learn_spam_trap: bool,
     pub auto_learn_spam_rbl_count: u32,
     pub hold_samples_for: u64,
-    pub train_frequency: Option<u64>,
+    pub train_interval: Option<u64>,
     pub log_scale: bool,
     pub l2_normalize: bool,
 }
@@ -167,15 +193,21 @@ pub struct PyzorConfig {
     pub ratio: f64,
 }
 
-#[derive(Debug, Default, Clone, PartialEq, Eq)]
+#[derive(Debug, Default, Clone)]
 pub struct SpamFilterRules {
-    pub url: Vec<IfBlock>,
-    pub domain: Vec<IfBlock>,
-    pub email: Vec<IfBlock>,
-    pub ip: Vec<IfBlock>,
-    pub header: Vec<IfBlock>,
-    pub body: Vec<IfBlock>,
-    pub any: Vec<IfBlock>,
+    pub before_ai: SpamFilterRuleSet,
+    pub after_ai: SpamFilterRuleSet,
+}
+
+#[derive(Debug, Default, Clone)]
+pub struct SpamFilterRuleSet {
+    pub url: ScopeRules,
+    pub domain: ScopeRules,
+    pub email: ScopeRules,
+    pub ip: ScopeRules,
+    pub header: ScopeRules,
+    pub body: ScopeRules,
+    pub any: ScopeRules,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -235,6 +267,7 @@ impl SpamFilterConfig {
             enabled: spam.enable,
             card_is_ham: spam.trust_contacts,
             trusted_reply: spam.trust_replies,
+            text_limits: SpamTextLimits::from(&spam),
             dnsbl: DnsBlConfig::parse(bp).await,
             rules: SpamFilterRules::parse(bp).await,
             lists: SpamFilterLists::parse(bp).await,
@@ -248,13 +281,37 @@ impl SpamFilterConfig {
             grey_list_expiry: spam.greylist_for.map(|d| d.into_inner().as_secs()),
             // inbuxa: unset, empty or upstream's old default means the bundled rules
             spam_rules_url: crate::manager::spam_rules::rules_url(spam.spam_filter_rules_url),
-            url_client: utils::http::http_client_builder(true)
-                .pool_max_idle_per_host(0)
-                .redirect(reqwest::redirect::Policy::none())
-                .user_agent("Mozilla/5.0 (X11; Linux i686; rv:109.0) Gecko/20100101 Firefox/118.0")
-                .build()
-                .unwrap_or_default(),
+            url_client: OutboundClient::new(
+                utils::http::http_client_builder(false)
+                    .pool_max_idle_per_host(0)
+                    .timeout(spam.redirect_timeout.into_inner())
+                    .user_agent(
+                        "Mozilla/5.0 (X11; Linux i686; rv:109.0) Gecko/20100101 Firefox/118.0",
+                    ),
+                OutboundPolicy::PublicOnly,
+                Redirects::None,
+            ),
+            url_redirect: UrlRedirectConfig {
+                max_urls: spam.max_redirect_urls as usize,
+                cache_ttl: spam.redirect_cache_ttl.into_inner(),
+            },
         }
+    }
+}
+
+impl From<&SpamSettings> for SpamTextLimits {
+    fn from(settings: &SpamSettings) -> Self {
+        SpamTextLimits {
+            max_body: usize::try_from(settings.max_body_text).unwrap_or(usize::MAX),
+            max_attachment: usize::try_from(settings.max_attachment_text).unwrap_or(usize::MAX),
+            max_message: usize::try_from(settings.max_message_text).unwrap_or(usize::MAX),
+        }
+    }
+}
+
+impl Default for SpamTextLimits {
+    fn default() -> Self {
+        SpamTextLimits::from(&SpamSettings::default())
     }
 }
 
@@ -268,22 +325,114 @@ impl SpamFilterRules {
         }
         rules.sort_by_key(|a| a.priority);
 
-        let mut result = SpamFilterRules::default();
+        let after_ai = rules_after_ai(rules.iter().map(|rule| &rule.rule));
+        let (after, before): (Vec<_>, Vec<_>) = rules
+            .into_iter()
+            .zip(after_ai)
+            .partition(|(_, is_after)| *is_after);
+
+        SpamFilterRules {
+            before_ai: SpamFilterRuleSet::new(before.into_iter().map(|(rule, _)| rule)),
+            after_ai: SpamFilterRuleSet::new(after.into_iter().map(|(rule, _)| rule)),
+        }
+    }
+}
+
+impl SpamFilterRuleSet {
+    fn new(rules: impl Iterator<Item = SpamFilterRule>) -> Self {
+        let mut url = Vec::new();
+        let mut domain = Vec::new();
+        let mut email = Vec::new();
+        let mut ip = Vec::new();
+        let mut header = Vec::new();
+        let mut body = Vec::new();
+        let mut any = Vec::new();
 
         for rule in rules {
             match rule.scope {
-                Element::Url => result.url.push(rule.rule),
-                Element::Domain => result.domain.push(rule.rule),
-                Element::Email => result.email.push(rule.rule),
-                Element::Ip => result.ip.push(rule.rule),
-                Element::Header => result.header.push(rule.rule),
-                Element::Body => result.body.push(rule.rule),
-                Element::Any => result.any.push(rule.rule),
+                Element::Url => url.push(rule.rule),
+                Element::Domain => domain.push(rule.rule),
+                Element::Email => email.push(rule.rule),
+                Element::Ip => ip.push(rule.rule),
+                Element::Header => header.push(rule.rule),
+                Element::Body => body.push(rule.rule),
+                Element::Any => any.push(rule.rule),
             }
         }
 
-        result
+        let location = Some(ExpressionVariable::Location);
+        SpamFilterRuleSet {
+            url: ScopeRules::new(url, location),
+            domain: ScopeRules::new(domain, location),
+            email: ScopeRules::new(email, location),
+            ip: ScopeRules::new(ip, location),
+            header: ScopeRules::new(header, Some(ExpressionVariable::NameLower)),
+            body: ScopeRules::new(body, location),
+            any: ScopeRules::new(any, None),
+        }
     }
+
+    pub fn is_empty(&self) -> bool {
+        self.url.is_empty()
+            && self.domain.is_empty()
+            && self.email.is_empty()
+            && self.ip.is_empty()
+            && self.header.is_empty()
+            && self.body.is_empty()
+            && self.any.is_empty()
+    }
+}
+
+pub const AI_TAG_PREFIX: &str = "AI_";
+
+pub fn rules_after_ai<'x>(rules: impl Iterator<Item = &'x IfBlock>) -> Vec<bool> {
+    let rules = rules.collect::<Vec<_>>();
+    let mut after = rules
+        .iter()
+        .map(|rule| rule_globals(rule).any(|tag| tag.starts_with(AI_TAG_PREFIX)))
+        .collect::<Vec<_>>();
+    let mut tainted: AHashSet<&str> = AHashSet::new();
+    let mut emitted = vec![false; rules.len()];
+
+    loop {
+        for ((rule, is_after), is_emitted) in rules.iter().zip(&after).zip(emitted.iter_mut()) {
+            if *is_after && !*is_emitted {
+                *is_emitted = true;
+                tainted.extend(rule_constant_tags(rule));
+            }
+        }
+
+        let mut changed = false;
+        for (rule, is_after) in rules.iter().zip(after.iter_mut()) {
+            if !*is_after && rule_globals(rule).any(|tag| tainted.contains(tag)) {
+                *is_after = true;
+                changed = true;
+            }
+        }
+        if !changed {
+            break;
+        }
+    }
+
+    after
+}
+
+fn rule_globals(rule: &IfBlock) -> impl Iterator<Item = &str> {
+    rule.all_items().filter_map(|item| match item {
+        ExpressionItem::Global(name) => Some(name.as_str()),
+        _ => None,
+    })
+}
+
+fn rule_constant_tags(rule: &IfBlock) -> impl Iterator<Item = &str> {
+    rule.if_then
+        .iter()
+        .map(|if_then| if_then.then.items())
+        .chain([rule.default.items()])
+        .filter_map(|items| match items {
+            [ExpressionItem::Constant(Constant::String(tag))] => Some(tag.as_str()),
+            _ => None,
+        })
 }
 
 struct SpamFilterRule {
@@ -554,7 +703,7 @@ impl ClassifierConfig {
             hold_samples_for: classifier.hold_samples_for.into_inner().as_secs(),
             min_ham_samples: classifier.min_ham_samples,
             min_spam_samples: classifier.min_spam_samples,
-            train_frequency: classifier.train_frequency.map(|d| d.into_inner().as_secs()),
+            train_interval: classifier.train_interval.map(|d| d.into_inner().as_secs()),
             log_scale,
             l2_normalize,
         }
@@ -633,55 +782,88 @@ impl Element {
     }
 }
 
+const IPV6_TEXT_MAX_LEN: usize = 39;
+const IPV6_REVERSE_LEN: usize = 63;
+
 pub struct IpResolver {
     ip: IpAddr,
-    ip_string: String,
-    reverse: String,
-    octets: Variable<'static>,
+    text: OnceLock<CompactString>,
+    reverse: OnceLock<CompactString>,
 }
 
 impl ResolveVariable for IpResolver {
-    fn resolve_variable(&self, variable: ExpressionVariable) -> Variable<'_> {
+    fn resolve_variable<'a>(
+        &'a self,
+        variable: ExpressionVariable,
+        arena: &'a Bump,
+    ) -> Variable<'a> {
         match variable {
-            ExpressionVariable::Ip | ExpressionVariable::Value => self.ip_string.as_str().into(),
-            ExpressionVariable::IpReverse => self.reverse.as_str().into(),
-            ExpressionVariable::Octets => self.octets.clone(),
+            ExpressionVariable::Ip | ExpressionVariable::Value => self.text().into(),
+            ExpressionVariable::IpReverse => self.reverse().into(),
+            ExpressionVariable::Octets => {
+                let octets = |octets: &[u8]| {
+                    arena.alloc_slice_fill_iter(
+                        octets
+                            .iter()
+                            .map(|octet| Variable::Integer(i64::from(*octet))),
+                    )
+                };
+                Variable::Array(match self.ip {
+                    IpAddr::V4(ip) => octets(&ip.octets()),
+                    IpAddr::V6(ip) => octets(&ip.octets()),
+                })
+            }
             ExpressionVariable::IsV4 => Variable::Integer(self.ip.is_ipv4() as _),
             ExpressionVariable::IsV6 => Variable::Integer(self.ip.is_ipv6() as _),
             _ => Variable::Integer(0),
         }
-    }
-
-    fn resolve_global(&self, _: &str) -> Variable<'_> {
-        Variable::Integer(0)
     }
 }
 
 impl IpResolver {
     pub fn new(ip: IpAddr) -> Self {
         Self {
-            ip_string: ip.to_string(),
-            reverse: ip.to_reverse_name(),
-            octets: Variable::Array(match ip {
-                IpAddr::V4(ipv4_addr) => ipv4_addr
-                    .octets()
-                    .iter()
-                    .map(|o| Variable::Integer(*o as _))
-                    .collect(),
-                IpAddr::V6(ipv6_addr) => ipv6_addr
-                    .octets()
-                    .iter()
-                    .map(|o| Variable::Integer(*o as _))
-                    .collect(),
-            }),
             ip,
+            text: OnceLock::new(),
+            reverse: OnceLock::new(),
         }
+    }
+
+    pub fn text(&self) -> &str {
+        self.text.get_or_init(|| self.ip.to_compact_string())
+    }
+
+    pub fn reverse(&self) -> &str {
+        self.reverse
+            .get_or_init(|| self.ip.to_reverse_name().into())
     }
 }
 
 impl CacheItemWeight for IpResolver {
     fn weight(&self) -> u64 {
-        (std::mem::size_of::<IpResolver>() + self.ip_string.len() + self.reverse.len()) as u64
+        let heap = match self.ip {
+            IpAddr::V4(_) => 0,
+            IpAddr::V6(_) => IPV6_TEXT_MAX_LEN + IPV6_REVERSE_LEN,
+        };
+        (size_of::<IpResolver>() + heap) as u64
+    }
+}
+
+#[derive(Clone)]
+pub enum SpamLookup {
+    None,
+    Dnsbl(Arc<[IpResolver]>),
+    Redirect(Arc<str>),
+}
+
+impl CacheItemWeight for SpamLookup {
+    fn weight(&self) -> u64 {
+        let heap = match self {
+            SpamLookup::None => 0,
+            SpamLookup::Dnsbl(codes) => codes.iter().map(IpResolver::weight).sum(),
+            SpamLookup::Redirect(url) => url.len() as u64,
+        };
+        size_of::<SpamLookup>() as u64 + heap
     }
 }
 

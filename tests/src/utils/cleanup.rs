@@ -12,7 +12,10 @@ use ::registry::{
 };
 use store::{
     ValueKey,
-    write::{key::DeserializeBigEndian, *},
+    write::{
+        key::{CounterKind, DeserializeBigEndian},
+        *,
+    },
     *,
 };
 use trc::AddContext;
@@ -21,34 +24,9 @@ use types::blob_hash::{BLOB_HASH_LEN, BlobHash};
 pub async fn store_destroy(store: &Store) {
     store_destroy_sql_indexes(store).await;
 
-    for subspace in [
-        SUBSPACE_ACL,
-        SUBSPACE_TASK_QUEUE,
-        SUBSPACE_INDEXES,
-        SUBSPACE_DELETED_ITEMS,
-        SUBSPACE_SPAM_SAMPLES,
-        store::SUBSPACE_INBUXA, // inbuxa: masked email
-        SUBSPACE_BLOB_LINK,
-        SUBSPACE_LOGS,
-        SUBSPACE_IN_MEMORY_COUNTER,
-        SUBSPACE_IN_MEMORY_VALUE,
-        SUBSPACE_COUNTER,
-        SUBSPACE_PROPERTY,
-        SUBSPACE_REGISTRY,
-        SUBSPACE_BLOBS,
-        SUBSPACE_QUEUE_MESSAGE,
-        SUBSPACE_QUEUE_EVENT,
-        SUBSPACE_QUOTA,
-        SUBSPACE_REPORT_OUT,
-        SUBSPACE_REPORT_IN,
-        SUBSPACE_TELEMETRY_SPAN,
-        SUBSPACE_TELEMETRY_METRIC,
-        SUBSPACE_SEARCH_INDEX,
-        SUBSPACE_REGISTRY_IDX,
-        SUBSPACE_REGISTRY_PK,
-        SUBSPACE_DIRECTORY,
-    ] {
-        if subspace == SUBSPACE_SEARCH_INDEX && store.is_pg_or_mysql() {
+    for subspace in Subspace::ALL.iter().copied() {
+        // The SQL stores keep their search index in tables of their own
+        if subspace.is_internal_fts() && store.is_pg_or_mysql() {
             continue;
         }
 
@@ -72,6 +50,17 @@ pub async fn search_store_destroy(store: &SearchStore) {
     match &store {
         SearchStore::Store(store) => {
             store_destroy_sql_indexes(store).await;
+        }
+        #[cfg(feature = "postgres")]
+        SearchStore::PostgreSQL(store) => {
+            store_destroy_sql_indexes(&Store::PostgreSQL(store.clone())).await;
+        }
+        #[cfg(feature = "mysql")]
+        SearchStore::MySQL(store) => {
+            store_destroy_sql_indexes(&Store::MySQL(store.clone())).await;
+        }
+        SearchStore::Replicated(store) => {
+            store_destroy_sql_indexes(&store.primary).await;
         }
         SearchStore::ElasticSearch(store) => {
             if let Err(err) = store.drop_indexes().await {
@@ -97,6 +86,7 @@ async fn store_destroy_sql_indexes(store: &Store) {
                 SearchIndex::Email,
                 SearchIndex::Calendar,
                 SearchIndex::Contacts,
+                SearchIndex::File,
                 SearchIndex::Tracing,
             ] {
                 #[cfg(feature = "postgres")]
@@ -136,7 +126,7 @@ pub async fn store_blob_expire_all(store: &Store) {
     store
         .iterate(
             IterateParams::new(from_key, to_key).ascending(),
-            |key, _| {
+            |key, value| {
                 if key.len() == BLOB_HASH_LEN + U32_LEN + U64_LEN {
                     let account_id = key
                         .deserialize_be_u32(BLOB_HASH_LEN)
@@ -151,10 +141,21 @@ pub async fn store_blob_expire_all(store: &Store) {
                         .deserialize_be_u64(BLOB_HASH_LEN + U32_LEN)
                         .caused_by(trc::location!())?;
 
+                    // inbuxa: 1.0 writes a blob's Commit marker only when its
+                    // hold is released, so a hold whose write failed has just
+                    // the temporary link; expire the link rather than remove
+                    // it, so purge_blobs drops the blob as well
                     batch.clear(ValueClass::Blob(BlobOp::Link {
-                        hash,
+                        hash: hash.clone(),
                         to: BlobLink::Temporary { until },
                     }));
+                    batch.set(
+                        ValueClass::Blob(BlobOp::Link {
+                            hash,
+                            to: BlobLink::Temporary { until: 0 },
+                        }),
+                        value.to_vec(),
+                    );
                 }
 
                 Ok(true)
@@ -162,67 +163,26 @@ pub async fn store_blob_expire_all(store: &Store) {
         )
         .await
         .unwrap();
-    store.write(batch.build_all()).await.unwrap();
+    store.write_batch(&mut batch).await.unwrap();
 }
 
 pub async fn store_lookup_expire_all(store: &Store) {
-    // Delete all temporary counters
-    let from_key = ValueKey::from(ValueClass::InMemory(InMemoryClass::Key(vec![0u8])));
-    let to_key = ValueKey::from(ValueClass::InMemory(InMemoryClass::Key(vec![u8::MAX; 10])));
-
-    let mut expired_keys = Vec::new();
-    let mut expired_counters = Vec::new();
-
+    // inbuxa: the in-memory store kept in the data store; everything with an
+    // expiry goes, and counters are temporary
+    store.purge_in_memory(u64::MAX - 1).await.unwrap();
     store
-        .iterate(IterateParams::new(from_key, to_key), |key, value| {
-            let expiry = value.deserialize_be_u64(0).caused_by(trc::location!())?;
-            if expiry == 0 {
-                expired_counters.push(key.to_vec());
-            } else if expiry != u64::MAX {
-                expired_keys.push(key.to_vec());
-            }
-            Ok(true)
-        })
+        .delete_range(
+            AnyKey {
+                subspace: Subspace::InMemoryCounter,
+                key: vec![0u8],
+            },
+            AnyKey {
+                subspace: Subspace::InMemoryCounter,
+                key: vec![u8::MAX; 16],
+            },
+        )
         .await
         .unwrap();
-
-    if !expired_keys.is_empty() {
-        let mut batch = BatchBuilder::new();
-        for key in expired_keys {
-            batch.any_op(Operation::Value {
-                class: ValueClass::InMemory(InMemoryClass::Key(key)),
-                op: ValueOp::Clear,
-            });
-            if batch.is_large_batch() {
-                store.write(batch.build_all()).await.unwrap();
-                batch = BatchBuilder::new();
-            }
-        }
-        if !batch.is_empty() {
-            store.write(batch.build_all()).await.unwrap();
-        }
-    }
-
-    if !expired_counters.is_empty() {
-        let mut batch = BatchBuilder::new();
-        for key in expired_counters {
-            batch.any_op(Operation::Value {
-                class: ValueClass::InMemory(InMemoryClass::Counter(key.clone())),
-                op: ValueOp::Clear,
-            });
-            batch.any_op(Operation::Value {
-                class: ValueClass::InMemory(InMemoryClass::Key(key)),
-                op: ValueOp::Clear,
-            });
-            if batch.is_large_batch() {
-                store.write(batch.build_all()).await.unwrap();
-                batch = BatchBuilder::new();
-            }
-        }
-        if !batch.is_empty() {
-            store.write(batch.build_all()).await.unwrap();
-        }
-    }
 }
 
 #[allow(unused_variables)]
@@ -241,34 +201,19 @@ pub async fn store_assert_is_empty(store: &Store, blob_store: BlobStore, include
     let mut failed = false;
     let mut delete_batch = BatchBuilder::new();
 
-    for (subspace, with_values) in [
-        (SUBSPACE_ACL, true),
-        (SUBSPACE_TASK_QUEUE, true),
-        (SUBSPACE_IN_MEMORY_VALUE, true),
-        (SUBSPACE_IN_MEMORY_COUNTER, false),
-        (SUBSPACE_PROPERTY, true),
-        (SUBSPACE_QUEUE_MESSAGE, true),
-        (SUBSPACE_QUEUE_EVENT, true),
-        (SUBSPACE_REPORT_OUT, true),
-        (SUBSPACE_REPORT_IN, true),
-        (SUBSPACE_DELETED_ITEMS, true),
-        (SUBSPACE_SPAM_SAMPLES, true),
-        (SUBSPACE_BLOB_LINK, true),
-        (SUBSPACE_BLOBS, true),
-        (SUBSPACE_COUNTER, false),
-        (SUBSPACE_QUOTA, false),
-        (SUBSPACE_INDEXES, false),
-        (SUBSPACE_TELEMETRY_SPAN, true),
-        (SUBSPACE_TELEMETRY_METRIC, true),
-        (SUBSPACE_SEARCH_INDEX, true),
-        (SUBSPACE_REGISTRY, true),
-        (SUBSPACE_REGISTRY_IDX, false),
-        (SUBSPACE_REGISTRY_PK, true),
-        (SUBSPACE_DIRECTORY, true),
-    ] {
-        if subspace == SUBSPACE_SEARCH_INDEX && store.is_pg_or_mysql() {
+    // inbuxa: 1.0's subspaces. Logs are cleared below; System keeps the
+    // node's id and our own subspace was never checked
+    for subspace in Subspace::ALL.iter().copied().filter(|subspace| {
+        !matches!(
+            subspace,
+            Subspace::Logs | Subspace::System | Subspace::Inbuxa
+        )
+    }) {
+        if subspace.is_internal_fts() && store.is_pg_or_mysql() {
             continue;
         }
+        let with_values =
+            subspace.shape() == Shape::Value || subspace == Subspace::Counter;
 
         let from_key = AnyKey {
             subspace,
@@ -284,14 +229,28 @@ pub async fn store_assert_is_empty(store: &Store, blob_store: BlobStore, include
                 IterateParams::new(from_key, to_key).set_values(with_values),
                 |key, value| {
                     match subspace {
-                        SUBSPACE_COUNTER
-                            if key.len() == U32_LEN + 1
-                                || key.len() == U32_LEN
-                                || key.len() == U16_LEN =>
+                        // inbuxa: 1.0 keys every counter by its kind first.
+                        // Registry id counters stay; id, change and UID
+                        // counters go; usage counters must be back at zero.
+                        Subspace::Counter
+                            if key.first().is_some_and(|kind| {
+                                *kind == CounterKind::RegistryId.byte()
+                                    || [
+                                        CounterKind::DocumentId,
+                                        CounterKind::ChangeId,
+                                        CounterKind::MailboxUid,
+                                        CounterKind::ReportRow,
+                                        // a tenant's usage isn't reduced when
+                                        // a member account is destroyed (0.16
+                                        // neither); 0.16's check deleted it too
+                                        CounterKind::TenantQuota,
+                                    ]
+                                    .into_iter()
+                                    .any(|k| k.byte() == *kind)
+                                    || value.iter().all(|b| *b == 0)
+                            }) =>
                         {
-                            // Message ID, change ID counters and registry counters
-                            if key.len() != U16_LEN {
-                                // Keep registry counters, delete the rest
+                            if key[0] != CounterKind::RegistryId.byte() {
                                 delete_batch.clear(ValueClass::Any(AnyClass {
                                     subspace,
                                     key: key.to_vec(),
@@ -299,7 +258,12 @@ pub async fn store_assert_is_empty(store: &Store, blob_store: BlobStore, include
                             }
                             return Ok(true);
                         }
-                        SUBSPACE_INDEXES => {
+                        // inbuxa: the search queue's per-partition cursors
+                        // stay; only queued documents count
+                        Subspace::SearchQueue if key.len() != 1 + (2 * U32_LEN) + U64_LEN => {
+                            return Ok(true);
+                        }
+                        Subspace::Indexes => {
                             println!(
                                 concat!(
                                     "Found index key, account {}, collection {}, ",
@@ -313,7 +277,7 @@ pub async fn store_assert_is_empty(store: &Store, blob_store: BlobStore, include
                                 key
                             );
                         }
-                        SUBSPACE_REGISTRY | SUBSPACE_DIRECTORY | SUBSPACE_SPAM_SAMPLES => {
+                        Subspace::Registry | Subspace::Directory | Subspace::SpamSamples => {
                             let object_id =
                                 ObjectType::from_id(key.deserialize_be_u16(0).unwrap()).unwrap();
 
@@ -327,7 +291,7 @@ pub async fn store_assert_is_empty(store: &Store, blob_store: BlobStore, include
                                 object_id, item_id
                             );
                         }
-                        SUBSPACE_REGISTRY_IDX => {
+                        Subspace::RegistryIndex => {
                             let mut id = key.deserialize_be_u16(0).unwrap();
                             if id == u16::MAX {
                                 id = key.deserialize_be_u16(U16_LEN).unwrap();
@@ -344,9 +308,13 @@ pub async fn store_assert_is_empty(store: &Store, blob_store: BlobStore, include
                                 object_id, key
                             );
                         }
-                        SUBSPACE_REGISTRY_PK => {
+                        Subspace::RegistryPrimaryKey => {
                             let mut id = key.deserialize_be_u16(0).unwrap();
-                            if id == u16::MAX {
+                            if id == RegistryClass::REFERENCE_MARKER {
+                                // inbuxa: 1.0 references: marker, then the
+                                // referenced object's type
+                                id = key.deserialize_be_u16(U16_LEN).unwrap();
+                            } else if id == u16::MAX {
                                 id = value.deserialize_be_u16(0).unwrap();
                             }
                             let object_id = ObjectType::from_id(id).unwrap();
@@ -362,7 +330,7 @@ pub async fn store_assert_is_empty(store: &Store, blob_store: BlobStore, include
                         _ => {
                             println!(
                                 "Found key in {:?}: {:?} ({:?}) = {:?} ({:?})",
-                                char::from(subspace),
+                                char::from(subspace.byte()),
                                 key,
                                 String::from_utf8_lossy(key),
                                 value,
@@ -383,11 +351,11 @@ pub async fn store_assert_is_empty(store: &Store, blob_store: BlobStore, include
     store
         .delete_range(
             AnyKey {
-                subspace: SUBSPACE_LOGS,
+                subspace: Subspace::Logs,
                 key: &[0u8],
             },
             AnyKey {
-                subspace: SUBSPACE_LOGS,
+                subspace: Subspace::Logs,
                 key: &[
                     u8::MAX,
                     u8::MAX,
@@ -403,7 +371,7 @@ pub async fn store_assert_is_empty(store: &Store, blob_store: BlobStore, include
         .unwrap();
 
     if !delete_batch.is_empty() {
-        store.write(delete_batch.build_all()).await.unwrap();
+        store.write_batch(&mut delete_batch).await.unwrap();
     }
 
     if failed {

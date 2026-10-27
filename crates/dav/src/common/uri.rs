@@ -2,16 +2,18 @@
  * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
- *
- * Modified by Coffey Labs in 2026 for INBUXA.
  */
 
 use crate::{DavError, DavResourceName};
-use common::{Server, auth::AccessToken};
+use common::{
+    DavResourcePath, Server,
+    auth::AccessToken,
+    storage::dav::{DavFileNameError, canonical_calcard_uri, canonical_dav_resource_uri},
+};
 use groupware::cache::GroupwareCache;
 use http_proto::request::decode_path_element;
 use hyper::StatusCode;
-use std::fmt::Display;
+use std::{borrow::Cow, fmt::Display};
 use trc::AddContext;
 use types::collection::Collection;
 
@@ -24,7 +26,51 @@ pub(crate) struct UriResource<A, R> {
 
 pub(crate) enum Urn {
     Lock(u64),
-    Sync { id: u64, seq: u32 },
+    Sync(SyncToken),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SyncToken {
+    State(u64),
+    ChangesPage {
+        from: u64,
+        snapshot: u64,
+        offset: u64,
+    },
+    InitialPage {
+        snapshot: u64,
+        after: SyncCursor,
+    },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) struct SyncCursor(u128);
+
+impl SyncCursor {
+    const PARENT_BITS: u32 = 33;
+    const DOCUMENT_BITS: u32 = 32;
+
+    pub fn new(
+        account_id: u32,
+        is_container: bool,
+        document_id: u32,
+        parent_id: Option<u32>,
+    ) -> Self {
+        let parent = parent_id.map_or(0, |parent_id| u128::from(parent_id) + 1);
+        let document = u128::from(document_id) << Self::PARENT_BITS;
+        let is_item = u128::from(!is_container) << (Self::PARENT_BITS + Self::DOCUMENT_BITS);
+        let account = u128::from(account_id) << (Self::PARENT_BITS + Self::DOCUMENT_BITS + 1);
+        SyncCursor(account | is_item | document | parent)
+    }
+
+    pub fn from_path(account_id: u32, path: &DavResourcePath<'_>) -> Self {
+        SyncCursor::new(
+            account_id,
+            path.is_container(),
+            path.document_id(),
+            path.parent_id(),
+        )
+    }
 }
 
 pub(crate) type UnresolvedUri<'x> = UriResource<Option<u32>, Option<&'x str>>;
@@ -32,6 +78,12 @@ pub(crate) type OwnedUri<'x> = UriResource<u32, Option<&'x str>>;
 pub(crate) type DocumentUri = UriResource<u32, u32>;
 
 pub(crate) trait DavUriResource: Sync + Send {
+    fn parse_uri<'x>(
+        &self,
+        uri: &'x str,
+        error_status: StatusCode,
+    ) -> impl Future<Output = crate::Result<UnresolvedUri<'x>>> + Send;
+
     fn validate_uri_with_status<'x>(
         &self,
         access_token: &AccessToken,
@@ -68,6 +120,21 @@ impl DavUriResource for Server {
         uri: &'x str,
         error_status: StatusCode,
     ) -> crate::Result<UnresolvedUri<'x>> {
+        let resource = self.parse_uri(uri, error_status).await?;
+        if let Some(account_id) = resource.account_id
+            && resource.collection != Collection::Principal
+            && !access_token.has_access(account_id, resource.collection)
+        {
+            return Err(DavError::Code(StatusCode::FORBIDDEN));
+        }
+        Ok(resource)
+    }
+
+    async fn parse_uri<'x>(
+        &self,
+        uri: &'x str,
+        error_status: StatusCode,
+    ) -> crate::Result<UnresolvedUri<'x>> {
         let (_, uri_parts) = uri
             .split_once("/dav/")
             .ok_or(DavError::Code(error_status))?;
@@ -99,13 +166,6 @@ impl DavUriResource for Server {
                     .ok_or(DavError::Code(error_status))?
             };
 
-            // Validate access
-            if resource.collection != Collection::Principal
-                && !access_token.has_access(account_id, resource.collection)
-            {
-                return Err(DavError::Code(StatusCode::FORBIDDEN));
-            }
-
             // Obtain remaining path
             resource.account_id = Some(account_id);
             resource.resource = uri_parts.next();
@@ -121,7 +181,7 @@ impl DavUriResource for Server {
     ) -> trc::Result<Option<DocumentUri>> {
         if let Some(resource) = uri.resource {
             if let Some(resource) = self
-                .fetch_dav_resources(
+                .fetch_groupware_resources(
                     access_token.account_id(),
                     uri.account_id,
                     uri.collection.into(),
@@ -174,11 +234,19 @@ impl OwnedUri<'_> {
     }
 }
 
-/*impl<A, R> UriResource<A, R> {
-    pub fn collection_path(&self) -> &'static str {
-        DavResourceName::from(self.collection).collection_path()
+pub(crate) fn canonical_dav_uri(uri: &str) -> Result<Cow<'_, str>, DavFileNameError> {
+    match uri
+        .split_once("/dav/")
+        .and_then(|(_, path)| path.split_once('/'))
+        .and_then(|(collection, _)| DavResourceName::parse(collection))
+    {
+        Some(DavResourceName::File) => canonical_dav_resource_uri(uri),
+        Some(DavResourceName::Cal | DavResourceName::Card) => Ok(canonical_calcard_uri(uri)),
+        Some(DavResourceName::Principal | DavResourceName::Scheduling) | None => {
+            Ok(Cow::Borrowed(uri))
+        }
     }
-}*/
+}
 
 impl Urn {
     pub fn try_extract_sync_id(token: &str) -> Option<&str> {
@@ -192,17 +260,7 @@ impl Urn {
         let (kind, id) = inbox.split_once(':')?;
         match kind {
             "davlock" => u64::from_str_radix(id, 16).ok().map(Urn::Lock),
-            "davsync" => {
-                if let Some((id, seq)) = id.split_once(':') {
-                    let id = u64::from_str_radix(id, 16).ok()?;
-                    let seq = u32::from_str_radix(seq, 16).ok()?;
-                    Some(Urn::Sync { id, seq })
-                } else {
-                    u64::from_str_radix(id, 16)
-                        .ok()
-                        .map(|id| Urn::Sync { id, seq: 0 })
-                }
-            }
+            "davsync" => SyncToken::parse(id).map(Urn::Sync),
             _ => None,
         }
     }
@@ -214,9 +272,9 @@ impl Urn {
         }
     }
 
-    pub fn try_unwrap_sync(&self) -> Option<(u64, u32)> {
+    pub fn try_unwrap_sync(&self) -> Option<SyncToken> {
         match self {
-            Urn::Sync { id, seq } => Some((*id, *seq)),
+            Urn::Sync(token) => Some(*token),
             _ => None,
         }
     }
@@ -226,13 +284,44 @@ impl Display for Urn {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Urn::Lock(id) => write!(f, "urn:inbuxa:davlock:{id:x}",),
-            Urn::Sync { id, seq } => {
-                if *seq == 0 {
-                    write!(f, "urn:inbuxa:davsync:{id:x}")
-                } else {
-                    write!(f, "urn:inbuxa:davsync:{id:x}:{seq:x}")
-                }
+            Urn::Sync(token) => write!(f, "urn:inbuxa:davsync:{token}"),
+        }
+    }
+}
+
+impl SyncToken {
+    fn parse(input: &str) -> Option<Self> {
+        let mut parts = input.splitn(3, ':');
+        let id = u64::from_str_radix(parts.next()?, 16).ok()?;
+        match (parts.next(), parts.next()) {
+            (None, None) => Some(SyncToken::State(id)),
+            (Some(after), None) => Some(SyncToken::InitialPage {
+                snapshot: id,
+                after: SyncCursor(u128::from_str_radix(after.strip_prefix('i')?, 16).ok()?),
+            }),
+            (Some(offset), Some(snapshot)) => Some(SyncToken::ChangesPage {
+                from: id,
+                snapshot: u64::from_str_radix(snapshot, 16).ok()?,
+                offset: u64::from_str_radix(offset, 16).ok()?,
+            }),
+            (None, Some(_)) => None,
+        }
+    }
+}
+
+impl Display for SyncToken {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            SyncToken::State(id) => write!(f, "{id:x}"),
+            SyncToken::ChangesPage {
+                from,
+                snapshot,
+                offset,
+            } => write!(f, "{from:x}:{offset:x}:{snapshot:x}"),
+            SyncToken::InitialPage { snapshot, after } => {
+                write!(f, "{snapshot:x}:i{:x}", after.0)
             }
         }
     }
 }
+

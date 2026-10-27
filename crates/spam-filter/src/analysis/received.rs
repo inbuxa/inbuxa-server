@@ -4,13 +4,11 @@
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
  */
 
-use std::future::Future;
-
+use crate::{Email, SpamFilterContext, analysis::eq_lowercase_str};
 use common::Server;
 use mail_parser::{HeaderName, Host};
 use smtp_proto::MAIL_SMTPUTF8;
-
-use crate::{Email, SpamFilterContext};
+use std::future::Future;
 
 pub trait SpamFilterAnalyzeReceived: Sync + Send {
     fn spam_filter_analyze_received(
@@ -26,18 +24,11 @@ impl SpamFilterAnalyzeReceived for Server {
         let mut tls_count = 0;
 
         let is_smtputf8 = (ctx.input.env_from_flags & MAIL_SMTPUTF8) != 0;
+        let has_recipients = ctx.output.all_recipients().next().is_some();
 
         for header in ctx.input.message.headers() {
-            if let HeaderName::Received = &header.name {
-                if !is_smtputf8
-                    && !ctx
-                        .input
-                        .message
-                        .raw_message()
-                        .get(header.offset_start as usize..header.offset_end as usize)
-                        .unwrap_or_default()
-                        .is_ascii()
-                {
+            if header.name() == HeaderName::Received {
+                if !is_smtputf8 && !header.raw_value().is_ascii() {
                     // Received headers have non-ASCII characters
                     ctx.result.add_tag("RCVD_ILLEGAL_CHARS");
                 }
@@ -52,13 +43,14 @@ impl SpamFilterAnalyzeReceived for Server {
                         ctx.result.add_tag("RCVD_HELO_USER");
                     } else if let (Some(Host::Name(helo_domain)), Some(ip_rev)) =
                         (helo_domain, ip_rev)
-                        && helo_domain.to_lowercase() != ip_rev.to_lowercase()
+                        && !eq_lowercase_str(helo_domain, ip_rev)
                     {
                         // HELO domain does not match PTR record
                         ctx.result.add_tag("FORGED_RCVD_TRAIL");
                     }
 
-                    if let Some(delivered_for) = received.for_().map(Email::new)
+                    if has_recipients
+                        && let Some(delivered_for) = received.for_().map(Email::new)
                         && ctx
                             .output
                             .all_recipients()
@@ -68,7 +60,7 @@ impl SpamFilterAnalyzeReceived for Server {
                         ctx.result.add_tag("PREVIOUSLY_DELIVERED");
                     }
 
-                    if matches!(received.from, Some(Host::IpAddr(_))) {
+                    if matches!(received.from(), Some(Host::IpAddr(_))) {
                         // Received from an IP address rather than a FQDN
                         rcvd_from_ip += 1;
                     }

@@ -36,7 +36,7 @@ use jmap_tools::{Key, Map, Value};
 use registry::{
     pickle::PickledStream,
     schema::{
-        enums::{AccountType, Permission},
+        enums::{AccountType, Permission, TaskType},
         prelude::{Object, ObjectInner, ObjectType, Property},
         structs::{Account, Credential, Task, TaskDestroyAccount, TaskStatus},
     },
@@ -45,7 +45,7 @@ use registry::{
 use std::borrow::Cow;
 use store::{
     registry::write::{RegistryWrite, RegistryWriteResult},
-    write::{BatchBuilder, TaskQueueClass, ValueClass, now},
+    write::{BatchBuilder, TaskId, TaskQueueClass, ValueClass, now},
 };
 use trc::AddContext;
 use types::id::Id;
@@ -65,12 +65,10 @@ const ALL: &[P] = &[
 /// The addresses an object answers to, with the property that names each.
 async fn addresses_of(server: &Server, inner: &ObjectInner) -> trc::Result<Vec<(Property, String)>> {
     let (name, domain_id, aliases) = match inner {
-        ObjectInner::Account(Account::User(account)) => {
-            (&account.name, account.domain_id, &account.aliases)
-        }
-        ObjectInner::Account(Account::Group(account)) => {
-            (&account.name, account.domain_id, &account.aliases)
-        }
+        ObjectInner::Account(account) => match account.as_ref() {
+            Account::User(account) => (&account.name, account.domain_id, &account.aliases),
+            Account::Group(account) => (&account.name, account.domain_id, &account.aliases),
+        },
         ObjectInner::MailingList(list) => (&list.name, list.domain_id, &list.aliases),
         ObjectInner::MaskedEmail(mask) => {
             return Ok(vec![(Property::Email, mask.email.to_lowercase())]);
@@ -125,7 +123,7 @@ pub async fn reserved(
 /// access changed, or `None` when nothing is kept.
 pub async fn keep(server: &Server, id: Id, account: &Account) -> trc::Result<Option<Vec<u32>>> {
     let account_id = id.document_id();
-    let inner = ObjectInner::Account(account.clone());
+    let inner = ObjectInner::Account(Box::new(account.clone()));
     // inbuxa: LH-8: a held account's data stays, with no expiry, whether or
     // not undelete keeps accounts; its holds name it from now on
     let member = inbuxa_features::hold::Member::of(account_id, &inner);
@@ -152,9 +150,21 @@ pub async fn keep(server: &Server, id: Id, account: &Account) -> trc::Result<Opt
         .into_iter()
         .map(|(_, address)| address)
         .collect();
-    let (domain_id, name, account_type, tenant) = match account {
-        Account::User(a) => (a.domain_id, a.name.clone(), AccountType::User, a.member_tenant_id),
-        Account::Group(a) => (a.domain_id, a.name.clone(), AccountType::Group, a.member_tenant_id),
+    let (domain_id, name, account_type, tenant, member_group_ids) = match account {
+        Account::User(a) => (
+            a.domain_id,
+            a.name.clone(),
+            AccountType::User,
+            a.member_tenant_id,
+            a.member_group_ids.clone(),
+        ),
+        Account::Group(a) => (
+            a.domain_id,
+            a.name.clone(),
+            AccountType::Group,
+            a.member_tenant_id,
+            Default::default(),
+        ),
     };
 
     // UD-17a: its shares are suspended both ways
@@ -188,11 +198,12 @@ pub async fn keep(server: &Server, id: Id, account: &Account) -> trc::Result<Opt
             account_id: id,
             account_name: name,
             account_type,
+            member_group_ids,
             status: TaskStatus::at(kept_until as i64),
         }),
     );
     data::set_kept_account(&mut batch, account_id, &kept)?;
-    data.write(batch.build_all())
+    data.write_batch(&mut batch)
         .await
         .caused_by(trc::location!())?;
     server.notify_task_queue();
@@ -388,7 +399,7 @@ async fn restore_account(
     };
 
     // A user comes back with a new password; its other credentials stay
-    if let Account::User(user) = &mut account {
+    if let Account::User(user) = account.as_mut() {
         let Some(password) = password else {
             return Ok(Err(SetError::invalid_properties()
                 .with_property(P::Password)
@@ -400,6 +411,7 @@ async fn restore_account(
                 .with_description(err)));
         }
         let secret = hash_secret(
+            &server.inner.data.password_verifier,
             server.core.network.security.password_hash_algorithm,
             password.into_bytes(),
         )
@@ -450,7 +462,7 @@ async fn restore_account(
     let mut batch = BatchBuilder::new();
     data::clear_kept_account(&mut batch, account_id, &kept);
     let data = &server.core.storage.data;
-    data.write(batch.build_all())
+    data.write_batch(&mut batch)
         .await
         .caused_by(trc::location!())?;
 
@@ -467,7 +479,7 @@ async fn restore_account(
             // Put the hold back
             let mut batch = BatchBuilder::new();
             data::set_kept_account(&mut batch, account_id, &kept)?;
-            data.write(batch.build_all())
+            data.write_batch(&mut batch)
                 .await
                 .caused_by(trc::location!())?;
             return Ok(Err(match err {
@@ -491,13 +503,12 @@ async fn restore_account(
 
     // Its destruction is off
     let mut batch = BatchBuilder::new();
-    batch
-        .clear(ValueClass::TaskQueue(TaskQueueClass::Task { id: kept.task_id }))
-        .clear(ValueClass::TaskQueue(TaskQueueClass::Due {
-            id: kept.task_id,
-            due: kept.kept_until,
-        }));
-    data.write(batch.build_all())
+    batch.clear_document_task(
+        TaskId::Assigned(kept.task_id),
+        TaskType::DestroyAccount,
+        kept.kept_until,
+    );
+    data.write_batch(&mut batch)
         .await
         .caused_by(trc::location!())?;
 
@@ -534,7 +545,9 @@ async fn restore_account(
 /// Destroys a kept account for good: its `DestroyAccount` task runs now.
 async fn destroy_now(server: &Server, id: Id, kept: &KeptAccount) -> trc::Result<()> {
     let data = &server.core.storage.data;
-    let task_key = ValueClass::TaskQueue(TaskQueueClass::Task { id: kept.task_id });
+    let task_key = ValueClass::TaskQueue(TaskQueueClass::Task {
+        id: TaskId::Assigned(kept.task_id),
+    });
     let mut batch = BatchBuilder::new();
     if let Some(mut task) = data
         .get_value::<Task>(store::ValueKey::from(task_key))
@@ -543,13 +556,14 @@ async fn destroy_now(server: &Server, id: Id, kept: &KeptAccount) -> trc::Result
         task.set_status(TaskStatus::now());
         batch
             .clear(ValueClass::TaskQueue(TaskQueueClass::Due {
-                id: kept.task_id,
+                id: TaskId::Assigned(kept.task_id),
+                typ: TaskType::DestroyAccount,
                 due: kept.kept_until,
             }))
             .schedule_task_with_id(kept.task_id, task);
     }
     data::clear_kept_account(&mut batch, id.document_id(), kept);
-    data.write(batch.build_all())
+    data.write_batch(&mut batch)
         .await
         .caused_by(trc::location!())?;
     server.notify_task_queue();

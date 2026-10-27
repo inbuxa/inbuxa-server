@@ -4,153 +4,125 @@
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
  */
 
+use memchr::memchr_iter;
 use std::{borrow::Cow, ops::Range};
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Copy, Default)]
 pub struct ChainedBytes<'x> {
-    first: &'x [u8],
-    last: &'x [u8],
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum SliceRange<'x> {
-    Single(&'x [u8]),
-    Split(&'x [u8], &'x [u8]),
-    None,
+    head: &'x [u8],
+    tail: &'x [u8],
 }
 
 impl<'x> ChainedBytes<'x> {
-    pub fn new(first: &'x [u8]) -> Self {
-        Self { first, last: &[] }
+    pub const fn new(bytes: &'x [u8]) -> Self {
+        Self {
+            head: bytes,
+            tail: &[],
+        }
     }
 
-    pub fn append(&mut self, bytes: &'x [u8]) {
-        self.last = bytes;
+    pub const fn chain(head: &'x [u8], tail: &'x [u8]) -> Self {
+        Self { head, tail }
     }
 
-    pub fn with_last(mut self, bytes: &'x [u8]) -> Self {
-        self.last = bytes;
-        self
+    pub fn from_blob(head: &'x [u8], blob: &'x [u8], body_offset: usize) -> Self {
+        Self {
+            head,
+            tail: blob.get(body_offset..).unwrap_or_default(),
+        }
     }
 
-    pub fn get(&self, index: Range<usize>) -> Option<Cow<'x, [u8]>> {
-        let start = index.start;
-        let end = index.end;
+    pub const fn len(&self) -> usize {
+        self.head.len() + self.tail.len()
+    }
 
-        if let Some(bytes) = self.first.get(start..end) {
-            Some(Cow::Borrowed(bytes))
-        } else if start >= self.first.len() {
-            self.last
-                .get(start - self.first.len()..end - self.first.len())
+    pub const fn is_empty(&self) -> bool {
+        self.head.is_empty() && self.tail.is_empty()
+    }
+
+    pub const fn segments(&self) -> [&'x [u8]; 2] {
+        [self.head, self.tail]
+    }
+
+    #[inline]
+    pub fn view(&self, range: Range<usize>) -> Option<Self> {
+        let split = self.head.len();
+        if range.end <= split {
+            self.head.get(range).map(Self::new)
+        } else if range.start >= split {
+            self.tail
+                .get(range.start - split..range.end - split)
+                .map(Self::new)
+        } else {
+            Some(Self::chain(
+                self.head.get(range.start..)?,
+                self.tail.get(..range.end - split)?,
+            ))
+        }
+    }
+
+    #[inline]
+    pub fn get(&self, range: Range<usize>) -> Option<Cow<'x, [u8]>> {
+        let split = self.head.len();
+        if range.end <= split {
+            self.head.get(range).map(Cow::Borrowed)
+        } else if range.start >= split {
+            self.tail
+                .get(range.start - split..range.end - split)
                 .map(Cow::Borrowed)
-        } else if let (Some(first), Some(last)) = (
-            self.first.get(start..),
-            self.last.get(..end - self.first.len()),
-        ) {
-            let mut vec = vec![0u8; first.len() + last.len()];
-            vec[..first.len()].copy_from_slice(first);
-            vec[first.len()..].copy_from_slice(last);
-            Some(Cow::Owned(vec))
         } else {
-            None
+            self.concat(range)
         }
     }
 
-    pub fn get_slice_range(&self, index: Range<usize>) -> SliceRange<'x> {
-        let start = index.start;
-        let end = index.end;
-
-        if let Some(bytes) = self.first.get(start..end) {
-            SliceRange::Single(bytes)
-        } else if start >= self.first.len() {
-            self.last
-                .get(start - self.first.len()..end - self.first.len())
-                .map(SliceRange::Single)
-                .unwrap_or(SliceRange::None)
-        } else if let (Some(first), Some(last)) = (
-            self.first.get(start..),
-            self.last.get(..end - self.first.len()),
-        ) {
-            SliceRange::Split(first, last)
-        } else {
-            SliceRange::None
-        }
+    pub fn to_vec(&self) -> Vec<u8> {
+        self.segments().concat()
     }
 
-    pub fn get_full_range(&self) -> SliceRange<'x> {
-        if self.last.is_empty() {
-            SliceRange::Single(self.first)
-        } else {
-            SliceRange::Split(self.first, self.last)
-        }
+    #[inline]
+    pub fn extend_into(&self, buf: &mut Vec<u8>) {
+        buf.reserve(self.len());
+        buf.extend_from_slice(self.head);
+        buf.extend_from_slice(self.tail);
     }
 
-    pub fn to_bytes(&self) -> Vec<u8> {
-        let mut bytes = vec![0u8; self.first.len() + self.last.len()];
-        bytes[..self.first.len()].copy_from_slice(self.first);
-        bytes[self.first.len()..].copy_from_slice(self.last);
-        bytes
+    pub fn line_prefix_len(&self, lines: usize) -> usize {
+        let Some(nth) = lines.checked_sub(1) else {
+            return 0;
+        };
+        let [head, tail] = self.segments();
+        memchr_iter(b'\n', head)
+            .chain(memchr_iter(b'\n', tail).map(|pos| pos + head.len()))
+            .nth(nth)
+            .map_or(self.len(), |pos| pos + 1)
     }
 
-    pub fn len(&self) -> usize {
-        self.first.len() + self.last.len()
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.len() == 0
+    #[cold]
+    fn concat(&self, range: Range<usize>) -> Option<Cow<'x, [u8]>> {
+        self.view(range).map(|bytes| Cow::Owned(bytes.to_vec()))
     }
 }
 
-impl<'x> SliceRange<'x> {
-    pub fn len(&self) -> usize {
-        match self {
-            SliceRange::Single(bytes) => bytes.len(),
-            SliceRange::Split(first, last) => first.len() + last.len(),
-            SliceRange::None => 0,
+impl PartialEq for ChainedBytes<'_> {
+    fn eq(&self, other: &Self) -> bool {
+        let (short, long) = if self.head.len() <= other.head.len() {
+            (self, other)
+        } else {
+            (other, self)
+        };
+        if short.len() != long.len() {
+            return false;
         }
-    }
-
-    pub fn try_into_bytes(self) -> Option<Cow<'x, [u8]>> {
-        match self {
-            SliceRange::Single(bytes) => Some(Cow::Borrowed(bytes)),
-            SliceRange::Split(first, last) => {
-                let mut vec = vec![0u8; first.len() + last.len()];
-                vec[..first.len()].copy_from_slice(first);
-                vec[first.len()..].copy_from_slice(last);
-                Some(Cow::Owned(vec))
-            }
-            SliceRange::None => None,
-        }
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.len() == 0
-    }
-
-    fn into_pairs(self) -> (&'x [u8], &'x [u8]) {
-        match self {
-            SliceRange::Single(bytes) => (bytes, &[][..]),
-            SliceRange::Split(first, last) => (first, last),
-            SliceRange::None => (&[][..], &[][..]),
-        }
-    }
-
-    pub fn is_none(&self) -> bool {
-        matches!(self, SliceRange::None)
-    }
-
-    pub fn is_some(&self) -> bool {
-        !self.is_none()
+        let Some((long_head, long_middle)) = long.head.split_at_checked(short.head.len()) else {
+            return false;
+        };
+        let Some((short_middle, short_tail)) = short.tail.split_at_checked(long_middle.len())
+        else {
+            return false;
+        };
+        short.head == long_head && short_middle == long_middle && short_tail == long.tail
     }
 }
 
-impl<'x> IntoIterator for SliceRange<'x> {
-    type Item = &'x u8;
-    type IntoIter = std::iter::Chain<std::slice::Iter<'x, u8>, std::slice::Iter<'x, u8>>;
+impl Eq for ChainedBytes<'_> {}
 
-    fn into_iter(self) -> Self::IntoIter {
-        let (first, last) = self.into_pairs();
-
-        first.iter().chain(last.iter())
-    }
-}

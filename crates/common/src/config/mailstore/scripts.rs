@@ -8,6 +8,7 @@
 
 use crate::{
     VERSION_PUBLIC,
+    config::mailstore::limits::EmailLimits,
     expr::if_block::{BootstrapExprExt, IfBlock},
     scripts::{
         functions::{register_functions_trusted, register_functions_untrusted},
@@ -26,8 +27,9 @@ use registry::{
     types::EnumImpl,
 };
 use sieve::{Compiler, Runtime, Sieve, compiler::grammar::Capability};
-use std::{collections::hash_map::Entry, sync::Arc};
+use std::{borrow::Cow, collections::hash_map::Entry};
 use store::registry::bootstrap::Bootstrap;
+use utils::text::lowercase;
 
 pub struct Scripting {
     pub untrusted_compiler: Compiler,
@@ -40,13 +42,13 @@ pub struct Scripting {
     pub return_path: IfBlock,
     pub sign: IfBlock,
     pub untrusted_sign: IfBlock,
-    pub trusted_scripts: AHashMap<String, Arc<Sieve>>,
-    pub untrusted_scripts: AHashMap<String, Arc<Sieve>>,
+    pub trusted_scripts: AHashMap<String, Sieve<'static>>,
+    pub untrusted_scripts: AHashMap<String, Sieve<'static>>,
     pub http_client: reqwest::Client,
 }
 
 impl Scripting {
-    pub async fn parse(bp: &mut Bootstrap) -> Self {
+    pub async fn parse(bp: &mut Bootstrap, limits: &EmailLimits) -> Self {
         // Parse untrusted compiler
         let untrusted = bp.setting_infallible::<SieveUserInterpreter>().await;
         let untrusted_sign = bp.compile_expr(
@@ -65,6 +67,13 @@ impl Scripting {
             .with_max_local_variables(untrusted.max_local_vars as usize)
             .with_max_header_size(untrusted.max_header_size as usize)
             .with_max_includes(untrusted.max_includes as usize)
+            .without_capabilities(
+                untrusted
+                    .disable_capabilities
+                    .iter()
+                    .map(|cap| cap.as_str()),
+            )
+            .without_capability(Capability::ImapSieve)
             .register_functions(&mut fnc_map_untrusted);
 
         // Parse untrusted runtime
@@ -77,6 +86,8 @@ impl Scripting {
             .with_max_received_headers(usize::MAX) // This is set to usize::MAX here, but the actual limit is enforced during ingestion.
             .with_max_header_size(untrusted.max_header_size as usize)
             .with_max_out_messages(untrusted.max_out_messages as usize)
+            .with_max_header_count(limits.header_count)
+            .with_max_header_block_size(limits.header_fields_size())
             .with_default_vacation_expiry(untrusted.default_expiry_vacation.into_inner().as_secs())
             .with_default_duplicate_expiry(
                 untrusted.default_expiry_duplicate.into_inner().as_secs(),
@@ -88,6 +99,7 @@ impl Scripting {
                     .iter()
                     .map(|cap| cap.as_str()),
             )
+            .without_capability(Capability::ImapSieve)
             .with_valid_notification_uris(untrusted.allowed_notify_uris)
             .with_protected_headers(untrusted.protected_headers)
             .with_vacation_default_subject(untrusted.default_subject)
@@ -143,14 +155,13 @@ impl Scripting {
             .with_cpu_limit(trusted.max_cpu_cycles as usize)
             .with_max_nested_includes(trusted.max_nested_includes as usize)
             .with_max_received_headers(trusted.max_received_headers as usize)
-            .with_default_duplicate_expiry(trusted.duplicate_expiry.into_inner().as_secs())
-            // inbuxa: without it, `environment "name"` answers sieve-rs's default
+            // inbuxa: without it, `environment "name"` answers the sieve crate's default
             .with_env_variable("name", types::brand_server!());
         trusted_runtime.set_local_hostname(local_hostname.clone());
         untrusted_runtime.set_local_hostname(local_hostname);
 
         // Parse trusted scripts
-        let mut trusted_scripts: AHashMap<String, Arc<Sieve>> = AHashMap::new();
+        let mut trusted_scripts: AHashMap<String, Sieve<'static>> = AHashMap::new();
         for script in bp.list_infallible::<SieveSystemScript>().await {
             if !script.object.is_active {
                 continue;
@@ -159,7 +170,7 @@ impl Scripting {
             match trusted_compiler.compile(script.object.contents.as_bytes()) {
                 Ok(compiled) => match trusted_scripts.entry(script.object.name.to_lowercase()) {
                     Entry::Vacant(entry) => {
-                        entry.insert(compiled.into());
+                        entry.insert(compiled);
                     }
                     Entry::Occupied(_) => {
                         bp.build_error(
@@ -181,7 +192,7 @@ impl Scripting {
         }
 
         // Parse untrusted scripts
-        let mut untrusted_scripts: AHashMap<String, Arc<Sieve>> = AHashMap::new();
+        let mut untrusted_scripts: AHashMap<String, Sieve<'static>> = AHashMap::new();
         for script in bp.list_infallible::<SieveUserScript>().await {
             if !script.object.is_active {
                 continue;
@@ -190,7 +201,7 @@ impl Scripting {
             match untrusted_compiler.compile(script.object.contents.as_bytes()) {
                 Ok(compiled) => match untrusted_scripts.entry(script.object.name.to_lowercase()) {
                     Entry::Vacant(entry) => {
-                        entry.insert(compiled.into());
+                        entry.insert(compiled);
                     }
                     Entry::Occupied(_) => {
                         bp.build_error(
@@ -203,9 +214,9 @@ impl Scripting {
                     }
                 },
                 Err(err) => {
-                    bp.build_error(
+                    bp.build_warning(
                         script.id,
-                        format!("Failed to compile user global Sieve script: {err}"),
+                        format!("Failed to compile user global Sieve script, skipping it: {err}"),
                     );
                 }
             }
@@ -218,7 +229,7 @@ impl Scripting {
             trusted_compiler,
             untrusted_scripts,
             trusted_scripts,
-            http_client: utils::http::http_client_builder(cfg!(feature = "test_mode"))
+            http_client: utils::http::http_client_builder(cfg!(inbuxa_tests))
                 .pool_max_idle_per_host(0)
                 .redirect(reqwest::redirect::Policy::none())
                 .build()
@@ -244,22 +255,23 @@ impl Scripting {
         }
     }
 
-    pub fn trusted_script(&self, name: &str) -> Option<&Arc<Sieve>> {
+    pub fn trusted_script(&self, name: &str) -> Option<&Sieve<'static>> {
         script_by_name(&self.trusted_scripts, name)
     }
 
-    pub fn untrusted_script(&self, name: &str) -> Option<&Arc<Sieve>> {
+    pub fn untrusted_script(&self, name: &str) -> Option<&Sieve<'static>> {
         script_by_name(&self.untrusted_scripts, name)
     }
 }
 
 fn script_by_name<'x>(
-    scripts: &'x AHashMap<String, Arc<Sieve>>,
+    scripts: &'x AHashMap<String, Sieve<'static>>,
     name: &str,
-) -> Option<&'x Arc<Sieve>> {
-    scripts
-        .get(name)
-        .or_else(|| scripts.get(name.to_lowercase().as_str()))
+) -> Option<&'x Sieve<'static>> {
+    scripts.get(name).or_else(|| match lowercase(name) {
+        Cow::Owned(name) => scripts.get(name.as_str()),
+        Cow::Borrowed(_) => None,
+    })
 }
 
 impl Clone for Scripting {
@@ -286,10 +298,9 @@ impl Clone for Scripting {
 mod tests {
     use sieve::compiler::grammar::Capability;
 
-    // inbuxa: sieve-rs is vendored (vendor/sieve-rs) to carry the fork's
-    // name in its Sieve extensions. If Cargo.lock moves sieve-rs past the
-    // vendored version, Cargo drops the patch with only a warning and
-    // upstream's spelling comes back; this fails instead.
+    // inbuxa: the Sieve extensions carry the fork's name. 1.0 moved the
+    // sieve crate in-tree (crates/sieve) and the import's rename pass spells
+    // it there; this fails if a later import misses it.
     #[test]
     fn sieve_extensions_carry_the_fork_name() {
         for (capability, name) in [

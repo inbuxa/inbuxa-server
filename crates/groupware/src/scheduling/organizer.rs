@@ -5,19 +5,61 @@
  */
 
 use crate::scheduling::{
-    InstanceId, ItipError, ItipMessage, ItipSnapshots, ItipSummary,
-    event_cancel::build_cancel_component,
-    itip::{ItipExportAs, itip_add_tz, itip_build_envelope, itip_export_component},
+    InstanceId, ItipDateTime, ItipEntryValue, ItipError, ItipMessage, ItipSnapshot, ItipSnapshots,
+    ItipSummary, RecurrenceId,
+    event_cancel::CancelScope,
+    itip::{
+        ItipExportAs, itip_add_tz, itip_build_envelope, itip_date_entry, itip_date_params,
+        itip_export_component,
+    },
 };
 use ahash::{AHashMap, AHashSet};
 use calcard::{
     common::PartialDateTime,
     icalendar::{
-        ICalendar, ICalendarComponent, ICalendarComponentType, ICalendarMethod,
-        ICalendarParticipationStatus, ICalendarProperty, ICalendarStatus,
+        ICalendar, ICalendarComponent, ICalendarComponentType, ICalendarEntry, ICalendarMethod,
+        ICalendarParticipationStatus, ICalendarProperty, ICalendarStatus, ICalendarValue,
     },
 };
 use std::collections::hash_map::Entry;
+
+pub(crate) struct SequenceIncrement<'x, 'y> {
+    previous: &'x ItipSnapshots<'y>,
+    component_ids: &'x mut Vec<u16>,
+}
+
+impl<'x, 'y> SequenceIncrement<'x, 'y> {
+    fn new(previous: &'x ItipSnapshots<'y>, component_ids: &'x mut Vec<u16>) -> Self {
+        SequenceIncrement {
+            previous,
+            component_ids,
+        }
+    }
+
+    fn sequence(&self, instance_id: &InstanceId, instance: &ItipSnapshot<'_>) -> i64 {
+        let sequence = instance.sequence.unwrap_or_default();
+        let previous = self
+            .previous
+            .components
+            .get(instance_id)
+            .or_else(|| self.previous.main_instance())
+            .and_then(|previous| previous.sequence)
+            .unwrap_or_default();
+        if sequence > previous {
+            sequence
+        } else {
+            sequence + 1
+        }
+    }
+
+    fn increment(&mut self, instance_id: &InstanceId, instance: &ItipSnapshot<'_>) -> i64 {
+        let sequence = self.sequence(instance_id, instance);
+        if sequence != instance.sequence.unwrap_or_default() {
+            self.component_ids.push(instance.comp_id);
+        }
+        sequence
+    }
+}
 
 pub(crate) fn organizer_handle_update(
     old_ical: &ICalendar,
@@ -29,6 +71,9 @@ pub(crate) fn organizer_handle_update(
     let mut changed_instances: Vec<(&InstanceId, &str, &ICalendarMethod)> = Vec::new();
     let mut increment_sequence = false;
     let mut changed_properties = AHashSet::new();
+    let mut added_exclusions: Vec<&ItipDateTime<'_>> = Vec::new();
+    let mut exclusion_recipients: Vec<&str> = Vec::new();
+    let mut cancelled_dates: Vec<i64> = Vec::new();
 
     for (instance_id, instance) in &new_itip.components {
         if let Some(old_instance) = old_itip.components.get(instance_id) {
@@ -74,17 +119,54 @@ pub(crate) fn organizer_handle_update(
                     increment_sequence = true;
                 }
 
-                changed_instances.extend(instance.attendees.iter().filter_map(|attendee| {
-                    if attendee.send_update_messages() {
-                        Some((
-                            instance_id,
-                            attendee.email.email.as_str(),
-                            &ICalendarMethod::Request,
-                        ))
-                    } else {
-                        None
+                let mut exclusions = Vec::new();
+                let mut is_exclusion_only = instance_id == &InstanceId::Main
+                    && changed_entries
+                    && !changed_attendees
+                    && old_instance
+                        .entries
+                        .difference(&instance.entries)
+                        .next()
+                        .is_none();
+
+                if is_exclusion_only {
+                    for entry in instance.entries.difference(&old_instance.entries) {
+                        match (entry.name, &entry.value) {
+                            (ICalendarProperty::Exdate, ItipEntryValue::DateTime(date)) => {
+                                exclusions.push(date);
+                            }
+                            _ => {
+                                is_exclusion_only = false;
+                                break;
+                            }
+                        }
                     }
-                }));
+                }
+
+                if is_exclusion_only {
+                    added_exclusions = exclusions;
+                    exclusion_recipients.extend(
+                        instance
+                            .attendees
+                            .iter()
+                            .filter(|attendee| attendee.send_update_messages())
+                            .map(|attendee| attendee.email.email.as_str()),
+                    );
+                    exclusion_recipients.sort_unstable();
+                    exclusion_recipients.dedup();
+                } else {
+                    changed_instances.extend(instance.attendees.iter().filter_map(|attendee| {
+                        if attendee.send_update_messages() {
+                            Some((
+                                instance_id,
+                                attendee.email.email.as_str(),
+                                &ICalendarMethod::Request,
+                            ))
+                        } else {
+                            None
+                        }
+                    }));
+                }
             }
         } else if instance_id != &InstanceId::Main {
             changed_properties.insert(&ICalendarProperty::Exdate);
@@ -124,13 +206,19 @@ pub(crate) fn organizer_handle_update(
                 }));
                 changed_properties.insert(&ICalendarProperty::Exdate);
                 increment_sequence = true;
+
+                if let InstanceId::Recurrence(recurrence_id) = instance_id {
+                    cancelled_dates.push(recurrence_id.date);
+                }
             } else {
                 return Err(ItipError::CannotModifyInstance);
             }
         }
     }
 
-    if changed_instances.is_empty() {
+    added_exclusions.retain(|date| !cancelled_dates.contains(&date.timestamp));
+
+    if changed_instances.is_empty() && added_exclusions.is_empty() {
         return Err(ItipError::NothingToSend);
     }
 
@@ -169,24 +257,23 @@ pub(crate) fn organizer_handle_update(
         }
     }
 
-    // Build summary of changed properties
-    let new_summary = new_itip
-        .main_instance_or_default()
-        .build_summary(Some(&new_itip.organizer), &[]);
-    let old_summary = old_itip
-        .main_instance_or_default()
-        .build_summary(Some(&old_itip.organizer), &new_summary);
-
     // Prepare full updates
     let mut messages = Vec::new();
     if !send_full_update.is_empty() {
         match organizer_request_full(
             new_ical,
             &new_itip,
-            increment_sequence.then_some(increment_sequences),
+            increment_sequence
+                .then(|| SequenceIncrement::new(&old_itip, &mut *increment_sequences)),
             false,
         ) {
             Ok(messages_) => {
+                let new_summary = new_itip
+                    .main_instance_or_default()
+                    .build_summary(Some(&new_itip.organizer), &[]);
+                let old_summary = old_itip
+                    .main_instance_or_default()
+                    .build_summary(Some(&old_itip.organizer), &new_summary);
                 for mut message in messages_ {
                     message.summary = ItipSummary::Update {
                         method: ICalendarMethod::Request,
@@ -217,13 +304,20 @@ pub(crate) fn organizer_handle_update(
             }
         }
 
+        let mut increment = increment_sequence
+            .then(|| SequenceIncrement::new(&old_itip, &mut *increment_sequences));
+        let main_sequence = new_itip
+            .main_instance()
+            .map(|instance| match &increment {
+                Some(increment) => increment.sequence(&InstanceId::Main, instance),
+                None => instance.sequence.unwrap_or_default(),
+            })
+            .unwrap_or_default();
         let dt_stamp = PartialDateTime::now();
+        let series_length = new_itip.main_instance().and_then(ItipSnapshot::length);
         for ((method, instances), emails) in updates {
-            let (mut ical, mut itip, is_cancel) = if matches!(method, ICalendarMethod::Cancel) {
-                (old_ical, &old_itip, true)
-            } else {
-                (new_ical, &new_itip, false)
-            };
+            let is_cancel = matches!(method, ICalendarMethod::Cancel);
+            let mut tz_source = if is_cancel { old_ical } else { new_ical };
 
             // Prepare iTIP message
             let mut message = ICalendar {
@@ -231,71 +325,93 @@ pub(crate) fn organizer_handle_update(
             };
             message.components.push(itip_build_envelope(method.clone()));
 
-            let mut increment_sequences = Vec::new();
-
-            for instance_id in instances {
-                let comp = match itip.components.get(instance_id) {
-                    Some(comp) => comp,
-                    None => {
-                        // New component added with CANCELLED status
-                        ical = new_ical;
-                        itip = &new_itip;
-                        itip.components.get(instance_id).unwrap()
+            for instance_id in &instances {
+                let old_instance = old_itip.components.get(*instance_id);
+                let new_instance = new_itip.components.get(*instance_id);
+                let component = if is_cancel {
+                    let Some(instance) = old_instance.or(new_instance) else {
+                        continue;
+                    };
+                    if old_instance.is_none() {
+                        tz_source = new_ical;
                     }
-                };
-                // Prepare component for iTIP
-                let sequence = if increment_sequence {
-                    comp.sequence.unwrap_or_default() + 1
+                    let sequence = match (new_instance, &mut increment) {
+                        (None, _) => (instance.sequence.unwrap_or_default() + 1).max(main_sequence),
+                        (Some(new_instance), Some(increment)) => increment
+                            .increment(instance_id, new_instance)
+                            .max(old_instance.map_or(0, |old_instance| {
+                                old_instance.sequence.unwrap_or_default() + 1
+                            })),
+                        (Some(new_instance), None) => new_instance
+                            .sequence
+                            .or(instance.sequence)
+                            .unwrap_or_default(),
+                    };
+                    let scope = if old_instance.is_some()
+                        && new_instance.is_some_and(|new_instance| {
+                            !matches!(new_instance.comp.status(), Some(ICalendarStatus::Cancelled))
+                        }) {
+                        CancelScope::Attendees(&emails)
+                    } else {
+                        CancelScope::Instance(&emails)
+                    };
+                    scope.build_component(instance.comp, sequence, dt_stamp.clone())
                 } else {
-                    comp.sequence.unwrap_or_default()
-                };
-                let orig_component = comp.comp;
-                let component = if !is_cancel {
-                    if increment_sequence {
-                        increment_sequences.push(comp.comp_id);
-                    }
+                    let Some(instance) = new_instance else {
+                        continue;
+                    };
+                    let sequence = match &mut increment {
+                        Some(increment) => increment.increment(instance_id, instance),
+                        None => instance.sequence.unwrap_or_default(),
+                    };
 
                     // Export component with updated sequence and participation status
                     itip_export_component(
-                        orig_component,
-                        itip.uid,
+                        instance.comp,
+                        new_itip.uid,
                         &dt_stamp,
                         sequence,
                         ItipExportAs::Organizer(&ICalendarParticipationStatus::NeedsAction),
+                        series_length.as_ref(),
                     )
-                } else {
-                    build_cancel_component(orig_component, sequence, dt_stamp.clone(), &emails)
                 };
 
                 // Add component to message
                 let comp_id = message.components.len() as u32;
                 message.components.push(component);
-                message.components[0].component_ids.push(comp_id);
+                if let Some(root) = message.components.first_mut() {
+                    root.component_ids.push(comp_id);
+                }
             }
 
             // Add timezones
-            itip_add_tz(&mut message, ical);
+            itip_add_tz(&mut message, tz_source);
+
+            let current_guests = instances
+                .iter()
+                .any(|instance_id| new_itip.components.contains_key(*instance_id))
+                .then_some(&new_itip.organizer);
+            let current = new_itip.build_instances_summary(&instances, current_guests, &[]);
+            let previous =
+                old_itip.build_instances_summary(&instances, Some(&old_itip.organizer), &current);
 
             messages.push(ItipMessage {
-                from: itip.organizer.email.email.clone(),
+                from: new_itip.organizer.email.email.clone(),
                 from_organizer: true,
                 to: emails.into_iter().map(|e| e.to_string()).collect(),
-                summary: if method == &ICalendarMethod::Cancel {
-                    ItipSummary::Cancel(
-                        new_summary
-                            .iter()
-                            .chain(old_summary.iter())
-                            .map(|summary| (&summary.name, summary))
-                            .collect::<AHashMap<_, _>>()
-                            .into_values()
-                            .cloned()
-                            .collect(),
-                    )
+                summary: if is_cancel {
+                    let mut fields = current;
+                    for field in previous {
+                        if !fields.iter().any(|existing| existing.name == field.name) {
+                            fields.push(field);
+                        }
+                    }
+                    ItipSummary::Cancel(fields)
                 } else {
                     ItipSummary::Update {
                         method: method.clone(),
-                        current: new_summary.clone(),
-                        previous: old_summary.clone(),
+                        current,
+                        previous,
                     }
                 },
                 message,
@@ -303,13 +419,143 @@ pub(crate) fn organizer_handle_update(
         }
     }
 
+    if !added_exclusions.is_empty()
+        && !exclusion_recipients.is_empty()
+        && send_full_update.is_empty()
+        && let Some(main_instance) = new_itip.main_instance()
+        && main_instance.entries.iter().any(|entry| {
+            matches!(
+                entry.name,
+                ICalendarProperty::Rrule | ICalendarProperty::Rdate
+            )
+        })
+    {
+        let mut increment = increment_sequence
+            .then(|| SequenceIncrement::new(&old_itip, &mut *increment_sequences));
+        let sequence = match &mut increment {
+            Some(increment) => increment.increment(&InstanceId::Main, main_instance),
+            None => main_instance.sequence.unwrap_or_default(),
+        };
+        let dt_stamp = PartialDateTime::now();
+        let mut message = ICalendar {
+            components: Vec::with_capacity(added_exclusions.len() + 1),
+        };
+        message
+            .components
+            .push(itip_build_envelope(ICalendarMethod::Cancel));
+        let mut cancelled_instances: Vec<InstanceId> = Vec::with_capacity(added_exclusions.len());
+        let mut exdate_sources: AHashMap<(Option<&str>, &PartialDateTime), &ICalendarEntry> =
+            AHashMap::with_capacity(added_exclusions.len());
+        let mut overrides_by_date = AHashMap::with_capacity(new_itip.components.len());
+
+        for entry in &main_instance.comp.entries {
+            if entry.name == ICalendarProperty::Exdate {
+                let tz_id = entry.tz_id();
+                for value in &entry.values {
+                    if let ICalendarValue::PartialDateTime(value) = value {
+                        exdate_sources.entry((tz_id, value)).or_insert(entry);
+                    }
+                }
+            }
+        }
+        for (instance_id, instance) in &new_itip.components {
+            if let InstanceId::Recurrence(recurrence_id) = instance_id {
+                overrides_by_date
+                    .entry(recurrence_id.date)
+                    .or_insert((instance_id, instance));
+            }
+        }
+
+        for date in added_exclusions {
+            let Some(source) = exdate_sources.get(&(date.tz_id, date.date)).copied() else {
+                continue;
+            };
+
+            let overridden = overrides_by_date.get(&date.timestamp).copied();
+            let instance_id = match overridden {
+                Some((instance_id, _)) => instance_id.clone(),
+                None => InstanceId::Recurrence(RecurrenceId {
+                    entry_id: 0,
+                    date: date.timestamp,
+                    this_and_future: false,
+                }),
+            };
+            let overridden = overridden.map(|(_, instance)| instance);
+            let params = itip_date_params(source);
+            let value = ICalendarValue::PartialDateTime(date.date.clone());
+            let dt_start = match overridden
+                .and_then(|instance| instance.comp.property(&ICalendarProperty::Dtstart))
+            {
+                Some(entry) => itip_date_entry(ICalendarProperty::Dtstart, entry),
+                None => ICalendarEntry {
+                    name: ICalendarProperty::Dtstart,
+                    params: params.clone(),
+                    values: [value.clone()].into(),
+                },
+            };
+
+            let mut component = CancelScope::Instance(&exclusion_recipients).build_component(
+                main_instance.comp,
+                sequence,
+                dt_stamp.clone(),
+            );
+            component.entries.retain(|entry| {
+                !matches!(
+                    entry.name,
+                    ICalendarProperty::Dtstart
+                        | ICalendarProperty::Dtend
+                        | ICalendarProperty::Duration
+                        | ICalendarProperty::Due
+                )
+            });
+            component.entries.push(ICalendarEntry {
+                name: ICalendarProperty::RecurrenceId,
+                params,
+                values: [value].into(),
+            });
+            component.entries.push(dt_start);
+
+            let comp_id = message.components.len() as u32;
+            message.components.push(component);
+            if let Some(root) = message.components.first_mut() {
+                root.component_ids.push(comp_id);
+            }
+            cancelled_instances.push(instance_id);
+        }
+
+        if !cancelled_instances.is_empty() {
+            itip_add_tz(&mut message, new_ical);
+
+            let mut fields = new_itip.build_instances_summary(&cancelled_instances, None, &[]);
+            fields.push(main_instance.guest_field(&new_itip.organizer));
+
+            messages.push(ItipMessage {
+                from: new_itip.organizer.email.email.clone(),
+                from_organizer: true,
+                to: exclusion_recipients
+                    .into_iter()
+                    .map(|email| email.to_string())
+                    .collect(),
+                summary: ItipSummary::Cancel(fields),
+                message,
+            });
+        }
+    }
+
+    if messages.is_empty() {
+        return Err(ItipError::NothingToSend);
+    }
+
+    increment_sequences.sort_unstable();
+    increment_sequences.dedup();
+
     Ok(messages)
 }
 
 pub(crate) fn organizer_request_full(
     ical: &ICalendar,
     itip: &ItipSnapshots<'_>,
-    mut increment_sequence: Option<&mut Vec<u16>>,
+    mut increment: Option<SequenceIncrement<'_, '_>>,
     is_first_request: bool,
 ) -> Result<Vec<ItipMessage<ICalendar>>, ItipError> {
     // Prepare iTIP message
@@ -321,19 +567,18 @@ pub(crate) fn organizer_request_full(
 
     let mut recipients = AHashSet::new();
     let mut copy_components = AHashSet::new();
+    let series_length = itip.main_instance().and_then(ItipSnapshot::length);
 
-    for comp in itip.components.values() {
+    for (instance_id, comp) in &itip.components {
         // Skip private components
         if comp.attendees.is_empty() {
             continue;
         }
 
         // Prepare component for iTIP
-        let sequence = if let Some(increment_sequence) = &mut increment_sequence {
-            increment_sequence.push(comp.comp_id);
-            comp.sequence.unwrap_or_default() + 1
-        } else {
-            comp.sequence.unwrap_or_default()
+        let sequence = match &mut increment {
+            Some(increment) => increment.increment(instance_id, comp),
+            None => comp.sequence.unwrap_or_default(),
         };
         let orig_component = &ical.components[comp.comp_id as usize];
         let mut component = itip_export_component(
@@ -342,6 +587,7 @@ pub(crate) fn organizer_request_full(
             &dt_stamp,
             sequence,
             ItipExportAs::Organizer(&ICalendarParticipationStatus::NeedsAction),
+            series_length.as_ref(),
         );
 
         // Add VALARM sub-components
@@ -401,3 +647,4 @@ pub(crate) fn organizer_request_full(
         Err(ItipError::NothingToSend)
     }
 }
+

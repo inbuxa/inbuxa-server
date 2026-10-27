@@ -2,6 +2,8 @@
  * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
+ *
+ * Modified by Coffey Labs in 2026 for INBUXA.
  */
 
 use crate::{
@@ -11,7 +13,7 @@ use crate::{
     },
     utils::{dns::DnsCache, server::TestServerBuilder},
 };
-use mail_auth::{DnssecStatus, MX};
+use mail_auth::{DnssecStatus, Mx};
 use registry::schema::structs::{Expression, MtaStageData};
 use smtp_proto::{MAIL_REQUIRETLS, MAIL_RET_HDRS, MAIL_SMTPUTF8, RCPT_NOTIFY_NEVER};
 use std::time::{Duration, Instant};
@@ -94,7 +96,7 @@ async fn extensions() {
     // Add mock DNS entries
     local.server.mx_add(
         "foobar.org",
-        vec![MX {
+        vec![Mx {
             exchanges: vec!["mx.foobar.org".into()].into_boxed_slice(),
             preference: 10,
         }],

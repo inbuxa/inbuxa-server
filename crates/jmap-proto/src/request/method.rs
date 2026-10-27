@@ -8,7 +8,10 @@
 
 use crate::request::capability::Capability;
 use registry::{
-    schema::prelude::{OBJ_SINGLETON, ObjectType},
+    schema::prelude::{
+        OBJ_NO_CREATE, OBJ_NO_DESTROY, OBJ_NO_GET, OBJ_NO_QUERY, OBJ_NO_UPDATE, OBJ_SINGLETON,
+        ObjectType,
+    },
     types::EnumImpl,
 };
 use std::{borrow::Cow, fmt::Display};
@@ -175,6 +178,15 @@ impl MethodName {
         Self {
             obj: MethodObject::Thread,
             fnc: MethodFunction::Echo,
+        }
+    }
+
+    pub fn capability(&self) -> Capability {
+        match (self.obj, self.fnc) {
+            (MethodObject::Principal, MethodFunction::GetAvailability) => {
+                Capability::PrincipalsAvailability
+            }
+            (obj, _) => obj.capability(),
         }
     }
 
@@ -386,7 +398,7 @@ impl MethodName {
     }
 
     pub fn parse(s: &str) -> Option<Self> {
-        hashify::tiny_map!(s.as_bytes(),
+        hashify::map!(s.as_bytes(), (MethodObject, MethodFunction),
             "PushSubscription/get" => (MethodObject::PushSubscription, MethodFunction::Get),
             "PushSubscription/set" => (MethodObject::PushSubscription, MethodFunction::Set),
 
@@ -552,15 +564,15 @@ impl MethodName {
             "inbuxa:FrontEnds/get" => (MethodObject::FrontEnds, MethodFunction::Get),
             "inbuxa:FrontEnds/set" => (MethodObject::FrontEnds, MethodFunction::Set),
 
-        ).or_else(|| {
+        ).copied().or_else(|| {
             let (obj, fnc) = s.strip_prefix("x:")?.split_once('/')?;
             let obj = ObjectType::parse(obj)?;
-            let fnc = hashify::tiny_map!(fnc.as_bytes(),
+            let fnc = hashify::map!(fnc.as_bytes(), MethodFunction,
                 "get" => MethodFunction::Get,
                 "set" => MethodFunction::Set,
                 "query" => MethodFunction::Query,
                 "changes" => MethodFunction::Changes,
-            )?;
+            ).copied()?;
             // inbuxa: only masked email and undelete have /changes (fork additions)
             if fnc == MethodFunction::Changes
                 && !matches!(obj, ObjectType::MaskedEmail | ObjectType::ArchivedItem)
@@ -568,7 +580,18 @@ impl MethodName {
                 return None;
             }
 
-            if obj.flags() & OBJ_SINGLETON == 0 || fnc != MethodFunction::Query {
+            let flags = obj.flags();
+            let offered = match fnc {
+                MethodFunction::Get => flags & OBJ_NO_GET == 0,
+                MethodFunction::Query => flags & (OBJ_SINGLETON | OBJ_NO_QUERY) == 0,
+                MethodFunction::Set => {
+                    flags & (OBJ_NO_CREATE | OBJ_NO_UPDATE | OBJ_NO_DESTROY)
+                        != (OBJ_NO_CREATE | OBJ_NO_UPDATE | OBJ_NO_DESTROY)
+                }
+                _ => true,
+            };
+
+            if offered {
                 (MethodObject::Registry(obj), fnc).into()
             } else {
                 None

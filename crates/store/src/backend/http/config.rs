@@ -13,6 +13,7 @@ use std::{
     collections::hash_map::Entry,
     sync::atomic::{AtomicBool, AtomicU64},
 };
+use utils::http::http_client_builder;
 
 impl LookupStores {
     pub async fn parse_http(&mut self, bp: &mut Bootstrap) {
@@ -24,10 +25,30 @@ impl LookupStores {
                 continue;
             }
 
+            let (client, custom_user_agent) = match http
+                .http_auth
+                .build_headers(http.http_headers, None)
+                .await
+                .and_then(|headers| {
+                    let custom_user_agent = headers.contains_key(reqwest::header::USER_AGENT);
+                    http_client_builder(http.allow_invalid_certs)
+                        .pool_max_idle_per_host(0)
+                        .default_headers(headers)
+                        .build()
+                        .map(|client| (client, custom_user_agent))
+                        .map_err(|err| format!("Failed to build HTTP client: {err}"))
+                }) {
+                Ok(result) => result,
+                Err(err) => {
+                    bp.build_error(id, err);
+                    continue;
+                }
+            };
+
             let http_config = HttpStoreConfig {
                 url: http.url,
                 retry: http.retry.as_secs(),
-                refresh: http.refresh.as_secs(),
+                refresh_interval: http.refresh_interval.as_secs(),
                 timeout: http.timeout.into_inner(),
                 gzipped: http.is_gzipped,
                 max_size: http.max_size as usize,
@@ -43,6 +64,7 @@ impl LookupStores {
                     },
                 },
                 id: http.namespace,
+                custom_user_agent,
             };
 
             match self.stores.entry(http_config.id.as_str().into()) {
@@ -52,7 +74,7 @@ impl LookupStores {
                         expires: AtomicU64::new(0),
                         in_flight: AtomicBool::new(false),
                         config: http_config,
-                        client: utils::http::unpooled_http_client(false),
+                        client,
                     };
 
                     entry.insert(InMemoryStore::Http(store.into()));

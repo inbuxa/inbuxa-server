@@ -72,18 +72,19 @@ impl Property for FrontEndsProperty {
 
 impl FrontEndsProperty {
     fn parse(value: &str) -> Option<Self> {
-        hashify::tiny_map!(value.as_bytes(),
-            b"id" => FrontEndsProperty::Id,
-            b"adminUrl" => FrontEndsProperty::AdminUrl,
-            b"webmailUrl" => FrontEndsProperty::WebmailUrl,
-            b"webmailClientSecret" => FrontEndsProperty::WebmailClientSecret,
-            b"webmailClientSecretSet" => FrontEndsProperty::WebmailClientSecretSet,
-            b"extraOrigins" => FrontEndsProperty::ExtraOrigins,
-            b"environmentAdminUrl" => FrontEndsProperty::EnvironmentAdminUrl,
-            b"environmentWebmailUrl" => FrontEndsProperty::EnvironmentWebmailUrl,
-            b"environmentWebmailClientSecret" => FrontEndsProperty::EnvironmentWebmailClientSecret,
-            b"changedAt" => FrontEndsProperty::ChangedAt,
-            b"changedBy" => FrontEndsProperty::ChangedBy,
+        hashify::fnc_map!(value.as_bytes(),
+            b"id" => Some(FrontEndsProperty::Id),
+            b"adminUrl" => Some(FrontEndsProperty::AdminUrl),
+            b"webmailUrl" => Some(FrontEndsProperty::WebmailUrl),
+            b"webmailClientSecret" => Some(FrontEndsProperty::WebmailClientSecret),
+            b"webmailClientSecretSet" => Some(FrontEndsProperty::WebmailClientSecretSet),
+            b"extraOrigins" => Some(FrontEndsProperty::ExtraOrigins),
+            b"environmentAdminUrl" => Some(FrontEndsProperty::EnvironmentAdminUrl),
+            b"environmentWebmailUrl" => Some(FrontEndsProperty::EnvironmentWebmailUrl),
+            b"environmentWebmailClientSecret" => Some(FrontEndsProperty::EnvironmentWebmailClientSecret),
+            b"changedAt" => Some(FrontEndsProperty::ChangedAt),
+            b"changedBy" => Some(FrontEndsProperty::ChangedBy),
+            _ => None,
         )
     }
 }

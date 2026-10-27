@@ -2,6 +2,8 @@
  * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
+ *
+ * Modified by Coffey Labs in 2026 for INBUXA.
  */
 
 use crate::{AssertConfig, utils::server::TestServer};
@@ -63,7 +65,7 @@ pub async fn spawn_mock_http_server(
                     SocketAddr::from_str(&format!("127.0.0.1:{port}")).unwrap(),
                 ]),
                 protocol: NetworkListenerProtocol::Http,
-                tls_implicit: true,
+                implicit_tls: true,
                 use_tls: true,
                 socket_reuse_address: true,
                 socket_reuse_port: true,

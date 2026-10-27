@@ -6,14 +6,20 @@
  * Modified by Coffey Labs in 2026 for INBUXA.
  */
 
-use common::{Server, auth::AccessToken, sharing::EffectiveAcl};
+use common::{
+    Server,
+    auth::AccessToken,
+    sharing::{
+        EffectiveAcl,
+        grants::{AclGrantLookup, ShareUpdate, ShareViolation},
+    },
+};
 use jmap_proto::{
     error::set::{SetError, SetErrorType},
     object::{JmapRight, JmapSharedObject},
 };
 use jmap_tools::{JsonPointerIter, Key, Map, Property, Value};
 use registry::{schema::prelude::ObjectType, types::id::ObjectId};
-use store::{registry::RegistryQuery, roaring::RoaringBitmap};
 use types::{
     acl::{Acl, AclGrant},
     id::Id,
@@ -98,7 +104,7 @@ impl JmapRights {
                 }
             };
 
-            let acl = right
+            let right = right
                 .as_property_key()
                 .cloned()
                 .and_then(|p| T::Right::try_from(p).ok())
@@ -109,16 +115,17 @@ impl JmapRights {
                             "Invalid permission {:?}.",
                             right.to_cow().unwrap_or_default()
                         ))
-                })?
-                .to_acl()
-                .iter()
-                .copied();
+                })?;
+            let acl = right.to_acl().iter().copied();
 
             if let Some(acl_item) = grants.iter_mut().find(|item| item.account_id == account_id) {
                 if is_set {
                     acl_item.grants.insert_many(acl);
                 } else {
                     acl_item.grants.remove_many(acl);
+                    if right.is_implied_by(&acl_item.grants) {
+                        return Err(implied_right::<T>(right));
+                    }
                     if acl_item.grants.is_empty() {
                         grants.retain(|item| item.account_id != account_id);
                     }
@@ -157,23 +164,63 @@ impl JmapRights {
         T::Right: TryFrom<T::Property>,
     {
         let mut acls = Bitmap::new();
+        let mut denied = Vec::new();
 
-        for key in value.into_expanded_boolean_set() {
-            acls.insert_many(
-                key.as_property()
-                    .and_then(|p| T::Right::try_from(p.clone()).ok())
-                    .ok_or_else(|| {
-                        SetError::invalid_properties()
-                            .with_property(T::SHARE_WITH_PROPERTY)
-                            .with_description(format!("Invalid permission {:?}.", key.to_string()))
-                    })?
-                    .to_acl()
-                    .iter()
-                    .copied(),
-            );
+        for (key, value) in value.into_expanded_object() {
+            let right = key
+                .as_property()
+                .and_then(|p| T::Right::try_from(p.clone()).ok());
+            match (value.as_bool(), right) {
+                (Some(true), Some(right)) => {
+                    acls.insert_many(right.to_acl().iter().copied());
+                }
+                (Some(false), Some(right)) => {
+                    if !right.implied_by_acl().is_empty() {
+                        denied.push(right);
+                    }
+                }
+                (Some(_), None) => {
+                    return Err(SetError::invalid_properties()
+                        .with_property(T::SHARE_WITH_PROPERTY)
+                        .with_description(format!("Invalid permission {:?}.", key.to_string())));
+                }
+                (None, _) => {
+                    return Err(SetError::invalid_properties()
+                        .with_property(T::SHARE_WITH_PROPERTY)
+                        .with_description(format!(
+                            "Permission {:?} must be a boolean.",
+                            key.to_string()
+                        )));
+                }
+            }
         }
 
-        Ok(acls)
+        match denied.into_iter().find(|right| right.is_implied_by(&acls)) {
+            Some(right) => Err(implied_right::<T>(right)),
+            None => Ok(acls),
+        }
+    }
+
+    pub fn validate_shares<T: JmapSharedObject, G: AclGrantLookup + ?Sized>(
+        update: ShareUpdate<'_, G>,
+        grants: &[AclGrant],
+    ) -> Result<(), SetError<T::Property>> {
+        update
+            .validate(grants)
+            .map_err(|violation| match violation {
+                ShareViolation::TooManyShares(max) => SetError::invalid_properties()
+                    .with_property(T::SHARE_WITH_PROPERTY)
+                    .with_description(format!(
+                        "Maximum number of shares per item exceeded (max: {max})"
+                    )),
+                ShareViolation::OwnerShared => SetError::invalid_properties()
+                    .with_property(T::SHARE_WITH_PROPERTY)
+                    .with_description(
+                        "An object cannot be shared with the principal that owns it.",
+                    ),
+                ShareViolation::RightNotHeld => SetError::forbidden()
+                    .with_description("You cannot grant rights that you do not have yourself."),
+            })
     }
 
     pub fn all_rights<T: JmapSharedObject>() -> Value<'static, T::Property, T::Element> {
@@ -210,7 +257,7 @@ impl JmapRights {
         for right in T::Right::all_rights() {
             obj.insert_unchecked(
                 Key::Property((*right).into()),
-                Value::Bool(right.to_acl().iter().all(|acl| acls.contains(*acl))),
+                Value::Bool(right.is_granted(&acls)),
             );
         }
 
@@ -228,39 +275,53 @@ impl JmapRights {
         if access_token.is_member(account_id)
             || grants.effective_acl(access_token).contains(Acl::Share)
         {
-            let mut share_with = Map::with_capacity(grants.len());
-            for grant in grants {
-                share_with.insert_unchecked(
-                    Key::Property(Id::from(grant.account_id).into()),
-                    Self::rights::<T>(grant.grants),
-                );
-            }
-
-            Value::Object(share_with)
+            Self::grants_value::<T>(grants)
         } else {
             Value::Null
         }
     }
+
+    pub fn grants_value<T: JmapSharedObject>(
+        grants: &[AclGrant],
+    ) -> Value<'static, T::Property, T::Element>
+    where
+        T::Property: From<Id>,
+    {
+        let mut share_with = Map::with_capacity(grants.len());
+        for grant in grants {
+            share_with.insert_unchecked(
+                Key::Property(Id::from(grant.account_id).into()),
+                Self::rights::<T>(grant.grants),
+            );
+        }
+        Value::Object(share_with)
+    }
 }
 
 pub trait JmapAcl {
-    fn acl_validate(
+    fn acl_validate<G: AclGrantLookup + Sync + ?Sized>(
         &self,
-        account_id: u32,
+        access_token: &AccessToken,
+        owner_id: u32,
         grants: &[AclGrant],
+        current: &G,
     ) -> impl Future<Output = Result<(), ShareValidationError>> + Send;
 }
 
 pub enum ShareValidationError {
     MaxSharesExceeded(usize),
     InvalidAccountId(Id),
+    Unavailable,
 }
 
 impl JmapAcl for Server {
-    async fn acl_validate(
+    #[cfg_attr(not(feature = "enterprise"), allow(unused_variables))]
+    async fn acl_validate<G: AclGrantLookup + Sync + ?Sized>(
         &self,
-        account_id: u32,
+        access_token: &AccessToken,
+        owner_id: u32,
         grants: &[AclGrant],
+        current: &G,
     ) -> Result<(), ShareValidationError> {
         if grants.len() > self.core.groupware.max_shares_per_item {
             return Err(ShareValidationError::MaxSharesExceeded(
@@ -268,29 +329,34 @@ impl JmapAcl for Server {
             ));
         }
 
-        let principal_ids = self
-            .registry()
-            .query::<RoaringBitmap>(RegistryQuery::new(ObjectType::Account))
-            .await
-            .unwrap_or_default();
-
         // inbuxa: MT-3: grants stay within the owner's tenant
-        let tenant_id = self
-            .try_account(account_id)
-            .await
-            .ok()
-            .flatten()
-            .and_then(|owner| owner.id_tenant);
-
+        let mut owner_tenant = None;
         for grant in grants {
-            if !principal_ids.contains(grant.account_id)
-                || self
-                    .try_account(grant.account_id)
-                    .await
-                    .ok()
-                    .flatten()
-                    .is_none_or(|grantee| grantee.id_tenant != tenant_id)
-            {
+            if !current.grants_of(grant.account_id).is_empty() {
+                continue;
+            }
+            let grantee = match self.try_account(grant.account_id).await {
+                Ok(Some(grantee)) => grantee,
+                Ok(None) => {
+                    return Err(ShareValidationError::InvalidAccountId(Id::from(
+                        grant.account_id,
+                    )));
+                }
+                Err(err) => {
+                    trc::error!(err.caused_by(trc::location!()));
+                    return Err(ShareValidationError::Unavailable);
+                }
+            };
+            if owner_tenant.is_none() {
+                match self.try_account(owner_id).await {
+                    Ok(owner) => owner_tenant = Some(owner.and_then(|owner| owner.id_tenant)),
+                    Err(err) => {
+                        trc::error!(err.caused_by(trc::location!()));
+                        return Err(ShareValidationError::Unavailable);
+                    }
+                }
+            }
+            if Some(grantee.id_tenant) != owner_tenant {
                 return Err(ShareValidationError::InvalidAccountId(Id::from(
                     grant.account_id,
                 )));
@@ -299,6 +365,26 @@ impl JmapAcl for Server {
 
         Ok(())
     }
+}
+
+trait ImpliedRight {
+    fn is_implied_by(&self, acls: &Bitmap<Acl>) -> bool;
+}
+
+impl<R: JmapRight> ImpliedRight for R {
+    fn is_implied_by(&self, acls: &Bitmap<Acl>) -> bool {
+        let implied_by = self.implied_by_acl();
+        !implied_by.is_empty() && implied_by.iter().all(|acl| acls.contains(*acl))
+    }
+}
+
+fn implied_right<T: JmapSharedObject>(right: T::Right) -> SetError<T::Property> {
+    SetError::invalid_properties()
+        .with_property(T::SHARE_WITH_PROPERTY)
+        .with_description(format!(
+            "Permission {} cannot be removed while other permissions imply it.",
+            Key::Property(right.into()).to_string()
+        ))
 }
 
 impl<T: Property> From<ShareValidationError> for SetError<T> {
@@ -315,6 +401,8 @@ impl<T: Property> From<ShareValidationError> for SetError<T> {
                     .with_object_id(ObjectId::new(ObjectType::Account, id))
                     .with_description(format!("Account id {id} is invalid."))
             }
+            ShareValidationError::Unavailable => SetError::invalid_properties()
+                .with_description("Shares could not be validated, please try again later."),
         }
     }
 }

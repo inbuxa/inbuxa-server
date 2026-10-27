@@ -2,6 +2,8 @@
  * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
+ *
+ * Modified by Coffey Labs in 2026 for INBUXA.
  */
 
 use super::{CompCtx, TestOutcome, check, check_contains, check_eq, skip};
@@ -250,9 +252,11 @@ async fn blob_copy_not_found(ctx: &CompCtx<'_>) -> TestOutcome {
     check(!r["notCopied"].is_null(), "notCopied must be present")?;
     let nc = &r["notCopied"]["nonexistent-blob-xyz"];
     check(!nc.is_null(), "Invalid blob should be in notCopied")?;
+    // inbuxa: RFC 8620 section 6.3 names "notFound" for a blob that cannot
+    // be found, which is what 1.0 returns
     check_eq(
         nc["type"].as_str().unwrap_or(""),
-        "blobNotFound",
+        "notFound",
         "notCopied type",
     )
 }

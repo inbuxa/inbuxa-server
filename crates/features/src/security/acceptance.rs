@@ -200,7 +200,7 @@ pub async fn create(data: &Store, acceptance: &Acceptance) -> trc::Result<Create
         let mut batch = BatchBuilder::new();
         batch.assert_value(class(id), AssertValue::None);
         batch.set(class(id), Json(&stored).serialize()?);
-        match data.write(batch.build_all()).await {
+        match data.write_batch(&mut batch).await {
             Ok(_) => return Ok(Created::Id(id)),
             Err(err)
                 if attempt < CREATE_ATTEMPTS
@@ -216,7 +216,7 @@ pub async fn create(data: &Store, acceptance: &Acceptance) -> trc::Result<Create
 pub async fn delete(data: &Store, id: u32) -> trc::Result<()> {
     let mut batch = BatchBuilder::new();
     batch.clear(class(id));
-    data.write(batch.build_all())
+    data.write_batch(&mut batch)
         .await
         .caused_by(trc::location!())?;
     Ok(())

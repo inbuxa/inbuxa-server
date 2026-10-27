@@ -4,50 +4,88 @@
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
  */
 
-use crate::{Server, ipc::PushNotification};
+use crate::{Server, cache::invalidate::CacheInvalidationBuilder, ipc::PushNotification};
 use std::time::Duration;
 use store::{
-    IterateParams, Key, LogKey, SUBSPACE_LOGS, U64_LEN,
-    write::{AnyClass, AssignedIds, BatchBuilder, ValueClass, key::DeserializeBigEndian},
+    IterateParams, Key, LogKey, Subspace, U64_LEN,
+    write::{
+        AnyClass, AssignedIds, BatchBuilder, ChangedCollection, LogCollection, QueueNotify,
+        ValueClass, key::DeserializeBigEndian,
+    },
 };
 use trc::AddContext;
 use types::{
-    collection::SyncCollection,
+    collection::{ChangeGroup, SyncCollection},
     type_state::{DataType, StateChange},
 };
-use utils::{map::bitmap::Bitmap, snowflake::SnowflakeIdGenerator};
+use utils::{
+    map::{bitmap::Bitmap, vec_map::VecMap},
+    snowflake::SnowflakeIdGenerator,
+};
 
 impl Server {
     pub async fn commit_batch(&self, mut builder: BatchBuilder) -> trc::Result<AssignedIds> {
-        let mut assigned_ids = AssignedIds::default();
-        let mut commit_points = builder.commit_points();
+        let mut assigned_ids = match self.store().write_batch(&mut builder).await {
+            Ok(assigned_ids) => assigned_ids,
+            Err(err) => {
+                if let Some(changes) = builder.changes() {
+                    self.invalidate_share_grantees(&changes).await;
+                }
+                return Err(err);
+            }
+        };
+        self.inner.mark_caches_stale_from(&assigned_ids);
 
-        for commit_point in commit_points.iter() {
-            let batch = builder.build_one(commit_point);
-            assigned_ids
-                .ids
-                .extend(self.store().write(batch).await?.ids);
+        if let Some(hash) = builder.last_archive_hash() {
+            assigned_ids.push_archive_hash(hash);
+        }
+
+        let queues = builder.queue_notify();
+        if queues != QueueNotify::default() {
+            self.notify_queues(queues).await;
         }
 
         if let Some(changes) = builder.changes() {
+            self.invalidate_share_grantees(&changes).await;
+            let mut group_types =
+                [Bitmap::<DataType>::default(); SyncCollection::MAX_CHANGE_GROUP as usize + 1];
+
             for (account_id, changed_collections) in changes {
-                let mut state_change = StateChange::new(account_id);
-                for changed_collection in changed_collections.changed_containers {
-                    if let Some(data_type) = DataType::try_from_sync(changed_collection, true) {
-                        state_change.set_change(data_type);
+                group_types.fill(Bitmap::default());
+
+                for (changed_collection, is_container) in changed_collections
+                    .changed_containers
+                    .into_iter()
+                    .map(|collection| (collection, true))
+                    .chain(
+                        changed_collections
+                            .changed_items
+                            .into_iter()
+                            .map(|collection| (collection, false)),
+                    )
+                {
+                    if let Some(data_type) =
+                        DataType::try_from_sync(changed_collection, is_container)
+                    {
+                        group_types[changed_collection.change_group().to_u8() as usize]
+                            .insert(data_type);
                     }
                 }
-                for changed_collection in changed_collections.changed_items {
-                    if let Some(data_type) = DataType::try_from_sync(changed_collection, false) {
-                        state_change.set_change(data_type);
+
+                for (group, types) in group_types.iter().enumerate() {
+                    if !types.is_empty() {
+                        self.broadcast_push_notification(PushNotification::StateChange(
+                            StateChange {
+                                account_id,
+                                change_id: assigned_ids
+                                    .last_change_id(account_id, ChangeGroup::from_u8(group as u8)),
+                                types: *types,
+                            },
+                        ))
+                        .await;
                     }
                 }
-                if state_change.has_changes() {
-                    self.broadcast_push_notification(PushNotification::StateChange(
-                        state_change.with_change_id(assigned_ids.last_change_id(account_id)?),
-                    ))
-                    .await;
-                }
+
                 if let Some(change_id) = changed_collections.share_notification_id {
                     self.broadcast_push_notification(PushNotification::StateChange(StateChange {
                         account_id,
@@ -60,6 +98,19 @@ impl Server {
         }
 
         Ok(assigned_ids)
+    }
+
+    async fn invalidate_share_grantees(&self, changes: &VecMap<u32, ChangedCollection>) {
+        let mut acl_changes = CacheInvalidationBuilder::default();
+        for (account_id, _) in changes
+            .iter()
+            .filter(|(_, changed)| changed.share_notification_id.is_some())
+        {
+            self.invalidate_grantee(&mut acl_changes, *account_id).await;
+        }
+        if let Err(err) = self.invalidate_caches(acl_changes).await {
+            trc::error!(err.caused_by(trc::location!()));
+        }
     }
 
     pub async fn delete_changes(
@@ -80,90 +131,29 @@ impl Server {
                 SyncCollection::Calendar,
                 SyncCollection::CalendarEventNotification,
             ] {
-                let collection = sync_collection.into();
-                let from_key = LogKey {
-                    account_id,
-                    collection,
-                    change_id: 0,
-                };
-                let to_key = LogKey {
-                    account_id,
-                    collection,
-                    change_id: u64::MAX,
+                let Some(first_change_id) = self
+                    .truncate_change_log(account_id, sync_collection.into(), max_entries)
+                    .await?
+                else {
+                    continue;
                 };
 
-                let mut first_change_id = 0;
-                let mut num_changes = 0;
-
-                self.store()
-                    .iterate(
-                        IterateParams::new(from_key, to_key)
-                            .descending()
-                            .no_values(),
-                        |key, _| {
-                            first_change_id = key.deserialize_be_u64(key.len() - U64_LEN)?;
-                            num_changes += 1;
-
-                            Ok(num_changes <= max_entries)
-                        },
-                    )
-                    .await
-                    .caused_by(trc::location!())?;
-
-                if num_changes > max_entries {
+                if let Some(vanished_collection) =
+                    sync_collection.vanished_collection().map(u8::from)
+                {
                     self.store()
                         .delete_range(
                             LogKey {
                                 account_id,
-                                collection,
+                                collection: vanished_collection,
                                 change_id: 0,
                             },
                             LogKey {
                                 account_id,
-                                collection,
+                                collection: vanished_collection,
                                 change_id: first_change_id,
                             },
                         )
-                        .await
-                        .caused_by(trc::location!())?;
-
-                    // Delete vanished items
-                    if let Some(vanished_collection) =
-                        sync_collection.vanished_collection().map(u8::from)
-                    {
-                        self.store()
-                            .delete_range(
-                                LogKey {
-                                    account_id,
-                                    collection: vanished_collection,
-                                    change_id: 0,
-                                },
-                                LogKey {
-                                    account_id,
-                                    collection: vanished_collection,
-                                    change_id: first_change_id,
-                                },
-                            )
-                            .await
-                            .caused_by(trc::location!())?;
-                    }
-
-                    // Write truncation entry for cache
-                    let mut batch = BatchBuilder::new();
-                    batch.with_account_id(account_id).set(
-                        ValueClass::Any(AnyClass {
-                            subspace: SUBSPACE_LOGS,
-                            key: LogKey {
-                                account_id,
-                                collection,
-                                change_id: first_change_id,
-                            }
-                            .serialize(0),
-                        }),
-                        Vec::new(),
-                    );
-                    self.store()
-                        .write(batch.build_all())
                         .await
                         .caused_by(trc::location!())?;
                 }
@@ -189,6 +179,60 @@ impl Server {
                 .caused_by(trc::location!())?;
         }
         Ok(())
+    }
+
+    pub async fn truncate_change_log(
+        &self,
+        account_id: u32,
+        collection: LogCollection,
+        max_entries: usize,
+    ) -> trc::Result<Option<u64>> {
+        let mut first_change_id = 0;
+        let mut num_changes = 0;
+
+        self.store()
+            .iterate(
+                IterateParams::new(
+                    collection.log_key(account_id, 0),
+                    collection.log_key(account_id, u64::MAX),
+                )
+                .descending()
+                .no_values()
+                .limit(max_entries.saturating_add(1)),
+                |key, _| {
+                    first_change_id = key.deserialize_be_u64(key.len() - U64_LEN)?;
+                    num_changes += 1;
+
+                    Ok(num_changes <= max_entries)
+                },
+            )
+            .await
+            .caused_by(trc::location!())?;
+
+        if num_changes <= max_entries {
+            return Ok(None);
+        }
+
+        let first_key = collection.log_key(account_id, first_change_id);
+        let mut batch = BatchBuilder::new();
+        batch.with_account_id(account_id).set(
+            ValueClass::Any(AnyClass {
+                subspace: Subspace::Logs,
+                key: first_key.serialize(0),
+            }),
+            Vec::new(),
+        );
+        self.store()
+            .write_batch(&mut batch)
+            .await
+            .caused_by(trc::location!())?;
+
+        self.store()
+            .delete_range(collection.log_key(account_id, 0), first_key)
+            .await
+            .caused_by(trc::location!())?;
+
+        Ok(Some(first_change_id))
     }
 
     #[inline(always)]

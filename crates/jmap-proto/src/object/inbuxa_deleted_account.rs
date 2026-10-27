@@ -59,15 +59,16 @@ impl Property for DeletedAccountProperty {
 
 impl DeletedAccountProperty {
     fn parse(value: &str) -> Option<Self> {
-        hashify::tiny_map!(value.as_bytes(),
-            b"id" => DeletedAccountProperty::Id,
-            b"name" => DeletedAccountProperty::Name,
-            b"addresses" => DeletedAccountProperty::Addresses,
-            b"memberTenantId" => DeletedAccountProperty::MemberTenantId,
-            b"deletedAt" => DeletedAccountProperty::DeletedAt,
-            b"keptUntil" => DeletedAccountProperty::KeptUntil,
-            b"restore" => DeletedAccountProperty::Restore,
-            b"password" => DeletedAccountProperty::Password,
+        hashify::fnc_map!(value.as_bytes(),
+            b"id" => Some(DeletedAccountProperty::Id),
+            b"name" => Some(DeletedAccountProperty::Name),
+            b"addresses" => Some(DeletedAccountProperty::Addresses),
+            b"memberTenantId" => Some(DeletedAccountProperty::MemberTenantId),
+            b"deletedAt" => Some(DeletedAccountProperty::DeletedAt),
+            b"keptUntil" => Some(DeletedAccountProperty::KeptUntil),
+            b"restore" => Some(DeletedAccountProperty::Restore),
+            b"password" => Some(DeletedAccountProperty::Password),
+            _ => None,
         )
     }
 }

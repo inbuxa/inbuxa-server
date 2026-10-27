@@ -2,6 +2,8 @@
  * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
+ *
+ * Modified by Coffey Labs in 2026 for INBUXA.
  */
 
 pub mod client;
@@ -33,6 +35,7 @@ pub struct Session<T: AsyncRead + AsyncWrite> {
 pub enum State {
     NotAuthenticated {
         auth_failures: u32,
+        sasl_failure: Option<trc::Error>,
     },
     Authenticated {
         access_token: AccessToken,
@@ -41,6 +44,13 @@ pub enum State {
 }
 
 impl State {
+    pub fn take_sasl_failure(&mut self) -> Option<trc::Error> {
+        match self {
+            State::NotAuthenticated { sasl_failure, .. } => sasl_failure.take(),
+            _ => None,
+        }
+    }
+
     pub fn access_token(&self) -> &AccessToken {
         match self {
             State::Authenticated { access_token, .. } => access_token,
@@ -133,7 +143,7 @@ pub enum ResponseCode {
     Active,
     NonExistent,
     AlreadyExists,
-    Tag(String),
+    Tag(CompactString),
     Warnings,
 }
 
@@ -268,7 +278,7 @@ pub trait SerializeResponse {
 impl SerializeResponse for trc::Error {
     fn serialize(&self) -> Vec<u8> {
         let mut buf = Vec::with_capacity(64);
-        buf.extend_from_slice(self.value_as_str(trc::Key::Type).unwrap_or("NO").as_bytes());
+        buf.extend_from_slice(b"NO");
         if let Some(code) = self
             .value_as_str(trc::Key::Code)
             .or_else(|| match self.as_ref() {
@@ -276,7 +286,10 @@ impl SerializeResponse for trc::Error {
                     Some(ResponseCode::NonExistent.as_str())
                 }
                 trc::EventType::Store(_) => Some(ResponseCode::TryLater.as_str()),
-                trc::EventType::Limit(trc::LimitEvent::Quota) => Some(ResponseCode::Quota.as_str()),
+                // inbuxa: MT-19
+                trc::EventType::Limit(trc::LimitEvent::Quota | trc::LimitEvent::TenantQuota) => {
+                    Some(ResponseCode::Quota.as_str())
+                }
                 trc::EventType::Limit(_) => Some(ResponseCode::TryLater.as_str()),
                 _ => None,
             })

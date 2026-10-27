@@ -13,8 +13,9 @@ use crate::{
         query::RegistryQueryFilters,
     },
 };
-use chrono::DateTime;
+use jiff::Timestamp;
 use jmap_proto::types::state::State;
+use memchr::memrchr;
 use registry::{
     jmap::IntoValue,
     schema::{enums::TracingLevel, prelude::Property, structs::Log},
@@ -292,19 +293,19 @@ fn is_log_header(line: &str) -> bool {
     let Some((timestamp, _)) = line.split_once(' ') else {
         return false;
     };
-    DateTime::parse_from_rfc3339(timestamp).is_ok()
+    timestamp.parse::<Timestamp>().is_ok()
 }
 
 fn log_from_line(line: &str) -> Option<Log> {
     let line = strip_ansi(line);
     let (timestamp, rest) = line.split_once(' ')?;
-    let timestamp = DateTime::parse_from_rfc3339(timestamp).ok()?;
+    let timestamp = timestamp.parse::<Timestamp>().ok()?;
     let (level, rest) = rest.trim().split_once(' ')?;
     let (_, rest) = rest.trim().split_once(" (")?;
     let (event_id, details) = rest.split_once(")")?;
 
     Some(Log {
-        timestamp: UTCDateTime::from_timestamp(timestamp.timestamp()),
+        timestamp: UTCDateTime::from_timestamp(timestamp.as_second()),
         level: TracingLevel::parse(&level.to_ascii_lowercase()).unwrap_or(TracingLevel::Info),
         event: EventType::parse(event_id)?,
         details: details.trim().to_string(),
@@ -462,21 +463,26 @@ impl<R: Seek + Read> RawRevLines<R> {
                 }
             }
 
-            let buffer_length = self.buffer_end;
-
-            for ch in self.buffer[..self.buffer_end].iter().rev() {
-                self.buffer_end -= 1;
-                // Found a new line character to break on
-                if *ch == LF_BYTE {
-                    result.push(self.buffer[self.buffer_end + 1..buffer_length].to_vec());
+            let buffer = self.buffer.get(..self.buffer_end).unwrap_or_default();
+            match memrchr(LF_BYTE, buffer) {
+                Some(pos) => {
+                    result.push(buffer.get(pos + 1..).unwrap_or_default().to_vec());
+                    self.buffer_end = pos;
                     break 'outer;
                 }
+                None => {
+                    result.push(buffer.to_vec());
+                    self.buffer_end = 0;
+                }
             }
-
-            result.push(self.buffer[..buffer_length].to_vec());
         }
 
-        Ok(Some(result.into_iter().rev().flatten().collect()))
+        result.reverse();
+        Ok(Some(if result.len() == 1 {
+            result.swap_remove(0)
+        } else {
+            result.concat()
+        }))
     }
 }
 
@@ -519,3 +525,4 @@ impl<R: Read + Seek> Iterator for RevLines<R> {
         )
     }
 }
+

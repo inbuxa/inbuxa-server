@@ -25,11 +25,13 @@ use managesieve::core::ManageSieveSessionManager;
 use pop3::Pop3SessionManager;
 use services::{StartServices, broadcast::subscriber::spawn_broadcast_subscriber};
 use smtp::{StartQueueManager, core::SmtpSessionManager};
-use std::sync::Arc;
-use std::time::Duration;
+use std::{process::ExitCode, sync::Arc, time::Duration};
 use tokio::sync::watch;
 use trc::Collector;
-use utils::wait_for_shutdown;
+use utils::{
+    runtime::{exit, run_server},
+    wait_for_shutdown,
+};
 
 #[cfg(all(
     target_arch = "x86_64",
@@ -47,8 +49,11 @@ use tikv_jemallocator::Jemalloc;
 #[global_allocator]
 static GLOBAL: Jemalloc = Jemalloc;
 
-#[tokio::main]
-async fn main() -> std::io::Result<()> {
+fn main() -> std::io::Result<ExitCode> {
+    run_server(async_main())
+}
+
+async fn async_main() -> ExitCode {
     // Install AWS-LC-RS as the default Rustls crypto provider
     rustls::crypto::aws_lc_rs::default_provider()
         .install_default()
@@ -57,17 +62,29 @@ async fn main() -> std::io::Result<()> {
     // Build the shared outbound TLS configurations
     utils::http::init_shared_tls_configs();
 
-    // Load config and apply macros
-    let mut init = Box::pin(BootManager::init()).await;
+    // Prepare the archive compression dictionaries
+    store::write::compress::init();
 
-    // Migrate database
-    if let Err(err) = migration::try_migrate(&init.inner.build_server()).await {
+    // Load config and apply macros
+    let mut init = BootManager::init().await;
+
+    // Verify database schema version
+    if let Err(err) = init.inner.build_server().verify_schema_version().await {
+        eprintln!("{err}");
         trc::event!(
             Server(trc::ServerEvent::StartupError),
-            Details = "Failed to migrate database, aborting startup.",
+            Details = "Unsupported database schema version, aborting startup.",
             Reason = err,
         );
-        return Ok(());
+        return ExitCode::FAILURE;
+    }
+
+    // inbuxa: move blobs still under pre-rename keys (0.16 did this in its
+    // migration crate) before the services read them
+    if let Err(err) =
+        common::manager::renamed_blobs::rename_spam_blobs(&init.inner.build_server()).await
+    {
+        trc::error!(err.details("Failed to move renamed spam filter blobs"));
     }
 
     // Init services
@@ -83,6 +100,7 @@ async fn main() -> std::io::Result<()> {
     if std::env::var("INSERT_TEST_DATA").is_ok() {
         let server = init.inner.build_server();
         test_data::insert_test_data(&server).await;
+        #[cfg(feature = "enterprise")]
         server.insert_test_metrics().await;
     }
 
@@ -127,18 +145,21 @@ async fn main() -> std::io::Result<()> {
     // run those tasks now rather than when the locks expire
     services::task_manager::lock::release_task_locks(&inner.build_server()).await;
 
-    // Shutdown collector
-    Collector::shutdown();
-
     // Stop services, then the listeners: the shutdown sender no longer reaches
     // them, since each holds its own channel (LP-2).
     let _ = shutdown_tx.send(true);
     inner.data.listener_control.stop_all();
 
+    // Persist the newest cache snapshots before the process exits
+    inner.cache.swap.stop().await;
+
+    // Shutdown collector
+    Collector::shutdown();
+
     // Wait for services to finish
     tokio::time::sleep(Duration::from_secs(1)).await;
 
-    Ok(())
+    exit(0);
 }
 
 /// Starts one listener under the session manager its protocol calls for.

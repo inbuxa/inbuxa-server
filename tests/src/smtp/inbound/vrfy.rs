@@ -112,8 +112,8 @@ async fn vrfy_expn() {
         .assert_contains("250 bill@foobar.org");
 
     // Non-existent VRFY
-    session.cmd("VRFY robert", "550 5.1.2").await;
+    session.cmd("VRFY robert", "550 5.1.1").await;
 
     // Non-existent EXPN
-    session.cmd("EXPN procurement", "550 5.1.2").await;
+    session.cmd("EXPN procurement", "550 5.1.1").await;
 }

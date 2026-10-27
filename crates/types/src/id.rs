@@ -7,9 +7,9 @@
  */
 
 use crate::DocumentId;
+use encodify::base32::{STALWART, U64Text};
 use jmap_tools::{Element, Property, Value};
 use std::{ops::Deref, str::FromStr};
-use utils::codec::base32_custom::{BASE32_ALPHABET, BASE32_INVERSE};
 
 #[derive(
     rkyv::Archive,
@@ -45,18 +45,7 @@ impl FromStr for Id {
             return Err(());
         }
 
-        let mut id = 0;
-
-        for &ch in s.as_bytes() {
-            let i = BASE32_INVERSE[ch as usize];
-            if i != u8::MAX {
-                id = (id << 5) | i as u64;
-            } else {
-                return Err(());
-            }
-        }
-
-        Ok(Id(id))
+        STALWART.decode_u64(s).map(Id).map_err(|_| ())
     }
 }
 
@@ -75,57 +64,12 @@ impl Id {
         Self::new(20080258862541)
     }
 
-    // From https://github.com/archer884/crockford by J/A <archer884@gmail.com>
-    // License: MIT/Apache 2.0
     pub fn as_string(&self) -> String {
-        match self.0 {
-            0 => "a".to_string(),
-            mut n => {
-                // Used for the initial shift.
-                const QUAD_SHIFT: usize = 60;
-                const QUAD_RESET: usize = 4;
+        self.text().as_str().to_string()
+    }
 
-                // Used for all subsequent shifts.
-                const FIVE_SHIFT: usize = 59;
-                const FIVE_RESET: usize = 5;
-
-                // After we clear the four most significant bits, the four least significant bits will be
-                // replaced with 0001. We can then know to stop once the four most significant bits are,
-                // likewise, 0001.
-                const STOP_BIT: u64 = 1 << QUAD_SHIFT;
-
-                let mut buf = String::with_capacity(7);
-
-                // Start by getting the most significant four bits. We get four here because these would be
-                // leftovers when starting from the least significant bits. In either case, tag the four least
-                // significant bits with our stop bit.
-                match (n >> QUAD_SHIFT) as usize {
-                    // Eat leading zero-bits. This should not be done if the first four bits were non-zero.
-                    // Additionally, we *must* do this in increments of five bits.
-                    0 => {
-                        n <<= QUAD_RESET;
-                        n |= 1;
-                        n <<= n.leading_zeros() / 5 * 5;
-                    }
-
-                    // Write value of first four bytes.
-                    i => {
-                        n <<= QUAD_RESET;
-                        n |= 1;
-                        buf.push(char::from(BASE32_ALPHABET[i]));
-                    }
-                }
-
-                // From now until we reach the stop bit, take the five most significant bits and then shift
-                // left by five bits.
-                while n != STOP_BIT {
-                    buf.push(char::from(BASE32_ALPHABET[(n >> FIVE_SHIFT) as usize]));
-                    n <<= FIVE_RESET;
-                }
-
-                buf
-            }
-        }
+    pub fn text(&self) -> U64Text {
+        STALWART.encode_u64(self.0)
     }
 
     #[inline(always)]
@@ -220,7 +164,7 @@ impl serde::Serialize for Id {
     where
         S: serde::Serializer,
     {
-        serializer.serialize_str(self.as_string().as_str())
+        serializer.serialize_str(self.text().as_str())
     }
 }
 
@@ -236,7 +180,7 @@ impl<'de> serde::Deserialize<'de> for Id {
 
 impl std::fmt::Display for Id {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(&self.as_string())
+        f.write_str(self.text().as_str())
     }
 }
 

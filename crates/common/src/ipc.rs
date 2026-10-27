@@ -12,30 +12,25 @@ use crate::config::smtp::{
     resolver::{Policy, Tlsa},
 };
 use ahash::RandomState;
-use mail_auth::{
-    dmarc::Dmarc,
-    mta_sts::TlsRpt,
-    report::{Record, tlsrpt::FailureDetails},
-};
+use mail_auth::{dmarc::DmarcRecord, mta_sts::TlsRptRecord};
 use registry::{schema::prelude::ObjectType, types::id::ObjectId};
+use smtp_report::{dmarc::Record, tlsrpt::FailureDetails};
 use std::sync::{
     Arc,
-    atomic::{AtomicBool, Ordering},
+    atomic::{AtomicBool, AtomicU32, Ordering},
 };
-use tokio::sync::{Semaphore, SemaphorePermit, mpsc};
+use store::write::TaskTypes;
+use tinyvec::TinyVec;
+use tokio::sync::{Notify, Semaphore, SemaphorePermit, futures::Notified, mpsc};
 use types::type_state::{DataType, StateChange};
 use utils::map::bitmap::Bitmap;
 
+pub mod subscribers;
+
 #[derive(Debug)]
 pub enum PushEvent {
-    Subscribe {
-        account_ids: Vec<u32>,
-        types: Bitmap<DataType>,
-        tx: mpsc::Sender<PushNotification>,
-    },
     Publish {
         notification: PushNotification,
-        broadcast: bool,
     },
     PushServerRegister {
         activate: Vec<u32>,
@@ -56,8 +51,17 @@ pub enum PushEvent {
 #[derive(Debug, Clone)]
 pub enum PushNotification {
     StateChange(StateChange),
+    ViewerStateChange(ViewerStateChange),
     CalendarAlert(CalendarAlert),
     EmailPush(EmailPush),
+}
+
+const _: () = assert!(size_of::<PushNotification>() <= 80);
+
+#[derive(Debug, Clone, Copy)]
+pub struct ViewerStateChange {
+    pub viewer_id: u32,
+    pub change: StateChange,
 }
 
 #[derive(Debug, Clone)]
@@ -70,6 +74,7 @@ pub struct EmailPush {
 #[derive(Debug, Clone)]
 pub struct CalendarAlert {
     pub account_id: u32,
+    pub event_account_id: u32,
     pub event_id: u32,
     pub recurrence_id: Option<i64>,
     pub uid: String,
@@ -85,14 +90,60 @@ pub enum BroadcastEvent {
     CacheInvalidateAll,
     CacheInvalidateNegative,
     MtaQueueStatus { is_running: bool },
-    QueueRefresh,
+    QueueRefresh(QueueNames),
+    TaskQueueRefresh(TaskTypes),
+    IndexQueueRefresh,
     // inbuxa: AL-3: end an account's open sessions on every node
     EndSessions(u32),
     // inbuxa: deliverability spec, DL-15: every node checks itself now
     DeliverabilityCheck,
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
+pub struct IndexQueueNotify {
+    notify: Arc<Notify>,
+    broadcast: Option<mpsc::Sender<BroadcastEvent>>,
+}
+
+impl IndexQueueNotify {
+    pub fn new(notify: Arc<Notify>, broadcast: Option<mpsc::Sender<BroadcastEvent>>) -> Self {
+        Self { notify, broadcast }
+    }
+
+    pub fn notify(&self) {
+        self.notify.notify_one();
+
+        if let Some(broadcast) = &self.broadcast {
+            let _ = broadcast.try_send(BroadcastEvent::IndexQueueRefresh);
+        }
+    }
+}
+
+#[derive(Debug, Default)]
+pub struct TaskQueueNotify {
+    notify: Notify,
+    task_types: AtomicU32,
+}
+
+impl TaskQueueNotify {
+    pub fn notify(&self, task_types: TaskTypes) {
+        if !task_types.is_empty() {
+            self.task_types
+                .fetch_or(task_types.bits(), Ordering::Release);
+        }
+        self.notify.notify_one();
+    }
+
+    pub fn take(&self) -> TaskTypes {
+        TaskTypes::from_bits(self.task_types.swap(0, Ordering::Acquire))
+    }
+
+    pub fn notified(&self) -> Notified<'_> {
+        self.notify.notified()
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum RegistryChange {
     Insert(ObjectId),
     Delete(ObjectId),
@@ -102,25 +153,33 @@ pub enum RegistryChange {
 #[derive(Debug, Clone, Copy, Hash, PartialEq, Eq)]
 pub enum CacheInvalidation {
     AccessToken(u32),
-    DavResources(u32),
+    GroupwareResources(u32),
+    MessageCache(u32),
     Domain(u32),
     Account(u32),
     DkimSignature(u32),
-    Tenant(u32),
     Role(u32),
     List(u32),
     DomainLogo(u32),
+    // inbuxa: MT
+    Tenant(u32),
     TenantLogo(u32),
     EmailNegative {
         domain_id: u32,
         local_part_hash: u32,
     },
     DomainNegative,
+    PrivateMetadata(u32),
+    OAuthGrant {
+        account_id: u32,
+        grant_id: u64,
+    },
+    ActiveSieveScript(u32),
 }
 
 #[derive(Debug)]
 pub enum QueueEvent {
-    Refresh,
+    Refresh(QueueRefresh),
     WorkerDone {
         queue_id: u64,
         queue_name: QueueName,
@@ -129,6 +188,61 @@ pub enum QueueEvent {
     Paused(bool),
     ReloadSettings,
     Stop,
+}
+
+#[derive(Debug)]
+pub enum QueueRefresh {
+    Queued(QueuedEvents),
+    Queues(QueueNames),
+    All,
+}
+
+pub type QueuedEvents = TinyVec<[QueuedEvent; 2]>;
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct QueueNames(TinyVec<[QueueName; 2]>);
+
+impl QueueNames {
+    pub fn insert(&mut self, name: QueueName) {
+        if !self.0.contains(&name) {
+            self.0.push(name);
+        }
+    }
+
+    pub fn merge(&mut self, other: &QueueNames) {
+        for name in other.iter() {
+            self.insert(name);
+        }
+    }
+
+    pub fn iter(&self) -> impl Iterator<Item = QueueName> + '_ {
+        self.0.iter().copied()
+    }
+
+    pub fn len(&self) -> usize {
+        self.0.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+}
+
+impl FromIterator<QueueName> for QueueNames {
+    fn from_iter<I: IntoIterator<Item = QueueName>>(iter: I) -> Self {
+        let mut names = QueueNames::default();
+        for name in iter {
+            names.insert(name);
+        }
+        names
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct QueuedEvent {
+    pub queue_name: QueueName,
+    pub due: u64,
+    pub queue_id: u64,
 }
 
 #[derive(Debug)]
@@ -149,7 +263,7 @@ pub enum ReportingEvent {
 pub struct DmarcEvent {
     pub domain: String,
     pub report_record: Record,
-    pub dmarc_record: Arc<Dmarc>,
+    pub dmarc_record: Arc<DmarcRecord>,
     pub interval: AggregateFrequency,
     pub span_id: u64,
 }
@@ -159,7 +273,7 @@ pub struct TlsEvent {
     pub domain: String,
     pub policy: PolicyType,
     pub failure: Option<FailureDetails>,
-    pub tls_record: Arc<TlsRpt>,
+    pub tls_record: Arc<TlsRptRecord>,
     pub interval: AggregateFrequency,
     pub span_id: u64,
 }
@@ -217,7 +331,7 @@ pub trait ToHash {
     fn to_hash(&self) -> u64;
 }
 
-impl ToHash for Dmarc {
+impl ToHash for DmarcRecord {
     fn to_hash(&self) -> u64 {
         RandomState::with_seeds(1, 9, 7, 9).hash_one(self)
     }
@@ -276,9 +390,10 @@ impl From<(&Option<Arc<Policy>>, &Option<Arc<Tlsa>>)> for PolicyType {
 }
 
 impl PushNotification {
-    pub fn account_id(&self) -> u32 {
+    pub fn recipient(&self) -> u32 {
         match self {
             PushNotification::StateChange(state_change) => state_change.account_id,
+            PushNotification::ViewerStateChange(viewer_change) => viewer_change.viewer_id,
             PushNotification::CalendarAlert(calendar_alert) => calendar_alert.account_id,
             PushNotification::EmailPush(email_push) => email_push.account_id,
         }
@@ -287,17 +402,15 @@ impl PushNotification {
     pub fn filter_types(&self, types: &Bitmap<DataType>) -> Option<PushNotification> {
         match self {
             PushNotification::StateChange(state_change) => {
-                let mut filtered_types = state_change.types;
-                filtered_types.intersection(types);
-                if !filtered_types.is_empty() {
-                    Some(PushNotification::StateChange(StateChange {
-                        account_id: state_change.account_id,
-                        change_id: state_change.change_id,
-                        types: filtered_types,
-                    }))
-                } else {
-                    None
-                }
+                filter_state_change(state_change, types).map(PushNotification::StateChange)
+            }
+            PushNotification::ViewerStateChange(viewer_change) => {
+                filter_state_change(&viewer_change.change, types).map(|change| {
+                    PushNotification::ViewerStateChange(ViewerStateChange {
+                        viewer_id: viewer_change.viewer_id,
+                        change,
+                    })
+                })
             }
             PushNotification::CalendarAlert(_) => {
                 if types.contains(DataType::CalendarAlert) {
@@ -325,6 +438,18 @@ impl PushNotification {
     }
 }
 
+fn filter_state_change(
+    state_change: &StateChange,
+    types: &Bitmap<DataType>,
+) -> Option<StateChange> {
+    let mut filtered_types = state_change.types;
+    filtered_types.intersection(types);
+    (!filtered_types.is_empty()).then_some(StateChange {
+        types: filtered_types,
+        ..*state_change
+    })
+}
+
 impl EmailPush {
     pub fn to_state_change(&self) -> StateChange {
         StateChange {
@@ -340,35 +465,28 @@ impl EmailPush {
     }
 }
 
-/// inbuxa: the task locks this node holds, so a graceful stop can hand them
-/// back instead of leaving the tasks blocked until the locks expire.
+/// inbuxa: the task leases this node holds, so a graceful stop can hand them
+/// back instead of leaving the tasks blocked until the leases lapse.
+#[derive(Default)]
 pub struct TaskLocks {
-    held: parking_lot::Mutex<ahash::AHashSet<u64>>,
+    // task id -> lease token
+    held: parking_lot::Mutex<ahash::AHashMap<u64, u64>>,
     stopping: AtomicBool,
-    expiry: std::sync::atomic::AtomicU64,
 }
 
 impl TaskLocks {
-    /// How long a task lock lasts, in seconds, unless it is released first
-    /// or renewed. inbuxa: upstream held a lock for an hour, so a killed
-    /// node's tasks waited that long; the lock is now a five-minute lease
-    /// that the task manager renews every third of it while the task runs
-    /// (renew_task_locks), so a dead node's tasks run elsewhere within
-    /// minutes.
-    pub const DEFAULT_EXPIRY: u64 = 5 * 60;
-
     pub fn is_stopping(&self) -> bool {
         self.stopping.load(Ordering::Acquire)
     }
 
-    /// Stops new claims and returns the ids of every lock still held.
-    pub fn stop(&self) -> Vec<u64> {
+    /// Stops new claims and returns every lease still held, as (id, lease).
+    pub fn stop(&self) -> Vec<(u64, u64)> {
         self.stopping.store(true, Ordering::Release);
         self.held.lock().drain().collect()
     }
 
-    pub fn insert(&self, id: u64) {
-        self.held.lock().insert(id);
+    pub fn insert(&self, id: u64, lease: u64) {
+        self.held.lock().insert(id, lease);
     }
 
     pub fn remove(&self, id: u64) {
@@ -377,34 +495,5 @@ impl TaskLocks {
 
     pub fn held(&self) -> usize {
         self.held.lock().len()
-    }
-
-    /// inbuxa: the tasks this node holds, to renew their locks.
-    pub fn held_ids(&self) -> Vec<u64> {
-        self.held.lock().iter().copied().collect()
-    }
-
-    /// inbuxa: whether this node holds (and is running) the task.
-    pub fn is_held(&self, id: u64) -> bool {
-        self.held.lock().contains(&id)
-    }
-
-    pub fn expiry(&self) -> u64 {
-        self.expiry.load(Ordering::Relaxed)
-    }
-
-    /// Changes the lock lifetime; the tests shorten it.
-    pub fn set_expiry(&self, seconds: u64) {
-        self.expiry.store(seconds.max(1), Ordering::Relaxed);
-    }
-}
-
-impl Default for TaskLocks {
-    fn default() -> Self {
-        Self {
-            held: Default::default(),
-            stopping: AtomicBool::new(false),
-            expiry: std::sync::atomic::AtomicU64::new(Self::DEFAULT_EXPIRY),
-        }
     }
 }

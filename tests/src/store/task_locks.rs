@@ -13,14 +13,14 @@
 use crate::utils::server::TestServerBuilder;
 use common::{KV_LOCK_TASK, Server};
 use registry::schema::{
-    enums::IndexDocumentType,
-    structs::{Task, TaskIndexDocument, TaskStatus},
+    enums::SharedObjectType,
+    structs::{Task, TaskShareRevokeCleanup, TaskStatus},
 };
 use services::task_manager::lock::{TaskLockManager, release_task_locks};
 use std::time::{Duration, Instant};
 use store::{
     ValueKey,
-    write::{BatchBuilder, TaskQueueClass, ValueClass},
+    write::{BatchBuilder, TaskId, TaskQueueClass, ValueClass},
 };
 use utils::snowflake::SnowflakeIdGenerator;
 
@@ -28,6 +28,15 @@ use utils::snowflake::SnowflakeIdGenerator;
 // of it) is well below it
 const LOCK_EXPIRY: u64 = 12;
 
+// inbuxa: 1.0 port: 1.0 replaced the fork's task locks with a fixed
+// five-minute lease that only the worker running a task renews, and parks a
+// task another node holds for REMOTE_LOCK_EXPIRY (five minutes) plus up to a
+// minute. The lock lifetime can no longer be shortened for a test
+// (`TaskLocks::set_expiry` is gone) and nothing renews a claim taken outside a
+// worker, so the expiry scenarios below can't run in test time. The graceful
+// stop scenario, and a claim held and released without the wait, run in
+// `task_lock_release_tests`.
+#[ignore = "1.0 port: task lock expiry is a fixed 5-minute lease (no set_expiry) and a foreign-locked task is retried after 5-6 minutes"]
 #[tokio::test(flavor = "multi_thread")]
 pub async fn task_lock_tests() {
     let test = TestServerBuilder::new("task_lock_tests")
@@ -39,7 +48,6 @@ pub async fn task_lock_tests() {
         "Running task lock tests on {}...",
         std::env::var("STORE").unwrap_or_default()
     );
-    server.inner.ipc.task_locks.set_expiry(LOCK_EXPIRY);
 
     // 1. Another node claimed the tasks and died. Its locks block them until
     // they expire; then this node runs them, without waiting for anything
@@ -52,7 +60,11 @@ pub async fn task_lock_tests() {
     let started = Instant::now();
     server.notify_task_queue();
     tokio::time::sleep(Duration::from_secs(3)).await;
-    assert_eq!(pending(&server, &ids).await, ids.len(), "held by the other node");
+    assert_eq!(
+        pending(&server, &ids).await,
+        ids.len(),
+        "held by the other node"
+    );
     wait_until_done(&server, &ids, Duration::from_secs(LOCK_EXPIRY + 10)).await;
     let elapsed = started.elapsed();
     assert!(
@@ -85,13 +97,16 @@ pub async fn task_lock_tests() {
     let [id] = new_task_ids(1)[..] else {
         unreachable!()
     };
-    assert!(server.try_lock_task(id).await, "claim {id}");
+    let lock = server
+        .lock_task(id)
+        .await
+        .unwrap_or_else(|| panic!("claim {id}"));
     tokio::time::sleep(Duration::from_secs(LOCK_EXPIRY + LOCK_EXPIRY / 2)).await;
     assert!(
         !foreign_lock(&server, id, LOCK_EXPIRY).await,
         "lease lapsed while the task ran"
     );
-    server.remove_index_lock(id).await;
+    server.unlock_task(lock).await;
     assert!(
         foreign_lock(&server, id, LOCK_EXPIRY).await,
         "released when the task ended"
@@ -100,16 +115,57 @@ pub async fn task_lock_tests() {
         .in_memory_store()
         .remove_lock(KV_LOCK_TASK, &id.to_be_bytes())
         .await;
-    assert!(
-        common::ipc::TaskLocks::DEFAULT_EXPIRY <= 5 * 60,
-        "a dead node's tasks wait no more than a few minutes"
+    // inbuxa: a dead node's tasks wait no more than a few minutes (0.16
+    // checked TaskLocks::DEFAULT_EXPIRY; 1.0 has a fixed lease)
+    const { assert!(services::task_manager::LEASE_DURATION <= 5 * 60) };
+
+    if test.is_reset() {
+        test.temp_dir.delete();
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+pub async fn task_lock_release_tests() {
+    let test = TestServerBuilder::new("task_lock_release_tests")
+        .await
+        .build()
+        .await;
+    let server = test.server.clone();
+    println!(
+        "Running task lock release tests on {}...",
+        std::env::var("STORE").unwrap_or_default()
     );
+
+    // 3, without the wait: a claim holds the task until it ends, then
+    // another node can take it at once
+    let [id] = new_task_ids(1)[..] else {
+        unreachable!()
+    };
+    let lock = server
+        .lock_task(id)
+        .await
+        .unwrap_or_else(|| panic!("claim {id}"));
+    assert_eq!(server.inner.ipc.task_locks.held(), 1);
+    assert!(
+        !foreign_lock(&server, id, LOCK_EXPIRY).await,
+        "held while the task runs"
+    );
+    server.unlock_task(lock).await;
+    assert_eq!(server.inner.ipc.task_locks.held(), 0);
+    assert!(
+        foreign_lock(&server, id, LOCK_EXPIRY).await,
+        "released when the task ended"
+    );
+    let _ = server
+        .in_memory_store()
+        .remove_lock(KV_LOCK_TASK, &id.to_be_bytes())
+        .await;
 
     // 4. A graceful stop releases the locks this node holds: another node
     // can claim those tasks at once, and this one claims nothing more
     let ids = new_task_ids(3);
     for id in &ids {
-        assert!(server.try_lock_task(*id).await, "claim {id}");
+        assert!(server.lock_task(*id).await.is_some(), "claim {id}");
     }
     assert_eq!(server.inner.ipc.task_locks.held(), ids.len());
     for id in &ids {
@@ -129,7 +185,10 @@ pub async fn task_lock_tests() {
     let [id] = new_task_ids(1)[..] else {
         unreachable!()
     };
-    assert!(!server.try_lock_task(id).await, "a stopping node claims nothing");
+    assert!(
+        server.lock_task(id).await.is_none(),
+        "a stopping node claims nothing"
+    );
 
     for id in ids {
         let _ = server
@@ -157,22 +216,23 @@ async fn foreign_lock(server: &Server, id: u64, seconds: u64) -> bool {
         .unwrap()
 }
 
-/// Unindex tasks for files that don't exist: files aren't search-indexed and
-/// there is no undelete note, so running one only drops it from the queue.
+/// Share cleanup tasks for accounts that don't exist, so running one only
+/// drops it from the queue. (inbuxa: 1.0 indexes through a queue, not tasks,
+/// so the unindex tasks used before are gone.)
 async fn schedule(server: &Server, ids: &[u64]) {
     let mut batch = BatchBuilder::new();
     for (n, id) in ids.iter().enumerate() {
         batch.schedule_task_with_id(
             *id,
-            Task::UnindexDocument(TaskIndexDocument {
-                account_id: 0u32.into(),
-                document_id: (u32::MAX - n as u32).into(),
-                document_type: IndexDocumentType::File,
+            Task::ShareRevokeCleanup(TaskShareRevokeCleanup {
+                object_type: SharedObjectType::FileNode,
+                account_id: (u32::MAX - n as u32).into(),
+                document_id: 0u32.into(),
                 status: TaskStatus::now(),
             }),
         );
     }
-    server.store().write(batch.build_all()).await.unwrap();
+    server.store().write_batch(&mut batch).await.unwrap();
 }
 
 async fn pending(server: &Server, ids: &[u64]) -> usize {
@@ -181,7 +241,9 @@ async fn pending(server: &Server, ids: &[u64]) -> usize {
         if server
             .store()
             .get_value::<Task>(ValueKey::from(ValueClass::TaskQueue(
-                TaskQueueClass::Task { id: *id },
+                TaskQueueClass::Task {
+                    id: TaskId::Assigned(*id),
+                },
             )))
             .await
             .unwrap()

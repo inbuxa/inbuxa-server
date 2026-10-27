@@ -49,12 +49,13 @@ impl Property for InventorySnapshotProperty {
 
 impl InventorySnapshotProperty {
     fn parse(value: &str) -> Option<Self> {
-        hashify::tiny_map!(value.as_bytes(),
-            b"id" => InventorySnapshotProperty::Id,
-            b"takenAt" => InventorySnapshotProperty::TakenAt,
-            b"trigger" => InventorySnapshotProperty::Trigger,
-            b"summary" => InventorySnapshotProperty::Summary,
-            b"inventory" => InventorySnapshotProperty::Inventory,
+        hashify::fnc_map!(value.as_bytes(),
+            b"id" => Some(InventorySnapshotProperty::Id),
+            b"takenAt" => Some(InventorySnapshotProperty::TakenAt),
+            b"trigger" => Some(InventorySnapshotProperty::Trigger),
+            b"summary" => Some(InventorySnapshotProperty::Summary),
+            b"inventory" => Some(InventorySnapshotProperty::Inventory),
+            _ => None,
         )
     }
 }

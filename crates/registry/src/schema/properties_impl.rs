@@ -2,6 +2,8 @@
  * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
+ *
+ * Modified by Coffey Labs in 2026 for INBUXA.
  */
 
 // This file is auto-generated. Do not edit directly.
@@ -10,8 +12,9 @@ use crate::schema::prelude::*;
 
 impl EnumImpl for ObjectType {
     fn parse(value: &str) -> Option<Self> {
-        hashify::tiny_map! {
+        hashify::map! {
             value.as_bytes(),
+            ObjectType,
             b"Account" => ObjectType::Account,
             b"AccountPassword" => ObjectType::AccountPassword,
             b"AccountSettings" => ObjectType::AccountSettings,
@@ -60,12 +63,14 @@ impl EnumImpl for ObjectType {
             b"HttpLookup" => ObjectType::HttpLookup,
             b"Imap" => ObjectType::Imap,
             b"InMemoryStore" => ObjectType::InMemoryStore,
+            b"IndexQueueStatus" => ObjectType::IndexQueueStatus,
             b"Jmap" => ObjectType::Jmap,
             b"Log" => ObjectType::Log,
             b"MailingList" => ObjectType::MailingList,
             b"MaskedEmail" => ObjectType::MaskedEmail,
             b"MemoryLookupKey" => ObjectType::MemoryLookupKey,
             b"MemoryLookupKeyValue" => ObjectType::MemoryLookupKeyValue,
+            b"Metadata" => ObjectType::Metadata,
             b"Metric" => ObjectType::Metric,
             b"Metrics" => ObjectType::Metrics,
             b"MetricsStore" => ObjectType::MetricsStore,
@@ -91,6 +96,7 @@ impl EnumImpl for ObjectType {
             b"MtaVirtualQueue" => ObjectType::MtaVirtualQueue,
             b"NetworkListener" => ObjectType::NetworkListener,
             b"OAuthClient" => ObjectType::OAuthClient,
+            b"OAuthGrant" => ObjectType::OAuthGrant,
             b"OidcProvider" => ObjectType::OidcProvider,
             b"PublicKey" => ObjectType::PublicKey,
             b"QueuedMessage" => ObjectType::QueuedMessage,
@@ -105,11 +111,11 @@ impl EnumImpl for ObjectType {
             b"SieveSystemScript" => ObjectType::SieveSystemScript,
             b"SieveUserInterpreter" => ObjectType::SieveUserInterpreter,
             b"SieveUserScript" => ObjectType::SieveUserScript,
+            b"SpamAi" => ObjectType::SpamAi,
             b"SpamClassifier" => ObjectType::SpamClassifier,
             b"SpamDnsblServer" => ObjectType::SpamDnsblServer,
             b"SpamDnsblSettings" => ObjectType::SpamDnsblSettings,
             b"SpamFileExtension" => ObjectType::SpamFileExtension,
-            b"SpamLlm" => ObjectType::SpamLlm,
             b"SpamPyzor" => ObjectType::SpamPyzor,
             b"SpamRule" => ObjectType::SpamRule,
             b"SpamSettings" => ObjectType::SpamSettings,
@@ -130,6 +136,7 @@ impl EnumImpl for ObjectType {
             b"WebDav" => ObjectType::WebDav,
             b"WebHook" => ObjectType::WebHook,
         }
+        .copied()
     }
 
     fn as_str(&self) -> &'static str {
@@ -182,12 +189,14 @@ impl EnumImpl for ObjectType {
             ObjectType::HttpLookup => "HttpLookup",
             ObjectType::Imap => "Imap",
             ObjectType::InMemoryStore => "InMemoryStore",
+            ObjectType::IndexQueueStatus => "IndexQueueStatus",
             ObjectType::Jmap => "Jmap",
             ObjectType::Log => "Log",
             ObjectType::MailingList => "MailingList",
             ObjectType::MaskedEmail => "MaskedEmail",
             ObjectType::MemoryLookupKey => "MemoryLookupKey",
             ObjectType::MemoryLookupKeyValue => "MemoryLookupKeyValue",
+            ObjectType::Metadata => "Metadata",
             ObjectType::Metric => "Metric",
             ObjectType::Metrics => "Metrics",
             ObjectType::MetricsStore => "MetricsStore",
@@ -213,6 +222,7 @@ impl EnumImpl for ObjectType {
             ObjectType::MtaVirtualQueue => "MtaVirtualQueue",
             ObjectType::NetworkListener => "NetworkListener",
             ObjectType::OAuthClient => "OAuthClient",
+            ObjectType::OAuthGrant => "OAuthGrant",
             ObjectType::OidcProvider => "OidcProvider",
             ObjectType::PublicKey => "PublicKey",
             ObjectType::QueuedMessage => "QueuedMessage",
@@ -227,11 +237,11 @@ impl EnumImpl for ObjectType {
             ObjectType::SieveSystemScript => "SieveSystemScript",
             ObjectType::SieveUserInterpreter => "SieveUserInterpreter",
             ObjectType::SieveUserScript => "SieveUserScript",
+            ObjectType::SpamAi => "SpamAi",
             ObjectType::SpamClassifier => "SpamClassifier",
             ObjectType::SpamDnsblServer => "SpamDnsblServer",
             ObjectType::SpamDnsblSettings => "SpamDnsblSettings",
             ObjectType::SpamFileExtension => "SpamFileExtension",
-            ObjectType::SpamLlm => "SpamLlm",
             ObjectType::SpamPyzor => "SpamPyzor",
             ObjectType::SpamRule => "SpamRule",
             ObjectType::SpamSettings => "SpamSettings",
@@ -308,80 +318,83 @@ impl EnumImpl for ObjectType {
             45 => Some(ObjectType::HttpLookup),
             46 => Some(ObjectType::Imap),
             47 => Some(ObjectType::InMemoryStore),
-            48 => Some(ObjectType::Jmap),
-            49 => Some(ObjectType::Log),
-            50 => Some(ObjectType::MailingList),
-            51 => Some(ObjectType::MaskedEmail),
-            52 => Some(ObjectType::MemoryLookupKey),
-            53 => Some(ObjectType::MemoryLookupKeyValue),
-            54 => Some(ObjectType::Metric),
-            55 => Some(ObjectType::Metrics),
-            56 => Some(ObjectType::MetricsStore),
-            57 => Some(ObjectType::MtaConnectionStrategy),
-            58 => Some(ObjectType::MtaDeliverySchedule),
-            59 => Some(ObjectType::MtaExtensions),
-            60 => Some(ObjectType::MtaHook),
-            61 => Some(ObjectType::MtaInboundSession),
-            62 => Some(ObjectType::MtaInboundThrottle),
-            63 => Some(ObjectType::MtaMilter),
-            64 => Some(ObjectType::MtaOutboundStrategy),
-            65 => Some(ObjectType::MtaOutboundThrottle),
-            66 => Some(ObjectType::MtaQueueQuota),
-            67 => Some(ObjectType::MtaRoute),
-            68 => Some(ObjectType::MtaStageAuth),
-            69 => Some(ObjectType::MtaStageConnect),
-            70 => Some(ObjectType::MtaStageData),
-            71 => Some(ObjectType::MtaStageEhlo),
-            72 => Some(ObjectType::MtaStageMail),
-            73 => Some(ObjectType::MtaStageRcpt),
-            74 => Some(ObjectType::MtaSts),
-            75 => Some(ObjectType::MtaTlsStrategy),
-            76 => Some(ObjectType::MtaVirtualQueue),
-            77 => Some(ObjectType::NetworkListener),
-            78 => Some(ObjectType::OAuthClient),
-            79 => Some(ObjectType::OidcProvider),
-            80 => Some(ObjectType::PublicKey),
-            81 => Some(ObjectType::QueuedMessage),
-            82 => Some(ObjectType::ReportSettings),
-            83 => Some(ObjectType::Role),
-            84 => Some(ObjectType::Search),
-            85 => Some(ObjectType::SearchStore),
-            86 => Some(ObjectType::Security),
-            87 => Some(ObjectType::SenderAuth),
-            88 => Some(ObjectType::Sharing),
-            89 => Some(ObjectType::SieveSystemInterpreter),
-            90 => Some(ObjectType::SieveSystemScript),
-            91 => Some(ObjectType::SieveUserInterpreter),
-            92 => Some(ObjectType::SieveUserScript),
-            93 => Some(ObjectType::SpamClassifier),
-            94 => Some(ObjectType::SpamDnsblServer),
-            95 => Some(ObjectType::SpamDnsblSettings),
-            96 => Some(ObjectType::SpamFileExtension),
-            97 => Some(ObjectType::SpamLlm),
-            98 => Some(ObjectType::SpamPyzor),
-            99 => Some(ObjectType::SpamRule),
-            100 => Some(ObjectType::SpamSettings),
-            101 => Some(ObjectType::SpamTag),
-            102 => Some(ObjectType::SpamTrainingSample),
-            103 => Some(ObjectType::SpfReportSettings),
-            104 => Some(ObjectType::StoreLookup),
-            105 => Some(ObjectType::SystemSettings),
-            106 => Some(ObjectType::Task),
-            107 => Some(ObjectType::TaskManager),
-            108 => Some(ObjectType::Tenant),
-            109 => Some(ObjectType::TlsExternalReport),
-            110 => Some(ObjectType::TlsInternalReport),
-            111 => Some(ObjectType::TlsReportSettings),
-            112 => Some(ObjectType::Trace),
-            113 => Some(ObjectType::Tracer),
-            114 => Some(ObjectType::TracingStore),
-            115 => Some(ObjectType::WebDav),
-            116 => Some(ObjectType::WebHook),
+            48 => Some(ObjectType::IndexQueueStatus),
+            49 => Some(ObjectType::Jmap),
+            50 => Some(ObjectType::Log),
+            51 => Some(ObjectType::MailingList),
+            52 => Some(ObjectType::MaskedEmail),
+            53 => Some(ObjectType::MemoryLookupKey),
+            54 => Some(ObjectType::MemoryLookupKeyValue),
+            55 => Some(ObjectType::Metadata),
+            56 => Some(ObjectType::Metric),
+            57 => Some(ObjectType::Metrics),
+            58 => Some(ObjectType::MetricsStore),
+            59 => Some(ObjectType::MtaConnectionStrategy),
+            60 => Some(ObjectType::MtaDeliverySchedule),
+            61 => Some(ObjectType::MtaExtensions),
+            62 => Some(ObjectType::MtaHook),
+            63 => Some(ObjectType::MtaInboundSession),
+            64 => Some(ObjectType::MtaInboundThrottle),
+            65 => Some(ObjectType::MtaMilter),
+            66 => Some(ObjectType::MtaOutboundStrategy),
+            67 => Some(ObjectType::MtaOutboundThrottle),
+            68 => Some(ObjectType::MtaQueueQuota),
+            69 => Some(ObjectType::MtaRoute),
+            70 => Some(ObjectType::MtaStageAuth),
+            71 => Some(ObjectType::MtaStageConnect),
+            72 => Some(ObjectType::MtaStageData),
+            73 => Some(ObjectType::MtaStageEhlo),
+            74 => Some(ObjectType::MtaStageMail),
+            75 => Some(ObjectType::MtaStageRcpt),
+            76 => Some(ObjectType::MtaSts),
+            77 => Some(ObjectType::MtaTlsStrategy),
+            78 => Some(ObjectType::MtaVirtualQueue),
+            79 => Some(ObjectType::NetworkListener),
+            80 => Some(ObjectType::OAuthClient),
+            81 => Some(ObjectType::OAuthGrant),
+            82 => Some(ObjectType::OidcProvider),
+            83 => Some(ObjectType::PublicKey),
+            84 => Some(ObjectType::QueuedMessage),
+            85 => Some(ObjectType::ReportSettings),
+            86 => Some(ObjectType::Role),
+            87 => Some(ObjectType::Search),
+            88 => Some(ObjectType::SearchStore),
+            89 => Some(ObjectType::Security),
+            90 => Some(ObjectType::SenderAuth),
+            91 => Some(ObjectType::Sharing),
+            92 => Some(ObjectType::SieveSystemInterpreter),
+            93 => Some(ObjectType::SieveSystemScript),
+            94 => Some(ObjectType::SieveUserInterpreter),
+            95 => Some(ObjectType::SieveUserScript),
+            96 => Some(ObjectType::SpamAi),
+            97 => Some(ObjectType::SpamClassifier),
+            98 => Some(ObjectType::SpamDnsblServer),
+            99 => Some(ObjectType::SpamDnsblSettings),
+            100 => Some(ObjectType::SpamFileExtension),
+            101 => Some(ObjectType::SpamPyzor),
+            102 => Some(ObjectType::SpamRule),
+            103 => Some(ObjectType::SpamSettings),
+            104 => Some(ObjectType::SpamTag),
+            105 => Some(ObjectType::SpamTrainingSample),
+            106 => Some(ObjectType::SpfReportSettings),
+            107 => Some(ObjectType::StoreLookup),
+            108 => Some(ObjectType::SystemSettings),
+            109 => Some(ObjectType::Task),
+            110 => Some(ObjectType::TaskManager),
+            111 => Some(ObjectType::Tenant),
+            112 => Some(ObjectType::TlsExternalReport),
+            113 => Some(ObjectType::TlsInternalReport),
+            114 => Some(ObjectType::TlsReportSettings),
+            115 => Some(ObjectType::Trace),
+            116 => Some(ObjectType::Tracer),
+            117 => Some(ObjectType::TracingStore),
+            118 => Some(ObjectType::WebDav),
+            119 => Some(ObjectType::WebHook),
             _ => None,
         }
     }
 
-    const COUNT: usize = 117;
+    const COUNT: usize = 120;
 }
 
 impl serde::Serialize for ObjectType {
@@ -405,17 +418,19 @@ impl<'de> serde::Deserialize<'de> for ObjectType {
 
 impl EnumImpl for Property {
     fn parse(value: &str) -> Option<Self> {
-        hashify::tiny_map! {
+        hashify::map! {
             value.as_bytes(),
+            Property,
             b"@type" => Property::Type,
             b"abuseBanPeriod" => Property::AbuseBanPeriod,
             b"abuseBanRate" => Property::AbuseBanRate,
-            b"accessKey" => Property::AccessKey,
+            b"acceptedAudiences" => Property::AcceptedAudiences,
             b"accessKeyId" => Property::AccessKeyId,
             b"accessToken" => Property::AccessToken,
             b"accessTokenExpiry" => Property::AccessTokenExpiry,
             b"accessTokens" => Property::AccessTokens,
             b"accountDomainId" => Property::AccountDomainId,
+            b"accountHashPrefix" => Property::AccountHashPrefix,
             b"accountId" => Property::AccountId,
             b"accountIdentifier" => Property::AccountIdentifier,
             b"accountKey" => Property::AccountKey,
@@ -428,27 +443,30 @@ impl EnumImpl for Property {
             b"addAuthResultsHeader" => Property::AddAuthResultsHeader,
             b"addDateHeader" => Property::AddDateHeader,
             b"addDeliveredToHeader" => Property::AddDeliveredToHeader,
+            b"addHeader" => Property::AddHeader,
             b"addMessageIdHeader" => Property::AddMessageIdHeader,
             b"addReceivedHeader" => Property::AddReceivedHeader,
             b"addReceivedSpfHeader" => Property::AddReceivedSpfHeader,
             b"addReturnPathHeader" => Property::AddReturnPathHeader,
             b"additionalInformation" => Property::AdditionalInformation,
             b"address" => Property::Address,
-            b"addresses" => Property::Addresses,
             b"aggregateContactInfo" => Property::AggregateContactInfo,
             b"aggregateDkimSignDomain" => Property::AggregateDkimSignDomain,
             b"aggregateFromAddress" => Property::AggregateFromAddress,
             b"aggregateFromName" => Property::AggregateFromName,
-            b"aggregateMaxReportSize" => Property::AggregateMaxReportSize,
             b"aggregateOrgName" => Property::AggregateOrgName,
             b"aggregateSendFrequency" => Property::AggregateSendFrequency,
-            b"aggregateSubject" => Property::AggregateSubject,
+            b"aiFacts" => Property::AiFacts,
+            b"aiGate" => Property::AiGate,
+            b"aiVerdict" => Property::AiVerdict,
             b"alarmId" => Property::AlarmId,
+            b"alertAfter" => Property::AlertAfter,
             b"algorithms" => Property::Algorithms,
             b"aliases" => Property::Aliases,
             b"allowCount" => Property::AllowCount,
             b"allowDirectoryQueries" => Property::AllowDirectoryQueries,
             b"allowExternalRcpts" => Property::AllowExternalRcpts,
+            b"allowIdTokenClaims" => Property::AllowIdTokenClaims,
             b"allowInvalidCerts" => Property::AllowInvalidCerts,
             b"allowPlainTextAuth" => Property::AllowPlainTextAuth,
             b"allowRelaying" => Property::AllowRelaying,
@@ -459,8 +477,10 @@ impl EnumImpl for Property {
             b"allowedNotifyUris" => Property::AllowedNotifyUris,
             b"alpha" => Property::Alpha,
             b"anonymousClientRegistration" => Property::AnonymousClientRegistration,
+            b"anonymousTimeout" => Property::AnonymousTimeout,
             b"ansi" => Property::Ansi,
             b"apiKey" => Property::ApiKey,
+            b"apiKeyId" => Property::ApiKeyId,
             b"apiUser" => Property::ApiUser,
             b"applicationKey" => Property::ApplicationKey,
             b"applicationSecret" => Property::ApplicationSecret,
@@ -487,18 +507,17 @@ impl EnumImpl for Property {
             b"authBanPeriod" => Property::AuthBanPeriod,
             b"authBanRate" => Property::AuthBanRate,
             b"authCodeExpiry" => Property::AuthCodeExpiry,
-            b"authCodeMaxAttempts" => Property::AuthCodeMaxAttempts,
             b"authFailure" => Property::AuthFailure,
             b"authId" => Property::AuthId,
             b"authSecret" => Property::AuthSecret,
-            b"authToken" => Property::AuthToken,
             b"authUsername" => Property::AuthUsername,
             b"authenticatedAs" => Property::AuthenticatedAs,
+            b"authenticatedTimeout" => Property::AuthenticatedTimeout,
             b"authenticationResults" => Property::AuthenticationResults,
             b"autoAddInvitations" => Property::AutoAddInvitations,
-            b"autoUpdateFrequency" => Property::AutoUpdateFrequency,
+            b"autoUpdateInterval" => Property::AutoUpdateInterval,
+            b"availabilityRateLimit" => Property::AvailabilityRateLimit,
             b"baseDn" => Property::BaseDn,
-            b"baseUrl" => Property::BaseUrl,
             b"bearerToken" => Property::BearerToken,
             b"beta" => Property::Beta,
             b"bind" => Property::Bind,
@@ -511,28 +530,34 @@ impl EnumImpl for Property {
             b"blobStore" => Property::BlobStore,
             b"blockCount" => Property::BlockCount,
             b"body" => Property::Body,
-            b"brokers" => Property::Brokers,
+            b"breakerCooldown" => Property::BreakerCooldown,
+            b"breakerThreshold" => Property::BreakerThreshold,
             b"bucket" => Property::Bucket,
+            b"bucketHigh" => Property::BucketHigh,
+            b"bucketMedium" => Property::BucketMedium,
             b"bufferSize" => Property::BufferSize,
             b"buffered" => Property::Buffered,
+            b"caaIdentities" => Property::CaaIdentities,
             b"cacheSize" => Property::CacheSize,
             b"canonicalization" => Property::Canonicalization,
-            b"capacityClient" => Property::CapacityClient,
-            b"capacityReadBuffer" => Property::CapacityReadBuffer,
-            b"capacitySubscription" => Property::CapacitySubscription,
             b"catchAllAddress" => Property::CatchAllAddress,
             b"categories" => Property::Categories,
             b"certificate" => Property::Certificate,
             b"certificateManagement" => Property::CertificateManagement,
             b"challengeType" => Property::ChallengeType,
-            b"changesMaxResults" => Property::ChangesMaxResults,
+            b"chunkSize" => Property::ChunkSize,
             b"chunking" => Property::Chunking,
             b"claimGroups" => Property::ClaimGroups,
             b"claimName" => Property::ClaimName,
             b"claimUsername" => Property::ClaimUsername,
             b"cleartext" => Property::Cleartext,
+            b"clientCapacity" => Property::ClientCapacity,
             b"clientId" => Property::ClientId,
             b"clientIp" => Property::ClientIp,
+            b"clientIpSource" => Property::ClientIpSource,
+            b"clientKind" => Property::ClientKind,
+            b"clientMetadataDocuments" => Property::ClientMetadataDocuments,
+            b"clientName" => Property::ClientName,
             b"clientSecret" => Property::ClientSecret,
             b"clientToken" => Property::ClientToken,
             b"clusterFile" => Property::ClusterFile,
@@ -540,12 +565,11 @@ impl EnumImpl for Property {
             b"columnDescription" => Property::ColumnDescription,
             b"columnEmail" => Property::ColumnEmail,
             b"columnSecret" => Property::ColumnSecret,
+            b"commandTimeout" => Property::CommandTimeout,
             b"comment" => Property::Comment,
             b"compartmentOcid" => Property::CompartmentOcid,
             b"compressionAlgorithm" => Property::CompressionAlgorithm,
-            b"concurrency" => Property::Concurrency,
             b"condition" => Property::Condition,
-            b"confidence" => Property::Confidence,
             b"config" => Property::Config,
             b"configName" => Property::ConfigName,
             b"connectTimeout" => Property::ConnectTimeout,
@@ -555,7 +579,6 @@ impl EnumImpl for Property {
             b"contactInfo" => Property::ContactInfo,
             b"contacts" => Property::Contacts,
             b"container" => Property::Container,
-            b"content" => Property::Content,
             b"contentTypes" => Property::ContentTypes,
             b"contents" => Property::Contents,
             b"context" => Property::Context,
@@ -566,21 +589,19 @@ impl EnumImpl for Property {
             b"credentialId" => Property::CredentialId,
             b"credentials" => Property::Credentials,
             b"currentSecret" => Property::CurrentSecret,
-            b"customEndpoint" => Property::CustomEndpoint,
-            b"customRegion" => Property::CustomRegion,
             b"customRule" => Property::CustomRule,
             b"customerNumber" => Property::CustomerNumber,
             b"dane" => Property::Dane,
             b"dataCleanupSchedule" => Property::DataCleanupSchedule,
             b"dataStore" => Property::DataStore,
             b"dataTimeout" => Property::DataTimeout,
+            b"dataTypes" => Property::DataTypes,
             b"database" => Property::Database,
             b"datacenterId" => Property::DatacenterId,
-            b"dateRangeBegin" => Property::DateRangeBegin,
             b"dateRangeEnd" => Property::DateRangeEnd,
             b"dateRangeStart" => Property::DateRangeStart,
             b"day" => Property::Day,
-            b"deadPropertyMaxSize" => Property::DeadPropertyMaxSize,
+            b"deadline" => Property::Deadline,
             b"defaultAdminRoleIds" => Property::DefaultAdminRoleIds,
             b"defaultCertificateId" => Property::DefaultCertificateId,
             b"defaultDisplayName" => Property::DefaultDisplayName,
@@ -614,6 +635,8 @@ impl EnumImpl for Property {
             b"details" => Property::Details,
             b"directory" => Property::Directory,
             b"directoryId" => Property::DirectoryId,
+            b"directoryRecipients" => Property::DirectoryRecipients,
+            b"directoryRecipientsTtl" => Property::DirectoryRecipientsTtl,
             b"disableCapabilities" => Property::DisableCapabilities,
             b"disabledPermissions" => Property::DisabledPermissions,
             b"discardAfter" => Property::DiscardAfter,
@@ -644,7 +667,6 @@ impl EnumImpl for Property {
             b"dnsMtaSts" => Property::DnsMtaSts,
             b"dnsMx" => Property::DnsMx,
             b"dnsPtr" => Property::DnsPtr,
-            b"dnsRbl" => Property::DnsRbl,
             b"dnsServer" => Property::DnsServer,
             b"dnsServerId" => Property::DnsServerId,
             b"dnsTlsa" => Property::DnsTlsa,
@@ -652,7 +674,6 @@ impl EnumImpl for Property {
             b"dnsView" => Property::DnsView,
             b"dnsZoneFile" => Property::DnsZoneFile,
             b"documentId" => Property::DocumentId,
-            b"documentType" => Property::DocumentType,
             b"domain" => Property::Domain,
             b"domainId" => Property::DomainId,
             b"domainLimit" => Property::DomainLimit,
@@ -661,7 +682,6 @@ impl EnumImpl for Property {
             b"domains" => Property::Domains,
             b"dsn" => Property::Dsn,
             b"due" => Property::Due,
-            b"duplicateExpiry" => Property::DuplicateExpiry,
             b"duration" => Property::Duration,
             b"eabHmacKey" => Property::EabHmacKey,
             b"eabKeyId" => Property::EabKeyId,
@@ -686,17 +706,12 @@ impl EnumImpl for Property {
             b"enableLogExporter" => Property::EnableLogExporter,
             b"enableSpamFilter" => Property::EnableSpamFilter,
             b"enableSpanExporter" => Property::EnableSpanExporter,
-            b"enabled" => Property::Enabled,
             b"enabledPermissions" => Property::EnabledPermissions,
             b"encryptAtRest" => Property::EncryptAtRest,
             b"encryptOnAppend" => Property::EncryptOnAppend,
             b"encryptionAtRest" => Property::EncryptionAtRest,
             b"encryptionKey" => Property::EncryptionKey,
-            b"endpoint" => Property::Endpoint,
-            b"envFrom" => Property::EnvFrom,
-            b"envFromParameters" => Property::EnvFromParameters,
             b"envId" => Property::EnvId,
-            b"envRcptTo" => Property::EnvRcptTo,
             b"envelopeFrom" => Property::EnvelopeFrom,
             b"envelopeTo" => Property::EnvelopeTo,
             b"environment" => Property::Environment,
@@ -704,6 +719,8 @@ impl EnumImpl for Property {
             b"errorMessage" => Property::ErrorMessage,
             b"errorType" => Property::ErrorType,
             b"errors" => Property::Errors,
+            b"escalateBelow" => Property::EscalateBelow,
+            b"escalateOn" => Property::EscalateOn,
             b"evaluatedDisposition" => Property::EvaluatedDisposition,
             b"evaluatedDkim" => Property::EvaluatedDkim,
             b"evaluatedSpf" => Property::EvaluatedSpf,
@@ -723,6 +740,7 @@ impl EnumImpl for Property {
             b"expiresAt" => Property::ExpiresAt,
             b"expiresAttempts" => Property::ExpiresAttempts,
             b"expiry" => Property::Expiry,
+            b"explanation" => Property::Explanation,
             b"expn" => Property::Expn,
             b"expungeSchedule" => Property::ExpungeSchedule,
             b"expungeSchedulingInboxAfter" => Property::ExpungeSchedulingInboxAfter,
@@ -733,6 +751,7 @@ impl EnumImpl for Property {
             b"extensions" => Property::Extensions,
             b"externalId" => Property::ExternalId,
             b"extraContactInfo" => Property::ExtraContactInfo,
+            b"extraParameters" => Property::ExtraParameters,
             b"factor" => Property::Factor,
             b"failOnTimeout" => Property::FailOnTimeout,
             b"failedAt" => Property::FailedAt,
@@ -756,28 +775,35 @@ impl EnumImpl for Property {
             b"filePath" => Property::FilePath,
             b"files" => Property::Files,
             b"filterLogin" => Property::FilterLogin,
-            b"filterMailbox" => Property::FilterMailbox,
             b"filterMemberOf" => Property::FilterMemberOf,
+            b"filterRecipient" => Property::FilterRecipient,
             b"fingerprint" => Property::Fingerprint,
+            b"firstFailedAt" => Property::FirstFailedAt,
+            b"firstParty" => Property::FirstParty,
             b"flags" => Property::Flags,
             b"flagsAction" => Property::FlagsAction,
             b"flagsProtocol" => Property::FlagsProtocol,
+            b"flushChanges" => Property::FlushChanges,
+            b"flushInterval" => Property::FlushInterval,
             b"folderId" => Property::FolderId,
             b"forDomain" => Property::ForDomain,
             b"format" => Property::Format,
+            b"forwardedHops" => Property::ForwardedHops,
             b"from" => Property::From,
             b"fromAddress" => Property::FromAddress,
-            b"fromEmail" => Property::FromEmail,
             b"fromName" => Property::FromName,
             b"futureRelease" => Property::FutureRelease,
             b"generateDkimKeys" => Property::GenerateDkimKeys,
+            b"generation" => Property::Generation,
             b"generator" => Property::Generator,
             b"geoUrls" => Property::GeoUrls,
-            b"getMaxResults" => Property::GetMaxResults,
+            b"grantTypes" => Property::GrantTypes,
             b"greetingTimeout" => Property::GreetingTimeout,
             b"greylistFor" => Property::GreylistFor,
             b"groupClass" => Property::GroupClass,
             b"groupId" => Property::GroupId,
+            b"groupwareLarge" => Property::GroupwareLarge,
+            b"groupwareLargeTtl" => Property::GroupwareLargeTtl,
             b"headerFrom" => Property::HeaderFrom,
             b"headers" => Property::Headers,
             b"holdMetricsFor" => Property::HoldMetricsFor,
@@ -787,6 +813,7 @@ impl EnumImpl for Property {
             b"host" => Property::Host,
             b"hostedZoneId" => Property::HostedZoneId,
             b"hostname" => Property::Hostname,
+            b"hosts" => Property::Hosts,
             b"hour" => Property::Hour,
             b"httpAuth" => Property::HttpAuth,
             b"httpHeaders" => Property::HttpHeaders,
@@ -800,15 +827,23 @@ impl EnumImpl for Property {
             b"id" => Property::Id,
             b"idTokenExpiry" => Property::IdTokenExpiry,
             b"identityAlignment" => Property::IdentityAlignment,
+            b"idleTimeout" => Property::IdleTimeout,
             b"if" => Property::If,
+            b"imapServerAdmin" => Property::ImapServerAdmin,
+            b"imapServerComment" => Property::ImapServerComment,
             b"impersonateServiceAccount" => Property::ImpersonateServiceAccount,
             b"implicitTls" => Property::ImplicitTls,
             b"inMemoryStore" => Property::InMemoryStore,
             b"inboundReportAddresses" => Property::InboundReportAddresses,
             b"inboundReportForwarding" => Property::InboundReportForwarding,
-            b"inboundReportMaxSize" => Property::InboundReportMaxSize,
             b"incidents" => Property::Incidents,
+            b"includeAttachments" => Property::IncludeAttachments,
+            b"includeAuth" => Property::IncludeAuth,
+            b"includeLinks" => Property::IncludeLinks,
+            b"includeSecrets" => Property::IncludeSecrets,
             b"includeSource" => Property::IncludeSource,
+            b"includes" => Property::Includes,
+            b"index" => Property::Index,
             b"indexAsn" => Property::IndexAsn,
             b"indexAsnName" => Property::IndexAsnName,
             b"indexBatchSize" => Property::IndexBatchSize,
@@ -819,14 +854,19 @@ impl EnumImpl for Property {
             b"indexCountry" => Property::IndexCountry,
             b"indexEmail" => Property::IndexEmail,
             b"indexEmailFields" => Property::IndexEmailFields,
+            b"indexFiles" => Property::IndexFiles,
             b"indexKey" => Property::IndexKey,
             b"indexTelemetry" => Property::IndexTelemetry,
-            b"indexTracingFields" => Property::IndexTracingFields,
             b"indexValue" => Property::IndexValue,
             b"indicatorParameters" => Property::IndicatorParameters,
             b"initialDelay" => Property::InitialDelay,
+            b"instanceHashes" => Property::InstanceHashes,
+            b"instructions" => Property::Instructions,
             b"interval" => Property::Interval,
             b"intervals" => Property::Intervals,
+            b"introspectionAuthMethod" => Property::IntrospectionAuthMethod,
+            b"introspectionClientId" => Property::IntrospectionClientId,
+            b"introspectionClientSecret" => Property::IntrospectionClientSecret,
             b"ipLimit" => Property::IpLimit,
             b"ipLookupStrategy" => Property::IpLookupStrategy,
             b"ipRevPtr" => Property::IpRevPtr,
@@ -834,7 +874,6 @@ impl EnumImpl for Property {
             b"isActive" => Property::IsActive,
             b"isArchive" => Property::IsArchive,
             b"isBad" => Property::IsBad,
-            b"isEnabled" => Property::IsEnabled,
             b"isFromOrganizer" => Property::IsFromOrganizer,
             b"isGlobPattern" => Property::IsGlobPattern,
             b"isGzipped" => Property::IsGzipped,
@@ -843,9 +882,10 @@ impl EnumImpl for Property {
             b"isSpam" => Property::IsSpam,
             b"isTls" => Property::IsTls,
             b"issuer" => Property::Issuer,
+            b"issuerDomainNames" => Property::IssuerDomainNames,
             b"issuerUrl" => Property::IssuerUrl,
-            b"itipMaxSize" => Property::ItipMaxSize,
             b"jitter" => Property::Jitter,
+            b"keepAlive" => Property::KeepAlive,
             b"key" => Property::Key,
             b"keyName" => Property::KeyName,
             b"keyPrefix" => Property::KeyPrefix,
@@ -853,70 +893,109 @@ impl EnumImpl for Property {
             b"l1Ratio" => Property::L1Ratio,
             b"l2Ratio" => Property::L2Ratio,
             b"lastRenewal" => Property::LastRenewal,
+            b"lastUsedAt" => Property::LastUsedAt,
+            b"learn" => Property::Learn,
             b"learnHamFromCard" => Property::LearnHamFromCard,
             b"learnHamFromReply" => Property::LearnHamFromReply,
             b"learnSpamFromRblHits" => Property::LearnSpamFromRblHits,
             b"learnSpamFromTraps" => Property::LearnSpamFromTraps,
+            b"lenientIssuerMatch" => Property::LenientIssuerMatch,
             b"level" => Property::Level,
             b"licenseKey" => Property::LicenseKey,
             b"line" => Property::Line,
             b"listenerIds" => Property::ListenerIds,
             b"listeners" => Property::Listeners,
-            b"livePropertyMaxSize" => Property::LivePropertyMaxSize,
+            b"localIp" => Property::LocalIp,
+            b"localIps" => Property::LocalIps,
             b"locale" => Property::Locale,
             b"logo" => Property::Logo,
-            b"logoUrl" => Property::LogoUrl,
+            b"logprobs" => Property::Logprobs,
             b"loiterBanPeriod" => Property::LoiterBanPeriod,
             b"loiterBanRate" => Property::LoiterBanRate,
             b"lossy" => Property::Lossy,
             b"machineId" => Property::MachineId,
             b"mailExchangers" => Property::MailExchangers,
             b"mailFrom" => Property::MailFrom,
+            b"mailFromParameters" => Property::MailFromParameters,
             b"mailFromTimeout" => Property::MailFromTimeout,
             b"mailRua" => Property::MailRua,
             b"mailingLists" => Property::MailingLists,
             b"maintenanceType" => Property::MaintenanceType,
             b"managedZone" => Property::ManagedZone,
             b"match" => Property::Match,
+            b"maxAccountSize" => Property::MaxAccountSize,
             b"maxAddressBooks" => Property::MaxAddressBooks,
+            b"maxAddressBooksPerCard" => Property::MaxAddressBooksPerCard,
             b"maxAge" => Property::MaxAge,
+            b"maxAggregateReportSize" => Property::MaxAggregateReportSize,
             b"maxAllowedPacket" => Property::MaxAllowedPacket,
             b"maxApiKeys" => Property::MaxApiKeys,
             b"maxAppPasswords" => Property::MaxAppPasswords,
             b"maxAttachmentSize" => Property::MaxAttachmentSize,
+            b"maxAttachmentText" => Property::MaxAttachmentText,
+            b"maxAttachments" => Property::MaxAttachments,
+            b"maxAttachmentsSize" => Property::MaxAttachmentsSize,
             b"maxAttempts" => Property::MaxAttempts,
             b"maxAttendees" => Property::MaxAttendees,
             b"maxAuthFailures" => Property::MaxAuthFailures,
+            b"maxAvailabilityDuration" => Property::MaxAvailabilityDuration,
+            b"maxBodyText" => Property::MaxBodyText,
+            b"maxBufferedMemory" => Property::MaxBufferedMemory,
             b"maxCalendars" => Property::MaxCalendars,
+            b"maxCalendarsPerEvent" => Property::MaxCalendarsPerEvent,
             b"maxChangesHistory" => Property::MaxChangesHistory,
-            b"maxConcurrent" => Property::MaxConcurrent,
+            b"maxChangesResults" => Property::MaxChangesResults,
+            b"maxConcurrentConnections" => Property::MaxConcurrentConnections,
+            b"maxConcurrentIndexTasks" => Property::MaxConcurrentIndexTasks,
             b"maxConcurrentRequests" => Property::MaxConcurrentRequests,
             b"maxConcurrentUploads" => Property::MaxConcurrentUploads,
             b"maxConnections" => Property::MaxConnections,
             b"maxContacts" => Property::MaxContacts,
             b"maxCpuCycles" => Property::MaxCpuCycles,
             b"maxDelay" => Property::MaxDelay,
+            b"maxDepth" => Property::MaxDepth,
             b"maxDuration" => Property::MaxDuration,
             b"maxEntries" => Property::MaxEntries,
             b"maxEntrySize" => Property::MaxEntrySize,
             b"maxEventNotifications" => Property::MaxEventNotifications,
             b"maxEvents" => Property::MaxEvents,
+            b"maxExpandedQueryDuration" => Property::MaxExpandedQueryDuration,
+            b"maxExtractArchiveEntries" => Property::MaxExtractArchiveEntries,
+            b"maxExtractDecompressedSize" => Property::MaxExtractDecompressedSize,
+            b"maxExtractDocumentSize" => Property::MaxExtractDocumentSize,
+            b"maxExtractPartSize" => Property::MaxExtractPartSize,
+            b"maxExtractParts" => Property::MaxExtractParts,
+            b"maxExtractPdfObjects" => Property::MaxExtractPdfObjects,
+            b"maxExtractRtfDepth" => Property::MaxExtractRtfDepth,
+            b"maxExtractTextSize" => Property::MaxExtractTextSize,
             b"maxFailures" => Property::MaxFailures,
             b"maxFiles" => Property::MaxFiles,
+            b"maxFlagLength" => Property::MaxFlagLength,
+            b"maxFlagsPerEmail" => Property::MaxFlagsPerEmail,
             b"maxFolders" => Property::MaxFolders,
+            b"maxGetResults" => Property::MaxGetResults,
+            b"maxHeaderCount" => Property::MaxHeaderCount,
             b"maxHeaderSize" => Property::MaxHeaderSize,
             b"maxICalendarSize" => Property::MaxICalendarSize,
             b"maxIdentities" => Property::MaxIdentities,
+            b"maxInboundReportSize" => Property::MaxInboundReportSize,
             b"maxIncludes" => Property::MaxIncludes,
+            b"maxInputChars" => Property::MaxInputChars,
+            b"maxItipSize" => Property::MaxItipSize,
+            b"maxLinks" => Property::MaxLinks,
+            b"maxLivePropertySize" => Property::MaxLivePropertySize,
             b"maxLocalVars" => Property::MaxLocalVars,
             b"maxLockTimeout" => Property::MaxLockTimeout,
             b"maxLocks" => Property::MaxLocks,
             b"maxMailboxDepth" => Property::MaxMailboxDepth,
             b"maxMailboxNameLength" => Property::MaxMailboxNameLength,
             b"maxMailboxes" => Property::MaxMailboxes,
+            b"maxMailboxesPerEmail" => Property::MaxMailboxesPerEmail,
             b"maxMaskedAddresses" => Property::MaxMaskedAddresses,
             b"maxMatchVars" => Property::MaxMatchVars,
+            b"maxMediaSize" => Property::MaxMediaSize,
             b"maxMessageSize" => Property::MaxMessageSize,
+            b"maxMessageText" => Property::MaxMessageText,
             b"maxMessages" => Property::MaxMessages,
             b"maxMessagesPerCommand" => Property::MaxMessagesPerCommand,
             b"maxMessagesPerSave" => Property::MaxMessagesPerSave,
@@ -928,16 +1007,23 @@ impl EnumImpl for Property {
             b"maxNestedIncludes" => Property::MaxNestedIncludes,
             b"maxNestedTests" => Property::MaxNestedTests,
             b"maxOutMessages" => Property::MaxOutMessages,
+            b"maxOutputTokens" => Property::MaxOutputTokens,
             b"maxParticipantIdentities" => Property::MaxParticipantIdentities,
+            b"maxPasswordLength" => Property::MaxPasswordLength,
+            b"maxPolls" => Property::MaxPolls,
+            b"maxPrivateSize" => Property::MaxPrivateSize,
             b"maxPublicKeys" => Property::MaxPublicKeys,
+            b"maxPushAttempts" => Property::MaxPushAttempts,
             b"maxPushSize" => Property::MaxPushSize,
+            b"maxQueryResults" => Property::MaxQueryResults,
+            b"maxQueryScan" => Property::MaxQueryScan,
             b"maxReceivedHeaders" => Property::MaxReceivedHeaders,
             b"maxRecipients" => Property::MaxRecipients,
             b"maxReconnects" => Property::MaxReconnects,
             b"maxRecurrenceExpansions" => Property::MaxRecurrenceExpansions,
+            b"maxRedirectUrls" => Property::MaxRedirectUrls,
             b"maxRedirects" => Property::MaxRedirects,
             b"maxReportSize" => Property::MaxReportSize,
-            b"maxRequestRate" => Property::MaxRequestRate,
             b"maxRequestSize" => Property::MaxRequestSize,
             b"maxResponseSize" => Property::MaxResponseSize,
             b"maxResults" => Property::MaxResults,
@@ -946,8 +1032,10 @@ impl EnumImpl for Property {
             b"maxScriptNameLength" => Property::MaxScriptNameLength,
             b"maxScriptSize" => Property::MaxScriptSize,
             b"maxScripts" => Property::MaxScripts,
+            b"maxSetObjects" => Property::MaxSetObjects,
             b"maxShares" => Property::MaxShares,
             b"maxSize" => Property::MaxSize,
+            b"maxSnippetResults" => Property::MaxSnippetResults,
             b"maxStringLength" => Property::MaxStringLength,
             b"maxSubmissions" => Property::MaxSubmissions,
             b"maxSubscriptions" => Property::MaxSubscriptions,
@@ -962,12 +1050,19 @@ impl EnumImpl for Property {
             b"message" => Property::Message,
             b"messageIdHostname" => Property::MessageIdHostname,
             b"messageIds" => Property::MessageIds,
+            b"messageTimeout" => Property::MessageTimeout,
             b"messages" => Property::Messages,
+            b"messagesLarge" => Property::MessagesLarge,
+            b"messagesLargeTtl" => Property::MessagesLargeTtl,
             b"metric" => Property::Metric,
             b"metrics" => Property::Metrics,
             b"metricsCollectionInterval" => Property::MetricsCollectionInterval,
             b"metricsPolicy" => Property::MetricsPolicy,
+            b"minAccountSize" => Property::MinAccountSize,
             b"minHamSamples" => Property::MinHamSamples,
+            b"minPasswordLength" => Property::MinPasswordLength,
+            b"minPasswordStrength" => Property::MinPasswordStrength,
+            b"minProbability" => Property::MinProbability,
             b"minRetryWait" => Property::MinRetryWait,
             b"minSpamSamples" => Property::MinSpamSamples,
             b"minTriggerInterval" => Property::MinTriggerInterval,
@@ -976,7 +1071,6 @@ impl EnumImpl for Property {
             b"mode" => Property::Mode,
             b"model" => Property::Model,
             b"modelId" => Property::ModelId,
-            b"modelType" => Property::ModelType,
             b"mtPriority" => Property::MtPriority,
             b"mtaSts" => Property::MtaSts,
             b"mtaStsTimeout" => Property::MtaStsTimeout,
@@ -1002,7 +1096,9 @@ impl EnumImpl for Property {
             b"numReplicas" => Property::NumReplicas,
             b"numShards" => Property::NumShards,
             b"oauthClientId" => Property::OauthClientId,
+            b"objectType" => Property::ObjectType,
             b"onSuccessRenewCertificate" => Property::OnSuccessRenewCertificate,
+            b"opaqueTokenValidation" => Property::OpaqueTokenValidation,
             b"openTelemetry" => Property::OpenTelemetry,
             b"options" => Property::Options,
             b"orcpt" => Property::Orcpt,
@@ -1024,13 +1120,12 @@ impl EnumImpl for Property {
             b"parseLimitContact" => Property::ParseLimitContact,
             b"parseLimitEmail" => Property::ParseLimitEmail,
             b"parseLimitEvent" => Property::ParseLimitEvent,
+            b"partition" => Property::Partition,
             b"password" => Property::Password,
             b"passwordDefaultExpiry" => Property::PasswordDefaultExpiry,
             b"passwordHashAlgorithm" => Property::PasswordHashAlgorithm,
-            b"passwordMaxLength" => Property::PasswordMaxLength,
-            b"passwordMinLength" => Property::PasswordMinLength,
-            b"passwordMinStrength" => Property::PasswordMinStrength,
             b"path" => Property::Path,
+            b"pending" => Property::Pending,
             b"period" => Property::Period,
             b"permissions" => Property::Permissions,
             b"pingInterval" => Property::PingInterval,
@@ -1052,7 +1147,6 @@ impl EnumImpl for Property {
             b"policyType" => Property::PolicyType,
             b"policyVersion" => Property::PolicyVersion,
             b"pollInterval" => Property::PollInterval,
-            b"pollingInterval" => Property::PollingInterval,
             b"poolMaxConnections" => Property::PoolMaxConnections,
             b"poolMinConnections" => Property::PoolMinConnections,
             b"poolRecyclingMethod" => Property::PoolRecyclingMethod,
@@ -1061,6 +1155,7 @@ impl EnumImpl for Property {
             b"poolTimeoutWait" => Property::PoolTimeoutWait,
             b"poolWorkers" => Property::PoolWorkers,
             b"port" => Property::Port,
+            b"postLogoutRedirectUris" => Property::PostLogoutRedirectUris,
             b"preferredChain" => Property::PreferredChain,
             b"prefix" => Property::Prefix,
             b"preserveIntermediates" => Property::PreserveIntermediates,
@@ -1068,12 +1163,12 @@ impl EnumImpl for Property {
             b"privateKey" => Property::PrivateKey,
             b"privateKeyPassword" => Property::PrivateKeyPassword,
             b"privateKeyPem" => Property::PrivateKeyPem,
+            b"privateMetadata" => Property::PrivateMetadata,
             b"privateZone" => Property::PrivateZone,
             b"privateZoneOnly" => Property::PrivateZoneOnly,
             b"profile" => Property::Profile,
             b"projectId" => Property::ProjectId,
             b"prometheus" => Property::Prometheus,
-            b"prompt" => Property::Prompt,
             b"propagationDelay" => Property::PropagationDelay,
             b"propagationTimeout" => Property::PropagationTimeout,
             b"protectedHeaders" => Property::ProtectedHeaders,
@@ -1084,7 +1179,6 @@ impl EnumImpl for Property {
             b"publicKey" => Property::PublicKey,
             b"publishRecords" => Property::PublishRecords,
             b"pushAttemptWait" => Property::PushAttemptWait,
-            b"pushMaxAttempts" => Property::PushMaxAttempts,
             b"pushRequestTimeout" => Property::PushRequestTimeout,
             b"pushRetryWait" => Property::PushRetryWait,
             b"pushShardsTotal" => Property::PushShardsTotal,
@@ -1092,21 +1186,26 @@ impl EnumImpl for Property {
             b"pushVerifyTimeout" => Property::PushVerifyTimeout,
             b"queryEmailAliases" => Property::QueryEmailAliases,
             b"queryLogin" => Property::QueryLogin,
-            b"queryMaxResults" => Property::QueryMaxResults,
             b"queryMemberOf" => Property::QueryMemberOf,
             b"queryRecipient" => Property::QueryRecipient,
+            b"question" => Property::Question,
             b"queueId" => Property::QueueId,
             b"queueName" => Property::QueueName,
+            b"queuedDeletions" => Property::QueuedDeletions,
+            b"queuedUpdates" => Property::QueuedUpdates,
             b"quotas" => Property::Quotas,
             b"rate" => Property::Rate,
             b"rateLimit" => Property::RateLimit,
             b"rateLimitAnonymous" => Property::RateLimitAnonymous,
             b"rateLimitAuthenticated" => Property::RateLimitAuthenticated,
             b"ratio" => Property::Ratio,
+            b"rcptTo" => Property::RcptTo,
             b"rcptToTimeout" => Property::RcptToTimeout,
+            b"readBufferCapacity" => Property::ReadBufferCapacity,
             b"readFromReplicas" => Property::ReadFromReplicas,
             b"readReplicas" => Property::ReadReplicas,
             b"reason" => Property::Reason,
+            b"reasoning" => Property::Reasoning,
             b"receivedAt" => Property::ReceivedAt,
             b"receivedFromIp" => Property::ReceivedFromIp,
             b"receivedViaPort" => Property::ReceivedViaPort,
@@ -1116,11 +1215,12 @@ impl EnumImpl for Property {
             b"recipients" => Property::Recipients,
             b"records" => Property::Records,
             b"recurrenceId" => Property::RecurrenceId,
+            b"redirectCacheTtl" => Property::RedirectCacheTtl,
             b"redirectRoot" => Property::RedirectRoot,
+            b"redirectTimeout" => Property::RedirectTimeout,
             b"redirectUris" => Property::RedirectUris,
-            b"refresh" => Property::Refresh,
+            b"refreshInterval" => Property::RefreshInterval,
             b"refreshTokenExpiry" => Property::RefreshTokenExpiry,
-            b"refreshTokenRenewal" => Property::RefreshTokenRenewal,
             b"region" => Property::Region,
             b"rejectNonFqdn" => Property::RejectNonFqdn,
             b"remoteIp" => Property::RemoteIp,
@@ -1131,12 +1231,9 @@ impl EnumImpl for Property {
             b"reportedDomains" => Property::ReportedDomains,
             b"reportedUris" => Property::ReportedUris,
             b"reportingMta" => Property::ReportingMta,
-            b"requestMaxSize" => Property::RequestMaxSize,
+            b"requestTimeout" => Property::RequestTimeout,
             b"requestTlsCertificate" => Property::RequestTlsCertificate,
             b"require" => Property::Require,
-            b"requireAudience" => Property::RequireAudience,
-            b"requireClientRegistration" => Property::RequireClientRegistration,
-            b"requireScopes" => Property::RequireScopes,
             b"requireTls" => Property::RequireTls,
             b"reservoirCapacity" => Property::ReservoirCapacity,
             b"resourceGroup" => Property::ResourceGroup,
@@ -1146,11 +1243,9 @@ impl EnumImpl for Property {
             b"responseHeaders" => Property::ResponseHeaders,
             b"responseHostname" => Property::ResponseHostname,
             b"responseMessage" => Property::ResponseMessage,
-            b"responsePosCategory" => Property::ResponsePosCategory,
-            b"responsePosConfidence" => Property::ResponsePosConfidence,
-            b"responsePosExplanation" => Property::ResponsePosExplanation,
             b"result" => Property::Result,
             b"resultType" => Property::ResultType,
+            b"retention" => Property::Retention,
             b"retireAfter" => Property::RetireAfter,
             b"retry" => Property::Retry,
             b"retryCount" => Property::RetryCount,
@@ -1165,6 +1260,7 @@ impl EnumImpl for Property {
             b"rotateAfter" => Property::RotateAfter,
             b"route" => Property::Route,
             b"rua" => Property::Rua,
+            b"sampleRate" => Property::SampleRate,
             b"sandbox" => Property::Sandbox,
             b"sasToken" => Property::SasToken,
             b"saslMechanisms" => Property::SaslMechanisms,
@@ -1175,6 +1271,7 @@ impl EnumImpl for Property {
             b"scheduling" => Property::Scheduling,
             b"scheme" => Property::Scheme,
             b"scope" => Property::Scope,
+            b"scopes" => Property::Scopes,
             b"score" => Property::Score,
             b"scoreDiscard" => Property::ScoreDiscard,
             b"scoreReject" => Property::ScoreReject,
@@ -1182,11 +1279,7 @@ impl EnumImpl for Property {
             b"script" => Property::Script,
             b"searchStore" => Property::SearchStore,
             b"secret" => Property::Secret,
-            b"secretAccessKey" => Property::SecretAccessKey,
-            b"secretApiKey" => Property::SecretApiKey,
-            b"secretId" => Property::SecretId,
             b"secretKey" => Property::SecretKey,
-            b"securityToken" => Property::SecurityToken,
             b"selector" => Property::Selector,
             b"selectorTemplate" => Property::SelectorTemplate,
             b"sendFrequency" => Property::SendFrequency,
@@ -1194,25 +1287,23 @@ impl EnumImpl for Property {
             b"sentinelSecret" => Property::SentinelSecret,
             b"sentinelUsername" => Property::SentinelUsername,
             b"separator" => Property::Separator,
-            b"serverHostname" => Property::ServerHostname,
             b"serverId" => Property::ServerId,
             b"servers" => Property::Servers,
             b"serviceAccountJson" => Property::ServiceAccountJson,
             b"serviceName" => Property::ServiceName,
             b"services" => Property::Services,
+            b"sessionTimeout" => Property::SessionTimeout,
             b"sessionToken" => Property::SessionToken,
-            b"setMaxObjects" => Property::SetMaxObjects,
             b"shardIndex" => Property::ShardIndex,
             b"sharedSecret" => Property::SharedSecret,
-            b"sig0Algorithm" => Property::Sig0Algorithm,
+            b"signals" => Property::Signals,
             b"signatureAlgorithm" => Property::SignatureAlgorithm,
             b"signatureKey" => Property::SignatureKey,
-            b"signerName" => Property::SignerName,
             b"size" => Property::Size,
+            b"skipAudienceValidation" => Property::SkipAudienceValidation,
             b"skipDeploy" => Property::SkipDeploy,
             b"skipFirst" => Property::SkipFirst,
             b"smtpGreeting" => Property::SmtpGreeting,
-            b"snippetMaxResults" => Property::SnippetMaxResults,
             b"socketBacklog" => Property::SocketBacklog,
             b"socketNoDelay" => Property::SocketNoDelay,
             b"socketReceiveBufferSize" => Property::SocketReceiveBufferSize,
@@ -1222,9 +1313,9 @@ impl EnumImpl for Property {
             b"socketTosV4" => Property::SocketTosV4,
             b"socketTtl" => Property::SocketTtl,
             b"sourceIp" => Property::SourceIp,
-            b"sourceIps" => Property::SourceIps,
             b"sourcePort" => Property::SourcePort,
             b"spamFilterRulesUrl" => Property::SpamFilterRulesUrl,
+            b"spamLookup" => Property::SpamLookup,
             b"spfDns" => Property::SpfDns,
             b"spfEhloDomain" => Property::SpfEhloDomain,
             b"spfEhloResult" => Property::SpfEhloResult,
@@ -1247,12 +1338,15 @@ impl EnumImpl for Property {
             b"subject" => Property::Subject,
             b"subjectAlternativeNames" => Property::SubjectAlternativeNames,
             b"subscribe" => Property::Subscribe,
+            b"subscriptionCapacity" => Property::SubscriptionCapacity,
             b"subscriptionId" => Property::SubscriptionId,
             b"sum" => Property::Sum,
             b"summary" => Property::Summary,
             b"supportedLanguages" => Property::SupportedLanguages,
+            b"swap" => Property::Swap,
             b"tag" => Property::Tag,
             b"tags" => Property::Tags,
+            b"targetAccountId" => Property::TargetAccountId,
             b"taskTypes" => Property::TaskTypes,
             b"tasks" => Property::Tasks,
             b"tcpOnError" => Property::TcpOnError,
@@ -1268,56 +1362,47 @@ impl EnumImpl for Property {
             b"thirdParty" => Property::ThirdParty,
             b"thirdPartyHash" => Property::ThirdPartyHash,
             b"threadName" => Property::ThreadName,
-            b"threadPoolSize" => Property::ThreadPoolSize,
             b"threadsPerNode" => Property::ThreadsPerNode,
             b"throttle" => Property::Throttle,
+            b"tiers" => Property::Tiers,
             b"timeZone" => Property::TimeZone,
             b"timeout" => Property::Timeout,
-            b"timeoutAnonymous" => Property::TimeoutAnonymous,
-            b"timeoutAuthenticated" => Property::TimeoutAuthenticated,
-            b"timeoutCommand" => Property::TimeoutCommand,
-            b"timeoutConnect" => Property::TimeoutConnect,
-            b"timeoutConnection" => Property::TimeoutConnection,
-            b"timeoutData" => Property::TimeoutData,
-            b"timeoutIdle" => Property::TimeoutIdle,
-            b"timeoutMessage" => Property::TimeoutMessage,
-            b"timeoutRequest" => Property::TimeoutRequest,
-            b"timeoutSession" => Property::TimeoutSession,
             b"timestamp" => Property::Timestamp,
             b"title" => Property::Title,
             b"tls" => Property::Tls,
             b"tlsDisableCipherSuites" => Property::TlsDisableCipherSuites,
             b"tlsDisableProtocols" => Property::TlsDisableProtocols,
             b"tlsIgnoreClientOrder" => Property::TlsIgnoreClientOrder,
-            b"tlsImplicit" => Property::TlsImplicit,
             b"tlsTimeout" => Property::TlsTimeout,
             b"to" => Property::To,
             b"token" => Property::Token,
-            b"totalDeadline" => Property::TotalDeadline,
+            b"tokenFile" => Property::TokenFile,
             b"totalFailedSessions" => Property::TotalFailedSessions,
             b"totalSuccessfulSessions" => Property::TotalSuccessfulSessions,
-            b"traceId" => Property::TraceId,
             b"tracer" => Property::Tracer,
-            b"trainFrequency" => Property::TrainFrequency,
+            b"trainInterval" => Property::TrainInterval,
             b"transactionRetryDelay" => Property::TransactionRetryDelay,
             b"transactionRetryLimit" => Property::TransactionRetryLimit,
             b"transactionTimeout" => Property::TransactionTimeout,
             b"transferLimit" => Property::TransferLimit,
+            b"trimQuotes" => Property::TrimQuotes,
             b"trustContacts" => Property::TrustContacts,
             b"trustReplies" => Property::TrustReplies,
             b"tsigAlgorithm" => Property::TsigAlgorithm,
             b"ttl" => Property::Ttl,
+            b"uncertainBelow" => Property::UncertainBelow,
             b"unpackDirectory" => Property::UnpackDirectory,
+            b"unscopedTokens" => Property::UnscopedTokens,
             b"updateRecords" => Property::UpdateRecords,
             b"uploadQuota" => Property::UploadQuota,
             b"uploadTtl" => Property::UploadTtl,
             b"url" => Property::Url,
+            b"urlFailover" => Property::UrlFailover,
             b"urlLimit" => Property::UrlLimit,
             b"urlPrefix" => Property::UrlPrefix,
             b"urls" => Property::Urls,
             b"usePermissiveCors" => Property::UsePermissiveCors,
             b"useTls" => Property::UseTls,
-            b"useXForwarded" => Property::UseXForwarded,
             b"usedDiskQuota" => Property::UsedDiskQuota,
             b"userAgent" => Property::UserAgent,
             b"userCodeExpiry" => Property::UserCodeExpiry,
@@ -1328,21 +1413,29 @@ impl EnumImpl for Property {
             b"validateDomain" => Property::ValidateDomain,
             b"value" => Property::Value,
             b"variableName" => Property::VariableName,
+            b"vendorNamespaces" => Property::VendorNamespaces,
+            b"verbalHigh" => Property::VerbalHigh,
+            b"verbalLow" => Property::VerbalLow,
+            b"verbalMedium" => Property::VerbalMedium,
             b"verifyAfterWrite" => Property::VerifyAfterWrite,
             b"version" => Property::Version,
             b"viewName" => Property::ViewName,
             b"vrfy" => Property::Vrfy,
             b"waitOnFail" => Property::WaitOnFail,
             b"wapiVersion" => Property::WapiVersion,
+            b"warnings" => Property::Warnings,
             b"webPushContact" => Property::WebPushContact,
             b"webPushKey" => Property::WebPushKey,
+            b"webSearch" => Property::WebSearch,
             b"websocketHeartbeat" => Property::WebsocketHeartbeat,
             b"websocketThrottle" => Property::WebsocketThrottle,
             b"websocketTimeout" => Property::WebsocketTimeout,
+            b"windowEnd" => Property::WindowEnd,
             b"zone" => Property::Zone,
             b"zoneIpV4" => Property::ZoneIpV4,
             b"zoneIpV6" => Property::ZoneIpV6,
         }
+        .copied()
     }
 
     fn as_str(&self) -> &'static str {
@@ -1350,12 +1443,13 @@ impl EnumImpl for Property {
             Property::Type => "@type",
             Property::AbuseBanPeriod => "abuseBanPeriod",
             Property::AbuseBanRate => "abuseBanRate",
-            Property::AccessKey => "accessKey",
+            Property::AcceptedAudiences => "acceptedAudiences",
             Property::AccessKeyId => "accessKeyId",
             Property::AccessToken => "accessToken",
             Property::AccessTokenExpiry => "accessTokenExpiry",
             Property::AccessTokens => "accessTokens",
             Property::AccountDomainId => "accountDomainId",
+            Property::AccountHashPrefix => "accountHashPrefix",
             Property::AccountId => "accountId",
             Property::AccountIdentifier => "accountIdentifier",
             Property::AccountKey => "accountKey",
@@ -1368,27 +1462,30 @@ impl EnumImpl for Property {
             Property::AddAuthResultsHeader => "addAuthResultsHeader",
             Property::AddDateHeader => "addDateHeader",
             Property::AddDeliveredToHeader => "addDeliveredToHeader",
+            Property::AddHeader => "addHeader",
             Property::AddMessageIdHeader => "addMessageIdHeader",
             Property::AddReceivedHeader => "addReceivedHeader",
             Property::AddReceivedSpfHeader => "addReceivedSpfHeader",
             Property::AddReturnPathHeader => "addReturnPathHeader",
             Property::AdditionalInformation => "additionalInformation",
             Property::Address => "address",
-            Property::Addresses => "addresses",
             Property::AggregateContactInfo => "aggregateContactInfo",
             Property::AggregateDkimSignDomain => "aggregateDkimSignDomain",
             Property::AggregateFromAddress => "aggregateFromAddress",
             Property::AggregateFromName => "aggregateFromName",
-            Property::AggregateMaxReportSize => "aggregateMaxReportSize",
             Property::AggregateOrgName => "aggregateOrgName",
             Property::AggregateSendFrequency => "aggregateSendFrequency",
-            Property::AggregateSubject => "aggregateSubject",
+            Property::AiFacts => "aiFacts",
+            Property::AiGate => "aiGate",
+            Property::AiVerdict => "aiVerdict",
             Property::AlarmId => "alarmId",
+            Property::AlertAfter => "alertAfter",
             Property::Algorithms => "algorithms",
             Property::Aliases => "aliases",
             Property::AllowCount => "allowCount",
             Property::AllowDirectoryQueries => "allowDirectoryQueries",
             Property::AllowExternalRcpts => "allowExternalRcpts",
+            Property::AllowIdTokenClaims => "allowIdTokenClaims",
             Property::AllowInvalidCerts => "allowInvalidCerts",
             Property::AllowPlainTextAuth => "allowPlainTextAuth",
             Property::AllowRelaying => "allowRelaying",
@@ -1399,8 +1496,10 @@ impl EnumImpl for Property {
             Property::AllowedNotifyUris => "allowedNotifyUris",
             Property::Alpha => "alpha",
             Property::AnonymousClientRegistration => "anonymousClientRegistration",
+            Property::AnonymousTimeout => "anonymousTimeout",
             Property::Ansi => "ansi",
             Property::ApiKey => "apiKey",
+            Property::ApiKeyId => "apiKeyId",
             Property::ApiUser => "apiUser",
             Property::ApplicationKey => "applicationKey",
             Property::ApplicationSecret => "applicationSecret",
@@ -1427,18 +1526,17 @@ impl EnumImpl for Property {
             Property::AuthBanPeriod => "authBanPeriod",
             Property::AuthBanRate => "authBanRate",
             Property::AuthCodeExpiry => "authCodeExpiry",
-            Property::AuthCodeMaxAttempts => "authCodeMaxAttempts",
             Property::AuthFailure => "authFailure",
             Property::AuthId => "authId",
             Property::AuthSecret => "authSecret",
-            Property::AuthToken => "authToken",
             Property::AuthUsername => "authUsername",
             Property::AuthenticatedAs => "authenticatedAs",
+            Property::AuthenticatedTimeout => "authenticatedTimeout",
             Property::AuthenticationResults => "authenticationResults",
             Property::AutoAddInvitations => "autoAddInvitations",
-            Property::AutoUpdateFrequency => "autoUpdateFrequency",
+            Property::AutoUpdateInterval => "autoUpdateInterval",
+            Property::AvailabilityRateLimit => "availabilityRateLimit",
             Property::BaseDn => "baseDn",
-            Property::BaseUrl => "baseUrl",
             Property::BearerToken => "bearerToken",
             Property::Beta => "beta",
             Property::Bind => "bind",
@@ -1451,28 +1549,34 @@ impl EnumImpl for Property {
             Property::BlobStore => "blobStore",
             Property::BlockCount => "blockCount",
             Property::Body => "body",
-            Property::Brokers => "brokers",
+            Property::BreakerCooldown => "breakerCooldown",
+            Property::BreakerThreshold => "breakerThreshold",
             Property::Bucket => "bucket",
+            Property::BucketHigh => "bucketHigh",
+            Property::BucketMedium => "bucketMedium",
             Property::BufferSize => "bufferSize",
             Property::Buffered => "buffered",
+            Property::CaaIdentities => "caaIdentities",
             Property::CacheSize => "cacheSize",
             Property::Canonicalization => "canonicalization",
-            Property::CapacityClient => "capacityClient",
-            Property::CapacityReadBuffer => "capacityReadBuffer",
-            Property::CapacitySubscription => "capacitySubscription",
             Property::CatchAllAddress => "catchAllAddress",
             Property::Categories => "categories",
             Property::Certificate => "certificate",
             Property::CertificateManagement => "certificateManagement",
             Property::ChallengeType => "challengeType",
-            Property::ChangesMaxResults => "changesMaxResults",
+            Property::ChunkSize => "chunkSize",
             Property::Chunking => "chunking",
             Property::ClaimGroups => "claimGroups",
             Property::ClaimName => "claimName",
             Property::ClaimUsername => "claimUsername",
             Property::Cleartext => "cleartext",
+            Property::ClientCapacity => "clientCapacity",
             Property::ClientId => "clientId",
             Property::ClientIp => "clientIp",
+            Property::ClientIpSource => "clientIpSource",
+            Property::ClientKind => "clientKind",
+            Property::ClientMetadataDocuments => "clientMetadataDocuments",
+            Property::ClientName => "clientName",
             Property::ClientSecret => "clientSecret",
             Property::ClientToken => "clientToken",
             Property::ClusterFile => "clusterFile",
@@ -1480,12 +1584,11 @@ impl EnumImpl for Property {
             Property::ColumnDescription => "columnDescription",
             Property::ColumnEmail => "columnEmail",
             Property::ColumnSecret => "columnSecret",
+            Property::CommandTimeout => "commandTimeout",
             Property::Comment => "comment",
             Property::CompartmentOcid => "compartmentOcid",
             Property::CompressionAlgorithm => "compressionAlgorithm",
-            Property::Concurrency => "concurrency",
             Property::Condition => "condition",
-            Property::Confidence => "confidence",
             Property::Config => "config",
             Property::ConfigName => "configName",
             Property::ConnectTimeout => "connectTimeout",
@@ -1495,7 +1598,6 @@ impl EnumImpl for Property {
             Property::ContactInfo => "contactInfo",
             Property::Contacts => "contacts",
             Property::Container => "container",
-            Property::Content => "content",
             Property::ContentTypes => "contentTypes",
             Property::Contents => "contents",
             Property::Context => "context",
@@ -1506,21 +1608,19 @@ impl EnumImpl for Property {
             Property::CredentialId => "credentialId",
             Property::Credentials => "credentials",
             Property::CurrentSecret => "currentSecret",
-            Property::CustomEndpoint => "customEndpoint",
-            Property::CustomRegion => "customRegion",
             Property::CustomRule => "customRule",
             Property::CustomerNumber => "customerNumber",
             Property::Dane => "dane",
             Property::DataCleanupSchedule => "dataCleanupSchedule",
             Property::DataStore => "dataStore",
             Property::DataTimeout => "dataTimeout",
+            Property::DataTypes => "dataTypes",
             Property::Database => "database",
             Property::DatacenterId => "datacenterId",
-            Property::DateRangeBegin => "dateRangeBegin",
             Property::DateRangeEnd => "dateRangeEnd",
             Property::DateRangeStart => "dateRangeStart",
             Property::Day => "day",
-            Property::DeadPropertyMaxSize => "deadPropertyMaxSize",
+            Property::Deadline => "deadline",
             Property::DefaultAdminRoleIds => "defaultAdminRoleIds",
             Property::DefaultCertificateId => "defaultCertificateId",
             Property::DefaultDisplayName => "defaultDisplayName",
@@ -1554,6 +1654,8 @@ impl EnumImpl for Property {
             Property::Details => "details",
             Property::Directory => "directory",
             Property::DirectoryId => "directoryId",
+            Property::DirectoryRecipients => "directoryRecipients",
+            Property::DirectoryRecipientsTtl => "directoryRecipientsTtl",
             Property::DisableCapabilities => "disableCapabilities",
             Property::DisabledPermissions => "disabledPermissions",
             Property::DiscardAfter => "discardAfter",
@@ -1584,7 +1686,6 @@ impl EnumImpl for Property {
             Property::DnsMtaSts => "dnsMtaSts",
             Property::DnsMx => "dnsMx",
             Property::DnsPtr => "dnsPtr",
-            Property::DnsRbl => "dnsRbl",
             Property::DnsServer => "dnsServer",
             Property::DnsServerId => "dnsServerId",
             Property::DnsTlsa => "dnsTlsa",
@@ -1592,7 +1693,6 @@ impl EnumImpl for Property {
             Property::DnsView => "dnsView",
             Property::DnsZoneFile => "dnsZoneFile",
             Property::DocumentId => "documentId",
-            Property::DocumentType => "documentType",
             Property::Domain => "domain",
             Property::DomainId => "domainId",
             Property::DomainLimit => "domainLimit",
@@ -1601,7 +1701,6 @@ impl EnumImpl for Property {
             Property::Domains => "domains",
             Property::Dsn => "dsn",
             Property::Due => "due",
-            Property::DuplicateExpiry => "duplicateExpiry",
             Property::Duration => "duration",
             Property::EabHmacKey => "eabHmacKey",
             Property::EabKeyId => "eabKeyId",
@@ -1626,17 +1725,12 @@ impl EnumImpl for Property {
             Property::EnableLogExporter => "enableLogExporter",
             Property::EnableSpamFilter => "enableSpamFilter",
             Property::EnableSpanExporter => "enableSpanExporter",
-            Property::Enabled => "enabled",
             Property::EnabledPermissions => "enabledPermissions",
             Property::EncryptAtRest => "encryptAtRest",
             Property::EncryptOnAppend => "encryptOnAppend",
             Property::EncryptionAtRest => "encryptionAtRest",
             Property::EncryptionKey => "encryptionKey",
-            Property::Endpoint => "endpoint",
-            Property::EnvFrom => "envFrom",
-            Property::EnvFromParameters => "envFromParameters",
             Property::EnvId => "envId",
-            Property::EnvRcptTo => "envRcptTo",
             Property::EnvelopeFrom => "envelopeFrom",
             Property::EnvelopeTo => "envelopeTo",
             Property::Environment => "environment",
@@ -1644,6 +1738,8 @@ impl EnumImpl for Property {
             Property::ErrorMessage => "errorMessage",
             Property::ErrorType => "errorType",
             Property::Errors => "errors",
+            Property::EscalateBelow => "escalateBelow",
+            Property::EscalateOn => "escalateOn",
             Property::EvaluatedDisposition => "evaluatedDisposition",
             Property::EvaluatedDkim => "evaluatedDkim",
             Property::EvaluatedSpf => "evaluatedSpf",
@@ -1663,6 +1759,7 @@ impl EnumImpl for Property {
             Property::ExpiresAt => "expiresAt",
             Property::ExpiresAttempts => "expiresAttempts",
             Property::Expiry => "expiry",
+            Property::Explanation => "explanation",
             Property::Expn => "expn",
             Property::ExpungeSchedule => "expungeSchedule",
             Property::ExpungeSchedulingInboxAfter => "expungeSchedulingInboxAfter",
@@ -1673,6 +1770,7 @@ impl EnumImpl for Property {
             Property::Extensions => "extensions",
             Property::ExternalId => "externalId",
             Property::ExtraContactInfo => "extraContactInfo",
+            Property::ExtraParameters => "extraParameters",
             Property::Factor => "factor",
             Property::FailOnTimeout => "failOnTimeout",
             Property::FailedAt => "failedAt",
@@ -1696,28 +1794,35 @@ impl EnumImpl for Property {
             Property::FilePath => "filePath",
             Property::Files => "files",
             Property::FilterLogin => "filterLogin",
-            Property::FilterMailbox => "filterMailbox",
             Property::FilterMemberOf => "filterMemberOf",
+            Property::FilterRecipient => "filterRecipient",
             Property::Fingerprint => "fingerprint",
+            Property::FirstFailedAt => "firstFailedAt",
+            Property::FirstParty => "firstParty",
             Property::Flags => "flags",
             Property::FlagsAction => "flagsAction",
             Property::FlagsProtocol => "flagsProtocol",
+            Property::FlushChanges => "flushChanges",
+            Property::FlushInterval => "flushInterval",
             Property::FolderId => "folderId",
             Property::ForDomain => "forDomain",
             Property::Format => "format",
+            Property::ForwardedHops => "forwardedHops",
             Property::From => "from",
             Property::FromAddress => "fromAddress",
-            Property::FromEmail => "fromEmail",
             Property::FromName => "fromName",
             Property::FutureRelease => "futureRelease",
             Property::GenerateDkimKeys => "generateDkimKeys",
+            Property::Generation => "generation",
             Property::Generator => "generator",
             Property::GeoUrls => "geoUrls",
-            Property::GetMaxResults => "getMaxResults",
+            Property::GrantTypes => "grantTypes",
             Property::GreetingTimeout => "greetingTimeout",
             Property::GreylistFor => "greylistFor",
             Property::GroupClass => "groupClass",
             Property::GroupId => "groupId",
+            Property::GroupwareLarge => "groupwareLarge",
+            Property::GroupwareLargeTtl => "groupwareLargeTtl",
             Property::HeaderFrom => "headerFrom",
             Property::Headers => "headers",
             Property::HoldMetricsFor => "holdMetricsFor",
@@ -1727,6 +1832,7 @@ impl EnumImpl for Property {
             Property::Host => "host",
             Property::HostedZoneId => "hostedZoneId",
             Property::Hostname => "hostname",
+            Property::Hosts => "hosts",
             Property::Hour => "hour",
             Property::HttpAuth => "httpAuth",
             Property::HttpHeaders => "httpHeaders",
@@ -1740,15 +1846,23 @@ impl EnumImpl for Property {
             Property::Id => "id",
             Property::IdTokenExpiry => "idTokenExpiry",
             Property::IdentityAlignment => "identityAlignment",
+            Property::IdleTimeout => "idleTimeout",
             Property::If => "if",
+            Property::ImapServerAdmin => "imapServerAdmin",
+            Property::ImapServerComment => "imapServerComment",
             Property::ImpersonateServiceAccount => "impersonateServiceAccount",
             Property::ImplicitTls => "implicitTls",
             Property::InMemoryStore => "inMemoryStore",
             Property::InboundReportAddresses => "inboundReportAddresses",
             Property::InboundReportForwarding => "inboundReportForwarding",
-            Property::InboundReportMaxSize => "inboundReportMaxSize",
             Property::Incidents => "incidents",
+            Property::IncludeAttachments => "includeAttachments",
+            Property::IncludeAuth => "includeAuth",
+            Property::IncludeLinks => "includeLinks",
+            Property::IncludeSecrets => "includeSecrets",
             Property::IncludeSource => "includeSource",
+            Property::Includes => "includes",
+            Property::Index => "index",
             Property::IndexAsn => "indexAsn",
             Property::IndexAsnName => "indexAsnName",
             Property::IndexBatchSize => "indexBatchSize",
@@ -1759,14 +1873,19 @@ impl EnumImpl for Property {
             Property::IndexCountry => "indexCountry",
             Property::IndexEmail => "indexEmail",
             Property::IndexEmailFields => "indexEmailFields",
+            Property::IndexFiles => "indexFiles",
             Property::IndexKey => "indexKey",
             Property::IndexTelemetry => "indexTelemetry",
-            Property::IndexTracingFields => "indexTracingFields",
             Property::IndexValue => "indexValue",
             Property::IndicatorParameters => "indicatorParameters",
             Property::InitialDelay => "initialDelay",
+            Property::InstanceHashes => "instanceHashes",
+            Property::Instructions => "instructions",
             Property::Interval => "interval",
             Property::Intervals => "intervals",
+            Property::IntrospectionAuthMethod => "introspectionAuthMethod",
+            Property::IntrospectionClientId => "introspectionClientId",
+            Property::IntrospectionClientSecret => "introspectionClientSecret",
             Property::IpLimit => "ipLimit",
             Property::IpLookupStrategy => "ipLookupStrategy",
             Property::IpRevPtr => "ipRevPtr",
@@ -1774,7 +1893,6 @@ impl EnumImpl for Property {
             Property::IsActive => "isActive",
             Property::IsArchive => "isArchive",
             Property::IsBad => "isBad",
-            Property::IsEnabled => "isEnabled",
             Property::IsFromOrganizer => "isFromOrganizer",
             Property::IsGlobPattern => "isGlobPattern",
             Property::IsGzipped => "isGzipped",
@@ -1783,9 +1901,10 @@ impl EnumImpl for Property {
             Property::IsSpam => "isSpam",
             Property::IsTls => "isTls",
             Property::Issuer => "issuer",
+            Property::IssuerDomainNames => "issuerDomainNames",
             Property::IssuerUrl => "issuerUrl",
-            Property::ItipMaxSize => "itipMaxSize",
             Property::Jitter => "jitter",
+            Property::KeepAlive => "keepAlive",
             Property::Key => "key",
             Property::KeyName => "keyName",
             Property::KeyPrefix => "keyPrefix",
@@ -1793,70 +1912,109 @@ impl EnumImpl for Property {
             Property::L1Ratio => "l1Ratio",
             Property::L2Ratio => "l2Ratio",
             Property::LastRenewal => "lastRenewal",
+            Property::LastUsedAt => "lastUsedAt",
+            Property::Learn => "learn",
             Property::LearnHamFromCard => "learnHamFromCard",
             Property::LearnHamFromReply => "learnHamFromReply",
             Property::LearnSpamFromRblHits => "learnSpamFromRblHits",
             Property::LearnSpamFromTraps => "learnSpamFromTraps",
+            Property::LenientIssuerMatch => "lenientIssuerMatch",
             Property::Level => "level",
             Property::LicenseKey => "licenseKey",
             Property::Line => "line",
             Property::ListenerIds => "listenerIds",
             Property::Listeners => "listeners",
-            Property::LivePropertyMaxSize => "livePropertyMaxSize",
+            Property::LocalIp => "localIp",
+            Property::LocalIps => "localIps",
             Property::Locale => "locale",
             Property::Logo => "logo",
-            Property::LogoUrl => "logoUrl",
+            Property::Logprobs => "logprobs",
             Property::LoiterBanPeriod => "loiterBanPeriod",
             Property::LoiterBanRate => "loiterBanRate",
             Property::Lossy => "lossy",
             Property::MachineId => "machineId",
             Property::MailExchangers => "mailExchangers",
             Property::MailFrom => "mailFrom",
+            Property::MailFromParameters => "mailFromParameters",
             Property::MailFromTimeout => "mailFromTimeout",
             Property::MailRua => "mailRua",
             Property::MailingLists => "mailingLists",
             Property::MaintenanceType => "maintenanceType",
             Property::ManagedZone => "managedZone",
             Property::Match => "match",
+            Property::MaxAccountSize => "maxAccountSize",
             Property::MaxAddressBooks => "maxAddressBooks",
+            Property::MaxAddressBooksPerCard => "maxAddressBooksPerCard",
             Property::MaxAge => "maxAge",
+            Property::MaxAggregateReportSize => "maxAggregateReportSize",
             Property::MaxAllowedPacket => "maxAllowedPacket",
             Property::MaxApiKeys => "maxApiKeys",
             Property::MaxAppPasswords => "maxAppPasswords",
             Property::MaxAttachmentSize => "maxAttachmentSize",
+            Property::MaxAttachmentText => "maxAttachmentText",
+            Property::MaxAttachments => "maxAttachments",
+            Property::MaxAttachmentsSize => "maxAttachmentsSize",
             Property::MaxAttempts => "maxAttempts",
             Property::MaxAttendees => "maxAttendees",
             Property::MaxAuthFailures => "maxAuthFailures",
+            Property::MaxAvailabilityDuration => "maxAvailabilityDuration",
+            Property::MaxBodyText => "maxBodyText",
+            Property::MaxBufferedMemory => "maxBufferedMemory",
             Property::MaxCalendars => "maxCalendars",
+            Property::MaxCalendarsPerEvent => "maxCalendarsPerEvent",
             Property::MaxChangesHistory => "maxChangesHistory",
-            Property::MaxConcurrent => "maxConcurrent",
+            Property::MaxChangesResults => "maxChangesResults",
+            Property::MaxConcurrentConnections => "maxConcurrentConnections",
+            Property::MaxConcurrentIndexTasks => "maxConcurrentIndexTasks",
             Property::MaxConcurrentRequests => "maxConcurrentRequests",
             Property::MaxConcurrentUploads => "maxConcurrentUploads",
             Property::MaxConnections => "maxConnections",
             Property::MaxContacts => "maxContacts",
             Property::MaxCpuCycles => "maxCpuCycles",
             Property::MaxDelay => "maxDelay",
+            Property::MaxDepth => "maxDepth",
             Property::MaxDuration => "maxDuration",
             Property::MaxEntries => "maxEntries",
             Property::MaxEntrySize => "maxEntrySize",
             Property::MaxEventNotifications => "maxEventNotifications",
             Property::MaxEvents => "maxEvents",
+            Property::MaxExpandedQueryDuration => "maxExpandedQueryDuration",
+            Property::MaxExtractArchiveEntries => "maxExtractArchiveEntries",
+            Property::MaxExtractDecompressedSize => "maxExtractDecompressedSize",
+            Property::MaxExtractDocumentSize => "maxExtractDocumentSize",
+            Property::MaxExtractPartSize => "maxExtractPartSize",
+            Property::MaxExtractParts => "maxExtractParts",
+            Property::MaxExtractPdfObjects => "maxExtractPdfObjects",
+            Property::MaxExtractRtfDepth => "maxExtractRtfDepth",
+            Property::MaxExtractTextSize => "maxExtractTextSize",
             Property::MaxFailures => "maxFailures",
             Property::MaxFiles => "maxFiles",
+            Property::MaxFlagLength => "maxFlagLength",
+            Property::MaxFlagsPerEmail => "maxFlagsPerEmail",
             Property::MaxFolders => "maxFolders",
+            Property::MaxGetResults => "maxGetResults",
+            Property::MaxHeaderCount => "maxHeaderCount",
             Property::MaxHeaderSize => "maxHeaderSize",
             Property::MaxICalendarSize => "maxICalendarSize",
             Property::MaxIdentities => "maxIdentities",
+            Property::MaxInboundReportSize => "maxInboundReportSize",
             Property::MaxIncludes => "maxIncludes",
+            Property::MaxInputChars => "maxInputChars",
+            Property::MaxItipSize => "maxItipSize",
+            Property::MaxLinks => "maxLinks",
+            Property::MaxLivePropertySize => "maxLivePropertySize",
             Property::MaxLocalVars => "maxLocalVars",
             Property::MaxLockTimeout => "maxLockTimeout",
             Property::MaxLocks => "maxLocks",
             Property::MaxMailboxDepth => "maxMailboxDepth",
             Property::MaxMailboxNameLength => "maxMailboxNameLength",
             Property::MaxMailboxes => "maxMailboxes",
+            Property::MaxMailboxesPerEmail => "maxMailboxesPerEmail",
             Property::MaxMaskedAddresses => "maxMaskedAddresses",
             Property::MaxMatchVars => "maxMatchVars",
+            Property::MaxMediaSize => "maxMediaSize",
             Property::MaxMessageSize => "maxMessageSize",
+            Property::MaxMessageText => "maxMessageText",
             Property::MaxMessages => "maxMessages",
             Property::MaxMessagesPerCommand => "maxMessagesPerCommand",
             Property::MaxMessagesPerSave => "maxMessagesPerSave",
@@ -1868,16 +2026,23 @@ impl EnumImpl for Property {
             Property::MaxNestedIncludes => "maxNestedIncludes",
             Property::MaxNestedTests => "maxNestedTests",
             Property::MaxOutMessages => "maxOutMessages",
+            Property::MaxOutputTokens => "maxOutputTokens",
             Property::MaxParticipantIdentities => "maxParticipantIdentities",
+            Property::MaxPasswordLength => "maxPasswordLength",
+            Property::MaxPolls => "maxPolls",
+            Property::MaxPrivateSize => "maxPrivateSize",
             Property::MaxPublicKeys => "maxPublicKeys",
+            Property::MaxPushAttempts => "maxPushAttempts",
             Property::MaxPushSize => "maxPushSize",
+            Property::MaxQueryResults => "maxQueryResults",
+            Property::MaxQueryScan => "maxQueryScan",
             Property::MaxReceivedHeaders => "maxReceivedHeaders",
             Property::MaxRecipients => "maxRecipients",
             Property::MaxReconnects => "maxReconnects",
             Property::MaxRecurrenceExpansions => "maxRecurrenceExpansions",
+            Property::MaxRedirectUrls => "maxRedirectUrls",
             Property::MaxRedirects => "maxRedirects",
             Property::MaxReportSize => "maxReportSize",
-            Property::MaxRequestRate => "maxRequestRate",
             Property::MaxRequestSize => "maxRequestSize",
             Property::MaxResponseSize => "maxResponseSize",
             Property::MaxResults => "maxResults",
@@ -1886,8 +2051,10 @@ impl EnumImpl for Property {
             Property::MaxScriptNameLength => "maxScriptNameLength",
             Property::MaxScriptSize => "maxScriptSize",
             Property::MaxScripts => "maxScripts",
+            Property::MaxSetObjects => "maxSetObjects",
             Property::MaxShares => "maxShares",
             Property::MaxSize => "maxSize",
+            Property::MaxSnippetResults => "maxSnippetResults",
             Property::MaxStringLength => "maxStringLength",
             Property::MaxSubmissions => "maxSubmissions",
             Property::MaxSubscriptions => "maxSubscriptions",
@@ -1902,12 +2069,19 @@ impl EnumImpl for Property {
             Property::Message => "message",
             Property::MessageIdHostname => "messageIdHostname",
             Property::MessageIds => "messageIds",
+            Property::MessageTimeout => "messageTimeout",
             Property::Messages => "messages",
+            Property::MessagesLarge => "messagesLarge",
+            Property::MessagesLargeTtl => "messagesLargeTtl",
             Property::Metric => "metric",
             Property::Metrics => "metrics",
             Property::MetricsCollectionInterval => "metricsCollectionInterval",
             Property::MetricsPolicy => "metricsPolicy",
+            Property::MinAccountSize => "minAccountSize",
             Property::MinHamSamples => "minHamSamples",
+            Property::MinPasswordLength => "minPasswordLength",
+            Property::MinPasswordStrength => "minPasswordStrength",
+            Property::MinProbability => "minProbability",
             Property::MinRetryWait => "minRetryWait",
             Property::MinSpamSamples => "minSpamSamples",
             Property::MinTriggerInterval => "minTriggerInterval",
@@ -1916,7 +2090,6 @@ impl EnumImpl for Property {
             Property::Mode => "mode",
             Property::Model => "model",
             Property::ModelId => "modelId",
-            Property::ModelType => "modelType",
             Property::MtPriority => "mtPriority",
             Property::MtaSts => "mtaSts",
             Property::MtaStsTimeout => "mtaStsTimeout",
@@ -1942,7 +2115,9 @@ impl EnumImpl for Property {
             Property::NumReplicas => "numReplicas",
             Property::NumShards => "numShards",
             Property::OauthClientId => "oauthClientId",
+            Property::ObjectType => "objectType",
             Property::OnSuccessRenewCertificate => "onSuccessRenewCertificate",
+            Property::OpaqueTokenValidation => "opaqueTokenValidation",
             Property::OpenTelemetry => "openTelemetry",
             Property::Options => "options",
             Property::Orcpt => "orcpt",
@@ -1964,13 +2139,12 @@ impl EnumImpl for Property {
             Property::ParseLimitContact => "parseLimitContact",
             Property::ParseLimitEmail => "parseLimitEmail",
             Property::ParseLimitEvent => "parseLimitEvent",
+            Property::Partition => "partition",
             Property::Password => "password",
             Property::PasswordDefaultExpiry => "passwordDefaultExpiry",
             Property::PasswordHashAlgorithm => "passwordHashAlgorithm",
-            Property::PasswordMaxLength => "passwordMaxLength",
-            Property::PasswordMinLength => "passwordMinLength",
-            Property::PasswordMinStrength => "passwordMinStrength",
             Property::Path => "path",
+            Property::Pending => "pending",
             Property::Period => "period",
             Property::Permissions => "permissions",
             Property::PingInterval => "pingInterval",
@@ -1992,7 +2166,6 @@ impl EnumImpl for Property {
             Property::PolicyType => "policyType",
             Property::PolicyVersion => "policyVersion",
             Property::PollInterval => "pollInterval",
-            Property::PollingInterval => "pollingInterval",
             Property::PoolMaxConnections => "poolMaxConnections",
             Property::PoolMinConnections => "poolMinConnections",
             Property::PoolRecyclingMethod => "poolRecyclingMethod",
@@ -2001,6 +2174,7 @@ impl EnumImpl for Property {
             Property::PoolTimeoutWait => "poolTimeoutWait",
             Property::PoolWorkers => "poolWorkers",
             Property::Port => "port",
+            Property::PostLogoutRedirectUris => "postLogoutRedirectUris",
             Property::PreferredChain => "preferredChain",
             Property::Prefix => "prefix",
             Property::PreserveIntermediates => "preserveIntermediates",
@@ -2008,12 +2182,12 @@ impl EnumImpl for Property {
             Property::PrivateKey => "privateKey",
             Property::PrivateKeyPassword => "privateKeyPassword",
             Property::PrivateKeyPem => "privateKeyPem",
+            Property::PrivateMetadata => "privateMetadata",
             Property::PrivateZone => "privateZone",
             Property::PrivateZoneOnly => "privateZoneOnly",
             Property::Profile => "profile",
             Property::ProjectId => "projectId",
             Property::Prometheus => "prometheus",
-            Property::Prompt => "prompt",
             Property::PropagationDelay => "propagationDelay",
             Property::PropagationTimeout => "propagationTimeout",
             Property::ProtectedHeaders => "protectedHeaders",
@@ -2024,7 +2198,6 @@ impl EnumImpl for Property {
             Property::PublicKey => "publicKey",
             Property::PublishRecords => "publishRecords",
             Property::PushAttemptWait => "pushAttemptWait",
-            Property::PushMaxAttempts => "pushMaxAttempts",
             Property::PushRequestTimeout => "pushRequestTimeout",
             Property::PushRetryWait => "pushRetryWait",
             Property::PushShardsTotal => "pushShardsTotal",
@@ -2032,21 +2205,26 @@ impl EnumImpl for Property {
             Property::PushVerifyTimeout => "pushVerifyTimeout",
             Property::QueryEmailAliases => "queryEmailAliases",
             Property::QueryLogin => "queryLogin",
-            Property::QueryMaxResults => "queryMaxResults",
             Property::QueryMemberOf => "queryMemberOf",
             Property::QueryRecipient => "queryRecipient",
+            Property::Question => "question",
             Property::QueueId => "queueId",
             Property::QueueName => "queueName",
+            Property::QueuedDeletions => "queuedDeletions",
+            Property::QueuedUpdates => "queuedUpdates",
             Property::Quotas => "quotas",
             Property::Rate => "rate",
             Property::RateLimit => "rateLimit",
             Property::RateLimitAnonymous => "rateLimitAnonymous",
             Property::RateLimitAuthenticated => "rateLimitAuthenticated",
             Property::Ratio => "ratio",
+            Property::RcptTo => "rcptTo",
             Property::RcptToTimeout => "rcptToTimeout",
+            Property::ReadBufferCapacity => "readBufferCapacity",
             Property::ReadFromReplicas => "readFromReplicas",
             Property::ReadReplicas => "readReplicas",
             Property::Reason => "reason",
+            Property::Reasoning => "reasoning",
             Property::ReceivedAt => "receivedAt",
             Property::ReceivedFromIp => "receivedFromIp",
             Property::ReceivedViaPort => "receivedViaPort",
@@ -2056,11 +2234,12 @@ impl EnumImpl for Property {
             Property::Recipients => "recipients",
             Property::Records => "records",
             Property::RecurrenceId => "recurrenceId",
+            Property::RedirectCacheTtl => "redirectCacheTtl",
             Property::RedirectRoot => "redirectRoot",
+            Property::RedirectTimeout => "redirectTimeout",
             Property::RedirectUris => "redirectUris",
-            Property::Refresh => "refresh",
+            Property::RefreshInterval => "refreshInterval",
             Property::RefreshTokenExpiry => "refreshTokenExpiry",
-            Property::RefreshTokenRenewal => "refreshTokenRenewal",
             Property::Region => "region",
             Property::RejectNonFqdn => "rejectNonFqdn",
             Property::RemoteIp => "remoteIp",
@@ -2071,12 +2250,9 @@ impl EnumImpl for Property {
             Property::ReportedDomains => "reportedDomains",
             Property::ReportedUris => "reportedUris",
             Property::ReportingMta => "reportingMta",
-            Property::RequestMaxSize => "requestMaxSize",
+            Property::RequestTimeout => "requestTimeout",
             Property::RequestTlsCertificate => "requestTlsCertificate",
             Property::Require => "require",
-            Property::RequireAudience => "requireAudience",
-            Property::RequireClientRegistration => "requireClientRegistration",
-            Property::RequireScopes => "requireScopes",
             Property::RequireTls => "requireTls",
             Property::ReservoirCapacity => "reservoirCapacity",
             Property::ResourceGroup => "resourceGroup",
@@ -2086,11 +2262,9 @@ impl EnumImpl for Property {
             Property::ResponseHeaders => "responseHeaders",
             Property::ResponseHostname => "responseHostname",
             Property::ResponseMessage => "responseMessage",
-            Property::ResponsePosCategory => "responsePosCategory",
-            Property::ResponsePosConfidence => "responsePosConfidence",
-            Property::ResponsePosExplanation => "responsePosExplanation",
             Property::Result => "result",
             Property::ResultType => "resultType",
+            Property::Retention => "retention",
             Property::RetireAfter => "retireAfter",
             Property::Retry => "retry",
             Property::RetryCount => "retryCount",
@@ -2105,6 +2279,7 @@ impl EnumImpl for Property {
             Property::RotateAfter => "rotateAfter",
             Property::Route => "route",
             Property::Rua => "rua",
+            Property::SampleRate => "sampleRate",
             Property::Sandbox => "sandbox",
             Property::SasToken => "sasToken",
             Property::SaslMechanisms => "saslMechanisms",
@@ -2115,6 +2290,7 @@ impl EnumImpl for Property {
             Property::Scheduling => "scheduling",
             Property::Scheme => "scheme",
             Property::Scope => "scope",
+            Property::Scopes => "scopes",
             Property::Score => "score",
             Property::ScoreDiscard => "scoreDiscard",
             Property::ScoreReject => "scoreReject",
@@ -2122,11 +2298,7 @@ impl EnumImpl for Property {
             Property::Script => "script",
             Property::SearchStore => "searchStore",
             Property::Secret => "secret",
-            Property::SecretAccessKey => "secretAccessKey",
-            Property::SecretApiKey => "secretApiKey",
-            Property::SecretId => "secretId",
             Property::SecretKey => "secretKey",
-            Property::SecurityToken => "securityToken",
             Property::Selector => "selector",
             Property::SelectorTemplate => "selectorTemplate",
             Property::SendFrequency => "sendFrequency",
@@ -2134,25 +2306,23 @@ impl EnumImpl for Property {
             Property::SentinelSecret => "sentinelSecret",
             Property::SentinelUsername => "sentinelUsername",
             Property::Separator => "separator",
-            Property::ServerHostname => "serverHostname",
             Property::ServerId => "serverId",
             Property::Servers => "servers",
             Property::ServiceAccountJson => "serviceAccountJson",
             Property::ServiceName => "serviceName",
             Property::Services => "services",
+            Property::SessionTimeout => "sessionTimeout",
             Property::SessionToken => "sessionToken",
-            Property::SetMaxObjects => "setMaxObjects",
             Property::ShardIndex => "shardIndex",
             Property::SharedSecret => "sharedSecret",
-            Property::Sig0Algorithm => "sig0Algorithm",
+            Property::Signals => "signals",
             Property::SignatureAlgorithm => "signatureAlgorithm",
             Property::SignatureKey => "signatureKey",
-            Property::SignerName => "signerName",
             Property::Size => "size",
+            Property::SkipAudienceValidation => "skipAudienceValidation",
             Property::SkipDeploy => "skipDeploy",
             Property::SkipFirst => "skipFirst",
             Property::SmtpGreeting => "smtpGreeting",
-            Property::SnippetMaxResults => "snippetMaxResults",
             Property::SocketBacklog => "socketBacklog",
             Property::SocketNoDelay => "socketNoDelay",
             Property::SocketReceiveBufferSize => "socketReceiveBufferSize",
@@ -2162,9 +2332,9 @@ impl EnumImpl for Property {
             Property::SocketTosV4 => "socketTosV4",
             Property::SocketTtl => "socketTtl",
             Property::SourceIp => "sourceIp",
-            Property::SourceIps => "sourceIps",
             Property::SourcePort => "sourcePort",
             Property::SpamFilterRulesUrl => "spamFilterRulesUrl",
+            Property::SpamLookup => "spamLookup",
             Property::SpfDns => "spfDns",
             Property::SpfEhloDomain => "spfEhloDomain",
             Property::SpfEhloResult => "spfEhloResult",
@@ -2187,12 +2357,15 @@ impl EnumImpl for Property {
             Property::Subject => "subject",
             Property::SubjectAlternativeNames => "subjectAlternativeNames",
             Property::Subscribe => "subscribe",
+            Property::SubscriptionCapacity => "subscriptionCapacity",
             Property::SubscriptionId => "subscriptionId",
             Property::Sum => "sum",
             Property::Summary => "summary",
             Property::SupportedLanguages => "supportedLanguages",
+            Property::Swap => "swap",
             Property::Tag => "tag",
             Property::Tags => "tags",
+            Property::TargetAccountId => "targetAccountId",
             Property::TaskTypes => "taskTypes",
             Property::Tasks => "tasks",
             Property::TcpOnError => "tcpOnError",
@@ -2208,56 +2381,47 @@ impl EnumImpl for Property {
             Property::ThirdParty => "thirdParty",
             Property::ThirdPartyHash => "thirdPartyHash",
             Property::ThreadName => "threadName",
-            Property::ThreadPoolSize => "threadPoolSize",
             Property::ThreadsPerNode => "threadsPerNode",
             Property::Throttle => "throttle",
+            Property::Tiers => "tiers",
             Property::TimeZone => "timeZone",
             Property::Timeout => "timeout",
-            Property::TimeoutAnonymous => "timeoutAnonymous",
-            Property::TimeoutAuthenticated => "timeoutAuthenticated",
-            Property::TimeoutCommand => "timeoutCommand",
-            Property::TimeoutConnect => "timeoutConnect",
-            Property::TimeoutConnection => "timeoutConnection",
-            Property::TimeoutData => "timeoutData",
-            Property::TimeoutIdle => "timeoutIdle",
-            Property::TimeoutMessage => "timeoutMessage",
-            Property::TimeoutRequest => "timeoutRequest",
-            Property::TimeoutSession => "timeoutSession",
             Property::Timestamp => "timestamp",
             Property::Title => "title",
             Property::Tls => "tls",
             Property::TlsDisableCipherSuites => "tlsDisableCipherSuites",
             Property::TlsDisableProtocols => "tlsDisableProtocols",
             Property::TlsIgnoreClientOrder => "tlsIgnoreClientOrder",
-            Property::TlsImplicit => "tlsImplicit",
             Property::TlsTimeout => "tlsTimeout",
             Property::To => "to",
             Property::Token => "token",
-            Property::TotalDeadline => "totalDeadline",
+            Property::TokenFile => "tokenFile",
             Property::TotalFailedSessions => "totalFailedSessions",
             Property::TotalSuccessfulSessions => "totalSuccessfulSessions",
-            Property::TraceId => "traceId",
             Property::Tracer => "tracer",
-            Property::TrainFrequency => "trainFrequency",
+            Property::TrainInterval => "trainInterval",
             Property::TransactionRetryDelay => "transactionRetryDelay",
             Property::TransactionRetryLimit => "transactionRetryLimit",
             Property::TransactionTimeout => "transactionTimeout",
             Property::TransferLimit => "transferLimit",
+            Property::TrimQuotes => "trimQuotes",
             Property::TrustContacts => "trustContacts",
             Property::TrustReplies => "trustReplies",
             Property::TsigAlgorithm => "tsigAlgorithm",
             Property::Ttl => "ttl",
+            Property::UncertainBelow => "uncertainBelow",
             Property::UnpackDirectory => "unpackDirectory",
+            Property::UnscopedTokens => "unscopedTokens",
             Property::UpdateRecords => "updateRecords",
             Property::UploadQuota => "uploadQuota",
             Property::UploadTtl => "uploadTtl",
             Property::Url => "url",
+            Property::UrlFailover => "urlFailover",
             Property::UrlLimit => "urlLimit",
             Property::UrlPrefix => "urlPrefix",
             Property::Urls => "urls",
             Property::UsePermissiveCors => "usePermissiveCors",
             Property::UseTls => "useTls",
-            Property::UseXForwarded => "useXForwarded",
             Property::UsedDiskQuota => "usedDiskQuota",
             Property::UserAgent => "userAgent",
             Property::UserCodeExpiry => "userCodeExpiry",
@@ -2268,17 +2432,24 @@ impl EnumImpl for Property {
             Property::ValidateDomain => "validateDomain",
             Property::Value => "value",
             Property::VariableName => "variableName",
+            Property::VendorNamespaces => "vendorNamespaces",
+            Property::VerbalHigh => "verbalHigh",
+            Property::VerbalLow => "verbalLow",
+            Property::VerbalMedium => "verbalMedium",
             Property::VerifyAfterWrite => "verifyAfterWrite",
             Property::Version => "version",
             Property::ViewName => "viewName",
             Property::Vrfy => "vrfy",
             Property::WaitOnFail => "waitOnFail",
             Property::WapiVersion => "wapiVersion",
+            Property::Warnings => "warnings",
             Property::WebPushContact => "webPushContact",
             Property::WebPushKey => "webPushKey",
+            Property::WebSearch => "webSearch",
             Property::WebsocketHeartbeat => "websocketHeartbeat",
             Property::WebsocketThrottle => "websocketThrottle",
             Property::WebsocketTimeout => "websocketTimeout",
+            Property::WindowEnd => "windowEnd",
             Property::Zone => "zone",
             Property::ZoneIpV4 => "zoneIpV4",
             Property::ZoneIpV6 => "zoneIpV6",
@@ -2292,945 +2463,1023 @@ impl EnumImpl for Property {
     fn from_id(id: u16) -> Option<Self> {
         match id {
             0 => Some(Property::Type),
-            678 => Some(Property::AbuseBanPeriod),
-            677 => Some(Property::AbuseBanRate),
-            118 => Some(Property::AccessKey),
-            327 => Some(Property::AccessKeyId),
-            890 => Some(Property::AccessToken),
-            619 => Some(Property::AccessTokenExpiry),
-            132 => Some(Property::AccessTokens),
-            810 => Some(Property::AccountDomainId),
-            57 => Some(Property::AccountId),
-            315 => Some(Property::AccountIdentifier),
+            793 => Some(Property::AbuseBanPeriod),
+            792 => Some(Property::AbuseBanRate),
+            710 => Some(Property::AcceptedAudiences),
+            354 => Some(Property::AccessKeyId),
+            378 => Some(Property::AccessToken),
+            721 => Some(Property::AccessTokenExpiry),
+            159 => Some(Property::AccessTokens),
+            952 => Some(Property::AccountDomainId),
+            17 => Some(Property::AccountHashPrefix),
+            71 => Some(Property::AccountId),
+            374 => Some(Property::AccountIdentifier),
             15 => Some(Property::AccountKey),
-            809 => Some(Property::AccountName),
-            891 => Some(Property::AccountSwitchKey),
-            811 => Some(Property::AccountType),
+            951 => Some(Property::AccountName),
+            379 => Some(Property::AccountSwitchKey),
+            953 => Some(Property::AccountType),
             16 => Some(Property::AccountUri),
-            151 => Some(Property::Accounts),
-            182 => Some(Property::AcmeProviderId),
-            554 => Some(Property::AddAuthResultsHeader),
-            555 => Some(Property::AddDateHeader),
-            556 => Some(Property::AddDeliveredToHeader),
-            557 => Some(Property::AddMessageIdHeader),
-            558 => Some(Property::AddReceivedHeader),
-            559 => Some(Property::AddReceivedSpfHeader),
-            560 => Some(Property::AddReturnPathHeader),
-            838 => Some(Property::AdditionalInformation),
-            44 => Some(Property::Address),
-            579 => Some(Property::Addresses),
-            268 => Some(Property::AggregateContactInfo),
-            274 => Some(Property::AggregateDkimSignDomain),
-            269 => Some(Property::AggregateFromAddress),
-            270 => Some(Property::AggregateFromName),
-            271 => Some(Property::AggregateMaxReportSize),
-            272 => Some(Property::AggregateOrgName),
-            273 => Some(Property::AggregateSendFrequency),
-            275 => Some(Property::AggregateSubject),
-            798 => Some(Property::AlarmId),
-            225 => Some(Property::Algorithms),
-            339 => Some(Property::Aliases),
-            768 => Some(Property::AllowCount),
-            695 => Some(Property::AllowDirectoryQueries),
-            164 => Some(Property::AllowExternalRcpts),
-            26 => Some(Property::AllowInvalidCerts),
-            424 => Some(Property::AllowPlainTextAuth),
-            348 => Some(Property::AllowRelaying),
-            932 => Some(Property::AllowScimProvisioning),
-            369 => Some(Property::AllowSpamTraining),
-            398 => Some(Property::AllowedEndpoints),
-            49 => Some(Property::AllowedIps),
-            712 => Some(Property::AllowedNotifyUris),
-            388 => Some(Property::Alpha),
-            614 => Some(Property::AnonymousClientRegistration),
-            858 => Some(Property::Ansi),
-            325 => Some(Property::ApiKey),
-            892 => Some(Property::ApiUser),
-            321 => Some(Property::ApplicationKey),
-            322 => Some(Property::ApplicationSecret),
-            292 => Some(Property::ArcResult),
-            690 => Some(Property::ArcVerify),
-            203 => Some(Property::ArchiveDeletedAccountsFor),
-            202 => Some(Property::ArchiveDeletedItemsFor),
-            58 => Some(Property::ArchivedAt),
-            820 => Some(Property::ArchivedItemType),
-            59 => Some(Property::ArchivedUntil),
-            68 => Some(Property::ArrivalDate),
-            102 => Some(Property::AsnUrls),
-            829 => Some(Property::AttemptNumber),
-            303 => Some(Property::Attempts),
-            470 => Some(Property::AttrClass),
-            471 => Some(Property::AttrDescription),
-            472 => Some(Property::AttrEmail),
-            473 => Some(Property::AttrEmailAlias),
-            474 => Some(Property::AttrMemberOf),
-            475 => Some(Property::AttrSecret),
-            476 => Some(Property::AttrSecretChanged),
-            215 => Some(Property::Auid),
-            897 => Some(Property::Auth),
-            680 => Some(Property::AuthBanPeriod),
-            679 => Some(Property::AuthBanRate),
-            616 => Some(Property::AuthCodeExpiry),
-            613 => Some(Property::AuthCodeMaxAttempts),
-            81 => Some(Property::AuthFailure),
-            886 => Some(Property::AuthId),
-            501 => Some(Property::AuthSecret),
-            314 => Some(Property::AuthToken),
-            502 => Some(Property::AuthUsername),
-            740 => Some(Property::AuthenticatedAs),
-            69 => Some(Property::AuthenticationResults),
-            171 => Some(Property::AutoAddInvitations),
-            53 => Some(Property::AutoUpdateFrequency),
-            463 => Some(Property::BaseDn),
-            882 => Some(Property::BaseUrl),
-            403 => Some(Property::BearerToken),
-            389 => Some(Property::Beta),
-            589 => Some(Property::Bind),
-            466 => Some(Property::BindAuthentication),
-            464 => Some(Property::BindDn),
-            465 => Some(Property::BindSecret),
-            200 => Some(Property::BlobCleanupSchedule),
-            60 => Some(Property::BlobId),
-            655 => Some(Property::BlobSize),
-            126 => Some(Property::BlobStore),
-            766 => Some(Property::BlockCount),
-            38 => Some(Property::Body),
-            459 => Some(Property::Brokers),
-            658 => Some(Property::Bucket),
-            656 => Some(Property::BufferSize),
-            863 => Some(Property::Buffered),
-            929 => Some(Property::CacheSize),
-            216 => Some(Property::Canonicalization),
-            584 => Some(Property::CapacityClient),
-            585 => Some(Property::CapacityReadBuffer),
-            586 => Some(Property::CapacitySubscription),
-            346 => Some(Property::CatchAllAddress),
-            759 => Some(Property::Categories),
-            176 => Some(Property::Certificate),
-            342 => Some(Property::CertificateManagement),
+            182 => Some(Property::Accounts),
+            220 => Some(Property::AcmeProviderId),
+            649 => Some(Property::AddAuthResultsHeader),
+            650 => Some(Property::AddDateHeader),
+            651 => Some(Property::AddDeliveredToHeader),
+            853 => Some(Property::AddHeader),
+            652 => Some(Property::AddMessageIdHeader),
+            653 => Some(Property::AddReceivedHeader),
+            654 => Some(Property::AddReceivedSpfHeader),
+            655 => Some(Property::AddReturnPathHeader),
+            981 => Some(Property::AdditionalInformation),
+            58 => Some(Property::Address),
+            311 => Some(Property::AggregateContactInfo),
+            317 => Some(Property::AggregateDkimSignDomain),
+            312 => Some(Property::AggregateFromAddress),
+            313 => Some(Property::AggregateFromName),
+            315 => Some(Property::AggregateOrgName),
+            316 => Some(Property::AggregateSendFrequency),
+            890 => Some(Property::AiFacts),
+            888 => Some(Property::AiGate),
+            889 => Some(Property::AiVerdict),
+            939 => Some(Property::AlarmId),
+            958 => Some(Property::AlertAfter),
+            265 => Some(Property::Algorithms),
+            411 => Some(Property::Aliases),
+            904 => Some(Property::AllowCount),
+            810 => Some(Property::AllowDirectoryQueries),
+            203 => Some(Property::AllowExternalRcpts),
+            717 => Some(Property::AllowIdTokenClaims),
+            41 => Some(Property::AllowInvalidCerts),
+            502 => Some(Property::AllowPlainTextAuth),
+            419 => Some(Property::AllowRelaying),
+            421 => Some(Property::AllowScimProvisioning),
+            446 => Some(Property::AllowSpamTraining),
+            475 => Some(Property::AllowedEndpoints),
+            63 => Some(Property::AllowedIps),
+            825 => Some(Property::AllowedNotifyUris),
+            464 => Some(Property::Alpha),
+            728 => Some(Property::AnonymousClientRegistration),
+            506 => Some(Property::AnonymousTimeout),
+            1000 => Some(Property::Ansi),
+            39 => Some(Property::ApiKey),
+            372 => Some(Property::ApiKeyId),
+            390 => Some(Property::ApiUser),
+            399 => Some(Property::ApplicationKey),
+            400 => Some(Property::ApplicationSecret),
+            337 => Some(Property::ArcResult),
+            805 => Some(Property::ArcVerify),
+            241 => Some(Property::ArchiveDeletedAccountsFor),
+            240 => Some(Property::ArchiveDeletedItemsFor),
+            72 => Some(Property::ArchivedAt),
+            962 => Some(Property::ArchivedItemType),
+            73 => Some(Property::ArchivedUntil),
+            82 => Some(Property::ArrivalDate),
+            116 => Some(Property::AsnUrls),
+            972 => Some(Property::AttemptNumber),
+            348 => Some(Property::Attempts),
+            559 => Some(Property::AttrClass),
+            560 => Some(Property::AttrDescription),
+            561 => Some(Property::AttrEmail),
+            562 => Some(Property::AttrEmailAlias),
+            563 => Some(Property::AttrMemberOf),
+            564 => Some(Property::AttrSecret),
+            565 => Some(Property::AttrSecretChanged),
+            253 => Some(Property::Auid),
+            139 => Some(Property::Auth),
+            795 => Some(Property::AuthBanPeriod),
+            794 => Some(Property::AuthBanRate),
+            719 => Some(Property::AuthCodeExpiry),
+            95 => Some(Property::AuthFailure),
+            370 => Some(Property::AuthId),
+            597 => Some(Property::AuthSecret),
+            598 => Some(Property::AuthUsername),
+            883 => Some(Property::AuthenticatedAs),
+            507 => Some(Property::AuthenticatedTimeout),
+            83 => Some(Property::AuthenticationResults),
+            209 => Some(Property::AutoAddInvitations),
+            66 => Some(Property::AutoUpdateInterval),
+            201 => Some(Property::AvailabilityRateLimit),
+            552 => Some(Property::BaseDn),
+            482 => Some(Property::BearerToken),
+            465 => Some(Property::Beta),
+            681 => Some(Property::Bind),
+            555 => Some(Property::BindAuthentication),
+            553 => Some(Property::BindDn),
+            554 => Some(Property::BindSecret),
+            238 => Some(Property::BlobCleanupSchedule),
+            74 => Some(Property::BlobId),
+            764 => Some(Property::BlobSize),
+            153 => Some(Property::BlobStore),
+            902 => Some(Property::BlockCount),
+            52 => Some(Property::Body),
+            863 => Some(Property::BreakerCooldown),
+            862 => Some(Property::BreakerThreshold),
+            768 => Some(Property::Bucket),
+            847 => Some(Property::BucketHigh),
+            848 => Some(Property::BucketMedium),
+            765 => Some(Property::BufferSize),
+            1005 => Some(Property::Buffered),
+            19 => Some(Property::CaaIdentities),
+            767 => Some(Property::CacheSize),
+            254 => Some(Property::Canonicalization),
+            417 => Some(Property::CatchAllAddress),
+            844 => Some(Property::Categories),
+            214 => Some(Property::Certificate),
+            413 => Some(Property::CertificateManagement),
             10 => Some(Property::ChallengeType),
-            435 => Some(Property::ChangesMaxResults),
-            517 => Some(Property::Chunking),
-            612 => Some(Property::ClaimGroups),
-            611 => Some(Property::ClaimName),
-            609 => Some(Property::ClaimUsername),
-            693 => Some(Property::Cleartext),
-            604 => Some(Property::ClientId),
-            898 => Some(Property::ClientIp),
-            878 => Some(Property::ClientSecret),
-            889 => Some(Property::ClientToken),
-            382 => Some(Property::ClusterFile),
-            781 => Some(Property::ColumnClass),
-            782 => Some(Property::ColumnDescription),
-            779 => Some(Property::ColumnEmail),
-            780 => Some(Property::ColumnSecret),
-            240 => Some(Property::Comment),
-            905 => Some(Property::CompartmentOcid),
-            359 => Some(Property::CompressionAlgorithm),
-            304 => Some(Property::Concurrency),
-            34 => Some(Property::Condition),
-            760 => Some(Property::Confidence),
-            873 => Some(Property::Config),
-            883 => Some(Property::ConfigName),
-            505 => Some(Property::ConnectTimeout),
-            539 => Some(Property::Connection),
-            323 => Some(Property::ConsumerKey),
+            757 => Some(Property::ChunkSize),
+            614 => Some(Property::Chunking),
+            709 => Some(Property::ClaimGroups),
+            708 => Some(Property::ClaimName),
+            706 => Some(Property::ClaimUsername),
+            808 => Some(Property::Cleartext),
+            677 => Some(Property::ClientCapacity),
+            132 => Some(Property::ClientId),
+            391 => Some(Property::ClientIp),
+            479 => Some(Property::ClientIpSource),
+            701 => Some(Property::ClientKind),
+            727 => Some(Property::ClientMetadataDocuments),
+            700 => Some(Property::ClientName),
+            133 => Some(Property::ClientSecret),
+            377 => Some(Property::ClientToken),
+            458 => Some(Property::ClusterFile),
+            922 => Some(Property::ColumnClass),
+            923 => Some(Property::ColumnDescription),
+            920 => Some(Property::ColumnEmail),
+            921 => Some(Property::ColumnSecret),
+            631 => Some(Property::CommandTimeout),
+            280 => Some(Property::Comment),
+            398 => Some(Property::CompartmentOcid),
+            431 => Some(Property::CompressionAlgorithm),
+            48 => Some(Property::Condition),
+            1012 => Some(Property::Config),
+            367 => Some(Property::ConfigName),
+            602 => Some(Property::ConnectTimeout),
+            634 => Some(Property::Connection),
+            401 => Some(Property::ConsumerKey),
             11 => Some(Property::Contact),
-            844 => Some(Property::ContactInfo),
-            133 => Some(Property::Contacts),
-            117 => Some(Property::Container),
-            65 => Some(Property::Content),
-            758 => Some(Property::ContentTypes),
-            708 => Some(Property::Contents),
-            877 => Some(Property::Context),
-            258 => Some(Property::Count),
-            367 => Some(Property::Create),
-            46 => Some(Property::CreatedAt),
-            486 => Some(Property::CreatedBy),
-            627 => Some(Property::CredentialId),
-            588 => Some(Property::Credentials),
+            987 => Some(Property::ContactInfo),
+            160 => Some(Property::Contacts),
+            137 => Some(Property::Container),
+            901 => Some(Property::ContentTypes),
+            79 => Some(Property::Contents),
+            364 => Some(Property::Context),
+            301 => Some(Property::Count),
+            444 => Some(Property::Create),
+            60 => Some(Property::CreatedAt),
+            575 => Some(Property::CreatedBy),
+            731 => Some(Property::CredentialId),
+            385 => Some(Property::Credentials),
             4 => Some(Property::CurrentSecret),
-            662 => Some(Property::CustomEndpoint),
-            663 => Some(Property::CustomRegion),
-            787 => Some(Property::CustomRule),
-            899 => Some(Property::CustomerNumber),
-            569 => Some(Property::Dane),
-            199 => Some(Property::DataCleanupSchedule),
-            125 => Some(Property::DataStore),
-            506 => Some(Property::DataTimeout),
-            575 => Some(Property::Database),
-            383 => Some(Property::DatacenterId),
-            245 => Some(Property::DateRangeBegin),
-            246 => Some(Property::DateRangeEnd),
-            845 => Some(Property::DateRangeStart),
-            192 => Some(Property::Day),
-            868 => Some(Property::DeadPropertyMaxSize),
-            108 => Some(Property::DefaultAdminRoleIds),
-            790 => Some(Property::DefaultCertificateId),
-            20 => Some(Property::DefaultDisplayName),
-            122 => Some(Property::DefaultDomain),
-            789 => Some(Property::DefaultDomainId),
-            709 => Some(Property::DefaultExpiryDuplicate),
-            710 => Some(Property::DefaultExpiryVacation),
-            360 => Some(Property::DefaultFolders),
-            405 => Some(Property::DefaultFromAddress),
-            697 => Some(Property::DefaultFromName),
-            106 => Some(Property::DefaultGroupRoleIds),
-            788 => Some(Property::DefaultHostname),
-            21 => Some(Property::DefaultHrefName),
-            665 => Some(Property::DefaultLanguage),
-            408 => Some(Property::DefaultName),
-            701 => Some(Property::DefaultReturnPath),
-            411 => Some(Property::DefaultSubject),
-            714 => Some(Property::DefaultSubjectPrefix),
-            107 => Some(Property::DefaultTenantRoleIds),
-            105 => Some(Property::DefaultUserRoleIds),
-            235 => Some(Property::Definition),
-            825 => Some(Property::Delay),
-            229 => Some(Property::DeleteAfter),
-            777 => Some(Property::DeleteAfterUse),
-            238 => Some(Property::DeliverAt),
-            518 => Some(Property::DeliverBy),
-            404 => Some(Property::DeliverTo),
-            82 => Some(Property::DeliveryResult),
-            381 => Some(Property::Depth),
+            928 => Some(Property::CustomRule),
+            392 => Some(Property::CustomerNumber),
+            664 => Some(Property::Dane),
+            237 => Some(Property::DataCleanupSchedule),
+            152 => Some(Property::DataStore),
+            603 => Some(Property::DataTimeout),
+            582 => Some(Property::DataTypes),
+            670 => Some(Property::Database),
+            459 => Some(Property::DatacenterId),
+            286 => Some(Property::DateRangeEnd),
+            285 => Some(Property::DateRangeStart),
+            230 => Some(Property::Day),
+            861 => Some(Property::Deadline),
+            123 => Some(Property::DefaultAdminRoleIds),
+            930 => Some(Property::DefaultCertificateId),
+            24 => Some(Property::DefaultDisplayName),
+            149 => Some(Property::DefaultDomain),
+            929 => Some(Property::DefaultDomainId),
+            822 => Some(Property::DefaultExpiryDuplicate),
+            823 => Some(Property::DefaultExpiryVacation),
+            432 => Some(Property::DefaultFolders),
+            484 => Some(Property::DefaultFromAddress),
+            812 => Some(Property::DefaultFromName),
+            121 => Some(Property::DefaultGroupRoleIds),
+            148 => Some(Property::DefaultHostname),
+            25 => Some(Property::DefaultHrefName),
+            771 => Some(Property::DefaultLanguage),
+            487 => Some(Property::DefaultName),
+            815 => Some(Property::DefaultReturnPath),
+            489 => Some(Property::DefaultSubject),
+            827 => Some(Property::DefaultSubjectPrefix),
+            122 => Some(Property::DefaultTenantRoleIds),
+            120 => Some(Property::DefaultUserRoleIds),
+            275 => Some(Property::Definition),
+            967 => Some(Property::Delay),
+            269 => Some(Property::DeleteAfter),
+            919 => Some(Property::DeleteAfterUse),
+            278 => Some(Property::DeliverAt),
+            615 => Some(Property::DeliverBy),
+            483 => Some(Property::DeliverTo),
+            96 => Some(Property::DeliveryResult),
+            457 => Some(Property::Depth),
             6 => Some(Property::Description),
-            297 => Some(Property::Details),
+            342 => Some(Property::Details),
             12 => Some(Property::Directory),
-            104 => Some(Property::DirectoryId),
-            711 => Some(Property::DisableCapabilities),
-            629 => Some(Property::DisabledPermissions),
-            872 => Some(Property::DiscardAfter),
-            747 => Some(Property::Disposition),
-            917 => Some(Property::Dkim2Pass),
-            916 => Some(Property::Dkim2Result),
-            83 => Some(Property::DkimAdspDns),
-            84 => Some(Property::DkimCanonicalizedBody),
-            85 => Some(Property::DkimCanonicalizedHeader),
-            86 => Some(Property::DkimDomain),
-            87 => Some(Property::DkimIdentity),
-            343 => Some(Property::DkimManagement),
-            291 => Some(Property::DkimPass),
-            266 => Some(Property::DkimResults),
-            88 => Some(Property::DkimSelector),
-            89 => Some(Property::DkimSelectorDns),
-            231 => Some(Property::DkimSignDomain),
-            155 => Some(Property::DkimSignatures),
-            686 => Some(Property::DkimStrict),
-            687 => Some(Property::DkimVerify),
-            294 => Some(Property::DmarcPass),
-            295 => Some(Property::DmarcPolicy),
-            293 => Some(Property::DmarcResult),
-            691 => Some(Property::DmarcVerify),
-            134 => Some(Property::DnsIpv4),
-            135 => Some(Property::DnsIpv6),
-            344 => Some(Property::DnsManagement),
-            136 => Some(Property::DnsMtaSts),
-            137 => Some(Property::DnsMx),
-            138 => Some(Property::DnsPtr),
-            139 => Some(Property::DnsRbl),
-            130 => Some(Property::DnsServer),
-            300 => Some(Property::DnsServerId),
-            140 => Some(Property::DnsTlsa),
-            141 => Some(Property::DnsTxt),
-            894 => Some(Property::DnsView),
-            345 => Some(Property::DnsZoneFile),
-            804 => Some(Property::DocumentId),
-            814 => Some(Property::DocumentType),
-            232 => Some(Property::Domain),
-            221 => Some(Property::DomainId),
-            750 => Some(Property::DomainLimit),
-            147 => Some(Property::DomainNames),
-            148 => Some(Property::DomainNamesNegative),
-            146 => Some(Property::Domains),
-            519 => Some(Property::Dsn),
-            797 => Some(Property::Due),
-            699 => Some(Property::DuplicateExpiry),
-            515 => Some(Property::Duration),
+            119 => Some(Property::DirectoryId),
+            188 => Some(Property::DirectoryRecipients),
+            189 => Some(Property::DirectoryRecipientsTtl),
+            824 => Some(Property::DisableCapabilities),
+            733 => Some(Property::DisabledPermissions),
+            1011 => Some(Property::DiscardAfter),
+            891 => Some(Property::Disposition),
+            336 => Some(Property::Dkim2Pass),
+            335 => Some(Property::Dkim2Result),
+            97 => Some(Property::DkimAdspDns),
+            98 => Some(Property::DkimCanonicalizedBody),
+            99 => Some(Property::DkimCanonicalizedHeader),
+            100 => Some(Property::DkimDomain),
+            101 => Some(Property::DkimIdentity),
+            414 => Some(Property::DkimManagement),
+            334 => Some(Property::DkimPass),
+            309 => Some(Property::DkimResults),
+            102 => Some(Property::DkimSelector),
+            103 => Some(Property::DkimSelectorDns),
+            271 => Some(Property::DkimSignDomain),
+            186 => Some(Property::DkimSignatures),
+            801 => Some(Property::DkimStrict),
+            802 => Some(Property::DkimVerify),
+            339 => Some(Property::DmarcPass),
+            340 => Some(Property::DmarcPolicy),
+            338 => Some(Property::DmarcResult),
+            806 => Some(Property::DmarcVerify),
+            161 => Some(Property::DnsIpv4),
+            162 => Some(Property::DnsIpv6),
+            415 => Some(Property::DnsManagement),
+            163 => Some(Property::DnsMtaSts),
+            164 => Some(Property::DnsMx),
+            165 => Some(Property::DnsPtr),
+            157 => Some(Property::DnsServer),
+            345 => Some(Property::DnsServerId),
+            167 => Some(Property::DnsTlsa),
+            168 => Some(Property::DnsTxt),
+            387 => Some(Property::DnsView),
+            416 => Some(Property::DnsZoneFile),
+            947 => Some(Property::DocumentId),
+            272 => Some(Property::Domain),
+            259 => Some(Property::DomainId),
+            893 => Some(Property::DomainLimit),
+            178 => Some(Property::DomainNames),
+            179 => Some(Property::DomainNamesNegative),
+            177 => Some(Property::Domains),
+            616 => Some(Property::Dsn),
+            938 => Some(Property::Due),
+            612 => Some(Property::Duration),
             13 => Some(Property::EabHmacKey),
             14 => Some(Property::EabKeyId),
-            283 => Some(Property::EhloDomain),
-            503 => Some(Property::EhloHostname),
-            507 => Some(Property::EhloTimeout),
-            296 => Some(Property::Elapsed),
-            375 => Some(Property::Else),
-            242 => Some(Property::Email),
-            393 => Some(Property::EmailAddress),
-            149 => Some(Property::EmailAddresses),
-            150 => Some(Property::EmailAddressesNegative),
-            35 => Some(Property::EmailAlert),
-            488 => Some(Property::EmailDomain),
-            751 => Some(Property::EmailLimit),
-            487 => Some(Property::EmailPrefix),
-            174 => Some(Property::EmailTemplate),
-            37 => Some(Property::Enable),
-            865 => Some(Property::EnableAssistedDiscovery),
-            305 => Some(Property::EnableEdns),
-            399 => Some(Property::EnableHsts),
-            860 => Some(Property::EnableLogExporter),
-            562 => Some(Property::EnableSpamFilter),
-            861 => Some(Property::EnableSpanExporter),
-            50 => Some(Property::Enabled),
-            628 => Some(Property::EnabledPermissions),
-            358 => Some(Property::EncryptAtRest),
-            357 => Some(Property::EncryptOnAppend),
+            325 => Some(Property::EhloDomain),
+            599 => Some(Property::EhloHostname),
+            604 => Some(Property::EhloTimeout),
+            341 => Some(Property::Elapsed),
+            451 => Some(Property::Else),
+            282 => Some(Property::Email),
+            469 => Some(Property::EmailAddress),
+            180 => Some(Property::EmailAddresses),
+            181 => Some(Property::EmailAddressesNegative),
+            49 => Some(Property::EmailAlert),
+            577 => Some(Property::EmailDomain),
+            894 => Some(Property::EmailLimit),
+            576 => Some(Property::EmailPrefix),
+            212 => Some(Property::EmailTemplate),
+            51 => Some(Property::Enable),
+            1006 => Some(Property::EnableAssistedDiscovery),
+            349 => Some(Property::EnableEdns),
+            476 => Some(Property::EnableHsts),
+            1002 => Some(Property::EnableLogExporter),
+            657 => Some(Property::EnableSpamFilter),
+            1003 => Some(Property::EnableSpanExporter),
+            732 => Some(Property::EnabledPermissions),
+            430 => Some(Property::EncryptAtRest),
+            429 => Some(Property::EncryptOnAppend),
             9 => Some(Property::EncryptionAtRest),
-            622 => Some(Property::EncryptionKey),
-            499 => Some(Property::Endpoint),
-            742 => Some(Property::EnvFrom),
-            743 => Some(Property::EnvFromParameters),
-            639 => Some(Property::EnvId),
-            744 => Some(Property::EnvRcptTo),
-            264 => Some(Property::EnvelopeFrom),
-            263 => Some(Property::EnvelopeTo),
-            881 => Some(Property::Environment),
-            210 => Some(Property::ErrorCommand),
-            209 => Some(Property::ErrorMessage),
-            208 => Some(Property::ErrorType),
-            247 => Some(Property::Errors),
-            259 => Some(Property::EvaluatedDisposition),
-            260 => Some(Property::EvaluatedDkim),
-            261 => Some(Property::EvaluatedSpf),
-            372 => Some(Property::Event),
-            36 => Some(Property::EventAlert),
-            801 => Some(Property::EventEnd),
-            803 => Some(Property::EventEndTz),
-            799 => Some(Property::EventId),
-            43 => Some(Property::EventMessage),
-            447 => Some(Property::EventSourceThrottle),
-            800 => Some(Property::EventStart),
-            802 => Some(Property::EventStartTz),
-            142 => Some(Property::Events),
-            855 => Some(Property::EventsPolicy),
-            217 => Some(Property::Expire),
-            100 => Some(Property::Expires),
-            47 => Some(Property::ExpiresAt),
-            632 => Some(Property::ExpiresAttempts),
-            512 => Some(Property::Expiry),
-            520 => Some(Property::Expn),
-            198 => Some(Property::ExpungeSchedule),
-            197 => Some(Property::ExpungeSchedulingInboxAfter),
-            196 => Some(Property::ExpungeShareNotifyAfter),
-            195 => Some(Property::ExpungeSubmissionsAfter),
-            194 => Some(Property::ExpungeTrashAfter),
-            754 => Some(Property::Extension),
-            257 => Some(Property::Extensions),
-            933 => Some(Property::ExternalId),
-            243 => Some(Property::ExtraContactInfo),
-            821 => Some(Property::Factor),
-            490 => Some(Property::FailOnTimeout),
-            826 => Some(Property::FailedAt),
-            827 => Some(Property::FailedAttemptNumber),
-            837 => Some(Property::FailedSessionCount),
-            851 => Some(Property::FailureDetails),
-            279 => Some(Property::FailureDkimSignDomain),
-            276 => Some(Property::FailureFromAddress),
-            277 => Some(Property::FailureFromName),
-            828 => Some(Property::FailureReason),
-            839 => Some(Property::FailureReasonCode),
-            278 => Some(Property::FailureSendFrequency),
-            280 => Some(Property::FailureSubject),
-            738 => Some(Property::FeatureL2Normalize),
-            739 => Some(Property::FeatureLogScale),
-            67 => Some(Property::FeedbackType),
-            406 => Some(Property::FieldEmail),
-            407 => Some(Property::FieldHoneyPot),
-            409 => Some(Property::FieldName),
-            412 => Some(Property::FieldSubject),
-            676 => Some(Property::FilePath),
-            144 => Some(Property::Files),
-            467 => Some(Property::FilterLogin),
-            468 => Some(Property::FilterMailbox),
-            469 => Some(Property::FilterMemberOf),
-            902 => Some(Property::Fingerprint),
-            638 => Some(Property::Flags),
-            537 => Some(Property::FlagsAction),
-            538 => Some(Property::FlagsProtocol),
-            909 => Some(Property::FolderId),
-            485 => Some(Property::ForDomain),
-            415 => Some(Property::Format),
-            62 => Some(Property::From),
-            39 => Some(Property::FromAddress),
-            165 => Some(Property::FromEmail),
-            40 => Some(Property::FromName),
-            521 => Some(Property::FutureRelease),
-            124 => Some(Property::GenerateDkimKeys),
-            918 => Some(Property::Generator),
-            103 => Some(Property::GeoUrls),
-            436 => Some(Property::GetMaxResults),
-            508 => Some(Property::GreetingTimeout),
-            770 => Some(Property::GreylistFor),
-            477 => Some(Property::GroupClass),
-            460 => Some(Property::GroupId),
-            265 => Some(Property::HeaderFrom),
-            93 => Some(Property::Headers),
-            206 => Some(Property::HoldMetricsFor),
-            204 => Some(Property::HoldMtaReportsFor),
-            730 => Some(Property::HoldSamplesFor),
-            205 => Some(Property::HoldTracesFor),
-            333 => Some(Property::Host),
-            331 => Some(Property::HostedZoneId),
-            185 => Some(Property::Hostname),
-            190 => Some(Property::Hour),
-            32 => Some(Property::HttpAuth),
-            33 => Some(Property::HttpHeaders),
-            168 => Some(Property::HttpRsvpEnable),
-            169 => Some(Property::HttpRsvpLinkExpiry),
-            175 => Some(Property::HttpRsvpTemplate),
-            170 => Some(Property::HttpRsvpUrl),
-            842 => Some(Property::HttpRua),
-            234 => Some(Property::HumanResult),
-            807 => Some(Property::ICalendarData),
+            724 => Some(Property::EncryptionKey),
+            741 => Some(Property::EnvId),
+            307 => Some(Property::EnvelopeFrom),
+            306 => Some(Property::EnvelopeTo),
+            138 => Some(Property::Environment),
+            248 => Some(Property::ErrorCommand),
+            247 => Some(Property::ErrorMessage),
+            246 => Some(Property::ErrorType),
+            287 => Some(Property::Errors),
+            868 => Some(Property::EscalateBelow),
+            869 => Some(Property::EscalateOn),
+            302 => Some(Property::EvaluatedDisposition),
+            303 => Some(Property::EvaluatedDkim),
+            304 => Some(Property::EvaluatedSpf),
+            448 => Some(Property::Event),
+            50 => Some(Property::EventAlert),
+            942 => Some(Property::EventEnd),
+            944 => Some(Property::EventEndTz),
+            940 => Some(Property::EventId),
+            57 => Some(Property::EventMessage),
+            532 => Some(Property::EventSourceThrottle),
+            941 => Some(Property::EventStart),
+            943 => Some(Property::EventStartTz),
+            169 => Some(Property::Events),
+            997 => Some(Property::EventsPolicy),
+            255 => Some(Property::Expire),
+            746 => Some(Property::Expires),
+            61 => Some(Property::ExpiresAt),
+            736 => Some(Property::ExpiresAttempts),
+            609 => Some(Property::Expiry),
+            846 => Some(Property::Explanation),
+            617 => Some(Property::Expn),
+            236 => Some(Property::ExpungeSchedule),
+            235 => Some(Property::ExpungeSchedulingInboxAfter),
+            234 => Some(Property::ExpungeShareNotifyAfter),
+            233 => Some(Property::ExpungeSubmissionsAfter),
+            232 => Some(Property::ExpungeTrashAfter),
+            897 => Some(Property::Extension),
+            297 => Some(Property::Extensions),
+            472 => Some(Property::ExternalId),
+            283 => Some(Property::ExtraContactInfo),
+            32 => Some(Property::ExtraParameters),
+            963 => Some(Property::Factor),
+            579 => Some(Property::FailOnTimeout),
+            969 => Some(Property::FailedAt),
+            970 => Some(Property::FailedAttemptNumber),
+            980 => Some(Property::FailedSessionCount),
+            993 => Some(Property::FailureDetails),
+            321 => Some(Property::FailureDkimSignDomain),
+            318 => Some(Property::FailureFromAddress),
+            319 => Some(Property::FailureFromName),
+            971 => Some(Property::FailureReason),
+            982 => Some(Property::FailureReasonCode),
+            320 => Some(Property::FailureSendFrequency),
+            322 => Some(Property::FailureSubject),
+            881 => Some(Property::FeatureL2Normalize),
+            882 => Some(Property::FeatureLogScale),
+            81 => Some(Property::FeedbackType),
+            485 => Some(Property::FieldEmail),
+            486 => Some(Property::FieldHoneyPot),
+            488 => Some(Property::FieldName),
+            490 => Some(Property::FieldSubject),
+            791 => Some(Property::FilePath),
+            171 => Some(Property::Files),
+            556 => Some(Property::FilterLogin),
+            558 => Some(Property::FilterMemberOf),
+            557 => Some(Property::FilterRecipient),
+            395 => Some(Property::Fingerprint),
+            973 => Some(Property::FirstFailedAt),
+            697 => Some(Property::FirstParty),
+            263 => Some(Property::Flags),
+            632 => Some(Property::FlagsAction),
+            633 => Some(Property::FlagsProtocol),
+            144 => Some(Property::FlushChanges),
+            145 => Some(Property::FlushInterval),
+            410 => Some(Property::FolderId),
+            574 => Some(Property::ForDomain),
+            493 => Some(Property::Format),
+            480 => Some(Property::ForwardedHops),
+            76 => Some(Property::From),
+            53 => Some(Property::FromAddress),
+            54 => Some(Property::FromName),
+            618 => Some(Property::FutureRelease),
+            151 => Some(Property::GenerateDkimKeys),
+            703 => Some(Property::Generation),
+            298 => Some(Property::Generator),
+            117 => Some(Property::GeoUrls),
+            699 => Some(Property::GrantTypes),
+            605 => Some(Property::GreetingTimeout),
+            906 => Some(Property::GreylistFor),
+            566 => Some(Property::GroupClass),
+            548 => Some(Property::GroupId),
+            175 => Some(Property::GroupwareLarge),
+            176 => Some(Property::GroupwareLargeTtl),
+            308 => Some(Property::HeaderFrom),
+            107 => Some(Property::Headers),
+            244 => Some(Property::HoldMetricsFor),
+            242 => Some(Property::HoldMtaReportsFor),
+            873 => Some(Property::HoldSamplesFor),
+            243 => Some(Property::HoldTracesFor),
+            376 => Some(Property::Host),
+            404 => Some(Property::HostedZoneId),
+            223 => Some(Property::Hostname),
+            547 => Some(Property::Hosts),
+            228 => Some(Property::Hour),
+            118 => Some(Property::HttpAuth),
+            40 => Some(Property::HttpHeaders),
+            206 => Some(Property::HttpRsvpEnable),
+            207 => Some(Property::HttpRsvpLinkExpiry),
+            213 => Some(Property::HttpRsvpTemplate),
+            208 => Some(Property::HttpRsvpUrl),
+            985 => Some(Property::HttpRua),
+            274 => Some(Property::HumanResult),
+            949 => Some(Property::ICalendarData),
             1 => Some(Property::Id),
-            621 => Some(Property::IdTokenExpiry),
-            91 => Some(Property::IdentityAlignment),
-            376 => Some(Property::If),
-            320 => Some(Property::ImpersonateServiceAccount),
-            546 => Some(Property::ImplicitTls),
-            128 => Some(Property::InMemoryStore),
-            651 => Some(Property::InboundReportAddresses),
-            652 => Some(Property::InboundReportForwarding),
-            928 => Some(Property::InboundReportMaxSize),
-            70 => Some(Property::Incidents),
-            352 => Some(Property::IncludeSource),
-            94 => Some(Property::IndexAsn),
-            95 => Some(Property::IndexAsnName),
-            664 => Some(Property::IndexBatchSize),
-            667 => Some(Property::IndexCalendar),
-            668 => Some(Property::IndexCalendarFields),
-            670 => Some(Property::IndexContactFields),
-            669 => Some(Property::IndexContacts),
-            96 => Some(Property::IndexCountry),
-            671 => Some(Property::IndexEmail),
-            672 => Some(Property::IndexEmailFields),
-            421 => Some(Property::IndexKey),
-            673 => Some(Property::IndexTelemetry),
-            674 => Some(Property::IndexTracingFields),
-            422 => Some(Property::IndexValue),
-            736 => Some(Property::IndicatorParameters),
-            822 => Some(Property::InitialDelay),
-            500 => Some(Property::Interval),
-            516 => Some(Property::Intervals),
-            752 => Some(Property::IpLimit),
-            543 => Some(Property::IpLookupStrategy),
-            290 => Some(Property::IpRevPtr),
-            289 => Some(Property::IpRevResult),
-            707 => Some(Property::IsActive),
-            755 => Some(Property::IsArchive),
-            756 => Some(Property::IsBad),
-            340 => Some(Property::IsEnabled),
-            806 => Some(Property::IsFromOrganizer),
-            491 => Some(Property::IsGlobPattern),
-            416 => Some(Property::IsGzipped),
-            757 => Some(Property::IsNz),
-            564 => Some(Property::IsSenderAllowed),
-            776 => Some(Property::IsSpam),
-            741 => Some(Property::IsTls),
-            181 => Some(Property::Issuer),
-            606 => Some(Property::IssuerUrl),
-            172 => Some(Property::ItipMaxSize),
-            824 => Some(Property::Jitter),
-            334 => Some(Property::Key),
-            337 => Some(Property::KeyName),
-            120 => Some(Property::KeyPrefix),
-            853 => Some(Property::KeyValues),
-            391 => Some(Property::L1Ratio),
-            392 => Some(Property::L2Ratio),
-            186 => Some(Property::LastRenewal),
-            727 => Some(Property::LearnHamFromCard),
-            735 => Some(Property::LearnHamFromReply),
-            728 => Some(Property::LearnSpamFromRblHits),
-            729 => Some(Property::LearnSpamFromTraps),
-            373 => Some(Property::Level),
-            370 => Some(Property::LicenseKey),
-            875 => Some(Property::Line),
-            183 => Some(Property::ListenerIds),
-            188 => Some(Property::Listeners),
-            869 => Some(Property::LivePropertyMaxSize),
+            723 => Some(Property::IdTokenExpiry),
+            105 => Some(Property::IdentityAlignment),
+            508 => Some(Property::IdleTimeout),
+            452 => Some(Property::If),
+            589 => Some(Property::ImapServerAdmin),
+            588 => Some(Property::ImapServerComment),
+            384 => Some(Property::ImpersonateServiceAccount),
+            641 => Some(Property::ImplicitTls),
+            155 => Some(Property::InMemoryStore),
+            759 => Some(Property::InboundReportAddresses),
+            760 => Some(Property::InboundReportForwarding),
+            84 => Some(Property::Incidents),
+            860 => Some(Property::IncludeAttachments),
+            858 => Some(Property::IncludeAuth),
+            859 => Some(Property::IncludeLinks),
+            936 => Some(Property::IncludeSecrets),
+            424 => Some(Property::IncludeSource),
+            839 => Some(Property::Includes),
+            513 => Some(Property::Index),
+            108 => Some(Property::IndexAsn),
+            109 => Some(Property::IndexAsnName),
+            770 => Some(Property::IndexBatchSize),
+            773 => Some(Property::IndexCalendar),
+            774 => Some(Property::IndexCalendarFields),
+            776 => Some(Property::IndexContactFields),
+            775 => Some(Property::IndexContacts),
+            110 => Some(Property::IndexCountry),
+            777 => Some(Property::IndexEmail),
+            778 => Some(Property::IndexEmailFields),
+            781 => Some(Property::IndexFiles),
+            498 => Some(Property::IndexKey),
+            779 => Some(Property::IndexTelemetry),
+            499 => Some(Property::IndexValue),
+            879 => Some(Property::IndicatorParameters),
+            964 => Some(Property::InitialDelay),
+            264 => Some(Property::InstanceHashes),
+            843 => Some(Property::Instructions),
+            596 => Some(Property::Interval),
+            613 => Some(Property::Intervals),
+            714 => Some(Property::IntrospectionAuthMethod),
+            712 => Some(Property::IntrospectionClientId),
+            713 => Some(Property::IntrospectionClientSecret),
+            895 => Some(Property::IpLimit),
+            638 => Some(Property::IpLookupStrategy),
+            333 => Some(Property::IpRevPtr),
+            332 => Some(Property::IpRevResult),
+            821 => Some(Property::IsActive),
+            898 => Some(Property::IsArchive),
+            899 => Some(Property::IsBad),
+            948 => Some(Property::IsFromOrganizer),
+            580 => Some(Property::IsGlobPattern),
+            494 => Some(Property::IsGzipped),
+            900 => Some(Property::IsNz),
+            659 => Some(Property::IsSenderAllowed),
+            918 => Some(Property::IsSpam),
+            884 => Some(Property::IsTls),
+            219 => Some(Property::Issuer),
+            18 => Some(Property::IssuerDomainNames),
+            705 => Some(Property::IssuerUrl),
+            966 => Some(Property::Jitter),
+            46 => Some(Property::KeepAlive),
+            375 => Some(Property::Key),
+            406 => Some(Property::KeyName),
+            141 => Some(Property::KeyPrefix),
+            995 => Some(Property::KeyValues),
+            467 => Some(Property::L1Ratio),
+            468 => Some(Property::L2Ratio),
+            224 => Some(Property::LastRenewal),
+            702 => Some(Property::LastUsedAt),
+            864 => Some(Property::Learn),
+            870 => Some(Property::LearnHamFromCard),
+            878 => Some(Property::LearnHamFromReply),
+            871 => Some(Property::LearnSpamFromRblHits),
+            872 => Some(Property::LearnSpamFromTraps),
+            718 => Some(Property::LenientIssuerMatch),
+            449 => Some(Property::Level),
+            447 => Some(Property::LicenseKey),
+            358 => Some(Property::Line),
+            221 => Some(Property::ListenerIds),
+            226 => Some(Property::Listeners),
+            600 => Some(Property::LocalIp),
+            601 => Some(Property::LocalIps),
             7 => Some(Property::Locale),
-            341 => Some(Property::Logo),
-            371 => Some(Property::LogoUrl),
-            682 => Some(Property::LoiterBanPeriod),
-            681 => Some(Property::LoiterBanRate),
-            854 => Some(Property::Lossy),
-            384 => Some(Property::MachineId),
-            793 => Some(Property::MailExchangers),
-            284 => Some(Property::MailFrom),
-            509 => Some(Property::MailFromTimeout),
-            841 => Some(Property::MailRua),
-            154 => Some(Property::MailingLists),
-            796 => Some(Property::MaintenanceType),
-            318 => Some(Property::ManagedZone),
-            374 => Some(Property::Match),
-            23 => Some(Property::MaxAddressBooks),
-            566 => Some(Property::MaxAge),
-            576 => Some(Property::MaxAllowedPacket),
-            115 => Some(Property::MaxApiKeys),
-            114 => Some(Property::MaxAppPasswords),
-            353 => Some(Property::MaxAttachmentSize),
-            511 => Some(Property::MaxAttempts),
-            157 => Some(Property::MaxAttendees),
-            425 => Some(Property::MaxAuthFailures),
-            160 => Some(Property::MaxCalendars),
-            201 => Some(Property::MaxChangesHistory),
-            426 => Some(Property::MaxConcurrent),
-            439 => Some(Property::MaxConcurrentRequests),
-            442 => Some(Property::MaxConcurrentUploads),
-            603 => Some(Property::MaxConnections),
-            24 => Some(Property::MaxContacts),
-            702 => Some(Property::MaxCpuCycles),
-            823 => Some(Property::MaxDelay),
-            530 => Some(Property::MaxDuration),
-            417 => Some(Property::MaxEntries),
-            418 => Some(Property::MaxEntrySize),
-            163 => Some(Property::MaxEventNotifications),
-            161 => Some(Property::MaxEvents),
-            547 => Some(Property::MaxFailures),
-            378 => Some(Property::MaxFiles),
-            379 => Some(Property::MaxFolders),
-            715 => Some(Property::MaxHeaderSize),
-            159 => Some(Property::MaxICalendarSize),
-            363 => Some(Property::MaxIdentities),
-            716 => Some(Property::MaxIncludes),
-            717 => Some(Property::MaxLocalVars),
-            866 => Some(Property::MaxLockTimeout),
-            867 => Some(Property::MaxLocks),
-            355 => Some(Property::MaxMailboxDepth),
-            356 => Some(Property::MaxMailboxNameLength),
-            364 => Some(Property::MaxMailboxes),
-            365 => Some(Property::MaxMaskedAddresses),
-            718 => Some(Property::MaxMatchVars),
-            354 => Some(Property::MaxMessageSize),
-            361 => Some(Property::MaxMessages),
-            924 => Some(Property::MaxMessagesPerCommand),
-            927 => Some(Property::MaxMessagesPerSave),
-            438 => Some(Property::MaxMethodCalls),
-            544 => Some(Property::MaxMultihomed),
-            545 => Some(Property::MaxMxHosts),
-            720 => Some(Property::MaxNestedBlocks),
-            721 => Some(Property::MaxNestedForEvery),
-            703 => Some(Property::MaxNestedIncludes),
-            722 => Some(Property::MaxNestedTests),
-            704 => Some(Property::MaxOutMessages),
-            162 => Some(Property::MaxParticipantIdentities),
-            366 => Some(Property::MaxPublicKeys),
-            923 => Some(Property::MaxPushSize),
-            561 => Some(Property::MaxReceivedHeaders),
-            173 => Some(Property::MaxRecipients),
-            580 => Some(Property::MaxReconnects),
-            158 => Some(Property::MaxRecurrenceExpansions),
-            705 => Some(Property::MaxRedirects),
-            852 => Some(Property::MaxReportSize),
-            427 => Some(Property::MaxRequestRate),
-            428 => Some(Property::MaxRequestSize),
-            527 => Some(Property::MaxResponseSize),
-            871 => Some(Property::MaxResults),
-            18 => Some(Property::MaxRetries),
-            648 => Some(Property::MaxRetryWait),
-            719 => Some(Property::MaxScriptNameLength),
-            723 => Some(Property::MaxScriptSize),
-            726 => Some(Property::MaxScripts),
-            696 => Some(Property::MaxShares),
-            101 => Some(Property::MaxSize),
-            724 => Some(Property::MaxStringLength),
-            362 => Some(Property::MaxSubmissions),
-            458 => Some(Property::MaxSubscriptions),
-            926 => Some(Property::MaxUidBatches),
-            444 => Some(Property::MaxUploadCount),
-            443 => Some(Property::MaxUploadSize),
-            22 => Some(Property::MaxVCardSize),
-            725 => Some(Property::MaxVarNameLength),
-            706 => Some(Property::MaxVarSize),
-            864 => Some(Property::MemberGroupIds),
-            19 => Some(Property::MemberTenantId),
-            92 => Some(Property::Message),
-            698 => Some(Property::MessageIdHostname),
-            819 => Some(Property::MessageIds),
-            145 => Some(Property::Messages),
-            493 => Some(Property::Metric),
-            497 => Some(Property::Metrics),
-            207 => Some(Property::MetricsCollectionInterval),
-            498 => Some(Property::MetricsPolicy),
-            731 => Some(Property::MinHamSamples),
-            649 => Some(Property::MinRetryWait),
-            732 => Some(Property::MinSpamSamples),
-            166 => Some(Property::MinTriggerInterval),
-            925 => Some(Property::MinUidBatchSize),
-            191 => Some(Property::Minute),
-            567 => Some(Property::Mode),
-            28 => Some(Property::Model),
-            764 => Some(Property::ModelId),
-            30 => Some(Property::ModelType),
-            522 => Some(Property::MtPriority),
-            570 => Some(Property::MtaSts),
-            572 => Some(Property::MtaStsTimeout),
-            859 => Some(Property::Multiline),
-            550 => Some(Property::MustMatchSender),
-            568 => Some(Property::MxHosts),
-            25 => Some(Property::Name),
-            414 => Some(Property::Namespace),
-            156 => Some(Property::NegativeTtl),
-            634 => Some(Property::NextNotify),
-            633 => Some(Property::NextRetry),
-            223 => Some(Property::NextTransitionAt),
-            700 => Some(Property::NoCapabilityCheck),
-            587 => Some(Property::NoEcho),
-            523 => Some(Property::NoSoliciting),
-            184 => Some(Property::NodeId),
-            179 => Some(Property::NotValidAfter),
-            180 => Some(Property::NotValidBefore),
-            513 => Some(Property::Notify),
-            642 => Some(Property::NotifyCount),
-            643 => Some(Property::NotifyDue),
-            390 => Some(Property::NumFeatures),
-            350 => Some(Property::NumReplicas),
-            351 => Some(Property::NumShards),
-            930 => Some(Property::OauthClientId),
-            813 => Some(Property::OnSuccessRenewCertificate),
-            495 => Some(Property::OpenTelemetry),
-            630 => Some(Property::Options),
-            645 => Some(Property::Orcpt),
-            241 => Some(Property::OrgName),
-            843 => Some(Property::OrganizationName),
-            301 => Some(Property::Origin),
-            71 => Some(Property::OriginalEnvelopeId),
-            72 => Some(Property::OriginalMailFrom),
-            73 => Some(Property::OriginalRcptTo),
+            412 => Some(Property::Logo),
+            45 => Some(Property::Logprobs),
+            797 => Some(Property::LoiterBanPeriod),
+            796 => Some(Property::LoiterBanRate),
+            996 => Some(Property::Lossy),
+            460 => Some(Property::MachineId),
+            933 => Some(Property::MailExchangers),
+            326 => Some(Property::MailFrom),
+            885 => Some(Property::MailFromParameters),
+            606 => Some(Property::MailFromTimeout),
+            984 => Some(Property::MailRua),
+            185 => Some(Property::MailingLists),
+            937 => Some(Property::MaintenanceType),
+            382 => Some(Property::ManagedZone),
+            450 => Some(Property::Match),
+            146 => Some(Property::MaxAccountSize),
+            27 => Some(Property::MaxAddressBooks),
+            30 => Some(Property::MaxAddressBooksPerCard),
+            661 => Some(Property::MaxAge),
+            314 => Some(Property::MaxAggregateReportSize),
+            671 => Some(Property::MaxAllowedPacket),
+            130 => Some(Property::MaxApiKeys),
+            129 => Some(Property::MaxAppPasswords),
+            425 => Some(Property::MaxAttachmentSize),
+            913 => Some(Property::MaxAttachmentText),
+            856 => Some(Property::MaxAttachments),
+            202 => Some(Property::MaxAttachmentsSize),
+            608 => Some(Property::MaxAttempts),
+            191 => Some(Property::MaxAttendees),
+            503 => Some(Property::MaxAuthFailures),
+            200 => Some(Property::MaxAvailabilityDuration),
+            912 => Some(Property::MaxBodyText),
+            931 => Some(Property::MaxBufferedMemory),
+            194 => Some(Property::MaxCalendars),
+            198 => Some(Property::MaxCalendarsPerEvent),
+            239 => Some(Property::MaxChangesHistory),
+            521 => Some(Property::MaxChangesResults),
+            504 => Some(Property::MaxConcurrentConnections),
+            780 => Some(Property::MaxConcurrentIndexTasks),
+            43 => Some(Property::MaxConcurrentRequests),
+            527 => Some(Property::MaxConcurrentUploads),
+            694 => Some(Property::MaxConnections),
+            28 => Some(Property::MaxContacts),
+            816 => Some(Property::MaxCpuCycles),
+            965 => Some(Property::MaxDelay),
+            585 => Some(Property::MaxDepth),
+            627 => Some(Property::MaxDuration),
+            495 => Some(Property::MaxEntries),
+            496 => Some(Property::MaxEntrySize),
+            197 => Some(Property::MaxEventNotifications),
+            195 => Some(Property::MaxEvents),
+            199 => Some(Property::MaxExpandedQueryDuration),
+            787 => Some(Property::MaxExtractArchiveEntries),
+            784 => Some(Property::MaxExtractDecompressedSize),
+            782 => Some(Property::MaxExtractDocumentSize),
+            785 => Some(Property::MaxExtractPartSize),
+            786 => Some(Property::MaxExtractParts),
+            788 => Some(Property::MaxExtractPdfObjects),
+            789 => Some(Property::MaxExtractRtfDepth),
+            783 => Some(Property::MaxExtractTextSize),
+            642 => Some(Property::MaxFailures),
+            454 => Some(Property::MaxFiles),
+            441 => Some(Property::MaxFlagLength),
+            440 => Some(Property::MaxFlagsPerEmail),
+            455 => Some(Property::MaxFolders),
+            522 => Some(Property::MaxGetResults),
+            443 => Some(Property::MaxHeaderCount),
+            442 => Some(Property::MaxHeaderSize),
+            193 => Some(Property::MaxICalendarSize),
+            435 => Some(Property::MaxIdentities),
+            763 => Some(Property::MaxInboundReportSize),
+            828 => Some(Property::MaxIncludes),
+            854 => Some(Property::MaxInputChars),
+            210 => Some(Property::MaxItipSize),
+            855 => Some(Property::MaxLinks),
+            1009 => Some(Property::MaxLivePropertySize),
+            829 => Some(Property::MaxLocalVars),
+            1007 => Some(Property::MaxLockTimeout),
+            1008 => Some(Property::MaxLocks),
+            427 => Some(Property::MaxMailboxDepth),
+            428 => Some(Property::MaxMailboxNameLength),
+            436 => Some(Property::MaxMailboxes),
+            439 => Some(Property::MaxMailboxesPerEmail),
+            437 => Some(Property::MaxMaskedAddresses),
+            830 => Some(Property::MaxMatchVars),
+            31 => Some(Property::MaxMediaSize),
+            426 => Some(Property::MaxMessageSize),
+            914 => Some(Property::MaxMessageText),
+            433 => Some(Property::MaxMessages),
+            509 => Some(Property::MaxMessagesPerCommand),
+            512 => Some(Property::MaxMessagesPerSave),
+            524 => Some(Property::MaxMethodCalls),
+            639 => Some(Property::MaxMultihomed),
+            640 => Some(Property::MaxMxHosts),
+            832 => Some(Property::MaxNestedBlocks),
+            833 => Some(Property::MaxNestedForEvery),
+            817 => Some(Property::MaxNestedIncludes),
+            834 => Some(Property::MaxNestedTests),
+            818 => Some(Property::MaxOutMessages),
+            33 => Some(Property::MaxOutputTokens),
+            196 => Some(Property::MaxParticipantIdentities),
+            126 => Some(Property::MaxPasswordLength),
+            578 => Some(Property::MaxPolls),
+            586 => Some(Property::MaxPrivateSize),
+            438 => Some(Property::MaxPublicKeys),
+            534 => Some(Property::MaxPushAttempts),
+            546 => Some(Property::MaxPushSize),
+            523 => Some(Property::MaxQueryResults),
+            587 => Some(Property::MaxQueryScan),
+            656 => Some(Property::MaxReceivedHeaders),
+            211 => Some(Property::MaxRecipients),
+            674 => Some(Property::MaxReconnects),
+            192 => Some(Property::MaxRecurrenceExpansions),
+            915 => Some(Property::MaxRedirectUrls),
+            819 => Some(Property::MaxRedirects),
+            994 => Some(Property::MaxReportSize),
+            505 => Some(Property::MaxRequestSize),
+            624 => Some(Property::MaxResponseSize),
+            1010 => Some(Property::MaxResults),
+            140 => Some(Property::MaxRetries),
+            751 => Some(Property::MaxRetryWait),
+            831 => Some(Property::MaxScriptNameLength),
+            835 => Some(Property::MaxScriptSize),
+            838 => Some(Property::MaxScripts),
+            525 => Some(Property::MaxSetObjects),
+            811 => Some(Property::MaxShares),
+            115 => Some(Property::MaxSize),
+            526 => Some(Property::MaxSnippetResults),
+            836 => Some(Property::MaxStringLength),
+            434 => Some(Property::MaxSubmissions),
+            543 => Some(Property::MaxSubscriptions),
+            511 => Some(Property::MaxUidBatches),
+            529 => Some(Property::MaxUploadCount),
+            528 => Some(Property::MaxUploadSize),
+            26 => Some(Property::MaxVCardSize),
+            837 => Some(Property::MaxVarNameLength),
+            820 => Some(Property::MaxVarSize),
+            954 => Some(Property::MemberGroupIds),
+            21 => Some(Property::MemberTenantId),
+            106 => Some(Property::Message),
+            813 => Some(Property::MessageIdHostname),
+            960 => Some(Property::MessageIds),
+            549 => Some(Property::MessageTimeout),
+            172 => Some(Property::Messages),
+            173 => Some(Property::MessagesLarge),
+            174 => Some(Property::MessagesLargeTtl),
+            590 => Some(Property::Metric),
+            594 => Some(Property::Metrics),
+            245 => Some(Property::MetricsCollectionInterval),
+            595 => Some(Property::MetricsPolicy),
+            147 => Some(Property::MinAccountSize),
+            874 => Some(Property::MinHamSamples),
+            125 => Some(Property::MinPasswordLength),
+            127 => Some(Property::MinPasswordStrength),
+            840 => Some(Property::MinProbability),
+            752 => Some(Property::MinRetryWait),
+            875 => Some(Property::MinSpamSamples),
+            204 => Some(Property::MinTriggerInterval),
+            510 => Some(Property::MinUidBatchSize),
+            229 => Some(Property::Minute),
+            662 => Some(Property::Mode),
+            37 => Some(Property::Model),
+            867 => Some(Property::ModelId),
+            619 => Some(Property::MtPriority),
+            665 => Some(Property::MtaSts),
+            667 => Some(Property::MtaStsTimeout),
+            1001 => Some(Property::Multiline),
+            645 => Some(Property::MustMatchSender),
+            663 => Some(Property::MxHosts),
+            36 => Some(Property::Name),
+            492 => Some(Property::Namespace),
+            187 => Some(Property::NegativeTtl),
+            737 => Some(Property::NextNotify),
+            517 => Some(Property::NextRetry),
+            261 => Some(Property::NextTransitionAt),
+            814 => Some(Property::NoCapabilityCheck),
+            680 => Some(Property::NoEcho),
+            620 => Some(Property::NoSoliciting),
+            222 => Some(Property::NodeId),
+            217 => Some(Property::NotValidAfter),
+            218 => Some(Property::NotValidBefore),
+            610 => Some(Property::Notify),
+            744 => Some(Property::NotifyCount),
+            745 => Some(Property::NotifyDue),
+            466 => Some(Property::NumFeatures),
+            422 => Some(Property::NumReplicas),
+            423 => Some(Property::NumShards),
+            68 => Some(Property::OauthClientId),
+            968 => Some(Property::ObjectType),
+            956 => Some(Property::OnSuccessRenewCertificate),
+            711 => Some(Property::OpaqueTokenValidation),
+            592 => Some(Property::OpenTelemetry),
+            734 => Some(Property::Options),
+            748 => Some(Property::Orcpt),
+            281 => Some(Property::OrgName),
+            986 => Some(Property::OrganizationName),
+            346 => Some(Property::Origin),
+            85 => Some(Property::OriginalEnvelopeId),
+            86 => Some(Property::OriginalMailFrom),
+            87 => Some(Property::OriginalRcptTo),
             5 => Some(Property::OtpAuth),
-            625 => Some(Property::OtpCode),
-            626 => Some(Property::OtpUrl),
-            653 => Some(Property::OutboundReportDomain),
-            654 => Some(Property::OutboundReportSubmitter),
-            590 => Some(Property::OverrideProxyTrustedNetworks),
-            239 => Some(Property::OverrideType),
-            324 => Some(Property::OvhEndpoint),
-            737 => Some(Property::Parameters),
-            433 => Some(Property::ParseLimitContact),
-            434 => Some(Property::ParseLimitEmail),
-            432 => Some(Property::ParseLimitEvent),
-            876 => Some(Property::Password),
-            113 => Some(Property::PasswordDefaultExpiry),
-            109 => Some(Property::PasswordHashAlgorithm),
-            111 => Some(Property::PasswordMaxLength),
-            110 => Some(Property::PasswordMinLength),
-            112 => Some(Property::PasswordMinStrength),
-            380 => Some(Property::Path),
-            646 => Some(Property::Period),
-            48 => Some(Property::Permissions),
-            583 => Some(Property::PingInterval),
-            524 => Some(Property::Pipelining),
-            846 => Some(Property::Policies),
-            250 => Some(Property::PolicyAdkim),
-            251 => Some(Property::PolicyAspf),
-            920 => Some(Property::PolicyDiscoveryMethod),
-            252 => Some(Property::PolicyDisposition),
-            248 => Some(Property::PolicyDomain),
-            255 => Some(Property::PolicyFailureReportingOptions),
-            237 => Some(Property::PolicyIdentifier),
-            840 => Some(Property::PolicyIdentifiers),
-            919 => Some(Property::PolicyNp),
-            262 => Some(Property::PolicyOverrideReasons),
-            848 => Some(Property::PolicyStrings),
-            253 => Some(Property::PolicySubdomainDisposition),
-            254 => Some(Property::PolicyTestingMode),
-            847 => Some(Property::PolicyType),
-            249 => Some(Property::PolicyVersion),
-            489 => Some(Property::PollInterval),
-            311 => Some(Property::PollingInterval),
-            478 => Some(Property::PoolMaxConnections),
-            577 => Some(Property::PoolMinConnections),
-            631 => Some(Property::PoolRecyclingMethod),
-            479 => Some(Property::PoolTimeoutCreate),
-            480 => Some(Property::PoolTimeoutRecycle),
-            481 => Some(Property::PoolTimeoutWait),
-            657 => Some(Property::PoolWorkers),
-            299 => Some(Property::Port),
-            910 => Some(Property::PreferredChain),
-            856 => Some(Property::Prefix),
-            306 => Some(Property::PreserveIntermediates),
-            483 => Some(Property::Priority),
-            177 => Some(Property::PrivateKey),
-            904 => Some(Property::PrivateKeyPassword),
-            903 => Some(Property::PrivateKeyPem),
-            319 => Some(Property::PrivateZone),
-            332 => Some(Property::PrivateZoneOnly),
-            661 => Some(Property::Profile),
-            317 => Some(Property::ProjectId),
-            496 => Some(Property::Prometheus),
-            765 => Some(Property::Prompt),
-            313 => Some(Property::PropagationDelay),
-            312 => Some(Property::PropagationTimeout),
-            713 => Some(Property::ProtectedHeaders),
-            298 => Some(Property::Protocol),
-            533 => Some(Property::ProtocolVersion),
-            795 => Some(Property::ProviderInfo),
-            792 => Some(Property::ProxyTrustedNetworks),
-            218 => Some(Property::PublicKey),
-            302 => Some(Property::PublishRecords),
-            448 => Some(Property::PushAttemptWait),
-            449 => Some(Property::PushMaxAttempts),
-            452 => Some(Property::PushRequestTimeout),
-            450 => Some(Property::PushRetryWait),
-            454 => Some(Property::PushShardsTotal),
-            451 => Some(Property::PushThrottle),
-            453 => Some(Property::PushVerifyTimeout),
-            786 => Some(Property::QueryEmailAliases),
-            783 => Some(Property::QueryLogin),
-            437 => Some(Property::QueryMaxResults),
-            785 => Some(Property::QueryMemberOf),
-            784 => Some(Property::QueryRecipient),
-            514 => Some(Property::QueueId),
-            644 => Some(Property::QueueName),
-            394 => Some(Property::Quotas),
-            532 => Some(Property::Rate),
-            410 => Some(Property::RateLimit),
-            397 => Some(Property::RateLimitAnonymous),
-            396 => Some(Property::RateLimitAuthenticated),
-            767 => Some(Property::Ratio),
-            510 => Some(Property::RcptToTimeout),
-            650 => Some(Property::ReadFromReplicas),
-            578 => Some(Property::ReadReplicas),
-            45 => Some(Property::Reason),
-            63 => Some(Property::ReceivedAt),
-            636 => Some(Property::ReceivedFromIp),
-            637 => Some(Property::ReceivedViaPort),
-            836 => Some(Property::ReceivingIp),
-            835 => Some(Property::ReceivingMxHelo),
-            834 => Some(Property::ReceivingMxHostname),
-            484 => Some(Property::Recipients),
-            256 => Some(Property::Records),
-            805 => Some(Property::RecurrenceId),
-            911 => Some(Property::RedirectRoot),
-            605 => Some(Property::RedirectUris),
-            419 => Some(Property::Refresh),
-            617 => Some(Property::RefreshTokenExpiry),
-            618 => Some(Property::RefreshTokenRenewal),
-            330 => Some(Property::Region),
-            563 => Some(Property::RejectNonFqdn),
-            282 => Some(Property::RemoteIp),
-            17 => Some(Property::RenewBefore),
-            66 => Some(Property::Report),
-            349 => Some(Property::ReportAddressUri),
-            244 => Some(Property::ReportId),
-            74 => Some(Property::ReportedDomains),
-            75 => Some(Property::ReportedUris),
-            76 => Some(Property::ReportingMta),
-            870 => Some(Property::RequestMaxSize),
-            123 => Some(Property::RequestTlsCertificate),
-            551 => Some(Property::Require),
-            607 => Some(Property::RequireAudience),
-            615 => Some(Property::RequireClientRegistration),
-            608 => Some(Property::RequireScopes),
-            525 => Some(Property::RequireTls),
-            733 => Some(Property::ReservoirCapacity),
-            880 => Some(Property::ResourceGroup),
-            51 => Some(Property::ResourceUrl),
-            212 => Some(Property::ResponseCode),
-            213 => Some(Property::ResponseEnhanced),
-            401 => Some(Property::ResponseHeaders),
-            211 => Some(Property::ResponseHostname),
-            214 => Some(Property::ResponseMessage),
-            761 => Some(Property::ResponsePosCategory),
-            762 => Some(Property::ResponsePosConfidence),
-            763 => Some(Property::ResponsePosExplanation),
-            233 => Some(Property::Result),
-            832 => Some(Property::ResultType),
-            228 => Some(Property::RetireAfter),
-            420 => Some(Property::Retry),
-            640 => Some(Property::RetryCount),
-            641 => Some(Property::RetryDue),
-            635 => Some(Property::ReturnPath),
-            912 => Some(Property::ReuseKey),
-            692 => Some(Property::ReverseIpVerify),
-            565 => Some(Property::Rewrite),
-            193 => Some(Property::RoleIds),
-            152 => Some(Property::Roles),
-            857 => Some(Property::Rotate),
-            227 => Some(Property::RotateAfter),
-            540 => Some(Property::Route),
-            236 => Some(Property::Rua),
-            896 => Some(Property::Sandbox),
-            119 => Some(Property::SasToken),
-            549 => Some(Property::SaslMechanisms),
-            683 => Some(Property::ScanBanPaths),
-            685 => Some(Property::ScanBanPeriod),
-            684 => Some(Property::ScanBanRate),
-            541 => Some(Property::Schedule),
-            143 => Some(Property::Scheduling),
-            908 => Some(Property::Scheme),
-            281 => Some(Property::Scope),
-            745 => Some(Property::Score),
-            771 => Some(Property::ScoreDiscard),
-            772 => Some(Property::ScoreReject),
-            773 => Some(Property::ScoreSpam),
-            553 => Some(Property::Script),
-            127 => Some(Property::SearchStore),
+            729 => Some(Property::OtpCode),
+            730 => Some(Property::OtpUrl),
+            761 => Some(Property::OutboundReportDomain),
+            762 => Some(Property::OutboundReportSubmitter),
+            682 => Some(Property::OverrideProxyTrustedNetworks),
+            279 => Some(Property::OverrideType),
+            402 => Some(Property::OvhEndpoint),
+            880 => Some(Property::Parameters),
+            519 => Some(Property::ParseLimitContact),
+            520 => Some(Property::ParseLimitEmail),
+            518 => Some(Property::ParseLimitEvent),
+            514 => Some(Property::Partition),
+            363 => Some(Property::Password),
+            128 => Some(Property::PasswordDefaultExpiry),
+            124 => Some(Property::PasswordHashAlgorithm),
+            456 => Some(Property::Path),
+            704 => Some(Property::Pending),
+            749 => Some(Property::Period),
+            62 => Some(Property::Permissions),
+            676 => Some(Property::PingInterval),
+            621 => Some(Property::Pipelining),
+            988 => Some(Property::Policies),
+            290 => Some(Property::PolicyAdkim),
+            291 => Some(Property::PolicyAspf),
+            300 => Some(Property::PolicyDiscoveryMethod),
+            292 => Some(Property::PolicyDisposition),
+            288 => Some(Property::PolicyDomain),
+            295 => Some(Property::PolicyFailureReportingOptions),
+            277 => Some(Property::PolicyIdentifier),
+            983 => Some(Property::PolicyIdentifiers),
+            299 => Some(Property::PolicyNp),
+            305 => Some(Property::PolicyOverrideReasons),
+            990 => Some(Property::PolicyStrings),
+            293 => Some(Property::PolicySubdomainDisposition),
+            294 => Some(Property::PolicyTestingMode),
+            989 => Some(Property::PolicyType),
+            289 => Some(Property::PolicyVersion),
+            360 => Some(Property::PollInterval),
+            567 => Some(Property::PoolMaxConnections),
+            672 => Some(Property::PoolMinConnections),
+            735 => Some(Property::PoolRecyclingMethod),
+            568 => Some(Property::PoolTimeoutCreate),
+            569 => Some(Property::PoolTimeoutRecycle),
+            570 => Some(Property::PoolTimeoutWait),
+            766 => Some(Property::PoolWorkers),
+            344 => Some(Property::Port),
+            696 => Some(Property::PostLogoutRedirectUris),
+            22 => Some(Property::PreferredChain),
+            998 => Some(Property::Prefix),
+            350 => Some(Property::PreserveIntermediates),
+            572 => Some(Property::Priority),
+            215 => Some(Property::PrivateKey),
+            397 => Some(Property::PrivateKeyPassword),
+            396 => Some(Property::PrivateKeyPem),
+            584 => Some(Property::PrivateMetadata),
+            383 => Some(Property::PrivateZone),
+            405 => Some(Property::PrivateZoneOnly),
+            47 => Some(Property::Profile),
+            381 => Some(Property::ProjectId),
+            593 => Some(Property::Prometheus),
+            362 => Some(Property::PropagationDelay),
+            361 => Some(Property::PropagationTimeout),
+            826 => Some(Property::ProtectedHeaders),
+            343 => Some(Property::Protocol),
+            630 => Some(Property::ProtocolVersion),
+            935 => Some(Property::ProviderInfo),
+            932 => Some(Property::ProxyTrustedNetworks),
+            256 => Some(Property::PublicKey),
+            347 => Some(Property::PublishRecords),
+            533 => Some(Property::PushAttemptWait),
+            537 => Some(Property::PushRequestTimeout),
+            535 => Some(Property::PushRetryWait),
+            539 => Some(Property::PushShardsTotal),
+            536 => Some(Property::PushThrottle),
+            538 => Some(Property::PushVerifyTimeout),
+            927 => Some(Property::QueryEmailAliases),
+            924 => Some(Property::QueryLogin),
+            926 => Some(Property::QueryMemberOf),
+            925 => Some(Property::QueryRecipient),
+            866 => Some(Property::Question),
+            611 => Some(Property::QueueId),
+            747 => Some(Property::QueueName),
+            516 => Some(Property::QueuedDeletions),
+            515 => Some(Property::QueuedUpdates),
+            470 => Some(Property::Quotas),
+            629 => Some(Property::Rate),
+            44 => Some(Property::RateLimit),
+            474 => Some(Property::RateLimitAnonymous),
+            473 => Some(Property::RateLimitAuthenticated),
+            903 => Some(Property::Ratio),
+            327 => Some(Property::RcptTo),
+            607 => Some(Property::RcptToTimeout),
+            678 => Some(Property::ReadBufferCapacity),
+            753 => Some(Property::ReadFromReplicas),
+            673 => Some(Property::ReadReplicas),
+            59 => Some(Property::Reason),
+            34 => Some(Property::Reasoning),
+            77 => Some(Property::ReceivedAt),
+            739 => Some(Property::ReceivedFromIp),
+            740 => Some(Property::ReceivedViaPort),
+            979 => Some(Property::ReceivingIp),
+            978 => Some(Property::ReceivingMxHelo),
+            977 => Some(Property::ReceivingMxHostname),
+            573 => Some(Property::Recipients),
+            296 => Some(Property::Records),
+            946 => Some(Property::RecurrenceId),
+            917 => Some(Property::RedirectCacheTtl),
+            481 => Some(Property::RedirectRoot),
+            916 => Some(Property::RedirectTimeout),
+            695 => Some(Property::RedirectUris),
+            114 => Some(Property::RefreshInterval),
+            720 => Some(Property::RefreshTokenExpiry),
+            356 => Some(Property::Region),
+            658 => Some(Property::RejectNonFqdn),
+            324 => Some(Property::RemoteIp),
+            20 => Some(Property::RenewBefore),
+            80 => Some(Property::Report),
+            420 => Some(Property::ReportAddressUri),
+            284 => Some(Property::ReportId),
+            88 => Some(Property::ReportedDomains),
+            89 => Some(Property::ReportedUris),
+            90 => Some(Property::ReportingMta),
+            675 => Some(Property::RequestTimeout),
+            150 => Some(Property::RequestTlsCertificate),
+            646 => Some(Property::Require),
+            622 => Some(Property::RequireTls),
+            876 => Some(Property::ReservoirCapacity),
+            366 => Some(Property::ResourceGroup),
+            64 => Some(Property::ResourceUrl),
+            250 => Some(Property::ResponseCode),
+            251 => Some(Property::ResponseEnhanced),
+            478 => Some(Property::ResponseHeaders),
+            249 => Some(Property::ResponseHostname),
+            252 => Some(Property::ResponseMessage),
+            273 => Some(Property::Result),
+            975 => Some(Property::ResultType),
+            143 => Some(Property::Retention),
+            268 => Some(Property::RetireAfter),
+            497 => Some(Property::Retry),
+            742 => Some(Property::RetryCount),
+            743 => Some(Property::RetryDue),
+            738 => Some(Property::ReturnPath),
+            23 => Some(Property::ReuseKey),
+            807 => Some(Property::ReverseIpVerify),
+            660 => Some(Property::Rewrite),
+            231 => Some(Property::RoleIds),
+            183 => Some(Property::Roles),
+            999 => Some(Property::Rotate),
+            267 => Some(Property::RotateAfter),
+            635 => Some(Property::Route),
+            276 => Some(Property::Rua),
+            841 => Some(Property::SampleRate),
+            389 => Some(Property::Sandbox),
+            134 => Some(Property::SasToken),
+            644 => Some(Property::SaslMechanisms),
+            798 => Some(Property::ScanBanPaths),
+            800 => Some(Property::ScanBanPeriod),
+            799 => Some(Property::ScanBanRate),
+            636 => Some(Property::Schedule),
+            170 => Some(Property::Scheduling),
+            409 => Some(Property::Scheme),
+            323 => Some(Property::Scope),
+            698 => Some(Property::Scopes),
+            886 => Some(Property::Score),
+            907 => Some(Property::ScoreDiscard),
+            908 => Some(Property::ScoreReject),
+            909 => Some(Property::ScoreSpam),
+            648 => Some(Property::Script),
+            154 => Some(Property::SearchStore),
             3 => Some(Property::Secret),
-            328 => Some(Property::SecretAccessKey),
-            326 => Some(Property::SecretApiKey),
-            906 => Some(Property::SecretId),
-            659 => Some(Property::SecretKey),
-            660 => Some(Property::SecurityToken),
-            222 => Some(Property::Selector),
-            226 => Some(Property::SelectorTemplate),
-            230 => Some(Property::SendFrequency),
-            833 => Some(Property::SendingMtaIp),
-            915 => Some(Property::SentinelSecret),
-            914 => Some(Property::SentinelUsername),
-            97 => Some(Property::Separator),
-            121 => Some(Property::ServerHostname),
-            934 => Some(Property::ServerId),
-            308 => Some(Property::Servers),
-            316 => Some(Property::ServiceAccountJson),
-            913 => Some(Property::ServiceName),
-            794 => Some(Property::Services),
-            329 => Some(Property::SessionToken),
-            440 => Some(Property::SetMaxObjects),
-            830 => Some(Property::ShardIndex),
-            895 => Some(Property::SharedSecret),
-            336 => Some(Property::Sig0Algorithm),
-            623 => Some(Property::SignatureAlgorithm),
-            624 => Some(Property::SignatureKey),
-            335 => Some(Property::SignerName),
-            64 => Some(Property::Size),
-            885 => Some(Property::SkipDeploy),
-            423 => Some(Property::SkipFirst),
-            552 => Some(Property::SmtpGreeting),
-            441 => Some(Property::SnippetMaxResults),
-            591 => Some(Property::SocketBacklog),
-            592 => Some(Property::SocketNoDelay),
-            593 => Some(Property::SocketReceiveBufferSize),
-            594 => Some(Property::SocketReuseAddress),
-            595 => Some(Property::SocketReusePort),
-            596 => Some(Property::SocketSendBufferSize),
-            597 => Some(Property::SocketTosV4),
-            598 => Some(Property::SocketTtl),
-            77 => Some(Property::SourceIp),
-            504 => Some(Property::SourceIps),
-            78 => Some(Property::SourcePort),
-            775 => Some(Property::SpamFilterRulesUrl),
-            90 => Some(Property::SpfDns),
-            285 => Some(Property::SpfEhloDomain),
-            286 => Some(Property::SpfEhloResult),
-            688 => Some(Property::SpfEhloVerify),
-            689 => Some(Property::SpfFromVerify),
-            287 => Some(Property::SpfMailFromDomain),
-            288 => Some(Property::SpfMailFromResult),
-            267 => Some(Property::SpfResults),
-            224 => Some(Property::Stage),
-            529 => Some(Property::Stages),
-            56 => Some(Property::StartTime),
-            571 => Some(Property::StartTls),
-            61 => Some(Property::Status),
-            116 => Some(Property::StorageAccount),
-            778 => Some(Property::Store),
-            694 => Some(Property::Stores),
-            816 => Some(Property::Strategy),
-            347 => Some(Property::SubAddressing),
-            887 => Some(Property::SubAuthId),
-            41 => Some(Property::Subject),
-            178 => Some(Property::SubjectAlternativeNames),
-            368 => Some(Property::Subscribe),
-            879 => Some(Property::SubscriptionId),
-            494 => Some(Property::Sum),
-            808 => Some(Property::Summary),
-            666 => Some(Property::SupportedLanguages),
-            748 => Some(Property::Tag),
-            746 => Some(Property::Tags),
-            189 => Some(Property::TaskTypes),
-            187 => Some(Property::Tasks),
-            307 => Some(Property::TcpOnError),
-            907 => Some(Property::TeamId),
-            528 => Some(Property::TempFailOnError),
-            27 => Some(Property::Temperature),
-            167 => Some(Property::Template),
-            900 => Some(Property::TenancyOcid),
-            831 => Some(Property::TenantId),
-            153 => Some(Property::Tenants),
+            355 => Some(Property::SecretKey),
+            260 => Some(Property::Selector),
+            266 => Some(Property::SelectorTemplate),
+            270 => Some(Property::SendFrequency),
+            976 => Some(Property::SendingMtaIp),
+            756 => Some(Property::SentinelSecret),
+            755 => Some(Property::SentinelUsername),
+            111 => Some(Property::Separator),
+            403 => Some(Property::ServerId),
+            352 => Some(Property::Servers),
+            380 => Some(Property::ServiceAccountJson),
+            754 => Some(Property::ServiceName),
+            934 => Some(Property::Services),
+            550 => Some(Property::SessionTimeout),
+            357 => Some(Property::SessionToken),
+            974 => Some(Property::ShardIndex),
+            388 => Some(Property::SharedSecret),
+            845 => Some(Property::Signals),
+            725 => Some(Property::SignatureAlgorithm),
+            726 => Some(Property::SignatureKey),
+            78 => Some(Property::Size),
+            716 => Some(Property::SkipAudienceValidation),
+            369 => Some(Property::SkipDeploy),
+            500 => Some(Property::SkipFirst),
+            647 => Some(Property::SmtpGreeting),
+            683 => Some(Property::SocketBacklog),
+            684 => Some(Property::SocketNoDelay),
+            685 => Some(Property::SocketReceiveBufferSize),
+            686 => Some(Property::SocketReuseAddress),
+            687 => Some(Property::SocketReusePort),
+            688 => Some(Property::SocketSendBufferSize),
+            689 => Some(Property::SocketTosV4),
+            690 => Some(Property::SocketTtl),
+            91 => Some(Property::SourceIp),
+            92 => Some(Property::SourcePort),
+            911 => Some(Property::SpamFilterRulesUrl),
+            166 => Some(Property::SpamLookup),
+            104 => Some(Property::SpfDns),
+            328 => Some(Property::SpfEhloDomain),
+            329 => Some(Property::SpfEhloResult),
+            803 => Some(Property::SpfEhloVerify),
+            804 => Some(Property::SpfFromVerify),
+            330 => Some(Property::SpfMailFromDomain),
+            331 => Some(Property::SpfMailFromResult),
+            310 => Some(Property::SpfResults),
+            262 => Some(Property::Stage),
+            626 => Some(Property::Stages),
+            70 => Some(Property::StartTime),
+            666 => Some(Property::StartTls),
+            75 => Some(Property::Status),
+            136 => Some(Property::StorageAccount),
+            142 => Some(Property::Store),
+            809 => Some(Property::Stores),
+            957 => Some(Property::Strategy),
+            418 => Some(Property::SubAddressing),
+            371 => Some(Property::SubAuthId),
+            55 => Some(Property::Subject),
+            216 => Some(Property::SubjectAlternativeNames),
+            445 => Some(Property::Subscribe),
+            679 => Some(Property::SubscriptionCapacity),
+            365 => Some(Property::SubscriptionId),
+            591 => Some(Property::Sum),
+            950 => Some(Property::Summary),
+            772 => Some(Property::SupportedLanguages),
+            190 => Some(Property::Swap),
+            892 => Some(Property::Tag),
+            887 => Some(Property::Tags),
+            945 => Some(Property::TargetAccountId),
+            227 => Some(Property::TaskTypes),
+            225 => Some(Property::Tasks),
+            351 => Some(Property::TcpOnError),
+            408 => Some(Property::TeamId),
+            625 => Some(Property::TempFailOnError),
+            35 => Some(Property::Temperature),
+            205 => Some(Property::Template),
+            393 => Some(Property::TenancyOcid),
+            131 => Some(Property::TenantId),
+            184 => Some(Property::Tenants),
             2 => Some(Property::Text),
-            377 => Some(Property::Then),
-            219 => Some(Property::ThirdParty),
-            220 => Some(Property::ThirdPartyHash),
-            818 => Some(Property::ThreadName),
-            791 => Some(Property::ThreadPoolSize),
-            574 => Some(Property::ThreadsPerNode),
-            862 => Some(Property::Throttle),
+            453 => Some(Property::Then),
+            257 => Some(Property::ThirdParty),
+            258 => Some(Property::ThirdPartyHash),
+            959 => Some(Property::ThreadName),
+            669 => Some(Property::ThreadsPerNode),
+            1004 => Some(Property::Throttle),
+            842 => Some(Property::Tiers),
             8 => Some(Property::TimeZone),
-            29 => Some(Property::Timeout),
-            429 => Some(Property::TimeoutAnonymous),
-            430 => Some(Property::TimeoutAuthenticated),
-            534 => Some(Property::TimeoutCommand),
-            535 => Some(Property::TimeoutConnect),
-            581 => Some(Property::TimeoutConnection),
-            536 => Some(Property::TimeoutData),
-            431 => Some(Property::TimeoutIdle),
-            461 => Some(Property::TimeoutMessage),
-            582 => Some(Property::TimeoutRequest),
-            462 => Some(Property::TimeoutSession),
-            482 => Some(Property::Timestamp),
-            55 => Some(Property::Title),
-            542 => Some(Property::Tls),
-            599 => Some(Property::TlsDisableCipherSuites),
-            600 => Some(Property::TlsDisableProtocols),
-            601 => Some(Property::TlsIgnoreClientOrder),
-            602 => Some(Property::TlsImplicit),
-            573 => Some(Property::TlsTimeout),
-            42 => Some(Property::To),
-            888 => Some(Property::Token),
-            817 => Some(Property::TotalDeadline),
-            850 => Some(Property::TotalFailedSessions),
-            849 => Some(Property::TotalSuccessfulSessions),
-            815 => Some(Property::TraceId),
-            129 => Some(Property::Tracer),
-            734 => Some(Property::TrainFrequency),
-            385 => Some(Property::TransactionRetryDelay),
-            386 => Some(Property::TransactionRetryLimit),
-            387 => Some(Property::TransactionTimeout),
-            531 => Some(Property::TransferLimit),
-            769 => Some(Property::TrustContacts),
-            774 => Some(Property::TrustReplies),
-            338 => Some(Property::TsigAlgorithm),
-            310 => Some(Property::Ttl),
-            54 => Some(Property::UnpackDirectory),
-            812 => Some(Property::UpdateRecords),
-            445 => Some(Property::UploadQuota),
-            446 => Some(Property::UploadTtl),
-            31 => Some(Property::Url),
-            753 => Some(Property::UrlLimit),
-            52 => Some(Property::UrlPrefix),
-            647 => Some(Property::Urls),
-            400 => Some(Property::UsePermissiveCors),
-            309 => Some(Property::UseTls),
-            402 => Some(Property::UseXForwarded),
-            395 => Some(Property::UsedDiskQuota),
-            79 => Some(Property::UserAgent),
-            620 => Some(Property::UserCodeExpiry),
-            901 => Some(Property::UserOcid),
-            131 => Some(Property::Username),
-            610 => Some(Property::UsernameDomain),
-            931 => Some(Property::VCardVersion),
-            413 => Some(Property::ValidateDomain),
-            492 => Some(Property::Value),
-            675 => Some(Property::VariableName),
-            874 => Some(Property::VerifyAfterWrite),
-            80 => Some(Property::Version),
-            884 => Some(Property::ViewName),
-            526 => Some(Property::Vrfy),
-            548 => Some(Property::WaitOnFail),
-            893 => Some(Property::WapiVersion),
-            922 => Some(Property::WebPushContact),
-            921 => Some(Property::WebPushKey),
-            455 => Some(Property::WebsocketHeartbeat),
-            456 => Some(Property::WebsocketThrottle),
-            457 => Some(Property::WebsocketTimeout),
-            749 => Some(Property::Zone),
-            98 => Some(Property::ZoneIpV4),
-            99 => Some(Property::ZoneIpV6),
+            42 => Some(Property::Timeout),
+            571 => Some(Property::Timestamp),
+            69 => Some(Property::Title),
+            637 => Some(Property::Tls),
+            691 => Some(Property::TlsDisableCipherSuites),
+            692 => Some(Property::TlsDisableProtocols),
+            693 => Some(Property::TlsIgnoreClientOrder),
+            668 => Some(Property::TlsTimeout),
+            56 => Some(Property::To),
+            373 => Some(Property::Token),
+            135 => Some(Property::TokenFile),
+            992 => Some(Property::TotalFailedSessions),
+            991 => Some(Property::TotalSuccessfulSessions),
+            156 => Some(Property::Tracer),
+            877 => Some(Property::TrainInterval),
+            461 => Some(Property::TransactionRetryDelay),
+            462 => Some(Property::TransactionRetryLimit),
+            463 => Some(Property::TransactionTimeout),
+            628 => Some(Property::TransferLimit),
+            857 => Some(Property::TrimQuotes),
+            905 => Some(Property::TrustContacts),
+            910 => Some(Property::TrustReplies),
+            407 => Some(Property::TsigAlgorithm),
+            359 => Some(Property::Ttl),
+            849 => Some(Property::UncertainBelow),
+            67 => Some(Property::UnpackDirectory),
+            715 => Some(Property::UnscopedTokens),
+            955 => Some(Property::UpdateRecords),
+            530 => Some(Property::UploadQuota),
+            531 => Some(Property::UploadTtl),
+            38 => Some(Property::Url),
+            551 => Some(Property::UrlFailover),
+            896 => Some(Property::UrlLimit),
+            65 => Some(Property::UrlPrefix),
+            750 => Some(Property::Urls),
+            477 => Some(Property::UsePermissiveCors),
+            353 => Some(Property::UseTls),
+            471 => Some(Property::UsedDiskQuota),
+            93 => Some(Property::UserAgent),
+            722 => Some(Property::UserCodeExpiry),
+            394 => Some(Property::UserOcid),
+            158 => Some(Property::Username),
+            707 => Some(Property::UsernameDomain),
+            29 => Some(Property::VCardVersion),
+            491 => Some(Property::ValidateDomain),
+            581 => Some(Property::Value),
+            790 => Some(Property::VariableName),
+            583 => Some(Property::VendorNamespaces),
+            850 => Some(Property::VerbalHigh),
+            852 => Some(Property::VerbalLow),
+            851 => Some(Property::VerbalMedium),
+            769 => Some(Property::VerifyAfterWrite),
+            94 => Some(Property::Version),
+            368 => Some(Property::ViewName),
+            623 => Some(Property::Vrfy),
+            643 => Some(Property::WaitOnFail),
+            386 => Some(Property::WapiVersion),
+            758 => Some(Property::Warnings),
+            545 => Some(Property::WebPushContact),
+            544 => Some(Property::WebPushKey),
+            865 => Some(Property::WebSearch),
+            540 => Some(Property::WebsocketHeartbeat),
+            541 => Some(Property::WebsocketThrottle),
+            542 => Some(Property::WebsocketTimeout),
+            961 => Some(Property::WindowEnd),
+            501 => Some(Property::Zone),
+            112 => Some(Property::ZoneIpV4),
+            113 => Some(Property::ZoneIpV6),
             _ => None,
         }
     }
 
-    const COUNT: usize = 935;
+    const COUNT: usize = 1013;
 }
 
 impl serde::Serialize for Property {
@@ -3303,12 +3552,14 @@ impl ObjectType {
             ObjectType::HttpLookup => HttpLookup::FLAGS,
             ObjectType::Imap => Imap::FLAGS,
             ObjectType::InMemoryStore => InMemoryStore::FLAGS,
+            ObjectType::IndexQueueStatus => IndexQueueStatus::FLAGS,
             ObjectType::Jmap => Jmap::FLAGS,
             ObjectType::Log => Log::FLAGS,
             ObjectType::MailingList => MailingList::FLAGS,
             ObjectType::MaskedEmail => MaskedEmail::FLAGS,
             ObjectType::MemoryLookupKey => MemoryLookupKey::FLAGS,
             ObjectType::MemoryLookupKeyValue => MemoryLookupKeyValue::FLAGS,
+            ObjectType::Metadata => Metadata::FLAGS,
             ObjectType::Metric => Metric::FLAGS,
             ObjectType::Metrics => Metrics::FLAGS,
             ObjectType::MetricsStore => MetricsStore::FLAGS,
@@ -3334,6 +3585,7 @@ impl ObjectType {
             ObjectType::MtaVirtualQueue => MtaVirtualQueue::FLAGS,
             ObjectType::NetworkListener => NetworkListener::FLAGS,
             ObjectType::OAuthClient => OAuthClient::FLAGS,
+            ObjectType::OAuthGrant => OAuthGrant::FLAGS,
             ObjectType::OidcProvider => OidcProvider::FLAGS,
             ObjectType::PublicKey => PublicKey::FLAGS,
             ObjectType::QueuedMessage => QueuedMessage::FLAGS,
@@ -3348,11 +3600,11 @@ impl ObjectType {
             ObjectType::SieveSystemScript => SieveSystemScript::FLAGS,
             ObjectType::SieveUserInterpreter => SieveUserInterpreter::FLAGS,
             ObjectType::SieveUserScript => SieveUserScript::FLAGS,
+            ObjectType::SpamAi => SpamAi::FLAGS,
             ObjectType::SpamClassifier => SpamClassifier::FLAGS,
             ObjectType::SpamDnsblServer => SpamDnsblServer::FLAGS,
             ObjectType::SpamDnsblSettings => SpamDnsblSettings::FLAGS,
             ObjectType::SpamFileExtension => SpamFileExtension::FLAGS,
-            ObjectType::SpamLlm => SpamLlm::FLAGS,
             ObjectType::SpamPyzor => SpamPyzor::FLAGS,
             ObjectType::SpamRule => SpamRule::FLAGS,
             ObjectType::SpamSettings => SpamSettings::FLAGS,
@@ -3569,6 +3821,11 @@ impl ObjectType {
                     IndexSchemaValueType::Id,
                 ),
             ],
+            ObjectType::OAuthGrant => vec![IndexSchema::new(
+                Property::AccountId,
+                IndexSchemaType::Search,
+                IndexSchemaValueType::Id,
+            )],
             ObjectType::PublicKey => vec![IndexSchema::new(
                 Property::AccountId,
                 IndexSchemaType::Search,
@@ -3636,7 +3893,7 @@ impl ObjectType {
             ObjectType::AccountPassword => Permission::SysAccountPasswordGet,
             ObjectType::AccountSettings => Permission::SysAccountSettingsGet,
             ObjectType::AcmeProvider => Permission::SysAcmeProviderGet,
-            ObjectType::Action => Permission::SysActionGet,
+            ObjectType::Action => unreachable!(),
             ObjectType::AddressBook => Permission::SysAddressBookGet,
             ObjectType::AiModel => Permission::SysAiModelGet,
             ObjectType::Alert => Permission::SysAlertGet,
@@ -3680,12 +3937,14 @@ impl ObjectType {
             ObjectType::HttpLookup => Permission::SysHttpLookupGet,
             ObjectType::Imap => Permission::SysImapGet,
             ObjectType::InMemoryStore => Permission::SysInMemoryStoreGet,
+            ObjectType::IndexQueueStatus => Permission::SysIndexQueueStatusGet,
             ObjectType::Jmap => Permission::SysJmapGet,
             ObjectType::Log => Permission::SysLogGet,
             ObjectType::MailingList => Permission::SysMailingListGet,
             ObjectType::MaskedEmail => Permission::SysMaskedEmailGet,
             ObjectType::MemoryLookupKey => Permission::SysMemoryLookupKeyGet,
             ObjectType::MemoryLookupKeyValue => Permission::SysMemoryLookupKeyValueGet,
+            ObjectType::Metadata => Permission::SysMetadataGet,
             ObjectType::Metric => Permission::SysMetricGet,
             ObjectType::Metrics => Permission::SysMetricsGet,
             ObjectType::MetricsStore => Permission::SysMetricsStoreGet,
@@ -3711,6 +3970,7 @@ impl ObjectType {
             ObjectType::MtaVirtualQueue => Permission::SysMtaVirtualQueueGet,
             ObjectType::NetworkListener => Permission::SysNetworkListenerGet,
             ObjectType::OAuthClient => Permission::SysOAuthClientGet,
+            ObjectType::OAuthGrant => Permission::SysOAuthGrantGet,
             ObjectType::OidcProvider => Permission::SysOidcProviderGet,
             ObjectType::PublicKey => Permission::SysPublicKeyGet,
             ObjectType::QueuedMessage => Permission::SysQueuedMessageGet,
@@ -3725,11 +3985,11 @@ impl ObjectType {
             ObjectType::SieveSystemScript => Permission::SysSieveSystemScriptGet,
             ObjectType::SieveUserInterpreter => Permission::SysSieveUserInterpreterGet,
             ObjectType::SieveUserScript => Permission::SysSieveUserScriptGet,
+            ObjectType::SpamAi => Permission::SysSpamAiGet,
             ObjectType::SpamClassifier => Permission::SysSpamClassifierGet,
             ObjectType::SpamDnsblServer => Permission::SysSpamDnsblServerGet,
             ObjectType::SpamDnsblSettings => Permission::SysSpamDnsblSettingsGet,
             ObjectType::SpamFileExtension => Permission::SysSpamFileExtensionGet,
-            ObjectType::SpamLlm => Permission::SysSpamLlmGet,
             ObjectType::SpamPyzor => Permission::SysSpamPyzorGet,
             ObjectType::SpamRule => Permission::SysSpamRuleGet,
             ObjectType::SpamSettings => Permission::SysSpamSettingsGet,
@@ -3756,7 +4016,6 @@ impl ObjectType {
         match self {
             ObjectType::Account => Permission::SysAccountQuery,
             ObjectType::AcmeProvider => Permission::SysAcmeProviderQuery,
-            ObjectType::Action => Permission::SysActionQuery,
             ObjectType::AiModel => Permission::SysAiModelQuery,
             ObjectType::Alert => Permission::SysAlertQuery,
             ObjectType::AllowedIp => Permission::SysAllowedIpQuery,
@@ -3777,6 +4036,7 @@ impl ObjectType {
             ObjectType::Domain => Permission::SysDomainQuery,
             ObjectType::EventTracingLevel => Permission::SysEventTracingLevelQuery,
             ObjectType::HttpLookup => Permission::SysHttpLookupQuery,
+            ObjectType::IndexQueueStatus => Permission::SysIndexQueueStatusQuery,
             ObjectType::Log => Permission::SysLogQuery,
             ObjectType::MailingList => Permission::SysMailingListQuery,
             ObjectType::MaskedEmail => Permission::SysMaskedEmailQuery,
@@ -3795,6 +4055,7 @@ impl ObjectType {
             ObjectType::MtaVirtualQueue => Permission::SysMtaVirtualQueueQuery,
             ObjectType::NetworkListener => Permission::SysNetworkListenerQuery,
             ObjectType::OAuthClient => Permission::SysOAuthClientQuery,
+            ObjectType::OAuthGrant => Permission::SysOAuthGrantQuery,
             ObjectType::PublicKey => Permission::SysPublicKeyQuery,
             ObjectType::QueuedMessage => Permission::SysQueuedMessageQuery,
             ObjectType::Role => Permission::SysRoleQuery,
@@ -3817,686 +4078,532 @@ impl ObjectType {
         }
     }
 
-    pub fn set_permission(&self) -> [Permission; 3] {
+    pub fn create_permission(&self) -> Permission {
         match self {
-            ObjectType::Account => [
-                Permission::SysAccountCreate,
-                Permission::SysAccountUpdate,
-                Permission::SysAccountDestroy,
-            ],
-            ObjectType::AccountPassword => [
-                Permission::SysAccountPasswordUpdate,
-                Permission::SysAccountPasswordUpdate,
-                Permission::SysAccountPasswordUpdate,
-            ],
-            ObjectType::AccountSettings => [
-                Permission::SysAccountSettingsUpdate,
-                Permission::SysAccountSettingsUpdate,
-                Permission::SysAccountSettingsUpdate,
-            ],
-            ObjectType::AcmeProvider => [
-                Permission::SysAcmeProviderCreate,
-                Permission::SysAcmeProviderUpdate,
-                Permission::SysAcmeProviderDestroy,
-            ],
-            ObjectType::Action => [
-                Permission::SysActionCreate,
-                Permission::SysActionUpdate,
-                Permission::SysActionDestroy,
-            ],
-            ObjectType::AddressBook => [
-                Permission::SysAddressBookUpdate,
-                Permission::SysAddressBookUpdate,
-                Permission::SysAddressBookUpdate,
-            ],
-            ObjectType::AiModel => [
-                Permission::SysAiModelCreate,
-                Permission::SysAiModelUpdate,
-                Permission::SysAiModelDestroy,
-            ],
-            ObjectType::Alert => [
-                Permission::SysAlertCreate,
-                Permission::SysAlertUpdate,
-                Permission::SysAlertDestroy,
-            ],
-            ObjectType::AllowedIp => [
-                Permission::SysAllowedIpCreate,
-                Permission::SysAllowedIpUpdate,
-                Permission::SysAllowedIpDestroy,
-            ],
-            ObjectType::ApiKey => [
-                Permission::SysApiKeyCreate,
-                Permission::SysApiKeyUpdate,
-                Permission::SysApiKeyDestroy,
-            ],
-            ObjectType::AppPassword => [
-                Permission::SysAppPasswordCreate,
-                Permission::SysAppPasswordUpdate,
-                Permission::SysAppPasswordDestroy,
-            ],
-            ObjectType::Application => [
-                Permission::SysApplicationCreate,
-                Permission::SysApplicationUpdate,
-                Permission::SysApplicationDestroy,
-            ],
-            ObjectType::ArchivedItem => [
-                Permission::SysArchivedItemCreate,
-                Permission::SysArchivedItemUpdate,
-                Permission::SysArchivedItemDestroy,
-            ],
-            ObjectType::ArfExternalReport => [
-                Permission::SysArfExternalReportCreate,
-                Permission::SysArfExternalReportUpdate,
-                Permission::SysArfExternalReportDestroy,
-            ],
-            ObjectType::Asn => [
-                Permission::SysAsnUpdate,
-                Permission::SysAsnUpdate,
-                Permission::SysAsnUpdate,
-            ],
-            ObjectType::Authentication => [
-                Permission::SysAuthenticationUpdate,
-                Permission::SysAuthenticationUpdate,
-                Permission::SysAuthenticationUpdate,
-            ],
-            ObjectType::BlobStore => [
-                Permission::SysBlobStoreUpdate,
-                Permission::SysBlobStoreUpdate,
-                Permission::SysBlobStoreUpdate,
-            ],
-            ObjectType::BlockedIp => [
-                Permission::SysBlockedIpCreate,
-                Permission::SysBlockedIpUpdate,
-                Permission::SysBlockedIpDestroy,
-            ],
-            ObjectType::Bootstrap => [
-                Permission::SysBootstrapUpdate,
-                Permission::SysBootstrapUpdate,
-                Permission::SysBootstrapUpdate,
-            ],
-            ObjectType::Cache => [
-                Permission::SysCacheUpdate,
-                Permission::SysCacheUpdate,
-                Permission::SysCacheUpdate,
-            ],
-            ObjectType::Calendar => [
-                Permission::SysCalendarUpdate,
-                Permission::SysCalendarUpdate,
-                Permission::SysCalendarUpdate,
-            ],
-            ObjectType::CalendarAlarm => [
-                Permission::SysCalendarAlarmUpdate,
-                Permission::SysCalendarAlarmUpdate,
-                Permission::SysCalendarAlarmUpdate,
-            ],
-            ObjectType::CalendarScheduling => [
-                Permission::SysCalendarSchedulingUpdate,
-                Permission::SysCalendarSchedulingUpdate,
-                Permission::SysCalendarSchedulingUpdate,
-            ],
-            ObjectType::Certificate => [
-                Permission::SysCertificateCreate,
-                Permission::SysCertificateUpdate,
-                Permission::SysCertificateDestroy,
-            ],
-            ObjectType::ClusterNode => [
-                Permission::SysClusterNodeCreate,
-                Permission::SysClusterNodeUpdate,
-                Permission::SysClusterNodeDestroy,
-            ],
-            ObjectType::ClusterRole => [
-                Permission::SysClusterRoleCreate,
-                Permission::SysClusterRoleUpdate,
-                Permission::SysClusterRoleDestroy,
-            ],
-            ObjectType::Coordinator => [
-                Permission::SysCoordinatorUpdate,
-                Permission::SysCoordinatorUpdate,
-                Permission::SysCoordinatorUpdate,
-            ],
-            ObjectType::DataRetention => [
-                Permission::SysDataRetentionUpdate,
-                Permission::SysDataRetentionUpdate,
-                Permission::SysDataRetentionUpdate,
-            ],
-            ObjectType::DataStore => [
-                Permission::SysDataStoreUpdate,
-                Permission::SysDataStoreUpdate,
-                Permission::SysDataStoreUpdate,
-            ],
-            ObjectType::Directory => [
-                Permission::SysDirectoryCreate,
-                Permission::SysDirectoryUpdate,
-                Permission::SysDirectoryDestroy,
-            ],
-            ObjectType::DkimReportSettings => [
-                Permission::SysDkimReportSettingsUpdate,
-                Permission::SysDkimReportSettingsUpdate,
-                Permission::SysDkimReportSettingsUpdate,
-            ],
-            ObjectType::DkimSignature => [
-                Permission::SysDkimSignatureCreate,
-                Permission::SysDkimSignatureUpdate,
-                Permission::SysDkimSignatureDestroy,
-            ],
-            ObjectType::DmarcExternalReport => [
-                Permission::SysDmarcExternalReportCreate,
-                Permission::SysDmarcExternalReportUpdate,
-                Permission::SysDmarcExternalReportDestroy,
-            ],
-            ObjectType::DmarcInternalReport => [
-                Permission::SysDmarcInternalReportCreate,
-                Permission::SysDmarcInternalReportUpdate,
-                Permission::SysDmarcInternalReportDestroy,
-            ],
-            ObjectType::DmarcReportSettings => [
-                Permission::SysDmarcReportSettingsUpdate,
-                Permission::SysDmarcReportSettingsUpdate,
-                Permission::SysDmarcReportSettingsUpdate,
-            ],
-            ObjectType::DnsResolver => [
-                Permission::SysDnsResolverUpdate,
-                Permission::SysDnsResolverUpdate,
-                Permission::SysDnsResolverUpdate,
-            ],
-            ObjectType::DnsServer => [
-                Permission::SysDnsServerCreate,
-                Permission::SysDnsServerUpdate,
-                Permission::SysDnsServerDestroy,
-            ],
-            ObjectType::Domain => [
-                Permission::SysDomainCreate,
-                Permission::SysDomainUpdate,
-                Permission::SysDomainDestroy,
-            ],
-            ObjectType::DsnReportSettings => [
-                Permission::SysDsnReportSettingsUpdate,
-                Permission::SysDsnReportSettingsUpdate,
-                Permission::SysDsnReportSettingsUpdate,
-            ],
-            ObjectType::Email => [
-                Permission::SysEmailUpdate,
-                Permission::SysEmailUpdate,
-                Permission::SysEmailUpdate,
-            ],
-            ObjectType::Enterprise => [
-                Permission::SysEnterpriseUpdate,
-                Permission::SysEnterpriseUpdate,
-                Permission::SysEnterpriseUpdate,
-            ],
-            ObjectType::EventTracingLevel => [
-                Permission::SysEventTracingLevelCreate,
-                Permission::SysEventTracingLevelUpdate,
-                Permission::SysEventTracingLevelDestroy,
-            ],
-            ObjectType::FileStorage => [
-                Permission::SysFileStorageUpdate,
-                Permission::SysFileStorageUpdate,
-                Permission::SysFileStorageUpdate,
-            ],
-            ObjectType::Http => [
-                Permission::SysHttpUpdate,
-                Permission::SysHttpUpdate,
-                Permission::SysHttpUpdate,
-            ],
-            ObjectType::HttpForm => [
-                Permission::SysHttpFormUpdate,
-                Permission::SysHttpFormUpdate,
-                Permission::SysHttpFormUpdate,
-            ],
-            ObjectType::HttpLookup => [
-                Permission::SysHttpLookupCreate,
-                Permission::SysHttpLookupUpdate,
-                Permission::SysHttpLookupDestroy,
-            ],
-            ObjectType::Imap => [
-                Permission::SysImapUpdate,
-                Permission::SysImapUpdate,
-                Permission::SysImapUpdate,
-            ],
-            ObjectType::InMemoryStore => [
-                Permission::SysInMemoryStoreUpdate,
-                Permission::SysInMemoryStoreUpdate,
-                Permission::SysInMemoryStoreUpdate,
-            ],
-            ObjectType::Jmap => [
-                Permission::SysJmapUpdate,
-                Permission::SysJmapUpdate,
-                Permission::SysJmapUpdate,
-            ],
-            ObjectType::Log => [
-                Permission::SysLogCreate,
-                Permission::SysLogUpdate,
-                Permission::SysLogDestroy,
-            ],
-            ObjectType::MailingList => [
-                Permission::SysMailingListCreate,
-                Permission::SysMailingListUpdate,
-                Permission::SysMailingListDestroy,
-            ],
-            ObjectType::MaskedEmail => [
-                Permission::SysMaskedEmailCreate,
-                Permission::SysMaskedEmailUpdate,
-                Permission::SysMaskedEmailDestroy,
-            ],
-            ObjectType::MemoryLookupKey => [
-                Permission::SysMemoryLookupKeyCreate,
-                Permission::SysMemoryLookupKeyUpdate,
-                Permission::SysMemoryLookupKeyDestroy,
-            ],
-            ObjectType::MemoryLookupKeyValue => [
-                Permission::SysMemoryLookupKeyValueCreate,
-                Permission::SysMemoryLookupKeyValueUpdate,
-                Permission::SysMemoryLookupKeyValueDestroy,
-            ],
-            ObjectType::Metric => [
-                Permission::SysMetricCreate,
-                Permission::SysMetricUpdate,
-                Permission::SysMetricDestroy,
-            ],
-            ObjectType::Metrics => [
-                Permission::SysMetricsUpdate,
-                Permission::SysMetricsUpdate,
-                Permission::SysMetricsUpdate,
-            ],
-            ObjectType::MetricsStore => [
-                Permission::SysMetricsStoreUpdate,
-                Permission::SysMetricsStoreUpdate,
-                Permission::SysMetricsStoreUpdate,
-            ],
-            ObjectType::MtaConnectionStrategy => [
-                Permission::SysMtaConnectionStrategyCreate,
-                Permission::SysMtaConnectionStrategyUpdate,
-                Permission::SysMtaConnectionStrategyDestroy,
-            ],
-            ObjectType::MtaDeliverySchedule => [
-                Permission::SysMtaDeliveryScheduleCreate,
-                Permission::SysMtaDeliveryScheduleUpdate,
-                Permission::SysMtaDeliveryScheduleDestroy,
-            ],
-            ObjectType::MtaExtensions => [
-                Permission::SysMtaExtensionsUpdate,
-                Permission::SysMtaExtensionsUpdate,
-                Permission::SysMtaExtensionsUpdate,
-            ],
-            ObjectType::MtaHook => [
-                Permission::SysMtaHookCreate,
-                Permission::SysMtaHookUpdate,
-                Permission::SysMtaHookDestroy,
-            ],
-            ObjectType::MtaInboundSession => [
-                Permission::SysMtaInboundSessionUpdate,
-                Permission::SysMtaInboundSessionUpdate,
-                Permission::SysMtaInboundSessionUpdate,
-            ],
-            ObjectType::MtaInboundThrottle => [
-                Permission::SysMtaInboundThrottleCreate,
-                Permission::SysMtaInboundThrottleUpdate,
-                Permission::SysMtaInboundThrottleDestroy,
-            ],
-            ObjectType::MtaMilter => [
-                Permission::SysMtaMilterCreate,
-                Permission::SysMtaMilterUpdate,
-                Permission::SysMtaMilterDestroy,
-            ],
-            ObjectType::MtaOutboundStrategy => [
-                Permission::SysMtaOutboundStrategyUpdate,
-                Permission::SysMtaOutboundStrategyUpdate,
-                Permission::SysMtaOutboundStrategyUpdate,
-            ],
-            ObjectType::MtaOutboundThrottle => [
-                Permission::SysMtaOutboundThrottleCreate,
-                Permission::SysMtaOutboundThrottleUpdate,
-                Permission::SysMtaOutboundThrottleDestroy,
-            ],
-            ObjectType::MtaQueueQuota => [
-                Permission::SysMtaQueueQuotaCreate,
-                Permission::SysMtaQueueQuotaUpdate,
-                Permission::SysMtaQueueQuotaDestroy,
-            ],
-            ObjectType::MtaRoute => [
-                Permission::SysMtaRouteCreate,
-                Permission::SysMtaRouteUpdate,
-                Permission::SysMtaRouteDestroy,
-            ],
-            ObjectType::MtaStageAuth => [
-                Permission::SysMtaStageAuthUpdate,
-                Permission::SysMtaStageAuthUpdate,
-                Permission::SysMtaStageAuthUpdate,
-            ],
-            ObjectType::MtaStageConnect => [
-                Permission::SysMtaStageConnectUpdate,
-                Permission::SysMtaStageConnectUpdate,
-                Permission::SysMtaStageConnectUpdate,
-            ],
-            ObjectType::MtaStageData => [
-                Permission::SysMtaStageDataUpdate,
-                Permission::SysMtaStageDataUpdate,
-                Permission::SysMtaStageDataUpdate,
-            ],
-            ObjectType::MtaStageEhlo => [
-                Permission::SysMtaStageEhloUpdate,
-                Permission::SysMtaStageEhloUpdate,
-                Permission::SysMtaStageEhloUpdate,
-            ],
-            ObjectType::MtaStageMail => [
-                Permission::SysMtaStageMailUpdate,
-                Permission::SysMtaStageMailUpdate,
-                Permission::SysMtaStageMailUpdate,
-            ],
-            ObjectType::MtaStageRcpt => [
-                Permission::SysMtaStageRcptUpdate,
-                Permission::SysMtaStageRcptUpdate,
-                Permission::SysMtaStageRcptUpdate,
-            ],
-            ObjectType::MtaSts => [
-                Permission::SysMtaStsUpdate,
-                Permission::SysMtaStsUpdate,
-                Permission::SysMtaStsUpdate,
-            ],
-            ObjectType::MtaTlsStrategy => [
-                Permission::SysMtaTlsStrategyCreate,
-                Permission::SysMtaTlsStrategyUpdate,
-                Permission::SysMtaTlsStrategyDestroy,
-            ],
-            ObjectType::MtaVirtualQueue => [
-                Permission::SysMtaVirtualQueueCreate,
-                Permission::SysMtaVirtualQueueUpdate,
-                Permission::SysMtaVirtualQueueDestroy,
-            ],
-            ObjectType::NetworkListener => [
-                Permission::SysNetworkListenerCreate,
-                Permission::SysNetworkListenerUpdate,
-                Permission::SysNetworkListenerDestroy,
-            ],
-            ObjectType::OAuthClient => [
-                Permission::SysOAuthClientCreate,
-                Permission::SysOAuthClientUpdate,
-                Permission::SysOAuthClientDestroy,
-            ],
-            ObjectType::OidcProvider => [
-                Permission::SysOidcProviderUpdate,
-                Permission::SysOidcProviderUpdate,
-                Permission::SysOidcProviderUpdate,
-            ],
-            ObjectType::PublicKey => [
-                Permission::SysPublicKeyCreate,
-                Permission::SysPublicKeyUpdate,
-                Permission::SysPublicKeyDestroy,
-            ],
-            ObjectType::QueuedMessage => [
-                Permission::SysQueuedMessageCreate,
-                Permission::SysQueuedMessageUpdate,
-                Permission::SysQueuedMessageDestroy,
-            ],
-            ObjectType::ReportSettings => [
-                Permission::SysReportSettingsUpdate,
-                Permission::SysReportSettingsUpdate,
-                Permission::SysReportSettingsUpdate,
-            ],
-            ObjectType::Role => [
-                Permission::SysRoleCreate,
-                Permission::SysRoleUpdate,
-                Permission::SysRoleDestroy,
-            ],
-            ObjectType::Search => [
-                Permission::SysSearchUpdate,
-                Permission::SysSearchUpdate,
-                Permission::SysSearchUpdate,
-            ],
-            ObjectType::SearchStore => [
-                Permission::SysSearchStoreUpdate,
-                Permission::SysSearchStoreUpdate,
-                Permission::SysSearchStoreUpdate,
-            ],
-            ObjectType::Security => [
-                Permission::SysSecurityUpdate,
-                Permission::SysSecurityUpdate,
-                Permission::SysSecurityUpdate,
-            ],
-            ObjectType::SenderAuth => [
-                Permission::SysSenderAuthUpdate,
-                Permission::SysSenderAuthUpdate,
-                Permission::SysSenderAuthUpdate,
-            ],
-            ObjectType::Sharing => [
-                Permission::SysSharingUpdate,
-                Permission::SysSharingUpdate,
-                Permission::SysSharingUpdate,
-            ],
-            ObjectType::SieveSystemInterpreter => [
-                Permission::SysSieveSystemInterpreterUpdate,
-                Permission::SysSieveSystemInterpreterUpdate,
-                Permission::SysSieveSystemInterpreterUpdate,
-            ],
-            ObjectType::SieveSystemScript => [
-                Permission::SysSieveSystemScriptCreate,
-                Permission::SysSieveSystemScriptUpdate,
-                Permission::SysSieveSystemScriptDestroy,
-            ],
-            ObjectType::SieveUserInterpreter => [
-                Permission::SysSieveUserInterpreterUpdate,
-                Permission::SysSieveUserInterpreterUpdate,
-                Permission::SysSieveUserInterpreterUpdate,
-            ],
-            ObjectType::SieveUserScript => [
-                Permission::SysSieveUserScriptCreate,
-                Permission::SysSieveUserScriptUpdate,
-                Permission::SysSieveUserScriptDestroy,
-            ],
-            ObjectType::SpamClassifier => [
-                Permission::SysSpamClassifierUpdate,
-                Permission::SysSpamClassifierUpdate,
-                Permission::SysSpamClassifierUpdate,
-            ],
-            ObjectType::SpamDnsblServer => [
-                Permission::SysSpamDnsblServerCreate,
-                Permission::SysSpamDnsblServerUpdate,
-                Permission::SysSpamDnsblServerDestroy,
-            ],
-            ObjectType::SpamDnsblSettings => [
-                Permission::SysSpamDnsblSettingsUpdate,
-                Permission::SysSpamDnsblSettingsUpdate,
-                Permission::SysSpamDnsblSettingsUpdate,
-            ],
-            ObjectType::SpamFileExtension => [
-                Permission::SysSpamFileExtensionCreate,
-                Permission::SysSpamFileExtensionUpdate,
-                Permission::SysSpamFileExtensionDestroy,
-            ],
-            ObjectType::SpamLlm => [
-                Permission::SysSpamLlmUpdate,
-                Permission::SysSpamLlmUpdate,
-                Permission::SysSpamLlmUpdate,
-            ],
-            ObjectType::SpamPyzor => [
-                Permission::SysSpamPyzorUpdate,
-                Permission::SysSpamPyzorUpdate,
-                Permission::SysSpamPyzorUpdate,
-            ],
-            ObjectType::SpamRule => [
-                Permission::SysSpamRuleCreate,
-                Permission::SysSpamRuleUpdate,
-                Permission::SysSpamRuleDestroy,
-            ],
-            ObjectType::SpamSettings => [
-                Permission::SysSpamSettingsUpdate,
-                Permission::SysSpamSettingsUpdate,
-                Permission::SysSpamSettingsUpdate,
-            ],
-            ObjectType::SpamTag => [
-                Permission::SysSpamTagCreate,
-                Permission::SysSpamTagUpdate,
-                Permission::SysSpamTagDestroy,
-            ],
-            ObjectType::SpamTrainingSample => [
-                Permission::SysSpamTrainingSampleCreate,
-                Permission::SysSpamTrainingSampleUpdate,
-                Permission::SysSpamTrainingSampleDestroy,
-            ],
-            ObjectType::SpfReportSettings => [
-                Permission::SysSpfReportSettingsUpdate,
-                Permission::SysSpfReportSettingsUpdate,
-                Permission::SysSpfReportSettingsUpdate,
-            ],
-            ObjectType::StoreLookup => [
-                Permission::SysStoreLookupCreate,
-                Permission::SysStoreLookupUpdate,
-                Permission::SysStoreLookupDestroy,
-            ],
-            ObjectType::SystemSettings => [
-                Permission::SysSystemSettingsUpdate,
-                Permission::SysSystemSettingsUpdate,
-                Permission::SysSystemSettingsUpdate,
-            ],
-            ObjectType::Task => [
-                Permission::SysTaskCreate,
-                Permission::SysTaskUpdate,
-                Permission::SysTaskDestroy,
-            ],
-            ObjectType::TaskManager => [
-                Permission::SysTaskManagerUpdate,
-                Permission::SysTaskManagerUpdate,
-                Permission::SysTaskManagerUpdate,
-            ],
-            ObjectType::Tenant => [
-                Permission::SysTenantCreate,
-                Permission::SysTenantUpdate,
-                Permission::SysTenantDestroy,
-            ],
-            ObjectType::TlsExternalReport => [
-                Permission::SysTlsExternalReportCreate,
-                Permission::SysTlsExternalReportUpdate,
-                Permission::SysTlsExternalReportDestroy,
-            ],
-            ObjectType::TlsInternalReport => [
-                Permission::SysTlsInternalReportCreate,
-                Permission::SysTlsInternalReportUpdate,
-                Permission::SysTlsInternalReportDestroy,
-            ],
-            ObjectType::TlsReportSettings => [
-                Permission::SysTlsReportSettingsUpdate,
-                Permission::SysTlsReportSettingsUpdate,
-                Permission::SysTlsReportSettingsUpdate,
-            ],
-            ObjectType::Trace => [
-                Permission::SysTraceCreate,
-                Permission::SysTraceUpdate,
-                Permission::SysTraceDestroy,
-            ],
-            ObjectType::Tracer => [
-                Permission::SysTracerCreate,
-                Permission::SysTracerUpdate,
-                Permission::SysTracerDestroy,
-            ],
-            ObjectType::TracingStore => [
-                Permission::SysTracingStoreUpdate,
-                Permission::SysTracingStoreUpdate,
-                Permission::SysTracingStoreUpdate,
-            ],
-            ObjectType::WebDav => [
-                Permission::SysWebDavUpdate,
-                Permission::SysWebDavUpdate,
-                Permission::SysWebDavUpdate,
-            ],
-            ObjectType::WebHook => [
-                Permission::SysWebHookCreate,
-                Permission::SysWebHookUpdate,
-                Permission::SysWebHookDestroy,
-            ],
+            ObjectType::Account => Permission::SysAccountCreate,
+            ObjectType::AccountPassword => Permission::SysAccountPasswordUpdate,
+            ObjectType::AccountSettings => Permission::SysAccountSettingsUpdate,
+            ObjectType::AcmeProvider => Permission::SysAcmeProviderCreate,
+            ObjectType::Action => Permission::SysActionCreate,
+            ObjectType::AddressBook => Permission::SysAddressBookUpdate,
+            ObjectType::AiModel => Permission::SysAiModelCreate,
+            ObjectType::Alert => Permission::SysAlertCreate,
+            ObjectType::AllowedIp => Permission::SysAllowedIpCreate,
+            ObjectType::ApiKey => Permission::SysApiKeyCreate,
+            ObjectType::AppPassword => Permission::SysAppPasswordCreate,
+            ObjectType::Application => Permission::SysApplicationCreate,
+            ObjectType::ArchivedItem => unreachable!(),
+            ObjectType::ArfExternalReport => unreachable!(),
+            ObjectType::Asn => Permission::SysAsnUpdate,
+            ObjectType::Authentication => Permission::SysAuthenticationUpdate,
+            ObjectType::BlobStore => Permission::SysBlobStoreUpdate,
+            ObjectType::BlockedIp => Permission::SysBlockedIpCreate,
+            ObjectType::Bootstrap => Permission::SysBootstrapUpdate,
+            ObjectType::Cache => Permission::SysCacheUpdate,
+            ObjectType::Calendar => Permission::SysCalendarUpdate,
+            ObjectType::CalendarAlarm => Permission::SysCalendarAlarmUpdate,
+            ObjectType::CalendarScheduling => Permission::SysCalendarSchedulingUpdate,
+            ObjectType::Certificate => Permission::SysCertificateCreate,
+            ObjectType::ClusterNode => unreachable!(),
+            ObjectType::ClusterRole => Permission::SysClusterRoleCreate,
+            ObjectType::Coordinator => Permission::SysCoordinatorUpdate,
+            ObjectType::DataRetention => Permission::SysDataRetentionUpdate,
+            ObjectType::DataStore => Permission::SysDataStoreUpdate,
+            ObjectType::Directory => Permission::SysDirectoryCreate,
+            ObjectType::DkimReportSettings => Permission::SysDkimReportSettingsUpdate,
+            ObjectType::DkimSignature => Permission::SysDkimSignatureCreate,
+            ObjectType::DmarcExternalReport => unreachable!(),
+            ObjectType::DmarcInternalReport => unreachable!(),
+            ObjectType::DmarcReportSettings => Permission::SysDmarcReportSettingsUpdate,
+            ObjectType::DnsResolver => Permission::SysDnsResolverUpdate,
+            ObjectType::DnsServer => Permission::SysDnsServerCreate,
+            ObjectType::Domain => Permission::SysDomainCreate,
+            ObjectType::DsnReportSettings => Permission::SysDsnReportSettingsUpdate,
+            ObjectType::Email => Permission::SysEmailUpdate,
+            ObjectType::Enterprise => Permission::SysEnterpriseUpdate,
+            ObjectType::EventTracingLevel => Permission::SysEventTracingLevelCreate,
+            ObjectType::FileStorage => Permission::SysFileStorageUpdate,
+            ObjectType::Http => Permission::SysHttpUpdate,
+            ObjectType::HttpForm => Permission::SysHttpFormUpdate,
+            ObjectType::HttpLookup => Permission::SysHttpLookupCreate,
+            ObjectType::Imap => Permission::SysImapUpdate,
+            ObjectType::InMemoryStore => Permission::SysInMemoryStoreUpdate,
+            ObjectType::IndexQueueStatus => unreachable!(),
+            ObjectType::Jmap => Permission::SysJmapUpdate,
+            ObjectType::Log => unreachable!(),
+            ObjectType::MailingList => Permission::SysMailingListCreate,
+            ObjectType::MaskedEmail => Permission::SysMaskedEmailCreate,
+            ObjectType::MemoryLookupKey => Permission::SysMemoryLookupKeyCreate,
+            ObjectType::MemoryLookupKeyValue => Permission::SysMemoryLookupKeyValueCreate,
+            ObjectType::Metadata => Permission::SysMetadataUpdate,
+            ObjectType::Metric => unreachable!(),
+            ObjectType::Metrics => Permission::SysMetricsUpdate,
+            ObjectType::MetricsStore => Permission::SysMetricsStoreUpdate,
+            ObjectType::MtaConnectionStrategy => Permission::SysMtaConnectionStrategyCreate,
+            ObjectType::MtaDeliverySchedule => Permission::SysMtaDeliveryScheduleCreate,
+            ObjectType::MtaExtensions => Permission::SysMtaExtensionsUpdate,
+            ObjectType::MtaHook => Permission::SysMtaHookCreate,
+            ObjectType::MtaInboundSession => Permission::SysMtaInboundSessionUpdate,
+            ObjectType::MtaInboundThrottle => Permission::SysMtaInboundThrottleCreate,
+            ObjectType::MtaMilter => Permission::SysMtaMilterCreate,
+            ObjectType::MtaOutboundStrategy => Permission::SysMtaOutboundStrategyUpdate,
+            ObjectType::MtaOutboundThrottle => Permission::SysMtaOutboundThrottleCreate,
+            ObjectType::MtaQueueQuota => Permission::SysMtaQueueQuotaCreate,
+            ObjectType::MtaRoute => Permission::SysMtaRouteCreate,
+            ObjectType::MtaStageAuth => Permission::SysMtaStageAuthUpdate,
+            ObjectType::MtaStageConnect => Permission::SysMtaStageConnectUpdate,
+            ObjectType::MtaStageData => Permission::SysMtaStageDataUpdate,
+            ObjectType::MtaStageEhlo => Permission::SysMtaStageEhloUpdate,
+            ObjectType::MtaStageMail => Permission::SysMtaStageMailUpdate,
+            ObjectType::MtaStageRcpt => Permission::SysMtaStageRcptUpdate,
+            ObjectType::MtaSts => Permission::SysMtaStsUpdate,
+            ObjectType::MtaTlsStrategy => Permission::SysMtaTlsStrategyCreate,
+            ObjectType::MtaVirtualQueue => Permission::SysMtaVirtualQueueCreate,
+            ObjectType::NetworkListener => Permission::SysNetworkListenerCreate,
+            ObjectType::OAuthClient => Permission::SysOAuthClientCreate,
+            ObjectType::OAuthGrant => unreachable!(),
+            ObjectType::OidcProvider => Permission::SysOidcProviderUpdate,
+            ObjectType::PublicKey => Permission::SysPublicKeyCreate,
+            ObjectType::QueuedMessage => unreachable!(),
+            ObjectType::ReportSettings => Permission::SysReportSettingsUpdate,
+            ObjectType::Role => Permission::SysRoleCreate,
+            ObjectType::Search => Permission::SysSearchUpdate,
+            ObjectType::SearchStore => Permission::SysSearchStoreUpdate,
+            ObjectType::Security => Permission::SysSecurityUpdate,
+            ObjectType::SenderAuth => Permission::SysSenderAuthUpdate,
+            ObjectType::Sharing => Permission::SysSharingUpdate,
+            ObjectType::SieveSystemInterpreter => Permission::SysSieveSystemInterpreterUpdate,
+            ObjectType::SieveSystemScript => Permission::SysSieveSystemScriptCreate,
+            ObjectType::SieveUserInterpreter => Permission::SysSieveUserInterpreterUpdate,
+            ObjectType::SieveUserScript => Permission::SysSieveUserScriptCreate,
+            ObjectType::SpamAi => Permission::SysSpamAiUpdate,
+            ObjectType::SpamClassifier => Permission::SysSpamClassifierUpdate,
+            ObjectType::SpamDnsblServer => Permission::SysSpamDnsblServerCreate,
+            ObjectType::SpamDnsblSettings => Permission::SysSpamDnsblSettingsUpdate,
+            ObjectType::SpamFileExtension => Permission::SysSpamFileExtensionCreate,
+            ObjectType::SpamPyzor => Permission::SysSpamPyzorUpdate,
+            ObjectType::SpamRule => Permission::SysSpamRuleCreate,
+            ObjectType::SpamSettings => Permission::SysSpamSettingsUpdate,
+            ObjectType::SpamTag => Permission::SysSpamTagCreate,
+            ObjectType::SpamTrainingSample => Permission::SysSpamTrainingSampleCreate,
+            ObjectType::SpfReportSettings => Permission::SysSpfReportSettingsUpdate,
+            ObjectType::StoreLookup => Permission::SysStoreLookupCreate,
+            ObjectType::SystemSettings => Permission::SysSystemSettingsUpdate,
+            ObjectType::Task => Permission::SysTaskCreate,
+            ObjectType::TaskManager => Permission::SysTaskManagerUpdate,
+            ObjectType::Tenant => Permission::SysTenantCreate,
+            ObjectType::TlsExternalReport => unreachable!(),
+            ObjectType::TlsInternalReport => unreachable!(),
+            ObjectType::TlsReportSettings => Permission::SysTlsReportSettingsUpdate,
+            ObjectType::Trace => unreachable!(),
+            ObjectType::Tracer => Permission::SysTracerCreate,
+            ObjectType::TracingStore => Permission::SysTracingStoreUpdate,
+            ObjectType::WebDav => Permission::SysWebDavUpdate,
+            ObjectType::WebHook => Permission::SysWebHookCreate,
+        }
+    }
+
+    pub fn update_permission(&self) -> Permission {
+        match self {
+            ObjectType::Account => Permission::SysAccountUpdate,
+            ObjectType::AccountPassword => Permission::SysAccountPasswordUpdate,
+            ObjectType::AccountSettings => Permission::SysAccountSettingsUpdate,
+            ObjectType::AcmeProvider => Permission::SysAcmeProviderUpdate,
+            ObjectType::Action => unreachable!(),
+            ObjectType::AddressBook => Permission::SysAddressBookUpdate,
+            ObjectType::AiModel => Permission::SysAiModelUpdate,
+            ObjectType::Alert => Permission::SysAlertUpdate,
+            ObjectType::AllowedIp => Permission::SysAllowedIpUpdate,
+            ObjectType::ApiKey => Permission::SysApiKeyUpdate,
+            ObjectType::AppPassword => Permission::SysAppPasswordUpdate,
+            ObjectType::Application => Permission::SysApplicationUpdate,
+            ObjectType::ArchivedItem => Permission::SysArchivedItemUpdate,
+            ObjectType::ArfExternalReport => unreachable!(),
+            ObjectType::Asn => Permission::SysAsnUpdate,
+            ObjectType::Authentication => Permission::SysAuthenticationUpdate,
+            ObjectType::BlobStore => Permission::SysBlobStoreUpdate,
+            ObjectType::BlockedIp => Permission::SysBlockedIpUpdate,
+            ObjectType::Bootstrap => Permission::SysBootstrapUpdate,
+            ObjectType::Cache => Permission::SysCacheUpdate,
+            ObjectType::Calendar => Permission::SysCalendarUpdate,
+            ObjectType::CalendarAlarm => Permission::SysCalendarAlarmUpdate,
+            ObjectType::CalendarScheduling => Permission::SysCalendarSchedulingUpdate,
+            ObjectType::Certificate => Permission::SysCertificateUpdate,
+            ObjectType::ClusterNode => unreachable!(),
+            ObjectType::ClusterRole => Permission::SysClusterRoleUpdate,
+            ObjectType::Coordinator => Permission::SysCoordinatorUpdate,
+            ObjectType::DataRetention => Permission::SysDataRetentionUpdate,
+            ObjectType::DataStore => Permission::SysDataStoreUpdate,
+            ObjectType::Directory => Permission::SysDirectoryUpdate,
+            ObjectType::DkimReportSettings => Permission::SysDkimReportSettingsUpdate,
+            ObjectType::DkimSignature => Permission::SysDkimSignatureUpdate,
+            ObjectType::DmarcExternalReport => unreachable!(),
+            ObjectType::DmarcInternalReport => Permission::SysDmarcInternalReportUpdate,
+            ObjectType::DmarcReportSettings => Permission::SysDmarcReportSettingsUpdate,
+            ObjectType::DnsResolver => Permission::SysDnsResolverUpdate,
+            ObjectType::DnsServer => Permission::SysDnsServerUpdate,
+            ObjectType::Domain => Permission::SysDomainUpdate,
+            ObjectType::DsnReportSettings => Permission::SysDsnReportSettingsUpdate,
+            ObjectType::Email => Permission::SysEmailUpdate,
+            ObjectType::Enterprise => Permission::SysEnterpriseUpdate,
+            ObjectType::EventTracingLevel => Permission::SysEventTracingLevelUpdate,
+            ObjectType::FileStorage => Permission::SysFileStorageUpdate,
+            ObjectType::Http => Permission::SysHttpUpdate,
+            ObjectType::HttpForm => Permission::SysHttpFormUpdate,
+            ObjectType::HttpLookup => Permission::SysHttpLookupUpdate,
+            ObjectType::Imap => Permission::SysImapUpdate,
+            ObjectType::InMemoryStore => Permission::SysInMemoryStoreUpdate,
+            ObjectType::IndexQueueStatus => Permission::SysIndexQueueStatusUpdate,
+            ObjectType::Jmap => Permission::SysJmapUpdate,
+            ObjectType::Log => unreachable!(),
+            ObjectType::MailingList => Permission::SysMailingListUpdate,
+            ObjectType::MaskedEmail => Permission::SysMaskedEmailUpdate,
+            ObjectType::MemoryLookupKey => Permission::SysMemoryLookupKeyUpdate,
+            ObjectType::MemoryLookupKeyValue => Permission::SysMemoryLookupKeyValueUpdate,
+            ObjectType::Metadata => Permission::SysMetadataUpdate,
+            ObjectType::Metric => unreachable!(),
+            ObjectType::Metrics => Permission::SysMetricsUpdate,
+            ObjectType::MetricsStore => Permission::SysMetricsStoreUpdate,
+            ObjectType::MtaConnectionStrategy => Permission::SysMtaConnectionStrategyUpdate,
+            ObjectType::MtaDeliverySchedule => Permission::SysMtaDeliveryScheduleUpdate,
+            ObjectType::MtaExtensions => Permission::SysMtaExtensionsUpdate,
+            ObjectType::MtaHook => Permission::SysMtaHookUpdate,
+            ObjectType::MtaInboundSession => Permission::SysMtaInboundSessionUpdate,
+            ObjectType::MtaInboundThrottle => Permission::SysMtaInboundThrottleUpdate,
+            ObjectType::MtaMilter => Permission::SysMtaMilterUpdate,
+            ObjectType::MtaOutboundStrategy => Permission::SysMtaOutboundStrategyUpdate,
+            ObjectType::MtaOutboundThrottle => Permission::SysMtaOutboundThrottleUpdate,
+            ObjectType::MtaQueueQuota => Permission::SysMtaQueueQuotaUpdate,
+            ObjectType::MtaRoute => Permission::SysMtaRouteUpdate,
+            ObjectType::MtaStageAuth => Permission::SysMtaStageAuthUpdate,
+            ObjectType::MtaStageConnect => Permission::SysMtaStageConnectUpdate,
+            ObjectType::MtaStageData => Permission::SysMtaStageDataUpdate,
+            ObjectType::MtaStageEhlo => Permission::SysMtaStageEhloUpdate,
+            ObjectType::MtaStageMail => Permission::SysMtaStageMailUpdate,
+            ObjectType::MtaStageRcpt => Permission::SysMtaStageRcptUpdate,
+            ObjectType::MtaSts => Permission::SysMtaStsUpdate,
+            ObjectType::MtaTlsStrategy => Permission::SysMtaTlsStrategyUpdate,
+            ObjectType::MtaVirtualQueue => Permission::SysMtaVirtualQueueUpdate,
+            ObjectType::NetworkListener => Permission::SysNetworkListenerUpdate,
+            ObjectType::OAuthClient => Permission::SysOAuthClientUpdate,
+            ObjectType::OAuthGrant => unreachable!(),
+            ObjectType::OidcProvider => Permission::SysOidcProviderUpdate,
+            ObjectType::PublicKey => Permission::SysPublicKeyUpdate,
+            ObjectType::QueuedMessage => Permission::SysQueuedMessageUpdate,
+            ObjectType::ReportSettings => Permission::SysReportSettingsUpdate,
+            ObjectType::Role => Permission::SysRoleUpdate,
+            ObjectType::Search => Permission::SysSearchUpdate,
+            ObjectType::SearchStore => Permission::SysSearchStoreUpdate,
+            ObjectType::Security => Permission::SysSecurityUpdate,
+            ObjectType::SenderAuth => Permission::SysSenderAuthUpdate,
+            ObjectType::Sharing => Permission::SysSharingUpdate,
+            ObjectType::SieveSystemInterpreter => Permission::SysSieveSystemInterpreterUpdate,
+            ObjectType::SieveSystemScript => Permission::SysSieveSystemScriptUpdate,
+            ObjectType::SieveUserInterpreter => Permission::SysSieveUserInterpreterUpdate,
+            ObjectType::SieveUserScript => Permission::SysSieveUserScriptUpdate,
+            ObjectType::SpamAi => Permission::SysSpamAiUpdate,
+            ObjectType::SpamClassifier => Permission::SysSpamClassifierUpdate,
+            ObjectType::SpamDnsblServer => Permission::SysSpamDnsblServerUpdate,
+            ObjectType::SpamDnsblSettings => Permission::SysSpamDnsblSettingsUpdate,
+            ObjectType::SpamFileExtension => Permission::SysSpamFileExtensionUpdate,
+            ObjectType::SpamPyzor => Permission::SysSpamPyzorUpdate,
+            ObjectType::SpamRule => Permission::SysSpamRuleUpdate,
+            ObjectType::SpamSettings => Permission::SysSpamSettingsUpdate,
+            ObjectType::SpamTag => Permission::SysSpamTagUpdate,
+            ObjectType::SpamTrainingSample => unreachable!(),
+            ObjectType::SpfReportSettings => Permission::SysSpfReportSettingsUpdate,
+            ObjectType::StoreLookup => Permission::SysStoreLookupUpdate,
+            ObjectType::SystemSettings => Permission::SysSystemSettingsUpdate,
+            ObjectType::Task => Permission::SysTaskUpdate,
+            ObjectType::TaskManager => Permission::SysTaskManagerUpdate,
+            ObjectType::Tenant => Permission::SysTenantUpdate,
+            ObjectType::TlsExternalReport => unreachable!(),
+            ObjectType::TlsInternalReport => Permission::SysTlsInternalReportUpdate,
+            ObjectType::TlsReportSettings => Permission::SysTlsReportSettingsUpdate,
+            ObjectType::Trace => unreachable!(),
+            ObjectType::Tracer => Permission::SysTracerUpdate,
+            ObjectType::TracingStore => Permission::SysTracingStoreUpdate,
+            ObjectType::WebDav => Permission::SysWebDavUpdate,
+            ObjectType::WebHook => Permission::SysWebHookUpdate,
+        }
+    }
+
+    pub fn destroy_permission(&self) -> Permission {
+        match self {
+            ObjectType::Account => Permission::SysAccountDestroy,
+            ObjectType::AccountPassword => Permission::SysAccountPasswordUpdate,
+            ObjectType::AccountSettings => Permission::SysAccountSettingsUpdate,
+            ObjectType::AcmeProvider => Permission::SysAcmeProviderDestroy,
+            ObjectType::Action => unreachable!(),
+            ObjectType::AddressBook => Permission::SysAddressBookUpdate,
+            ObjectType::AiModel => Permission::SysAiModelDestroy,
+            ObjectType::Alert => Permission::SysAlertDestroy,
+            ObjectType::AllowedIp => Permission::SysAllowedIpDestroy,
+            ObjectType::ApiKey => Permission::SysApiKeyDestroy,
+            ObjectType::AppPassword => Permission::SysAppPasswordDestroy,
+            ObjectType::Application => Permission::SysApplicationDestroy,
+            ObjectType::ArchivedItem => Permission::SysArchivedItemDestroy,
+            ObjectType::ArfExternalReport => Permission::SysArfExternalReportDestroy,
+            ObjectType::Asn => Permission::SysAsnUpdate,
+            ObjectType::Authentication => Permission::SysAuthenticationUpdate,
+            ObjectType::BlobStore => Permission::SysBlobStoreUpdate,
+            ObjectType::BlockedIp => Permission::SysBlockedIpDestroy,
+            ObjectType::Bootstrap => Permission::SysBootstrapUpdate,
+            ObjectType::Cache => Permission::SysCacheUpdate,
+            ObjectType::Calendar => Permission::SysCalendarUpdate,
+            ObjectType::CalendarAlarm => Permission::SysCalendarAlarmUpdate,
+            ObjectType::CalendarScheduling => Permission::SysCalendarSchedulingUpdate,
+            ObjectType::Certificate => Permission::SysCertificateDestroy,
+            ObjectType::ClusterNode => unreachable!(),
+            ObjectType::ClusterRole => Permission::SysClusterRoleDestroy,
+            ObjectType::Coordinator => Permission::SysCoordinatorUpdate,
+            ObjectType::DataRetention => Permission::SysDataRetentionUpdate,
+            ObjectType::DataStore => Permission::SysDataStoreUpdate,
+            ObjectType::Directory => Permission::SysDirectoryDestroy,
+            ObjectType::DkimReportSettings => Permission::SysDkimReportSettingsUpdate,
+            ObjectType::DkimSignature => Permission::SysDkimSignatureDestroy,
+            ObjectType::DmarcExternalReport => Permission::SysDmarcExternalReportDestroy,
+            ObjectType::DmarcInternalReport => Permission::SysDmarcInternalReportDestroy,
+            ObjectType::DmarcReportSettings => Permission::SysDmarcReportSettingsUpdate,
+            ObjectType::DnsResolver => Permission::SysDnsResolverUpdate,
+            ObjectType::DnsServer => Permission::SysDnsServerDestroy,
+            ObjectType::Domain => Permission::SysDomainDestroy,
+            ObjectType::DsnReportSettings => Permission::SysDsnReportSettingsUpdate,
+            ObjectType::Email => Permission::SysEmailUpdate,
+            ObjectType::Enterprise => Permission::SysEnterpriseUpdate,
+            ObjectType::EventTracingLevel => Permission::SysEventTracingLevelDestroy,
+            ObjectType::FileStorage => Permission::SysFileStorageUpdate,
+            ObjectType::Http => Permission::SysHttpUpdate,
+            ObjectType::HttpForm => Permission::SysHttpFormUpdate,
+            ObjectType::HttpLookup => Permission::SysHttpLookupDestroy,
+            ObjectType::Imap => Permission::SysImapUpdate,
+            ObjectType::InMemoryStore => Permission::SysInMemoryStoreUpdate,
+            ObjectType::IndexQueueStatus => unreachable!(),
+            ObjectType::Jmap => Permission::SysJmapUpdate,
+            ObjectType::Log => unreachable!(),
+            ObjectType::MailingList => Permission::SysMailingListDestroy,
+            ObjectType::MaskedEmail => Permission::SysMaskedEmailDestroy,
+            ObjectType::MemoryLookupKey => Permission::SysMemoryLookupKeyDestroy,
+            ObjectType::MemoryLookupKeyValue => Permission::SysMemoryLookupKeyValueDestroy,
+            ObjectType::Metadata => Permission::SysMetadataUpdate,
+            ObjectType::Metric => unreachable!(),
+            ObjectType::Metrics => Permission::SysMetricsUpdate,
+            ObjectType::MetricsStore => Permission::SysMetricsStoreUpdate,
+            ObjectType::MtaConnectionStrategy => Permission::SysMtaConnectionStrategyDestroy,
+            ObjectType::MtaDeliverySchedule => Permission::SysMtaDeliveryScheduleDestroy,
+            ObjectType::MtaExtensions => Permission::SysMtaExtensionsUpdate,
+            ObjectType::MtaHook => Permission::SysMtaHookDestroy,
+            ObjectType::MtaInboundSession => Permission::SysMtaInboundSessionUpdate,
+            ObjectType::MtaInboundThrottle => Permission::SysMtaInboundThrottleDestroy,
+            ObjectType::MtaMilter => Permission::SysMtaMilterDestroy,
+            ObjectType::MtaOutboundStrategy => Permission::SysMtaOutboundStrategyUpdate,
+            ObjectType::MtaOutboundThrottle => Permission::SysMtaOutboundThrottleDestroy,
+            ObjectType::MtaQueueQuota => Permission::SysMtaQueueQuotaDestroy,
+            ObjectType::MtaRoute => Permission::SysMtaRouteDestroy,
+            ObjectType::MtaStageAuth => Permission::SysMtaStageAuthUpdate,
+            ObjectType::MtaStageConnect => Permission::SysMtaStageConnectUpdate,
+            ObjectType::MtaStageData => Permission::SysMtaStageDataUpdate,
+            ObjectType::MtaStageEhlo => Permission::SysMtaStageEhloUpdate,
+            ObjectType::MtaStageMail => Permission::SysMtaStageMailUpdate,
+            ObjectType::MtaStageRcpt => Permission::SysMtaStageRcptUpdate,
+            ObjectType::MtaSts => Permission::SysMtaStsUpdate,
+            ObjectType::MtaTlsStrategy => Permission::SysMtaTlsStrategyDestroy,
+            ObjectType::MtaVirtualQueue => Permission::SysMtaVirtualQueueDestroy,
+            ObjectType::NetworkListener => Permission::SysNetworkListenerDestroy,
+            ObjectType::OAuthClient => Permission::SysOAuthClientDestroy,
+            ObjectType::OAuthGrant => Permission::SysOAuthGrantDestroy,
+            ObjectType::OidcProvider => Permission::SysOidcProviderUpdate,
+            ObjectType::PublicKey => Permission::SysPublicKeyDestroy,
+            ObjectType::QueuedMessage => Permission::SysQueuedMessageDestroy,
+            ObjectType::ReportSettings => Permission::SysReportSettingsUpdate,
+            ObjectType::Role => Permission::SysRoleDestroy,
+            ObjectType::Search => Permission::SysSearchUpdate,
+            ObjectType::SearchStore => Permission::SysSearchStoreUpdate,
+            ObjectType::Security => Permission::SysSecurityUpdate,
+            ObjectType::SenderAuth => Permission::SysSenderAuthUpdate,
+            ObjectType::Sharing => Permission::SysSharingUpdate,
+            ObjectType::SieveSystemInterpreter => Permission::SysSieveSystemInterpreterUpdate,
+            ObjectType::SieveSystemScript => Permission::SysSieveSystemScriptDestroy,
+            ObjectType::SieveUserInterpreter => Permission::SysSieveUserInterpreterUpdate,
+            ObjectType::SieveUserScript => Permission::SysSieveUserScriptDestroy,
+            ObjectType::SpamAi => Permission::SysSpamAiUpdate,
+            ObjectType::SpamClassifier => Permission::SysSpamClassifierUpdate,
+            ObjectType::SpamDnsblServer => Permission::SysSpamDnsblServerDestroy,
+            ObjectType::SpamDnsblSettings => Permission::SysSpamDnsblSettingsUpdate,
+            ObjectType::SpamFileExtension => Permission::SysSpamFileExtensionDestroy,
+            ObjectType::SpamPyzor => Permission::SysSpamPyzorUpdate,
+            ObjectType::SpamRule => Permission::SysSpamRuleDestroy,
+            ObjectType::SpamSettings => Permission::SysSpamSettingsUpdate,
+            ObjectType::SpamTag => Permission::SysSpamTagDestroy,
+            ObjectType::SpamTrainingSample => Permission::SysSpamTrainingSampleDestroy,
+            ObjectType::SpfReportSettings => Permission::SysSpfReportSettingsUpdate,
+            ObjectType::StoreLookup => Permission::SysStoreLookupDestroy,
+            ObjectType::SystemSettings => Permission::SysSystemSettingsUpdate,
+            ObjectType::Task => Permission::SysTaskDestroy,
+            ObjectType::TaskManager => Permission::SysTaskManagerUpdate,
+            ObjectType::Tenant => Permission::SysTenantDestroy,
+            ObjectType::TlsExternalReport => Permission::SysTlsExternalReportDestroy,
+            ObjectType::TlsInternalReport => Permission::SysTlsInternalReportDestroy,
+            ObjectType::TlsReportSettings => Permission::SysTlsReportSettingsUpdate,
+            ObjectType::Trace => unreachable!(),
+            ObjectType::Tracer => Permission::SysTracerDestroy,
+            ObjectType::TracingStore => Permission::SysTracingStoreUpdate,
+            ObjectType::WebDav => Permission::SysWebDavUpdate,
+            ObjectType::WebHook => Permission::SysWebHookDestroy,
         }
     }
 }
 
 impl ObjectInner {
+    pub fn account_id(&self) -> Option<Id> {
+        match self {
+            ObjectInner::ArchivedItem(inner) => match inner.as_ref() {
+                ArchivedItem::Email(obj) => Some(obj.account_id),
+                ArchivedItem::FileNode(obj) => Some(obj.account_id),
+                ArchivedItem::CalendarEvent(obj) => Some(obj.account_id),
+                ArchivedItem::ContactCard(obj) => Some(obj.account_id),
+                ArchivedItem::SieveScript(obj) => Some(obj.account_id),
+            },
+            ObjectInner::MaskedEmail(obj) => Some(obj.account_id),
+            ObjectInner::OAuthGrant(obj) => Some(obj.account_id),
+            ObjectInner::PublicKey(obj) => Some(obj.account_id),
+            ObjectInner::SpamTrainingSample(obj) => obj.account_id,
+            ObjectInner::Task(inner) => match inner.as_ref() {
+                Task::CalendarAlarmEmail(obj) => Some(obj.account_id),
+                Task::CalendarAlarmNotification(obj) => Some(obj.account_id),
+                Task::CalendarItipMessage(obj) => Some(obj.account_id),
+                Task::MergeThreads(obj) => Some(obj.account_id),
+                Task::RestoreArchivedItem(obj) => Some(obj.account_id),
+                Task::DestroyAccount(obj) => Some(obj.account_id),
+                Task::AccountMaintenance(obj) => Some(obj.account_id),
+                Task::ShareRevokeCleanup(obj) => Some(obj.account_id),
+                _ => None,
+            },
+            _ => None,
+        }
+    }
+
+    pub fn set_account_id(&mut self, id: Id) {
+        match self {
+            ObjectInner::ArchivedItem(inner) => match inner.as_mut() {
+                ArchivedItem::Email(obj) => obj.account_id = id,
+                ArchivedItem::FileNode(obj) => obj.account_id = id,
+                ArchivedItem::CalendarEvent(obj) => obj.account_id = id,
+                ArchivedItem::ContactCard(obj) => obj.account_id = id,
+                ArchivedItem::SieveScript(obj) => obj.account_id = id,
+            },
+            ObjectInner::MaskedEmail(obj) => obj.account_id = id,
+            ObjectInner::OAuthGrant(obj) => obj.account_id = id,
+            ObjectInner::PublicKey(obj) => obj.account_id = id,
+            ObjectInner::SpamTrainingSample(obj) => obj.account_id = Some(id),
+            ObjectInner::Task(inner) => match inner.as_mut() {
+                Task::CalendarAlarmEmail(obj) => obj.account_id = id,
+                Task::CalendarAlarmNotification(obj) => obj.account_id = id,
+                Task::CalendarItipMessage(obj) => obj.account_id = id,
+                Task::MergeThreads(obj) => obj.account_id = id,
+                Task::RestoreArchivedItem(obj) => obj.account_id = id,
+                Task::DestroyAccount(obj) => obj.account_id = id,
+                Task::AccountMaintenance(obj) => obj.account_id = id,
+                Task::ShareRevokeCleanup(obj) => obj.account_id = id,
+                _ => {}
+            },
+            _ => {}
+        }
+    }
+
     pub fn member_tenant_id(&self) -> Option<Id> {
         match self {
-            ObjectInner::Account(Account::User(obj)) => obj.member_tenant_id,
-            ObjectInner::Account(Account::Group(obj)) => obj.member_tenant_id,
+            ObjectInner::Account(inner) => match inner.as_ref() {
+                Account::User(obj) => obj.member_tenant_id,
+                Account::Group(obj) => obj.member_tenant_id,
+            },
             ObjectInner::AcmeProvider(obj) => obj.member_tenant_id,
             ObjectInner::ArfExternalReport(obj) => obj.member_tenant_id,
-            ObjectInner::Directory(Directory::Ldap(obj)) => obj.member_tenant_id,
-            ObjectInner::Directory(Directory::Sql(obj)) => obj.member_tenant_id,
-            ObjectInner::Directory(Directory::Oidc(obj)) => obj.member_tenant_id,
-            ObjectInner::DkimSignature(DkimSignature::Dkim1Ed25519Sha256(obj)) => {
-                obj.member_tenant_id
-            }
-            ObjectInner::DkimSignature(DkimSignature::Dkim1RsaSha256(obj)) => obj.member_tenant_id,
-            ObjectInner::DkimSignature(DkimSignature::Dkim2Ed25519Sha256(obj)) => {
-                obj.member_tenant_id
-            }
-            ObjectInner::DkimSignature(DkimSignature::Dkim2RsaSha256(obj)) => obj.member_tenant_id,
+            ObjectInner::Directory(inner) => match inner.as_ref() {
+                Directory::Ldap(obj) => obj.member_tenant_id,
+                Directory::Sql(obj) => obj.member_tenant_id,
+                Directory::Oidc(obj) => obj.member_tenant_id,
+            },
+            ObjectInner::DkimSignature(inner) => match inner.as_ref() {
+                DkimSignature::Dkim1Ed25519Sha256(obj) => obj.member_tenant_id,
+                DkimSignature::Dkim1RsaSha256(obj) => obj.member_tenant_id,
+                DkimSignature::Dkim2Ed25519Sha256(obj) => obj.member_tenant_id,
+                DkimSignature::Dkim2RsaSha256(obj) => obj.member_tenant_id,
+                DkimSignature::Dkim2MlDsa44Ed25519Sha512(obj) => obj.member_tenant_id,
+            },
             ObjectInner::DmarcExternalReport(obj) => obj.member_tenant_id,
-            ObjectInner::DnsServer(DnsServer::Tsig(obj)) => obj.member_tenant_id,
-            ObjectInner::DnsServer(DnsServer::Cloudflare(obj)) => obj.member_tenant_id,
-            ObjectInner::DnsServer(DnsServer::DigitalOcean(obj)) => obj.member_tenant_id,
-            ObjectInner::DnsServer(DnsServer::DeSEC(obj)) => obj.member_tenant_id,
-            ObjectInner::DnsServer(DnsServer::Ovh(obj)) => obj.member_tenant_id,
-            ObjectInner::DnsServer(DnsServer::Bunny(obj)) => obj.member_tenant_id,
-            ObjectInner::DnsServer(DnsServer::Porkbun(obj)) => obj.member_tenant_id,
-            ObjectInner::DnsServer(DnsServer::Dnsimple(obj)) => obj.member_tenant_id,
-            ObjectInner::DnsServer(DnsServer::Spaceship(obj)) => obj.member_tenant_id,
-            ObjectInner::DnsServer(DnsServer::Route53(obj)) => obj.member_tenant_id,
-            ObjectInner::DnsServer(DnsServer::GoogleCloudDns(obj)) => obj.member_tenant_id,
-            ObjectInner::DnsServer(DnsServer::Alidns(obj)) => obj.member_tenant_id,
-            ObjectInner::DnsServer(DnsServer::ArvanCloud(obj)) => obj.member_tenant_id,
-            ObjectInner::DnsServer(DnsServer::Autodns(obj)) => obj.member_tenant_id,
-            ObjectInner::DnsServer(DnsServer::AzureDns(obj)) => obj.member_tenant_id,
-            ObjectInner::DnsServer(DnsServer::BaiduCloud(obj)) => obj.member_tenant_id,
-            ObjectInner::DnsServer(DnsServer::BluecatV2(obj)) => obj.member_tenant_id,
-            ObjectInner::DnsServer(DnsServer::ClouDns(obj)) => obj.member_tenant_id,
-            ObjectInner::DnsServer(DnsServer::Constellix(obj)) => obj.member_tenant_id,
-            ObjectInner::DnsServer(DnsServer::Cpanel(obj)) => obj.member_tenant_id,
-            ObjectInner::DnsServer(DnsServer::Ddnss(obj)) => obj.member_tenant_id,
-            ObjectInner::DnsServer(DnsServer::DnsMadeEasy(obj)) => obj.member_tenant_id,
-            ObjectInner::DnsServer(DnsServer::Domeneshop(obj)) => obj.member_tenant_id,
-            ObjectInner::DnsServer(DnsServer::Dreamhost(obj)) => obj.member_tenant_id,
-            ObjectInner::DnsServer(DnsServer::DuckDns(obj)) => obj.member_tenant_id,
-            ObjectInner::DnsServer(DnsServer::Dynu(obj)) => obj.member_tenant_id,
-            ObjectInner::DnsServer(DnsServer::EasyDns(obj)) => obj.member_tenant_id,
-            ObjectInner::DnsServer(DnsServer::EdgeDns(obj)) => obj.member_tenant_id,
-            ObjectInner::DnsServer(DnsServer::Exoscale(obj)) => obj.member_tenant_id,
-            ObjectInner::DnsServer(DnsServer::FreeMyIp(obj)) => obj.member_tenant_id,
-            ObjectInner::DnsServer(DnsServer::GandiV5(obj)) => obj.member_tenant_id,
-            ObjectInner::DnsServer(DnsServer::Gcore(obj)) => obj.member_tenant_id,
-            ObjectInner::DnsServer(DnsServer::Glesys(obj)) => obj.member_tenant_id,
-            ObjectInner::DnsServer(DnsServer::Godaddy(obj)) => obj.member_tenant_id,
-            ObjectInner::DnsServer(DnsServer::Hetzner(obj)) => obj.member_tenant_id,
-            ObjectInner::DnsServer(DnsServer::HostingDe(obj)) => obj.member_tenant_id,
-            ObjectInner::DnsServer(DnsServer::Hostinger(obj)) => obj.member_tenant_id,
-            ObjectInner::DnsServer(DnsServer::HuaweiCloud(obj)) => obj.member_tenant_id,
-            ObjectInner::DnsServer(DnsServer::Hurricane(obj)) => obj.member_tenant_id,
-            ObjectInner::DnsServer(DnsServer::IbmCloud(obj)) => obj.member_tenant_id,
-            ObjectInner::DnsServer(DnsServer::Infoblox(obj)) => obj.member_tenant_id,
-            ObjectInner::DnsServer(DnsServer::Infomaniak(obj)) => obj.member_tenant_id,
-            ObjectInner::DnsServer(DnsServer::Inwx(obj)) => obj.member_tenant_id,
-            ObjectInner::DnsServer(DnsServer::Ionos(obj)) => obj.member_tenant_id,
-            ObjectInner::DnsServer(DnsServer::Ipv64(obj)) => obj.member_tenant_id,
-            ObjectInner::DnsServer(DnsServer::Joker(obj)) => obj.member_tenant_id,
-            ObjectInner::DnsServer(DnsServer::Lightsail(obj)) => obj.member_tenant_id,
-            ObjectInner::DnsServer(DnsServer::Linode(obj)) => obj.member_tenant_id,
-            ObjectInner::DnsServer(DnsServer::LuaDns(obj)) => obj.member_tenant_id,
-            ObjectInner::DnsServer(DnsServer::MythicBeasts(obj)) => obj.member_tenant_id,
-            ObjectInner::DnsServer(DnsServer::Namecheap(obj)) => obj.member_tenant_id,
-            ObjectInner::DnsServer(DnsServer::NameDotCom(obj)) => obj.member_tenant_id,
-            ObjectInner::DnsServer(DnsServer::NameSilo(obj)) => obj.member_tenant_id,
-            ObjectInner::DnsServer(DnsServer::Netcup(obj)) => obj.member_tenant_id,
-            ObjectInner::DnsServer(DnsServer::Netlify(obj)) => obj.member_tenant_id,
-            ObjectInner::DnsServer(DnsServer::Nifcloud(obj)) => obj.member_tenant_id,
-            ObjectInner::DnsServer(DnsServer::Ns1(obj)) => obj.member_tenant_id,
-            ObjectInner::DnsServer(DnsServer::OracleCloud(obj)) => obj.member_tenant_id,
-            ObjectInner::DnsServer(DnsServer::Plesk(obj)) => obj.member_tenant_id,
-            ObjectInner::DnsServer(DnsServer::Safedns(obj)) => obj.member_tenant_id,
-            ObjectInner::DnsServer(DnsServer::Scaleway(obj)) => obj.member_tenant_id,
-            ObjectInner::DnsServer(DnsServer::TencentCloud(obj)) => obj.member_tenant_id,
-            ObjectInner::DnsServer(DnsServer::Transip(obj)) => obj.member_tenant_id,
-            ObjectInner::DnsServer(DnsServer::UltraDns(obj)) => obj.member_tenant_id,
-            ObjectInner::DnsServer(DnsServer::Vercel(obj)) => obj.member_tenant_id,
-            ObjectInner::DnsServer(DnsServer::Volcengine(obj)) => obj.member_tenant_id,
-            ObjectInner::DnsServer(DnsServer::Vultr(obj)) => obj.member_tenant_id,
-            ObjectInner::DnsServer(DnsServer::WebSupport(obj)) => obj.member_tenant_id,
-            ObjectInner::DnsServer(DnsServer::YandexCloud(obj)) => obj.member_tenant_id,
-            ObjectInner::DnsServer(DnsServer::PowerDns(obj)) => obj.member_tenant_id,
+            ObjectInner::DnsServer(inner) => match inner.as_ref() {
+                DnsServer::Tsig(obj) => obj.member_tenant_id,
+                DnsServer::Cloudflare(obj) => obj.member_tenant_id,
+                DnsServer::DigitalOcean(obj) => obj.member_tenant_id,
+                DnsServer::DeSEC(obj) => obj.member_tenant_id,
+                DnsServer::Ovh(obj) => obj.member_tenant_id,
+                DnsServer::Bunny(obj) => obj.member_tenant_id,
+                DnsServer::Porkbun(obj) => obj.member_tenant_id,
+                DnsServer::Dnsimple(obj) => obj.member_tenant_id,
+                DnsServer::Spaceship(obj) => obj.member_tenant_id,
+                DnsServer::Route53(obj) => obj.member_tenant_id,
+                DnsServer::GoogleCloudDns(obj) => obj.member_tenant_id,
+                DnsServer::Alidns(obj) => obj.member_tenant_id,
+                DnsServer::ArvanCloud(obj) => obj.member_tenant_id,
+                DnsServer::Autodns(obj) => obj.member_tenant_id,
+                DnsServer::AzureDns(obj) => obj.member_tenant_id,
+                DnsServer::BaiduCloud(obj) => obj.member_tenant_id,
+                DnsServer::BluecatV2(obj) => obj.member_tenant_id,
+                DnsServer::ClouDns(obj) => obj.member_tenant_id,
+                DnsServer::Constellix(obj) => obj.member_tenant_id,
+                DnsServer::Cpanel(obj) => obj.member_tenant_id,
+                DnsServer::Ddnss(obj) => obj.member_tenant_id,
+                DnsServer::DnsMadeEasy(obj) => obj.member_tenant_id,
+                DnsServer::Domeneshop(obj) => obj.member_tenant_id,
+                DnsServer::Dreamhost(obj) => obj.member_tenant_id,
+                DnsServer::DuckDns(obj) => obj.member_tenant_id,
+                DnsServer::Dynu(obj) => obj.member_tenant_id,
+                DnsServer::EasyDns(obj) => obj.member_tenant_id,
+                DnsServer::EdgeDns(obj) => obj.member_tenant_id,
+                DnsServer::Exoscale(obj) => obj.member_tenant_id,
+                DnsServer::FreeMyIp(obj) => obj.member_tenant_id,
+                DnsServer::GandiV5(obj) => obj.member_tenant_id,
+                DnsServer::Gcore(obj) => obj.member_tenant_id,
+                DnsServer::Glesys(obj) => obj.member_tenant_id,
+                DnsServer::Godaddy(obj) => obj.member_tenant_id,
+                DnsServer::Hetzner(obj) => obj.member_tenant_id,
+                DnsServer::HostingDe(obj) => obj.member_tenant_id,
+                DnsServer::Hostinger(obj) => obj.member_tenant_id,
+                DnsServer::HuaweiCloud(obj) => obj.member_tenant_id,
+                DnsServer::Hurricane(obj) => obj.member_tenant_id,
+                DnsServer::IbmCloud(obj) => obj.member_tenant_id,
+                DnsServer::Infoblox(obj) => obj.member_tenant_id,
+                DnsServer::Infomaniak(obj) => obj.member_tenant_id,
+                DnsServer::Inwx(obj) => obj.member_tenant_id,
+                DnsServer::Ionos(obj) => obj.member_tenant_id,
+                DnsServer::Ipv64(obj) => obj.member_tenant_id,
+                DnsServer::Joker(obj) => obj.member_tenant_id,
+                DnsServer::Lightsail(obj) => obj.member_tenant_id,
+                DnsServer::Linode(obj) => obj.member_tenant_id,
+                DnsServer::LuaDns(obj) => obj.member_tenant_id,
+                DnsServer::MythicBeasts(obj) => obj.member_tenant_id,
+                DnsServer::Namecheap(obj) => obj.member_tenant_id,
+                DnsServer::NameDotCom(obj) => obj.member_tenant_id,
+                DnsServer::NameSilo(obj) => obj.member_tenant_id,
+                DnsServer::Netcup(obj) => obj.member_tenant_id,
+                DnsServer::Netlify(obj) => obj.member_tenant_id,
+                DnsServer::Nifcloud(obj) => obj.member_tenant_id,
+                DnsServer::Ns1(obj) => obj.member_tenant_id,
+                DnsServer::OracleCloud(obj) => obj.member_tenant_id,
+                DnsServer::Plesk(obj) => obj.member_tenant_id,
+                DnsServer::Safedns(obj) => obj.member_tenant_id,
+                DnsServer::Scaleway(obj) => obj.member_tenant_id,
+                DnsServer::TencentCloud(obj) => obj.member_tenant_id,
+                DnsServer::Transip(obj) => obj.member_tenant_id,
+                DnsServer::UltraDns(obj) => obj.member_tenant_id,
+                DnsServer::Vercel(obj) => obj.member_tenant_id,
+                DnsServer::Volcengine(obj) => obj.member_tenant_id,
+                DnsServer::Vultr(obj) => obj.member_tenant_id,
+                DnsServer::WebSupport(obj) => obj.member_tenant_id,
+                DnsServer::YandexCloud(obj) => obj.member_tenant_id,
+                DnsServer::PowerDns(obj) => obj.member_tenant_id,
+            },
             ObjectInner::Domain(obj) => obj.member_tenant_id,
             ObjectInner::MailingList(obj) => obj.member_tenant_id,
             ObjectInner::OAuthClient(obj) => obj.member_tenant_id,
@@ -4508,98 +4615,97 @@ impl ObjectInner {
 
     pub fn set_member_tenant_id(&mut self, id: Id) {
         match self {
-            ObjectInner::Account(Account::User(obj)) => obj.member_tenant_id = Some(id),
-            ObjectInner::Account(Account::Group(obj)) => obj.member_tenant_id = Some(id),
+            ObjectInner::Account(inner) => match inner.as_mut() {
+                Account::User(obj) => obj.member_tenant_id = Some(id),
+                Account::Group(obj) => obj.member_tenant_id = Some(id),
+            },
             ObjectInner::AcmeProvider(obj) => obj.member_tenant_id = Some(id),
             ObjectInner::ArfExternalReport(obj) => obj.member_tenant_id = Some(id),
-            ObjectInner::Directory(Directory::Ldap(obj)) => obj.member_tenant_id = Some(id),
-            ObjectInner::Directory(Directory::Sql(obj)) => obj.member_tenant_id = Some(id),
-            ObjectInner::Directory(Directory::Oidc(obj)) => obj.member_tenant_id = Some(id),
-            ObjectInner::DkimSignature(DkimSignature::Dkim1Ed25519Sha256(obj)) => {
-                obj.member_tenant_id = Some(id)
-            }
-            ObjectInner::DkimSignature(DkimSignature::Dkim1RsaSha256(obj)) => {
-                obj.member_tenant_id = Some(id)
-            }
-            ObjectInner::DkimSignature(DkimSignature::Dkim2Ed25519Sha256(obj)) => {
-                obj.member_tenant_id = Some(id)
-            }
-            ObjectInner::DkimSignature(DkimSignature::Dkim2RsaSha256(obj)) => {
-                obj.member_tenant_id = Some(id)
-            }
+            ObjectInner::Directory(inner) => match inner.as_mut() {
+                Directory::Ldap(obj) => obj.member_tenant_id = Some(id),
+                Directory::Sql(obj) => obj.member_tenant_id = Some(id),
+                Directory::Oidc(obj) => obj.member_tenant_id = Some(id),
+            },
+            ObjectInner::DkimSignature(inner) => match inner.as_mut() {
+                DkimSignature::Dkim1Ed25519Sha256(obj) => obj.member_tenant_id = Some(id),
+                DkimSignature::Dkim1RsaSha256(obj) => obj.member_tenant_id = Some(id),
+                DkimSignature::Dkim2Ed25519Sha256(obj) => obj.member_tenant_id = Some(id),
+                DkimSignature::Dkim2RsaSha256(obj) => obj.member_tenant_id = Some(id),
+                DkimSignature::Dkim2MlDsa44Ed25519Sha512(obj) => obj.member_tenant_id = Some(id),
+            },
             ObjectInner::DmarcExternalReport(obj) => obj.member_tenant_id = Some(id),
-            ObjectInner::DnsServer(DnsServer::Tsig(obj)) => obj.member_tenant_id = Some(id),
-            ObjectInner::DnsServer(DnsServer::Cloudflare(obj)) => obj.member_tenant_id = Some(id),
-            ObjectInner::DnsServer(DnsServer::DigitalOcean(obj)) => obj.member_tenant_id = Some(id),
-            ObjectInner::DnsServer(DnsServer::DeSEC(obj)) => obj.member_tenant_id = Some(id),
-            ObjectInner::DnsServer(DnsServer::Ovh(obj)) => obj.member_tenant_id = Some(id),
-            ObjectInner::DnsServer(DnsServer::Bunny(obj)) => obj.member_tenant_id = Some(id),
-            ObjectInner::DnsServer(DnsServer::Porkbun(obj)) => obj.member_tenant_id = Some(id),
-            ObjectInner::DnsServer(DnsServer::Dnsimple(obj)) => obj.member_tenant_id = Some(id),
-            ObjectInner::DnsServer(DnsServer::Spaceship(obj)) => obj.member_tenant_id = Some(id),
-            ObjectInner::DnsServer(DnsServer::Route53(obj)) => obj.member_tenant_id = Some(id),
-            ObjectInner::DnsServer(DnsServer::GoogleCloudDns(obj)) => {
-                obj.member_tenant_id = Some(id)
-            }
-            ObjectInner::DnsServer(DnsServer::Alidns(obj)) => obj.member_tenant_id = Some(id),
-            ObjectInner::DnsServer(DnsServer::ArvanCloud(obj)) => obj.member_tenant_id = Some(id),
-            ObjectInner::DnsServer(DnsServer::Autodns(obj)) => obj.member_tenant_id = Some(id),
-            ObjectInner::DnsServer(DnsServer::AzureDns(obj)) => obj.member_tenant_id = Some(id),
-            ObjectInner::DnsServer(DnsServer::BaiduCloud(obj)) => obj.member_tenant_id = Some(id),
-            ObjectInner::DnsServer(DnsServer::BluecatV2(obj)) => obj.member_tenant_id = Some(id),
-            ObjectInner::DnsServer(DnsServer::ClouDns(obj)) => obj.member_tenant_id = Some(id),
-            ObjectInner::DnsServer(DnsServer::Constellix(obj)) => obj.member_tenant_id = Some(id),
-            ObjectInner::DnsServer(DnsServer::Cpanel(obj)) => obj.member_tenant_id = Some(id),
-            ObjectInner::DnsServer(DnsServer::Ddnss(obj)) => obj.member_tenant_id = Some(id),
-            ObjectInner::DnsServer(DnsServer::DnsMadeEasy(obj)) => obj.member_tenant_id = Some(id),
-            ObjectInner::DnsServer(DnsServer::Domeneshop(obj)) => obj.member_tenant_id = Some(id),
-            ObjectInner::DnsServer(DnsServer::Dreamhost(obj)) => obj.member_tenant_id = Some(id),
-            ObjectInner::DnsServer(DnsServer::DuckDns(obj)) => obj.member_tenant_id = Some(id),
-            ObjectInner::DnsServer(DnsServer::Dynu(obj)) => obj.member_tenant_id = Some(id),
-            ObjectInner::DnsServer(DnsServer::EasyDns(obj)) => obj.member_tenant_id = Some(id),
-            ObjectInner::DnsServer(DnsServer::EdgeDns(obj)) => obj.member_tenant_id = Some(id),
-            ObjectInner::DnsServer(DnsServer::Exoscale(obj)) => obj.member_tenant_id = Some(id),
-            ObjectInner::DnsServer(DnsServer::FreeMyIp(obj)) => obj.member_tenant_id = Some(id),
-            ObjectInner::DnsServer(DnsServer::GandiV5(obj)) => obj.member_tenant_id = Some(id),
-            ObjectInner::DnsServer(DnsServer::Gcore(obj)) => obj.member_tenant_id = Some(id),
-            ObjectInner::DnsServer(DnsServer::Glesys(obj)) => obj.member_tenant_id = Some(id),
-            ObjectInner::DnsServer(DnsServer::Godaddy(obj)) => obj.member_tenant_id = Some(id),
-            ObjectInner::DnsServer(DnsServer::Hetzner(obj)) => obj.member_tenant_id = Some(id),
-            ObjectInner::DnsServer(DnsServer::HostingDe(obj)) => obj.member_tenant_id = Some(id),
-            ObjectInner::DnsServer(DnsServer::Hostinger(obj)) => obj.member_tenant_id = Some(id),
-            ObjectInner::DnsServer(DnsServer::HuaweiCloud(obj)) => obj.member_tenant_id = Some(id),
-            ObjectInner::DnsServer(DnsServer::Hurricane(obj)) => obj.member_tenant_id = Some(id),
-            ObjectInner::DnsServer(DnsServer::IbmCloud(obj)) => obj.member_tenant_id = Some(id),
-            ObjectInner::DnsServer(DnsServer::Infoblox(obj)) => obj.member_tenant_id = Some(id),
-            ObjectInner::DnsServer(DnsServer::Infomaniak(obj)) => obj.member_tenant_id = Some(id),
-            ObjectInner::DnsServer(DnsServer::Inwx(obj)) => obj.member_tenant_id = Some(id),
-            ObjectInner::DnsServer(DnsServer::Ionos(obj)) => obj.member_tenant_id = Some(id),
-            ObjectInner::DnsServer(DnsServer::Ipv64(obj)) => obj.member_tenant_id = Some(id),
-            ObjectInner::DnsServer(DnsServer::Joker(obj)) => obj.member_tenant_id = Some(id),
-            ObjectInner::DnsServer(DnsServer::Lightsail(obj)) => obj.member_tenant_id = Some(id),
-            ObjectInner::DnsServer(DnsServer::Linode(obj)) => obj.member_tenant_id = Some(id),
-            ObjectInner::DnsServer(DnsServer::LuaDns(obj)) => obj.member_tenant_id = Some(id),
-            ObjectInner::DnsServer(DnsServer::MythicBeasts(obj)) => obj.member_tenant_id = Some(id),
-            ObjectInner::DnsServer(DnsServer::Namecheap(obj)) => obj.member_tenant_id = Some(id),
-            ObjectInner::DnsServer(DnsServer::NameDotCom(obj)) => obj.member_tenant_id = Some(id),
-            ObjectInner::DnsServer(DnsServer::NameSilo(obj)) => obj.member_tenant_id = Some(id),
-            ObjectInner::DnsServer(DnsServer::Netcup(obj)) => obj.member_tenant_id = Some(id),
-            ObjectInner::DnsServer(DnsServer::Netlify(obj)) => obj.member_tenant_id = Some(id),
-            ObjectInner::DnsServer(DnsServer::Nifcloud(obj)) => obj.member_tenant_id = Some(id),
-            ObjectInner::DnsServer(DnsServer::Ns1(obj)) => obj.member_tenant_id = Some(id),
-            ObjectInner::DnsServer(DnsServer::OracleCloud(obj)) => obj.member_tenant_id = Some(id),
-            ObjectInner::DnsServer(DnsServer::Plesk(obj)) => obj.member_tenant_id = Some(id),
-            ObjectInner::DnsServer(DnsServer::Safedns(obj)) => obj.member_tenant_id = Some(id),
-            ObjectInner::DnsServer(DnsServer::Scaleway(obj)) => obj.member_tenant_id = Some(id),
-            ObjectInner::DnsServer(DnsServer::TencentCloud(obj)) => obj.member_tenant_id = Some(id),
-            ObjectInner::DnsServer(DnsServer::Transip(obj)) => obj.member_tenant_id = Some(id),
-            ObjectInner::DnsServer(DnsServer::UltraDns(obj)) => obj.member_tenant_id = Some(id),
-            ObjectInner::DnsServer(DnsServer::Vercel(obj)) => obj.member_tenant_id = Some(id),
-            ObjectInner::DnsServer(DnsServer::Volcengine(obj)) => obj.member_tenant_id = Some(id),
-            ObjectInner::DnsServer(DnsServer::Vultr(obj)) => obj.member_tenant_id = Some(id),
-            ObjectInner::DnsServer(DnsServer::WebSupport(obj)) => obj.member_tenant_id = Some(id),
-            ObjectInner::DnsServer(DnsServer::YandexCloud(obj)) => obj.member_tenant_id = Some(id),
-            ObjectInner::DnsServer(DnsServer::PowerDns(obj)) => obj.member_tenant_id = Some(id),
+            ObjectInner::DnsServer(inner) => match inner.as_mut() {
+                DnsServer::Tsig(obj) => obj.member_tenant_id = Some(id),
+                DnsServer::Cloudflare(obj) => obj.member_tenant_id = Some(id),
+                DnsServer::DigitalOcean(obj) => obj.member_tenant_id = Some(id),
+                DnsServer::DeSEC(obj) => obj.member_tenant_id = Some(id),
+                DnsServer::Ovh(obj) => obj.member_tenant_id = Some(id),
+                DnsServer::Bunny(obj) => obj.member_tenant_id = Some(id),
+                DnsServer::Porkbun(obj) => obj.member_tenant_id = Some(id),
+                DnsServer::Dnsimple(obj) => obj.member_tenant_id = Some(id),
+                DnsServer::Spaceship(obj) => obj.member_tenant_id = Some(id),
+                DnsServer::Route53(obj) => obj.member_tenant_id = Some(id),
+                DnsServer::GoogleCloudDns(obj) => obj.member_tenant_id = Some(id),
+                DnsServer::Alidns(obj) => obj.member_tenant_id = Some(id),
+                DnsServer::ArvanCloud(obj) => obj.member_tenant_id = Some(id),
+                DnsServer::Autodns(obj) => obj.member_tenant_id = Some(id),
+                DnsServer::AzureDns(obj) => obj.member_tenant_id = Some(id),
+                DnsServer::BaiduCloud(obj) => obj.member_tenant_id = Some(id),
+                DnsServer::BluecatV2(obj) => obj.member_tenant_id = Some(id),
+                DnsServer::ClouDns(obj) => obj.member_tenant_id = Some(id),
+                DnsServer::Constellix(obj) => obj.member_tenant_id = Some(id),
+                DnsServer::Cpanel(obj) => obj.member_tenant_id = Some(id),
+                DnsServer::Ddnss(obj) => obj.member_tenant_id = Some(id),
+                DnsServer::DnsMadeEasy(obj) => obj.member_tenant_id = Some(id),
+                DnsServer::Domeneshop(obj) => obj.member_tenant_id = Some(id),
+                DnsServer::Dreamhost(obj) => obj.member_tenant_id = Some(id),
+                DnsServer::DuckDns(obj) => obj.member_tenant_id = Some(id),
+                DnsServer::Dynu(obj) => obj.member_tenant_id = Some(id),
+                DnsServer::EasyDns(obj) => obj.member_tenant_id = Some(id),
+                DnsServer::EdgeDns(obj) => obj.member_tenant_id = Some(id),
+                DnsServer::Exoscale(obj) => obj.member_tenant_id = Some(id),
+                DnsServer::FreeMyIp(obj) => obj.member_tenant_id = Some(id),
+                DnsServer::GandiV5(obj) => obj.member_tenant_id = Some(id),
+                DnsServer::Gcore(obj) => obj.member_tenant_id = Some(id),
+                DnsServer::Glesys(obj) => obj.member_tenant_id = Some(id),
+                DnsServer::Godaddy(obj) => obj.member_tenant_id = Some(id),
+                DnsServer::Hetzner(obj) => obj.member_tenant_id = Some(id),
+                DnsServer::HostingDe(obj) => obj.member_tenant_id = Some(id),
+                DnsServer::Hostinger(obj) => obj.member_tenant_id = Some(id),
+                DnsServer::HuaweiCloud(obj) => obj.member_tenant_id = Some(id),
+                DnsServer::Hurricane(obj) => obj.member_tenant_id = Some(id),
+                DnsServer::IbmCloud(obj) => obj.member_tenant_id = Some(id),
+                DnsServer::Infoblox(obj) => obj.member_tenant_id = Some(id),
+                DnsServer::Infomaniak(obj) => obj.member_tenant_id = Some(id),
+                DnsServer::Inwx(obj) => obj.member_tenant_id = Some(id),
+                DnsServer::Ionos(obj) => obj.member_tenant_id = Some(id),
+                DnsServer::Ipv64(obj) => obj.member_tenant_id = Some(id),
+                DnsServer::Joker(obj) => obj.member_tenant_id = Some(id),
+                DnsServer::Lightsail(obj) => obj.member_tenant_id = Some(id),
+                DnsServer::Linode(obj) => obj.member_tenant_id = Some(id),
+                DnsServer::LuaDns(obj) => obj.member_tenant_id = Some(id),
+                DnsServer::MythicBeasts(obj) => obj.member_tenant_id = Some(id),
+                DnsServer::Namecheap(obj) => obj.member_tenant_id = Some(id),
+                DnsServer::NameDotCom(obj) => obj.member_tenant_id = Some(id),
+                DnsServer::NameSilo(obj) => obj.member_tenant_id = Some(id),
+                DnsServer::Netcup(obj) => obj.member_tenant_id = Some(id),
+                DnsServer::Netlify(obj) => obj.member_tenant_id = Some(id),
+                DnsServer::Nifcloud(obj) => obj.member_tenant_id = Some(id),
+                DnsServer::Ns1(obj) => obj.member_tenant_id = Some(id),
+                DnsServer::OracleCloud(obj) => obj.member_tenant_id = Some(id),
+                DnsServer::Plesk(obj) => obj.member_tenant_id = Some(id),
+                DnsServer::Safedns(obj) => obj.member_tenant_id = Some(id),
+                DnsServer::Scaleway(obj) => obj.member_tenant_id = Some(id),
+                DnsServer::TencentCloud(obj) => obj.member_tenant_id = Some(id),
+                DnsServer::Transip(obj) => obj.member_tenant_id = Some(id),
+                DnsServer::UltraDns(obj) => obj.member_tenant_id = Some(id),
+                DnsServer::Vercel(obj) => obj.member_tenant_id = Some(id),
+                DnsServer::Volcengine(obj) => obj.member_tenant_id = Some(id),
+                DnsServer::Vultr(obj) => obj.member_tenant_id = Some(id),
+                DnsServer::WebSupport(obj) => obj.member_tenant_id = Some(id),
+                DnsServer::YandexCloud(obj) => obj.member_tenant_id = Some(id),
+                DnsServer::PowerDns(obj) => obj.member_tenant_id = Some(id),
+            },
             ObjectInner::Domain(obj) => obj.member_tenant_id = Some(id),
             ObjectInner::MailingList(obj) => obj.member_tenant_id = Some(id),
             ObjectInner::OAuthClient(obj) => obj.member_tenant_id = Some(id),
@@ -4609,65 +4715,19 @@ impl ObjectInner {
         }
     }
 
-    pub fn account_id(&self) -> Option<Id> {
-        match self {
-            ObjectInner::ArchivedItem(ArchivedItem::Email(obj)) => Some(obj.account_id),
-            ObjectInner::ArchivedItem(ArchivedItem::FileNode(obj)) => Some(obj.account_id),
-            ObjectInner::ArchivedItem(ArchivedItem::CalendarEvent(obj)) => Some(obj.account_id),
-            ObjectInner::ArchivedItem(ArchivedItem::ContactCard(obj)) => Some(obj.account_id),
-            ObjectInner::ArchivedItem(ArchivedItem::SieveScript(obj)) => Some(obj.account_id),
-            ObjectInner::MaskedEmail(obj) => Some(obj.account_id),
-            ObjectInner::PublicKey(obj) => Some(obj.account_id),
-            ObjectInner::SpamTrainingSample(obj) => obj.account_id,
-            ObjectInner::Task(Task::IndexDocument(obj)) => Some(obj.account_id),
-            ObjectInner::Task(Task::UnindexDocument(obj)) => Some(obj.account_id),
-            ObjectInner::Task(Task::CalendarAlarmEmail(obj)) => Some(obj.account_id),
-            ObjectInner::Task(Task::CalendarAlarmNotification(obj)) => Some(obj.account_id),
-            ObjectInner::Task(Task::CalendarItipMessage(obj)) => Some(obj.account_id),
-            ObjectInner::Task(Task::MergeThreads(obj)) => Some(obj.account_id),
-            ObjectInner::Task(Task::RestoreArchivedItem(obj)) => Some(obj.account_id),
-            ObjectInner::Task(Task::DestroyAccount(obj)) => Some(obj.account_id),
-            ObjectInner::Task(Task::AccountMaintenance(obj)) => Some(obj.account_id),
-            _ => None,
-        }
-    }
-
-    pub fn set_account_id(&mut self, id: Id) {
-        match self {
-            ObjectInner::ArchivedItem(ArchivedItem::Email(obj)) => obj.account_id = id,
-            ObjectInner::ArchivedItem(ArchivedItem::FileNode(obj)) => obj.account_id = id,
-            ObjectInner::ArchivedItem(ArchivedItem::CalendarEvent(obj)) => obj.account_id = id,
-            ObjectInner::ArchivedItem(ArchivedItem::ContactCard(obj)) => obj.account_id = id,
-            ObjectInner::ArchivedItem(ArchivedItem::SieveScript(obj)) => obj.account_id = id,
-            ObjectInner::MaskedEmail(obj) => obj.account_id = id,
-            ObjectInner::PublicKey(obj) => obj.account_id = id,
-            ObjectInner::SpamTrainingSample(obj) => obj.account_id = Some(id),
-            ObjectInner::Task(Task::IndexDocument(obj)) => obj.account_id = id,
-            ObjectInner::Task(Task::UnindexDocument(obj)) => obj.account_id = id,
-            ObjectInner::Task(Task::CalendarAlarmEmail(obj)) => obj.account_id = id,
-            ObjectInner::Task(Task::CalendarAlarmNotification(obj)) => obj.account_id = id,
-            ObjectInner::Task(Task::CalendarItipMessage(obj)) => obj.account_id = id,
-            ObjectInner::Task(Task::MergeThreads(obj)) => obj.account_id = id,
-            ObjectInner::Task(Task::RestoreArchivedItem(obj)) => obj.account_id = id,
-            ObjectInner::Task(Task::DestroyAccount(obj)) => obj.account_id = id,
-            ObjectInner::Task(Task::AccountMaintenance(obj)) => obj.account_id = id,
-            _ => {}
-        }
-    }
-
     pub fn to_pickled_vec(&self) -> Vec<u8> {
         match &self {
             ObjectInner::Account(obj) => obj.to_pickled_vec(),
-            ObjectInner::AccountPassword(obj) => obj.to_pickled_vec(),
-            ObjectInner::AccountSettings(obj) => obj.to_pickled_vec(),
+            ObjectInner::AccountPassword(_) => unimplemented!("AccountPassword is not stored"),
+            ObjectInner::AccountSettings(_) => unimplemented!("AccountSettings is not stored"),
             ObjectInner::AcmeProvider(obj) => obj.to_pickled_vec(),
-            ObjectInner::Action(obj) => obj.to_pickled_vec(),
+            ObjectInner::Action(_) => unimplemented!("Action is not stored"),
             ObjectInner::AddressBook(obj) => obj.to_pickled_vec(),
             ObjectInner::AiModel(obj) => obj.to_pickled_vec(),
             ObjectInner::Alert(obj) => obj.to_pickled_vec(),
             ObjectInner::AllowedIp(obj) => obj.to_pickled_vec(),
-            ObjectInner::ApiKey(obj) => obj.to_pickled_vec(),
-            ObjectInner::AppPassword(obj) => obj.to_pickled_vec(),
+            ObjectInner::ApiKey(_) => unimplemented!("ApiKey is not stored"),
+            ObjectInner::AppPassword(_) => unimplemented!("AppPassword is not stored"),
             ObjectInner::Application(obj) => obj.to_pickled_vec(),
             ObjectInner::ArchivedItem(obj) => obj.to_pickled_vec(),
             ObjectInner::ArfExternalReport(obj) => obj.to_pickled_vec(),
@@ -4675,17 +4735,17 @@ impl ObjectInner {
             ObjectInner::Authentication(obj) => obj.to_pickled_vec(),
             ObjectInner::BlobStore(obj) => obj.to_pickled_vec(),
             ObjectInner::BlockedIp(obj) => obj.to_pickled_vec(),
-            ObjectInner::Bootstrap(obj) => obj.to_pickled_vec(),
+            ObjectInner::Bootstrap(_) => unimplemented!("Bootstrap is not stored"),
             ObjectInner::Cache(obj) => obj.to_pickled_vec(),
             ObjectInner::Calendar(obj) => obj.to_pickled_vec(),
             ObjectInner::CalendarAlarm(obj) => obj.to_pickled_vec(),
             ObjectInner::CalendarScheduling(obj) => obj.to_pickled_vec(),
             ObjectInner::Certificate(obj) => obj.to_pickled_vec(),
-            ObjectInner::ClusterNode(obj) => obj.to_pickled_vec(),
+            ObjectInner::ClusterNode(_) => unimplemented!("ClusterNode is not stored"),
             ObjectInner::ClusterRole(obj) => obj.to_pickled_vec(),
             ObjectInner::Coordinator(obj) => obj.to_pickled_vec(),
             ObjectInner::DataRetention(obj) => obj.to_pickled_vec(),
-            ObjectInner::DataStore(obj) => obj.to_pickled_vec(),
+            ObjectInner::DataStore(_) => unimplemented!("DataStore is not stored"),
             ObjectInner::Directory(obj) => obj.to_pickled_vec(),
             ObjectInner::DkimReportSettings(obj) => obj.to_pickled_vec(),
             ObjectInner::DkimSignature(obj) => obj.to_pickled_vec(),
@@ -4705,12 +4765,14 @@ impl ObjectInner {
             ObjectInner::HttpLookup(obj) => obj.to_pickled_vec(),
             ObjectInner::Imap(obj) => obj.to_pickled_vec(),
             ObjectInner::InMemoryStore(obj) => obj.to_pickled_vec(),
+            ObjectInner::IndexQueueStatus(_) => unimplemented!("IndexQueueStatus is not stored"),
             ObjectInner::Jmap(obj) => obj.to_pickled_vec(),
-            ObjectInner::Log(obj) => obj.to_pickled_vec(),
+            ObjectInner::Log(_) => unimplemented!("Log is not stored"),
             ObjectInner::MailingList(obj) => obj.to_pickled_vec(),
             ObjectInner::MaskedEmail(obj) => obj.to_pickled_vec(),
             ObjectInner::MemoryLookupKey(obj) => obj.to_pickled_vec(),
             ObjectInner::MemoryLookupKeyValue(obj) => obj.to_pickled_vec(),
+            ObjectInner::Metadata(obj) => obj.to_pickled_vec(),
             ObjectInner::Metric(obj) => obj.to_pickled_vec(),
             ObjectInner::Metrics(obj) => obj.to_pickled_vec(),
             ObjectInner::MetricsStore(obj) => obj.to_pickled_vec(),
@@ -4736,9 +4798,10 @@ impl ObjectInner {
             ObjectInner::MtaVirtualQueue(obj) => obj.to_pickled_vec(),
             ObjectInner::NetworkListener(obj) => obj.to_pickled_vec(),
             ObjectInner::OAuthClient(obj) => obj.to_pickled_vec(),
+            ObjectInner::OAuthGrant(obj) => obj.to_pickled_vec(),
             ObjectInner::OidcProvider(obj) => obj.to_pickled_vec(),
             ObjectInner::PublicKey(obj) => obj.to_pickled_vec(),
-            ObjectInner::QueuedMessage(obj) => obj.to_pickled_vec(),
+            ObjectInner::QueuedMessage(_) => unimplemented!("QueuedMessage is not stored"),
             ObjectInner::ReportSettings(obj) => obj.to_pickled_vec(),
             ObjectInner::Role(obj) => obj.to_pickled_vec(),
             ObjectInner::Search(obj) => obj.to_pickled_vec(),
@@ -4750,11 +4813,11 @@ impl ObjectInner {
             ObjectInner::SieveSystemScript(obj) => obj.to_pickled_vec(),
             ObjectInner::SieveUserInterpreter(obj) => obj.to_pickled_vec(),
             ObjectInner::SieveUserScript(obj) => obj.to_pickled_vec(),
+            ObjectInner::SpamAi(obj) => obj.to_pickled_vec(),
             ObjectInner::SpamClassifier(obj) => obj.to_pickled_vec(),
             ObjectInner::SpamDnsblServer(obj) => obj.to_pickled_vec(),
             ObjectInner::SpamDnsblSettings(obj) => obj.to_pickled_vec(),
             ObjectInner::SpamFileExtension(obj) => obj.to_pickled_vec(),
-            ObjectInner::SpamLlm(obj) => obj.to_pickled_vec(),
             ObjectInner::SpamPyzor(obj) => obj.to_pickled_vec(),
             ObjectInner::SpamRule(obj) => obj.to_pickled_vec(),
             ObjectInner::SpamSettings(obj) => obj.to_pickled_vec(),
@@ -4782,189 +4845,340 @@ impl ObjectInner {
         stream: &mut crate::pickle::PickledStream<'_>,
     ) -> Option<Self> {
         match object {
-            ObjectType::Account => Pickle::unpickle(stream).map(ObjectInner::Account),
-            ObjectType::AccountPassword => {
-                Pickle::unpickle(stream).map(ObjectInner::AccountPassword)
+            ObjectType::Account => {
+                Pickle::unpickle(stream).map(|obj| ObjectInner::Account(Box::new(obj)))
             }
-            ObjectType::AccountSettings => {
-                Pickle::unpickle(stream).map(ObjectInner::AccountSettings)
+            ObjectType::AccountPassword => unimplemented!("AccountPassword is not stored"),
+            ObjectType::AccountSettings => unimplemented!("AccountSettings is not stored"),
+            ObjectType::AcmeProvider => {
+                Pickle::unpickle(stream).map(|obj| ObjectInner::AcmeProvider(Box::new(obj)))
             }
-            ObjectType::AcmeProvider => Pickle::unpickle(stream).map(ObjectInner::AcmeProvider),
-            ObjectType::Action => Pickle::unpickle(stream).map(ObjectInner::Action),
-            ObjectType::AddressBook => Pickle::unpickle(stream).map(ObjectInner::AddressBook),
-            ObjectType::AiModel => Pickle::unpickle(stream).map(ObjectInner::AiModel),
-            ObjectType::Alert => Pickle::unpickle(stream).map(ObjectInner::Alert),
-            ObjectType::AllowedIp => Pickle::unpickle(stream).map(ObjectInner::AllowedIp),
-            ObjectType::ApiKey => Pickle::unpickle(stream).map(ObjectInner::ApiKey),
-            ObjectType::AppPassword => Pickle::unpickle(stream).map(ObjectInner::AppPassword),
-            ObjectType::Application => Pickle::unpickle(stream).map(ObjectInner::Application),
-            ObjectType::ArchivedItem => Pickle::unpickle(stream).map(ObjectInner::ArchivedItem),
+            ObjectType::Action => unimplemented!("Action is not stored"),
+            ObjectType::AddressBook => {
+                Pickle::unpickle(stream).map(|obj| ObjectInner::AddressBook(Box::new(obj)))
+            }
+            ObjectType::AiModel => {
+                Pickle::unpickle(stream).map(|obj| ObjectInner::AiModel(Box::new(obj)))
+            }
+            ObjectType::Alert => {
+                Pickle::unpickle(stream).map(|obj| ObjectInner::Alert(Box::new(obj)))
+            }
+            ObjectType::AllowedIp => {
+                Pickle::unpickle(stream).map(|obj| ObjectInner::AllowedIp(Box::new(obj)))
+            }
+            ObjectType::ApiKey => unimplemented!("ApiKey is not stored"),
+            ObjectType::AppPassword => unimplemented!("AppPassword is not stored"),
+            ObjectType::Application => {
+                Pickle::unpickle(stream).map(|obj| ObjectInner::Application(Box::new(obj)))
+            }
+            ObjectType::ArchivedItem => {
+                Pickle::unpickle(stream).map(|obj| ObjectInner::ArchivedItem(Box::new(obj)))
+            }
             ObjectType::ArfExternalReport => {
-                Pickle::unpickle(stream).map(ObjectInner::ArfExternalReport)
+                Pickle::unpickle(stream).map(|obj| ObjectInner::ArfExternalReport(Box::new(obj)))
             }
-            ObjectType::Asn => Pickle::unpickle(stream).map(ObjectInner::Asn),
-            ObjectType::Authentication => Pickle::unpickle(stream).map(ObjectInner::Authentication),
-            ObjectType::BlobStore => Pickle::unpickle(stream).map(ObjectInner::BlobStore),
-            ObjectType::BlockedIp => Pickle::unpickle(stream).map(ObjectInner::BlockedIp),
-            ObjectType::Bootstrap => Pickle::unpickle(stream).map(ObjectInner::Bootstrap),
-            ObjectType::Cache => Pickle::unpickle(stream).map(ObjectInner::Cache),
-            ObjectType::Calendar => Pickle::unpickle(stream).map(ObjectInner::Calendar),
-            ObjectType::CalendarAlarm => Pickle::unpickle(stream).map(ObjectInner::CalendarAlarm),
+            ObjectType::Asn => Pickle::unpickle(stream).map(|obj| ObjectInner::Asn(Box::new(obj))),
+            ObjectType::Authentication => {
+                Pickle::unpickle(stream).map(|obj| ObjectInner::Authentication(Box::new(obj)))
+            }
+            ObjectType::BlobStore => {
+                Pickle::unpickle(stream).map(|obj| ObjectInner::BlobStore(Box::new(obj)))
+            }
+            ObjectType::BlockedIp => {
+                Pickle::unpickle(stream).map(|obj| ObjectInner::BlockedIp(Box::new(obj)))
+            }
+            ObjectType::Bootstrap => unimplemented!("Bootstrap is not stored"),
+            ObjectType::Cache => {
+                Pickle::unpickle(stream).map(|obj| ObjectInner::Cache(Box::new(obj)))
+            }
+            ObjectType::Calendar => {
+                Pickle::unpickle(stream).map(|obj| ObjectInner::Calendar(Box::new(obj)))
+            }
+            ObjectType::CalendarAlarm => {
+                Pickle::unpickle(stream).map(|obj| ObjectInner::CalendarAlarm(Box::new(obj)))
+            }
             ObjectType::CalendarScheduling => {
-                Pickle::unpickle(stream).map(ObjectInner::CalendarScheduling)
+                Pickle::unpickle(stream).map(|obj| ObjectInner::CalendarScheduling(Box::new(obj)))
             }
-            ObjectType::Certificate => Pickle::unpickle(stream).map(ObjectInner::Certificate),
-            ObjectType::ClusterNode => Pickle::unpickle(stream).map(ObjectInner::ClusterNode),
-            ObjectType::ClusterRole => Pickle::unpickle(stream).map(ObjectInner::ClusterRole),
-            ObjectType::Coordinator => Pickle::unpickle(stream).map(ObjectInner::Coordinator),
-            ObjectType::DataRetention => Pickle::unpickle(stream).map(ObjectInner::DataRetention),
-            ObjectType::DataStore => Pickle::unpickle(stream).map(ObjectInner::DataStore),
-            ObjectType::Directory => Pickle::unpickle(stream).map(ObjectInner::Directory),
+            ObjectType::Certificate => {
+                Pickle::unpickle(stream).map(|obj| ObjectInner::Certificate(Box::new(obj)))
+            }
+            ObjectType::ClusterNode => unimplemented!("ClusterNode is not stored"),
+            ObjectType::ClusterRole => {
+                Pickle::unpickle(stream).map(|obj| ObjectInner::ClusterRole(Box::new(obj)))
+            }
+            ObjectType::Coordinator => {
+                Pickle::unpickle(stream).map(|obj| ObjectInner::Coordinator(Box::new(obj)))
+            }
+            ObjectType::DataRetention => {
+                Pickle::unpickle(stream).map(|obj| ObjectInner::DataRetention(Box::new(obj)))
+            }
+            ObjectType::DataStore => unimplemented!("DataStore is not stored"),
+            ObjectType::Directory => {
+                Pickle::unpickle(stream).map(|obj| ObjectInner::Directory(Box::new(obj)))
+            }
             ObjectType::DkimReportSettings => {
-                Pickle::unpickle(stream).map(ObjectInner::DkimReportSettings)
+                Pickle::unpickle(stream).map(|obj| ObjectInner::DkimReportSettings(Box::new(obj)))
             }
-            ObjectType::DkimSignature => Pickle::unpickle(stream).map(ObjectInner::DkimSignature),
+            ObjectType::DkimSignature => {
+                Pickle::unpickle(stream).map(|obj| ObjectInner::DkimSignature(Box::new(obj)))
+            }
             ObjectType::DmarcExternalReport => {
-                Pickle::unpickle(stream).map(ObjectInner::DmarcExternalReport)
+                Pickle::unpickle(stream).map(|obj| ObjectInner::DmarcExternalReport(Box::new(obj)))
             }
             ObjectType::DmarcInternalReport => {
-                Pickle::unpickle(stream).map(ObjectInner::DmarcInternalReport)
+                Pickle::unpickle(stream).map(|obj| ObjectInner::DmarcInternalReport(Box::new(obj)))
             }
             ObjectType::DmarcReportSettings => {
-                Pickle::unpickle(stream).map(ObjectInner::DmarcReportSettings)
+                Pickle::unpickle(stream).map(|obj| ObjectInner::DmarcReportSettings(Box::new(obj)))
             }
-            ObjectType::DnsResolver => Pickle::unpickle(stream).map(ObjectInner::DnsResolver),
-            ObjectType::DnsServer => Pickle::unpickle(stream).map(ObjectInner::DnsServer),
-            ObjectType::Domain => Pickle::unpickle(stream).map(ObjectInner::Domain),
+            ObjectType::DnsResolver => {
+                Pickle::unpickle(stream).map(|obj| ObjectInner::DnsResolver(Box::new(obj)))
+            }
+            ObjectType::DnsServer => {
+                Pickle::unpickle(stream).map(|obj| ObjectInner::DnsServer(Box::new(obj)))
+            }
+            ObjectType::Domain => {
+                Pickle::unpickle(stream).map(|obj| ObjectInner::Domain(Box::new(obj)))
+            }
             ObjectType::DsnReportSettings => {
-                Pickle::unpickle(stream).map(ObjectInner::DsnReportSettings)
+                Pickle::unpickle(stream).map(|obj| ObjectInner::DsnReportSettings(Box::new(obj)))
             }
-            ObjectType::Email => Pickle::unpickle(stream).map(ObjectInner::Email),
-            ObjectType::Enterprise => Pickle::unpickle(stream).map(ObjectInner::Enterprise),
+            ObjectType::Email => {
+                Pickle::unpickle(stream).map(|obj| ObjectInner::Email(Box::new(obj)))
+            }
+            ObjectType::Enterprise => {
+                Pickle::unpickle(stream).map(|obj| ObjectInner::Enterprise(Box::new(obj)))
+            }
             ObjectType::EventTracingLevel => {
-                Pickle::unpickle(stream).map(ObjectInner::EventTracingLevel)
+                Pickle::unpickle(stream).map(|obj| ObjectInner::EventTracingLevel(Box::new(obj)))
             }
-            ObjectType::FileStorage => Pickle::unpickle(stream).map(ObjectInner::FileStorage),
-            ObjectType::Http => Pickle::unpickle(stream).map(ObjectInner::Http),
-            ObjectType::HttpForm => Pickle::unpickle(stream).map(ObjectInner::HttpForm),
-            ObjectType::HttpLookup => Pickle::unpickle(stream).map(ObjectInner::HttpLookup),
-            ObjectType::Imap => Pickle::unpickle(stream).map(ObjectInner::Imap),
-            ObjectType::InMemoryStore => Pickle::unpickle(stream).map(ObjectInner::InMemoryStore),
-            ObjectType::Jmap => Pickle::unpickle(stream).map(ObjectInner::Jmap),
-            ObjectType::Log => Pickle::unpickle(stream).map(ObjectInner::Log),
-            ObjectType::MailingList => Pickle::unpickle(stream).map(ObjectInner::MailingList),
-            ObjectType::MaskedEmail => Pickle::unpickle(stream).map(ObjectInner::MaskedEmail),
+            ObjectType::FileStorage => {
+                Pickle::unpickle(stream).map(|obj| ObjectInner::FileStorage(Box::new(obj)))
+            }
+            ObjectType::Http => {
+                Pickle::unpickle(stream).map(|obj| ObjectInner::Http(Box::new(obj)))
+            }
+            ObjectType::HttpForm => {
+                Pickle::unpickle(stream).map(|obj| ObjectInner::HttpForm(Box::new(obj)))
+            }
+            ObjectType::HttpLookup => {
+                Pickle::unpickle(stream).map(|obj| ObjectInner::HttpLookup(Box::new(obj)))
+            }
+            ObjectType::Imap => {
+                Pickle::unpickle(stream).map(|obj| ObjectInner::Imap(Box::new(obj)))
+            }
+            ObjectType::InMemoryStore => {
+                Pickle::unpickle(stream).map(|obj| ObjectInner::InMemoryStore(Box::new(obj)))
+            }
+            ObjectType::IndexQueueStatus => unimplemented!("IndexQueueStatus is not stored"),
+            ObjectType::Jmap => {
+                Pickle::unpickle(stream).map(|obj| ObjectInner::Jmap(Box::new(obj)))
+            }
+            ObjectType::Log => unimplemented!("Log is not stored"),
+            ObjectType::MailingList => {
+                Pickle::unpickle(stream).map(|obj| ObjectInner::MailingList(Box::new(obj)))
+            }
+            ObjectType::MaskedEmail => {
+                Pickle::unpickle(stream).map(|obj| ObjectInner::MaskedEmail(Box::new(obj)))
+            }
             ObjectType::MemoryLookupKey => {
-                Pickle::unpickle(stream).map(ObjectInner::MemoryLookupKey)
+                Pickle::unpickle(stream).map(|obj| ObjectInner::MemoryLookupKey(Box::new(obj)))
             }
             ObjectType::MemoryLookupKeyValue => {
-                Pickle::unpickle(stream).map(ObjectInner::MemoryLookupKeyValue)
+                Pickle::unpickle(stream).map(|obj| ObjectInner::MemoryLookupKeyValue(Box::new(obj)))
             }
-            ObjectType::Metric => Pickle::unpickle(stream).map(ObjectInner::Metric),
-            ObjectType::Metrics => Pickle::unpickle(stream).map(ObjectInner::Metrics),
-            ObjectType::MetricsStore => Pickle::unpickle(stream).map(ObjectInner::MetricsStore),
-            ObjectType::MtaConnectionStrategy => {
-                Pickle::unpickle(stream).map(ObjectInner::MtaConnectionStrategy)
+            ObjectType::Metadata => {
+                Pickle::unpickle(stream).map(|obj| ObjectInner::Metadata(Box::new(obj)))
             }
+            ObjectType::Metric => {
+                Pickle::unpickle(stream).map(|obj| ObjectInner::Metric(Box::new(obj)))
+            }
+            ObjectType::Metrics => {
+                Pickle::unpickle(stream).map(|obj| ObjectInner::Metrics(Box::new(obj)))
+            }
+            ObjectType::MetricsStore => {
+                Pickle::unpickle(stream).map(|obj| ObjectInner::MetricsStore(Box::new(obj)))
+            }
+            ObjectType::MtaConnectionStrategy => Pickle::unpickle(stream)
+                .map(|obj| ObjectInner::MtaConnectionStrategy(Box::new(obj))),
             ObjectType::MtaDeliverySchedule => {
-                Pickle::unpickle(stream).map(ObjectInner::MtaDeliverySchedule)
+                Pickle::unpickle(stream).map(|obj| ObjectInner::MtaDeliverySchedule(Box::new(obj)))
             }
-            ObjectType::MtaExtensions => Pickle::unpickle(stream).map(ObjectInner::MtaExtensions),
-            ObjectType::MtaHook => Pickle::unpickle(stream).map(ObjectInner::MtaHook),
+            ObjectType::MtaExtensions => {
+                Pickle::unpickle(stream).map(|obj| ObjectInner::MtaExtensions(Box::new(obj)))
+            }
+            ObjectType::MtaHook => {
+                Pickle::unpickle(stream).map(|obj| ObjectInner::MtaHook(Box::new(obj)))
+            }
             ObjectType::MtaInboundSession => {
-                Pickle::unpickle(stream).map(ObjectInner::MtaInboundSession)
+                Pickle::unpickle(stream).map(|obj| ObjectInner::MtaInboundSession(Box::new(obj)))
             }
             ObjectType::MtaInboundThrottle => {
-                Pickle::unpickle(stream).map(ObjectInner::MtaInboundThrottle)
+                Pickle::unpickle(stream).map(|obj| ObjectInner::MtaInboundThrottle(Box::new(obj)))
             }
-            ObjectType::MtaMilter => Pickle::unpickle(stream).map(ObjectInner::MtaMilter),
+            ObjectType::MtaMilter => {
+                Pickle::unpickle(stream).map(|obj| ObjectInner::MtaMilter(Box::new(obj)))
+            }
             ObjectType::MtaOutboundStrategy => {
-                Pickle::unpickle(stream).map(ObjectInner::MtaOutboundStrategy)
+                Pickle::unpickle(stream).map(|obj| ObjectInner::MtaOutboundStrategy(Box::new(obj)))
             }
             ObjectType::MtaOutboundThrottle => {
-                Pickle::unpickle(stream).map(ObjectInner::MtaOutboundThrottle)
+                Pickle::unpickle(stream).map(|obj| ObjectInner::MtaOutboundThrottle(Box::new(obj)))
             }
-            ObjectType::MtaQueueQuota => Pickle::unpickle(stream).map(ObjectInner::MtaQueueQuota),
-            ObjectType::MtaRoute => Pickle::unpickle(stream).map(ObjectInner::MtaRoute),
-            ObjectType::MtaStageAuth => Pickle::unpickle(stream).map(ObjectInner::MtaStageAuth),
+            ObjectType::MtaQueueQuota => {
+                Pickle::unpickle(stream).map(|obj| ObjectInner::MtaQueueQuota(Box::new(obj)))
+            }
+            ObjectType::MtaRoute => {
+                Pickle::unpickle(stream).map(|obj| ObjectInner::MtaRoute(Box::new(obj)))
+            }
+            ObjectType::MtaStageAuth => {
+                Pickle::unpickle(stream).map(|obj| ObjectInner::MtaStageAuth(Box::new(obj)))
+            }
             ObjectType::MtaStageConnect => {
-                Pickle::unpickle(stream).map(ObjectInner::MtaStageConnect)
+                Pickle::unpickle(stream).map(|obj| ObjectInner::MtaStageConnect(Box::new(obj)))
             }
-            ObjectType::MtaStageData => Pickle::unpickle(stream).map(ObjectInner::MtaStageData),
-            ObjectType::MtaStageEhlo => Pickle::unpickle(stream).map(ObjectInner::MtaStageEhlo),
-            ObjectType::MtaStageMail => Pickle::unpickle(stream).map(ObjectInner::MtaStageMail),
-            ObjectType::MtaStageRcpt => Pickle::unpickle(stream).map(ObjectInner::MtaStageRcpt),
-            ObjectType::MtaSts => Pickle::unpickle(stream).map(ObjectInner::MtaSts),
-            ObjectType::MtaTlsStrategy => Pickle::unpickle(stream).map(ObjectInner::MtaTlsStrategy),
+            ObjectType::MtaStageData => {
+                Pickle::unpickle(stream).map(|obj| ObjectInner::MtaStageData(Box::new(obj)))
+            }
+            ObjectType::MtaStageEhlo => {
+                Pickle::unpickle(stream).map(|obj| ObjectInner::MtaStageEhlo(Box::new(obj)))
+            }
+            ObjectType::MtaStageMail => {
+                Pickle::unpickle(stream).map(|obj| ObjectInner::MtaStageMail(Box::new(obj)))
+            }
+            ObjectType::MtaStageRcpt => {
+                Pickle::unpickle(stream).map(|obj| ObjectInner::MtaStageRcpt(Box::new(obj)))
+            }
+            ObjectType::MtaSts => {
+                Pickle::unpickle(stream).map(|obj| ObjectInner::MtaSts(Box::new(obj)))
+            }
+            ObjectType::MtaTlsStrategy => {
+                Pickle::unpickle(stream).map(|obj| ObjectInner::MtaTlsStrategy(Box::new(obj)))
+            }
             ObjectType::MtaVirtualQueue => {
-                Pickle::unpickle(stream).map(ObjectInner::MtaVirtualQueue)
+                Pickle::unpickle(stream).map(|obj| ObjectInner::MtaVirtualQueue(Box::new(obj)))
             }
             ObjectType::NetworkListener => {
-                Pickle::unpickle(stream).map(ObjectInner::NetworkListener)
+                Pickle::unpickle(stream).map(|obj| ObjectInner::NetworkListener(Box::new(obj)))
             }
-            ObjectType::OAuthClient => Pickle::unpickle(stream).map(ObjectInner::OAuthClient),
-            ObjectType::OidcProvider => Pickle::unpickle(stream).map(ObjectInner::OidcProvider),
-            ObjectType::PublicKey => Pickle::unpickle(stream).map(ObjectInner::PublicKey),
-            ObjectType::QueuedMessage => Pickle::unpickle(stream).map(ObjectInner::QueuedMessage),
-            ObjectType::ReportSettings => Pickle::unpickle(stream).map(ObjectInner::ReportSettings),
-            ObjectType::Role => Pickle::unpickle(stream).map(ObjectInner::Role),
-            ObjectType::Search => Pickle::unpickle(stream).map(ObjectInner::Search),
-            ObjectType::SearchStore => Pickle::unpickle(stream).map(ObjectInner::SearchStore),
-            ObjectType::Security => Pickle::unpickle(stream).map(ObjectInner::Security),
-            ObjectType::SenderAuth => Pickle::unpickle(stream).map(ObjectInner::SenderAuth),
-            ObjectType::Sharing => Pickle::unpickle(stream).map(ObjectInner::Sharing),
-            ObjectType::SieveSystemInterpreter => {
-                Pickle::unpickle(stream).map(ObjectInner::SieveSystemInterpreter)
+            ObjectType::OAuthClient => {
+                Pickle::unpickle(stream).map(|obj| ObjectInner::OAuthClient(Box::new(obj)))
             }
+            ObjectType::OAuthGrant => {
+                Pickle::unpickle(stream).map(|obj| ObjectInner::OAuthGrant(Box::new(obj)))
+            }
+            ObjectType::OidcProvider => {
+                Pickle::unpickle(stream).map(|obj| ObjectInner::OidcProvider(Box::new(obj)))
+            }
+            ObjectType::PublicKey => {
+                Pickle::unpickle(stream).map(|obj| ObjectInner::PublicKey(Box::new(obj)))
+            }
+            ObjectType::QueuedMessage => unimplemented!("QueuedMessage is not stored"),
+            ObjectType::ReportSettings => {
+                Pickle::unpickle(stream).map(|obj| ObjectInner::ReportSettings(Box::new(obj)))
+            }
+            ObjectType::Role => {
+                Pickle::unpickle(stream).map(|obj| ObjectInner::Role(Box::new(obj)))
+            }
+            ObjectType::Search => {
+                Pickle::unpickle(stream).map(|obj| ObjectInner::Search(Box::new(obj)))
+            }
+            ObjectType::SearchStore => {
+                Pickle::unpickle(stream).map(|obj| ObjectInner::SearchStore(Box::new(obj)))
+            }
+            ObjectType::Security => {
+                Pickle::unpickle(stream).map(|obj| ObjectInner::Security(Box::new(obj)))
+            }
+            ObjectType::SenderAuth => {
+                Pickle::unpickle(stream).map(|obj| ObjectInner::SenderAuth(Box::new(obj)))
+            }
+            ObjectType::Sharing => {
+                Pickle::unpickle(stream).map(|obj| ObjectInner::Sharing(Box::new(obj)))
+            }
+            ObjectType::SieveSystemInterpreter => Pickle::unpickle(stream)
+                .map(|obj| ObjectInner::SieveSystemInterpreter(Box::new(obj))),
             ObjectType::SieveSystemScript => {
-                Pickle::unpickle(stream).map(ObjectInner::SieveSystemScript)
+                Pickle::unpickle(stream).map(|obj| ObjectInner::SieveSystemScript(Box::new(obj)))
             }
             ObjectType::SieveUserInterpreter => {
-                Pickle::unpickle(stream).map(ObjectInner::SieveUserInterpreter)
+                Pickle::unpickle(stream).map(|obj| ObjectInner::SieveUserInterpreter(Box::new(obj)))
             }
             ObjectType::SieveUserScript => {
-                Pickle::unpickle(stream).map(ObjectInner::SieveUserScript)
+                Pickle::unpickle(stream).map(|obj| ObjectInner::SieveUserScript(Box::new(obj)))
             }
-            ObjectType::SpamClassifier => Pickle::unpickle(stream).map(ObjectInner::SpamClassifier),
+            ObjectType::SpamAi => {
+                Pickle::unpickle(stream).map(|obj| ObjectInner::SpamAi(Box::new(obj)))
+            }
+            ObjectType::SpamClassifier => {
+                Pickle::unpickle(stream).map(|obj| ObjectInner::SpamClassifier(Box::new(obj)))
+            }
             ObjectType::SpamDnsblServer => {
-                Pickle::unpickle(stream).map(ObjectInner::SpamDnsblServer)
+                Pickle::unpickle(stream).map(|obj| ObjectInner::SpamDnsblServer(Box::new(obj)))
             }
             ObjectType::SpamDnsblSettings => {
-                Pickle::unpickle(stream).map(ObjectInner::SpamDnsblSettings)
+                Pickle::unpickle(stream).map(|obj| ObjectInner::SpamDnsblSettings(Box::new(obj)))
             }
             ObjectType::SpamFileExtension => {
-                Pickle::unpickle(stream).map(ObjectInner::SpamFileExtension)
+                Pickle::unpickle(stream).map(|obj| ObjectInner::SpamFileExtension(Box::new(obj)))
             }
-            ObjectType::SpamLlm => Pickle::unpickle(stream).map(ObjectInner::SpamLlm),
-            ObjectType::SpamPyzor => Pickle::unpickle(stream).map(ObjectInner::SpamPyzor),
-            ObjectType::SpamRule => Pickle::unpickle(stream).map(ObjectInner::SpamRule),
-            ObjectType::SpamSettings => Pickle::unpickle(stream).map(ObjectInner::SpamSettings),
-            ObjectType::SpamTag => Pickle::unpickle(stream).map(ObjectInner::SpamTag),
+            ObjectType::SpamPyzor => {
+                Pickle::unpickle(stream).map(|obj| ObjectInner::SpamPyzor(Box::new(obj)))
+            }
+            ObjectType::SpamRule => {
+                Pickle::unpickle(stream).map(|obj| ObjectInner::SpamRule(Box::new(obj)))
+            }
+            ObjectType::SpamSettings => {
+                Pickle::unpickle(stream).map(|obj| ObjectInner::SpamSettings(Box::new(obj)))
+            }
+            ObjectType::SpamTag => {
+                Pickle::unpickle(stream).map(|obj| ObjectInner::SpamTag(Box::new(obj)))
+            }
             ObjectType::SpamTrainingSample => {
-                Pickle::unpickle(stream).map(ObjectInner::SpamTrainingSample)
+                Pickle::unpickle(stream).map(|obj| ObjectInner::SpamTrainingSample(Box::new(obj)))
             }
             ObjectType::SpfReportSettings => {
-                Pickle::unpickle(stream).map(ObjectInner::SpfReportSettings)
+                Pickle::unpickle(stream).map(|obj| ObjectInner::SpfReportSettings(Box::new(obj)))
             }
-            ObjectType::StoreLookup => Pickle::unpickle(stream).map(ObjectInner::StoreLookup),
-            ObjectType::SystemSettings => Pickle::unpickle(stream).map(ObjectInner::SystemSettings),
-            ObjectType::Task => Pickle::unpickle(stream).map(ObjectInner::Task),
-            ObjectType::TaskManager => Pickle::unpickle(stream).map(ObjectInner::TaskManager),
-            ObjectType::Tenant => Pickle::unpickle(stream).map(ObjectInner::Tenant),
+            ObjectType::StoreLookup => {
+                Pickle::unpickle(stream).map(|obj| ObjectInner::StoreLookup(Box::new(obj)))
+            }
+            ObjectType::SystemSettings => {
+                Pickle::unpickle(stream).map(|obj| ObjectInner::SystemSettings(Box::new(obj)))
+            }
+            ObjectType::Task => {
+                Pickle::unpickle(stream).map(|obj| ObjectInner::Task(Box::new(obj)))
+            }
+            ObjectType::TaskManager => {
+                Pickle::unpickle(stream).map(|obj| ObjectInner::TaskManager(Box::new(obj)))
+            }
+            ObjectType::Tenant => {
+                Pickle::unpickle(stream).map(|obj| ObjectInner::Tenant(Box::new(obj)))
+            }
             ObjectType::TlsExternalReport => {
-                Pickle::unpickle(stream).map(ObjectInner::TlsExternalReport)
+                Pickle::unpickle(stream).map(|obj| ObjectInner::TlsExternalReport(Box::new(obj)))
             }
             ObjectType::TlsInternalReport => {
-                Pickle::unpickle(stream).map(ObjectInner::TlsInternalReport)
+                Pickle::unpickle(stream).map(|obj| ObjectInner::TlsInternalReport(Box::new(obj)))
             }
             ObjectType::TlsReportSettings => {
-                Pickle::unpickle(stream).map(ObjectInner::TlsReportSettings)
+                Pickle::unpickle(stream).map(|obj| ObjectInner::TlsReportSettings(Box::new(obj)))
             }
-            ObjectType::Trace => Pickle::unpickle(stream).map(ObjectInner::Trace),
-            ObjectType::Tracer => Pickle::unpickle(stream).map(ObjectInner::Tracer),
-            ObjectType::TracingStore => Pickle::unpickle(stream).map(ObjectInner::TracingStore),
-            ObjectType::WebDav => Pickle::unpickle(stream).map(ObjectInner::WebDav),
-            ObjectType::WebHook => Pickle::unpickle(stream).map(ObjectInner::WebHook),
+            ObjectType::Trace => {
+                Pickle::unpickle(stream).map(|obj| ObjectInner::Trace(Box::new(obj)))
+            }
+            ObjectType::Tracer => {
+                Pickle::unpickle(stream).map(|obj| ObjectInner::Tracer(Box::new(obj)))
+            }
+            ObjectType::TracingStore => {
+                Pickle::unpickle(stream).map(|obj| ObjectInner::TracingStore(Box::new(obj)))
+            }
+            ObjectType::WebDav => {
+                Pickle::unpickle(stream).map(|obj| ObjectInner::WebDav(Box::new(obj)))
+            }
+            ObjectType::WebHook => {
+                Pickle::unpickle(stream).map(|obj| ObjectInner::WebHook(Box::new(obj)))
+            }
         }
     }
 
@@ -4973,287 +5187,280 @@ impl ObjectInner {
         D: serde::Deserializer<'de>,
     {
         match object {
-            ObjectType::Account => Account::deserialize(deserializer).map(ObjectInner::Account),
-            ObjectType::AccountPassword => {
-                AccountPassword::deserialize(deserializer).map(ObjectInner::AccountPassword)
+            ObjectType::Account => {
+                Account::deserialize(deserializer).map(|obj| ObjectInner::Account(Box::new(obj)))
             }
-            ObjectType::AccountSettings => {
-                AccountSettings::deserialize(deserializer).map(ObjectInner::AccountSettings)
+            ObjectType::AccountPassword => AccountPassword::deserialize(deserializer)
+                .map(|obj| ObjectInner::AccountPassword(Box::new(obj))),
+            ObjectType::AccountSettings => AccountSettings::deserialize(deserializer)
+                .map(|obj| ObjectInner::AccountSettings(Box::new(obj))),
+            ObjectType::AcmeProvider => AcmeProvider::deserialize(deserializer)
+                .map(|obj| ObjectInner::AcmeProvider(Box::new(obj))),
+            ObjectType::Action => {
+                Action::deserialize(deserializer).map(|obj| ObjectInner::Action(Box::new(obj)))
             }
-            ObjectType::AcmeProvider => {
-                AcmeProvider::deserialize(deserializer).map(ObjectInner::AcmeProvider)
+            ObjectType::AddressBook => AddressBook::deserialize(deserializer)
+                .map(|obj| ObjectInner::AddressBook(Box::new(obj))),
+            ObjectType::AiModel => {
+                AiModel::deserialize(deserializer).map(|obj| ObjectInner::AiModel(Box::new(obj)))
             }
-            ObjectType::Action => Action::deserialize(deserializer).map(ObjectInner::Action),
-            ObjectType::AddressBook => {
-                AddressBook::deserialize(deserializer).map(ObjectInner::AddressBook)
+            ObjectType::Alert => {
+                Alert::deserialize(deserializer).map(|obj| ObjectInner::Alert(Box::new(obj)))
             }
-            ObjectType::AiModel => AiModel::deserialize(deserializer).map(ObjectInner::AiModel),
-            ObjectType::Alert => Alert::deserialize(deserializer).map(ObjectInner::Alert),
-            ObjectType::AllowedIp => {
-                AllowedIp::deserialize(deserializer).map(ObjectInner::AllowedIp)
+            ObjectType::AllowedIp => AllowedIp::deserialize(deserializer)
+                .map(|obj| ObjectInner::AllowedIp(Box::new(obj))),
+            ObjectType::ApiKey => {
+                ApiKey::deserialize(deserializer).map(|obj| ObjectInner::ApiKey(Box::new(obj)))
             }
-            ObjectType::ApiKey => ApiKey::deserialize(deserializer).map(ObjectInner::ApiKey),
-            ObjectType::AppPassword => {
-                AppPassword::deserialize(deserializer).map(ObjectInner::AppPassword)
+            ObjectType::AppPassword => AppPassword::deserialize(deserializer)
+                .map(|obj| ObjectInner::AppPassword(Box::new(obj))),
+            ObjectType::Application => Application::deserialize(deserializer)
+                .map(|obj| ObjectInner::Application(Box::new(obj))),
+            ObjectType::ArchivedItem => ArchivedItem::deserialize(deserializer)
+                .map(|obj| ObjectInner::ArchivedItem(Box::new(obj))),
+            ObjectType::ArfExternalReport => ArfExternalReport::deserialize(deserializer)
+                .map(|obj| ObjectInner::ArfExternalReport(Box::new(obj))),
+            ObjectType::Asn => {
+                Asn::deserialize(deserializer).map(|obj| ObjectInner::Asn(Box::new(obj)))
             }
-            ObjectType::Application => {
-                Application::deserialize(deserializer).map(ObjectInner::Application)
+            ObjectType::Authentication => Authentication::deserialize(deserializer)
+                .map(|obj| ObjectInner::Authentication(Box::new(obj))),
+            ObjectType::BlobStore => BlobStore::deserialize(deserializer)
+                .map(|obj| ObjectInner::BlobStore(Box::new(obj))),
+            ObjectType::BlockedIp => BlockedIp::deserialize(deserializer)
+                .map(|obj| ObjectInner::BlockedIp(Box::new(obj))),
+            ObjectType::Bootstrap => Bootstrap::deserialize(deserializer)
+                .map(|obj| ObjectInner::Bootstrap(Box::new(obj))),
+            ObjectType::Cache => {
+                Cache::deserialize(deserializer).map(|obj| ObjectInner::Cache(Box::new(obj)))
             }
-            ObjectType::ArchivedItem => {
-                ArchivedItem::deserialize(deserializer).map(ObjectInner::ArchivedItem)
+            ObjectType::Calendar => {
+                Calendar::deserialize(deserializer).map(|obj| ObjectInner::Calendar(Box::new(obj)))
             }
-            ObjectType::ArfExternalReport => {
-                ArfExternalReport::deserialize(deserializer).map(ObjectInner::ArfExternalReport)
+            ObjectType::CalendarAlarm => CalendarAlarm::deserialize(deserializer)
+                .map(|obj| ObjectInner::CalendarAlarm(Box::new(obj))),
+            ObjectType::CalendarScheduling => CalendarScheduling::deserialize(deserializer)
+                .map(|obj| ObjectInner::CalendarScheduling(Box::new(obj))),
+            ObjectType::Certificate => Certificate::deserialize(deserializer)
+                .map(|obj| ObjectInner::Certificate(Box::new(obj))),
+            ObjectType::ClusterNode => ClusterNode::deserialize(deserializer)
+                .map(|obj| ObjectInner::ClusterNode(Box::new(obj))),
+            ObjectType::ClusterRole => ClusterRole::deserialize(deserializer)
+                .map(|obj| ObjectInner::ClusterRole(Box::new(obj))),
+            ObjectType::Coordinator => Coordinator::deserialize(deserializer)
+                .map(|obj| ObjectInner::Coordinator(Box::new(obj))),
+            ObjectType::DataRetention => DataRetention::deserialize(deserializer)
+                .map(|obj| ObjectInner::DataRetention(Box::new(obj))),
+            ObjectType::DataStore => DataStore::deserialize(deserializer)
+                .map(|obj| ObjectInner::DataStore(Box::new(obj))),
+            ObjectType::Directory => Directory::deserialize(deserializer)
+                .map(|obj| ObjectInner::Directory(Box::new(obj))),
+            ObjectType::DkimReportSettings => DkimReportSettings::deserialize(deserializer)
+                .map(|obj| ObjectInner::DkimReportSettings(Box::new(obj))),
+            ObjectType::DkimSignature => DkimSignature::deserialize(deserializer)
+                .map(|obj| ObjectInner::DkimSignature(Box::new(obj))),
+            ObjectType::DmarcExternalReport => DmarcExternalReport::deserialize(deserializer)
+                .map(|obj| ObjectInner::DmarcExternalReport(Box::new(obj))),
+            ObjectType::DmarcInternalReport => DmarcInternalReport::deserialize(deserializer)
+                .map(|obj| ObjectInner::DmarcInternalReport(Box::new(obj))),
+            ObjectType::DmarcReportSettings => DmarcReportSettings::deserialize(deserializer)
+                .map(|obj| ObjectInner::DmarcReportSettings(Box::new(obj))),
+            ObjectType::DnsResolver => DnsResolver::deserialize(deserializer)
+                .map(|obj| ObjectInner::DnsResolver(Box::new(obj))),
+            ObjectType::DnsServer => DnsServer::deserialize(deserializer)
+                .map(|obj| ObjectInner::DnsServer(Box::new(obj))),
+            ObjectType::Domain => {
+                Domain::deserialize(deserializer).map(|obj| ObjectInner::Domain(Box::new(obj)))
             }
-            ObjectType::Asn => Asn::deserialize(deserializer).map(ObjectInner::Asn),
-            ObjectType::Authentication => {
-                Authentication::deserialize(deserializer).map(ObjectInner::Authentication)
+            ObjectType::DsnReportSettings => DsnReportSettings::deserialize(deserializer)
+                .map(|obj| ObjectInner::DsnReportSettings(Box::new(obj))),
+            ObjectType::Email => {
+                Email::deserialize(deserializer).map(|obj| ObjectInner::Email(Box::new(obj)))
             }
-            ObjectType::BlobStore => {
-                BlobStore::deserialize(deserializer).map(ObjectInner::BlobStore)
+            ObjectType::Enterprise => Enterprise::deserialize(deserializer)
+                .map(|obj| ObjectInner::Enterprise(Box::new(obj))),
+            ObjectType::EventTracingLevel => EventTracingLevel::deserialize(deserializer)
+                .map(|obj| ObjectInner::EventTracingLevel(Box::new(obj))),
+            ObjectType::FileStorage => FileStorage::deserialize(deserializer)
+                .map(|obj| ObjectInner::FileStorage(Box::new(obj))),
+            ObjectType::Http => {
+                Http::deserialize(deserializer).map(|obj| ObjectInner::Http(Box::new(obj)))
             }
-            ObjectType::BlockedIp => {
-                BlockedIp::deserialize(deserializer).map(ObjectInner::BlockedIp)
+            ObjectType::HttpForm => {
+                HttpForm::deserialize(deserializer).map(|obj| ObjectInner::HttpForm(Box::new(obj)))
             }
-            ObjectType::Bootstrap => {
-                Bootstrap::deserialize(deserializer).map(ObjectInner::Bootstrap)
+            ObjectType::HttpLookup => HttpLookup::deserialize(deserializer)
+                .map(|obj| ObjectInner::HttpLookup(Box::new(obj))),
+            ObjectType::Imap => {
+                Imap::deserialize(deserializer).map(|obj| ObjectInner::Imap(Box::new(obj)))
             }
-            ObjectType::Cache => Cache::deserialize(deserializer).map(ObjectInner::Cache),
-            ObjectType::Calendar => Calendar::deserialize(deserializer).map(ObjectInner::Calendar),
-            ObjectType::CalendarAlarm => {
-                CalendarAlarm::deserialize(deserializer).map(ObjectInner::CalendarAlarm)
+            ObjectType::InMemoryStore => InMemoryStore::deserialize(deserializer)
+                .map(|obj| ObjectInner::InMemoryStore(Box::new(obj))),
+            ObjectType::IndexQueueStatus => IndexQueueStatus::deserialize(deserializer)
+                .map(|obj| ObjectInner::IndexQueueStatus(Box::new(obj))),
+            ObjectType::Jmap => {
+                Jmap::deserialize(deserializer).map(|obj| ObjectInner::Jmap(Box::new(obj)))
             }
-            ObjectType::CalendarScheduling => {
-                CalendarScheduling::deserialize(deserializer).map(ObjectInner::CalendarScheduling)
+            ObjectType::Log => {
+                Log::deserialize(deserializer).map(|obj| ObjectInner::Log(Box::new(obj)))
             }
-            ObjectType::Certificate => {
-                Certificate::deserialize(deserializer).map(ObjectInner::Certificate)
-            }
-            ObjectType::ClusterNode => {
-                ClusterNode::deserialize(deserializer).map(ObjectInner::ClusterNode)
-            }
-            ObjectType::ClusterRole => {
-                ClusterRole::deserialize(deserializer).map(ObjectInner::ClusterRole)
-            }
-            ObjectType::Coordinator => {
-                Coordinator::deserialize(deserializer).map(ObjectInner::Coordinator)
-            }
-            ObjectType::DataRetention => {
-                DataRetention::deserialize(deserializer).map(ObjectInner::DataRetention)
-            }
-            ObjectType::DataStore => {
-                DataStore::deserialize(deserializer).map(ObjectInner::DataStore)
-            }
-            ObjectType::Directory => {
-                Directory::deserialize(deserializer).map(ObjectInner::Directory)
-            }
-            ObjectType::DkimReportSettings => {
-                DkimReportSettings::deserialize(deserializer).map(ObjectInner::DkimReportSettings)
-            }
-            ObjectType::DkimSignature => {
-                DkimSignature::deserialize(deserializer).map(ObjectInner::DkimSignature)
-            }
-            ObjectType::DmarcExternalReport => {
-                DmarcExternalReport::deserialize(deserializer).map(ObjectInner::DmarcExternalReport)
-            }
-            ObjectType::DmarcInternalReport => {
-                DmarcInternalReport::deserialize(deserializer).map(ObjectInner::DmarcInternalReport)
-            }
-            ObjectType::DmarcReportSettings => {
-                DmarcReportSettings::deserialize(deserializer).map(ObjectInner::DmarcReportSettings)
-            }
-            ObjectType::DnsResolver => {
-                DnsResolver::deserialize(deserializer).map(ObjectInner::DnsResolver)
-            }
-            ObjectType::DnsServer => {
-                DnsServer::deserialize(deserializer).map(ObjectInner::DnsServer)
-            }
-            ObjectType::Domain => Domain::deserialize(deserializer).map(ObjectInner::Domain),
-            ObjectType::DsnReportSettings => {
-                DsnReportSettings::deserialize(deserializer).map(ObjectInner::DsnReportSettings)
-            }
-            ObjectType::Email => Email::deserialize(deserializer).map(ObjectInner::Email),
-            ObjectType::Enterprise => {
-                Enterprise::deserialize(deserializer).map(ObjectInner::Enterprise)
-            }
-            ObjectType::EventTracingLevel => {
-                EventTracingLevel::deserialize(deserializer).map(ObjectInner::EventTracingLevel)
-            }
-            ObjectType::FileStorage => {
-                FileStorage::deserialize(deserializer).map(ObjectInner::FileStorage)
-            }
-            ObjectType::Http => Http::deserialize(deserializer).map(ObjectInner::Http),
-            ObjectType::HttpForm => HttpForm::deserialize(deserializer).map(ObjectInner::HttpForm),
-            ObjectType::HttpLookup => {
-                HttpLookup::deserialize(deserializer).map(ObjectInner::HttpLookup)
-            }
-            ObjectType::Imap => Imap::deserialize(deserializer).map(ObjectInner::Imap),
-            ObjectType::InMemoryStore => {
-                InMemoryStore::deserialize(deserializer).map(ObjectInner::InMemoryStore)
-            }
-            ObjectType::Jmap => Jmap::deserialize(deserializer).map(ObjectInner::Jmap),
-            ObjectType::Log => Log::deserialize(deserializer).map(ObjectInner::Log),
-            ObjectType::MailingList => {
-                MailingList::deserialize(deserializer).map(ObjectInner::MailingList)
-            }
-            ObjectType::MaskedEmail => {
-                MaskedEmail::deserialize(deserializer).map(ObjectInner::MaskedEmail)
-            }
-            ObjectType::MemoryLookupKey => {
-                MemoryLookupKey::deserialize(deserializer).map(ObjectInner::MemoryLookupKey)
-            }
+            ObjectType::MailingList => MailingList::deserialize(deserializer)
+                .map(|obj| ObjectInner::MailingList(Box::new(obj))),
+            ObjectType::MaskedEmail => MaskedEmail::deserialize(deserializer)
+                .map(|obj| ObjectInner::MaskedEmail(Box::new(obj))),
+            ObjectType::MemoryLookupKey => MemoryLookupKey::deserialize(deserializer)
+                .map(|obj| ObjectInner::MemoryLookupKey(Box::new(obj))),
             ObjectType::MemoryLookupKeyValue => MemoryLookupKeyValue::deserialize(deserializer)
-                .map(ObjectInner::MemoryLookupKeyValue),
-            ObjectType::Metric => Metric::deserialize(deserializer).map(ObjectInner::Metric),
-            ObjectType::Metrics => Metrics::deserialize(deserializer).map(ObjectInner::Metrics),
-            ObjectType::MetricsStore => {
-                MetricsStore::deserialize(deserializer).map(ObjectInner::MetricsStore)
+                .map(|obj| ObjectInner::MemoryLookupKeyValue(Box::new(obj))),
+            ObjectType::Metadata => {
+                Metadata::deserialize(deserializer).map(|obj| ObjectInner::Metadata(Box::new(obj)))
             }
+            ObjectType::Metric => {
+                Metric::deserialize(deserializer).map(|obj| ObjectInner::Metric(Box::new(obj)))
+            }
+            ObjectType::Metrics => {
+                Metrics::deserialize(deserializer).map(|obj| ObjectInner::Metrics(Box::new(obj)))
+            }
+            ObjectType::MetricsStore => MetricsStore::deserialize(deserializer)
+                .map(|obj| ObjectInner::MetricsStore(Box::new(obj))),
             ObjectType::MtaConnectionStrategy => MtaConnectionStrategy::deserialize(deserializer)
-                .map(ObjectInner::MtaConnectionStrategy),
-            ObjectType::MtaDeliverySchedule => {
-                MtaDeliverySchedule::deserialize(deserializer).map(ObjectInner::MtaDeliverySchedule)
+                .map(|obj| ObjectInner::MtaConnectionStrategy(Box::new(obj))),
+            ObjectType::MtaDeliverySchedule => MtaDeliverySchedule::deserialize(deserializer)
+                .map(|obj| ObjectInner::MtaDeliverySchedule(Box::new(obj))),
+            ObjectType::MtaExtensions => MtaExtensions::deserialize(deserializer)
+                .map(|obj| ObjectInner::MtaExtensions(Box::new(obj))),
+            ObjectType::MtaHook => {
+                MtaHook::deserialize(deserializer).map(|obj| ObjectInner::MtaHook(Box::new(obj)))
             }
-            ObjectType::MtaExtensions => {
-                MtaExtensions::deserialize(deserializer).map(ObjectInner::MtaExtensions)
+            ObjectType::MtaInboundSession => MtaInboundSession::deserialize(deserializer)
+                .map(|obj| ObjectInner::MtaInboundSession(Box::new(obj))),
+            ObjectType::MtaInboundThrottle => MtaInboundThrottle::deserialize(deserializer)
+                .map(|obj| ObjectInner::MtaInboundThrottle(Box::new(obj))),
+            ObjectType::MtaMilter => MtaMilter::deserialize(deserializer)
+                .map(|obj| ObjectInner::MtaMilter(Box::new(obj))),
+            ObjectType::MtaOutboundStrategy => MtaOutboundStrategy::deserialize(deserializer)
+                .map(|obj| ObjectInner::MtaOutboundStrategy(Box::new(obj))),
+            ObjectType::MtaOutboundThrottle => MtaOutboundThrottle::deserialize(deserializer)
+                .map(|obj| ObjectInner::MtaOutboundThrottle(Box::new(obj))),
+            ObjectType::MtaQueueQuota => MtaQueueQuota::deserialize(deserializer)
+                .map(|obj| ObjectInner::MtaQueueQuota(Box::new(obj))),
+            ObjectType::MtaRoute => {
+                MtaRoute::deserialize(deserializer).map(|obj| ObjectInner::MtaRoute(Box::new(obj)))
             }
-            ObjectType::MtaHook => MtaHook::deserialize(deserializer).map(ObjectInner::MtaHook),
-            ObjectType::MtaInboundSession => {
-                MtaInboundSession::deserialize(deserializer).map(ObjectInner::MtaInboundSession)
+            ObjectType::MtaStageAuth => MtaStageAuth::deserialize(deserializer)
+                .map(|obj| ObjectInner::MtaStageAuth(Box::new(obj))),
+            ObjectType::MtaStageConnect => MtaStageConnect::deserialize(deserializer)
+                .map(|obj| ObjectInner::MtaStageConnect(Box::new(obj))),
+            ObjectType::MtaStageData => MtaStageData::deserialize(deserializer)
+                .map(|obj| ObjectInner::MtaStageData(Box::new(obj))),
+            ObjectType::MtaStageEhlo => MtaStageEhlo::deserialize(deserializer)
+                .map(|obj| ObjectInner::MtaStageEhlo(Box::new(obj))),
+            ObjectType::MtaStageMail => MtaStageMail::deserialize(deserializer)
+                .map(|obj| ObjectInner::MtaStageMail(Box::new(obj))),
+            ObjectType::MtaStageRcpt => MtaStageRcpt::deserialize(deserializer)
+                .map(|obj| ObjectInner::MtaStageRcpt(Box::new(obj))),
+            ObjectType::MtaSts => {
+                MtaSts::deserialize(deserializer).map(|obj| ObjectInner::MtaSts(Box::new(obj)))
             }
-            ObjectType::MtaInboundThrottle => {
-                MtaInboundThrottle::deserialize(deserializer).map(ObjectInner::MtaInboundThrottle)
+            ObjectType::MtaTlsStrategy => MtaTlsStrategy::deserialize(deserializer)
+                .map(|obj| ObjectInner::MtaTlsStrategy(Box::new(obj))),
+            ObjectType::MtaVirtualQueue => MtaVirtualQueue::deserialize(deserializer)
+                .map(|obj| ObjectInner::MtaVirtualQueue(Box::new(obj))),
+            ObjectType::NetworkListener => NetworkListener::deserialize(deserializer)
+                .map(|obj| ObjectInner::NetworkListener(Box::new(obj))),
+            ObjectType::OAuthClient => OAuthClient::deserialize(deserializer)
+                .map(|obj| ObjectInner::OAuthClient(Box::new(obj))),
+            ObjectType::OAuthGrant => OAuthGrant::deserialize(deserializer)
+                .map(|obj| ObjectInner::OAuthGrant(Box::new(obj))),
+            ObjectType::OidcProvider => OidcProvider::deserialize(deserializer)
+                .map(|obj| ObjectInner::OidcProvider(Box::new(obj))),
+            ObjectType::PublicKey => PublicKey::deserialize(deserializer)
+                .map(|obj| ObjectInner::PublicKey(Box::new(obj))),
+            ObjectType::QueuedMessage => QueuedMessage::deserialize(deserializer)
+                .map(|obj| ObjectInner::QueuedMessage(Box::new(obj))),
+            ObjectType::ReportSettings => ReportSettings::deserialize(deserializer)
+                .map(|obj| ObjectInner::ReportSettings(Box::new(obj))),
+            ObjectType::Role => {
+                Role::deserialize(deserializer).map(|obj| ObjectInner::Role(Box::new(obj)))
             }
-            ObjectType::MtaMilter => {
-                MtaMilter::deserialize(deserializer).map(ObjectInner::MtaMilter)
+            ObjectType::Search => {
+                Search::deserialize(deserializer).map(|obj| ObjectInner::Search(Box::new(obj)))
             }
-            ObjectType::MtaOutboundStrategy => {
-                MtaOutboundStrategy::deserialize(deserializer).map(ObjectInner::MtaOutboundStrategy)
+            ObjectType::SearchStore => SearchStore::deserialize(deserializer)
+                .map(|obj| ObjectInner::SearchStore(Box::new(obj))),
+            ObjectType::Security => {
+                Security::deserialize(deserializer).map(|obj| ObjectInner::Security(Box::new(obj)))
             }
-            ObjectType::MtaOutboundThrottle => {
-                MtaOutboundThrottle::deserialize(deserializer).map(ObjectInner::MtaOutboundThrottle)
+            ObjectType::SenderAuth => SenderAuth::deserialize(deserializer)
+                .map(|obj| ObjectInner::SenderAuth(Box::new(obj))),
+            ObjectType::Sharing => {
+                Sharing::deserialize(deserializer).map(|obj| ObjectInner::Sharing(Box::new(obj)))
             }
-            ObjectType::MtaQueueQuota => {
-                MtaQueueQuota::deserialize(deserializer).map(ObjectInner::MtaQueueQuota)
-            }
-            ObjectType::MtaRoute => MtaRoute::deserialize(deserializer).map(ObjectInner::MtaRoute),
-            ObjectType::MtaStageAuth => {
-                MtaStageAuth::deserialize(deserializer).map(ObjectInner::MtaStageAuth)
-            }
-            ObjectType::MtaStageConnect => {
-                MtaStageConnect::deserialize(deserializer).map(ObjectInner::MtaStageConnect)
-            }
-            ObjectType::MtaStageData => {
-                MtaStageData::deserialize(deserializer).map(ObjectInner::MtaStageData)
-            }
-            ObjectType::MtaStageEhlo => {
-                MtaStageEhlo::deserialize(deserializer).map(ObjectInner::MtaStageEhlo)
-            }
-            ObjectType::MtaStageMail => {
-                MtaStageMail::deserialize(deserializer).map(ObjectInner::MtaStageMail)
-            }
-            ObjectType::MtaStageRcpt => {
-                MtaStageRcpt::deserialize(deserializer).map(ObjectInner::MtaStageRcpt)
-            }
-            ObjectType::MtaSts => MtaSts::deserialize(deserializer).map(ObjectInner::MtaSts),
-            ObjectType::MtaTlsStrategy => {
-                MtaTlsStrategy::deserialize(deserializer).map(ObjectInner::MtaTlsStrategy)
-            }
-            ObjectType::MtaVirtualQueue => {
-                MtaVirtualQueue::deserialize(deserializer).map(ObjectInner::MtaVirtualQueue)
-            }
-            ObjectType::NetworkListener => {
-                NetworkListener::deserialize(deserializer).map(ObjectInner::NetworkListener)
-            }
-            ObjectType::OAuthClient => {
-                OAuthClient::deserialize(deserializer).map(ObjectInner::OAuthClient)
-            }
-            ObjectType::OidcProvider => {
-                OidcProvider::deserialize(deserializer).map(ObjectInner::OidcProvider)
-            }
-            ObjectType::PublicKey => {
-                PublicKey::deserialize(deserializer).map(ObjectInner::PublicKey)
-            }
-            ObjectType::QueuedMessage => {
-                QueuedMessage::deserialize(deserializer).map(ObjectInner::QueuedMessage)
-            }
-            ObjectType::ReportSettings => {
-                ReportSettings::deserialize(deserializer).map(ObjectInner::ReportSettings)
-            }
-            ObjectType::Role => Role::deserialize(deserializer).map(ObjectInner::Role),
-            ObjectType::Search => Search::deserialize(deserializer).map(ObjectInner::Search),
-            ObjectType::SearchStore => {
-                SearchStore::deserialize(deserializer).map(ObjectInner::SearchStore)
-            }
-            ObjectType::Security => Security::deserialize(deserializer).map(ObjectInner::Security),
-            ObjectType::SenderAuth => {
-                SenderAuth::deserialize(deserializer).map(ObjectInner::SenderAuth)
-            }
-            ObjectType::Sharing => Sharing::deserialize(deserializer).map(ObjectInner::Sharing),
             ObjectType::SieveSystemInterpreter => SieveSystemInterpreter::deserialize(deserializer)
-                .map(ObjectInner::SieveSystemInterpreter),
-            ObjectType::SieveSystemScript => {
-                SieveSystemScript::deserialize(deserializer).map(ObjectInner::SieveSystemScript)
-            }
+                .map(|obj| ObjectInner::SieveSystemInterpreter(Box::new(obj))),
+            ObjectType::SieveSystemScript => SieveSystemScript::deserialize(deserializer)
+                .map(|obj| ObjectInner::SieveSystemScript(Box::new(obj))),
             ObjectType::SieveUserInterpreter => SieveUserInterpreter::deserialize(deserializer)
-                .map(ObjectInner::SieveUserInterpreter),
-            ObjectType::SieveUserScript => {
-                SieveUserScript::deserialize(deserializer).map(ObjectInner::SieveUserScript)
+                .map(|obj| ObjectInner::SieveUserInterpreter(Box::new(obj))),
+            ObjectType::SieveUserScript => SieveUserScript::deserialize(deserializer)
+                .map(|obj| ObjectInner::SieveUserScript(Box::new(obj))),
+            ObjectType::SpamAi => {
+                SpamAi::deserialize(deserializer).map(|obj| ObjectInner::SpamAi(Box::new(obj)))
             }
-            ObjectType::SpamClassifier => {
-                SpamClassifier::deserialize(deserializer).map(ObjectInner::SpamClassifier)
+            ObjectType::SpamClassifier => SpamClassifier::deserialize(deserializer)
+                .map(|obj| ObjectInner::SpamClassifier(Box::new(obj))),
+            ObjectType::SpamDnsblServer => SpamDnsblServer::deserialize(deserializer)
+                .map(|obj| ObjectInner::SpamDnsblServer(Box::new(obj))),
+            ObjectType::SpamDnsblSettings => SpamDnsblSettings::deserialize(deserializer)
+                .map(|obj| ObjectInner::SpamDnsblSettings(Box::new(obj))),
+            ObjectType::SpamFileExtension => SpamFileExtension::deserialize(deserializer)
+                .map(|obj| ObjectInner::SpamFileExtension(Box::new(obj))),
+            ObjectType::SpamPyzor => SpamPyzor::deserialize(deserializer)
+                .map(|obj| ObjectInner::SpamPyzor(Box::new(obj))),
+            ObjectType::SpamRule => {
+                SpamRule::deserialize(deserializer).map(|obj| ObjectInner::SpamRule(Box::new(obj)))
             }
-            ObjectType::SpamDnsblServer => {
-                SpamDnsblServer::deserialize(deserializer).map(ObjectInner::SpamDnsblServer)
+            ObjectType::SpamSettings => SpamSettings::deserialize(deserializer)
+                .map(|obj| ObjectInner::SpamSettings(Box::new(obj))),
+            ObjectType::SpamTag => {
+                SpamTag::deserialize(deserializer).map(|obj| ObjectInner::SpamTag(Box::new(obj)))
             }
-            ObjectType::SpamDnsblSettings => {
-                SpamDnsblSettings::deserialize(deserializer).map(ObjectInner::SpamDnsblSettings)
+            ObjectType::SpamTrainingSample => SpamTrainingSample::deserialize(deserializer)
+                .map(|obj| ObjectInner::SpamTrainingSample(Box::new(obj))),
+            ObjectType::SpfReportSettings => SpfReportSettings::deserialize(deserializer)
+                .map(|obj| ObjectInner::SpfReportSettings(Box::new(obj))),
+            ObjectType::StoreLookup => StoreLookup::deserialize(deserializer)
+                .map(|obj| ObjectInner::StoreLookup(Box::new(obj))),
+            ObjectType::SystemSettings => SystemSettings::deserialize(deserializer)
+                .map(|obj| ObjectInner::SystemSettings(Box::new(obj))),
+            ObjectType::Task => {
+                Task::deserialize(deserializer).map(|obj| ObjectInner::Task(Box::new(obj)))
             }
-            ObjectType::SpamFileExtension => {
-                SpamFileExtension::deserialize(deserializer).map(ObjectInner::SpamFileExtension)
+            ObjectType::TaskManager => TaskManager::deserialize(deserializer)
+                .map(|obj| ObjectInner::TaskManager(Box::new(obj))),
+            ObjectType::Tenant => {
+                Tenant::deserialize(deserializer).map(|obj| ObjectInner::Tenant(Box::new(obj)))
             }
-            ObjectType::SpamLlm => SpamLlm::deserialize(deserializer).map(ObjectInner::SpamLlm),
-            ObjectType::SpamPyzor => {
-                SpamPyzor::deserialize(deserializer).map(ObjectInner::SpamPyzor)
+            ObjectType::TlsExternalReport => TlsExternalReport::deserialize(deserializer)
+                .map(|obj| ObjectInner::TlsExternalReport(Box::new(obj))),
+            ObjectType::TlsInternalReport => TlsInternalReport::deserialize(deserializer)
+                .map(|obj| ObjectInner::TlsInternalReport(Box::new(obj))),
+            ObjectType::TlsReportSettings => TlsReportSettings::deserialize(deserializer)
+                .map(|obj| ObjectInner::TlsReportSettings(Box::new(obj))),
+            ObjectType::Trace => {
+                Trace::deserialize(deserializer).map(|obj| ObjectInner::Trace(Box::new(obj)))
             }
-            ObjectType::SpamRule => SpamRule::deserialize(deserializer).map(ObjectInner::SpamRule),
-            ObjectType::SpamSettings => {
-                SpamSettings::deserialize(deserializer).map(ObjectInner::SpamSettings)
+            ObjectType::Tracer => {
+                Tracer::deserialize(deserializer).map(|obj| ObjectInner::Tracer(Box::new(obj)))
             }
-            ObjectType::SpamTag => SpamTag::deserialize(deserializer).map(ObjectInner::SpamTag),
-            ObjectType::SpamTrainingSample => {
-                SpamTrainingSample::deserialize(deserializer).map(ObjectInner::SpamTrainingSample)
+            ObjectType::TracingStore => TracingStore::deserialize(deserializer)
+                .map(|obj| ObjectInner::TracingStore(Box::new(obj))),
+            ObjectType::WebDav => {
+                WebDav::deserialize(deserializer).map(|obj| ObjectInner::WebDav(Box::new(obj)))
             }
-            ObjectType::SpfReportSettings => {
-                SpfReportSettings::deserialize(deserializer).map(ObjectInner::SpfReportSettings)
+            ObjectType::WebHook => {
+                WebHook::deserialize(deserializer).map(|obj| ObjectInner::WebHook(Box::new(obj)))
             }
-            ObjectType::StoreLookup => {
-                StoreLookup::deserialize(deserializer).map(ObjectInner::StoreLookup)
-            }
-            ObjectType::SystemSettings => {
-                SystemSettings::deserialize(deserializer).map(ObjectInner::SystemSettings)
-            }
-            ObjectType::Task => Task::deserialize(deserializer).map(ObjectInner::Task),
-            ObjectType::TaskManager => {
-                TaskManager::deserialize(deserializer).map(ObjectInner::TaskManager)
-            }
-            ObjectType::Tenant => Tenant::deserialize(deserializer).map(ObjectInner::Tenant),
-            ObjectType::TlsExternalReport => {
-                TlsExternalReport::deserialize(deserializer).map(ObjectInner::TlsExternalReport)
-            }
-            ObjectType::TlsInternalReport => {
-                TlsInternalReport::deserialize(deserializer).map(ObjectInner::TlsInternalReport)
-            }
-            ObjectType::TlsReportSettings => {
-                TlsReportSettings::deserialize(deserializer).map(ObjectInner::TlsReportSettings)
-            }
-            ObjectType::Trace => Trace::deserialize(deserializer).map(ObjectInner::Trace),
-            ObjectType::Tracer => Tracer::deserialize(deserializer).map(ObjectInner::Tracer),
-            ObjectType::TracingStore => {
-                TracingStore::deserialize(deserializer).map(ObjectInner::TracingStore)
-            }
-            ObjectType::WebDav => WebDav::deserialize(deserializer).map(ObjectInner::WebDav),
-            ObjectType::WebHook => WebHook::deserialize(deserializer).map(ObjectInner::WebHook),
         }
     }
 
@@ -5342,12 +5549,14 @@ impl Object {
             ObjectInner::HttpLookup(_) => HttpLookup::FLAGS,
             ObjectInner::Imap(_) => Imap::FLAGS,
             ObjectInner::InMemoryStore(_) => InMemoryStore::FLAGS,
+            ObjectInner::IndexQueueStatus(_) => IndexQueueStatus::FLAGS,
             ObjectInner::Jmap(_) => Jmap::FLAGS,
             ObjectInner::Log(_) => Log::FLAGS,
             ObjectInner::MailingList(_) => MailingList::FLAGS,
             ObjectInner::MaskedEmail(_) => MaskedEmail::FLAGS,
             ObjectInner::MemoryLookupKey(_) => MemoryLookupKey::FLAGS,
             ObjectInner::MemoryLookupKeyValue(_) => MemoryLookupKeyValue::FLAGS,
+            ObjectInner::Metadata(_) => Metadata::FLAGS,
             ObjectInner::Metric(_) => Metric::FLAGS,
             ObjectInner::Metrics(_) => Metrics::FLAGS,
             ObjectInner::MetricsStore(_) => MetricsStore::FLAGS,
@@ -5373,6 +5582,7 @@ impl Object {
             ObjectInner::MtaVirtualQueue(_) => MtaVirtualQueue::FLAGS,
             ObjectInner::NetworkListener(_) => NetworkListener::FLAGS,
             ObjectInner::OAuthClient(_) => OAuthClient::FLAGS,
+            ObjectInner::OAuthGrant(_) => OAuthGrant::FLAGS,
             ObjectInner::OidcProvider(_) => OidcProvider::FLAGS,
             ObjectInner::PublicKey(_) => PublicKey::FLAGS,
             ObjectInner::QueuedMessage(_) => QueuedMessage::FLAGS,
@@ -5387,11 +5597,11 @@ impl Object {
             ObjectInner::SieveSystemScript(_) => SieveSystemScript::FLAGS,
             ObjectInner::SieveUserInterpreter(_) => SieveUserInterpreter::FLAGS,
             ObjectInner::SieveUserScript(_) => SieveUserScript::FLAGS,
+            ObjectInner::SpamAi(_) => SpamAi::FLAGS,
             ObjectInner::SpamClassifier(_) => SpamClassifier::FLAGS,
             ObjectInner::SpamDnsblServer(_) => SpamDnsblServer::FLAGS,
             ObjectInner::SpamDnsblSettings(_) => SpamDnsblSettings::FLAGS,
             ObjectInner::SpamFileExtension(_) => SpamFileExtension::FLAGS,
-            ObjectInner::SpamLlm(_) => SpamLlm::FLAGS,
             ObjectInner::SpamPyzor(_) => SpamPyzor::FLAGS,
             ObjectInner::SpamRule(_) => SpamRule::FLAGS,
             ObjectInner::SpamSettings(_) => SpamSettings::FLAGS,
@@ -5464,12 +5674,14 @@ impl Object {
             ObjectInner::HttpLookup(_) => ObjectType::HttpLookup,
             ObjectInner::Imap(_) => ObjectType::Imap,
             ObjectInner::InMemoryStore(_) => ObjectType::InMemoryStore,
+            ObjectInner::IndexQueueStatus(_) => ObjectType::IndexQueueStatus,
             ObjectInner::Jmap(_) => ObjectType::Jmap,
             ObjectInner::Log(_) => ObjectType::Log,
             ObjectInner::MailingList(_) => ObjectType::MailingList,
             ObjectInner::MaskedEmail(_) => ObjectType::MaskedEmail,
             ObjectInner::MemoryLookupKey(_) => ObjectType::MemoryLookupKey,
             ObjectInner::MemoryLookupKeyValue(_) => ObjectType::MemoryLookupKeyValue,
+            ObjectInner::Metadata(_) => ObjectType::Metadata,
             ObjectInner::Metric(_) => ObjectType::Metric,
             ObjectInner::Metrics(_) => ObjectType::Metrics,
             ObjectInner::MetricsStore(_) => ObjectType::MetricsStore,
@@ -5495,6 +5707,7 @@ impl Object {
             ObjectInner::MtaVirtualQueue(_) => ObjectType::MtaVirtualQueue,
             ObjectInner::NetworkListener(_) => ObjectType::NetworkListener,
             ObjectInner::OAuthClient(_) => ObjectType::OAuthClient,
+            ObjectInner::OAuthGrant(_) => ObjectType::OAuthGrant,
             ObjectInner::OidcProvider(_) => ObjectType::OidcProvider,
             ObjectInner::PublicKey(_) => ObjectType::PublicKey,
             ObjectInner::QueuedMessage(_) => ObjectType::QueuedMessage,
@@ -5509,11 +5722,11 @@ impl Object {
             ObjectInner::SieveSystemScript(_) => ObjectType::SieveSystemScript,
             ObjectInner::SieveUserInterpreter(_) => ObjectType::SieveUserInterpreter,
             ObjectInner::SieveUserScript(_) => ObjectType::SieveUserScript,
+            ObjectInner::SpamAi(_) => ObjectType::SpamAi,
             ObjectInner::SpamClassifier(_) => ObjectType::SpamClassifier,
             ObjectInner::SpamDnsblServer(_) => ObjectType::SpamDnsblServer,
             ObjectInner::SpamDnsblSettings(_) => ObjectType::SpamDnsblSettings,
             ObjectInner::SpamFileExtension(_) => ObjectType::SpamFileExtension,
-            ObjectInner::SpamLlm(_) => ObjectType::SpamLlm,
             ObjectInner::SpamPyzor(_) => ObjectType::SpamPyzor,
             ObjectInner::SpamRule(_) => ObjectType::SpamRule,
             ObjectInner::SpamSettings(_) => ObjectType::SpamSettings,
@@ -5540,6 +5753,7 @@ impl Object {
         match &self.inner {
             ObjectInner::Account(obj) => Some(obj.object_type().as_str()),
             ObjectInner::Action(obj) => Some(obj.object_type().as_str()),
+            ObjectInner::AiModel(obj) => Some(obj.object_type().as_str()),
             ObjectInner::ArchivedItem(obj) => Some(obj.object_type().as_str()),
             ObjectInner::Asn(obj) => Some(obj.object_type().as_str()),
             ObjectInner::BlobStore(obj) => Some(obj.object_type().as_str()),
@@ -5554,8 +5768,8 @@ impl Object {
             ObjectInner::MetricsStore(obj) => Some(obj.object_type().as_str()),
             ObjectInner::MtaRoute(obj) => Some(obj.object_type().as_str()),
             ObjectInner::SearchStore(obj) => Some(obj.object_type().as_str()),
+            ObjectInner::SpamAi(obj) => Some(obj.object_type().as_str()),
             ObjectInner::SpamDnsblServer(obj) => Some(obj.object_type().as_str()),
-            ObjectInner::SpamLlm(obj) => Some(obj.object_type().as_str()),
             ObjectInner::SpamRule(obj) => Some(obj.object_type().as_str()),
             ObjectInner::SpamTag(obj) => Some(obj.object_type().as_str()),
             ObjectInner::Task(obj) => Some(obj.object_type().as_str()),
@@ -5615,12 +5829,14 @@ impl Object {
             ObjectInner::HttpLookup(obj) => obj.validate(errors),
             ObjectInner::Imap(obj) => obj.validate(errors),
             ObjectInner::InMemoryStore(obj) => obj.validate(errors),
+            ObjectInner::IndexQueueStatus(obj) => obj.validate(errors),
             ObjectInner::Jmap(obj) => obj.validate(errors),
             ObjectInner::Log(obj) => obj.validate(errors),
             ObjectInner::MailingList(obj) => obj.validate(errors),
             ObjectInner::MaskedEmail(obj) => obj.validate(errors),
             ObjectInner::MemoryLookupKey(obj) => obj.validate(errors),
             ObjectInner::MemoryLookupKeyValue(obj) => obj.validate(errors),
+            ObjectInner::Metadata(obj) => obj.validate(errors),
             ObjectInner::Metric(obj) => obj.validate(errors),
             ObjectInner::Metrics(obj) => obj.validate(errors),
             ObjectInner::MetricsStore(obj) => obj.validate(errors),
@@ -5646,6 +5862,7 @@ impl Object {
             ObjectInner::MtaVirtualQueue(obj) => obj.validate(errors),
             ObjectInner::NetworkListener(obj) => obj.validate(errors),
             ObjectInner::OAuthClient(obj) => obj.validate(errors),
+            ObjectInner::OAuthGrant(obj) => obj.validate(errors),
             ObjectInner::OidcProvider(obj) => obj.validate(errors),
             ObjectInner::PublicKey(obj) => obj.validate(errors),
             ObjectInner::QueuedMessage(obj) => obj.validate(errors),
@@ -5660,11 +5877,11 @@ impl Object {
             ObjectInner::SieveSystemScript(obj) => obj.validate(errors),
             ObjectInner::SieveUserInterpreter(obj) => obj.validate(errors),
             ObjectInner::SieveUserScript(obj) => obj.validate(errors),
+            ObjectInner::SpamAi(obj) => obj.validate(errors),
             ObjectInner::SpamClassifier(obj) => obj.validate(errors),
             ObjectInner::SpamDnsblServer(obj) => obj.validate(errors),
             ObjectInner::SpamDnsblSettings(obj) => obj.validate(errors),
             ObjectInner::SpamFileExtension(obj) => obj.validate(errors),
-            ObjectInner::SpamLlm(obj) => obj.validate(errors),
             ObjectInner::SpamPyzor(obj) => obj.validate(errors),
             ObjectInner::SpamRule(obj) => obj.validate(errors),
             ObjectInner::SpamSettings(obj) => obj.validate(errors),
@@ -5737,12 +5954,14 @@ impl Object {
             ObjectInner::HttpLookup(obj) => obj.index(i),
             ObjectInner::Imap(obj) => obj.index(i),
             ObjectInner::InMemoryStore(obj) => obj.index(i),
+            ObjectInner::IndexQueueStatus(obj) => obj.index(i),
             ObjectInner::Jmap(obj) => obj.index(i),
             ObjectInner::Log(obj) => obj.index(i),
             ObjectInner::MailingList(obj) => obj.index(i),
             ObjectInner::MaskedEmail(obj) => obj.index(i),
             ObjectInner::MemoryLookupKey(obj) => obj.index(i),
             ObjectInner::MemoryLookupKeyValue(obj) => obj.index(i),
+            ObjectInner::Metadata(obj) => obj.index(i),
             ObjectInner::Metric(obj) => obj.index(i),
             ObjectInner::Metrics(obj) => obj.index(i),
             ObjectInner::MetricsStore(obj) => obj.index(i),
@@ -5768,6 +5987,7 @@ impl Object {
             ObjectInner::MtaVirtualQueue(obj) => obj.index(i),
             ObjectInner::NetworkListener(obj) => obj.index(i),
             ObjectInner::OAuthClient(obj) => obj.index(i),
+            ObjectInner::OAuthGrant(obj) => obj.index(i),
             ObjectInner::OidcProvider(obj) => obj.index(i),
             ObjectInner::PublicKey(obj) => obj.index(i),
             ObjectInner::QueuedMessage(obj) => obj.index(i),
@@ -5782,11 +6002,11 @@ impl Object {
             ObjectInner::SieveSystemScript(obj) => obj.index(i),
             ObjectInner::SieveUserInterpreter(obj) => obj.index(i),
             ObjectInner::SieveUserScript(obj) => obj.index(i),
+            ObjectInner::SpamAi(obj) => obj.index(i),
             ObjectInner::SpamClassifier(obj) => obj.index(i),
             ObjectInner::SpamDnsblServer(obj) => obj.index(i),
             ObjectInner::SpamDnsblSettings(obj) => obj.index(i),
             ObjectInner::SpamFileExtension(obj) => obj.index(i),
-            ObjectInner::SpamLlm(obj) => obj.index(i),
             ObjectInner::SpamPyzor(obj) => obj.index(i),
             ObjectInner::SpamRule(obj) => obj.index(i),
             ObjectInner::SpamSettings(obj) => obj.index(i),
@@ -5863,12 +6083,14 @@ impl Object {
             ObjectInner::HttpLookup(obj) => obj.patch(pointer, value),
             ObjectInner::Imap(obj) => obj.patch(pointer, value),
             ObjectInner::InMemoryStore(obj) => obj.patch(pointer, value),
+            ObjectInner::IndexQueueStatus(obj) => obj.patch(pointer, value),
             ObjectInner::Jmap(obj) => obj.patch(pointer, value),
             ObjectInner::Log(obj) => obj.patch(pointer, value),
             ObjectInner::MailingList(obj) => obj.patch(pointer, value),
             ObjectInner::MaskedEmail(obj) => obj.patch(pointer, value),
             ObjectInner::MemoryLookupKey(obj) => obj.patch(pointer, value),
             ObjectInner::MemoryLookupKeyValue(obj) => obj.patch(pointer, value),
+            ObjectInner::Metadata(obj) => obj.patch(pointer, value),
             ObjectInner::Metric(obj) => obj.patch(pointer, value),
             ObjectInner::Metrics(obj) => obj.patch(pointer, value),
             ObjectInner::MetricsStore(obj) => obj.patch(pointer, value),
@@ -5894,6 +6116,7 @@ impl Object {
             ObjectInner::MtaVirtualQueue(obj) => obj.patch(pointer, value),
             ObjectInner::NetworkListener(obj) => obj.patch(pointer, value),
             ObjectInner::OAuthClient(obj) => obj.patch(pointer, value),
+            ObjectInner::OAuthGrant(obj) => obj.patch(pointer, value),
             ObjectInner::OidcProvider(obj) => obj.patch(pointer, value),
             ObjectInner::PublicKey(obj) => obj.patch(pointer, value),
             ObjectInner::QueuedMessage(obj) => obj.patch(pointer, value),
@@ -5908,11 +6131,11 @@ impl Object {
             ObjectInner::SieveSystemScript(obj) => obj.patch(pointer, value),
             ObjectInner::SieveUserInterpreter(obj) => obj.patch(pointer, value),
             ObjectInner::SieveUserScript(obj) => obj.patch(pointer, value),
+            ObjectInner::SpamAi(obj) => obj.patch(pointer, value),
             ObjectInner::SpamClassifier(obj) => obj.patch(pointer, value),
             ObjectInner::SpamDnsblServer(obj) => obj.patch(pointer, value),
             ObjectInner::SpamDnsblSettings(obj) => obj.patch(pointer, value),
             ObjectInner::SpamFileExtension(obj) => obj.patch(pointer, value),
-            ObjectInner::SpamLlm(obj) => obj.patch(pointer, value),
             ObjectInner::SpamPyzor(obj) => obj.patch(pointer, value),
             ObjectInner::SpamRule(obj) => obj.patch(pointer, value),
             ObjectInner::SpamSettings(obj) => obj.patch(pointer, value),
@@ -5938,124 +6161,131 @@ impl Object {
 
 impl IntoValue for Object {
     fn into_value(self) -> JmapValue<'static> {
+        self.into_value_with(ValueOptions::default())
+    }
+
+    fn into_value_with(self, opts: ValueOptions) -> JmapValue<'static> {
         match self.inner {
-            ObjectInner::Account(obj) => obj.into_value(),
-            ObjectInner::AccountPassword(obj) => obj.into_value(),
-            ObjectInner::AccountSettings(obj) => obj.into_value(),
-            ObjectInner::AcmeProvider(obj) => obj.into_value(),
-            ObjectInner::Action(obj) => obj.into_value(),
-            ObjectInner::AddressBook(obj) => obj.into_value(),
-            ObjectInner::AiModel(obj) => obj.into_value(),
-            ObjectInner::Alert(obj) => obj.into_value(),
-            ObjectInner::AllowedIp(obj) => obj.into_value(),
-            ObjectInner::ApiKey(obj) => obj.into_value(),
-            ObjectInner::AppPassword(obj) => obj.into_value(),
-            ObjectInner::Application(obj) => obj.into_value(),
-            ObjectInner::ArchivedItem(obj) => obj.into_value(),
-            ObjectInner::ArfExternalReport(obj) => obj.into_value(),
-            ObjectInner::Asn(obj) => obj.into_value(),
-            ObjectInner::Authentication(obj) => obj.into_value(),
-            ObjectInner::BlobStore(obj) => obj.into_value(),
-            ObjectInner::BlockedIp(obj) => obj.into_value(),
-            ObjectInner::Bootstrap(obj) => obj.into_value(),
-            ObjectInner::Cache(obj) => obj.into_value(),
-            ObjectInner::Calendar(obj) => obj.into_value(),
-            ObjectInner::CalendarAlarm(obj) => obj.into_value(),
-            ObjectInner::CalendarScheduling(obj) => obj.into_value(),
-            ObjectInner::Certificate(obj) => obj.into_value(),
-            ObjectInner::ClusterNode(obj) => obj.into_value(),
-            ObjectInner::ClusterRole(obj) => obj.into_value(),
-            ObjectInner::Coordinator(obj) => obj.into_value(),
-            ObjectInner::DataRetention(obj) => obj.into_value(),
-            ObjectInner::DataStore(obj) => obj.into_value(),
-            ObjectInner::Directory(obj) => obj.into_value(),
-            ObjectInner::DkimReportSettings(obj) => obj.into_value(),
-            ObjectInner::DkimSignature(obj) => obj.into_value(),
-            ObjectInner::DmarcExternalReport(obj) => obj.into_value(),
-            ObjectInner::DmarcInternalReport(obj) => obj.into_value(),
-            ObjectInner::DmarcReportSettings(obj) => obj.into_value(),
-            ObjectInner::DnsResolver(obj) => obj.into_value(),
-            ObjectInner::DnsServer(obj) => obj.into_value(),
-            ObjectInner::Domain(obj) => obj.into_value(),
-            ObjectInner::DsnReportSettings(obj) => obj.into_value(),
-            ObjectInner::Email(obj) => obj.into_value(),
-            ObjectInner::Enterprise(obj) => obj.into_value(),
-            ObjectInner::EventTracingLevel(obj) => obj.into_value(),
-            ObjectInner::FileStorage(obj) => obj.into_value(),
-            ObjectInner::Http(obj) => obj.into_value(),
-            ObjectInner::HttpForm(obj) => obj.into_value(),
-            ObjectInner::HttpLookup(obj) => obj.into_value(),
-            ObjectInner::Imap(obj) => obj.into_value(),
-            ObjectInner::InMemoryStore(obj) => obj.into_value(),
-            ObjectInner::Jmap(obj) => obj.into_value(),
-            ObjectInner::Log(obj) => obj.into_value(),
-            ObjectInner::MailingList(obj) => obj.into_value(),
-            ObjectInner::MaskedEmail(obj) => obj.into_value(),
-            ObjectInner::MemoryLookupKey(obj) => obj.into_value(),
-            ObjectInner::MemoryLookupKeyValue(obj) => obj.into_value(),
-            ObjectInner::Metric(obj) => obj.into_value(),
-            ObjectInner::Metrics(obj) => obj.into_value(),
-            ObjectInner::MetricsStore(obj) => obj.into_value(),
-            ObjectInner::MtaConnectionStrategy(obj) => obj.into_value(),
-            ObjectInner::MtaDeliverySchedule(obj) => obj.into_value(),
-            ObjectInner::MtaExtensions(obj) => obj.into_value(),
-            ObjectInner::MtaHook(obj) => obj.into_value(),
-            ObjectInner::MtaInboundSession(obj) => obj.into_value(),
-            ObjectInner::MtaInboundThrottle(obj) => obj.into_value(),
-            ObjectInner::MtaMilter(obj) => obj.into_value(),
-            ObjectInner::MtaOutboundStrategy(obj) => obj.into_value(),
-            ObjectInner::MtaOutboundThrottle(obj) => obj.into_value(),
-            ObjectInner::MtaQueueQuota(obj) => obj.into_value(),
-            ObjectInner::MtaRoute(obj) => obj.into_value(),
-            ObjectInner::MtaStageAuth(obj) => obj.into_value(),
-            ObjectInner::MtaStageConnect(obj) => obj.into_value(),
-            ObjectInner::MtaStageData(obj) => obj.into_value(),
-            ObjectInner::MtaStageEhlo(obj) => obj.into_value(),
-            ObjectInner::MtaStageMail(obj) => obj.into_value(),
-            ObjectInner::MtaStageRcpt(obj) => obj.into_value(),
-            ObjectInner::MtaSts(obj) => obj.into_value(),
-            ObjectInner::MtaTlsStrategy(obj) => obj.into_value(),
-            ObjectInner::MtaVirtualQueue(obj) => obj.into_value(),
-            ObjectInner::NetworkListener(obj) => obj.into_value(),
-            ObjectInner::OAuthClient(obj) => obj.into_value(),
-            ObjectInner::OidcProvider(obj) => obj.into_value(),
-            ObjectInner::PublicKey(obj) => obj.into_value(),
-            ObjectInner::QueuedMessage(obj) => obj.into_value(),
-            ObjectInner::ReportSettings(obj) => obj.into_value(),
-            ObjectInner::Role(obj) => obj.into_value(),
-            ObjectInner::Search(obj) => obj.into_value(),
-            ObjectInner::SearchStore(obj) => obj.into_value(),
-            ObjectInner::Security(obj) => obj.into_value(),
-            ObjectInner::SenderAuth(obj) => obj.into_value(),
-            ObjectInner::Sharing(obj) => obj.into_value(),
-            ObjectInner::SieveSystemInterpreter(obj) => obj.into_value(),
-            ObjectInner::SieveSystemScript(obj) => obj.into_value(),
-            ObjectInner::SieveUserInterpreter(obj) => obj.into_value(),
-            ObjectInner::SieveUserScript(obj) => obj.into_value(),
-            ObjectInner::SpamClassifier(obj) => obj.into_value(),
-            ObjectInner::SpamDnsblServer(obj) => obj.into_value(),
-            ObjectInner::SpamDnsblSettings(obj) => obj.into_value(),
-            ObjectInner::SpamFileExtension(obj) => obj.into_value(),
-            ObjectInner::SpamLlm(obj) => obj.into_value(),
-            ObjectInner::SpamPyzor(obj) => obj.into_value(),
-            ObjectInner::SpamRule(obj) => obj.into_value(),
-            ObjectInner::SpamSettings(obj) => obj.into_value(),
-            ObjectInner::SpamTag(obj) => obj.into_value(),
-            ObjectInner::SpamTrainingSample(obj) => obj.into_value(),
-            ObjectInner::SpfReportSettings(obj) => obj.into_value(),
-            ObjectInner::StoreLookup(obj) => obj.into_value(),
-            ObjectInner::SystemSettings(obj) => obj.into_value(),
-            ObjectInner::Task(obj) => obj.into_value(),
-            ObjectInner::TaskManager(obj) => obj.into_value(),
-            ObjectInner::Tenant(obj) => obj.into_value(),
-            ObjectInner::TlsExternalReport(obj) => obj.into_value(),
-            ObjectInner::TlsInternalReport(obj) => obj.into_value(),
-            ObjectInner::TlsReportSettings(obj) => obj.into_value(),
-            ObjectInner::Trace(obj) => obj.into_value(),
-            ObjectInner::Tracer(obj) => obj.into_value(),
-            ObjectInner::TracingStore(obj) => obj.into_value(),
-            ObjectInner::WebDav(obj) => obj.into_value(),
-            ObjectInner::WebHook(obj) => obj.into_value(),
+            ObjectInner::Account(obj) => (*obj).into_value_with(opts),
+            ObjectInner::AccountPassword(obj) => (*obj).into_value_with(opts),
+            ObjectInner::AccountSettings(obj) => (*obj).into_value_with(opts),
+            ObjectInner::AcmeProvider(obj) => (*obj).into_value_with(opts),
+            ObjectInner::Action(obj) => (*obj).into_value_with(opts),
+            ObjectInner::AddressBook(obj) => (*obj).into_value_with(opts),
+            ObjectInner::AiModel(obj) => (*obj).into_value_with(opts),
+            ObjectInner::Alert(obj) => (*obj).into_value_with(opts),
+            ObjectInner::AllowedIp(obj) => (*obj).into_value_with(opts),
+            ObjectInner::ApiKey(obj) => (*obj).into_value_with(opts),
+            ObjectInner::AppPassword(obj) => (*obj).into_value_with(opts),
+            ObjectInner::Application(obj) => (*obj).into_value_with(opts),
+            ObjectInner::ArchivedItem(obj) => (*obj).into_value_with(opts),
+            ObjectInner::ArfExternalReport(obj) => (*obj).into_value_with(opts),
+            ObjectInner::Asn(obj) => (*obj).into_value_with(opts),
+            ObjectInner::Authentication(obj) => (*obj).into_value_with(opts),
+            ObjectInner::BlobStore(obj) => (*obj).into_value_with(opts),
+            ObjectInner::BlockedIp(obj) => (*obj).into_value_with(opts),
+            ObjectInner::Bootstrap(obj) => (*obj).into_value_with(opts),
+            ObjectInner::Cache(obj) => (*obj).into_value_with(opts),
+            ObjectInner::Calendar(obj) => (*obj).into_value_with(opts),
+            ObjectInner::CalendarAlarm(obj) => (*obj).into_value_with(opts),
+            ObjectInner::CalendarScheduling(obj) => (*obj).into_value_with(opts),
+            ObjectInner::Certificate(obj) => (*obj).into_value_with(opts),
+            ObjectInner::ClusterNode(obj) => (*obj).into_value_with(opts),
+            ObjectInner::ClusterRole(obj) => (*obj).into_value_with(opts),
+            ObjectInner::Coordinator(obj) => (*obj).into_value_with(opts),
+            ObjectInner::DataRetention(obj) => (*obj).into_value_with(opts),
+            ObjectInner::DataStore(obj) => (*obj).into_value_with(opts),
+            ObjectInner::Directory(obj) => (*obj).into_value_with(opts),
+            ObjectInner::DkimReportSettings(obj) => (*obj).into_value_with(opts),
+            ObjectInner::DkimSignature(obj) => (*obj).into_value_with(opts),
+            ObjectInner::DmarcExternalReport(obj) => (*obj).into_value_with(opts),
+            ObjectInner::DmarcInternalReport(obj) => (*obj).into_value_with(opts),
+            ObjectInner::DmarcReportSettings(obj) => (*obj).into_value_with(opts),
+            ObjectInner::DnsResolver(obj) => (*obj).into_value_with(opts),
+            ObjectInner::DnsServer(obj) => (*obj).into_value_with(opts),
+            ObjectInner::Domain(obj) => (*obj).into_value_with(opts),
+            ObjectInner::DsnReportSettings(obj) => (*obj).into_value_with(opts),
+            ObjectInner::Email(obj) => (*obj).into_value_with(opts),
+            ObjectInner::Enterprise(obj) => (*obj).into_value_with(opts),
+            ObjectInner::EventTracingLevel(obj) => (*obj).into_value_with(opts),
+            ObjectInner::FileStorage(obj) => (*obj).into_value_with(opts),
+            ObjectInner::Http(obj) => (*obj).into_value_with(opts),
+            ObjectInner::HttpForm(obj) => (*obj).into_value_with(opts),
+            ObjectInner::HttpLookup(obj) => (*obj).into_value_with(opts),
+            ObjectInner::Imap(obj) => (*obj).into_value_with(opts),
+            ObjectInner::InMemoryStore(obj) => (*obj).into_value_with(opts),
+            ObjectInner::IndexQueueStatus(obj) => (*obj).into_value_with(opts),
+            ObjectInner::Jmap(obj) => (*obj).into_value_with(opts),
+            ObjectInner::Log(obj) => (*obj).into_value_with(opts),
+            ObjectInner::MailingList(obj) => (*obj).into_value_with(opts),
+            ObjectInner::MaskedEmail(obj) => (*obj).into_value_with(opts),
+            ObjectInner::MemoryLookupKey(obj) => (*obj).into_value_with(opts),
+            ObjectInner::MemoryLookupKeyValue(obj) => (*obj).into_value_with(opts),
+            ObjectInner::Metadata(obj) => (*obj).into_value_with(opts),
+            ObjectInner::Metric(obj) => (*obj).into_value_with(opts),
+            ObjectInner::Metrics(obj) => (*obj).into_value_with(opts),
+            ObjectInner::MetricsStore(obj) => (*obj).into_value_with(opts),
+            ObjectInner::MtaConnectionStrategy(obj) => (*obj).into_value_with(opts),
+            ObjectInner::MtaDeliverySchedule(obj) => (*obj).into_value_with(opts),
+            ObjectInner::MtaExtensions(obj) => (*obj).into_value_with(opts),
+            ObjectInner::MtaHook(obj) => (*obj).into_value_with(opts),
+            ObjectInner::MtaInboundSession(obj) => (*obj).into_value_with(opts),
+            ObjectInner::MtaInboundThrottle(obj) => (*obj).into_value_with(opts),
+            ObjectInner::MtaMilter(obj) => (*obj).into_value_with(opts),
+            ObjectInner::MtaOutboundStrategy(obj) => (*obj).into_value_with(opts),
+            ObjectInner::MtaOutboundThrottle(obj) => (*obj).into_value_with(opts),
+            ObjectInner::MtaQueueQuota(obj) => (*obj).into_value_with(opts),
+            ObjectInner::MtaRoute(obj) => (*obj).into_value_with(opts),
+            ObjectInner::MtaStageAuth(obj) => (*obj).into_value_with(opts),
+            ObjectInner::MtaStageConnect(obj) => (*obj).into_value_with(opts),
+            ObjectInner::MtaStageData(obj) => (*obj).into_value_with(opts),
+            ObjectInner::MtaStageEhlo(obj) => (*obj).into_value_with(opts),
+            ObjectInner::MtaStageMail(obj) => (*obj).into_value_with(opts),
+            ObjectInner::MtaStageRcpt(obj) => (*obj).into_value_with(opts),
+            ObjectInner::MtaSts(obj) => (*obj).into_value_with(opts),
+            ObjectInner::MtaTlsStrategy(obj) => (*obj).into_value_with(opts),
+            ObjectInner::MtaVirtualQueue(obj) => (*obj).into_value_with(opts),
+            ObjectInner::NetworkListener(obj) => (*obj).into_value_with(opts),
+            ObjectInner::OAuthClient(obj) => (*obj).into_value_with(opts),
+            ObjectInner::OAuthGrant(obj) => (*obj).into_value_with(opts),
+            ObjectInner::OidcProvider(obj) => (*obj).into_value_with(opts),
+            ObjectInner::PublicKey(obj) => (*obj).into_value_with(opts),
+            ObjectInner::QueuedMessage(obj) => (*obj).into_value_with(opts),
+            ObjectInner::ReportSettings(obj) => (*obj).into_value_with(opts),
+            ObjectInner::Role(obj) => (*obj).into_value_with(opts),
+            ObjectInner::Search(obj) => (*obj).into_value_with(opts),
+            ObjectInner::SearchStore(obj) => (*obj).into_value_with(opts),
+            ObjectInner::Security(obj) => (*obj).into_value_with(opts),
+            ObjectInner::SenderAuth(obj) => (*obj).into_value_with(opts),
+            ObjectInner::Sharing(obj) => (*obj).into_value_with(opts),
+            ObjectInner::SieveSystemInterpreter(obj) => (*obj).into_value_with(opts),
+            ObjectInner::SieveSystemScript(obj) => (*obj).into_value_with(opts),
+            ObjectInner::SieveUserInterpreter(obj) => (*obj).into_value_with(opts),
+            ObjectInner::SieveUserScript(obj) => (*obj).into_value_with(opts),
+            ObjectInner::SpamAi(obj) => (*obj).into_value_with(opts),
+            ObjectInner::SpamClassifier(obj) => (*obj).into_value_with(opts),
+            ObjectInner::SpamDnsblServer(obj) => (*obj).into_value_with(opts),
+            ObjectInner::SpamDnsblSettings(obj) => (*obj).into_value_with(opts),
+            ObjectInner::SpamFileExtension(obj) => (*obj).into_value_with(opts),
+            ObjectInner::SpamPyzor(obj) => (*obj).into_value_with(opts),
+            ObjectInner::SpamRule(obj) => (*obj).into_value_with(opts),
+            ObjectInner::SpamSettings(obj) => (*obj).into_value_with(opts),
+            ObjectInner::SpamTag(obj) => (*obj).into_value_with(opts),
+            ObjectInner::SpamTrainingSample(obj) => (*obj).into_value_with(opts),
+            ObjectInner::SpfReportSettings(obj) => (*obj).into_value_with(opts),
+            ObjectInner::StoreLookup(obj) => (*obj).into_value_with(opts),
+            ObjectInner::SystemSettings(obj) => (*obj).into_value_with(opts),
+            ObjectInner::Task(obj) => (*obj).into_value_with(opts),
+            ObjectInner::TaskManager(obj) => (*obj).into_value_with(opts),
+            ObjectInner::Tenant(obj) => (*obj).into_value_with(opts),
+            ObjectInner::TlsExternalReport(obj) => (*obj).into_value_with(opts),
+            ObjectInner::TlsInternalReport(obj) => (*obj).into_value_with(opts),
+            ObjectInner::TlsReportSettings(obj) => (*obj).into_value_with(opts),
+            ObjectInner::Trace(obj) => (*obj).into_value_with(opts),
+            ObjectInner::Tracer(obj) => (*obj).into_value_with(opts),
+            ObjectInner::TracingStore(obj) => (*obj).into_value_with(opts),
+            ObjectInner::WebDav(obj) => (*obj).into_value_with(opts),
+            ObjectInner::WebHook(obj) => (*obj).into_value_with(opts),
         }
     }
 }
@@ -6063,145 +6293,142 @@ impl IntoValue for Object {
 impl From<ObjectType> for ObjectInner {
     fn from(obj: ObjectType) -> Self {
         match obj {
-            ObjectType::Account => ObjectInner::Account(Default::default()),
-            ObjectType::AccountPassword => ObjectInner::AccountPassword(Default::default()),
-            ObjectType::AccountSettings => ObjectInner::AccountSettings(Default::default()),
-            ObjectType::AcmeProvider => ObjectInner::AcmeProvider(Default::default()),
-            ObjectType::Action => ObjectInner::Action(Default::default()),
-            ObjectType::AddressBook => ObjectInner::AddressBook(Default::default()),
-            ObjectType::AiModel => ObjectInner::AiModel(Default::default()),
-            ObjectType::Alert => ObjectInner::Alert(Default::default()),
-            ObjectType::AllowedIp => ObjectInner::AllowedIp(Default::default()),
-            ObjectType::ApiKey => ObjectInner::ApiKey(Default::default()),
-            ObjectType::AppPassword => ObjectInner::AppPassword(Default::default()),
-            ObjectType::Application => ObjectInner::Application(Default::default()),
-            ObjectType::ArchivedItem => ObjectInner::ArchivedItem(Default::default()),
-            ObjectType::ArfExternalReport => ObjectInner::ArfExternalReport(Default::default()),
-            ObjectType::Asn => ObjectInner::Asn(Default::default()),
-            ObjectType::Authentication => ObjectInner::Authentication(Default::default()),
-            ObjectType::BlobStore => ObjectInner::BlobStore(Default::default()),
-            ObjectType::BlockedIp => ObjectInner::BlockedIp(Default::default()),
-            ObjectType::Bootstrap => ObjectInner::Bootstrap(Default::default()),
-            ObjectType::Cache => ObjectInner::Cache(Default::default()),
-            ObjectType::Calendar => ObjectInner::Calendar(Default::default()),
-            ObjectType::CalendarAlarm => ObjectInner::CalendarAlarm(Default::default()),
-            ObjectType::CalendarScheduling => ObjectInner::CalendarScheduling(Default::default()),
-            ObjectType::Certificate => ObjectInner::Certificate(Default::default()),
-            ObjectType::ClusterNode => ObjectInner::ClusterNode(Default::default()),
-            ObjectType::ClusterRole => ObjectInner::ClusterRole(Default::default()),
-            ObjectType::Coordinator => ObjectInner::Coordinator(Default::default()),
-            ObjectType::DataRetention => ObjectInner::DataRetention(Default::default()),
-            ObjectType::DataStore => ObjectInner::DataStore(Default::default()),
-            ObjectType::Directory => ObjectInner::Directory(Default::default()),
-            ObjectType::DkimReportSettings => ObjectInner::DkimReportSettings(Default::default()),
-            ObjectType::DkimSignature => ObjectInner::DkimSignature(Default::default()),
-            ObjectType::DmarcExternalReport => ObjectInner::DmarcExternalReport(Default::default()),
-            ObjectType::DmarcInternalReport => ObjectInner::DmarcInternalReport(Default::default()),
-            ObjectType::DmarcReportSettings => ObjectInner::DmarcReportSettings(Default::default()),
-            ObjectType::DnsResolver => ObjectInner::DnsResolver(Default::default()),
-            ObjectType::DnsServer => ObjectInner::DnsServer(Default::default()),
-            ObjectType::Domain => ObjectInner::Domain(Default::default()),
-            ObjectType::DsnReportSettings => ObjectInner::DsnReportSettings(Default::default()),
-            ObjectType::Email => ObjectInner::Email(Default::default()),
-            ObjectType::Enterprise => ObjectInner::Enterprise(Default::default()),
-            ObjectType::EventTracingLevel => ObjectInner::EventTracingLevel(Default::default()),
-            ObjectType::FileStorage => ObjectInner::FileStorage(Default::default()),
-            ObjectType::Http => ObjectInner::Http(Default::default()),
-            ObjectType::HttpForm => ObjectInner::HttpForm(Default::default()),
-            ObjectType::HttpLookup => ObjectInner::HttpLookup(Default::default()),
-            ObjectType::Imap => ObjectInner::Imap(Default::default()),
-            ObjectType::InMemoryStore => ObjectInner::InMemoryStore(Default::default()),
-            ObjectType::Jmap => ObjectInner::Jmap(Default::default()),
-            ObjectType::Log => ObjectInner::Log(Default::default()),
-            ObjectType::MailingList => ObjectInner::MailingList(Default::default()),
-            ObjectType::MaskedEmail => ObjectInner::MaskedEmail(Default::default()),
-            ObjectType::MemoryLookupKey => ObjectInner::MemoryLookupKey(Default::default()),
-            ObjectType::MemoryLookupKeyValue => {
-                ObjectInner::MemoryLookupKeyValue(Default::default())
-            }
-            ObjectType::Metric => ObjectInner::Metric(Default::default()),
-            ObjectType::Metrics => ObjectInner::Metrics(Default::default()),
-            ObjectType::MetricsStore => ObjectInner::MetricsStore(Default::default()),
-            ObjectType::MtaConnectionStrategy => {
-                ObjectInner::MtaConnectionStrategy(Default::default())
-            }
-            ObjectType::MtaDeliverySchedule => ObjectInner::MtaDeliverySchedule(Default::default()),
-            ObjectType::MtaExtensions => ObjectInner::MtaExtensions(Default::default()),
-            ObjectType::MtaHook => ObjectInner::MtaHook(Default::default()),
-            ObjectType::MtaInboundSession => ObjectInner::MtaInboundSession(Default::default()),
-            ObjectType::MtaInboundThrottle => ObjectInner::MtaInboundThrottle(Default::default()),
-            ObjectType::MtaMilter => ObjectInner::MtaMilter(Default::default()),
-            ObjectType::MtaOutboundStrategy => ObjectInner::MtaOutboundStrategy(Default::default()),
-            ObjectType::MtaOutboundThrottle => ObjectInner::MtaOutboundThrottle(Default::default()),
-            ObjectType::MtaQueueQuota => ObjectInner::MtaQueueQuota(Default::default()),
-            ObjectType::MtaRoute => ObjectInner::MtaRoute(Default::default()),
-            ObjectType::MtaStageAuth => ObjectInner::MtaStageAuth(Default::default()),
-            ObjectType::MtaStageConnect => ObjectInner::MtaStageConnect(Default::default()),
-            ObjectType::MtaStageData => ObjectInner::MtaStageData(Default::default()),
-            ObjectType::MtaStageEhlo => ObjectInner::MtaStageEhlo(Default::default()),
-            ObjectType::MtaStageMail => ObjectInner::MtaStageMail(Default::default()),
-            ObjectType::MtaStageRcpt => ObjectInner::MtaStageRcpt(Default::default()),
-            ObjectType::MtaSts => ObjectInner::MtaSts(Default::default()),
-            ObjectType::MtaTlsStrategy => ObjectInner::MtaTlsStrategy(Default::default()),
-            ObjectType::MtaVirtualQueue => ObjectInner::MtaVirtualQueue(Default::default()),
-            ObjectType::NetworkListener => ObjectInner::NetworkListener(Default::default()),
-            ObjectType::OAuthClient => ObjectInner::OAuthClient(Default::default()),
-            ObjectType::OidcProvider => ObjectInner::OidcProvider(Default::default()),
-            ObjectType::PublicKey => ObjectInner::PublicKey(Default::default()),
-            ObjectType::QueuedMessage => ObjectInner::QueuedMessage(Default::default()),
-            ObjectType::ReportSettings => ObjectInner::ReportSettings(Default::default()),
-            ObjectType::Role => ObjectInner::Role(Default::default()),
-            ObjectType::Search => ObjectInner::Search(Default::default()),
-            ObjectType::SearchStore => ObjectInner::SearchStore(Default::default()),
-            ObjectType::Security => ObjectInner::Security(Default::default()),
-            ObjectType::SenderAuth => ObjectInner::SenderAuth(Default::default()),
-            ObjectType::Sharing => ObjectInner::Sharing(Default::default()),
+            ObjectType::Account => ObjectInner::Account(Box::default()),
+            ObjectType::AccountPassword => ObjectInner::AccountPassword(Box::default()),
+            ObjectType::AccountSettings => ObjectInner::AccountSettings(Box::default()),
+            ObjectType::AcmeProvider => ObjectInner::AcmeProvider(Box::default()),
+            ObjectType::Action => ObjectInner::Action(Box::default()),
+            ObjectType::AddressBook => ObjectInner::AddressBook(Box::default()),
+            ObjectType::AiModel => ObjectInner::AiModel(Box::default()),
+            ObjectType::Alert => ObjectInner::Alert(Box::default()),
+            ObjectType::AllowedIp => ObjectInner::AllowedIp(Box::default()),
+            ObjectType::ApiKey => ObjectInner::ApiKey(Box::default()),
+            ObjectType::AppPassword => ObjectInner::AppPassword(Box::default()),
+            ObjectType::Application => ObjectInner::Application(Box::default()),
+            ObjectType::ArchivedItem => ObjectInner::ArchivedItem(Box::default()),
+            ObjectType::ArfExternalReport => ObjectInner::ArfExternalReport(Box::default()),
+            ObjectType::Asn => ObjectInner::Asn(Box::default()),
+            ObjectType::Authentication => ObjectInner::Authentication(Box::default()),
+            ObjectType::BlobStore => ObjectInner::BlobStore(Box::default()),
+            ObjectType::BlockedIp => ObjectInner::BlockedIp(Box::default()),
+            ObjectType::Bootstrap => ObjectInner::Bootstrap(Box::default()),
+            ObjectType::Cache => ObjectInner::Cache(Box::default()),
+            ObjectType::Calendar => ObjectInner::Calendar(Box::default()),
+            ObjectType::CalendarAlarm => ObjectInner::CalendarAlarm(Box::default()),
+            ObjectType::CalendarScheduling => ObjectInner::CalendarScheduling(Box::default()),
+            ObjectType::Certificate => ObjectInner::Certificate(Box::default()),
+            ObjectType::ClusterNode => ObjectInner::ClusterNode(Box::default()),
+            ObjectType::ClusterRole => ObjectInner::ClusterRole(Box::default()),
+            ObjectType::Coordinator => ObjectInner::Coordinator(Box::default()),
+            ObjectType::DataRetention => ObjectInner::DataRetention(Box::default()),
+            ObjectType::DataStore => ObjectInner::DataStore(Box::default()),
+            ObjectType::Directory => ObjectInner::Directory(Box::default()),
+            ObjectType::DkimReportSettings => ObjectInner::DkimReportSettings(Box::default()),
+            ObjectType::DkimSignature => ObjectInner::DkimSignature(Box::default()),
+            ObjectType::DmarcExternalReport => ObjectInner::DmarcExternalReport(Box::default()),
+            ObjectType::DmarcInternalReport => ObjectInner::DmarcInternalReport(Box::default()),
+            ObjectType::DmarcReportSettings => ObjectInner::DmarcReportSettings(Box::default()),
+            ObjectType::DnsResolver => ObjectInner::DnsResolver(Box::default()),
+            ObjectType::DnsServer => ObjectInner::DnsServer(Box::default()),
+            ObjectType::Domain => ObjectInner::Domain(Box::default()),
+            ObjectType::DsnReportSettings => ObjectInner::DsnReportSettings(Box::default()),
+            ObjectType::Email => ObjectInner::Email(Box::default()),
+            ObjectType::Enterprise => ObjectInner::Enterprise(Box::default()),
+            ObjectType::EventTracingLevel => ObjectInner::EventTracingLevel(Box::default()),
+            ObjectType::FileStorage => ObjectInner::FileStorage(Box::default()),
+            ObjectType::Http => ObjectInner::Http(Box::default()),
+            ObjectType::HttpForm => ObjectInner::HttpForm(Box::default()),
+            ObjectType::HttpLookup => ObjectInner::HttpLookup(Box::default()),
+            ObjectType::Imap => ObjectInner::Imap(Box::default()),
+            ObjectType::InMemoryStore => ObjectInner::InMemoryStore(Box::default()),
+            ObjectType::IndexQueueStatus => ObjectInner::IndexQueueStatus(Box::default()),
+            ObjectType::Jmap => ObjectInner::Jmap(Box::default()),
+            ObjectType::Log => ObjectInner::Log(Box::default()),
+            ObjectType::MailingList => ObjectInner::MailingList(Box::default()),
+            ObjectType::MaskedEmail => ObjectInner::MaskedEmail(Box::default()),
+            ObjectType::MemoryLookupKey => ObjectInner::MemoryLookupKey(Box::default()),
+            ObjectType::MemoryLookupKeyValue => ObjectInner::MemoryLookupKeyValue(Box::default()),
+            ObjectType::Metadata => ObjectInner::Metadata(Box::default()),
+            ObjectType::Metric => ObjectInner::Metric(Box::default()),
+            ObjectType::Metrics => ObjectInner::Metrics(Box::default()),
+            ObjectType::MetricsStore => ObjectInner::MetricsStore(Box::default()),
+            ObjectType::MtaConnectionStrategy => ObjectInner::MtaConnectionStrategy(Box::default()),
+            ObjectType::MtaDeliverySchedule => ObjectInner::MtaDeliverySchedule(Box::default()),
+            ObjectType::MtaExtensions => ObjectInner::MtaExtensions(Box::default()),
+            ObjectType::MtaHook => ObjectInner::MtaHook(Box::default()),
+            ObjectType::MtaInboundSession => ObjectInner::MtaInboundSession(Box::default()),
+            ObjectType::MtaInboundThrottle => ObjectInner::MtaInboundThrottle(Box::default()),
+            ObjectType::MtaMilter => ObjectInner::MtaMilter(Box::default()),
+            ObjectType::MtaOutboundStrategy => ObjectInner::MtaOutboundStrategy(Box::default()),
+            ObjectType::MtaOutboundThrottle => ObjectInner::MtaOutboundThrottle(Box::default()),
+            ObjectType::MtaQueueQuota => ObjectInner::MtaQueueQuota(Box::default()),
+            ObjectType::MtaRoute => ObjectInner::MtaRoute(Box::default()),
+            ObjectType::MtaStageAuth => ObjectInner::MtaStageAuth(Box::default()),
+            ObjectType::MtaStageConnect => ObjectInner::MtaStageConnect(Box::default()),
+            ObjectType::MtaStageData => ObjectInner::MtaStageData(Box::default()),
+            ObjectType::MtaStageEhlo => ObjectInner::MtaStageEhlo(Box::default()),
+            ObjectType::MtaStageMail => ObjectInner::MtaStageMail(Box::default()),
+            ObjectType::MtaStageRcpt => ObjectInner::MtaStageRcpt(Box::default()),
+            ObjectType::MtaSts => ObjectInner::MtaSts(Box::default()),
+            ObjectType::MtaTlsStrategy => ObjectInner::MtaTlsStrategy(Box::default()),
+            ObjectType::MtaVirtualQueue => ObjectInner::MtaVirtualQueue(Box::default()),
+            ObjectType::NetworkListener => ObjectInner::NetworkListener(Box::default()),
+            ObjectType::OAuthClient => ObjectInner::OAuthClient(Box::default()),
+            ObjectType::OAuthGrant => ObjectInner::OAuthGrant(Box::default()),
+            ObjectType::OidcProvider => ObjectInner::OidcProvider(Box::default()),
+            ObjectType::PublicKey => ObjectInner::PublicKey(Box::default()),
+            ObjectType::QueuedMessage => ObjectInner::QueuedMessage(Box::default()),
+            ObjectType::ReportSettings => ObjectInner::ReportSettings(Box::default()),
+            ObjectType::Role => ObjectInner::Role(Box::default()),
+            ObjectType::Search => ObjectInner::Search(Box::default()),
+            ObjectType::SearchStore => ObjectInner::SearchStore(Box::default()),
+            ObjectType::Security => ObjectInner::Security(Box::default()),
+            ObjectType::SenderAuth => ObjectInner::SenderAuth(Box::default()),
+            ObjectType::Sharing => ObjectInner::Sharing(Box::default()),
             ObjectType::SieveSystemInterpreter => {
-                ObjectInner::SieveSystemInterpreter(Default::default())
+                ObjectInner::SieveSystemInterpreter(Box::default())
             }
-            ObjectType::SieveSystemScript => ObjectInner::SieveSystemScript(Default::default()),
-            ObjectType::SieveUserInterpreter => {
-                ObjectInner::SieveUserInterpreter(Default::default())
-            }
-            ObjectType::SieveUserScript => ObjectInner::SieveUserScript(Default::default()),
-            ObjectType::SpamClassifier => ObjectInner::SpamClassifier(Default::default()),
-            ObjectType::SpamDnsblServer => ObjectInner::SpamDnsblServer(Default::default()),
-            ObjectType::SpamDnsblSettings => ObjectInner::SpamDnsblSettings(Default::default()),
-            ObjectType::SpamFileExtension => ObjectInner::SpamFileExtension(Default::default()),
-            ObjectType::SpamLlm => ObjectInner::SpamLlm(Default::default()),
-            ObjectType::SpamPyzor => ObjectInner::SpamPyzor(Default::default()),
-            ObjectType::SpamRule => ObjectInner::SpamRule(Default::default()),
-            ObjectType::SpamSettings => ObjectInner::SpamSettings(Default::default()),
-            ObjectType::SpamTag => ObjectInner::SpamTag(Default::default()),
-            ObjectType::SpamTrainingSample => ObjectInner::SpamTrainingSample(Default::default()),
-            ObjectType::SpfReportSettings => ObjectInner::SpfReportSettings(Default::default()),
-            ObjectType::StoreLookup => ObjectInner::StoreLookup(Default::default()),
-            ObjectType::SystemSettings => ObjectInner::SystemSettings(Default::default()),
-            ObjectType::Task => ObjectInner::Task(Default::default()),
-            ObjectType::TaskManager => ObjectInner::TaskManager(Default::default()),
-            ObjectType::Tenant => ObjectInner::Tenant(Default::default()),
-            ObjectType::TlsExternalReport => ObjectInner::TlsExternalReport(Default::default()),
-            ObjectType::TlsInternalReport => ObjectInner::TlsInternalReport(Default::default()),
-            ObjectType::TlsReportSettings => ObjectInner::TlsReportSettings(Default::default()),
-            ObjectType::Trace => ObjectInner::Trace(Default::default()),
-            ObjectType::Tracer => ObjectInner::Tracer(Default::default()),
-            ObjectType::TracingStore => ObjectInner::TracingStore(Default::default()),
-            ObjectType::WebDav => ObjectInner::WebDav(Default::default()),
-            ObjectType::WebHook => ObjectInner::WebHook(Default::default()),
+            ObjectType::SieveSystemScript => ObjectInner::SieveSystemScript(Box::default()),
+            ObjectType::SieveUserInterpreter => ObjectInner::SieveUserInterpreter(Box::default()),
+            ObjectType::SieveUserScript => ObjectInner::SieveUserScript(Box::default()),
+            ObjectType::SpamAi => ObjectInner::SpamAi(Box::default()),
+            ObjectType::SpamClassifier => ObjectInner::SpamClassifier(Box::default()),
+            ObjectType::SpamDnsblServer => ObjectInner::SpamDnsblServer(Box::default()),
+            ObjectType::SpamDnsblSettings => ObjectInner::SpamDnsblSettings(Box::default()),
+            ObjectType::SpamFileExtension => ObjectInner::SpamFileExtension(Box::default()),
+            ObjectType::SpamPyzor => ObjectInner::SpamPyzor(Box::default()),
+            ObjectType::SpamRule => ObjectInner::SpamRule(Box::default()),
+            ObjectType::SpamSettings => ObjectInner::SpamSettings(Box::default()),
+            ObjectType::SpamTag => ObjectInner::SpamTag(Box::default()),
+            ObjectType::SpamTrainingSample => ObjectInner::SpamTrainingSample(Box::default()),
+            ObjectType::SpfReportSettings => ObjectInner::SpfReportSettings(Box::default()),
+            ObjectType::StoreLookup => ObjectInner::StoreLookup(Box::default()),
+            ObjectType::SystemSettings => ObjectInner::SystemSettings(Box::default()),
+            ObjectType::Task => ObjectInner::Task(Box::default()),
+            ObjectType::TaskManager => ObjectInner::TaskManager(Box::default()),
+            ObjectType::Tenant => ObjectInner::Tenant(Box::default()),
+            ObjectType::TlsExternalReport => ObjectInner::TlsExternalReport(Box::default()),
+            ObjectType::TlsInternalReport => ObjectInner::TlsInternalReport(Box::default()),
+            ObjectType::TlsReportSettings => ObjectInner::TlsReportSettings(Box::default()),
+            ObjectType::Trace => ObjectInner::Trace(Box::default()),
+            ObjectType::Tracer => ObjectInner::Tracer(Box::default()),
+            ObjectType::TracingStore => ObjectInner::TracingStore(Box::default()),
+            ObjectType::WebDav => ObjectInner::WebDav(Box::default()),
+            ObjectType::WebHook => ObjectInner::WebHook(Box::default()),
         }
     }
 }
 
 impl From<Account> for ObjectInner {
     fn from(value: Account) -> Self {
-        ObjectInner::Account(value)
+        ObjectInner::Account(Box::new(value))
     }
 }
 
 impl From<Object> for Account {
     fn from(obj: Object) -> Self {
         match obj.inner {
-            ObjectInner::Account(obj) => obj,
+            ObjectInner::Account(obj) => *obj,
             _ => unreachable!(),
         }
     }
@@ -6209,14 +6436,14 @@ impl From<Object> for Account {
 
 impl From<AccountPassword> for ObjectInner {
     fn from(value: AccountPassword) -> Self {
-        ObjectInner::AccountPassword(value)
+        ObjectInner::AccountPassword(Box::new(value))
     }
 }
 
 impl From<Object> for AccountPassword {
     fn from(obj: Object) -> Self {
         match obj.inner {
-            ObjectInner::AccountPassword(obj) => obj,
+            ObjectInner::AccountPassword(obj) => *obj,
             _ => unreachable!(),
         }
     }
@@ -6224,14 +6451,14 @@ impl From<Object> for AccountPassword {
 
 impl From<AccountSettings> for ObjectInner {
     fn from(value: AccountSettings) -> Self {
-        ObjectInner::AccountSettings(value)
+        ObjectInner::AccountSettings(Box::new(value))
     }
 }
 
 impl From<Object> for AccountSettings {
     fn from(obj: Object) -> Self {
         match obj.inner {
-            ObjectInner::AccountSettings(obj) => obj,
+            ObjectInner::AccountSettings(obj) => *obj,
             _ => unreachable!(),
         }
     }
@@ -6239,14 +6466,14 @@ impl From<Object> for AccountSettings {
 
 impl From<AcmeProvider> for ObjectInner {
     fn from(value: AcmeProvider) -> Self {
-        ObjectInner::AcmeProvider(value)
+        ObjectInner::AcmeProvider(Box::new(value))
     }
 }
 
 impl From<Object> for AcmeProvider {
     fn from(obj: Object) -> Self {
         match obj.inner {
-            ObjectInner::AcmeProvider(obj) => obj,
+            ObjectInner::AcmeProvider(obj) => *obj,
             _ => unreachable!(),
         }
     }
@@ -6254,14 +6481,14 @@ impl From<Object> for AcmeProvider {
 
 impl From<Action> for ObjectInner {
     fn from(value: Action) -> Self {
-        ObjectInner::Action(value)
+        ObjectInner::Action(Box::new(value))
     }
 }
 
 impl From<Object> for Action {
     fn from(obj: Object) -> Self {
         match obj.inner {
-            ObjectInner::Action(obj) => obj,
+            ObjectInner::Action(obj) => *obj,
             _ => unreachable!(),
         }
     }
@@ -6269,14 +6496,14 @@ impl From<Object> for Action {
 
 impl From<AddressBook> for ObjectInner {
     fn from(value: AddressBook) -> Self {
-        ObjectInner::AddressBook(value)
+        ObjectInner::AddressBook(Box::new(value))
     }
 }
 
 impl From<Object> for AddressBook {
     fn from(obj: Object) -> Self {
         match obj.inner {
-            ObjectInner::AddressBook(obj) => obj,
+            ObjectInner::AddressBook(obj) => *obj,
             _ => unreachable!(),
         }
     }
@@ -6284,14 +6511,14 @@ impl From<Object> for AddressBook {
 
 impl From<AiModel> for ObjectInner {
     fn from(value: AiModel) -> Self {
-        ObjectInner::AiModel(value)
+        ObjectInner::AiModel(Box::new(value))
     }
 }
 
 impl From<Object> for AiModel {
     fn from(obj: Object) -> Self {
         match obj.inner {
-            ObjectInner::AiModel(obj) => obj,
+            ObjectInner::AiModel(obj) => *obj,
             _ => unreachable!(),
         }
     }
@@ -6299,14 +6526,14 @@ impl From<Object> for AiModel {
 
 impl From<Alert> for ObjectInner {
     fn from(value: Alert) -> Self {
-        ObjectInner::Alert(value)
+        ObjectInner::Alert(Box::new(value))
     }
 }
 
 impl From<Object> for Alert {
     fn from(obj: Object) -> Self {
         match obj.inner {
-            ObjectInner::Alert(obj) => obj,
+            ObjectInner::Alert(obj) => *obj,
             _ => unreachable!(),
         }
     }
@@ -6314,14 +6541,14 @@ impl From<Object> for Alert {
 
 impl From<AllowedIp> for ObjectInner {
     fn from(value: AllowedIp) -> Self {
-        ObjectInner::AllowedIp(value)
+        ObjectInner::AllowedIp(Box::new(value))
     }
 }
 
 impl From<Object> for AllowedIp {
     fn from(obj: Object) -> Self {
         match obj.inner {
-            ObjectInner::AllowedIp(obj) => obj,
+            ObjectInner::AllowedIp(obj) => *obj,
             _ => unreachable!(),
         }
     }
@@ -6329,14 +6556,14 @@ impl From<Object> for AllowedIp {
 
 impl From<ApiKey> for ObjectInner {
     fn from(value: ApiKey) -> Self {
-        ObjectInner::ApiKey(value)
+        ObjectInner::ApiKey(Box::new(value))
     }
 }
 
 impl From<Object> for ApiKey {
     fn from(obj: Object) -> Self {
         match obj.inner {
-            ObjectInner::ApiKey(obj) => obj,
+            ObjectInner::ApiKey(obj) => *obj,
             _ => unreachable!(),
         }
     }
@@ -6344,14 +6571,14 @@ impl From<Object> for ApiKey {
 
 impl From<AppPassword> for ObjectInner {
     fn from(value: AppPassword) -> Self {
-        ObjectInner::AppPassword(value)
+        ObjectInner::AppPassword(Box::new(value))
     }
 }
 
 impl From<Object> for AppPassword {
     fn from(obj: Object) -> Self {
         match obj.inner {
-            ObjectInner::AppPassword(obj) => obj,
+            ObjectInner::AppPassword(obj) => *obj,
             _ => unreachable!(),
         }
     }
@@ -6359,14 +6586,14 @@ impl From<Object> for AppPassword {
 
 impl From<Application> for ObjectInner {
     fn from(value: Application) -> Self {
-        ObjectInner::Application(value)
+        ObjectInner::Application(Box::new(value))
     }
 }
 
 impl From<Object> for Application {
     fn from(obj: Object) -> Self {
         match obj.inner {
-            ObjectInner::Application(obj) => obj,
+            ObjectInner::Application(obj) => *obj,
             _ => unreachable!(),
         }
     }
@@ -6374,14 +6601,14 @@ impl From<Object> for Application {
 
 impl From<ArchivedItem> for ObjectInner {
     fn from(value: ArchivedItem) -> Self {
-        ObjectInner::ArchivedItem(value)
+        ObjectInner::ArchivedItem(Box::new(value))
     }
 }
 
 impl From<Object> for ArchivedItem {
     fn from(obj: Object) -> Self {
         match obj.inner {
-            ObjectInner::ArchivedItem(obj) => obj,
+            ObjectInner::ArchivedItem(obj) => *obj,
             _ => unreachable!(),
         }
     }
@@ -6389,14 +6616,14 @@ impl From<Object> for ArchivedItem {
 
 impl From<ArfExternalReport> for ObjectInner {
     fn from(value: ArfExternalReport) -> Self {
-        ObjectInner::ArfExternalReport(value)
+        ObjectInner::ArfExternalReport(Box::new(value))
     }
 }
 
 impl From<Object> for ArfExternalReport {
     fn from(obj: Object) -> Self {
         match obj.inner {
-            ObjectInner::ArfExternalReport(obj) => obj,
+            ObjectInner::ArfExternalReport(obj) => *obj,
             _ => unreachable!(),
         }
     }
@@ -6404,14 +6631,14 @@ impl From<Object> for ArfExternalReport {
 
 impl From<Asn> for ObjectInner {
     fn from(value: Asn) -> Self {
-        ObjectInner::Asn(value)
+        ObjectInner::Asn(Box::new(value))
     }
 }
 
 impl From<Object> for Asn {
     fn from(obj: Object) -> Self {
         match obj.inner {
-            ObjectInner::Asn(obj) => obj,
+            ObjectInner::Asn(obj) => *obj,
             _ => unreachable!(),
         }
     }
@@ -6419,14 +6646,14 @@ impl From<Object> for Asn {
 
 impl From<Authentication> for ObjectInner {
     fn from(value: Authentication) -> Self {
-        ObjectInner::Authentication(value)
+        ObjectInner::Authentication(Box::new(value))
     }
 }
 
 impl From<Object> for Authentication {
     fn from(obj: Object) -> Self {
         match obj.inner {
-            ObjectInner::Authentication(obj) => obj,
+            ObjectInner::Authentication(obj) => *obj,
             _ => unreachable!(),
         }
     }
@@ -6434,14 +6661,14 @@ impl From<Object> for Authentication {
 
 impl From<BlobStore> for ObjectInner {
     fn from(value: BlobStore) -> Self {
-        ObjectInner::BlobStore(value)
+        ObjectInner::BlobStore(Box::new(value))
     }
 }
 
 impl From<Object> for BlobStore {
     fn from(obj: Object) -> Self {
         match obj.inner {
-            ObjectInner::BlobStore(obj) => obj,
+            ObjectInner::BlobStore(obj) => *obj,
             _ => unreachable!(),
         }
     }
@@ -6449,14 +6676,14 @@ impl From<Object> for BlobStore {
 
 impl From<BlockedIp> for ObjectInner {
     fn from(value: BlockedIp) -> Self {
-        ObjectInner::BlockedIp(value)
+        ObjectInner::BlockedIp(Box::new(value))
     }
 }
 
 impl From<Object> for BlockedIp {
     fn from(obj: Object) -> Self {
         match obj.inner {
-            ObjectInner::BlockedIp(obj) => obj,
+            ObjectInner::BlockedIp(obj) => *obj,
             _ => unreachable!(),
         }
     }
@@ -6464,14 +6691,14 @@ impl From<Object> for BlockedIp {
 
 impl From<Bootstrap> for ObjectInner {
     fn from(value: Bootstrap) -> Self {
-        ObjectInner::Bootstrap(value)
+        ObjectInner::Bootstrap(Box::new(value))
     }
 }
 
 impl From<Object> for Bootstrap {
     fn from(obj: Object) -> Self {
         match obj.inner {
-            ObjectInner::Bootstrap(obj) => obj,
+            ObjectInner::Bootstrap(obj) => *obj,
             _ => unreachable!(),
         }
     }
@@ -6479,14 +6706,14 @@ impl From<Object> for Bootstrap {
 
 impl From<Cache> for ObjectInner {
     fn from(value: Cache) -> Self {
-        ObjectInner::Cache(value)
+        ObjectInner::Cache(Box::new(value))
     }
 }
 
 impl From<Object> for Cache {
     fn from(obj: Object) -> Self {
         match obj.inner {
-            ObjectInner::Cache(obj) => obj,
+            ObjectInner::Cache(obj) => *obj,
             _ => unreachable!(),
         }
     }
@@ -6494,14 +6721,14 @@ impl From<Object> for Cache {
 
 impl From<Calendar> for ObjectInner {
     fn from(value: Calendar) -> Self {
-        ObjectInner::Calendar(value)
+        ObjectInner::Calendar(Box::new(value))
     }
 }
 
 impl From<Object> for Calendar {
     fn from(obj: Object) -> Self {
         match obj.inner {
-            ObjectInner::Calendar(obj) => obj,
+            ObjectInner::Calendar(obj) => *obj,
             _ => unreachable!(),
         }
     }
@@ -6509,14 +6736,14 @@ impl From<Object> for Calendar {
 
 impl From<CalendarAlarm> for ObjectInner {
     fn from(value: CalendarAlarm) -> Self {
-        ObjectInner::CalendarAlarm(value)
+        ObjectInner::CalendarAlarm(Box::new(value))
     }
 }
 
 impl From<Object> for CalendarAlarm {
     fn from(obj: Object) -> Self {
         match obj.inner {
-            ObjectInner::CalendarAlarm(obj) => obj,
+            ObjectInner::CalendarAlarm(obj) => *obj,
             _ => unreachable!(),
         }
     }
@@ -6524,14 +6751,14 @@ impl From<Object> for CalendarAlarm {
 
 impl From<CalendarScheduling> for ObjectInner {
     fn from(value: CalendarScheduling) -> Self {
-        ObjectInner::CalendarScheduling(value)
+        ObjectInner::CalendarScheduling(Box::new(value))
     }
 }
 
 impl From<Object> for CalendarScheduling {
     fn from(obj: Object) -> Self {
         match obj.inner {
-            ObjectInner::CalendarScheduling(obj) => obj,
+            ObjectInner::CalendarScheduling(obj) => *obj,
             _ => unreachable!(),
         }
     }
@@ -6539,14 +6766,14 @@ impl From<Object> for CalendarScheduling {
 
 impl From<Certificate> for ObjectInner {
     fn from(value: Certificate) -> Self {
-        ObjectInner::Certificate(value)
+        ObjectInner::Certificate(Box::new(value))
     }
 }
 
 impl From<Object> for Certificate {
     fn from(obj: Object) -> Self {
         match obj.inner {
-            ObjectInner::Certificate(obj) => obj,
+            ObjectInner::Certificate(obj) => *obj,
             _ => unreachable!(),
         }
     }
@@ -6554,14 +6781,14 @@ impl From<Object> for Certificate {
 
 impl From<ClusterNode> for ObjectInner {
     fn from(value: ClusterNode) -> Self {
-        ObjectInner::ClusterNode(value)
+        ObjectInner::ClusterNode(Box::new(value))
     }
 }
 
 impl From<Object> for ClusterNode {
     fn from(obj: Object) -> Self {
         match obj.inner {
-            ObjectInner::ClusterNode(obj) => obj,
+            ObjectInner::ClusterNode(obj) => *obj,
             _ => unreachable!(),
         }
     }
@@ -6569,14 +6796,14 @@ impl From<Object> for ClusterNode {
 
 impl From<ClusterRole> for ObjectInner {
     fn from(value: ClusterRole) -> Self {
-        ObjectInner::ClusterRole(value)
+        ObjectInner::ClusterRole(Box::new(value))
     }
 }
 
 impl From<Object> for ClusterRole {
     fn from(obj: Object) -> Self {
         match obj.inner {
-            ObjectInner::ClusterRole(obj) => obj,
+            ObjectInner::ClusterRole(obj) => *obj,
             _ => unreachable!(),
         }
     }
@@ -6584,14 +6811,14 @@ impl From<Object> for ClusterRole {
 
 impl From<Coordinator> for ObjectInner {
     fn from(value: Coordinator) -> Self {
-        ObjectInner::Coordinator(value)
+        ObjectInner::Coordinator(Box::new(value))
     }
 }
 
 impl From<Object> for Coordinator {
     fn from(obj: Object) -> Self {
         match obj.inner {
-            ObjectInner::Coordinator(obj) => obj,
+            ObjectInner::Coordinator(obj) => *obj,
             _ => unreachable!(),
         }
     }
@@ -6599,14 +6826,14 @@ impl From<Object> for Coordinator {
 
 impl From<DataRetention> for ObjectInner {
     fn from(value: DataRetention) -> Self {
-        ObjectInner::DataRetention(value)
+        ObjectInner::DataRetention(Box::new(value))
     }
 }
 
 impl From<Object> for DataRetention {
     fn from(obj: Object) -> Self {
         match obj.inner {
-            ObjectInner::DataRetention(obj) => obj,
+            ObjectInner::DataRetention(obj) => *obj,
             _ => unreachable!(),
         }
     }
@@ -6614,14 +6841,14 @@ impl From<Object> for DataRetention {
 
 impl From<DataStore> for ObjectInner {
     fn from(value: DataStore) -> Self {
-        ObjectInner::DataStore(value)
+        ObjectInner::DataStore(Box::new(value))
     }
 }
 
 impl From<Object> for DataStore {
     fn from(obj: Object) -> Self {
         match obj.inner {
-            ObjectInner::DataStore(obj) => obj,
+            ObjectInner::DataStore(obj) => *obj,
             _ => unreachable!(),
         }
     }
@@ -6629,14 +6856,14 @@ impl From<Object> for DataStore {
 
 impl From<Directory> for ObjectInner {
     fn from(value: Directory) -> Self {
-        ObjectInner::Directory(value)
+        ObjectInner::Directory(Box::new(value))
     }
 }
 
 impl From<Object> for Directory {
     fn from(obj: Object) -> Self {
         match obj.inner {
-            ObjectInner::Directory(obj) => obj,
+            ObjectInner::Directory(obj) => *obj,
             _ => unreachable!(),
         }
     }
@@ -6644,14 +6871,14 @@ impl From<Object> for Directory {
 
 impl From<DkimReportSettings> for ObjectInner {
     fn from(value: DkimReportSettings) -> Self {
-        ObjectInner::DkimReportSettings(value)
+        ObjectInner::DkimReportSettings(Box::new(value))
     }
 }
 
 impl From<Object> for DkimReportSettings {
     fn from(obj: Object) -> Self {
         match obj.inner {
-            ObjectInner::DkimReportSettings(obj) => obj,
+            ObjectInner::DkimReportSettings(obj) => *obj,
             _ => unreachable!(),
         }
     }
@@ -6659,14 +6886,14 @@ impl From<Object> for DkimReportSettings {
 
 impl From<DkimSignature> for ObjectInner {
     fn from(value: DkimSignature) -> Self {
-        ObjectInner::DkimSignature(value)
+        ObjectInner::DkimSignature(Box::new(value))
     }
 }
 
 impl From<Object> for DkimSignature {
     fn from(obj: Object) -> Self {
         match obj.inner {
-            ObjectInner::DkimSignature(obj) => obj,
+            ObjectInner::DkimSignature(obj) => *obj,
             _ => unreachable!(),
         }
     }
@@ -6674,14 +6901,14 @@ impl From<Object> for DkimSignature {
 
 impl From<DmarcExternalReport> for ObjectInner {
     fn from(value: DmarcExternalReport) -> Self {
-        ObjectInner::DmarcExternalReport(value)
+        ObjectInner::DmarcExternalReport(Box::new(value))
     }
 }
 
 impl From<Object> for DmarcExternalReport {
     fn from(obj: Object) -> Self {
         match obj.inner {
-            ObjectInner::DmarcExternalReport(obj) => obj,
+            ObjectInner::DmarcExternalReport(obj) => *obj,
             _ => unreachable!(),
         }
     }
@@ -6689,14 +6916,14 @@ impl From<Object> for DmarcExternalReport {
 
 impl From<DmarcInternalReport> for ObjectInner {
     fn from(value: DmarcInternalReport) -> Self {
-        ObjectInner::DmarcInternalReport(value)
+        ObjectInner::DmarcInternalReport(Box::new(value))
     }
 }
 
 impl From<Object> for DmarcInternalReport {
     fn from(obj: Object) -> Self {
         match obj.inner {
-            ObjectInner::DmarcInternalReport(obj) => obj,
+            ObjectInner::DmarcInternalReport(obj) => *obj,
             _ => unreachable!(),
         }
     }
@@ -6704,14 +6931,14 @@ impl From<Object> for DmarcInternalReport {
 
 impl From<DmarcReportSettings> for ObjectInner {
     fn from(value: DmarcReportSettings) -> Self {
-        ObjectInner::DmarcReportSettings(value)
+        ObjectInner::DmarcReportSettings(Box::new(value))
     }
 }
 
 impl From<Object> for DmarcReportSettings {
     fn from(obj: Object) -> Self {
         match obj.inner {
-            ObjectInner::DmarcReportSettings(obj) => obj,
+            ObjectInner::DmarcReportSettings(obj) => *obj,
             _ => unreachable!(),
         }
     }
@@ -6719,14 +6946,14 @@ impl From<Object> for DmarcReportSettings {
 
 impl From<DnsResolver> for ObjectInner {
     fn from(value: DnsResolver) -> Self {
-        ObjectInner::DnsResolver(value)
+        ObjectInner::DnsResolver(Box::new(value))
     }
 }
 
 impl From<Object> for DnsResolver {
     fn from(obj: Object) -> Self {
         match obj.inner {
-            ObjectInner::DnsResolver(obj) => obj,
+            ObjectInner::DnsResolver(obj) => *obj,
             _ => unreachable!(),
         }
     }
@@ -6734,14 +6961,14 @@ impl From<Object> for DnsResolver {
 
 impl From<DnsServer> for ObjectInner {
     fn from(value: DnsServer) -> Self {
-        ObjectInner::DnsServer(value)
+        ObjectInner::DnsServer(Box::new(value))
     }
 }
 
 impl From<Object> for DnsServer {
     fn from(obj: Object) -> Self {
         match obj.inner {
-            ObjectInner::DnsServer(obj) => obj,
+            ObjectInner::DnsServer(obj) => *obj,
             _ => unreachable!(),
         }
     }
@@ -6749,14 +6976,14 @@ impl From<Object> for DnsServer {
 
 impl From<Domain> for ObjectInner {
     fn from(value: Domain) -> Self {
-        ObjectInner::Domain(value)
+        ObjectInner::Domain(Box::new(value))
     }
 }
 
 impl From<Object> for Domain {
     fn from(obj: Object) -> Self {
         match obj.inner {
-            ObjectInner::Domain(obj) => obj,
+            ObjectInner::Domain(obj) => *obj,
             _ => unreachable!(),
         }
     }
@@ -6764,14 +6991,14 @@ impl From<Object> for Domain {
 
 impl From<DsnReportSettings> for ObjectInner {
     fn from(value: DsnReportSettings) -> Self {
-        ObjectInner::DsnReportSettings(value)
+        ObjectInner::DsnReportSettings(Box::new(value))
     }
 }
 
 impl From<Object> for DsnReportSettings {
     fn from(obj: Object) -> Self {
         match obj.inner {
-            ObjectInner::DsnReportSettings(obj) => obj,
+            ObjectInner::DsnReportSettings(obj) => *obj,
             _ => unreachable!(),
         }
     }
@@ -6779,14 +7006,14 @@ impl From<Object> for DsnReportSettings {
 
 impl From<Email> for ObjectInner {
     fn from(value: Email) -> Self {
-        ObjectInner::Email(value)
+        ObjectInner::Email(Box::new(value))
     }
 }
 
 impl From<Object> for Email {
     fn from(obj: Object) -> Self {
         match obj.inner {
-            ObjectInner::Email(obj) => obj,
+            ObjectInner::Email(obj) => *obj,
             _ => unreachable!(),
         }
     }
@@ -6794,14 +7021,14 @@ impl From<Object> for Email {
 
 impl From<Enterprise> for ObjectInner {
     fn from(value: Enterprise) -> Self {
-        ObjectInner::Enterprise(value)
+        ObjectInner::Enterprise(Box::new(value))
     }
 }
 
 impl From<Object> for Enterprise {
     fn from(obj: Object) -> Self {
         match obj.inner {
-            ObjectInner::Enterprise(obj) => obj,
+            ObjectInner::Enterprise(obj) => *obj,
             _ => unreachable!(),
         }
     }
@@ -6809,14 +7036,14 @@ impl From<Object> for Enterprise {
 
 impl From<EventTracingLevel> for ObjectInner {
     fn from(value: EventTracingLevel) -> Self {
-        ObjectInner::EventTracingLevel(value)
+        ObjectInner::EventTracingLevel(Box::new(value))
     }
 }
 
 impl From<Object> for EventTracingLevel {
     fn from(obj: Object) -> Self {
         match obj.inner {
-            ObjectInner::EventTracingLevel(obj) => obj,
+            ObjectInner::EventTracingLevel(obj) => *obj,
             _ => unreachable!(),
         }
     }
@@ -6824,14 +7051,14 @@ impl From<Object> for EventTracingLevel {
 
 impl From<FileStorage> for ObjectInner {
     fn from(value: FileStorage) -> Self {
-        ObjectInner::FileStorage(value)
+        ObjectInner::FileStorage(Box::new(value))
     }
 }
 
 impl From<Object> for FileStorage {
     fn from(obj: Object) -> Self {
         match obj.inner {
-            ObjectInner::FileStorage(obj) => obj,
+            ObjectInner::FileStorage(obj) => *obj,
             _ => unreachable!(),
         }
     }
@@ -6839,14 +7066,14 @@ impl From<Object> for FileStorage {
 
 impl From<Http> for ObjectInner {
     fn from(value: Http) -> Self {
-        ObjectInner::Http(value)
+        ObjectInner::Http(Box::new(value))
     }
 }
 
 impl From<Object> for Http {
     fn from(obj: Object) -> Self {
         match obj.inner {
-            ObjectInner::Http(obj) => obj,
+            ObjectInner::Http(obj) => *obj,
             _ => unreachable!(),
         }
     }
@@ -6854,14 +7081,14 @@ impl From<Object> for Http {
 
 impl From<HttpForm> for ObjectInner {
     fn from(value: HttpForm) -> Self {
-        ObjectInner::HttpForm(value)
+        ObjectInner::HttpForm(Box::new(value))
     }
 }
 
 impl From<Object> for HttpForm {
     fn from(obj: Object) -> Self {
         match obj.inner {
-            ObjectInner::HttpForm(obj) => obj,
+            ObjectInner::HttpForm(obj) => *obj,
             _ => unreachable!(),
         }
     }
@@ -6869,14 +7096,14 @@ impl From<Object> for HttpForm {
 
 impl From<HttpLookup> for ObjectInner {
     fn from(value: HttpLookup) -> Self {
-        ObjectInner::HttpLookup(value)
+        ObjectInner::HttpLookup(Box::new(value))
     }
 }
 
 impl From<Object> for HttpLookup {
     fn from(obj: Object) -> Self {
         match obj.inner {
-            ObjectInner::HttpLookup(obj) => obj,
+            ObjectInner::HttpLookup(obj) => *obj,
             _ => unreachable!(),
         }
     }
@@ -6884,14 +7111,14 @@ impl From<Object> for HttpLookup {
 
 impl From<Imap> for ObjectInner {
     fn from(value: Imap) -> Self {
-        ObjectInner::Imap(value)
+        ObjectInner::Imap(Box::new(value))
     }
 }
 
 impl From<Object> for Imap {
     fn from(obj: Object) -> Self {
         match obj.inner {
-            ObjectInner::Imap(obj) => obj,
+            ObjectInner::Imap(obj) => *obj,
             _ => unreachable!(),
         }
     }
@@ -6899,14 +7126,29 @@ impl From<Object> for Imap {
 
 impl From<InMemoryStore> for ObjectInner {
     fn from(value: InMemoryStore) -> Self {
-        ObjectInner::InMemoryStore(value)
+        ObjectInner::InMemoryStore(Box::new(value))
     }
 }
 
 impl From<Object> for InMemoryStore {
     fn from(obj: Object) -> Self {
         match obj.inner {
-            ObjectInner::InMemoryStore(obj) => obj,
+            ObjectInner::InMemoryStore(obj) => *obj,
+            _ => unreachable!(),
+        }
+    }
+}
+
+impl From<IndexQueueStatus> for ObjectInner {
+    fn from(value: IndexQueueStatus) -> Self {
+        ObjectInner::IndexQueueStatus(Box::new(value))
+    }
+}
+
+impl From<Object> for IndexQueueStatus {
+    fn from(obj: Object) -> Self {
+        match obj.inner {
+            ObjectInner::IndexQueueStatus(obj) => *obj,
             _ => unreachable!(),
         }
     }
@@ -6914,14 +7156,14 @@ impl From<Object> for InMemoryStore {
 
 impl From<Jmap> for ObjectInner {
     fn from(value: Jmap) -> Self {
-        ObjectInner::Jmap(value)
+        ObjectInner::Jmap(Box::new(value))
     }
 }
 
 impl From<Object> for Jmap {
     fn from(obj: Object) -> Self {
         match obj.inner {
-            ObjectInner::Jmap(obj) => obj,
+            ObjectInner::Jmap(obj) => *obj,
             _ => unreachable!(),
         }
     }
@@ -6929,14 +7171,14 @@ impl From<Object> for Jmap {
 
 impl From<Log> for ObjectInner {
     fn from(value: Log) -> Self {
-        ObjectInner::Log(value)
+        ObjectInner::Log(Box::new(value))
     }
 }
 
 impl From<Object> for Log {
     fn from(obj: Object) -> Self {
         match obj.inner {
-            ObjectInner::Log(obj) => obj,
+            ObjectInner::Log(obj) => *obj,
             _ => unreachable!(),
         }
     }
@@ -6944,14 +7186,14 @@ impl From<Object> for Log {
 
 impl From<MailingList> for ObjectInner {
     fn from(value: MailingList) -> Self {
-        ObjectInner::MailingList(value)
+        ObjectInner::MailingList(Box::new(value))
     }
 }
 
 impl From<Object> for MailingList {
     fn from(obj: Object) -> Self {
         match obj.inner {
-            ObjectInner::MailingList(obj) => obj,
+            ObjectInner::MailingList(obj) => *obj,
             _ => unreachable!(),
         }
     }
@@ -6959,14 +7201,14 @@ impl From<Object> for MailingList {
 
 impl From<MaskedEmail> for ObjectInner {
     fn from(value: MaskedEmail) -> Self {
-        ObjectInner::MaskedEmail(value)
+        ObjectInner::MaskedEmail(Box::new(value))
     }
 }
 
 impl From<Object> for MaskedEmail {
     fn from(obj: Object) -> Self {
         match obj.inner {
-            ObjectInner::MaskedEmail(obj) => obj,
+            ObjectInner::MaskedEmail(obj) => *obj,
             _ => unreachable!(),
         }
     }
@@ -6974,14 +7216,14 @@ impl From<Object> for MaskedEmail {
 
 impl From<MemoryLookupKey> for ObjectInner {
     fn from(value: MemoryLookupKey) -> Self {
-        ObjectInner::MemoryLookupKey(value)
+        ObjectInner::MemoryLookupKey(Box::new(value))
     }
 }
 
 impl From<Object> for MemoryLookupKey {
     fn from(obj: Object) -> Self {
         match obj.inner {
-            ObjectInner::MemoryLookupKey(obj) => obj,
+            ObjectInner::MemoryLookupKey(obj) => *obj,
             _ => unreachable!(),
         }
     }
@@ -6989,14 +7231,29 @@ impl From<Object> for MemoryLookupKey {
 
 impl From<MemoryLookupKeyValue> for ObjectInner {
     fn from(value: MemoryLookupKeyValue) -> Self {
-        ObjectInner::MemoryLookupKeyValue(value)
+        ObjectInner::MemoryLookupKeyValue(Box::new(value))
     }
 }
 
 impl From<Object> for MemoryLookupKeyValue {
     fn from(obj: Object) -> Self {
         match obj.inner {
-            ObjectInner::MemoryLookupKeyValue(obj) => obj,
+            ObjectInner::MemoryLookupKeyValue(obj) => *obj,
+            _ => unreachable!(),
+        }
+    }
+}
+
+impl From<Metadata> for ObjectInner {
+    fn from(value: Metadata) -> Self {
+        ObjectInner::Metadata(Box::new(value))
+    }
+}
+
+impl From<Object> for Metadata {
+    fn from(obj: Object) -> Self {
+        match obj.inner {
+            ObjectInner::Metadata(obj) => *obj,
             _ => unreachable!(),
         }
     }
@@ -7004,14 +7261,14 @@ impl From<Object> for MemoryLookupKeyValue {
 
 impl From<Metric> for ObjectInner {
     fn from(value: Metric) -> Self {
-        ObjectInner::Metric(value)
+        ObjectInner::Metric(Box::new(value))
     }
 }
 
 impl From<Object> for Metric {
     fn from(obj: Object) -> Self {
         match obj.inner {
-            ObjectInner::Metric(obj) => obj,
+            ObjectInner::Metric(obj) => *obj,
             _ => unreachable!(),
         }
     }
@@ -7019,14 +7276,14 @@ impl From<Object> for Metric {
 
 impl From<Metrics> for ObjectInner {
     fn from(value: Metrics) -> Self {
-        ObjectInner::Metrics(value)
+        ObjectInner::Metrics(Box::new(value))
     }
 }
 
 impl From<Object> for Metrics {
     fn from(obj: Object) -> Self {
         match obj.inner {
-            ObjectInner::Metrics(obj) => obj,
+            ObjectInner::Metrics(obj) => *obj,
             _ => unreachable!(),
         }
     }
@@ -7034,14 +7291,14 @@ impl From<Object> for Metrics {
 
 impl From<MetricsStore> for ObjectInner {
     fn from(value: MetricsStore) -> Self {
-        ObjectInner::MetricsStore(value)
+        ObjectInner::MetricsStore(Box::new(value))
     }
 }
 
 impl From<Object> for MetricsStore {
     fn from(obj: Object) -> Self {
         match obj.inner {
-            ObjectInner::MetricsStore(obj) => obj,
+            ObjectInner::MetricsStore(obj) => *obj,
             _ => unreachable!(),
         }
     }
@@ -7049,14 +7306,14 @@ impl From<Object> for MetricsStore {
 
 impl From<MtaConnectionStrategy> for ObjectInner {
     fn from(value: MtaConnectionStrategy) -> Self {
-        ObjectInner::MtaConnectionStrategy(value)
+        ObjectInner::MtaConnectionStrategy(Box::new(value))
     }
 }
 
 impl From<Object> for MtaConnectionStrategy {
     fn from(obj: Object) -> Self {
         match obj.inner {
-            ObjectInner::MtaConnectionStrategy(obj) => obj,
+            ObjectInner::MtaConnectionStrategy(obj) => *obj,
             _ => unreachable!(),
         }
     }
@@ -7064,14 +7321,14 @@ impl From<Object> for MtaConnectionStrategy {
 
 impl From<MtaDeliverySchedule> for ObjectInner {
     fn from(value: MtaDeliverySchedule) -> Self {
-        ObjectInner::MtaDeliverySchedule(value)
+        ObjectInner::MtaDeliverySchedule(Box::new(value))
     }
 }
 
 impl From<Object> for MtaDeliverySchedule {
     fn from(obj: Object) -> Self {
         match obj.inner {
-            ObjectInner::MtaDeliverySchedule(obj) => obj,
+            ObjectInner::MtaDeliverySchedule(obj) => *obj,
             _ => unreachable!(),
         }
     }
@@ -7079,14 +7336,14 @@ impl From<Object> for MtaDeliverySchedule {
 
 impl From<MtaExtensions> for ObjectInner {
     fn from(value: MtaExtensions) -> Self {
-        ObjectInner::MtaExtensions(value)
+        ObjectInner::MtaExtensions(Box::new(value))
     }
 }
 
 impl From<Object> for MtaExtensions {
     fn from(obj: Object) -> Self {
         match obj.inner {
-            ObjectInner::MtaExtensions(obj) => obj,
+            ObjectInner::MtaExtensions(obj) => *obj,
             _ => unreachable!(),
         }
     }
@@ -7094,14 +7351,14 @@ impl From<Object> for MtaExtensions {
 
 impl From<MtaHook> for ObjectInner {
     fn from(value: MtaHook) -> Self {
-        ObjectInner::MtaHook(value)
+        ObjectInner::MtaHook(Box::new(value))
     }
 }
 
 impl From<Object> for MtaHook {
     fn from(obj: Object) -> Self {
         match obj.inner {
-            ObjectInner::MtaHook(obj) => obj,
+            ObjectInner::MtaHook(obj) => *obj,
             _ => unreachable!(),
         }
     }
@@ -7109,14 +7366,14 @@ impl From<Object> for MtaHook {
 
 impl From<MtaInboundSession> for ObjectInner {
     fn from(value: MtaInboundSession) -> Self {
-        ObjectInner::MtaInboundSession(value)
+        ObjectInner::MtaInboundSession(Box::new(value))
     }
 }
 
 impl From<Object> for MtaInboundSession {
     fn from(obj: Object) -> Self {
         match obj.inner {
-            ObjectInner::MtaInboundSession(obj) => obj,
+            ObjectInner::MtaInboundSession(obj) => *obj,
             _ => unreachable!(),
         }
     }
@@ -7124,14 +7381,14 @@ impl From<Object> for MtaInboundSession {
 
 impl From<MtaInboundThrottle> for ObjectInner {
     fn from(value: MtaInboundThrottle) -> Self {
-        ObjectInner::MtaInboundThrottle(value)
+        ObjectInner::MtaInboundThrottle(Box::new(value))
     }
 }
 
 impl From<Object> for MtaInboundThrottle {
     fn from(obj: Object) -> Self {
         match obj.inner {
-            ObjectInner::MtaInboundThrottle(obj) => obj,
+            ObjectInner::MtaInboundThrottle(obj) => *obj,
             _ => unreachable!(),
         }
     }
@@ -7139,14 +7396,14 @@ impl From<Object> for MtaInboundThrottle {
 
 impl From<MtaMilter> for ObjectInner {
     fn from(value: MtaMilter) -> Self {
-        ObjectInner::MtaMilter(value)
+        ObjectInner::MtaMilter(Box::new(value))
     }
 }
 
 impl From<Object> for MtaMilter {
     fn from(obj: Object) -> Self {
         match obj.inner {
-            ObjectInner::MtaMilter(obj) => obj,
+            ObjectInner::MtaMilter(obj) => *obj,
             _ => unreachable!(),
         }
     }
@@ -7154,14 +7411,14 @@ impl From<Object> for MtaMilter {
 
 impl From<MtaOutboundStrategy> for ObjectInner {
     fn from(value: MtaOutboundStrategy) -> Self {
-        ObjectInner::MtaOutboundStrategy(value)
+        ObjectInner::MtaOutboundStrategy(Box::new(value))
     }
 }
 
 impl From<Object> for MtaOutboundStrategy {
     fn from(obj: Object) -> Self {
         match obj.inner {
-            ObjectInner::MtaOutboundStrategy(obj) => obj,
+            ObjectInner::MtaOutboundStrategy(obj) => *obj,
             _ => unreachable!(),
         }
     }
@@ -7169,14 +7426,14 @@ impl From<Object> for MtaOutboundStrategy {
 
 impl From<MtaOutboundThrottle> for ObjectInner {
     fn from(value: MtaOutboundThrottle) -> Self {
-        ObjectInner::MtaOutboundThrottle(value)
+        ObjectInner::MtaOutboundThrottle(Box::new(value))
     }
 }
 
 impl From<Object> for MtaOutboundThrottle {
     fn from(obj: Object) -> Self {
         match obj.inner {
-            ObjectInner::MtaOutboundThrottle(obj) => obj,
+            ObjectInner::MtaOutboundThrottle(obj) => *obj,
             _ => unreachable!(),
         }
     }
@@ -7184,14 +7441,14 @@ impl From<Object> for MtaOutboundThrottle {
 
 impl From<MtaQueueQuota> for ObjectInner {
     fn from(value: MtaQueueQuota) -> Self {
-        ObjectInner::MtaQueueQuota(value)
+        ObjectInner::MtaQueueQuota(Box::new(value))
     }
 }
 
 impl From<Object> for MtaQueueQuota {
     fn from(obj: Object) -> Self {
         match obj.inner {
-            ObjectInner::MtaQueueQuota(obj) => obj,
+            ObjectInner::MtaQueueQuota(obj) => *obj,
             _ => unreachable!(),
         }
     }
@@ -7199,14 +7456,14 @@ impl From<Object> for MtaQueueQuota {
 
 impl From<MtaRoute> for ObjectInner {
     fn from(value: MtaRoute) -> Self {
-        ObjectInner::MtaRoute(value)
+        ObjectInner::MtaRoute(Box::new(value))
     }
 }
 
 impl From<Object> for MtaRoute {
     fn from(obj: Object) -> Self {
         match obj.inner {
-            ObjectInner::MtaRoute(obj) => obj,
+            ObjectInner::MtaRoute(obj) => *obj,
             _ => unreachable!(),
         }
     }
@@ -7214,14 +7471,14 @@ impl From<Object> for MtaRoute {
 
 impl From<MtaStageAuth> for ObjectInner {
     fn from(value: MtaStageAuth) -> Self {
-        ObjectInner::MtaStageAuth(value)
+        ObjectInner::MtaStageAuth(Box::new(value))
     }
 }
 
 impl From<Object> for MtaStageAuth {
     fn from(obj: Object) -> Self {
         match obj.inner {
-            ObjectInner::MtaStageAuth(obj) => obj,
+            ObjectInner::MtaStageAuth(obj) => *obj,
             _ => unreachable!(),
         }
     }
@@ -7229,14 +7486,14 @@ impl From<Object> for MtaStageAuth {
 
 impl From<MtaStageConnect> for ObjectInner {
     fn from(value: MtaStageConnect) -> Self {
-        ObjectInner::MtaStageConnect(value)
+        ObjectInner::MtaStageConnect(Box::new(value))
     }
 }
 
 impl From<Object> for MtaStageConnect {
     fn from(obj: Object) -> Self {
         match obj.inner {
-            ObjectInner::MtaStageConnect(obj) => obj,
+            ObjectInner::MtaStageConnect(obj) => *obj,
             _ => unreachable!(),
         }
     }
@@ -7244,14 +7501,14 @@ impl From<Object> for MtaStageConnect {
 
 impl From<MtaStageData> for ObjectInner {
     fn from(value: MtaStageData) -> Self {
-        ObjectInner::MtaStageData(value)
+        ObjectInner::MtaStageData(Box::new(value))
     }
 }
 
 impl From<Object> for MtaStageData {
     fn from(obj: Object) -> Self {
         match obj.inner {
-            ObjectInner::MtaStageData(obj) => obj,
+            ObjectInner::MtaStageData(obj) => *obj,
             _ => unreachable!(),
         }
     }
@@ -7259,14 +7516,14 @@ impl From<Object> for MtaStageData {
 
 impl From<MtaStageEhlo> for ObjectInner {
     fn from(value: MtaStageEhlo) -> Self {
-        ObjectInner::MtaStageEhlo(value)
+        ObjectInner::MtaStageEhlo(Box::new(value))
     }
 }
 
 impl From<Object> for MtaStageEhlo {
     fn from(obj: Object) -> Self {
         match obj.inner {
-            ObjectInner::MtaStageEhlo(obj) => obj,
+            ObjectInner::MtaStageEhlo(obj) => *obj,
             _ => unreachable!(),
         }
     }
@@ -7274,14 +7531,14 @@ impl From<Object> for MtaStageEhlo {
 
 impl From<MtaStageMail> for ObjectInner {
     fn from(value: MtaStageMail) -> Self {
-        ObjectInner::MtaStageMail(value)
+        ObjectInner::MtaStageMail(Box::new(value))
     }
 }
 
 impl From<Object> for MtaStageMail {
     fn from(obj: Object) -> Self {
         match obj.inner {
-            ObjectInner::MtaStageMail(obj) => obj,
+            ObjectInner::MtaStageMail(obj) => *obj,
             _ => unreachable!(),
         }
     }
@@ -7289,14 +7546,14 @@ impl From<Object> for MtaStageMail {
 
 impl From<MtaStageRcpt> for ObjectInner {
     fn from(value: MtaStageRcpt) -> Self {
-        ObjectInner::MtaStageRcpt(value)
+        ObjectInner::MtaStageRcpt(Box::new(value))
     }
 }
 
 impl From<Object> for MtaStageRcpt {
     fn from(obj: Object) -> Self {
         match obj.inner {
-            ObjectInner::MtaStageRcpt(obj) => obj,
+            ObjectInner::MtaStageRcpt(obj) => *obj,
             _ => unreachable!(),
         }
     }
@@ -7304,14 +7561,14 @@ impl From<Object> for MtaStageRcpt {
 
 impl From<MtaSts> for ObjectInner {
     fn from(value: MtaSts) -> Self {
-        ObjectInner::MtaSts(value)
+        ObjectInner::MtaSts(Box::new(value))
     }
 }
 
 impl From<Object> for MtaSts {
     fn from(obj: Object) -> Self {
         match obj.inner {
-            ObjectInner::MtaSts(obj) => obj,
+            ObjectInner::MtaSts(obj) => *obj,
             _ => unreachable!(),
         }
     }
@@ -7319,14 +7576,14 @@ impl From<Object> for MtaSts {
 
 impl From<MtaTlsStrategy> for ObjectInner {
     fn from(value: MtaTlsStrategy) -> Self {
-        ObjectInner::MtaTlsStrategy(value)
+        ObjectInner::MtaTlsStrategy(Box::new(value))
     }
 }
 
 impl From<Object> for MtaTlsStrategy {
     fn from(obj: Object) -> Self {
         match obj.inner {
-            ObjectInner::MtaTlsStrategy(obj) => obj,
+            ObjectInner::MtaTlsStrategy(obj) => *obj,
             _ => unreachable!(),
         }
     }
@@ -7334,14 +7591,14 @@ impl From<Object> for MtaTlsStrategy {
 
 impl From<MtaVirtualQueue> for ObjectInner {
     fn from(value: MtaVirtualQueue) -> Self {
-        ObjectInner::MtaVirtualQueue(value)
+        ObjectInner::MtaVirtualQueue(Box::new(value))
     }
 }
 
 impl From<Object> for MtaVirtualQueue {
     fn from(obj: Object) -> Self {
         match obj.inner {
-            ObjectInner::MtaVirtualQueue(obj) => obj,
+            ObjectInner::MtaVirtualQueue(obj) => *obj,
             _ => unreachable!(),
         }
     }
@@ -7349,14 +7606,14 @@ impl From<Object> for MtaVirtualQueue {
 
 impl From<NetworkListener> for ObjectInner {
     fn from(value: NetworkListener) -> Self {
-        ObjectInner::NetworkListener(value)
+        ObjectInner::NetworkListener(Box::new(value))
     }
 }
 
 impl From<Object> for NetworkListener {
     fn from(obj: Object) -> Self {
         match obj.inner {
-            ObjectInner::NetworkListener(obj) => obj,
+            ObjectInner::NetworkListener(obj) => *obj,
             _ => unreachable!(),
         }
     }
@@ -7364,14 +7621,29 @@ impl From<Object> for NetworkListener {
 
 impl From<OAuthClient> for ObjectInner {
     fn from(value: OAuthClient) -> Self {
-        ObjectInner::OAuthClient(value)
+        ObjectInner::OAuthClient(Box::new(value))
     }
 }
 
 impl From<Object> for OAuthClient {
     fn from(obj: Object) -> Self {
         match obj.inner {
-            ObjectInner::OAuthClient(obj) => obj,
+            ObjectInner::OAuthClient(obj) => *obj,
+            _ => unreachable!(),
+        }
+    }
+}
+
+impl From<OAuthGrant> for ObjectInner {
+    fn from(value: OAuthGrant) -> Self {
+        ObjectInner::OAuthGrant(Box::new(value))
+    }
+}
+
+impl From<Object> for OAuthGrant {
+    fn from(obj: Object) -> Self {
+        match obj.inner {
+            ObjectInner::OAuthGrant(obj) => *obj,
             _ => unreachable!(),
         }
     }
@@ -7379,14 +7651,14 @@ impl From<Object> for OAuthClient {
 
 impl From<OidcProvider> for ObjectInner {
     fn from(value: OidcProvider) -> Self {
-        ObjectInner::OidcProvider(value)
+        ObjectInner::OidcProvider(Box::new(value))
     }
 }
 
 impl From<Object> for OidcProvider {
     fn from(obj: Object) -> Self {
         match obj.inner {
-            ObjectInner::OidcProvider(obj) => obj,
+            ObjectInner::OidcProvider(obj) => *obj,
             _ => unreachable!(),
         }
     }
@@ -7394,14 +7666,14 @@ impl From<Object> for OidcProvider {
 
 impl From<PublicKey> for ObjectInner {
     fn from(value: PublicKey) -> Self {
-        ObjectInner::PublicKey(value)
+        ObjectInner::PublicKey(Box::new(value))
     }
 }
 
 impl From<Object> for PublicKey {
     fn from(obj: Object) -> Self {
         match obj.inner {
-            ObjectInner::PublicKey(obj) => obj,
+            ObjectInner::PublicKey(obj) => *obj,
             _ => unreachable!(),
         }
     }
@@ -7409,14 +7681,14 @@ impl From<Object> for PublicKey {
 
 impl From<QueuedMessage> for ObjectInner {
     fn from(value: QueuedMessage) -> Self {
-        ObjectInner::QueuedMessage(value)
+        ObjectInner::QueuedMessage(Box::new(value))
     }
 }
 
 impl From<Object> for QueuedMessage {
     fn from(obj: Object) -> Self {
         match obj.inner {
-            ObjectInner::QueuedMessage(obj) => obj,
+            ObjectInner::QueuedMessage(obj) => *obj,
             _ => unreachable!(),
         }
     }
@@ -7424,14 +7696,14 @@ impl From<Object> for QueuedMessage {
 
 impl From<ReportSettings> for ObjectInner {
     fn from(value: ReportSettings) -> Self {
-        ObjectInner::ReportSettings(value)
+        ObjectInner::ReportSettings(Box::new(value))
     }
 }
 
 impl From<Object> for ReportSettings {
     fn from(obj: Object) -> Self {
         match obj.inner {
-            ObjectInner::ReportSettings(obj) => obj,
+            ObjectInner::ReportSettings(obj) => *obj,
             _ => unreachable!(),
         }
     }
@@ -7439,14 +7711,14 @@ impl From<Object> for ReportSettings {
 
 impl From<Role> for ObjectInner {
     fn from(value: Role) -> Self {
-        ObjectInner::Role(value)
+        ObjectInner::Role(Box::new(value))
     }
 }
 
 impl From<Object> for Role {
     fn from(obj: Object) -> Self {
         match obj.inner {
-            ObjectInner::Role(obj) => obj,
+            ObjectInner::Role(obj) => *obj,
             _ => unreachable!(),
         }
     }
@@ -7454,14 +7726,14 @@ impl From<Object> for Role {
 
 impl From<Search> for ObjectInner {
     fn from(value: Search) -> Self {
-        ObjectInner::Search(value)
+        ObjectInner::Search(Box::new(value))
     }
 }
 
 impl From<Object> for Search {
     fn from(obj: Object) -> Self {
         match obj.inner {
-            ObjectInner::Search(obj) => obj,
+            ObjectInner::Search(obj) => *obj,
             _ => unreachable!(),
         }
     }
@@ -7469,14 +7741,14 @@ impl From<Object> for Search {
 
 impl From<SearchStore> for ObjectInner {
     fn from(value: SearchStore) -> Self {
-        ObjectInner::SearchStore(value)
+        ObjectInner::SearchStore(Box::new(value))
     }
 }
 
 impl From<Object> for SearchStore {
     fn from(obj: Object) -> Self {
         match obj.inner {
-            ObjectInner::SearchStore(obj) => obj,
+            ObjectInner::SearchStore(obj) => *obj,
             _ => unreachable!(),
         }
     }
@@ -7484,14 +7756,14 @@ impl From<Object> for SearchStore {
 
 impl From<Security> for ObjectInner {
     fn from(value: Security) -> Self {
-        ObjectInner::Security(value)
+        ObjectInner::Security(Box::new(value))
     }
 }
 
 impl From<Object> for Security {
     fn from(obj: Object) -> Self {
         match obj.inner {
-            ObjectInner::Security(obj) => obj,
+            ObjectInner::Security(obj) => *obj,
             _ => unreachable!(),
         }
     }
@@ -7499,14 +7771,14 @@ impl From<Object> for Security {
 
 impl From<SenderAuth> for ObjectInner {
     fn from(value: SenderAuth) -> Self {
-        ObjectInner::SenderAuth(value)
+        ObjectInner::SenderAuth(Box::new(value))
     }
 }
 
 impl From<Object> for SenderAuth {
     fn from(obj: Object) -> Self {
         match obj.inner {
-            ObjectInner::SenderAuth(obj) => obj,
+            ObjectInner::SenderAuth(obj) => *obj,
             _ => unreachable!(),
         }
     }
@@ -7514,14 +7786,14 @@ impl From<Object> for SenderAuth {
 
 impl From<Sharing> for ObjectInner {
     fn from(value: Sharing) -> Self {
-        ObjectInner::Sharing(value)
+        ObjectInner::Sharing(Box::new(value))
     }
 }
 
 impl From<Object> for Sharing {
     fn from(obj: Object) -> Self {
         match obj.inner {
-            ObjectInner::Sharing(obj) => obj,
+            ObjectInner::Sharing(obj) => *obj,
             _ => unreachable!(),
         }
     }
@@ -7529,14 +7801,14 @@ impl From<Object> for Sharing {
 
 impl From<SieveSystemInterpreter> for ObjectInner {
     fn from(value: SieveSystemInterpreter) -> Self {
-        ObjectInner::SieveSystemInterpreter(value)
+        ObjectInner::SieveSystemInterpreter(Box::new(value))
     }
 }
 
 impl From<Object> for SieveSystemInterpreter {
     fn from(obj: Object) -> Self {
         match obj.inner {
-            ObjectInner::SieveSystemInterpreter(obj) => obj,
+            ObjectInner::SieveSystemInterpreter(obj) => *obj,
             _ => unreachable!(),
         }
     }
@@ -7544,14 +7816,14 @@ impl From<Object> for SieveSystemInterpreter {
 
 impl From<SieveSystemScript> for ObjectInner {
     fn from(value: SieveSystemScript) -> Self {
-        ObjectInner::SieveSystemScript(value)
+        ObjectInner::SieveSystemScript(Box::new(value))
     }
 }
 
 impl From<Object> for SieveSystemScript {
     fn from(obj: Object) -> Self {
         match obj.inner {
-            ObjectInner::SieveSystemScript(obj) => obj,
+            ObjectInner::SieveSystemScript(obj) => *obj,
             _ => unreachable!(),
         }
     }
@@ -7559,14 +7831,14 @@ impl From<Object> for SieveSystemScript {
 
 impl From<SieveUserInterpreter> for ObjectInner {
     fn from(value: SieveUserInterpreter) -> Self {
-        ObjectInner::SieveUserInterpreter(value)
+        ObjectInner::SieveUserInterpreter(Box::new(value))
     }
 }
 
 impl From<Object> for SieveUserInterpreter {
     fn from(obj: Object) -> Self {
         match obj.inner {
-            ObjectInner::SieveUserInterpreter(obj) => obj,
+            ObjectInner::SieveUserInterpreter(obj) => *obj,
             _ => unreachable!(),
         }
     }
@@ -7574,14 +7846,29 @@ impl From<Object> for SieveUserInterpreter {
 
 impl From<SieveUserScript> for ObjectInner {
     fn from(value: SieveUserScript) -> Self {
-        ObjectInner::SieveUserScript(value)
+        ObjectInner::SieveUserScript(Box::new(value))
     }
 }
 
 impl From<Object> for SieveUserScript {
     fn from(obj: Object) -> Self {
         match obj.inner {
-            ObjectInner::SieveUserScript(obj) => obj,
+            ObjectInner::SieveUserScript(obj) => *obj,
+            _ => unreachable!(),
+        }
+    }
+}
+
+impl From<SpamAi> for ObjectInner {
+    fn from(value: SpamAi) -> Self {
+        ObjectInner::SpamAi(Box::new(value))
+    }
+}
+
+impl From<Object> for SpamAi {
+    fn from(obj: Object) -> Self {
+        match obj.inner {
+            ObjectInner::SpamAi(obj) => *obj,
             _ => unreachable!(),
         }
     }
@@ -7589,14 +7876,14 @@ impl From<Object> for SieveUserScript {
 
 impl From<SpamClassifier> for ObjectInner {
     fn from(value: SpamClassifier) -> Self {
-        ObjectInner::SpamClassifier(value)
+        ObjectInner::SpamClassifier(Box::new(value))
     }
 }
 
 impl From<Object> for SpamClassifier {
     fn from(obj: Object) -> Self {
         match obj.inner {
-            ObjectInner::SpamClassifier(obj) => obj,
+            ObjectInner::SpamClassifier(obj) => *obj,
             _ => unreachable!(),
         }
     }
@@ -7604,14 +7891,14 @@ impl From<Object> for SpamClassifier {
 
 impl From<SpamDnsblServer> for ObjectInner {
     fn from(value: SpamDnsblServer) -> Self {
-        ObjectInner::SpamDnsblServer(value)
+        ObjectInner::SpamDnsblServer(Box::new(value))
     }
 }
 
 impl From<Object> for SpamDnsblServer {
     fn from(obj: Object) -> Self {
         match obj.inner {
-            ObjectInner::SpamDnsblServer(obj) => obj,
+            ObjectInner::SpamDnsblServer(obj) => *obj,
             _ => unreachable!(),
         }
     }
@@ -7619,14 +7906,14 @@ impl From<Object> for SpamDnsblServer {
 
 impl From<SpamDnsblSettings> for ObjectInner {
     fn from(value: SpamDnsblSettings) -> Self {
-        ObjectInner::SpamDnsblSettings(value)
+        ObjectInner::SpamDnsblSettings(Box::new(value))
     }
 }
 
 impl From<Object> for SpamDnsblSettings {
     fn from(obj: Object) -> Self {
         match obj.inner {
-            ObjectInner::SpamDnsblSettings(obj) => obj,
+            ObjectInner::SpamDnsblSettings(obj) => *obj,
             _ => unreachable!(),
         }
     }
@@ -7634,29 +7921,14 @@ impl From<Object> for SpamDnsblSettings {
 
 impl From<SpamFileExtension> for ObjectInner {
     fn from(value: SpamFileExtension) -> Self {
-        ObjectInner::SpamFileExtension(value)
+        ObjectInner::SpamFileExtension(Box::new(value))
     }
 }
 
 impl From<Object> for SpamFileExtension {
     fn from(obj: Object) -> Self {
         match obj.inner {
-            ObjectInner::SpamFileExtension(obj) => obj,
-            _ => unreachable!(),
-        }
-    }
-}
-
-impl From<SpamLlm> for ObjectInner {
-    fn from(value: SpamLlm) -> Self {
-        ObjectInner::SpamLlm(value)
-    }
-}
-
-impl From<Object> for SpamLlm {
-    fn from(obj: Object) -> Self {
-        match obj.inner {
-            ObjectInner::SpamLlm(obj) => obj,
+            ObjectInner::SpamFileExtension(obj) => *obj,
             _ => unreachable!(),
         }
     }
@@ -7664,14 +7936,14 @@ impl From<Object> for SpamLlm {
 
 impl From<SpamPyzor> for ObjectInner {
     fn from(value: SpamPyzor) -> Self {
-        ObjectInner::SpamPyzor(value)
+        ObjectInner::SpamPyzor(Box::new(value))
     }
 }
 
 impl From<Object> for SpamPyzor {
     fn from(obj: Object) -> Self {
         match obj.inner {
-            ObjectInner::SpamPyzor(obj) => obj,
+            ObjectInner::SpamPyzor(obj) => *obj,
             _ => unreachable!(),
         }
     }
@@ -7679,14 +7951,14 @@ impl From<Object> for SpamPyzor {
 
 impl From<SpamRule> for ObjectInner {
     fn from(value: SpamRule) -> Self {
-        ObjectInner::SpamRule(value)
+        ObjectInner::SpamRule(Box::new(value))
     }
 }
 
 impl From<Object> for SpamRule {
     fn from(obj: Object) -> Self {
         match obj.inner {
-            ObjectInner::SpamRule(obj) => obj,
+            ObjectInner::SpamRule(obj) => *obj,
             _ => unreachable!(),
         }
     }
@@ -7694,14 +7966,14 @@ impl From<Object> for SpamRule {
 
 impl From<SpamSettings> for ObjectInner {
     fn from(value: SpamSettings) -> Self {
-        ObjectInner::SpamSettings(value)
+        ObjectInner::SpamSettings(Box::new(value))
     }
 }
 
 impl From<Object> for SpamSettings {
     fn from(obj: Object) -> Self {
         match obj.inner {
-            ObjectInner::SpamSettings(obj) => obj,
+            ObjectInner::SpamSettings(obj) => *obj,
             _ => unreachable!(),
         }
     }
@@ -7709,14 +7981,14 @@ impl From<Object> for SpamSettings {
 
 impl From<SpamTag> for ObjectInner {
     fn from(value: SpamTag) -> Self {
-        ObjectInner::SpamTag(value)
+        ObjectInner::SpamTag(Box::new(value))
     }
 }
 
 impl From<Object> for SpamTag {
     fn from(obj: Object) -> Self {
         match obj.inner {
-            ObjectInner::SpamTag(obj) => obj,
+            ObjectInner::SpamTag(obj) => *obj,
             _ => unreachable!(),
         }
     }
@@ -7724,14 +7996,14 @@ impl From<Object> for SpamTag {
 
 impl From<SpamTrainingSample> for ObjectInner {
     fn from(value: SpamTrainingSample) -> Self {
-        ObjectInner::SpamTrainingSample(value)
+        ObjectInner::SpamTrainingSample(Box::new(value))
     }
 }
 
 impl From<Object> for SpamTrainingSample {
     fn from(obj: Object) -> Self {
         match obj.inner {
-            ObjectInner::SpamTrainingSample(obj) => obj,
+            ObjectInner::SpamTrainingSample(obj) => *obj,
             _ => unreachable!(),
         }
     }
@@ -7739,14 +8011,14 @@ impl From<Object> for SpamTrainingSample {
 
 impl From<SpfReportSettings> for ObjectInner {
     fn from(value: SpfReportSettings) -> Self {
-        ObjectInner::SpfReportSettings(value)
+        ObjectInner::SpfReportSettings(Box::new(value))
     }
 }
 
 impl From<Object> for SpfReportSettings {
     fn from(obj: Object) -> Self {
         match obj.inner {
-            ObjectInner::SpfReportSettings(obj) => obj,
+            ObjectInner::SpfReportSettings(obj) => *obj,
             _ => unreachable!(),
         }
     }
@@ -7754,14 +8026,14 @@ impl From<Object> for SpfReportSettings {
 
 impl From<StoreLookup> for ObjectInner {
     fn from(value: StoreLookup) -> Self {
-        ObjectInner::StoreLookup(value)
+        ObjectInner::StoreLookup(Box::new(value))
     }
 }
 
 impl From<Object> for StoreLookup {
     fn from(obj: Object) -> Self {
         match obj.inner {
-            ObjectInner::StoreLookup(obj) => obj,
+            ObjectInner::StoreLookup(obj) => *obj,
             _ => unreachable!(),
         }
     }
@@ -7769,14 +8041,14 @@ impl From<Object> for StoreLookup {
 
 impl From<SystemSettings> for ObjectInner {
     fn from(value: SystemSettings) -> Self {
-        ObjectInner::SystemSettings(value)
+        ObjectInner::SystemSettings(Box::new(value))
     }
 }
 
 impl From<Object> for SystemSettings {
     fn from(obj: Object) -> Self {
         match obj.inner {
-            ObjectInner::SystemSettings(obj) => obj,
+            ObjectInner::SystemSettings(obj) => *obj,
             _ => unreachable!(),
         }
     }
@@ -7784,14 +8056,14 @@ impl From<Object> for SystemSettings {
 
 impl From<Task> for ObjectInner {
     fn from(value: Task) -> Self {
-        ObjectInner::Task(value)
+        ObjectInner::Task(Box::new(value))
     }
 }
 
 impl From<Object> for Task {
     fn from(obj: Object) -> Self {
         match obj.inner {
-            ObjectInner::Task(obj) => obj,
+            ObjectInner::Task(obj) => *obj,
             _ => unreachable!(),
         }
     }
@@ -7799,14 +8071,14 @@ impl From<Object> for Task {
 
 impl From<TaskManager> for ObjectInner {
     fn from(value: TaskManager) -> Self {
-        ObjectInner::TaskManager(value)
+        ObjectInner::TaskManager(Box::new(value))
     }
 }
 
 impl From<Object> for TaskManager {
     fn from(obj: Object) -> Self {
         match obj.inner {
-            ObjectInner::TaskManager(obj) => obj,
+            ObjectInner::TaskManager(obj) => *obj,
             _ => unreachable!(),
         }
     }
@@ -7814,14 +8086,14 @@ impl From<Object> for TaskManager {
 
 impl From<Tenant> for ObjectInner {
     fn from(value: Tenant) -> Self {
-        ObjectInner::Tenant(value)
+        ObjectInner::Tenant(Box::new(value))
     }
 }
 
 impl From<Object> for Tenant {
     fn from(obj: Object) -> Self {
         match obj.inner {
-            ObjectInner::Tenant(obj) => obj,
+            ObjectInner::Tenant(obj) => *obj,
             _ => unreachable!(),
         }
     }
@@ -7829,14 +8101,14 @@ impl From<Object> for Tenant {
 
 impl From<TlsExternalReport> for ObjectInner {
     fn from(value: TlsExternalReport) -> Self {
-        ObjectInner::TlsExternalReport(value)
+        ObjectInner::TlsExternalReport(Box::new(value))
     }
 }
 
 impl From<Object> for TlsExternalReport {
     fn from(obj: Object) -> Self {
         match obj.inner {
-            ObjectInner::TlsExternalReport(obj) => obj,
+            ObjectInner::TlsExternalReport(obj) => *obj,
             _ => unreachable!(),
         }
     }
@@ -7844,14 +8116,14 @@ impl From<Object> for TlsExternalReport {
 
 impl From<TlsInternalReport> for ObjectInner {
     fn from(value: TlsInternalReport) -> Self {
-        ObjectInner::TlsInternalReport(value)
+        ObjectInner::TlsInternalReport(Box::new(value))
     }
 }
 
 impl From<Object> for TlsInternalReport {
     fn from(obj: Object) -> Self {
         match obj.inner {
-            ObjectInner::TlsInternalReport(obj) => obj,
+            ObjectInner::TlsInternalReport(obj) => *obj,
             _ => unreachable!(),
         }
     }
@@ -7859,14 +8131,14 @@ impl From<Object> for TlsInternalReport {
 
 impl From<TlsReportSettings> for ObjectInner {
     fn from(value: TlsReportSettings) -> Self {
-        ObjectInner::TlsReportSettings(value)
+        ObjectInner::TlsReportSettings(Box::new(value))
     }
 }
 
 impl From<Object> for TlsReportSettings {
     fn from(obj: Object) -> Self {
         match obj.inner {
-            ObjectInner::TlsReportSettings(obj) => obj,
+            ObjectInner::TlsReportSettings(obj) => *obj,
             _ => unreachable!(),
         }
     }
@@ -7874,14 +8146,14 @@ impl From<Object> for TlsReportSettings {
 
 impl From<Trace> for ObjectInner {
     fn from(value: Trace) -> Self {
-        ObjectInner::Trace(value)
+        ObjectInner::Trace(Box::new(value))
     }
 }
 
 impl From<Object> for Trace {
     fn from(obj: Object) -> Self {
         match obj.inner {
-            ObjectInner::Trace(obj) => obj,
+            ObjectInner::Trace(obj) => *obj,
             _ => unreachable!(),
         }
     }
@@ -7889,14 +8161,14 @@ impl From<Object> for Trace {
 
 impl From<Tracer> for ObjectInner {
     fn from(value: Tracer) -> Self {
-        ObjectInner::Tracer(value)
+        ObjectInner::Tracer(Box::new(value))
     }
 }
 
 impl From<Object> for Tracer {
     fn from(obj: Object) -> Self {
         match obj.inner {
-            ObjectInner::Tracer(obj) => obj,
+            ObjectInner::Tracer(obj) => *obj,
             _ => unreachable!(),
         }
     }
@@ -7904,14 +8176,14 @@ impl From<Object> for Tracer {
 
 impl From<TracingStore> for ObjectInner {
     fn from(value: TracingStore) -> Self {
-        ObjectInner::TracingStore(value)
+        ObjectInner::TracingStore(Box::new(value))
     }
 }
 
 impl From<Object> for TracingStore {
     fn from(obj: Object) -> Self {
         match obj.inner {
-            ObjectInner::TracingStore(obj) => obj,
+            ObjectInner::TracingStore(obj) => *obj,
             _ => unreachable!(),
         }
     }
@@ -7919,14 +8191,14 @@ impl From<Object> for TracingStore {
 
 impl From<WebDav> for ObjectInner {
     fn from(value: WebDav) -> Self {
-        ObjectInner::WebDav(value)
+        ObjectInner::WebDav(Box::new(value))
     }
 }
 
 impl From<Object> for WebDav {
     fn from(obj: Object) -> Self {
         match obj.inner {
-            ObjectInner::WebDav(obj) => obj,
+            ObjectInner::WebDav(obj) => *obj,
             _ => unreachable!(),
         }
     }
@@ -7934,14 +8206,14 @@ impl From<Object> for WebDav {
 
 impl From<WebHook> for ObjectInner {
     fn from(value: WebHook) -> Self {
-        ObjectInner::WebHook(value)
+        ObjectInner::WebHook(Box::new(value))
     }
 }
 
 impl From<Object> for WebHook {
     fn from(obj: Object) -> Self {
         match obj.inner {
-            ObjectInner::WebHook(obj) => obj,
+            ObjectInner::WebHook(obj) => *obj,
             _ => unreachable!(),
         }
     }

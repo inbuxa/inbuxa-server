@@ -2,6 +2,8 @@
  * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
+ *
+ * Modified by Coffey Labs in 2026 for INBUXA.
  */
 
 use crate::{
@@ -196,22 +198,17 @@ pub async fn test(test: &TestServer) {
                     "name": "Room A"
                 }
             },
+            // inbuxa: 1.0 stores overrides as minimal patches: values equal
+            // to the base event's are left out and a changed location is
+            // a pointer patch
             "recurrenceOverrides": {
                 "2007-03-06T12:00:00": {
                     "title": "Standup with guests",
-                    "start": "2007-03-06T12:00:00",
-                    "duration": "PT1H",
-                    "locations": {
-                        "loc1": {
-                            "@type": "Location",
-                            "name": "Room B"
-                        }
-                    }
+                    "locations/loc1/name": "Room B"
                 },
                 "2007-03-07T12:00:00": {
                     "title": "Moved standup, renamed",
-                    "start": "2007-03-07T15:00:00",
-                    "duration": "PT1H"
+                    "start": "2007-03-07T15:00:00"
                 }
             }
         }),
@@ -390,9 +387,12 @@ pub async fn test(test: &TestServer) {
         );
     }
 
-    // Properties that are not per-occurrence are rejected
+    // Properties that are not per-occurrence are rejected (inbuxa: 1.0
+    // ignores a value equal to the base event's, so calendarIds names a
+    // different calendar)
+    let other_calendar_id = Id::from_parts(0, 9999).to_string();
     for property in [
-        json!({"calendarIds": {&calendar_id: true}}),
+        json!({"calendarIds": {&other_calendar_id: true}}),
         json!({"isDraft": true}),
         json!({"utcStart": "2007-03-06T17:00:00Z"}),
         json!({"utcEnd": "2007-03-06T18:00:00Z"}),
@@ -419,13 +419,14 @@ pub async fn test(test: &TestServer) {
             MethodObject::CalendarEvent,
             [(
                 &id,
+                // inbuxa: 1.0 ignores series properties only when they
+                // match the base event; different values are rejected below
                 json!({
                     "@type": "Event",
                     "title": "Ignoring inherited properties",
-                    "uid": "somebody-elses-uid@example.com",
-                    "recurrenceRule": {"frequency": "weekly"},
-                    "privacy": "private",
-                    "participants/xyz/calendarAddress": "mailto:nobody@example.com"
+                    "uid": "recurring-instances@example.com",
+                    "recurrenceRule": null,
+                    "privacy": null
                 }),
             )],
             Vec::<(&str, &str)>::new(),
@@ -433,6 +434,25 @@ pub async fn test(test: &TestServer) {
         .await
         .updated(&id);
     test.wait_for_tasks().await;
+    for property in [
+        json!({"uid": "somebody-elses-uid@example.com"}),
+        json!({"recurrenceRule": {"frequency": "weekly"}}),
+        json!({"privacy": "private"}),
+        json!({"participants/xyz/calendarAddress": "mailto:nobody@example.com"}),
+    ] {
+        let response = account
+            .jmap_update(
+                MethodObject::CalendarEvent,
+                [(&id, property)],
+                Vec::<(&str, &str)>::new(),
+            )
+            .await;
+        assert_eq!(response.not_updated(&id).typ(), "invalidProperties");
+        assert_eq!(
+            response.not_updated(&id).description(),
+            "This property cannot be modified on a single occurrence."
+        );
+    }
 
     let base = account
         .jmap_get(
@@ -482,10 +502,11 @@ pub async fn test(test: &TestServer) {
     );
     test.wait_for_tasks().await;
 
-    // A synthetic id of a non-recurring event refers to the event itself
+    // A non-recurring event expands to the event itself (inbuxa: 1.0 returns
+    // its own id rather than a synthetic one)
     let instances = expand_instances(account, &calendar_id).await;
     let id = instance_id(&instances, "2007-03-12T09:00:00");
-    assert_ne!(id, single_id);
+    assert_eq!(id, single_id);
     account
         .jmap_update(
             MethodObject::CalendarEvent,
@@ -608,18 +629,14 @@ pub async fn test(test: &TestServer) {
     let account_id = account.id().document_id();
     let resources = test
         .server
-        .fetch_dav_resources(account_id, account_id, SyncCollection::Calendar)
+        .fetch_groupware_resources(account_id, account_id, SyncCollection::Calendar)
         .await
         .unwrap();
     let calendar_document_id = Id::from_str(&calendar_id).unwrap().document_id();
     let calendar_path = resources
-        .paths
-        .iter()
-        .find(|path| {
-            path.parent_id.is_none()
-                && resources.resources[path.resource_idx].document_id == calendar_document_id
-        })
-        .map(|path| format!("{}{}", resources.base_path, path.path))
+        .tree_with_depth(usize::MAX)
+        .find(|path| path.parent_id().is_none() && path.document_id() == calendar_document_id)
+        .map(|path| format!("{}{}", resources.base_path, path.path()))
         .unwrap();
 
     dav_client
@@ -648,10 +665,15 @@ pub async fn test(test: &TestServer) {
         instance(&instances, "2007-03-07T14:00:00").text_field("recurrenceId"),
         "2007-03-07T12:00:00"
     );
-    for start in ["2007-03-08T14:00:00", "2007-03-09T14:00:00"] {
+    // inbuxa: 1.0 keeps each later occurrence's original recurrence id
+    // (RFC 5545 RANGE=THISANDFUTURE), not its shifted start
+    for (start, recurrence_id) in [
+        ("2007-03-08T14:00:00", "2007-03-08T12:00:00"),
+        ("2007-03-09T14:00:00", "2007-03-09T12:00:00"),
+    ] {
         assert_eq!(
             instance(&instances, start).text_field("recurrenceId"),
-            start
+            recurrence_id
         );
         let id = instance_id(&instances, start);
         let response = account

@@ -78,21 +78,22 @@ impl Property for MailRuleProperty {
 
 impl MailRuleProperty {
     fn parse(value: &str) -> Option<Self> {
-        hashify::tiny_map!(value.as_bytes(),
-            b"id" => MailRuleProperty::Id,
-            b"name" => MailRuleProperty::Name,
-            b"description" => MailRuleProperty::Description,
-            b"kind" => MailRuleProperty::Kind,
-            b"enabled" => MailRuleProperty::Enabled,
-            b"priority" => MailRuleProperty::Priority,
-            b"direction" => MailRuleProperty::Direction,
-            b"conditions" => MailRuleProperty::Conditions,
-            b"exceptions" => MailRuleProperty::Exceptions,
-            b"actions" => MailRuleProperty::Actions,
-            b"stopProcessing" => MailRuleProperty::StopProcessing,
-            b"createdBy" => MailRuleProperty::CreatedBy,
-            b"createdAt" => MailRuleProperty::CreatedAt,
-            b"updatedAt" => MailRuleProperty::UpdatedAt,
+        hashify::fnc_map!(value.as_bytes(),
+            b"id" => Some(MailRuleProperty::Id),
+            b"name" => Some(MailRuleProperty::Name),
+            b"description" => Some(MailRuleProperty::Description),
+            b"kind" => Some(MailRuleProperty::Kind),
+            b"enabled" => Some(MailRuleProperty::Enabled),
+            b"priority" => Some(MailRuleProperty::Priority),
+            b"direction" => Some(MailRuleProperty::Direction),
+            b"conditions" => Some(MailRuleProperty::Conditions),
+            b"exceptions" => Some(MailRuleProperty::Exceptions),
+            b"actions" => Some(MailRuleProperty::Actions),
+            b"stopProcessing" => Some(MailRuleProperty::StopProcessing),
+            b"createdBy" => Some(MailRuleProperty::CreatedBy),
+            b"createdAt" => Some(MailRuleProperty::CreatedAt),
+            b"updatedAt" => Some(MailRuleProperty::UpdatedAt),
+            _ => None,
         )
     }
 }

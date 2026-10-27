@@ -2,15 +2,30 @@
  * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
+ *
+ * Modified by Coffey Labs in 2026 for INBUXA.
  */
 
-use directory::{Account, Credentials, Group, Recipient, backend::sql::SqlDirectory};
+use directory::{
+    Account, Credentials, Group, Recipient, backend::sql::SqlDirectory,
+    core::verifier::PasswordVerifier,
+};
 use registry::schema::structs::{self, SqlAuthStore};
-use store::{Store, backend::sqlite::SqliteStore};
+use std::num::NonZeroUsize;
+use store::backend::sqlite::SqliteStore;
 
 pub async fn test() {
     println!("Running SQL directory tests...");
-    let sql_store = Store::SQLite(SqliteStore::open_memory().unwrap().into());
+    // inbuxa: 1.0 has no open_memory(); one pooled connection keeps the
+    // in-memory database alive and shared
+    let sql_store = SqliteStore::open(structs::SqliteStore {
+        path: ":memory:".to_string(),
+        pool_workers: None,
+        pool_max_connections: Some(1),
+    })
+    .unwrap();
+    // inbuxa: 1.0 directories verify passwords on a shared worker pool
+    let verifier = PasswordVerifier::new(NonZeroUsize::MIN);
 
     // Create test directory
     for query in [
@@ -98,11 +113,14 @@ pub async fn test() {
     // Test authentication
     let sql = SqlDirectory::open(config, &sql_store).await.unwrap();
     assert_eq!(
-        sql.authenticate(&Credentials::Basic {
-            username: "john@example.org".to_string(),
-            secret: "john secret".to_string(),
-            mfa_token: None,
-        })
+        sql.authenticate(
+            &Credentials::Basic {
+                username: "john@example.org".to_string(),
+                secret: "john secret".to_string(),
+                mfa_token: None,
+            },
+            &verifier
+        )
         .await
         .unwrap(),
         Account {
@@ -114,22 +132,28 @@ pub async fn test() {
         }
     );
     assert!(
-        sql.authenticate(&Credentials::Basic {
-            username: "john@example.org".to_string(),
-            secret: "wrong secret".to_string(),
-            mfa_token: None,
-        })
+        sql.authenticate(
+            &Credentials::Basic {
+                username: "john@example.org".to_string(),
+                secret: "wrong secret".to_string(),
+                mfa_token: None,
+            },
+            &verifier
+        )
         .await
         .is_err()
     );
 
     // Empty columns are treated as missing values
     assert_eq!(
-        sql.authenticate(&Credentials::Basic {
-            username: "bob@example.org".to_string(),
-            secret: "bob secret".to_string(),
-            mfa_token: None,
-        })
+        sql.authenticate(
+            &Credentials::Basic {
+                username: "bob@example.org".to_string(),
+                secret: "bob secret".to_string(),
+                mfa_token: None,
+            },
+            &verifier
+        )
         .await
         .unwrap(),
         Account {
@@ -141,11 +165,14 @@ pub async fn test() {
         }
     );
     assert!(
-        sql.authenticate(&Credentials::Basic {
-            username: "nobody@example.org".to_string(),
-            secret: "".to_string(),
-            mfa_token: None,
-        })
+        sql.authenticate(
+            &Credentials::Basic {
+                username: "nobody@example.org".to_string(),
+                secret: "".to_string(),
+                mfa_token: None,
+            },
+            &verifier
+        )
         .await
         .is_err()
     );

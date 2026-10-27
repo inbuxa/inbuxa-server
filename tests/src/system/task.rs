@@ -73,14 +73,16 @@ pub async fn test(test: &mut TestServer) {
     admin.assert_no_tasks().await;
 
     // Test attempt limits strategy
+    // inbuxa: 1.0 dropped max_attempts and total_deadline. A transient
+    // failure retries for good; after alert_after attempts the task is
+    // marked Stalled (and keeps retrying) instead of Failed.
     admin
         .registry_update_setting(
             TaskManager {
-                max_attempts: 3,
+                alert_after: 3,
                 strategy: TaskRetryStrategy::FixedDelay(TaskRetryStrategyFixed {
                     delay: 1_000u64.into(),
                 }),
-                total_deadline: 86_400_000u64.into(), // 24 hours
             },
             &[],
         )
@@ -94,26 +96,26 @@ pub async fn test(test: &mut TestServer) {
     assert_eq!(task_status.failure_reason, "Simulated temporary failure");
     assert_eq!(task_status.attempt_number, 1);
 
-    // Wait until the max attempts is reached
-    test.wait_for_tasks_skip_failures().await;
-    let task = admin.assert_has_failed_task().await;
-    let task_status = task.task.status().unwrap_failed();
+    // Wait until the alert threshold is reached
+    let task = admin.assert_has_stalled_task().await;
+    let task_status = task.task.status().unwrap_stalled();
     assert_eq!(task_status.failure_reason, "Simulated temporary failure");
-    assert_eq!(task_status.failed_attempt_number, 3);
+    assert_eq!(task_status.attempt_number, 3);
     admin
         .registry_destroy(ObjectType::Task, [task.id])
         .await
         .assert_destroyed(&[task.id]);
 
-    // Test attempt limits strategy
+    // inbuxa: 1.0 has no total deadline for retries (only iTIP messages
+    // expire), so a task under the alert threshold keeps retrying rather
+    // than failing once its time is up.
     admin
         .registry_update_setting(
             TaskManager {
-                max_attempts: 100,
+                alert_after: 100,
                 strategy: TaskRetryStrategy::FixedDelay(TaskRetryStrategyFixed {
                     delay: 1_000u64.into(),
                 }),
-                total_deadline: 2_000u64.into(), // 2 seconds
             },
             &[],
         )
@@ -127,16 +129,22 @@ pub async fn test(test: &mut TestServer) {
     assert_eq!(task_status.failure_reason, "Simulated temporary failure");
     assert_eq!(task_status.attempt_number, 1);
 
-    // Wait until 2 seconds deadline is reached
-    test.wait_for_tasks_skip_failures().await;
-    let task = admin.assert_has_failed_task().await;
-    let task_status = task.task.status().unwrap_failed();
+    // Wait past the old 2 second deadline: still retrying, not failed
+    tokio::time::sleep(std::time::Duration::from_millis(2_500)).await;
+    let task = admin.assert_has_retried_task().await;
+    let task_status = task.task.status().unwrap_retry();
     assert_eq!(task_status.failure_reason, "Simulated temporary failure");
-    assert_eq!(task_status.failed_attempt_number, 2);
+    assert!(task_status.attempt_number >= 2, "{task_status:?}");
     admin
         .registry_destroy(ObjectType::Task, [task.id])
         .await
         .assert_destroyed(&[task.id]);
+
+    // Restore the default retry policy
+    admin
+        .registry_update_setting(TaskManager::default(), &[])
+        .await;
+    admin.reload_settings().await;
 
     pagination_test(test).await;
 
@@ -344,6 +352,16 @@ impl Account {
         .unwrap()
     }
 
+    async fn assert_has_stalled_task(&self) -> TaskId {
+        self.await_tasks(1, |task| {
+            matches!(task.task.status(), TaskStatus::Stalled(_))
+        })
+        .await
+        .into_iter()
+        .next()
+        .unwrap()
+    }
+
     async fn assert_has_retried_task(&self) -> TaskId {
         self.await_tasks(1, |task| matches!(task.task.status(), TaskStatus::Retry(_)))
             .await
@@ -397,6 +415,7 @@ trait UnwrapTaskStatus {
     fn unwrap_pending(&self) -> &TaskStatusPending;
     fn unwrap_retry(&self) -> &TaskStatusRetry;
     fn unwrap_failed(&self) -> &TaskStatusFailed;
+    fn unwrap_stalled(&self) -> &TaskStatusRetry;
 }
 
 impl UnwrapTaskStatus for TaskStatus {
@@ -418,6 +437,13 @@ impl UnwrapTaskStatus for TaskStatus {
         match self {
             TaskStatus::Failed(status) => status,
             _ => panic!("Expected TaskStatus::Failed, found {:?}", self),
+        }
+    }
+
+    fn unwrap_stalled(&self) -> &TaskStatusRetry {
+        match self {
+            TaskStatus::Stalled(status) => status,
+            _ => panic!("Expected TaskStatus::Stalled, found {:?}", self),
         }
     }
 }

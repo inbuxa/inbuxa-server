@@ -72,20 +72,21 @@ impl Property for HoldExportProperty {
 
 impl HoldExportProperty {
     fn parse(value: &str) -> Option<Self> {
-        hashify::tiny_map!(value.as_bytes(),
-            b"id" => HoldExportProperty::Id,
-            b"holdId" => HoldExportProperty::HoldId,
-            b"accountIds" => HoldExportProperty::AccountIds,
-            b"reason" => HoldExportProperty::Reason,
-            b"status" => HoldExportProperty::Status,
-            b"createdAt" => HoldExportProperty::CreatedAt,
-            b"createdBy" => HoldExportProperty::CreatedBy,
-            b"finishedAt" => HoldExportProperty::FinishedAt,
-            b"blobId" => HoldExportProperty::BlobId,
-            b"size" => HoldExportProperty::Size,
-            b"items" => HoldExportProperty::Items,
-            b"sha256" => HoldExportProperty::Sha256,
-            b"error" => HoldExportProperty::Error,
+        hashify::fnc_map!(value.as_bytes(),
+            b"id" => Some(HoldExportProperty::Id),
+            b"holdId" => Some(HoldExportProperty::HoldId),
+            b"accountIds" => Some(HoldExportProperty::AccountIds),
+            b"reason" => Some(HoldExportProperty::Reason),
+            b"status" => Some(HoldExportProperty::Status),
+            b"createdAt" => Some(HoldExportProperty::CreatedAt),
+            b"createdBy" => Some(HoldExportProperty::CreatedBy),
+            b"finishedAt" => Some(HoldExportProperty::FinishedAt),
+            b"blobId" => Some(HoldExportProperty::BlobId),
+            b"size" => Some(HoldExportProperty::Size),
+            b"items" => Some(HoldExportProperty::Items),
+            b"sha256" => Some(HoldExportProperty::Sha256),
+            b"error" => Some(HoldExportProperty::Error),
+            _ => None,
         )
     }
 }

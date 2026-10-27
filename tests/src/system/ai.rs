@@ -23,15 +23,14 @@ use email::cache::MessageCacheFetch;
 use http_proto::{HttpResponse, JsonResponse, ToHttpResponse};
 use hyper::StatusCode;
 use registry::schema::{
-    enums::AiModelType,
     prelude::{ObjectType, Property},
     structs::{
-        AiModel, Expression, ExpressionMatch, HttpAuth, HttpAuthBearer, MtaStageAuth, SecretKey,
-        SecretKeyValue, SpamLlm, SpamLlmProperties, SpamRule, SpamRuleAny, SpamSettings, SpamTag,
-        SpamTagAction, SpamTagScore, UserRoles,
+        AiModel, AiModelOpenAi, Expression, ExpressionMatch, MtaStageAuth, SecretKeyOptional,
+        SecretKeyValue, SpamAi, SpamAiCategory, SpamAiProperties, SpamAiTier, SpamRule,
+        SpamRuleAny, SpamSettings, SpamTag, SpamTagAction, SpamTagScore, UserRoles,
     },
 };
-use registry::types::{list::List, map::Map};
+use registry::types::list::List;
 use serde_json::{Value, json};
 use std::{
     sync::{Arc, Mutex},
@@ -45,7 +44,7 @@ const PORT: u16 = 9391;
 const USER: &str = "ai@example.org";
 const PROMPT: &str = "Classify the email below as one of: Unsolicited, Commercial, Harmful, \
 Legitimate. Then give your confidence: High, Medium or Low. Answer on one line as \
-Category,Confidence,Reason.";
+Category|Confidence|Reason.";
 
 /// How the stub answers.
 #[derive(Clone)]
@@ -101,7 +100,7 @@ async fn spawn_stub(test: &TestServer) -> (Arc<Stub>, impl Sized) {
 /// A stub model on `port`, for the suites that share it.
 pub(super) async fn spawn_stub_on(test: &TestServer, port: u16) -> (Arc<Stub>, impl Sized) {
     let stub = Arc::new(Stub {
-        mode: Mutex::new(Mode::Answer("Legitimate,Low,fine".into())),
+        mode: Mutex::new(Mode::Answer("Legitimate|Low|fine".into())),
         requests: Mutex::new(Vec::new()),
     });
     let handler_stub = stub.clone();
@@ -172,7 +171,7 @@ pub async fn test(test: &mut TestServer) {
     // Acceptance test 1: nothing configured, nothing sent (AI-1)
     assert!(admin.registry_query_all(ObjectType::AiModel).await.is_empty(), "test 1");
     let response = admin
-        .jmap_method_call("x:SpamLlm/get", json!({"ids": ["singleton"]}))
+        .jmap_method_call("x:SpamAi/get", json!({"ids": ["singleton"]}))
         .await;
     assert_eq!(response.list()[0]["@type"], "Disable", "test 1");
     deliver(&[USER], "Nothing configured", "Hello.").await;
@@ -180,42 +179,51 @@ pub async fn test(test: &mut TestServer) {
 
     // The model and the classifier
     let model_id = admin
-        .registry_create_object(AiModel {
+        .registry_create_object(AiModel::OpenAi(AiModelOpenAi {
             name: "stub".to_string(),
             model: "stub-model".to_string(),
-            model_type: AiModelType::Chat,
-            url: format!("https://127.0.0.1:{PORT}/v1/chat/completions"),
+            url: Some(format!("https://127.0.0.1:{PORT}/v1/chat/completions")),
             allow_invalid_certs: true,
             ..Default::default()
-        })
+        }))
         .await;
-    let classifier = |pos_confidence: Option<u64>| {
-        SpamLlm::Enable(SpamLlmProperties {
-            model_id,
-            prompt: PROMPT.to_string(),
-            separator: ",".to_string(),
-            response_pos_category: 0,
-            response_pos_confidence: pos_confidence,
-            response_pos_explanation: Some(2),
-            categories: Map::new(
-                ["Unsolicited", "Commercial", "Harmful", "Legitimate"]
-                    .map(String::from)
-                    .to_vec(),
+    // inbuxa: 1.0's x:SpamAi replaced x:SpamLlm. The answer format is fixed
+    // (category|confidence|explanation, confidence High/Medium/Low), the
+    // model sits in a tier, and the condition is opened up so every test
+    // message reaches the model whatever its provisional score.
+    let classifier = || {
+        SpamAi::Enable(SpamAiProperties {
+            condition: Expression {
+                else_: "true".to_string(),
+                ..Default::default()
+            },
+            tiers: List::from_iter([SpamAiTier {
+                model_id,
+                ..Default::default()
+            }]),
+            instructions: PROMPT.to_string(),
+            categories: List::from_iter(
+                ["Unsolicited", "Commercial", "Harmful", "Legitimate"].map(|name| {
+                    SpamAiCategory {
+                        name: name.to_string(),
+                        ..Default::default()
+                    }
+                }),
             ),
-            confidence: Map::new(["High", "Medium", "Low"].map(String::from).to_vec()),
+            explanation: true,
             ..Default::default()
         })
     };
-    admin.set_classifier(classifier(Some(1))).await;
+    admin.set_classifier(classifier()).await;
 
-    // Acceptance test 3: spacing, case, and commas in the explanation
+    // Acceptance test 3: spacing, case, and the separator in the explanation
     stub.set(Mode::Answer(
-        "unsolicited , HIGH , Lots of commas, here".into(),
+        "unsolicited | HIGH | Lots of pipes | here".into(),
     ));
     let headers = deliver_and_read(test, &user, "Commas", "Buy now.").await;
     assert_eq!(
         header(&headers, "X-Spam-LLM"),
-        Some("LLM_UNSOLICITED_HIGH (Lots of commas, here)".to_string()),
+        Some("LLM_UNSOLICITED_HIGH (Lots of pipes | here)".to_string()),
         "test 3"
     );
     assert!(
@@ -259,25 +267,29 @@ pub async fn test(test: &mut TestServer) {
     assert!(!user_text.contains("remote.example.org"), "test 6: no headers");
 
     // Acceptance test 4: answers that name nothing configured
-    for (n, answer) in ["Maybe,High,x", "", "no separator here"].into_iter().enumerate() {
+    for (n, answer) in ["Maybe|High|x", "", "no separator here"].into_iter().enumerate() {
         stub.set(Mode::Answer(answer.into()));
         let headers = deliver_and_read(test, &user, &format!("No tag {n}"), "Hello.").await;
         assert_eq!(header(&headers, "X-Spam-LLM"), None, "test 4: {answer:?}");
     }
 
     // Acceptance test 5: no confidence position
-    admin.set_classifier(classifier(None)).await;
-    stub.set(Mode::Answer("Unsolicited,whatever".into()));
+    // inbuxa: 1.0 always reads a confidence (there's no position to leave
+    // out), so an answer without a known one names no tag, and every tag
+    // carries its bucket
+    stub.set(Mode::Answer("Unsolicited|whatever".into()));
     let headers = deliver_and_read(test, &user, "No confidence", "Hello.").await;
-    assert!(
-        header(&headers, "X-Spam-LLM").is_some_and(|h| h.starts_with("LLM_UNSOLICITED")
-            && !h.starts_with("LLM_UNSOLICITED_")),
+    assert_eq!(header(&headers, "X-Spam-LLM"), None, "test 5: {headers}");
+    stub.set(Mode::Answer("Unsolicited|Medium".into()));
+    let headers = deliver_and_read(test, &user, "Medium confidence", "Hello.").await;
+    assert_eq!(
+        header(&headers, "X-Spam-LLM"),
+        Some("LLM_UNSOLICITED_MEDIUM".to_string()),
         "test 5: {headers}"
     );
-    admin.set_classifier(classifier(Some(1))).await;
 
     // Acceptance test 7: a long body is cut, and says so
-    stub.set(Mode::Answer("Legitimate,Low,long".into()));
+    stub.set(Mode::Answer("Legitimate|Low|long".into()));
     deliver(&[USER], "Long", &"a".repeat(100 * 1024)).await;
     let (_, long) = stub.last();
     let text = long["messages"][1]["content"].as_str().unwrap();
@@ -286,7 +298,7 @@ pub async fn test(test: &mut TestServer) {
     // Acceptance test 12: a hostile explanation and a planted header
     // AI-12 reads the first line only, so the hostile part rides on a lone CR
     stub.set(Mode::Answer(
-        "Harmful,High,Très (bad)\rX-Injected: yes\r\nX-Second-Line: no".into(),
+        "Harmful|High|Très (bad)\rX-Injected: yes\r\nX-Second-Line: no".into(),
     ));
     let raw = deliver_and_read_raw(
         test,
@@ -329,9 +341,9 @@ pub async fn test(test: &mut TestServer) {
         .await;
     admin.reload_settings().await;
     for (answer, expected) in [
-        ("Unsolicited,High,x", "LLM_UNSOLICITED_HIGH (2.00)"),
-        ("Legitimate,High,x", "LLM_LEGITIMATE_HIGH (-1.00)"),
-        ("Harmful,High,x", "LLM_HARMFUL_HIGH (0.00)"),
+        ("Unsolicited|High|x", "LLM_UNSOLICITED_HIGH (2.00)"),
+        ("Legitimate|High|x", "LLM_LEGITIMATE_HIGH (-1.00)"),
+        ("Harmful|High|x", "LLM_HARMFUL_HIGH (0.00)"),
     ] {
         stub.set(Mode::Answer(answer.into()));
         let headers = deliver_and_read(test, &user, &format!("Scored {expected}"), "Hello.").await;
@@ -360,7 +372,7 @@ pub async fn test(test: &mut TestServer) {
         }))
         .await;
     admin.reload_settings().await;
-    stub.set(Mode::Answer("Harmful,High,x".into()));
+    stub.set(Mode::Answer("Harmful|High|x".into()));
     let headers = deliver_and_read(test, &user, "Rule", "Hello.").await;
     assert!(
         header(&headers, "X-Spam-Result").unwrap_or_default().contains("AI_RULE_FIRED"),
@@ -382,7 +394,7 @@ pub async fn test(test: &mut TestServer) {
     // Acceptance test 8: a model that doesn't answer in time costs nothing
     // The test client waits 1.5s for a reply, so the ceiling is short here
     admin.set_limits(json!({"spamCallCeiling": 500})).await;
-    stub.set(Mode::Sleep(Duration::from_secs(3), "Unsolicited,High,x".into()));
+    stub.set(Mode::Sleep(Duration::from_secs(3), "Unsolicited|High|x".into()));
     let started = Instant::now();
     let headers = deliver_and_read(test, &user, "Slow", "Hello.").await;
     assert_eq!(header(&headers, "X-Spam-LLM"), None, "test 8");
@@ -393,7 +405,7 @@ pub async fn test(test: &mut TestServer) {
     admin
         .set_limits(json!({"spamCallCeiling": 5000, "maxConcurrentCalls": 1}))
         .await;
-    stub.set(Mode::Sleep(Duration::from_millis(1000), "Unsolicited,High,x".into()));
+    stub.set(Mode::Sleep(Duration::from_millis(1000), "Unsolicited|High|x".into()));
     let calls_before = stub.count();
     let join_started = Instant::now();
     let (a, b) = tokio::join!(
@@ -424,7 +436,7 @@ pub async fn test(test: &mut TestServer) {
     deliver(&[USER], "While paused", "Hello.").await;
     assert_eq!(stub.count(), paused_at, "test 9: not called while paused");
     tokio::time::sleep(Duration::from_millis(2100)).await;
-    stub.set(Mode::Answer("Legitimate,Low,back".into()));
+    stub.set(Mode::Answer("Legitimate|Low|back".into()));
     deliver(&[USER], "Probe", "Hello.").await;
     assert_eq!(stub.count(), paused_at + 1, "test 9: one probe");
     admin.set_limits(json!({"failureBackoff": null})).await;
@@ -451,18 +463,16 @@ pub async fn test(test: &mut TestServer) {
 
     // Acceptance test 16: bearer auth reaches the model, /get never shows it
     let secret_model = admin
-        .registry_create_object(AiModel {
+        .registry_create_object(AiModel::OpenAi(AiModelOpenAi {
             name: "secret".to_string(),
             model: "stub-model".to_string(),
-            url: format!("https://127.0.0.1:{PORT}/v1/chat/completions"),
+            url: Some(format!("https://127.0.0.1:{PORT}/v1/chat/completions")),
             allow_invalid_certs: true,
-            http_auth: HttpAuth::Bearer(HttpAuthBearer {
-                bearer_token: SecretKey::Value(SecretKeyValue {
-                    secret: "token-from-value".into(),
-                }),
+            api_key: SecretKeyOptional::Value(SecretKeyValue {
+                secret: "token-from-value".into(),
             }),
             ..Default::default()
-        })
+        }))
         .await;
     let fetched = admin
         .jmap_method_call(
@@ -474,13 +484,13 @@ pub async fn test(test: &mut TestServer) {
 
     // Acceptance tests 17 and 18: llm_prompt from a user's Sieve script
     let echo = admin
-        .registry_create_object(AiModel {
+        .registry_create_object(AiModel::OpenAi(AiModelOpenAi {
             name: "echo-test".to_string(),
             model: "stub-model".to_string(),
-            url: format!("https://127.0.0.1:{PORT}/v1/chat/completions"),
+            url: Some(format!("https://127.0.0.1:{PORT}/v1/chat/completions")),
             allow_invalid_certs: true,
             ..Default::default()
-        })
+        }))
         .await;
     stub.set(Mode::Echo);
     user.activate_script(concat!(
@@ -512,7 +522,7 @@ pub async fn test(test: &mut TestServer) {
     let (t_admin, t_id, t_domain) = admin.brand_new_tenant_admin().await;
     for (method, args) in [
         ("x:AiModel/get", json!({"ids": null})),
-        ("x:SpamLlm/set", json!({"update": {"singleton": {"@type": "Disable"}}})),
+        ("x:SpamAi/set", json!({"update": {"singleton": {"@type": "Disable"}}})),
     ] {
         let response = t_admin.jmap_method_call(method, args).await;
         let text = response.to_string();
@@ -534,12 +544,12 @@ pub async fn test(test: &mut TestServer) {
         let before = Collector::read_metric_counter(warning);
         ids.push(
             admin
-                .registry_create_object(AiModel {
+                .registry_create_object(AiModel::OpenAi(AiModelOpenAi {
                     name: format!("locality-{}", ids.len()),
                     model: "m".into(),
-                    url: url.into(),
+                    url: Some(url.into()),
                     ..Default::default()
-                })
+                }))
                 .await,
         );
         if counted {
@@ -554,9 +564,9 @@ pub async fn test(test: &mut TestServer) {
     // AI-18: a missing model is refused, and a model in use can't go
     let refused = admin
         .registry_update_object_expect_err(
-            ObjectType::SpamLlm,
+            ObjectType::SpamAi,
             Id::singleton(),
-            json!({"modelId": Id::new(999_999).to_string()}),
+            json!({"tiers": {"0": {"modelId": Id::new(999_999).to_string()}}}),
         )
         .await;
     let _ = refused;
@@ -568,7 +578,7 @@ pub async fn test(test: &mut TestServer) {
 
     // Clean up
     admin
-        .registry_update_setting(SpamLlm::Disable, &[])
+        .registry_update_setting(SpamAi::Disable, &[])
         .await;
     for id in ids.into_iter().chain([model_id, secret_model, echo]) {
         admin
@@ -720,8 +730,8 @@ async fn deliver_and_read_raw(test: &TestServer, user: &Account, message: &str) 
 async fn newest_raw(test: &TestServer, account_id: u32, subject: &str) -> Vec<u8> {
     for _ in 0..40 {
         let messages = test.server.get_cached_messages(account_id).await.unwrap();
-        for item in messages.emails.items.iter().rev() {
-            let raw = test.fetch_email(account_id, item.document_id).await;
+        for item in messages.emails.iter().rev() {
+            let raw = test.fetch_email(account_id, item.document_id()).await;
             if header_block(&String::from_utf8_lossy(&raw))
                 .lines()
                 .any(|l| l == format!("Subject: {subject}"))
@@ -766,7 +776,7 @@ fn header(headers: &str, name: &str) -> Option<String> {
 }
 
 impl Account {
-    async fn set_classifier(&self, classifier: SpamLlm) {
+    async fn set_classifier(&self, classifier: SpamAi) {
         self.registry_update_setting(classifier, &[]).await;
     }
 
@@ -820,7 +830,7 @@ impl Account {
             .await;
         let domain = self.registry_create_object(registry::schema::structs::Domain {
             name: "ai-t.example.org".into(),
-            is_enabled: true,
+            enable: true,
             member_tenant_id: Some(tenant),
             certificate_management: registry::schema::structs::CertificateManagement::Manual,
             dns_management: registry::schema::structs::DnsManagement::Manual,

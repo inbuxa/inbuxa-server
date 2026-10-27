@@ -44,7 +44,7 @@ impl Server {
         let server_logo = registry
             .object::<Enterprise>(Id::singleton())
             .await?
-            .and_then(|e| e.logo_url);
+            .and_then(|e| e.logo);
         Ok(logo::chain([
             (
                 Source::Domain(domain.as_ref().map_or(u32::MAX, |d| d.id)),

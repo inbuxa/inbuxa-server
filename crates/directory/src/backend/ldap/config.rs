@@ -4,11 +4,15 @@
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
  */
 
-use super::{Bind, LdapConnectionManager, LdapDirectory, LdapFilter, LdapFilterItem, LdapMappings};
+use super::{
+    Bind, LdapConnectionManager, LdapDirectory, LdapFilter, LdapFilterItem, LdapMappings,
+    failover::LdapServers,
+};
 use crate::Directory;
 use deadpool::{Runtime, managed::Pool};
 use ldap3::LdapConnSettings;
 use registry::schema::structs;
+use std::sync::Arc;
 
 impl LdapDirectory {
     pub async fn open(config: structs::LdapDirectory) -> Result<Directory, String> {
@@ -29,19 +33,23 @@ impl LdapDirectory {
             None
         };
 
-        let manager = LdapConnectionManager::new(
-            config.url,
-            LdapConnSettings::new()
-                .set_conn_timeout(config.timeout.into_inner())
-                .set_starttls(config.use_tls)
-                .set_no_tls_verify(config.allow_invalid_certs),
-            bind_dn,
-        );
+        let timeout = config.timeout.into_inner();
+        let settings = LdapConnSettings::new()
+            .set_conn_timeout(timeout)
+            .set_starttls(config.use_tls)
+            .set_no_tls_verify(config.allow_invalid_certs);
+        #[cfg_attr(not(feature = "enterprise"), allow(unused_mut))]
+        let mut urls = vec![config.url];
+        let servers = Arc::new(LdapServers::new(urls.into_boxed_slice()));
+        let bind_manager = config
+            .bind_authentication
+            .then(|| LdapConnectionManager::new(servers.clone(), settings.clone(), None, timeout));
+        let manager = LdapConnectionManager::new(servers.clone(), settings, bind_dn, timeout);
 
         let mut mappings = LdapMappings {
             base_dn: config.base_dn,
             filter_login: LdapFilter::new(&config.filter_login)?,
-            filter_mailbox: LdapFilter::new(&config.filter_mailbox)?,
+            filter_recipient: LdapFilter::new(&config.filter_recipient)?,
             filter_member_of: if let Some(filter) = config.filter_member_of {
                 Some(LdapFilter::new(&filter)?)
             } else {
@@ -111,19 +119,32 @@ impl LdapDirectory {
         }
         mappings.attrs_principal = attrs_principal;
 
-        let pool = Pool::builder(manager)
-            .runtime(Runtime::Tokio1)
-            .max_size(config.pool_max_connections as usize)
-            .create_timeout(config.pool_timeout_create.into_inner().into())
-            .wait_timeout(config.pool_timeout_wait.into_inner().into())
-            .recycle_timeout(config.pool_timeout_recycle.into_inner().into())
-            .build()
-            .map_err(|err| format!("Failed to build LDAP pool: {err}"))?;
+        let create_timeout = if servers.server_count() > 1 {
+            config
+                .pool_timeout_create
+                .into_inner()
+                .max(timeout)
+                .saturating_mul(u32::try_from(servers.server_count()).unwrap_or(u32::MAX))
+        } else {
+            config.pool_timeout_create.into_inner()
+        };
+        let build_pool = |manager: LdapConnectionManager| {
+            Pool::builder(manager)
+                .runtime(Runtime::Tokio1)
+                .max_size(config.pool_max_connections as usize)
+                .create_timeout(create_timeout.into())
+                .wait_timeout(config.pool_timeout_wait.into_inner().into())
+                .recycle_timeout(config.pool_timeout_recycle.into_inner().into())
+                .build()
+                .map_err(|err| format!("Failed to build LDAP pool: {err}"))
+        };
 
         Ok(Directory::Ldap(LdapDirectory {
             mappings,
-            pool,
-            auth_bind: config.bind_authentication,
+            pool: build_pool(manager)?,
+            bind_pool: bind_manager.map(build_pool).transpose()?,
+            servers,
+            timeout,
         }))
     }
 }
@@ -132,9 +153,9 @@ impl LdapFilter {
     pub(super) fn new(value: &str) -> Result<Self, String> {
         let mut filter = Vec::new();
         let mut token = String::new();
-        let mut value = value.chars();
+        let mut chars = value.chars();
 
-        while let Some(ch) = value.next() {
+        while let Some(ch) = chars.next() {
             match ch {
                 '?' => {
                     // For backwards compatibility, we treat '?' as a placeholder for the full value.
@@ -149,7 +170,7 @@ impl LdapFilter {
                         filter.push(LdapFilterItem::Static(token));
                         token = String::new();
                     }
-                    for ch in value.by_ref() {
+                    for ch in chars.by_ref() {
                         if ch == '}' {
                             break;
                         } else {

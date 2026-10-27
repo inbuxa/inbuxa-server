@@ -2,6 +2,8 @@
  * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
+ *
+ * Modified by Coffey Labs in 2026 for INBUXA.
  */
 
 use crate::utils::{jmap::JmapUtils, server::TestServer};
@@ -13,6 +15,8 @@ use jmap_proto::{
 use serde_json::json;
 use types::id::Id;
 
+// inbuxa: 1.0 adds the maySetMetadata right (Acl::ModifyMetadata) to every
+// rights object; owners hold it, sharees here aren't granted it
 pub async fn test(test: &TestServer) {
     println!("Running Calendar ACL tests...");
     let john = test.account("jdoe@example.com");
@@ -104,6 +108,7 @@ pub async fn test(test: &TestServer) {
             "mayWriteAll": true,
             "mayDelete": true,
             "mayShare": true,
+            "maySetMetadata": true,
             "mayWriteOwn": true,
             "mayReadFreeBusy": true,
             "mayUpdatePrivate": true,
@@ -134,7 +139,8 @@ pub async fn test(test: &TestServer) {
         .await
         .method_response()
         .typ(),
-        "forbidden"
+        // inbuxa: 1.0 answers accountNotFound when nothing in the account is shared
+        "accountNotFound"
     );
 
     // Share calendar with Jane
@@ -174,6 +180,7 @@ pub async fn test(test: &TestServer) {
                 "mayWriteAll": false,
                 "mayDelete": false,
                 "mayShare": false,
+                "maySetMetadata": false,
                 "mayWriteOwn": false,
                 "mayReadFreeBusy": false,
                 "mayUpdatePrivate": false,
@@ -203,6 +210,7 @@ pub async fn test(test: &TestServer) {
             "mayWriteAll": false,
             "mayDelete": false,
             "mayShare": false,
+            "maySetMetadata": false,
             "mayWriteOwn": false,
             "mayReadFreeBusy": false,
             "mayUpdatePrivate": false,
@@ -261,6 +269,7 @@ pub async fn test(test: &TestServer) {
             "mayWriteAll": false,
             "mayDelete": false,
             "mayShare": false,
+            "maySetMetadata": false,
             "mayWriteOwn": false,
             "mayReadFreeBusy": false,
             "mayUpdatePrivate": false,
@@ -271,6 +280,7 @@ pub async fn test(test: &TestServer) {
             "mayWriteAll": false,
             "mayDelete": false,
             "mayShare": false,
+            "maySetMetadata": false,
             "mayWriteOwn": false,
             "mayReadFreeBusy": false,
             "mayUpdatePrivate": false,
@@ -279,12 +289,15 @@ pub async fn test(test: &TestServer) {
           "name": null
         }));
 
-    // Updating and deleting should fail
+    // Updating and deleting should fail (inbuxa: 1.0 accepts an empty patch
+    // as a no-op, so each update changes something. In 1.0 name, color,
+    // sortOrder and the like are per-user preferences a sharee may set for
+    // their own view; description is a shared property that needs Modify.)
     assert_eq!(
         jane.jmap_update_account(
             john,
             MethodObject::Calendar,
-            [(&john_calendar_id, json!({}))],
+            [(&john_calendar_id, json!({"description": "Changed by Jane"}))],
             Vec::<(&str, &str)>::new(),
         )
         .await
@@ -308,13 +321,14 @@ pub async fn test(test: &TestServer) {
         jane.jmap_update_account(
             john,
             MethodObject::CalendarEvent,
-            [(&john_event_id, json!({}))],
+            [(&john_event_id, json!({"title": "Renamed by Jane"}))],
             Vec::<(&str, &str)>::new(),
         )
         .await
         .not_updated(&john_event_id)
         .description()
-        .contains("You are not allowed to modify calendar"),
+        // inbuxa: 1.0 checks event rights per property
+        .contains("You are not allowed to modify this event."),
     );
     assert!(
         jane.jmap_destroy_account(
@@ -358,15 +372,17 @@ pub async fn test(test: &TestServer) {
         .assert_is_equal(json!({
         "id": john_calendar_id,
         "name": "Test #1",
+        // inbuxa: 1.0 grants mayWriteOwn, mayUpdatePrivate and mayRSVP with mayWriteAll
         "myRights": {
             "mayReadItems": true,
             "mayWriteAll": true,
             "mayDelete": true,
             "mayShare": false,
-            "mayWriteOwn": false,
+            "maySetMetadata": false,
+            "mayWriteOwn": true,
             "mayReadFreeBusy": false,
-            "mayUpdatePrivate": false,
-            "mayRSVP": false
+            "mayUpdatePrivate": true,
+            "mayRSVP": true
         }
         }));
 
@@ -409,6 +425,7 @@ pub async fn test(test: &TestServer) {
             "mayWriteAll": false,
             "mayDelete": false,
             "mayShare": false,
+            "maySetMetadata": false,
             "mayWriteOwn": false,
             "mayReadFreeBusy": false,
             "mayUpdatePrivate": false,
@@ -419,10 +436,11 @@ pub async fn test(test: &TestServer) {
             "mayWriteAll": true,
             "mayDelete": true,
             "mayShare": false,
-            "mayWriteOwn": false,
+            "maySetMetadata": false,
+            "mayWriteOwn": true,
             "mayReadFreeBusy": false,
-            "mayUpdatePrivate": false,
-            "mayRSVP": false
+            "mayUpdatePrivate": true,
+            "mayRSVP": true
           },
           "name": null
         }));
@@ -616,7 +634,8 @@ pub async fn test(test: &TestServer) {
         .await
         .method_response()
         .typ(),
-        "forbidden"
+        // inbuxa: 1.0 answers accountNotFound when nothing in the account is shared
+        "accountNotFound"
     );
 
     // Verify Jane received a share notification with the updated rights
@@ -657,16 +676,18 @@ pub async fn test(test: &TestServer) {
             "mayWriteAll": true,
             "mayDelete": true,
             "mayShare": false,
-            "mayWriteOwn": false,
+            "maySetMetadata": false,
+            "mayWriteOwn": true,
             "mayReadFreeBusy": false,
-            "mayUpdatePrivate": false,
-            "mayRSVP": false
+            "mayUpdatePrivate": true,
+            "mayRSVP": true
           },
           "newRights": {
             "mayReadItems": false,
             "mayWriteAll": false,
             "mayDelete": false,
             "mayShare": false,
+            "maySetMetadata": false,
             "mayWriteOwn": false,
             "mayReadFreeBusy": false,
             "mayUpdatePrivate": false,
@@ -707,5 +728,8 @@ pub async fn test(test: &TestServer) {
     // Destroy all mailboxes
     john.destroy_all_calendars().await;
     jane.destroy_all_calendars().await;
+    // inbuxa: 1.0 notifies the owner when a sharee changes their events
+    john.destroy_all_event_notifications().await;
+    jane.destroy_all_event_notifications().await;
     test.assert_is_empty().await;
 }

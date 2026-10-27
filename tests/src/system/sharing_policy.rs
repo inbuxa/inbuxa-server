@@ -107,7 +107,7 @@ pub async fn sharing_policy_tests() {
     admin
         .registry_create_object(Domain {
             name: "school.example.org".to_string(),
-            is_enabled: true,
+            enable: true,
             member_tenant_id: Some(tenant),
             certificate_management: CertificateManagement::Manual,
             dns_management: DnsManagement::Manual,

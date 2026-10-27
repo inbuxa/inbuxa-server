@@ -80,7 +80,7 @@ pub async fn test(test: &mut TestServer) {
         "ME-13: never upstream's shape"
     );
     assert_eq!(pending["state"], "pending", "test 1");
-    assert!(alice.x_mask(pending_id).await.enabled, "test 1: x: enabled");
+    assert!(alice.x_mask(pending_id).await.enable, "test 1: x: enabled");
     // Through x: it starts enabled in both
     let x_id = alice.x_create(json!({})).await;
     assert_eq!(
@@ -156,7 +156,7 @@ pub async fn test(test: &mut TestServer) {
     .await;
     alice.wait_for_count(TRASH_ID, trash_before + 1).await;
     assert!(
-        alice.x_mask(pending_id).await.enabled,
+        alice.x_mask(pending_id).await.enable,
         "disabled reads enabled in x:"
     );
 
@@ -165,11 +165,11 @@ pub async fn test(test: &mut TestServer) {
     alice
         .fastmail_update(pending_id, json!({"state": "deleted"}))
         .await;
-    assert!(!alice.x_mask(pending_id).await.enabled, "test 5");
+    assert!(!alice.x_mask(pending_id).await.enable, "test 5");
     refused(&pending_email).await;
-    alice.x_update(pending_id, json!({"enabled": true})).await;
+    alice.x_update(pending_id, json!({"enable": true})).await;
     assert_eq!(alice.fastmail_state(pending_id).await, "enabled", "test 5");
-    alice.x_update(pending_id, json!({"enabled": false})).await;
+    alice.x_update(pending_id, json!({"enable": false})).await;
     assert_eq!(alice.fastmail_state(pending_id).await, "deleted", "test 5");
     refused(&pending_email).await;
     // ME-1: pending can't come back
@@ -263,7 +263,7 @@ pub async fn test(test: &mut TestServer) {
     let t_domain = admin
         .registry_create_object(registry::schema::structs::Domain {
             name: "mask-tenant.example.org".to_string(),
-            is_enabled: true,
+            enable: true,
             member_tenant_id: Some(t_id),
             certificate_management: registry::schema::structs::CertificateManagement::Manual,
             dns_management: registry::schema::structs::DnsManagement::Manual,
@@ -466,7 +466,8 @@ pub async fn masked_email_compat() {
             .await;
         let stored = &response.method_response()["list"][0];
         assert_eq!(stored["email"], email, "{id}: {response:?}");
-        assert_eq!(stored["enabled"], enabled, "{id}");
+        // inbuxa: 1.0 names the property `enable`
+        assert_eq!(stored["enable"], enabled, "{id}");
 
         // Resolves by its stored address, to its owner
         let resolved = inbuxa_features::masked_email::ops::resolve(
@@ -537,7 +538,7 @@ impl TestServer {
         record.pending_until = Some(1);
         let mut batch = BatchBuilder::new();
         data::set_record(&mut batch, id, &record).unwrap();
-        data_store.write(batch.build_all()).await.unwrap();
+        data_store.write_batch(&mut batch).await.unwrap();
     }
 
     /// `Some(live)` when the address is in the fork's index.
@@ -554,8 +555,9 @@ async fn refused(address: &str) {
     let mut lmtp = SmtpConnection::connect().await;
     lmtp.mail_from("sender@remote.example.org", 2).await;
     let reply = lmtp.rcpt_to(address, 5).await;
+    // inbuxa: 1.0 refuses an unknown mailbox with 5.1.1 (0.16: 5.1.2)
     assert!(
-        reply.iter().any(|line| line.starts_with("550 5.1.2")),
+        reply.iter().any(|line| line.starts_with("550 5.1.1")),
         "ME-6: {reply:?}"
     );
 }

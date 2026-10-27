@@ -7,6 +7,7 @@
 use crate::{
     jmap::{
         IntoValue, JmapValue, JsonPointerPatch, MaybeUnpatched, PatchResult, RegistryJsonPatch,
+        ValueOptions,
     },
     pickle::{Pickle, PickledStream},
     types::error::PatchError,
@@ -72,15 +73,15 @@ where
     T: Pickle,
 {
     fn pickle(&self, out: &mut Vec<u8>) {
-        (self.0.len() as u32).pickle(out);
+        (self.0.len() as u64).pickle(out);
         for item in self.0.values() {
             item.pickle(out);
         }
     }
 
     fn unpickle(stream: &mut PickledStream<'_>) -> Option<Self> {
-        let len = u32::unpickle(stream)? as usize;
-        let mut vec = Self::with_capacity(len);
+        let len = usize::try_from(u64::unpickle(stream)?).ok()?;
+        let mut vec = Self::with_capacity(len.min(stream.remaining_len()));
         for _ in 0..len {
             vec.push_unchecked(T::unpickle(stream)?);
         }
@@ -149,9 +150,13 @@ impl<T: RegistryJsonPatch + Default + Debug> RegistryJsonPatch for List<T> {
 
 impl<V: IntoValue> IntoValue for List<V> {
     fn into_value(self) -> JmapValue<'static> {
+        self.into_value_with(ValueOptions::default())
+    }
+
+    fn into_value_with(self, opts: ValueOptions) -> JmapValue<'static> {
         let mut map = jmap_tools::Map::with_capacity(self.0.len());
         for (idx, v) in self.0 {
-            map.insert_unchecked(Key::Owned(idx.to_string()), v.into_value());
+            map.insert_unchecked(Key::Owned(idx.to_string()), v.into_value_with(opts));
         }
 
         JmapValue::Object(map)

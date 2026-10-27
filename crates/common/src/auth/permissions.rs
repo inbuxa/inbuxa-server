@@ -167,7 +167,7 @@ impl AccessToken {
         &self,
         mut requested_permissions: Permissions,
     ) -> Result<(), Vec<Permission>> {
-        requested_permissions.difference(self.permissions_bits());
+        requested_permissions.difference(&self.effective_permissions());
         // inbuxa: journaling, JR-18: whoever sets up journals may give
         // others (or, through a role, themselves) the reading of them,
         // which administrators don't hold by default; the role change is
@@ -377,6 +377,7 @@ impl Default for DefaultPermissions {
                     } else if name.starts_with("sysAccountPassword")
                         || name.starts_with("sysApiKey")
                         || name.starts_with("sysAppPassword")
+                        || name.starts_with("sysOAuthGrant")
                     {
                         default.user.push(permission);
                         default.superuser.push(permission);

@@ -7,186 +7,142 @@
 use super::{Metadata, QueueEnvelope, Status};
 use crate::{core::throttle::NewKey, queue::MessageWrapper};
 use ahash::AHashSet;
-use common::{Server, config::smtp::queue::QueueQuota, expr::functions::ResolveVariable};
-use std::future::Future;
-use store::{
-    ValueKey,
-    write::{BatchBuilder, QueueClass, ValueClass},
+use common::{
+    Server,
+    config::smtp::queue::QueueQuota,
+    expr::{Bump, functions::ResolveVariable},
 };
-use trc::QueueEvent;
+use std::future::Future;
+use store::write::{BatchBuilder, QueueClass, QueueCounter, ValueClass};
 use utils::DomainPart;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum QuotaReservation {
+    Size { key: u128, id: u64, max: u64 },
+    Count { key: u128, id: u64, max: u64 },
+}
+
 pub trait HasQueueQuota: Sync + Send {
-    fn has_quota(
+    fn queue_quotas(
         &self,
-        message: &mut MessageWrapper,
-    ) -> impl Future<Output = Option<Vec<Metadata>>> + Send;
-    fn check_quota<'x>(
-        &'x self,
-        quota: &'x QueueQuota,
-        envelope: &impl ResolveVariable,
-        size: u64,
-        id: u64,
-        refs: &mut Vec<Metadata>,
-        session_id: u64,
-    ) -> impl Future<Output = bool> + Send;
+        message: &MessageWrapper,
+    ) -> impl Future<Output = Vec<QuotaReservation>> + Send;
 }
 
 impl HasQueueQuota for Server {
-    async fn has_quota(&self, message: &mut MessageWrapper) -> Option<Vec<Metadata>> {
-        let mut quota_keys = Vec::new();
+    async fn queue_quotas(&self, message: &MessageWrapper) -> Vec<QuotaReservation> {
+        let quotas = &self.core.smtp.queue.quota;
+        let mut reservations = Vec::new();
+        let mut arena = Bump::new();
 
-        if !self.core.smtp.queue.quota.sender.is_empty() {
-            for quota in &self.core.smtp.queue.quota.sender {
-                if !self
-                    .check_quota(
-                        quota,
-                        &message.message,
-                        message.message.size,
-                        0,
-                        &mut quota_keys,
-                        message.span_id,
-                    )
-                    .await
-                {
-                    trc::event!(
-                        Queue(QueueEvent::QuotaExceeded),
-                        SpanId = message.span_id,
-                        Id = quota.id.to_string(),
-                        Type = "Sender"
-                    );
-
-                    return None;
-                }
+        for quota in &quotas.sender {
+            if matches_quota(self, quota, &message.message, &mut arena, message.span_id).await {
+                push_reservations(quota, &message.message, 0, &mut reservations);
             }
         }
 
-        if !self.core.smtp.queue.quota.rcpt_domain.is_empty() {
+        if !quotas.rcpt_domain.is_empty() {
             let mut seen_domains = AHashSet::new();
-            for quota in &self.core.smtp.queue.quota.rcpt_domain {
+            for quota in &quotas.rcpt_domain {
+                seen_domains.clear();
                 for (rcpt_idx, rcpt) in message.message.recipients.iter().enumerate() {
-                    if seen_domains.insert(rcpt.address.domain_part())
-                        && !self
-                            .check_quota(
+                    if seen_domains.insert(rcpt.address.domain_part()) {
+                        let envelope = QueueEnvelope::new(&message.message, rcpt);
+                        if matches_quota(self, quota, &envelope, &mut arena, message.span_id).await
+                        {
+                            push_reservations(
                                 quota,
-                                &QueueEnvelope::new(&message.message, rcpt),
-                                message.message.size,
-                                ((rcpt_idx + 1) << 32) as u64,
-                                &mut quota_keys,
-                                message.span_id,
-                            )
-                            .await
-                    {
-                        trc::event!(
-                            Queue(QueueEvent::QuotaExceeded),
-                            SpanId = message.span_id,
-                            Id = quota.id.to_string(),
-                            Type = "Domain"
-                        );
-
-                        return None;
+                                &envelope,
+                                ((rcpt_idx + 1) as u64) << 32,
+                                &mut reservations,
+                            );
+                        }
                     }
                 }
             }
         }
 
-        for quota in &self.core.smtp.queue.quota.rcpt {
+        for quota in &quotas.rcpt {
             for (rcpt_idx, rcpt) in message.message.recipients.iter().enumerate() {
-                if !self
-                    .check_quota(
-                        quota,
-                        &QueueEnvelope::new(&message.message, rcpt),
-                        message.message.size,
-                        (rcpt_idx + 1) as u64,
-                        &mut quota_keys,
-                        message.span_id,
-                    )
-                    .await
-                {
-                    trc::event!(
-                        Queue(QueueEvent::QuotaExceeded),
-                        SpanId = message.span_id,
-                        Id = quota.id.to_string(),
-                        Type = "Recipient"
-                    );
-
-                    return None;
+                let envelope = QueueEnvelope::new(&message.message, rcpt);
+                if matches_quota(self, quota, &envelope, &mut arena, message.span_id).await {
+                    push_reservations(quota, &envelope, (rcpt_idx + 1) as u64, &mut reservations);
                 }
             }
         }
 
-        Some(quota_keys)
+        reservations
+    }
+}
+
+async fn matches_quota(
+    server: &Server,
+    quota: &QueueQuota,
+    envelope: &impl ResolveVariable,
+    arena: &mut Bump,
+    session_id: u64,
+) -> bool {
+    if quota.expr.is_empty() {
+        return true;
+    }
+    arena.reset();
+    server
+        .eval_if(&quota.expr, envelope, arena, session_id)
+        .await
+        .unwrap_or(false)
+}
+
+fn push_reservations(
+    quota: &QueueQuota,
+    envelope: &impl ResolveVariable,
+    id: u64,
+    reservations: &mut Vec<QuotaReservation>,
+) {
+    let key = quota.new_key(envelope, "").quota_key();
+    if let Some(max) = quota.size {
+        reservations.push(QuotaReservation::Size { key, id, max });
+    }
+    if let Some(max) = quota.messages {
+        reservations.push(QuotaReservation::Count { key, id, max });
+    }
+}
+
+impl QuotaReservation {
+    pub fn metadata(&self) -> Metadata {
+        match *self {
+            QuotaReservation::Size { key, id, .. } => Metadata::QueueSize { key, id },
+            QuotaReservation::Count { key, id, .. } => Metadata::QueueCount { key, id },
+        }
     }
 
-    async fn check_quota<'x>(
-        &'x self,
-        quota: &'x QueueQuota,
-        envelope: &impl ResolveVariable,
-        size: u64,
-        id: u64,
-        refs: &mut Vec<Metadata>,
-        session_id: u64,
-    ) -> bool {
-        if quota.expr.is_empty()
-            || self
-                .eval_if(&quota.expr, envelope, session_id)
-                .await
-                .unwrap_or(false)
-        {
-            let key = quota.new_key(envelope, "");
-            if let Some(max_size) = quota.size {
-                let used_size = self
-                    .core
-                    .storage
-                    .data
-                    .get_counter(ValueKey::from(ValueClass::Queue(QueueClass::QuotaSize(
-                        key.as_ref().to_vec(),
-                    ))))
-                    .await
-                    .unwrap_or(0) as u64;
-                if used_size + size > max_size {
-                    return false;
-                } else {
-                    refs.push(Metadata::QueueSize {
-                        key: key.as_ref().into(),
-                        id,
-                    });
-                }
+    pub fn reserve(&self, batch: &mut BatchBuilder, size: u64) {
+        match *self {
+            QuotaReservation::Size { key, max, .. } => {
+                let key = key.into();
+                batch.limit_queue_counter(QueueCounter::Size(key), max).add(
+                    ValueClass::Queue(QueueClass::QuotaSize(key)),
+                    i64::try_from(size).unwrap_or(i64::MAX),
+                );
             }
-
-            if let Some(max_messages) = quota.messages {
-                let total_messages = self
-                    .core
-                    .storage
-                    .data
-                    .get_counter(ValueKey::from(ValueClass::Queue(QueueClass::QuotaCount(
-                        key.as_ref().to_vec(),
-                    ))))
-                    .await
-                    .unwrap_or(0) as u64;
-                if total_messages + 1 > max_messages {
-                    return false;
-                } else {
-                    refs.push(Metadata::QueueCount {
-                        key: key.as_ref().into(),
-                        id,
-                    });
-                }
+            QuotaReservation::Count { key, max, .. } => {
+                let key = key.into();
+                batch
+                    .limit_queue_counter(QueueCounter::Count(key), max)
+                    .add(ValueClass::Queue(QueueClass::QuotaCount(key)), 1);
             }
         }
-        true
     }
 }
 
 impl MessageWrapper {
-    pub fn release_quota(&mut self, batch: &mut BatchBuilder) {
+    pub fn release_quota(&mut self, batch: &mut BatchBuilder) -> Vec<u64> {
         if !self.message.metadata.iter().any(|metadata| {
             matches!(
                 metadata,
                 Metadata::QueueSize { .. } | Metadata::QueueCount { .. }
             )
         }) {
-            return;
+            return Vec::new();
         }
         let mut quota_ids = Vec::with_capacity(self.message.recipients.len());
 
@@ -204,18 +160,16 @@ impl MessageWrapper {
         }
 
         if !quota_ids.is_empty() {
+            quota_ids.sort_unstable();
             let mut metadata = Vec::new();
             for entry in std::mem::take(&mut self.message.metadata) {
                 match entry {
-                    Metadata::QueueCount { id, key } if quota_ids.contains(&id) => {
-                        batch.add(
-                            ValueClass::Queue(QueueClass::QuotaCount(key.into_vec())),
-                            -1,
-                        );
+                    Metadata::QueueCount { id, key } if quota_ids.binary_search(&id).is_ok() => {
+                        batch.add(ValueClass::Queue(QueueClass::QuotaCount(key.into())), -1);
                     }
-                    Metadata::QueueSize { id, key } if quota_ids.contains(&id) => {
+                    Metadata::QueueSize { id, key } if quota_ids.binary_search(&id).is_ok() => {
                         batch.add(
-                            ValueClass::Queue(QueueClass::QuotaSize(key.into_vec())),
+                            ValueClass::Queue(QueueClass::QuotaSize(key.into())),
                             -(self.message.size as i64),
                         );
                     }
@@ -226,5 +180,7 @@ impl MessageWrapper {
             }
             self.message.metadata = metadata.into_boxed_slice();
         }
+
+        quota_ids
     }
 }

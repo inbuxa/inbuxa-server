@@ -24,9 +24,9 @@ use registry::{
 };
 use std::collections::HashSet;
 use store::{
-    IterateParams, U64_LEN, ValueKey,
+    IterateParams, ValueKey,
     registry::RegistryQuery,
-    write::{BatchBuilder, TaskQueueClass, ValueClass, key::DeserializeBigEndian},
+    write::{BatchBuilder, TaskDue, TaskId, TaskQueueClass, ValueClass},
 };
 use trc::{AddContext, TaskManagerEvent};
 use types::id::Id;
@@ -83,7 +83,7 @@ pub async fn check_tasks_for_domains(server: &Server, domain_ids: &[Id]) -> trc:
     if !batch.is_empty() {
         server
             .store()
-            .write(batch.build_all())
+            .write_batch(&mut batch)
             .await
             .caused_by(trc::location!())?;
         server.notify_task_queue();
@@ -112,7 +112,7 @@ async fn missing_tasks(
     }
 
     // A renewal that finds a certificate still valid reschedules itself for
-    // when it falls due (renew.rs), so queuing one now orders nothing early.
+    // when it falls due (tasks/acme.rs), so queuing one now orders nothing early.
     if needs_acme_task(domain, queued.acme.contains(&domain_id)) {
         tasks.push(Task::AcmeRenewal(TaskDomainManagement {
             domain_id,
@@ -155,40 +155,44 @@ async fn has_dkim_keys(server: &Server, domain_id: Id) -> trc::Result<bool> {
 }
 
 async fn queued_domain_tasks(server: &Server) -> trc::Result<QueuedDomainTasks> {
-    // The due index carries each task's type, so only the few domain tasks
-    // are read in full. Failed tasks sit at the end of it (due u64::MAX).
+    // The due index is keyed by task type (1.0), so only the few domain tasks
+    // are read. Failed tasks sit at the end of each type's run (due u64::MAX).
     let mut ids = Vec::new();
-    server
-        .store()
-        .iterate(
-            IterateParams::new(
-                ValueKey::from(ValueClass::TaskQueue(TaskQueueClass::Due { id: 0, due: 1 })),
-                ValueKey::from(ValueClass::TaskQueue(TaskQueueClass::Due {
-                    id: u64::MAX,
-                    due: u64::MAX,
-                })),
+    for typ in [TaskType::DkimManagement, TaskType::AcmeRenewal] {
+        server
+            .store()
+            .iterate(
+                IterateParams::new(
+                    ValueKey::from(ValueClass::TaskQueue(TaskQueueClass::Due {
+                        id: TaskId::Assigned(0),
+                        typ,
+                        due: 0,
+                    })),
+                    ValueKey::from(ValueClass::TaskQueue(TaskQueueClass::Due {
+                        id: TaskId::Assigned(u64::MAX),
+                        typ,
+                        due: u64::MAX,
+                    })),
+                )
+                .ascending()
+                .no_values(),
+                |key, _| {
+                    ids.push(TaskDue::deserialize(key)?.id);
+                    Ok(true)
+                },
             )
-            .ascending(),
-            |key, value| {
-                let task_type = value.deserialize_be_u16(0).ok().and_then(TaskType::from_id);
-                if matches!(
-                    task_type,
-                    Some(TaskType::DkimManagement | TaskType::AcmeRenewal)
-                ) {
-                    ids.push(key.deserialize_be_u64(U64_LEN)?);
-                }
-                Ok(true)
-            },
-        )
-        .await
-        .caused_by(trc::location!())?;
+            .await
+            .caused_by(trc::location!())?;
+    }
 
     let mut queued = QueuedDomainTasks::default();
     for id in ids {
         match server
             .store()
             .get_value::<Task>(ValueKey::from(ValueClass::TaskQueue(
-                TaskQueueClass::Task { id },
+                TaskQueueClass::Task {
+                    id: TaskId::Assigned(id),
+                },
             )))
             .await
             .caused_by(trc::location!())?

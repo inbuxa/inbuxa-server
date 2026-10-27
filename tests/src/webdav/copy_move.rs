@@ -2,6 +2,8 @@
  * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
+ *
+ * Modified by Coffey Labs in 2026 for INBUXA.
  */
 
 use crate::utils::{
@@ -147,7 +149,15 @@ pub async fn test(test: &TestServer, assisted_discovery: bool) {
                 ["D:getetag"],
             )
             .await
-            .with_href_count(2)
+            // inbuxa: for files 1.0 reports every member of the moved
+            // collection under its new URL (each URL changed, RFC 6578), plus
+            // the old root as removed; 0.16 reported the two roots only, as
+            // 1.0 still does for calendars and address books
+            .with_href_count(if resource_type == DavResourceName::File {
+                1 + hierarchy.len()
+            } else {
+                2
+            })
             .into_propfind_response(None);
         changes
             .properties(&hierarchy_root)
@@ -155,6 +165,11 @@ pub async fn test(test: &TestServer, assisted_discovery: bool) {
         changes
             .properties(&new_hierarchy_root)
             .with_status(StatusCode::OK);
+        if resource_type == DavResourceName::File {
+            for (path, _) in &hierarchy {
+                changes.properties(path).with_status(StatusCode::OK);
+            }
+        }
         let hierarchy_root = new_hierarchy_root;
 
         // Test 2: Copy container
@@ -604,7 +619,9 @@ pub async fn test(test: &TestServer, assisted_discovery: bool) {
                         "",
                     )
                     .await
-                    .with_status(StatusCode::PRECONDITION_FAILED)
+                    // inbuxa: 1.0 answers a UID conflict with 403 Forbidden
+                    // plus no-uid-conflict (RFC 4791, RFC 6352); 0.16 sent 412
+                    .with_status(StatusCode::FORBIDDEN)
                     .with_failed_precondition(
                         if resource_type == DavResourceName::Cal {
                             "A:no-uid-conflict.D:href"
@@ -764,7 +781,10 @@ pub async fn test(test: &TestServer, assisted_discovery: bool) {
                     StatusCode::CREATED => {
                         num_success += 1;
                     }
-                    StatusCode::PRECONDITION_FAILED => {
+                    // inbuxa: 1.0 answers an exceeded quota with 507 Insufficient
+                    // Storage and quota-not-exceeded (RFC 4331); 0.16 sent 412
+                    StatusCode::INSUFFICIENT_STORAGE => {
+                        response.with_failed_precondition("D:quota-not-exceeded", "");
                         did_fail = true;
                         break;
                     }

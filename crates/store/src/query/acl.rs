@@ -9,9 +9,11 @@ use trc::AddContext;
 use types::collection::Collection;
 
 use crate::{
-    Deserialize, IterateParams, Store, U32_LEN, ValueKey,
+    Deserialize, IterateParams, Store, Subspace, U32_LEN, ValueKey,
     write::{BatchBuilder, ValueClass, key::DeserializeBigEndian},
 };
+
+const MAX_REVOKE_RANGES: usize = 1_000;
 
 pub enum AclQuery {
     SharedWith {
@@ -81,65 +83,69 @@ impl Store {
         .map(|_| results)
     }
 
-    pub async fn acl_revoke_all(&self, account_id: u32) -> trc::Result<AHashSet<u32>> {
-        let from_key = ValueKey {
-            account_id: 0,
-            collection: 0,
-            document_id: 0,
-            class: ValueClass::Acl(0),
-        };
-        let to_key = ValueKey {
-            account_id: u32::MAX,
-            collection: u8::MAX,
-            document_id: u32::MAX,
-            class: ValueClass::Acl(u32::MAX),
-        };
-
-        let mut delete_keys = Vec::new();
-        let mut revoked_accounts = AHashSet::new();
+    pub async fn acl_owned(&self, account_id: u32) -> trc::Result<Vec<(u32, AclItem)>> {
+        let mut results = Vec::new();
         self.iterate(
-            IterateParams::new(from_key, to_key).ascending().no_values(),
-            |key, _| {
+            IterateParams::new(
+                ValueKey {
+                    account_id: 0,
+                    collection: 0,
+                    document_id: 0,
+                    class: ValueClass::Acl(0),
+                },
+                ValueKey {
+                    account_id: u32::MAX,
+                    collection: u8::MAX,
+                    document_id: u32::MAX,
+                    class: ValueClass::Acl(u32::MAX),
+                },
+            )
+            .ascending(),
+            |key, value| {
                 if account_id == key.deserialize_be_u32(U32_LEN)? {
-                    let owner_account_id = key.deserialize_be_u32(0)?;
-                    revoked_accounts.insert(owner_account_id);
-                    delete_keys.push((owner_account_id, AclItem::deserialize(key)?));
+                    results.push((
+                        key.deserialize_be_u32(0)?,
+                        AclItem::deserialize(key)?.with_permissions(u64::deserialize(value)?),
+                    ));
                 }
 
                 Ok(true)
             },
         )
         .await
-        .caused_by(trc::location!())?;
+        .caused_by(trc::location!())
+        .map(|_| results)
+    }
 
-        // Remove permissions
+    pub async fn acl_revoke_owner(
+        &self,
+        owner_account_id: u32,
+        grantee_ids: &AHashSet<u32>,
+    ) -> trc::Result<()> {
         let mut batch = BatchBuilder::new();
-        batch.with_account_id(account_id);
-        let mut last_collection = Collection::None;
-        for (revoke_account_id, acl_item) in delete_keys.into_iter() {
-            if batch.is_large_batch() {
-                self.write(batch.build_all())
+        let mut ranges = 0;
+        for grantee_id in grantee_ids {
+            if ranges == MAX_REVOKE_RANGES || batch.is_large_batch() {
+                self.write_batch(&mut batch)
                     .await
                     .caused_by(trc::location!())?;
                 batch = BatchBuilder::new();
-                batch.with_account_id(account_id);
-                last_collection = Collection::None;
+                ranges = 0;
             }
-            if acl_item.to_collection != last_collection {
-                batch.with_collection(acl_item.to_collection);
-                last_collection = acl_item.to_collection;
-            }
-            batch
-                .with_document(acl_item.to_document_id)
-                .acl_revoke(revoke_account_id);
+            ranges += 1;
+            let from = (u64::from(*grantee_id) << 32) | u64::from(owner_account_id);
+            batch.clear_range(
+                Subspace::Acl,
+                from.to_be_bytes().to_vec(),
+                from.saturating_add(1).to_be_bytes().to_vec(),
+            );
         }
         if !batch.is_empty() {
-            self.write(batch.build_all())
+            self.write_batch(&mut batch)
                 .await
                 .caused_by(trc::location!())?;
         }
-
-        Ok(revoked_accounts)
+        Ok(())
     }
 }
 

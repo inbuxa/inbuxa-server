@@ -446,7 +446,7 @@ pub async fn put_report(data: &Store, report: &Report) -> trc::Result<()> {
         class(KIND_REPORT, Some(report.id)),
         Json(report).serialize()?,
     );
-    data.write(batch.build_all())
+    data.write_batch(&mut batch)
         .await
         .caused_by(trc::location!())?;
     Ok(())
@@ -455,7 +455,7 @@ pub async fn put_report(data: &Store, report: &Report) -> trc::Result<()> {
 pub async fn delete_report(data: &Store, id: u64) -> trc::Result<()> {
     let mut batch = BatchBuilder::new();
     batch.clear(class(KIND_REPORT, Some(id)));
-    data.write(batch.build_all())
+    data.write_batch(&mut batch)
         .await
         .caused_by(trc::location!())?;
     Ok(())
@@ -520,7 +520,7 @@ async fn move_legacy(data: &Store) -> trc::Result<()> {
         batch.set(class(KIND_SETTINGS, None), Json(&settings).serialize()?);
         batch.clear(class_in(LEGACY_FEATURE, KIND_SETTINGS, None));
     }
-    data.write(batch.build_all())
+    data.write_batch(&mut batch)
         .await
         .caused_by(trc::location!())?;
     Ok(())
@@ -550,7 +550,7 @@ pub async fn settings(data: &Store) -> trc::Result<Settings> {
 pub async fn put_settings(data: &Store, settings: &Settings) -> trc::Result<()> {
     let mut batch = BatchBuilder::new();
     batch.set(class(KIND_SETTINGS, None), Json(settings).serialize()?);
-    data.write(batch.build_all())
+    data.write_batch(&mut batch)
         .await
         .caused_by(trc::location!())?;
     Ok(())

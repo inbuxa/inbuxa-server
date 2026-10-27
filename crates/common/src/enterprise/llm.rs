@@ -17,15 +17,16 @@ use inbuxa_features::ai::{
     request::{self, Kind, MAX_RESPONSE_BYTES},
 };
 use registry::schema::{
-    enums::AiModelType,
+    enums::AiOpenAiProfile,
     prelude::ObjectType,
-    structs::AiModel,
+    structs::{AiModel, SecretKeyOptional, SpamAi},
 };
 use serde::{Deserialize, Serialize};
 use std::time::{Duration, Instant};
 use store::registry::RegistryQuery;
 use trc::AiEvent;
 use types::id::Id;
+use utils::map::vec_map::VecMap;
 
 /// A chat completions request.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -73,6 +74,7 @@ pub enum Failure {
     Http(String),
     Status(u16),
     BadAnswer,
+    Unsupported(&'static str),
 }
 
 /// One call to make.
@@ -83,7 +85,8 @@ pub struct Call<'x> {
     pub account_id: Option<u32>,
     pub system: Option<&'x str>,
     pub user: &'x str,
-    pub temperature: f64,
+    /// `None` leaves it to the provider.
+    pub temperature: Option<f64>,
     pub max_tokens: u32,
     pub timeout: Duration,
     /// Set for "Explain this" (ai-explain spec, EX-10, EX-14, EX-15).
@@ -102,10 +105,112 @@ pub struct Explain<'x> {
     pub subject: &'x str,
 }
 
-fn kind(model: &AiModel) -> Kind {
-    match model.model_type {
-        AiModelType::Chat => Kind::Chat,
-        AiModelType::Text => Kind::Text,
+/// inbuxa: 1.0 split `x:AiModel` into one variant per provider. These are
+/// the settings every variant has, and where a call goes.
+pub trait AiModelExt {
+    fn name(&self) -> &str;
+    fn model(&self) -> &str;
+    fn api_key(&self) -> &SecretKeyOptional;
+    fn http_headers(&self) -> &VecMap<String, String>;
+    fn allow_invalid_certs(&self) -> bool;
+    fn timeout(&self) -> Duration;
+    /// The model's own temperature; `None` leaves it to the provider.
+    fn temperature(&self) -> Option<f64>;
+    /// The configured base URL, or the provider's default.
+    fn base_url(&self) -> &str;
+    /// The chat completions URL, or why this build can't call the provider.
+    fn endpoint(&self) -> Result<String, Failure>;
+}
+
+macro_rules! each_model {
+    ($model:expr, $m:ident => $e:expr) => {
+        match $model {
+            AiModel::OpenAi($m) => $e,
+            AiModel::Anthropic($m) => $e,
+            AiModel::Gemini($m) => $e,
+            AiModel::Ollama($m) => $e,
+            AiModel::TypeSafe($m) => $e,
+        }
+    };
+}
+
+/// A base URL with `path` added, unless it already names an endpoint (0.16
+/// models stored the full chat completions URL).
+fn join_endpoint(base: &str, path: &str) -> String {
+    let base = base.trim_end_matches('/');
+    if base.ends_with("/completions") {
+        base.to_string()
+    } else {
+        format!("{base}{path}")
+    }
+}
+
+impl AiModelExt for AiModel {
+    fn name(&self) -> &str {
+        each_model!(self, m => &m.name)
+    }
+
+    fn model(&self) -> &str {
+        each_model!(self, m => &m.model)
+    }
+
+    fn api_key(&self) -> &SecretKeyOptional {
+        each_model!(self, m => &m.api_key)
+    }
+
+    fn http_headers(&self) -> &VecMap<String, String> {
+        each_model!(self, m => &m.http_headers)
+    }
+
+    fn allow_invalid_certs(&self) -> bool {
+        each_model!(self, m => m.allow_invalid_certs)
+    }
+
+    fn timeout(&self) -> Duration {
+        each_model!(self, m => m.timeout.into_inner())
+    }
+
+    fn temperature(&self) -> Option<f64> {
+        match self {
+            AiModel::OpenAi(m) => m.temperature,
+            AiModel::Anthropic(m) => m.temperature,
+            AiModel::Gemini(m) => m.temperature,
+            AiModel::Ollama(m) => m.temperature,
+            AiModel::TypeSafe(_) => None,
+        }
+        .map(|t| t.into_inner())
+    }
+
+    fn base_url(&self) -> &str {
+        let default = match self {
+            AiModel::OpenAi(_) => "https://api.openai.com/v1",
+            AiModel::Anthropic(_) => "https://api.anthropic.com",
+            AiModel::Gemini(_) => "https://generativelanguage.googleapis.com",
+            AiModel::Ollama(_) => "http://localhost:11434",
+            AiModel::TypeSafe(_) => "",
+        };
+        each_model!(self, m => m.url.as_deref())
+            .filter(|url| !url.trim().is_empty())
+            .unwrap_or(default)
+    }
+
+    fn endpoint(&self) -> Result<String, Failure> {
+        match self {
+            AiModel::OpenAi(_) => Ok(join_endpoint(self.base_url(), "/chat/completions")),
+            AiModel::Ollama(_) => {
+                let base = self.base_url().trim_end_matches('/');
+                Ok(if base.ends_with("/v1") {
+                    join_endpoint(base, "/chat/completions")
+                } else {
+                    join_endpoint(base, "/v1/chat/completions")
+                })
+            }
+            // inbuxa: our client speaks the OpenAI-compatible chat wire;
+            // these providers' own APIs are a follow-up
+            AiModel::Anthropic(_) | AiModel::Gemini(_) | AiModel::TypeSafe(_) => Err(
+                Failure::Unsupported("This provider isn't supported yet; use an OpenAI-compatible or Ollama model"),
+            ),
+        }
     }
 }
 
@@ -178,7 +283,7 @@ impl Server {
         let mut by_id = None;
         for id in ids {
             if let Some(model) = self.ai_model_by_id(id).await {
-                if model.name == name {
+                if model.name() == name {
                     return Some((id, model));
                 }
                 if id.to_string() == name {
@@ -193,7 +298,6 @@ impl Server {
     /// for explanations, else the spam classifier's, else the only model
     /// there is. `None` when explanations are off or no model resolves.
     pub async fn ai_explain_model(&self, limits: &AiLimits) -> Option<(Id, AiModel)> {
-        use registry::schema::structs::SpamLlm;
         if !limits.explain_enabled {
             return None;
         }
@@ -201,11 +305,13 @@ impl Server {
             let id = Id::from(id);
             return self.ai_model_by_id(id).await.map(|model| (id, model));
         }
-        if let Ok(Some(SpamLlm::Enable(settings))) =
-            self.registry().object::<SpamLlm>(Id::singleton()).await
-            && let Some(model) = self.ai_model_by_id(settings.model_id).await
+        // inbuxa: 1.0's spam classifier has tiers of models: its first
+        if let Ok(Some(SpamAi::Enable(settings))) =
+            self.registry().object::<SpamAi>(Id::singleton()).await
+            && let Some(tier) = settings.tiers.iter().next()
+            && let Some(model) = self.ai_model_by_id(tier.model_id).await
         {
-            return Some((settings.model_id, model));
+            return Some((tier.model_id, model));
         }
         let ids = self
             .registry()
@@ -237,7 +343,7 @@ impl Server {
             Err(refused) => {
                 trc::event!(
                     Ai(AiEvent::ApiError),
-                    Details = call.model.name.clone(),
+                    Details = call.model.name().to_string(),
                     AccountId = call.account_id,
                     Reason = format!("{refused:?}"),
                 );
@@ -254,7 +360,7 @@ impl Server {
         match &transition {
             Some(Transition::Paused) => trc::event!(
                 Ai(AiEvent::ApiError),
-                Details = call.model.name.clone(),
+                Details = call.model.name().to_string(),
                 Reason = format!(
                     "Paused for {}s after repeated failures",
                     limits.failure_backoff.into_inner().as_secs()
@@ -262,7 +368,7 @@ impl Server {
             ),
             Some(Transition::Resumed) => trc::event!(
                 Ai(AiEvent::LlmResponse),
-                Details = call.model.name.clone(),
+                Details = call.model.name().to_string(),
                 Reason = "Resumed after a pause",
             ),
             None => {}
@@ -272,14 +378,14 @@ impl Server {
                 // EX-10: an explanation's answer is never logged
                 Some(explain) => trc::event!(
                     Ai(AiEvent::LlmResponse),
-                    Details = call.model.name.clone(),
+                    Details = call.model.name().to_string(),
                     AccountId = call.account_id,
                     Elapsed = started.elapsed(),
                     Reason = format!("Explained a {}", explain.subject),
                 ),
                 None => trc::event!(
                     Ai(AiEvent::LlmResponse),
-                    Details = call.model.name.clone(),
+                    Details = call.model.name().to_string(),
                     AccountId = call.account_id,
                     Elapsed = started.elapsed(),
                     Result = request::cut(answer, 1024),
@@ -287,7 +393,7 @@ impl Server {
             },
             Err(failure) => trc::event!(
                 Ai(AiEvent::ApiError),
-                Details = call.model.name.clone(),
+                Details = call.model.name().to_string(),
                 AccountId = call.account_id,
                 Elapsed = started.elapsed(),
                 Code = match failure {
@@ -302,10 +408,11 @@ impl Server {
 
     async fn ai_request(&self, call: &Call<'_>) -> Result<String, Failure> {
         let model = call.model;
-        let kind = kind(model);
+        let kind = Kind::Chat;
+        let endpoint = model.endpoint()?;
         let body = request::body(
             kind,
-            &model.model,
+            model.model(),
             call.system,
             call.user,
             call.temperature,
@@ -313,12 +420,24 @@ impl Server {
             call.stream.is_some(),
         );
         // Secrets are read now, from their source (AI-8)
-        let headers = model
-            .http_auth
-            .build_headers(model.http_headers.clone(), Some("application/json"))
-            .await
-            .map_err(Failure::Http)?;
-        let client = utils::http::http_client_builder(model.allow_invalid_certs)
+        let key = model.api_key().secret().await.map_err(Failure::Http)?;
+        let mut extra = model.http_headers().clone();
+        let bearer = match (model, &key) {
+            (AiModel::OpenAi(m), Some(key)) if m.profile == AiOpenAiProfile::Azure => {
+                extra.append("api-key".to_string(), key.to_string());
+                None
+            }
+            (_, key) => key.as_deref(),
+        };
+        let headers = utils::http::build_http_headers(
+            extra,
+            None,
+            None,
+            bearer,
+            Some("application/json"),
+        )
+        .map_err(Failure::Http)?;
+        let client = utils::http::http_client_builder(model.allow_invalid_certs())
             // A redirect would send content to a host nobody named (AI-8)
             .redirect(reqwest::redirect::Policy::none())
             .connect_timeout(call.timeout)
@@ -327,7 +446,7 @@ impl Server {
             .build()
             .map_err(|err| Failure::Http(err.to_string()))?;
         let mut response = client
-            .post(&model.url)
+            .post(&endpoint)
             .body(body.to_string())
             .send()
             .await
@@ -368,10 +487,11 @@ impl Server {
 /// AI-2: warns when a model's endpoint isn't on this network. Names are
 /// resolved; any address outside the local ranges counts.
 pub async fn warn_if_remote(model: &AiModel) {
-    let local = match locality::classify(&model.url) {
+    let url = model.base_url();
+    let local = match locality::classify(url) {
         Some(local) => local,
         None => {
-            let host = locality::host(&model.url).unwrap_or_default().to_string();
+            let host = locality::host(url).unwrap_or_default().to_string();
             match tokio::net::lookup_host((host.as_str(), 443)).await {
                 Ok(addrs) => {
                     let addrs = addrs.map(|a| a.ip()).collect::<Vec<_>>();
@@ -385,7 +505,7 @@ pub async fn warn_if_remote(model: &AiModel) {
     if !local {
         trc::event!(
             Registry(trc::RegistryEvent::BuildWarning),
-            Details = locality::warning(&model.name, &model.url),
+            Details = locality::warning(model.name(), url),
         );
     }
 }
@@ -442,11 +562,8 @@ pub async fn sieve_prompt(
     };
     let limits = server.ai_limits().await;
     let timeout = match account_id {
-        Some(_) => model.timeout.into_inner().min(ACCOUNT_SCRIPT_CEILING),
-        None => model
-            .timeout
-            .into_inner()
-            .min(limits.spam_call_ceiling.into_inner()),
+        Some(_) => model.timeout().min(ACCOUNT_SCRIPT_CEILING),
+        None => model.timeout().min(limits.spam_call_ceiling.into_inner()),
     };
     let prompt = request::cut(&prompt, MAX_PROMPT_BYTES);
     let answer = server
@@ -456,7 +573,7 @@ pub async fn sieve_prompt(
             account_id,
             system: None,
             user: &prompt,
-            temperature: temperature.unwrap_or_else(|| model.temperature.into_inner()),
+            temperature: temperature.or_else(|| model.temperature()),
             max_tokens: request::PROMPT_MAX_TOKENS,
             timeout,
             explain: None,

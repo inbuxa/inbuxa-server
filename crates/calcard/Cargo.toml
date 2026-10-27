@@ -1,0 +1,46 @@
+[package]
+name = "calcard"
+description = "iCalendar/JSCalendar and vCard/JSContact parsing, building and conversion library"
+version = "0.4.0"
+edition = "2024"
+license = "AGPL-3.0-only OR LicenseRef-SEL"
+publish = false
+
+[dependencies]
+jmap-tools = { path = "../jmap-tools", optional = true }
+ahash = "0.8.12"
+jiff = "0.2.38"
+hashify = "0.3"
+memchr = "2.8"
+encodify = "1.0"
+mail-parser = "1.0"
+simdutf8 = "0.1.5"
+smallvec = { version = "1.16", features = ["union"] }
+uuid = { version = "1.29", default-features = false, optional = true }
+sha1 = { version = "0.11", default-features = false, optional = true }
+rkyv = { version = "0.8", optional = true, features = ["smallvec-1"] }
+serde = { version = "1.0", features = ["derive"], optional = true }
+serde_json = { version = "1.0", optional = true }
+
+[target.'cfg(all(target_family = "wasm", target_os = "unknown"))'.dependencies]
+jiff = { version = "0.2.38", features = ["js"] }
+
+[features]
+default = ["jmap", "tzdb-bundle"]
+rkyv = ["dep:rkyv"]
+serde = ["dep:serde", "smallvec/serde"]
+jmap = ["jmap-tools", "uuid", "sha1", "serde", "serde_json"]
+tzdb-bundle = ["jiff/tzdb-bundle-always"]
+
+[dev-dependencies]
+smallvec = { version = "1.16", features = ["serde"] }
+insta = "1.49"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+uuid = { version = "1.29", default-features = false, features = ["v5"] }
+
+[lib]
+doctest = false
+
+[lints]
+workspace = true

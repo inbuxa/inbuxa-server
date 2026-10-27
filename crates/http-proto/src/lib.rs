@@ -6,6 +6,7 @@
 
 #![warn(clippy::large_futures)]
 
+pub mod body;
 pub mod context;
 pub mod request;
 pub mod response;
@@ -13,7 +14,7 @@ pub mod response;
 pub use form_urlencoded;
 
 use common::network::ServerInstance;
-use hyper::StatusCode;
+use hyper::{StatusCode, body::Bytes};
 use std::{net::IpAddr, sync::Arc};
 
 pub type HttpRequest = hyper::Request<hyper::body::Incoming>;
@@ -31,7 +32,8 @@ pub struct HtmlResponse {
 
 pub enum HttpResponseBody {
     Text(String),
-    Binary(Vec<u8>),
+    Binary(Bytes),
+    Prefixed(body::PrefixedBody),
     Stream(http_body_util::combinators::BoxBody<hyper::body::Bytes, hyper::Error>),
     WebsocketUpgrade(String),
     Empty,
@@ -61,7 +63,8 @@ pub struct HttpSessionData {
 pub struct DownloadResponse {
     pub filename: String,
     pub content_type: String,
-    pub blob: Vec<u8>,
+    pub prefix: Option<Bytes>,
+    pub blob: Bytes,
 }
 
 pub struct JsonProblemResponse(pub StatusCode);

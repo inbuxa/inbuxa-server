@@ -186,7 +186,7 @@ async fn validate(store: &ReplicatedStore, index: usize, replica: &Replica) {
     });
     let mut batch = BatchBuilder::new();
     batch.set(class.clone(), marker.serialize());
-    if let Err(err) = store.primary.write(batch.build_all()).await {
+    if let Err(err) = store.primary.write_batch(&mut batch).await {
         report(
             store.kind,
             format!("Failed to write the replica check marker: {err}"),
