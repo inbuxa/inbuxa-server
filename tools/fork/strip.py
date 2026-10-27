@@ -239,6 +239,26 @@ def deactivate_enterprise_in_scripts(tree):
     return edits
 
 
+def trailing_attribute(lines):
+    """
+    How many lines at the end of `lines` make up one outer attribute, or 0.
+
+    An attribute can span lines, e.g. a `#[cfg(all(` whose conditions follow
+    one per line. Leaving its tail behind would hand the attribute to the next
+    item, and compile that item out instead of the removed `mod`.
+    """
+    if not lines or not lines[-1].rstrip().endswith(']'):
+        return 0
+    for i in range(len(lines) - 1, -1, -1):
+        text = lines[i].strip()
+        if not text or text.endswith((';', '{', '}')):
+            return 0
+        if text.startswith('#['):
+            joined = ''.join(l.strip() for l in lines[i:])
+            return len(lines) - i if joined.count('[') == joined.count(']') else 0
+    return 0
+
+
 def remove_dangling_mods(tree):
     """
     Remove `mod x;` declarations whose file ossify.py deleted.
@@ -259,8 +279,9 @@ def remove_dangling_mods(tree):
             m = decl.match(line)
             if m and not (base / f'{m.group(1)}.rs').is_file() and not (base / m.group(1) / 'mod.rs').is_file():
                 dropped = [line]
-                while keep and keep[-1].strip().startswith('#['):
-                    dropped.insert(0, keep.pop())
+                while (n_attr := trailing_attribute(keep)):
+                    dropped[:0] = keep[-n_attr:]
+                    del keep[-n_attr:]
                 removed.append({'file': str(path.relative_to(tree)), 'line': n, 'module': m.group(1),
                                 'lines': [l.strip() for l in dropped]})
                 continue
