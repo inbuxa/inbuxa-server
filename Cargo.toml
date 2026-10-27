@@ -134,10 +134,17 @@ debug-assertions = false
 overflow-checks = false
 rpath = false
 
-# inbuxa: hickory is upstream's patched branch (DNSSEC fixes), vendored at
-# the commit upstream pins so builds never fetch from upstream's
-# repositories; see vendor/hickory-dns/VENDORED.md.
+# inbuxa: hickory and opentelemetry are upstream's patched branches, vendored
+# at the commits upstream pins so builds never fetch from upstream's
+# repositories; see vendor/hickory-dns/VENDORED.md and
+# vendor/opentelemetry-rust/VENDORED.md.
 [patch.crates-io]
 hickory-proto = { path = "vendor/hickory-dns/hickory-proto" }
 hickory-net = { path = "vendor/hickory-dns/hickory-net" }
 hickory-resolver = { path = "vendor/hickory-dns/hickory-resolver" }
+opentelemetry = { path = "vendor/opentelemetry-rust/opentelemetry" }
+opentelemetry_sdk = { path = "vendor/opentelemetry-rust/opentelemetry_sdk" }
+opentelemetry-otlp = { path = "vendor/opentelemetry-rust/opentelemetry-otlp" }
+opentelemetry-proto = { path = "vendor/opentelemetry-rust/opentelemetry-proto" }
+opentelemetry-http = { path = "vendor/opentelemetry-rust/opentelemetry-http" }
+opentelemetry-semantic-conventions = { path = "vendor/opentelemetry-rust/opentelemetry-semantic-conventions" }

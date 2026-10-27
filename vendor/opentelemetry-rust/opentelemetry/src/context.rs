@@ -1,0 +1,1662 @@
+//! Execution-scoped context propagation.
+//!
+//! The `context` module provides mechanisms for propagating values across API boundaries and between
+//! logically associated execution units. It enables cross-cutting concerns to access their data in-process
+//! using a shared context object.
+//!
+//! # Main Types
+//!
+//! - [`Context`]: An immutable, execution-scoped collection of values.
+//!
+
+use crate::otel_warn;
+#[cfg(feature = "trace")]
+use crate::trace::context::SynchronizedSpan;
+use std::any::{Any, TypeId};
+use std::cell::RefCell;
+use std::collections::HashMap;
+use std::fmt;
+use std::hash::{BuildHasherDefault, Hasher};
+use std::marker::PhantomData;
+use std::sync::Arc;
+#[cfg(feature = "experimental_context_observer")]
+use std::sync::OnceLock;
+
+#[cfg(feature = "futures")]
+mod future_ext;
+
+#[cfg(feature = "futures")]
+pub use future_ext::{FutureExt, WithContext};
+
+#[cfg(feature = "experimental_context_observer")]
+pub use context_observer::*;
+
+thread_local! {
+    static CURRENT_CONTEXT: RefCell<ContextStack> = RefCell::new(ContextStack::default());
+}
+
+/// An execution-scoped collection of values.
+///
+/// A [`Context`] is a propagation mechanism which carries execution-scoped
+/// values across API boundaries and between logically associated execution
+/// units. Cross-cutting concerns access their data in-process using the same
+/// shared context object.
+///
+/// [`Context`]s are immutable, and their write operations result in the creation
+/// of a new context containing the original values and the new specified values.
+///
+/// ## Context state
+///
+/// Concerns can create and retrieve their local state in the current execution
+/// state represented by a context through the [`get`] and [`with_value`]
+/// methods. It is recommended to use application-specific types when storing new
+/// context values to avoid unintentionally overwriting existing state.
+///
+/// ## Managing the current context
+///
+/// Contexts can be associated with the caller's current execution unit on a
+/// given thread via the [`attach`] method, and previous contexts can be restored
+/// by dropping the returned [`ContextGuard`]. Context can be nested, and will
+/// restore their parent outer context when detached on drop. To access the
+/// values of the context, a snapshot can be created via the [`Context::current`]
+/// method.
+///
+/// [`Context::current`]: Context::current()
+/// [`get`]: Context::get()
+/// [`with_value`]: Context::with_value()
+/// [`attach`]: Context::attach()
+///
+/// # Examples
+///
+/// ```
+/// use opentelemetry::Context;
+///
+/// // Application-specific `a` and `b` values
+/// #[derive(Debug, PartialEq)]
+/// struct ValueA(&'static str);
+/// #[derive(Debug, PartialEq)]
+/// struct ValueB(u64);
+///
+/// let _outer_guard = Context::new().with_value(ValueA("a")).attach();
+///
+/// // Only value a has been set
+/// let current = Context::current();
+/// assert_eq!(current.get::<ValueA>(), Some(&ValueA("a")));
+/// assert_eq!(current.get::<ValueB>(), None);
+///
+/// {
+///     let _inner_guard = Context::current_with_value(ValueB(42)).attach();
+///     // Both values are set in inner context
+///     let current = Context::current();
+///     assert_eq!(current.get::<ValueA>(), Some(&ValueA("a")));
+///     assert_eq!(current.get::<ValueB>(), Some(&ValueB(42)));
+/// }
+///
+/// // Resets to only the `a` value when inner guard is dropped
+/// let current = Context::current();
+/// assert_eq!(current.get::<ValueA>(), Some(&ValueA("a")));
+/// assert_eq!(current.get::<ValueB>(), None);
+/// ```
+#[derive(Clone, Default)]
+pub struct Context {
+    #[cfg(feature = "trace")]
+    pub(crate) span: Option<Arc<SynchronizedSpan>>,
+    entries: Option<Arc<EntryMap>>,
+    suppress_telemetry: bool,
+    /// A context's observer view of this [Context].
+    ///
+    /// The main application for observers is to share information from the current context with
+    /// external readers (e.g. a full host eBPF profiler). In that case, the observer will attach
+    /// and detach some data on context events using its own mechanism. The shared data has no
+    /// reason to match our internal representation ([Context]).
+    ///
+    /// [observer_view] makes it possible to store the observer's view of the context alongside a
+    /// [Context] value, such that it can be attached and detached on context events.
+    #[cfg(feature = "experimental_context_observer")]
+    observer_view: Option<Arc<dyn ObserverContextView>>,
+}
+
+type EntryMap = HashMap<TypeId, Arc<dyn Any + Sync + Send>, BuildHasherDefault<IdHasher>>;
+
+impl Context {
+    /// Creates an empty `Context`.
+    ///
+    /// The context is initially created with a capacity of 0, so it will not
+    /// allocate. Use [`with_value`] to create a new context that has entries.
+    ///
+    /// [`with_value`]: Context::with_value()
+    pub fn new() -> Self {
+        Context::default()
+    }
+
+    /// Returns an immutable snapshot of the current thread's context.
+    ///
+    /// # Behavior During Context Drop
+    ///
+    /// When called from within a [`Drop`] implementation that is triggered by
+    /// a [`ContextGuard`] being dropped (e.g., when a [`Span`] is dropped as part
+    /// of context cleanup), this function returns **whatever context happens to be
+    /// current after the guard is popped**, not the context being dropped.
+    ///
+    /// **Important**: The returned context may be completely unrelated to the
+    /// context being dropped, as contexts can be activated in any order and are
+    /// not necessarily hierarchical. Do not rely on any relationship between them.
+    ///
+    /// This behavior is by design and prevents panics that would otherwise occur
+    /// from attempting to borrow the context while it's being mutably borrowed
+    /// for cleanup. See [issue #2871](https://github.com/open-telemetry/opentelemetry-rust/issues/2871)
+    /// for details.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use opentelemetry::Context;
+    ///
+    /// #[derive(Debug, PartialEq)]
+    /// struct ValueA(&'static str);
+    ///
+    /// fn do_work() {
+    ///     assert_eq!(Context::current().get(), Some(&ValueA("a")));
+    /// }
+    ///
+    /// let _guard = Context::new().with_value(ValueA("a")).attach();
+    /// do_work()
+    /// ```
+    ///
+    /// [`Span`]: crate::trace::Span
+    pub fn current() -> Self {
+        Self::map_current(|cx| cx.clone())
+    }
+
+    /// Applies a function to the current context returning its value.
+    ///
+    /// This can be used to build higher performing algebraic expressions for
+    /// optionally creating a new context without the overhead of cloning the
+    /// current one and dropping it.
+    ///
+    /// Note: This function will panic if you attempt to attach another context
+    /// while the current one is still borrowed.
+    pub fn map_current<T>(f: impl FnOnce(&Context) -> T) -> T {
+        CURRENT_CONTEXT.with(|cx| cx.borrow().map_current_cx(f))
+    }
+
+    /// Returns a clone of the current thread's context with the given value.
+    ///
+    /// This is a more efficient form of `Context::current().with_value(value)`
+    /// as it avoids the intermediate context clone.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use opentelemetry::Context;
+    ///
+    /// // Given some value types defined in your application
+    /// #[derive(Debug, PartialEq)]
+    /// struct ValueA(&'static str);
+    /// #[derive(Debug, PartialEq)]
+    /// struct ValueB(u64);
+    ///
+    /// // You can create and attach context with the first value set to "a"
+    /// let _guard = Context::new().with_value(ValueA("a")).attach();
+    ///
+    /// // And create another context based on the fist with a new value
+    /// let all_current_and_b = Context::current_with_value(ValueB(42));
+    ///
+    /// // The second context now contains all the current values and the addition
+    /// assert_eq!(all_current_and_b.get::<ValueA>(), Some(&ValueA("a")));
+    /// assert_eq!(all_current_and_b.get::<ValueB>(), Some(&ValueB(42)));
+    /// ```
+    pub fn current_with_value<T: 'static + Send + Sync>(value: T) -> Self {
+        Self::map_current(|cx| cx.with_value(value))
+    }
+
+    /// Returns a reference to the entry for the corresponding value type.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use opentelemetry::Context;
+    ///
+    /// // Given some value types defined in your application
+    /// #[derive(Debug, PartialEq)]
+    /// struct ValueA(&'static str);
+    /// #[derive(Debug, PartialEq)]
+    /// struct MyUser();
+    ///
+    /// let cx = Context::new().with_value(ValueA("a"));
+    ///
+    /// // Values can be queried by type
+    /// assert_eq!(cx.get::<ValueA>(), Some(&ValueA("a")));
+    ///
+    /// // And return none if not yet set
+    /// assert_eq!(cx.get::<MyUser>(), None);
+    /// ```
+    pub fn get<T: 'static>(&self) -> Option<&T> {
+        self.entries
+            .as_ref()?
+            .get(&TypeId::of::<T>())?
+            .downcast_ref()
+    }
+
+    /// Returns a copy of the context with the new value included.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use opentelemetry::Context;
+    ///
+    /// // Given some value types defined in your application
+    /// #[derive(Debug, PartialEq)]
+    /// struct ValueA(&'static str);
+    /// #[derive(Debug, PartialEq)]
+    /// struct ValueB(u64);
+    ///
+    /// // You can create a context with the first value set to "a"
+    /// let cx_with_a = Context::new().with_value(ValueA("a"));
+    ///
+    /// // And create another context based on the fist with a new value
+    /// let cx_with_a_and_b = cx_with_a.with_value(ValueB(42));
+    ///
+    /// // The first context is still available and unmodified
+    /// assert_eq!(cx_with_a.get::<ValueA>(), Some(&ValueA("a")));
+    /// assert_eq!(cx_with_a.get::<ValueB>(), None);
+    ///
+    /// // The second context now contains both values
+    /// assert_eq!(cx_with_a_and_b.get::<ValueA>(), Some(&ValueA("a")));
+    /// assert_eq!(cx_with_a_and_b.get::<ValueB>(), Some(&ValueB(42)));
+    /// ```
+    pub fn with_value<T: 'static + Send + Sync>(&self, value: T) -> Self {
+        let entries = if let Some(current_entries) = &self.entries {
+            let mut inner_entries = (**current_entries).clone();
+            inner_entries.insert(TypeId::of::<T>(), Arc::new(value));
+            Some(Arc::new(inner_entries))
+        } else {
+            let mut entries = EntryMap::default();
+            entries.insert(TypeId::of::<T>(), Arc::new(value));
+            Some(Arc::new(entries))
+        };
+
+        Context {
+            entries,
+            #[cfg(feature = "trace")]
+            span: self.span.clone(),
+            suppress_telemetry: self.suppress_telemetry,
+            #[cfg(feature = "experimental_context_observer")]
+            observer_view: None,
+        }
+        .with_observer_view()
+    }
+
+    /// Replaces the current context on this thread with this context.
+    ///
+    /// Dropping the returned [`ContextGuard`] will reset the current context to the
+    /// previous value.
+    ///
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use opentelemetry::Context;
+    ///
+    /// #[derive(Debug, PartialEq)]
+    /// struct ValueA(&'static str);
+    ///
+    /// let my_cx = Context::new().with_value(ValueA("a"));
+    ///
+    /// // Set the current thread context
+    /// let cx_guard = my_cx.attach();
+    /// assert_eq!(Context::current().get::<ValueA>(), Some(&ValueA("a")));
+    ///
+    /// // Drop the guard to restore the previous context
+    /// drop(cx_guard);
+    /// assert_eq!(Context::current().get::<ValueA>(), None);
+    /// ```
+    ///
+    /// Guards do not need to be explicitly dropped:
+    ///
+    /// ```
+    /// use opentelemetry::Context;
+    ///
+    /// #[derive(Debug, PartialEq)]
+    /// struct ValueA(&'static str);
+    ///
+    /// fn my_function() -> String {
+    ///     // attach a context the duration of this function.
+    ///     let my_cx = Context::new().with_value(ValueA("a"));
+    ///     // NOTE: a variable name after the underscore is **required** or rust
+    ///     // will drop the guard, restoring the previous context _immediately_.
+    ///     let _guard = my_cx.attach();
+    ///
+    ///     // anything happening in functions we call can still access my_cx...
+    ///     my_other_function();
+    ///
+    ///     // returning from the function drops the guard, exiting the span.
+    ///     return "Hello world".to_owned();
+    /// }
+    ///
+    /// fn my_other_function() {
+    ///     // ...
+    /// }
+    /// ```
+    /// Sub-scopes may be created to limit the duration for which the span is
+    /// entered:
+    ///
+    /// ```
+    /// use opentelemetry::Context;
+    ///
+    /// #[derive(Debug, PartialEq)]
+    /// struct ValueA(&'static str);
+    ///
+    /// let my_cx = Context::new().with_value(ValueA("a"));
+    ///
+    /// {
+    ///     let _guard = my_cx.attach();
+    ///
+    ///     // the current context can access variables in
+    ///     assert_eq!(Context::current().get::<ValueA>(), Some(&ValueA("a")));
+    ///
+    ///     // exiting the scope drops the guard, detaching the context.
+    /// }
+    ///
+    /// // this is back in the default empty context
+    /// assert_eq!(Context::current().get::<ValueA>(), None);
+    /// ```
+    pub fn attach(self) -> ContextGuard {
+        let cx_id = CURRENT_CONTEXT.with(|cx| cx.borrow_mut().push(self));
+
+        ContextGuard {
+            cx_pos: cx_id,
+            _marker: PhantomData,
+        }
+    }
+
+    /// Returns whether telemetry is suppressed in this context.
+    #[inline]
+    pub fn is_telemetry_suppressed(&self) -> bool {
+        self.suppress_telemetry
+    }
+
+    /// Returns a new context with telemetry suppression enabled.
+    pub fn with_telemetry_suppressed(&self) -> Self {
+        Context {
+            entries: self.entries.clone(),
+            #[cfg(feature = "trace")]
+            span: self.span.clone(),
+            suppress_telemetry: true,
+            #[cfg(feature = "experimental_context_observer")]
+            observer_view: None,
+        }
+        .with_observer_view()
+    }
+
+    /// Enters a scope where telemetry is suppressed.
+    ///
+    /// This method is specifically designed for OpenTelemetry components (like Exporters,
+    /// Processors etc.) to prevent generating recursive or self-referential
+    /// telemetry data when performing their own operations.
+    ///
+    /// Without suppression, we have a telemetry-induced-telemetry situation
+    /// where, operations like exporting telemetry could generate new telemetry
+    /// about the export process itself, potentially causing:
+    /// - Infinite telemetry feedback loops
+    /// - Excessive resource consumption
+    ///
+    /// This method:
+    /// 1. Takes the current context
+    /// 2. Creates a new context from current, with `suppress_telemetry` set to `true`
+    /// 3. Attaches it to the current thread
+    /// 4. Returns a guard that restores the previous context when dropped
+    ///
+    /// OTel SDK components would check `is_current_telemetry_suppressed()` before
+    /// generating new telemetry, but not end users.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use opentelemetry::Context;
+    ///
+    /// // Example: Inside an exporter's implementation
+    /// fn example_export_function() {
+    ///     // Prevent telemetry-generating operations from creating more telemetry
+    ///     let _guard = Context::enter_telemetry_suppressed_scope();
+    ///     
+    ///     // Verify suppression is active
+    ///     assert_eq!(Context::is_current_telemetry_suppressed(), true);
+    ///     
+    ///     // Here you would normally perform operations that might generate telemetry
+    ///     // but now they won't because the context has suppression enabled
+    /// }
+    ///
+    /// // Demonstrate the function
+    /// example_export_function();
+    /// ```
+    pub fn enter_telemetry_suppressed_scope() -> ContextGuard {
+        Self::map_current(|cx| cx.with_telemetry_suppressed()).attach()
+    }
+
+    /// Returns whether telemetry is suppressed in the current context.
+    ///
+    /// This method is used by OpenTelemetry components to determine whether they should
+    /// generate new telemetry in the current execution context. It provides a performant
+    /// way to check the suppression state.
+    ///
+    /// End-users generally should not use this method directly, as it is primarily intended for
+    /// OpenTelemetry SDK components.
+    ///
+    ///
+    #[inline]
+    pub fn is_current_telemetry_suppressed() -> bool {
+        Self::map_current(|cx| cx.is_telemetry_suppressed())
+    }
+
+    // Initialize `self.observer_view` for a newly created context using the current context
+    // observer, if set.
+    #[cfg(feature = "experimental_context_observer")]
+    fn with_observer_view(mut self) -> Self {
+        if let Some(observer) = GlobalContextObserver::get() {
+            self.observer_view = observer.make_view(&self);
+        }
+
+        self
+    }
+
+    // No-op when the experimental_context_observer feature is not enabled.
+    #[cfg(not(feature = "experimental_context_observer"))]
+    const fn with_observer_view(self) -> Self {
+        self
+    }
+
+    /// Returns the observer's view of this context, if any.
+    #[cfg(feature = "experimental_context_observer")]
+    #[inline]
+    pub fn observer_view(&self) -> &Option<Arc<dyn ObserverContextView>> {
+        &self.observer_view
+    }
+
+    #[cfg(feature = "trace")]
+    pub(crate) fn current_with_synchronized_span(value: SynchronizedSpan) -> Self {
+        Self::map_current(|cx| {
+            Context {
+                span: Some(Arc::new(value)),
+                entries: cx.entries.clone(),
+                suppress_telemetry: cx.suppress_telemetry,
+                #[cfg(feature = "experimental_context_observer")]
+                observer_view: None,
+            }
+            .with_observer_view()
+        })
+    }
+
+    #[cfg(feature = "trace")]
+    pub(crate) fn with_synchronized_span(&self, value: SynchronizedSpan) -> Self {
+        Context {
+            span: Some(Arc::new(value)),
+            entries: self.entries.clone(),
+            suppress_telemetry: self.suppress_telemetry,
+            #[cfg(feature = "experimental_context_observer")]
+            observer_view: None,
+        }
+        .with_observer_view()
+    }
+}
+
+impl fmt::Debug for Context {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let mut dbg = f.debug_struct("Context");
+
+        #[cfg(feature = "trace")]
+        let mut entries = self.entries.as_ref().map_or(0, |e| e.len());
+        #[cfg(feature = "trace")]
+        {
+            if let Some(span) = &self.span {
+                dbg.field("span", &span.span_context());
+                entries += 1;
+            } else {
+                dbg.field("span", &"None");
+            }
+        }
+        #[cfg(not(feature = "trace"))]
+        let entries = self.entries.as_ref().map_or(0, |e| e.len());
+
+        dbg.field("entries count", &entries)
+            .field("suppress_telemetry", &self.suppress_telemetry)
+            .finish()
+    }
+}
+
+/// A guard that resets the current context to the prior context when dropped.
+#[derive(Debug)]
+pub struct ContextGuard {
+    // The position of the context in the stack. This is used to pop the context.
+    cx_pos: u16,
+    // Ensure this type is !Send as it relies on thread locals
+    _marker: PhantomData<*const ()>,
+}
+
+impl Drop for ContextGuard {
+    fn drop(&mut self) {
+        let id = self.cx_pos;
+        if id > ContextStack::BASE_POS && id < ContextStack::MAX_POS {
+            // Defer destructors that may call back into Context until after
+            // the mutable borrow of CURRENT_CONTEXT has been released.
+            let _to_drop =
+                CURRENT_CONTEXT.with(|context_stack| context_stack.borrow_mut().pop_id(id));
+        }
+    }
+}
+
+/// With TypeIds as keys, there's no need to hash them. They are already hashes
+/// themselves, coming from the compiler. The IdHasher holds the u64 of
+/// the TypeId, and then returns it, instead of doing any bit fiddling.
+#[derive(Clone, Default, Debug)]
+struct IdHasher(u64);
+
+impl Hasher for IdHasher {
+    fn write(&mut self, _: &[u8]) {
+        unreachable!("TypeId calls write_u64");
+    }
+
+    #[inline]
+    fn write_u64(&mut self, id: u64) {
+        self.0 = id;
+    }
+
+    #[inline]
+    fn finish(&self) -> u64 {
+        self.0
+    }
+}
+
+/// A stack for keeping track of the [`Context`] instances that have been attached
+/// to a thread.
+///
+/// The stack allows for popping of contexts by position, which is used to do out
+/// of order dropping of [`ContextGuard`] instances. Only when the top of the
+/// stack is popped, the topmost [`Context`] is actually restored.
+///
+/// The stack relies on the fact that it is thread local and that the
+/// [`ContextGuard`] instances that are constructed using ids from it can't be
+/// moved to other threads. That means that the ids are always valid and that
+/// they are always within the bounds of the stack.
+struct ContextStack {
+    /// This is the current [`Context`] that is active on this thread, and the top
+    /// of the [`ContextStack`]. It is always present, and if the `stack` is empty
+    /// it's an empty [`Context`].
+    ///
+    /// Having this here allows for fast access to the current [`Context`].
+    current_cx: Context,
+    /// A `stack` of the other contexts that have been attached to the thread.
+    stack: Vec<Option<Context>>,
+    /// Ensure this type is !Send as it relies on thread locals
+    _marker: PhantomData<*const ()>,
+}
+
+// Fields whose destructors must run after releasing the mutable
+// borrow of CURRENT_CONTEXT.
+#[derive(Default)]
+struct ContextToDrop {
+    #[cfg(feature = "trace")]
+    _span: Option<Arc<SynchronizedSpan>>,
+    _entries: Option<Arc<EntryMap>>,
+    #[cfg(feature = "experimental_context_observer")]
+    _observer_view: Option<Arc<dyn ObserverContextView>>,
+}
+
+impl From<Context> for ContextToDrop {
+    fn from(context: Context) -> Self {
+        Self {
+            #[cfg(feature = "trace")]
+            _span: context.span,
+            _entries: context.entries,
+            #[cfg(feature = "experimental_context_observer")]
+            _observer_view: context.observer_view,
+        }
+    }
+}
+
+impl ContextStack {
+    const BASE_POS: u16 = 0;
+    const MAX_POS: u16 = u16::MAX;
+    const INITIAL_CAPACITY: usize = 8;
+
+    #[inline(always)]
+    fn push(&mut self, cx: Context) -> u16 {
+        // The next id is the length of the `stack`, plus one since we have the
+        // top of the [`ContextStack`] as the `current_cx`.
+        let next_id = self.stack.len() + 1;
+        if next_id < ContextStack::MAX_POS.into() {
+            #[cfg(feature = "experimental_context_observer")]
+            if let Some(observer) = GlobalContextObserver::get() {
+                observer.on_context_enter(&self.current_cx, &cx);
+            }
+
+            let current_cx = std::mem::replace(&mut self.current_cx, cx);
+            self.stack.push(Some(current_cx));
+            next_id as u16
+        } else {
+            // This is an overflow, log it and ignore it.
+            otel_warn!(
+                name: "Context.AttachFailed",
+                message = format!("Too many contexts. Max limit is {}. \
+                  Context::current() remains unchanged as this attach failed. \
+                  Dropping the returned ContextGuard will have no impact on Context::current().",
+                  ContextStack::MAX_POS)
+            );
+            ContextStack::MAX_POS
+        }
+    }
+
+    #[inline(always)]
+    fn pop_id(&mut self, pos: u16) -> ContextToDrop {
+        if pos == ContextStack::BASE_POS || pos == ContextStack::MAX_POS {
+            // The empty context is always at the bottom of the [`ContextStack`]
+            // and cannot be popped, and the overflow position is invalid, so do
+            // nothing.
+            otel_warn!(
+                name: "Context.OutOfOrderDrop",
+                position = pos,
+                message = if pos == ContextStack::BASE_POS {
+                    "Attempted to pop the base context which is not allowed"
+                } else {
+                    "Attempted to pop the overflow position which is not allowed"
+                }
+            );
+
+            return ContextToDrop::default();
+        }
+        let len: u16 = self.stack.len() as u16;
+        // Are we at the top of the [`ContextStack`]?
+        if pos == len {
+            // Shrink the stack if possible to clear out any out of order pops.
+            while let Some(None) = self.stack.last() {
+                _ = self.stack.pop();
+            }
+            // Restore the previous context. This will always happen since the
+            // empty context is always at the bottom of the stack if the
+            // [`ContextStack`] is not empty.
+            if let Some(Some(next_cx)) = self.stack.pop() {
+                #[cfg(feature = "experimental_context_observer")]
+                if let Some(observer) = GlobalContextObserver::get() {
+                    observer.on_context_exit(&self.current_cx, &next_cx);
+                }
+
+                // Move fields with potentially reentrant destructors out of the borrow.
+                let old_cx = std::mem::replace(&mut self.current_cx, next_cx);
+                return old_cx.into();
+            }
+
+            ContextToDrop::default()
+        } else {
+            // This is an out of order pop.
+            if pos >= len {
+                // This is an invalid id, ignore it.
+                otel_warn!(
+                    name: "Context.PopOutOfBounds",
+                    position = pos,
+                    stack_length = len,
+                    message = "Attempted to pop beyond the end of the context stack"
+                );
+                return ContextToDrop::default();
+            }
+            // Remove the context and defer dropping its owned fields.
+            self.stack[pos as usize]
+                .take()
+                .map(ContextToDrop::from)
+                .unwrap_or_default()
+        }
+    }
+
+    #[inline(always)]
+    fn map_current_cx<T>(&self, f: impl FnOnce(&Context) -> T) -> T {
+        f(&self.current_cx)
+    }
+}
+
+impl Default for ContextStack {
+    fn default() -> Self {
+        ContextStack {
+            current_cx: Context::default(),
+            stack: Vec::with_capacity(ContextStack::INITIAL_CAPACITY),
+            _marker: PhantomData,
+        }
+    }
+}
+
+#[cfg(feature = "experimental_context_observer")]
+mod context_observer {
+    use super::*;
+
+    /// An observer trait for monitoring context transitions.
+    ///
+    /// Implementors of this trait can observe when a context is entered or exited, allowing for
+    /// custom logic to be executed during context switches.
+    ///
+    /// An observer-specific view can be attached to a [`Context`] via
+    /// [`Context::observer_view`]. A view is usually a different representation of the context
+    /// to be published through an alternative channel, but in essence it is arbitrary data computed
+    /// from the context.
+    ///
+    /// # Refcell already borrowed panic
+    ///
+    /// [crate::context] maintains thread-local, internal state in a `RefCell`. This implementation
+    /// detail leaks when the `experimental_context_observer` feature is enabled:
+    /// [Self::on_context_enter] and [Self::on_context_exit] are called from a point where the cell
+    /// is currently borrowed. If a [ContextObserver] implementation calls back into a
+    /// cell-borrowing function from the Context API, typically `Context::current()`, this will
+    /// result in a `Refcell already borrowed` panic.
+    ///
+    /// As general hygiene, with respect to the [Context] API, it is strongly advised to only use
+    /// simple getters and setters on the `from` and `to` context objects provided to the observer.
+    /// Do not call `Context::current()`, nor try to manually attach or detach context objects from
+    /// an observer.
+    ///
+    /// If you get Refcell-related panics within the [crate::context] module, this is the most
+    /// likely cause.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// # #[cfg(feature = "experimental_context_observer")]
+    /// # {
+    /// use opentelemetry::Context;
+    /// use opentelemetry::context::{ContextObserver, ObserverContextView};
+    /// use std::any::Any;
+    /// use std::sync::Arc;
+    ///
+    /// // An observer's own view of the context, carrying arbitrary data.
+    /// struct MyView {
+    ///     correlation_id: u64,
+    /// }
+    ///
+    /// impl ObserverContextView for MyView {
+    ///     fn as_any(&self) -> &dyn Any {
+    ///         self
+    ///     }
+    /// }
+    ///
+    /// struct Observer;
+    ///
+    /// # fn do_something(view: &MyView) { }
+    ///
+    /// impl ContextObserver for Observer {
+    ///     fn on_context_enter(&self, from: &Context, to: &Context) {
+    ///         let view = to.observer_view().as_ref().unwrap();
+    ///         do_something(view.as_any().downcast_ref::<MyView>().unwrap());
+    ///     }
+    ///
+    ///     fn on_context_exit(&self, from: &Context, to: &Context) {
+    ///         let view = to
+    ///             .observer_view()
+    ///             .as_ref()
+    ///             .unwrap()
+    ///             .as_any()
+    ///             .downcast_ref::<MyView>()
+    ///             .unwrap();
+    ///         assert_eq!(view.correlation_id, 42);
+    ///     }
+    ///
+    ///     fn make_view(&self, ctx: &Context) -> Option<Arc<dyn ObserverContextView>> {
+    ///         Some(Arc::new(MyView { correlation_id: 42 }))
+    ///     }
+    /// }
+    /// # }
+    /// ```
+    pub trait ContextObserver {
+        /// Called when a context is entered, allowing observers to react to the transition
+        /// from one context (`from`) to another (`to`).
+        fn on_context_enter(&self, from: &Context, to: &Context);
+
+        /// Called when a context is exited, allowing observers to react to the transition
+        /// from one context (`from`) to another (`to`).
+        fn on_context_exit(&self, from: &Context, to: &Context);
+
+        /// Derive a fresh view for a newly created context. The provided `ctx` has an unitialized
+        /// view sets to `None`.
+        ///
+        /// The default implementation returns `None` for observers that don't use the view.
+        fn make_view(&self, _ctx: &Context) -> Option<Arc<dyn ObserverContextView>> {
+            None
+        }
+    }
+
+    static GLOBAL_CONTEXT_OBSERVER: OnceLock<Arc<dyn ContextObserver + Send + Sync>> =
+        OnceLock::new();
+
+    /// A global observer for context transitions.
+    ///
+    /// This struct provides static methods to set and get a global context observer.
+    #[derive(Debug)]
+    pub struct GlobalContextObserver;
+
+    impl GlobalContextObserver {
+        /// Sets the global context observer, logging a warning if it was already set.
+        pub fn set(observer: Arc<dyn ContextObserver + Send + Sync>) {
+            if GLOBAL_CONTEXT_OBSERVER.set(observer).is_err() {
+                otel_warn!(
+                    name: "GlobalContextObserver.SetFailed",
+                    message = "Global context observer was already set. Ignoring new observer."
+                );
+            }
+        }
+
+        /// Returns the global context observer.
+        pub(super) fn get<'a>() -> Option<&'a Arc<dyn ContextObserver + Send + Sync>> {
+            GLOBAL_CONTEXT_OBSERVER.get()
+        }
+    }
+
+    /// A context's observer view of a [Context]. This is an arbitrary data structure. See
+    /// [ContextObserver]'s documentation for examples.
+    #[cfg(feature = "experimental_context_observer")]
+    pub trait ObserverContextView: Any + Send + Sync {
+        /// Returns this view as a `&dyn Any`, enabling downcasting back to the concrete type.
+        ///
+        /// This method is required because this crate's MSRV is below the Rust version (1.86) that
+        /// stabilized trait upcasting. Without it, callers below 1.86 couldn't upcast `&dyn
+        /// ObserverContextView` to `&dyn Any` to perform the downcast themselves.
+        ///
+        /// This is a work-around for the absence of trait upcasting before Rust 1.86.
+        ///
+        /// Implementors should simply return `self`:
+        ///
+        /// ```ignore
+        /// fn as_any(&self) -> &dyn std::any::Any {
+        ///     self
+        /// }
+        /// ```
+        fn as_any(&self) -> &dyn Any;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::Duration;
+    use tokio::time::sleep;
+
+    #[derive(Debug, PartialEq)]
+    struct ValueA(u64);
+    #[derive(Debug, PartialEq)]
+    struct ValueB(u64);
+
+    struct ReadCurrentContextOnDrop;
+
+    impl Drop for ReadCurrentContextOnDrop {
+        fn drop(&mut self) {
+            let _ = Context::current();
+        }
+    }
+
+    #[test]
+    fn context_value_drop_can_access_current_context() {
+        let guard = Context::new().with_value(ReadCurrentContextOnDrop).attach();
+
+        drop(guard);
+    }
+
+    #[test]
+    fn out_of_order_context_value_drop_can_access_current_context() {
+        let outer_guard = Context::new().with_value(ReadCurrentContextOnDrop).attach();
+        let inner_guard = Context::new().attach();
+
+        drop(outer_guard);
+        drop(inner_guard);
+    }
+
+    #[test]
+    fn context_immutable() {
+        // start with Current, which should be an empty context
+        let cx = Context::current();
+        assert_eq!(cx.get::<ValueA>(), None);
+        assert_eq!(cx.get::<ValueB>(), None);
+
+        // with_value should return a new context,
+        // leaving the original context unchanged
+        let cx_new = cx.with_value(ValueA(1));
+
+        // cx should be unchanged
+        assert_eq!(cx.get::<ValueA>(), None);
+        assert_eq!(cx.get::<ValueB>(), None);
+
+        // cx_new should contain the new value
+        assert_eq!(cx_new.get::<ValueA>(), Some(&ValueA(1)));
+
+        // cx_new should be unchanged
+        let cx_newer = cx_new.with_value(ValueB(1));
+
+        // Cx and cx_new are unchanged
+        assert_eq!(cx.get::<ValueA>(), None);
+        assert_eq!(cx.get::<ValueB>(), None);
+        assert_eq!(cx_new.get::<ValueA>(), Some(&ValueA(1)));
+        assert_eq!(cx_new.get::<ValueB>(), None);
+
+        // cx_newer should contain both values
+        assert_eq!(cx_newer.get::<ValueA>(), Some(&ValueA(1)));
+        assert_eq!(cx_newer.get::<ValueB>(), Some(&ValueB(1)));
+    }
+
+    #[test]
+    fn nested_contexts() {
+        let _outer_guard = Context::new().with_value(ValueA(1)).attach();
+
+        // Only value `a` is set
+        let current = Context::current();
+        assert_eq!(current.get(), Some(&ValueA(1)));
+        assert_eq!(current.get::<ValueB>(), None);
+
+        {
+            let _inner_guard = Context::current_with_value(ValueB(42)).attach();
+            // Both values are set in inner context
+            let current = Context::current();
+            assert_eq!(current.get(), Some(&ValueA(1)));
+            assert_eq!(current.get(), Some(&ValueB(42)));
+
+            assert!(Context::map_current(|cx| {
+                assert_eq!(cx.get(), Some(&ValueA(1)));
+                assert_eq!(cx.get(), Some(&ValueB(42)));
+                true
+            }));
+        }
+
+        // Resets to only value `a` when inner guard is dropped
+        let current = Context::current();
+        assert_eq!(current.get(), Some(&ValueA(1)));
+        assert_eq!(current.get::<ValueB>(), None);
+
+        assert!(Context::map_current(|cx| {
+            assert_eq!(cx.get(), Some(&ValueA(1)));
+            assert_eq!(cx.get::<ValueB>(), None);
+            true
+        }));
+    }
+
+    #[test]
+    fn overlapping_contexts() {
+        let outer_guard = Context::new().with_value(ValueA(1)).attach();
+
+        // Only value `a` is set
+        let current = Context::current();
+        assert_eq!(current.get(), Some(&ValueA(1)));
+        assert_eq!(current.get::<ValueB>(), None);
+
+        let inner_guard = Context::current_with_value(ValueB(42)).attach();
+        // Both values are set in inner context
+        let current = Context::current();
+        assert_eq!(current.get(), Some(&ValueA(1)));
+        assert_eq!(current.get(), Some(&ValueB(42)));
+
+        assert!(Context::map_current(|cx| {
+            assert_eq!(cx.get(), Some(&ValueA(1)));
+            assert_eq!(cx.get(), Some(&ValueB(42)));
+            true
+        }));
+
+        drop(outer_guard);
+
+        // `inner_guard` is still alive so both `ValueA` and `ValueB` should still be accessible
+        let current = Context::current();
+        assert_eq!(current.get(), Some(&ValueA(1)));
+        assert_eq!(current.get(), Some(&ValueB(42)));
+
+        drop(inner_guard);
+
+        // Both guards are dropped and neither value should be accessible.
+        let current = Context::current();
+        assert_eq!(current.get::<ValueA>(), None);
+        assert_eq!(current.get::<ValueB>(), None);
+    }
+
+    #[test]
+    fn too_many_contexts() {
+        let mut guards: Vec<ContextGuard> = Vec::with_capacity(ContextStack::MAX_POS as usize);
+        let stack_max_pos = ContextStack::MAX_POS as u64;
+        // Fill the stack up until the last position
+        for i in 1..stack_max_pos {
+            let cx_guard = Context::current().with_value(ValueB(i)).attach();
+            assert_eq!(Context::current().get(), Some(&ValueB(i)));
+            assert_eq!(cx_guard.cx_pos, i as u16);
+            guards.push(cx_guard);
+        }
+        // Let's overflow the stack a couple of times
+        for _ in 0..16 {
+            let cx_guard = Context::current().with_value(ValueA(1)).attach();
+            assert_eq!(cx_guard.cx_pos, ContextStack::MAX_POS);
+            assert_eq!(Context::current().get::<ValueA>(), None);
+            assert_eq!(Context::current().get(), Some(&ValueB(stack_max_pos - 1)));
+            guards.push(cx_guard);
+        }
+        // Drop the overflow contexts
+        for _ in 0..16 {
+            guards.pop();
+            assert_eq!(Context::current().get::<ValueA>(), None);
+            assert_eq!(Context::current().get(), Some(&ValueB(stack_max_pos - 1)));
+        }
+        // Drop one more so we can add a new one
+        guards.pop();
+        assert_eq!(Context::current().get::<ValueA>(), None);
+        assert_eq!(Context::current().get(), Some(&ValueB(stack_max_pos - 2)));
+        // Push a new context and see that it works
+        let cx_guard = Context::current().with_value(ValueA(2)).attach();
+        assert_eq!(cx_guard.cx_pos, ContextStack::MAX_POS - 1);
+        assert_eq!(Context::current().get(), Some(&ValueA(2)));
+        assert_eq!(Context::current().get(), Some(&ValueB(stack_max_pos - 2)));
+        guards.push(cx_guard);
+        // Let's overflow the stack a couple of times again
+        for _ in 0..16 {
+            let cx_guard = Context::current().with_value(ValueA(1)).attach();
+            assert_eq!(cx_guard.cx_pos, ContextStack::MAX_POS);
+            assert_eq!(Context::current().get::<ValueA>(), Some(&ValueA(2)));
+            assert_eq!(Context::current().get(), Some(&ValueB(stack_max_pos - 2)));
+            guards.push(cx_guard);
+        }
+    }
+
+    /// Tests that a new ContextStack is created with the correct initial capacity.
+    #[test]
+    fn test_initial_capacity() {
+        let stack = ContextStack::default();
+        assert_eq!(stack.stack.capacity(), ContextStack::INITIAL_CAPACITY);
+    }
+
+    /// Tests that map_current_cx correctly accesses the current context.
+    #[test]
+    fn test_map_current_cx() {
+        let mut stack = ContextStack::default();
+        let test_value = ValueA(42);
+        stack.current_cx = Context::new().with_value(test_value);
+
+        let result = stack.map_current_cx(|cx| {
+            assert_eq!(cx.get::<ValueA>(), Some(&ValueA(42)));
+            true
+        });
+        assert!(result);
+    }
+
+    /// Tests popping contexts in non-sequential order.
+    #[test]
+    fn test_pop_id_out_of_order() {
+        let mut stack = ContextStack::default();
+
+        // Push three contexts
+        let cx1 = Context::new().with_value(ValueA(1));
+        let cx2 = Context::new().with_value(ValueA(2));
+        let cx3 = Context::new().with_value(ValueA(3));
+
+        let id1 = stack.push(cx1);
+        let id2 = stack.push(cx2);
+        let id3 = stack.push(cx3);
+
+        // Pop middle context first - should not affect current context
+        stack.pop_id(id2);
+        assert_eq!(stack.current_cx.get::<ValueA>(), Some(&ValueA(3)));
+        assert_eq!(stack.stack.len(), 3); // Length unchanged for middle pops
+
+        // Pop last context - should restore previous valid context
+        stack.pop_id(id3);
+        assert_eq!(stack.current_cx.get::<ValueA>(), Some(&ValueA(1)));
+        assert_eq!(stack.stack.len(), 1);
+
+        // Pop first context - should restore to empty state
+        stack.pop_id(id1);
+        assert_eq!(stack.current_cx.get::<ValueA>(), None);
+        assert_eq!(stack.stack.len(), 0);
+    }
+
+    /// Tests edge cases in context stack operations. IRL these should log
+    /// warnings, and definitely not panic.
+    #[test]
+    fn test_pop_id_edge_cases() {
+        let mut stack = ContextStack::default();
+
+        // Test popping BASE_POS - should be no-op
+        stack.pop_id(ContextStack::BASE_POS);
+        assert_eq!(stack.stack.len(), 0);
+
+        // Test popping MAX_POS - should be no-op
+        stack.pop_id(ContextStack::MAX_POS);
+        assert_eq!(stack.stack.len(), 0);
+
+        // Test popping invalid position - should be no-op
+        stack.pop_id(1000);
+        assert_eq!(stack.stack.len(), 0);
+
+        // Test popping from empty stack - should be safe
+        stack.pop_id(1);
+        assert_eq!(stack.stack.len(), 0);
+    }
+
+    /// Tests stack behavior when reaching maximum capacity.
+    /// Once we push beyond this point, we should end up with a context
+    /// that points _somewhere_, but mutating it should not affect the current
+    /// active context.
+    #[test]
+    fn test_push_overflow() {
+        let mut stack = ContextStack::default();
+        let max_pos = ContextStack::MAX_POS as usize;
+
+        // Fill stack up to max position
+        for i in 0..max_pos {
+            let cx = Context::new().with_value(ValueA(i as u64));
+            let id = stack.push(cx);
+            assert_eq!(id, (i + 1) as u16);
+        }
+
+        // Try to push beyond capacity
+        let cx = Context::new().with_value(ValueA(max_pos as u64));
+        let id = stack.push(cx);
+        assert_eq!(id, ContextStack::MAX_POS);
+
+        // Verify current context remains unchanged after overflow
+        assert_eq!(
+            stack.current_cx.get::<ValueA>(),
+            Some(&ValueA((max_pos - 2) as u64))
+        );
+    }
+
+    /// Tests that:
+    /// 1. Parent context values are properly propagated to async operations
+    /// 2. Values added during async operations do not affect parent context
+    #[tokio::test]
+    async fn test_async_context_propagation() {
+        // A nested async operation we'll use to test propagation
+        async fn nested_operation() {
+            // Verify we can see the parent context's value
+            assert_eq!(
+                Context::current().get::<ValueA>(),
+                Some(&ValueA(42)),
+                "Parent context value should be available in async operation"
+            );
+
+            // Create new context
+            let cx_with_both = Context::current()
+                .with_value(ValueA(43)) // override ValueA
+                .with_value(ValueB(24)); // Add new ValueB
+
+            // Run nested async operation with both values
+            async {
+                // Verify both values are available
+                assert_eq!(
+                    Context::current().get::<ValueA>(),
+                    Some(&ValueA(43)),
+                    "Parent value should still be available after adding new value"
+                );
+                assert_eq!(
+                    Context::current().get::<ValueB>(),
+                    Some(&ValueB(24)),
+                    "New value should be available in async operation"
+                );
+
+                // Do some async work to simulate real-world scenario
+                sleep(Duration::from_millis(10)).await;
+
+                // Values should still be available after async work
+                assert_eq!(
+                    Context::current().get::<ValueA>(),
+                    Some(&ValueA(43)),
+                    "Parent value should persist across await points"
+                );
+                assert_eq!(
+                    Context::current().get::<ValueB>(),
+                    Some(&ValueB(24)),
+                    "New value should persist across await points"
+                );
+            }
+            .with_context(cx_with_both)
+            .await;
+        }
+
+        // Set up initial context with ValueA
+        let parent_cx = Context::new().with_value(ValueA(42));
+
+        // Create and run async operation with the parent context explicitly propagated
+        nested_operation().with_context(parent_cx.clone()).await;
+
+        // After async operation completes:
+        // 1. Parent context should be unchanged
+        assert_eq!(
+            parent_cx.get::<ValueA>(),
+            Some(&ValueA(42)),
+            "Parent context should be unchanged"
+        );
+        assert_eq!(
+            parent_cx.get::<ValueB>(),
+            None,
+            "Parent context should not see values added in async operation"
+        );
+
+        // 2. Current context should be back to default
+        assert_eq!(
+            Context::current().get::<ValueA>(),
+            None,
+            "Current context should be back to default"
+        );
+        assert_eq!(
+            Context::current().get::<ValueB>(),
+            None,
+            "Current context should not have async operation's values"
+        );
+    }
+
+    ///
+    /// Tests that unnatural parent->child relationships in nested async
+    /// operations behave properly.
+    ///
+    #[tokio::test]
+    async fn test_out_of_order_context_detachment_futures() {
+        // This function returns a future, but doesn't await it
+        // It will complete before the future that it creates.
+        async fn create_a_future() -> impl std::future::Future<Output = ()> {
+            // Create a future that will do some work, referencing our current
+            // context, but don't await it.
+            async {
+                assert_eq!(Context::current().get::<ValueA>(), Some(&ValueA(42)));
+
+                // Longer work
+                sleep(Duration::from_millis(50)).await;
+            }
+            .with_context(Context::current())
+        }
+
+        // Create our base context
+        let parent_cx = Context::new().with_value(ValueA(42));
+
+        // await our nested function, which will create and detach a context
+        let future = create_a_future().with_context(parent_cx).await;
+
+        // Execute the future. The future that created it is long gone, but this shouldn't
+        // cause issues.
+        let _a = future.await;
+
+        // Nothing terrible (e.g., panics!) should happen, and we should definitely not have any
+        // values attached to our current context that were set in the nested operations.
+        assert_eq!(Context::current().get::<ValueA>(), None);
+        assert_eq!(Context::current().get::<ValueB>(), None);
+    }
+
+    #[test]
+    fn test_is_telemetry_suppressed() {
+        // Default context has suppression disabled
+        let cx = Context::new();
+        assert!(!cx.is_telemetry_suppressed());
+
+        // With suppression enabled
+        let suppressed = cx.with_telemetry_suppressed();
+        assert!(suppressed.is_telemetry_suppressed());
+    }
+
+    #[test]
+    fn test_with_telemetry_suppressed() {
+        // Start with a normal context
+        let cx = Context::new();
+        assert!(!cx.is_telemetry_suppressed());
+
+        // Create a suppressed context
+        let suppressed = cx.with_telemetry_suppressed();
+
+        // Original should remain unchanged
+        assert!(!cx.is_telemetry_suppressed());
+
+        // New context should be suppressed
+        assert!(suppressed.is_telemetry_suppressed());
+
+        // Test with values to ensure they're preserved
+        let cx_with_value = cx.with_value(ValueA(42));
+        let suppressed_with_value = cx_with_value.with_telemetry_suppressed();
+
+        assert!(!cx_with_value.is_telemetry_suppressed());
+        assert!(suppressed_with_value.is_telemetry_suppressed());
+        assert_eq!(suppressed_with_value.get::<ValueA>(), Some(&ValueA(42)));
+    }
+
+    #[test]
+    fn test_enter_telemetry_suppressed_scope() {
+        // Ensure we start with a clean context
+        let _reset_guard = Context::new().attach();
+
+        // Default context should not be suppressed
+        assert!(!Context::is_current_telemetry_suppressed());
+
+        // Add an entry to the current context
+        let cx_with_value = Context::current().with_value(ValueA(42));
+        let _guard_with_value = cx_with_value.attach();
+
+        // Verify the entry is present and context is not suppressed
+        assert_eq!(Context::current().get::<ValueA>(), Some(&ValueA(42)));
+        assert!(!Context::is_current_telemetry_suppressed());
+
+        // Enter a suppressed scope
+        {
+            let _guard = Context::enter_telemetry_suppressed_scope();
+
+            // Verify suppression is active and the entry is still present
+            assert!(Context::is_current_telemetry_suppressed());
+            assert!(Context::current().is_telemetry_suppressed());
+            assert_eq!(Context::current().get::<ValueA>(), Some(&ValueA(42)));
+        }
+
+        // After guard is dropped, should be back to unsuppressed and entry should still be present
+        assert!(!Context::is_current_telemetry_suppressed());
+        assert!(!Context::current().is_telemetry_suppressed());
+        assert_eq!(Context::current().get::<ValueA>(), Some(&ValueA(42)));
+    }
+
+    #[test]
+    fn test_nested_suppression_scopes() {
+        // Ensure we start with a clean context
+        let _reset_guard = Context::new().attach();
+
+        // Default context should not be suppressed
+        assert!(!Context::is_current_telemetry_suppressed());
+
+        // First level suppression
+        {
+            let _outer = Context::enter_telemetry_suppressed_scope();
+            assert!(Context::is_current_telemetry_suppressed());
+
+            // Second level. This component is unaware of Suppression,
+            // and just attaches a new context. Since it is from current,
+            // it'll already have suppression enabled.
+            {
+                let _inner = Context::current().with_value(ValueA(1)).attach();
+                assert!(Context::is_current_telemetry_suppressed());
+                assert_eq!(Context::current().get::<ValueA>(), Some(&ValueA(1)));
+            }
+
+            // Another scenario. This component is unaware of Suppression,
+            // and just attaches a new context, not from Current. Since it is
+            // not from current it will not have suppression enabled.
+            {
+                let _inner = Context::new().with_value(ValueA(1)).attach();
+                assert!(!Context::is_current_telemetry_suppressed());
+                assert_eq!(Context::current().get::<ValueA>(), Some(&ValueA(1)));
+            }
+
+            // Still suppressed after inner scope
+            assert!(Context::is_current_telemetry_suppressed());
+        }
+
+        // Back to unsuppressed
+        assert!(!Context::is_current_telemetry_suppressed());
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn test_async_suppression() {
+        async fn nested_operation() {
+            assert!(Context::is_current_telemetry_suppressed());
+
+            let cx_with_additional_value = Context::current().with_value(ValueB(24));
+
+            async {
+                assert_eq!(
+                    Context::current().get::<ValueB>(),
+                    Some(&ValueB(24)),
+                    "Parent value should still be available after adding new value"
+                );
+                assert!(Context::is_current_telemetry_suppressed());
+
+                // Do some async work to simulate real-world scenario
+                sleep(Duration::from_millis(10)).await;
+
+                // Values should still be available after async work
+                assert_eq!(
+                    Context::current().get::<ValueB>(),
+                    Some(&ValueB(24)),
+                    "Parent value should still be available after adding new value"
+                );
+                assert!(Context::is_current_telemetry_suppressed());
+            }
+            .with_context(cx_with_additional_value)
+            .await;
+        }
+
+        // Set up suppressed context, but don't attach it to current
+        let suppressed_parent = Context::new().with_telemetry_suppressed();
+        // Current should not be suppressed as we haven't attached it
+        assert!(!Context::is_current_telemetry_suppressed());
+
+        // Create and run async operation with the suppressed context explicitly propagated
+        nested_operation()
+            .with_context(suppressed_parent.clone())
+            .await;
+
+        // After async operation completes:
+        // Suppression should be active
+        assert!(suppressed_parent.is_telemetry_suppressed());
+
+        // Current should still be not suppressed
+        assert!(!Context::is_current_telemetry_suppressed());
+    }
+}
+
+#[cfg(all(test, feature = "experimental_context_observer"))]
+mod observer_tests {
+    use super::*;
+    use std::cell::{Cell, RefCell};
+    use std::sync::Arc;
+
+    #[derive(Debug, PartialEq)]
+    struct V(u64);
+
+    #[derive(Debug, PartialEq, Clone)]
+    enum Event {
+        Enter { from: Option<u64>, to: Option<u64> },
+        Exit { from: Option<u64>, to: Option<u64> },
+    }
+
+    thread_local! {
+        static EVENTS: RefCell<Vec<Event>> = const { RefCell::new(Vec::new()) };
+    }
+
+    fn value_of(cx: &Context) -> Option<u64> {
+        cx.get::<V>().map(|v| v.0)
+    }
+
+    // When enabled, on each transition it records the event into a thread-local buffer, and on
+    // enter it also installs an observer view on the entered context and bumps the thread-local
+    // `VIEWS_CREATED` counter. See `observer_installs_and_reuses_view`.
+    //
+    // The observer is a process-global singleton, so its callbacks fire for context activity on
+    // *every* thread across the whole test binary once installed. To keep that cheap and isolated,
+    // all of its work is gated behind the per-thread `ENABLE_TEST_OBSERVER` switch: threads that
+    // didn't opt in (via `setup()`) get an inert observer.
+    struct RecordingObserver;
+
+    impl ContextObserver for RecordingObserver {
+        fn on_context_enter(&self, from: &Context, to: &Context) {
+            if !ENABLE_TEST_OBSERVER.with(Cell::get) {
+                return;
+            }
+
+            EVENTS.with(|e| {
+                e.borrow_mut().push(Event::Enter {
+                    from: value_of(from),
+                    to: value_of(to),
+                })
+            });
+        }
+
+        fn on_context_exit(&self, from: &Context, to: &Context) {
+            if !ENABLE_TEST_OBSERVER.with(Cell::get) {
+                return;
+            }
+
+            EVENTS.with(|e| {
+                e.borrow_mut().push(Event::Exit {
+                    from: value_of(from),
+                    to: value_of(to),
+                })
+            });
+        }
+
+        // On context enter, install the observer's view if this context doesn't have one yet, or reuse
+        // the existing one otherwise. The view is the context's `V` value (or 0 for a value-less
+        // context).
+        fn make_view(&self, cx: &Context) -> Option<Arc<dyn ObserverContextView>> {
+            let correlation_id = value_of(cx).unwrap_or(0);
+            VIEWS_CREATED.with(|c| c.set(c.get() + 1));
+            Some(Arc::new(MyView { correlation_id }))
+        }
+    }
+
+    thread_local! {
+        // Master switch for the observer per thread. Enabled for the duration of a test that cares,
+        // and left false everywhere else, so we don't slow down tests unrelated to the observer.
+        // See `setup`.
+        static ENABLE_TEST_OBSERVER: Cell<bool> = const { Cell::new(false) };
+        // Counts how many distinct views the observer created on the current thread.
+        static VIEWS_CREATED: Cell<u64> = const { Cell::new(0) };
+    }
+
+    // Recovers the correlation id stored in a context's observer view, if any.
+    fn view_id(cx: &Context) -> Option<u64> {
+        cx.observer_view()
+            .as_ref()
+            .and_then(|v| v.as_any().downcast_ref::<MyView>())
+            .map(|v| v.correlation_id)
+    }
+
+    // Holds the base context guard and disables the observer on this thread when dropped. The
+    // struct's own `Drop` runs before its fields, so the flag is cleared before the base context is
+    // popped, which is thus not observed (symmetrically to `setup`, which installs the base context
+    // before registering/enabling the observer).
+    struct ObserverTestGuard {
+        _cx: ContextGuard,
+    }
+
+    impl Drop for ObserverTestGuard {
+        fn drop(&mut self) {
+            ENABLE_TEST_OBSERVER.with(|e| e.set(false));
+        }
+    }
+
+    // Enables the observer on this thread, establishes a clean base context, and clears any
+    // previously recorded events, so the assertions below only see transitions this test
+    // triggers. Dropping the returned guard disables the observer again.
+    fn setup_observer() -> ObserverTestGuard {
+        // Idempotent across tests: only the first call installs the observer, but every test
+        // uses the same `RecordingObserver`, so a lost race is harmless.
+        GlobalContextObserver::set(Arc::new(RecordingObserver));
+        ENABLE_TEST_OBSERVER.with(|e| e.set(true));
+        let guard = Context::new().attach();
+        EVENTS.with(|e| e.borrow_mut().clear());
+        ObserverTestGuard { _cx: guard }
+    }
+
+    #[test]
+    fn global_observer_records_enter_and_exit() {
+        let _clean = setup_observer();
+
+        {
+            let _g = Context::current().with_value(V(1)).attach();
+            // Entering fires immediately: from the clean base (no value) to `V(1)`.
+            EVENTS.with(|e| {
+                assert_eq!(
+                    *e.borrow(),
+                    vec![Event::Enter {
+                        from: None,
+                        to: Some(1)
+                    }]
+                )
+            });
+        }
+
+        // Dropping the (context) guard restores the base and fires the matching exit event.
+        EVENTS.with(|e| {
+            assert_eq!(
+                *e.borrow(),
+                vec![
+                    Event::Enter {
+                        from: None,
+                        to: Some(1)
+                    },
+                    Event::Exit {
+                        from: Some(1),
+                        to: None
+                    }
+                ]
+            )
+        });
+    }
+
+    #[test]
+    fn global_observer_records_nested_transitions() {
+        let _clean = setup_observer();
+
+        let g1 = Context::current().with_value(V(1)).attach();
+        let g2 = Context::current().with_value(V(2)).attach();
+        drop(g2);
+        drop(g1);
+
+        EVENTS.with(|e| {
+            assert_eq!(
+                *e.borrow(),
+                vec![
+                    Event::Enter {
+                        from: None,
+                        to: Some(1)
+                    },
+                    Event::Enter {
+                        from: Some(1),
+                        to: Some(2)
+                    },
+                    Event::Exit {
+                        from: Some(2),
+                        to: Some(1)
+                    },
+                    Event::Exit {
+                        from: Some(1),
+                        to: None
+                    },
+                ]
+            )
+        });
+    }
+
+    // An observer view carrying arbitrary data, unrelated to the internal `Context`
+    // representation.
+    struct MyView {
+        correlation_id: u64,
+    }
+
+    impl ObserverContextView for MyView {
+        fn as_any(&self) -> &dyn Any {
+            self
+        }
+    }
+
+    // A realistic use of the observer view: the global observer installs its own view on each
+    // context the first time that context is entered, and reuses it on re-entry. The
+    // thread-local counter checks that exactly one view is created per distinct context.
+    #[test]
+    fn observer_installs_and_reuses_view() {
+        let _clean = setup_observer();
+
+        // Reset the counter for the work below.
+        VIEWS_CREATED.with(|c| c.set(0));
+
+        // Entering two distinct contexts installs a fresh view for each, derived from its value.
+        let g1 = Context::current().with_value(V(1)).attach();
+        assert_eq!(view_id(&Context::current()), Some(1));
+
+        let g2 = Context::current().with_value(V(2)).attach();
+        assert_eq!(view_id(&Context::current()), Some(2));
+
+        assert_eq!(VIEWS_CREATED.with(Cell::get), 2);
+
+        // Re-entering an already-observed context must reuse its view, not create a new one.
+        // `Context::current()` clones the current context, carrying along its already-set view.
+        let observed = Context::current();
+        let g3 = observed.attach();
+
+        assert_eq!(view_id(&Context::current()), Some(2));
+        assert_eq!(
+            VIEWS_CREATED.with(Cell::get),
+            2,
+            "re-entering an observed context must not create a new view"
+        );
+
+        drop(g3);
+        drop(g2);
+        drop(g1);
+    }
+}
