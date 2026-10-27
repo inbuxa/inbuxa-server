@@ -26,11 +26,14 @@ use common::{
     ipc::CacheInvalidation,
     storage::encryption::{EncryptionMethod, parse_public_key},
 };
+use compact_str::{CompactString, format_compact};
 use directory::core::secret::{SecretVerificationResult, hash_secret, verify_mfa_secret_hash};
 use jmap_proto::{error::set::SetError, request::MaybeInvalid, types::state::State};
 use jmap_tools::{JsonPointer, JsonPointerItem, Key, Map, Value};
 use registry::{
-    jmap::{IntoValue, JsonPointerPatch, MaybeUnpatched, RegistryJsonPatch, RegistryValue},
+    jmap::{
+        IntoValue, JsonPointerPatch, MaybeUnpatched, RegistryJsonPatch, RegistryValue, ValueOptions,
+    },
     schema::{
         enums::{CredentialType, StorageQuota},
         prelude::{MASKED_PASSWORD, Object, ObjectInner, ObjectType, Property},
@@ -67,7 +70,9 @@ pub(crate) async fn account_set(
         return Ok(set);
     };
     let revision = object.revision;
-    let old_account = if let ObjectInner::Account(Account::User(account)) = object.inner {
+    let old_account = if let ObjectInner::Account(account) = object.inner
+        && let Account::User(account) = *account
+    {
         account
     } else {
         set.fail_all(SetError::not_found());
@@ -144,7 +149,7 @@ pub(crate) async fn account_set(
                         current_secret: None,
                         otp_auth: OtpAuth {
                             otp_code: None,
-                            otp_url: if old_credential.otp_auth.is_some() {
+                            otp_url: if old_credential.otp_url.is_some() {
                                 Some(MASKED_PASSWORD.to_string())
                             } else {
                                 None
@@ -186,7 +191,7 @@ pub(crate) async fn account_set(
                     let is_empty_otp = account_pass.otp_auth.otp_url.as_deref()
                         == Some(MASKED_PASSWORD)
                         || (account_pass.otp_auth.otp_url.is_none()
-                            && old_credential.otp_auth.is_none());
+                            && old_credential.otp_url.is_none());
                     if !is_empty_secret || !is_empty_otp {
                         let user_provided_secret = if !is_empty_secret {
                             account_pass.secret.as_ref().unwrap()
@@ -194,12 +199,12 @@ pub(crate) async fn account_set(
                             old_credential.secret.as_str()
                         };
                         if is_empty_otp {
-                            account_pass.otp_auth.otp_url = old_credential.otp_auth.clone();
+                            account_pass.otp_auth.otp_url = old_credential.otp_url.clone();
                         }
 
                         // Password changes are not supported when using external directories
                         if (user_provided_secret != old_credential.secret
-                            || account_pass.otp_auth.otp_url != old_credential.otp_auth)
+                            || account_pass.otp_auth.otp_url != old_credential.otp_url)
                             && set
                                 .server
                                 .domain_by_id(account.domain_id.document_id())
@@ -217,7 +222,7 @@ pub(crate) async fn account_set(
                         }
 
                         if user_provided_secret != old_credential.secret
-                            || account_pass.otp_auth.otp_url != old_credential.otp_auth
+                            || account_pass.otp_auth.otp_url != old_credential.otp_url
                         {
                             if old_credential.secret.is_empty() {
                                 set.response.not_updated.append(
@@ -232,7 +237,8 @@ pub(crate) async fn account_set(
                             let current_otp_code = account_pass.otp_auth.otp_code;
                             if let Some(current_secret) = account_pass.current_secret {
                                 match verify_mfa_secret_hash(
-                                    old_credential.otp_auth.as_deref(),
+                                    &set.server.inner.data.password_verifier,
+                                    old_credential.otp_url.as_deref(),
                                     current_otp_code.as_deref(),
                                     &old_credential.secret,
                                     current_secret.as_ref(),
@@ -259,7 +265,7 @@ pub(crate) async fn account_set(
                                                 .ctx(trc::Key::RemoteIp, set.remote_ip)
                                                 .ctx(
                                                     trc::Key::AccountName,
-                                                    account.name().to_string(),
+                                                    CompactString::from(account.name()),
                                                 ));
                                         } else {
                                             set.response.not_updated.append(
@@ -310,6 +316,7 @@ pub(crate) async fn account_set(
                                     }
 
                                     old_credential.secret = hash_secret(
+                                        &set.server.inner.data.password_verifier,
                                         set.server.core.network.security.password_hash_algorithm,
                                         user_provided_secret.as_bytes().to_vec(),
                                     )
@@ -317,8 +324,8 @@ pub(crate) async fn account_set(
                                     .caused_by(trc::location!())?;
                                 }
 
-                                if account_pass.otp_auth.otp_url != old_credential.otp_auth {
-                                    old_credential.otp_auth = account_pass.otp_auth.otp_url;
+                                if account_pass.otp_auth.otp_url != old_credential.otp_url {
+                                    old_credential.otp_url = account_pass.otp_auth.otp_url;
                                 }
                             } else {
                                 set.response.not_updated.append(
@@ -435,6 +442,7 @@ pub(crate) async fn account_set(
                             // Generate App password and hash secret
                             let app_pass = AppPassword::new(last_credential_id as u32);
                             credential.secret = hash_secret(
+                                &set.server.inner.data.password_verifier,
                                 set.server.core.network.security.password_hash_algorithm,
                                 app_pass.secret.to_vec(),
                             )
@@ -488,6 +496,7 @@ pub(crate) async fn account_set(
                             // Generate API key and hash secret
                             let api_key = ApiKey::new(set.account_id, last_credential_id as u32);
                             credential.secret = hash_secret(
+                                &set.server.inner.data.password_verifier,
                                 set.server.core.network.security.password_hash_algorithm,
                                 api_key.secret.to_vec(),
                             )
@@ -641,13 +650,15 @@ pub(crate) async fn account_set(
         }
         if account.credentials != old_account.credentials {
             cache_invalidator.invalidate(CacheInvalidation::AccessToken(set.account_id));
+            cache_invalidator.process_credentials_update(
+                set.account_id,
+                &old_account.credentials,
+                &account.credentials,
+            );
         }
 
-        let object = Object::new(ObjectInner::Account(Account::User(account)));
-        let old_object = Object::with_revision(
-            ObjectInner::Account(Account::User(old_account.clone())),
-            revision,
-        );
+        let object = Object::new(Account::User(account).into());
+        let old_object = Object::with_revision(Account::User(old_account.clone()).into(), revision);
 
         match set
             .server
@@ -708,6 +719,9 @@ pub(crate) async fn account_get(
     else {
         return Ok(get.not_found_any());
     };
+    let value_options = ValueOptions {
+        include_secrets: get.server.core.network.include_secrets,
+    };
 
     match get.object_type {
         ObjectType::AccountSettings => {
@@ -743,16 +757,17 @@ pub(crate) async fn account_get(
                 .take()
                 .unwrap_or_else(|| vec![Id::singleton()])
                 .into_iter();
+            let mut password = account.credentials.into_iter().find_map(|pass| {
+                if let Credential::Password(pass) = pass {
+                    Some(pass)
+                } else {
+                    None
+                }
+            });
 
             for id in ids.by_ref() {
                 if id == Id::singleton()
-                    && let Some(pass) = account.credentials.iter().find_map(|pass| {
-                        if let Credential::Password(pass) = pass {
-                            Some(pass)
-                        } else {
-                            None
-                        }
-                    })
+                    && let Some(pass) = password.take()
                 {
                     get.insert(
                         id,
@@ -760,15 +775,11 @@ pub(crate) async fn account_get(
                             current_secret: None,
                             otp_auth: OtpAuth {
                                 otp_code: None,
-                                otp_url: if pass.otp_auth.is_some() {
-                                    MASKED_PASSWORD.to_string().into()
-                                } else {
-                                    None
-                                },
+                                otp_url: pass.otp_url,
                             },
-                            secret: MASKED_PASSWORD.to_string().into(),
+                            secret: pass.secret.into(),
                         }
-                        .into_value(),
+                        .into_value_with(value_options),
                     );
                     break;
                 } else {
@@ -796,7 +807,7 @@ pub(crate) async fn account_get(
                         if ids.contains(&pass.credential_id) =>
                     {
                         let id = pass.credential_id;
-                        let mut credential = pass.into_value();
+                        let mut credential = pass.into_value_with(value_options);
                         credential
                             .as_object_mut()
                             .unwrap()
@@ -902,10 +913,12 @@ pub(crate) async fn credential_query(
             }
         }
         property => {
-            return Err(trc::JmapEvent::UnsupportedSort.into_err().details(format!(
-                "Property {} is not supported for sorting",
-                property
-            )));
+            return Err(trc::JmapEvent::UnsupportedSort
+                .into_err()
+                .details(format_compact!(
+                    "Property {} is not supported for sorting",
+                    property
+                )));
         }
     }
 

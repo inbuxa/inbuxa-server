@@ -4,21 +4,25 @@
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
  */
 
-use super::{ImapContext, ToModSeq};
-use crate::{
-    core::{ImapUidToId, MailboxId, SelectedMailbox, Session, SessionData},
-    spawn_op,
+use super::{ImapContext, IntoImapError, ToModSeq};
+use crate::core::{MailboxId, Row, SelectedMailbox, Session, SessionData};
+use common::{
+    MAX_RECEIVED_AT, auth::BuildAccessToken, ipc::PushNotification, network::SessionStream,
 };
-use common::{auth::BuildAccessToken, ipc::PushNotification, network::SessionStream};
-use email::message::ingest::{EmailIngest, IngestEmail, IngestSource};
+use email::message::ingest::{
+    IngestEmail, IngestSource, IngestedEmail,
+    group::{IngestGroup, ThreadKey},
+    recheck::ThreadRecheck,
+};
 use imap_proto::{
     Command, ResponseCode, StatusResponse,
     protocol::{append::Arguments, select::HighestModSeq},
     receiver::Request,
 };
 use mail_parser::MessageParser;
-use registry::schema::enums::Permission;
+use registry::schema::enums::{Permission, StorageQuota};
 use std::{sync::Arc, time::Instant};
+use tokio::sync::OwnedSemaphorePermit;
 use types::{
     acl::Acl,
     keyword::Keyword,
@@ -26,7 +30,11 @@ use types::{
 };
 
 impl<T: SessionStream> Session<T> {
-    pub async fn handle_append(&mut self, request: Request<Command>) -> trc::Result<()> {
+    pub async fn handle_append(
+        &mut self,
+        request: Request<Command>,
+        _permit: Option<OwnedSemaphorePermit>,
+    ) -> trc::Result<()> {
         // Validate access
         self.assert_has_permission(Permission::ImapAppend)?;
 
@@ -51,6 +59,7 @@ impl<T: SessionStream> Session<T> {
         }
 
         // Refresh mailboxes
+        data.expire_folders_of(&arguments.mailbox_name);
         data.synchronize_mailboxes(false)
             .await
             .imap_ctx(&arguments.tag, trc::location!())?;
@@ -66,32 +75,48 @@ impl<T: SessionStream> Session<T> {
                 .id(arguments.tag));
         };
         let is_qresync = self.is_qresync;
+        let use_vanished = self.is_qresync || self.is_uidonly;
 
-        spawn_op!(data, {
-            let response = data
-                .append_messages(arguments, selected_mailbox, mailbox, is_qresync, op_start)
-                .await?
-                .into_bytes();
+        let mut recheck = ThreadRecheck::default();
+        let result = match data
+            .append_messages(
+                arguments,
+                selected_mailbox,
+                mailbox,
+                is_qresync,
+                use_vanished,
+                op_start,
+                &mut recheck,
+            )
+            .await
+        {
+            Ok(response) => data.write_bytes(response.into_bytes()).await,
+            Err(err) => Err(err),
+        };
 
-            data.write_bytes(response).await
-        })
+        recheck.finish(&data.server, data.session_id).await;
+
+        result
     }
 }
 
 impl<T: SessionStream> SessionData<T> {
+    #[allow(clippy::too_many_arguments)]
     async fn append_messages(
         &self,
         arguments: Arguments,
         selected_mailbox: Option<Arc<SelectedMailbox>>,
         mailbox: MailboxId,
         is_qresync: bool,
+        use_vanished: bool,
         op_start: Instant,
+        recheck: &mut ThreadRecheck,
     ) -> trc::Result<StatusResponse> {
         // Verify ACLs
         let account_id = mailbox.account_id;
         let mailbox_id = mailbox.mailbox_id;
         if !self
-            .check_mailbox_acl(account_id, mailbox_id, Acl::AddItems)
+            .check_mailbox_acl(None, account_id, mailbox_id, Acl::AddItems)
             .await
             .imap_ctx(&arguments.tag, trc::location!())?
         {
@@ -117,50 +142,115 @@ impl<T: SessionStream> SessionData<T> {
                 .build()
         };
 
+        // RFC 9738 makes APPEND atomic, so the whole batch must fit in the email quota
+        if arguments.messages.len() > 1 {
+            let account = self
+                .server
+                .account(account_id)
+                .await
+                .imap_ctx(&arguments.tag, trc::location!())?;
+            if self
+                .server
+                .object_quota_limit(&account, StorageQuota::MaxEmails)
+                .is_some()
+            {
+                let used = self
+                    .server
+                    .object_count(account_id, StorageQuota::MaxEmails)
+                    .await
+                    .imap_ctx(&arguments.tag, trc::location!())?;
+                self.server
+                    .assert_object_quota(
+                        &account,
+                        StorageQuota::MaxEmails,
+                        arguments.messages.len(),
+                        || used,
+                    )
+                    .map_err(|err| {
+                        err.details("Quota exceeded.")
+                            .code(ResponseCode::OverQuota)
+                            .id(arguments.tag.clone())
+                    })?;
+            }
+        }
+
         // Append messages
         let mut response = StatusResponse::completed(Command::Append);
-        let mut created_ids = Vec::with_capacity(arguments.messages.len());
+        let mut created = Vec::with_capacity(arguments.messages.len());
         let mut last_change_id = None;
+        let limits = &self.server.core.email.limits;
+        let grouping = arguments.messages.len() > 1;
+        let mut group = IngestGroup::with_max_emails(arguments.messages.len());
         for message in arguments.messages {
-            match self
-                .server
-                .email_ingest(IngestEmail {
-                    raw_message: &message.message,
-                    message: MessageParser::new().parse(&message.message),
-                    blob_hash: None,
-                    access_token: &access_token,
-                    mailbox_ids: vec![mailbox_id],
-                    keywords: message.flags.into_iter().map(Keyword::from).collect(),
-                    received_at: message.received_at.map(|d| d as u64),
-                    source: IngestSource::Imap {
-                        train_classifier: true,
-                    },
-                    session_id: self.session_id,
-                })
-                .await
+            let parsed = MessageParser::new().parse(&message.message);
+            if let Some(parsed) = &parsed
+                && let Err(err) = limits.validate_header_section(parsed)
             {
-                Ok(email) => {
-                    created_ids.push(ImapUidToId {
-                        uid: email.imap_uids[0],
-                        id: email.document_id,
-                    });
-                    last_change_id = Some(email.change_id);
-                }
-                Err(err) => {
-                    return Err(
-                        if err.matches(trc::EventType::Limit(trc::LimitEvent::Quota)) {
-                            err.details("Disk quota exceeded.")
-                                .code(ResponseCode::OverQuota)
-                        } else if err.matches(trc::EventType::Limit(trc::LimitEvent::TenantQuota)) {
-                            err.details("Organization disk quota exceeded.")
-                                .code(ResponseCode::OverQuota)
-                        } else {
-                            err
-                        }
-                        .id(arguments.tag),
-                    );
+                return Err(err.into_imap_error().id(arguments.tag));
+            }
+            let keywords = message
+                .flags
+                .into_iter()
+                .map(Keyword::from)
+                .collect::<Vec<_>>();
+            if let Err(err) = limits.validate_email(1, &keywords) {
+                return Err(err.into_imap_error().id(arguments.tag));
+            }
+
+            let received_at = message
+                .received_at
+                .map(|received_at| received_at.clamp(0, MAX_RECEIVED_AT as i64) as u64);
+
+            let key = match &parsed {
+                Some(parsed) if grouping => ThreadKey::new(parsed),
+                _ => ThreadKey::default(),
+            };
+            if group.must_flush_before(message.message.len()) {
+                match group.flush(&self.server).await {
+                    Ok(emails) => appended(
+                        emails,
+                        account_id,
+                        recheck,
+                        &mut created,
+                        &mut last_change_id,
+                    ),
+                    Err(err) => return Err(append_error(err).id(arguments.tag)),
                 }
             }
+
+            if let Err(err) = group
+                .ingest(
+                    &self.server,
+                    IngestEmail {
+                        raw_message: &message.message,
+                        message: parsed,
+                        blob_hash: None,
+                        access_token: &access_token,
+                        mailbox_ids: vec![mailbox_id],
+                        keywords,
+                        received_at,
+                        source: IngestSource::Imap {
+                            train_classifier: true,
+                        },
+                        metadata: None,
+                        session_id: self.session_id,
+                    },
+                    key,
+                )
+                .await
+            {
+                return Err(append_error(err).id(arguments.tag));
+            }
+        }
+        match group.flush(&self.server).await {
+            Ok(emails) => appended(
+                emails,
+                account_id,
+                recheck,
+                &mut created,
+                &mut last_change_id,
+            ),
+            Err(err) => return Err(append_error(err).id(arguments.tag)),
         }
 
         // Broadcast changes
@@ -183,38 +273,72 @@ impl<T: SessionStream> SessionData<T> {
             MailboxName = arguments.mailbox_name.clone(),
             AccountId = account_id,
             MailboxId = mailbox_id,
-            DocumentId = created_ids
+            DocumentId = created
                 .iter()
-                .map(|r| trc::Value::from(r.id))
+                .map(|row| trc::Value::from(row.id))
                 .collect::<Vec<_>>(),
             Elapsed = op_start.elapsed()
         );
 
-        if !created_ids.is_empty() {
-            let uids = created_ids.iter().map(|id| id.uid).collect();
-            match selected_mailbox {
-                Some(selected_mailbox) if selected_mailbox.id == mailbox => {
-                    // Write updated modseq
-                    if is_qresync {
-                        self.write_bytes(
-                            HighestModSeq::new(last_change_id.unwrap_or_default().to_modseq())
-                                .into_bytes(),
-                        )
-                        .await?;
-                    }
-
-                    selected_mailbox.append_messages(created_ids, last_change_id);
+        if !created.is_empty() {
+            let uids = created.iter().map(|row| row.uid).collect();
+            if let Some(selected_mailbox) = selected_mailbox
+                && selected_mailbox.id == mailbox
+            {
+                // Write updated modseq
+                if is_qresync {
+                    self.write_bytes(
+                        HighestModSeq::new(last_change_id.unwrap_or_default().to_modseq())
+                            .into_bytes(),
+                    )
+                    .await?;
                 }
-                _ => {}
-            };
-            let uid_validity = self
-                .mailbox_state(&mailbox)
-                .map(|m| m.uid_validity as u32)
-                .unwrap_or_default();
+
+                selected_mailbox.view.lock().append_local(created);
+
+                // RFC 9051 6.3.12 requires an untagged EXISTS when the mailbox
+                // being appended to is the one this connection has selected
+                self.flush_view(&selected_mailbox, use_vanished)
+                    .await
+                    .imap_ctx(&arguments.tag, trc::location!())?;
+            }
+            let uid_validity = self.uid_validity(&mailbox);
 
             response = response.with_code(ResponseCode::AppendUid { uid_validity, uids });
         }
 
         Ok(response.with_tag(arguments.tag))
+    }
+}
+
+fn appended(
+    emails: Vec<IngestedEmail>,
+    account_id: u32,
+    recheck: &mut ThreadRecheck,
+    created: &mut Vec<Row>,
+    last_change_id: &mut Option<u64>,
+) {
+    for mut email in emails {
+        recheck.push(account_id, &mut email);
+        *last_change_id = Some(email.change_id);
+        if let Some(&uid) = email.imap_uids.first() {
+            created.push(Row {
+                uid,
+                id: email.document_id,
+            });
+        }
+    }
+}
+
+fn append_error(err: trc::Error) -> trc::Error {
+    #[cfg(not(feature = "enterprise"))]
+    let is_tenant_quota = false;
+    if err.matches(trc::EventType::Limit(trc::LimitEvent::Quota)) {
+        err.details("Quota exceeded.").code(ResponseCode::OverQuota)
+    } else if is_tenant_quota {
+        err.details("Organization disk quota exceeded.")
+            .code(ResponseCode::OverQuota)
+    } else {
+        err
     }
 }

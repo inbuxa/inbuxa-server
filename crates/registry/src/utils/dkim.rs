@@ -5,10 +5,17 @@
  */
 
 use crate::schema::{
-    enums::{DkimRotationStage, DkimSignatureType},
+    enums::{DkimRotationStage, DkimSignatureType, DnsRecordType},
     prelude::{DkimSignature, UTCDateTime},
+    structs::DnsManagement,
 };
 use types::id::Id;
+
+impl DnsManagement {
+    pub fn publishes(&self, record: DnsRecordType) -> bool {
+        matches!(self, DnsManagement::Automatic(props) if props.publish_records.contains(&record))
+    }
+}
 
 impl DkimSignature {
     pub fn rotation_due(&self) -> Option<DkimRotationStage> {
@@ -16,7 +23,10 @@ impl DkimSignature {
             DkimSignature::Dkim1Ed25519Sha256(sign) => (sign.stage, sign.next_transition_at),
             DkimSignature::Dkim1RsaSha256(sign) => (sign.stage, sign.next_transition_at),
             DkimSignature::Dkim2Ed25519Sha256(sign) => (sign.stage, sign.next_transition_at),
-            DkimSignature::Dkim2RsaSha256(sign) => (sign.stage, sign.next_transition_at),
+            DkimSignature::Dkim2RsaSha256(sign)
+            | DkimSignature::Dkim2MlDsa44Ed25519Sha512(sign) => {
+                (sign.stage, sign.next_transition_at)
+            }
         };
         next_transition.and_then(|next_transition| {
             if next_transition <= UTCDateTime::now() {
@@ -32,7 +42,8 @@ impl DkimSignature {
             DkimSignature::Dkim1Ed25519Sha256(sign) => sign.next_transition_at,
             DkimSignature::Dkim1RsaSha256(sign) => sign.next_transition_at,
             DkimSignature::Dkim2Ed25519Sha256(sign) => sign.next_transition_at,
-            DkimSignature::Dkim2RsaSha256(sign) => sign.next_transition_at,
+            DkimSignature::Dkim2RsaSha256(sign)
+            | DkimSignature::Dkim2MlDsa44Ed25519Sha512(sign) => sign.next_transition_at,
         }
     }
 
@@ -45,7 +56,10 @@ impl DkimSignature {
             DkimSignature::Dkim2Ed25519Sha256(sign) => {
                 sign.next_transition_at = Some(next_transition)
             }
-            DkimSignature::Dkim2RsaSha256(sign) => sign.next_transition_at = Some(next_transition),
+            DkimSignature::Dkim2RsaSha256(sign)
+            | DkimSignature::Dkim2MlDsa44Ed25519Sha512(sign) => {
+                sign.next_transition_at = Some(next_transition)
+            }
         }
     }
 
@@ -54,7 +68,8 @@ impl DkimSignature {
             DkimSignature::Dkim1Ed25519Sha256(sign) => sign.stage,
             DkimSignature::Dkim1RsaSha256(sign) => sign.stage,
             DkimSignature::Dkim2Ed25519Sha256(sign) => sign.stage,
-            DkimSignature::Dkim2RsaSha256(sign) => sign.stage,
+            DkimSignature::Dkim2RsaSha256(sign)
+            | DkimSignature::Dkim2MlDsa44Ed25519Sha512(sign) => sign.stage,
         }
     }
 
@@ -63,7 +78,8 @@ impl DkimSignature {
             DkimSignature::Dkim1Ed25519Sha256(sign) => sign.stage = stage,
             DkimSignature::Dkim1RsaSha256(sign) => sign.stage = stage,
             DkimSignature::Dkim2Ed25519Sha256(sign) => sign.stage = stage,
-            DkimSignature::Dkim2RsaSha256(sign) => sign.stage = stage,
+            DkimSignature::Dkim2RsaSha256(sign)
+            | DkimSignature::Dkim2MlDsa44Ed25519Sha512(sign) => sign.stage = stage,
         }
     }
 
@@ -72,7 +88,10 @@ impl DkimSignature {
             DkimSignature::Dkim1Ed25519Sha256(sign) => sign.stage == DkimRotationStage::Active,
             DkimSignature::Dkim1RsaSha256(sign) => sign.stage == DkimRotationStage::Active,
             DkimSignature::Dkim2Ed25519Sha256(sign) => sign.stage == DkimRotationStage::Active,
-            DkimSignature::Dkim2RsaSha256(sign) => sign.stage == DkimRotationStage::Active,
+            DkimSignature::Dkim2RsaSha256(sign)
+            | DkimSignature::Dkim2MlDsa44Ed25519Sha512(sign) => {
+                sign.stage == DkimRotationStage::Active
+            }
         }
     }
 
@@ -85,7 +104,8 @@ impl DkimSignature {
             DkimSignature::Dkim1Ed25519Sha256(sign) => &sign.selector,
             DkimSignature::Dkim1RsaSha256(sign) => &sign.selector,
             DkimSignature::Dkim2Ed25519Sha256(sign) => &sign.selector,
-            DkimSignature::Dkim2RsaSha256(sign) => &sign.selector,
+            DkimSignature::Dkim2RsaSha256(sign)
+            | DkimSignature::Dkim2MlDsa44Ed25519Sha512(sign) => &sign.selector,
         }
     }
 
@@ -94,7 +114,8 @@ impl DkimSignature {
             DkimSignature::Dkim1Ed25519Sha256(sign) => sign.domain_id,
             DkimSignature::Dkim1RsaSha256(sign) => sign.domain_id,
             DkimSignature::Dkim2Ed25519Sha256(sign) => sign.domain_id,
-            DkimSignature::Dkim2RsaSha256(sign) => sign.domain_id,
+            DkimSignature::Dkim2RsaSha256(sign)
+            | DkimSignature::Dkim2MlDsa44Ed25519Sha512(sign) => sign.domain_id,
         }
     }
 }
@@ -104,17 +125,27 @@ impl DkimSignatureType {
         match self {
             Self::Dkim1Ed25519Sha256 | Self::Dkim2Ed25519Sha256 => "ed25519",
             Self::Dkim1RsaSha256 | Self::Dkim2RsaSha256 => "rsa",
+            Self::Dkim2MlDsa44Ed25519Sha512 => "mldsa44-ed25519",
         }
     }
 
     pub const fn hash(self) -> &'static str {
-        "sha256"
+        match self {
+            Self::Dkim2MlDsa44Ed25519Sha512 => "sha512",
+            Self::Dkim1Ed25519Sha256
+            | Self::Dkim1RsaSha256
+            | Self::Dkim2Ed25519Sha256
+            | Self::Dkim2RsaSha256 => "sha256",
+        }
     }
 
     pub const fn version(self) -> &'static str {
         match self {
             Self::Dkim1Ed25519Sha256 | Self::Dkim1RsaSha256 => "1",
-            Self::Dkim2Ed25519Sha256 | Self::Dkim2RsaSha256 => "2",
+            Self::Dkim2Ed25519Sha256 | Self::Dkim2RsaSha256 | Self::Dkim2MlDsa44Ed25519Sha512 => {
+                "2"
+            }
         }
     }
 }
+

@@ -4,19 +4,19 @@
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
  */
 
-use std::{iter::Peekable, sync::Arc, vec::IntoIter};
-
-use common::{
-    KV_RATE_LIMIT_IMAP,
-    network::{SessionResult, SessionStream},
-};
+use super::{MAX_CONCURRENT_OPS, SelectedAccess, SelectedMailbox, Session, SessionData, State};
+use crate::op::ImapContext;
+use common::network::{SessionResult, SessionStream};
 use imap_proto::{
     Command, ResponseCode, ResponseType, StatusResponse,
     receiver::{self, Request},
 };
+use std::{iter::Peekable, sync::Arc, vec::IntoIter};
+use tokio::sync::OwnedSemaphorePermit;
 use trc::SecurityEvent;
 
-use super::{SelectedMailbox, Session, SessionData, State};
+const UNAUTHENTICATED_LITERAL_BYE: &[u8] =
+    b"* BYE [TOOBIG] Literal exceeds the maximum size allowed before authentication.\r\n";
 
 impl<T: SessionStream> Session<T> {
     pub async fn ingest(&mut self, bytes: &[u8]) -> SessionResult {
@@ -30,22 +30,18 @@ impl<T: SessionStream> Session<T> {
         let mut bytes = bytes.iter();
         let mut requests = Vec::with_capacity(2);
         let mut needs_literal = None;
-        let mut has_expunge = false;
 
         loop {
             match self.receiver.parse(&mut bytes) {
-                Ok(request) => match self.is_allowed(request).await {
-                    Ok(request) => {
-                        has_expunge |=
-                            matches!(request.command, Command::Expunge(_) | Command::Close);
-                        requests.push(request);
-                    }
-                    Err(err) => {
-                        if !self.write_error(err).await {
+                Ok(request) => {
+                    if let Some(failure) = self.state.take_sasl_failure() {
+                        if !self.write_error(failure).await {
                             return SessionResult::Close;
                         }
+                    } else {
+                        requests.push(request);
                     }
-                },
+                }
                 Err(receiver::Error::NeedsMoreData) => {
                     break;
                 }
@@ -54,6 +50,20 @@ impl<T: SessionStream> Session<T> {
                     break;
                 }
                 Err(receiver::Error::Error { response }) => {
+                    let is_discarding = self.receiver.is_discarding();
+                    if is_discarding && matches!(self.state, State::NotAuthenticated { .. }) {
+                        trc::error!(response.span_id(self.session_id));
+                        self.write_bytes(UNAUTHENTICATED_LITERAL_BYE).await.ok();
+                        return SessionResult::Close;
+                    }
+
+                    if let Some(failure) = self.state.take_sasl_failure() {
+                        if !self.write_error(failure).await {
+                            return SessionResult::Close;
+                        }
+                        break;
+                    }
+
                     // Check for port scanners
                     if matches!(
                         (&self.state, response.key(trc::Key::Code)),
@@ -86,56 +96,83 @@ impl<T: SessionStream> Session<T> {
                     if !self.write_error(response).await {
                         return SessionResult::Close;
                     }
-                    break;
+                    if !is_discarding {
+                        break;
+                    }
                 }
             }
         }
 
         let mut requests = requests.into_iter().peekable();
         while let Some(request) = requests.next() {
+            let request = match self.is_allowed(request).await {
+                Ok(request) => request,
+                Err(err) => {
+                    if !self.write_error(err).await {
+                        return SessionResult::Close;
+                    }
+                    continue;
+                }
+            };
+            if let Err(err) = self.assert_selected_readable(&request).await {
+                if !self.write_error(err).await {
+                    return SessionResult::Close;
+                }
+                continue;
+            }
+
             let result = match request.command {
                 Command::List | Command::Lsub => self
-                    .handle_list(request)
+                    .handle_list(request, self.acquire_read_permit().await)
                     .await
                     .map(|_| SessionResult::Continue),
                 Command::Select | Command::Examine => self
-                    .handle_select(request)
+                    .handle_select(request, self.acquire_write_permit().await)
                     .await
                     .map(|_| SessionResult::Continue),
                 Command::Create => self
-                    .handle_create(group_requests(&mut requests, vec![request]))
+                    .handle_create(
+                        group_requests(&mut requests, vec![request]),
+                        self.acquire_write_permit().await,
+                    )
                     .await
                     .map(|_| SessionResult::Continue),
                 Command::Delete => self
-                    .handle_delete(group_requests(&mut requests, vec![request]))
+                    .handle_delete(
+                        group_requests(&mut requests, vec![request]),
+                        self.acquire_write_permit().await,
+                    )
                     .await
                     .map(|_| SessionResult::Continue),
                 Command::Rename => self
-                    .handle_rename(request)
+                    .handle_rename(request, self.acquire_write_permit().await)
                     .await
                     .map(|_| SessionResult::Continue),
                 Command::Status => self
-                    .handle_status(group_requests(&mut requests, vec![request]))
+                    .handle_status(
+                        group_requests(&mut requests, vec![request]),
+                        self.acquire_read_permit().await,
+                    )
                     .await
                     .map(|_| SessionResult::Continue),
                 Command::Append => self
-                    .handle_append(request)
+                    .handle_append(request, self.acquire_write_permit().await)
                     .await
                     .map(|_| SessionResult::Continue),
                 Command::Close => self
-                    .handle_close(request)
+                    .handle_close(request, self.acquire_write_permit().await)
                     .await
                     .map(|_| SessionResult::Continue),
                 Command::Unselect => self
-                    .handle_unselect(request)
+                    .handle_unselect(request, self.acquire_write_permit().await)
                     .await
                     .map(|_| SessionResult::Continue),
                 Command::Expunge(is_uid) => self
-                    .handle_expunge(request, is_uid)
+                    .handle_expunge(request, is_uid, self.acquire_write_permit().await)
                     .await
                     .map(|_| SessionResult::Continue),
                 Command::Search(is_uid) => self
-                    .handle_search(request, false, is_uid)
+                    .handle_search(request, false, is_uid, self.acquire_read_permit().await)
                     .await
                     .map(|_| SessionResult::Continue),
                 Command::Fetch(_) => self
@@ -143,45 +180,47 @@ impl<T: SessionStream> Session<T> {
                     .await
                     .map(|_| SessionResult::Continue),
                 Command::Store(is_uid) => self
-                    .handle_store(request, is_uid, !has_expunge)
+                    .handle_store(request, is_uid, self.acquire_write_permit().await)
                     .await
                     .map(|_| SessionResult::Continue),
                 Command::Copy(is_uid) => self
-                    .handle_copy_move(request, false, is_uid)
+                    .handle_copy_move(request, false, is_uid, self.acquire_write_permit().await)
                     .await
                     .map(|_| SessionResult::Continue),
                 Command::Move(is_uid) => self
-                    .handle_copy_move(request, true, is_uid)
+                    .handle_copy_move(request, true, is_uid, self.acquire_write_permit().await)
                     .await
                     .map(|_| SessionResult::Continue),
                 Command::Sort(is_uid) => self
-                    .handle_search(request, true, is_uid)
+                    .handle_search(request, true, is_uid, self.acquire_read_permit().await)
                     .await
                     .map(|_| SessionResult::Continue),
                 Command::Thread(is_uid) => self
-                    .handle_thread(request, is_uid)
+                    .handle_thread(request, is_uid, self.acquire_read_permit().await)
                     .await
                     .map(|_| SessionResult::Continue),
                 Command::Idle => self
-                    .handle_idle(request)
+                    .handle_idle(request, self.acquire_write_permit().await)
                     .await
                     .map(|_| SessionResult::Continue),
                 Command::Subscribe => self
-                    .handle_subscribe(request, true)
+                    .handle_subscribe(request, true, self.acquire_write_permit().await)
                     .await
                     .map(|_| SessionResult::Continue),
                 Command::Unsubscribe => self
-                    .handle_subscribe(request, false)
+                    .handle_subscribe(request, false, self.acquire_write_permit().await)
                     .await
                     .map(|_| SessionResult::Continue),
                 Command::Namespace => self
                     .handle_namespace(request)
                     .await
                     .map(|_| SessionResult::Continue),
-                Command::Authenticate => Box::pin(self.handle_authenticate(request))
+                Command::Authenticate => self
+                    .handle_authenticate(request)
                     .await
                     .map(|_| SessionResult::Continue),
-                Command::Login => Box::pin(self.handle_login(request))
+                Command::Login => self
+                    .handle_login(request)
                     .await
                     .map(|_| SessionResult::Continue),
                 Command::Capability => self
@@ -201,11 +240,11 @@ impl<T: SessionStream> Session<T> {
                     .await
                     .map(|_| SessionResult::UpgradeTls),
                 Command::Noop => self
-                    .handle_noop(request)
+                    .handle_noop(request, self.acquire_write_permit().await)
                     .await
                     .map(|_| SessionResult::Continue),
                 Command::Check => self
-                    .handle_noop(request)
+                    .handle_noop(request, self.acquire_write_permit().await)
                     .await
                     .map(|_| SessionResult::Continue),
                 Command::Logout => self
@@ -213,15 +252,15 @@ impl<T: SessionStream> Session<T> {
                     .await
                     .map(|_| SessionResult::Close),
                 Command::SetAcl => self
-                    .handle_set_acl(request)
+                    .handle_set_acl(request, self.acquire_write_permit().await)
                     .await
                     .map(|_| SessionResult::Continue),
                 Command::DeleteAcl => self
-                    .handle_set_acl(request)
+                    .handle_set_acl(request, self.acquire_write_permit().await)
                     .await
                     .map(|_| SessionResult::Continue),
                 Command::GetAcl => self
-                    .handle_get_acl(request)
+                    .handle_get_acl(request, self.acquire_read_permit().await)
                     .await
                     .map(|_| SessionResult::Continue),
                 Command::ListRights => self
@@ -229,19 +268,19 @@ impl<T: SessionStream> Session<T> {
                     .await
                     .map(|_| SessionResult::Continue),
                 Command::MyRights => self
-                    .handle_my_rights(request)
+                    .handle_my_rights(request, self.acquire_read_permit().await)
                     .await
                     .map(|_| SessionResult::Continue),
                 Command::GetQuota => self
-                    .handle_get_quota(request)
+                    .handle_get_quota(request, self.acquire_read_permit().await)
                     .await
                     .map(|_| SessionResult::Continue),
                 Command::GetQuotaRoot => self
-                    .handle_get_quota_root(request)
+                    .handle_get_quota_root(request, self.acquire_read_permit().await)
                     .await
                     .map(|_| SessionResult::Continue),
                 Command::Unauthenticate => self
-                    .handle_unauthenticate(request)
+                    .handle_unauthenticate(request, self.acquire_write_permit().await)
                     .await
                     .map(|_| SessionResult::Continue),
                 Command::Id => self
@@ -254,6 +293,14 @@ impl<T: SessionStream> Session<T> {
                     .map(|_| SessionResult::Continue),
                 Command::UidBatches => self
                     .handle_uidbatches(request)
+                    .await
+                    .map(|_| SessionResult::Continue),
+                Command::GetMetadata => self
+                    .handle_get_metadata(request, self.acquire_read_permit().await)
+                    .await
+                    .map(|_| SessionResult::Continue),
+                Command::SetMetadata => self
+                    .handle_set_metadata(request, self.acquire_write_permit().await)
                     .await
                     .map(|_| SessionResult::Continue),
             };
@@ -280,6 +327,18 @@ impl<T: SessionStream> Session<T> {
 
         SessionResult::Continue
     }
+
+    pub async fn acquire_read_permit(&self) -> Option<OwnedSemaphorePermit> {
+        self.op_semaphore.clone().acquire_owned().await.ok()
+    }
+
+    pub async fn acquire_write_permit(&self) -> Option<OwnedSemaphorePermit> {
+        self.op_semaphore
+            .clone()
+            .acquire_many_owned(MAX_CONCURRENT_OPS)
+            .await
+            .ok()
+    }
 }
 
 pub fn group_requests(
@@ -301,22 +360,13 @@ pub fn group_requests(
 impl<T: SessionStream> Session<T> {
     async fn is_allowed(&self, request: Request<Command>) -> trc::Result<Request<Command>> {
         let state = &self.state;
-        // Rate limit request
         if let State::Authenticated { data } | State::Selected { data, .. } = state
-            && let Some(rate) = &self.server.core.imap.rate_requests
-            && data
+            && let Err(err) = self
                 .server
-                .in_memory_store()
-                .is_rate_allowed(
-                    KV_RATE_LIMIT_IMAP,
-                    &data.account_id.to_be_bytes(),
-                    rate,
-                    true,
-                )
-                .await?
-                .is_some()
+                .is_imap_request_allowed(&data.access_token)
+                .await
         {
-            return Err(trc::LimitEvent::TooManyRequests.into_err());
+            return Err(err.id(request.tag));
         }
 
         match &request.command {
@@ -395,7 +445,9 @@ impl<T: SessionStream> Session<T> {
             | Command::Unauthenticate
             | Command::GetQuota
             | Command::GetQuotaRoot
-            | Command::GetJmapAccess => {
+            | Command::GetJmapAccess
+            | Command::GetMetadata
+            | Command::SetMetadata => {
                 if let State::Authenticated { .. } | State::Selected { .. } = state {
                     Ok(request)
                 } else {
@@ -452,9 +504,48 @@ impl<T: SessionStream> Session<T> {
             },
         }
     }
+
+    async fn assert_selected_readable(&self, request: &Request<Command>) -> trc::Result<()> {
+        let State::Selected { data, mailbox } = &self.state else {
+            return Ok(());
+        };
+        let touches_selected = matches!(
+            request.command,
+            Command::Expunge(_)
+                | Command::Search(_)
+                | Command::Fetch(_)
+                | Command::Store(_)
+                | Command::Copy(_)
+                | Command::Move(_)
+                | Command::Sort(_)
+                | Command::Thread(_)
+                | Command::UidBatches
+                | Command::Check
+                | Command::Noop
+                | Command::Idle
+        );
+        if !touches_selected || !data.is_acl_shared(mailbox.id.account_id) {
+            return Ok(());
+        }
+        match data
+            .selected_access(&mailbox.id)
+            .await
+            .imap_ctx(&request.tag, trc::location!())?
+        {
+            SelectedAccess::Readable { .. } => Ok(()),
+            SelectedAccess::Revoked => Err(data.close_revoked().await.id(request.tag.clone())),
+        }
+    }
 }
 
 impl<T: SessionStream> State<T> {
+    pub fn take_sasl_failure(&mut self) -> Option<trc::Error> {
+        match self {
+            State::NotAuthenticated { sasl_failure, .. } => sasl_failure.take(),
+            _ => None,
+        }
+    }
+
     pub fn auth_failures(&self) -> u32 {
         match self {
             State::NotAuthenticated { auth_failures, .. } => *auth_failures,

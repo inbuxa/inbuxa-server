@@ -4,30 +4,32 @@
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
  */
 
-use crate::{api::query::QueryResponseBuilder, changes::state::JmapCacheState};
+use crate::{
+    api::{
+        metadata::{
+            MetadataType, ObjectMetadata, ResourceScope, filter_containers, flagged_documents,
+        },
+        query::QueryResponseBuilder,
+    },
+    calendar_event::query::{matched_items, rank_comparator},
+    changes::state::JmapCacheState,
+};
 use common::{Server, auth::AccessToken};
 use groupware::cache::GroupwareCache;
 use jmap_proto::{
     method::query::{Filter, QueryRequest, QueryResponse},
     object::{
-        addressbook::AddressBook,
+        addressbook::{AddressBook, AddressBookFilter},
         contact::{ContactCard, ContactCardComparator, ContactCardFilter},
     },
-    request::MaybeInvalid,
-    types::state::State,
+    request::{MaybeInvalid, capability::CapabilityIds},
 };
 use store::{
-    IterateParams, U32_LEN, U64_LEN, ValueKey,
     roaring::RoaringBitmap,
-    search::{ContactSearchField, SearchComparator, SearchFilter, SearchQuery},
-    write::{IndexPropertyClass, SearchIndex, ValueClass, key::DeserializeBigEndian},
+    search::{ContactSearchField, QueryResults, SearchFilter, SearchQuery},
+    write::SearchIndex,
 };
-use trc::AddContext;
-use types::{
-    acl::Acl,
-    collection::{Collection, SyncCollection},
-    field::ContactField,
-};
+use types::{acl::Acl, collection::SyncCollection};
 use utils::sanitize_email;
 
 pub trait ContactCardQuery: Sync + Send {
@@ -35,20 +37,15 @@ pub trait ContactCardQuery: Sync + Send {
         &self,
         request: QueryRequest<ContactCard>,
         access_token: &AccessToken,
+        using: CapabilityIds,
     ) -> impl Future<Output = trc::Result<QueryResponse>> + Send;
 
     fn address_book_query(
         &self,
         request: QueryRequest<AddressBook>,
         access_token: &AccessToken,
+        using: CapabilityIds,
     ) -> impl Future<Output = trc::Result<QueryResponse>> + Send;
-}
-
-#[derive(Clone)]
-struct CreatedUpdated {
-    document_id: u32,
-    created: u64,
-    updated: u64,
 }
 
 impl ContactCardQuery for Server {
@@ -56,72 +53,36 @@ impl ContactCardQuery for Server {
         &self,
         mut request: QueryRequest<ContactCard>,
         access_token: &AccessToken,
+        using: CapabilityIds,
     ) -> trc::Result<QueryResponse> {
         let account_id = request.account_id.document_id();
         let mut filters = Vec::with_capacity(request.filter.len());
+        let metadata = ObjectMetadata::new(self, access_token, using, MetadataType::ContactCard);
+        let sampled = metadata.viewer_change_id(self, account_id).await?;
+        let metadata_query =
+            metadata.query(request.filter.iter().filter_map(|filter| match filter {
+                Filter::Property(ContactCardFilter::Metadata(filter)) => Some(filter),
+                _ => None,
+            }))?;
         let cache = self
-            .fetch_dav_resources(
+            .fetch_groupware_resources(
                 access_token.account_id(),
                 account_id,
                 SyncCollection::AddressBook,
             )
             .await?;
-        let mut created_to_updated = Vec::new();
-
-        if request.filter.iter().any(|cond| {
-            matches!(
-                cond,
-                Filter::Property(
-                    ContactCardFilter::CreatedBefore(_)
-                        | ContactCardFilter::CreatedAfter(_)
-                        | ContactCardFilter::UpdatedBefore(_)
-                        | ContactCardFilter::UpdatedAfter(_)
-                )
-            )
-        }) || request.sort.as_ref().is_some_and(|v| {
-            v.iter().any(|sort| {
-                matches!(
-                    sort.property,
-                    ContactCardComparator::Created | ContactCardComparator::Updated
-                )
+        let is_shared = access_token.is_shared(account_id);
+        let mask = if is_shared {
+            cache.shared_items(access_token, [Acl::ReadItems], true)
+        } else {
+            cache.document_ids(false).collect()
+        };
+        let mut metadata_leaves = metadata
+            .evaluate(self, account_id, &metadata_query, || {
+                flagged_documents(&cache, ResourceScope::Items, is_shared.then_some(&mask))
             })
-        }) {
-            self.store()
-                .iterate(
-                    IterateParams::new(
-                        ValueKey {
-                            account_id,
-                            collection: Collection::ContactCard.into(),
-                            document_id: 0,
-                            class: ValueClass::IndexProperty(IndexPropertyClass::Integer {
-                                property: ContactField::CreatedToUpdated.into(),
-                                value: 0,
-                            }),
-                        },
-                        ValueKey {
-                            account_id,
-                            collection: Collection::ContactCard.into(),
-                            document_id: 0,
-                            class: ValueClass::IndexProperty(IndexPropertyClass::Integer {
-                                property: ContactField::CreatedToUpdated.into(),
-                                value: u64::MAX,
-                            }),
-                        },
-                    )
-                    .ascending(),
-                    |key, value| {
-                        created_to_updated.push(CreatedUpdated {
-                            document_id: key.deserialize_be_u32(key.len() - U32_LEN)?,
-                            created: key.deserialize_be_u64(key.len() - U32_LEN - U64_LEN)?,
-                            updated: value.deserialize_be_u64(0)?,
-                        });
-
-                        Ok(true)
-                    },
-                )
-                .await
-                .caused_by(trc::location!())?;
-        }
+            .await?
+            .into_iter();
 
         for cond in std::mem::take(&mut request.filter) {
             match cond {
@@ -175,10 +136,10 @@ impl ContactCardQuery for Server {
                         filters.push(SearchFilter::has_keyword(ContactSearchField::Member, value));
                     }
                     ContactCardFilter::Kind(value) => {
-                        filters.push(SearchFilter::eq(ContactSearchField::Kind, value));
+                        filters.push(SearchFilter::text_eq(ContactSearchField::Kind, value));
                     }
-                    ContactCardFilter::Uid(value) => {
-                        filters.push(SearchFilter::eq(ContactSearchField::Uid, value))
+                    ContactCardFilter::Uid(uid) => {
+                        filters.push(SearchFilter::is_in_set(cache.uid_matches(&uid)));
                     }
                     ContactCardFilter::Email(email) => filters.push(SearchFilter::has_keyword(
                         ContactSearchField::Email,
@@ -222,36 +183,49 @@ impl ContactCardQuery for Server {
                         filters.push(SearchFilter::End);
                     }
                     ContactCardFilter::CreatedBefore(before) => {
-                        let before = before.timestamp() as u64;
+                        let before = before.timestamp();
                         filters.push(SearchFilter::is_in_set(RoaringBitmap::from_iter(
-                            created_to_updated
-                                .iter()
-                                .filter_map(|cu| (cu.created < before).then_some(cu.document_id)),
+                            cache.resources.iter().filter_map(|r| {
+                                r.created_at()
+                                    .filter(|created_at| *created_at < before)
+                                    .map(|_| r.document_id())
+                            }),
                         )));
                     }
                     ContactCardFilter::CreatedAfter(after) => {
-                        let after = after.timestamp() as u64;
+                        let after = after.timestamp();
                         filters.push(SearchFilter::is_in_set(RoaringBitmap::from_iter(
-                            created_to_updated
-                                .iter()
-                                .filter_map(|cu| (cu.created > after).then_some(cu.document_id)),
+                            cache.resources.iter().filter_map(|r| {
+                                r.created_at()
+                                    .filter(|created_at| *created_at > after)
+                                    .map(|_| r.document_id())
+                            }),
                         )));
                     }
                     ContactCardFilter::UpdatedBefore(before) => {
-                        let before = before.timestamp() as u64;
+                        let before = before.timestamp();
                         filters.push(SearchFilter::is_in_set(RoaringBitmap::from_iter(
-                            created_to_updated
-                                .iter()
-                                .filter_map(|cu| (cu.updated < before).then_some(cu.document_id)),
+                            cache.resources.iter().filter_map(|r| {
+                                r.modified_at()
+                                    .filter(|modified_at| *modified_at < before)
+                                    .map(|_| r.document_id())
+                            }),
                         )));
                     }
                     ContactCardFilter::UpdatedAfter(after) => {
-                        let after = after.timestamp() as u64;
+                        let after = after.timestamp();
                         filters.push(SearchFilter::is_in_set(RoaringBitmap::from_iter(
-                            created_to_updated
-                                .iter()
-                                .filter_map(|cu| (cu.updated > after).then_some(cu.document_id)),
+                            cache.resources.iter().filter_map(|r| {
+                                r.modified_at()
+                                    .filter(|modified_at| *modified_at > after)
+                                    .map(|_| r.document_id())
+                            }),
                         )));
+                    }
+                    ContactCardFilter::Metadata(_) => {
+                        filters.push(SearchFilter::is_in_set(
+                            metadata_leaves.next().unwrap_or_default(),
+                        ));
                     }
                     unsupported => {
                         return Err(trc::JmapEvent::UnsupportedFilter
@@ -274,31 +248,17 @@ impl ContactCardQuery for Server {
             }
         }
 
-        let comparators = request
+        let sort = request
             .sort
             .take()
             .unwrap_or_default()
             .into_iter()
             .map(|comparator| match comparator.property {
-                ContactCardComparator::Created => Ok(SearchComparator::sorted_set(
-                    created_to_updated
-                        .iter()
-                        .enumerate()
-                        .map(|(idx, u)| (u.document_id, idx as u32))
-                        .collect(),
-                    comparator.is_ascending,
-                )),
+                ContactCardComparator::Created => {
+                    Ok((ContactSortKey::Created, comparator.is_ascending))
+                }
                 ContactCardComparator::Updated => {
-                    let mut updated = created_to_updated.clone();
-                    updated.sort_by_key(|a| a.updated);
-                    Ok(SearchComparator::sorted_set(
-                        updated
-                            .iter()
-                            .enumerate()
-                            .map(|(idx, u)| (u.document_id, idx as u32))
-                            .collect(),
-                        comparator.is_ascending,
-                    ))
+                    Ok((ContactSortKey::Updated, comparator.is_ascending))
                 }
                 other => Err(trc::JmapEvent::UnsupportedSort
                     .into_err()
@@ -308,23 +268,35 @@ impl ContactCardQuery for Server {
 
         let results = self
             .search_store()
-            .query_account(
+            .filter_account(
                 SearchQuery::new(SearchIndex::Contacts)
                     .with_filters(filters)
-                    .with_comparators(comparators)
                     .with_account_id(account_id)
-                    .with_mask(if access_token.is_shared(account_id) {
-                        cache.shared_items(access_token, [Acl::ReadItems], true)
-                    } else {
-                        cache.document_ids(false).collect()
-                    }),
+                    .with_mask(mask),
             )
             .await?;
+        let results = if results.len() > 1 && !sort.is_empty() {
+            let items = matched_items(&cache, &results);
+            let comparators = sort
+                .into_iter()
+                .map(|(key, is_ascending)| match key {
+                    ContactSortKey::Created => {
+                        rank_comparator(&items, |item| item.created_at(), is_ascending)
+                    }
+                    ContactSortKey::Updated => {
+                        rank_comparator(&items, |item| item.modified_at(), is_ascending)
+                    }
+                })
+                .collect();
+            QueryResults::new(results, comparators).into_sorted()
+        } else {
+            results.into_iter().collect()
+        };
 
         let mut response = QueryResponseBuilder::new(
             results.len(),
             self.core.jmap.query_max_results,
-            cache.get_state(false),
+            sampled.state(cache.get_state(false)),
             &request,
         );
 
@@ -341,22 +313,56 @@ impl ContactCardQuery for Server {
         &self,
         request: QueryRequest<AddressBook>,
         access_token: &AccessToken,
+        using: CapabilityIds,
     ) -> trc::Result<QueryResponse> {
+        let metadata = ObjectMetadata::new(self, access_token, using, MetadataType::AddressBook);
+        let mut metadata_filters = Vec::new();
+        for filter in &request.filter {
+            match filter {
+                Filter::Property(AddressBookFilter::Metadata(filter)) => {
+                    metadata_filters.push(filter);
+                }
+                Filter::Property(AddressBookFilter::_T(other)) => {
+                    return Err(trc::JmapEvent::UnsupportedFilter
+                        .into_err()
+                        .details(other.clone()));
+                }
+                Filter::And | Filter::Or | Filter::Not | Filter::Close => {}
+            }
+        }
+        let metadata_query = metadata.query(metadata_filters)?;
+
         let account_id = request.account_id.document_id();
+        let sampled = metadata.viewer_change_id(self, account_id).await?;
         let cache = self
-            .fetch_dav_resources(
+            .fetch_groupware_resources(
                 access_token.account_id(),
                 account_id,
                 SyncCollection::AddressBook,
             )
             .await?;
 
-        let results = cache.document_ids(true).collect::<Vec<_>>();
+        let is_member = access_token.is_member(account_id);
+        let readable = if is_member {
+            cache.document_ids(true).collect::<RoaringBitmap>()
+        } else {
+            cache.shared_containers(access_token, [Acl::Read, Acl::ReadItems], true)
+        };
+        let leaves = metadata
+            .evaluate(self, account_id, &metadata_query, || {
+                flagged_documents(
+                    &cache,
+                    ResourceScope::Containers,
+                    (!is_member).then_some(&readable),
+                )
+            })
+            .await?;
+        let results = filter_containers(&request.filter, leaves, readable);
 
         let mut response = QueryResponseBuilder::new(
             results.len() as usize,
             self.core.jmap.query_max_results,
-            State::Initial,
+            sampled.state(cache.get_state(true)),
             &request,
         );
 
@@ -368,4 +374,10 @@ impl ContactCardQuery for Server {
 
         response.build()
     }
+}
+
+#[derive(Debug, Clone, Copy)]
+enum ContactSortKey {
+    Created,
+    Updated,
 }

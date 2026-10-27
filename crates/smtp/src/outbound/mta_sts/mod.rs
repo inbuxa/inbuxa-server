@@ -8,9 +8,15 @@ pub mod lookup;
 pub mod parse;
 pub mod verify;
 
+use common::config::smtp::resolver::MtaStsFailure;
+use std::sync::Arc;
+use utils::outbound::OutboundError;
+
 #[derive(Debug)]
 pub enum Error {
     Dns(mail_auth::Error),
     Http(reqwest::Error),
+    Destination(OutboundError),
     InvalidPolicy(String),
+    Backoff(Arc<MtaStsFailure>),
 }

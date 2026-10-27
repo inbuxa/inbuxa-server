@@ -4,18 +4,18 @@
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
  */
 
-use std::time::Instant;
-
+use super::{ImapContext, metadata::ListMetadataTarget};
 use crate::{
-    core::{Session, SessionData},
+    core::{AccountView, MailboxRefresh, Session, SessionData},
     spawn_op,
 };
+use ahash::AHashSet;
 use common::network::SessionStream;
-
+use compact_str::{CompactString, format_compact};
 use imap_proto::{
-    Command, StatusResponse,
+    Command, ResponseType, StatusResponse,
     protocol::{
-        ImapResponse, ProtocolVersion,
+        MailboxObjectId, ProtocolVersion,
         list::{
             self, Arguments, Attribute, ChildInfo, ListItem, ReturnOption, SelectionOption, Tag,
         },
@@ -23,12 +23,16 @@ use imap_proto::{
     receiver::Request,
 };
 use registry::schema::enums::Permission;
+use std::time::Instant;
+use tokio::sync::OwnedSemaphorePermit;
 use trc::StoreEvent;
 
-use super::ImapContext;
-
 impl<T: SessionStream> Session<T> {
-    pub async fn handle_list(&mut self, request: Request<Command>) -> trc::Result<()> {
+    pub async fn handle_list(
+        &mut self,
+        request: Request<Command>,
+        permit: Option<OwnedSemaphorePermit>,
+    ) -> trc::Result<()> {
         let op_start = Instant::now();
         let command = request.command;
         let is_lsub = command == Command::Lsub;
@@ -44,34 +48,43 @@ impl<T: SessionStream> Session<T> {
             request.parse_lsub(self.is_utf8)
         }?;
 
+        if arguments.requests_objectid()
+            && let Some(enabled) = self.activate_objectid()
+        {
+            self.write_bytes(enabled).await?;
+        }
+
         if !arguments.is_separator_query() {
             let data = self.state.session_data();
             let version = self.version;
             let is_utf8 = self.is_utf8;
 
             spawn_op!(
+                permit,
                 data,
                 data.list(arguments, is_lsub, version, is_utf8, op_start)
                     .await
             )
         } else {
+            let objectid = arguments
+                .returns_objectid()
+                .then_some(MailboxObjectId::Empty);
             self.write_bytes(
                 StatusResponse::completed(command)
                     .with_tag(arguments.unwrap_tag())
-                    .serialize(
-                        list::Response {
-                            is_rev2: self.version.is_rev2(),
-                            is_utf8: self.is_utf8,
-                            is_lsub,
-                            list_items: vec![ListItem {
-                                mailbox_name: "".into(),
-                                attributes: vec![Attribute::NoSelect],
-                                tags: vec![],
-                            }],
-                            status_items: Vec::new(),
-                        }
-                        .serialize(),
-                    ),
+                    .serialize_after(&list::Response {
+                        is_rev2: self.version.is_rev2(),
+                        is_utf8: self.is_utf8,
+                        is_lsub,
+                        list_items: vec![ListItem {
+                            mailbox_name: "".into(),
+                            attributes: vec![Attribute::NoSelect],
+                            tags: vec![],
+                            objectid,
+                            metadata: None,
+                        }],
+                        status_items: Vec::new(),
+                    }),
             )
             .await
         }
@@ -116,7 +129,12 @@ impl<T: SessionStream> SessionData<T> {
         };
 
         // Refresh mailboxes
-        self.synchronize_mailboxes(false)
+        let MailboxRefresh {
+            mut caches,
+            access_token,
+            ..
+        } = self
+            .synchronize_mailboxes(false)
             .await
             .imap_ctx(&tag, trc::location!())?;
 
@@ -128,6 +146,8 @@ impl<T: SessionStream> SessionData<T> {
         let mut include_subscribed = false;
         let mut include_children = false;
         let mut include_status = None;
+        let mut include_metadata = None;
+        let mut include_objectid = false;
         for selection_option in &selection_options {
             match selection_option {
                 SelectionOption::Subscribed => {
@@ -158,23 +178,44 @@ impl<T: SessionStream> SessionData<T> {
                 ReturnOption::SpecialUse => {
                     include_special_use = true;
                 }
+                ReturnOption::Metadata(entries) => {
+                    include_metadata = Some(entries.as_slice());
+                }
+                ReturnOption::ObjectId => {
+                    include_objectid = true;
+                }
             }
         }
         if recursive_match && !filter_subscribed {
             return Err(trc::ImapEvent::Error
                 .into_err()
                 .details("RECURSIVEMATCH requires the SUBSCRIBED selection option.")
+                .ctx(trc::Key::Type, ResponseType::Bad)
                 .id(tag));
         }
 
         // Append reference name
         if !patterns.is_empty() && !reference_name.is_empty() {
             patterns.iter_mut().for_each(|item| {
-                *item = format!("{}{}", reference_name, item);
+                *item = format_compact!("{}{}", reference_name, item);
             })
         }
 
+        let metadata_access = match include_metadata {
+            Some(entries) => {
+                self.assert_metadata_request(&tag, entries.len())?;
+                access_token
+                    .enforce_permission(Permission::ImapMetadataGet)
+                    .map_err(|err| err.id(tag.clone()))?;
+                Some(access_token.clone())
+            }
+            None => None,
+        };
+        let mut metadata_targets = Vec::new();
+
         let mut list_items = Vec::with_capacity(10);
+        let mut lsub_unmatched = Vec::new();
+        let mut child_prefix = String::new();
 
         // Add mailboxes
         let mut added_shared_folder = false;
@@ -192,100 +233,207 @@ impl<T: SessionStream> SessionData<T> {
                                 vec![Attribute::NoSelect]
                             },
                             tags: vec![],
+                            objectid: include_objectid.then_some(MailboxObjectId::Empty),
+                            metadata: None,
                         });
                     }
                     added_shared_folder = true;
                 }
                 if !filter_subscribed && matches_pattern(&patterns, prefix) {
                     list_items.push(ListItem {
-                        mailbox_name: prefix.clone(),
+                        mailbox_name: prefix.as_str().into(),
                         attributes: if include_children {
                             vec![Attribute::HasChildren, Attribute::NoSelect]
                         } else {
                             vec![Attribute::NoSelect]
                         },
                         tags: vec![],
+                        objectid: include_objectid.then_some(MailboxObjectId::Empty),
+                        metadata: None,
                     });
                 }
             }
 
-            for (mailbox_name, mailbox_id) in &account.mailbox_names {
+            for entry in &account.names {
+                let mailbox_name = &entry.name;
+                let mailbox_id = entry.mailbox_id;
                 if matches_pattern(&patterns, mailbox_name) {
-                    let mailbox = if let Some(mailbox) = account.mailbox_state.get(mailbox_id) {
-                        mailbox
-                    } else {
+                    let Some(mailbox) = account.mailbox(mailbox_id) else {
                         trc::event!(
                             Store(StoreEvent::UnexpectedError),
                             Details = "IMAP mailbox no longer present in account state",
-                            Id = *mailbox_id,
-                            Details = account
-                                .mailbox_state
-                                .keys()
-                                .copied()
-                                .map(trc::Value::from)
-                                .collect::<Vec<_>>()
+                            MailboxId = mailbox_id,
                         );
                         continue;
                     };
-                    let mut has_recursive_match = false;
-                    if recursive_match {
-                        let prefix = format!("{}/", mailbox_name);
-                        for (mailbox_name, mailbox_id) in &account.mailbox_names {
-                            if mailbox_name.starts_with(&prefix)
-                                && account.mailbox_state.get(mailbox_id).unwrap().is_subscribed
-                            {
-                                has_recursive_match = true;
-                                break;
-                            }
-                        }
-                    }
-                    if !filter_subscribed || mailbox.is_subscribed || has_recursive_match {
+                    let is_subscribed = mailbox.subscribers.contains(&self.account_id);
+                    let has_recursive_match = recursive_match && {
+                        child_prefix.clear();
+                        child_prefix.push_str(mailbox_name);
+                        child_prefix.push('/');
+                        let start = account
+                            .names
+                            .partition_point(|child| child.name.as_str() < child_prefix.as_str());
+                        account
+                            .names
+                            .get(start..)
+                            .unwrap_or_default()
+                            .iter()
+                            .take_while(|child| child.name.starts_with(child_prefix.as_str()))
+                            .any(|child| account.is_subscribed(child.mailbox_id, self.account_id))
+                    };
+                    if !filter_subscribed || is_subscribed || has_recursive_match {
                         let mut attributes = Vec::with_capacity(2);
                         if include_children {
-                            attributes.push(if mailbox.has_children {
+                            attributes.push(if account.has_children(mailbox_id) {
                                 Attribute::HasChildren
                             } else {
                                 Attribute::HasNoChildren
                             });
                         }
-                        if include_subscribed && mailbox.is_subscribed {
+                        if include_subscribed && is_subscribed {
                             attributes.push(Attribute::Subscribed);
                         }
                         if include_special_use {
-                            if let Some(special_use) = &mailbox.special_use {
-                                attributes.push(*special_use);
+                            if let Some(special_use) =
+                                AccountView::special_use_attribute(&mailbox.role)
+                            {
+                                attributes.push(special_use);
                             } else if filter_special_use {
                                 continue;
                             }
                         }
+                        if let Some(access_token) = &metadata_access
+                            && (!filter_subscribed || is_subscribed)
+                            && let Some(target) = ListMetadataTarget::new(
+                                list_items.len(),
+                                account.account_id,
+                                mailbox_id,
+                                mailbox,
+                                access_token,
+                            )
+                        {
+                            metadata_targets.push(target);
+                        }
                         list_items.push(ListItem {
-                            mailbox_name: mailbox_name.clone(),
+                            mailbox_name: mailbox_name.as_str().into(),
                             attributes,
                             tags: if !has_recursive_match {
                                 vec![]
                             } else {
                                 vec![Tag::ChildInfo(vec![ChildInfo::Subscribed])]
                             },
+                            objectid: include_objectid.then(|| entry.object_id(account.account_id)),
+                            metadata: None,
                         });
+                    }
+                } else if is_lsub && account.is_subscribed(mailbox_id, self.account_id) {
+                    lsub_unmatched.push(mailbox_name.clone());
+                }
+            }
+        }
+
+        // RFC 3501 6.3.9 requires LSUB with % to report the unsubscribed parents
+        // of a subscribed mailbox, flagged \Noselect
+        if !lsub_unmatched.is_empty() {
+            let mut emitted = list_items
+                .iter()
+                .map(|item| item.mailbox_name.as_str())
+                .collect::<AHashSet<_>>();
+            let mut parents = Vec::new();
+            for mailbox_name in &lsub_unmatched {
+                for (pos, _) in mailbox_name.match_indices('/') {
+                    if let Some(parent) = mailbox_name.get(..pos)
+                        && matches_pattern(&patterns, parent)
+                        && emitted.insert(parent)
+                    {
+                        parents.push(parent);
                     }
                 }
             }
+            list_items.extend(parents.into_iter().map(|parent| ListItem {
+                mailbox_name: parent.into(),
+                attributes: vec![Attribute::NoSelect],
+                tags: vec![],
+                objectid: include_objectid.then_some(MailboxObjectId::Empty),
+                metadata: None,
+            }));
+        }
+
+        if let (Some(requested), Some(access_token)) = (include_metadata, &metadata_access)
+            && !metadata_targets.is_empty()
+        {
+            self.list_metadata(
+                &tag,
+                requested,
+                &metadata_targets,
+                &mut list_items,
+                access_token,
+            )
+            .await?;
+        }
+
+        // RFC 5258 3.5 requires redundant CHILDINFO responses to be suppressed
+        if recursive_match {
+            let mut names = list_items
+                .iter()
+                .map(|item| item.mailbox_name.as_str())
+                .collect::<Vec<_>>();
+            names.sort_unstable();
+            let redundant = list_items
+                .iter()
+                .map(|item| {
+                    item.tags.iter().any(|tag| matches!(tag, Tag::ChildInfo(_))) && {
+                        child_prefix.clear();
+                        child_prefix.push_str(item.mailbox_name.as_str());
+                        child_prefix.push('/');
+                        let pos = names.partition_point(|name| *name < child_prefix.as_str());
+                        names
+                            .get(pos)
+                            .is_some_and(|name| name.starts_with(child_prefix.as_str()))
+                    }
+                })
+                .collect::<Vec<_>>();
+
+            let mut redundant = redundant.into_iter();
+            list_items.retain_mut(|item| match redundant.next() {
+                Some(true) => {
+                    item.tags.clear();
+                    item.attributes.contains(&Attribute::Subscribed)
+                }
+                _ => true,
+            });
         }
 
         // Add status response
         let mut status_items = Vec::new();
         if let Some(include_status) = include_status {
-            for list_item in &list_items {
-                match self
-                    .status(list_item.mailbox_name.clone(), include_status)
+            for list_item in &mut list_items {
+                let Some(mailbox) = self.get_mailbox_by_name(&list_item.mailbox_name) else {
+                    continue;
+                };
+                let cache = caches
+                    .fetch(&self.server, mailbox.account_id)
                     .await
-                    .imap_ctx(&tag, trc::location!())
+                    .imap_ctx(&tag, trc::location!())?;
+                match self
+                    .status_in(
+                        &cache,
+                        &access_token,
+                        mailbox,
+                        list_item.mailbox_name.clone(),
+                        include_status,
+                    )
+                    .await
                 {
                     Ok(status_item) => {
                         status_items.push(status_item);
                     }
                     Err(err) => {
-                        self.write_error(err).await?;
+                        if err.matches(trc::EventType::Imap(trc::ImapEvent::Error)) {
+                            list_item.attributes.push(Attribute::NoSelect);
+                        }
+                        trc::error!(err.span_id(self.session_id));
                     }
                 }
             }
@@ -313,23 +461,20 @@ impl<T: SessionStream> SessionData<T> {
                 Command::Lsub
             })
             .with_tag(tag)
-            .serialize(
-                list::Response {
-                    is_rev2: version.is_rev2(),
-                    is_utf8,
-                    is_lsub,
-                    list_items,
-                    status_items,
-                }
-                .serialize(),
-            ),
+            .serialize_after(&list::Response {
+                is_rev2: version.is_rev2(),
+                is_utf8,
+                is_lsub,
+                list_items,
+                status_items,
+            }),
         )
         .await
     }
 }
 
 #[allow(clippy::while_let_on_iterator)]
-pub fn matches_pattern(patterns: &[String], mailbox_name: &str) -> bool {
+pub fn matches_pattern(patterns: &[CompactString], mailbox_name: &str) -> bool {
     if patterns.is_empty() {
         return true;
     }

@@ -35,6 +35,15 @@ use tokio_rustls::TlsAcceptor;
 use types::id::Id;
 use utils::snowflake::SnowflakeIdGenerator;
 
+const DEFAULT_RECOVERY_MODE_PORT: u16 = 8080;
+
+pub fn recovery_mode_port() -> u16 {
+    std::env::var("STALWART_RECOVERY_MODE_PORT")
+        .ok()
+        .and_then(|port| port.parse().ok())
+        .unwrap_or(DEFAULT_RECOVERY_MODE_PORT)
+}
+
 impl Listeners {
     pub async fn parse(bp: &mut Bootstrap) -> Self {
         // Parse ACME managers
@@ -67,18 +76,12 @@ impl Listeners {
                     id: ObjectId::new(ObjectType::NetworkListener, Id::singleton()),
                     object: NetworkListener {
                         bind: Map::new(vec![
-                            SocketAddr::from_str(&format!(
-                                "[::]:{}",
-                                std::env::var("STALWART_RECOVERY_MODE_PORT")
-                                    .ok()
-                                    .and_then(|p| p.parse::<u16>().ok())
-                                    .unwrap_or(8080)
-                            ))
-                            .unwrap(),
+                            SocketAddr::from_str(&format!("[::]:{}", recovery_mode_port()))
+                                .unwrap(),
                         ]),
                         name: "http-recovery".to_string(),
                         protocol: NetworkListenerProtocol::Http,
-                        tls_implicit: false,
+                        implicit_tls: false,
                         ..Default::default()
                     },
                     revision: 0,
@@ -321,7 +324,7 @@ impl Listeners {
                 TcpAcceptor::Tls {
                     acceptor: TlsAcceptor::from(default_config.clone()),
                     config: default_config,
-                    implicit: listener.tls_implicit,
+                    implicit: listener.implicit_tls,
                 }
             } else {
                 TcpAcceptor::Plain

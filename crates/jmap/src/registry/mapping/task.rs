@@ -14,7 +14,8 @@ use crate::{
 use common::Server;
 use jmap_proto::{
     error::set::{SetError, SetErrorType},
-    object::registry::RegistryComparator,
+    method::query::QueryRequest,
+    object::{JmapObject, registry::RegistryComparator},
     types::state::State,
 };
 use jmap_tools::{JsonPointer, JsonPointerItem, Key};
@@ -23,7 +24,7 @@ use registry::{
     schema::{
         enums::{TaskStatusType, TaskType},
         prelude::Property,
-        structs::Task,
+        structs::{CertificateManagement, DkimManagement, Domain, Task},
     },
     types::{
         EnumImpl, ObjectImpl,
@@ -31,12 +32,13 @@ use registry::{
         index::{IndexBuilder, IndexKey},
     },
 };
-use services::task_manager::lock::TaskLockManager;
-use std::str::FromStr;
+use services::task_manager::{lock::TaskLockManager, reconcile::schedule_replacing};
+use std::{cmp::Ordering, str::FromStr};
 use store::{
-    IterateParams, SerializeInfallible, U64_LEN, ValueKey,
+    IterateParams, ValueKey,
+    ahash::AHashSet,
     registry::RegistryFilterOp,
-    write::{BatchBuilder, RegistryClass, TaskQueueClass, ValueClass, key::DeserializeBigEndian},
+    write::{BatchBuilder, RegistryClass, TaskDue, TaskId, TaskQueueClass, ValueClass},
 };
 use trc::AddContext;
 use types::id::Id;
@@ -82,67 +84,75 @@ pub(crate) async fn task_set(
         }
 
         let task_type = task.object_type();
-        match task_type {
-            TaskType::IndexDocument
-            | TaskType::UnindexDocument
-            | TaskType::IndexTrace
-            | TaskType::AccountMaintenance
-            | TaskType::TenantMaintenance
+        let is_client_task = match task_type {
+            TaskType::AccountMaintenance
             | TaskType::StoreMaintenance
             | TaskType::SpamFilterMaintenance
             | TaskType::AcmeRenewal
             | TaskType::DkimManagement
-            | TaskType::DnsManagement => {
-                let mut index = IndexBuilder::default();
-                task.index(&mut index);
-
-                // Validate foreign keys
-                for key in index.keys {
-                    if let IndexKey::ForeignKey {
-                        object_id: foreign_id,
-                        ..
-                    } = key
-                        && !set
-                            .server
-                            .store()
-                            .key_exists(ValueKey::from(ValueClass::Registry(
-                                RegistryClass::IndexId {
-                                    object_id: foreign_id.object().to_id(),
-                                    item_id: foreign_id.id().id(),
-                                },
-                            )))
-                            .await
-                            .caused_by(trc::location!())?
-                    {
-                        set.response.not_created.append(
-                            id,
-                            SetError::new(SetErrorType::InvalidForeignKey)
-                                .with_object_id(foreign_id),
-                        );
-                        continue 'outer;
-                    }
-                }
-
-                let task_id = set.server.registry().assign_id();
-                batch.schedule_task_with_id(task_id, task).commit_point();
-                set.response.created(id, task_id);
-            }
+            | TaskType::DnsManagement => true,
             TaskType::CalendarAlarmEmail
             | TaskType::CalendarAlarmNotification
             | TaskType::CalendarItipMessage
             | TaskType::MergeThreads
             | TaskType::DmarcReport
             | TaskType::TlsReport
+            | TaskType::DmarcReportWindow
+            | TaskType::TlsReportWindow
             | TaskType::DestroyAccount
-            | TaskType::RestoreArchivedItem => {
-                set.response.not_created.append(
-                    id,
-                    SetError::forbidden().with_description(format!(
-                        "{} is an internal task type that cannot be created by clients",
-                        task_type.as_str()
-                    )),
-                );
+            | TaskType::ShareRevokeCleanup => false,
+        };
+        if is_client_task {
+            let mut index = IndexBuilder::default();
+            task.index(&mut index);
+
+            // Validate foreign keys
+            for key in index.keys {
+                if let IndexKey::ForeignKey {
+                    object_id: foreign_id,
+                    ..
+                } = key
+                    && !set
+                        .server
+                        .store()
+                        .key_exists(ValueKey::from(ValueClass::Registry(
+                            RegistryClass::IndexId {
+                                object_id: foreign_id.object().to_id(),
+                                item_id: foreign_id.id().id(),
+                            },
+                        )))
+                        .await
+                        .caused_by(trc::location!())?
+                {
+                    set.response.not_created.append(
+                        id,
+                        SetError::new(SetErrorType::InvalidForeignKey).with_object_id(foreign_id),
+                    );
+                    continue 'outer;
+                }
             }
+
+            let task_id = match TaskId::singleton_of(&task) {
+                Some(task_id) => {
+                    schedule_replacing(set.server, &mut batch, task).await?;
+                    batch.commit_point();
+                    task_id
+                }
+                None => {
+                    let task_id = set.server.registry().assign_id();
+                    batch.schedule_task_with_id(task_id, task).commit_point();
+                    task_id
+                }
+            };
+            set.response.created(id, task_id);
+        } else {
+            set.response.not_created.append(
+                id,
+                SetError::forbidden().with_description(format!(
+                    "{} is an internal task type that cannot be created by clients",
+                    task_type.as_str()
+                )),
+            );
         }
     }
 
@@ -153,7 +163,9 @@ pub(crate) async fn task_set(
             .server
             .store()
             .get_value::<Task>(ValueKey::from(ValueClass::TaskQueue(
-                TaskQueueClass::Task { id: task_id },
+                TaskQueueClass::Task {
+                    id: TaskId::Assigned(task_id),
+                },
             )))
             .await?
         else {
@@ -172,7 +184,7 @@ pub(crate) async fn task_set(
             continue 'outer;
         }
 
-        if !set.server.try_lock_task(task_id).await {
+        let Some(lock) = set.server.lock_task(task_id).await else {
             set.response.not_updated.append(
                 id,
                 SetError::forbidden().with_description(
@@ -180,8 +192,8 @@ pub(crate) async fn task_set(
                 ),
             );
             continue;
-        }
-        locked_tasks.push(task_id);
+        };
+        locked_tasks.push(lock);
 
         let old_timestamp = task.due_timestamp();
         let old_status = task.status().clone();
@@ -206,25 +218,26 @@ pub(crate) async fn task_set(
         }
 
         if task.status() != &old_status {
-            let timestamp = task.due_timestamp();
-            if timestamp != old_timestamp {
-                batch
-                    .clear(ValueClass::TaskQueue(TaskQueueClass::Due {
-                        id: task_id,
-                        due: old_timestamp,
-                    }))
-                    .set(
-                        ValueClass::TaskQueue(TaskQueueClass::Due {
-                            id: task_id,
-                            due: timestamp,
-                        }),
-                        task.object_type().to_id().serialize(),
-                    );
-            }
+            let id = TaskId::Assigned(task_id);
+            let typ = task.object_type();
+            batch
+                .clear(ValueClass::TaskQueue(TaskQueueClass::Due {
+                    id,
+                    typ,
+                    due: old_timestamp,
+                }))
+                .set_task_due_marked(
+                    id,
+                    typ,
+                    task.due_timestamp(),
+                    TaskQueueClass::due_marker(task.status()),
+                );
 
             batch
                 .set(
-                    ValueClass::TaskQueue(TaskQueueClass::Task { id: task_id }),
+                    ValueClass::TaskQueue(TaskQueueClass::Task {
+                        id: TaskId::Assigned(task_id),
+                    }),
                     task.to_pickled_vec(),
                 )
                 .commit_point();
@@ -240,7 +253,9 @@ pub(crate) async fn task_set(
             .server
             .store()
             .get_value::<Task>(ValueKey::from(ValueClass::TaskQueue(
-                TaskQueueClass::Task { id: task_id },
+                TaskQueueClass::Task {
+                    id: TaskId::Assigned(task_id),
+                },
             )))
             .await?
         else {
@@ -259,9 +274,28 @@ pub(crate) async fn task_set(
             continue;
         }
 
-        locked_tasks.push(task_id);
+        if let Some(reason) = managed_domain_task(set.server, &task).await? {
+            set.response
+                .not_destroyed
+                .append(id, SetError::forbidden().with_description(reason));
+            continue;
+        }
+
+        if matches!(task, Task::DestroyAccount(_)) {
+            let Some(lock) = set.server.lock_task(task_id).await else {
+                set.response.not_destroyed.append(
+                    id,
+                    SetError::forbidden().with_description(
+                        "Task is currently being processed and cannot be destroyed".to_string(),
+                    ),
+                );
+                continue;
+            };
+            locked_tasks.push(lock);
+        }
 
         let due = task.due_timestamp();
+        let typ = task.object_type();
 
 
         #[cfg(not(feature = "enterprise"))]
@@ -276,9 +310,12 @@ pub(crate) async fn task_set(
         }
 
         batch
-            .clear(ValueClass::TaskQueue(TaskQueueClass::Task { id: task_id }))
+            .clear(ValueClass::TaskQueue(TaskQueueClass::Task {
+                id: TaskId::Assigned(task_id),
+            }))
             .clear(ValueClass::TaskQueue(TaskQueueClass::Due {
-                id: task_id,
+                id: TaskId::Assigned(task_id),
+                typ,
                 due,
             }))
             .commit_point();
@@ -286,24 +323,55 @@ pub(crate) async fn task_set(
         set.response.destroyed.push(id);
     }
 
-    let has_changes = !batch.is_empty();
-    if has_changes {
+    if !batch.is_empty() {
         set.server
-            .store()
-            .write(batch.build_all())
+            .commit_batch(batch)
             .await
             .caused_by(trc::location!())?;
     }
 
-    for task_id in locked_tasks {
-        set.server.remove_index_lock(task_id).await;
-    }
-
-    if has_changes {
-        set.server.notify_task_queue();
+    for lock in locked_tasks {
+        set.server.unlock_task(lock).await;
     }
 
     Ok(set)
+}
+
+async fn managed_domain_task(server: &Server, task: &Task) -> trc::Result<Option<&'static str>> {
+    match task {
+        Task::AcmeRenewal(task) => server
+            .registry()
+            .object::<Domain>(task.domain_id)
+            .await
+            .caused_by(trc::location!())
+            .map(|domain| {
+                domain
+                    .is_some_and(|domain| {
+                        matches!(
+                            domain.certificate_management,
+                            CertificateManagement::Automatic(_)
+                        )
+                    })
+                    .then_some(
+                        "The domain uses automatic certificate management; switch it to manual certificate management before destroying its ACME renewal task",
+                    )
+            }),
+        Task::DkimManagement(task) => server
+            .registry()
+            .object::<Domain>(task.domain_id)
+            .await
+            .caused_by(trc::location!())
+            .map(|domain| {
+                domain
+                    .is_some_and(|domain| {
+                        matches!(domain.dkim_management, DkimManagement::Automatic(_))
+                    })
+                    .then_some(
+                        "The domain uses automatic DKIM management; switch it to manual DKIM management before destroying its DKIM management task",
+                    )
+            }),
+        _ => Ok(None),
+    }
 }
 
 pub(crate) async fn task_get(
@@ -321,7 +389,9 @@ pub(crate) async fn task_get(
             .server
             .store()
             .get_value::<Task>(ValueKey::from(ValueClass::TaskQueue(
-                TaskQueueClass::Task { id: id.id() },
+                TaskQueueClass::Task {
+                    id: TaskId::Assigned(id.id()),
+                },
             )))
             .await?
         {
@@ -346,9 +416,10 @@ pub(crate) async fn task_get(
 pub(crate) async fn task_query(
     mut req: RegistryQueryResponse<'_>,
 ) -> trc::Result<QueryResponseBuilder> {
-    let mut due_from = 1u64;
+    let mut due_from = 0u64;
     let mut due_to = u64::MAX;
     let mut typ = None;
+    let mut status_marker = None;
 
     req.request
         .extract_filters(|property, op, value| match property {
@@ -375,11 +446,19 @@ pub(crate) async fn task_query(
             }
             Property::Status => {
                 if let Some(typ) = value.as_str().and_then(TaskStatusType::parse) {
-                    if typ == TaskStatusType::Failed {
-                        due_from = u64::MAX;
-                        due_to = u64::MAX;
-                    }
-                    true
+                    let marker = match typ {
+                        TaskStatusType::Failed => {
+                            due_from = u64::MAX;
+                            due_to = u64::MAX;
+                            return true;
+                        }
+                        TaskStatusType::Pending => None,
+                        TaskStatusType::Retry => Some(TaskQueueClass::DUE_RETRY),
+                        TaskStatusType::Stalled => Some(TaskQueueClass::DUE_STALLED),
+                    };
+                    due_to = due_to.min(u64::MAX - 1);
+                    status_marker = Some(marker);
+                    due_from <= due_to
                 } else {
                     false
                 }
@@ -405,7 +484,7 @@ pub(crate) async fn task_query(
     {
         return Err(trc::JmapEvent::UnsupportedSort
             .into_err()
-            .details("Only sorting by 'due' is supported for tasks".to_string()));
+            .details("Only sorting by 'due' is supported for tasks"));
     }
 
     let params = req
@@ -419,7 +498,9 @@ pub(crate) async fn task_query(
             .server
             .store()
             .get_value::<Task>(ValueKey::from(ValueClass::TaskQueue(
-                TaskQueueClass::Task { id: anchor_id },
+                TaskQueueClass::Task {
+                    id: TaskId::Assigned(anchor_id),
+                },
             )))
             .await
             .caused_by(trc::location!())?
@@ -444,51 +525,73 @@ pub(crate) async fn task_query(
         &req.request,
     );
 
+    let page = query_page(&req.request, &response);
+    let count_total = response.response.total.is_some();
+    let (first_type, type_count) = match typ {
+        Some(typ) => (typ.to_id(), 1),
+        None => (0, TaskType::COUNT as u16),
+    };
     let mut total = 0;
-    let from_key = ValueKey::from(ValueClass::TaskQueue(TaskQueueClass::Due {
-        id: from_id,
-        due: due_from,
-    }));
-    let to_key = ValueKey::from(ValueClass::TaskQueue(TaskQueueClass::Due {
-        id: to_id,
-        due: due_to,
-    }));
+    let mut entries = Vec::new();
+    let mut seen = AHashSet::new();
+    for typ in (first_type..first_type + type_count).filter_map(TaskType::from_id) {
+        let from_key = ValueKey::from(ValueClass::TaskQueue(TaskQueueClass::Due {
+            id: TaskId::Assigned(from_id),
+            typ,
+            due: due_from,
+        }));
+        let to_key = ValueKey::from(ValueClass::TaskQueue(TaskQueueClass::Due {
+            id: TaskId::Assigned(to_id),
+            typ,
+            due: due_to,
+        }));
+        let mut iterate = IterateParams::new(from_key, to_key).set_ascending(params.sort_ascending);
+        if status_marker.is_none() {
+            iterate = iterate.no_values();
+            if let Some(page) = page
+                && !count_total
+            {
+                iterate = iterate.limit(page);
+            }
+        }
 
-    req.server
-        .store()
-        .iterate(
-            IterateParams::new(from_key, to_key)
-                .set_ascending(params.sort_ascending)
-                .set_values(typ.is_some()),
-            |key, value| {
-                if let Some(typ) = typ {
-                    let task_type =
-                        TaskType::from_id(value.deserialize_be_u16(0)?).ok_or_else(|| {
-                            trc::StoreEvent::DataCorruption
-                                .into_err()
-                                .ctx(trc::Key::Key, key.to_vec())
-                                .ctx(trc::Key::Value, value.to_vec())
-                                .caused_by(trc::location!())
-                        })?;
-                    if task_type != typ {
-                        return Ok(true);
-                    }
+        let mut taken = 0;
+        req.server
+            .store()
+            .iterate(iterate, |key, value| {
+                if status_marker
+                    .is_some_and(|marker| marker != TaskQueueClass::due_marker_of(value))
+                {
+                    return Ok(true);
                 }
-
-                let id = key.deserialize_be_u64(U64_LEN)?;
+                let TaskDue { due, id, .. } = TaskDue::deserialize(key)?;
+                if !seen.insert(id) {
+                    return Ok(true);
+                }
                 total += 1;
-                if response.response.total.is_some() {
-                    if !response.is_full() {
-                        response.add_id(id.into());
-                    }
-                    Ok(true)
-                } else {
-                    Ok(response.add_id(id.into()))
+                if page.is_none_or(|page| taken < page) {
+                    entries.push((due, id));
+                    taken += 1;
                 }
-            },
-        )
-        .await
-        .caused_by(trc::location!())?;
+                Ok(count_total || page.is_none_or(|page| taken < page))
+            })
+            .await
+            .caused_by(trc::location!())?;
+
+        if let Some(page) = page
+            && entries.len() > page
+        {
+            entries.select_nth_unstable_by(page, |a, b| due_order(a, b, params.sort_ascending));
+            entries.truncate(page);
+        }
+    }
+
+    entries.sort_unstable_by(|a, b| due_order(a, b, params.sort_ascending));
+    for (_, id) in entries {
+        if !response.add_id(id.into()) {
+            break;
+        }
+    }
 
     if response.response.total.is_some() {
         response.response.total = Some(total);
@@ -505,23 +608,63 @@ pub(crate) async fn task_query(
 
 async fn task_ids(server: &Server, max_results: usize) -> trc::Result<Vec<Id>> {
     let mut tasks = Vec::with_capacity(8);
-    let from_key = ValueKey::from(ValueClass::TaskQueue(TaskQueueClass::Due { id: 0, due: 1 }));
-    let to_key = ValueKey::from(ValueClass::TaskQueue(TaskQueueClass::Due {
-        id: u64::MAX,
-        due: u64::MAX,
-    }));
+    let mut seen = AHashSet::new();
 
-    server
-        .store()
-        .iterate(
-            IterateParams::new(from_key, to_key).ascending().no_values(),
-            |key, _| {
-                tasks.push(key.deserialize_be_u64(U64_LEN)?.into());
+    for typ in (0..TaskType::COUNT as u16).filter_map(TaskType::from_id) {
+        if tasks.len() >= max_results {
+            break;
+        }
+        let from_key = ValueKey::from(ValueClass::TaskQueue(TaskQueueClass::Due {
+            id: TaskId::Assigned(0),
+            typ,
+            due: 0,
+        }));
+        let to_key = ValueKey::from(ValueClass::TaskQueue(TaskQueueClass::Due {
+            id: TaskId::Assigned(u64::MAX),
+            typ,
+            due: u64::MAX,
+        }));
 
-                Ok(tasks.len() < max_results)
-            },
-        )
-        .await
-        .caused_by(trc::location!())
-        .map(|_| tasks)
+        server
+            .store()
+            .iterate(
+                IterateParams::new(from_key, to_key)
+                    .ascending()
+                    .no_values()
+                    .limit(max_results - tasks.len()),
+                |key, _| {
+                    let id = TaskDue::deserialize(key)?.id;
+                    if seen.insert(id) {
+                        tasks.push(id.into());
+                    }
+                    Ok(tasks.len() < max_results)
+                },
+            )
+            .await
+            .caused_by(trc::location!())?;
+    }
+
+    Ok(tasks)
+}
+
+fn due_order(a: &(u64, u64), b: &(u64, u64), ascending: bool) -> Ordering {
+    if ascending { a.cmp(b) } else { b.cmp(a) }
+}
+
+pub(super) fn query_page<T: JmapObject + Sync + Send>(
+    request: &QueryRequest<T>,
+    response: &QueryResponseBuilder,
+) -> Option<usize> {
+    let limit = response.limit;
+    if limit == 0 {
+        None
+    } else if request.anchor.is_some() {
+        usize::try_from(request.anchor_offset.unwrap_or(0).max(0))
+            .ok()
+            .map(|offset| offset + limit + 1)
+    } else {
+        usize::try_from(request.position.unwrap_or(0))
+            .ok()
+            .map(|position| position + limit)
+    }
 }

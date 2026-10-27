@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
  */
 
+use self::pool::PgPool;
 use crate::{
     search::{
         CalendarSearchField, ContactSearchField, EmailSearchField, FileSearchField, SearchField,
@@ -12,33 +13,40 @@ use crate::{
     write::SearchIndex,
 };
 use ahash::AHashSet;
-use deadpool_postgres::Pool;
+use compact_str::CompactString;
+use std::sync::Arc;
 use tokio_postgres::error::SqlState;
+
+use self::sql::SqlStatements;
 
 pub mod blob;
 pub mod lookup;
 pub mod main;
+pub mod pool;
+mod pooled;
 pub mod read;
 pub mod search;
+pub mod sql;
 pub mod tls;
 pub mod write;
 
 pub struct PostgresStore {
-    pub(crate) conn_pool: Pool,
+    pub(crate) conn_pool: PgPool,
     pub(crate) ts_configs: AHashSet<&'static str>,
+    pub(crate) sql: Arc<SqlStatements>,
 }
 
 #[inline(always)]
 fn into_error(err: tokio_postgres::error::Error) -> trc::Error {
     let mut local_err = trc::StoreEvent::PostgresqlError.reason(error_chain(&err));
     if let Some(db_err) = err.as_db_error() {
-        local_err = local_err.code(db_err.code().code().to_string());
+        local_err = local_err.code(CompactString::from(db_err.code().code()));
         if let Some(detail) = db_err.detail() {
-            local_err = local_err.details(detail.to_string());
+            local_err = local_err.details(CompactString::from(detail));
         }
 
         if let Some(hint) = db_err.hint() {
-            local_err = local_err.caused_by(hint.to_string());
+            local_err = local_err.caused_by(CompactString::from(hint));
         }
     }
     local_err
@@ -60,6 +68,8 @@ fn error_chain(err: &(dyn std::error::Error + 'static)) -> String {
 
 pub(crate) const DELETE_CHUNK_SIZE: usize = 1000;
 pub(crate) const MIN_DELETE_CHUNK_SIZE: usize = 10;
+pub(crate) const ITERATE_CHUNK_SIZE: usize = 1000;
+pub(crate) const MIN_ITERATE_CHUNK_SIZE: usize = 10;
 
 #[inline(always)]
 pub(crate) fn is_timeout_error(err: &tokio_postgres::Error) -> bool {
@@ -89,13 +99,25 @@ impl SearchIndex {
             SearchIndex::InMemory => "",
         }
     }
+
+    fn reads_account_first(&self) -> bool {
+        matches!(self, SearchIndex::Calendar | SearchIndex::Contacts)
+    }
+}
+
+impl SearchField {
+    fn holds_long_text(&self) -> bool {
+        matches!(
+            self,
+            SearchField::Calendar(CalendarSearchField::Description)
+                | SearchField::Contact(ContactSearchField::Note)
+        )
+    }
 }
 
 trait PsqlSearchField {
     fn column(&self) -> &'static str;
     fn column_type(&self) -> &'static str;
-    fn sort_column_type(&self) -> Option<&'static str>;
-    fn sort_column(&self) -> Option<&'static str>;
 }
 
 impl PsqlSearchField for EmailSearchField {
@@ -108,45 +130,14 @@ impl PsqlSearchField for EmailSearchField {
             EmailSearchField::Subject => "subj",
             EmailSearchField::Body => "body",
             EmailSearchField::Attachment => "atta",
-            EmailSearchField::ReceivedAt => "rcvd",
-            EmailSearchField::SentAt => "sent",
-            EmailSearchField::Size => "size",
-            EmailSearchField::HasAttachment => "hatt",
             EmailSearchField::Headers => "hdrs",
         }
     }
 
     fn column_type(&self) -> &'static str {
         match self {
-            EmailSearchField::ReceivedAt | EmailSearchField::SentAt => "BIGINT",
-            EmailSearchField::Size => "INTEGER",
-            EmailSearchField::HasAttachment => "BOOLEAN",
             EmailSearchField::Headers => "JSONB",
             _ => "TSVECTOR",
-        }
-    }
-
-    fn sort_column_type(&self) -> Option<&'static str> {
-        match self {
-            EmailSearchField::From | EmailSearchField::To | EmailSearchField::Subject => {
-                Some("TEXT")
-            }
-            #[cfg(feature = "test_mode")]
-            EmailSearchField::Cc | EmailSearchField::Bcc => Some("TEXT"),
-            _ => None,
-        }
-    }
-
-    fn sort_column(&self) -> Option<&'static str> {
-        match self {
-            EmailSearchField::From => Some("s_fr"),
-            EmailSearchField::To => Some("s_to"),
-            EmailSearchField::Subject => Some("s_sj"),
-            #[cfg(feature = "test_mode")]
-            EmailSearchField::Bcc => Some("s_bc"),
-            #[cfg(feature = "test_mode")]
-            EmailSearchField::Cc => Some("s_cc"),
-            _ => None,
         }
     }
 }
@@ -159,25 +150,11 @@ impl PsqlSearchField for CalendarSearchField {
             CalendarSearchField::Location => "locn",
             CalendarSearchField::Owner => "ownr",
             CalendarSearchField::Attendee => "atnd",
-            CalendarSearchField::Start => "strt",
-            CalendarSearchField::Uid => "uid",
         }
     }
 
     fn column_type(&self) -> &'static str {
-        match self {
-            CalendarSearchField::Start => "BIGINT",
-            CalendarSearchField::Uid => "TEXT",
-            _ => "TSVECTOR",
-        }
-    }
-
-    fn sort_column_type(&self) -> Option<&'static str> {
-        None
-    }
-
-    fn sort_column(&self) -> Option<&'static str> {
-        None
+        "TSVECTOR"
     }
 }
 
@@ -194,44 +171,26 @@ impl PsqlSearchField for ContactSearchField {
             ContactSearchField::Address => "addr",
             ContactSearchField::Note => "note",
             ContactSearchField::Kind => "kind",
-            ContactSearchField::Uid => "uid",
         }
     }
 
     fn column_type(&self) -> &'static str {
         match self {
-            ContactSearchField::Kind | ContactSearchField::Uid => "TEXT",
+            ContactSearchField::Kind => "TEXT",
             _ => "TSVECTOR",
         }
-    }
-
-    fn sort_column_type(&self) -> Option<&'static str> {
-        None
-    }
-
-    fn sort_column(&self) -> Option<&'static str> {
-        None
     }
 }
 
 impl PsqlSearchField for FileSearchField {
     fn column(&self) -> &'static str {
         match self {
-            FileSearchField::Name => "name",
             FileSearchField::Content => "body",
         }
     }
 
     fn column_type(&self) -> &'static str {
         "TSVECTOR"
-    }
-
-    fn sort_column_type(&self) -> Option<&'static str> {
-        None
-    }
-
-    fn sort_column(&self) -> Option<&'static str> {
-        None
     }
 }
 impl PsqlSearchField for TracingSearchField {
@@ -249,14 +208,6 @@ impl PsqlSearchField for TracingSearchField {
             TracingSearchField::QueueId => "BIGINT",
             TracingSearchField::Keywords => "TSVECTOR",
         }
-    }
-
-    fn sort_column_type(&self) -> Option<&'static str> {
-        None
-    }
-
-    fn sort_column(&self) -> Option<&'static str> {
-        None
     }
 }
 
@@ -284,28 +235,6 @@ impl PsqlSearchField for SearchField {
             SearchField::Contact(field) => field.column_type(),
             SearchField::File(field) => field.column_type(),
             SearchField::Tracing(field) => field.column_type(),
-        }
-    }
-
-    fn sort_column_type(&self) -> Option<&'static str> {
-        match self {
-            SearchField::Email(field) => field.sort_column_type(),
-            SearchField::Calendar(field) => field.sort_column_type(),
-            SearchField::Contact(field) => field.sort_column_type(),
-            SearchField::File(field) => field.sort_column_type(),
-            SearchField::Tracing(field) => field.sort_column_type(),
-            SearchField::AccountId | SearchField::DocumentId | SearchField::Id => None,
-        }
-    }
-
-    fn sort_column(&self) -> Option<&'static str> {
-        match self {
-            SearchField::Email(field) => field.sort_column(),
-            SearchField::Calendar(field) => field.sort_column(),
-            SearchField::Contact(field) => field.sort_column(),
-            SearchField::File(field) => field.sort_column(),
-            SearchField::Tracing(field) => field.sort_column(),
-            SearchField::AccountId | SearchField::DocumentId | SearchField::Id => None,
         }
     }
 }

@@ -20,6 +20,7 @@ impl<T: SessionStream> Session<T> {
                 mfa_token: None,
             },
             arguments.tag,
+            None,
         )
         .await
     }

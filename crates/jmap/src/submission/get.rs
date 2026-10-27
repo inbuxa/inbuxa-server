@@ -7,8 +7,8 @@
 use crate::changes::state::StateManager;
 use common::Server;
 use email::submission::{
-    ArchivedAddress, ArchivedEnvelope, ArchivedUndoStatus, Delivered, DeliveryStatus,
-    EmailSubmission,
+    ArchivedAddress, ArchivedEnvelope, ArchivedUndoStatus, Delivered, DeliveryResults,
+    DeliveryStatus, EmailSubmission,
 };
 use jmap_proto::{
     method::get::{GetRequest, GetResponse},
@@ -16,15 +16,12 @@ use jmap_proto::{
     types::date::UTCDate,
 };
 use jmap_tools::{Key, Map, Value};
-use smtp::queue::{ArchivedError, ArchivedErrorDetails, ArchivedStatus, Message, spool::SmtpSpool};
-use smtp_proto::ArchivedResponse;
+use smtp::queue::{Message, spool::SmtpSpool};
 use std::future::Future;
 use store::{
     IterateParams, U32_LEN, ValueKey,
     rkyv::option::ArchivedOption,
-    write::{
-        AlignedBytes, Archive, IndexPropertyClass, ValueClass, key::DeserializeBigEndian, now,
-    },
+    write::{Archive, ArchiveBytes, IndexPropertyClass, ValueClass, key::DeserializeBigEndian},
 };
 use trc::AddContext;
 use types::{
@@ -39,6 +36,13 @@ pub trait EmailSubmissionGet: Sync + Send {
         &self,
         request: GetRequest<email_submission::EmailSubmission>,
     ) -> impl Future<Output = trc::Result<GetResponse<email_submission::EmailSubmission>>> + Send;
+
+    fn email_submission_delivery_results(
+        &self,
+        account_id: u32,
+        queue_id: u64,
+        delivery_status: &mut VecMap<String, DeliveryStatus>,
+    ) -> impl Future<Output = trc::Result<bool>> + Send;
 }
 
 impl EmailSubmissionGet for Server {
@@ -74,7 +78,7 @@ impl EmailSubmissionGet for Server {
                             document_id: 0,
                             class: ValueClass::IndexProperty(IndexPropertyClass::Integer {
                                 property: EmailSubmissionField::Metadata.into(),
-                                value: now() - (3 * 86400),
+                                value: 0,
                             }),
                         },
                         ValueKey {
@@ -88,15 +92,19 @@ impl EmailSubmissionGet for Server {
                         },
                     )
                     .ascending()
-                    .no_values(),
+                    .no_values()
+                    .limit(self.core.jmap.get_max_objects.saturating_add(1)),
                     |key, _| {
                         ids.push(Id::from(key.deserialize_be_u32(key.len() - U32_LEN)?));
 
-                        Ok(ids.len() < self.core.jmap.get_max_objects)
+                        Ok(ids.len() <= self.core.jmap.get_max_objects)
                     },
                 )
                 .await
                 .caused_by(trc::location!())?;
+            if ids.len() > self.core.jmap.get_max_objects {
+                return Err(trc::JmapEvent::RequestTooLarge.into_err());
+            }
 
             ids
         };
@@ -115,7 +123,7 @@ impl EmailSubmissionGet for Server {
             let document_id = id.document_id();
             let submission_ = if let Some(submission) = self
                 .store()
-                .get_value::<Archive<AlignedBytes>>(ValueKey::archive(
+                .get_value::<Archive<ArchiveBytes>>(ValueKey::archive(
                     account_id,
                     Collection::EmailSubmission,
                     document_id,
@@ -138,8 +146,18 @@ impl EmailSubmissionGet for Server {
                 .map(|(k, v)| (k.to_string(), DeliveryStatus::from(v)))
                 .collect::<VecMap<_, _>>();
             let mut queued_status = None;
-            if let Some(queue_id) = submission.queue_id.as_ref().map(u64::from) {
-                if let Some(queued_message_) = self
+            if let Some(queue_id) = submission
+                .queue_id
+                .as_ref()
+                .filter(|_| !matches!(submission.undo_status, ArchivedUndoStatus::Canceled))
+                .map(u64::from)
+            {
+                if self
+                    .email_submission_delivery_results(account_id, queue_id, &mut delivery_status)
+                    .await?
+                {
+                    queued_status = email_submission::UndoStatus::Final.into();
+                } else if let Some(queued_message_) = self
                     .read_message_archive(queue_id)
                     .await
                     .caused_by(trc::location!())?
@@ -149,28 +167,16 @@ impl EmailSubmissionGet for Server {
                         .caused_by(trc::location!())?;
                     for rcpt in queued_message.recipients.iter() {
                         *delivery_status.get_mut_or_insert(rcpt.address().to_string()) =
-                            DeliveryStatus {
-                                smtp_reply: match &rcpt.status {
-                                    ArchivedStatus::Completed(reply) => {
-                                        format_archived_response(&reply.response)
-                                    }
-                                    ArchivedStatus::TemporaryFailure(reply)
-                                    | ArchivedStatus::PermanentFailure(reply) => {
-                                        format_archived_error_details(reply)
-                                    }
-                                    ArchivedStatus::Scheduled => "250 2.1.5 Queued".to_string(),
-                                },
-                                delivered: match &rcpt.status {
-                                    ArchivedStatus::Scheduled
-                                    | ArchivedStatus::TemporaryFailure(_) => Delivered::Queued,
-                                    ArchivedStatus::Completed(_) => Delivered::Yes,
-                                    ArchivedStatus::PermanentFailure(_) => Delivered::No,
-                                },
-                                displayed: false,
-                            };
+                            rcpt.delivery_status();
                     }
                     queued_status = email_submission::UndoStatus::Pending.into();
                 } else {
+                    self.email_submission_delivery_results(
+                        account_id,
+                        queue_id,
+                        &mut delivery_status,
+                    )
+                    .await?;
                     queued_status = email_submission::UndoStatus::Final.into();
                 }
             }
@@ -258,6 +264,31 @@ impl EmailSubmissionGet for Server {
 
         Ok(response)
     }
+
+    async fn email_submission_delivery_results(
+        &self,
+        account_id: u32,
+        queue_id: u64,
+        delivery_status: &mut VecMap<String, DeliveryStatus>,
+    ) -> trc::Result<bool> {
+        let Some(results) = self
+            .store()
+            .get_value::<Archive<ArchiveBytes>>(DeliveryResults::key(account_id, queue_id))
+            .await?
+        else {
+            return Ok(false);
+        };
+        for result in results
+            .unarchive::<DeliveryResults>()
+            .caused_by(trc::location!())?
+            .0
+            .iter()
+        {
+            *delivery_status.get_mut_or_insert(result.address.to_string()) =
+                DeliveryStatus::from(result);
+        }
+        Ok(true)
+    }
 }
 
 fn build_envelope(
@@ -296,29 +327,4 @@ fn build_address(
             },
         )
         .into()
-}
-
-fn format_archived_response(response: &ArchivedResponse<Box<str>>) -> String {
-    format!(
-        "Code: {}, Enhanced code: {}.{}.{}, Message: {}",
-        response.code,
-        response.esc[0],
-        response.esc[1],
-        response.esc[2],
-        response.message.replace('\n', " "),
-    )
-}
-
-fn format_archived_error_details(response: &ArchivedErrorDetails) -> String {
-    match &response.details {
-        ArchivedError::UnexpectedResponse(response) => format_archived_response(&response.response),
-        ArchivedError::DnsError(details)
-        | ArchivedError::Io(details)
-        | ArchivedError::ConnectionError(details)
-        | ArchivedError::TlsError(details)
-        | ArchivedError::DaneError(details)
-        | ArchivedError::MtaStsError(details) => details.to_string(),
-        ArchivedError::RateLimited => "Rate limited".to_string(),
-        ArchivedError::ConcurrencyLimited => "Concurrency limited".to_string(),
-    }
 }

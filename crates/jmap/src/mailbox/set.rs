@@ -5,27 +5,44 @@
  */
 
 use crate::{
-    api::acl::{JmapAcl, JmapRights},
+    api::{
+        acl::{JmapAcl, JmapRights},
+        metadata::{
+            MetadataAccess, MetadataPatches, MetadataTarget, MetadataType, MetadataWriter,
+            ObjectMetadata, is_empty_update,
+        },
+        parent_ref::{CreateResolver, ParentRef},
+    },
     changes::state::JmapCacheState,
 };
 use common::{
-    Server, auth::AccessToken, sharing::EffectiveAcl, storage::index::ObjectIndexBuilder,
+    Server,
+    auth::AccessToken,
+    sharing::EffectiveAcl,
+    storage::index::{ObjectIndexBuilder, PresenceFlags, RewritePresence},
 };
-#[allow(unused_imports)]
-use email::mailbox::{INBOX_ID, JUNK_ID, TRASH_ID, UidMailbox};
 use email::{
-    cache::{MessageCacheFetch, mailbox::MailboxCacheAccess},
+    cache::{
+        MessageCacheFetch,
+        email::{MailboxCounters, MessageCacheAccess},
+        mailbox::MailboxCacheAccess,
+    },
     mailbox::{
         Mailbox,
         destroy::{MailboxDestroy, MailboxDestroyError},
+        merge_subscription,
+        role::RoleChange,
     },
 };
 use jmap_proto::{
     error::set::{SetError, SetErrorType},
     method::set::{SetRequest, SetResponse},
-    object::mailbox::{self, MailboxProperty, MailboxValue},
+    object::{
+        AnyId,
+        mailbox::{self, MailboxProperty, MailboxValue},
+    },
     references::resolve::ResolveCreatedReference,
-    request::MaybeInvalid,
+    request::{MaybeInvalid, capability::CapabilityIds},
     types::state::State,
 };
 use jmap_tools::{JsonPointerItem, Key, Map, Value};
@@ -33,13 +50,20 @@ use registry::schema::enums::StorageQuota;
 use std::future::Future;
 use store::{
     ValueKey,
+    ahash::AHashMap,
     roaring::RoaringBitmap,
-    write::{AlignedBytes, Archive, BatchBuilder, assert::AssertValue},
+    write::{Archive, ArchiveBytes, BatchBuilder, Slot, assert::AssertValue},
 };
 use trc::AddContext;
 use types::{
-    acl::Acl, collection::Collection, field::MailboxField, id::Id, special_use::SpecialUse,
+    acl::{Acl, AclGrant},
+    collection::{Collection, SyncCollection},
+    field::MailboxField,
+    id::Id,
+    special_use::SpecialUse,
 };
+
+const SERVER_SET_MISMATCH: &str = "Server-set property does not match the current value.";
 
 pub struct SetContext<'x> {
     account_id: u32,
@@ -48,6 +72,7 @@ pub struct SetContext<'x> {
     response: SetResponse<mailbox::Mailbox>,
     mailbox_ids: RoaringBitmap,
     will_destroy: Vec<Id>,
+    counters: AHashMap<u32, MailboxCounters>,
 }
 
 pub trait MailboxSet: Sync + Send {
@@ -55,18 +80,30 @@ pub trait MailboxSet: Sync + Send {
         &self,
         request: SetRequest<'_, mailbox::Mailbox>,
         access_token: &AccessToken,
+        using: CapabilityIds,
     ) -> impl Future<Output = trc::Result<SetResponse<mailbox::Mailbox>>> + Send;
 
+    #[allow(clippy::type_complexity)]
     fn mailbox_set_item(
         &self,
         changes_: Map<'_, MailboxProperty, MailboxValue>,
         update: Option<(u32, Archive<Mailbox>)>,
         ctx: &SetContext,
+        resolver: Option<&CreateResolver<'_>>,
     ) -> impl Future<
         Output = trc::Result<
-            Result<ObjectIndexBuilder<Mailbox, Mailbox>, SetError<MailboxProperty>>,
+            Result<
+                (ObjectIndexBuilder<Archive<Mailbox>, Mailbox>, ParentRef),
+                SetError<MailboxProperty>,
+            >,
         >,
     > + Send;
+}
+
+impl ResolveCreatedReference<MailboxProperty, MailboxValue> for CreateResolver<'_> {
+    fn get_created_id(&self, id_ref: &str) -> Option<AnyId> {
+        self.created_id(id_ref)
+    }
 }
 
 impl MailboxSet for Server {
@@ -75,14 +112,55 @@ impl MailboxSet for Server {
         &self,
         mut request: SetRequest<'_, mailbox::Mailbox>,
         access_token: &AccessToken,
+        using: CapabilityIds,
     ) -> trc::Result<SetResponse<mailbox::Mailbox>> {
         // Prepare response
         let account_id = request.account_id.document_id();
         let on_destroy_remove_emails = request.arguments.on_destroy_remove_emails.unwrap_or(false);
+        let object_metadata = ObjectMetadata::new(self, access_token, using, MetadataType::Mailbox);
+        let sampled = object_metadata.viewer_change_id(self, account_id).await?;
         let cache = self.get_cached_messages(account_id).await?;
+        let shared_state = cache.get_state(true);
         let mut response = SetResponse::from_request(&request, self.core.jmap.set_max_objects)?
-            .with_state(cache.assert_state(true, &request.if_in_state)?);
+            .with_state(sampled.assert_state(shared_state.clone(), &request.if_in_state)?);
+        let account_info = self.account(account_id).await?;
+        let mut metadata_writer =
+            MetadataWriter::new(object_metadata, account_id).with_owner(account_info.clone());
+        metadata_writer
+            .preload_updates(self, request.update.as_ref(), |document_id| {
+                cache
+                    .mailbox_by_id(&document_id)
+                    .map(|mailbox| mailbox.metadata_kinds)
+            })
+            .await?;
         let will_destroy = response.collect_will_destroy(request.unwrap_destroy());
+        let mut count_threads = false;
+        let mut counter_ids = Vec::new();
+        for (id, object) in request.update.iter().flat_map(|update| update.iter()) {
+            if let (MaybeInvalid::Value(id), Value::Object(object)) = (id, object) {
+                let mut has_counters = false;
+                for key in object.keys() {
+                    match key {
+                        Key::Property(
+                            MailboxProperty::TotalEmails | MailboxProperty::UnreadEmails,
+                        ) => {
+                            has_counters = true;
+                        }
+                        Key::Property(
+                            MailboxProperty::TotalThreads | MailboxProperty::UnreadThreads,
+                        ) => {
+                            has_counters = true;
+                            count_threads = true;
+                        }
+                        _ => {}
+                    }
+                }
+                if has_counters {
+                    counter_ids.push(id.document_id());
+                }
+            }
+        }
+        let counters = cache.mailbox_counters(counter_ids, count_threads);
         let mut ctx = SetContext {
             account_id,
             is_shared: access_token.is_shared(account_id),
@@ -90,19 +168,28 @@ impl MailboxSet for Server {
             response,
             mailbox_ids: RoaringBitmap::from_iter(cache.mailboxes.index.keys()),
             will_destroy,
+            counters,
         };
         let mut change_id = None;
-        let account_info = self.account(account_id).await?;
 
         // Process creates
         let mut batch = BatchBuilder::new();
-        'create: for (id, object) in request.unwrap_create() {
+        let mut pending_creates: AHashMap<String, Slot> = AHashMap::new();
+        'create: for (id, mut object) in request.unwrap_create() {
+            let metadata_patches =
+                match object_metadata.extract(MetadataPatches::for_create(), &mut object) {
+                    Ok(patches) => patches,
+                    Err(err) => {
+                        ctx.response.not_created.append(id, err);
+                        continue 'create;
+                    }
+                };
             let Some(object) = object.into_object() else {
                 continue;
             };
 
             // Validate quota
-            if ctx.mailbox_ids.len()
+            if ctx.mailbox_ids.len() + pending_creates.len() as u64
                 >= self.object_quota(account_info.object_quotas(), StorageQuota::MaxMailboxes)
                     as u64
             {
@@ -116,33 +203,69 @@ impl MailboxSet for Server {
                 continue 'create;
             }
 
-            match self.mailbox_set_item(object, None, &ctx).await? {
-                Ok(builder) => {
+            match self
+                .mailbox_set_item(
+                    object,
+                    None,
+                    &ctx,
+                    Some(&CreateResolver::new(&pending_creates)),
+                )
+                .await?
+            {
+                Ok((mut builder, parent)) => {
+                    let metadata_writes = if let Some(metadata_patches) = metadata_patches {
+                        let access = if ctx.is_shared {
+                            MetadataAccess {
+                                may_write_shared: false,
+                                may_read: false,
+                            }
+                        } else {
+                            MetadataAccess::FULL
+                        };
+                        match metadata_writer
+                            .prepare_for(self, metadata_patches, access, MetadataTarget::Create)
+                            .await?
+                        {
+                            Ok(prepared) => {
+                                if let Some((kinds, mailbox)) =
+                                    prepared.shared_kinds().zip(builder.changes_mut())
+                                {
+                                    mailbox.set_metadata_kinds(kinds);
+                                }
+                                Some(prepared)
+                            }
+                            Err(err) => {
+                                ctx.response.not_created.append(id, err);
+                                continue 'create;
+                            }
+                        }
+                    } else {
+                        None
+                    };
+
                     batch
                         .with_account_id(account_id)
                         .with_collection(Collection::Mailbox);
 
-                    let parent_id = builder.changes().unwrap().parent_id;
-                    if parent_id > 0 {
+                    if let Some(parent_document_id) = parent.document_id() {
                         batch
-                            .with_document(parent_id - 1)
+                            .with_document(parent_document_id)
                             .assert_value(MailboxField::Archive, AssertValue::Some);
                     }
 
-                    let document_id = self
-                        .store()
-                        .assign_document_ids(account_id, Collection::Mailbox, 1)
-                        .await
-                        .caused_by(trc::location!())?;
-
+                    let slot = batch.reserve_document_id(account_id, Collection::Mailbox);
                     batch
-                        .with_document(document_id)
-                        .custom(builder)
-                        .caused_by(trc::location!())?
-                        .commit_point();
+                        .create_document(slot)
+                        .custom(builder.with_pending_id_opt(parent.slot()))
+                        .caused_by(trc::location!())?;
+                    if let Some(prepared) = metadata_writes {
+                        metadata_writer
+                            .write(prepared, slot, &mut batch)
+                            .caused_by(trc::location!())?;
+                    }
+                    batch.commit_point();
 
-                    ctx.mailbox_ids.insert(document_id);
-                    ctx.response.created(id, document_id);
+                    pending_creates.insert(id, slot);
                 }
                 Err(err) => {
                     ctx.response.not_created.append(id, err);
@@ -152,18 +275,25 @@ impl MailboxSet for Server {
         }
 
         if !batch.is_empty() {
-            change_id = self
-                .commit_batch(batch)
+            let assigned_ids = metadata_writer
+                .commit(self, batch)
                 .await
-                .and_then(|ids| ids.last_change_id(account_id))
-                .caused_by(trc::location!())?
+                .caused_by(trc::location!())?;
+            change_id = assigned_ids
+                .last_change_id(account_id, SyncCollection::Email)
                 .into();
+
+            for (id, slot) in pending_creates {
+                let document_id = assigned_ids.slot(slot);
+                ctx.mailbox_ids.insert(document_id);
+                ctx.response.created(id, document_id);
+            }
         }
 
         // Process updates
         let mut will_update = Vec::with_capacity(request.update.as_ref().map_or(0, |u| u.len()));
         let mut batch = BatchBuilder::new();
-        'update: for (id, object) in request.unwrap_update() {
+        'update: for (id, mut object) in request.unwrap_update() {
             let id = match id {
                 MaybeInvalid::Value(id) => id,
                 invalid => {
@@ -180,15 +310,23 @@ impl MailboxSet for Server {
                     .append(id, SetError::will_destroy());
                 continue 'update;
             }
+            let metadata_patches =
+                match object_metadata.extract(MetadataPatches::for_update(), &mut object) {
+                    Ok(patches) => patches,
+                    Err(err) => {
+                        ctx.response.not_updated.append(id, err);
+                        continue 'update;
+                    }
+                };
             let Some(object) = object.into_object() else {
                 continue 'update;
             };
 
             // Obtain mailbox
             let document_id = id.document_id();
-            if let Some(mailbox) = self
+            if let Some(mailbox_archive) = self
                 .store()
-                .get_value::<Archive<AlignedBytes>>(ValueKey::archive(
+                .get_value::<Archive<ArchiveBytes>>(ValueKey::archive(
                     account_id,
                     Collection::Mailbox,
                     document_id,
@@ -196,18 +334,31 @@ impl MailboxSet for Server {
                 .await?
             {
                 // Validate ACL
-                let mailbox = mailbox
+                let mailbox = mailbox_archive
                     .into_deserialized::<email::mailbox::Mailbox>()
                     .caused_by(trc::location!())?;
-                if ctx.is_shared {
-                    let acl = mailbox.inner.acls.effective_acl(access_token);
-                    let subscription_only = object.keys().all(|key| {
-                        matches!(
-                            key,
-                            Key::Property(MailboxProperty::IsSubscribed | MailboxProperty::Id)
+                let subscription_only = object.keys().all(|key| {
+                    matches!(
+                        key,
+                        Key::Property(
+                            MailboxProperty::IsSubscribed
+                                | MailboxProperty::Id
+                                | MailboxProperty::MyRights
+                                | MailboxProperty::TotalEmails
+                                | MailboxProperty::UnreadEmails
+                                | MailboxProperty::TotalThreads
+                                | MailboxProperty::UnreadThreads
                         )
-                    });
-                    if subscription_only {
+                    )
+                });
+                let acl = ctx
+                    .is_shared
+                    .then(|| mailbox.inner.acls.effective_acl(access_token));
+                if let Some(acl) = acl {
+                    if metadata_patches.is_some() && !acl.contains(Acl::Read) {
+                        ctx.response.not_updated.append(id, SetError::not_found());
+                        continue 'update;
+                    } else if subscription_only {
                         if !acl.contains(Acl::Read) {
                             ctx.response.not_updated.append(
                                 id,
@@ -237,27 +388,128 @@ impl MailboxSet for Server {
                     }
                 }
 
+                let metadata_writes = if let Some(metadata_patches) = metadata_patches {
+                    let access = MetadataAccess {
+                        may_write_shared: acl.is_none_or(|acl| acl.contains(Acl::ModifyMetadata)),
+                        may_read: acl.is_none_or(|acl| acl.contains(Acl::Read)),
+                    };
+                    match metadata_writer
+                        .prepare_for(
+                            self,
+                            metadata_patches,
+                            access,
+                            MetadataTarget::Update { document_id },
+                        )
+                        .await?
+                    {
+                        Ok(prepared) => (!prepared.is_empty()).then_some(prepared),
+                        Err(err) => {
+                            ctx.response.not_updated.append(id, err);
+                            continue 'update;
+                        }
+                    }
+                } else {
+                    None
+                };
+
+                if is_empty_update::<mailbox::Mailbox>(&object, id) {
+                    match metadata_writes {
+                        Some(prepared) => {
+                            if let Some(presence) = metadata_writer
+                                .write(prepared, document_id, &mut batch)
+                                .caused_by(trc::location!())?
+                            {
+                                Mailbox::rewrite_presence(
+                                    &mailbox_archive
+                                        .to_unarchived::<Mailbox>()
+                                        .caused_by(trc::location!())?,
+                                    presence.after,
+                                    account_id,
+                                    document_id,
+                                    &mut batch,
+                                )
+                                .caused_by(trc::location!())?;
+                            }
+                            batch.commit_point();
+                            will_update.push(id);
+                        }
+                        None => {
+                            ctx.response.updated.append(id, None);
+                        }
+                    }
+                    continue 'update;
+                }
+
                 match self
-                    .mailbox_set_item(object, (document_id, mailbox).into(), &ctx)
+                    .mailbox_set_item(object, (document_id, mailbox).into(), &ctx, None)
                     .await?
                 {
-                    Ok(builder) => {
+                    Ok((mut builder, parent)) => {
                         batch
                             .with_account_id(account_id)
                             .with_collection(Collection::Mailbox);
 
-                        let parent_id = builder.changes().unwrap().parent_id;
-                        if parent_id > 0 {
-                            batch
-                                .with_document(parent_id - 1)
-                                .assert_value(MailboxField::Archive, AssertValue::Some);
-                        }
+                        if subscription_only {
+                            let subscriber = access_token.account_id();
+                            let subscribe = builder.changes().unwrap().is_subscribed(subscriber);
+                            let subscription_changed = builder.current().is_some_and(|current| {
+                                current.inner.is_subscribed(subscriber) != subscribe
+                            });
 
-                        batch
-                            .with_document(document_id)
-                            .custom(builder)
-                            .caused_by(trc::location!())?
-                            .commit_point();
+                            if !subscription_changed && metadata_writes.is_none() {
+                                ctx.response.updated.append(id, None);
+                                continue 'update;
+                            }
+
+                            if let Some(prepared) = metadata_writes
+                                && let Some(presence) = metadata_writer
+                                    .write(prepared, document_id, &mut batch)
+                                    .caused_by(trc::location!())?
+                            {
+                                Mailbox::rewrite_presence(
+                                    &mailbox_archive
+                                        .to_unarchived::<Mailbox>()
+                                        .caused_by(trc::location!())?,
+                                    presence.after,
+                                    account_id,
+                                    document_id,
+                                    &mut batch,
+                                )
+                                .caused_by(trc::location!())?;
+                            }
+                            if subscription_changed {
+                                batch
+                                    .with_account_id(account_id)
+                                    .with_collection(Collection::Mailbox)
+                                    .with_document(document_id);
+                                merge_subscription(&mut batch, subscriber, subscribe);
+                            }
+                            batch.commit_point();
+                        } else {
+                            if let Some(kinds) = metadata_writes
+                                .as_ref()
+                                .and_then(|prepared| prepared.shared_kinds())
+                                && let Some(mailbox) = builder.changes_mut()
+                            {
+                                mailbox.set_metadata_kinds(kinds);
+                            }
+                            if let Some(parent_document_id) = parent.document_id() {
+                                batch
+                                    .with_document(parent_document_id)
+                                    .assert_value(MailboxField::Archive, AssertValue::Some);
+                            }
+
+                            batch
+                                .with_document(document_id)
+                                .custom(builder)
+                                .caused_by(trc::location!())?;
+                            if let Some(prepared) = metadata_writes {
+                                metadata_writer
+                                    .write(prepared, document_id, &mut batch)
+                                    .caused_by(trc::location!())?;
+                            }
+                            batch.commit_point();
+                        }
                         will_update.push(id);
                     }
                     Err(err) => {
@@ -271,13 +523,10 @@ impl MailboxSet for Server {
         }
 
         if !batch.is_empty() {
-            match self
-                .commit_batch(batch)
-                .await
-                .and_then(|ids| ids.last_change_id(account_id))
-            {
-                Ok(change_id_) => {
-                    change_id = Some(change_id_);
+            match metadata_writer.commit(self, batch).await {
+                Ok(assigned_ids) => {
+                    change_id =
+                        Some(assigned_ids.last_change_id(account_id, SyncCollection::Email));
                     for id in will_update {
                         ctx.response.updated.append(id, None);
                     }
@@ -299,6 +548,23 @@ impl MailboxSet for Server {
         }
 
         // Process deletions
+        let destroy_containers = self
+            .preload_container_cleanup(
+                access_token.changed_by(),
+                account_id,
+                Collection::Mailbox,
+                &ctx.will_destroy
+                    .iter()
+                    .map(|id| id.document_id())
+                    .filter(|document_id| {
+                        cache
+                            .mailbox_by_id(document_id)
+                            .is_some_and(|mailbox| !mailbox.metadata_kinds.is_empty())
+                    })
+                    .collect(),
+            )
+            .await
+            .caused_by(trc::location!())?;
         for id in ctx.will_destroy {
             match self
                 .mailbox_destroy(
@@ -306,6 +572,7 @@ impl MailboxSet for Server {
                     id.document_id(),
                     ctx.access_token,
                     on_destroy_remove_emails,
+                    Some(&destroy_containers),
                 )
                 .await?
             {
@@ -346,8 +613,12 @@ impl MailboxSet for Server {
         }
 
         // Write changes
-        if let Some(change_id) = change_id {
-            ctx.response.new_state = State::Exact(change_id).into();
+        if change_id.is_some() {
+            ctx.response.new_state = object_metadata
+                .viewer_change_id(self, account_id)
+                .await?
+                .state(change_id.map_or(shared_state, State::Exact))
+                .into();
         }
 
         Ok(ctx.response)
@@ -359,15 +630,25 @@ impl MailboxSet for Server {
         changes_: Map<'_, MailboxProperty, MailboxValue>,
         update: Option<(u32, Archive<Mailbox>)>,
         ctx: &SetContext<'_>,
-    ) -> trc::Result<Result<ObjectIndexBuilder<Mailbox, Mailbox>, SetError<MailboxProperty>>> {
+        resolver: Option<&CreateResolver<'_>>,
+    ) -> trc::Result<
+        Result<
+            (ObjectIndexBuilder<Archive<Mailbox>, Mailbox>, ParentRef),
+            SetError<MailboxProperty>,
+        >,
+    > {
         // Parse properties
         let mut changes = update
             .as_ref()
             .map(|(_, obj)| obj.inner.clone())
             .unwrap_or_else(|| Mailbox::new(String::new()));
+        let mut parent = ParentRef::from_stored(changes.parent_id);
         let mut has_acl_changes = false;
         for (property, mut value) in changes_.into_vec() {
-            if let Err(err) = ctx.response.resolve_self_references(&mut value, 0, false) {
+            if let Err(err) = match resolver {
+                Some(resolver) => resolver.resolve_self_references(&mut value, 0, false),
+                None => ctx.response.resolve_self_references(&mut value, 0, false),
+            } {
                 return Ok(Err(err));
             };
             match (&property, value) {
@@ -392,18 +673,23 @@ impl MailboxSet for Server {
                     Key::Property(MailboxProperty::ParentId),
                     Value::Element(MailboxValue::Id(value)),
                 ) => {
-                    let parent_id = value.document_id();
-                    if ctx.will_destroy.contains(&value) {
-                        return Ok(Err(SetError::will_destroy()
-                            .with_description("Parent ID will be destroyed.")));
-                    } else if !ctx.mailbox_ids.contains(parent_id) {
+                    let Some(parent_ref) = ParentRef::from_client_id(value, resolver) else {
                         return Ok(Err(SetError::invalid_properties()
                             .with_description("Parent ID does not exist.")));
+                    };
+                    if let Some(parent_id) = parent_ref.document_id() {
+                        if ctx.will_destroy.contains(&value) {
+                            return Ok(Err(SetError::will_destroy()
+                                .with_description("Parent ID will be destroyed.")));
+                        } else if !ctx.mailbox_ids.contains(parent_id) {
+                            return Ok(Err(SetError::invalid_properties()
+                                .with_description("Parent ID does not exist.")));
+                        }
                     }
-                    changes.parent_id = parent_id + 1;
+                    parent = parent_ref;
                 }
                 (Key::Property(MailboxProperty::ParentId), Value::Null) => {
-                    changes.parent_id = 0;
+                    parent = ParentRef::ROOT;
                 }
                 (Key::Property(MailboxProperty::IsSubscribed), Value::Bool(subscribe)) => {
                     let account_id = ctx
@@ -421,13 +707,18 @@ impl MailboxSet for Server {
                     Key::Property(MailboxProperty::Role),
                     Value::Element(MailboxValue::Role(role)),
                 ) => {
-                    changes.role = role;
+                    changes.set_role(role);
                 }
                 (Key::Property(MailboxProperty::Role), Value::Null) => {
-                    changes.role = SpecialUse::None;
+                    changes.set_role(SpecialUse::None);
                 }
-                (Key::Property(MailboxProperty::SortOrder), Value::Number(value)) => {
-                    changes.sort_order = Some(value.cast_to_u64() as u32);
+                (Key::Property(MailboxProperty::SortOrder), Value::Number(value))
+                    if let Some(sort_order) = value
+                        .as_u64()
+                        .and_then(|sort_order| u32::try_from(sort_order).ok())
+                        .filter(|sort_order| *sort_order < 1 << 31) =>
+                {
+                    changes.sort_order = Some(sort_order);
                 }
                 (Key::Property(MailboxProperty::ShareWith), value) => {
                     match JmapRights::acl_set::<mailbox::Mailbox>(value) {
@@ -475,6 +766,53 @@ impl MailboxSet for Server {
                             .with_description("The id property is immutable.".to_string())));
                     }
                 }
+                (Key::Property(MailboxProperty::MyRights), value)
+                    if let Some((_, current)) = &update =>
+                {
+                    let rights = if ctx.is_shared {
+                        JmapRights::rights::<mailbox::Mailbox>(
+                            current.inner.acls.effective_acl(ctx.access_token),
+                        )
+                    } else {
+                        JmapRights::all_rights::<mailbox::Mailbox>()
+                    };
+                    let is_current = match (&value, &rights) {
+                        (Value::Object(requested), Value::Object(rights)) => {
+                            requested.len() == rights.len()
+                                && requested
+                                    .iter()
+                                    .all(|(right, value)| rights.get(right) == Some(value))
+                        }
+                        _ => false,
+                    };
+                    if !is_current {
+                        return Ok(Err(SetError::invalid_properties()
+                            .with_property(MailboxProperty::MyRights)
+                            .with_description(SERVER_SET_MISMATCH)));
+                    }
+                }
+                (
+                    Key::Property(
+                        counter @ (MailboxProperty::TotalEmails
+                        | MailboxProperty::UnreadEmails
+                        | MailboxProperty::TotalThreads
+                        | MailboxProperty::UnreadThreads),
+                    ),
+                    Value::Number(value),
+                ) if let Some((document_id, _)) = &update => {
+                    let counters = ctx.counters.get(document_id);
+                    let current = match counter {
+                        MailboxProperty::TotalEmails => counters.map_or(0, |c| c.total),
+                        MailboxProperty::UnreadEmails => counters.map_or(0, |c| c.unread),
+                        MailboxProperty::TotalThreads => counters.map_or(0, |c| c.threads.len()),
+                        _ => counters.map_or(0, |c| c.unread_threads.len()),
+                    };
+                    if value.as_u64() != u64::try_from(current).ok() {
+                        return Ok(Err(SetError::invalid_properties()
+                            .with_property(counter.clone())
+                            .with_description(SERVER_SET_MISMATCH)));
+                    }
+                }
                 _ => {
                     return Ok(Err(SetError::invalid_properties()
                         .with_property(property.into_owned())
@@ -483,10 +821,15 @@ impl MailboxSet for Server {
             }
         }
 
-        // Validate depth and circular parent-child relationship
-        if update
-            .as_ref()
-            .is_none_or(|(_, m)| m.inner.parent_id != changes.parent_id)
+        changes.parent_id = parent.as_stored();
+        let cached_mailboxes = self.get_cached_messages(ctx.account_id).await?;
+
+        // Validate depth and circular parent-child relationship. A parent created within
+        // this request has no ancestors in storage yet, so there is nothing to walk.
+        if !parent.is_pending()
+            && update
+                .as_ref()
+                .is_none_or(|(_, m)| m.inner.parent_id != changes.parent_id)
         {
             let mut mailbox_parent_id = changes.parent_id;
             let current_mailbox_id = update
@@ -508,22 +851,12 @@ impl MailboxSet for Server {
                 }
                 let parent_document_id = mailbox_parent_id - 1;
 
-                if let Some(mailbox_) = self
-                    .store()
-                    .get_value::<Archive<AlignedBytes>>(ValueKey::archive(
-                        ctx.account_id,
-                        Collection::Mailbox,
-                        parent_document_id,
-                    ))
-                    .await?
-                {
-                    let mailbox = mailbox_
-                        .unarchive::<email::mailbox::Mailbox>()
-                        .caused_by(trc::location!())?;
+                if let Some(mailbox) = cached_mailboxes.mailbox_by_id(&parent_document_id) {
                     if depth == 0
                         && ctx.is_shared
                         && !mailbox
                             .acls
+                            .as_slice()
                             .effective_acl(ctx.access_token)
                             .contains(Acl::CreateChild)
                     {
@@ -532,7 +865,7 @@ impl MailboxSet for Server {
                         )));
                     }
 
-                    mailbox_parent_id = mailbox.parent_id.into();
+                    mailbox_parent_id = mailbox.parent_id().map_or(0, |parent_id| parent_id + 1);
                 } else if ctx.mailbox_ids.contains(parent_document_id) {
                     // Parent mailbox is probably created within the same request
                     success = true;
@@ -553,34 +886,20 @@ impl MailboxSet for Server {
             }
         }
 
-        let cached_mailboxes = self.get_cached_messages(ctx.account_id).await?;
-
-        // Verify that the mailbox role is unique.
-        if update
-            .as_ref()
-            .is_none_or(|(_, m)| m.inner.role != changes.role)
-        {
-            if !matches!(changes.role, SpecialUse::None)
-                && cached_mailboxes.mailbox_by_role(&changes.role).is_some()
-            {
-                return Ok(Err(SetError::invalid_properties()
-                    .with_property(MailboxProperty::Role)
-                    .with_description(format!(
-                        "A mailbox with role '{}' already exists.",
-                        changes.role.as_str().unwrap_or_default()
-                    ))));
-            }
-
-            // Role of internal folders cannot be modified
-            if update.as_ref().is_some_and(|(document_id, _)| {
-                *document_id == INBOX_ID || *document_id == TRASH_ID || *document_id == JUNK_ID
-            }) {
-                return Ok(Err(SetError::invalid_properties()
-                    .with_property(MailboxProperty::Role)
-                    .with_description(
-                        "You are not allowed to change the role of Inbox, Junk or Trash folders.",
-                    )));
-            }
+        let role_change = match &update {
+            Some((document_id, current)) => RoleChange::Update {
+                document_id: *document_id,
+                current: current.inner.role(),
+                role: changes.role(),
+            },
+            None => RoleChange::Create {
+                role: changes.role(),
+            },
+        };
+        if let Err(err) = role_change.validate(&cached_mailboxes) {
+            return Ok(Err(SetError::invalid_properties()
+                .with_property(MailboxProperty::Role)
+                .with_description(err.to_string())));
         }
 
         // Verify that the mailbox name is unique.
@@ -590,11 +909,13 @@ impl MailboxSet for Server {
             let current_id = update.as_ref().map(|(document_id, _)| *document_id);
             if update.as_ref().is_none_or(|(_, m)| {
                 m.inner.name != changes.name || m.inner.parent_id != changes.parent_id
-            }) && let Some(existing) = cached_mailboxes.mailboxes.items.iter().find(|m| {
-                Some(m.document_id) != current_id
-                    && m.parent_id().map_or(0, |id| id + 1) == changes.parent_id
-                    && m.name.to_lowercase() == lower_name
-            }) {
+            }) && let Some(parent_cache_id) = parent.cache_id()
+                && let Some(existing) = cached_mailboxes.mailboxes.items.iter().find(|m| {
+                    Some(m.document_id) != current_id
+                        && m.parent_id() == parent_cache_id
+                        && m.name.to_lowercase() == lower_name
+                })
+            {
                 return Ok(Err(SetError::already_exists()
                     .with_existing_id(Id::from(existing.document_id))
                     .with_description(format!(
@@ -608,26 +929,30 @@ impl MailboxSet for Server {
                 .with_description("Mailbox name cannot be empty.")));
         }
 
-        // Refresh ACLs
+        // Validate ACLs
         let current = update.map(|(_, current)| current);
-        if has_acl_changes {
-            if !changes.acls.is_empty()
-                && let Err(err) = self.acl_validate(&changes.acls).await
-            {
-                return Ok(Err(err.into()));
-            }
-
-            self.refresh_acls(
-                &changes.acls,
-                current.as_ref().map(|m| m.inner.acls.as_slice()),
-            )
-            .await
-            .caused_by(trc::location!())?;
+        if has_acl_changes
+            && !changes.acls.is_empty()
+            && let Err(err) = self
+                .acl_validate(
+                    ctx.access_token,
+                    ctx.account_id,
+                    &changes.acls,
+                    current
+                        .as_ref()
+                        .map_or(&[] as &[AclGrant], |current| current.inner.acls.as_slice()),
+                )
+                .await
+        {
+            return Ok(Err(err.into()));
         }
 
         // Validate
-        Ok(Ok(ObjectIndexBuilder::new()
-            .with_changes(changes)
-            .with_current_opt(current)))
+        Ok(Ok((
+            ObjectIndexBuilder::new()
+                .with_changes(changes)
+                .with_current_opt(current),
+            parent,
+        )))
     }
 }

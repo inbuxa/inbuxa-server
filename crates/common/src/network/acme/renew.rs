@@ -11,17 +11,18 @@ use crate::{
         AcmeDnsParameters, AcmeError, AcmeResult, ParsedCert, directory::AcmeRequestBuilder,
     },
 };
+use compact_str::ToCompactString;
 use registry::{
     schema::{
         enums::{AcmeChallengeType, AcmeRenewBefore, DnsRecordType},
-        prelude::{ObjectType, Property},
+        prelude::{ObjectInner, ObjectType, Property},
         structs::{
             AcmeProvider, Certificate, CertificateManagement, DnsManagement, Domain, PublicText,
             PublicTextValue, SecretText, SecretTextValue, SystemSettings, Task, TaskDnsManagement,
             TaskDomainManagement, TaskStatus,
         },
     },
-    types::{datetime::UTCDateTime, id::ObjectId, map::Map},
+    types::{id::ObjectId, map::Map},
 };
 use store::{
     registry::{
@@ -48,9 +49,12 @@ impl Server {
             }
             CertificateManagement::Automatic(props) => props,
         };
-        let Some(acme_provider) = self
+        let Some(provider_object) = self
             .registry()
-            .object::<AcmeProvider>(cert.acme_provider_id)
+            .get(ObjectId::new(
+                ObjectType::AcmeProvider,
+                cert.acme_provider_id,
+            ))
             .await?
         else {
             return Err(AcmeError::Invalid(format!(
@@ -58,10 +62,49 @@ impl Server {
                 cert.acme_provider_id
             )));
         };
+        let acme_provider = AcmeProvider::from(provider_object.clone());
         let challenge_type = acme_provider.challenge_type;
         let renew_before = acme_provider.renew_before;
         let reuse_key = acme_provider.reuse_key;
         let request = AcmeRequestBuilder::new(acme_provider).await?;
+        if let ObjectInner::AcmeProvider(stored) = &provider_object.inner {
+            let meta = &request.directory.meta;
+            if stored.account_hash_prefix != meta.account_hash_prefix
+                || stored.issuer_domain_names.as_slice() != meta.issuer_domain_names.as_slice()
+                || stored.caa_identities.as_slice() != meta.caa_identities.as_slice()
+            {
+                let mut updated = stored.as_ref().clone();
+                updated.account_hash_prefix = meta.account_hash_prefix.clone();
+                updated.issuer_domain_names = Map::new(meta.issuer_domain_names.clone());
+                updated.caa_identities = Map::new(meta.caa_identities.clone());
+                match self
+                    .registry()
+                    .write(RegistryWrite::update(
+                        cert.acme_provider_id,
+                        &updated.into(),
+                        &provider_object,
+                    ))
+                    .await
+                {
+                    Ok(RegistryWriteResult::Success(_)) => {}
+                    Ok(result) => {
+                        trc::error!(
+                            trc::AcmeEvent::Error
+                                .into_err()
+                                .details("Failed to update ACME provider directory metadata.")
+                                .reason(format!("{result:?}"))
+                                .caused_by(trc::location!())
+                        );
+                    }
+                    Err(err) => {
+                        trc::error!(
+                            err.details("Failed to update ACME provider directory metadata.")
+                                .caused_by(trc::location!())
+                        );
+                    }
+                }
+            }
+        }
         let domains = request.build_domains(
             self,
             &domain.name,
@@ -72,11 +115,10 @@ impl Server {
             .acme_certificate_renewal_due(&domains, renew_before, now())
             .await?
         {
-            return Err(AcmeError::NotDue(format!(
-                "Certificate for domain {} is still valid; renewal is not due until {}",
-                domain.name,
-                UTCDateTime::from_timestamp(renew_at as i64)
-            )));
+            return Err(AcmeError::NotDue {
+                domain: domain.name,
+                renew_at,
+            });
         }
 
         let dns_parameters = match &domain.dns_management {
@@ -132,8 +174,8 @@ impl Server {
                 value: pem_cert.certificate,
             }),
             issuer: parsed_cert.issuer,
-            not_valid_after: UTCDateTime::from_timestamp(parsed_cert.valid_not_after.timestamp()),
-            not_valid_before: UTCDateTime::from_timestamp(parsed_cert.valid_not_before.timestamp()),
+            not_valid_after: parsed_cert.valid_not_after,
+            not_valid_before: parsed_cert.valid_not_before,
             subject_alternative_names: Map::new(parsed_cert.sans),
         };
         let now = now();
@@ -190,7 +232,7 @@ impl Server {
 
                 // Reload registry
                 let change = RegistryChange::Insert(ObjectId::new(ObjectType::Certificate, id));
-                Box::pin(self.reload_registry(change)).await?;
+                self.reload_registry(change).await?;
                 self.cluster_broadcast(BroadcastEvent::RegistryChange(change))
                     .await;
 
@@ -205,7 +247,7 @@ impl Server {
                     Acme(trc::AcmeEvent::OrderCompleted),
                     Domain = domain.name.clone(),
                     Hostname = new_sans.as_slice(),
-                    Id = id.to_string(),
+                    Id = id.to_compact_string(),
                     ValidFrom =
                         trc::Value::Timestamp(parsed_cert.valid_not_before.timestamp() as u64),
                     ValidTo = trc::Value::Timestamp(parsed_cert.valid_not_after.timestamp() as u64),

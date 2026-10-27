@@ -5,23 +5,32 @@
  */
 
 use super::{ImapContext, ToModSeq};
-use crate::core::{SavedSearch, SelectedMailbox, Session, State};
+use crate::core::{
+    MailboxRefresh, MailboxView, SavedSearch, SelectedMailbox, Session, State,
+    rights::MailboxRights,
+};
 use common::network::SessionStream;
+use email::cache::mailbox::MailboxCacheAccess;
 use imap_proto::{
     Command, ResponseCode, ResponseType, StatusResponse,
     protocol::{
         ImapResponse, ObjectId, Sequence, fetch,
         list::ListItem,
-        select::{HighestModSeq, Response},
+        select::{HighestModSeq, PermanentFlags, Response},
     },
     receiver::Request,
 };
 use registry::schema::enums::Permission;
 use std::{sync::Arc, time::Instant};
-use types::{acl::Acl, id::Id};
+use tokio::sync::OwnedSemaphorePermit;
+use types::acl::Acl;
 
 impl<T: SessionStream> Session<T> {
-    pub async fn handle_select(&mut self, request: Request<Command>) -> trc::Result<()> {
+    pub async fn handle_select(
+        &mut self,
+        request: Request<Command>,
+        _permit: Option<OwnedSemaphorePermit>,
+    ) -> trc::Result<()> {
         // Validate access
         self.assert_has_permission(if request.command == Command::Select {
             Permission::ImapSelect
@@ -46,7 +55,21 @@ impl<T: SessionStream> Session<T> {
         let want_objectid = self.is_objectid;
 
         // Refresh mailboxes
-        data.synchronize_mailboxes(false)
+        if let Some(account_id) = arguments
+            .objectid
+            .as_ref()
+            .and_then(|objectid| objectid.account_id)
+            .and_then(|account_id| u32::try_from(account_id.id()).ok())
+        {
+            data.use_messages(account_id);
+        }
+        data.use_messages_of(&arguments.mailbox_name);
+        let MailboxRefresh {
+            mut caches,
+            access_token,
+            ..
+        } = data
+            .synchronize_mailboxes(false)
             .await
             .imap_ctx(&arguments.tag, trc::location!())?;
 
@@ -54,35 +77,40 @@ impl<T: SessionStream> Session<T> {
         let mailbox = arguments
             .objectid
             .as_ref()
-            .and_then(
-                |objectid| match (objectid.account_id, objectid.mailbox_id) {
-                    (Some(account_id), Some(mailbox_id)) => {
-                        data.get_mailbox_by_id(account_id.document_id(), mailbox_id.document_id())
-                    }
-                    _ => None,
-                },
-            )
-            .or_else(|| data.get_mailbox_by_name(&arguments.mailbox_name));
+            .and_then(|objectid| data.get_mailbox_by_object_id(objectid, &access_token))
+            .or_else(|| {
+                data.get_mailbox_by_name(&arguments.mailbox_name)
+                    .map(|mailbox| (mailbox, arguments.mailbox_name))
+            });
 
-        if let Some(mailbox) = mailbox {
-            if !data
-                .check_mailbox_acl(mailbox.account_id, mailbox.mailbox_id, Acl::ReadItems)
+        if let Some((mailbox, mailbox_name)) = mailbox {
+            let cache = caches
+                .fetch(&data.server, mailbox.account_id)
                 .await
-                .imap_ctx(&arguments.tag, trc::location!())?
-            {
-                return Err(trc::ImapEvent::Error
-                    .into_err()
-                    .details("You do not have the required permissions to read this mailbox.")
-                    .code(ResponseCode::NoPerm)
-                    .id(arguments.tag));
+                .imap_ctx(&arguments.tag, trc::location!())?;
+            data.use_messages(mailbox.account_id);
+            let acl = MailboxRights::new(&access_token, mailbox.account_id)
+                .acl(&cache, mailbox.mailbox_id);
+            if !acl.contains(Acl::ReadItems) {
+                return Err(if cache.has_mailbox_id(&mailbox.mailbox_id) {
+                    trc::ImapEvent::Error
+                        .into_err()
+                        .details("You do not have the required permissions to read this mailbox.")
+                        .code(ResponseCode::NoPerm)
+                        .id(arguments.tag)
+                } else {
+                    trc::ImapEvent::Error
+                        .into_err()
+                        .details("Mailbox no longer exists.")
+                        .id(arguments.tag)
+                });
             }
-
-            // Try obtaining the mailbox from the cache
-            let state = data
-                .fetch_messages(&mailbox, None)
+            let view = MailboxView::build(&cache, mailbox.mailbox_id);
+            let uid_validity = data.uid_validity(&mailbox);
+            let uid_next = data
+                .uid_next(&cache, &mailbox)
                 .await
-                .imap_ctx(&arguments.tag, trc::location!())?
-                .unwrap();
+                .imap_ctx(&arguments.tag, trc::location!())?;
 
             // Synchronize messages
             let closed_previous = self.state.close_mailbox();
@@ -91,57 +119,80 @@ impl<T: SessionStream> Session<T> {
             // Build new state
             let is_rev2 = self.version.is_rev2();
             let is_utf8 = self.is_utf8;
-            let mailbox_state = data.mailbox_state(&mailbox).unwrap();
-            let total_messages = state.total_messages;
+            let is_read_write = is_select
+                && acl
+                    .contains_any([Acl::AddItems, Acl::RemoveItems, Acl::ModifyItems].into_iter());
+            let total_messages = view.len();
             let highest_modseq = if is_condstore {
-                HighestModSeq::new(state.modseq.to_modseq()).into()
+                HighestModSeq::new(view.change_id().to_modseq()).into()
             } else {
                 None
             };
             let mailbox = Arc::new(SelectedMailbox {
                 id: mailbox,
-                state: parking_lot::Mutex::new(state),
+                view: parking_lot::Mutex::new(view),
                 saved_search: parking_lot::Mutex::new(SavedSearch::None),
                 is_select,
                 is_condstore,
             });
 
             // Validate QRESYNC arguments
-            if let Some(qresync) = arguments.qresync {
-                if !self.is_qresync {
-                    return Err(trc::ImapEvent::Error
-                        .into_err()
-                        .details("QRESYNC is not enabled.")
-                        .id(arguments.tag));
+            let qresync = match arguments.qresync {
+                Some(qresync) => {
+                    if !self.is_qresync {
+                        return Err(trc::ImapEvent::Error
+                            .into_err()
+                            .details("QRESYNC is not enabled.")
+                            .id(arguments.tag));
+                    }
+                    if self.is_uidonly && qresync.seq_match.is_some() {
+                        return Err(trc::ImapEvent::Error
+                            .into_err()
+                            .details(concat!(
+                                "The QRESYNC sequence matching parameter ",
+                                "is not allowed once UIDONLY is enabled."
+                            ))
+                            .code(ResponseCode::UidRequired)
+                            .ctx(trc::Key::Type, ResponseType::Bad)
+                            .id(arguments.tag));
+                    }
+                    (qresync.uid_validity == uid_validity).then_some(qresync)
                 }
-                if self.is_uidonly && qresync.seq_match.is_some() {
-                    return Err(trc::ImapEvent::Error
-                        .into_err()
-                        .details(concat!(
-                            "The QRESYNC sequence matching parameter ",
-                            "is not allowed once UIDONLY is enabled."
-                        ))
-                        .code(ResponseCode::UidRequired)
-                        .ctx(trc::Key::Type, ResponseType::Bad)
-                        .id(arguments.tag));
-                }
-                if qresync.uid_validity == mailbox_state.uid_validity as u32 {
-                    // Send flags for changed messages
+                None => None,
+            };
+
+            // Build response
+            let response = Response {
+                mailbox: ListItem::new(mailbox_name.clone()),
+                total_messages,
+                recent_messages: 0,
+                unseen_seq: 0,
+                uid_validity,
+                uid_next,
+                closed_previous,
+                is_rev2,
+                is_utf8,
+                highest_modseq,
+                objectid: want_objectid.then(|| ObjectId::from(mailbox.id)),
+                permanent_flags: PermanentFlags::from(acl),
+            };
+
+            let untagged = match qresync {
+                Some(qresync) => {
+                    self.write_bytes(response.serialize()).await?;
                     data.fetch(
                         fetch::Arguments {
                             tag: "".into(),
-                            sequence_set: qresync
-                                .known_uids
-                                .or_else(|| qresync.seq_match.map(|(_, s)| s))
-                                .unwrap_or(Sequence::Range {
-                                    start: 1.into(),
-                                    end: None,
-                                }),
+                            sequence_set: qresync.known_uids.unwrap_or(Sequence::Range {
+                                start: 1.into(),
+                                end: None,
+                            }),
                             attributes: vec![fetch::Attribute::Flags],
                             changed_since: qresync.modseq.into(),
                             include_vanished: true,
                         },
                         mailbox.clone(),
+                        Some(cache),
                         true,
                         true,
                         self.is_uidonly,
@@ -152,53 +203,37 @@ impl<T: SessionStream> Session<T> {
                     )
                     .await
                     .imap_ctx(&arguments.tag, trc::location!())?;
+                    None
                 }
-            }
+                None => Some(response),
+            };
 
             trc::event!(
                 Imap(trc::ImapEvent::Select),
                 SpanId = self.session_id,
-                MailboxName = arguments.mailbox_name.clone(),
+                MailboxName = mailbox_name,
                 AccountId = mailbox.id.account_id,
                 MailboxId = mailbox.id.mailbox_id,
                 Total = total_messages,
-                UidNext = mailbox_state.uid_next,
-                UidValidity = mailbox_state.uid_validity,
+                UidNext = uid_next,
+                UidValidity = uid_validity,
                 Elapsed = op_start.elapsed()
             );
-
-            // Build response
-            let response = Response {
-                mailbox: ListItem::new(arguments.mailbox_name),
-                total_messages,
-                recent_messages: 0,
-                unseen_seq: 0,
-                uid_validity: mailbox_state.uid_validity as u32,
-                uid_next: mailbox_state.uid_next as u32,
-                closed_previous,
-                is_rev2,
-                is_utf8,
-                highest_modseq,
-                objectid: want_objectid.then(|| ObjectId {
-                    mailbox_id: Some(Id::from(mailbox.id.mailbox_id)),
-                    account_id: Some(Id::from(mailbox.id.account_id)),
-                    ..Default::default()
-                }),
-            };
 
             // Update state
             self.state = State::Selected { data, mailbox };
 
-            self.write_bytes(
-                StatusResponse::completed(command)
-                    .with_tag(arguments.tag)
-                    .with_code(if is_select {
-                        ResponseCode::ReadWrite
-                    } else {
-                        ResponseCode::ReadOnly
-                    })
-                    .serialize(response.serialize()),
-            )
+            let completed = StatusResponse::completed(command)
+                .with_tag(arguments.tag)
+                .with_code(if is_read_write {
+                    ResponseCode::ReadWrite
+                } else {
+                    ResponseCode::ReadOnly
+                });
+            self.write_bytes(match untagged {
+                Some(response) => completed.serialize_after(&response),
+                None => completed.into_bytes(),
+            })
             .await
         } else {
             Err(trc::ImapEvent::Error
@@ -209,7 +244,11 @@ impl<T: SessionStream> Session<T> {
         }
     }
 
-    pub async fn handle_unselect(&mut self, request: Request<Command>) -> trc::Result<()> {
+    pub async fn handle_unselect(
+        &mut self,
+        request: Request<Command>,
+        _permit: Option<OwnedSemaphorePermit>,
+    ) -> trc::Result<()> {
         self.state.close_mailbox();
         self.state = State::Authenticated {
             data: self.state.session_data(),

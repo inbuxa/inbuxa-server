@@ -5,7 +5,7 @@
  */
 
 use super::EphemeralStore;
-use crate::{Deserialize, IterateParams, Key, ValueKey, write::ValueClass};
+use crate::{Deserialize, Fetch, IterateParams, Key, ValueKey, write::ValueClass};
 
 impl EphemeralStore {
     pub(crate) async fn get_value<U>(&self, key: impl Key) -> trc::Result<Option<U>>
@@ -40,24 +40,57 @@ impl EphemeralStore {
         params: IterateParams<T>,
         mut cb: impl for<'x> FnMut(&'x [u8], &'x [u8]) -> trc::Result<bool> + Sync + Send,
     ) -> trc::Result<()> {
+        let limit = match params.fetch {
+            Fetch::Limit(rows) => usize::try_from(rows).unwrap_or(usize::MAX),
+            Fetch::All | Fetch::Expect(_) => usize::MAX,
+        };
         let subspace = params.begin.subspace();
         let begin = params.begin.serialize(0);
         let end = params.end.serialize(0);
+        if begin > end {
+            return Ok(());
+        }
         let state = self.state.read();
         let Some(map) = state.subspaces.get(&subspace) else {
             return Ok(());
         };
 
         if params.ascending {
-            for (k, v) in map.range(begin..=end) {
-                if !cb(k.as_slice(), v.as_slice())? || params.first {
+            for (k, v) in map.range(begin..=end).take(limit) {
+                if !cb(k.as_slice(), v.as_slice())? {
                     break;
                 }
             }
         } else {
-            for (k, v) in map.range(begin..=end).rev() {
-                if !cb(k.as_slice(), v.as_slice())? || params.first {
+            for (k, v) in map.range(begin..=end).rev().take(limit) {
+                if !cb(k.as_slice(), v.as_slice())? {
                     break;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    pub(crate) async fn iterate_many<T: Key>(
+        &self,
+        ranges: Vec<IterateParams<T>>,
+        mut cb: impl for<'x> FnMut(&'x [u8], &'x [u8]) -> trc::Result<bool> + Sync + Send,
+    ) -> trc::Result<()> {
+        let subspace = ranges[0].begin.subspace();
+        let state = self.state.read();
+        let Some(map) = state.subspaces.get(&subspace) else {
+            return Ok(());
+        };
+
+        'outer: for params in ranges {
+            let begin = params.begin.serialize(0);
+            let end = params.end.serialize(0);
+            if begin > end {
+                continue;
+            }
+            for (k, v) in map.range(begin..=end) {
+                if !cb(k.as_slice(), v.as_slice())? {
+                    break 'outer;
                 }
             }
         }

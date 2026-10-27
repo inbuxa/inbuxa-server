@@ -1,0 +1,30 @@
+/*
+ * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
+ *
+ * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
+ */
+
+use crate::compiler::CompileError;
+use crate::compiler::Value;
+use crate::compiler::grammar::instruction::CompilerState;
+
+use crate::compiler::grammar::test::Test;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(
+    any(all(test, stalwart_tests), feature = "serde"),
+    derive(serde::Serialize, serde::Deserialize)
+)]
+pub(crate) struct TestMailboxIdExists {
+    pub mailbox_ids: Box<[Value]>,
+    pub is_not: bool,
+}
+
+impl CompilerState<'_> {
+    pub(crate) fn parse_test_mailboxidexists(&mut self) -> Result<Test, CompileError> {
+        Ok(Test::MailboxIdExists(Box::new(TestMailboxIdExists {
+            mailbox_ids: self.parse_strings(false)?.into(),
+            is_not: false,
+        })))
+    }
+}

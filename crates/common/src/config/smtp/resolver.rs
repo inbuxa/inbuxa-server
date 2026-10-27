@@ -20,7 +20,7 @@ use mail_auth::{
 use registry::schema::{
     enums::{DnsResolverProtocol, PolicyEnforcement},
     prelude::ObjectType,
-    structs::{DnsResolver, MtaSts, SystemSettings},
+    structs::{Cache, DnsResolver, MtaSts, SystemSettings},
 };
 use serde::{Deserialize, Serialize};
 use std::{
@@ -29,6 +29,7 @@ use std::{
     net::IpAddr,
     str::FromStr,
     sync::Arc,
+    time::Instant,
 };
 use store::registry::bootstrap::Bootstrap;
 use utils::cache::CacheItemWeight;
@@ -90,6 +91,88 @@ pub struct Policy {
     pub max_age: u64,
 }
 
+#[derive(Debug, Clone)]
+pub struct CachedPolicy {
+    pub policy: Arc<Policy>,
+    pub expires: Instant,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MtaStsFailureKind {
+    TemporaryFetchError,
+    PermanentFetchError,
+    InvalidPolicy,
+}
+
+#[derive(Debug)]
+pub struct MtaStsFailure {
+    pub id: Box<str>,
+    pub kind: MtaStsFailureKind,
+    pub reason: Box<str>,
+    pub retry_after: Instant,
+    pub fallback: Option<CachedPolicy>,
+}
+
+#[derive(Debug, Clone)]
+pub enum MtaStsEntry {
+    Policy(CachedPolicy),
+    Failed(Arc<MtaStsFailure>),
+}
+
+impl MtaStsEntry {
+    pub fn policy_for(
+        &self,
+        id: &str,
+        now: Instant,
+    ) -> Option<Result<Arc<Policy>, Arc<MtaStsFailure>>> {
+        match self {
+            MtaStsEntry::Policy(cached) => {
+                (cached.policy.id == id).then(|| Ok(cached.policy.clone()))
+            }
+            MtaStsEntry::Failed(failure) => {
+                let fallback = failure.live_fallback(now);
+                if let Some(cached) = fallback.filter(|cached| cached.policy.id == id) {
+                    Some(Ok(cached.policy.clone()))
+                } else {
+                    (&*failure.id == id && now < failure.retry_after).then(|| match fallback {
+                        Some(cached) => Ok(cached.policy.clone()),
+                        None => Err(failure.clone()),
+                    })
+                }
+            }
+        }
+    }
+
+    pub fn fallback(&self, now: Instant) -> Option<&CachedPolicy> {
+        match self {
+            MtaStsEntry::Policy(cached) => Some(cached),
+            MtaStsEntry::Failed(failure) => failure.live_fallback(now),
+        }
+    }
+}
+
+impl MtaStsFailure {
+    fn live_fallback(&self, now: Instant) -> Option<&CachedPolicy> {
+        self.fallback.as_ref().filter(|cached| cached.expires > now)
+    }
+}
+
+impl CacheItemWeight for MtaStsEntry {
+    fn weight(&self) -> u64 {
+        match self {
+            MtaStsEntry::Policy(cached) => cached.policy.weight(),
+            MtaStsEntry::Failed(failure) => {
+                (std::mem::size_of::<MtaStsFailure>() + failure.id.len() + failure.reason.len())
+                    as u64
+                    + failure
+                        .fallback
+                        .as_ref()
+                        .map_or(0, |cached| cached.policy.weight())
+            }
+        }
+    }
+}
+
 impl CacheItemWeight for Tlsa {
     fn weight(&self) -> u64 {
         self.entries
@@ -124,7 +207,7 @@ impl Resolvers {
                 Ok((config, options)) => {
                     resolver_config = config;
                     opts = options;
-                    opts.num_concurrent_reqs = resolver.concurrency as usize;
+                    opts.num_concurrent_reqs = resolver.max_concurrent_requests as usize;
                     opts.timeout = resolver.timeout.into_inner();
                     opts.preserve_intermediates = resolver.preserve_intermediates;
                     opts.try_tcp_on_error = resolver.tcp_on_error;
@@ -162,7 +245,7 @@ impl Resolvers {
                     resolver_config.add_name_server(NameServerConfig::new(ip, true, connections));
                 }
 
-                opts.num_concurrent_reqs = resolver.concurrency as usize;
+                opts.num_concurrent_reqs = resolver.max_concurrent_requests as usize;
                 opts.timeout = resolver.timeout.into_inner();
                 opts.preserve_intermediates = resolver.preserve_intermediates;
                 opts.try_tcp_on_error = resolver.tcp_on_error;
@@ -176,7 +259,7 @@ impl Resolvers {
                     ResolverConfig::udp_and_tcp(&CLOUDFLARE)
                 };
 
-                opts.num_concurrent_reqs = resolver.concurrency as usize;
+                opts.num_concurrent_reqs = resolver.max_concurrent_requests as usize;
                 opts.timeout = resolver.timeout.into_inner();
                 opts.preserve_intermediates = resolver.preserve_intermediates;
                 opts.try_tcp_on_error = resolver.tcp_on_error;
@@ -189,7 +272,7 @@ impl Resolvers {
                 } else {
                     ResolverConfig::udp_and_tcp(&QUAD9)
                 };
-                opts.num_concurrent_reqs = resolver.concurrency as usize;
+                opts.num_concurrent_reqs = resolver.max_concurrent_requests as usize;
                 opts.timeout = resolver.timeout.into_inner();
                 opts.preserve_intermediates = resolver.preserve_intermediates;
                 opts.try_tcp_on_error = resolver.tcp_on_error;
@@ -198,7 +281,7 @@ impl Resolvers {
             }
             DnsResolver::Google(resolver) => {
                 resolver_config = ResolverConfig::udp_and_tcp(&GOOGLE);
-                opts.num_concurrent_reqs = resolver.concurrency as usize;
+                opts.num_concurrent_reqs = resolver.max_concurrent_requests as usize;
                 opts.timeout = resolver.timeout.into_inner();
                 opts.preserve_intermediates = resolver.preserve_intermediates;
                 opts.try_tcp_on_error = resolver.tcp_on_error;
@@ -225,18 +308,22 @@ impl Resolvers {
             .expect("Failed to build DNSSEC resolver"),
         };
 
+        let negative_ttl = bp.setting_infallible::<Cache>().await.negative_ttl;
+
         Resolvers {
-            #[cfg(not(feature = "test_mode"))]
+            #[cfg(not(stalwart_tests))]
             dnssec_available: ensure_dnssec(&resolver_config, &dnssec.resolver).await,
-            #[cfg(feature = "test_mode")]
+            #[cfg(stalwart_tests)]
             dnssec_available: true,
-            dns: MessageAuthenticator::new(resolver_config, opts).unwrap(),
+            dns: MessageAuthenticator::new(resolver_config, opts)
+                .unwrap()
+                .with_max_negative_ttl(negative_ttl.into_inner()),
             dnssec,
         }
     }
 }
 
-#[cfg(not(feature = "test_mode"))]
+#[cfg(not(stalwart_tests))]
 async fn ensure_dnssec(config: &ResolverConfig, resolver: &TokioResolver) -> bool {
     config.name_servers().iter().any(|name_server| {
         name_server
@@ -404,3 +491,4 @@ impl Clone for Resolvers {
         }
     }
 }
+

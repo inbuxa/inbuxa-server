@@ -4,12 +4,12 @@
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
  */
 
-use base64::Engine;
-use base64::engine::general_purpose;
+use encodify::base64::STANDARD;
 use std::env;
 use std::io::{self, Write};
+use store::write::serialize::RawValue;
 use store::write::{AnyClass, AnyKey, BatchBuilder, ValueClass};
-use store::{Deserialize, IterateParams, SUBSPACE_INDEXES, SUBSPACE_REGISTRY_IDX, Store};
+use store::{IterateParams, Shape, Store, Subspace};
 
 const HELP: &str = concat!(
     "Stalwart Server v",
@@ -52,12 +52,17 @@ pub async fn store_console(store: Store) {
                     println!("Scanning from {:?} to {:?}", from_key, to_key);
                     let mut from_key = from_key.into_iter();
                     let mut to_key = to_key.into_iter();
-                    let from_subspace = from_key.next().unwrap();
-                    let to_subspace = to_key.next().unwrap();
+                    let (Some(from_subspace), Some(to_subspace)) = (
+                        from_key.next().and_then(Subspace::try_from_byte),
+                        to_key.next().and_then(Subspace::try_from_byte),
+                    ) else {
+                        println!("Unknown subspace.");
+                        continue;
+                    };
 
                     if from_subspace != to_subspace {
                         println!("Keys must be in the same subspace.");
-                        return;
+                        continue;
                     }
 
                     store
@@ -72,11 +77,9 @@ pub async fn store_console(store: Store) {
                                     key: to_key.collect::<Vec<_>>(),
                                 },
                             )
-                            .set_values(
-                                ![SUBSPACE_INDEXES, SUBSPACE_REGISTRY_IDX].contains(&from_subspace),
-                            ),
+                            .set_values(!matches!(from_subspace.shape(), Shape::Presence)),
                             |key, value| {
-                                print!("{}", char::from(from_subspace));
+                                print!("{}", from_subspace.name());
                                 print_escaped(key);
                                 print!(" : ");
                                 print_escaped(value);
@@ -95,18 +98,25 @@ pub async fn store_console(store: Store) {
                         let mut from_key = from_key.into_iter();
                         let mut to_key = to_key.into_iter();
 
+                        let (Some(from_subspace), Some(to_subspace)) = (
+                            from_key.next().and_then(Subspace::try_from_byte),
+                            to_key.next().and_then(Subspace::try_from_byte),
+                        ) else {
+                            println!("Unknown subspace.");
+                            continue;
+                        };
                         let from_key = AnyKey {
-                            subspace: from_key.next().unwrap(),
+                            subspace: from_subspace,
                             key: from_key.collect::<Vec<_>>(),
                         };
                         let to_key = AnyKey {
-                            subspace: to_key.next().unwrap(),
+                            subspace: to_subspace,
                             key: to_key.collect::<Vec<_>>(),
                         };
 
                         if from_key.subspace != to_key.subspace {
                             println!("Keys must be in the same subspace.");
-                            return;
+                            continue;
                         }
 
                         let mut total = 0;
@@ -128,7 +138,7 @@ pub async fn store_console(store: Store) {
                             io::stdin().read_line(&mut response).unwrap();
                             if !response.trim().eq_ignore_ascii_case("y") {
                                 println!("Aborted.");
-                                return;
+                                continue;
                             }
 
                             store
@@ -145,12 +155,11 @@ pub async fn store_console(store: Store) {
                     if let Some(key) = parse_key(key) {
                         println!("Deleting key: {:?}", key);
                         let mut key = key.into_iter();
-                        let mut batch = BatchBuilder::new();
-                        batch.clear(ValueClass::Any(AnyClass {
-                            subspace: key.next().unwrap(),
-                            key: key.collect(),
-                        }));
-                        if let Err(err) = store.write(batch.build_all()).await {
+                        let Some(subspace) = key.next().and_then(Subspace::try_from_byte) else {
+                            println!("Unknown subspace.");
+                            continue;
+                        };
+                        if let Err(err) = delete_raw_key(&store, subspace, key.collect()).await {
                             println!("Failed to delete key: {}", err);
                         }
                     }
@@ -164,9 +173,13 @@ pub async fn store_console(store: Store) {
                     println!("Usage: get <key>");
                 } else if let Some(key) = parse_key(parts[1]) {
                     let mut key = key.into_iter();
+                    let Some(subspace) = key.next().and_then(Subspace::try_from_byte) else {
+                        println!("Unknown subspace.");
+                        continue;
+                    };
                     match store
                         .get_value::<RawValue>(AnyKey {
-                            subspace: key.next().unwrap(),
+                            subspace,
                             key: key.collect::<Vec<_>>(),
                         })
                         .await
@@ -188,19 +201,21 @@ pub async fn store_console(store: Store) {
                 if parts.len() < 2 {
                     println!("Usage: put <key> [<value>]");
                 } else if let Some(key) = parse_key(parts[1]) {
-                    let value = parts.get(2).map(|v| parse_value(v)).unwrap_or_default();
+                    let value = match parts.get(2) {
+                        Some(value) => match parse_value(value) {
+                            Some(value) => value,
+                            None => continue,
+                        },
+                        None => Vec::new(),
+                    };
                     println!("Putting key: {key:?}");
 
                     let mut key = key.into_iter();
-                    let mut batch = BatchBuilder::new();
-                    batch.set(
-                        ValueClass::Any(AnyClass {
-                            subspace: key.next().unwrap(),
-                            key: key.collect(),
-                        }),
-                        value,
-                    );
-                    if let Err(err) = store.write(batch.build_all()).await {
+                    let Some(subspace) = key.next().and_then(Subspace::try_from_byte) else {
+                        println!("Unknown subspace.");
+                        continue;
+                    };
+                    if let Err(err) = put_raw_key(&store, subspace, key.collect(), value).await {
                         println!("Failed to insert key: {}", err);
                     }
                 }
@@ -220,12 +235,11 @@ pub async fn store_console(store: Store) {
 }
 
 fn parse_key(input: &str) -> Option<Vec<u8>> {
-    let result = if let Some(key) = input.strip_prefix("base64:") {
-        base64_decode(key)
-    } else {
-        parse_binary(input)
-    };
-    if matches!(result.first(), Some(ch) if ch.is_ascii_alphabetic() && ch.is_ascii_lowercase()) {
+    let result = parse_value(input)?;
+    if result
+        .first()
+        .is_some_and(|ch| Subspace::try_from_byte(*ch).is_some())
+    {
         Some(result)
     } else {
         println!("Invalid key: {result:?}");
@@ -233,18 +247,22 @@ fn parse_key(input: &str) -> Option<Vec<u8>> {
     }
 }
 
-fn parse_value(input: &str) -> Vec<u8> {
+fn parse_value(input: &str) -> Option<Vec<u8>> {
     if let Some(key) = input.strip_prefix("base64:") {
         base64_decode(key)
     } else {
-        parse_binary(input)
+        Some(parse_binary(input))
     }
 }
 
-fn base64_decode(input: &str) -> Vec<u8> {
-    general_purpose::STANDARD
-        .decode(input)
-        .expect("Failed to decode base64")
+fn base64_decode(input: &str) -> Option<Vec<u8>> {
+    match STANDARD.decode(input) {
+        Ok(value) => Some(value),
+        Err(err) => {
+            println!("Invalid base64 value: {err}");
+            None
+        }
+    }
 }
 
 fn parse_binary(input: &str) -> Vec<u8> {
@@ -295,6 +313,64 @@ fn print_escaped(bytes: &[u8]) {
     }
 }
 
+pub async fn delete_raw_key(store: &Store, subspace: Subspace, key: Vec<u8>) -> trc::Result<()> {
+    let mut batch = BatchBuilder::new();
+    clear_raw_chunks(store, subspace, &key, &mut batch).await?;
+    batch.clear(ValueClass::Any(AnyClass { subspace, key }));
+    store.write_batch(&mut batch).await.map(|_| ())
+}
+
+pub async fn put_raw_key(
+    store: &Store,
+    subspace: Subspace,
+    key: Vec<u8>,
+    value: Vec<u8>,
+) -> trc::Result<()> {
+    let mut batch = BatchBuilder::new();
+    clear_raw_chunks(store, subspace, &key, &mut batch).await?;
+    batch.set(ValueClass::Any(AnyClass { subspace, key }), value);
+    store.write_batch(&mut batch).await.map(|_| ())
+}
+
+async fn clear_raw_chunks(
+    store: &Store,
+    subspace: Subspace,
+    key: &[u8],
+    batch: &mut BatchBuilder,
+) -> trc::Result<()> {
+    let Some(chunk_size) = store.chunk_size() else {
+        return Ok(());
+    };
+    let is_chunked = store
+        .get_value::<RawValue>(AnyKey { subspace, key })
+        .await?
+        .is_some_and(|value| value.0.len() >= chunk_size);
+    if !is_chunked {
+        return Ok(());
+    }
+
+    let mut chunk_key = Vec::with_capacity(key.len() + 1);
+    chunk_key.extend_from_slice(key);
+    chunk_key.push(0);
+    while store
+        .key_exists(AnyKey {
+            subspace,
+            key: chunk_key.as_slice(),
+        })
+        .await?
+    {
+        batch.clear(ValueClass::Any(AnyClass {
+            subspace,
+            key: chunk_key.clone(),
+        }));
+        match chunk_key.last_mut() {
+            Some(last) if *last < u8::MAX => *last += 1,
+            _ => break,
+        }
+    }
+    Ok(())
+}
+
 fn print_help() {
     println!("Available commands:");
     println!("  scan <from_key> <to_key>");
@@ -305,12 +381,4 @@ fn print_help() {
     println!("  exit/quit");
     println!("Note: Keys and values can be prefixed with 'base64:' for base64 encoding");
     println!("      or use escaped hex values (e.g., \\x41 for 'A')");
-}
-
-struct RawValue(Vec<u8>);
-
-impl Deserialize for RawValue {
-    fn deserialize(bytes: &[u8]) -> trc::Result<Self> {
-        Ok(RawValue(bytes.to_vec()))
-    }
 }

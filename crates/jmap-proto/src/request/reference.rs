@@ -6,12 +6,14 @@
 
 use super::method::MethodName;
 use jmap_tools::{JsonPointer, Null};
+use serde::Deserialize;
 use std::{borrow::Cow, fmt::Display, str::FromStr};
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct ResultReference {
     #[serde(rename = "resultOf")]
     pub result_of: String,
+    #[serde(deserialize_with = "deserialize_reference_name")]
     pub name: MethodName,
     pub path: JsonPointer<Null>,
 }
@@ -27,6 +29,14 @@ pub enum MaybeIdReference<V: FromStr> {
 pub enum MaybeResultReference<V> {
     Value(V),
     Reference(ResultReference),
+}
+
+fn deserialize_reference_name<'de, D>(deserializer: D) -> Result<MethodName, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    <Cow<'de, str>>::deserialize(deserializer)
+        .map(|name| MethodName::parse(name.as_ref()).unwrap_or_else(MethodName::error))
 }
 
 impl Display for ResultReference {

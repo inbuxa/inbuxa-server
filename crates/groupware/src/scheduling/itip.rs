@@ -8,8 +8,8 @@ use crate::scheduling::{Email, ItipMessage, ItipMessages, ItipSummary};
 use calcard::{
     common::{IanaString, PartialDateTime},
     icalendar::{
-        ICalendar, ICalendarComponent, ICalendarComponentType, ICalendarEntry, ICalendarMethod,
-        ICalendarParameter, ICalendarParameterName, ICalendarParameterValue,
+        ICalendar, ICalendarComponent, ICalendarComponentType, ICalendarDuration, ICalendarEntry,
+        ICalendarMethod, ICalendarParameter, ICalendarParameterName, ICalendarParameterValue,
         ICalendarParticipationStatus, ICalendarProperty, ICalendarScheduleAgentValue,
         ICalendarValue,
     },
@@ -19,6 +19,7 @@ use registry::schema::structs::{
     Task, TaskCalendarItipContents, TaskCalendarItipMessage, TaskStatus,
 };
 use store::write::BatchBuilder;
+use types::id::Id;
 
 pub(crate) fn itip_build_envelope(method: ICalendarMethod) -> ICalendarComponent {
     ICalendarComponent {
@@ -27,17 +28,17 @@ pub(crate) fn itip_build_envelope(method: ICalendarMethod) -> ICalendarComponent
             ICalendarEntry {
                 name: ICalendarProperty::Version,
                 params: vec![],
-                values: vec![ICalendarValue::Text("2.0".to_string())],
+                values: [ICalendarValue::Text("2.0".to_string())].into(),
             },
             ICalendarEntry {
                 name: ICalendarProperty::Prodid,
                 params: vec![],
-                values: vec![ICalendarValue::Text(PROD_ID.to_string())],
+                values: [ICalendarValue::Text(PROD_ID.to_string())].into(),
             },
             ICalendarEntry {
                 name: ICalendarProperty::Method,
                 params: vec![],
-                values: vec![ICalendarValue::Method(method)],
+                values: [ICalendarValue::Method(method)].into(),
             },
         ],
         component_ids: Default::default(),
@@ -67,7 +68,7 @@ pub fn itip_assign_organizer(ical: &mut ICalendar, organizer_address: &str) -> b
             component.entries.push(ICalendarEntry {
                 name: ICalendarProperty::Organizer,
                 params: vec![],
-                values: vec![ICalendarValue::Text(format!("mailto:{organizer_address}"))],
+                values: [ICalendarValue::Text(format!("mailto:{organizer_address}"))].into(),
             });
             assigned = true;
         }
@@ -213,8 +214,10 @@ pub(crate) fn itip_export_component(
     dt_stamp: &PartialDateTime,
     sequence: i64,
     export_as: ItipExportAs<'_>,
+    series_length: Option<&ICalendarDuration>,
 ) -> ICalendarComponent {
     let is_todo = component.component_type == ICalendarComponentType::VTodo;
+    let is_event = component.component_type == ICalendarComponentType::VEvent;
     let mut comp = ICalendarComponent {
         component_type: component.component_type.clone(),
         entries: Vec::with_capacity(component.entries.len() + 1),
@@ -327,18 +330,62 @@ pub(crate) fn itip_export_component(
         }
     }
 
-    if matches!(export_as, ItipExportAs::Attendee(_)) {
-        comp.entries.push(ICalendarEntry {
-            name: ICalendarProperty::RequestStatus,
-            params: vec![],
-            values: vec![
-                ICalendarValue::Text("2.0".to_string()),
-                ICalendarValue::Text("Success".to_string()),
-            ],
-        });
+    match export_as {
+        ItipExportAs::Attendee(_) => {
+            comp.entries.push(ICalendarEntry {
+                name: ICalendarProperty::RequestStatus,
+                params: vec![],
+                values: vec![
+                    ICalendarValue::Text("2.0".to_string()),
+                    ICalendarValue::Text("Success".to_string()),
+                ]
+                .into(),
+            });
+        }
+        ItipExportAs::Organizer(_) => {
+            if is_event
+                && !component.has_property(&ICalendarProperty::Dtstart)
+                && let Some(recurrence_id) = component.property(&ICalendarProperty::RecurrenceId)
+            {
+                comp.entries
+                    .push(itip_date_entry(ICalendarProperty::Dtstart, recurrence_id));
+                if !component.has_property(&ICalendarProperty::Dtend)
+                    && !component.has_property(&ICalendarProperty::Duration)
+                    && let Some(series_length) = series_length
+                {
+                    comp.entries.push(ICalendarEntry {
+                        name: ICalendarProperty::Duration,
+                        params: vec![],
+                        values: [ICalendarValue::Duration(series_length.clone())].into(),
+                    });
+                }
+            }
+        }
     }
 
     comp
+}
+
+pub(crate) fn itip_date_entry(name: ICalendarProperty, source: &ICalendarEntry) -> ICalendarEntry {
+    ICalendarEntry {
+        name,
+        params: itip_date_params(source),
+        values: source.values.clone(),
+    }
+}
+
+pub(crate) fn itip_date_params(source: &ICalendarEntry) -> Vec<ICalendarParameter> {
+    source
+        .params
+        .iter()
+        .filter(|param| {
+            matches!(
+                param.name,
+                ICalendarParameterName::Tzid | ICalendarParameterName::Value
+            )
+        })
+        .cloned()
+        .collect()
 }
 
 pub(crate) fn itip_finalize(ical: &mut ICalendar, scheduling_object_ids: &[u16]) {
@@ -366,7 +413,7 @@ pub(crate) fn itip_finalize(ical: &mut ICalendar, scheduling_object_ids: &[u16])
                 if let Some(ICalendarValue::Integer(seq)) = entry.values.first_mut() {
                     *seq += 1;
                 } else {
-                    entry.values = vec![ICalendarValue::Integer(1)];
+                    entry.values = [ICalendarValue::Integer(1)].into();
                 }
                 found_sequence = true;
                 break;
@@ -445,12 +492,17 @@ impl ItipMessages {
     }
 
     pub fn queue(self, batch: &mut BatchBuilder) -> trc::Result<()> {
-        batch.schedule_task(Task::CalendarItipMessage(TaskCalendarItipMessage {
-            account_id: batch.last_account_id().unwrap().into(),
-            document_id: batch.last_document_id().unwrap().into(),
+        let account_id = batch.last_account_id().ok_or_else(|| {
+            trc::StoreEvent::UnexpectedError
+                .caused_by(trc::location!())
+                .ctx(trc::Key::Reason, "No account is set for an iTIP task.")
+        })?;
+        batch.schedule_task_with_document(Task::CalendarItipMessage(TaskCalendarItipMessage {
+            account_id: account_id.into(),
+            document_id: Id::default(),
             messages: self.messages.into(),
             status: TaskStatus::now(),
-        }));
+        }))?;
 
         Ok(())
     }

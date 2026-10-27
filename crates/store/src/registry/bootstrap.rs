@@ -6,6 +6,7 @@
 
 use crate::{RegistryStore, Store, registry::RegistryObject};
 use registry::{
+    pickle::Pickle,
     schema::{
         prelude::{Object, ObjectType, Property},
         structs::ClusterRole,
@@ -68,68 +69,33 @@ impl Bootstrap {
 
     pub async fn setting<T: ObjectImpl + From<Object>>(&mut self) -> trc::Result<T> {
         let object_id = T::OBJECT.singleton();
-
-        if let Some(setting) = self.registry.object::<T>(object_id.id()).await? {
-            let mut errors = Vec::new();
-            if setting.validate(&mut errors) {
-                return Ok(setting);
-            }
-            self.errors.push(Error::Validation { object_id, errors });
-        }
-
-        Ok(T::default())
+        Ok(self
+            .registry
+            .get(object_id)
+            .await?
+            .map(T::from)
+            .filter(|setting| self.validate(object_id, setting))
+            .unwrap_or_default())
     }
 
     pub async fn setting_infallible<T: ObjectImpl + From<Object>>(&mut self) -> T {
-        match self.setting::<T>().await {
-            Ok(setting) => setting,
-            Err(err) => {
-                if !self.has_fatal_errors {
-                    self.errors.push(Error::Internal {
-                        object_id: Some(T::OBJECT.singleton()),
-                        error: err,
-                    });
-                    self.has_fatal_errors = true;
-                }
-                T::default()
-            }
-        }
+        let object_id = T::OBJECT.singleton();
+        self.fetch_object(object_id)
+            .await
+            .map(T::from)
+            .filter(|setting| self.validate(object_id, setting))
+            .unwrap_or_default()
     }
 
     pub async fn get_infallible<T: ObjectImpl + From<Object>>(&mut self, id: Id) -> Option<T> {
-        match self.registry.object::<T>(id).await {
-            Ok(Some(setting)) => {
-                let mut errors = Vec::new();
-                if setting.validate(&mut errors) {
-                    Some(setting)
-                } else {
-                    self.errors.push(Error::Validation {
-                        object_id: ObjectId::new(T::OBJECT, id),
-                        errors,
-                    });
-                    None
-                }
-            }
-            Ok(None) => {
-                self.errors.push(Error::NotFound {
-                    object_id: ObjectId::new(T::OBJECT, id),
-                });
-                None
-            }
-            Err(err) => {
-                if !self.has_fatal_errors {
-                    self.errors.push(Error::Internal {
-                        object_id: Some(ObjectId::new(T::OBJECT, id)),
-                        error: err,
-                    });
-                    self.has_fatal_errors = true;
-                }
-                None
-            }
-        }
+        let object_id = ObjectId::new(T::OBJECT, id);
+        self.fetch_existing_object(object_id)
+            .await
+            .map(T::from)
+            .filter(|setting| self.validate(object_id, setting))
     }
 
-    pub async fn list_infallible<T: ObjectImpl + From<Object>>(
+    pub async fn list_infallible<T: ObjectImpl + Pickle + From<Object>>(
         &mut self,
     ) -> Vec<RegistryObject<T>> {
         match self.registry.list::<T>().await {
@@ -138,15 +104,40 @@ impl Bootstrap {
                 .filter(|object| self.validate(object.id, &object.object))
                 .collect(),
             Err(err) => {
-                if !self.has_fatal_errors {
-                    self.errors.push(Error::Internal {
-                        object_id: None,
-                        error: err,
-                    });
-                    self.has_fatal_errors = true;
-                }
+                self.internal_error(None, err);
                 Vec::new()
             }
+        }
+    }
+
+    async fn fetch_object(&mut self, object_id: ObjectId) -> Option<Object> {
+        match self.registry.get(object_id).await {
+            Ok(object) => object,
+            Err(err) => {
+                self.internal_error(Some(object_id), err);
+                None
+            }
+        }
+    }
+
+    async fn fetch_existing_object(&mut self, object_id: ObjectId) -> Option<Object> {
+        match self.registry.get(object_id).await {
+            Ok(Some(object)) => Some(object),
+            Ok(None) => {
+                self.errors.push(Error::NotFound { object_id });
+                None
+            }
+            Err(err) => {
+                self.internal_error(Some(object_id), err);
+                None
+            }
+        }
+    }
+
+    fn internal_error(&mut self, object_id: Option<ObjectId>, error: trc::Error) {
+        if !self.has_fatal_errors {
+            self.errors.push(Error::Internal { object_id, error });
+            self.has_fatal_errors = true;
         }
     }
 

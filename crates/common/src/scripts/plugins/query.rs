@@ -6,6 +6,7 @@
 
 use super::PluginContext;
 use crate::scripts::{into_sieve_value, to_store_value};
+use compact_str::CompactString;
 use sieve::{FunctionMap, runtime::Variable};
 use std::cmp::Ordering;
 use store::{Rows, Value};
@@ -14,18 +15,21 @@ pub fn register(plugin_id: u32, fnc_map: &mut FunctionMap) {
     fnc_map.set_external_function("query", plugin_id, 3);
 }
 
-pub async fn exec(ctx: PluginContext<'_>) -> trc::Result<Variable> {
+pub async fn exec(ctx: PluginContext<'_>) -> trc::Result<Variable<'static>> {
     // Obtain store name
     let store = match &ctx.arguments[0] {
         Variable::String(v) if !v.is_empty() => ctx
             .server
-            .get_lookup_store(v.as_str())
+            .get_lookup_store(v.as_ref())
             .and_then(|v| v.into_store()),
         _ => Some(ctx.server.core.storage.data.clone()),
     }
     .ok_or_else(|| {
         trc::SieveEvent::RuntimeError
-            .ctx(trc::Key::Id, ctx.arguments[0].to_string().into_owned())
+            .ctx(
+                trc::Key::Name,
+                CompactString::from(ctx.arguments[0].to_string()),
+            )
             .details("Unknown store")
     })?;
 
@@ -34,7 +38,10 @@ pub async fn exec(ctx: PluginContext<'_>) -> trc::Result<Variable> {
     if query.is_empty() {
         trc::bail!(
             trc::SieveEvent::RuntimeError
-                .ctx(trc::Key::Id, ctx.arguments[0].to_string().into_owned())
+                .ctx(
+                    trc::Key::Name,
+                    CompactString::from(ctx.arguments[0].to_string())
+                )
                 .details("Empty query string")
         );
     }

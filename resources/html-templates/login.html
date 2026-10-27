@@ -242,6 +242,154 @@
             transform: none;
         }
 
+        .btn.secondary {
+            background: transparent;
+            color: var(--text);
+            border: 1px solid var(--border);
+        }
+
+        .actions {
+            display: flex;
+            gap: .625rem;
+            margin-top: 1.25rem;
+        }
+
+        .actions .btn {
+            margin-top: 0;
+        }
+
+        .client {
+            display: flex;
+            align-items: center;
+            gap: .75rem;
+            margin-bottom: 1rem;
+        }
+
+        .tile {
+            flex-shrink: 0;
+            width: 44px;
+            height: 44px;
+            border-radius: 10px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            overflow: hidden;
+            color: #fff;
+            font-size: 1.25rem;
+            font-weight: 600;
+            background: var(--muted);
+        }
+
+        .tile img {
+            width: 100%;
+            height: 100%;
+            object-fit: contain;
+            background: var(--card);
+        }
+
+        .client-name {
+            font-size: .9375rem;
+            font-weight: 600;
+            word-break: break-word;
+        }
+
+        .client-host {
+            font-size: .75rem;
+            color: var(--muted);
+            word-break: break-all;
+        }
+
+        .badge {
+            display: inline-block;
+            margin-top: .25rem;
+            padding: .0625rem .4375rem;
+            font-size: .6875rem;
+            font-weight: 500;
+            border-radius: 999px;
+            color: #a0192f;
+            background: color-mix(in srgb, #db2d54 10%, transparent);
+            border: 1px solid color-mix(in srgb, #db2d54 30%, transparent);
+        }
+
+        @media(prefers-color-scheme:dark) {
+            .badge {
+                color: #f4839a
+            }
+        }
+
+        .consent-lead {
+            font-size: .8125rem;
+            color: var(--muted);
+            margin-bottom: .5rem;
+        }
+
+        .scopes {
+            list-style: none;
+            font-size: .875rem;
+            border: 1px solid var(--border);
+            border-radius: 8px;
+            background: var(--input-bg);
+        }
+
+        .scopes li {
+            display: flex;
+            align-items: flex-start;
+            gap: .5rem;
+            padding: .5rem .75rem;
+            font-size: .8125rem;
+            line-height: 1.35;
+            color: color-mix(in srgb, var(--text) 78%, var(--card));
+        }
+
+        .scopes li::before {
+            content: '';
+            flex-shrink: 0;
+            width: 16px;
+            height: 16px;
+            margin-top: .05rem;
+            border-radius: 50%;
+            background:
+                url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23fff' stroke-width='3.5' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M19 7 10 16l-4-4'/%3E%3C/svg%3E") center / 10px no-repeat,
+                var(--success);
+        }
+
+        @media(prefers-color-scheme:dark) {
+            .scopes li::before {
+                background:
+                    url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%2318181b' stroke-width='3.5' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M19 7 10 16l-4-4'/%3E%3C/svg%3E") center / 10px no-repeat,
+                    var(--success);
+            }
+        }
+
+        .scopes li+li {
+            border-top: 1px solid var(--border);
+        }
+
+        .redirect-note {
+            font-size: .75rem;
+            color: var(--muted);
+            margin-top: .75rem;
+            word-break: break-all;
+        }
+
+        .app-header {
+            display: flex;
+            align-items: center;
+            gap: .625rem;
+            margin-bottom: .25rem;
+        }
+
+        .app-header .tile {
+            width: 32px;
+            height: 32px;
+            font-size: 1rem;
+            border-radius: 8px;
+        }
+
+        .app-header h1 {
+            margin-bottom: 0;
+        }
+
         [hidden] {
             display: none !important;
         }
@@ -258,7 +406,10 @@
                     d="M149.1 84.7h-4.8l-44.8 25.9v8.3l44.8 25.9h4.8l44.8-25.9v-8.3l-44.8-25.9zm32.9 30h-35.3V94.4l35.3 20.3zm-35.3 20.4-35.3-20.4 27-15.6v20.2l6.3 3.6h22.9l-20.9 12.2zM99.5 129.9v11l44.8 25.9h4.8l44.8-25.9v-11l-47.2 27.3zM187.3 166.8l6.6-3.8v-11l-25.7 14.8zM99.5 163l6.6 3.8h19.1L99.5 152z" />
             </svg>
         </div>
-        <h1 id="title">Sign in</h1>
+        <div class="app-header">
+            <div class="tile" id="app-tile" hidden></div>
+            <h1 id="title">Sign in</h1>
+        </div>
         <p class="sub" id="subtitle">Enter your credentials to continue</p>
 
         <div class="alert" id="alert" hidden aria-live="polite">
@@ -294,6 +445,24 @@
             </div>
             <button type="submit" class="btn" id="submit-btn">Sign in</button>
         </form>
+
+        <div id="consent" hidden>
+            <div class="client">
+                <div class="tile" id="client-tile"></div>
+                <div>
+                    <div class="client-name" id="client-name"></div>
+                    <div class="client-host" id="client-host" hidden></div>
+                    <span class="badge" id="client-unverified" hidden>Unverified application</span>
+                </div>
+            </div>
+            <p class="consent-lead">If you allow it, this application will be able to:</p>
+            <ul class="scopes" id="client-scopes"></ul>
+            <p class="redirect-note" id="client-redirect" hidden></p>
+            <div class="actions">
+                <button type="button" class="btn secondary" id="deny-btn">Deny</button>
+                <button type="button" class="btn" id="allow-btn">Allow</button>
+            </div>
+        </div>
     </div>
 
     <script>
@@ -301,14 +470,18 @@
             'use strict';
 
             var $ = function (id) { return document.getElementById(id); };
+            var FAILURE = 'Temporary server failure. If the problem persists, contact your administrator.';
 
             function setText(el, text) {
-                // textContent is XSS-safe: never parses HTML.
                 el.textContent = text == null ? '' : String(text);
             }
 
             function show(el) { if (el) el.hidden = false; }
             function hide(el) { if (el) el.hidden = true; }
+
+            function clear(el) {
+                while (el.firstChild) el.removeChild(el.firstChild);
+            }
 
             function showError(msg) {
                 var a = $('alert');
@@ -329,54 +502,172 @@
             var url = new URL(window.location.href);
             var params = url.searchParams;
             var isDevice = /\/device(\/|$)/.test(url.pathname);
-
-            // Collected OAuth params for the code flow
-            var oauth = {
-                client_id: params.get('client_id') || '',
-                redirect_uri: params.get('redirect_uri'),
-                scope: params.get('scope'),
-                state: params.get('state'),
-                nonce: params.get('nonce'),
-                code_challenge: params.get('code_challenge'),
-                code_challenge_method: params.get('code_challenge_method'),
-                resource: params.getAll('resource')
-            };
-
-            // This page is the OAuth authorization screen used by apps
-            if (!isDevice && !oauth.redirect_uri) {
-                hide($('login-form'));
-                setText($('title'), 'Sign in with an app');
-                setText($('subtitle'), 'This page is opened automatically by your mail, calendar or contacts app to authorize access to your account.');
-                showError('This sign-in page cannot be used directly. Please start the sign-in from your app instead. (The required "redirect_uri" parameter is missing.)');
-                return;
-            }
-
-            // Prefill username from login_hint
+            var query = url.search.charAt(0) === '?' ? url.search.slice(1) : url.search;
             var loginHint = params.get('login_hint');
+            var clientInfo = null;
+            var consentGiven = false;
+            var deviceCode = null;
+            var stage = 'login';
+            var inMfa = false;
+            var lastCreds = null;
+            var allowHandler = null;
+            var denyHandler = null;
+
             if (loginHint) $('username').value = loginHint;
 
-            // Device-flow specific UI
-            if (isDevice) {
-                setText($('title'), 'Authorize device');
-                setText($('subtitle'), 'Sign in to approve this device.');
-                show($('field-device-code'));
-                var prefillCode = params.get('code');
-                if (prefillCode) $('device-code').value = prefillCode;
+            var BLOCKED_PROTOCOLS = ['javascript:', 'data:', 'vbscript:', 'file:', 'blob:', 'about:'];
+
+            function isSafeLocation(location) {
+                try {
+                    return BLOCKED_PROTOCOLS.indexOf(new URL(location).protocol.toLowerCase()) === -1;
+                } catch (e) {
+                    return false;
+                }
             }
 
-            var inMfa = false;
-            var lastCreds = null; // { account_name, account_secret } cached to resubmit with OTP
+            function navigate(location) {
+                if (typeof location !== 'string' || !location) {
+                    showFatal(FAILURE);
+                } else if (!isSafeLocation(location)) {
+                    showFatal('The application redirect address is not allowed.');
+                } else {
+                    window.location.assign(location);
+                }
+            }
+
+            function showFatal(msg) {
+                hide($('login-form'));
+                hide($('consent'));
+                hide($('app-tile'));
+                setText($('title'), 'Unable to continue');
+                setText($('subtitle'), '');
+                showError(msg);
+            }
+
+            function hashHue(seed) {
+                var h = 0;
+                for (var i = 0; i < seed.length; i++) h = (h * 31 + seed.charCodeAt(i)) >>> 0;
+                return h % 360;
+            }
+
+            function isSafeLogo(logo) {
+                if (typeof logo !== 'string' || !logo) return false;
+                if (logo.indexOf('data:image/') === 0) return true;
+                try {
+                    return new URL(logo, window.location.href).origin === window.location.origin;
+                } catch (e) {
+                    return false;
+                }
+            }
+
+            function renderTile(tile, name, logo, seed) {
+                clear(tile);
+                tile.style.background = '';
+                if (isSafeLogo(logo)) {
+                    var img = new Image();
+                    img.alt = '';
+                    img.onerror = function () { renderTile(tile, name, null, seed); };
+                    img.src = logo;
+                    tile.appendChild(img);
+                    return;
+                }
+                var letter = Array.from((name || '').trim())[0] || '?';
+                tile.style.background = 'hsl(' + hashHue(seed || name || '') + ',45%,45%)';
+                setText(tile, letter.toUpperCase());
+            }
+
+            function renderConsent(info, onAllow, onDeny) {
+                var name = typeof info.name === 'string' && info.name ? info.name : 'Unnamed application';
+                setText($('client-name'), name);
+                if (info.verified) hide($('client-unverified')); else show($('client-unverified'));
+                if (typeof info.clientHost === 'string' && info.clientHost) {
+                    setText($('client-host'), info.clientHost);
+                    show($('client-host'));
+                } else {
+                    hide($('client-host'));
+                }
+                renderTile($('client-tile'), name, info.verified ? info.logo : null,
+                    info.clientHost || info.redirectHost || name);
+
+                var list = $('client-scopes');
+                clear(list);
+                var scopes = Array.isArray(info.scopes) ? info.scopes : [];
+                if (!scopes.length) scopes = ['Confirm that you have an account on this server'];
+                scopes.forEach(function (label) {
+                    var li = document.createElement('li');
+                    setText(li, label);
+                    list.appendChild(li);
+                });
+
+                if (typeof info.redirectHost === 'string' && info.redirectHost) {
+                    setText($('client-redirect'), 'You will be sent back to ' + info.redirectHost + ' after you sign in.');
+                    show($('client-redirect'));
+                } else {
+                    hide($('client-redirect'));
+                }
+
+                hide($('login-form'));
+                hide($('app-tile'));
+                setText($('title'), isDevice ? 'Authorize device' : 'Authorize access');
+                setText($('subtitle'), isDevice
+                    ? 'A device is requesting access to your account.'
+                    : 'An application is requesting access to your account.');
+                allowHandler = onAllow;
+                denyHandler = onDeny;
+                stage = 'consent';
+                show($('consent'));
+                setTimeout(function () { $('allow-btn').focus(); }, 0);
+            }
+
+            function showLoginForm() {
+                stage = 'login';
+                hide($('consent'));
+                show($('field-username'));
+                show($('field-password'));
+                hide($('field-device-code'));
+                hide($('field-otp'));
+                setText($('submit-btn'), 'Sign in');
+                var name = clientInfo && typeof clientInfo.name === 'string' ? clientInfo.name : '';
+                if (clientInfo && !clientInfo.consentRequired && name) {
+                    setText($('title'), 'Sign in to ' + name);
+                    if (isSafeLogo(clientInfo.logo)) {
+                        renderTile($('app-tile'), name, clientInfo.logo, name);
+                        show($('app-tile'));
+                    }
+                    setText($('subtitle'), 'Enter your credentials to continue');
+                } else {
+                    setText($('title'), 'Sign in');
+                    setText($('subtitle'), name
+                        ? 'Enter your credentials to continue to ' + name
+                        : 'Enter your credentials to continue');
+                }
+                show($('login-form'));
+                focusFirst();
+            }
+
+            function focusFirst() {
+                setTimeout(function () {
+                    if (stage === 'code') { $('device-code').focus(); return; }
+                    if (!$('username').value) { $('username').focus(); return; }
+                    if (!$('password').value) { $('password').focus(); return; }
+                }, 0);
+            }
 
             function enterMfaMode() {
                 inMfa = true;
                 hide($('field-username'));
                 hide($('field-password'));
-                if (isDevice) hide($('field-device-code'));
                 show($('field-otp'));
                 setText($('title'), 'Two-factor authentication');
                 setText($('subtitle'), 'Enter the 6-digit code from your authenticator app.');
                 clearAlert();
                 setTimeout(function () { $('otp').focus(); }, 0);
+            }
+
+            function leaveMfaMode() {
+                inMfa = false;
+                $('otp').value = '';
+                showLoginForm();
             }
 
             (function loadCustomLogo() {
@@ -403,7 +694,7 @@
                         img.className = 'custom-logo';
                         img.alt = 'Logo';
                         img.onload = function () {
-                            while (wrap.firstChild) wrap.removeChild(wrap.firstChild);
+                            clear(wrap);
                             wrap.appendChild(img);
                             wrap.removeAttribute('data-loading');
                         };
@@ -419,143 +710,22 @@
                     });
             })();
 
-            function buildRequest(creds, otpValue) {
-                if (isDevice) {
-                    var req = {
-                        type: 'authDevice',
-                        accountName: creds.account_name,
-                        accountSecret: creds.account_secret,
-                        code: ($('device-code').value || '').trim()
-                    };
-                    if (otpValue) req.mfaToken = otpValue;
-                    return req;
-                }
-                var r = {
-                    type: 'authCode',
-                    accountName: creds.account_name,
-                    accountSecret: creds.account_secret,
-                    clientId: oauth.client_id || ''
-                };
-                if (oauth.redirect_uri) r.redirectUri = oauth.redirect_uri;
-                if (oauth.scope) r.scope = oauth.scope;
-                if (oauth.state) r.state = oauth.state;
-                if (oauth.nonce) r.nonce = oauth.nonce;
-                if (oauth.code_challenge) r.codeChallenge = oauth.code_challenge;
-                if (oauth.code_challenge_method) r.codeChallengeMethod = oauth.code_challenge_method;
-                if (oauth.resource && oauth.resource.length) r.resource = oauth.resource;
-                if (otpValue) r.mfaToken = otpValue;
-                return r;
-            }
-
-            function performRedirect(clientCode, issuer) {
-                // Build redirect_uri?code=<client_code>&state=<state>
-                var target;
-                try {
-                    if (!oauth.redirect_uri) throw new Error('missing redirect_uri');
-                    target = new URL(oauth.redirect_uri);
-                } catch (e) {
-                    console.log('Invalid or missing redirect_uri:', oauth.redirect_uri, e);
-                    showError('Temporary server failure. If the problem persists, contact your administrator.');
-                    return;
-                }
-                target.searchParams.set('code', clientCode);
-                if (oauth.state) target.searchParams.set('state', oauth.state);
-                target.searchParams.set('iss', issuer || url.origin);
-                window.location.assign(target.toString());
-            }
-
-            function handleResponse(resp) {
-                if (!resp || typeof resp !== 'object' || typeof resp.type !== 'string') {
-                    console.log('Malformed login response:', resp);
-                    showError('Temporary server failure. If the problem persists, contact your administrator.');
-                    return;
-                }
-                switch (resp.type) {
-                    case 'authenticated':
-                        if (typeof resp.client_code !== 'string') {
-                            console.log('Missing client_code in response:', resp);
-                            showError('Temporary server failure. If the problem persists, contact your administrator.');
-                            return;
-                        }
-                        performRedirect(resp.client_code, resp.iss);
-                        return;
-                    case 'verified':
-                        hide($('login-form'));
-                        setText($('title'), 'Device authorized');
-                        setText($('subtitle'), 'You have successfully authorized this device. You may now close this window.');
-                        clearAlert();
-                        showSuccess('Device verified.');
-                        return;
-                    case 'mfaRequired':
-                        enterMfaMode();
-                        return;
-                    case 'failure':
-                        // Reset MFA state on failure so the user can retry credentials.
-                        if (inMfa) {
-                            inMfa = false;
-                            show($('field-username'));
-                            show($('field-password'));
-                            if (isDevice) show($('field-device-code'));
-                            hide($('field-otp'));
-                            $('otp').value = '';
-                            setText($('title'), isDevice ? 'Authorize device' : 'Sign in');
-                            setText($('subtitle'), isDevice
-                                ? 'Sign in to approve this device.'
-                                : 'Enter your credentials to continue');
-                        }
-                        showError('Invalid username or password. Please try again.');
-                        return;
-                    default:
-                        console.log('Unknown login response type:', resp);
-                        showError('Temporary server failure. If the problem persists, contact your administrator.');
-                }
-            }
-
-            function submitLogin(e) {
-                if (e) e.preventDefault();
-                clearAlert();
-
-                var creds;
-                if (inMfa) {
-                    var otp = ($('otp').value || '').trim();
-                    if (!otp) { showError('Please enter your one-time code.'); return; }
-                    if (!lastCreds) {
-                        // Safety net: shouldn't happen.
-                        inMfa = false;
-                        show($('field-username'));
-                        show($('field-password'));
-                        hide($('field-otp'));
-                        showError('Session expired. Please sign in again.');
-                        return;
-                    }
-                    creds = lastCreds;
-                    var body = buildRequest(creds, otp);
-                    postLogin(body);
-                    return;
-                }
-
-                var username = ($('username').value || '').trim();
-                var password = $('password').value || '';
-                if (!username || !password) {
-                    showError('Please enter your username and password.');
-                    return;
-                }
-                if (isDevice) {
-                    var devCode = ($('device-code').value || '').trim();
-                    if (!devCode) {
-                        showError('Please enter the device code.');
-                        return;
-                    }
-                }
-                creds = { account_name: username, account_secret: password };
-                lastCreds = creds;
-                postLogin(buildRequest(creds, null));
+            function getJson(target) {
+                return fetch(target, {
+                    method: 'GET',
+                    credentials: 'same-origin',
+                    cache: 'no-store',
+                    headers: { 'Accept': 'application/json' }
+                }).then(function (res) {
+                    if (res.status !== 200) throw new Error('http ' + res.status);
+                    return res.json();
+                });
             }
 
             function postLogin(body) {
                 var btn = $('submit-btn');
                 btn.disabled = true;
-                fetch('/api/auth', {
+                return fetch('/api/auth', {
                     method: 'POST',
                     credentials: 'same-origin',
                     cache: 'no-store',
@@ -571,34 +741,228 @@
                             throw new Error('http ' + res.status);
                         });
                     }
-                    return res.json().catch(function (err) {
-                        console.log('Failed to parse login response JSON:', err);
-                        throw err;
-                    });
+                    return res.json();
                 }).then(function (json) {
                     handleResponse(json);
                 }).catch(function (err) {
                     console.log('Login request failed:', err);
-                    showError('Temporary server failure. If the problem persists, contact your administrator.');
+                    showError(FAILURE);
                 }).then(function () {
                     btn.disabled = false;
                 });
             }
 
-            $('login-form').addEventListener('submit', submitLogin);
+            function handleResponse(resp) {
+                if (!resp || typeof resp !== 'object' || typeof resp.type !== 'string') {
+                    console.log('Malformed login response:', resp);
+                    showError(FAILURE);
+                    return;
+                }
+                switch (resp.type) {
+                    case 'authenticated':
+                    case 'redirect':
+                        navigate(resp.location);
+                        return;
+                    case 'invalid':
+                        showFatal(typeof resp.description === 'string' && resp.description
+                            ? resp.description
+                            : 'The sign-in request is invalid.');
+                        return;
+                    case 'verified':
+                        hide($('login-form'));
+                        hide($('consent'));
+                        setText($('title'), 'Device authorized');
+                        setText($('subtitle'), 'You have successfully authorized this device. You may now close this window.');
+                        showSuccess('Device verified.');
+                        return;
+                    case 'denied':
+                        hide($('login-form'));
+                        hide($('consent'));
+                        setText($('title'), 'Access denied');
+                        setText($('subtitle'), 'The device was not authorized. You may now close this window.');
+                        clearAlert();
+                        return;
+                    case 'mfaRequired':
+                        enterMfaMode();
+                        return;
+                    case 'expired':
+                        if (inMfa) leaveMfaMode();
+                        showError('Your password has expired. Change it in the account portal, then sign in again.');
+                        return;
+                    case 'failure':
+                        if (inMfa) leaveMfaMode();
+                        showError(isDevice
+                            ? 'Invalid username or password, or the device code has expired. Please try again.'
+                            : 'Invalid username or password. Please try again.');
+                        return;
+                    default:
+                        console.log('Unknown login response type:', resp);
+                        showError(FAILURE);
+                }
+            }
 
-            // Digit-only filter on OTP and auto-submit on 6 digits.
+            function buildRequest(creds, otpValue) {
+                var r;
+                if (isDevice) {
+                    r = {
+                        type: 'authDevice',
+                        accountName: creds.account_name,
+                        accountSecret: creds.account_secret,
+                        code: deviceCode,
+                        consent: true
+                    };
+                } else {
+                    r = {
+                        type: 'authCode',
+                        accountName: creds.account_name,
+                        accountSecret: creds.account_secret,
+                        query: query
+                    };
+                    if (consentGiven) r.consent = true;
+                }
+                if (otpValue) r.mfaToken = otpValue;
+                return r;
+            }
+
+            function normalizeCode(value) {
+                var code = (value || '').toUpperCase().replace(/[^A-Z0-9]/g, '');
+                return code.length === 8 ? code.slice(0, 4) + '-' + code.slice(4) : code;
+            }
+
+            function lookupDevice() {
+                var code = normalizeCode($('device-code').value);
+                if (!code) {
+                    showError('Please enter the device code.');
+                    return;
+                }
+                $('device-code').value = code;
+                var btn = $('submit-btn');
+                btn.disabled = true;
+                getJson('/api/auth/client?user_code=' + encodeURIComponent(code)).then(function (info) {
+                    if (!info || typeof info !== 'object' || typeof info.error === 'string') {
+                        showError('The device code is invalid or has expired.');
+                        return;
+                    }
+                    deviceCode = code;
+                    clientInfo = info;
+                    renderConsent(info, function () {
+                        consentGiven = true;
+                        showLoginForm();
+                    }, function () {
+                        postLogin({ type: 'authDevice', code: deviceCode, consent: false });
+                    });
+                }).catch(function (err) {
+                    console.log('Device lookup failed:', err);
+                    showError(FAILURE);
+                }).then(function () {
+                    btn.disabled = false;
+                });
+            }
+
+            function startDevice() {
+                stage = 'code';
+                hide($('field-username'));
+                hide($('field-password'));
+                show($('field-device-code'));
+                setText($('submit-btn'), 'Continue');
+                setText($('title'), 'Authorize device');
+                setText($('subtitle'), 'Enter the code shown on your device.');
+                var prefillCode = params.get('code');
+                if (prefillCode) {
+                    $('device-code').value = normalizeCode(prefillCode);
+                    lookupDevice();
+                } else {
+                    focusFirst();
+                }
+            }
+
+            function startAuthorization() {
+                hide($('login-form'));
+                if (!query) {
+                    setText($('title'), 'Sign in with an app');
+                    setText($('subtitle'), 'This page is opened automatically by your mail, calendar or contacts app to authorize access to your account.');
+                    showError('This sign-in page cannot be used directly. Please start the sign-in from your app instead.');
+                    return;
+                }
+                setText($('subtitle'), 'Loading...');
+                getJson('/api/auth/client?' + query).then(function (info) {
+                    if (!info || typeof info !== 'object') throw new Error('malformed response');
+                    if (typeof info.error === 'string') {
+                        if (info.redirect === true) {
+                            navigate(info.location);
+                        } else {
+                            showFatal(typeof info.description === 'string' && info.description
+                                ? info.description
+                                : 'The sign-in request is invalid.');
+                        }
+                        return;
+                    }
+                    clientInfo = info;
+                    if (info.consentRequired) {
+                        renderConsent(info, function () {
+                            consentGiven = true;
+                            showLoginForm();
+                        }, function () {
+                            navigate(info.denyLocation);
+                        });
+                    } else {
+                        showLoginForm();
+                    }
+                }).catch(function (err) {
+                    console.log('Client lookup failed:', err);
+                    showFatal(FAILURE);
+                });
+            }
+
+            function submitLogin(e) {
+                if (e) e.preventDefault();
+                clearAlert();
+
+                if (stage === 'code') {
+                    lookupDevice();
+                    return;
+                } else if (stage !== 'login') {
+                    return;
+                }
+
+                if (inMfa) {
+                    var otp = ($('otp').value || '').trim();
+                    if (!otp) { showError('Please enter your one-time code.'); return; }
+                    if (!lastCreds) {
+                        leaveMfaMode();
+                        showError('Session expired. Please sign in again.');
+                        return;
+                    }
+                    postLogin(buildRequest(lastCreds, otp));
+                    return;
+                }
+
+                var username = ($('username').value || '').trim();
+                var password = $('password').value || '';
+                if (!username || !password) {
+                    showError('Please enter your username and password.');
+                    return;
+                }
+                lastCreds = { account_name: username, account_secret: password };
+                postLogin(buildRequest(lastCreds, null));
+            }
+
+            $('login-form').addEventListener('submit', submitLogin);
+            $('allow-btn').addEventListener('click', function () {
+                clearAlert();
+                if (allowHandler) allowHandler();
+            });
+            $('deny-btn').addEventListener('click', function () {
+                clearAlert();
+                if (denyHandler) denyHandler();
+            });
+
             $('otp').addEventListener('input', function () {
                 this.value = this.value.replace(/\D/g, '');
                 if (this.value.length === 6) submitLogin();
             });
 
-            // Focus the first visible empty field.
-            setTimeout(function () {
-                if (!$('username').value) { $('username').focus(); return; }
-                if (!$('password').value) { $('password').focus(); return; }
-                if (isDevice && !$('device-code').value) { $('device-code').focus(); return; }
-            }, 0);
+            if (isDevice) startDevice(); else startAuthorization();
         })();
     </script>
 </body>

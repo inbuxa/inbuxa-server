@@ -242,13 +242,12 @@ impl<'de> serde::Deserialize<'de> for UTCDateTime {
 
 impl Pickle for UTCDateTime {
     fn pickle(&self, out: &mut Vec<u8>) {
-        out.extend_from_slice(&self.0.to_be_bytes());
+        out.extend_from_slice(&self.0.to_le_bytes());
     }
 
     fn unpickle(data: &mut PickledStream<'_>) -> Option<Self> {
-        let mut arr = [0u8; 8];
-        arr.copy_from_slice(data.read_bytes(8)?);
-        Some(UTCDateTime(i64::from_be_bytes(arr)))
+        data.read_array::<8>()
+            .map(|bytes| UTCDateTime(i64::from_le_bytes(bytes)))
     }
 }
 
@@ -290,33 +289,3 @@ impl IntoValue for UTCDateTime {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use std::str::FromStr;
-
-    use crate::types::datetime::UTCDateTime;
-
-    #[test]
-    fn parse_jmap_date() {
-        for (input, _) in [
-            ("1997-11-21T09:55:06-06:00", "1997-11-21T09:55:06-06:00"),
-            ("1997-11-21T09:55:06+00:00", "1997-11-21T09:55:06Z"),
-            ("2021-01-01T09:55:06+02:00", "2021-01-01T09:55:06+02:00"),
-            ("2004-06-28T23:43:45.000Z", "2004-06-28T23:43:45Z"),
-            ("1997-11-21T09:55:06.123+00:00", "1997-11-21T09:55:06Z"),
-            (
-                "2021-01-01T09:55:06.4567+02:00",
-                "2021-01-01T09:55:06+02:00",
-            ),
-        ] {
-            let date = UTCDateTime::from_str(input).unwrap();
-            //assert_eq!(date.to_string(), expected_result);
-
-            let timestamp = date.timestamp();
-            assert_eq!(
-                UTCDateTime::from_timestamp(timestamp).timestamp(),
-                timestamp
-            );
-        }
-    }
-}

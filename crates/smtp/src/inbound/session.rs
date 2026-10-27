@@ -4,13 +4,17 @@
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
  */
 
+use super::{auth::SaslToken, data::MessageOrigin};
+use crate::core::{DataFailure, Session, State};
 use common::{
-    config::{server::ServerProtocol, smtp::session::Mechanism},
-    expr::{self, functions::ResolveVariable, *},
-    network::SessionStream,
+    config::server::ServerProtocol,
+    expr::{Bump, Variable, functions::ResolveVariable},
+    network::{
+        SessionStream,
+        memory::{MEMORY_STEP, MemoryClass},
+    },
 };
-
-use compact_str::ToCompactString;
+use compact_str::{CompactString, ToCompactString, format_compact};
 use registry::schema::enums::ExpressionVariable;
 use smtp_proto::{
     request::receiver::{
@@ -20,11 +24,12 @@ use smtp_proto::{
     *,
 };
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
-use trc::{NetworkEvent, SecurityEvent, SmtpEvent};
+use trc::{LimitEvent, NetworkEvent, SecurityEvent, SmtpEvent};
 
-use crate::core::{Session, State};
-
-use super::auth::SaslToken;
+const MAX_BATCHED_RESPONSE: usize = 4096;
+const MIN_DATA_BUFFER: usize = 1024;
+pub(crate) const INSUFFICIENT_STORAGE: &[u8] =
+    b"452 4.3.1 Insufficient system storage, try again later.\r\n";
 
 impl<T: SessionStream> Session<T> {
     pub async fn ingest(&mut self, bytes: &[u8]) -> Result<bool, ()> {
@@ -40,7 +45,17 @@ impl<T: SessionStream> Session<T> {
                                 self.handle_rcpt_to(to).await?;
                             }
                             Request::Mail { from } => {
-                                self.handle_mail_from(from).await?;
+                                if self.server.is_memory_available(MemoryClass::SmtpInbound) {
+                                    self.handle_mail_from(from).await?;
+                                } else {
+                                    trc::event!(
+                                        Limit(LimitEvent::MemoryBudget),
+                                        SpanId = self.data.session_id,
+                                        Size = from.size,
+                                        Limit = self.server.core.network.max_buffered_memory,
+                                    );
+                                    self.write(INSUFFICIENT_STORAGE).await?;
+                                }
                             }
                             Request::Ehlo { host } => {
                                 if self.instance.protocol == ServerProtocol::Smtp {
@@ -60,7 +75,10 @@ impl<T: SessionStream> Session<T> {
                                 } else {
                                     self.write(b"354 Start mail input; end with <CRLF>.<CRLF>\r\n")
                                         .await?;
-                                    self.data.message = Vec::with_capacity(1024);
+                                    self.data.message = Vec::new();
+                                    self.data.message_memory = Some(
+                                        self.server.memory_reservation(MemoryClass::SmtpInbound),
+                                    );
                                     state = State::Data(DataReceiver::new());
                                     continue 'outer;
                                 }
@@ -73,16 +91,21 @@ impl<T: SessionStream> Session<T> {
                                     State::SkipData(
                                         DummyDataReceiver::new_bdat(chunk_size),
                                         response,
+                                        DataFailure::Chunk,
                                     )
                                 } else if chunk_size.saturating_add(self.data.message.len())
                                     < self.params.max_message_size
                                 {
-                                    if self.data.message.is_empty() {
-                                        self.data.message = Vec::with_capacity(chunk_size);
-                                    } else {
-                                        self.data.message.reserve(chunk_size);
+                                    if self.data.message_memory.is_none() {
+                                        self.data.message_memory = Some(
+                                            self.server
+                                                .memory_reservation(MemoryClass::SmtpInbound),
+                                        );
                                     }
-                                    State::Bdat(BdatReceiver::new(chunk_size, is_last))
+                                    State::Bdat {
+                                        receiver: BdatReceiver::new(chunk_size, is_last),
+                                        bytes_left: chunk_size,
+                                    }
                                 } else {
                                     trc::event!(
                                         Smtp(SmtpEvent::MessageTooLarge),
@@ -90,10 +113,12 @@ impl<T: SessionStream> Session<T> {
                                         Size = chunk_size.saturating_add(self.data.message.len()),
                                         Limit = self.params.max_message_size,
                                     );
+                                    self.reset();
 
                                     State::SkipData(
                                         DummyDataReceiver::new_bdat(chunk_size),
                                         b"552 5.3.4 Message too big for system.\r\n",
+                                        DataFailure::Chunk,
                                     )
                                 };
                                 continue 'outer;
@@ -102,16 +127,7 @@ impl<T: SessionStream> Session<T> {
                                 mechanism,
                                 initial_response,
                             } => {
-                                let auth: u64 = self
-                                    .server
-                                    .eval_if::<Mechanism, _>(
-                                        &self.server.core.smtp.session.auth.mechanisms,
-                                        self,
-                                        self.data.session_id,
-                                    )
-                                    .await
-                                    .unwrap_or_default()
-                                    .into();
+                                let auth = self.sasl_mechanisms().await;
                                 if auth == 0 {
                                     trc::event!(
                                         Smtp(SmtpEvent::AuthNotAllowed),
@@ -123,7 +139,7 @@ impl<T: SessionStream> Session<T> {
                                     trc::event!(
                                         Smtp(SmtpEvent::AlreadyAuthenticated),
                                         SpanId = self.data.session_id,
-                                        AccountName = authenticated_as.to_string(),
+                                        AccountName = CompactString::from(authenticated_as),
                                     );
 
                                     self.write(b"503 5.5.1 Already authenticated.\r\n").await?;
@@ -172,7 +188,7 @@ impl<T: SessionStream> Session<T> {
                                         );
 
                                         self.write(b"220 2.0.0 Ready to start TLS.\r\n").await?;
-                                        #[cfg(any(test, feature = "test_mode"))]
+                                        #[cfg(any(test, stalwart_tests))]
                                         if self.data.helo_domain.contains("badtls") {
                                             return Err(());
                                         }
@@ -246,7 +262,7 @@ impl<T: SessionStream> Session<T> {
                                 trc::event!(
                                     Smtp(SmtpEvent::CommandNotImplemented),
                                     SpanId = self.data.session_id,
-                                    Details = format!("{cmd:?}"),
+                                    Details = format_compact!("{cmd:?}"),
                                 );
 
                                 self.write(b"502 5.5.1 Command not implemented.\r\n")
@@ -332,7 +348,7 @@ impl<T: SessionStream> Session<T> {
                                 trc::event!(
                                     Smtp(SmtpEvent::InvalidParameter),
                                     SpanId = self.data.session_id,
-                                    Details = param
+                                    Name = param
                                 );
 
                                 self.write(
@@ -345,7 +361,7 @@ impl<T: SessionStream> Session<T> {
                                 trc::event!(
                                     Smtp(SmtpEvent::UnsupportedParameter),
                                     SpanId = self.data.session_id,
-                                    Details = param.clone()
+                                    Value = param.clone()
                                 );
 
                                 self.write(
@@ -363,17 +379,16 @@ impl<T: SessionStream> Session<T> {
                 },
                 State::Data(receiver) => {
                     if self.data.message.len() + bytes.len() < self.params.max_message_size {
-                        if receiver.ingest(&mut iter, &mut self.data.message) {
-                            let message = self.queue_message().await;
-                            let num_responses = if self.instance.protocol == ServerProtocol::Smtp {
-                                1
-                            } else {
-                                self.data.rcpt_oks
-                            };
+                        if !self.grow_message_buffer(iter.len()) {
+                            state = State::SkipData(
+                                DummyDataReceiver::new_data(receiver),
+                                INSUFFICIENT_STORAGE,
+                                DataFailure::Transaction,
+                            );
+                        } else if receiver.ingest(&mut iter, &mut self.data.message) {
+                            let message = self.queue_message(MessageOrigin::Client).await;
                             if !message.is_empty() {
-                                for _ in 0..num_responses {
-                                    self.write(message.as_ref()).await?;
-                                }
+                                self.write_data_responses(message.as_ref()).await?;
                                 self.reset();
                                 state = State::default();
                             } else {
@@ -394,23 +409,32 @@ impl<T: SessionStream> Session<T> {
                         state = State::SkipData(
                             DummyDataReceiver::new_data(receiver),
                             b"552 5.3.4 Message too big for system.\r\n",
+                            DataFailure::Transaction,
                         );
                     }
                 }
-                State::Bdat(receiver) => {
-                    if receiver.ingest(&mut iter, &mut self.data.message) {
+                State::Bdat {
+                    receiver,
+                    bytes_left,
+                } => {
+                    if !self.grow_message_buffer(iter.len().min(*bytes_left)) {
+                        let bytes_left = *bytes_left;
+                        self.reset();
+                        state = State::SkipData(
+                            DummyDataReceiver::new_bdat(bytes_left),
+                            INSUFFICIENT_STORAGE,
+                            DataFailure::Chunk,
+                        );
+                        continue 'outer;
+                    }
+                    let available = iter.len();
+                    let completed = receiver.ingest(&mut iter, &mut self.data.message);
+                    *bytes_left = bytes_left.saturating_sub(available - iter.len());
+                    if completed {
                         if receiver.is_last {
-                            let message = self.queue_message().await;
+                            let message = self.queue_message(MessageOrigin::Client).await;
                             if !message.is_empty() {
-                                let num_responses =
-                                    if self.instance.protocol == ServerProtocol::Smtp {
-                                        1
-                                    } else {
-                                        self.data.rcpt_oks
-                                    };
-                                for _ in 0..num_responses {
-                                    self.write(message.as_ref()).await?;
-                                }
+                                self.write_data_responses(message.as_ref()).await?;
                                 self.reset();
                             } else {
                                 // Disconnect requested
@@ -451,10 +475,19 @@ impl<T: SessionStream> Session<T> {
                         break 'outer;
                     }
                 }
-                State::SkipData(receiver, response) => {
+                State::SkipData(receiver, response, failure) => {
                     if receiver.ingest(&mut iter) {
-                        self.data.message = Vec::with_capacity(0);
-                        self.write(response).await?;
+                        match failure {
+                            DataFailure::Chunk => {
+                                self.data.message = Vec::with_capacity(0);
+                                self.data.message_memory = None;
+                                self.write(response).await?;
+                            }
+                            DataFailure::Transaction => {
+                                self.write_data_responses(response).await?;
+                                self.reset();
+                            }
+                        }
                         state = State::default();
                     } else {
                         break 'outer;
@@ -480,6 +513,66 @@ impl<T: SessionStream> Session<T> {
 
         Ok(true)
     }
+
+    fn grow_message_buffer(&mut self, incoming: usize) -> bool {
+        let required = self.data.message.len().saturating_add(incoming);
+        let capacity = self.data.message.capacity();
+        if required <= capacity {
+            return true;
+        }
+
+        let target = if capacity == 0 {
+            self.data
+                .message_size
+                .clamp(MIN_DATA_BUFFER, MEMORY_STEP as usize)
+        } else {
+            capacity.saturating_mul(2)
+        }
+        .min(self.params.max_message_size)
+        .max(required);
+        if let Some(memory) = &mut self.data.message_memory
+            && !memory.reserve_to(target as u64)
+        {
+            trc::event!(
+                Limit(LimitEvent::MemoryBudget),
+                SpanId = self.data.session_id,
+                Size = target,
+                Limit = memory.limit(),
+            );
+            self.data.message = Vec::new();
+            self.data.message_memory = None;
+            return false;
+        }
+
+        self.data
+            .message
+            .reserve_exact(target - self.data.message.len());
+        true
+    }
+
+    async fn write_data_responses(&mut self, response: &[u8]) -> Result<(), ()> {
+        let count = if self.instance.protocol == ServerProtocol::Smtp {
+            1
+        } else {
+            self.data.rcpt_oks
+        };
+        match count {
+            0 => return Ok(()),
+            1 => return self.write(response).await,
+            _ => {}
+        }
+
+        let per_write = (MAX_BATCHED_RESPONSE / response.len().max(1)).clamp(1, count);
+        let batch = response.repeat(per_write);
+        let mut remaining = count;
+        while remaining > 0 {
+            let chunk = remaining.min(per_write);
+            self.write(batch.get(..chunk * response.len()).unwrap_or_default())
+                .await?;
+            remaining -= chunk;
+        }
+        Ok(())
+    }
 }
 
 impl<T: AsyncWrite + AsyncRead + Unpin> Session<T> {
@@ -488,6 +581,8 @@ impl<T: AsyncWrite + AsyncRead + Unpin> Session<T> {
         self.data.spf_mail_from = None;
         self.data.rcpt_to.clear();
         self.data.message = Vec::with_capacity(0);
+        self.data.message_memory = None;
+        self.data.message_size = 0;
         self.data.priority = 0;
         self.data.delivery_by = 0;
         self.data.future_release = 0;
@@ -519,7 +614,7 @@ impl<T: AsyncWrite + AsyncRead + Unpin> Session<T> {
                     trc::event!(
                         Network(NetworkEvent::FlushError),
                         SpanId = self.data.session_id,
-                        Reason = err.to_string(),
+                        Reason = err.to_compact_string(),
                     );
                     Err(())
                 }
@@ -528,7 +623,7 @@ impl<T: AsyncWrite + AsyncRead + Unpin> Session<T> {
                 trc::event!(
                     Network(NetworkEvent::WriteError),
                     SpanId = self.data.session_id,
-                    Reason = err.to_string(),
+                    Reason = err.to_compact_string(),
                 );
 
                 Err(())
@@ -537,15 +632,17 @@ impl<T: AsyncWrite + AsyncRead + Unpin> Session<T> {
     }
 
     #[inline(always)]
-    pub async fn read(&mut self, bytes: &mut [u8]) -> Result<usize, ()> {
-        match self.stream.read(bytes).await {
+    pub async fn read(&mut self, bytes: &mut Vec<u8>) -> Result<usize, ()> {
+        bytes.clear();
+        match self.stream.read_buf(bytes).await {
             Ok(len) => {
                 trc::event!(
                     Smtp(SmtpEvent::RawInput),
                     SpanId = self.data.session_id,
                     Size = len,
-                    Contents =
-                        String::from_utf8_lossy(bytes.get(0..len).unwrap_or_default()).into_owned(),
+                    Contents = CompactString::from(String::from_utf8_lossy(
+                        bytes.get(0..len).unwrap_or_default()
+                    )),
                 );
 
                 Ok(len)
@@ -554,7 +651,7 @@ impl<T: AsyncWrite + AsyncRead + Unpin> Session<T> {
                 trc::event!(
                     Network(NetworkEvent::ReadError),
                     SpanId = self.data.session_id,
-                    Reason = err.to_string(),
+                    Reason = err.to_compact_string(),
                 );
 
                 Err(())
@@ -564,7 +661,11 @@ impl<T: AsyncWrite + AsyncRead + Unpin> Session<T> {
 }
 
 impl<T: SessionStream> ResolveVariable for Session<T> {
-    fn resolve_variable(&self, variable: ExpressionVariable) -> expr::Variable<'_> {
+    fn resolve_variable<'a>(
+        &'a self,
+        variable: ExpressionVariable,
+        arena: &'a Bump,
+    ) -> Variable<'a> {
         match variable {
             ExpressionVariable::Rcpt => self
                 .data
@@ -580,13 +681,14 @@ impl<T: SessionStream> ResolveVariable for Session<T> {
                 .map(|r| r.domain.as_str())
                 .unwrap_or_default()
                 .into(),
-            ExpressionVariable::Recipients => self
-                .data
-                .rcpt_to
-                .iter()
-                .map(|r| Variable::from(r.address_lcase.as_str()))
-                .collect::<Vec<_>>()
-                .into(),
+            ExpressionVariable::Recipients => Variable::Array(
+                arena.alloc_slice_fill_iter(
+                    self.data
+                        .rcpt_to
+                        .iter()
+                        .map(|r| Variable::String(r.address_lcase.as_str())),
+                ),
+            ),
             ExpressionVariable::Sender => self
                 .data
                 .mail_from
@@ -611,7 +713,7 @@ impl<T: SessionStream> ResolveVariable for Session<T> {
             ExpressionVariable::LocalIp => self.data.local_ip_str.as_str().into(),
             ExpressionVariable::LocalPort => self.data.local_port.into(),
             ExpressionVariable::IsTls => self.stream.is_tls().into(),
-            ExpressionVariable::Priority => self.data.priority.to_compact_string().into(),
+            ExpressionVariable::Priority => self.data.priority.into(),
             ExpressionVariable::Protocol => self.instance.protocol.as_str().into(),
             ExpressionVariable::Asn => self
                 .data
@@ -625,15 +727,10 @@ impl<T: SessionStream> ResolveVariable for Session<T> {
                 .data
                 .asn_geo_data
                 .country
-                .as_ref()
-                .map(|c| c.as_str())
+                .as_deref()
                 .unwrap_or_default()
                 .into(),
-            _ => expr::Variable::default(),
+            _ => Variable::default(),
         }
-    }
-
-    fn resolve_global(&self, _: &str) -> Variable<'_> {
-        Variable::Integer(0)
     }
 }

@@ -5,7 +5,7 @@
  */
 
 use crate::{
-    jmap::{IntoValue, JmapValue},
+    jmap::{IntoValue, JmapValue, ValueOptions},
     schema::prelude::Property,
     types::EnumImpl,
 };
@@ -15,8 +15,12 @@ use utils::map::vec_map::VecMap;
 
 impl<T: IntoValue> IntoValue for Option<T> {
     fn into_value(self) -> JmapValue<'static> {
+        self.into_value_with(ValueOptions::default())
+    }
+
+    fn into_value_with(self, opts: ValueOptions) -> JmapValue<'static> {
         match self {
-            Some(value) => value.into_value(),
+            Some(value) => value.into_value_with(opts),
             None => JmapValue::Null,
         }
     }
@@ -76,9 +80,13 @@ impl<T: EnumImpl> MapKey for T {
 
 impl<K: MapKey, V: IntoValue> IntoValue for VecMap<K, V> {
     fn into_value(self) -> JmapValue<'static> {
+        self.into_value_with(ValueOptions::default())
+    }
+
+    fn into_value_with(self, opts: ValueOptions) -> JmapValue<'static> {
         let mut map = jmap_tools::Map::with_capacity(self.len());
         for (k, v) in self {
-            map.insert_unchecked(k.to_key(), v.into_value());
+            map.insert_unchecked(k.to_key(), v.into_value_with(opts));
         }
         JmapValue::Object(map)
     }

@@ -4,33 +4,51 @@
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
  */
 
-use crate::{api::acl::JmapRights, changes::state::JmapCacheState};
-use common::{Server, auth::AccessToken, sharing::EffectiveAcl};
-use groupware::{cache::GroupwareCache, file::FileNode};
+use super::node::{default_media_type, node_type_from_id, target_value};
+use crate::{
+    api::{
+        acl::JmapRights,
+        metadata::{MetadataDocuments, MetadataType, ObjectMetadata, select_properties},
+    },
+    changes::state::JmapCacheState,
+};
+use common::{
+    GroupwareResourceRef, Server,
+    auth::AccessToken,
+    storage::{
+        batch::{DocumentBatch, Lookup, MAX_BATCH_BYTES, MAX_BATCH_DOCUMENTS},
+        dav::{FILE_KIND_DIRECTORY, FILE_KIND_FILE, FILE_KIND_SYMLINK},
+    },
+};
+use groupware::{
+    cache::GroupwareCache,
+    file::{FileNode, FileNodeRole},
+};
 use jmap_proto::{
-    method::get::{GetRequest, GetResponse},
-    object::file_node::{self, FileNodeNodeType, FileNodeProperty, FileNodeValue},
+    method::get::{GetRequest, GetResponse, all_ids},
+    object::file_node::{self, FileNodeProperty, FileNodeValue},
+    request::capability::CapabilityIds,
     types::date::UTCDate,
 };
 use jmap_tools::{Map, Value};
-use store::{
-    ValueKey,
-    roaring::RoaringBitmap,
-    write::{AlignedBytes, Archive, now},
-};
+use store::roaring::RoaringBitmap;
 use trc::AddContext;
 use types::{
-    acl::{Acl, AclGrant},
+    acl::Acl,
     blob::{BlobClass, BlobId},
     blob_hash::BlobHash,
     collection::{Collection, SyncCollection},
+    field::Field,
+    id::Id,
 };
+use utils::map::bitmap::Bitmap;
 
 pub trait FileNodeGet: Sync + Send {
     fn file_node_get(
         &self,
         request: GetRequest<file_node::FileNode>,
         access_token: &AccessToken,
+        using: CapabilityIds,
     ) -> impl Future<Output = trc::Result<GetResponse<file_node::FileNode>>> + Send;
 }
 
@@ -39,271 +57,402 @@ impl FileNodeGet for Server {
         &self,
         mut request: GetRequest<file_node::FileNode>,
         access_token: &AccessToken,
+        using: CapabilityIds,
     ) -> trc::Result<GetResponse<file_node::FileNode>> {
         let (ids, not_found_ids) = request.unwrap_ids(self.core.jmap.get_max_objects)?;
-        let properties = request.unwrap_properties(&[
-            FileNodeProperty::Id,
-            FileNodeProperty::ParentId,
-            FileNodeProperty::NodeType,
-            FileNodeProperty::BlobId,
-            FileNodeProperty::Target,
-            FileNodeProperty::Size,
-            FileNodeProperty::Name,
-            FileNodeProperty::Type,
-            FileNodeProperty::Created,
-            FileNodeProperty::Modified,
-            FileNodeProperty::Accessed,
-            FileNodeProperty::Changed,
-            FileNodeProperty::Executable,
-            FileNodeProperty::IsSubscribed,
-            FileNodeProperty::MyRights,
-            FileNodeProperty::ShareWith,
-            FileNodeProperty::Role,
-        ]);
+        let (mut properties, selection) = select_properties(
+            &mut request,
+            &[
+                FileNodeProperty::Id,
+                FileNodeProperty::ParentId,
+                FileNodeProperty::Type,
+                FileNodeProperty::BlobId,
+                FileNodeProperty::Target,
+                FileNodeProperty::Size,
+                FileNodeProperty::Name,
+                FileNodeProperty::MediaType,
+                FileNodeProperty::Created,
+                FileNodeProperty::Modified,
+                FileNodeProperty::Accessed,
+                FileNodeProperty::Changed,
+                FileNodeProperty::Executable,
+                FileNodeProperty::IsSubscribed,
+                FileNodeProperty::MyRights,
+                FileNodeProperty::ShareWith,
+                FileNodeProperty::Role,
+            ],
+            using,
+        )?;
+        if !properties.contains(&FileNodeProperty::Type) {
+            properties.push(FileNodeProperty::Type);
+        }
+        let metadata = ObjectMetadata::new(self, access_token, using, MetadataType::FileNode);
+        let metadata_get = metadata.get(selection);
+        let metadata_slots = metadata_get.as_ref().map_or(0, |get| {
+            usize::from(get.wants_shared()) + usize::from(get.wants_private())
+        });
         let account_id = request.account_id.document_id();
+        let sampled = metadata.viewer_change_id(self, account_id).await?;
         let cache = self
-            .fetch_dav_resources(
+            .fetch_groupware_resources(
                 access_token.account_id(),
                 account_id,
                 SyncCollection::FileNode,
             )
             .await?;
-        // TODO: draft-14 section 5 case 2 - ancestors of shared nodes should be discoverable with mayRead=false
-        let file_node_ids = if access_token.is_member(account_id) {
-            cache
-                .resources
-                .iter()
-                .map(|r| r.document_id)
-                .collect::<RoaringBitmap>()
-        } else {
-            cache.shared_documents(access_token, [Acl::Read, Acl::ReadItems], true)
+        let is_owner = access_token.is_member(account_id);
+        let access = (!is_owner).then(|| cache.file_access(access_token));
+        let is_visible = |document_id: u32| {
+            access
+                .as_ref()
+                .is_none_or(|access| access.discoverable.contains(document_id))
         };
 
-        let mut ids = if let Some(ids) = ids {
-            ids
-        } else {
-            file_node_ids
-                .iter()
-                .take(self.core.jmap.get_max_objects)
-                .map(Into::into)
-                .collect::<Vec<_>>()
+        let mut ids = match ids {
+            Some(ids) => ids,
+            None => match &access {
+                Some(access) => all_ids(
+                    access.discoverable.iter().map(Id::from),
+                    self.core.jmap.get_max_objects,
+                )?,
+                None => all_ids(
+                    cache
+                        .resources
+                        .iter()
+                        .map(|resource| Id::from(resource.document_id())),
+                    self.core.jmap.get_max_objects,
+                )?,
+            },
         };
 
         if request.arguments.fetch_parents.unwrap_or(false) {
-            let mut seen: RoaringBitmap = ids.iter().map(|i| i.document_id()).collect();
-            let mut extra: Vec<types::id::Id> = Vec::new();
-            for id in &ids {
+            let mut seen = ids
+                .iter()
+                .map(|id| id.document_id())
+                .collect::<RoaringBitmap>();
+            let mut ancestors = Vec::new();
+            for id in ids.iter().filter(|id| is_visible(id.document_id())) {
                 let mut current = cache
-                    .any_resource_path_by_id(id.document_id())
-                    .and_then(|r| r.parent_id());
+                    .resources
+                    .find_any(id.document_id())
+                    .and_then(|resource| resource.parent_id());
                 while let Some(parent_id) = current {
                     if !seen.insert(parent_id) {
                         break;
                     }
-                    if file_node_ids.contains(parent_id) {
-                        extra.push(parent_id.into());
+                    if is_visible(parent_id) {
+                        ancestors.push(Id::from(parent_id));
                     }
                     current = cache
-                        .container_resource_by_id(parent_id)
-                        .and_then(|r| r.parent_id());
+                        .resources
+                        .find_any(parent_id)
+                        .and_then(|resource| resource.parent_id());
                 }
             }
-            ids.extend(extra);
+            ids.extend(ancestors);
         }
+
+        let needs_node_archive = properties.iter().any(|property| {
+            matches!(
+                property,
+                FileNodeProperty::BlobId
+                    | FileNodeProperty::Target
+                    | FileNodeProperty::Accessed
+                    | FileNodeProperty::Changed
+            )
+        });
+        let needs_directory_archive =
+            needs_node_archive || properties.contains(&FileNodeProperty::IsSubscribed);
+        let needs_archive = |resource: &GroupwareResourceRef<'_>| {
+            if resource.is_container() {
+                needs_directory_archive
+            } else {
+                needs_node_archive
+            }
+        };
+        let rights_access = access.as_ref().filter(|_| {
+            properties.iter().any(|property| {
+                matches!(
+                    property,
+                    FileNodeProperty::MyRights | FileNodeProperty::ShareWith
+                )
+            })
+        });
+        let personal_id = access_token.personal_id(account_id, Collection::FileNode);
+        let is_readable = |document_id: u32| {
+            access
+                .as_ref()
+                .is_none_or(|access| access.readable.contains(document_id))
+        };
+        let mut metadata_values = match &metadata_get {
+            Some(get) => {
+                let mut documents = MetadataDocuments::default();
+                for id in &ids {
+                    let document_id = id.document_id();
+                    if let Some(resource) = cache
+                        .resources
+                        .find_any(document_id)
+                        .filter(|_| is_visible(document_id) && is_readable(document_id))
+                    {
+                        documents.insert(document_id, resource.metadata_kinds());
+                    }
+                }
+                Some(metadata.load(self, account_id, get, &documents).await?)
+            }
+            None => None,
+        };
         let mut response = GetResponse {
             account_id: request.account_id.into(),
-            state: cache.get_state(false).into(),
+            state: sampled.state(cache.get_state(false)).into(),
             list: Vec::with_capacity(ids.len()),
             not_found: not_found_ids,
         };
 
-        for id in ids {
-            // Obtain the file_node object
-            let document_id = id.document_id();
-            if !file_node_ids.contains(document_id) {
-                response.push_not_found(id);
-                continue;
-            }
-            let _file_node = if let Some(file_node) = self
-                .store()
-                .get_value::<Archive<AlignedBytes>>(ValueKey::archive(
-                    account_id,
-                    Collection::FileNode,
-                    document_id,
-                ))
-                .await?
-            {
-                file_node
-            } else {
-                response.push_not_found(id);
-                continue;
-            };
-            let file_node = _file_node
-                .unarchive::<FileNode>()
-                .caused_by(trc::location!())?;
-            let mut result = Map::with_capacity(properties.len());
-            for property in &properties {
-                match property {
-                    FileNodeProperty::Id => {
-                        result.insert_unchecked(FileNodeProperty::Id, FileNodeValue::Id(id));
-                    }
-                    FileNodeProperty::Name => {
-                        result.insert_unchecked(FileNodeProperty::Name, file_node.name.to_string());
-                    }
-                    FileNodeProperty::ShareWith => {
-                        result.insert_unchecked(
-                            FileNodeProperty::ShareWith,
-                            JmapRights::share_with::<file_node::FileNode>(
-                                account_id,
-                                access_token,
-                                &file_node
-                                    .acls
-                                    .iter()
-                                    .map(AclGrant::from)
-                                    .collect::<Vec<_>>(),
-                            ),
-                        );
-                    }
-                    FileNodeProperty::MyRights => {
-                        result.insert_unchecked(
-                            FileNodeProperty::MyRights,
-                            if access_token.is_shared(account_id) {
-                                JmapRights::rights::<file_node::FileNode>(
-                                    file_node.acls.effective_acl(access_token),
-                                )
-                            } else {
-                                JmapRights::all_rights::<file_node::FileNode>()
-                            },
-                        );
-                    }
-                    FileNodeProperty::ParentId => {
-                        let parent_id = file_node.parent_id.to_native();
-
-                        result.insert_unchecked(
-                            FileNodeProperty::ParentId,
-                            if parent_id > 0 {
-                                Value::Element(FileNodeValue::Id((parent_id - 1).into()))
-                            } else {
-                                Value::Null
-                            },
-                        );
-                    }
-                    FileNodeProperty::BlobId => {
-                        result.insert_unchecked(
-                            FileNodeProperty::BlobId,
-                            if let Some(file) = file_node.file.as_ref() {
-                                Value::Element(FileNodeValue::BlobId(BlobId::new(
-                                    BlobHash::from(&file.blob_hash),
-                                    BlobClass::Linked {
-                                        account_id,
-                                        collection: Collection::FileNode.into(),
-                                        document_id: id.document_id(),
-                                    },
-                                )))
-                            } else {
-                                Value::Null
-                            },
-                        );
-                    }
-                    FileNodeProperty::Size => {
-                        result.insert_unchecked(
-                            FileNodeProperty::Size,
-                            if let Some(file) = file_node.file.as_ref() {
-                                Value::Number(file.size.to_native().into())
-                            } else {
-                                Value::Null
-                            },
-                        );
-                    }
-                    FileNodeProperty::Type => {
-                        result.insert_unchecked(
-                            FileNodeProperty::Type,
-                            if let Some(file) = file_node.file.as_ref() {
-                                Value::Str(
-                                    file.media_type
-                                        .as_ref()
-                                        .map(|t| t.to_string())
-                                        .unwrap_or_else(|| "application/octet-stream".to_string())
-                                        .into(),
-                                )
-                            } else {
-                                Value::Null
-                            },
-                        );
-                    }
-                    FileNodeProperty::Executable => {
-                        result.insert_unchecked(
-                            FileNodeProperty::Executable,
-                            if let Some(file) = file_node.file.as_ref() {
-                                Value::Bool(file.executable)
-                            } else {
-                                Value::Null
-                            },
-                        );
-                    }
-                    FileNodeProperty::Created => {
-                        result.insert_unchecked(
-                            FileNodeProperty::Created,
-                            Value::Element(FileNodeValue::Date(UTCDate::from_timestamp(
-                                file_node.created.to_native(),
-                            ))),
-                        );
-                    }
-                    FileNodeProperty::Modified => {
-                        result.insert_unchecked(
-                            FileNodeProperty::Modified,
-                            Value::Element(FileNodeValue::Date(UTCDate::from_timestamp(
-                                file_node.modified.to_native(),
-                            ))),
-                        );
-                    }
-                    FileNodeProperty::Accessed => {
-                        // TODO: needs serialization change (per-user accessed timestamp); returns now() as a placeholder
-                        result.insert_unchecked(
-                            FileNodeProperty::Accessed,
-                            Value::Element(FileNodeValue::Date(UTCDate::from_timestamp(
-                                now() as i64
-                            ))),
-                        );
-                    }
-                    FileNodeProperty::Changed => {
-                        // TODO: needs serialization change (dedicated server-set changed timestamp); returns modified as a placeholder
-                        result.insert_unchecked(
-                            FileNodeProperty::Changed,
-                            Value::Element(FileNodeValue::Date(UTCDate::from_timestamp(
-                                file_node.modified.to_native(),
-                            ))),
-                        );
-                    }
-                    FileNodeProperty::NodeType => {
-                        let node_type = if file_node.file.is_some() {
-                            FileNodeNodeType::File
-                        } else {
-                            FileNodeNodeType::Directory
-                        };
-                        result.insert_unchecked(
-                            FileNodeProperty::NodeType,
-                            Value::Str(node_type.as_str().into()),
-                        );
-                    }
-                    FileNodeProperty::Target => {
-                        result.insert_unchecked(FileNodeProperty::Target, Value::Null);
-                    }
-                    FileNodeProperty::Role => {
-                        result.insert_unchecked(FileNodeProperty::Role, Value::Null);
-                    }
-                    FileNodeProperty::IsSubscribed => {
-                        // TODO: needs serialization change (per-user subscription state); always true for now
-                        result.insert_unchecked(FileNodeProperty::IsSubscribed, Value::Bool(true));
-                    }
-                    property => {
-                        result.insert_unchecked(property.clone(), Value::Null);
+        let mut batch = DocumentBatch::new(MAX_BATCH_BYTES);
+        for chunk in ids.chunks(MAX_BATCH_DOCUMENTS) {
+            batch.reset();
+            if needs_directory_archive {
+                for id in chunk {
+                    let document_id = id.document_id();
+                    if is_visible(document_id)
+                        && is_readable(document_id)
+                        && cache
+                            .resources
+                            .find_any(document_id)
+                            .is_some_and(|resource| needs_archive(&resource))
+                    {
+                        batch.request(document_id);
                     }
                 }
             }
-            response.list.push(result.into());
+
+            loop {
+                self.read_archive_batch(
+                    account_id,
+                    Collection::FileNode,
+                    Field::ARCHIVE,
+                    &mut batch,
+                )
+                .await?;
+
+                for &id in chunk {
+                    let document_id = id.document_id();
+                    let Some(resource) = cache
+                        .resources
+                        .find_any(document_id)
+                        .filter(|_| is_visible(document_id))
+                    else {
+                        if batch.is_first_round() {
+                            response.push_not_found(id);
+                        }
+                        continue;
+                    };
+                    if !is_readable(document_id) {
+                        if batch.is_first_round() {
+                            let mut result = discoverable_only(
+                                &properties,
+                                id,
+                                &resource,
+                                rights_access.map(|access| {
+                                    access.node_rights(document_id, resource.parent_id())
+                                }),
+                            );
+                            if let Some(values) = &mut metadata_values {
+                                values.insert_into(document_id, &mut result);
+                            }
+                            response.list.push(result.into());
+                        }
+                        continue;
+                    }
+                    let archive = if needs_archive(&resource) {
+                        match batch.lookup(document_id) {
+                            Lookup::Found(archive) => Some(archive),
+                            Lookup::Missing => {
+                                response.push_not_found(id);
+                                continue;
+                            }
+                            Lookup::Skip => continue,
+                        }
+                    } else if batch.is_first_round() {
+                        None
+                    } else {
+                        continue;
+                    };
+                    let node = archive
+                        .map(|archive| archive.unarchive::<FileNode>())
+                        .transpose()
+                        .caused_by(trc::location!())?;
+                    let flags = resource.file_flags().unwrap_or_default();
+                    let kind = flags.kind();
+                    let is_file = kind == FILE_KIND_FILE;
+                    let is_directory = kind == FILE_KIND_DIRECTORY;
+                    let rights = rights_access
+                        .filter(|_| is_directory)
+                        .map(|access| access.node_rights(document_id, resource.parent_id()));
+
+                    let mut result = Map::with_capacity(properties.len() + metadata_slots);
+                    for property in &properties {
+                        let value = match property {
+                            FileNodeProperty::Id => Value::Element(FileNodeValue::Id(id)),
+                            FileNodeProperty::Name => Value::Str(
+                                resource
+                                    .container_name()
+                                    .unwrap_or_default()
+                                    .to_string()
+                                    .into(),
+                            ),
+                            FileNodeProperty::ParentId => {
+                                resource.parent_id().map_or(Value::Null, |parent_id| {
+                                    Value::Element(FileNodeValue::Id(parent_id.into()))
+                                })
+                            }
+                            FileNodeProperty::Type => {
+                                Value::Str(node_type_from_id(kind).as_str().into())
+                            }
+                            FileNodeProperty::BlobId if is_file => node
+                                .and_then(|node| node.file())
+                                .map_or(Value::Null, |file| {
+                                    Value::Element(FileNodeValue::BlobId(BlobId::new(
+                                        BlobHash::from(&file.blob_hash),
+                                        BlobClass::Linked {
+                                            account_id,
+                                            collection: Collection::FileNode.into(),
+                                            document_id,
+                                        },
+                                    )))
+                                }),
+                            FileNodeProperty::Target if kind == FILE_KIND_SYMLINK => node
+                                .and_then(|node| node.symlink_target())
+                                .map_or(Value::Null, target_value),
+                            FileNodeProperty::Size if is_file => resource
+                                .size()
+                                .map_or(Value::Null, |size| Value::Number(size.into())),
+                            FileNodeProperty::MediaType if is_file => Value::Str(
+                                resource
+                                    .media_type()
+                                    .unwrap_or(default_media_type())
+                                    .to_string()
+                                    .into(),
+                            ),
+                            FileNodeProperty::Executable if is_file => {
+                                Value::Bool(flags.is_executable())
+                            }
+                            FileNodeProperty::BlobId
+                            | FileNodeProperty::Target
+                            | FileNodeProperty::Size
+                            | FileNodeProperty::MediaType
+                            | FileNodeProperty::Executable => continue,
+                            FileNodeProperty::Created => date_value(resource.created_at()),
+                            FileNodeProperty::Modified => date_value(resource.modified_at()),
+                            FileNodeProperty::Accessed => {
+                                date_value(node.map(|node| node.accessed.to_native()))
+                            }
+                            FileNodeProperty::Changed => {
+                                date_value(node.map(|node| node.changed.to_native()))
+                            }
+                            FileNodeProperty::IsSubscribed if is_directory => {
+                                Value::Bool(node.is_none_or(|node| node.is_subscribed(personal_id)))
+                            }
+                            FileNodeProperty::Role if is_directory => {
+                                FileNodeRole::from_id(flags.role())
+                                    .map_or(Value::Null, |role| Value::Str(role.as_str().into()))
+                            }
+                            FileNodeProperty::MyRights if is_directory => my_rights(rights),
+                            FileNodeProperty::ShareWith if is_directory => {
+                                share_with(&resource, rights)
+                            }
+                            FileNodeProperty::IsSubscribed
+                            | FileNodeProperty::Role
+                            | FileNodeProperty::MyRights
+                            | FileNodeProperty::ShareWith => continue,
+                            property => {
+                                result.insert_unchecked(property.clone(), Value::Null);
+                                continue;
+                            }
+                        };
+                        result.insert_unchecked(property.clone(), value);
+                    }
+                    if let Some(values) = &mut metadata_values {
+                        values.insert_into(document_id, &mut result);
+                    }
+                    response.list.push(result.into());
+                }
+
+                if !batch.next_round() {
+                    break;
+                }
+            }
         }
 
         Ok(response)
     }
+}
+
+fn discoverable_only(
+    properties: &[FileNodeProperty],
+    id: Id,
+    resource: &GroupwareResourceRef<'_>,
+    rights: Option<Bitmap<Acl>>,
+) -> Map<'static, FileNodeProperty, FileNodeValue> {
+    let mut result = Map::with_capacity(properties.len());
+    for property in properties {
+        let value = match property {
+            FileNodeProperty::Id => Value::Element(FileNodeValue::Id(id)),
+            FileNodeProperty::Name => Value::Str(
+                resource
+                    .container_name()
+                    .unwrap_or_default()
+                    .to_string()
+                    .into(),
+            ),
+            FileNodeProperty::ParentId => resource.parent_id().map_or(Value::Null, |parent_id| {
+                Value::Element(FileNodeValue::Id(parent_id.into()))
+            }),
+            FileNodeProperty::Type => Value::Str(
+                node_type_from_id(resource.file_kind().unwrap_or_default())
+                    .as_str()
+                    .into(),
+            ),
+            FileNodeProperty::MyRights => my_rights(rights),
+            FileNodeProperty::IsSubscribed => Value::Bool(true),
+            FileNodeProperty::ShareWith => share_with(resource, rights),
+            FileNodeProperty::BlobId
+            | FileNodeProperty::Target
+            | FileNodeProperty::Size
+            | FileNodeProperty::MediaType
+            | FileNodeProperty::Executable => continue,
+            _ => Value::Null,
+        };
+        result.insert_unchecked(property.clone(), value);
+    }
+    result
+}
+
+fn share_with(
+    resource: &GroupwareResourceRef<'_>,
+    rights: Option<Bitmap<Acl>>,
+) -> Value<'static, FileNodeProperty, FileNodeValue> {
+    let acls = resource.acls();
+    if !acls.is_empty() && rights.is_none_or(|rights| rights.contains(Acl::Share)) {
+        JmapRights::grants_value::<file_node::FileNode>(acls)
+    } else {
+        Value::Null
+    }
+}
+
+pub(super) fn my_rights(
+    rights: Option<Bitmap<Acl>>,
+) -> Value<'static, FileNodeProperty, FileNodeValue> {
+    match rights {
+        Some(rights) => JmapRights::rights::<file_node::FileNode>(rights),
+        None => JmapRights::all_rights::<file_node::FileNode>(),
+    }
+}
+
+pub(super) fn date_value(
+    timestamp: Option<i64>,
+) -> Value<'static, FileNodeProperty, FileNodeValue> {
+    timestamp.map_or(Value::Null, |timestamp| {
+        Value::Element(FileNodeValue::Date(UTCDate::from_timestamp(timestamp)))
+    })
 }

@@ -10,12 +10,20 @@ use std::{
     time::{Duration, Instant},
 };
 
+mod assembly;
 pub mod blob;
 pub mod main;
+mod preread;
 pub mod read;
+mod window;
 pub mod write;
 
-const MAX_VALUE_SIZE: usize = 100000;
+pub(crate) const MAX_VALUE_SIZE: usize = 100000;
+pub(crate) const FDB_VALUE_TOO_LARGE: i32 = 2103;
+const FDB_BATCH_THROTTLED: i32 = 1051;
+const MAX_THROTTLED_TIME: Duration = Duration::from_secs(15 * 60);
+
+const MAX_EXACT_MODE_ROWS: u64 = 256;
 
 const REFRESH_READ_VERSION_AFTER: Duration = Duration::from_secs(1);
 const MAX_READ_VERSION_AGE: Duration = Duration::from_secs(4);
@@ -23,11 +31,13 @@ const MAX_READ_VERSION_AGE: Duration = Duration::from_secs(4);
 pub struct FdbStore {
     db: Database,
     version: ReadVersion,
+    windows: window::WindowLoad,
 }
 
 pub(crate) struct ReadVersion {
     base: Instant,
     version: AtomicI64,
+    committed: AtomicI64,
     obtained: AtomicU64,
     refreshing: AtomicBool,
 }
@@ -46,7 +56,7 @@ impl ReadVersion {
             .saturating_sub(self.obtained.load(Ordering::Acquire))
     }
 
-    fn store_max(&self, version: i64) {
+    fn store_max(&self, version: i64) -> bool {
         let mut current = self.version.load(Ordering::Relaxed);
         while version > current {
             match self.version.compare_exchange_weak(
@@ -55,10 +65,11 @@ impl ReadVersion {
                 Ordering::Release,
                 Ordering::Relaxed,
             ) {
-                Ok(_) => break,
+                Ok(_) => return true,
                 Err(actual) => current = actual,
             }
         }
+        false
     }
 
     fn refreshed(&self, version: i64) {
@@ -67,7 +78,18 @@ impl ReadVersion {
     }
 
     fn raise_floor(&self, version: i64) {
+        self.committed.fetch_max(version, Ordering::AcqRel);
         self.store_max(version);
+    }
+
+    fn advance(&self, version: i64) {
+        if self.store_max(version) {
+            self.obtained.store(self.now(), Ordering::Release);
+        }
+    }
+
+    fn last_committed(&self) -> Option<i64> {
+        Some(self.committed.load(Ordering::Acquire)).filter(|version| *version > 0)
     }
 
     fn expire(&self) {
@@ -92,6 +114,7 @@ impl Default for ReadVersion {
         Self {
             base: Instant::now(),
             version: AtomicI64::new(0),
+            committed: AtomicI64::new(0),
             obtained: AtomicU64::new(0),
             refreshing: AtomicBool::new(false),
         }
@@ -112,3 +135,4 @@ fn into_error(error: FdbError) -> trc::Error {
         .reason(error.message())
         .ctx(trc::Key::Code, error.code())
 }
+

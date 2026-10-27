@@ -4,21 +4,22 @@
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
  */
 
-use super::{ImapSessionManager, Session, State};
-use crate::{
-    GREETING_WITH_TLS, GREETING_WITH_TLS_LOGIN_DISABLED, GREETING_WITHOUT_TLS,
-    GREETING_WITHOUT_TLS_LOGIN_DISABLED,
-};
+use super::{ImapSessionManager, MAX_CONCURRENT_OPS, Session, State};
+use crate::{auth_capability, greeting};
 use common::{
     BuildServer,
     network::{SessionData, SessionManager, SessionResult, SessionStream, stream::NullIo},
 };
+use compact_str::ToCompactString;
 use imap_proto::{
+    ResponseCode, StatusResponse,
     protocol::{ProtocolVersion, SerializeResponse},
-    receiver::Receiver,
+    receiver::{MAX_UNAUTHENTICATED_REQUEST_SIZE, Receiver},
 };
 use std::sync::Arc;
+use store::write::is_commit_contention;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::sync::Semaphore;
 use tokio_rustls::server::TlsStream;
 
 impl SessionManager for ImapSessionManager {
@@ -46,7 +47,7 @@ impl SessionManager for ImapSessionManager {
 
 impl<T: SessionStream> Session<T> {
     pub async fn handle_conn(&mut self) -> bool {
-        let mut buf = vec![0; 8192];
+        let mut buf = vec![0; 65536];
         let mut shutdown_rx = self.instance.shutdown_rx.clone();
 
         loop {
@@ -83,7 +84,7 @@ impl<T: SessionStream> Session<T> {
                             trc::event!(
                                 Network(trc::NetworkEvent::ReadError),
                                 SpanId = self.session_id,
-                                Reason = err.to_string(),
+                                Reason = err.to_compact_string(),
                                 CausedBy = trc::location!()
                             );
                             break;
@@ -123,18 +124,12 @@ impl<T: SessionStream> Session<T> {
         let is_tls = session.stream.is_tls();
         let server = manager.inner.build_server();
         let offer_tls = !is_tls && session.instance.acceptor.is_tls();
-        let allow_auth = is_tls || server.core.imap.allow_plain_auth;
-        let greeting = match (offer_tls, allow_auth) {
-            (true, true) => &GREETING_WITH_TLS,
-            (true, false) => &GREETING_WITH_TLS_LOGIN_DISABLED,
-            (false, true) => &GREETING_WITHOUT_TLS,
-            (false, false) => &GREETING_WITHOUT_TLS_LOGIN_DISABLED,
-        };
+        let greeting = greeting(offer_tls, auth_capability(&server, is_tls));
 
         if let Err(err) = session.stream.write_all(greeting).await {
             trc::event!(
                 Network(trc::NetworkEvent::WriteError),
-                Reason = err.to_string(),
+                Reason = err.to_compact_string(),
                 SpanId = session.session_id,
                 Details = "Failed to write to stream"
             );
@@ -146,9 +141,13 @@ impl<T: SessionStream> Session<T> {
         let (stream_rx, stream_tx) = tokio::io::split(session.stream);
 
         Ok(Session {
-            receiver: Receiver::with_max_request_size(server.core.imap.max_request_size),
+            receiver: Receiver::with_max_request_size(MAX_UNAUTHENTICATED_REQUEST_SIZE),
+            op_semaphore: Arc::new(Semaphore::new(MAX_CONCURRENT_OPS as usize)),
             version: ProtocolVersion::Rev1,
-            state: State::NotAuthenticated { auth_failures: 0 },
+            state: State::NotAuthenticated {
+                auth_failures: 0,
+                sasl_failure: None,
+            },
             is_tls,
             is_condstore: false,
             is_qresync: false,
@@ -201,10 +200,11 @@ impl<T: SessionStream> Session<T> {
         let (stream_rx, stream_tx) =
             tokio::io::split(self.instance.tls_accept(stream, self.session_id).await?);
         let stream_tx = Arc::new(tokio::sync::Mutex::new(stream_tx));
-        let receiver = Receiver::with_max_request_size(self.server.core.imap.max_request_size);
+        let receiver = Receiver::with_max_request_size(self.receiver.max_request_size);
 
         Ok(Session {
             server: self.server,
+            op_semaphore: self.op_semaphore,
             instance: self.instance,
             receiver,
             version: self.version,
@@ -259,7 +259,7 @@ impl<T: SessionStream> Session<T> {
     pub async fn write_error(&self, err: trc::Error) -> bool {
         if err.should_write_err() {
             let disconnect = err.must_disconnect();
-            let bytes = err.serialize();
+            let bytes = error_response(&err);
             trc::error!(err.span_id(self.session_id));
 
             if let Err(err) = self.write_bytes(bytes).await {
@@ -276,7 +276,41 @@ impl<T: SessionStream> Session<T> {
     }
 }
 
+fn error_response(err: &trc::Error) -> Vec<u8> {
+    if is_commit_contention(err) {
+        let response =
+            StatusResponse::no("Temporary failure, try again.").with_code(ResponseCode::InUse);
+        match err
+            .keys()
+            .iter()
+            .rev()
+            .find_map(|(key, value)| (*key == trc::Key::Id).then_some(value))
+            .and_then(|value| value.as_str())
+        {
+            Some(tag) => response.with_tag(tag),
+            None => response,
+        }
+        .into_bytes()
+    } else {
+        err.serialize()
+    }
+}
+
+pub const OUTPUT_FLUSH_THRESHOLD: usize = 64 * 1024;
+const OUTPUT_RETAIN_CAPACITY: usize = 4 * OUTPUT_FLUSH_THRESHOLD;
+
 impl<T: SessionStream> super::SessionData<T> {
+    pub async fn flush_output(&self, output: &mut Vec<u8>, force: bool) -> trc::Result<()> {
+        if !output.is_empty() && (force || output.len() >= OUTPUT_FLUSH_THRESHOLD) {
+            self.write_bytes(&output).await?;
+            output.clear();
+            if output.capacity() > OUTPUT_RETAIN_CAPACITY {
+                output.shrink_to(OUTPUT_FLUSH_THRESHOLD);
+            }
+        }
+        Ok(())
+    }
+
     pub async fn write_bytes(&self, bytes: impl AsRef<[u8]>) -> trc::Result<()> {
         let bytes = bytes.as_ref();
 
@@ -301,7 +335,7 @@ impl<T: SessionStream> super::SessionData<T> {
 
     pub async fn write_error(&self, err: trc::Error) -> trc::Result<()> {
         if err.should_write_err() {
-            let bytes = err.serialize();
+            let bytes = error_response(&err);
             trc::error!(err.span_id(self.session_id));
             self.write_bytes(bytes).await
         } else {
@@ -310,3 +344,4 @@ impl<T: SessionStream> super::SessionData<T> {
         }
     }
 }
+

@@ -5,30 +5,47 @@
  */
 
 use crate::{
-    blob::download::BlobDownload,
+    api::metadata::{
+        MetadataAccess, MetadataPatches, MetadataTarget, MetadataType, MetadataWriter, NewMetadata,
+        ObjectMetadata,
+    },
+    blob::download::{BlobAccess, BlobDownload},
     changes::state::JmapCacheState,
-    email::{PatchResult, handle_email_patch, ingested_into_object},
+    email::{
+        PatchResult,
+        grouped::{GroupedIngest, QueuedEmail},
+        handle_email_patch, ingested_into_object, parse_keywords,
+    },
 };
 use common::{
-    Server, auth::AccessToken, ipc::PushNotification, storage::index::ObjectIndexBuilder,
+    MAX_RECEIVED_AT, MessageUid, Server, auth::AccessToken, ipc::PushNotification,
+    network::memory::MemoryReservation, storage::index::ObjectIndexBuilder,
 };
 use email::message::headers::{BuildHeader, ValueToHeader};
 use email::{
-    cache::{MessageCacheFetch, email::MessageCacheAccess, mailbox::MailboxCacheAccess},
-    mailbox::{JUNK_ID, TRASH_ID, UidMailbox},
+    cache::{
+        MessageCacheFetch,
+        email::{MessageAccess, MessageCacheAccess},
+        mailbox::MailboxCacheAccess,
+    },
+    mailbox::{JUNK_ID, TRASH_ID},
     message::{
         delete::EmailDeletion,
-        ingest::{EmailIngest, IngestEmail, IngestSource},
-        metadata::MessageData,
+        ingest::{
+            EmailIngest, IngestEmail, IngestSource, SpamSamples, group::ThreadKey,
+            recheck::ThreadRecheck,
+        },
+        messagedata::{KeywordDiff, PendingMessageData, merge_keywords},
     },
+    presence::update_email_presence,
 };
 use http_proto::HttpSessionData;
 use jmap_proto::{
-    error::set::{SetError, SetErrorType},
+    error::set::{InvalidProperty, SetError, SetErrorType},
     method::set::{SetRequest, SetResponse},
     object::email::{Email, EmailProperty, EmailValue},
     references::resolve::ResolveCreatedReference,
-    request::MaybeInvalid,
+    request::{MaybeInvalid, capability::CapabilityIds},
     types::state::State,
 };
 use jmap_tools::{Key, Value};
@@ -44,17 +61,16 @@ use mail_parser::MessageParser;
 use std::future::Future;
 use std::{borrow::Cow, collections::HashMap};
 use store::{
-    ValueKey,
     ahash::AHashMap,
     roaring::RoaringBitmap,
-    write::{AlignedBytes, Archive, BatchBuilder},
+    write::{BatchBuilder, PendingId, SlotRange},
 };
 use trc::AddContext;
 use types::{
     acl::Acl,
     collection::{Collection, SyncCollection, VanishedCollection},
     id::Id,
-    keyword::{ArchivedKeyword, Keyword},
+    keyword::Keyword,
     type_state::{DataType, StateChange},
 };
 
@@ -64,6 +80,7 @@ pub trait EmailSet: Sync + Send {
         request: SetRequest<'_, Email>,
         access_token: &AccessToken,
         session: &HttpSessionData,
+        using: CapabilityIds,
     ) -> impl Future<Output = trc::Result<SetResponse<Email>>> + Send;
 }
 
@@ -73,37 +90,53 @@ impl EmailSet for Server {
         mut request: SetRequest<'_, Email>,
         access_token: &AccessToken,
         session: &HttpSessionData,
+        using: CapabilityIds,
     ) -> trc::Result<SetResponse<Email>> {
         // Prepare response
         let account_id = request.account_id.document_id();
+        let mut metadata_writer = MetadataWriter::new(
+            ObjectMetadata::new(self, access_token, using, MetadataType::Email),
+            account_id,
+        );
+        let sampled = metadata_writer
+            .metadata()
+            .viewer_change_id(self, account_id)
+            .await?;
         let cache = self.get_cached_messages(account_id).await?;
         let mut response = SetResponse::from_request(&request, self.core.jmap.set_max_objects)?
-            .with_state(cache.assert_state(false, &request.if_in_state)?);
+            .with_state(sampled.assert_state(cache.get_state(false), &request.if_in_state)?);
 
         // Obtain mailboxIds
-        let (can_add_mailbox_ids, can_delete_mailbox_ids, can_modify_mailbox_ids) =
-            if access_token.is_shared(account_id) {
-                (
-                    cache.shared_mailboxes(access_token, Acl::AddItems).into(),
-                    cache
-                        .shared_mailboxes(access_token, Acl::RemoveItems)
-                        .into(),
-                    cache
-                        .shared_mailboxes(access_token, Acl::ModifyItems)
-                        .into(),
-                )
-            } else {
-                (None, None, None)
-            };
+        let is_shared = access_token.is_shared(account_id);
+        let (
+            can_read_mailbox_ids,
+            can_add_mailbox_ids,
+            can_delete_mailbox_ids,
+            can_modify_mailbox_ids,
+        ) = if is_shared {
+            (
+                cache.shared_mailboxes(access_token, Acl::ReadItems).into(),
+                cache.shared_mailboxes(access_token, Acl::AddItems).into(),
+                cache
+                    .shared_mailboxes(access_token, Acl::RemoveItems)
+                    .into(),
+                cache
+                    .shared_mailboxes(access_token, Acl::ModifyItems)
+                    .into(),
+            )
+        } else {
+            (None, None, None, None)
+        };
+        let mut can_set_metadata_mailbox_ids = None;
 
         // Obtain import access token
         let import_access_token = if account_id != access_token.account_id() {
-            #[cfg(feature = "test_mode")]
+            #[cfg(stalwart_tests)]
             {
                 AccessToken::from_id_maybe_invalid(account_id).into()
             }
 
-            #[cfg(not(feature = "test_mode"))]
+            #[cfg(not(stalwart_tests))]
             {
                 use common::auth::BuildAccessToken;
                 self.access_token(account_id)
@@ -120,7 +153,22 @@ impl EmailSet for Server {
         let will_destroy = response.collect_will_destroy(request.unwrap_destroy());
 
         // Process creates
-        'create: for (id, object) in request.unwrap_create() {
+        let mut recheck = ThreadRecheck::default();
+        let mut grouped = GroupedIngest::new(
+            import_access_token.as_ref().unwrap_or(access_token),
+            session.session_id,
+        );
+        let creates = request.unwrap_create();
+        let grouping = creates.len() > 1;
+        'create: for (id, mut object) in creates {
+            let metadata_patches =
+                match metadata_writer.extract(MetadataPatches::for_create(), &mut object) {
+                    Ok(patches) => patches,
+                    Err(err) => {
+                        response.not_created.append(id, err);
+                        continue 'create;
+                    }
+                };
             let Value::Object(mut object) = object else {
                 continue;
             };
@@ -128,11 +176,13 @@ impl EmailSet for Server {
             let has_body_structure =
                 object.contains_key(&Key::Property(EmailProperty::BodyStructure));
             let mut builder = MessageBuilder::new();
+            let mut attachment_memory = Vec::new();
             let mut mailboxes = Vec::new();
             let mut keywords = Vec::new();
             let mut received_at = None;
 
             // Parse body values
+            let mut invalid_body_values = Vec::new();
             let body_values = object
                 .remove(&Key::Property(EmailProperty::BodyValues))
                 .and_then(|obj| obj.into_object())
@@ -140,25 +190,73 @@ impl EmailSet for Server {
                     let mut values = HashMap::with_capacity(obj.len());
                     for (key, value) in obj.into_vec() {
                         let id = key.into_string();
-                        if let Value::Object(mut bv) = value {
-                            values.insert(
-                                id,
-                                bv.remove(&Key::Property(EmailProperty::Value))?
-                                    .into_string()?,
-                            );
-                        } else {
+                        let Value::Object(bv) = value else {
                             return None;
+                        };
+                        let mut contents = None;
+                        for (property, value) in bv.into_vec() {
+                            match (property, value) {
+                                (Key::Property(EmailProperty::Value), value) => {
+                                    contents = value.into_string();
+                                }
+                                (
+                                    Key::Property(
+                                        flag @ (EmailProperty::IsTruncated
+                                        | EmailProperty::IsEncodingProblem),
+                                    ),
+                                    Value::Bool(true),
+                                ) => {
+                                    invalid_body_values.push(InvalidProperty::Path(vec![
+                                        Key::Property(EmailProperty::BodyValues),
+                                        Key::Owned(id.replace('~', "~0").replace('/', "~1")),
+                                        Key::Property(flag),
+                                    ]));
+                                }
+                                _ => {}
+                            }
                         }
+                        values.insert(id, contents?);
                     }
                     Some(values)
                 });
+            if !invalid_body_values.is_empty() {
+                response.not_created.append(
+                    id,
+                    SetError::invalid_properties()
+                        .with_properties(invalid_body_values)
+                        .with_description(
+                            "isTruncated and isEncodingProblem must be false or omitted.",
+                        ),
+                );
+                continue 'create;
+            }
             let mut size_attachments = 0;
+            let mut missing_blobs = Vec::new();
 
             // Parse properties
             for (property, mut value) in object.into_vec() {
                 if let Err(err) = response.resolve_self_references(&mut value, 0, false) {
-                    response.not_created.append(id, err);
-                    continue 'create;
+                    if grouped.is_empty() {
+                        response.not_created.append(id, err);
+                        continue 'create;
+                    }
+                    if let Err(err) = flush(
+                        self,
+                        &mut grouped,
+                        &mut response,
+                        &mut recheck,
+                        &mut last_change_id,
+                        account_id,
+                    )
+                    .await
+                    {
+                        recheck.finish(self, session.session_id).await;
+                        return Err(err);
+                    }
+                    if let Err(err) = response.resolve_self_references(&mut value, 0, false) {
+                        response.not_created.append(id, err);
+                        continue 'create;
+                    }
                 };
                 let Key::Property(property) = property else {
                     response.invalid_property_create(id, property.into_owned());
@@ -174,11 +272,14 @@ impl EmailSet for Server {
                             })
                             .collect();
                     }
-                    (EmailProperty::Keywords, Value::Object(keywords_)) => {
-                        keywords = keywords_
-                            .into_expanded_boolean_set()
-                            .filter_map(|id| id.try_into_property()?.try_into_keyword())
-                            .collect();
+                    (EmailProperty::Keywords, keywords_ @ Value::Object(_)) => {
+                        match parse_keywords(keywords_) {
+                            Ok(keywords_) => keywords = keywords_,
+                            Err(err) => {
+                                response.not_created.append(id, err);
+                                continue 'create;
+                            }
+                        }
                     }
                     (EmailProperty::Pointer(pointer), value) => {
                         match handle_email_patch(&pointer, value) {
@@ -243,7 +344,8 @@ impl EmailSet for Server {
                     }
 
                     (EmailProperty::ReceivedAt, Value::Element(EmailValue::Date(value))) => {
-                        received_at = (value.timestamp() as u64).into();
+                        received_at =
+                            (value.timestamp().clamp(0, MAX_RECEIVED_AT as i64) as u64).into();
                     }
 
                     (EmailProperty::SentAt, Value::Element(EmailValue::Date(value))) => {
@@ -332,7 +434,13 @@ impl EmailSet for Server {
                                                 EmailProperty::BlobId,
                                                 Value::Element(EmailValue::BlobId(value)),
                                             ) => {
-                                                blob_id = value.into();
+                                                blob_id = Some(MaybeInvalid::Value(value));
+                                            }
+                                            (EmailProperty::BlobId, Value::Str(value))
+                                                if is_jmap_id(&value) =>
+                                            {
+                                                blob_id =
+                                                    Some(MaybeInvalid::Invalid(value.into_owned()));
                                             }
                                             (EmailProperty::Disposition, Value::Str(value)) => {
                                                 content_disposition = value.into_owned().into();
@@ -513,6 +621,10 @@ impl EmailSet for Server {
                                 }
 
                                 // Set Content-Type and Content-Disposition
+                                let is_text = content_type
+                                    .as_bytes()
+                                    .get(..5)
+                                    .is_some_and(|prefix| prefix.eq_ignore_ascii_case(b"text/"));
                                 let mut content_type = ContentType::new(content_type);
                                 if !is_multipart {
                                     if let Some(charset) = charset {
@@ -531,7 +643,7 @@ impl EmailSet for Server {
                                         );
                                             continue 'create;
                                         }
-                                    } else if part_id.is_some() {
+                                    } else if part_id.is_some() && is_text {
                                         content_type
                                             .attributes
                                             .push(("charset".into(), "utf-8".into()));
@@ -562,7 +674,7 @@ impl EmailSet for Server {
                                 headers.push(("Content-Type".into(), content_type.into()));
 
                                 // In test, sort headers to avoid randomness
-                                #[cfg(feature = "test_mode")]
+                                #[cfg(stalwart_tests)]
                                 {
                                     headers.sort_unstable_by(|a, b| match a.0.cmp(&b.0) {
                                         std::cmp::Ordering::Equal => a.1.cmp(&b.1),
@@ -574,18 +686,41 @@ impl EmailSet for Server {
                                     headers,
                                     contents: if !is_multipart {
                                         if let Some(blob_id) = blob_id {
-                                            match self.blob_download(&blob_id, access_token).await? {
-                                                Some(contents) => {
-                                                    BodyPart::Binary(contents.into())
+                                            match blob_id {
+                                                MaybeInvalid::Value(blob_id)
+                                                    if missing_blobs.is_empty() =>
+                                                {
+                                                    match self
+                                                        .blob_download(&blob_id, access_token)
+                                                        .await?
+                                                    {
+                                                        Some(contents) => {
+                                                            let (contents, memory) =
+                                                                contents.into_parts();
+                                                            attachment_memory.push(memory);
+                                                            BodyPart::Binary(contents.into())
+                                                        }
+                                                        None => {
+                                                            missing_blobs
+                                                                .push(MaybeInvalid::Value(blob_id));
+                                                            BodyPart::Binary(Cow::Borrowed(&[]))
+                                                        }
+                                                    }
                                                 }
-                                                None => {
-                                                    response.not_created.append(
-                                                    id,
-                                                    SetError::new(SetErrorType::BlobNotFound).with_description(
-                                                        format!("blobId {blob_id} does not exist on this server.")
-                                                    ),
-                                                );
-                                                    continue 'create;
+                                                MaybeInvalid::Value(blob_id) => {
+                                                    if !matches!(
+                                                        self.has_access_blob(&blob_id, access_token)
+                                                            .await?,
+                                                        BlobAccess::Allowed { .. }
+                                                    ) {
+                                                        missing_blobs
+                                                            .push(MaybeInvalid::Value(blob_id));
+                                                    }
+                                                    BodyPart::Binary(Cow::Borrowed(&[]))
+                                                }
+                                                invalid => {
+                                                    missing_blobs.push(invalid);
+                                                    BodyPart::Binary(Cow::Borrowed(&[]))
                                                 }
                                             }
                                         } else if let Some(part_id) = part_id {
@@ -664,6 +799,23 @@ impl EmailSet for Server {
                         }
                     }
 
+                    (EmailProperty::Header(header), _)
+                        if header
+                            .header
+                            .as_bytes()
+                            .get(..8)
+                            .is_some_and(|prefix| prefix.eq_ignore_ascii_case(b"content-")) =>
+                    {
+                        response.not_created.append(
+                            id,
+                            SetError::invalid_properties()
+                                .with_property(EmailProperty::Header(header))
+                                .with_description(
+                                    "Content-* headers can only be set on body parts.",
+                                ),
+                        );
+                        continue 'create;
+                    }
                     (EmailProperty::Header(header), value) => {
                         match builder.build_header(header, value) {
                             Ok(builder_) => {
@@ -683,6 +835,16 @@ impl EmailSet for Server {
                         continue 'create;
                     }
                 }
+            }
+
+            if !missing_blobs.is_empty() {
+                response.not_created.append(
+                    id,
+                    SetError::new(SetErrorType::BlobNotFound)
+                        .with_description("One or more blobIds do not exist on this server.")
+                        .with_not_found(missing_blobs),
+                );
+                continue 'create;
             }
 
             // Make sure message belongs to at least one mailbox
@@ -724,20 +886,43 @@ impl EmailSet for Server {
                 }
             }
 
-            // Make sure the message is not empty
-            if builder.headers.is_empty()
-                && builder.body.is_none()
-                && builder.html_body.is_none()
-                && builder.text_body.is_none()
-                && builder.attachments.is_none()
+            // Validate per-email limits
+            if let Err(err) = self
+                .core
+                .email
+                .limits
+                .validate_email(mailboxes.len(), &keywords)
             {
-                response.not_created.append(
-                    id,
-                    SetError::invalid_properties()
-                        .with_description("Message has to have at least one header or body part."),
-                );
+                response.not_created.append(id, err.into());
                 continue 'create;
             }
+
+            let ingest_metadata = match metadata_patches {
+                Some(metadata_patches) => {
+                    let access = MetadataAccess {
+                        may_write_shared: !is_shared || {
+                            let ids = can_set_metadata_mailbox_ids.get_or_insert_with(|| {
+                                cache.shared_mailboxes(access_token, Acl::ModifyMetadata)
+                            });
+                            mailboxes.iter().all(|id| ids.contains(*id))
+                        },
+                        may_read: can_read_mailbox_ids
+                            .as_ref()
+                            .is_none_or(|ids| mailboxes.iter().any(|id| ids.contains(*id))),
+                    };
+                    match metadata_writer
+                        .prepare_ingest(self, NewMetadata::Create(metadata_patches), access)
+                        .await?
+                    {
+                        Ok(metadata) => metadata,
+                        Err(err) => {
+                            response.not_created.append(id, err);
+                            continue 'create;
+                        }
+                    }
+                }
+                None => None,
+            };
 
             match builder
                 .headers
@@ -753,7 +938,7 @@ impl EmailSet for Server {
             }
 
             // In test, sort headers to avoid randomness
-            #[cfg(feature = "test_mode")]
+            #[cfg(stalwart_tests)]
             {
                 builder
                     .headers
@@ -767,44 +952,130 @@ impl EmailSet for Server {
             let mut raw_message = Vec::with_capacity((4 * size_attachments / 3) + 1024);
             builder.write_to(&mut raw_message).unwrap_or_default();
 
+            let message = match MessageParser::new().parse(&raw_message) {
+                Some(message) => {
+                    if let Err(err) = self.core.email.limits.validate_header_section(&message) {
+                        response.not_created.append(id, err.into());
+                        continue 'create;
+                    }
+                    Some(message)
+                }
+                None => None,
+            };
+
             // Ingest message
-            match self
-                .email_ingest(IngestEmail {
-                    raw_message: &raw_message,
-                    message: MessageParser::new().parse(&raw_message),
+            if let (Some(parsed), None) = (&message, &ingest_metadata) {
+                let key = if grouping {
+                    ThreadKey::new(parsed)
+                } else {
+                    ThreadKey::default()
+                };
+                if grouped.must_flush_before(raw_message.len())
+                    && let Err(err) = flush(
+                        self,
+                        &mut grouped,
+                        &mut response,
+                        &mut recheck,
+                        &mut last_change_id,
+                        account_id,
+                    )
+                    .await
+                {
+                    recheck.finish(self, session.session_id).await;
+                    return Err(err);
+                }
+                let email = QueuedEmail {
+                    id,
                     blob_hash: None,
-                    access_token: import_access_token.as_ref().unwrap_or(access_token),
                     mailbox_ids: mailboxes,
                     keywords,
                     received_at,
-                    source: IngestSource::Jmap {
-                        train_classifier: true,
+                    train_classifier: true,
+                };
+                let result = grouped
+                    .ingest(self, &email, &raw_message, message, key)
+                    .await;
+                grouped.queue(
+                    email,
+                    HeldMessage {
+                        raw: raw_message,
+                        _memory: attachment_memory,
                     },
-                    session_id: session.session_id,
-                })
+                    result,
+                );
+            } else {
+                if let Err(err) = flush(
+                    self,
+                    &mut grouped,
+                    &mut response,
+                    &mut recheck,
+                    &mut last_change_id,
+                    account_id,
+                )
                 .await
-            {
-                Ok(message) => {
-                    last_change_id = message.change_id.into();
-                    response
-                        .created
-                        .insert(id, ingested_into_object(message).into());
+                {
+                    recheck.finish(self, session.session_id).await;
+                    return Err(err);
                 }
-                Err(err) if err.matches(trc::EventType::Limit(trc::LimitEvent::Quota)) => {
-                    response.not_created.append(
-                        id,
-                        SetError::new(SetErrorType::OverQuota)
-                            .with_description("You have exceeded your disk quota."),
-                    );
-                }
-                Err(err) => return Err(err),
+                let result = self
+                    .email_ingest(IngestEmail {
+                        raw_message: &raw_message,
+                        message,
+                        blob_hash: None,
+                        access_token: import_access_token.as_ref().unwrap_or(access_token),
+                        mailbox_ids: mailboxes,
+                        keywords,
+                        received_at,
+                        source: IngestSource::Jmap {
+                            train_classifier: true,
+                        },
+                        metadata: ingest_metadata,
+                        session_id: session.session_id,
+                    })
+                    .await;
+                grouped.results.push((id, result));
+            }
+            if let Err(err) = record(
+                &mut grouped,
+                &mut response,
+                &mut recheck,
+                &mut last_change_id,
+                account_id,
+            ) {
+                recheck.finish(self, session.session_id).await;
+                return Err(err);
             }
         }
+        if let Err(err) = flush(
+            self,
+            &mut grouped,
+            &mut response,
+            &mut recheck,
+            &mut last_change_id,
+            account_id,
+        )
+        .await
+        {
+            recheck.finish(self, session.session_id).await;
+            return Err(err);
+        }
+        recheck.finish(self, session.session_id).await;
 
         // Process updates
         let mut batch = BatchBuilder::new();
+        let mut spam_samples = SpamSamples::default();
         let mut changed_mailboxes: AHashMap<u32, Vec<u32>> = AHashMap::new();
+        let mut update_mailboxes: Vec<(u32, Option<u32>)> = Vec::new();
         let mut will_update = Vec::with_capacity(request.update.as_ref().map_or(0, |u| u.len()));
+        let mut has_shared_updates = false;
+        let mut shared_updates_committed = false;
+        metadata_writer
+            .preload_updates(self, request.update.as_ref(), |document_id| {
+                cache
+                    .email_by_id(&document_id)
+                    .map(|email| cache.metadata_kinds(email))
+            })
+            .await?;
         'update: for (id, object) in request.unwrap_update() {
             let id = match id {
                 MaybeInvalid::Value(id) => id,
@@ -818,309 +1089,430 @@ impl EmailSet for Server {
                 response.not_updated.append(id, SetError::will_destroy());
                 continue 'update;
             }
-
-            // Obtain message data
             let document_id = id.document_id();
-            let data_ = match self
-                .store()
-                .get_value::<Archive<AlignedBytes>>(ValueKey::archive(
-                    account_id,
-                    Collection::Email,
-                    document_id,
-                ))
-                .await?
-            {
-                Some(data) => data,
-                None => {
+            let (current_kinds, metadata_writes, has_mailbox_changes, train_spam) = {
+                let mut object = object;
+                let metadata_patches =
+                    match metadata_writer.extract(MetadataPatches::for_update(), &mut object) {
+                        Ok(patches) => patches,
+                        Err(err) => {
+                            response.not_updated.append(id, err);
+                            continue 'update;
+                        }
+                    };
+
+                // Obtain message data
+                let Some(data) = cache.message_data(document_id).filter(|data| {
+                    can_read_mailbox_ids.as_ref().is_none_or(|ids| {
+                        data.mailboxes
+                            .iter()
+                            .any(|mailbox| ids.contains(mailbox.mailbox_id))
+                    })
+                }) else {
                     response.not_updated.append(id, SetError::not_found());
                     continue 'update;
-                }
-            };
-            let data = data_
-                .to_unarchived::<MessageData>()
-                .caused_by(trc::location!())?;
-            let mut new_data = data.inner.to_builder();
-
-            for (property, mut value) in object.into_expanded_object() {
-                if let Err(err) = response.resolve_self_references(&mut value, 0, false) {
-                    response.not_updated.append(id, err);
-                    continue 'update;
                 };
+                let mut new_data = data.clone();
+                let mut has_keyword_replace = false;
 
-                match (property, value) {
-                    (Key::Property(EmailProperty::MailboxIds), Value::Object(ids)) => {
-                        new_data.set_mailboxes(
-                            ids.into_expanded_boolean_set()
-                                .filter_map(|id| {
-                                    let mailbox_id =
-                                        id.try_into_property()?.try_into_id()?.document_id();
-                                    UidMailbox::new(
-                                        mailbox_id,
-                                        data.inner.message_uid(mailbox_id).unwrap_or(0),
-                                    )
-                                    .into()
-                                })
-                                .collect(),
-                        );
-                    }
-                    (Key::Property(EmailProperty::Keywords), Value::Object(keywords_)) => {
-                        new_data.set_keywords(
-                            keywords_
-                                .into_expanded_boolean_set()
-                                .filter_map(|keyword| {
-                                    keyword.try_into_property()?.try_into_keyword()
-                                })
-                                .collect(),
-                        );
-                    }
-                    (Key::Property(EmailProperty::Pointer(pointer)), value) => {
-                        match handle_email_patch(&pointer, value) {
-                            PatchResult::SetKeyword(keyword) => {
-                                new_data.add_keyword(keyword.clone());
+                for (property, mut value) in object.into_expanded_object() {
+                    if let Err(err) = response.resolve_self_references(&mut value, 0, false) {
+                        response.not_updated.append(id, err);
+                        continue 'update;
+                    };
+
+                    match (property, value) {
+                        (Key::Property(EmailProperty::MailboxIds), Value::Object(ids)) => {
+                            new_data.set_mailboxes(
+                                ids.into_expanded_boolean_set()
+                                    .filter_map(|id| {
+                                        let mailbox_id =
+                                            id.try_into_property()?.try_into_id()?.document_id();
+                                        MessageUid::new(
+                                            mailbox_id,
+                                            data.message_uid(mailbox_id).unwrap_or(0),
+                                        )
+                                        .into()
+                                    })
+                                    .collect(),
+                            );
+                        }
+                        (Key::Property(EmailProperty::Keywords), keywords @ Value::Object(_)) => {
+                            has_keyword_replace = true;
+                            match parse_keywords(keywords) {
+                                Ok(keywords) => new_data.set_keywords(keywords),
+                                Err(err) => {
+                                    response.not_updated.append(id, err);
+                                    continue 'update;
+                                }
                             }
-                            PatchResult::RemoveKeyword(keyword) => {
-                                new_data.remove_keyword(keyword);
+                        }
+                        (Key::Property(EmailProperty::Pointer(pointer)), value) => {
+                            match handle_email_patch(&pointer, value) {
+                                PatchResult::SetKeyword(keyword) => {
+                                    new_data.add_keyword(keyword.clone());
+                                }
+                                PatchResult::RemoveKeyword(keyword) => {
+                                    new_data.remove_keyword(keyword);
+                                }
+                                PatchResult::AddMailbox(id) => {
+                                    new_data.add_mailbox(MessageUid::new_unassigned(id));
+                                }
+                                PatchResult::RemoveMailbox(id) => {
+                                    new_data.remove_mailbox(id);
+                                }
+                                PatchResult::Invalid(set_error) => {
+                                    response.not_updated.append(id, set_error);
+                                    continue 'update;
+                                }
                             }
-                            PatchResult::AddMailbox(id) => {
-                                new_data.add_mailbox(UidMailbox::new_unassigned(id));
-                            }
-                            PatchResult::RemoveMailbox(id) => {
-                                new_data.remove_mailbox(id);
-                            }
-                            PatchResult::Invalid(set_error) => {
-                                response.not_updated.append(id, set_error);
+                        }
+                        (Key::Property(EmailProperty::Id), value) => {
+                            if !crate::matches_id(&value, id) {
+                                response.not_updated.append(
+                                    id,
+                                    SetError::invalid_properties()
+                                        .with_property(EmailProperty::Id)
+                                        .with_description("The id property is immutable."),
+                                );
                                 continue 'update;
                             }
                         }
-                    }
-                    (Key::Property(EmailProperty::Id), value) => {
-                        if !crate::matches_id(&value, id) {
-                            response.not_updated.append(
-                                id,
-                                SetError::invalid_properties()
-                                    .with_property(EmailProperty::Id)
-                                    .with_description("The id property is immutable."),
-                            );
+                        (property, _) => {
+                            response.invalid_property_update(id, property.into_owned());
                             continue 'update;
                         }
                     }
-                    (property, _) => {
-                        response.invalid_property_update(id, property.into_owned());
+                }
+
+                let current_kinds = data.metadata_kinds();
+                let mut shared_kinds = None;
+                let metadata_writes = if let Some(metadata_patches) = metadata_patches {
+                    let access = MetadataAccess {
+                        may_write_shared: !is_shared || {
+                            let ids = can_set_metadata_mailbox_ids.get_or_insert_with(|| {
+                                cache.shared_mailboxes(access_token, Acl::ModifyMetadata)
+                            });
+                            data.mailboxes
+                                .iter()
+                                .chain(new_data.added_mailboxes(&data))
+                                .all(|mailbox| ids.contains(mailbox.mailbox_id))
+                        },
+                        may_read: true,
+                    };
+                    match metadata_writer
+                        .prepare_for(
+                            self,
+                            metadata_patches,
+                            access,
+                            MetadataTarget::UpdateInThread {
+                                document_id,
+                                thread_id: data.thread_id,
+                            },
+                        )
+                        .await?
+                    {
+                        Ok(prepared) if prepared.is_empty() => None,
+                        Ok(prepared) => {
+                            shared_kinds = prepared.shared_kinds();
+                            Some(prepared)
+                        }
+                        Err(err) => {
+                            response.not_updated.append(id, err);
+                            continue 'update;
+                        }
+                    }
+                } else {
+                    None
+                };
+
+                let has_keyword_changes = new_data.has_keyword_changes(&data);
+                let has_mailbox_changes = new_data.has_mailbox_changes(&data);
+                if !has_keyword_changes && !has_mailbox_changes {
+                    match metadata_writes {
+                        Some(prepared) => {
+                            has_shared_updates |= !prepared.is_private_only();
+                            if let Some(presence) = metadata_writer
+                                .write(prepared, document_id, &mut batch)
+                                .caused_by(trc::location!())?
+                            {
+                                update_email_presence(
+                                    &mut batch,
+                                    account_id,
+                                    document_id,
+                                    current_kinds,
+                                    presence,
+                                );
+                            }
+                            batch.commit_point();
+                            will_update.push(id);
+                        }
+                        None => {
+                            response.updated.append(id, None);
+                        }
+                    }
+                    continue 'update;
+                }
+
+                // Validate per-email limits
+                if let Err(err) = new_data.validate_limits(&data, &self.core.email.limits) {
+                    response.not_updated.append(id, err.into());
+                    continue 'update;
+                }
+
+                // Process keywords
+                let mut train_spam = None;
+                update_mailboxes.clear();
+                if has_keyword_changes {
+                    // Verify permissions on shared accounts
+                    if can_modify_mailbox_ids.as_ref().is_some_and(|ids| {
+                        !data
+                            .mailboxes
+                            .iter()
+                            .chain(new_data.added_mailboxes(&data))
+                            .all(|mb| ids.contains(mb.mailbox_id))
+                    }) {
+                        response.not_updated.append(
+                            id,
+                            SetError::forbidden()
+                                .with_description("You are not allowed to modify keywords."),
+                        );
                         continue 'update;
                     }
-                }
-            }
-
-            let has_keyword_changes = new_data.has_keyword_changes(data.inner);
-            let has_mailbox_changes = new_data.has_mailbox_changes(data.inner);
-            if !has_keyword_changes && !has_mailbox_changes {
-                response.updated.append(id, None);
-                continue 'update;
-            }
-
-            // Process keywords
-            let mut train_spam = None;
-            if has_keyword_changes {
-                // Verify permissions on shared accounts
-                if can_modify_mailbox_ids.as_ref().is_some_and(|ids| {
-                    !new_data
-                        .mailboxes
-                        .iter()
-                        .any(|mb| ids.contains(mb.mailbox_id))
-                }) {
-                    response.not_updated.append(
-                        id,
-                        SetError::forbidden()
-                            .with_description("You are not allowed to modify keywords."),
-                    );
-                    continue 'update;
-                }
-
-                // Process keyword changes
-                let mut changed_seen = false;
-                for keyword in new_data.added_keywords(data.inner) {
-                    match keyword {
-                        Keyword::Seen => {
-                            changed_seen = true;
-                        }
-                        Keyword::Junk => {
-                            train_spam = Some(true);
-                        }
-                        Keyword::NotJunk => {
-                            train_spam = Some(false);
-                        }
-                        _ => {}
+                    if can_delete_mailbox_ids.as_ref().is_some_and(|ids| {
+                        new_data
+                            .added_keywords(&data)
+                            .chain(new_data.removed_keywords(&data))
+                            .any(|keyword| keyword == Keyword::Deleted)
+                            && !data
+                                .mailboxes
+                                .iter()
+                                .chain(new_data.added_mailboxes(&data))
+                                .all(|mb| ids.contains(mb.mailbox_id))
+                    }) {
+                        response.not_updated.append(
+                            id,
+                            SetError::forbidden().with_description(
+                                "You are not allowed to change the $deleted keyword.",
+                            ),
+                        );
+                        continue 'update;
                     }
-                }
-                for keyword in new_data.removed_keywords(data.inner) {
-                    match keyword {
-                        ArchivedKeyword::Seen => {
-                            changed_seen = true;
-                        }
-                        ArchivedKeyword::Junk if train_spam.is_none() => {
-                            train_spam = Some(false);
-                        }
-                        _ => {}
-                    }
-                }
 
-                // Set all current mailboxes as changed if the Seen tag changed
-                if changed_seen {
-                    for mailbox_id in new_data.mailboxes.iter() {
-                        changed_mailboxes.insert(mailbox_id.mailbox_id, Vec::new());
-                    }
-                }
-            }
-
-            // Process mailboxes
-            if has_mailbox_changes {
-                // Make sure the message is at least in one mailbox
-                if new_data.mailboxes.is_empty() {
-                    response.not_updated.append(
-                        id,
-                        SetError::invalid_properties()
-                            .with_property(EmailProperty::MailboxIds)
-                            .with_description("Message has to belong to at least one mailbox."),
-                    );
-                    continue 'update;
-                }
-
-                // Make sure all new mailboxIds are valid
-                for mailbox_id in new_data.added_mailboxes(data.inner) {
-                    if cache.has_mailbox_id(&mailbox_id.mailbox_id) {
-                        // Verify permissions on shared accounts
-                        if can_add_mailbox_ids
-                            .as_ref()
-                            .is_none_or(|ids| ids.contains(mailbox_id.mailbox_id))
-                        {
-                            if mailbox_id.mailbox_id == JUNK_ID {
+                    // Process keyword changes
+                    let mut changed_seen = false;
+                    for keyword in new_data.added_keywords(&data) {
+                        match keyword {
+                            Keyword::Seen => {
+                                changed_seen = true;
+                            }
+                            Keyword::Junk => {
                                 train_spam = Some(true);
                             }
-
-                            changed_mailboxes.insert(mailbox_id.mailbox_id, Vec::new());
-                        } else {
-                            response.not_updated.append(
-                                id,
-                                SetError::forbidden().with_description(format!(
-                                    "You are not allowed to add messages to mailbox {}.",
-                                    Id::from(mailbox_id.mailbox_id)
-                                )),
-                            );
-                            continue 'update;
+                            Keyword::NotJunk => {
+                                train_spam = Some(false);
+                            }
+                            _ => {}
                         }
-                    } else {
+                    }
+                    for keyword in new_data.removed_keywords(&data) {
+                        match keyword {
+                            Keyword::Seen => {
+                                changed_seen = true;
+                            }
+                            Keyword::Junk if train_spam.is_none() => {
+                                train_spam = Some(false);
+                            }
+                            _ => {}
+                        }
+                    }
+
+                    // Set all current mailboxes as changed if the Seen tag changed
+                    if changed_seen {
+                        for mailbox_id in new_data.mailboxes.iter() {
+                            update_mailboxes.push((mailbox_id.mailbox_id, None));
+                        }
+                    }
+                }
+
+                // Process mailboxes
+                let mut uid_slots = SlotRange::default();
+                if has_mailbox_changes {
+                    // Make sure the message is at least in one mailbox
+                    if new_data.mailboxes.is_empty() {
                         response.not_updated.append(
                             id,
                             SetError::invalid_properties()
                                 .with_property(EmailProperty::MailboxIds)
-                                .with_description(format!(
-                                    "mailboxId {} does not exist.",
-                                    Id::from(mailbox_id.mailbox_id)
-                                )),
+                                .with_description("Message has to belong to at least one mailbox."),
                         );
                         continue 'update;
                     }
-                }
 
-                // Add all removed mailboxes to change list
-                for mailbox_id in new_data.removed_mailboxes(data.inner) {
-                    // Verify permissions on shared accounts
-                    if can_delete_mailbox_ids
-                        .as_ref()
-                        .is_none_or(|ids| ids.contains(u32::from(mailbox_id.mailbox_id)))
-                    {
-                        if mailbox_id.mailbox_id == JUNK_ID
-                            && !new_data
-                                .mailboxes
-                                .iter()
-                                .any(|mb| mb.mailbox_id == TRASH_ID)
-                        {
-                            train_spam = Some(false);
+                    // Make sure all new mailboxIds are valid
+                    for mailbox_id in new_data.added_mailboxes(&data) {
+                        if cache.has_mailbox_id(&mailbox_id.mailbox_id) {
+                            // Verify permissions on shared accounts
+                            if can_add_mailbox_ids
+                                .as_ref()
+                                .is_none_or(|ids| ids.contains(mailbox_id.mailbox_id))
+                            {
+                                if mailbox_id.mailbox_id == JUNK_ID {
+                                    train_spam = Some(true);
+                                }
+
+                                update_mailboxes.push((mailbox_id.mailbox_id, None));
+                            } else {
+                                response.not_updated.append(
+                                    id,
+                                    SetError::forbidden().with_description(format!(
+                                        "You are not allowed to add messages to mailbox {}.",
+                                        Id::from(mailbox_id.mailbox_id)
+                                    )),
+                                );
+                                continue 'update;
+                            }
+                        } else {
+                            response.not_updated.append(
+                                id,
+                                SetError::invalid_properties()
+                                    .with_property(EmailProperty::MailboxIds)
+                                    .with_description(format!(
+                                        "mailboxId {} does not exist.",
+                                        Id::from(mailbox_id.mailbox_id)
+                                    )),
+                            );
+                            continue 'update;
                         }
-
-                        changed_mailboxes
-                            .entry(mailbox_id.mailbox_id.to_native())
-                            .or_default()
-                            .push(mailbox_id.uid.to_native());
-                    } else {
-                        response.not_updated.append(
-                            id,
-                            SetError::forbidden().with_description(format!(
-                                "You are not allowed to delete messages from mailbox {}.",
-                                mailbox_id.mailbox_id
-                            )),
-                        );
-                        continue 'update;
                     }
-                }
 
-                // Obtain IMAP UIDs for added mailboxes
-                let ids = self
-                    .assign_email_ids(
+                    // Add all removed mailboxes to change list
+                    for mailbox_id in new_data.removed_mailboxes(&data) {
+                        // Verify permissions on shared accounts
+                        if can_delete_mailbox_ids
+                            .as_ref()
+                            .is_none_or(|ids| ids.contains(mailbox_id.mailbox_id))
+                        {
+                            if mailbox_id.mailbox_id == JUNK_ID
+                                && !new_data
+                                    .mailboxes
+                                    .iter()
+                                    .any(|mb| mb.mailbox_id == TRASH_ID)
+                            {
+                                train_spam = Some(false);
+                            }
+
+                            update_mailboxes.push((mailbox_id.mailbox_id, Some(mailbox_id.uid)));
+                        } else {
+                            response.not_updated.append(
+                                id,
+                                SetError::forbidden().with_description(format!(
+                                    "You are not allowed to delete messages from mailbox {}.",
+                                    mailbox_id.mailbox_id
+                                )),
+                            );
+                            continue 'update;
+                        }
+                    }
+
+                    // Reserve IMAP UIDs for added mailboxes
+                    uid_slots = batch.reserve_uids(
                         account_id,
                         new_data
                             .mailboxes
                             .iter()
                             .filter(|m| m.uid == 0)
                             .map(|m| m.mailbox_id),
-                        false,
-                    )
-                    .await
-                    .caused_by(trc::location!())?;
-                for (uid_mailbox, uid) in new_data
-                    .mailboxes
-                    .iter_mut()
-                    .filter(|m| m.uid == 0)
-                    .zip(ids)
-                {
-                    uid_mailbox.uid = uid;
+                    );
                 }
-            }
 
-            // Write changes
-            batch
-                .with_account_id(account_id)
-                .with_collection(Collection::Email)
-                .with_document(document_id)
-                .custom(
-                    ObjectIndexBuilder::new()
-                        .with_current(data)
-                        .with_changes(new_data.seal()),
+                // Write changes
+                batch
+                    .with_account_id(account_id)
+                    .with_collection(Collection::Email)
+                    .with_document(document_id);
+                if has_mailbox_changes {
+                    if let Some(kinds) = shared_kinds {
+                        new_data.set_metadata_kinds(kinds);
+                    }
+                    batch
+                        .custom(ObjectIndexBuilder::new().with_current(data).with_changes(
+                            PendingMessageData {
+                                data: new_data,
+                                uid_slots,
+                                thread_slot: None,
+                                change_id: None,
+                            },
+                        ))
+                        .caused_by(trc::location!())?;
+                } else {
+                    merge_keywords(
+                        &mut batch,
+                        data.thread_id,
+                        if has_keyword_replace {
+                            KeywordDiff::replace(new_data.keywords().collect())
+                        } else {
+                            new_data.keyword_diff(&data)
+                        },
+                    );
+                }
+
+                (
+                    current_kinds,
+                    metadata_writes,
+                    has_mailbox_changes,
+                    train_spam,
                 )
-                .caused_by(trc::location!())?;
+            };
 
             if let Some(train_spam) = train_spam {
-                self.add_account_spam_sample(
-                    &mut batch,
-                    account_id,
-                    document_id,
-                    train_spam,
-                    session.session_id,
-                )
-                .await
-                .caused_by(trc::location!())?;
+                spam_samples.add(document_id, train_spam);
+            }
+
+            if let Some(prepared) = metadata_writes
+                && let Some(presence) = metadata_writer
+                    .write(prepared, document_id, &mut batch)
+                    .caused_by(trc::location!())?
+                && !has_mailbox_changes
+            {
+                update_email_presence(&mut batch, account_id, document_id, current_kinds, presence);
             }
 
             batch.commit_point();
+            for (mailbox_id, uid) in update_mailboxes.drain(..) {
+                changed_mailboxes.entry(mailbox_id).or_default().extend(uid);
+            }
+            has_shared_updates = true;
             will_update.push(id);
         }
 
+        self.add_account_spam_samples(&mut batch, account_id, spam_samples, session.session_id)
+            .await
+            .caused_by(trc::location!())?;
+
+        let mut has_private_changes = false;
         if !batch.is_empty() {
             // Log mailbox changes
             for (parent_id, deleted_uids) in changed_mailboxes {
-                batch.log_container_property_change(SyncCollection::Email, parent_id);
+                batch.log_container_property_change(
+                    SyncCollection::Email,
+                    PendingId::Assigned(parent_id),
+                );
                 for deleted_uid in deleted_uids {
                     batch.log_vanished_item(VanishedCollection::Email, (parent_id, deleted_uid));
                 }
             }
 
-            match self
-                .commit_batch(batch)
-                .await
-                .and_then(|ids| ids.last_change_id(account_id))
-            {
-                Ok(change_id) => {
-                    last_change_id = change_id.into();
+            match metadata_writer.commit(self, batch).await {
+                Ok(assigned_ids) => {
+                    if has_shared_updates {
+                        shared_updates_committed = true;
+                        last_change_id = assigned_ids
+                            .last_change_id(account_id, SyncCollection::Email)
+                            .into();
+                    } else {
+                        has_private_changes = true;
+                    }
 
                     // Add to updated list
                     for id in will_update {
@@ -1145,32 +1537,37 @@ impl EmailSet for Server {
 
         // Process deletions
         if !will_destroy.is_empty() {
-            let email_ids = cache.email_document_ids();
-            let can_destroy_message_ids = if access_token.is_shared(account_id) {
-                cache.shared_messages(access_token, Acl::RemoveItems).into()
-            } else {
-                None
+            let (can_read, can_destroy) = match (can_read_mailbox_ids, can_delete_mailbox_ids) {
+                (Some(can_read), Some(can_delete)) => (
+                    MessageAccess::Mailboxes(can_read),
+                    MessageAccess::Mailboxes(can_delete),
+                ),
+                _ => (MessageAccess::All, MessageAccess::All),
             };
             let mut destroy_ids = RoaringBitmap::new();
             for destroy_id in will_destroy {
                 let document_id = destroy_id.document_id();
 
-                if email_ids.contains(document_id) {
-                    if !matches!(&can_destroy_message_ids, Some(ids) if !ids.contains(document_id))
-                    {
+                match cache
+                    .email_by_id(&document_id)
+                    .filter(|message| can_read.allows(*message))
+                {
+                    Some(message) if can_destroy.allows(message) => {
                         destroy_ids.insert(document_id);
                         response.destroyed.push(destroy_id);
-                    } else {
+                    }
+                    Some(_) => {
                         response.not_destroyed.append(
                             destroy_id,
                             SetError::forbidden()
                                 .with_description("You are not allowed to delete this message."),
                         );
                     }
-                } else {
-                    response
-                        .not_destroyed
-                        .append(destroy_id, SetError::not_found());
+                    None => {
+                        response
+                            .not_destroyed
+                            .append(destroy_id, SetError::not_found());
+                    }
                 }
             }
 
@@ -1180,19 +1577,32 @@ impl EmailSet for Server {
                 let not_destroyed = self
                     .emails_delete(
                         account_id,
-                        access_token.tenant_id(),
+                        access_token.changed_by(),
                         &mut batch,
                         destroy_ids,
                     )
                     .await?;
                 if !batch.is_empty() {
-                    last_change_id = self
-                        .commit_batch(batch)
-                        .await
-                        .and_then(|ids| ids.last_change_id(account_id))
-                        .caused_by(trc::location!())?
-                        .into();
-                    self.notify_task_queue();
+                    match self.commit_batch(batch).await {
+                        Ok(assigned_ids) => {
+                            last_change_id = assigned_ids
+                                .last_change_id(account_id, SyncCollection::Email)
+                                .into();
+                        }
+                        Err(err) if err.is_assertion_failure() => {
+                            for destroy_id in response.destroyed.drain(..) {
+                                response.not_destroyed.append(
+                                    destroy_id,
+                                    SetError::forbidden().with_description(
+                                        "Another process modified this message, please try again.",
+                                    ),
+                                );
+                            }
+                        }
+                        Err(err) => {
+                            return Err(err.caused_by(trc::location!()));
+                        }
+                    }
                 }
 
                 // Mark messages that were not found as not destroyed (this should not occur in practice)
@@ -1216,7 +1626,7 @@ impl EmailSet for Server {
 
         // Update state
         if let Some(change_id) = last_change_id {
-            if response.updated.is_empty() && response.destroyed.is_empty() {
+            if !shared_updates_committed && response.destroyed.is_empty() {
                 // Message ingest does not broadcast state changes
                 let mut state_change = StateChange::new(account_id)
                     .with_change_id(change_id)
@@ -1236,10 +1646,75 @@ impl EmailSet for Server {
                 ))
                 .await;
             }
-
-            response.new_state = State::Exact(change_id).into();
+        }
+        if last_change_id.is_some() || has_private_changes {
+            response.new_state = metadata_writer
+                .metadata()
+                .viewer_change_id(self, account_id)
+                .await?
+                .state(last_change_id.map_or_else(|| cache.get_state(false), State::Exact))
+                .into();
         }
 
         Ok(response)
     }
+}
+
+async fn flush(
+    server: &Server,
+    grouped: &mut GroupedIngest<'_, HeldMessage>,
+    response: &mut SetResponse<Email>,
+    recheck: &mut ThreadRecheck,
+    last_change_id: &mut Option<u64>,
+    account_id: u32,
+) -> trc::Result<()> {
+    grouped.flush(server).await?;
+    record(grouped, response, recheck, last_change_id, account_id)
+}
+
+fn record(
+    grouped: &mut GroupedIngest<'_, HeldMessage>,
+    response: &mut SetResponse<Email>,
+    recheck: &mut ThreadRecheck,
+    last_change_id: &mut Option<u64>,
+    account_id: u32,
+) -> trc::Result<()> {
+    for (id, result) in grouped.results.drain(..) {
+        match result {
+            Ok(mut message) => {
+                recheck.push(account_id, &mut message);
+                *last_change_id = message.change_id.into();
+                response
+                    .created
+                    .insert(id, ingested_into_object(message).into());
+            }
+            Err(err) if err.matches(trc::EventType::Limit(trc::LimitEvent::Quota)) => {
+                response.not_created.append(
+                    id,
+                    SetError::new(SetErrorType::OverQuota)
+                        .with_description("You have exceeded your account quota."),
+                );
+            }
+            Err(err) => return Err(err),
+        }
+    }
+    Ok(())
+}
+
+struct HeldMessage {
+    raw: Vec<u8>,
+    _memory: Vec<MemoryReservation>,
+}
+
+impl AsRef<[u8]> for HeldMessage {
+    fn as_ref(&self) -> &[u8] {
+        &self.raw
+    }
+}
+
+fn is_jmap_id(value: &str) -> bool {
+    (1..=255).contains(&value.len())
+        && value
+            .bytes()
+            .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, b'-' | b'_'))
 }

@@ -6,11 +6,13 @@
 
 use super::AuthResult;
 use crate::{
-    core::{Session, SessionAddress, State},
-    inbound::{dkim::DkimSign, milter::Modification},
+    core::{Session, SessionAddress, SessionData, State},
+    inbound::{dkim::DkimSign, milter::Modification, session::INSUFFICIENT_STORAGE},
     queue::{
-        self, Message, MessageSource, MessageWrapper, QueueEnvelope, RCPT_SPAM_MASK,
-        quota::HasQueueQuota, rcpt_spam_flag, spool::QueueParams,
+        self, Message, MessageSource, MessageWrapper, Metadata, QueueEnvelope, RCPT_SPAM_MASK,
+        quota::HasQueueQuota,
+        rcpt_spam_flag,
+        spool::{QueueOutcome, QueueParams},
     },
     reporting::analysis::{AnalyzeReport, ReportData},
     scripts::ScriptResult,
@@ -24,42 +26,78 @@ use common::{
             session::Stage,
         },
     },
+    expr::{Bump, Variable as ExprVariable},
     network::SessionStream,
     scripts::ScriptModification,
 };
+use compact_str::{CompactString, ToCompactString};
 use mail_auth::{
     AuthenticatedMessage, AuthenticationResults, Dkim2Result, DkimResult, DmarcResult, ReceivedSpf,
     SpfOutput, SpfResult,
-    common::{
-        crypto::Algorithm,
-        headers::{Header, HeaderWriter},
-        verify::VerifySignature,
-    },
+    crypto::Algorithm,
     dkim::DkimError,
     dkim2::{Dkim2Dsn, Dkim2DsnFailure, Envelope as Dkim2Envelope},
     dmarc::{self, verify::DmarcParameters},
+    headers::HeaderWriter,
+    spf::verify::SpfParameters,
 };
-use mail_builder::headers::{date::Date, message_id::generate_message_id_header};
-use mail_parser::{MessageParser, MimeHeaders, parsers::fields::thread::thread_name};
+use mail_builder::headers::{Header, date::Date, message_id::generate_message_id_header};
+use mail_parser::{AddressList, MessageParser, PartKind, thread_name};
 use registry::schema::structs::Rate;
-use sieve::runtime::Variable;
+use sieve::{Envelope, runtime::Variable};
 use smtp_proto::{
     MAIL_BY_RETURN, RCPT_NOTIFY_DELAY, RCPT_NOTIFY_FAILURE, RCPT_NOTIFY_NEVER, RCPT_NOTIFY_SUCCESS,
 };
 use std::{
     borrow::Cow,
+    io::Write,
     time::{Instant, SystemTime},
 };
-use trc::{SmtpEvent, SpamEvent};
+use trc::{LimitEvent, SmtpEvent, SpamEvent};
 use utils::DomainPart;
 
+const PROCESSING_MEMORY_FACTOR: u64 = 3;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MessageOrigin {
+    Client,
+    Internal,
+    Submission { account_id: u32 },
+}
+
+impl MessageOrigin {
+    fn metadata(self) -> Option<Metadata> {
+        match self {
+            MessageOrigin::Submission { account_id } => Some(Metadata::Submission { account_id }),
+            MessageOrigin::Client | MessageOrigin::Internal => None,
+        }
+    }
+}
+
 impl<T: SessionStream> Session<T> {
-    pub async fn queue_message(&mut self) -> Cow<'static, [u8]> {
+    pub async fn queue_message(&mut self, origin: MessageOrigin) -> Cow<'static, [u8]> {
         // Parse message
         let raw_message = std::mem::take(&mut self.data.message);
+        let _message_memory = match self.data.message_memory.take() {
+            Some(mut memory) => {
+                let required = (raw_message.len() as u64).saturating_mul(PROCESSING_MEMORY_FACTOR);
+                if !memory.reserve_to(required) {
+                    trc::event!(
+                        Limit(LimitEvent::MemoryBudget),
+                        SpanId = self.data.session_id,
+                        Size = required,
+                        Limit = memory.limit(),
+                    );
+
+                    return INSUFFICIENT_STORAGE.into();
+                }
+                Some(memory)
+            }
+            None => None,
+        };
         let parsed_message = match MessageParser::new()
             .parse(&raw_message)
-            .filter(|p| p.headers().iter().any(|h| !h.name.is_other()))
+            .filter(|p| p.headers().has_known())
         {
             Some(parsed_message) => parsed_message,
             None => {
@@ -71,6 +109,23 @@ impl<T: SessionStream> Session<T> {
                 return (&b"550 5.7.7 Failed to parse message.\r\n"[..]).into();
             }
         };
+
+        if origin == MessageOrigin::Client
+            && let Err(err) = self
+                .server
+                .core
+                .email
+                .limits
+                .validate_header_section(&parsed_message)
+        {
+            trc::event!(
+                Smtp(SmtpEvent::MessageTooLarge),
+                SpanId = self.data.session_id,
+                Details = err.to_string(),
+            );
+
+            return (&b"552 5.3.4 Message header too large.\r\n"[..]).into();
+        }
 
         // Authenticate message
         let mut auth_message = AuthenticatedMessage::from_parsed(
@@ -86,11 +141,7 @@ impl<T: SessionStream> Session<T> {
         let ac = &self.server.core.smtp.mail_auth;
         let rc = &self.server.core.smtp.report;
         if auth_message.received_headers_count()
-            > self
-                .server
-                .eval_if(&dc.max_received_headers, self, self.data.session_id)
-                .await
-                .unwrap_or(50)
+            > self.eval_if(&dc.max_received_headers).await.unwrap_or(50)
         {
             trc::event!(
                 Smtp(SmtpEvent::LoopDetected),
@@ -104,31 +155,22 @@ impl<T: SessionStream> Session<T> {
 
         // Verify DKIM
         let dkim = self
-            .server
-            .eval_if(&ac.dkim.verify, self, self.data.session_id)
+            .eval_if(&ac.dkim.verify)
             .await
             .unwrap_or(VerifyStrategy::Relaxed);
         let dmarc = self
-            .server
-            .eval_if(&ac.dmarc.verify, self, self.data.session_id)
+            .eval_if(&ac.dmarc.verify)
             .await
             .unwrap_or(VerifyStrategy::Relaxed);
         let dkim_output = if dkim.verify() || dmarc.verify() {
             // Remove insecure DKIM signatures before verification
-            auth_message.dkim_headers.retain(|header| {
-                let signature = &header.header;
-                if signature.algorithm() == Algorithm::RsaSha1
-                    || (signature.algorithm() == Algorithm::RsaSha256 && signature.b.len() < 128)
+            auth_message.retain_dkim_signatures(|signature| {
+                if signature.a == Algorithm::RsaSha1
+                    || (signature.a == Algorithm::RsaSha256 && signature.b.len() < 128)
                 {
-                    auth_message.errors.push(Header {
-                        name: header.name,
-                        value: header.value,
-                        header: mail_auth::Error::Dkim(DkimError::UnsupportedAlgorithm),
-                    });
-                    auth_message.has_dkim_errors = true;
-                    false
+                    Err(DkimError::UnsupportedAlgorithm)
                 } else {
-                    true
+                    Ok(())
                 }
             });
 
@@ -148,13 +190,9 @@ impl<T: SessionStream> Session<T> {
             let rejected = strict && !pass;
 
             // Send reports for failed signatures
-            if let Some(rate) = self
-                .server
-                .eval_if::<Rate, _>(&rc.dkim.send, self, self.data.session_id)
-                .await
-            {
+            if let Some(rate) = self.eval_if::<Rate>(&rc.dkim.send).await {
                 for output in &dkim_output {
-                    if let Some(rcpt) = output.failure_report_addr() {
+                    if let Some(rcpt) = output.report_address() {
                         self.send_dkim_report(rcpt, &auth_message, &rate, rejected, output)
                             .await;
                     }
@@ -192,8 +230,7 @@ impl<T: SessionStream> Session<T> {
 
         // Verify ARC
         let arc = self
-            .server
-            .eval_if(&ac.arc.verify, self, self.data.session_id)
+            .eval_if(&ac.arc.verify)
             .await
             .unwrap_or(VerifyStrategy::Relaxed);
         let arc_output = if arc.verify() {
@@ -237,12 +274,13 @@ impl<T: SessionStream> Session<T> {
 
         // Verify DKIM2
         let mail_from = self.data.mail_from.as_ref().unwrap();
-        let dkim2_output = if (dkim.verify() || dmarc.verify())
-            && (!auth_message.dkim2_signatures.is_empty() || auth_message.has_dkim2_errors)
-        {
+        let has_dkim2_fields = !auth_message.dkim2_signatures().is_empty()
+            || !auth_message.dkim2_instances().is_empty()
+            || auth_message.has_dkim2_errors();
+        let dkim2_output = if (dkim.verify() || dmarc.verify()) && has_dkim2_fields {
             // Discard forged DKIM2-signed delivery status notifications
             if dkim.verify()
-                && !auth_message.dkim2_signatures.is_empty()
+                && !auth_message.dkim2_signatures().is_empty()
                 && let Some(dsn) =
                     parse_dkim2_dsn(&parsed_message, &auth_message, raw_message.as_slice())
                 && let Err(failure) = self
@@ -259,29 +297,32 @@ impl<T: SessionStream> Session<T> {
                         },
                     )
                     .await
-                && matches!(
+                && (matches!(
                     failure,
                     Dkim2DsnFailure::DsnChainFailed
                         | Dkim2DsnFailure::ReturnedChainFailed
                         | Dkim2DsnFailure::NotAligned
-                )
+                ) || (failure == Dkim2DsnFailure::TempError && dkim.is_strict()))
             {
                 trc::event!(
-                    Smtp(SmtpEvent::Dkim2DsnDiscarded),
+                    Smtp(SmtpEvent::Dkim2DsnRejected),
                     SpanId = self.data.session_id,
-                    From = mail_from.address.to_string(),
+                    From = CompactString::from(&mail_from.address),
                     To = self
                         .data
                         .rcpt_to
                         .iter()
-                        .map(|rcpt| trc::Value::from(rcpt.address.to_string()))
+                        .map(|rcpt| trc::Value::from(CompactString::from(&rcpt.address)))
                         .collect::<Vec<_>>(),
-                    Reason = failure.to_string(),
+                    Details = failure.to_compact_string(),
                 );
 
                 self.data.messages_sent += 1;
-                return (b"550 5.7.1 DSN rejected due to DKIM2 verification failure.\r\n"[..])
-                    .into();
+                return if failure == Dkim2DsnFailure::TempError {
+                    (b"451 4.7.5 Unable to verify DKIM2 DSN, try again later.\r\n"[..]).into()
+                } else {
+                    (b"550 5.7.1 DSN rejected due to DKIM2 verification failure.\r\n"[..]).into()
+                };
             }
 
             let time = Instant::now();
@@ -313,6 +354,22 @@ impl<T: SessionStream> Session<T> {
                 );
             }
 
+            if dkim.is_strict()
+                && matches!(output.result(), Dkim2Result::TempError(_))
+                && self
+                    .server
+                    .eval_signers(&ac.dkim.sign, self, self.data.session_id)
+                    .await
+                    .is_some_and(|signers| signers.dkim2.is_some())
+                && self
+                    .server
+                    .has_remote_domain(self.data.rcpt_to.iter().map(|rcpt| rcpt.domain.as_str()))
+                    .await
+            {
+                return (b"451 4.7.5 Unable to verify DKIM2 signatures, try again later.\r\n"[..])
+                    .into();
+            }
+
             Some(output)
         } else {
             None
@@ -321,7 +378,8 @@ impl<T: SessionStream> Session<T> {
         // Build authentication results header
         let mut auth_results = AuthenticationResults::new(&self.hostname);
         if !dkim_output.is_empty() {
-            auth_results = auth_results.with_dkim_results(&dkim_output, auth_message.from())
+            auth_results =
+                auth_results.with_dkim_results(&dkim_output, auth_message.first_from_address())
         }
         if let Some(dkim2_output) = &dkim2_output
             && (!matches!(dkim2_output.result(), Dkim2Result::None)
@@ -330,18 +388,20 @@ impl<T: SessionStream> Session<T> {
             auth_results = auth_results.with_dkim2_result(dkim2_output);
         }
         if let Some(spf_ehlo) = &self.data.spf_ehlo {
-            auth_results = auth_results.with_spf_ehlo_result(
+            auth_results = auth_results.with_spf_result(
                 spf_ehlo,
-                self.data.remote_ip,
-                &self.data.helo_domain,
+                &SpfParameters::helo(self.data.remote_ip, &self.data.helo_domain, &self.hostname),
             );
         }
         if let Some(spf_mail_from) = &self.data.spf_mail_from {
-            auth_results = auth_results.with_spf_mailfrom_result(
+            auth_results = auth_results.with_spf_result(
                 spf_mail_from,
-                self.data.remote_ip,
-                &mail_from.address,
-                &self.data.helo_domain,
+                &SpfParameters::mail_from(
+                    self.data.remote_ip,
+                    &self.data.helo_domain,
+                    &self.hostname,
+                    &mail_from.address,
+                ),
             );
         }
         if let Some(iprev) = &self.data.iprev {
@@ -372,7 +432,7 @@ impl<T: SessionStream> Session<T> {
                                 message: &auth_message,
                                 dkim_output: &dkim_output,
                                 dkim2_output: dkim2_output.as_ref(),
-                                rfc5321_mail_from_domain: if !mail_from.domain.is_empty() {
+                                mail_from_domain: if !mail_from.domain.is_empty() {
                                     &mail_from.domain
                                 } else {
                                     &self.data.helo_domain
@@ -381,6 +441,25 @@ impl<T: SessionStream> Session<T> {
                             },
                         ))
                         .await;
+
+                if origin == MessageOrigin::Client
+                    && !self.is_authenticated()
+                    && dmarc_output.domain().is_empty()
+                    && let Some((author_domain, other_domain)) =
+                        conflicting_author_domains(parsed_message.all_from())
+                {
+                    trc::event!(
+                        Smtp(SmtpEvent::MultipleFromDomains),
+                        SpanId = self.data.session_id,
+                        Domain = vec![
+                            trc::Value::String(author_domain.as_ref().into()),
+                            trc::Value::String(other_domain.as_ref().into()),
+                        ],
+                    );
+
+                    return (&b"550 5.7.1 Multiple author domains in From header are not allowed.\r\n"[..])
+                        .into();
+                }
 
                 let dmarc_result = dmarc_output.result();
                 let pass = dmarc_result == DmarcResult::Pass;
@@ -402,14 +481,14 @@ impl<T: SessionStream> Session<T> {
                     }),
                     SpanId = self.data.session_id,
                     Strict = strict,
-                    Domain = dmarc_output.domain().to_string(),
-                    Policy = dmarc_policy.to_string(),
+                    Domain = CompactString::from(dmarc_output.domain()),
+                    Policy = dmarc_policy.to_compact_string(),
                     Result = trc::Error::from(&dmarc_result),
                     Elapsed = time.elapsed(),
                 );
 
                 // Send DMARC report
-                if dmarc_output.requested_reports() && !is_report && !(rejected && is_temp_fail) {
+                if dmarc_output.requests_reports() && !is_report && !(rejected && is_temp_fail) {
                     self.send_dmarc_report(
                         &auth_message,
                         &auth_results,
@@ -445,76 +524,40 @@ impl<T: SessionStream> Session<T> {
             }
 
             if self.data.rcpt_to.is_empty() {
-                self.server.analyze_report(
-                    mail_parser::Message {
-                        html_body: parsed_message.html_body,
-                        text_body: parsed_message.text_body,
-                        attachments: parsed_message.attachments,
-                        parts: parsed_message
-                            .parts
-                            .into_iter()
-                            .map(|p| p.into_owned())
-                            .collect(),
-                        raw_message: b"".into(),
-                    },
-                    self.data.session_id,
-                );
+                self.server
+                    .analyze_report(parsed_message.into_owned(), self.data.session_id);
                 self.data.messages_sent += 1;
                 return (b"250 2.0.0 Message queued for delivery.\r\n"[..]).into();
             } else {
-                self.server.analyze_report(
-                    mail_parser::Message {
-                        html_body: parsed_message.html_body.clone(),
-                        text_body: parsed_message.text_body.clone(),
-                        attachments: parsed_message.attachments.clone(),
-                        parts: parsed_message
-                            .parts
-                            .iter()
-                            .map(|p| p.clone().into_owned())
-                            .collect(),
-                        raw_message: b"".into(),
-                    },
-                    self.data.session_id,
-                );
+                self.server
+                    .analyze_report(parsed_message.clone().into_owned(), self.data.session_id);
             }
         }
 
         // Add Received header
         let message_id = self.server.inner.data.queue_id_gen.generate();
         let mut headers = Vec::with_capacity(64);
-        if self
-            .server
-            .eval_if(&dc.add_received, self, self.data.session_id)
-            .await
-            .unwrap_or(true)
-        {
+        if self.eval_if(&dc.add_received).await.unwrap_or(true) {
             self.write_received(&mut headers, message_id)
         }
 
         // Add authentication results header
-        if self
-            .server
-            .eval_if(&dc.add_auth_results, self, self.data.session_id)
-            .await
-            .unwrap_or(true)
-        {
+        if self.eval_if(&dc.add_auth_results).await.unwrap_or(true) {
             auth_results.write_header(&mut headers);
         }
 
         // Add Received-SPF header
         if let Some(spf_output) = &self.data.spf_mail_from
-            && self
-                .server
-                .eval_if(&dc.add_received_spf, self, self.data.session_id)
-                .await
-                .unwrap_or(true)
+            && self.eval_if(&dc.add_received_spf).await.unwrap_or(true)
         {
             ReceivedSpf::new(
                 spf_output,
-                self.data.remote_ip,
-                &self.data.helo_domain,
-                &mail_from.address_lcase,
-                &self.hostname,
+                &SpfParameters::mail_from(
+                    self.data.remote_ip,
+                    &self.data.helo_domain,
+                    &self.hostname,
+                    &mail_from.address_lcase,
+                ),
             )
             .write_header(&mut headers);
         }
@@ -522,13 +565,7 @@ impl<T: SessionStream> Session<T> {
         // Run SPAM filter
         let mut train_spam = None;
         let mut spam_result = None;
-        if self.server.core.spam.enabled
-            && self
-                .server
-                .eval_if(&dc.spam_filter, self, self.data.session_id)
-                .await
-                .unwrap_or(true)
-        {
+        if self.server.core.spam.enabled && self.eval_if(&dc.spam_filter).await.unwrap_or(true) {
             match self
                 .spam_classify(
                     &parsed_message,
@@ -622,6 +659,20 @@ impl<T: SessionStream> Session<T> {
         };
 
         // Apply modifications
+        let needs_arrival_envelope = has_dkim2_fields && dkim2_output.is_none();
+        let mut arrival_envelope = None;
+        if needs_arrival_envelope
+            && modifications.iter().any(|modification| {
+                matches!(
+                    modification,
+                    Modification::ChangeFrom { .. }
+                        | Modification::AddRcpt { .. }
+                        | Modification::DeleteRcpt { .. }
+                )
+            })
+        {
+            arrival_envelope = Some(ArrivalEnvelope::capture(&self.data));
+        }
         let mut edited_message = if !modifications.is_empty() {
             self.data
                 .apply_milter_modifications(modifications, &auth_message)
@@ -630,19 +681,21 @@ impl<T: SessionStream> Session<T> {
         };
 
         // Sieve filtering
-        if let Some((script, script_id)) = self
-            .server
-            .eval_if::<String, _>(&dc.script, self, self.data.session_id)
-            .await
-            .and_then(|name| {
+        let mut sieve_redirected = false;
+        if let Some((script, script_id)) =
+            self.eval_if::<String>(&dc.script).await.and_then(|name| {
                 self.server
                     .get_trusted_sieve_script(&name, self.data.session_id)
                     .map(|s| (s, name))
             })
         {
+            let edited_parsed_message = edited_message
+                .as_deref()
+                .and_then(|message| MessageParser::new().parse(message));
             let mut params = self
                 .build_script_parameters("data")
-                .with_auth_headers(&headers);
+                .with_auth_headers(&headers)
+                .with_dkim2_verified(dkim2_output.as_ref(), &auth_message);
             if let Some((score, percentage)) = spam_result {
                 params = params
                     .with_spam_status(spam_status(Some(percentage)))
@@ -672,8 +725,7 @@ impl<T: SessionStream> Session<T> {
                         .iter()
                         .filter_map(|r| {
                             if matches!(r.result(), DkimResult::Pass) {
-                                r.signature()
-                                    .map(|s| Variable::from(s.domain().to_lowercase()))
+                                r.signature().map(|s| Variable::from(s.d.to_lowercase()))
                             } else {
                                 None
                             }
@@ -694,20 +746,23 @@ impl<T: SessionStream> Session<T> {
                         .map(|a| a.as_str())
                         .unwrap_or_default(),
                 )
-                .with_message(
-                    edited_message
-                        .as_deref()
-                        .and_then(|message| MessageParser::new().parse(message))
-                        .unwrap_or(parsed_message),
-                );
+                .with_message(edited_parsed_message.as_ref().unwrap_or(&parsed_message));
 
-            let modifications = match self.run_script(script_id, script.clone(), params).await {
-                ScriptResult::Accept { modifications } => modifications,
+            let modifications = match self.run_script(script_id, script, params).await {
+                ScriptResult::Accept {
+                    modifications,
+                    redirected,
+                } => {
+                    sieve_redirected = redirected;
+                    modifications
+                }
                 ScriptResult::Replace {
                     message,
                     modifications,
+                    redirected,
                 } => {
                     edited_message = message.into();
+                    sieve_redirected = redirected;
                     modifications
                 }
                 ScriptResult::Reject(message) => {
@@ -730,6 +785,12 @@ impl<T: SessionStream> Session<T> {
                         }
                     }
                     ScriptModification::SetEnvelope { name, value } => {
+                        if needs_arrival_envelope
+                            && arrival_envelope.is_none()
+                            && matches!(name, Envelope::From | Envelope::To)
+                        {
+                            arrival_envelope = Some(ArrivalEnvelope::capture(&self.data));
+                        }
                         self.data.apply_envelope_modification(name, value);
                     }
                 }
@@ -737,19 +798,20 @@ impl<T: SessionStream> Session<T> {
         }
 
         // Build message
-        let mail_from = self.data.mail_from.clone().unwrap();
+        let mail_from = self.data.mail_from.as_ref().unwrap();
+        let arrival_envelope = arrival_envelope.filter(|arrival| !arrival.is_current(&self.data));
         let rcpt_to = std::mem::take(&mut self.data.rcpt_to);
         let source = if !self.is_authenticated() {
             let dmarc_pass = dmarc_result.is_some_and(|result| result == DmarcResult::Pass);
 
-            #[cfg(feature = "test_mode")]
+            #[cfg(stalwart_tests)]
             {
                 MessageSource::Unauthenticated {
                     dmarc_pass: dmarc_pass || mail_from.address.starts_with("dmarc-"),
                 }
             }
 
-            #[cfg(not(feature = "test_mode"))]
+            #[cfg(not(stalwart_tests))]
             {
                 MessageSource::Unauthenticated { dmarc_pass }
             }
@@ -761,36 +823,18 @@ impl<T: SessionStream> Session<T> {
             .await;
 
         // Add Return-Path
-        if self
-            .server
-            .eval_if(&dc.add_return_path, self, self.data.session_id)
-            .await
-            .unwrap_or(true)
-        {
+        if self.eval_if(&dc.add_return_path).await.unwrap_or(true) {
             headers.extend_from_slice(b"Return-Path: <");
             headers.extend_from_slice(message.message.return_path.as_bytes());
             headers.extend_from_slice(b">\r\n");
         }
 
         // Add any missing headers
-        if !has_date_header
-            && self
-                .server
-                .eval_if(&dc.add_date, self, self.data.session_id)
-                .await
-                .unwrap_or(true)
-        {
+        if !has_date_header && self.eval_if(&dc.add_date).await.unwrap_or(true) {
             headers.extend_from_slice(b"Date: ");
-            headers.extend_from_slice(Date::now().to_rfc822().as_bytes());
-            headers.extend_from_slice(b"\r\n");
+            Date::now().write_header(&mut headers, 0);
         }
-        if !has_message_id_header
-            && self
-                .server
-                .eval_if(&dc.add_message_id, self, self.data.session_id)
-                .await
-                .unwrap_or(true)
-        {
+        if !has_message_id_header && self.eval_if(&dc.add_message_id).await.unwrap_or(true) {
             headers.extend_from_slice(b"Message-ID: ");
             generate_message_id_header(&mut headers, &self.hostname);
             headers.extend_from_slice(b"\r\n");
@@ -801,42 +845,74 @@ impl<T: SessionStream> Session<T> {
         let raw_message = edited_message.as_deref().unwrap_or(raw_message.as_slice());
         message.message.size = (raw_message.len() + headers.len()) as u64;
 
-        // Verify queue quota
-        if let Some(metadata) = self.server.has_quota(&mut message).await {
-            // Queue message
-            let queue_id = message.queue_id;
-            let dkim_signers = self
-                .server
-                .eval_signers(&ac.dkim.sign, self, self.data.session_id)
-                .await;
-            if message
-                .queue(
-                    QueueParams::new(raw_message, self.data.session_id, &self.server)
-                        .with_train_spam(train_spam)
-                        .with_raw_headers(&headers)
-                        .with_dkim_signers(dkim_signers)
-                        .with_original_raw_message(original_message)
-                        .with_original_authenticated_message(auth_message)
-                        .with_metadata(metadata),
-                )
-                .await
-            {
+        // Queue message
+        let dkim_signers = self
+            .server
+            .eval_signers(&ac.dkim.sign, self, self.data.session_id)
+            .await;
+        let dkim2_proof = if dkim2_output.is_none() {
+            match &arrival_envelope {
+                Some(arrival) => {
+                    self.server
+                        .dkim2_signing_proof(
+                            dkim_signers.as_deref(),
+                            &auth_message,
+                            &arrival.mail_from,
+                            &arrival.rcpt_to,
+                        )
+                        .await
+                }
+                None => {
+                    self.server
+                        .dkim2_signing_proof(
+                            dkim_signers.as_deref(),
+                            &auth_message,
+                            &mail_from.address,
+                            message.message.recipients.iter().map(|rcpt| rcpt.address()),
+                        )
+                        .await
+                }
+            }
+        } else {
+            None
+        };
+        let dkim2_verified = dkim2_output.as_ref().or(dkim2_proof.as_ref());
+        let quotas = self.server.queue_quotas(&message).await;
+        let queue_id = message.queue_id;
+        match message
+            .queue(
+                QueueParams::new(raw_message, self.data.session_id, &self.server)
+                    .with_train_spam(train_spam)
+                    .with_raw_headers(&headers)
+                    .with_dkim_signers(dkim_signers)
+                    .with_original_raw_message(original_message)
+                    .with_original_authenticated_message(&auth_message)
+                    .with_dkim2_verified(dkim2_verified)
+                    .with_exploded(sieve_redirected)
+                    .with_quotas(quotas)
+                    .with_metadata(origin.metadata()),
+            )
+            .await
+        {
+            QueueOutcome::Queued => {
                 self.state = State::Accepted(queue_id);
                 self.data.messages_sent += 1;
                 format!("250 2.0.0 Message queued with id {queue_id:x}.\r\n")
                     .into_bytes()
                     .into()
-            } else {
+            }
+            QueueOutcome::QuotaExceeded => {
+                (b"452 4.3.1 Mail system full, try again later.\r\n"[..]).into()
+            }
+            QueueOutcome::Failed => {
                 (b"451 4.3.5 Unable to accept message at this time.\r\n"[..]).into()
             }
-        } else {
-            (b"452 4.3.1 Mail system full, try again later.\r\n"[..]).into()
         }
     }
 
     pub async fn build_message(
         &self,
-        mail_from: SessionAddress,
+        mail_from: &SessionAddress,
         mut rcpt_to: Vec<SessionAddress>,
         source: MessageSource,
         queue_id: u64,
@@ -856,7 +932,7 @@ impl<T: SessionStream> Session<T> {
             flags: mail_from.flags | source.flags(),
             priority: self.data.priority,
             size: 0,
-            env_id: mail_from.dsn_info.map(|i| i.into_boxed_str()),
+            env_id: mail_from.dsn_info.as_deref().map(Box::from),
             blob_hash: Default::default(),
             metadata: Default::default(),
             received_from_ip: self.data.remote_ip,
@@ -865,6 +941,7 @@ impl<T: SessionStream> Session<T> {
 
         // Add recipients
         let future_release = self.data.future_release;
+        let mut arena = Bump::new();
         rcpt_to.sort_unstable();
         for rcpt in rcpt_to {
             message.recipients.push(
@@ -895,18 +972,24 @@ impl<T: SessionStream> Session<T> {
             };
 
             // Resolve queue
-            let queue = self.server.get_queue_or_default(
-                &self
-                    .server
-                    .eval_if::<String, _>(
-                        &self.server.core.smtp.queue.queue,
-                        &envelope,
-                        self.data.session_id,
-                    )
-                    .await
-                    .unwrap_or_else(|| "default".to_string()),
-                self.data.session_id,
-            );
+            let session_id = self.data.session_id;
+            let queue = self
+                .server
+                .eval_if_with(
+                    &self.server.core.smtp.queue.queue,
+                    &envelope,
+                    &mut arena,
+                    session_id,
+                    |name| match name {
+                        ExprVariable::String(name) => {
+                            Some(self.server.get_queue_or_default(name, session_id))
+                        }
+                        _ => None,
+                    },
+                )
+                .await
+                .flatten()
+                .unwrap_or_else(|| self.server.get_queue_or_default("default", session_id));
 
             // Set expiration and notification times
             let num_intervals = std::cmp::max(queue.notify.len(), 1);
@@ -990,12 +1073,7 @@ impl<T: SessionStream> Session<T> {
             Some(b"503 5.5.1 RCPT is required first.\r\n")
         } else if self.data.messages_sent
             < self
-                .server
-                .eval_if(
-                    &self.server.core.smtp.session.data.max_messages,
-                    self,
-                    self.data.session_id,
-                )
+                .eval_if(&self.server.core.smtp.session.data.max_messages)
                 .await
                 .unwrap_or(10)
         {
@@ -1025,13 +1103,12 @@ impl<T: SessionStream> Session<T> {
                 .as_bytes(),
         );
         headers.extend_from_slice(b" [");
-        headers.extend_from_slice(self.data.remote_ip.to_string().as_bytes());
+        headers.extend_from_slice(self.data.remote_ip_str.as_bytes());
         headers.extend_from_slice(b"]");
         if self.data.asn_geo_data.asn.is_some() || self.data.asn_geo_data.country.is_some() {
             headers.extend_from_slice(b" (");
             if let Some(asn) = &self.data.asn_geo_data.asn {
-                headers.extend_from_slice(b"AS");
-                headers.extend_from_slice(asn.id.to_string().as_bytes());
+                let _ = write!(headers, "AS{}", asn.id);
                 if let Some(name) = &asn.name {
                     headers.extend_from_slice(b" ");
                     headers.extend_from_slice(name.as_bytes());
@@ -1063,11 +1140,72 @@ impl<T: SessionStream> Session<T> {
             (false, true) => b"ESMTP",
             (false, false) => b"ESMTPA",
         });
-        headers.extend_from_slice(b" id ");
-        headers.extend_from_slice(format!("{id:X}").as_bytes());
-        headers.extend_from_slice(b";\r\n\t");
-        headers.extend_from_slice(Date::now().to_rfc822().as_bytes());
-        headers.extend_from_slice(b"\r\n");
+        let _ = write!(headers, " id {id:X};\r\n\t");
+        Date::now().write_header(headers, 0);
+    }
+}
+
+fn conflicting_author_domains<'m>(
+    from: impl Iterator<Item = AddressList<'m>>,
+) -> Option<(Cow<'m, str>, Cow<'m, str>)> {
+    let mut author_domain: Option<Cow<'m, str>> = None;
+    for domain in from
+        .flat_map(|list| list.mailboxes())
+        .filter_map(|mailbox| mailbox.address()?.rsplit_once('@'))
+        .map(|(_, domain)| domain)
+        .filter(|domain| !domain.is_empty())
+    {
+        let domain = if domain.is_ascii() {
+            Cow::Borrowed(domain)
+        } else {
+            domain
+                .to_ascii_domain()
+                .map_or(Cow::Borrowed(domain), |domain| {
+                    Cow::Owned(domain.into_owned())
+                })
+        };
+        match author_domain {
+            Some(author_domain) if !author_domain.eq_ignore_ascii_case(&domain) => {
+                return Some((author_domain, domain));
+            }
+            Some(_) => {}
+            None => author_domain = Some(domain),
+        }
+    }
+    None
+}
+
+struct ArrivalEnvelope {
+    mail_from: String,
+    rcpt_to: Vec<String>,
+}
+
+impl ArrivalEnvelope {
+    fn capture(data: &SessionData) -> Self {
+        ArrivalEnvelope {
+            mail_from: data
+                .mail_from
+                .as_ref()
+                .map(|mail_from| mail_from.address.clone())
+                .unwrap_or_default(),
+            rcpt_to: data
+                .rcpt_to
+                .iter()
+                .map(|rcpt| rcpt.address.clone())
+                .collect(),
+        }
+    }
+
+    fn is_current(&self, data: &SessionData) -> bool {
+        data.mail_from
+            .as_ref()
+            .map_or("", |mail_from| mail_from.address.as_str())
+            == self.mail_from
+            && self
+                .rcpt_to
+                .iter()
+                .map(String::as_str)
+                .eq(data.rcpt_to.iter().map(|rcpt| rcpt.address.as_str()))
     }
 }
 
@@ -1087,19 +1225,19 @@ fn parse_dkim2_dsn<'x, 'r>(
     }) {
         return None;
     }
-    let mail_parser::PartType::Multipart(children) = &parsed_message.root_part().body else {
+    let root_part = parsed_message.root_part();
+    if !matches!(root_part.kind(), PartKind::Multipart) {
         return None;
-    };
+    }
 
     let mut returned = &b""[..];
     let mut returned_full = false;
-    for child in children {
-        let part = parsed_message.parts.get(*child as usize)?;
+    for part in root_part.children() {
         if part.is_content_type("message", "rfc822") {
-            returned = raw_message.get(part.offset_body as usize..part.offset_end as usize)?;
+            returned = raw_message.get(part.offset_body() as usize..part.offset_end() as usize)?;
             returned_full = true;
         } else if part.is_content_type("text", "rfc822-headers") {
-            returned = raw_message.get(part.offset_body as usize..part.offset_end as usize)?;
+            returned = raw_message.get(part.offset_body() as usize..part.offset_end() as usize)?;
             returned_full = false;
         }
     }

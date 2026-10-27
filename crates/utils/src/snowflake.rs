@@ -32,9 +32,12 @@ static SEQUENCE_ID: AtomicU64 = AtomicU64::new(0);
 
 ID characteristics:
 
-- 43 bits for milliseconds since January 1st, 2022: 2^43 / (1000 * 60 * 60 * 24 * 365) = 278.92 years (from year 2022 until 2300)
-- 9 bits for a node id: 2^9 = 512 nodes
+- 43 bits for milliseconds since DEFAULT_EPOCH (September 22nd, 2021): 2^43 ms = 278.92 years (until 2300)
 - 12 bits for a sequence number: 2^12 = 4096 ids per millisecond
+- 9 bits for a node id: 2^9 = 512 nodes
+
+The two most significant bits stay zero only while the timestamp is below 2^41 ms, until around May 2091.
+Task ids with either of those bits set belong to the derived task id partitions.
 
 */
 
@@ -81,6 +84,17 @@ impl SnowflakeIdGenerator {
     pub fn global_id_from_timestamp(timestamp: u64) -> Option<u64> {
         let sequence = SEQUENCE_ID.fetch_add(1, Ordering::Relaxed) & SEQUENCE_MASK;
         Self::from_timestamp(timestamp).map(|id| id | (sequence << NODE_ID_LEN) | node_id())
+    }
+
+    pub fn global_id_with_sequence_id(sequence: u64) -> Option<u64> {
+        (SystemTime::UNIX_EPOCH + Duration::from_secs(DEFAULT_EPOCH))
+            .elapsed()
+            .ok()
+            .map(|elapsed| {
+                ((elapsed.as_millis() as u64) << (SEQUENCE_LEN + NODE_ID_LEN))
+                    | (sequence << NODE_ID_LEN)
+                    | node_id()
+            })
     }
 
     pub fn global_id() -> Option<u64> {

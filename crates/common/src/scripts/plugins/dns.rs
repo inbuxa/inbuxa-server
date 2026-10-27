@@ -19,7 +19,7 @@ pub fn register_exists(plugin_id: u32, fnc_map: &mut FunctionMap) {
     fnc_map.set_external_function("dns_exists", plugin_id, 2);
 }
 
-pub async fn exec(ctx: PluginContext<'_>) -> trc::Result<Variable> {
+pub async fn exec(ctx: PluginContext<'_>) -> trc::Result<Variable<'static>> {
     let entry = ctx.arguments[0].to_string();
     let record_type = ctx.arguments[1].to_string();
 
@@ -57,7 +57,7 @@ pub async fn exec(ctx: PluginContext<'_>) -> trc::Result<Variable> {
             .await
         {
             Ok(result) => result
-                .rrset
+                .records
                 .iter()
                 .flat_map(|mx| {
                     mx.exchanges
@@ -69,7 +69,7 @@ pub async fn exec(ctx: PluginContext<'_>) -> trc::Result<Variable> {
             Err(err) => err.short_error().into(),
         }
     } else if record_type.eq_ignore_ascii_case("txt") {
-        #[cfg(feature = "test_mode")]
+        #[cfg(stalwart_tests)]
         {
             if entry.contains("origin") {
                 return Ok(Variable::from("23028|US|arin|2002-01-04".to_string()));
@@ -100,7 +100,7 @@ pub async fn exec(ctx: PluginContext<'_>) -> trc::Result<Variable> {
                 .await
             {
                 Ok(result) => result
-                    .rrset
+                    .records
                     .iter()
                     .map(|host| Variable::from(host.to_string()))
                     .collect::<Vec<_>>()
@@ -111,7 +111,7 @@ pub async fn exec(ctx: PluginContext<'_>) -> trc::Result<Variable> {
             Variable::default()
         }
     } else if record_type.eq_ignore_ascii_case("ipv4") {
-        #[cfg(feature = "test_mode")]
+        #[cfg(stalwart_tests)]
         {
             if entry.contains(".168.192.") {
                 let parts = entry.split('.').collect::<Vec<_>>();
@@ -129,7 +129,7 @@ pub async fn exec(ctx: PluginContext<'_>) -> trc::Result<Variable> {
             .await
         {
             Ok(result) => result
-                .rrset
+                .records
                 .iter()
                 .map(|ip| Variable::from(ip.to_string()))
                 .collect::<Vec<_>>()
@@ -147,7 +147,7 @@ pub async fn exec(ctx: PluginContext<'_>) -> trc::Result<Variable> {
             .await
         {
             Ok(result) => result
-                .rrset
+                .records
                 .iter()
                 .map(|ip| Variable::from(ip.to_string()))
                 .collect::<Vec<_>>()
@@ -159,7 +159,7 @@ pub async fn exec(ctx: PluginContext<'_>) -> trc::Result<Variable> {
     })
 }
 
-pub async fn exec_exists(ctx: PluginContext<'_>) -> trc::Result<Variable> {
+pub async fn exec_exists(ctx: PluginContext<'_>) -> trc::Result<Variable<'static>> {
     let entry = ctx.arguments[0].to_string();
     let record_type = ctx.arguments[1].to_string();
 
@@ -170,7 +170,7 @@ pub async fn exec_exists(ctx: PluginContext<'_>) -> trc::Result<Variable> {
     } else if record_type.eq_ignore_ascii_case("ptr") {
         ctx.server.dns_exists_ptr(entry.as_ref()).await
     } else if record_type.eq_ignore_ascii_case("ipv4") {
-        #[cfg(feature = "test_mode")]
+        #[cfg(stalwart_tests)]
         {
             if entry.starts_with("2.0.168.192.") {
                 return Ok(1.into());

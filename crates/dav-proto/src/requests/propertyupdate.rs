@@ -5,17 +5,19 @@
  */
 
 use crate::{
-    parser::{DavParser, Token, tokenizer::Tokenizer},
-    schema::{Element, NamedElement, Namespace, request::PropertyUpdate},
+    parser::{DavParser, Token, tokenizer::Tokenizer, value::InheritedLang},
+    schema::{
+        Element, NamedElement, Namespace,
+        request::{PropertyUpdate, PropertyUpdateOp},
+    },
 };
 
 impl DavParser for PropertyUpdate {
     fn parse(stream: &mut Tokenizer<'_>) -> crate::parser::Result<Self> {
-        stream.expect_named_element(NamedElement::dav(Element::Propertyupdate))?;
+        let request =
+            stream.expect_named_element_raw(NamedElement::dav(Element::Propertyupdate))?;
         let mut update = PropertyUpdate {
-            set: Vec::with_capacity(4),
-            remove: Vec::with_capacity(4),
-            set_first: true,
+            ops: Vec::with_capacity(4),
         };
 
         loop {
@@ -26,12 +28,14 @@ impl DavParser for PropertyUpdate {
                             ns: Namespace::Dav,
                             element: Element::Set,
                         },
-                    ..
+                    raw,
                 } => {
-                    stream.expect_named_element(NamedElement::dav(Element::Prop))?;
-                    stream.collect_property_values(&mut update.set)?;
+                    let prop = stream.expect_named_element_raw(NamedElement::dav(Element::Prop))?;
+                    stream.collect_property_values(
+                        |value| update.ops.push(PropertyUpdateOp::Set(value)),
+                        &mut InheritedLang::new(&prop, &raw, &request),
+                    )?;
                     stream.expect_element_end()?;
-                    update.set_first = update.remove.is_empty();
                 }
                 Token::ElementStart {
                     name:
@@ -42,7 +46,12 @@ impl DavParser for PropertyUpdate {
                     ..
                 } => {
                     stream.expect_named_element(NamedElement::dav(Element::Prop))?;
-                    update.remove = stream.collect_properties(update.remove)?;
+                    update.ops.extend(
+                        stream
+                            .collect_properties(Vec::new())?
+                            .into_iter()
+                            .map(PropertyUpdateOp::Remove),
+                    );
                     stream.expect_element_end()?;
                 }
                 Token::ElementEnd | Token::Eof => {

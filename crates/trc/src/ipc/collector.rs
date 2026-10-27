@@ -6,12 +6,13 @@
 
 use std::{
     sync::{Arc, LazyLock, atomic::Ordering},
-    thread::{Builder, JoinHandle, park},
-    time::SystemTime,
+    thread::{Builder, JoinHandle, park_timeout},
+    time::{Duration, SystemTime},
 };
 
 use ahash::AHashMap;
 use atomics::bitset::AtomicBitset;
+use event::SPAN_EVENTS;
 use ipc::{
     USIZE_BITS,
     channel::{CHANNEL_FLAGS, CHANNEL_UPDATE_MARKER, Receiver},
@@ -54,9 +55,17 @@ pub(crate) enum Update {
 
 pub struct Collector {
     receivers: Vec<Receiver>,
+    dispatcher: Dispatcher,
+    dropped: u64,
+    next_maintenance: u64,
+}
+
+struct Dispatcher {
     subscribers: Vec<Subscriber>,
     levels: [Level; TOTAL_EVENT_COUNT],
     active_spans: AHashMap<u64, Arc<Event<EventDetails>>>,
+    discarded_spans: u64,
+    next_span_pressure_sweep: u64,
 }
 
 const HTTP_CONN_START: usize = EventType::Http(HttpEvent::ConnectionStart).to_id() as usize;
@@ -74,8 +83,14 @@ const MANAGE_SIEVE_CONN_END: usize =
 const EV_ATTEMPT_START: usize = EventType::Delivery(DeliveryEvent::AttemptStart).to_id() as usize;
 const EV_ATTEMPT_END: usize = EventType::Delivery(DeliveryEvent::AttemptEnd).to_id() as usize;
 
-const STALE_SPAN_CHECK_WATERMARK: usize = 8000;
-const SPAN_MAX_HOLD: u64 = 60 * 60 * 24; // 1 day
+const EVENTS_DROPPED: EventType = EventType::Telemetry(TelemetryEvent::EventsDropped);
+
+pub const SPAN_MAX_HOLD: u64 = 60 * 60 * 24;
+const SPAN_PRESSURE_HOLD: u64 = 60 * 60;
+const MAX_ACTIVE_SPANS: usize = 1 << 17;
+const MAINTENANCE_INTERVAL: u64 = 60;
+const FLUSH_BATCH_SIZE: usize = 1024;
+const MAX_COALESCED_PASSES: u32 = 64;
 
 pub(crate) static COLLECTOR_THREAD: LazyLock<Arc<CollectorThread>> = LazyLock::new(|| {
     Arc::new(
@@ -90,15 +105,13 @@ pub(crate) static COLLECTOR_THREAD: LazyLock<Arc<CollectorThread>> = LazyLock::n
 
 impl Collector {
     fn collect(&mut self) {
-        let mut do_continue = true;
-
-        // Update
-        self.update();
+        let mut do_continue = self.update();
+        let mut coalesced_passes = 0u32;
 
         while do_continue {
-            match CHANNEL_FLAGS.swap(0, Ordering::Relaxed) {
-                0 => {
-                    park();
+            match CHANNEL_FLAGS.swap(0, Ordering::Acquire) {
+                0 if coalesced_passes == 0 => {
+                    park_timeout(Duration::from_secs(MAINTENANCE_INTERVAL));
                 }
                 CHANNEL_UPDATE_MARKER..=u64::MAX => {
                     do_continue = self.update();
@@ -106,105 +119,22 @@ impl Collector {
                 _ => {}
             }
 
-            // Collect all events
-            let mut closed_rxs = Vec::new();
-            for (rx_idx, rx) in self.receivers.iter_mut().enumerate() {
-                let timestamp = SystemTime::now()
-                    .duration_since(SystemTime::UNIX_EPOCH)
-                    .map_or(0, |d| d.as_secs());
+            let timestamp = SystemTime::now()
+                .duration_since(SystemTime::UNIX_EPOCH)
+                .map_or(0, |d| d.as_secs());
 
+            let mut has_closed = false;
+            let mut drained = false;
+            for rx in self.receivers.iter_mut() {
                 loop {
                     match rx.try_recv() {
                         Ok(Some(event)) => {
-                            // Build event
-                            let event_id = event.inner.to_id() as usize;
-                            let mut event = Event {
-                                inner: EventDetails {
-                                    level: self.levels[event_id],
-                                    typ: event.inner,
-                                    timestamp,
-                                    span: None,
-                                },
-                                keys: event.keys,
-                            };
-
-                            // Track spans
-                            let event = match event_id {
-                                HTTP_CONN_START
-                                | IMAP_CONN_START
-                                | POP3_CONN_START
-                                | SMTP_CONN_START
-                                | MANAGE_SIEVE_CONN_START
-                                | EV_ATTEMPT_START => {
-                                    let event = Arc::new(event);
-                                    self.active_spans.insert(
-                                        event.span_id().unwrap_or_else(|| {
-                                            panic!("Missing span ID: {event:?}")
-                                        }),
-                                        event.clone(),
-                                    );
-
-                                    if self.active_spans.len() > STALE_SPAN_CHECK_WATERMARK {
-                                        self.active_spans.retain(|_, span| {
-                                            timestamp.saturating_sub(span.inner.timestamp)
-                                                < SPAN_MAX_HOLD
-                                        });
-                                    }
-                                    event
-                                }
-
-                                HTTP_CONN_END
-                                | IMAP_CONN_END
-                                | POP3_CONN_END
-                                | SMTP_CONN_END
-                                | MANAGE_SIEVE_CONN_END
-                                | EV_ATTEMPT_END => {
-                                    if let Some(span) = self
-                                        .active_spans
-                                        .remove(&event.span_id().expect("Missing span ID"))
-                                    {
-                                        event.inner.span = Some(span.clone());
-                                    } else {
-                                        #[cfg(any(feature = "dev_mode", feature = "test_mode"))]
-                                        {
-                                            if event.span_id().unwrap() != 0 {
-                                                eprintln!("Unregistered span ID: {event:?}");
-                                            }
-                                        }
-                                    }
-                                    Arc::new(event)
-                                }
-                                _ => {
-                                    if let Some(span_id) = event.span_id() {
-                                        if let Some(span) = self.active_spans.get(&span_id) {
-                                            event.inner.span = Some(span.clone());
-                                        } else {
-                                            #[cfg(any(
-                                                feature = "dev_mode",
-                                                feature = "test_mode"
-                                            ))]
-                                            {
-                                                if span_id != 0 {
-                                                    eprintln!("Unregistered span ID: {event:?}");
-                                                }
-                                            }
-                                        }
-                                    }
-
-                                    Arc::new(event)
-                                }
-                            };
-
-                            // Send to subscribers
-                            for subscriber in self.subscribers.iter_mut() {
-                                subscriber.push_event(event_id, event.clone());
-                            }
+                            drained = true;
+                            self.dispatcher.dispatch(event, timestamp);
                         }
-                        Ok(None) => {
-                            break;
-                        }
+                        Ok(None) => break,
                         Err(_) => {
-                            closed_rxs.push(rx_idx); // Channel is closed, remove.
+                            has_closed = true;
                             break;
                         }
                     }
@@ -212,28 +142,68 @@ impl Collector {
             }
 
             if do_continue {
-                // Remove closed receivers (should be rare in Tokio)
-                if !closed_rxs.is_empty() {
-                    let mut receivers = Vec::with_capacity(self.receivers.len() - closed_rxs.len());
-                    for (rx_idx, rx) in self.receivers.drain(..).enumerate() {
-                        if !closed_rxs.contains(&rx_idx) {
-                            receivers.push(rx);
+                if has_closed {
+                    let dropped = &mut self.dropped;
+                    self.receivers.retain(|rx| {
+                        if rx.is_closed() {
+                            *dropped += rx.take_dropped();
+                            false
+                        } else {
+                            true
                         }
-                    }
-                    self.receivers = receivers;
+                    });
                 }
 
-                // Send batched events
-                if !self.subscribers.is_empty() {
-                    self.subscribers
-                        .retain_mut(|subscriber| subscriber.send_batch().is_ok());
+                if timestamp >= self.next_maintenance {
+                    self.maintenance(timestamp);
                 }
+
+                if drained
+                    && coalesced_passes < MAX_COALESCED_PASSES
+                    && self
+                        .dispatcher
+                        .subscribers
+                        .iter()
+                        .all(|subscriber| subscriber.batch.len() < FLUSH_BATCH_SIZE)
+                {
+                    coalesced_passes += 1;
+                    continue;
+                }
+                coalesced_passes = 0;
+
+                let dropped = &mut self.dropped;
+                self.dispatcher.subscribers.retain_mut(|subscriber| {
+                    match subscriber.send_batch() {
+                        Ok(lost) => {
+                            *dropped += lost;
+                            true
+                        }
+                        Err(_) => false,
+                    }
+                });
             }
         }
 
-        // Send remaining events
-        for mut subscriber in self.subscribers.drain(..) {
+        for mut subscriber in self.dispatcher.subscribers.drain(..) {
             let _ = subscriber.send_batch();
+        }
+    }
+
+    fn maintenance(&mut self, timestamp: u64) {
+        self.next_maintenance = timestamp + MAINTENANCE_INTERVAL;
+
+        self.dispatcher.retain_spans(SPAN_MAX_HOLD, timestamp);
+        let discarded_spans = std::mem::take(&mut self.dispatcher.discarded_spans);
+
+        let dropped = self
+            .receivers
+            .iter()
+            .map(Receiver::take_dropped)
+            .sum::<u64>()
+            + std::mem::take(&mut self.dropped);
+        if dropped > 0 || discarded_spans > 0 {
+            self.dispatcher
+                .report_dropped(dropped + discarded_spans, timestamp);
         }
     }
 
@@ -245,33 +215,32 @@ impl Collector {
                 }
                 Update::RegisterSubscriber { subscriber } => {
                     ACTIVE_SUBSCRIBERS.lock().push(subscriber.id.clone());
-                    self.subscribers.push(subscriber);
+                    self.dispatcher.subscribers.push(subscriber);
                 }
                 Update::UnregisterSubscriber { id } => {
                     ACTIVE_SUBSCRIBERS.lock().retain(|s| s != &id);
-                    self.subscribers.retain(|s| s.id != id);
+                    self.dispatcher.subscribers.retain(|s| s.id != id);
                 }
                 Update::UpdateSubscriber {
                     id,
                     interests,
                     lossy,
                 } => {
-                    for subscriber in self.subscribers.iter_mut() {
-                        if subscriber.id == id {
-                            subscriber.interests = interests;
-                            subscriber.lossy = lossy;
-                            break;
-                        }
+                    if let Some(subscriber) = self
+                        .dispatcher
+                        .subscribers
+                        .iter_mut()
+                        .find(|subscriber| subscriber.id == id)
+                    {
+                        subscriber.shared_interests.update(&interests);
+                        subscriber.interests = interests;
+                        subscriber.lossy = lossy;
                     }
                 }
                 Update::UpdateLevels { levels } => {
                     for event in EVENT_TYPES.iter() {
-                        let event_id = event.to_id() as usize;
-                        if let Some(level) = levels.get(event) {
-                            self.levels[event_id] = *level;
-                        } else {
-                            self.levels[event_id] = event.level();
-                        }
+                        self.dispatcher.levels[event.to_id() as usize] =
+                            levels.get(event).copied().unwrap_or_else(|| event.level());
                     }
                 }
                 Update::Shutdown => return false,
@@ -283,11 +252,7 @@ impl Collector {
 
     pub fn set_interests(mut interests: Interests) {
         if !interests.is_empty() {
-            for event_type in EVENT_TYPES.iter() {
-                if event_type.is_span_start() || event_type.is_span_end() {
-                    interests.set(*event_type);
-                }
-            }
+            interests.union(&SPAN_EVENTS);
         }
 
         TRACE_INTERESTS.update(interests);
@@ -341,20 +306,140 @@ impl Collector {
     }
 }
 
-impl Default for Collector {
-    fn default() -> Self {
-        let mut c = Collector {
-            subscribers: Vec::new(),
-            levels: [Level::Disable; TOTAL_EVENT_COUNT],
-            active_spans: AHashMap::new(),
-            receivers: Vec::new(),
+impl Dispatcher {
+    #[inline(always)]
+    fn dispatch(&mut self, event: Event<EventType>, timestamp: u64) {
+        let event_id = event.inner.to_id() as usize;
+        let mut event = Event {
+            inner: EventDetails {
+                level: self.levels[event_id],
+                typ: event.inner,
+                timestamp,
+                span: None,
+            },
+            keys: event.keys,
         };
 
-        for event in EVENT_TYPES.iter() {
-            let event_id = event.to_id() as usize;
-            c.levels[event_id] = event.level();
+        let event = match event_id {
+            HTTP_CONN_START
+            | IMAP_CONN_START
+            | POP3_CONN_START
+            | SMTP_CONN_START
+            | MANAGE_SIEVE_CONN_START
+            | EV_ATTEMPT_START => {
+                let event = Arc::new(event);
+                match event.span_id() {
+                    Some(span_id) => self.track_span(span_id, &event, timestamp),
+                    None => missing_span_id(&event),
+                }
+                event
+            }
+            HTTP_CONN_END
+            | IMAP_CONN_END
+            | POP3_CONN_END
+            | SMTP_CONN_END
+            | MANAGE_SIEVE_CONN_END
+            | EV_ATTEMPT_END => {
+                match event.span_id() {
+                    Some(span_id) => match self.active_spans.remove(&span_id) {
+                        Some(span) => event.inner.span = Some(span),
+                        None => unregistered_span_id(span_id, &event),
+                    },
+                    None => missing_span_id(&event),
+                }
+                Arc::new(event)
+            }
+            _ => {
+                if let Some(span_id) = event.span_id() {
+                    match self.active_spans.get(&span_id) {
+                        Some(span) => event.inner.span = Some(span.clone()),
+                        None => unregistered_span_id(span_id, &event),
+                    }
+                }
+                Arc::new(event)
+            }
+        };
+
+        for subscriber in self.subscribers.iter_mut() {
+            subscriber.push_event(event_id, &event);
+        }
+    }
+
+    fn track_span(&mut self, span_id: u64, event: &Arc<Event<EventDetails>>, timestamp: u64) {
+        if self.active_spans.len() >= MAX_ACTIVE_SPANS {
+            if timestamp < self.next_span_pressure_sweep {
+                self.discarded_spans += 1;
+                return;
+            }
+            self.next_span_pressure_sweep = timestamp + MAINTENANCE_INTERVAL;
+            self.retain_spans(SPAN_PRESSURE_HOLD, timestamp);
+            if self.active_spans.len() >= MAX_ACTIVE_SPANS {
+                self.discarded_spans += 1;
+                return;
+            }
         }
 
-        c
+        self.active_spans.insert(span_id, event.clone());
+    }
+
+    fn retain_spans(&mut self, max_age: u64, timestamp: u64) {
+        let discarded = &mut self.discarded_spans;
+        self.active_spans.retain(|_, span| {
+            let keep = timestamp.saturating_sub(span.inner.timestamp) < max_age;
+            *discarded += u64::from(!keep);
+            keep
+        });
+    }
+
+    fn report_dropped(&mut self, dropped: u64, timestamp: u64) {
+        let event_id = EVENTS_DROPPED.to_id() as usize;
+        if Collector::is_metric(event_id) {
+            Collector::update_event_counter(
+                EVENTS_DROPPED,
+                u32::try_from(dropped).unwrap_or(u32::MAX),
+            );
+        }
+        if Collector::has_interest(event_id) {
+            self.dispatch(
+                Event::with_keys(EVENTS_DROPPED, vec![(Key::Total, Value::UInt(dropped))]),
+                timestamp,
+            );
+        }
+    }
+}
+
+#[inline(always)]
+fn missing_span_id(_event: &Event<EventDetails>) {
+    #[cfg(any(feature = "dev_mode", stalwart_tests))]
+    eprintln!("Missing span ID: {_event:?}");
+}
+
+#[inline(always)]
+fn unregistered_span_id(_span_id: u64, _event: &Event<EventDetails>) {
+    #[cfg(any(feature = "dev_mode", stalwart_tests))]
+    if _span_id != 0 {
+        eprintln!("Unregistered span ID: {_event:?}");
+    }
+}
+
+impl Default for Collector {
+    fn default() -> Self {
+        let mut levels = [Level::Disable; TOTAL_EVENT_COUNT];
+        for event in EVENT_TYPES.iter() {
+            levels[event.to_id() as usize] = event.level();
+        }
+
+        Collector {
+            receivers: Vec::new(),
+            dispatcher: Dispatcher {
+                subscribers: Vec::new(),
+                levels,
+                active_spans: AHashMap::new(),
+                discarded_spans: 0,
+                next_span_pressure_sweep: 0,
+            },
+            dropped: 0,
+            next_maintenance: 0,
+        }
     }
 }

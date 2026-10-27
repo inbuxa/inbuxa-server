@@ -5,7 +5,7 @@
  */
 
 use crate::{
-    parser::{DavParser, Token, tokenizer::Tokenizer},
+    parser::{DavParser, Token, tokenizer::Tokenizer, value::InheritedLang},
     schema::{Element, NamedElement, Namespace, request::MkCol},
 };
 
@@ -15,24 +15,25 @@ impl DavParser for MkCol {
             is_mkcalendar: false,
             props: Vec::new(),
         };
-        match stream.token()? {
+        let request = match stream.token()? {
             Token::ElementStart {
                 name:
                     NamedElement {
                         ns: Namespace::Dav,
                         element: Element::Mkcol,
                     },
-                ..
-            } => {}
+                raw,
+            } => raw,
             Token::ElementStart {
                 name:
                     NamedElement {
                         ns: Namespace::CalDav,
                         element: Element::Mkcalendar,
                     },
-                ..
+                raw,
             } => {
                 mkcol.is_mkcalendar = true;
+                raw
             }
             Token::Eof => {
                 return Ok(mkcol);
@@ -48,10 +49,13 @@ impl DavParser for MkCol {
                             ns: Namespace::Dav,
                             element: Element::Set,
                         },
-                    ..
+                    raw,
                 } => {
-                    stream.expect_named_element(NamedElement::dav(Element::Prop))?;
-                    stream.collect_property_values(&mut mkcol.props)?;
+                    let prop = stream.expect_named_element_raw(NamedElement::dav(Element::Prop))?;
+                    stream.collect_property_values(
+                        |value| mkcol.props.push(value),
+                        &mut InheritedLang::new(&prop, &raw, &request),
+                    )?;
                     stream.expect_element_end()?;
                 }
                 Token::ElementEnd | Token::Eof => {

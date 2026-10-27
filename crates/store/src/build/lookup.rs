@@ -5,7 +5,15 @@
  */
 
 use crate::{LookupStores, registry::bootstrap::Bootstrap};
-use registry::schema::structs::{LookupStore, StoreLookup};
+#[cfg(any(
+    feature = "postgres",
+    feature = "mysql",
+    feature = "sqlite",
+    feature = "enterprise",
+    feature = "redis"
+))]
+use registry::schema::structs::LookupStore;
+use registry::schema::structs::StoreLookup;
 use std::collections::hash_map::Entry;
 
 impl LookupStores {
@@ -28,18 +36,18 @@ impl LookupStores {
                 LookupStore::PostgreSql(postgre_sql_store) => {
                     crate::backend::postgres::PostgresStore::open(postgre_sql_store)
                         .await
-                        .map(crate::InMemoryStore::Store)
+                        .map(crate::InMemoryStore::Sql)
                 }
                 #[cfg(feature = "mysql")]
                 LookupStore::MySql(my_sql_store) => {
                     crate::backend::mysql::MysqlStore::open(my_sql_store)
                         .await
-                        .map(crate::InMemoryStore::Store)
+                        .map(crate::InMemoryStore::Sql)
                 }
                 #[cfg(feature = "sqlite")]
                 LookupStore::Sqlite(sqlite_store) => {
                     crate::backend::sqlite::SqliteStore::open(sqlite_store)
-                        .map(crate::InMemoryStore::Store)
+                        .map(crate::InMemoryStore::Sql)
                 }
                 #[cfg(feature = "redis")]
                 LookupStore::Redis(redis_store) => {
@@ -48,6 +56,10 @@ impl LookupStores {
                 #[cfg(feature = "redis")]
                 LookupStore::RedisCluster(redis_cluster_store) => {
                     crate::backend::redis::RedisStore::open_cluster(redis_cluster_store).await
+                }
+                #[cfg(feature = "redis")]
+                LookupStore::RedisSentinel(redis_sentinel_store) => {
+                    crate::backend::redis::RedisStore::open_sentinel(redis_sentinel_store).await
                 }
                 _ => Err(
                     "Binary was not compiled with the selected lookup store backend".to_string(),

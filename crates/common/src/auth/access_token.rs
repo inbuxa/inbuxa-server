@@ -8,28 +8,37 @@ use super::AccessToken;
 use crate::{
     Server,
     auth::{
-        AccessScope, AccessTo, AccessTokenInner, AccountTenantIds, Permissions, RECOVERY_ADMIN_ID,
+        AccessScope, AccessTo, AccessTokenInner, AccountCache, ChangedBy, GrantClient, Permissions,
+        RECOVERY_ADMIN_ID, TokenScope,
+        oauth::scope::{OAuthScopes, scope_data_types},
         permissions::{BuildPermissions, PermissionsListBuilder},
     },
-    network::limiter::{ConcurrencyLimiter, LimiterResult},
+    network::limiter::{AccountLimit, AccountLimits, AccountRate, LimiterResult, RateCounter},
 };
 use ahash::AHasher;
+use compact_str::format_compact;
 use registry::{
     schema::{
         enums::Permission,
         structs::{self, Account, Roles, UserRoles},
     },
-    types::EnumImpl,
+    types::{EnumImpl, ipmask::IpAddrOrMask},
 };
 use std::{
+    borrow::Cow,
     hash::{Hash, Hasher},
     net::IpAddr,
     sync::Arc,
 };
-use store::{query::acl::AclQuery, rand, write::now};
+use store::{
+    Deserialize, IterateParams, ValueKey,
+    query::acl::{AclItem, AclQuery},
+    rand,
+    write::{ValueClass, key::DeserializeBigEndian, now},
+};
 use tinyvec::TinyVec;
-use trc::{AddContext, StoreEvent};
-use types::{acl::Acl, collection::Collection};
+use trc::{AddContext, CacheEvent};
+use types::{acl::Acl, collection::Collection, type_state::DataType};
 use utils::map::bitmap::{Bitmap, BitmapItem};
 use xxhash_rust::xxh3;
 
@@ -43,83 +52,28 @@ impl Server {
     ) -> trc::Result<AccessTokenInner> {
         match account {
             Account::User(account) => {
-                let tenant_id = account.member_tenant_id.map(|t| t.id() as u32);
+                let role_ids = match &account.roles {
+                    UserRoles::User => self.core.network.security.default_role_ids_user.as_slice(),
+                    UserRoles::Admin => {
+                        self.core.network.security.default_role_ids_admin.as_slice()
+                    }
+                    UserRoles::Custom(custom_roles) => custom_roles.role_ids.as_slice(),
+                };
+                #[cfg(not(feature = "enterprise"))]
                 let permissions = self
-                    .effective_permissions(
-                        &account.permissions,
-                        match &account.roles {
-                            UserRoles::User => {
-                                self.core.network.security.default_role_ids_user.as_slice()
-                            }
-                            UserRoles::Admin => {
-                                if tenant_id.is_none() {
-                                    self.core.network.security.default_role_ids_admin.as_slice()
-                                } else {
-                                    self.core
-                                        .network
-                                        .security
-                                        .default_role_ids_tenant
-                                        .as_slice()
-                                }
-                            }
-                            UserRoles::Custom(custom_roles) => custom_roles.role_ids.as_slice(),
-                        },
-                        tenant_id,
-                    )
+                    .effective_permissions(&account.permissions, role_ids)
                     .await?;
 
                 let member_of = account
                     .member_group_ids
                     .iter()
                     .map(|m| m.id() as u32)
-                    .collect::<TinyVec<[u32; 3]>>();
-                let mut access_to: Vec<AccessTo> = Vec::new();
-                for grant_account_id in [account_id].into_iter().chain(member_of.iter().copied()) {
-                    for acl_item in self
-                        .store()
-                        .acl_query(AclQuery::HasAccess { grant_account_id })
-                        .await
-                        .caused_by(trc::location!())?
-                    {
-                        if acl_item.to_account_id != account_id
-                            && !member_of.contains(&acl_item.to_account_id)
-                        {
-                            let acl = Bitmap::<Acl>::from(acl_item.permissions);
-                            let collection = acl_item.to_collection;
-                            if !collection.is_valid() {
-                                return Err(trc::StoreEvent::DataCorruption
-                                    .ctx(trc::Key::Reason, "Corrupted collection found in ACL key.")
-                                    .details(format!("{acl_item:?}"))
-                                    .account_id(grant_account_id)
-                                    .caused_by(trc::location!()));
-                            }
-
-                            let mut collections: Bitmap<Collection> = Bitmap::new();
-                            if acl.contains(Acl::Read) {
-                                collections.insert(collection);
-                            }
-                            if acl.contains(Acl::ReadItems)
-                                && let Some(child_col) = collection.child_collection()
-                            {
-                                collections.insert(child_col);
-                            }
-
-                            if !collections.is_empty() {
-                                if let Some(idx) = access_to
-                                    .iter()
-                                    .position(|a| a.account_id == acl_item.to_account_id)
-                                {
-                                    access_to[idx].collections.union(&collections);
-                                } else {
-                                    access_to.push(AccessTo {
-                                        account_id: acl_item.to_account_id,
-                                        collections,
-                                    });
-                                }
-                            }
-                        }
-                    }
-                }
+                    .collect::<Box<[u32]>>();
+                let access_to = AccessTo::from_acl_items(
+                    account_id,
+                    &member_of,
+                    self.acl_items_by_grantee(account_id, &member_of).await?,
+                )?;
 
                 let now = now();
                 let mut credential_version = 0;
@@ -184,29 +138,14 @@ impl Server {
                 }
 
                 Ok(AccessTokenInner {
-                    concurrent_imap_requests: self
-                        .core
-                        .imap
-                        .rate_concurrent
-                        .map(ConcurrencyLimiter::new),
-                    concurrent_http_requests: self
-                        .core
-                        .jmap
-                        .request_max_concurrent
-                        .map(ConcurrencyLimiter::new),
-                    concurrent_uploads: self
-                        .core
-                        .jmap
-                        .upload_max_concurrent
-                        .map(ConcurrencyLimiter::new),
+                    limits: self.account_limits(),
                     obj_size: 0,
                     revision,
                     revision_account,
                     credential_version,
                     account_id,
-                    tenant_id,
                     member_of,
-                    access_to: access_to.into_boxed_slice(),
+                    access_to,
                     scopes: []
                         .into_iter()
                         .chain(credential_scopes)
@@ -215,39 +154,22 @@ impl Server {
                 .update_size())
             }
             Account::Group(account) => {
-                let tenant_id = account.member_tenant_id.map(|t| t.id() as u32);
+                let role_ids = account
+                    .roles
+                    .role_ids()
+                    .unwrap_or(self.core.network.security.default_role_ids_group.as_slice());
+                #[cfg(not(feature = "enterprise"))]
                 let permissions = self
-                    .effective_permissions(
-                        &account.permissions,
-                        account.roles.role_ids().unwrap_or(
-                            self.core.network.security.default_role_ids_group.as_slice(),
-                        ),
-                        tenant_id,
-                    )
+                    .effective_permissions(&account.permissions, role_ids)
                     .await?;
 
                 Ok(AccessTokenInner {
-                    concurrent_imap_requests: self
-                        .core
-                        .imap
-                        .rate_concurrent
-                        .map(ConcurrencyLimiter::new),
-                    concurrent_http_requests: self
-                        .core
-                        .jmap
-                        .request_max_concurrent
-                        .map(ConcurrencyLimiter::new),
-                    concurrent_uploads: self
-                        .core
-                        .jmap
-                        .upload_max_concurrent
-                        .map(ConcurrencyLimiter::new),
+                    limits: self.account_limits(),
                     obj_size: 0,
                     revision,
                     revision_account,
                     credential_version: 0,
                     account_id,
-                    tenant_id,
                     member_of: Default::default(),
                     access_to: Default::default(),
                     scopes: Box::new([AccessScope::new(permissions.finalize(), u32::MAX)]),
@@ -255,6 +177,79 @@ impl Server {
                 .update_size())
             }
         }
+    }
+
+    async fn acl_items_by_grantee(
+        &self,
+        account_id: u32,
+        member_of: &[u32],
+    ) -> trc::Result<Vec<(u32, AclItem)>> {
+        if member_of.is_empty() {
+            return self
+                .store()
+                .acl_query(AclQuery::HasAccess {
+                    grant_account_id: account_id,
+                })
+                .await
+                .caused_by(trc::location!())
+                .map(|items| items.into_iter().map(|item| (account_id, item)).collect());
+        }
+
+        let grantees = [account_id]
+            .into_iter()
+            .chain(member_of.iter().copied())
+            .collect::<TinyVec<[u32; 4]>>();
+        let mut ordered = grantees.clone();
+        ordered.sort_unstable();
+        let mut previous = None;
+        ordered.retain(|id| previous.replace(*id) != Some(*id));
+        let mut items = Vec::new();
+        self.store()
+            .iterate_many(
+                ordered
+                    .iter()
+                    .map(|&grant_account_id| {
+                        IterateParams::new(
+                            ValueKey {
+                                account_id: 0,
+                                collection: 0,
+                                document_id: 0,
+                                class: ValueClass::Acl(grant_account_id),
+                            },
+                            ValueKey {
+                                account_id: u32::MAX,
+                                collection: u8::MAX,
+                                document_id: u32::MAX,
+                                class: ValueClass::Acl(grant_account_id),
+                            },
+                        )
+                        .ascending()
+                    })
+                    .collect(),
+                |key, value| {
+                    let grant_account_id = key.deserialize_be_u32(0)?;
+                    let mut item = AclItem::deserialize(key)?;
+                    item.permissions = u64::deserialize(value)?;
+                    items.push((grant_account_id, item));
+                    Ok(true)
+                },
+            )
+            .await
+            .caused_by(trc::location!())?;
+
+        items.sort_unstable_by_key(|(grant_account_id, item)| {
+            (
+                grantees
+                    .iter()
+                    .position(|id| id == grant_account_id)
+                    .unwrap_or(usize::MAX),
+                item.to_account_id,
+                u8::from(item.to_collection),
+                item.to_document_id,
+            )
+        });
+
+        Ok(items)
     }
 
     pub async fn access_token(&self, account_id: u32) -> trc::Result<Arc<AccessTokenInner>> {
@@ -267,18 +262,18 @@ impl Server {
         {
             Ok(token) => {
                 trc::event!(
-                    Store(StoreEvent::CacheHit),
+                    Cache(CacheEvent::Hit),
                     Key = account_id,
-                    Collection = "accessToken",
+                    Name = "accessToken",
                 );
 
                 Ok(token)
             }
             Err(guard) => {
                 trc::event!(
-                    Store(StoreEvent::CacheMiss),
+                    Cache(CacheEvent::Miss),
                     Key = account_id,
-                    Collection = "accessToken",
+                    Name = "accessToken",
                 );
 
                 let token: Arc<AccessTokenInner> = if let Some(account) =
@@ -299,7 +294,7 @@ impl Server {
                         .caused_by(trc::location!()));
                 };
 
-                let _ = guard.insert(token.clone());
+                guard.insert(token.clone());
                 Ok(token)
             }
         }
@@ -321,18 +316,18 @@ impl Server {
             Ok(token) => {
                 if token.revision_account == revision_account {
                     trc::event!(
-                        Store(StoreEvent::CacheHit),
+                        Cache(CacheEvent::Hit),
                         Key = account_id,
-                        Collection = "accessToken",
+                        Name = "accessToken",
                     );
 
                     Ok(token)
                 } else {
                     // Token is stale, rebuild it
                     trc::event!(
-                        Store(StoreEvent::CacheStale),
+                        Cache(CacheEvent::Stale),
                         Key = account_id,
-                        Collection = "accessToken",
+                        Name = "accessToken",
                     );
 
                     debug_assert!(
@@ -353,9 +348,9 @@ impl Server {
             }
             Err(guard) => {
                 trc::event!(
-                    Store(StoreEvent::CacheMiss),
+                    Cache(CacheEvent::Miss),
                     Key = account_id,
-                    Collection = "accessToken",
+                    Name = "accessToken",
                 );
 
                 let revision = rand::random::<u64>();
@@ -363,7 +358,7 @@ impl Server {
                     .build_access_token(account, account_id, revision, revision_account)
                     .await?
                     .into();
-                let _ = guard.insert(token.clone());
+                guard.insert(token.clone());
                 Ok(token)
             }
         }
@@ -375,6 +370,7 @@ impl AccessToken {
         AccessToken {
             scope_idx: 0,
             inner,
+            token_scope: None,
         }
         .assert_is_valid(remote_ip)
     }
@@ -383,6 +379,7 @@ impl AccessToken {
         AccessToken {
             scope_idx: 0,
             inner,
+            token_scope: None,
         }
     }
 
@@ -402,24 +399,85 @@ impl AccessToken {
                     .ctx(trc::Key::Id, credential_id)
                     .reason("Credential expired or removed.")
             })
-            .map(|scope_idx| AccessToken { scope_idx, inner })
+            .map(|scope_idx| AccessToken {
+                scope_idx,
+                inner,
+                token_scope: None,
+            })
             .and_then(|token| token.assert_is_valid(remote_ip))
     }
 
     pub fn renew(
         inner: Arc<AccessTokenInner>,
         credential_id: Option<u32>,
+        token_scope: Option<TokenScope>,
         remote_ip: IpAddr,
     ) -> trc::Result<Self> {
-        if let Some(credential_id) = credential_id {
+        if let Some(credential_id) = credential_id.filter(|id| *id != u32::MAX) {
             Self::new_scoped(inner, credential_id, remote_ip)
         } else {
             AccessToken {
                 scope_idx: 0,
                 inner,
+                token_scope,
             }
             .assert_is_valid(remote_ip)
         }
+    }
+
+    pub fn is_built_from(&self, inner: &Arc<AccessTokenInner>) -> bool {
+        Arc::ptr_eq(&self.inner, inner)
+    }
+
+    pub fn with_token_scope(mut self, token_scope: Option<TokenScope>) -> Self {
+        self.token_scope = token_scope;
+        self
+    }
+
+    #[inline(always)]
+    pub fn token_scope(&self) -> Option<TokenScope> {
+        self.token_scope
+    }
+
+    #[inline(always)]
+    pub fn grant_id(&self) -> Option<u64> {
+        self.token_scope.and_then(TokenScope::grant_id)
+    }
+
+    pub fn oauth_scopes(&self) -> Option<OAuthScopes> {
+        self.token_scope.and_then(TokenScope::restricted_scopes)
+    }
+
+    pub fn allows_oauth_scopes(&self, required: OAuthScopes) -> bool {
+        self.oauth_scopes()
+            .is_none_or(|scopes| scopes.intersects(required))
+    }
+
+    pub fn assert_allows_oauth_scopes(self, required: OAuthScopes) -> trc::Result<Self> {
+        if self.allows_oauth_scopes(required) {
+            Ok(self)
+        } else {
+            Err(trc::SecurityEvent::Unauthorized
+                .into_err()
+                .details("The token scope does not allow this request")
+                .account_id(self.account_id()))
+        }
+    }
+
+    pub fn restrict_data_types(&self, types: &mut Bitmap<DataType>) {
+        if let Some(scopes) = self.oauth_scopes() {
+            types.intersection(&scope_data_types(scopes));
+        }
+    }
+
+    #[inline(always)]
+    pub fn credential_version(&self) -> u64 {
+        self.inner.credential_version
+    }
+
+    #[inline(always)]
+    pub fn is_main_credential_expired(&self) -> bool {
+        self.inner.is_main_credential_expired()
     }
 
     pub fn state(&self) -> u32 {
@@ -435,10 +493,6 @@ impl AccessToken {
         self.inner.account_id
     }
 
-    #[inline(always)]
-    pub fn tenant_id(&self) -> Option<u32> {
-        self.inner.tenant_id
-    }
 
     pub fn secondary_ids(&self) -> impl Iterator<Item = &u32> {
         self.inner
@@ -487,10 +541,9 @@ impl AccessToken {
         let child_collection = collection.child_collection();
         if self.is_account_id(account_id)
             || self.inner.member_of.contains(&account_id)
-            || self.inner.access_to.iter().any(|a| {
-                a.account_id == account_id
-                    && (a.collections.contains(collection)
-                        || child_collection.is_some_and(|child| a.collections.contains(child)))
+            || self.inner.shared_access(account_id).is_some_and(|a| {
+                a.collections.contains(collection)
+                    || child_collection.is_some_and(|child| a.collections.contains(child))
             })
         {
             self.inner.account_id
@@ -505,17 +558,27 @@ impl AccessToken {
             .scopes
             .get(self.scope_idx)
             .is_some_and(|scope| scope.permissions.get(permission as usize))
+            && self
+                .token_scope
+                .and_then(TokenScope::permissions)
+                .is_none_or(|permissions| permissions.get(permission as usize))
     }
 
     pub fn assert_is_valid(self, remote_ip: IpAddr) -> trc::Result<Self> {
         if let Some(scope) = self.inner.scopes.get(self.scope_idx) {
-            let has_expired = scope.expires_at <= now();
-            let is_valid_ip = scope.allowed_ips.is_empty()
-                || scope
+            if !scope.allowed_ips.is_empty()
+                && !scope
                     .allowed_ips
                     .iter()
-                    .any(|ip_mask| ip_mask.matches(&remote_ip));
+                    .any(|ip_mask| ip_mask.matches(&remote_ip))
+            {
+                return Err(trc::SecurityEvent::IpUnauthorized
+                    .into_err()
+                    .ctx(trc::Key::AccountId, self.inner.account_id)
+                    .reason("IP address not allowed."));
+            }
 
+            let has_expired = scope.expires_at <= now();
             let mut access_token = self;
             if has_expired {
                 if access_token.scope_idx > 0 {
@@ -523,6 +586,17 @@ impl AccessToken {
                         .into_err()
                         .ctx(trc::Key::AccountId, access_token.inner.account_id)
                         .reason("Credential expired."));
+                } else if matches!(
+                    access_token.token_scope,
+                    Some(TokenScope::Grant {
+                        client: GrantClient::ThirdParty,
+                        ..
+                    })
+                ) {
+                    return Err(trc::AuthEvent::CredentialExpired
+                        .into_err()
+                        .ctx(trc::Key::AccountId, access_token.inner.account_id)
+                        .reason("Main credential expired, third-party grant refused."));
                 } else {
                     trc::event!(
                         Auth(trc::AuthEvent::CredentialExpired),
@@ -552,7 +626,7 @@ impl AccessToken {
                         scopes.push(AccessScope {
                             permissions,
                             credential_id: scope.credential_id,
-                            expires_at: u64::MAX,
+                            expires_at: scope.expires_at,
                             allowed_ips: scope.allowed_ips.clone(),
                         });
                     } else {
@@ -563,12 +637,9 @@ impl AccessToken {
                 let inner = AccessTokenInner {
                     scopes: scopes.into_boxed_slice(),
                     account_id: old_inner.account_id,
-                    tenant_id: old_inner.tenant_id,
                     member_of: old_inner.member_of.clone(),
                     access_to: old_inner.access_to.clone(),
-                    concurrent_http_requests: old_inner.concurrent_http_requests.clone(),
-                    concurrent_imap_requests: old_inner.concurrent_imap_requests.clone(),
-                    concurrent_uploads: old_inner.concurrent_uploads.clone(),
+                    limits: old_inner.limits.clone(),
                     revision_account: old_inner.revision_account,
                     revision: old_inner.revision,
                     credential_version: old_inner.credential_version,
@@ -578,17 +649,11 @@ impl AccessToken {
                 access_token = AccessToken {
                     scope_idx: access_token.scope_idx,
                     inner: Arc::new(inner),
+                    token_scope: access_token.token_scope,
                 };
             }
 
-            if is_valid_ip {
-                Ok(access_token)
-            } else {
-                Err(trc::SecurityEvent::IpUnauthorized
-                    .into_err()
-                    .ctx(trc::Key::AccountId, access_token.inner.account_id)
-                    .reason("IP address not allowed."))
-            }
+            Ok(access_token)
         } else {
             Err(trc::SecurityEvent::Unauthorized
                 .into_err()
@@ -646,11 +711,7 @@ impl AccessToken {
     }
 
     pub fn permissions(&self) -> Vec<Permission> {
-        if let Some(scope) = self.inner.scopes.get(self.scope_idx) {
-            scope.permissions.build_permissions_list()
-        } else {
-            vec![]
-        }
+        self.effective_permissions().build_permissions_list()
     }
 
     #[inline(always)]
@@ -658,13 +719,18 @@ impl AccessToken {
         self.inner.scopes.get(self.scope_idx)
     }
 
-    pub(crate) fn permissions_bits(&self) -> &Permissions {
-        &self
-            .inner
-            .scopes
-            .get(self.scope_idx)
-            .unwrap_or(&self.inner.scopes[0])
-            .permissions
+    pub fn effective_permissions(&self) -> Cow<'_, Permissions> {
+        let Some(scope) = self.inner.scopes.get(self.scope_idx) else {
+            return Cow::Owned(Permissions::new());
+        };
+        match self.token_scope.and_then(TokenScope::permissions) {
+            Some(filter) => {
+                let mut permissions = scope.permissions.clone();
+                permissions.intersection(filter);
+                Cow::Owned(permissions)
+            }
+            None => Cow::Borrowed(&scope.permissions),
+        }
     }
 
     pub fn account_permissions(&self) -> &Permissions {
@@ -672,12 +738,7 @@ impl AccessToken {
     }
 
     pub fn is_shared(&self, account_id: u32) -> bool {
-        !self.is_member(account_id)
-            && self
-                .inner
-                .access_to
-                .iter()
-                .any(|a| a.account_id == account_id)
+        !self.is_member(account_id) && self.inner.shared_access(account_id).is_some()
     }
 
     pub fn shared_accounts(&self, collection: Collection) -> impl Iterator<Item = &u32> {
@@ -698,61 +759,45 @@ impl AccessToken {
         self.is_member(to_account_id)
             || self
                 .inner
-                .access_to
-                .iter()
-                .any(|a| a.account_id == to_account_id && a.collections.contains(to_collection))
+                .shared_access(to_account_id)
+                .is_some_and(|a| a.collections.contains(to_collection))
+    }
+
+    pub fn is_read_only(&self, to_account_id: u32) -> bool {
+        !self.is_member(to_account_id)
+            && !self
+                .inner
+                .shared_access(to_account_id)
+                .is_some_and(|a| a.is_writable)
     }
 
     pub fn has_account_access(&self, to_account_id: u32) -> bool {
-        self.is_member(to_account_id)
-            || self
-                .inner
-                .access_to
-                .iter()
-                .any(|a| a.account_id == to_account_id)
+        self.is_member(to_account_id) || self.inner.shared_access(to_account_id).is_some()
     }
 
     pub fn is_http_request_allowed(&self) -> LimiterResult {
-        self.inner
-            .concurrent_http_requests
-            .as_ref()
-            .map_or(LimiterResult::Disabled, |limiter| limiter.is_allowed())
+        self.inner.is_allowed(AccountLimit::HttpRequests)
     }
 
     pub fn concurrent_http_requests(&self) -> u64 {
-        self.inner
-            .concurrent_http_requests
-            .as_ref()
-            .map(|limiter| limiter.max_concurrent())
-            .unwrap_or(0)
+        self.inner.max_concurrent(AccountLimit::HttpRequests)
     }
 
     pub fn is_imap_request_allowed(&self) -> LimiterResult {
-        self.inner
-            .concurrent_imap_requests
-            .as_ref()
-            .map_or(LimiterResult::Disabled, |limiter| limiter.is_allowed())
+        self.inner.is_allowed(AccountLimit::ImapRequests)
     }
 
     pub fn is_upload_allowed(&self) -> LimiterResult {
-        self.inner
-            .concurrent_uploads
-            .as_ref()
-            .map_or(LimiterResult::Disabled, |limiter| limiter.is_allowed())
+        self.inner.is_allowed(AccountLimit::Uploads)
     }
 
     pub fn concurrent_uploads(&self) -> u64 {
-        self.inner
-            .concurrent_uploads
-            .as_ref()
-            .map(|limiter| limiter.max_concurrent())
-            .unwrap_or(0)
+        self.inner.max_concurrent(AccountLimit::Uploads)
     }
 
-    pub fn account_tenant_ids(&self) -> AccountTenantIds {
-        AccountTenantIds {
+    pub fn changed_by(&self) -> ChangedBy {
+        ChangedBy {
             account_id: self.account_id(),
-            tenant_id: self.tenant_id(),
         }
     }
 
@@ -760,6 +805,7 @@ impl AccessToken {
         AccessToken {
             scope_idx: 0,
             inner: Arc::new(AccessTokenInner::new_admin()),
+            token_scope: None,
         }
     }
 
@@ -773,15 +819,13 @@ impl AccessToken {
         }
         AccessToken {
             scope_idx: 0,
+            token_scope: None,
             inner: Arc::new(AccessTokenInner {
                 account_id,
-                tenant_id: Default::default(),
                 member_of: Default::default(),
                 access_to: Default::default(),
                 scopes: Box::new([AccessScope::new(permissions, u32::MAX)]),
-                concurrent_http_requests: Default::default(),
-                concurrent_imap_requests: Default::default(),
-                concurrent_uploads: Default::default(),
+                limits: Default::default(),
                 revision: Default::default(),
                 revision_account: Default::default(),
                 credential_version: Default::default(),
@@ -793,6 +837,14 @@ impl AccessToken {
     pub fn from_id_maybe_invalid(account_id: u32) -> Self {
         AccessToken::new_maybe_invalid(Arc::new(AccessTokenInner::from_id(account_id)))
     }
+
+    pub fn from_account_maybe_invalid(account: &AccountCache) -> Self {
+        AccessToken::new_maybe_invalid(Arc::new(AccessTokenInner {
+            account_id: account.id,
+            member_of: account.id_member_of.clone(),
+            ..Default::default()
+        }))
+    }
 }
 
 impl AccessTokenInner {
@@ -803,30 +855,60 @@ impl AccessTokenInner {
         }
     }
 
-    pub fn with_tenant_id(mut self, tenant_id: Option<u32>) -> Self {
-        self.tenant_id = tenant_id;
+
+    pub fn update_size(mut self) -> Self {
+        let size = std::mem::size_of::<AccessTokenInner>()
+            + std::mem::size_of_val::<[u32]>(&self.member_of)
+            + std::mem::size_of_val::<[AccessTo]>(&self.access_to)
+            + std::mem::size_of_val::<[AccessScope]>(&self.scopes)
+            + self
+                .scopes
+                .iter()
+                .map(|scope| std::mem::size_of_val::<[IpAddrOrMask]>(&scope.allowed_ips))
+                .sum::<usize>()
+            + self
+                .limits
+                .as_ref()
+                .map_or(0, |_| std::mem::size_of::<AccountLimits>());
+        self.obj_size = u32::try_from(size).unwrap_or(u32::MAX);
         self
     }
 
-    pub fn update_size(mut self) -> Self {
-        self.obj_size = (std::mem::size_of::<AccessToken>()
-            + (self.member_of.len() * std::mem::size_of::<u32>())
-            + (self.access_to.len() * (std::mem::size_of::<u32>() + std::mem::size_of::<u64>()))
-            + (self.scopes.len() * std::mem::size_of::<AccessScope>()))
-            as u64;
-        self
+    fn shared_access(&self, account_id: u32) -> Option<&AccessTo> {
+        self.access_to
+            .binary_search_by_key(&account_id, |a| a.account_id)
+            .ok()
+            .and_then(|idx| self.access_to.get(idx))
+    }
+
+    #[inline]
+    fn is_allowed(&self, limit: AccountLimit) -> LimiterResult {
+        self.limits
+            .as_ref()
+            .map_or(LimiterResult::Disabled, |limits| limits.is_allowed(limit))
+    }
+
+    #[inline]
+    fn max_concurrent(&self, limit: AccountLimit) -> u64 {
+        self.limits
+            .as_ref()
+            .map_or(0, |limits| limits.max_concurrent(limit))
+    }
+
+    #[inline]
+    pub(crate) fn rate_counter(&self, rate: AccountRate) -> Option<&RateCounter> {
+        self.limits
+            .as_ref()
+            .and_then(|limits| limits.rate_counter(rate))
     }
 
     pub fn new_admin() -> Self {
         AccessTokenInner {
             account_id: RECOVERY_ADMIN_ID,
-            tenant_id: Default::default(),
             member_of: Default::default(),
             access_to: Default::default(),
             scopes: Box::new([AccessScope::new(Permissions::all(), u32::MAX)]),
-            concurrent_http_requests: Default::default(),
-            concurrent_imap_requests: Default::default(),
-            concurrent_uploads: Default::default(),
+            limits: Default::default(),
             revision: Default::default(),
             revision_account: Default::default(),
             credential_version: Default::default(),
@@ -844,6 +926,82 @@ impl AccessTokenInner {
 
     pub fn credential_version(&self) -> u64 {
         self.credential_version
+    }
+
+    pub fn is_main_credential_expired(&self) -> bool {
+        self.scopes
+            .first()
+            .is_some_and(|scope| scope.expires_at <= now())
+    }
+}
+
+impl AccessTo {
+    fn from_acl_items(
+        account_id: u32,
+        member_of: &[u32],
+        items: Vec<(u32, AclItem)>,
+    ) -> trc::Result<Box<[AccessTo]>> {
+        let mut access_to: Vec<AccessTo> = Vec::new();
+        let mut is_sorted = true;
+        for (grant_account_id, acl_item) in items {
+            if acl_item.to_account_id == account_id || member_of.contains(&acl_item.to_account_id) {
+                continue;
+            }
+
+            let acl = Bitmap::<Acl>::from(acl_item.permissions);
+            let collection = acl_item.to_collection;
+            if !collection.is_valid() {
+                return Err(trc::StoreEvent::DataCorruption
+                    .ctx(trc::Key::Reason, "Corrupted collection found in ACL key.")
+                    .details(format_compact!("{acl_item:?}"))
+                    .account_id(grant_account_id)
+                    .caused_by(trc::location!()));
+            }
+
+            let mut collections: Bitmap<Collection> = Bitmap::new();
+            if acl.contains(Acl::Read) {
+                collections.insert(collection);
+            }
+            if acl.contains(Acl::ReadItems)
+                && let Some(child_col) = collection.child_collection()
+            {
+                collections.insert(child_col);
+            }
+
+            if !collections.is_empty() {
+                let is_writable = acl.intersects(&Acl::WRITE);
+                match access_to.last_mut() {
+                    Some(last) if last.account_id == acl_item.to_account_id => {
+                        last.collections.union(&collections);
+                        last.is_writable |= is_writable;
+                    }
+                    last => {
+                        is_sorted &=
+                            last.is_none_or(|last| last.account_id < acl_item.to_account_id);
+                        access_to.push(AccessTo {
+                            account_id: acl_item.to_account_id,
+                            collections,
+                            is_writable,
+                        });
+                    }
+                }
+            }
+        }
+
+        if !is_sorted {
+            access_to.sort_unstable_by_key(|a| a.account_id);
+            access_to.dedup_by(|next, kept| {
+                if next.account_id == kept.account_id {
+                    kept.collections.union(&next.collections);
+                    kept.is_writable |= next.is_writable;
+                    true
+                } else {
+                    false
+                }
+            });
+        }
+
+        Ok(access_to.into_boxed_slice())
     }
 }
 
@@ -863,7 +1021,6 @@ fn hash_account(account: &Account) -> u64 {
 
     match account {
         Account::User(account) => {
-            account.member_tenant_id.hash(&mut s);
             match &account.roles {
                 UserRoles::User => {
                     0u8.hash(&mut s);
@@ -891,7 +1048,6 @@ fn hash_account(account: &Account) -> u64 {
             }
         }
         Account::Group(account) => {
-            account.member_tenant_id.hash(&mut s);
             match &account.roles {
                 Roles::Default => {}
                 Roles::Custom(custom_roles) => {
@@ -938,3 +1094,4 @@ fn hash_credential_permissions(hasher: &mut AHasher, permissions: &structs::Cred
         }
     }
 }
+

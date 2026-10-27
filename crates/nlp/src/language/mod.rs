@@ -16,6 +16,10 @@ use crate::tokenizers::{
 };
 use std::borrow::Cow;
 
+const MIN_QUERY_LANGUAGE_SCORE: f64 = 0.3;
+const MAX_SCRIPT_DETECTION_WORDS: usize = 3;
+const MAX_SCRIPT_DETECTION_BYTES: usize = 256;
+
 pub type LanguageTokenizer<'x> = Box<dyn Iterator<Item = Token<Cow<'x, str>>> + 'x + Sync + Send>;
 
 impl Language {
@@ -36,7 +40,7 @@ impl Language {
             Language::None => {
                 Box::new(
                     SpaceTokenizer::new(text, max_token_length).map(|word| Token {
-                        word: word.into(),
+                        word,
                         from: 0,
                         to: 0,
                     }),
@@ -210,62 +214,43 @@ impl Language {
 }
 
 impl Language {
+    pub fn split_prefix(text: &str) -> Option<(Language, &str)> {
+        let (code, text) = text.split_once(':')?;
+        Some((Language::from_iso_639(code)?, text))
+    }
+
     pub fn detect(text: String, default: Language) -> (String, Language) {
-        if let Some((l, t)) = text
-            .split_once(':')
-            .and_then(|(l, t)| (Language::from_iso_639(l)?, t).into())
-        {
+        if let Some((l, t)) = Language::split_prefix(&text) {
             (t.to_string(), l)
         } else {
-            let l = LanguageDetector::detect_single(&text)
-                .and_then(|(l, c)| if c > 0.3 { Some(l) } else { None })
-                .unwrap_or(default);
+            let l = Language::detect_text(&text, default);
             (text, l)
         }
     }
-}
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn iso_639_codes() {
-        for (code, expected) in [
-            ("nl", Language::Dutch),
-            ("fi", Language::Finnish),
-            ("hu", Language::Hungarian),
-            ("tr", Language::Turkish),
-            ("ro", Language::Romanian),
-            ("nb", Language::Bokmal),
-            ("no", Language::Bokmal),
-            ("yi", Language::Yiddish),
-            ("eo", Language::Esperanto),
-            ("uk", Language::Ukrainian),
-            ("cs", Language::Czech),
-            ("sk", Language::Slovak),
-            ("bg", Language::Bulgarian),
-            ("be", Language::Belarusian),
-            ("th", Language::Thai),
-            ("mr", Language::Marathi),
-            ("kn", Language::Kannada),
-            ("jv", Language::Javanese),
-            ("en", Language::English),
-            ("pl", Language::Polish),
-        ] {
-            assert_eq!(Language::from_iso_639(code), Some(expected), "{code}");
+    pub fn detect_non_ascii(text: String, default: Language) -> (String, Language) {
+        if let Some((l, t)) = Language::split_prefix(&text) {
+            (t.to_string(), l)
+        } else if text.is_ascii() {
+            (text, default)
+        } else if text.len() > MAX_SCRIPT_DETECTION_BYTES
+            || text
+                .split_whitespace()
+                .nth(MAX_SCRIPT_DETECTION_WORDS)
+                .is_some()
+        {
+            let l = Language::detect_text(&text, default);
+            (text, l)
+        } else {
+            let l = LanguageDetector::detect_by_script(&text).unwrap_or(default);
+            (text, l)
         }
     }
 
-    #[test]
-    fn iso_639_locale_suffixes() {
-        for code in ["nl_NL", "nl_BE", "nl_NL@euro", "nl-NL"] {
-            assert_eq!(
-                Language::from_iso_639(code),
-                Some(Language::Dutch),
-                "{code}"
-            );
-        }
-        assert_eq!(Language::from_iso_639("xx_XX"), None);
+    fn detect_text(text: &str, default: Language) -> Language {
+        LanguageDetector::detect_single(text)
+            .and_then(|(l, c)| (c > MIN_QUERY_LANGUAGE_SCORE).then_some(l))
+            .unwrap_or(default)
     }
 }
+

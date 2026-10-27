@@ -91,7 +91,7 @@ impl<T: SessionStream> Session<T> {
                     .server
                     .emails_delete(
                         mailbox.account_id,
-                        self.state.access_token().tenant_id(),
+                        self.state.access_token().changed_by(),
                         &mut batch,
                         deleted,
                     )
@@ -103,7 +103,6 @@ impl<T: SessionStream> Session<T> {
                         .commit_batch(batch)
                         .await
                         .caused_by(trc::location!())?;
-                    self.server.notify_task_queue();
                 }
                 if not_deleted.is_empty() {
                     self.write_ok(format!(

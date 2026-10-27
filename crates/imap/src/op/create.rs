@@ -5,25 +5,30 @@
  */
 
 use crate::{
-    core::{Session, SessionData},
+    core::{MailboxId, Session, SessionData},
     op::ImapContext,
-    spawn_op,
 };
 use common::{network::SessionStream, storage::index::ObjectIndexBuilder};
-use email::cache::{MessageCacheFetch, mailbox::MailboxCacheAccess};
+use compact_str::format_compact;
+use email::{cache::MessageCacheFetch, mailbox::role::RoleChange};
 use imap_proto::{
     Command, ResponseCode, StatusResponse,
-    protocol::{ObjectId, create::Arguments, list::Attribute},
+    protocol::{create::Arguments, list::Attribute},
     receiver::Request,
 };
 use registry::schema::enums::{Permission, StorageQuota};
 use std::time::Instant;
 use store::write::BatchBuilder;
+use tokio::sync::OwnedSemaphorePermit;
 use trc::AddContext;
-use types::{acl::Acl, collection::Collection, id::Id, special_use::SpecialUse};
+use types::{acl::Acl, collection::Collection, special_use::SpecialUse};
 
 impl<T: SessionStream> Session<T> {
-    pub async fn handle_create(&mut self, requests: Vec<Request<Command>>) -> trc::Result<()> {
+    pub async fn handle_create(
+        &mut self,
+        requests: Vec<Request<Command>>,
+        _permit: Option<OwnedSemaphorePermit>,
+    ) -> trc::Result<()> {
         // Validate access
         self.assert_has_permission(Permission::ImapCreate)?;
 
@@ -31,23 +36,21 @@ impl<T: SessionStream> Session<T> {
         let is_utf8 = self.is_utf8;
         let is_objectid = self.is_objectid;
 
-        spawn_op!(data, {
-            for request in requests {
-                match request.parse_create(is_utf8) {
-                    Ok(argument) => match data.create_folder(argument, is_objectid).await {
-                        Ok(response) => {
-                            data.write_bytes(response.into_bytes()).await?;
-                        }
-                        Err(error) => {
-                            data.write_error(error).await?;
-                        }
-                    },
-                    Err(err) => data.write_error(err).await?,
-                }
+        for request in requests {
+            match request.parse_create(is_utf8) {
+                Ok(argument) => match data.create_folder(argument, is_objectid).await {
+                    Ok(response) => {
+                        data.write_bytes(response.into_bytes()).await?;
+                    }
+                    Err(error) => {
+                        data.write_error(error).await?;
+                    }
+                },
+                Err(err) => data.write_error(err).await?,
             }
+        }
 
-            Ok(())
-        })
+        Ok(())
     }
 }
 
@@ -60,9 +63,12 @@ impl<T: SessionStream> SessionData<T> {
         let op_start = Instant::now();
 
         // Refresh mailboxes
-        self.synchronize_mailboxes(false)
+        self.expire_folders_of(&arguments.mailbox_name);
+        let mut caches = self
+            .synchronize_mailboxes(false)
             .await
-            .imap_ctx(&arguments.tag, trc::location!())?;
+            .imap_ctx(&arguments.tag, trc::location!())?
+            .caches;
 
         // Validate mailbox name
         let params = self
@@ -77,9 +83,8 @@ impl<T: SessionStream> SessionData<T> {
             .account(params.account_id)
             .await
             .imap_ctx(&arguments.tag, trc::location!())?;
-        let mailbox_count = self
-            .server
-            .get_cached_messages(params.account_id)
+        let mailbox_count = caches
+            .fetch(&self.server, params.account_id)
             .await
             .imap_ctx(&arguments.tag, trc::location!())?
             .mailboxes
@@ -102,44 +107,45 @@ impl<T: SessionStream> SessionData<T> {
         }
 
         // Build batch
-        let mut parent_id = params.parent_mailbox_id.map(|id| id + 1).unwrap_or(0);
-        let mut create_ids = Vec::with_capacity(params.path.len());
-        let mut next_document_id = self
-            .server
-            .store()
-            .assign_document_ids(
-                params.account_id,
-                Collection::Mailbox,
-                params.path.len() as u64,
-            )
-            .await
-            .caused_by(trc::location!())?;
+        let parent_id = params.parent_mailbox_id.map(|id| id + 1).unwrap_or(0);
         let mut batch = BatchBuilder::new();
-        for (pos, &path_item) in params.path.iter().enumerate() {
-            let mut mailbox = email::mailbox::Mailbox::new(path_item).with_parent_id(parent_id);
+        let slots = batch.reserve_document_ids(
+            params.account_id,
+            Collection::Mailbox,
+            params.path.len() as u32,
+        );
+        let mut parent_slot = None;
+
+        for ((pos, &path_item), slot) in params.path.iter().enumerate().zip(slots.iter()) {
+            let mut mailbox = email::mailbox::Mailbox::new(path_item);
+            if parent_slot.is_none() {
+                mailbox.parent_id = parent_id;
+            }
 
             if pos == params.path.len() - 1
                 && let Some(mailbox_role) = arguments.mailbox_role.map(attr_to_role)
             {
-                mailbox.role = mailbox_role;
+                mailbox.set_role(mailbox_role);
             }
-            let mailbox_id = next_document_id;
-            next_document_id -= 1;
+            let builder = ObjectIndexBuilder::<(), _>::new().with_changes(mailbox);
             batch
                 .with_account_id(params.account_id)
                 .with_collection(Collection::Mailbox)
-                .with_document(mailbox_id)
-                .custom(ObjectIndexBuilder::<(), _>::new().with_changes(mailbox))
+                .create_document(slot)
+                .custom(builder.with_pending_id_opt(parent_slot))
                 .imap_ctx(&arguments.tag, trc::location!())?
                 .commit_point();
-            parent_id = mailbox_id + 1;
-            create_ids.push(mailbox_id);
+            parent_slot = Some(slot);
         }
 
-        self.server
+        let assigned_ids = self
+            .server
             .commit_batch(batch)
             .await
             .imap_ctx(&arguments.tag, trc::location!())?;
+        self.expire_folders(params.account_id);
+        let create_ids = assigned_ids.slots(slots).collect::<Vec<_>>();
+        let last_mailbox_id = create_ids.last().copied().unwrap_or_default();
 
         trc::event!(
             Imap(trc::ImapEvent::CreateMailbox),
@@ -156,11 +162,13 @@ impl<T: SessionStream> SessionData<T> {
         // Build response
         let response = StatusResponse::ok("Mailbox created.").with_tag(arguments.tag);
         Ok(if is_objectid {
-            response.with_code(ResponseCode::ObjectId(ObjectId {
-                mailbox_id: Some(Id::from(parent_id - 1)),
-                account_id: Some(Id::from(params.account_id)),
-                ..Default::default()
-            }))
+            response.with_code(ResponseCode::ObjectId(self.mailbox_object_id(
+                MailboxId {
+                    account_id: params.account_id,
+                    mailbox_id: last_mailbox_id,
+                },
+                arguments.mailbox_name.trim_end_matches('/'),
+            )))
         } else {
             response
         })
@@ -182,7 +190,7 @@ impl<T: SessionStream> SessionData<T> {
         if name.is_empty() {
             return Err(trc::ImapEvent::Error
                 .into_err()
-                .details(format!("Invalid folder name '{mailbox_name}'.",)));
+                .details(format_compact!("Invalid folder name '{mailbox_name}'.",)));
         }
 
         // Build path
@@ -244,7 +252,7 @@ impl<T: SessionStream> SessionData<T> {
                         (account, full_path, prefix)
                     } else {
                         #[allow(clippy::unnecessary_literal_unwrap)]
-                        return Err(trc::ImapEvent::Error.into_err().details(format!(
+                        return Err(trc::ImapEvent::Error.into_err().details(format_compact!(
                             "Shared account '{}' not found.",
                             prefix.unwrap_or_default()
                         )));
@@ -265,10 +273,10 @@ impl<T: SessionStream> SessionData<T> {
                 };
 
             // Locate parent mailbox
-            if account.mailbox_names.contains_key(&full_path) {
+            if account.id_by_name(&full_path).is_some() {
                 return Err(trc::ImapEvent::Error
                     .into_err()
-                    .details(format!("Mailbox '{}' already exists.", full_path))
+                    .details(format_compact!("Mailbox '{}' already exists.", full_path))
                     .code(ResponseCode::AlreadyExists));
             }
 
@@ -278,7 +286,7 @@ impl<T: SessionStream> SessionData<T> {
                     let mut create_path = Vec::with_capacity(path.len());
                     while !path.is_empty() {
                         let mailbox_name: String = path.join("/");
-                        if let Some(&mailbox_id) = account.mailbox_names.get(&mailbox_name) {
+                        if let Some(mailbox_id) = account.id_by_name(&mailbox_name) {
                             parent_mailbox_id = mailbox_id.into();
                             parent_mailbox_name = mailbox_name.into();
                             break;
@@ -302,7 +310,7 @@ impl<T: SessionStream> SessionData<T> {
         // Validate ACLs
         if let Some(parent_mailbox_id) = parent_mailbox_id {
             if !self
-                .check_mailbox_acl(account_id, parent_mailbox_id, Acl::CreateChild)
+                .check_mailbox_acl(None, account_id, parent_mailbox_id, Acl::CreateChild)
                 .await?
             {
                 return Err(trc::ImapEvent::Error
@@ -329,24 +337,22 @@ impl<T: SessionStream> SessionData<T> {
             parent_mailbox_id,
             parent_mailbox_name,
             special_use: if let Some(mailbox_role) = mailbox_role {
-                // Make sure role is unique
-                let special_use = attr_to_role(mailbox_role);
-                if self
-                    .server
-                    .get_cached_messages(account_id)
-                    .await
-                    .caused_by(trc::location!())?
-                    .mailbox_by_role(&special_use)
-                    .is_some()
-                {
-                    return Err(trc::ImapEvent::Error
-                        .into_err()
-                        .details(format!(
-                            "A mailbox with role '{}' already exists.",
-                            special_use.as_str().unwrap_or_default()
-                        ))
-                        .code(ResponseCode::UseAttr));
+                RoleChange::Create {
+                    role: attr_to_role(mailbox_role),
                 }
+                .validate(
+                    self.server
+                        .get_cached_messages(account_id)
+                        .await
+                        .caused_by(trc::location!())?
+                        .as_ref(),
+                )
+                .map_err(|err| {
+                    trc::ImapEvent::Error
+                        .into_err()
+                        .details(err.to_string())
+                        .code(ResponseCode::UseAttr)
+                })?;
                 Some(mailbox_role)
             } else {
                 None
@@ -366,8 +372,7 @@ pub struct CreateParams<'x> {
     pub is_rename: bool,
 }
 
-#[inline]
-fn attr_to_role(attr: Attribute) -> SpecialUse {
+pub(crate) fn attr_to_role(attr: Attribute) -> SpecialUse {
     match attr {
         Attribute::Archive => SpecialUse::Archive,
         Attribute::Drafts => SpecialUse::Drafts,

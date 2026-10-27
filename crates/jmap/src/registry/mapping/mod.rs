@@ -27,7 +27,9 @@ pub mod bootstrap;
 pub mod cluster;
 pub mod dkim;
 pub mod domain;
+pub mod index_queue;
 pub mod log;
+pub mod oauth_client;
 pub mod principal;
 pub mod public_key;
 pub mod queued_message;
@@ -40,14 +42,12 @@ pub mod tls;
 
 pub(crate) struct RegistryGetResponse<'x> {
     pub server: &'x Server,
-    pub access_token: &'x AccessToken,
     pub account_id: u32,
     pub ids: Option<Vec<Id>>,
     pub properties: AHashSet<Property>,
     pub response: GetResponse<Registry>,
     pub object_type: ObjectType,
     pub object_flags: u64,
-    pub is_tenant_filtered: bool,
     pub is_account_filtered: bool,
 }
 
@@ -61,7 +61,6 @@ pub(crate) struct RegistrySetResponse<'x> {
     pub destroy: Vec<Id>,
     pub response: SetResponse<Registry>,
     pub object_type: ObjectType,
-    pub is_tenant_filtered: bool,
     pub is_account_filtered: bool,
 }
 

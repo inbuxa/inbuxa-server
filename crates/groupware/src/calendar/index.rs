@@ -9,33 +9,49 @@ use super::{
     ArchivedTimezone, Calendar, CalendarEvent, CalendarPreferences, DefaultAlert, Timezone,
 };
 use crate::{
+    MetaHasher, SizeWriter,
     calendar::{
-        ArchivedCalendarEventNotification, ArchivedChangedBy, ArchivedEventPreferences,
-        CalendarEventNotification, ChangedBy, EventPreferences,
+        ArchivedCalendarEventContent, ArchivedCalendarEventNotification,
+        ArchivedCalendarEventNotificationContent, ArchivedChangedBy, CalendarEventContent,
+        CalendarEventNotification, CalendarEventNotificationContent, ChangedBy,
+        EVENT_FLOATING_START, EVENT_HAS_ALARMS, EVENT_HAS_UNBOUNDED_TODO,
+        EVENT_USES_DEFAULT_ALERTS, EventPreferences, PREF_HAS_ALERTS,
+        participants::ArchivedParticipantEntry, privacy::ICalendarPrivacy,
     },
     strip_mailto_scheme,
 };
 use ahash::AHashSet;
 use calcard::icalendar::{
-    ArchivedICalendarParameterValue, ArchivedICalendarProperty, ArchivedICalendarValue,
+    ArchivedICalendar, ArchivedICalendarComponentType, ArchivedICalendarParameterValue,
+    ArchivedICalendarProperty, ArchivedICalendarValue, ICalendar, ICalendarComponentType,
     ICalendarParameterValue, ICalendarProperty, ICalendarValue,
 };
-use common::storage::index::{IndexValue, IndexableAndSerializableObject, IndexableObject};
+use common::storage::{
+    dav::PresenceBits,
+    index::{
+        ArchivedSplitObject, IndexValue, IndexableAndSerializableObject, IndexableObject,
+        SEARCH_HASH_UNCHANGED, SerializableObject, SplitObject, serialize_object,
+    },
+};
 use nlp::language::{
     Language,
     detect::{LanguageDetector, MIN_LANGUAGE_SCORE},
 };
+use registry::schema::enums::StorageQuota;
 use store::{
     U32_LEN,
     search::{CalendarSearchField, IndexDocument, SearchField},
-    write::{IndexPropertyClass, SearchIndex, ValueClass},
+    write::{ArchiveCompression, BatchBuilder, Compression, Dictionary, SearchIndex, Slot},
     xxhash_rust::xxh3,
 };
 use types::{
     acl::AclGrant,
     collection::SyncCollection,
-    field::{CalendarEventField, CalendarNotificationField},
+    field::{CalendarEventField, CalendarNotificationField, Field},
+    metadata::MetadataKinds,
 };
+
+const EVENT_HASHED_FLAGS: u16 = !PresenceBits::CALENDAR_EVENT.mask();
 
 impl IndexableObject for Calendar {
     fn index_values(&self) -> impl Iterator<Item = IndexValue<'_>> {
@@ -51,6 +67,10 @@ impl IndexableObject for Calendar {
             },
         ]
         .into_iter()
+    }
+
+    fn metadata_kinds(&self) -> MetadataKinds {
+        Calendar::metadata_kinds(self)
     }
 }
 
@@ -74,6 +94,10 @@ impl IndexableObject for &ArchivedCalendar {
         ]
         .into_iter()
     }
+
+    fn metadata_kinds(&self) -> MetadataKinds {
+        ArchivedCalendar::metadata_kinds(self)
+    }
 }
 
 impl IndexableAndSerializableObject for Calendar {
@@ -82,55 +106,45 @@ impl IndexableAndSerializableObject for Calendar {
     }
 }
 
+impl SerializableObject for Calendar {
+    fn serialize_into(self, batch: &mut BatchBuilder, pending_id: Option<Slot>) -> trc::Result<()> {
+        serialize_object(self, batch, pending_id)
+    }
+}
+
 impl IndexableObject for CalendarEvent {
     fn index_values(&self) -> impl Iterator<Item = IndexValue<'_>> {
         [
             IndexValue::SearchIndex {
                 index: SearchIndex::Calendar,
-                hash: self
-                    .hashes()
-                    .chain([self.data.event_range_start() as u64])
-                    .fold(0, |acc, hash| acc ^ hash),
+                hash: SEARCH_HASH_UNCHANGED,
             },
             IndexValue::Index {
                 field: CalendarEventField::Uid.into(),
-                value: self.data.event.uids().next().into(),
+                value: self.uid.as_str().into(),
             },
-            IndexValue::Quota {
-                used: self.size() as u32,
-            },
+            IndexValue::Quota { used: self.size },
             IndexValue::LogItem {
                 sync_collection: SyncCollection::Calendar,
                 prefix: None,
             },
+            IndexValue::ObjectCount(StorageQuota::MaxCalendarEvents),
         ]
         .into_iter()
+    }
+
+    fn metadata_kinds(&self) -> MetadataKinds {
+        CalendarEvent::metadata_kinds(self)
     }
 }
 
 impl IndexableObject for &ArchivedCalendarEvent {
     fn index_values(&self) -> impl Iterator<Item = IndexValue<'_>> {
-        [
-            IndexValue::SearchIndex {
-                index: SearchIndex::Calendar,
-                hash: self
-                    .hashes()
-                    .chain([self.data.event_range_start() as u64])
-                    .fold(0, |acc, hash| acc ^ hash),
-            },
-            IndexValue::Index {
-                field: CalendarEventField::Uid.into(),
-                value: self.data.event.uids().next().into(),
-            },
-            IndexValue::Quota {
-                used: self.size() as u32,
-            },
-            IndexValue::LogItem {
-                sync_collection: SyncCollection::Calendar,
-                prefix: None,
-            },
-        ]
-        .into_iter()
+        self.meta_index_values().into_iter()
+    }
+
+    fn metadata_kinds(&self) -> MetadataKinds {
+        ArchivedCalendarEvent::metadata_kinds(self)
     }
 }
 
@@ -138,25 +152,218 @@ impl IndexableAndSerializableObject for CalendarEvent {
     fn is_versioned() -> bool {
         true
     }
+
+    fn set_pending_id(&mut self, document_id: u32) -> trc::Result<()> {
+        let content_hash = self.etag ^ self.meta_hash();
+        self.names
+            .last_mut()
+            .ok_or_else(|| {
+                trc::StoreEvent::UnexpectedError
+                    .caused_by(trc::location!())
+                    .ctx(trc::Key::Reason, "Pending calendar id requires a name.")
+            })?
+            .parent_id = document_id;
+        self.etag = content_hash ^ self.meta_hash();
+        Ok(())
+    }
+
+    fn size_hint(&self) -> usize {
+        self.meta_size_hint()
+    }
+}
+
+impl SplitObject for CalendarEvent {
+    type Content = CalendarEventContent;
+    type Context = ();
+
+    const CONTENT_FIELD: Field = CalendarEventField::Content.field();
+
+    fn meta_hash(&self) -> u32 {
+        let mut hasher = MetaHasher::new();
+        hasher.u32(self.names.len() as u32);
+        for name in &self.names {
+            hasher.str(&name.name).u32(name.parent_id);
+        }
+        hasher
+            .str(&self.uid)
+            .opt_str(self.display_name.as_deref())
+            .i64(self.start)
+            .u32(self.duration)
+            .i64(self.created)
+            .i64(self.modified)
+            .u32(self.size)
+            .u16(self.flags & EVENT_HASHED_FLAGS)
+            .opt_u32(self.schedule_tag)
+            .finish()
+    }
+
+    fn set_etag(&mut self, etag: u32) {
+        self.etag = etag;
+    }
+
+    fn etag_value(&self) -> u32 {
+        self.etag
+    }
+
+    fn refresh_from_content(&mut self, content: &CalendarEventContent, _ctx: ()) {
+        self.uid = content
+            .data
+            .event
+            .object_uid()
+            .unwrap_or_default()
+            .to_string();
+        let (start, duration) = content.data.event_range().unwrap_or_default();
+        self.start = start;
+        self.duration = duration;
+        self.size = SizeWriter::ical(&content.data.event) as u32;
+        if content.data.has_unbounded_todo() {
+            self.flags |= EVENT_HAS_UNBOUNDED_TODO;
+        } else {
+            self.flags &= !EVENT_HAS_UNBOUNDED_TODO;
+        }
+        if content.data.has_floating_start() {
+            self.flags |= EVENT_FLOATING_START;
+        } else {
+            self.flags &= !EVENT_FLOATING_START;
+        }
+        let alarm_flags = if content
+            .preferences
+            .iter()
+            .any(EventPreferences::use_default_alerts)
+        {
+            EVENT_HAS_ALARMS | EVENT_USES_DEFAULT_ALERTS
+        } else if !content.data.alarms.is_empty()
+            || content.preferences.iter().any(|preferences| {
+                preferences.instances.iter().any(|instance| {
+                    instance.flags & PREF_HAS_ALERTS != 0 && !instance.alerts.is_empty()
+                })
+            })
+        {
+            EVENT_HAS_ALARMS
+        } else {
+            0
+        };
+        self.flags = (self.flags & !(EVENT_HAS_ALARMS | EVENT_USES_DEFAULT_ALERTS)) | alarm_flags;
+        self.flags = content.data.event.privacy().apply_to_flags(self.flags);
+    }
+
+    fn full_index_values<'x>(&'x self, content: &'x CalendarEventContent) -> Vec<IndexValue<'x>> {
+        vec![
+            IndexValue::SearchIndex {
+                index: SearchIndex::Calendar,
+                hash: content
+                    .hashes()
+                    .chain([content.data.event_range_start() as u64])
+                    .fold(0, |acc, hash| acc ^ hash),
+            },
+            IndexValue::Index {
+                field: CalendarEventField::Uid.into(),
+                value: self.uid.as_str().into(),
+            },
+            IndexValue::Quota { used: self.size },
+            IndexValue::LogItem {
+                sync_collection: SyncCollection::Calendar,
+                prefix: None,
+            },
+            IndexValue::ObjectCount(StorageQuota::MaxCalendarEvents),
+        ]
+    }
+}
+
+impl ArchivedSplitObject for ArchivedCalendarEvent {
+    type ArchivedContent = ArchivedCalendarEventContent;
+
+    const CONTENT_FIELD: Field = CalendarEventField::Content.field();
+
+    fn meta_hash(&self) -> u32 {
+        let mut hasher = MetaHasher::new();
+        hasher.u32(self.names.len() as u32);
+        for name in self.names.iter() {
+            hasher.str(&name.name).u32(name.parent_id.to_native());
+        }
+        hasher
+            .str(&self.uid)
+            .opt_str(self.display_name.as_deref())
+            .i64(self.start.to_native())
+            .u32(self.duration.to_native())
+            .i64(self.created.to_native())
+            .i64(self.modified.to_native())
+            .u32(self.size.to_native())
+            .u16(self.flags.to_native() & EVENT_HASHED_FLAGS)
+            .opt_u32(self.schedule_tag.as_ref().map(|tag| tag.to_native()))
+            .finish()
+    }
+
+    fn etag(&self) -> u32 {
+        self.etag.to_native()
+    }
+
+    fn metadata_kinds(&self) -> MetadataKinds {
+        ArchivedCalendarEvent::metadata_kinds(self)
+    }
+
+    fn meta_index_values(&self) -> Vec<IndexValue<'_>> {
+        vec![
+            IndexValue::SearchIndex {
+                index: SearchIndex::Calendar,
+                hash: SEARCH_HASH_UNCHANGED,
+            },
+            IndexValue::Index {
+                field: CalendarEventField::Uid.into(),
+                value: self.uid.as_str().into(),
+            },
+            IndexValue::Quota {
+                used: self.size.to_native(),
+            },
+            IndexValue::LogItem {
+                sync_collection: SyncCollection::Calendar,
+                prefix: None,
+            },
+            IndexValue::ObjectCount(StorageQuota::MaxCalendarEvents),
+        ]
+    }
+
+    fn full_index_values<'x>(
+        &'x self,
+        content: &'x ArchivedCalendarEventContent,
+    ) -> Vec<IndexValue<'x>> {
+        vec![
+            IndexValue::SearchIndex {
+                index: SearchIndex::Calendar,
+                hash: content
+                    .hashes()
+                    .chain([content.data.event_range_start() as u64])
+                    .fold(0, |acc, hash| acc ^ hash),
+            },
+            IndexValue::Index {
+                field: CalendarEventField::Uid.into(),
+                value: self.uid.as_str().into(),
+            },
+            IndexValue::Quota {
+                used: self.size.to_native(),
+            },
+            IndexValue::LogItem {
+                sync_collection: SyncCollection::Calendar,
+                prefix: None,
+            },
+            IndexValue::ObjectCount(StorageQuota::MaxCalendarEvents),
+        ]
+    }
 }
 
 impl IndexableObject for CalendarEventNotification {
     fn index_values(&self) -> impl Iterator<Item = IndexValue<'_>> {
         [
-            IndexValue::Quota {
-                used: self.size() as u32,
-            },
-            IndexValue::Property {
-                field: ValueClass::IndexProperty(IndexPropertyClass::Integer {
-                    property: CalendarNotificationField::CreatedToId.into(),
-                    value: self.created as u64,
-                }),
-                value: self.event_id.unwrap_or(u32::MAX).into(),
+            IndexValue::Quota { used: self.size },
+            IndexValue::Index {
+                field: CalendarNotificationField::Created.into(),
+                value: self.created.into(),
             },
             IndexValue::LogItem {
                 sync_collection: SyncCollection::CalendarEventNotification,
                 prefix: None,
             },
+            IndexValue::ObjectCount(StorageQuota::MaxCalendarEventNotifications),
         ]
         .into_iter()
     }
@@ -164,28 +371,7 @@ impl IndexableObject for CalendarEventNotification {
 
 impl IndexableObject for &ArchivedCalendarEventNotification {
     fn index_values(&self) -> impl Iterator<Item = IndexValue<'_>> {
-        [
-            IndexValue::Quota {
-                used: self.size() as u32,
-            },
-            IndexValue::Property {
-                field: ValueClass::IndexProperty(IndexPropertyClass::Integer {
-                    property: CalendarNotificationField::CreatedToId.into(),
-                    value: self.created.to_native() as u64,
-                }),
-                value: self
-                    .event_id
-                    .as_ref()
-                    .map(|v| v.to_native())
-                    .unwrap_or(u32::MAX)
-                    .into(),
-            },
-            IndexValue::LogItem {
-                sync_collection: SyncCollection::CalendarEventNotification,
-                prefix: None,
-            },
-        ]
-        .into_iter()
+        self.meta_index_values().into_iter()
     }
 }
 
@@ -193,12 +379,174 @@ impl IndexableAndSerializableObject for CalendarEventNotification {
     fn is_versioned() -> bool {
         false
     }
+
+    fn set_pending_id(&mut self, document_id: u32) -> trc::Result<()> {
+        let content_hash = self.etag ^ self.meta_hash();
+        self.event_id = Some(document_id);
+        self.etag = content_hash ^ self.meta_hash();
+        Ok(())
+    }
+
+    fn size_hint(&self) -> usize {
+        self.meta_size_hint()
+    }
+}
+
+impl SplitObject for CalendarEventNotification {
+    type Content = CalendarEventNotificationContent;
+    type Context = ();
+
+    const CONTENT_FIELD: Field = CalendarNotificationField::Content.field();
+
+    fn meta_hash(&self) -> u32 {
+        let mut hasher = MetaHasher::new();
+        match &self.changed_by {
+            ChangedBy::PrincipalId(id) => {
+                hasher.u16(0).u32(*id);
+            }
+            ChangedBy::CalendarAddress(address) => {
+                hasher.u16(1).str(address);
+            }
+        }
+        for calendar_id in &self.calendar_ids {
+            hasher.u32(*calendar_id);
+        }
+        hasher
+            .opt_u32(self.event_id)
+            .i64(self.created)
+            .i64(self.modified)
+            .u32(self.size)
+            .u16(self.flags)
+            .u32(self.calendar_ids.len() as u32)
+            .finish()
+    }
+
+    fn set_etag(&mut self, etag: u32) {
+        self.etag = etag;
+    }
+
+    fn etag_value(&self) -> u32 {
+        self.etag
+    }
+
+    fn refresh_from_content(&mut self, content: &CalendarEventNotificationContent, _ctx: ()) {
+        self.size = content
+            .snapshots()
+            .into_iter()
+            .flatten()
+            .filter(|snapshot| !snapshot.components.is_empty())
+            .map(SizeWriter::ical)
+            .sum::<usize>() as u32;
+    }
+
+    fn full_index_values<'x>(
+        &'x self,
+        _content: &'x CalendarEventNotificationContent,
+    ) -> Vec<IndexValue<'x>> {
+        self.index_values().collect()
+    }
+}
+
+impl ArchivedSplitObject for ArchivedCalendarEventNotification {
+    type ArchivedContent = ArchivedCalendarEventNotificationContent;
+
+    const CONTENT_FIELD: Field = CalendarNotificationField::Content.field();
+
+    fn meta_hash(&self) -> u32 {
+        let mut hasher = MetaHasher::new();
+        match &self.changed_by {
+            ArchivedChangedBy::PrincipalId(id) => {
+                hasher.u16(0).u32(id.to_native());
+            }
+            ArchivedChangedBy::CalendarAddress(address) => {
+                hasher.u16(1).str(address);
+            }
+        }
+        for calendar_id in self.calendar_ids.iter() {
+            hasher.u32(calendar_id.to_native());
+        }
+        hasher
+            .opt_u32(self.event_id.as_ref().map(|id| id.to_native()))
+            .i64(self.created.to_native())
+            .i64(self.modified.to_native())
+            .u32(self.size.to_native())
+            .u16(self.flags.to_native())
+            .u32(self.calendar_ids.len() as u32)
+            .finish()
+    }
+
+    fn etag(&self) -> u32 {
+        self.etag.to_native()
+    }
+
+    fn meta_index_values(&self) -> Vec<IndexValue<'_>> {
+        vec![
+            IndexValue::Quota {
+                used: self.size.to_native(),
+            },
+            IndexValue::Index {
+                field: CalendarNotificationField::Created.into(),
+                value: self.created.to_native().into(),
+            },
+            IndexValue::LogItem {
+                sync_collection: SyncCollection::CalendarEventNotification,
+                prefix: None,
+            },
+            IndexValue::ObjectCount(StorageQuota::MaxCalendarEventNotifications),
+        ]
+    }
+
+    fn full_index_values<'x>(
+        &'x self,
+        _content: &'x ArchivedCalendarEventNotificationContent,
+    ) -> Vec<IndexValue<'x>> {
+        self.meta_index_values()
+    }
+}
+
+pub trait ICalendarObjectUid {
+    fn object_uid(&self) -> Option<&str>;
+}
+
+impl ICalendarObjectUid for ICalendar {
+    fn object_uid(&self) -> Option<&str> {
+        self.components
+            .iter()
+            .filter(|component| {
+                matches!(
+                    component.component_type,
+                    ICalendarComponentType::VEvent
+                        | ICalendarComponentType::VTodo
+                        | ICalendarComponentType::VJournal
+                        | ICalendarComponentType::VFreebusy
+                        | ICalendarComponentType::VAvailability
+                )
+            })
+            .find_map(|component| component.uid())
+    }
+}
+
+impl ICalendarObjectUid for ArchivedICalendar {
+    fn object_uid(&self) -> Option<&str> {
+        self.components
+            .iter()
+            .filter(|component| {
+                matches!(
+                    component.component_type,
+                    ArchivedICalendarComponentType::VEvent
+                        | ArchivedICalendarComponentType::VTodo
+                        | ArchivedICalendarComponentType::VJournal
+                        | ArchivedICalendarComponentType::VFreebusy
+                        | ArchivedICalendarComponentType::VAvailability
+                )
+            })
+            .find_map(|component| component.uid())
+    }
 }
 
 impl Calendar {
     pub fn size(&self) -> usize {
-        self.dead_properties.size()
-            + self.preferences.iter().map(|p| p.size()).sum::<usize>()
+        self.preferences.iter().map(|p| p.size()).sum::<usize>()
             + self.name.len()
             + std::mem::size_of::<Calendar>()
     }
@@ -206,52 +554,53 @@ impl Calendar {
 
 impl ArchivedCalendar {
     pub fn size(&self) -> usize {
-        self.dead_properties.size()
-            + self.preferences.iter().map(|p| p.size()).sum::<usize>()
+        self.preferences.iter().map(|p| p.size()).sum::<usize>()
             + self.name.len()
             + std::mem::size_of::<Calendar>()
     }
 }
 
 impl CalendarEvent {
-    pub fn size(&self) -> usize {
-        self.dead_properties.size()
+    pub fn meta_size_hint(&self) -> usize {
+        self.uid.len()
             + self.display_name.as_ref().map_or(0, |n| n.len())
             + self.names.iter().map(|n| n.name.len()).sum::<usize>()
-            + self.preferences.iter().map(|p| p.size()).sum::<usize>()
-            + self.size as usize
             + std::mem::size_of::<CalendarEvent>()
     }
 }
 
 impl ArchivedCalendarEvent {
-    pub fn size(&self) -> usize {
-        self.dead_properties.size()
+    pub fn event_range_end(&self) -> i64 {
+        self.start
+            .to_native()
+            .saturating_add(self.duration.to_native() as i64)
+    }
+
+    pub fn meta_size_hint(&self) -> usize {
+        self.uid.len()
             + self.display_name.as_ref().map_or(0, |n| n.len())
             + self.names.iter().map(|n| n.name.len()).sum::<usize>()
-            + self.preferences.iter().map(|p| p.size()).sum::<usize>()
-            + self.size.to_native() as usize
             + std::mem::size_of::<CalendarEvent>()
     }
 }
 
 impl CalendarEventNotification {
-    pub fn size(&self) -> usize {
+    pub fn meta_size_hint(&self) -> usize {
         (match &self.changed_by {
             ChangedBy::PrincipalId(_) => U32_LEN,
             ChangedBy::CalendarAddress(v) => v.len(),
-        }) + std::mem::size_of::<CalendarEventNotification>()
-            + self.size as usize
+        }) + ((self.calendar_ids.len() + self.dismissed_by.len()) * U32_LEN)
+            + std::mem::size_of::<CalendarEventNotification>()
     }
 }
 
 impl ArchivedCalendarEventNotification {
-    pub fn size(&self) -> usize {
+    pub fn meta_size_hint(&self) -> usize {
         (match &self.changed_by {
             ArchivedChangedBy::PrincipalId(_) => U32_LEN,
             ArchivedChangedBy::CalendarAddress(v) => v.len(),
-        }) + std::mem::size_of::<CalendarEventNotification>()
-            + self.size.to_native() as usize
+        }) + ((self.calendar_ids.len() + self.dismissed_by.len()) * U32_LEN)
+            + std::mem::size_of::<CalendarEventNotification>()
     }
 }
 
@@ -274,22 +623,6 @@ impl ArchivedCalendarPreferences {
             + self.color.as_ref().map_or(0, |n| n.len())
             + self.time_zone.size()
             + std::mem::size_of::<CalendarPreferences>()
-    }
-}
-
-impl EventPreferences {
-    pub fn size(&self) -> usize {
-        self.alerts.iter().map(|a| a.size()).sum::<usize>()
-            + self.properties.iter().map(|p| p.size()).sum::<usize>()
-            + std::mem::size_of::<EventPreferences>()
-    }
-}
-
-impl ArchivedEventPreferences {
-    pub fn size(&self) -> usize {
-        self.alerts.iter().map(|a| a.size()).sum::<usize>()
-            + self.properties.iter().map(|p| p.size()).sum::<usize>()
-            + std::mem::size_of::<EventPreferences>()
     }
 }
 
@@ -325,7 +658,7 @@ impl ArchivedDefaultAlert {
     }
 }
 
-impl CalendarEvent {
+impl CalendarEventContent {
     pub fn hashes(&self) -> impl Iterator<Item = u64> {
         self.data
             .event
@@ -365,7 +698,7 @@ impl CalendarEvent {
     }
 }
 
-impl ArchivedCalendarEvent {
+impl ArchivedCalendarEventContent {
     pub fn hashes(&self) -> impl Iterator<Item = u64> {
         self.data
             .event
@@ -405,7 +738,7 @@ impl ArchivedCalendarEvent {
     }
 }
 
-impl ArchivedCalendarEvent {
+impl ArchivedCalendarEventContent {
     pub fn index_document(
         &self,
         account_id: u32,
@@ -417,12 +750,6 @@ impl ArchivedCalendarEvent {
             .with_account_id(account_id)
             .with_document_id(document_id);
 
-        if index_fields.is_empty()
-            || index_fields.contains(&SearchField::Calendar(CalendarSearchField::Start))
-        {
-            document.index_integer(CalendarSearchField::Start, self.data.event_range_start());
-        }
-
         let mut detector = LanguageDetector::new();
         for component in self
             .data
@@ -432,6 +759,8 @@ impl ArchivedCalendarEvent {
             .filter(|e| e.component_type.is_scheduling_object())
         {
             for entry in component.entries.iter() {
+                let is_owner_attendee = matches!(entry.name, ArchivedICalendarProperty::Attendee)
+                    && entry.has_owner_role();
                 let (is_lang, is_keyword, field) = match entry.name {
                     ArchivedICalendarProperty::Summary => (true, false, CalendarSearchField::Title),
                     ArchivedICalendarProperty::Description => {
@@ -446,7 +775,6 @@ impl ArchivedCalendarEvent {
                     ArchivedICalendarProperty::Attendee => {
                         (false, false, CalendarSearchField::Attendee)
                     }
-                    ArchivedICalendarProperty::Uid => (false, true, CalendarSearchField::Uid),
                     _ => continue,
                 };
                 let field = SearchField::Calendar(field);
@@ -481,6 +809,18 @@ impl ArchivedCalendarEvent {
                         }
                     }
                 }
+                if is_owner_attendee {
+                    let field = SearchField::Calendar(CalendarSearchField::Owner);
+                    if index_fields.is_empty() || index_fields.contains(&field) {
+                        for value in entry.name_and_address() {
+                            document.index_text(
+                                field.clone(),
+                                strip_mailto_scheme(value),
+                                Language::None,
+                            );
+                        }
+                    }
+                }
             }
         }
 
@@ -493,3 +833,24 @@ impl ArchivedCalendarEvent {
         document
     }
 }
+
+impl ArchiveCompression for Calendar {
+    const COMPRESSION: Compression = Compression::None;
+}
+
+impl ArchiveCompression for CalendarEvent {
+    const COMPRESSION: Compression = Compression::None;
+}
+
+impl ArchiveCompression for CalendarEventContent {
+    const COMPRESSION: Compression = Compression::Zstd(Some(Dictionary::Calendar));
+}
+
+impl ArchiveCompression for CalendarEventNotification {
+    const COMPRESSION: Compression = Compression::None;
+}
+
+impl ArchiveCompression for CalendarEventNotificationContent {
+    const COMPRESSION: Compression = Compression::Zstd(Some(Dictionary::Calendar));
+}
+

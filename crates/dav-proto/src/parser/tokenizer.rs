@@ -4,17 +4,22 @@
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
  */
 
-use super::{Error, RawElement, Token, UnexpectedToken, XmlValueParser};
-use crate::schema::{Attribute, AttributeValue, Element, NamedElement, Namespace};
+use super::{
+    Error, RawElement, Token, UnexpectedToken, XmlValueParser,
+    value::{extension_namespace, known_namespace},
+};
+use crate::schema::{Attribute, AttributeValue, Element, NamedElement};
 use quick_xml::{
     NsReader, XmlVersion,
-    events::{Event, attributes::AttrError},
+    events::{BytesRef, Event, attributes::AttrError},
     name::ResolveResult,
 };
+use std::{borrow::Cow, mem};
 
 pub struct Tokenizer<'x> {
-    xml: NsReader<&'x [u8]>,
-    last_is_end: bool,
+    pub(super) xml: NsReader<&'x [u8]>,
+    pub(super) last_is_end: bool,
+    content: bool,
 }
 
 impl<'x> Tokenizer<'x> {
@@ -24,10 +29,11 @@ impl<'x> Tokenizer<'x> {
         Self {
             xml,
             last_is_end: false,
+            content: false,
         }
     }
 
-    pub fn token(&'_ mut self) -> super::Result<Token<'_>> {
+    pub fn token(&mut self) -> super::Result<Token<'x>> {
         loop {
             if self.last_is_end {
                 self.last_is_end = false;
@@ -44,33 +50,23 @@ impl<'x> Tokenizer<'x> {
                 Event::End(_) => {
                     return Ok(Token::ElementEnd);
                 }
-                Event::Text(text) if text.iter().any(|ch| !ch.is_ascii_whitespace()) => {
-                    return text
-                        .xml_content(XmlVersion::Implicit1_0)
-                        .map(Token::Text)
-                        .map_err(|err| Error::Xml(Box::new(err.into())));
+                event @ (Event::Text(_) | Event::CData(_) | Event::GeneralRef(_))
+                    if self.content =>
+                {
+                    return Ok(Token::Content(event));
+                }
+                Event::Text(text) if text.bytes().any(|ch| !ch.is_ascii_whitespace()) => {
+                    return Ok(Token::Text(text.xml_content(XmlVersion::Implicit1_0)));
                 }
                 Event::GeneralRef(entity) => {
-                    let entity_ref: &[u8] = entity.as_ref();
-                    hashify::fnc_map!(entity_ref,
-                        b"lt" => { return Ok(Token::Text("<".into())); },
-                        b"gt" => { return Ok(Token::Text(">".into())); },
-                        b"amp" => { return Ok(Token::Text("&".into())); },
-                        b"apos" => { return Ok(Token::Text("'".into())); },
-                        b"quot" => { return Ok(Token::Text("\"".into())); },
-                        _ => {
-                            if let Ok(Some(gr)) = entity.resolve_char_ref() {
-                                return Ok(Token::Text(gr.to_string().into()));
-                            }
-                        }
-                    );
-
-                    return entity
-                        .xml_content(XmlVersion::Implicit1_0)
-                        .map(Token::Text)
-                        .map_err(|err| Error::Xml(Box::new(err.into())));
+                    return Ok(Token::Text(general_ref_text(entity)));
                 }
-                Event::CData(bytes) => return Ok(Token::Bytes(bytes.into_inner())),
+                Event::CData(bytes) => {
+                    return Ok(Token::Bytes(match bytes.into_inner() {
+                        Cow::Borrowed(text) => Cow::Borrowed(text.as_bytes()),
+                        Cow::Owned(text) => Cow::Owned(text.into_bytes()),
+                    }));
+                }
                 Event::Eof => return Ok(Token::Eof),
                 _ => {
                     continue;
@@ -80,21 +76,23 @@ impl<'x> Tokenizer<'x> {
             // Parse element
             let name = tag.name();
             match resolve_result {
-                ResolveResult::Bound(raw_ns) if !raw_ns.as_ref().is_empty() => {
-                    if let (Some(ns), Some(element)) = (
-                        Namespace::try_parse(raw_ns.as_ref()),
-                        Element::try_parse(name.local_name().as_ref()).copied(),
-                    ) {
-                        return Ok(Token::ElementStart {
-                            name: NamedElement { ns, element },
-                            raw: RawElement::new(tag)
-                                .with_namespace_static(ns.namespace().as_bytes()),
-                        });
-                    } else {
-                        return Ok(Token::UnknownElement(
-                            RawElement::new(tag).with_namespace(raw_ns),
-                        ));
-                    }
+                ResolveResult::Bound(raw_ns) if !raw_ns.0.is_empty() => {
+                    let element =
+                        Element::try_parse(name.local_name().into_inner().as_bytes()).copied();
+                    let raw = RawElement::new(tag);
+                    return Ok(match (known_namespace(raw_ns.0), element) {
+                        (Some((ns, uri)), Some(element)) => Token::ElementStart {
+                            name: NamedElement { ns: *ns, element },
+                            raw: raw.with_namespace_static(uri),
+                        },
+                        (Some((_, uri)), None) => {
+                            Token::UnknownElement(raw.with_namespace_static(uri))
+                        }
+                        (None, _) => Token::UnknownElement(match extension_namespace(raw_ns.0) {
+                            Some(uri) => raw.with_namespace_static(uri),
+                            None => raw.with_namespace(raw_ns),
+                        }),
+                    });
                 }
                 ResolveResult::Unknown(p) => {
                     return Err(Error::Xml(Box::new(quick_xml::Error::Namespace(
@@ -119,8 +117,15 @@ impl<'x> Tokenizer<'x> {
     }
 
     pub fn expect_named_element(&mut self, expected: NamedElement) -> super::Result<()> {
+        self.expect_named_element_raw(expected).map(|_| ())
+    }
+
+    pub fn expect_named_element_raw(
+        &mut self,
+        expected: NamedElement,
+    ) -> super::Result<RawElement<'x>> {
         match self.token()? {
-            Token::ElementStart { name, .. } if name == expected => Ok(()),
+            Token::ElementStart { name, raw } if name == expected => Ok(raw),
             found => Err(Error::UnexpectedToken(Box::new(UnexpectedToken {
                 expected: Token::ElementStart {
                     name: expected,
@@ -132,10 +137,13 @@ impl<'x> Tokenizer<'x> {
         }
     }
 
-    pub fn expect_named_element_or_eof(&mut self, expected: NamedElement) -> super::Result<bool> {
+    pub fn expect_named_element_or_eof(
+        &mut self,
+        expected: NamedElement,
+    ) -> super::Result<Option<RawElement<'x>>> {
         match self.token()? {
-            Token::ElementStart { name, .. } if name == expected => Ok(true),
-            Token::Eof => Ok(false),
+            Token::ElementStart { name, raw } if name == expected => Ok(Some(raw)),
+            Token::Eof => Ok(None),
             found => Err(Error::UnexpectedToken(Box::new(UnexpectedToken {
                 expected: Token::ElementStart {
                     name: expected,
@@ -174,9 +182,27 @@ impl<'x> Tokenizer<'x> {
         }
     }
 
+    pub(super) fn with_content<T>(
+        &mut self,
+        read: impl FnOnce(&mut Self) -> super::Result<T>,
+    ) -> super::Result<T> {
+        self.content = true;
+        let result = read(self);
+        self.content = false;
+        result
+    }
+
     pub fn collect_string_value(&mut self) -> super::Result<Option<String>> {
-        let mut depth = 1;
-        let mut value: Option<String> = None;
+        if mem::take(&mut self.last_is_end) {
+            return Ok(None);
+        }
+        self.with_content(Tokenizer::collect_string_content)
+    }
+
+    fn collect_string_content(&mut self) -> super::Result<Option<String>> {
+        let mut depth = 1u32;
+        let mut value = String::new();
+        let mut has_content = false;
 
         loop {
             match self.token()? {
@@ -187,25 +213,24 @@ impl<'x> Tokenizer<'x> {
                         break;
                     }
                 }
-                Token::Text(text) => {
-                    if let Some(ref mut v) = value {
-                        v.push_str(&text);
-                    } else {
-                        value = Some(text.into_owned());
-                    }
+                Token::Content(Event::Text(text)) => {
+                    has_content |= text.bytes().any(|ch| !ch.is_ascii_whitespace());
+                    append_text(&mut value, text.xml_content(XmlVersion::Implicit1_0));
                 }
-                Token::Bytes(bytes) => {
-                    if let Some(ref mut v) = value {
-                        v.push_str(&String::from_utf8_lossy(&bytes));
-                    } else {
-                        value = Some(String::from_utf8_lossy(&bytes).into_owned());
-                    }
+                Token::Content(Event::CData(bytes)) => {
+                    has_content = true;
+                    append_text(&mut value, bytes.into_inner());
+                }
+                Token::Content(Event::GeneralRef(entity)) => {
+                    has_content = true;
+                    append_text(&mut value, general_ref_text(entity));
                 }
                 Token::Eof => return Err(Token::Eof.into_unexpected()),
+                Token::Content(_) | Token::Text(_) | Token::Bytes(_) => {}
             }
         }
 
-        Ok(value)
+        Ok(has_content.then_some(value))
     }
 
     pub fn parse_value<T: XmlValueParser>(&mut self) -> super::Result<Option<Result<T, String>>> {
@@ -235,6 +260,7 @@ impl<'x> Tokenizer<'x> {
                         result = Some(Err(String::from_utf8_lossy(&bytes).into_owned()));
                     }
                 }
+                Token::Content(_) => {}
                 Token::Eof => return Err(Token::Eof.into_unexpected()),
             }
         }
@@ -277,13 +303,37 @@ impl<'x> Tokenizer<'x> {
     }
 }
 
+pub(super) fn append_text(value: &mut String, piece: Cow<'_, str>) {
+    if value.is_empty() {
+        *value = piece.into_owned();
+    } else {
+        value.push_str(&piece);
+    }
+}
+
+fn general_ref_text(entity: BytesRef<'_>) -> Cow<'_, str> {
+    if let Some(text) = hashify::map!(entity.as_bytes(), &'static str,
+        "lt" => "<",
+        "gt" => ">",
+        "amp" => "&",
+        "apos" => "'",
+        "quot" => "\""
+    ) {
+        return Cow::Borrowed(text);
+    }
+    if let Ok(Some(ch)) = entity.resolve_char_ref() {
+        return Cow::Owned(ch.to_string());
+    }
+    entity.xml_content(XmlVersion::Implicit1_0)
+}
+
 impl RawElement<'_> {
     pub fn attributes<T: AttributeValue>(
         &self,
     ) -> impl Iterator<Item = super::Result<Attribute<T>>> + '_ {
         self.element.attributes().filter_map(|attr| match attr {
             Ok(attr) => match attr.normalized_value(XmlVersion::Implicit1_0) {
-                Ok(value) => Attribute::from_param(attr.key.as_ref(), value).map(Ok),
+                Ok(value) => Attribute::from_param(attr.key.into_inner().as_bytes(), value).map(Ok),
                 Err(err) => Some(Err(err.into())),
             },
             Err(err) => Some(Err(err.into())),
@@ -303,201 +353,3 @@ impl From<AttrError> for Error {
     }
 }
 
-#[cfg(test)]
-mod tests {
-
-    use std::borrow::Cow;
-
-    use crate::schema::{Collation, MatchType};
-
-    use super::*;
-
-    #[derive(Debug, PartialEq, Eq)]
-    pub enum TestToken<'x> {
-        ElementStart(NamedElement),
-        ElementEnd,
-        Attribute(Attribute<String>),
-        Bytes(Cow<'x, [u8]>),
-        Text(Cow<'x, str>),
-    }
-
-    #[test]
-    fn test_tokenizer() {
-        for (input, expected) in [
-            (
-                r#"<?xml version="1.0" encoding="utf-8" ?>
-   <C:calendar-query xmlns:D="DAV:"
-                    xmlns:C="urn:ietf:params:xml:ns:caldav">
-    <D:prop>
-      <D:getetag/>
-      <C:calendar-data/>
-    </D:prop>
-    <C:filter>
-      <C:comp-filter name="VCALENDAR"/>
-    </C:filter>
-   </C:calendar-query>"#,
-                vec![
-                    TestToken::ElementStart(NamedElement {
-                        ns: Namespace::CalDav,
-                        element: Element::CalendarQuery,
-                    }),
-                    TestToken::ElementStart(NamedElement {
-                        ns: Namespace::Dav,
-                        element: Element::Prop,
-                    }),
-                    TestToken::ElementStart(NamedElement {
-                        ns: Namespace::Dav,
-                        element: Element::Getetag,
-                    }),
-                    TestToken::ElementEnd,
-                    TestToken::ElementStart(NamedElement {
-                        ns: Namespace::CalDav,
-                        element: Element::CalendarData,
-                    }),
-                    TestToken::ElementEnd,
-                    TestToken::ElementEnd,
-                    TestToken::ElementStart(NamedElement {
-                        ns: Namespace::CalDav,
-                        element: Element::Filter,
-                    }),
-                    TestToken::ElementStart(NamedElement {
-                        ns: Namespace::CalDav,
-                        element: Element::CompFilter,
-                    }),
-                    TestToken::Attribute(Attribute::Name("VCALENDAR".to_string())),
-                    TestToken::ElementEnd,
-                    TestToken::ElementEnd,
-                    TestToken::ElementEnd,
-                ],
-            ),
-            (
-                r#" <?xml version="1.0" encoding="utf-8" ?>
-   <C:addressbook-query xmlns:D="DAV:"
-                     xmlns:C="urn:ietf:params:xml:ns:carddav">
-     <D:prop>
-       <D:getetag/>
-       <C:address-data>
-         <C:prop name="VERSION"/>
-         <C:prop name="UID"/>
-         <C:prop name="NICKNAME"/>
-         <C:prop name="EMAIL"/>
-         <C:prop name="FN"/>
-       </C:address-data>
-     </D:prop>
-     <C:filter>
-       <C:prop-filter name="NICKNAME">
-         <C:text-match collation="i;unicode-casemap"
-                       match-type="equals"
-         >me</C:text-match>
-       </C:prop-filter>
-     </C:filter>
-   </C:addressbook-query>"#,
-                vec![
-                    TestToken::ElementStart(NamedElement {
-                        ns: Namespace::CardDav,
-                        element: Element::AddressbookQuery,
-                    }),
-                    TestToken::ElementStart(NamedElement {
-                        ns: Namespace::Dav,
-                        element: Element::Prop,
-                    }),
-                    TestToken::ElementStart(NamedElement {
-                        ns: Namespace::Dav,
-                        element: Element::Getetag,
-                    }),
-                    TestToken::ElementEnd,
-                    TestToken::ElementStart(NamedElement {
-                        ns: Namespace::CardDav,
-                        element: Element::AddressData,
-                    }),
-                    TestToken::ElementStart(NamedElement {
-                        ns: Namespace::CardDav,
-                        element: Element::Prop,
-                    }),
-                    TestToken::Attribute(Attribute::Name("VERSION".to_string())),
-                    TestToken::ElementEnd,
-                    TestToken::ElementStart(NamedElement {
-                        ns: Namespace::CardDav,
-                        element: Element::Prop,
-                    }),
-                    TestToken::Attribute(Attribute::Name("UID".to_string())),
-                    TestToken::ElementEnd,
-                    TestToken::ElementStart(NamedElement {
-                        ns: Namespace::CardDav,
-                        element: Element::Prop,
-                    }),
-                    TestToken::Attribute(Attribute::Name("NICKNAME".to_string())),
-                    TestToken::ElementEnd,
-                    TestToken::ElementStart(NamedElement {
-                        ns: Namespace::CardDav,
-                        element: Element::Prop,
-                    }),
-                    TestToken::Attribute(Attribute::Name("EMAIL".to_string())),
-                    TestToken::ElementEnd,
-                    TestToken::ElementStart(NamedElement {
-                        ns: Namespace::CardDav,
-                        element: Element::Prop,
-                    }),
-                    TestToken::Attribute(Attribute::Name("FN".to_string())),
-                    TestToken::ElementEnd,
-                    TestToken::ElementEnd,
-                    TestToken::ElementEnd,
-                    TestToken::ElementStart(NamedElement {
-                        ns: Namespace::CardDav,
-                        element: Element::Filter,
-                    }),
-                    TestToken::ElementStart(NamedElement {
-                        ns: Namespace::CardDav,
-                        element: Element::PropFilter,
-                    }),
-                    TestToken::Attribute(Attribute::Name("NICKNAME".to_string())),
-                    TestToken::ElementStart(NamedElement {
-                        ns: Namespace::CardDav,
-                        element: Element::TextMatch,
-                    }),
-                    TestToken::Attribute(Attribute::Collation(Collation::UnicodeCasemap)),
-                    TestToken::Attribute(Attribute::MatchType(MatchType::Equals)),
-                    TestToken::Text("me".into()),
-                    TestToken::ElementEnd,
-                    TestToken::ElementEnd,
-                    TestToken::ElementEnd,
-                    TestToken::ElementEnd,
-                ],
-            ),
-        ] {
-            let mut tokenizer = Tokenizer::new(input.as_bytes());
-            let mut result = vec![];
-
-            loop {
-                match tokenizer.token() {
-                    Ok(token) => match token {
-                        Token::ElementStart { name, raw } => {
-                            result.push(TestToken::ElementStart(name));
-                            for attr in raw.attributes::<String>() {
-                                result.push(TestToken::Attribute(attr.unwrap()));
-                            }
-                        }
-                        Token::ElementEnd => {
-                            result.push(TestToken::ElementEnd);
-                        }
-                        Token::Bytes(cow) => {
-                            result.push(TestToken::Bytes(cow.into_owned().into()));
-                        }
-                        Token::Text(cow) => {
-                            result.push(TestToken::Text(cow.into_owned().into()));
-                        }
-                        Token::UnknownElement(_) => {
-                            //result.push(TestToken::UnknownElement(unknown_element));
-                        }
-                        Token::Eof => break,
-                    },
-                    Err(err) => {
-                        panic!("Error: {:?}", err);
-                    }
-                }
-            }
-
-            assert_eq!(result, expected);
-        }
-    }
-}

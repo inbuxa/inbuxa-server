@@ -11,38 +11,41 @@ use crate::{
         ACCOUNT_FLAG_ENCRYPT_ALGO_AES256_GCM, ACCOUNT_FLAG_ENCRYPT_ALGO_CHACHA20_POLY1305,
         ACCOUNT_FLAG_ENCRYPT_APPEND, ACCOUNT_FLAG_ENCRYPT_METHOD_PGP,
         ACCOUNT_FLAG_ENCRYPT_METHOD_SMIME, ACCOUNT_FLAG_ENCRYPT_TRAIN_SPAM_FILTER, ACCOUNT_IS_USER,
-        AccountCache, AccountInfo, AccountTenantIds, DOMAIN_FLAG_RELAY, DOMAIN_FLAG_SUB_ADDRESSING,
-        DomainCache, EmailAddress, EmailAddressRef, EmailCache, MailingListCache, PermissionsGroup,
-        RECOVERY_ADMIN_ID, RoleCache, TenantCache, permissions::BuildPermissions,
+        AccountCache, AccountInfo, AccountStorage, ChangedBy, DOMAIN_FLAG_RELAY,
+        DOMAIN_FLAG_SUB_ADDRESSING, DomainCache, EmailAddress, EmailAddressRef, EmailCache,
+        EncryptionKeys, MailingListCache, PermissionsGroup, RECOVERY_ADMIN_ID, RoleCache,
+        permissions::BuildPermissions,
     },
     config::smtp::auth::DkimSigners,
-    expr::if_block::BootstrapExprExt,
+    expr::{Bump, if_block::BootstrapExprExt},
     network::mta::AddressResolver,
     storage::{
-        ObjectQuota, TenantQuota,
+        ObjectQuota,
         encryption::{EncryptionMethod, parse_public_key},
     },
 };
+use compact_str::{CompactString, ToCompactString};
 use registry::{
     schema::{
-        enums::{DkimRotationStage, Locale, StorageQuota, TenantStorageQuota},
+        enums::{DkimRotationStage, Locale, StorageQuota},
         prelude::{ObjectType, Property},
         structs::{
-            Account, DkimSignature, Domain, EncryptionAtRest, MailingList, MaskedEmail,
-            Permissions, PublicKey, Role, SubAddressing, Tenant,
+            Account, DkimSignature, Domain, EncryptionAtRest, MailingList, PublicKey, Role,
+            SubAddressing,
         },
     },
     types::id::ObjectId,
 };
 use std::{borrow::Cow, sync::Arc};
 use store::{
-    U64_LEN,
+    U32_LEN,
     registry::{RegistryQuery, bootstrap::Bootstrap},
-    write::{key::KeySerializer, now},
+    write::key::KeySerializer,
 };
-use trc::{AddContext, StoreEvent};
+use trc::{AddContext, CacheEvent};
 use types::id::Id;
 use utils::DomainPart;
+
 
 impl Server {
     pub async fn domain(&self, domain: &str) -> trc::Result<Option<Arc<DomainCache>>> {
@@ -54,9 +57,9 @@ impl Server {
 
         if let Some(domain_id) = domain_names.get(domain) {
             trc::event!(
-                Store(StoreEvent::CacheHit),
-                Key = domain.to_string(),
-                Collection = "domainName",
+                Cache(CacheEvent::Hit),
+                Key = CompactString::from(domain),
+                Name = "domainName",
             );
 
             let result = self.domain_by_id(domain_id).await?;
@@ -68,26 +71,18 @@ impl Server {
         } else {
             let domain_names_negative = &self.inner.cache.domain_names_negative;
             if domain_names_negative.get(domain).is_none() {
-                let mut object = self
+                let object = self
                     .registry()
-                    .primary_key(
+                    .first_primary_key(
                         ObjectType::Domain.into(),
-                        Property::Name,
-                        domain.as_bytes().to_vec(),
+                        &[
+                            (Property::Name, domain.as_bytes()),
+                            (Property::Aliases, domain.as_bytes()),
+                        ],
                     )
                     .await
-                    .caused_by(trc::location!())?;
-                if object.is_none() {
-                    object = self
-                        .registry()
-                        .primary_key(
-                            ObjectType::Domain.into(),
-                            Property::Aliases,
-                            domain.as_bytes().to_vec(),
-                        )
-                        .await
-                        .caused_by(trc::location!())?;
-                }
+                    .caused_by(trc::location!())?
+                    .map(|(_, object)| object);
 
                 if let Some(domain) = object {
                     // Cache positive result
@@ -95,7 +90,7 @@ impl Server {
                     let domain = self.domain_by_id(domain_id).await?;
                     if let Some(domain) = &domain {
                         for name in domain.names.iter() {
-                            domain_names.insert(name.clone(), domain_id);
+                            domain_names.insert(CompactString::from(name.as_ref()), domain_id);
                         }
                     }
 
@@ -109,18 +104,18 @@ impl Server {
                     );
 
                     trc::event!(
-                        Store(StoreEvent::CacheMiss),
-                        Key = domain.to_string(),
-                        Collection = "domainName",
+                        Cache(CacheEvent::Miss),
+                        Key = CompactString::from(domain),
+                        Name = "domainName",
                     );
 
                     Ok(None)
                 }
             } else {
                 trc::event!(
-                    Store(StoreEvent::CacheHit),
-                    Key = domain.to_string(),
-                    Collection = "domainNameNegative",
+                    Cache(CacheEvent::Hit),
+                    Key = CompactString::from(domain),
+                    Name = "domainNameNegative",
                 );
 
                 Ok(None)
@@ -137,20 +132,12 @@ impl Server {
             .await
         {
             Ok(domain) => {
-                trc::event!(
-                    Store(StoreEvent::CacheHit),
-                    Key = domain_id,
-                    Collection = "domainId",
-                );
+                trc::event!(Cache(CacheEvent::Hit), Key = domain_id, Name = "domainId",);
 
                 Ok(Some(domain))
             }
             Err(guard) => {
-                trc::event!(
-                    Store(StoreEvent::CacheMiss),
-                    Key = domain_id,
-                    Collection = "domainId",
-                );
+                trc::event!(Cache(CacheEvent::Miss), Key = domain_id, Name = "domainId",);
                 let Some(domain) = self.registry().object::<Domain>(domain_id.into()).await? else {
                     return Ok(None);
                 };
@@ -193,8 +180,6 @@ impl Server {
                         )
                         .collect(),
                     id: domain_id,
-                    id_directory: domain.directory_id.map(|id| id.document_id()),
-                    id_tenant: domain.member_tenant_id.map(|id| id.document_id()),
                     catch_all: domain.catch_all_address.map(|s| s.into_boxed_str()),
                     sub_addressing_custom,
                     flags,
@@ -215,10 +200,10 @@ impl Server {
 
         if let Some(email) = emails.get(&EmailAddressRef::new(local_part, domain_id)) {
             trc::event!(
-                Store(StoreEvent::CacheHit),
-                Key = local_part.to_string(),
+                Cache(CacheEvent::Hit),
+                Key = CompactString::from(local_part),
                 Domain = domain_id,
-                Collection = "email",
+                Name = "email",
             );
 
             Ok(Some(email))
@@ -229,10 +214,10 @@ impl Server {
                 .is_none()
             {
                 trc::event!(
-                    Store(StoreEvent::CacheMiss),
-                    Key = local_part.to_string(),
+                    Cache(CacheEvent::Miss),
+                    Key = CompactString::from(local_part),
                     Domain = domain_id,
-                    Collection = "email",
+                    Name = "email",
                 );
 
                 if let Some(object) = self
@@ -240,9 +225,9 @@ impl Server {
                     .primary_key(
                         None,
                         Property::Email,
-                        KeySerializer::new(local_part.len() + U64_LEN)
+                        KeySerializer::new(local_part.len() + U32_LEN)
                             .write(local_part.as_bytes())
-                            .write(domain_id as u64)
+                            .write(domain_id)
                             .finalize(),
                     )
                     .await
@@ -259,7 +244,7 @@ impl Server {
                                 .iter()
                                 .any(|address| {
                                     address.domain_id == domain_id
-                                        && address.local_part.as_ref() == local_part
+                                        && address.local_part == local_part
                                 })
                             {
                                 EmailCache::Account(item_id)
@@ -271,7 +256,7 @@ impl Server {
                             if let Some(list) = self.try_list(item_id).await?
                                 && !list.addresses.iter().any(|address| {
                                     address.domain_id == domain_id
-                                        && address.local_part.as_ref() == local_part
+                                        && address.local_part == local_part
                                 })
                             {
                                 EmailCache::DisabledListAddress(item_id)
@@ -285,7 +270,7 @@ impl Server {
                                 .details(
                                     "Object with email property is not an account or mailing list.",
                                 )
-                                .ctx(trc::Key::Id, object.to_string())
+                                .ctx(trc::Key::Id, object.to_compact_string())
                                 .caused_by(trc::location!()));
                         }
                     };
@@ -303,10 +288,10 @@ impl Server {
                 }
             } else {
                 trc::event!(
-                    Store(StoreEvent::CacheHit),
-                    Key = local_part.to_string(),
+                    Cache(CacheEvent::Hit),
+                    Key = CompactString::from(local_part),
                     Domain = domain_id,
-                    Collection = "emailNegative",
+                    Name = "emailNegative",
                 );
                 Ok(None)
             }
@@ -339,14 +324,13 @@ impl Server {
                     .into(),
                 id: RECOVERY_ADMIN_ID,
                 addresses: Default::default(),
-                id_tenant: Default::default(),
                 id_member_of: Default::default(),
                 quota_disk: Default::default(),
-                quota_objects: Default::default(),
                 description: Some("Recovery admin account".into()),
-                encryption_key: Default::default(),
+                storage: Default::default(),
                 locale: Default::default(),
                 flags: Default::default(),
+                active_script: Default::default(),
             }))
         } else {
             Err(trc::AuthEvent::Error
@@ -366,20 +350,12 @@ impl Server {
             .await
         {
             Ok(account) => {
-                trc::event!(
-                    Store(StoreEvent::CacheHit),
-                    Key = account_id,
-                    Collection = "account",
-                );
+                trc::event!(Cache(CacheEvent::Hit), Key = account_id, Name = "account",);
 
                 Ok(Some(account))
             }
             Err(guard) => {
-                trc::event!(
-                    Store(StoreEvent::CacheMiss),
-                    Key = account_id,
-                    Collection = "account",
-                );
+                trc::event!(Cache(CacheEvent::Miss), Key = account_id, Name = "account",);
 
                 let Some(account) = self.registry().object::<Account>(account_id.into()).await?
                 else {
@@ -450,9 +426,10 @@ impl Server {
                                 .await
                                 .caused_by(trc::location!())?
                             {
-                                parse_public_key(&public_key)
-                                    .unwrap_or_default()
-                                    .map(|params| {
+                                match parse_public_key(&public_key).and_then(|params| {
+                                    params.ok_or(Cow::Borrowed("No public key found"))
+                                }) {
+                                    Ok(params) => {
                                         match params.method {
                                             EncryptionMethod::PGP => {
                                                 flags |= ACCOUNT_FLAG_ENCRYPT_METHOD_PGP
@@ -461,8 +438,23 @@ impl Server {
                                                 flags |= ACCOUNT_FLAG_ENCRYPT_METHOD_SMIME
                                             }
                                         }
-                                        params.certs
-                                    })
+                                        Some(params.certs)
+                                    }
+                                    Err(err) => {
+                                        trc::error!(
+                                            trc::EventType::Registry(
+                                                trc::RegistryEvent::ValidationError
+                                            )
+                                            .into_err()
+                                            .details("Invalid public key, encryption disabled")
+                                            .reason(err)
+                                            .account_id(account_id)
+                                            .ctx(trc::Key::Id, settings.public_key.id())
+                                            .caused_by(trc::location!())
+                                        );
+                                        None
+                                    }
+                                }
                             } else {
                                 None
                             }
@@ -482,25 +474,24 @@ impl Server {
                                 account
                                     .aliases
                                     .into_iter()
-                                    .filter(|alias| alias.enabled)
+                                    .filter(|alias| alias.enable)
                                     .map(|alias| EmailAddress {
                                         local_part: alias.name.into(),
                                         domain_id: alias.domain_id.document_id(),
                                     }),
                             )
                             .collect(),
-                            id_tenant: account.member_tenant_id.map(|id| id.document_id()),
                             id_member_of: account
                                 .member_group_ids
                                 .into_iter()
                                 .map(|id| id.document_id())
                                 .collect(),
                             quota_disk,
-                            quota_objects: quota_objects.map(Box::new),
                             description: account.description.map(Into::into),
+                            storage: AccountStorage::boxed(quota_objects, encryption_key),
                             locale: account.locale,
-                            encryption_key,
                             flags,
+                            active_script: Default::default(),
                         }
                     }
                     Account::Group(account) => {
@@ -545,21 +536,20 @@ impl Server {
                                 account
                                     .aliases
                                     .into_iter()
-                                    .filter(|alias| alias.enabled)
+                                    .filter(|alias| alias.enable)
                                     .map(|alias| EmailAddress {
                                         local_part: alias.name.into(),
                                         domain_id: alias.domain_id.document_id(),
                                     }),
                             )
                             .collect(),
-                            id_tenant: account.member_tenant_id.map(|id| id.document_id()),
                             id_member_of: Default::default(),
                             quota_disk,
-                            quota_objects: quota_objects.map(Box::new),
                             description: account.description.map(Into::into),
-                            encryption_key: None,
+                            storage: AccountStorage::boxed(quota_objects, None),
                             locale: account.locale,
                             flags: 0,
+                            active_script: Default::default(),
                         }
                     }
                 });
@@ -599,10 +589,12 @@ impl Server {
                     if domain.flags & DOMAIN_FLAG_SUB_ADDRESSING != 0 {
                         if let Some(sub_addressing) = &domain.sub_addressing_custom {
                             // Custom sub-addressing resolution
+                            let mut arena = Bump::new();
                             if let Some(result) = self
                                 .eval_if::<String, _>(
                                     sub_addressing,
                                     &AddressResolver(local_part.as_ref()),
+                                    &mut arena,
                                     0,
                                 )
                                 .await
@@ -645,28 +637,6 @@ impl Server {
         self.build_account_info(account).await
     }
 
-    pub async fn scheduling_account_info(
-        &self,
-        authenticated_account_id: u32,
-        owner_account_id: u32,
-    ) -> trc::Result<AccountInfo> {
-        let account = self.account(authenticated_account_id).await?;
-        let mut account_info = self.build_account_info(account).await?;
-
-        if owner_account_id != authenticated_account_id {
-            let owner_account = self.account(owner_account_id).await?;
-            let owner_account_info = self.build_account_info(owner_account).await?;
-
-            for address in owner_account_info.addresses {
-                if !account_info.addresses.contains(&address) {
-                    account_info.addresses.push(address);
-                }
-            }
-        }
-
-        Ok(account_info)
-    }
-
     pub async fn build_account_info(&self, account: Arc<AccountCache>) -> trc::Result<AccountInfo> {
         let mut addresses =
             Vec::with_capacity(account.id_member_of.len() + account.addresses.len());
@@ -674,7 +644,7 @@ impl Server {
             if let Some(domain) = self.domain_by_id(address.domain_id).await? {
                 for name in domain.names.iter() {
                     let mut addr = String::with_capacity(name.len() + address.local_part.len() + 1);
-                    addr.push_str(address.local_part.as_ref());
+                    addr.push_str(&address.local_part);
                     addr.push('@');
                     addr.push_str(name.as_ref());
                     addresses.push(addr);
@@ -689,7 +659,7 @@ impl Server {
                         for name in domain.names.iter() {
                             let mut addr =
                                 String::with_capacity(name.len() + address.local_part.len() + 1);
-                            addr.push_str(address.local_part.as_ref());
+                            addr.push_str(&address.local_part);
                             addr.push('@');
                             addr.push_str(name.as_ref());
                             addresses.push(addr);
@@ -710,12 +680,12 @@ impl Server {
         let cache = &self.inner.cache.roles;
         match cache.get_value_or_guard_async(&id).await {
             Ok(role) => {
-                trc::event!(Store(StoreEvent::CacheHit), Key = id, Collection = "role");
+                trc::event!(Cache(CacheEvent::Hit), Key = id, Name = "role");
 
                 Ok(role)
             }
             Err(guard) => {
-                trc::event!(Store(StoreEvent::CacheMiss), Key = id, Collection = "role");
+                trc::event!(Cache(CacheEvent::Miss), Key = id, Name = "role");
 
                 let Some(role) = self.registry().object::<Role>(id.into()).await? else {
                     return Err(trc::AuthEvent::Error
@@ -748,107 +718,39 @@ impl Server {
         }
     }
 
-    pub async fn tenant(&self, id: u32) -> trc::Result<Arc<TenantCache>> {
-        let cache = &self.inner.cache.tenants;
-        match cache.get_value_or_guard_async(&id).await {
-            Ok(tenant) => {
-                trc::event!(Store(StoreEvent::CacheHit), Key = id, Collection = "tenant");
-
-                Ok(tenant)
-            }
-            Err(guard) => {
-                trc::event!(
-                    Store(StoreEvent::CacheMiss),
-                    Key = id,
-                    Collection = "tenant"
-                );
-
-                let Some(tenant) = self.registry().object::<Tenant>(id.into()).await? else {
-                    return Err(trc::AuthEvent::Error
-                        .into_err()
-                        .details("Tenant not found.")
-                        .ctx(trc::Key::Id, id)
-                        .caused_by(trc::location!()));
-                };
-
-                let mut quota_objects: Option<TenantQuota> = None;
-                let mut quota_disk = 0;
-                for (resource, limit) in tenant.quotas {
-                    if resource == TenantStorageQuota::MaxDiskQuota {
-                        quota_disk = limit;
-                    } else {
-                        quota_objects
-                            .get_or_insert_default()
-                            .set(resource, limit as u32);
-                    }
-                }
-
-                // Calculate effective permissions
-                let permissions = match tenant.permissions {
-                    Permissions::Inherit => None,
-                    Permissions::Merge(permissions) => Some(Box::new(
-                        PermissionsGroup::from(permissions).with_merge(true),
-                    )),
-                    Permissions::Replace(permissions) => Some(Box::new(
-                        PermissionsGroup::from(permissions).with_merge(false),
-                    )),
-                };
-
-                let cache = Arc::new(TenantCache {
-                    id_roles: tenant
-                        .roles
-                        .role_ids()
-                        .unwrap_or(
-                            self.core
-                                .network
-                                .security
-                                .default_role_ids_tenant
-                                .as_slice(),
-                        )
-                        .iter()
-                        .map(|id| id.document_id())
-                        .collect(),
-                    quota_disk,
-                    quota_objects: quota_objects.map(Box::new),
-                    permissions,
-                });
-
-                let _ = guard.insert(cache.clone());
-                Ok(cache)
-            }
-        }
-    }
 
     pub async fn try_list(&self, id: u32) -> trc::Result<Option<Arc<MailingListCache>>> {
         let cache = &self.inner.cache.lists;
         match cache.get_value_or_guard_async(&id).await {
             Ok(list) => {
-                trc::event!(Store(StoreEvent::CacheHit), Key = id, Collection = "list");
+                trc::event!(Cache(CacheEvent::Hit), Key = id, Name = "list");
 
                 Ok(Some(list))
             }
             Err(guard) => {
-                trc::event!(Store(StoreEvent::CacheMiss), Key = id, Collection = "list");
+                trc::event!(Cache(CacheEvent::Miss), Key = id, Name = "list");
 
                 let Some(list) = self.registry().object::<MailingList>(id.into()).await? else {
                     return Ok(None);
                 };
-                let cache =
-                    Arc::new(MailingListCache {
-                        addresses: [EmailAddress {
-                            local_part: list.name.into(),
-                            domain_id: list.domain_id.document_id(),
-                        }]
-                        .into_iter()
-                        .chain(list.aliases.into_iter().filter(|alias| alias.enabled).map(
-                            |alias| EmailAddress {
+                let cache = Arc::new(MailingListCache {
+                    addresses: [EmailAddress {
+                        local_part: list.name.into(),
+                        domain_id: list.domain_id.document_id(),
+                    }]
+                    .into_iter()
+                    .chain(
+                        list.aliases
+                            .into_iter()
+                            .filter(|alias| alias.enable)
+                            .map(|alias| EmailAddress {
                                 local_part: alias.name.into(),
                                 domain_id: alias.domain_id.document_id(),
-                            },
-                        ))
-                        .collect(),
-                        recipients: list.recipients.into_iter().map(Into::into).collect(),
-                    });
+                            }),
+                    )
+                    .collect(),
+                    recipients: list.recipients.into_iter().map(Into::into).collect(),
+                });
                 let _ = guard.insert(cache.clone());
                 Ok(Some(cache))
             }
@@ -863,18 +765,18 @@ impl Server {
         match cache.get_value_or_guard_async(&domain.id).await {
             Ok(signers) => {
                 trc::event!(
-                    Store(StoreEvent::CacheHit),
+                    Cache(CacheEvent::Hit),
                     Key = domain.id,
-                    Collection = "dkimSigners",
+                    Name = "dkimSigners",
                 );
 
-                Ok(Some(signers))
+                Ok(has_dkim_signers(&signers).then_some(signers))
             }
             Err(guard) => {
                 trc::event!(
-                    Store(StoreEvent::CacheMiss),
+                    Cache(CacheEvent::Miss),
                     Key = domain.id,
-                    Collection = "dkimSigners",
+                    Name = "dkimSigners",
                 );
 
                 let ids = self
@@ -887,7 +789,7 @@ impl Server {
                 let domain_name = &domain.names[0];
                 let mut signers = DkimSigners {
                     dkim1: Vec::with_capacity(ids.len()),
-                    dkim2: None,
+                    ..Default::default()
                 };
                 for id in ids {
                     if let Some(signature) = self.registry().object::<DkimSignature>(id).await?
@@ -898,16 +800,16 @@ impl Server {
                     }
                 }
 
-                if !signers.dkim1.is_empty() || signers.dkim2.is_some() {
-                    let signers = Arc::new(signers);
-                    let _ = guard.insert(signers.clone());
-                    Ok(Some(signers))
-                } else {
-                    Ok(None)
-                }
+                let signers = Arc::new(signers);
+                let _ = guard.insert(signers.clone());
+                Ok(has_dkim_signers(&signers).then_some(signers))
             }
         }
     }
+}
+
+fn has_dkim_signers(signers: &DkimSigners) -> bool {
+    !signers.dkim1.is_empty() || signers.dkim2.is_some()
 }
 
 impl AccountInfo {
@@ -925,16 +827,11 @@ impl AccountInfo {
         self.account.description.as_deref()
     }
 
-    #[inline(always)]
-    pub fn tenant_id(&self) -> Option<u32> {
-        self.account.id_tenant
-    }
 
     #[inline(always)]
-    pub fn account_tenant_ids(&self) -> AccountTenantIds {
-        AccountTenantIds {
+    pub fn changed_by(&self) -> ChangedBy {
+        ChangedBy {
             account_id: self.account_id,
-            tenant_id: self.account.id_tenant,
         }
     }
 
@@ -954,7 +851,7 @@ impl AccountInfo {
 
     #[inline(always)]
     pub fn object_quotas(&self) -> Option<&ObjectQuota> {
-        self.account.quota_objects.as_deref()
+        self.account.object_quotas()
     }
 
     #[inline(always)]
@@ -979,10 +876,6 @@ impl AccountCache {
         self.description.as_deref()
     }
 
-    #[inline(always)]
-    pub fn tenant_id(&self) -> Option<u32> {
-        self.id_tenant
-    }
 
     #[inline(always)]
     pub fn is_user_account(&self) -> bool {
@@ -996,14 +889,22 @@ impl AccountCache {
 
     #[inline(always)]
     pub fn object_quotas(&self) -> Option<&ObjectQuota> {
-        self.quota_objects.as_deref()
+        self.storage
+            .as_ref()
+            .and_then(|storage| storage.quota_objects.as_ref())
     }
 
     #[inline(always)]
-    pub fn account_tenant_ids(&self) -> AccountTenantIds {
-        AccountTenantIds {
+    pub fn encryption_key(&self) -> Option<&EncryptionKeys> {
+        self.storage
+            .as_ref()
+            .and_then(|storage| storage.encryption_key.as_ref())
+    }
+
+    #[inline(always)]
+    pub fn changed_by(&self) -> ChangedBy {
+        ChangedBy {
             account_id: self.id,
-            tenant_id: self.id_tenant,
         }
     }
 }

@@ -7,9 +7,9 @@
 use std::{borrow::Cow, fmt::Debug, str::FromStr, time::Duration};
 
 use compact_str::{CompactString, ToCompactString, format_compact};
-use mail_auth::common::verify::VerifySignature;
 
 use crate::*;
+use mail_auth::{arc::ArcError, dkim::DkimError, dkim2::Dkim2Error};
 
 impl AsRef<EventType> for Error {
     fn as_ref(&self) -> &EventType {
@@ -203,10 +203,6 @@ impl EventType {
         self.reason(err).details("JSON deserialization failed")
     }
 
-    pub fn from_base64_error(self, err: base64::DecodeError) -> Error {
-        self.reason(err).details("Base64 decoding failed")
-    }
-
     pub fn from_http_error(self, err: reqwest::Error) -> Error {
         self.into_err()
             .ctx_opt(
@@ -226,9 +222,7 @@ impl EventType {
 impl From<mail_auth::Error> for Error {
     fn from(err: mail_auth::Error) -> Self {
         match err {
-            mail_auth::Error::ParseError => {
-                EventType::MailAuth(MailAuthEvent::ParseError).into_err()
-            }
+            mail_auth::Error::Parse => EventType::MailAuth(MailAuthEvent::ParseError).into_err(),
             mail_auth::Error::MissingParameters => {
                 EventType::MailAuth(MailAuthEvent::MissingParameters).into_err()
             }
@@ -243,16 +237,20 @@ impl From<mail_auth::Error> for Error {
                 EventType::MailAuth(MailAuthEvent::PolicyNotAligned).into_err()
             }
             mail_auth::Error::Crypto(err) => match err {
-                mail_auth::common::crypto::CryptoError::Library(details) => {
+                mail_auth::crypto::CryptoError::Library(details) => {
                     EventType::MailAuth(MailAuthEvent::Crypto)
                         .into_err()
                         .details(CompactString::from(details))
                 }
-                mail_auth::common::crypto::CryptoError::FailedVerification => {
-                    EventType::Dkim(DkimEvent::FailedVerification).into_err()
+                mail_auth::crypto::CryptoError::FailedVerification => {
+                    EventType::Dkim(DkimEvent::VerificationFailed)
+                        .into_err()
+                        .details(err.to_compact_string())
                 }
-                mail_auth::common::crypto::CryptoError::IncompatibleAlgorithms => {
-                    EventType::Dkim(DkimEvent::IncompatibleAlgorithms).into_err()
+                mail_auth::crypto::CryptoError::IncompatibleAlgorithms => {
+                    EventType::Dkim(DkimEvent::PublicKeyError)
+                        .into_err()
+                        .details(err.to_compact_string())
                 }
             },
             mail_auth::Error::Dns(err) => match err {
@@ -270,159 +268,79 @@ impl From<mail_auth::Error> for Error {
                     EventType::MailAuth(MailAuthEvent::DnsInvalidRecordType).into_err()
                 }
             },
-            mail_auth::Error::Dkim(err) => match err {
-                mail_auth::dkim::DkimError::UnsupportedVersion => {
-                    EventType::Dkim(DkimEvent::UnsupportedVersion).into_err()
+            mail_auth::Error::Dkim(err) => EventType::Dkim(match err {
+                DkimError::UnsupportedVersion
+                | DkimError::UnsupportedAlgorithm
+                | DkimError::UnsupportedCanonicalization
+                | DkimError::AuidMismatch
+                | DkimError::SignatureExpired
+                | DkimError::BodyLengthTag => DkimEvent::SignatureInvalid,
+                DkimError::UnsupportedKeyType | DkimError::PublicKeyRevoked => {
+                    DkimEvent::PublicKeyError
                 }
-                mail_auth::dkim::DkimError::UnsupportedAlgorithm => {
-                    EventType::Dkim(DkimEvent::UnsupportedAlgorithm).into_err()
+                DkimError::BodyHashMismatch => DkimEvent::HashMismatch,
+            })
+            .into_err()
+            .details(err.to_compact_string()),
+            mail_auth::Error::Arc(err) => EventType::Arc(match err {
+                ArcError::ChainTooLong
+                | ArcError::InvalidInstance(_)
+                | ArcError::InvalidChainValidation
+                | ArcError::BrokenChain => ArcEvent::ChainInvalid,
+                ArcError::HasHeaderTag | ArcError::SignatureExpired | ArcError::BodyLengthTag => {
+                    ArcEvent::SignatureInvalid
                 }
-                mail_auth::dkim::DkimError::UnsupportedCanonicalization => {
-                    EventType::Dkim(DkimEvent::UnsupportedCanonicalization).into_err()
+                ArcError::BodyHashMismatch => ArcEvent::HashMismatch,
+            })
+            .into_err()
+            .details(err.to_compact_string()),
+            mail_auth::Error::Dkim2(err) => EventType::Dkim2(match &err {
+                Dkim2Error::InstanceMissing(_)
+                | Dkim2Error::InstanceSyntax(_)
+                | Dkim2Error::InstanceTagMissing { .. }
+                | Dkim2Error::InstanceNotSigned(_)
+                | Dkim2Error::InstanceDuplicateHash(_)
+                | Dkim2Error::NoValidHash(_) => Dkim2Event::InstanceInvalid,
+                Dkim2Error::SignatureMissing(_)
+                | Dkim2Error::SignatureSyntax(_)
+                | Dkim2Error::SignatureTagMissing { .. }
+                | Dkim2Error::SignatureTagUnexpected { .. }
+                | Dkim2Error::DuplicateSelector(_)
+                | Dkim2Error::TooManySelectors(_)
+                | Dkim2Error::NoValidAlgorithm(_) => Dkim2Event::SignatureInvalid,
+                Dkim2Error::SequenceGap(_)
+                | Dkim2Error::SequenceOverflow
+                | Dkim2Error::ChainTooLong
+                | Dkim2Error::NotValidlySigned => Dkim2Event::ChainInvalid,
+                Dkim2Error::SignatureExpired(_) | Dkim2Error::SignatureFromFuture(_) => {
+                    Dkim2Event::TimestampInvalid
                 }
-                mail_auth::dkim::DkimError::UnsupportedKeyType => {
-                    EventType::Dkim(DkimEvent::UnsupportedKeyType).into_err()
+                Dkim2Error::MailFromMismatch { .. } | Dkim2Error::RcptToMismatch { .. } => {
+                    Dkim2Event::EnvelopeMismatch
                 }
-                mail_auth::dkim::DkimError::FailedBodyHashMatch => {
-                    EventType::Dkim(DkimEvent::FailedBodyHashMatch).into_err()
+                Dkim2Error::MailFromDomainMismatch(_)
+                | Dkim2Error::NextDomainMismatch(_)
+                | Dkim2Error::CustodyMailFromMismatch { .. }
+                | Dkim2Error::CustodyDomainMismatch { .. }
+                | Dkim2Error::FromNotAuthentic(_) => Dkim2Event::CustodyBroken,
+                Dkim2Error::PublicKeyFetch { .. }
+                | Dkim2Error::PublicKeyMissing { .. }
+                | Dkim2Error::PublicKeyMultiple { .. }
+                | Dkim2Error::PublicKeySyntax { .. }
+                | Dkim2Error::PublicKeyAlgorithmMismatch { .. }
+                | Dkim2Error::PublicKeyRevoked { .. } => Dkim2Event::PublicKeyError,
+                Dkim2Error::IncorrectSignature { .. }
+                | Dkim2Error::PartialSignatureFailure { .. } => Dkim2Event::VerificationFailed,
+                Dkim2Error::HeaderHashMismatch { .. } | Dkim2Error::BodyHashMismatch { .. } => {
+                    Dkim2Event::HashMismatch
                 }
-                mail_auth::dkim::DkimError::FailedAuidMatch => {
-                    EventType::Dkim(DkimEvent::FailedAuidMatch).into_err()
-                }
-                mail_auth::dkim::DkimError::RevokedPublicKey => {
-                    EventType::Dkim(DkimEvent::RevokedPublicKey).into_err()
-                }
-                mail_auth::dkim::DkimError::SignatureExpired => {
-                    EventType::Dkim(DkimEvent::SignatureExpired).into_err()
-                }
-                mail_auth::dkim::DkimError::SignatureLength => {
-                    EventType::Dkim(DkimEvent::SignatureLength).into_err()
-                }
-            },
-            mail_auth::Error::Arc(err) => match err {
-                mail_auth::arc::ArcError::ChainTooLong => {
-                    EventType::Arc(ArcEvent::ChainTooLong).into_err()
-                }
-                mail_auth::arc::ArcError::InvalidInstance(instance) => {
-                    EventType::Arc(ArcEvent::InvalidInstance).ctx(Key::Id, instance)
-                }
-                mail_auth::arc::ArcError::InvalidCV => {
-                    EventType::Arc(ArcEvent::InvalidCv).into_err()
-                }
-                mail_auth::arc::ArcError::HasHeaderTag => {
-                    EventType::Arc(ArcEvent::HasHeaderTag).into_err()
-                }
-                mail_auth::arc::ArcError::BrokenChain => {
-                    EventType::Arc(ArcEvent::BrokenChain).into_err()
-                }
-                mail_auth::arc::ArcError::FailedBodyHashMatch => {
-                    EventType::Dkim(DkimEvent::FailedBodyHashMatch).into_err()
-                }
-                mail_auth::arc::ArcError::SignatureExpired => {
-                    EventType::Dkim(DkimEvent::SignatureExpired).into_err()
-                }
-                mail_auth::arc::ArcError::SignatureLength => {
-                    EventType::Dkim(DkimEvent::SignatureLength).into_err()
-                }
-            },
-            mail_auth::Error::Dkim2(err) => match err {
-                mail_auth::dkim2::Dkim2Error::InstanceMissing(m) => {
-                    EventType::Dkim(DkimEvent::InstanceMissing).ctx(Key::Id, m)
-                }
-                mail_auth::dkim2::Dkim2Error::InstanceSyntax(m) => {
-                    EventType::Dkim(DkimEvent::InstanceSyntax).ctx(Key::Id, m)
-                }
-                mail_auth::dkim2::Dkim2Error::InstanceTagMissing { m, tag } => {
-                    EventType::Dkim(DkimEvent::InstanceTagMissing)
-                        .ctx(Key::Id, m)
-                        .details(tag)
-                }
-                mail_auth::dkim2::Dkim2Error::InstanceNotSigned(m) => {
-                    EventType::Dkim(DkimEvent::InstanceNotSigned).ctx(Key::Id, m)
-                }
-                mail_auth::dkim2::Dkim2Error::InstanceAboveSignature(m) => {
-                    EventType::Dkim(DkimEvent::InstanceAboveSignature).ctx(Key::Id, m)
-                }
-                mail_auth::dkim2::Dkim2Error::SignatureMissing(i) => {
-                    EventType::Dkim(DkimEvent::SignatureMissing).ctx(Key::Id, i)
-                }
-                mail_auth::dkim2::Dkim2Error::SignatureSyntax(i) => {
-                    EventType::Dkim(DkimEvent::SignatureSyntax).ctx(Key::Id, i)
-                }
-                mail_auth::dkim2::Dkim2Error::SignatureTagMissing { i, tag } => {
-                    EventType::Dkim(DkimEvent::SignatureTagMissing)
-                        .ctx(Key::Id, i)
-                        .details(tag)
-                }
-                mail_auth::dkim2::Dkim2Error::SignatureTagUnexpected { i, tag } => {
-                    EventType::Dkim(DkimEvent::SignatureTagUnexpected)
-                        .ctx(Key::Id, i)
-                        .details(tag)
-                }
-                mail_auth::dkim2::Dkim2Error::SequenceGap => {
-                    EventType::Dkim(DkimEvent::SequenceGap).into_err()
-                }
-                mail_auth::dkim2::Dkim2Error::SequenceOverflow => {
-                    EventType::Dkim(DkimEvent::SequenceOverflow).into_err()
-                }
-                mail_auth::dkim2::Dkim2Error::ChainTooLong => {
-                    EventType::Dkim(DkimEvent::ChainTooLong).into_err()
-                }
-                mail_auth::dkim2::Dkim2Error::SignatureExpired(i) => {
-                    EventType::Dkim(DkimEvent::SignatureExpired).ctx(Key::Id, i)
-                }
-                mail_auth::dkim2::Dkim2Error::MailFromMismatch(i) => {
-                    EventType::Dkim(DkimEvent::MailFromMismatch).ctx(Key::Id, i)
-                }
-                mail_auth::dkim2::Dkim2Error::RcptToMismatch(i) => {
-                    EventType::Dkim(DkimEvent::RcptToMismatch).ctx(Key::Id, i)
-                }
-                mail_auth::dkim2::Dkim2Error::MailFromDomainMismatch(i) => {
-                    EventType::Dkim(DkimEvent::MailFromDomainMismatch).ctx(Key::Id, i)
-                }
-                mail_auth::dkim2::Dkim2Error::NextDomainMismatch(i) => {
-                    EventType::Dkim(DkimEvent::NextDomainMismatch).ctx(Key::Id, i)
-                }
-                mail_auth::dkim2::Dkim2Error::CustodyBreak(i) => {
-                    EventType::Dkim(DkimEvent::CustodyBreak).ctx(Key::Id, i)
-                }
-                mail_auth::dkim2::Dkim2Error::PublicKeyFetch(i) => {
-                    EventType::Dkim(DkimEvent::PublicKeyFetch).ctx(Key::Id, i)
-                }
-                mail_auth::dkim2::Dkim2Error::PublicKeyMissing(i) => {
-                    EventType::Dkim(DkimEvent::PublicKeyMissing).ctx(Key::Id, i)
-                }
-                mail_auth::dkim2::Dkim2Error::PublicKeyMultiple(i) => {
-                    EventType::Dkim(DkimEvent::PublicKeyMultiple).ctx(Key::Id, i)
-                }
-                mail_auth::dkim2::Dkim2Error::PublicKeySyntax(i) => {
-                    EventType::Dkim(DkimEvent::PublicKeySyntax).ctx(Key::Id, i)
-                }
-                mail_auth::dkim2::Dkim2Error::PublicKeyAlgorithmMismatch(i) => {
-                    EventType::Dkim(DkimEvent::PublicKeyAlgorithmMismatch).ctx(Key::Id, i)
-                }
-                mail_auth::dkim2::Dkim2Error::PublicKeyRevoked(i) => {
-                    EventType::Dkim(DkimEvent::RevokedPublicKey).ctx(Key::Id, i)
-                }
-                mail_auth::dkim2::Dkim2Error::IncorrectSignature(i) => {
-                    EventType::Dkim(DkimEvent::FailedVerification).ctx(Key::Id, i)
-                }
-                mail_auth::dkim2::Dkim2Error::NoValidAlgorithm(i) => {
-                    EventType::Dkim(DkimEvent::NoValidAlgorithm).ctx(Key::Id, i)
-                }
-                mail_auth::dkim2::Dkim2Error::HeaderHashMismatch(m) => {
-                    EventType::Dkim(DkimEvent::HeaderHashMismatch).ctx(Key::Id, m)
-                }
-                mail_auth::dkim2::Dkim2Error::BodyHashMismatch(m) => {
-                    EventType::Dkim(DkimEvent::FailedBodyHashMatch).ctx(Key::Id, m)
-                }
-                mail_auth::dkim2::Dkim2Error::Modified => {
-                    EventType::Dkim(DkimEvent::Modified).into_err()
-                }
-                mail_auth::dkim2::Dkim2Error::Exploded => {
-                    EventType::Dkim(DkimEvent::Exploded).into_err()
-                }
-            },
+                Dkim2Error::InvalidJson(_)
+                | Dkim2Error::RecipeSyntax
+                | Dkim2Error::HeaderNotRepresentable
+                | Dkim2Error::BodyUnreconstructable => Dkim2Event::RecipeError,
+            })
+            .into_err()
+            .details(err.to_compact_string()),
         }
     }
 }
@@ -500,7 +418,7 @@ impl From<&mail_auth::DkimOutput<'_>> for Error {
     fn from(value: &mail_auth::DkimOutput<'_>) -> Self {
         Error::from(value.result()).ctx_opt(
             Key::Domain,
-            value.signature().map(|s| s.domain().to_compact_string()),
+            value.signature().map(|s| s.d.to_compact_string()),
         )
     }
 }
@@ -596,3 +514,4 @@ impl FromStr for Key {
         Key::parse(s).ok_or(())
     }
 }
+

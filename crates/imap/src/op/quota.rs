@@ -4,22 +4,16 @@
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
  */
 
-/*
- * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
- *
- * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
- */
-
 use crate::{
     core::{Session, SessionData},
     op::ImapContext,
     spawn_op,
 };
 use common::network::SessionStream;
+use compact_str::format_compact;
 use imap_proto::{
     Command, ResponseCode, StatusResponse,
     protocol::{
-        ImapResponse,
         capability::QuotaResourceName,
         quota::{Arguments, QuotaItem, QuotaResource, Response},
     },
@@ -27,15 +21,20 @@ use imap_proto::{
 };
 use registry::schema::enums::Permission;
 use std::time::Instant;
+use tokio::sync::OwnedSemaphorePermit;
 
 impl<T: SessionStream> Session<T> {
-    pub async fn handle_get_quota(&mut self, request: Request<Command>) -> trc::Result<()> {
+    pub async fn handle_get_quota(
+        &mut self,
+        request: Request<Command>,
+        permit: Option<OwnedSemaphorePermit>,
+    ) -> trc::Result<()> {
         // Validate access
         self.assert_has_permission(Permission::ImapStatus)?;
 
         let data = self.state.session_data();
 
-        spawn_op!(data, {
+        spawn_op!(permit, data, {
             match request.parse_get_quota() {
                 Ok(argument) => match data.get_quota(argument).await {
                     Ok(response) => {
@@ -52,14 +51,18 @@ impl<T: SessionStream> Session<T> {
         })
     }
 
-    pub async fn handle_get_quota_root(&mut self, request: Request<Command>) -> trc::Result<()> {
+    pub async fn handle_get_quota_root(
+        &mut self,
+        request: Request<Command>,
+        permit: Option<OwnedSemaphorePermit>,
+    ) -> trc::Result<()> {
         // Validate access
         self.assert_has_permission(Permission::ImapStatus)?;
 
         let data = self.state.session_data();
         let is_utf8 = self.is_utf8;
 
-        spawn_op!(data, {
+        spawn_op!(permit, data, {
             match request.parse_get_quota_root(is_utf8) {
                 Ok(argument) => match data.get_quota_root(argument).await {
                     Ok(response) => {
@@ -96,7 +99,7 @@ impl<T: SessionStream> SessionData<T> {
                 trc::ImapEvent::Error
                     .into_err()
                     .details("Invalid quota root parameter.")
-                    .id(arguments.tag.to_string())
+                    .id(arguments.tag.clone())
             })?;
 
         // Obtain access token for mailbox
@@ -114,11 +117,9 @@ impl<T: SessionStream> SessionData<T> {
         trc::event!(
             Imap(trc::ImapEvent::GetQuota),
             SpanId = self.session_id,
-            Id = arguments.name.clone(),
-            Details = vec![
-                trc::Value::from(used_quota),
-                trc::Value::from(account.disk_quota())
-            ],
+            MailboxName = arguments.name.clone(),
+            Used = used_quota,
+            Limit = account.disk_quota(),
             Elapsed = op_start.elapsed()
         );
 
@@ -141,7 +142,7 @@ impl<T: SessionStream> SessionData<T> {
 
         Ok(StatusResponse::ok("GETQUOTA successful.")
             .with_tag(arguments.tag)
-            .serialize(response.serialize()))
+            .serialize_after(&response))
     }
 
     pub async fn get_quota_root(&self, arguments: Arguments) -> trc::Result<Vec<u8>> {
@@ -188,9 +189,9 @@ impl<T: SessionStream> SessionData<T> {
 
         // Build response
         let response = Response {
-            quota_root_items: vec![arguments.name, format!("#{account_id}")],
+            quota_root_items: vec![arguments.name, format_compact!("#{account_id}")],
             quota_items: vec![QuotaItem {
-                name: format!("#{account_id}"),
+                name: format_compact!("#{account_id}"),
                 resources: if account.disk_quota() > 0 {
                     vec![QuotaResource {
                         resource: QuotaResourceName::Storage,
@@ -205,6 +206,6 @@ impl<T: SessionStream> SessionData<T> {
 
         Ok(StatusResponse::ok("GETQUOTAROOT successful.")
             .with_tag(arguments.tag)
-            .serialize(response.serialize()))
+            .serialize_after(&response))
     }
 }

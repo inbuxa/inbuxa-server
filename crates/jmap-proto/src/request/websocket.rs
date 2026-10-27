@@ -8,14 +8,20 @@ use super::Request;
 use crate::{
     error::request::{RequestError, RequestErrorType, RequestLimitError},
     object::AnyId,
-    request::{Call, deserialize::DeserializeArguments},
+    request::{
+        Call, RequestMethod,
+        parser::{CallList, LenientCall},
+    },
     response::{Response, ResponseMethod, serialize::serialize_hex, status::PushObject},
 };
+use ahash::AHashMap;
+use compact_str::{CompactString, ToCompactString, format_compact};
 use serde::{
     Deserialize, Deserializer,
     de::{self, MapAccess, Visitor},
 };
-use std::{borrow::Cow, collections::HashMap, fmt};
+use simdutf8::basic::from_utf8;
+use std::{borrow::Cow, fmt, marker::PhantomData};
 use types::type_state::DataType;
 
 #[derive(Debug)]
@@ -37,8 +43,8 @@ pub struct WebSocketResponse<'x> {
     session_state: u32,
 
     #[serde(rename(deserialize = "createdIds"))]
-    #[serde(skip_serializing_if = "HashMap::is_empty")]
-    created_ids: HashMap<String, AnyId>,
+    #[serde(skip_serializing_if = "crate::method::ahash_is_empty")]
+    created_ids: AHashMap<String, AnyId>,
 
     #[serde(rename = "requestId")]
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -104,9 +110,23 @@ enum MessageType {
 }
 
 impl<'x> WebSocketMessage<'x> {
+    #[cold]
+    #[inline(never)]
+    fn parse_lenient(text: &'x str, err: serde_json::Error) -> Result<Self, CompactString> {
+        serde_json::from_str::<LenientWebSocketMessage>(text)
+            .map(|message| message.0)
+            .map_err(|_| err.to_compact_string())
+    }
+
     pub fn parse(json: &'x [u8], max_calls: usize, max_size: usize) -> trc::Result<Self> {
         if json.len() <= max_size {
-            match serde_json::from_slice::<Self>(json) {
+            let message = match from_utf8(json) {
+                Ok(text) => {
+                    serde_json::from_str::<Self>(text).or_else(|err| Self::parse_lenient(text, err))
+                }
+                Err(err) => Err(err.to_compact_string()),
+            };
+            match message {
                 Ok(WebSocketMessage::Request(req))
                     if req.request.method_calls.len() > max_calls =>
                 {
@@ -115,7 +135,7 @@ impl<'x> WebSocketMessage<'x> {
                 Ok(msg) => Ok(msg),
                 Err(err) => Err(trc::JmapEvent::NotRequest
                     .into_err()
-                    .details(format!("Invalid WebSocket JMAP request {err}"))),
+                    .details(format_compact!("Invalid WebSocket JMAP request {err}"))),
             }
         } else {
             Err(trc::LimitEvent::SizeRequest.into_err())
@@ -128,13 +148,32 @@ impl<'de: 'x, 'x: 'de> Deserialize<'de> for WebSocketMessage<'x> {
     where
         D: Deserializer<'de>,
     {
-        deserializer.deserialize_map(WebSocketMessageVisitor)
+        deserializer.deserialize_map(WebSocketMessageVisitor::<Vec<Call<RequestMethod<'x>>>> {
+            _calls: PhantomData,
+        })
     }
 }
 
-struct WebSocketMessageVisitor;
+struct LenientWebSocketMessage<'x>(WebSocketMessage<'x>);
 
-impl<'de> Visitor<'de> for WebSocketMessageVisitor {
+impl<'de> Deserialize<'de> for LenientWebSocketMessage<'de> {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        deserializer
+            .deserialize_map(WebSocketMessageVisitor::<Vec<LenientCall<'de>>> {
+                _calls: PhantomData,
+            })
+            .map(LenientWebSocketMessage)
+    }
+}
+
+struct WebSocketMessageVisitor<C> {
+    _calls: PhantomData<C>,
+}
+
+impl<'de, C: CallList<'de>> Visitor<'de> for WebSocketMessageVisitor<C> {
     type Value = WebSocketMessage<'de>;
 
     fn expecting(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
@@ -172,7 +211,7 @@ impl<'de> Visitor<'de> for WebSocketMessageVisitor {
                     request.id = map.next_value()?;
                 },
                 _ => {
-                    request.request.deserialize_argument(key, &mut map)?;
+                    request.request.deserialize_field::<V, C>(key, &mut map)?;
                     found_request_keys = true;
                 }
             );
@@ -193,10 +232,11 @@ impl<'de> Visitor<'de> for WebSocketMessageVisitor {
 
 impl MessageType {
     fn parse(s: &str) -> Self {
-        hashify::tiny_map!(s.as_bytes(),
-            b"Request" => MessageType::Request,
-            b"WebSocketPushEnable" => MessageType::PushEnable,
-            b"WebSocketPushDisable" => MessageType::PushDisable,
+        hashify::fnc_map!(s.as_bytes(),
+            b"Request" => Some(MessageType::Request),
+            b"WebSocketPushEnable" => Some(MessageType::PushEnable),
+            b"WebSocketPushDisable" => Some(MessageType::PushDisable),
+            _ => None,
         )
         .unwrap_or(MessageType::None)
     }
@@ -236,8 +276,8 @@ impl<'x> WebSocketResponse<'x> {
         }
     }
 
-    pub fn to_json(&self) -> String {
-        serde_json::to_string(self).unwrap()
+    pub fn to_json(&self) -> Result<String, sonic_rs::Error> {
+        sonic_rs::to_string(self)
     }
 }
 

@@ -5,14 +5,15 @@
  */
 
 use crate::{
-    IterateParams, RegistryStore, RegistryStoreInner, Store, U16_LEN, U32_LEN, U64_LEN, ValueKey,
+    IterateParams, RegistryStore, RegistryStoreInner, Store, U64_LEN, ValueKey,
     write::{
-        BatchBuilder, ValueClass,
+        BatchBuilder, MergeResult, ValueClass,
         assert::AssertValue,
-        key::{DeserializeBigEndian, KeySerializer},
+        key::{KeySerializer, node_id_from_key},
         now,
     },
 };
+use compact_str::CompactString;
 use registry::{
     schema::{enums::ClusterNodeStatus, structs::ClusterNode},
     types::datetime::UTCDateTime,
@@ -38,6 +39,11 @@ struct NodeClaim {
     assert: AssertValue,
 }
 
+struct NodeLease<'x> {
+    last_renewal: u64,
+    hostname: &'x str,
+}
+
 impl RegistryStoreInner {
     pub(super) async fn acquire_node_id(&mut self) -> Result<(), String> {
         let mut retry_count = 0;
@@ -53,13 +59,14 @@ impl RegistryStoreInner {
                 .assert_value(ValueClass::NodeId(claim.node_id), claim.assert)
                 .set(
                     ValueClass::NodeId(claim.node_id),
-                    KeySerializer::new(self.env_hostname.len() + U64_LEN)
-                        .write(now)
-                        .write(&self.env_hostname)
-                        .finalize(),
+                    NodeLease {
+                        last_renewal: now,
+                        hostname: &self.env_hostname,
+                    }
+                    .serialize(),
                 );
 
-            match self.store.write(batch.build_all()).await {
+            match self.store.write_batch(&mut batch).await {
                 Ok(_) => {
                     self.node_id = claim.node_id;
                     break slots;
@@ -107,35 +114,21 @@ impl RegistryStore {
 
     pub async fn refresh_node_id_lease(&self) -> trc::Result<()> {
         let node_id = self.0.node_id;
-        let assert = match NodeSlot::list(&self.0.store, now())
-            .await
-            .caused_by(trc::location!())?
-            .into_iter()
-            .find(|slot| slot.node_id == node_id)
-        {
-            Some(slot) if slot.is_owned_by(&self.0.env_hostname) => AssertValue::Hash(slot.hash),
-            Some(slot) => {
-                return Err(trc::StoreEvent::AssertValueFailed
-                    .into_err()
-                    .details("Node id lease is held by another host")
-                    .ctx(trc::Key::Id, node_id)
-                    .ctx(trc::Key::Hostname, slot.hostname));
-            }
-            None => AssertValue::None,
-        };
+        let hostname = self.0.env_hostname.clone();
+        let last_renewal = now();
 
         let mut batch = BatchBuilder::new();
-        batch.assert_value(ValueClass::NodeId(node_id), assert).set(
-            ValueClass::NodeId(node_id),
-            KeySerializer::new(self.0.env_hostname.len() + U64_LEN)
-                .write(now())
-                .write(&self.0.env_hostname)
-                .finalize(),
-        );
+        batch.merge_fnc(ValueClass::NodeId(node_id), move |_, value| {
+            NodeLease {
+                last_renewal,
+                hostname: &hostname,
+            }
+            .renew(node_id, value)
+        });
 
         self.0
             .store
-            .write(batch.build_all())
+            .write_batch(&mut batch)
             .await
             .caused_by(trc::location!())
             .map(|_| ())
@@ -175,31 +168,23 @@ impl NodeSlot {
                 )
                 .ascending(),
                 |key, value| {
-                    if key.len() == U16_LEN * 3 {
-                        let node_id = key.deserialize_be_u16(U32_LEN)?;
-
-                        match (
-                            value.deserialize_be_u64(0),
-                            value
-                                .get(U64_LEN..)
-                                .and_then(|bytes| std::str::from_utf8(bytes).ok())
-                                .filter(|text| !text.is_empty()),
-                        ) {
-                            (Ok(last_renewal), Some(hostname)) => {
+                    if let Some(node_id) = node_id_from_key(key) {
+                        match NodeLease::parse(value) {
+                            Some(lease) => {
                                 slots.push(NodeSlot {
                                     node_id,
-                                    hostname: hostname.to_string(),
-                                    last_renewal,
-                                    elapsed: now.saturating_sub(last_renewal),
+                                    hostname: lease.hostname.to_string(),
+                                    last_renewal: lease.last_renewal,
+                                    elapsed: now.saturating_sub(lease.last_renewal),
                                     hash: xxhash_rust::xxh3::xxh3_64(value),
                                 });
                             }
-                            _ => {
+                            None => {
                                 trc::error!(
                                     trc::StoreEvent::DataCorruption
                                         .into_err()
                                         .details("Invalid node id lease")
-                                        .ctx(trc::Key::Id, node_id)
+                                        .ctx(trc::Key::NodeId, node_id)
                                 );
                             }
                         }
@@ -258,23 +243,31 @@ impl NodeSlot {
         store: &Store,
         slots: impl Iterator<Item = &'x NodeSlot>,
     ) -> trc::Result<()> {
+        let mut batch = BatchBuilder::new();
         for slot in slots {
-            let mut batch = BatchBuilder::new();
-            batch
-                .assert_value(
-                    ValueClass::NodeId(slot.node_id),
-                    AssertValue::Hash(slot.hash),
-                )
-                .clear(ValueClass::NodeId(slot.node_id));
-
-            if let Err(err) = store.write(batch.build_all()).await
-                && !err.is_assertion_failure()
-            {
-                return Err(err.caused_by(trc::location!()));
-            }
+            let hash = slot.hash;
+            batch.merge_fnc(ValueClass::NodeId(slot.node_id), move |_, value| {
+                Ok(NodeSlot::release_if_unchanged(hash, value))
+            });
         }
 
-        Ok(())
+        if batch.is_empty() {
+            Ok(())
+        } else {
+            store
+                .write_batch(&mut batch)
+                .await
+                .caused_by(trc::location!())
+                .map(|_| ())
+        }
+    }
+
+    fn release_if_unchanged(hash: u64, value: Option<&[u8]>) -> MergeResult {
+        if value.is_some_and(|value| xxhash_rust::xxh3::xxh3_64(value) == hash) {
+            MergeResult::Delete
+        } else {
+            MergeResult::Skip
+        }
     }
 
     fn is_owned_by(&self, hostname: &str) -> bool {
@@ -304,6 +297,50 @@ impl NodeSlot {
     }
 }
 
+impl<'x> NodeLease<'x> {
+    fn parse(value: &'x [u8]) -> Option<Self> {
+        let (last_renewal, hostname) = value.split_first_chunk::<U64_LEN>()?;
+        let hostname = std::str::from_utf8(hostname)
+            .ok()
+            .filter(|hostname| !hostname.is_empty())?;
+
+        Some(NodeLease {
+            last_renewal: u64::from_be_bytes(*last_renewal),
+            hostname,
+        })
+    }
+
+    fn serialize(&self) -> Vec<u8> {
+        KeySerializer::new(self.hostname.len() + U64_LEN)
+            .write(self.last_renewal)
+            .write(self.hostname)
+            .finalize()
+    }
+
+    fn renew(&self, node_id: u16, current: Option<&[u8]>) -> trc::Result<MergeResult> {
+        if let Some(current) = current {
+            match NodeLease::parse(current) {
+                Some(lease) if lease.hostname == self.hostname => {}
+                Some(lease) => {
+                    return Err(trc::StoreEvent::AssertValueFailed
+                        .into_err()
+                        .details("Node id lease is held by another host")
+                        .ctx(trc::Key::NodeId, node_id)
+                        .ctx(trc::Key::Hostname, CompactString::from(lease.hostname)));
+                }
+                None => {
+                    return Err(trc::StoreEvent::AssertValueFailed
+                        .into_err()
+                        .details("Invalid node id lease")
+                        .ctx(trc::Key::NodeId, node_id));
+                }
+            }
+        }
+
+        Ok(MergeResult::Update(self.serialize()))
+    }
+}
+
 impl From<NodeSlot> for ClusterNode {
     fn from(slot: NodeSlot) -> Self {
         ClusterNode {
@@ -314,3 +351,4 @@ impl From<NodeSlot> for ClusterNode {
         }
     }
 }
+

@@ -17,6 +17,9 @@ use std::time::Instant;
 use tokio_rustls::server::TlsStream;
 use trc::{SecurityEvent, SmtpEvent};
 
+const READ_BUFFER: usize = 8192;
+const DATA_READ_BUFFER: usize = 65536;
+
 impl SessionManager for SmtpSessionManager {
     async fn handle<T: SessionStream>(self, session: network::SessionData<T>) {
         // Build server and create session
@@ -76,21 +79,16 @@ impl<T: SessionStream> Session<T> {
         let config = &self.server.core.smtp.session.connect;
 
         // Sieve filtering
-        if let Some((script, script_id)) = self
-            .server
-            .eval_if::<String, _>(&config.script, self, self.data.session_id)
-            .await
-            .and_then(|name| {
-                self.server
-                    .get_trusted_sieve_script(&name, self.data.session_id)
-                    .map(|s| (s, name))
-            })
+        if let Some((script, script_id)) =
+            self.eval_if::<String>(&config.script)
+                .await
+                .and_then(|name| {
+                    self.server
+                        .get_trusted_sieve_script(&name, self.data.session_id)
+                        .map(|s| (s, name))
+                })
             && let ScriptResult::Reject(message) = self
-                .run_script(
-                    script_id,
-                    script.clone(),
-                    self.build_script_parameters("connect"),
-                )
+                .run_script(script_id, script, self.build_script_parameters("connect"))
                 .await
         {
             let _ = self.write(message.as_bytes()).await;
@@ -111,8 +109,7 @@ impl<T: SessionStream> Session<T> {
 
         // Obtain hostname
         self.hostname = self
-            .server
-            .eval_if::<String, _>(&config.hostname, self, self.data.session_id)
+            .eval_if::<String>(&config.hostname)
             .await
             .unwrap_or_default();
         if self.hostname.is_empty() {
@@ -125,8 +122,7 @@ impl<T: SessionStream> Session<T> {
 
         // Obtain greeting
         let greeting = self
-            .server
-            .eval_if::<String, _>(&config.greeting, self, self.data.session_id)
+            .eval_if::<String>(&config.greeting)
             .await
             .filter(|g| !g.is_empty())
             .map(|g| format!("220 {}\r\n", g))
@@ -140,7 +136,7 @@ impl<T: SessionStream> Session<T> {
     }
 
     pub async fn handle_conn(&mut self) -> bool {
-        let mut buf = vec![0; 8192];
+        let mut buf = Vec::with_capacity(READ_BUFFER);
         let mut shutdown_rx = self.instance.shutdown_rx.clone();
 
         loop {
@@ -153,8 +149,21 @@ impl<T: SessionStream> Session<T> {
                                 if bytes_read > 0 {
                                     if Instant::now() < self.data.valid_until && bytes_read <= self.data.bytes_left  {
                                         self.data.bytes_left -= bytes_read;
-                                        match Box::pin(self.ingest(&buf[..bytes_read])).await {
-                                            Ok(true) => (),
+                                        match self.ingest(&buf).await {
+                                            Ok(true) => match &self.state {
+                                                State::Data(_) | State::Bdat { .. }
+                                                    if buf.capacity() < DATA_READ_BUFFER =>
+                                                {
+                                                    buf = Vec::with_capacity(DATA_READ_BUFFER);
+                                                }
+                                                State::Request(_)
+                                                    if buf.capacity() > READ_BUFFER
+                                                        && self.data.message.is_empty() =>
+                                                {
+                                                    buf = Vec::with_capacity(READ_BUFFER);
+                                                }
+                                                _ => {}
+                                            },
                                             Ok(false) => {
                                                 return true;
                                             }

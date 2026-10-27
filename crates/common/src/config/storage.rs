@@ -21,8 +21,6 @@ pub struct Storage {
     pub blob: BlobStore,
     pub search: SearchStore,
     pub memory: InMemoryStore,
-    pub metrics: Store,
-    pub tracing: Store,
     pub coordinator: Coordinator,
     pub directory: Option<Arc<Directory>>,
     pub directories: IdMap<Directory>,
@@ -48,8 +46,6 @@ impl Storage {
             search,
             coordinator: Coordinator::build(bp, &memory).await.unwrap_or_default(),
             memory,
-            tracing: Store::build_tracing(bp).await.unwrap_or_default(),
-            metrics: Store::build_metrics(bp).await.unwrap_or_default(),
             directory: directory.default_directory,
             directories: directory.directories,
         }

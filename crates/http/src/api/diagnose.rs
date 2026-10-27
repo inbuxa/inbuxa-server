@@ -12,7 +12,7 @@ use common::{
     },
 };
 use hyper::body::{Bytes, Frame};
-use mail_auth::{DnssecStatus, IpLookupStrategy, mta_sts::TlsRpt};
+use mail_auth::{DnssecStatus, IpLookupStrategy, mta_sts::TlsRptRecord};
 use serde::{Deserialize, Serialize};
 use smtp::outbound::{
     client::{SmtpClient, StartTlsResult},
@@ -29,6 +29,7 @@ use std::{
     time::{Duration, Instant},
 };
 use tokio::{io::AsyncWriteExt, sync::mpsc};
+use utils::{sanitize_domain, sanitize_email};
 
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -194,15 +195,62 @@ impl ElapsedMs for Instant {
         self.elapsed().as_millis() as u64
     }
 }
+
+#[derive(Debug)]
+pub(crate) struct DeliveryTarget(Target);
+
+#[derive(Debug)]
+enum Target {
+    Domain(String),
+    Address(String),
+}
+
+impl DeliveryTarget {
+    pub(crate) fn parse(target: &str) -> Option<Self> {
+        if target
+            .chars()
+            .any(|ch| ch.is_whitespace() || ch.is_control() || matches!(ch, '<' | '>'))
+        {
+            return None;
+        }
+        let target = if target.contains('@') {
+            DeliveryTarget(Target::Address(sanitize_email(target)?))
+        } else {
+            DeliveryTarget(Target::Domain(sanitize_domain(target)?))
+        };
+        target
+            .domain()
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'-' | b'_'))
+            .then_some(target)
+    }
+
+    fn domain(&self) -> &str {
+        match &self.0 {
+            Target::Domain(domain) => domain,
+            Target::Address(address) => address
+                .rsplit_once('@')
+                .map_or(address.as_str(), |(_, domain)| domain),
+        }
+    }
+
+    fn address(&self) -> Option<&str> {
+        match &self.0 {
+            Target::Domain(_) => None,
+            Target::Address(address) => Some(address),
+        }
+    }
+}
+
 pub(crate) fn spawn_delivery_diagnose(
     server: Server,
-    domain_or_email: String,
+    target: DeliveryTarget,
     timeout: Duration,
 ) -> mpsc::Receiver<DeliveryStage> {
     let (tx, rx) = mpsc::channel(10);
 
     tokio::spawn(async move {
-        let _ = delivery_diagnose(tx, server, domain_or_email, timeout).await;
+        let _ = delivery_diagnose(tx, server, target, timeout).await;
     });
 
     rx
@@ -211,14 +259,11 @@ pub(crate) fn spawn_delivery_diagnose(
 async fn delivery_diagnose(
     tx: mpsc::Sender<DeliveryStage>,
     server: Server,
-    domain_or_email: String,
+    target: DeliveryTarget,
     timeout: Duration,
 ) -> Result<(), mpsc::error::SendError<DeliveryStage>> {
-    let (domain, email) = if let Some((_, domain)) = domain_or_email.rsplit_once('@') {
-        (domain.to_string(), Some(domain_or_email))
-    } else {
-        (domain_or_email, None)
-    };
+    let domain = target.domain();
+    let email = target.address();
 
     let local_host = &server.core.network.server_name;
     let conn_strategy = server.get_connection_or_default("default", 0);
@@ -230,7 +275,7 @@ async fn delivery_diagnose(
 
     // Lookup MX
     let now = Instant::now();
-    let mxs = match server.mx_lookup(domain.as_str()).await {
+    let mxs = match server.mx_lookup(domain).await {
         Ok(mxs) => mxs,
         Err(err) => {
             tx.send(DeliveryStage::MxLookupError {
@@ -245,14 +290,14 @@ async fn delivery_diagnose(
 
     // Obtain remote host list
     let mx_config = MxConfig {
-        max_mx: mxs.rrset.len(),
+        max_mx: mxs.records.len(),
         max_multi_homed: 10,
         ip_lookup_strategy: IpLookupStrategy::Ipv4thenIpv6,
     };
-    let hosts = if let Some(hosts) = mxs.to_remote_hosts(&domain, &mx_config) {
+    let hosts = if let Some(hosts) = mxs.to_remote_hosts(domain, &mx_config) {
         tx.send(DeliveryStage::MxLookupSuccess {
             mxs: mxs
-                .rrset
+                .records
                 .iter()
                 .map(|mx| MX {
                     exchanges: mx.exchanges.iter().map(|e| e.to_string()).collect(),
@@ -277,7 +322,7 @@ async fn delivery_diagnose(
     // Fetch MTA-STS policy
     let now = Instant::now();
     tx.send(DeliveryStage::MtaStsFetchStart).await?;
-    let mta_sts_policy = match server.lookup_mta_sts_policy(&domain, timeout).await {
+    let mta_sts_policy = match server.lookup_mta_sts_policy(domain, timeout).await {
         Ok(policy) => {
             tx.send(DeliveryStage::MtaStsFetchSuccess {
                 policy: policy.as_ref().clone(),
@@ -316,7 +361,7 @@ async fn delivery_diagnose(
         .smtp
         .resolvers
         .dns
-        .txt_lookup::<TlsRpt>(
+        .txt_lookup::<TlsRptRecord>(
             format!("_smtp._tls.{domain}."),
             Some(&server.inner.cache.dns_txt),
         )
@@ -697,7 +742,7 @@ async fn delivery_diagnose(
 
                     // Verify recipient
                     let mut is_success = email.is_none();
-                    if let Some(email) = &email {
+                    if let Some(email) = email {
                         // MAIL FROM
                         tx.send(DeliveryStage::MailFromStart).await?;
 
@@ -783,3 +828,4 @@ async fn delivery_diagnose(
 
     Ok(())
 }
+

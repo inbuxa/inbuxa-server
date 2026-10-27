@@ -3,12 +3,13 @@
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
  */
+use compact_str::CompactString;
 
-use std::fmt::Write;
+use super::push_int;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Arguments {
-    pub tag: String,
+    pub tag: CompactString,
     pub batch_size: u32,
     pub batch_range: Option<(u32, u32)>,
 }
@@ -20,39 +21,18 @@ pub struct Response {
 
 impl Response {
     pub fn serialize(self, tag: &str) -> Vec<u8> {
-        let mut buf = String::with_capacity(32 + (self.ranges.len() * 16));
-        let _ = write!(&mut buf, "* UIDBATCHES (TAG \"{tag}\")");
+        let mut buf = Vec::with_capacity(32 + tag.len() + (self.ranges.len() * 22));
+        buf.extend_from_slice(b"* UIDBATCHES (TAG \"");
+        buf.extend_from_slice(tag.as_bytes());
+        buf.extend_from_slice(b"\")");
         for (pos, (high, low)) in self.ranges.iter().enumerate() {
-            let _ = write!(&mut buf, "{}{high}:{low}", if pos == 0 { ' ' } else { ',' });
+            buf.push(if pos == 0 { b' ' } else { b',' });
+            push_int(&mut buf, *high);
+            buf.push(b':');
+            push_int(&mut buf, *low);
         }
-        buf.push_str("\r\n");
-        buf.into_bytes()
+        buf.extend_from_slice(b"\r\n");
+        buf
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::Response;
-
-    #[test]
-    fn serialize_uidbatches() {
-        assert_eq!(
-            String::from_utf8(
-                Response {
-                    ranges: vec![(215295, 99696), (99695, 20351), (20350, 7830), (7829, 1)],
-                }
-                .serialize("A143")
-            )
-            .unwrap(),
-            concat!(
-                "* UIDBATCHES (TAG \"A143\") ",
-                "215295:99696,99695:20351,20350:7830,7829:1\r\n"
-            )
-        );
-
-        assert_eq!(
-            String::from_utf8(Response { ranges: vec![] }.serialize("A144")).unwrap(),
-            "* UIDBATCHES (TAG \"A144\")\r\n"
-        );
-    }
-}

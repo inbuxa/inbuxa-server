@@ -10,6 +10,7 @@ pub mod api;
 pub mod auth;
 pub mod form;
 pub mod request;
+mod stream;
 
 use common::Inner;
 use std::sync::Arc;

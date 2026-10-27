@@ -18,10 +18,13 @@ pub mod list;
 
 impl<T: SessionStream> Session<T> {
     pub async fn handle_capa(&mut self) -> trc::Result<()> {
-        let mechanisms = if self.stream.is_tls() || self.server.core.imap.allow_plain_auth {
+        let is_tls = self.stream.is_tls();
+        let mechanisms = if !is_tls && !self.server.core.imap.allow_plain_auth {
+            vec![]
+        } else if self.server.accepts_bearer_tokens(is_tls) {
             vec![Mechanism::Plain, Mechanism::OAuthBearer, Mechanism::XOauth2]
         } else {
-            vec![Mechanism::OAuthBearer, Mechanism::XOauth2]
+            vec![Mechanism::Plain]
         };
 
         trc::event!(

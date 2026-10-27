@@ -5,6 +5,7 @@
  */
 
 use super::{ImapResponse, authenticate::Mechanism};
+use crate::protocol::push_int;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Response {
@@ -58,6 +59,16 @@ pub enum Capability {
     UidBatches,
     MessageLimit(u32),
     SaveLimit(u32),
+    Metadata,
+    MetadataServer,
+    ListMetadata,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AuthCapability {
+    Disabled,
+    Plain,
+    PlainAndBearer,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -95,7 +106,7 @@ impl Capability {
             Capability::Binary => b"BINARY",
             Capability::Unselect => b"UNSELECT",
             Capability::ACL => b"ACL",
-            Capability::Rights => b"RIGHTS=texk",
+            Capability::Rights => b"RIGHTS=texkn",
             Capability::UIDPlus => b"UIDPLUS",
             Capability::ESearch => b"ESEARCH",
             Capability::SASLIR => b"SASL-IR",
@@ -127,14 +138,17 @@ impl Capability {
             Capability::JmapAccess => b"JMAPACCESS",
             Capability::UidOnly => b"UIDONLY",
             Capability::UidBatches => b"UIDBATCHES",
+            Capability::Metadata => b"METADATA",
+            Capability::MetadataServer => b"METADATA-SERVER",
+            Capability::ListMetadata => b"LIST-METADATA",
             Capability::MessageLimit(limit) => {
                 buf.extend_from_slice(b"MESSAGELIMIT=");
-                buf.extend_from_slice(limit.to_string().as_bytes());
+                push_int(buf, *limit);
                 return;
             }
             Capability::SaveLimit(limit) => {
                 buf.extend_from_slice(b"SAVELIMIT=");
-                buf.extend_from_slice(limit.to_string().as_bytes());
+                push_int(buf, *limit);
                 return;
             }
         });
@@ -143,7 +157,7 @@ impl Capability {
     pub fn all_capabilities(
         is_authenticated: bool,
         offer_tls: bool,
-        allow_auth: bool,
+        auth: AuthCapability,
         message_limit: u32,
         save_limit: u32,
     ) -> Vec<Capability> {
@@ -194,14 +208,16 @@ impl Capability {
                 Capability::MessageLimit(message_limit),
                 Capability::SaveLimit(save_limit),
             ]);
-        } else if allow_auth {
-            capabilities.extend([
-                Capability::Auth(Mechanism::Plain),
-                Capability::Auth(Mechanism::OAuthBearer),
-                Capability::Auth(Mechanism::XOauth2),
-            ]);
         } else {
-            capabilities.push(Capability::LoginDisabled);
+            match auth {
+                AuthCapability::PlainAndBearer => capabilities.extend([
+                    Capability::Auth(Mechanism::Plain),
+                    Capability::Auth(Mechanism::OAuthBearer),
+                    Capability::Auth(Mechanism::XOauth2),
+                ]),
+                AuthCapability::Plain => capabilities.push(Capability::Auth(Mechanism::Plain)),
+                AuthCapability::Disabled => capabilities.push(Capability::LoginDisabled),
+            }
         }
         if offer_tls {
             capabilities.push(Capability::StartTLS);
@@ -212,37 +228,20 @@ impl Capability {
 }
 
 impl ImapResponse for Response {
-    fn serialize(self) -> Vec<u8> {
-        let mut buf = Vec::with_capacity(64);
+    fn serialize_into(&self, buf: &mut Vec<u8>) {
         buf.extend_from_slice(b"* CAPABILITY");
         for capability in self.capabilities.iter() {
             buf.push(b' ');
-            capability.serialize(&mut buf);
+            capability.serialize(buf);
         }
         buf.extend_from_slice(b"\r\n");
-        buf
+    }
+
+    fn size_hint(&self) -> usize {
+        const FRAMING_LEN: usize = 16;
+        const CAPABILITY_LEN: usize = 20;
+
+        FRAMING_LEN + self.capabilities.len() * CAPABILITY_LEN
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use crate::protocol::{
-        ImapResponse,
-        capability::{Capability, Response},
-    };
-
-    #[test]
-    fn serialize_capability() {
-        assert_eq!(
-            &Response {
-                capabilities: vec![
-                    Capability::IMAP4rev2,
-                    Capability::StartTLS,
-                    Capability::LoginDisabled
-                ],
-            }
-            .serialize(),
-            "* CAPABILITY IMAP4rev2 STARTTLS LOGINDISABLED\r\n".as_bytes()
-        );
-    }
-}

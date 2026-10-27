@@ -4,11 +4,9 @@
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
  */
 
-use std::ops::Range;
-
-use crate::backend::postgres::into_pool_error;
-
 use super::{PostgresStore, into_error};
+use crate::backend::postgres::into_pool_error;
+use std::ops::Range;
 
 impl PostgresStore {
     pub(crate) async fn get_blob(
@@ -21,6 +19,8 @@ impl PostgresStore {
             .prepare_cached("SELECT v FROM t WHERE k = $1")
             .await
             .map_err(into_error)?;
+        #[cfg(stalwart_tests)]
+        super::probe::record(super::probe::Statement::Read);
         conn.query_opt(&s, &[&key])
             .await
             .and_then(|row| {
@@ -49,6 +49,8 @@ impl PostgresStore {
             )
             .await
             .map_err(into_error)?;
+        #[cfg(stalwart_tests)]
+        super::probe::record(super::probe::Statement::AutocommitWrite);
         conn.execute(&s, &[&key, &data])
             .await
             .map_err(into_error)
@@ -61,6 +63,8 @@ impl PostgresStore {
             .prepare_cached("DELETE FROM t WHERE k = $1")
             .await
             .map_err(into_error)?;
+        #[cfg(stalwart_tests)]
+        super::probe::record(super::probe::Statement::AutocommitWrite);
         conn.execute(&s, &[&key])
             .await
             .map_err(into_error)

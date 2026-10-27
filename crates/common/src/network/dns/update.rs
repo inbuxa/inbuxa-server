@@ -5,11 +5,12 @@
  */
 
 use crate::{Core, Server};
-use base64::{Engine, engine::general_purpose};
+use compact_str::{CompactString, ToCompactString, format_compact};
 use dns_update::{
     DnsRecord, DnsRecordType, TsigAlgorithm,
     providers::{ovh::OvhEndpoint, rfc2136::DnsAddress},
 };
+use encodify::base64::STANDARD;
 use registry::schema::{
     enums,
     structs::{DnsManagement, DnsServer, Domain},
@@ -31,7 +32,7 @@ pub struct DnsUpdater {
     core: Arc<Core>,
 }
 
-#[cfg(feature = "test_mode")]
+#[cfg(stalwart_tests)]
 pub static DNS_RECORDS: std::sync::LazyLock<
     Arc<std::sync::Mutex<Vec<dns_update::NamedDnsRecord>>>,
 > = std::sync::LazyLock::new(|| Arc::new(std::sync::Mutex::new(Vec::new())));
@@ -40,7 +41,7 @@ impl DnsUpdater {
     pub async fn build(server: DnsServer, core: Arc<Core>) -> Result<Self, String> {
         match server {
             DnsServer::Tsig(server) => Ok(DnsUpdater {
-                polling_interval: server.polling_interval.into_inner(),
+                polling_interval: server.poll_interval.into_inner(),
                 propagation_timeout: server.propagation_timeout.into_inner(),
                 propagation_delay: server.propagation_delay.map(|d| d.into_inner()),
                 ttl: server.ttl.into_inner(),
@@ -57,7 +58,7 @@ impl DnsUpdater {
                         )),
                     },
                     server.key_name,
-                    general_purpose::STANDARD
+                    STANDARD
                         .decode(server.key.secret().await?.as_bytes())
                         .map_err(|err| format!("Failed to base64 decode TSIG key: {err}"))?,
                     match server.tsig_algorithm {
@@ -77,7 +78,7 @@ impl DnsUpdater {
             }),
             DnsServer::Cloudflare(server) => {
                 let updater = {
-                    #[cfg(feature = "test_mode")]
+                    #[cfg(stalwart_tests)]
                     match server.secret.secret().await.unwrap().as_ref() {
                         "test@pebble.org" => dns_update::DnsUpdater::new_pebble(
                             "http://localhost:8055",
@@ -93,7 +94,7 @@ impl DnsUpdater {
                         .map_err(|err| format!("Failed to build DNS updater: {}", err))?,
                     }
 
-                    #[cfg(not(feature = "test_mode"))]
+                    #[cfg(not(stalwart_tests))]
                     dns_update::DnsUpdater::new_cloudflare(
                         server.secret.secret().await?,
                         server.timeout.into_inner().into(),
@@ -102,7 +103,7 @@ impl DnsUpdater {
                 };
 
                 Ok(DnsUpdater {
-                    polling_interval: server.polling_interval.into_inner(),
+                    polling_interval: server.poll_interval.into_inner(),
                     propagation_timeout: server.propagation_timeout.into_inner(),
                     propagation_delay: server.propagation_delay.map(|d| d.into_inner()),
                     ttl: server.ttl.into_inner(),
@@ -111,7 +112,7 @@ impl DnsUpdater {
                 })
             }
             DnsServer::DigitalOcean(server) => Ok(DnsUpdater {
-                polling_interval: server.polling_interval.into_inner(),
+                polling_interval: server.poll_interval.into_inner(),
                 propagation_timeout: server.propagation_timeout.into_inner(),
                 propagation_delay: server.propagation_delay.map(|d| d.into_inner()),
                 ttl: server.ttl.into_inner(),
@@ -123,7 +124,7 @@ impl DnsUpdater {
                 .map_err(|err| format!("Failed to build DNS updater: {}", err))?,
             }),
             DnsServer::DeSEC(server) => Ok(DnsUpdater {
-                polling_interval: server.polling_interval.into_inner(),
+                polling_interval: server.poll_interval.into_inner(),
                 propagation_timeout: server.propagation_timeout.into_inner(),
                 propagation_delay: server.propagation_delay.map(|d| d.into_inner()),
                 ttl: server.ttl.into_inner(),
@@ -135,7 +136,7 @@ impl DnsUpdater {
                 .map_err(|err| format!("Failed to build DNS updater: {}", err))?,
             }),
             DnsServer::Ovh(server) => Ok(DnsUpdater {
-                polling_interval: server.polling_interval.into_inner(),
+                polling_interval: server.poll_interval.into_inner(),
                 propagation_timeout: server.propagation_timeout.into_inner(),
                 propagation_delay: server.propagation_delay.map(|d| d.into_inner()),
                 ttl: server.ttl.into_inner(),
@@ -157,7 +158,7 @@ impl DnsUpdater {
                 .map_err(|err| format!("Failed to build DNS updater: {}", err))?,
             }),
             DnsServer::Bunny(server) => Ok(DnsUpdater {
-                polling_interval: server.polling_interval.into_inner(),
+                polling_interval: server.poll_interval.into_inner(),
                 propagation_timeout: server.propagation_timeout.into_inner(),
                 propagation_delay: server.propagation_delay.map(|d| d.into_inner()),
                 ttl: server.ttl.into_inner(),
@@ -169,46 +170,46 @@ impl DnsUpdater {
                 .map_err(|err| format!("Failed to build DNS updater: {}", err))?,
             }),
             DnsServer::Porkbun(server) => Ok(DnsUpdater {
-                polling_interval: server.polling_interval.into_inner(),
+                polling_interval: server.poll_interval.into_inner(),
                 propagation_timeout: server.propagation_timeout.into_inner(),
                 propagation_delay: server.propagation_delay.map(|d| d.into_inner()),
                 ttl: server.ttl.into_inner(),
                 core,
                 updater: dns_update::DnsUpdater::new_porkbun(
-                    server.api_key.as_str(),
-                    server.secret_api_key.secret().await?,
+                    server.api_key_id.as_str(),
+                    server.secret.secret().await?,
                     server.timeout.into_inner().into(),
                 )
                 .map_err(|err| format!("Failed to build DNS updater: {}", err))?,
             }),
             DnsServer::Dnsimple(server) => Ok(DnsUpdater {
-                polling_interval: server.polling_interval.into_inner(),
+                polling_interval: server.poll_interval.into_inner(),
                 propagation_timeout: server.propagation_timeout.into_inner(),
                 propagation_delay: server.propagation_delay.map(|d| d.into_inner()),
                 ttl: server.ttl.into_inner(),
                 core,
                 updater: dns_update::DnsUpdater::new_dnsimple(
-                    server.auth_token.secret().await?,
+                    server.token.secret().await?,
                     server.account_identifier.as_str(),
                     server.timeout.into_inner().into(),
                 )
                 .map_err(|err| format!("Failed to build DNS updater: {}", err))?,
             }),
             DnsServer::Spaceship(server) => Ok(DnsUpdater {
-                polling_interval: server.polling_interval.into_inner(),
+                polling_interval: server.poll_interval.into_inner(),
                 propagation_timeout: server.propagation_timeout.into_inner(),
                 propagation_delay: server.propagation_delay.map(|d| d.into_inner()),
                 ttl: server.ttl.into_inner(),
                 core,
                 updater: dns_update::DnsUpdater::new_spaceship(
-                    server.api_key.as_str(),
+                    server.api_key_id.as_str(),
                     server.secret.secret().await?,
                     server.timeout.into_inner().into(),
                 )
                 .map_err(|err| format!("Failed to build DNS updater: {}", err))?,
             }),
             DnsServer::Route53(server) => {
-                let secret_access_key = server.secret_access_key.secret().await?.into_owned();
+                let secret_access_key = server.secret_key.secret().await?.into_owned();
                 let session_token = server.session_token.secret().await?.map(|c| c.into_owned());
                 let config = dns_update::providers::route53::Route53Config {
                     access_key_id: server.access_key_id,
@@ -220,7 +221,7 @@ impl DnsUpdater {
                     endpoint: None,
                 };
                 Ok(DnsUpdater {
-                    polling_interval: server.polling_interval.into_inner(),
+                    polling_interval: server.poll_interval.into_inner(),
                     propagation_timeout: server.propagation_timeout.into_inner(),
                     propagation_delay: server.propagation_delay.map(|d| d.into_inner()),
                     ttl: server.ttl.into_inner(),
@@ -240,7 +241,7 @@ impl DnsUpdater {
                     request_timeout: Some(server.timeout.into_inner()),
                 };
                 Ok(DnsUpdater {
-                    polling_interval: server.polling_interval.into_inner(),
+                    polling_interval: server.poll_interval.into_inner(),
                     propagation_timeout: server.propagation_timeout.into_inner(),
                     propagation_delay: server.propagation_delay.map(|d| d.into_inner()),
                     ttl: server.ttl.into_inner(),
@@ -251,22 +252,18 @@ impl DnsUpdater {
             }
             DnsServer::Alidns(server) => {
                 let secret_key = server.secret_key.secret().await?.into_owned();
-                let security_token = server
-                    .security_token
-                    .secret()
-                    .await?
-                    .map(|c| c.into_owned());
+                let session_token = server.session_token.secret().await?.map(|c| c.into_owned());
                 Ok(DnsUpdater {
-                    polling_interval: server.polling_interval.into_inner(),
+                    polling_interval: server.poll_interval.into_inner(),
                     propagation_timeout: server.propagation_timeout.into_inner(),
                     propagation_delay: server.propagation_delay.map(|d| d.into_inner()),
                     ttl: server.ttl.into_inner(),
                     core,
                     updater: dns_update::DnsUpdater::new_alidns(
-                        server.access_key.as_str(),
+                        server.access_key_id.as_str(),
                         secret_key.as_str(),
                         server.region.as_deref(),
-                        security_token.as_deref(),
+                        session_token.as_deref(),
                         server.line.as_deref(),
                         server.timeout.into_inner().into(),
                     )
@@ -274,7 +271,7 @@ impl DnsUpdater {
                 })
             }
             DnsServer::ArvanCloud(server) => Ok(DnsUpdater {
-                polling_interval: server.polling_interval.into_inner(),
+                polling_interval: server.poll_interval.into_inner(),
                 propagation_timeout: server.propagation_timeout.into_inner(),
                 propagation_delay: server.propagation_delay.map(|d| d.into_inner()),
                 ttl: server.ttl.into_inner(),
@@ -286,7 +283,7 @@ impl DnsUpdater {
                 .map_err(|err| format!("Failed to build DNS updater: {}", err))?,
             }),
             DnsServer::Autodns(server) => Ok(DnsUpdater {
-                polling_interval: server.polling_interval.into_inner(),
+                polling_interval: server.poll_interval.into_inner(),
                 propagation_timeout: server.propagation_timeout.into_inner(),
                 propagation_delay: server.propagation_delay.map(|d| d.into_inner()),
                 ttl: server.ttl.into_inner(),
@@ -321,7 +318,7 @@ impl DnsUpdater {
                     request_timeout: Some(server.timeout.into_inner()),
                 };
                 Ok(DnsUpdater {
-                    polling_interval: server.polling_interval.into_inner(),
+                    polling_interval: server.poll_interval.into_inner(),
                     propagation_timeout: server.propagation_timeout.into_inner(),
                     propagation_delay: server.propagation_delay.map(|d| d.into_inner()),
                     ttl: server.ttl.into_inner(),
@@ -331,13 +328,13 @@ impl DnsUpdater {
                 })
             }
             DnsServer::BaiduCloud(server) => Ok(DnsUpdater {
-                polling_interval: server.polling_interval.into_inner(),
+                polling_interval: server.poll_interval.into_inner(),
                 propagation_timeout: server.propagation_timeout.into_inner(),
                 propagation_delay: server.propagation_delay.map(|d| d.into_inner()),
                 ttl: server.ttl.into_inner(),
                 core,
                 updater: dns_update::DnsUpdater::new_baiducloud(
-                    server.access_key.as_str(),
+                    server.access_key_id.as_str(),
                     server.secret_key.secret().await?,
                     server.timeout.into_inner().into(),
                 )
@@ -346,7 +343,7 @@ impl DnsUpdater {
             DnsServer::BluecatV2(server) => {
                 let password = server.password.secret().await?.into_owned();
                 let config = dns_update::providers::bluecatv2::BluecatV2Config {
-                    server_url: server.base_url,
+                    server_url: server.url,
                     username: server.username,
                     password,
                     config_name: server.config_name,
@@ -355,7 +352,7 @@ impl DnsUpdater {
                     request_timeout: Some(server.timeout.into_inner()),
                 };
                 Ok(DnsUpdater {
-                    polling_interval: server.polling_interval.into_inner(),
+                    polling_interval: server.poll_interval.into_inner(),
                     propagation_timeout: server.propagation_timeout.into_inner(),
                     propagation_delay: server.propagation_delay.map(|d| d.into_inner()),
                     ttl: server.ttl.into_inner(),
@@ -365,7 +362,7 @@ impl DnsUpdater {
                 })
             }
             DnsServer::ClouDns(server) => Ok(DnsUpdater {
-                polling_interval: server.polling_interval.into_inner(),
+                polling_interval: server.poll_interval.into_inner(),
                 propagation_timeout: server.propagation_timeout.into_inner(),
                 propagation_delay: server.propagation_delay.map(|d| d.into_inner()),
                 ttl: server.ttl.into_inner(),
@@ -379,26 +376,26 @@ impl DnsUpdater {
                 .map_err(|err| format!("Failed to build DNS updater: {}", err))?,
             }),
             DnsServer::Constellix(server) => Ok(DnsUpdater {
-                polling_interval: server.polling_interval.into_inner(),
+                polling_interval: server.poll_interval.into_inner(),
                 propagation_timeout: server.propagation_timeout.into_inner(),
                 propagation_delay: server.propagation_delay.map(|d| d.into_inner()),
                 ttl: server.ttl.into_inner(),
                 core,
                 updater: dns_update::DnsUpdater::new_constellix(
-                    server.api_key.as_str(),
+                    server.api_key_id.as_str(),
                     server.secret_key.secret().await?,
                     server.timeout.into_inner().into(),
                 )
                 .map_err(|err| format!("Failed to build DNS updater: {}", err))?,
             }),
             DnsServer::Cpanel(server) => Ok(DnsUpdater {
-                polling_interval: server.polling_interval.into_inner(),
+                polling_interval: server.poll_interval.into_inner(),
                 propagation_timeout: server.propagation_timeout.into_inner(),
                 propagation_delay: server.propagation_delay.map(|d| d.into_inner()),
                 ttl: server.ttl.into_inner(),
                 core,
                 updater: dns_update::DnsUpdater::new_cpanel(
-                    server.base_url.as_str(),
+                    server.url.as_str(),
                     server.username.as_str(),
                     server.token.secret().await?,
                     server.timeout.into_inner().into(),
@@ -406,7 +403,7 @@ impl DnsUpdater {
                 .map_err(|err| format!("Failed to build DNS updater: {}", err))?,
             }),
             DnsServer::Ddnss(server) => Ok(DnsUpdater {
-                polling_interval: server.polling_interval.into_inner(),
+                polling_interval: server.poll_interval.into_inner(),
                 propagation_timeout: server.propagation_timeout.into_inner(),
                 propagation_delay: server.propagation_delay.map(|d| d.into_inner()),
                 ttl: server.ttl.into_inner(),
@@ -418,33 +415,33 @@ impl DnsUpdater {
                 .map_err(|err| format!("Failed to build DNS updater: {}", err))?,
             }),
             DnsServer::DnsMadeEasy(server) => Ok(DnsUpdater {
-                polling_interval: server.polling_interval.into_inner(),
+                polling_interval: server.poll_interval.into_inner(),
                 propagation_timeout: server.propagation_timeout.into_inner(),
                 propagation_delay: server.propagation_delay.map(|d| d.into_inner()),
                 ttl: server.ttl.into_inner(),
                 core,
                 updater: dns_update::DnsUpdater::new_dnsmadeeasy(
-                    server.api_key.as_str(),
+                    server.api_key_id.as_str(),
                     server.secret.secret().await?,
                     server.timeout.into_inner().into(),
                 )
                 .map_err(|err| format!("Failed to build DNS updater: {}", err))?,
             }),
             DnsServer::Domeneshop(server) => Ok(DnsUpdater {
-                polling_interval: server.polling_interval.into_inner(),
+                polling_interval: server.poll_interval.into_inner(),
                 propagation_timeout: server.propagation_timeout.into_inner(),
                 propagation_delay: server.propagation_delay.map(|d| d.into_inner()),
                 ttl: server.ttl.into_inner(),
                 core,
                 updater: dns_update::DnsUpdater::new_domeneshop(
-                    server.auth_token.as_str(),
+                    server.token.as_str(),
                     server.secret.secret().await?,
                     server.timeout.into_inner().into(),
                 )
                 .map_err(|err| format!("Failed to build DNS updater: {}", err))?,
             }),
             DnsServer::Dreamhost(server) => Ok(DnsUpdater {
-                polling_interval: server.polling_interval.into_inner(),
+                polling_interval: server.poll_interval.into_inner(),
                 propagation_timeout: server.propagation_timeout.into_inner(),
                 propagation_delay: server.propagation_delay.map(|d| d.into_inner()),
                 ttl: server.ttl.into_inner(),
@@ -456,7 +453,7 @@ impl DnsUpdater {
                 .map_err(|err| format!("Failed to build DNS updater: {}", err))?,
             }),
             DnsServer::DuckDns(server) => Ok(DnsUpdater {
-                polling_interval: server.polling_interval.into_inner(),
+                polling_interval: server.poll_interval.into_inner(),
                 propagation_timeout: server.propagation_timeout.into_inner(),
                 propagation_delay: server.propagation_delay.map(|d| d.into_inner()),
                 ttl: server.ttl.into_inner(),
@@ -468,7 +465,7 @@ impl DnsUpdater {
                 .map_err(|err| format!("Failed to build DNS updater: {}", err))?,
             }),
             DnsServer::Dynu(server) => Ok(DnsUpdater {
-                polling_interval: server.polling_interval.into_inner(),
+                polling_interval: server.poll_interval.into_inner(),
                 propagation_timeout: server.propagation_timeout.into_inner(),
                 propagation_delay: server.propagation_delay.map(|d| d.into_inner()),
                 ttl: server.ttl.into_inner(),
@@ -480,7 +477,7 @@ impl DnsUpdater {
                 .map_err(|err| format!("Failed to build DNS updater: {}", err))?,
             }),
             DnsServer::EasyDns(server) => Ok(DnsUpdater {
-                polling_interval: server.polling_interval.into_inner(),
+                polling_interval: server.poll_interval.into_inner(),
                 propagation_timeout: server.propagation_timeout.into_inner(),
                 propagation_delay: server.propagation_delay.map(|d| d.into_inner()),
                 ttl: server.ttl.into_inner(),
@@ -504,7 +501,7 @@ impl DnsUpdater {
                     request_timeout: Some(server.timeout.into_inner()),
                 };
                 Ok(DnsUpdater {
-                    polling_interval: server.polling_interval.into_inner(),
+                    polling_interval: server.poll_interval.into_inner(),
                     propagation_timeout: server.propagation_timeout.into_inner(),
                     propagation_delay: server.propagation_delay.map(|d| d.into_inner()),
                     ttl: server.ttl.into_inner(),
@@ -514,20 +511,20 @@ impl DnsUpdater {
                 })
             }
             DnsServer::Exoscale(server) => Ok(DnsUpdater {
-                polling_interval: server.polling_interval.into_inner(),
+                polling_interval: server.poll_interval.into_inner(),
                 propagation_timeout: server.propagation_timeout.into_inner(),
                 propagation_delay: server.propagation_delay.map(|d| d.into_inner()),
                 ttl: server.ttl.into_inner(),
                 core,
                 updater: dns_update::DnsUpdater::new_exoscale(
-                    server.api_key.as_str(),
+                    server.api_key_id.as_str(),
                     server.secret.secret().await?,
                     server.timeout.into_inner().into(),
                 )
                 .map_err(|err| format!("Failed to build DNS updater: {}", err))?,
             }),
             DnsServer::FreeMyIp(server) => Ok(DnsUpdater {
-                polling_interval: server.polling_interval.into_inner(),
+                polling_interval: server.poll_interval.into_inner(),
                 propagation_timeout: server.propagation_timeout.into_inner(),
                 propagation_delay: server.propagation_delay.map(|d| d.into_inner()),
                 ttl: server.ttl.into_inner(),
@@ -539,7 +536,7 @@ impl DnsUpdater {
                 .map_err(|err| format!("Failed to build DNS updater: {}", err))?,
             }),
             DnsServer::GandiV5(server) => Ok(DnsUpdater {
-                polling_interval: server.polling_interval.into_inner(),
+                polling_interval: server.poll_interval.into_inner(),
                 propagation_timeout: server.propagation_timeout.into_inner(),
                 propagation_delay: server.propagation_delay.map(|d| d.into_inner()),
                 ttl: server.ttl.into_inner(),
@@ -551,7 +548,7 @@ impl DnsUpdater {
                 .map_err(|err| format!("Failed to build DNS updater: {}", err))?,
             }),
             DnsServer::Gcore(server) => Ok(DnsUpdater {
-                polling_interval: server.polling_interval.into_inner(),
+                polling_interval: server.poll_interval.into_inner(),
                 propagation_timeout: server.propagation_timeout.into_inner(),
                 propagation_delay: server.propagation_delay.map(|d| d.into_inner()),
                 ttl: server.ttl.into_inner(),
@@ -563,33 +560,33 @@ impl DnsUpdater {
                 .map_err(|err| format!("Failed to build DNS updater: {}", err))?,
             }),
             DnsServer::Glesys(server) => Ok(DnsUpdater {
-                polling_interval: server.polling_interval.into_inner(),
+                polling_interval: server.poll_interval.into_inner(),
                 propagation_timeout: server.propagation_timeout.into_inner(),
                 propagation_delay: server.propagation_delay.map(|d| d.into_inner()),
                 ttl: server.ttl.into_inner(),
                 core,
                 updater: dns_update::DnsUpdater::new_glesys(
-                    server.api_user.as_str(),
+                    server.username.as_str(),
                     server.api_key.secret().await?,
                     server.timeout.into_inner().into(),
                 )
                 .map_err(|err| format!("Failed to build DNS updater: {}", err))?,
             }),
             DnsServer::Godaddy(server) => Ok(DnsUpdater {
-                polling_interval: server.polling_interval.into_inner(),
+                polling_interval: server.poll_interval.into_inner(),
                 propagation_timeout: server.propagation_timeout.into_inner(),
                 propagation_delay: server.propagation_delay.map(|d| d.into_inner()),
                 ttl: server.ttl.into_inner(),
                 core,
                 updater: dns_update::DnsUpdater::new_godaddy(
-                    server.api_key.as_str(),
+                    server.api_key_id.as_str(),
                     server.secret.secret().await?,
                     server.timeout.into_inner().into(),
                 )
                 .map_err(|err| format!("Failed to build DNS updater: {}", err))?,
             }),
             DnsServer::Hetzner(server) => Ok(DnsUpdater {
-                polling_interval: server.polling_interval.into_inner(),
+                polling_interval: server.poll_interval.into_inner(),
                 propagation_timeout: server.propagation_timeout.into_inner(),
                 propagation_delay: server.propagation_delay.map(|d| d.into_inner()),
                 ttl: server.ttl.into_inner(),
@@ -601,7 +598,7 @@ impl DnsUpdater {
                 .map_err(|err| format!("Failed to build DNS updater: {}", err))?,
             }),
             DnsServer::HostingDe(server) => Ok(DnsUpdater {
-                polling_interval: server.polling_interval.into_inner(),
+                polling_interval: server.poll_interval.into_inner(),
                 propagation_timeout: server.propagation_timeout.into_inner(),
                 propagation_delay: server.propagation_delay.map(|d| d.into_inner()),
                 ttl: server.ttl.into_inner(),
@@ -613,7 +610,7 @@ impl DnsUpdater {
                 .map_err(|err| format!("Failed to build DNS updater: {}", err))?,
             }),
             DnsServer::Hostinger(server) => Ok(DnsUpdater {
-                polling_interval: server.polling_interval.into_inner(),
+                polling_interval: server.poll_interval.into_inner(),
                 propagation_timeout: server.propagation_timeout.into_inner(),
                 propagation_delay: server.propagation_delay.map(|d| d.into_inner()),
                 ttl: server.ttl.into_inner(),
@@ -625,13 +622,13 @@ impl DnsUpdater {
                 .map_err(|err| format!("Failed to build DNS updater: {}", err))?,
             }),
             DnsServer::HuaweiCloud(server) => Ok(DnsUpdater {
-                polling_interval: server.polling_interval.into_inner(),
+                polling_interval: server.poll_interval.into_inner(),
                 propagation_timeout: server.propagation_timeout.into_inner(),
                 propagation_delay: server.propagation_delay.map(|d| d.into_inner()),
                 ttl: server.ttl.into_inner(),
                 core,
                 updater: dns_update::DnsUpdater::new_huaweicloud(
-                    server.access_key.as_str(),
+                    server.access_key_id.as_str(),
                     server.secret_key.secret().await?,
                     server.region.as_str(),
                     server.timeout.into_inner().into(),
@@ -645,7 +642,7 @@ impl DnsUpdater {
                     credentials.insert(cred.zone, secret);
                 }
                 Ok(DnsUpdater {
-                    polling_interval: server.polling_interval.into_inner(),
+                    polling_interval: server.poll_interval.into_inner(),
                     propagation_timeout: server.propagation_timeout.into_inner(),
                     propagation_delay: server.propagation_delay.map(|d| d.into_inner()),
                     ttl: server.ttl.into_inner(),
@@ -658,7 +655,7 @@ impl DnsUpdater {
                 })
             }
             DnsServer::IbmCloud(server) => Ok(DnsUpdater {
-                polling_interval: server.polling_interval.into_inner(),
+                polling_interval: server.poll_interval.into_inner(),
                 propagation_timeout: server.propagation_timeout.into_inner(),
                 propagation_delay: server.propagation_delay.map(|d| d.into_inner()),
                 ttl: server.ttl.into_inner(),
@@ -674,7 +671,7 @@ impl DnsUpdater {
                 let password = server.password.secret().await?.into_owned();
                 let config = dns_update::providers::infoblox::InfobloxConfig {
                     host: server.host,
-                    port: server.port,
+                    port: server.port.map(|port| port.to_string()),
                     username: server.username,
                     password,
                     wapi_version: server.wapi_version,
@@ -682,7 +679,7 @@ impl DnsUpdater {
                     request_timeout: Some(server.timeout.into_inner()),
                 };
                 Ok(DnsUpdater {
-                    polling_interval: server.polling_interval.into_inner(),
+                    polling_interval: server.poll_interval.into_inner(),
                     propagation_timeout: server.propagation_timeout.into_inner(),
                     propagation_delay: server.propagation_delay.map(|d| d.into_inner()),
                     ttl: server.ttl.into_inner(),
@@ -692,7 +689,7 @@ impl DnsUpdater {
                 })
             }
             DnsServer::Infomaniak(server) => Ok(DnsUpdater {
-                polling_interval: server.polling_interval.into_inner(),
+                polling_interval: server.poll_interval.into_inner(),
                 propagation_timeout: server.propagation_timeout.into_inner(),
                 propagation_delay: server.propagation_delay.map(|d| d.into_inner()),
                 ttl: server.ttl.into_inner(),
@@ -706,7 +703,7 @@ impl DnsUpdater {
             DnsServer::Inwx(server) => {
                 let password = server.password.secret().await?.into_owned();
                 Ok(DnsUpdater {
-                    polling_interval: server.polling_interval.into_inner(),
+                    polling_interval: server.poll_interval.into_inner(),
                     propagation_timeout: server.propagation_timeout.into_inner(),
                     propagation_delay: server.propagation_delay.map(|d| d.into_inner()),
                     ttl: server.ttl.into_inner(),
@@ -721,7 +718,7 @@ impl DnsUpdater {
                 })
             }
             DnsServer::Ionos(server) => Ok(DnsUpdater {
-                polling_interval: server.polling_interval.into_inner(),
+                polling_interval: server.poll_interval.into_inner(),
                 propagation_timeout: server.propagation_timeout.into_inner(),
                 propagation_delay: server.propagation_delay.map(|d| d.into_inner()),
                 ttl: server.ttl.into_inner(),
@@ -733,7 +730,7 @@ impl DnsUpdater {
                 .map_err(|err| format!("Failed to build DNS updater: {}", err))?,
             }),
             DnsServer::Ipv64(server) => Ok(DnsUpdater {
-                polling_interval: server.polling_interval.into_inner(),
+                polling_interval: server.poll_interval.into_inner(),
                 propagation_timeout: server.propagation_timeout.into_inner(),
                 propagation_delay: server.propagation_delay.map(|d| d.into_inner()),
                 ttl: server.ttl.into_inner(),
@@ -759,7 +756,7 @@ impl DnsUpdater {
                     }
                 };
                 Ok(DnsUpdater {
-                    polling_interval: server.polling_interval.into_inner(),
+                    polling_interval: server.poll_interval.into_inner(),
                     propagation_timeout: server.propagation_timeout.into_inner(),
                     propagation_delay: server.propagation_delay.map(|d| d.into_inner()),
                     ttl: server.ttl.into_inner(),
@@ -772,7 +769,7 @@ impl DnsUpdater {
                 })
             }
             DnsServer::Lightsail(server) => {
-                let secret_access_key = server.secret_access_key.secret().await?.into_owned();
+                let secret_access_key = server.secret_key.secret().await?.into_owned();
                 let session_token = server.session_token.secret().await?.map(|c| c.into_owned());
                 let config = dns_update::providers::lightsail::LightsailConfig {
                     access_key_id: server.access_key_id,
@@ -783,7 +780,7 @@ impl DnsUpdater {
                     request_timeout: Some(server.timeout.into_inner()),
                 };
                 Ok(DnsUpdater {
-                    polling_interval: server.polling_interval.into_inner(),
+                    polling_interval: server.poll_interval.into_inner(),
                     propagation_timeout: server.propagation_timeout.into_inner(),
                     propagation_delay: server.propagation_delay.map(|d| d.into_inner()),
                     ttl: server.ttl.into_inner(),
@@ -793,7 +790,7 @@ impl DnsUpdater {
                 })
             }
             DnsServer::Linode(server) => Ok(DnsUpdater {
-                polling_interval: server.polling_interval.into_inner(),
+                polling_interval: server.poll_interval.into_inner(),
                 propagation_timeout: server.propagation_timeout.into_inner(),
                 propagation_delay: server.propagation_delay.map(|d| d.into_inner()),
                 ttl: server.ttl.into_inner(),
@@ -805,20 +802,20 @@ impl DnsUpdater {
                 .map_err(|err| format!("Failed to build DNS updater: {}", err))?,
             }),
             DnsServer::LuaDns(server) => Ok(DnsUpdater {
-                polling_interval: server.polling_interval.into_inner(),
+                polling_interval: server.poll_interval.into_inner(),
                 propagation_timeout: server.propagation_timeout.into_inner(),
                 propagation_delay: server.propagation_delay.map(|d| d.into_inner()),
                 ttl: server.ttl.into_inner(),
                 core,
                 updater: dns_update::DnsUpdater::new_luadns(
                     server.username.as_str(),
-                    server.auth_token.secret().await?,
+                    server.token.secret().await?,
                     server.timeout.into_inner().into(),
                 )
                 .map_err(|err| format!("Failed to build DNS updater: {}", err))?,
             }),
             DnsServer::MythicBeasts(server) => Ok(DnsUpdater {
-                polling_interval: server.polling_interval.into_inner(),
+                polling_interval: server.poll_interval.into_inner(),
                 propagation_timeout: server.propagation_timeout.into_inner(),
                 propagation_delay: server.propagation_delay.map(|d| d.into_inner()),
                 ttl: server.ttl.into_inner(),
@@ -831,7 +828,7 @@ impl DnsUpdater {
                 .map_err(|err| format!("Failed to build DNS updater: {}", err))?,
             }),
             DnsServer::Namecheap(server) => Ok(DnsUpdater {
-                polling_interval: server.polling_interval.into_inner(),
+                polling_interval: server.poll_interval.into_inner(),
                 propagation_timeout: server.propagation_timeout.into_inner(),
                 propagation_delay: server.propagation_delay.map(|d| d.into_inner()),
                 ttl: server.ttl.into_inner(),
@@ -846,20 +843,20 @@ impl DnsUpdater {
                 .map_err(|err| format!("Failed to build DNS updater: {}", err))?,
             }),
             DnsServer::NameDotCom(server) => Ok(DnsUpdater {
-                polling_interval: server.polling_interval.into_inner(),
+                polling_interval: server.poll_interval.into_inner(),
                 propagation_timeout: server.propagation_timeout.into_inner(),
                 propagation_delay: server.propagation_delay.map(|d| d.into_inner()),
                 ttl: server.ttl.into_inner(),
                 core,
                 updater: dns_update::DnsUpdater::new_namedotcom(
                     server.username.as_str(),
-                    server.auth_token.secret().await?,
+                    server.token.secret().await?,
                     server.timeout.into_inner().into(),
                 )
                 .map_err(|err| format!("Failed to build DNS updater: {}", err))?,
             }),
             DnsServer::NameSilo(server) => Ok(DnsUpdater {
-                polling_interval: server.polling_interval.into_inner(),
+                polling_interval: server.poll_interval.into_inner(),
                 propagation_timeout: server.propagation_timeout.into_inner(),
                 propagation_delay: server.propagation_delay.map(|d| d.into_inner()),
                 ttl: server.ttl.into_inner(),
@@ -871,21 +868,21 @@ impl DnsUpdater {
                 .map_err(|err| format!("Failed to build DNS updater: {}", err))?,
             }),
             DnsServer::Netcup(server) => Ok(DnsUpdater {
-                polling_interval: server.polling_interval.into_inner(),
+                polling_interval: server.poll_interval.into_inner(),
                 propagation_timeout: server.propagation_timeout.into_inner(),
                 propagation_delay: server.propagation_delay.map(|d| d.into_inner()),
                 ttl: server.ttl.into_inner(),
                 core,
                 updater: dns_update::DnsUpdater::new_netcup(
                     server.customer_number.as_str(),
-                    server.api_key.as_str(),
+                    server.api_key_id.as_str(),
                     server.password.secret().await?,
                     server.timeout.into_inner().into(),
                 )
                 .map_err(|err| format!("Failed to build DNS updater: {}", err))?,
             }),
             DnsServer::Netlify(server) => Ok(DnsUpdater {
-                polling_interval: server.polling_interval.into_inner(),
+                polling_interval: server.poll_interval.into_inner(),
                 propagation_timeout: server.propagation_timeout.into_inner(),
                 propagation_delay: server.propagation_delay.map(|d| d.into_inner()),
                 ttl: server.ttl.into_inner(),
@@ -897,20 +894,20 @@ impl DnsUpdater {
                 .map_err(|err| format!("Failed to build DNS updater: {}", err))?,
             }),
             DnsServer::Nifcloud(server) => Ok(DnsUpdater {
-                polling_interval: server.polling_interval.into_inner(),
+                polling_interval: server.poll_interval.into_inner(),
                 propagation_timeout: server.propagation_timeout.into_inner(),
                 propagation_delay: server.propagation_delay.map(|d| d.into_inner()),
                 ttl: server.ttl.into_inner(),
                 core,
                 updater: dns_update::DnsUpdater::new_nifcloud(
-                    server.access_key.as_str(),
+                    server.access_key_id.as_str(),
                     server.secret_key.secret().await?,
                     server.timeout.into_inner().into(),
                 )
                 .map_err(|err| format!("Failed to build DNS updater: {}", err))?,
             }),
             DnsServer::Ns1(server) => Ok(DnsUpdater {
-                polling_interval: server.polling_interval.into_inner(),
+                polling_interval: server.poll_interval.into_inner(),
                 propagation_timeout: server.propagation_timeout.into_inner(),
                 propagation_delay: server.propagation_delay.map(|d| d.into_inner()),
                 ttl: server.ttl.into_inner(),
@@ -939,7 +936,7 @@ impl DnsUpdater {
                     request_timeout: Some(server.timeout.into_inner()),
                 };
                 Ok(DnsUpdater {
-                    polling_interval: server.polling_interval.into_inner(),
+                    polling_interval: server.poll_interval.into_inner(),
                     propagation_timeout: server.propagation_timeout.into_inner(),
                     propagation_delay: server.propagation_delay.map(|d| d.into_inner()),
                     ttl: server.ttl.into_inner(),
@@ -949,34 +946,34 @@ impl DnsUpdater {
                 })
             }
             DnsServer::Plesk(server) => Ok(DnsUpdater {
-                polling_interval: server.polling_interval.into_inner(),
+                polling_interval: server.poll_interval.into_inner(),
                 propagation_timeout: server.propagation_timeout.into_inner(),
                 propagation_delay: server.propagation_delay.map(|d| d.into_inner()),
                 ttl: server.ttl.into_inner(),
                 core,
                 updater: dns_update::DnsUpdater::new_plesk(
-                    server.base_url.as_str(),
+                    server.url.as_str(),
                     server.api_key.secret().await?,
                     server.timeout.into_inner().into(),
                 )
                 .map_err(|err| format!("Failed to build DNS updater: {}", err))?,
             }),
             DnsServer::PowerDns(server) => Ok(DnsUpdater {
-                polling_interval: server.polling_interval.into_inner(),
+                polling_interval: server.poll_interval.into_inner(),
                 propagation_timeout: server.propagation_timeout.into_inner(),
                 propagation_delay: server.propagation_delay.map(|d| d.into_inner()),
                 ttl: server.ttl.into_inner(),
                 core,
                 updater: dns_update::DnsUpdater::new_pdns(
                     server.api_key.secret().await?,
-                    server.endpoint,
+                    server.url,
                     server.server_id,
                     server.timeout.into_inner().into(),
                 )
                 .map_err(|err| format!("Failed to build DNS updater: {}", err))?,
             }),
             DnsServer::Safedns(server) => Ok(DnsUpdater {
-                polling_interval: server.polling_interval.into_inner(),
+                polling_interval: server.poll_interval.into_inner(),
                 propagation_timeout: server.propagation_timeout.into_inner(),
                 propagation_delay: server.propagation_delay.map(|d| d.into_inner()),
                 ttl: server.ttl.into_inner(),
@@ -988,7 +985,7 @@ impl DnsUpdater {
                 .map_err(|err| format!("Failed to build DNS updater: {}", err))?,
             }),
             DnsServer::Scaleway(server) => Ok(DnsUpdater {
-                polling_interval: server.polling_interval.into_inner(),
+                polling_interval: server.poll_interval.into_inner(),
                 propagation_timeout: server.propagation_timeout.into_inner(),
                 propagation_delay: server.propagation_delay.map(|d| d.into_inner()),
                 ttl: server.ttl.into_inner(),
@@ -1003,13 +1000,13 @@ impl DnsUpdater {
                 let secret_key = server.secret_key.secret().await?.into_owned();
                 let session_token = server.session_token.secret().await?.map(|c| c.into_owned());
                 Ok(DnsUpdater {
-                    polling_interval: server.polling_interval.into_inner(),
+                    polling_interval: server.poll_interval.into_inner(),
                     propagation_timeout: server.propagation_timeout.into_inner(),
                     propagation_delay: server.propagation_delay.map(|d| d.into_inner()),
                     ttl: server.ttl.into_inner(),
                     core,
                     updater: dns_update::DnsUpdater::new_tencentcloud(
-                        server.secret_id.as_str(),
+                        server.access_key_id.as_str(),
                         secret_key.as_str(),
                         server.region.as_deref(),
                         session_token.as_deref(),
@@ -1019,7 +1016,7 @@ impl DnsUpdater {
                 })
             }
             DnsServer::Transip(server) => Ok(DnsUpdater {
-                polling_interval: server.polling_interval.into_inner(),
+                polling_interval: server.poll_interval.into_inner(),
                 propagation_timeout: server.propagation_timeout.into_inner(),
                 propagation_delay: server.propagation_delay.map(|d| d.into_inner()),
                 ttl: server.ttl.into_inner(),
@@ -1035,7 +1032,7 @@ impl DnsUpdater {
             DnsServer::UltraDns(server) => {
                 let password = server.password.secret().await?.into_owned();
                 Ok(DnsUpdater {
-                    polling_interval: server.polling_interval.into_inner(),
+                    polling_interval: server.poll_interval.into_inner(),
                     propagation_timeout: server.propagation_timeout.into_inner(),
                     propagation_delay: server.propagation_delay.map(|d| d.into_inner()),
                     ttl: server.ttl.into_inner(),
@@ -1043,20 +1040,20 @@ impl DnsUpdater {
                     updater: dns_update::DnsUpdater::new_ultradns(
                         server.username,
                         password,
-                        server.endpoint,
+                        server.url,
                         server.timeout.into_inner().into(),
                     )
                     .map_err(|err| format!("Failed to build DNS updater: {}", err))?,
                 })
             }
             DnsServer::Vercel(server) => Ok(DnsUpdater {
-                polling_interval: server.polling_interval.into_inner(),
+                polling_interval: server.poll_interval.into_inner(),
                 propagation_timeout: server.propagation_timeout.into_inner(),
                 propagation_delay: server.propagation_delay.map(|d| d.into_inner()),
                 ttl: server.ttl.into_inner(),
                 core,
                 updater: dns_update::DnsUpdater::new_vercel(
-                    server.auth_token.secret().await?,
+                    server.token.secret().await?,
                     server.team_id.as_deref(),
                     server.timeout.into_inner().into(),
                 )
@@ -1065,7 +1062,7 @@ impl DnsUpdater {
             DnsServer::Volcengine(server) => {
                 let secret_key = server.secret_key.secret().await?.into_owned();
                 let config = dns_update::providers::volcengine::VolcengineConfig {
-                    access_key: server.access_key,
+                    access_key: server.access_key_id,
                     secret_key,
                     region: server.region,
                     host: server.host,
@@ -1073,7 +1070,7 @@ impl DnsUpdater {
                     request_timeout: Some(server.timeout.into_inner()),
                 };
                 Ok(DnsUpdater {
-                    polling_interval: server.polling_interval.into_inner(),
+                    polling_interval: server.poll_interval.into_inner(),
                     propagation_timeout: server.propagation_timeout.into_inner(),
                     propagation_delay: server.propagation_delay.map(|d| d.into_inner()),
                     ttl: server.ttl.into_inner(),
@@ -1083,7 +1080,7 @@ impl DnsUpdater {
                 })
             }
             DnsServer::Vultr(server) => Ok(DnsUpdater {
-                polling_interval: server.polling_interval.into_inner(),
+                polling_interval: server.poll_interval.into_inner(),
                 propagation_timeout: server.propagation_timeout.into_inner(),
                 propagation_delay: server.propagation_delay.map(|d| d.into_inner()),
                 ttl: server.ttl.into_inner(),
@@ -1095,13 +1092,13 @@ impl DnsUpdater {
                 .map_err(|err| format!("Failed to build DNS updater: {}", err))?,
             }),
             DnsServer::WebSupport(server) => Ok(DnsUpdater {
-                polling_interval: server.polling_interval.into_inner(),
+                polling_interval: server.poll_interval.into_inner(),
                 propagation_timeout: server.propagation_timeout.into_inner(),
                 propagation_delay: server.propagation_delay.map(|d| d.into_inner()),
                 ttl: server.ttl.into_inner(),
                 core,
                 updater: dns_update::DnsUpdater::new_websupport(
-                    server.api_key.as_str(),
+                    server.api_key_id.as_str(),
                     server.secret.secret().await?,
                     server.timeout.into_inner().into(),
                 )
@@ -1115,7 +1112,7 @@ impl DnsUpdater {
                     request_timeout: Some(server.timeout.into_inner()),
                 };
                 Ok(DnsUpdater {
-                    polling_interval: server.polling_interval.into_inner(),
+                    polling_interval: server.poll_interval.into_inner(),
                     propagation_timeout: server.propagation_timeout.into_inner(),
                     propagation_delay: server.propagation_delay.map(|d| d.into_inner()),
                     ttl: server.ttl.into_inner(),
@@ -1124,7 +1121,6 @@ impl DnsUpdater {
                         .map_err(|err| format!("Failed to build DNS updater: {}", err))?,
                 })
             }
-            DnsServer::Deprecated1 => Err("DNS server type no longer supported".to_string()),
         }
     }
 
@@ -1134,10 +1130,10 @@ impl DnsUpdater {
         name: &str,
         record_type: DnsRecordType,
         records: Vec<DnsRecord>,
-    ) -> Result<(), String> {
+    ) -> dns_update::Result<()> {
         let record_values = records
             .iter()
-            .map(|r| trc::Value::String(r.to_string().into()))
+            .map(|r| trc::Value::String(r.to_compact_string()))
             .collect::<Vec<_>>();
 
         if let Err(err) = self
@@ -1151,13 +1147,21 @@ impl DnsUpdater {
             )
             .await
         {
-            return Err(format!("Failed to set DNS RRSet: {}", err));
+            trc::event!(
+                Dns(DnsEvent::RecordCreationFailed),
+                Hostname = CompactString::from(name),
+                Domain = CompactString::from(origin),
+                Type = record_type.as_str(),
+                Value = record_values,
+                Reason = format_compact!("Failed to set DNS RRSet: {err}"),
+            );
+            return Err(err);
         }
 
         trc::event!(
             Dns(DnsEvent::RecordCreated),
-            Hostname = name.to_string(),
-            Details = origin.to_string(),
+            Hostname = CompactString::from(name),
+            Domain = CompactString::from(origin),
             Type = record_type.as_str(),
             Value = record_values,
         );
@@ -1183,10 +1187,10 @@ impl DnsUpdater {
         {
             trc::event!(
                 Dns(DnsEvent::RecordDeletionFailed),
-                Hostname = name.to_string(),
-                Details = origin.to_string(),
+                Hostname = CompactString::from(name),
+                Domain = CompactString::from(origin),
                 Type = record_type.as_str(),
-                Reason = err.to_string(),
+                Reason = err.to_compact_string(),
             );
             return Err(format!("Failed to delete DNS RRSet: {}", err));
         }
@@ -1203,7 +1207,7 @@ impl DnsUpdater {
     ) -> Result<(), String> {
         let record_values = records
             .iter()
-            .map(|r| trc::Value::String(r.to_string().into()))
+            .map(|r| trc::Value::String(r.to_compact_string()))
             .collect::<Vec<_>>();
 
         if let Err(err) = self
@@ -1222,8 +1226,8 @@ impl DnsUpdater {
 
         trc::event!(
             Dns(DnsEvent::RecordCreated),
-            Hostname = name.to_string(),
-            Details = origin.to_string(),
+            Hostname = CompactString::from(name),
+            Domain = CompactString::from(origin),
             Type = record_type.as_str(),
             Value = record_values,
         );
@@ -1248,7 +1252,7 @@ impl DnsUpdater {
     ) -> Result<(), String> {
         let record_values = records
             .iter()
-            .map(|r| trc::Value::String(r.to_string().into()))
+            .map(|r| trc::Value::String(r.to_compact_string()))
             .collect::<Vec<_>>();
 
         match self
@@ -1260,9 +1264,9 @@ impl DnsUpdater {
             Err(err) => {
                 trc::event!(
                     Dns(DnsEvent::RecordDeletionFailed),
-                    Hostname = name.to_string(),
-                    Reason = err.to_string(),
-                    Details = origin.to_string(),
+                    Hostname = CompactString::from(name),
+                    Reason = err.to_compact_string(),
+                    Domain = CompactString::from(origin),
                     Type = record_type.as_str(),
                     Value = record_values,
                 );
@@ -1271,8 +1275,60 @@ impl DnsUpdater {
         }
     }
 
+    pub async fn check_txt_propagation(&self, name: &str, origin: &str, expected: &str) -> bool {
+        #[cfg(stalwart_tests)]
+        if matches!(
+            self.updater,
+            dns_update::DnsUpdater::Pebble(_) | dns_update::DnsUpdater::InMemory(_)
+        ) {
+            return true;
+        }
+
+        let did_propagate = self.lookup_txt(name, origin, expected).await;
+        if did_propagate {
+            trc::event!(
+                Dns(DnsEvent::RecordPropagated),
+                Hostname = CompactString::from(name),
+                Domain = CompactString::from(origin),
+                Type = DnsRecordType::TXT.as_str(),
+                Value = CompactString::from(expected),
+            );
+        }
+        did_propagate
+    }
+
+    async fn lookup_txt(&self, name: &str, origin: &str, expected: &str) -> bool {
+        match self.core.smtp.resolvers.dns.txt_raw_lookup(&name).await {
+            Ok(result) => {
+                let result = std::str::from_utf8(&result).unwrap_or_default();
+                if result.contains(expected) {
+                    return true;
+                }
+                trc::event!(
+                    Dns(DnsEvent::RecordNotPropagated),
+                    Hostname = CompactString::from(name),
+                    Domain = CompactString::from(origin),
+                    Result = CompactString::from(result),
+                    Type = DnsRecordType::TXT.as_str(),
+                    Value = CompactString::from(expected),
+                );
+            }
+            Err(err) => {
+                trc::event!(
+                    Dns(DnsEvent::RecordLookupFailed),
+                    Hostname = CompactString::from(name),
+                    Domain = CompactString::from(origin),
+                    Reason = err.to_compact_string(),
+                    Type = DnsRecordType::TXT.as_str(),
+                    Value = CompactString::from(expected),
+                );
+            }
+        }
+        false
+    }
+
     pub async fn wait_for_txt_propagation(&self, name: &str, origin: &str, expected: &str) -> bool {
-        #[cfg(feature = "test_mode")]
+        #[cfg(stalwart_tests)]
         if matches!(
             self.updater,
             dns_update::DnsUpdater::Pebble(_) | dns_update::DnsUpdater::InMemory(_)
@@ -1286,33 +1342,9 @@ impl DnsUpdater {
         let wait_until = Instant::now() + self.propagation_timeout;
         let mut did_propagate = false;
         while Instant::now() < wait_until {
-            match self.core.smtp.resolvers.dns.txt_raw_lookup(&name).await {
-                Ok(result) => {
-                    let result = std::str::from_utf8(&result).unwrap_or_default();
-                    if result.contains(expected) {
-                        did_propagate = true;
-                        break;
-                    } else {
-                        trc::event!(
-                            Dns(DnsEvent::RecordNotPropagated),
-                            Hostname = name.to_string(),
-                            Details = origin.to_string(),
-                            Result = result.to_string(),
-                            Type = DnsRecordType::TXT.as_str(),
-                            Value = expected.to_string(),
-                        );
-                    }
-                }
-                Err(err) => {
-                    trc::event!(
-                        Dns(DnsEvent::RecordLookupFailed),
-                        Hostname = name.to_string(),
-                        Details = origin.to_string(),
-                        Reason = err.to_string(),
-                        Type = DnsRecordType::TXT.as_str(),
-                        Value = expected.to_string(),
-                    );
-                }
+            if self.lookup_txt(name, origin, expected).await {
+                did_propagate = true;
+                break;
             }
 
             tokio::time::sleep(self.polling_interval).await;
@@ -1321,18 +1353,18 @@ impl DnsUpdater {
         if did_propagate {
             trc::event!(
                 Dns(DnsEvent::RecordPropagated),
-                Hostname = name.to_string(),
-                Details = origin.to_string(),
+                Hostname = CompactString::from(name),
+                Domain = CompactString::from(origin),
                 Type = DnsRecordType::TXT.as_str(),
-                Value = expected.to_string(),
+                Value = CompactString::from(expected),
             );
         } else {
             trc::event!(
                 Dns(DnsEvent::RecordPropagationTimeout),
-                Hostname = name.to_string(),
-                Details = origin.to_string(),
+                Hostname = CompactString::from(name),
+                Domain = CompactString::from(origin),
                 Type = DnsRecordType::TXT.as_str(),
-                Value = expected.to_string(),
+                Value = CompactString::from(expected),
             );
         }
         did_propagate

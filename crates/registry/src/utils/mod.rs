@@ -8,7 +8,6 @@ use crate::schema::prelude::{DkimSignature, Roles, SecretText};
 use types::id::Id;
 
 pub mod account;
-pub mod archived_item;
 pub mod cron;
 pub mod dkim;
 pub mod http;
@@ -32,7 +31,8 @@ impl DkimSignature {
             DkimSignature::Dkim1Ed25519Sha256(signature) => &signature.private_key,
             DkimSignature::Dkim1RsaSha256(signature) => &signature.private_key,
             DkimSignature::Dkim2Ed25519Sha256(signature) => &signature.private_key,
-            DkimSignature::Dkim2RsaSha256(signature) => &signature.private_key,
+            DkimSignature::Dkim2RsaSha256(signature)
+            | DkimSignature::Dkim2MlDsa44Ed25519Sha512(signature) => &signature.private_key,
         }
     }
 
@@ -41,7 +41,8 @@ impl DkimSignature {
             DkimSignature::Dkim1Ed25519Sha256(signature) => &mut signature.private_key,
             DkimSignature::Dkim1RsaSha256(signature) => &mut signature.private_key,
             DkimSignature::Dkim2Ed25519Sha256(signature) => &mut signature.private_key,
-            DkimSignature::Dkim2RsaSha256(signature) => &mut signature.private_key,
+            DkimSignature::Dkim2RsaSha256(signature)
+            | DkimSignature::Dkim2MlDsa44Ed25519Sha512(signature) => &mut signature.private_key,
         }
     }
 }

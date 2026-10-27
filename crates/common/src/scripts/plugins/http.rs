@@ -15,13 +15,13 @@ pub fn register_header(plugin_id: u32, fnc_map: &mut FunctionMap) {
     fnc_map.set_external_function("http_header", plugin_id, 4);
 }
 
-pub async fn exec_header(ctx: PluginContext<'_>) -> trc::Result<Variable> {
+pub async fn exec_header(ctx: PluginContext<'_>) -> trc::Result<Variable<'static>> {
     let url = ctx.arguments[0].to_string();
     let header = ctx.arguments[1].to_string();
     let agent = ctx.arguments[2].to_string();
     let timeout = ctx.arguments[3].to_string().parse::<u64>().unwrap_or(5000);
 
-    #[cfg(feature = "test_mode")]
+    #[cfg(stalwart_tests)]
     if url.contains("redirect.") {
         return Ok(Variable::from(url.split_once("/?").unwrap().1.to_string()));
     }

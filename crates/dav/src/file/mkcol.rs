@@ -6,16 +6,20 @@
 
 use super::proppatch::FilePropPatchRequestHandler;
 use crate::{
-    DavMethod, PropStatBuilder,
+    DavError, DavMethod, PropStatBuilder,
     common::{
         ExtractETag,
-        acl::ResourceAcl,
+        dead::{DeadPatch, DeadTarget, DisplayName},
         lock::{LockRequestHandler, ResourceState},
         uri::DavUriResource,
     },
-    file::DavFileResource,
+    file::{DavFileResource, file_name_from_uri, is_symlink, validate_file_parent_acl},
 };
-use common::{Server, auth::AccessToken, storage::index::ObjectIndexBuilder};
+use common::{
+    Server,
+    auth::AccessToken,
+    storage::{dav::MAX_FILE_NODE_DEPTH, index::ObjectIndexBuilder},
+};
 use dav_proto::{
     RequestHeaders, Return,
     schema::{Namespace, request::MkCol, response::MkColResponse},
@@ -23,11 +27,13 @@ use dav_proto::{
 use groupware::{cache::GroupwareCache, file::FileNode};
 use http_proto::HttpResponse;
 use hyper::StatusCode;
+use registry::schema::enums::StorageQuota;
 use store::write::{BatchBuilder, now};
 use trc::AddContext;
 use types::{
     acl::Acl,
     collection::{Collection, SyncCollection},
+    metadata::MetadataKinds,
 };
 
 pub(crate) trait FileMkColRequestHandler: Sync + Send {
@@ -53,21 +59,52 @@ impl FileMkColRequestHandler for Server {
             .into_owned_uri()?;
         let account_id = resource_.account_id;
         let resources = self
-            .fetch_dav_resources(
+            .fetch_groupware_resources(
                 access_token.account_id(),
                 account_id,
                 SyncCollection::FileNode,
             )
             .await
             .caused_by(trc::location!())?;
-        let resource = resources.map_parent_resource(&resource_)?;
+        let path = resource_
+            .resource
+            .ok_or(DavError::Code(StatusCode::METHOD_NOT_ALLOWED))?;
+        if !access_token.is_member(account_id) {
+            resources.hide_undiscoverable_for(
+                access_token,
+                path,
+                StatusCode::FORBIDDEN,
+                StatusCode::CONFLICT,
+            )?;
+        }
+        if let Some(existing) = resources.by_path(path) {
+            return Err(DavError::Code(if is_symlink(&existing) {
+                StatusCode::CONFLICT
+            } else {
+                StatusCode::METHOD_NOT_ALLOWED
+            }));
+        }
+        let parent = resources.map_directory_parent(path)?;
 
         // Validate and map parent ACL
-        let parent_id = resources.validate_and_map_parent_acl(
+        let parent_id = validate_file_parent_acl(
+            &resources,
             access_token,
             access_token.is_member(account_id),
-            resource.resource.0,
+            parent.map(|parent| parent.document_id()),
             Acl::AddItems,
+        )?;
+        let name = file_name_from_uri(headers.uri)?;
+        if path.split('/').count() > MAX_FILE_NODE_DEPTH {
+            return Err(DavError::Code(StatusCode::FORBIDDEN));
+        }
+
+        // Validate quota
+        self.assert_object_quota(
+            &*self.account(account_id).await?,
+            StorageQuota::MaxFolders,
+            1,
+            || resources.resources.count(true),
         )?;
 
         // Validate headers
@@ -76,9 +113,9 @@ impl FileMkColRequestHandler for Server {
             headers,
             vec![ResourceState {
                 account_id,
-                collection: resource.collection,
+                collection: resource_.collection,
                 document_id: Some(u32::MAX),
-                path: resource_.resource.unwrap(),
+                path,
                 ..Default::default()
             }],
             Default::default(),
@@ -90,20 +127,38 @@ impl FileMkColRequestHandler for Server {
         let now = now();
         let mut node = FileNode {
             parent_id,
-            name: resource.resource.1.to_string(),
-            display_name: None,
-            file: None,
+            name,
             created: now as i64,
             modified: now as i64,
-            dead_properties: Default::default(),
-            acls: Default::default(),
+            accessed: now as i64,
+            changed: now as i64,
+            ..Default::default()
         };
 
         // Apply MKCOL properties
+        let mut batch = BatchBuilder::new();
+        let document_id = batch.reserve_document_id(account_id, Collection::FileNode);
         let mut return_prop_stat = None;
-        if let Some(mkcol) = request {
+        let mut dead_write = None;
+        if let Some(mut mkcol) = request {
             let mut prop_stat = PropStatBuilder::default();
-            if !self.apply_file_properties(&mut node, false, mkcol.props, &mut prop_stat) {
+            let dead = DeadPatch::take_values(&mut mkcol.props, DisplayName::Stored);
+            self.apply_file_properties(&mut node, mkcol.props, &mut prop_stat);
+            dead_write = dead
+                .apply(
+                    self,
+                    DeadTarget::item(
+                        account_id,
+                        Collection::FileNode,
+                        document_id,
+                        MetadataKinds::NONE,
+                    ),
+                    &mut prop_stat,
+                )
+                .await
+                .caused_by(trc::location!())?;
+            if prop_stat.has_errors() {
+                prop_stat.fail_dependencies();
                 return Ok(HttpResponse::new(StatusCode::FORBIDDEN).with_xml_body(
                     MkColResponse::new(prop_stat.build())
                         .with_namespace(Namespace::Dav)
@@ -116,20 +171,25 @@ impl FileMkColRequestHandler for Server {
         }
 
         // Prepare write batch
-        let document_id = self
-            .store()
-            .assign_document_ids(account_id, Collection::FileNode, 1)
-            .await
-            .caused_by(trc::location!())?;
-        let mut batch = BatchBuilder::new();
+        if let Some(dead_write) = &dead_write {
+            node.set_presence(dead_write.file_presence);
+        }
+        if let Some(write) = dead_write.and_then(|dead_write| dead_write.write) {
+            write
+                .build(document_id.into(), &mut batch)
+                .caused_by(trc::location!())?;
+        }
         batch
             .with_account_id(account_id)
             .with_collection(Collection::FileNode)
-            .with_document(document_id)
+            .create_document(document_id)
             .custom(ObjectIndexBuilder::<(), _>::new().with_changes(node))
             .caused_by(trc::location!())?;
-        let etag = batch.etag();
-        self.commit_batch(batch).await.caused_by(trc::location!())?;
+        let etag = self
+            .commit_batch(batch)
+            .await
+            .caused_by(trc::location!())?
+            .etag();
 
         if let Some(prop_stat) = return_prop_stat {
             Ok(HttpResponse::new(StatusCode::CREATED)

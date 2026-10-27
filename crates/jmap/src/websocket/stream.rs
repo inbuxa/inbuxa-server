@@ -4,8 +4,18 @@
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
  */
 
-use crate::api::{ToRequestError, notifications_into_push_objects, request::RequestHandler};
-use common::{Server, auth::AccessToken, ipc::PushNotification};
+use crate::api::{
+    ToRequestError, notifications_into_push_objects, request::RequestHandler,
+    session::allowed_capabilities,
+};
+use common::{
+    BuildServer, Server,
+    auth::AccessToken,
+    cache::http_auth::RevocationEpoch,
+    ipc::{PushNotification, ViewerStateChange},
+    network::memory::MemoryClass,
+};
+use compact_str::ToCompactString;
 use futures_util::{SinkExt, StreamExt};
 use http_proto::HttpSessionData;
 use hyper::upgrade::Upgraded;
@@ -20,7 +30,10 @@ use std::future::Future;
 use std::time::Instant;
 use tokio_tungstenite::WebSocketStream;
 use trc::JmapEvent;
-use tungstenite::Message;
+use tungstenite::{
+    Message,
+    protocol::{CloseFrame, frame::coding::CloseCode},
+};
 use types::type_state::{DataType, StateChange};
 use utils::map::bitmap::Bitmap;
 
@@ -29,6 +42,7 @@ pub trait WebSocketHandler: Sync + Send {
         &self,
         stream: WebSocketStream<TokioIo<Upgraded>>,
         access_token: AccessToken,
+        epoch: RevocationEpoch,
         session: HttpSessionData,
     ) -> impl Future<Output = ()> + Send;
 }
@@ -37,7 +51,8 @@ impl WebSocketHandler for Server {
     async fn handle_websocket_stream(
         &self,
         mut stream: WebSocketStream<TokioIo<Upgraded>>,
-        access_token: AccessToken,
+        mut access_token: AccessToken,
+        epoch: RevocationEpoch,
         session: HttpSessionData,
     ) {
         trc::event!(
@@ -56,29 +71,13 @@ impl WebSocketHandler for Server {
         let mut next_event = heartbeat;
 
         // Register with push manager
-        let mut push_rx = match self
-            .subscribe_push_manager(&access_token, Bitmap::all())
-            .await
-        {
-            Ok(push_rx) => push_rx,
-            Err(err) => {
-                trc::error!(
-                    err.details("Failed to subscribe to push manager")
-                        .span_id(session.session_id)
-                );
-
-                let _ = stream
-                    .send(Message::Text(
-                        WebSocketRequestError::from(RequestError::internal_server_error())
-                            .to_json()
-                            .into(),
-                    ))
-                    .await;
-                return;
-            }
-        };
+        let mut allowed_types = Bitmap::all();
+        access_token.restrict_data_types(&mut allowed_types);
+        let mut push_rx = self.subscribe_push_manager(&access_token, allowed_types);
+        let mut revocation_epoch = epoch;
 
         let mut notifications = Vec::new();
+        let mut received = Vec::new();
         let mut change_types: Bitmap<DataType> = Bitmap::new();
 
         loop {
@@ -93,16 +92,82 @@ impl WebSocketHandler for Server {
                                         self.core.jmap.request_max_calls,
                                         self.core.jmap.request_max_size,
                                     ) {
-                                        Ok(WebSocketMessage::Request(request)) => {
-                                            let response = self
-                                                .handle_jmap_request(
-                                                    request.request,
-                                                    &access_token,
-                                                    &session,
-                                                )
-                                                .await;
-                                            WebSocketResponse::from_response(response, request.id)
-                                            .to_json()
+                                        Ok(WebSocketMessage::Request(mut request)) => {
+                                            let server = self.inner.build_server();
+                                            let renewal = match access_token
+                                                .grant_id()
+                                                .map(|_| server.inner.cache.grant_revocations.epoch())
+                                            {
+                                                Some(epoch) if epoch != revocation_epoch => server
+                                                    .renew_access_token(&access_token, session.remote_ip)
+                                                    .await
+                                                    .map(|renewed| {
+                                                        revocation_epoch = epoch;
+                                                        Some(renewed)
+                                                    }),
+                                                _ => server.refresh_access_token(&access_token, session.remote_ip).await,
+                                            };
+                                            let renewal = match renewal {
+                                                Ok(renewed) => {
+                                                    if let Some(renewed) = renewed {
+                                                        access_token = renewed;
+                                                    }
+                                                    Ok(())
+                                                }
+                                                Err(err) if matches!(err.as_ref(), trc::EventType::Auth(_) | trc::EventType::Security(_)) => {
+                                                    trc::event!(
+                                                        Jmap(JmapEvent::WebsocketStop),
+                                                        SpanId = session.session_id,
+                                                        Reason = "Authorization revoked"
+                                                    );
+                                                    let _ = stream.close(Some(CloseFrame {
+                                                        code: CloseCode::Policy,
+                                                        reason: "Authorization revoked".into(),
+                                                    })).await;
+                                                    break;
+                                                }
+                                                Err(err) => Err(err),
+                                            };
+                                            match renewal {
+                                                Ok(()) => match server
+                                                    .is_http_authenticated_request_allowed(&access_token, session.remote_ip)
+                                                    .await
+                                                {
+                                                    Ok(_in_flight) => {
+                                                        request.request.using = allowed_capabilities(&access_token, request.request.using);
+                                                        let mut reservation = server.memory_reservation(MemoryClass::Read);
+                                                        let response = server
+                                                            .handle_jmap_request(
+                                                                request.request,
+                                                                &access_token,
+                                                                &session,
+                                                                &mut reservation,
+                                                            )
+                                                            .await;
+                                                        match WebSocketResponse::from_response(response, request.id).to_json() {
+                                                            Ok(response) => response,
+                                                            Err(err) => {
+                                                                trc::event!(
+                                                                    Jmap(JmapEvent::WebsocketError),
+                                                                    Details = "Failed to serialize response",
+                                                                    SpanId = session.session_id,
+                                                                    Reason = err.to_compact_string()
+                                                                );
+                                                                WebSocketRequestError::from(RequestError::internal_server_error()).to_json()
+                                                            }
+                                                        }
+                                                    }
+                                                    Err(err) => {
+                                                        let response = WebSocketRequestError::from_error(err.to_request_error(), request.id).to_json();
+                                                        trc::error!(err.span_id(session.session_id));
+                                                        response
+                                                    }
+                                                },
+                                                Err(err) => {
+                                                    trc::error!(err.details("Failed to renew WebSocket access token").span_id(session.session_id));
+                                                    WebSocketRequestError::from_error(RequestError::internal_server_error(), request.id).to_json()
+                                                }
+                                            }
                                         }
                                         Ok(WebSocketMessage::PushEnable(push_enable)) => {
                                             change_types = if !push_enable.data_types.is_empty() {
@@ -110,6 +175,7 @@ impl WebSocketHandler for Server {
                                             } else {
                                                 Bitmap::all()
                                             };
+                                            change_types.intersection(&allowed_types);
                                             continue;
                                         }
                                         Ok(WebSocketMessage::PushDisable) => {
@@ -126,7 +192,7 @@ impl WebSocketHandler for Server {
                                         trc::event!(Jmap(JmapEvent::WebsocketError),
                                                     Details = "Failed to send text message",
                                                     SpanId = session.session_id,
-                                                    Reason = err.to_string()
+                                                    Reason = err.to_compact_string()
                                         );
                                     }
                                 }
@@ -135,7 +201,7 @@ impl WebSocketHandler for Server {
                                         trc::event!(Jmap(JmapEvent::WebsocketError),
                                                     Details = "Failed to send pong message",
                                                     SpanId = session.session_id,
-                                                    Reason = err.to_string()
+                                                    Reason = err.to_compact_string()
                                         );
                                     }
                                 }
@@ -153,7 +219,7 @@ impl WebSocketHandler for Server {
                             trc::event!(Jmap(JmapEvent::WebsocketError),
                                                     Details = "Websocket error",
                                                     SpanId = session.session_id,
-                                                    Reason = err.to_string()
+                                                    Reason = err.to_compact_string()
                                         );
                             break;
                         }
@@ -172,47 +238,50 @@ impl WebSocketHandler for Server {
                         }
                     }
                 }
-                push_notification = push_rx.recv() => {
-                    if let Some(push_notification) = push_notification {
-                        match push_notification {
-                            PushNotification::StateChange(state_change) => {
-                                let mut types = state_change.types;
-                                types.intersection(&change_types);
+                is_open = push_rx.recv(&mut received) => {
+                    if is_open {
+                        for push_notification in received.drain(..) {
+                            match push_notification {
+                                PushNotification::StateChange(state_change)
+                                | PushNotification::ViewerStateChange(ViewerStateChange {
+                                    change: state_change,
+                                    ..
+                                }) => {
+                                    let mut types = state_change.types;
+                                    types.intersection(&change_types);
 
-                                if !types.is_empty() {
-                                    notifications.push(PushNotification::StateChange(
-                                        StateChange {
-                                            account_id: state_change.account_id,
-                                            types,
-                                            change_id: state_change.change_id,
-                                        }
-                                    ));
-                                }
-                            },
-                            PushNotification::EmailPush(email_push) => {
-                                let state_change = email_push.to_state_change();
-                                let mut types = state_change.types;
-                                types.intersection(&change_types);
+                                    if !types.is_empty() {
+                                        notifications.push(PushNotification::StateChange(
+                                            StateChange {
+                                                types,
+                                                ..state_change
+                                            }
+                                        ));
+                                    }
+                                },
+                                PushNotification::EmailPush(email_push) => {
+                                    let state_change = email_push.to_state_change();
+                                    let mut types = state_change.types;
+                                    types.intersection(&change_types);
 
-                                if !types.is_empty() {
-                                    notifications.push(PushNotification::StateChange(
-                                        StateChange {
-                                            account_id: state_change.account_id,
-                                            types,
-                                            change_id: state_change.change_id,
-                                        }
-                                    ));
-                                }
-                            },
-                            PushNotification::CalendarAlert(calendar_alert) => {
-                                if change_types.contains(DataType::CalendarAlert) {
-                                    notifications.push(PushNotification::CalendarAlert(
-                                        calendar_alert
-                                    ));
-                                }
-                            },
+                                    if !types.is_empty() {
+                                        notifications.push(PushNotification::StateChange(
+                                            StateChange {
+                                                types,
+                                                ..state_change
+                                            }
+                                        ));
+                                    }
+                                },
+                                PushNotification::CalendarAlert(calendar_alert) => {
+                                    if change_types.contains(DataType::CalendarAlert) {
+                                        notifications.push(PushNotification::CalendarAlert(
+                                            calendar_alert
+                                        ));
+                                    }
+                                },
+                            }
                         }
-
                     } else {
                         trc::event!(
                             Jmap(JmapEvent::WebsocketStop),
@@ -241,7 +310,7 @@ impl WebSocketHandler for Server {
                                 Jmap(JmapEvent::WebsocketError),
                                 Details = "Failed to send state change message.",
                                 SpanId = session.session_id,
-                                Reason = err.to_string()
+                                Reason = err.to_compact_string()
                             );
                         }
                     }
@@ -257,7 +326,7 @@ impl WebSocketHandler for Server {
                         Jmap(JmapEvent::WebsocketError),
                         Details = "Failed to send ping message.",
                         SpanId = session.session_id,
-                        Reason = err.to_string()
+                        Reason = err.to_compact_string()
                     );
                     break;
                 }

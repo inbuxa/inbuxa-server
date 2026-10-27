@@ -10,9 +10,8 @@ use crate::network::acme::{AcmeError, AcmeResult};
 use aws_lc_rs::digest::{Digest, SHA256, digest};
 use aws_lc_rs::hmac;
 use aws_lc_rs::rand::SystemRandom;
-use aws_lc_rs::signature::{EcdsaKeyPair, KeyPair};
-use base64::Engine;
-use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+use aws_lc_rs::signature::{ECDSA_P256_SHA256_FIXED_SIGNING, EcdsaKeyPair, KeyPair};
+use encodify::base64::URL_SAFE_NO_PAD;
 use serde::Serialize;
 
 pub(crate) fn sign(
@@ -62,12 +61,22 @@ pub(crate) fn eab_sign(
     })
 }
 
+pub(crate) fn decode_account_key(encoded: &str) -> AcmeResult<EcdsaKeyPair> {
+    EcdsaKeyPair::from_pkcs8(
+        &ECDSA_P256_SHA256_FIXED_SIGNING,
+        &URL_SAFE_NO_PAD
+            .decode(encoded)
+            .map_err(|err| AcmeError::Crypto(format!("Failed to decode account key: {}", err)))?,
+    )
+    .map_err(|err| AcmeError::Crypto(format!("Failed to create ECDSA key pair: {}", err)))
+}
+
+pub(crate) fn account_thumbprint(key: &EcdsaKeyPair) -> AcmeResult<String> {
+    Jwk::new(key).thumb_sha256_base64()
+}
+
 pub(crate) fn key_authorization(key: &EcdsaKeyPair, token: &str) -> AcmeResult<String> {
-    Ok(format!(
-        "{}.{}",
-        token,
-        Jwk::new(key).thumb_sha256_base64()?
-    ))
+    Ok(format!("{}.{}", token, account_thumbprint(key)?))
 }
 
 pub(crate) fn key_authorization_sha256(key: &EcdsaKeyPair, token: &str) -> AcmeResult<Digest> {

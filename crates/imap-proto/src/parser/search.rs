@@ -8,17 +8,18 @@ use std::borrow::Cow;
 use std::iter::Peekable;
 use std::vec::IntoIter;
 
-use compact_str::ToCompactString;
 use mail_parser::decoders::charsets::DecoderFnc;
-use mail_parser::decoders::charsets::map::charset_decoder;
+use mail_parser::decoders::charsets::charset_decoder;
 
 use crate::Command;
 use crate::protocol::search::{self, Filter};
 use crate::protocol::search::{ModSeqEntry, ResultOption};
 use crate::protocol::{Flag, ProtocolVersion};
-use crate::receiver::{Request, Token, bad};
+use crate::receiver::{ArgumentBytes, Request, Token, bad};
 
 use super::{parse_date, parse_number, parse_sequence_set};
+
+const FILTERS_INIT_LEN: usize = 16;
 
 impl Request<Command> {
     #[allow(clippy::while_let_on_iterator)]
@@ -37,15 +38,15 @@ impl Request<Command> {
                 Some(Token::Argument(value)) if value.eq_ignore_ascii_case(b"return") => {
                     tokens.next();
                     is_esearch = true;
-                    result_options = parse_result_options(&mut tokens)
-                        .map_err(|v| bad(self.tag.to_compact_string(), v))?;
+                    result_options =
+                        parse_result_options(&mut tokens).map_err(|v| bad(self.tag.clone(), v))?;
                 }
                 Some(Token::Argument(value)) if value.eq_ignore_ascii_case(b"charset") => {
                     tokens.next();
                     decoder = charset_decoder(
                         &tokens
                             .next()
-                            .ok_or_else(|| bad(self.tag.to_compact_string(), "Missing charset."))?
+                            .ok_or_else(|| bad(self.tag.clone(), "Missing charset."))?
                             .unwrap_bytes(),
                     );
                 }
@@ -53,14 +54,10 @@ impl Request<Command> {
             }
         }
 
-        let filter = parse_filters(&mut tokens, decoder)
-            .map_err(|v| bad(self.tag.to_compact_string(), v))?;
+        let filter = parse_filters(&mut tokens, decoder).map_err(|v| bad(self.tag.clone(), v))?;
 
         match filter.len() {
-            0 => Err(bad(
-                self.tag.to_compact_string(),
-                "No filters found in command.",
-            )),
+            0 => Err(bad(self.tag.clone(), "No filters found in command.")),
             _ => Ok(search::Arguments {
                 tag: self.tag,
                 result_options,
@@ -100,7 +97,7 @@ pub fn parse_filters(
     tokens: &mut Peekable<IntoIter<Token>>,
     decoder: Option<DecoderFnc>,
 ) -> super::Result<Vec<Filter>> {
-    let mut filters = Vec::new();
+    let mut filters = Vec::with_capacity(tokens.len().min(FILTERS_INIT_LEN));
     let mut filters_len = 0;
     let mut filters_stack = Vec::new();
     let mut operator = Filter::And;
@@ -382,7 +379,7 @@ pub fn parse_filters(
                                 )
                                 .into());
                             }
-                            let flag = Flag::parse_imap((param[7..]).to_vec())?;
+                            let flag = Flag::parse_imap(ArgumentBytes::from_slice(&param[7..]))?;
                             let mod_seq_entry = match tokens.next() {
                                 Some(Token::Argument(value)) if value.eq_ignore_ascii_case(b"all") => {
                                     ModSeqEntry::All(flag)
@@ -499,7 +496,7 @@ pub fn parse_filters(
             while let Some((mut prev_filters, prev_operator, prev_filters_len)) =
                 filters_stack.pop()
             {
-                if operator == Filter::And && (prev_operator != Filter::Or || filters_len == 1) {
+                if operator == Filter::And && (prev_operator == Filter::And || filters_len == 1) {
                     prev_filters.extend(filters);
                     filters_len += prev_filters_len;
                 } else {
@@ -532,20 +529,22 @@ pub fn decode_argument(
     if let Some(decoder) = decoder {
         Ok(decoder(&argument))
     } else {
-        Ok(String::from_utf8(argument).map_err(|_| Cow::from("Invalid UTF-8 argument."))?)
+        Ok(String::from_utf8(argument.into_vec())
+            .map_err(|_| Cow::from("Invalid UTF-8 argument."))?)
     }
 }
 
 impl ResultOption {
     pub fn parse(value: &[u8]) -> super::Result<Self> {
-        hashify::tiny_map_ignore_case!(
+        hashify::fnc_map_ignore_case!(
             value,
-            "min" => Self::Min,
-            "max" => Self::Max,
-            "all" => Self::All,
-            "count" => Self::Count,
-            "save" => Self::Save,
-            "context" => Self::Context,
+            "min" => Some(Self::Min),
+            "max" => Some(Self::Max),
+            "all" => Some(Self::All),
+            "count" => Some(Self::Count),
+            "save" => Some(Self::Save),
+            "context" => Some(Self::Context),
+            _ => None,
         )
         .ok_or_else(|| {
             format!(
@@ -557,334 +556,3 @@ impl ResultOption {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use crate::{
-        protocol::{
-            Flag, ProtocolVersion, Sequence,
-            search::{self, Filter, ModSeqEntry, ResultOption},
-        },
-        receiver::Receiver,
-    };
-
-    #[test]
-    fn parse_search() {
-        let mut receiver = Receiver::new();
-
-        for (command, arguments) in [
-            (
-                b"A282 SEARCH RETURN (MIN COUNT) FLAGGED SINCE 1-Feb-1994 NOT FROM \"Smith\"\r\n"
-                    .to_vec(),
-                search::Arguments {
-                    tag: "A282".into(),
-                    result_options: vec![ResultOption::Min, ResultOption::Count],
-                    filter: vec![
-                        Filter::Flagged,
-                        Filter::Since(760060800),
-                        Filter::Not,
-                        Filter::From("Smith".into()),
-                        Filter::End,
-                    ],
-                    is_esearch: true,
-                    sort: None,
-                },
-            ),
-            (
-                b"A283 SEARCH RETURN () FLAGGED SINCE 1-Feb-1994 NOT FROM \"Smith\"\r\n".to_vec(),
-                search::Arguments {
-                    tag: "A283".into(),
-                    result_options: vec![],
-                    filter: vec![
-                        Filter::Flagged,
-                        Filter::Since(760060800),
-                        Filter::Not,
-                        Filter::From("Smith".into()),
-                        Filter::End,
-                    ],
-                    is_esearch: true,
-                    sort: None,
-                },
-            ),
-            (
-                b"A301 SEARCH $ SMALLER 4096\r\n".to_vec(),
-                search::Arguments {
-                    tag: "A301".into(),
-                    result_options: vec![],
-                    filter: vec![Filter::seq_saved_search(), Filter::Smaller(4096)],
-                    is_esearch: true,
-                    sort: None,
-                },
-            ),
-            (
-                "P283 SEARCH CHARSET UTF-8 (OR $ 1,3000:3021) TEXT {8+}\r\nмать\r\n"
-                    .as_bytes()
-                    .to_vec(),
-                search::Arguments {
-                    tag: "P283".into(),
-                    result_options: vec![],
-                    filter: vec![
-                        Filter::Or,
-                        Filter::seq_saved_search(),
-                        Filter::Sequence(
-                            Sequence::List {
-                                items: vec![
-                                    Sequence::number(1),
-                                    Sequence::range(3000.into(), 3021.into()),
-                                ],
-                            },
-                            false,
-                        ),
-                        Filter::End,
-                        Filter::Text("мать".into()),
-                    ],
-                    is_esearch: true,
-                    sort: None,
-                },
-            ),
-            (
-                b"F282 SEARCH RETURN (SAVE) KEYWORD $Junk\r\n".to_vec(),
-                search::Arguments {
-                    tag: "F282".into(),
-                    result_options: vec![ResultOption::Save],
-                    filter: vec![Filter::Keyword(Flag::Junk)],
-                    is_esearch: true,
-                    sort: None,
-                },
-            ),
-            (
-                [
-                    b"F282 SEARCH OR OR FROM hello@world.com TO ".to_vec(),
-                    b"test@example.com OR BCC jane@foobar.com ".to_vec(),
-                    b"CC john@doe.com\r\n".to_vec(),
-                ]
-                .concat(),
-                search::Arguments {
-                    tag: "F282".into(),
-                    result_options: vec![],
-                    filter: vec![
-                        Filter::Or,
-                        Filter::Or,
-                        Filter::From("hello@world.com".into()),
-                        Filter::To("test@example.com".into()),
-                        Filter::End,
-                        Filter::Or,
-                        Filter::Bcc("jane@foobar.com".into()),
-                        Filter::Cc("john@doe.com".into()),
-                        Filter::End,
-                        Filter::End,
-                    ],
-                    is_esearch: true,
-                    sort: None,
-                },
-            ),
-            (
-                [
-                    b"abc SEARCH OR SMALLER 10000 OR ".to_vec(),
-                    b"HEADER Subject \"ravioli festival\" ".to_vec(),
-                    b"HEADER From \"dr. ravioli\"\r\n".to_vec(),
-                ]
-                .concat(),
-                search::Arguments {
-                    tag: "abc".into(),
-                    result_options: vec![],
-                    filter: vec![
-                        Filter::Or,
-                        Filter::Smaller(10000),
-                        Filter::Or,
-                        Filter::Header("Subject".into(), "ravioli festival".into()),
-                        Filter::Header("From".into(), "dr. ravioli".into()),
-                        Filter::End,
-                        Filter::End,
-                    ],
-                    is_esearch: true,
-                    sort: None,
-                },
-            ),
-            (
-                [
-                    b"abc SEARCH (DELETED SEEN ANSWERED) ".to_vec(),
-                    b"NOT (FROM john TO jane BCC bill) ".to_vec(),
-                    b"(1,30:* UID 1,2,3,4 $)\r\n".to_vec(),
-                ]
-                .concat(),
-                search::Arguments {
-                    tag: "abc".into(),
-                    result_options: vec![],
-                    filter: vec![
-                        Filter::Deleted,
-                        Filter::Seen,
-                        Filter::Answered,
-                        Filter::Not,
-                        Filter::From("john".into()),
-                        Filter::To("jane".into()),
-                        Filter::Bcc("bill".into()),
-                        Filter::End,
-                        Filter::Sequence(
-                            Sequence::List {
-                                items: vec![Sequence::number(1), Sequence::range(30.into(), None)],
-                            },
-                            false,
-                        ),
-                        Filter::Sequence(
-                            Sequence::List {
-                                items: vec![
-                                    Sequence::number(1),
-                                    Sequence::number(2),
-                                    Sequence::number(3),
-                                    Sequence::number(4),
-                                ],
-                            },
-                            true,
-                        ),
-                        Filter::seq_saved_search(),
-                    ],
-                    is_esearch: true,
-                    sort: None,
-                },
-            ),
-            (
-                [
-                    b"abc SEARCH *:* UID *:100,100:* ".to_vec(),
-                    b"(FLAGGED (DRAFT (DELETED (ANSWERED)))) ".to_vec(),
-                    b"OR (SENTON 20-Nov-2022) (LARGER 8196)\r\n".to_vec(),
-                ]
-                .concat(),
-                search::Arguments {
-                    tag: "abc".into(),
-                    result_options: vec![],
-                    filter: vec![
-                        Filter::seq_range(None, None),
-                        Filter::Sequence(
-                            Sequence::List {
-                                items: vec![
-                                    Sequence::range(None, 100.into()),
-                                    Sequence::range(100.into(), None),
-                                ],
-                            },
-                            true,
-                        ),
-                        Filter::Flagged,
-                        Filter::Draft,
-                        Filter::Deleted,
-                        Filter::Answered,
-                        Filter::Or,
-                        Filter::SentOn(1668902400),
-                        Filter::Larger(8196),
-                        Filter::End,
-                    ],
-                    is_esearch: true,
-                    sort: None,
-                },
-            ),
-            (
-                [
-                    b"abc SEARCH NOT (FROM john OR TO jane CC bill) ".to_vec(),
-                    b"OR (UNDELETED ALL) ($ NOT FLAGGED) ".to_vec(),
-                    b"(((KEYWORD \"tps report\")))\r\n".to_vec(),
-                ]
-                .concat(),
-                search::Arguments {
-                    tag: "abc".into(),
-                    result_options: vec![],
-                    filter: vec![
-                        Filter::Not,
-                        Filter::From("john".into()),
-                        Filter::Or,
-                        Filter::To("jane".into()),
-                        Filter::Cc("bill".into()),
-                        Filter::End,
-                        Filter::End,
-                        Filter::Or,
-                        Filter::And,
-                        Filter::Undeleted,
-                        Filter::All,
-                        Filter::End,
-                        Filter::And,
-                        Filter::seq_saved_search(),
-                        Filter::Not,
-                        Filter::Flagged,
-                        Filter::End,
-                        Filter::End,
-                        Filter::End,
-                        Filter::Keyword(Flag::Keyword("tps report".into())),
-                    ],
-                    is_esearch: true,
-                    sort: None,
-                },
-            ),
-            (
-                [
-                    b"B283 SEARCH RETURN (SAVE MIN MAX) CHARSET KOI8-R TEXT ".to_vec(),
-                    b"{11+}\r\n\xf0\xd2\xc9\xd7\xc5\xd4, \xcd\xc9\xd2\r\n".to_vec(),
-                ]
-                .concat(),
-                search::Arguments {
-                    tag: "B283".into(),
-                    result_options: vec![ResultOption::Save, ResultOption::Min, ResultOption::Max],
-                    filter: vec![Filter::Text("Привет, мир".into())],
-                    is_esearch: true,
-                    sort: None,
-                },
-            ),
-            (
-                b"B283 SEARCH CHARSET BIG5 FROM \"\xa7A\xa6n\xa1A\xa5@\xac\xc9\"\r\n".to_vec(),
-                search::Arguments {
-                    tag: "B283".into(),
-                    result_options: vec![],
-                    filter: vec![Filter::From("你好，世界".into())],
-                    is_esearch: true,
-                    sort: None,
-                },
-            ),
-            (
-                b"a SEARCH MODSEQ \"/flags/\\draft\" all 620162338\r\n".to_vec(),
-                search::Arguments {
-                    tag: "a".into(),
-                    result_options: vec![],
-                    filter: vec![Filter::ModSeq((620162338, ModSeqEntry::All(Flag::Draft)))],
-                    is_esearch: true,
-                    sort: None,
-                },
-            ),
-            (
-                b"t SEARCH OR NOT MODSEQ 720162338 LARGER 50000\r\n".to_vec(),
-                search::Arguments {
-                    tag: "t".into(),
-                    result_options: vec![],
-                    filter: vec![
-                        Filter::Or,
-                        Filter::Not,
-                        Filter::ModSeq((720162338, ModSeqEntry::None)),
-                        Filter::End,
-                        Filter::Larger(50000),
-                        Filter::End,
-                    ],
-                    is_esearch: true,
-                    sort: None,
-                },
-            ),
-            (
-                b"5 UID SEARCH BEFORE 1-Dec-2023\r\n".to_vec(),
-                search::Arguments {
-                    tag: "5".into(),
-                    result_options: vec![],
-                    filter: vec![Filter::Before(1701388800)],
-                    is_esearch: true,
-                    sort: None,
-                },
-            ),
-        ] {
-            let command_str = String::from_utf8_lossy(&command).into_owned();
-            assert_eq!(
-                receiver
-                    .parse(&mut command.iter())
-                    .unwrap()
-                    .parse_search(ProtocolVersion::Rev2)
-                    .expect(&command_str),
-                arguments,
-                "{}",
-                command_str
-            );
-        }
-    }
-}

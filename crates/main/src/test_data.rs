@@ -71,7 +71,7 @@ pub async fn insert_test_data(server: &Server) {
             ValueClass::Registry(RegistryClass::Item { object_id, item_id }),
             report_bytes,
         );
-        server.store().write(batch.build_all()).await.unwrap();
+        server.store().write_batch(&mut batch).await.unwrap();
     }
 
     for report in sample_dmarc_internal_reports() {
@@ -85,28 +85,28 @@ pub async fn insert_test_data(server: &Server) {
             ValueClass::Registry(RegistryClass::Item { object_id, item_id }),
             report_bytes,
         );
-        server.store().write(batch.build_all()).await.unwrap();
+        server.store().write_batch(&mut batch).await.unwrap();
     }
 
     for report in sample_tls_external_reports() {
         let mut batch = BatchBuilder::new();
         let item_id = server.inner.data.queue_id_gen.generate();
         report.write_ops(&mut batch, item_id, true);
-        server.store().write(batch.build_all()).await.unwrap();
+        server.store().write_batch(&mut batch).await.unwrap();
     }
 
     for report in sample_dmarc_external_reports() {
         let mut batch = BatchBuilder::new();
         let item_id = server.inner.data.queue_id_gen.generate();
         report.write_ops(&mut batch, item_id, true);
-        server.store().write(batch.build_all()).await.unwrap();
+        server.store().write_batch(&mut batch).await.unwrap();
     }
 
     for report in sample_arf_external_reports() {
         let mut batch = BatchBuilder::new();
         let item_id = server.inner.data.queue_id_gen.generate();
         report.write_ops(&mut batch, item_id, true);
-        server.store().write(batch.build_all()).await.unwrap();
+        server.store().write_batch(&mut batch).await.unwrap();
     }
 }
 
@@ -154,14 +154,14 @@ fn sample_queued_messages(blob_hashes: Vec<BlobHash>) -> Vec<Message> {
                     },
                     expires: QueueExpiry::Ttl(365 * 24 * 3600),
                     queue: Default::default(),
-                    status: Status::Completed(HostResponse {
+                    status: Status::Completed(Box::new(HostResponse {
                         hostname: "mx.example.org".into(),
                         response: Response {
                             code: 250,
                             esc: [2, 1, 5],
                             message: "OK".into(),
                         },
-                    }),
+                    })),
                     flags: RCPT_DSN_SENT,
                     orcpt: Some("bob@example.org".into()),
                 },
@@ -191,17 +191,17 @@ fn sample_queued_messages(blob_hashes: Vec<BlobHash>) -> Vec<Message> {
                 },
                 expires: QueueExpiry::Ttl(365 * 24 * 3600),
                 queue: Default::default(),
-                status: Status::TemporaryFailure(ErrorDetails {
+                status: Status::TemporaryFailure(Box::new(ErrorDetails {
                     entity: "mx.remote.net".into(),
-                    details: Error::UnexpectedResponse(UnexpectedResponse {
+                    details: Error::UnexpectedResponse(Box::new(UnexpectedResponse {
                         command: "RCPT TO".into(),
                         response: Response {
                             code: 450,
                             esc: [4, 2, 1],
                             message: "Mailbox temporarily unavailable".into(),
                         },
-                    }),
-                }),
+                    })),
+                })),
                 flags: 0,
                 orcpt: None,
             }],
@@ -230,10 +230,10 @@ fn sample_queued_messages(blob_hashes: Vec<BlobHash>) -> Vec<Message> {
                 },
                 expires: QueueExpiry::Ttl(365 * 24 * 3600),
                 queue: Default::default(),
-                status: Status::TemporaryFailure(ErrorDetails {
+                status: Status::TemporaryFailure(Box::new(ErrorDetails {
                     entity: "mx.bigcorp.com".into(),
                     details: Error::ConnectionError("Rejected by policy".into()),
-                }),
+                })),
                 flags: rcpt_spam_flag(72),
                 orcpt: None,
             }],
@@ -465,7 +465,7 @@ fn sample_dmarc_internal_reports() -> Vec<DmarcInternalReport> {
             domain: "trusted-sender.com".to_string(),
             policy_identifier: 100,
             report: DmarcReport {
-                date_range_begin: days_ago(1),
+                date_range_start: days_ago(1),
                 date_range_end: now(),
                 email: "dmarc@myserver.com".to_string(),
                 errors: Map::new(vec![]),
@@ -521,7 +521,7 @@ fn sample_dmarc_internal_reports() -> Vec<DmarcInternalReport> {
             domain: "strict-domain.org".to_string(),
             policy_identifier: 200,
             report: DmarcReport {
-                date_range_begin: days_ago(1),
+                date_range_start: days_ago(1),
                 date_range_end: now(),
                 email: "dmarc@myserver.com".to_string(),
                 errors: Map::new(vec!["DKIM signature verification failed".to_string()]),
@@ -577,7 +577,7 @@ fn sample_dmarc_internal_reports() -> Vec<DmarcInternalReport> {
             domain: "new-policy.io".to_string(),
             policy_identifier: 300,
             report: DmarcReport {
-                date_range_begin: days_ago(1),
+                date_range_start: days_ago(1),
                 date_range_end: now(),
                 email: "dmarc@myserver.com".to_string(),
                 errors: Map::new(vec![]),
@@ -666,7 +666,6 @@ fn sample_tls_external_reports() -> Vec<TlsExternalReport> {
         TlsExternalReport {
             expires_at: future,
             from: "tls-reports@bigprovider.com".to_string(),
-            member_tenant_id: None,
             received_at: now(),
             report: TlsReport {
                 contact_info: Some("postmaster@bigprovider.com".to_string()),
@@ -732,7 +731,6 @@ fn sample_tls_external_reports() -> Vec<TlsExternalReport> {
         TlsExternalReport {
             expires_at: future,
             from: "noreply@securemail.org".to_string(),
-            member_tenant_id: None,
             received_at: now(),
             report: TlsReport {
                 contact_info: None,
@@ -822,7 +820,6 @@ fn sample_tls_external_reports() -> Vec<TlsExternalReport> {
         TlsExternalReport {
             expires_at: future,
             from: "reports@mailhoster.net".to_string(),
-            member_tenant_id: None,
             received_at: now(),
             report: TlsReport {
                 contact_info: Some("abuse@mailhoster.net".to_string()),
@@ -918,10 +915,9 @@ fn sample_dmarc_external_reports() -> Vec<DmarcExternalReport> {
         DmarcExternalReport {
             expires_at: future,
             from: "noreply-dmarc@google.com".to_string(),
-            member_tenant_id: None,
             received_at: now(),
             report: DmarcReport {
-                date_range_begin: days_ago(1),
+                date_range_start: days_ago(1),
                 date_range_end: now(),
                 email: "noreply-dmarc@google.com".to_string(),
                 errors: Map::new(vec![]),
@@ -1027,10 +1023,9 @@ fn sample_dmarc_external_reports() -> Vec<DmarcExternalReport> {
         DmarcExternalReport {
             expires_at: future,
             from: "dmarc@yahoo.com".to_string(),
-            member_tenant_id: None,
             received_at: now(),
             report: DmarcReport {
-                date_range_begin: days_ago(1),
+                date_range_start: days_ago(1),
                 date_range_end: now(),
                 email: "dmarc@yahoo.com".to_string(),
                 errors: Map::new(vec![]),
@@ -1148,10 +1143,9 @@ fn sample_dmarc_external_reports() -> Vec<DmarcExternalReport> {
         DmarcExternalReport {
             expires_at: future,
             from: "dmarc-noreply@microsoft.com".to_string(),
-            member_tenant_id: None,
             received_at: now(),
             report: DmarcReport {
-                date_range_begin: days_ago(1),
+                date_range_start: days_ago(1),
                 date_range_end: now(),
                 email: "dmarc-noreply@microsoft.com".to_string(),
                 errors: Map::new(vec![]),
@@ -1266,7 +1260,6 @@ fn sample_arf_external_reports() -> Vec<ArfExternalReport> {
         ArfExternalReport {
             expires_at: future,
             from: "fbl@isp-provider.com".to_string(),
-            member_tenant_id: None,
             received_at: now(),
             report: ArfFeedbackReport {
                 arrival_date: Some(days_ago(1)),
@@ -1310,7 +1303,6 @@ fn sample_arf_external_reports() -> Vec<ArfExternalReport> {
         ArfExternalReport {
             expires_at: future,
             from: "authfail@receiver.org".to_string(),
-            member_tenant_id: None,
             received_at: now(),
             report: ArfFeedbackReport {
                 arrival_date: Some(days_ago(2)),
@@ -1355,7 +1347,6 @@ fn sample_arf_external_reports() -> Vec<ArfExternalReport> {
         ArfExternalReport {
             expires_at: future,
             from: "reports@antiphish.net".to_string(),
-            member_tenant_id: None,
             received_at: now(),
             report: ArfFeedbackReport {
                 arrival_date: Some(days_ago(3)),

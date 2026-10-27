@@ -4,24 +4,14 @@
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
  */
 
+use crate::{
+    Deserialize, InMemoryStore, Store, U64_LEN, Value,
+    backend::{http::lookup::HttpStoreGet, memory::StaticMemoryStore},
+    write::now,
+};
 use registry::schema::structs::Rate;
 use std::borrow::Cow;
 use trc::AddContext;
-
-#[allow(unused_imports)]
-use crate::{
-    Deserialize, InMemoryStore, IterateParams, QueryResult, Store, U64_LEN, Value, ValueKey,
-    write::{
-        BatchBuilder, Operation, ValueClass, ValueOp,
-        key::{DeserializeBigEndian, KeySerializer},
-        now,
-    },
-};
-use crate::{
-    SerializeInfallible,
-    backend::{http::lookup::HttpStoreGet, memory::StaticMemoryStore},
-    write::{InMemoryClass, assert::AssertValue},
-};
 
 pub struct KeyValue<T> {
     pub key: Vec<u8>,
@@ -29,89 +19,74 @@ pub struct KeyValue<T> {
     pub expires: Option<u64>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RateWindow {
+    pub index: u64,
+    pub expires_in: u64,
+}
+
+impl RateWindow {
+    pub fn new(rate: &Rate, now: u64) -> Self {
+        let period = rate.period.as_secs().max(1);
+        RateWindow {
+            index: now / period,
+            expires_in: period - now % period,
+        }
+    }
+
+    pub fn bucket(&self, prefix: u8, key: &[u8]) -> Vec<u8> {
+        let mut bucket = Vec::with_capacity(key.len() + U64_LEN + 1);
+        bucket.push(prefix);
+        bucket.extend_from_slice(key);
+        bucket.extend_from_slice(&self.index.to_be_bytes());
+        bucket
+    }
+}
+
 impl InMemoryStore {
     pub async fn key_set(&self, kv: KeyValue<Vec<u8>>) -> trc::Result<()> {
+        #[cfg(stalwart_tests)]
+        crate::dispatch::StoreOps::count_in_memory(self).await;
+
         match self {
-            InMemoryStore::Store(store) => {
-                let mut batch = BatchBuilder::new();
-                batch.any_op(Operation::Value {
-                    class: ValueClass::InMemory(InMemoryClass::Key(kv.key)),
-                    op: ValueOp::Set(
-                        KeySerializer::new(kv.value.len() + U64_LEN)
-                            .write(kv.expires.map_or(u64::MAX, |expires| now() + expires))
-                            .write(kv.value.as_slice())
-                            .finalize(),
-                    ),
-                });
-                store.write(batch.build_all()).await.map(|_| ())
-            }
+            InMemoryStore::Local(store) => store.key_set(kv.key, kv.value, kv.expires, now()),
             #[cfg(feature = "redis")]
             InMemoryStore::Redis(store) => store.key_set(&kv.key, &kv.value, kv.expires).await,
-            InMemoryStore::Static(_) | InMemoryStore::Http(_) => {
+            InMemoryStore::Sql(_) | InMemoryStore::Static(_) | InMemoryStore::Http(_) => {
                 Err(trc::StoreEvent::NotSupported.into_err())
             }
         }
         .caused_by(trc::location!())
     }
 
-    pub async fn counter_incr(&self, kv: KeyValue<i64>, return_value: bool) -> trc::Result<i64> {
+    pub async fn key_incr(&self, kv: KeyValue<i64>) -> trc::Result<i64> {
+        self.key_incr_at(kv, now()).await
+    }
+
+    async fn key_incr_at(&self, kv: KeyValue<i64>, now: u64) -> trc::Result<i64> {
+        #[cfg(stalwart_tests)]
+        crate::dispatch::StoreOps::count_in_memory(self).await;
+
         match self {
-            InMemoryStore::Store(store) => {
-                let mut batch = BatchBuilder::new();
-
-                if let Some(expires) = kv.expires {
-                    batch.any_op(Operation::Value {
-                        class: ValueClass::InMemory(InMemoryClass::Key(kv.key.clone())),
-                        op: ValueOp::Set(
-                            KeySerializer::new(U64_LEN * 2)
-                                .write(0u64)
-                                .write(now() + expires)
-                                .finalize(),
-                        ),
-                    });
-                }
-
-                if return_value {
-                    batch.any_op(Operation::Value {
-                        class: ValueClass::InMemory(InMemoryClass::Counter(kv.key)),
-                        op: ValueOp::AddAndGet(kv.value),
-                    });
-
-                    store
-                        .write(batch.build_all())
-                        .await
-                        .and_then(|r| r.last_counter_id())
-                } else {
-                    batch.any_op(Operation::Value {
-                        class: ValueClass::InMemory(InMemoryClass::Counter(kv.key)),
-                        op: ValueOp::AtomicAdd(kv.value),
-                    });
-
-                    store.write(batch.build_all()).await.map(|_| 0)
-                }
-            }
+            InMemoryStore::Local(store) => store.key_incr(kv.key, kv.value, kv.expires, now),
             #[cfg(feature = "redis")]
             InMemoryStore::Redis(store) => store.key_incr(&kv.key, kv.value, kv.expires).await,
-            InMemoryStore::Static(_) | InMemoryStore::Http(_) => {
+            InMemoryStore::Sql(_) | InMemoryStore::Static(_) | InMemoryStore::Http(_) => {
                 Err(trc::StoreEvent::NotSupported.into_err())
             }
         }
         .caused_by(trc::location!())
     }
 
-    pub async fn key_delete(&self, key: impl Into<LookupKey<'_>>) -> trc::Result<()> {
+    pub async fn key_delete(&self, key: impl Into<LookupKey<'_>>) -> trc::Result<bool> {
+        #[cfg(stalwart_tests)]
+        crate::dispatch::StoreOps::count_in_memory(self).await;
+
         match self {
-            InMemoryStore::Store(store) => {
-                let mut batch = BatchBuilder::new();
-                batch.any_op(Operation::Value {
-                    class: ValueClass::InMemory(InMemoryClass::Key(key.into().into_bytes())),
-                    op: ValueOp::Clear,
-                });
-                store.write(batch.build_all()).await.map(|_| ())
-            }
+            InMemoryStore::Local(store) => Ok(store.key_delete(key.into().as_bytes(), now())),
             #[cfg(feature = "redis")]
             InMemoryStore::Redis(store) => store.key_delete(key.into().as_bytes()).await,
-            InMemoryStore::Static(_) | InMemoryStore::Http(_) => {
+            InMemoryStore::Sql(_) | InMemoryStore::Static(_) | InMemoryStore::Http(_) => {
                 Err(trc::StoreEvent::NotSupported.into_err())
             }
         }
@@ -119,18 +94,19 @@ impl InMemoryStore {
     }
 
     pub async fn counter_delete(&self, key: impl Into<LookupKey<'_>>) -> trc::Result<()> {
+        #[cfg(stalwart_tests)]
+        crate::dispatch::StoreOps::count_in_memory(self).await;
+
         match self {
-            InMemoryStore::Store(store) => {
-                let mut batch = BatchBuilder::new();
-                batch.any_op(Operation::Value {
-                    class: ValueClass::InMemory(InMemoryClass::Counter(key.into().into_bytes())),
-                    op: ValueOp::Clear,
-                });
-                store.write(batch.build_all()).await.map(|_| ())
+            InMemoryStore::Local(store) => {
+                store.key_delete(key.into().as_bytes(), now());
+                Ok(())
             }
             #[cfg(feature = "redis")]
-            InMemoryStore::Redis(store) => store.key_delete(key.into().as_bytes()).await,
-            InMemoryStore::Static(_) | InMemoryStore::Http(_) => {
+            InMemoryStore::Redis(store) => {
+                store.key_delete(key.into().as_bytes()).await.map(|_| ())
+            }
+            InMemoryStore::Sql(_) | InMemoryStore::Static(_) | InMemoryStore::Http(_) => {
                 Err(trc::StoreEvent::NotSupported.into_err())
             }
         }
@@ -138,38 +114,17 @@ impl InMemoryStore {
     }
 
     pub async fn key_delete_prefix(&self, prefix: &[u8]) -> trc::Result<()> {
+        #[cfg(stalwart_tests)]
+        crate::dispatch::StoreOps::count_in_memory(self).await;
+
         match self {
-            InMemoryStore::Store(store) => {
-                if prefix.is_empty() {
-                    return Ok(());
-                }
-
-                let from_range = prefix.to_vec();
-                let mut to_range = Vec::with_capacity(prefix.len() + 3);
-                to_range.extend_from_slice(prefix);
-                to_range.extend_from_slice([u8::MAX, u8::MAX, u8::MAX].as_ref());
-
-                store
-                    .delete_range(
-                        ValueKey::from(ValueClass::InMemory(InMemoryClass::Counter(
-                            from_range.clone(),
-                        ))),
-                        ValueKey::from(ValueClass::InMemory(InMemoryClass::Counter(
-                            to_range.clone(),
-                        ))),
-                    )
-                    .await?;
-
-                store
-                    .delete_range(
-                        ValueKey::from(ValueClass::InMemory(InMemoryClass::Key(from_range))),
-                        ValueKey::from(ValueClass::InMemory(InMemoryClass::Key(to_range))),
-                    )
-                    .await
+            InMemoryStore::Local(store) => {
+                store.key_delete_prefix(prefix);
+                Ok(())
             }
             #[cfg(feature = "redis")]
             InMemoryStore::Redis(store) => store.key_delete_prefix(prefix).await,
-            InMemoryStore::Static(_) | InMemoryStore::Http(_) => {
+            InMemoryStore::Sql(_) | InMemoryStore::Static(_) | InMemoryStore::Http(_) => {
                 Err(trc::StoreEvent::NotSupported.into_err())
             }
         }
@@ -180,13 +135,11 @@ impl InMemoryStore {
         &self,
         key: impl Into<LookupKey<'_>>,
     ) -> trc::Result<Option<T>> {
+        #[cfg(stalwart_tests)]
+        crate::dispatch::StoreOps::count_in_memory(self).await;
+
         match self {
-            InMemoryStore::Store(store) => store
-                .get_value::<LookupValue<T>>(ValueKey::from(ValueClass::InMemory(
-                    InMemoryClass::Key(key.into().into_bytes()),
-                )))
-                .await
-                .map(|value| value.and_then(|v| v.into())),
+            InMemoryStore::Local(store) => store.key_get(key.into().as_bytes(), now()),
             #[cfg(feature = "redis")]
             InMemoryStore::Redis(store) => store.key_get(key.into().as_bytes()).await,
             InMemoryStore::Static(store) => Ok(match store.as_ref() {
@@ -204,36 +157,17 @@ impl InMemoryStore {
             InMemoryStore::Http(store) => {
                 Ok(store.get(key.into().as_str()).map(|value| T::from(value)))
             }
-        }
-        .caused_by(trc::location!())
-    }
-
-    pub async fn counter_get(&self, key: impl Into<LookupKey<'_>>) -> trc::Result<i64> {
-        match self {
-            InMemoryStore::Store(store) => {
-                store
-                    .get_counter(ValueKey::from(ValueClass::InMemory(
-                        InMemoryClass::Counter(key.into().into_bytes()),
-                    )))
-                    .await
-            }
-            #[cfg(feature = "redis")]
-            InMemoryStore::Redis(store) => store.counter_get(key.into().as_bytes()).await,
-            InMemoryStore::Static(_) | InMemoryStore::Http(_) => {
-                Err(trc::StoreEvent::NotSupported.into_err())
-            }
+            InMemoryStore::Sql(_) => Err(trc::StoreEvent::NotSupported.into_err()),
         }
         .caused_by(trc::location!())
     }
 
     pub async fn key_exists(&self, key: impl Into<LookupKey<'_>>) -> trc::Result<bool> {
+        #[cfg(stalwart_tests)]
+        crate::dispatch::StoreOps::count_in_memory(self).await;
+
         match self {
-            InMemoryStore::Store(store) => store
-                .get_value::<LookupValue<Empty>>(ValueKey::from(ValueClass::InMemory(
-                    InMemoryClass::Key(key.into().into_bytes()),
-                )))
-                .await
-                .map(|value| matches!(value, Some(LookupValue::Value(Empty)))),
+            InMemoryStore::Local(store) => Ok(store.key_exists(key.into().as_bytes(), now())),
             #[cfg(feature = "redis")]
             InMemoryStore::Redis(store) => store.key_exists(key.into().as_bytes()).await,
             InMemoryStore::Static(store) => Ok(match store.as_ref() {
@@ -241,6 +175,7 @@ impl InMemoryStore {
                 StaticMemoryStore::Set(set) => set.contains(key.into().as_str()),
             }),
             InMemoryStore::Http(store) => Ok(store.contains(key.into().as_str())),
+            InMemoryStore::Sql(_) => Err(trc::StoreEvent::NotSupported.into_err()),
         }
         .caused_by(trc::location!())
     }
@@ -250,89 +185,37 @@ impl InMemoryStore {
         prefix: u8,
         key: &[u8],
         rate: &Rate,
-        soft_check: bool,
     ) -> trc::Result<Option<u64>> {
         let now = now();
-        let period = rate.period.as_secs().max(1);
-        let range_start = now / period;
-        let range_end = (range_start * period) + period;
-        let expires_in = range_end - now;
+        let window = RateWindow::new(rate, now);
 
-        let mut bucket = Vec::with_capacity(key.len() + U64_LEN + 1);
-        bucket.push(prefix);
-        bucket.extend_from_slice(key);
-        bucket.extend_from_slice(range_start.to_be_bytes().as_slice());
-
-        let requests = if !soft_check {
-            self.counter_incr(KeyValue::new(bucket, 1).expires(expires_in), true)
-                .await
-                .caused_by(trc::location!())?
-        } else {
-            self.counter_get(bucket).await.caused_by(trc::location!())? + 1
-        };
+        let requests = self
+            .key_incr_at(
+                KeyValue::new(window.bucket(prefix, key), 1).expires(window.expires_in),
+                now,
+            )
+            .await
+            .caused_by(trc::location!())?;
 
         if requests <= rate.count as i64 {
             Ok(None)
         } else {
-            Ok(Some(expires_in))
+            Ok(Some(window.expires_in))
         }
     }
 
+    pub async fn rate_reset(&self, prefix: u8, key: &[u8], rate: &Rate) -> trc::Result<()> {
+        self.counter_delete(RateWindow::new(rate, now()).bucket(prefix, key))
+            .await
+    }
+
     pub async fn try_lock(&self, prefix: u8, key: &[u8], duration: u64) -> trc::Result<bool> {
+        #[cfg(stalwart_tests)]
+        crate::dispatch::StoreOps::count_in_memory(self).await;
+
         match self {
-            InMemoryStore::Store(store) => {
-                let key = KeyValue::<()>::build_key(prefix, key);
-                let lock_expiry = match store
-                    .get_value::<u64>(ValueKey::from(ValueClass::InMemory(InMemoryClass::Key(
-                        key.clone(),
-                    ))))
-                    .await
-                {
-                    Ok(lock_expiry) => lock_expiry,
-                    Err(err)
-                        if err.matches(trc::EventType::Store(trc::StoreEvent::DataCorruption)) =>
-                    {
-                        // TODO remove in 1.0
-                        let mut batch = BatchBuilder::new();
-                        batch.any_op(Operation::Value {
-                            class: ValueClass::InMemory(InMemoryClass::Key(key.clone())),
-                            op: ValueOp::Clear,
-                        });
-                        store
-                            .write(batch.build_all())
-                            .await
-                            .caused_by(trc::location!())?;
-                        None
-                    }
-                    Err(err) => {
-                        return Err(err
-                            .details("Failed to read lock.")
-                            .caused_by(trc::location!()));
-                    }
-                };
-
-                let now = now();
-                if lock_expiry.is_some_and(|expiry| expiry > now) {
-                    return Ok(false);
-                }
-
-                let key: ValueClass = ValueClass::InMemory(InMemoryClass::Key(key));
-                let mut batch = BatchBuilder::new();
-                batch.assert_value(
-                    key.clone(),
-                    match lock_expiry {
-                        Some(value) => AssertValue::U64(value),
-                        None => AssertValue::None,
-                    },
-                );
-                batch.set(key.clone(), (now + duration).serialize());
-                match store.write(batch.build_all()).await {
-                    Ok(_) => Ok(true),
-                    Err(err) if err.is_assertion_failure() => Ok(false),
-                    Err(err) => Err(err
-                        .details("Failed to lock event.")
-                        .caused_by(trc::location!())),
-                }
+            InMemoryStore::Local(store) => {
+                store.try_lock(KeyValue::<()>::build_key(prefix, key), duration, now())
             }
             #[cfg(feature = "redis")]
             InMemoryStore::Redis(store) => {
@@ -340,7 +223,84 @@ impl InMemoryStore {
                     .try_lock(&KeyValue::<()>::build_key(prefix, key), duration)
                     .await
             }
-            InMemoryStore::Static(_) | InMemoryStore::Http(_) => {
+            InMemoryStore::Sql(_) | InMemoryStore::Static(_) | InMemoryStore::Http(_) => {
+                Err(trc::StoreEvent::NotSupported.into_err())
+            }
+        }
+    }
+
+    pub async fn renew_lock(&self, prefix: u8, key: &[u8], duration: u64) -> trc::Result<()> {
+        #[cfg(stalwart_tests)]
+        crate::dispatch::StoreOps::count_in_memory(self).await;
+
+        match self {
+            InMemoryStore::Local(store) => {
+                store.renew_lock(KeyValue::<()>::build_key(prefix, key), duration, now())
+            }
+            #[cfg(feature = "redis")]
+            InMemoryStore::Redis(store) => {
+                store
+                    .renew_lock(&KeyValue::<()>::build_key(prefix, key), duration)
+                    .await
+            }
+            InMemoryStore::Sql(_) | InMemoryStore::Static(_) | InMemoryStore::Http(_) => {
+                Err(trc::StoreEvent::NotSupported.into_err())
+            }
+        }
+    }
+
+    pub async fn try_lease(
+        &self,
+        prefix: u8,
+        key: &[u8],
+        token: u64,
+        duration: u64,
+    ) -> trc::Result<bool> {
+        #[cfg(stalwart_tests)]
+        crate::dispatch::StoreOps::count_in_memory(self).await;
+
+        let key = KeyValue::<()>::build_key(prefix, key);
+        match self {
+            InMemoryStore::Local(store) => store.try_lease(key, token, duration, now()),
+            #[cfg(feature = "redis")]
+            InMemoryStore::Redis(store) => store.try_lease(&key, token, duration).await,
+            InMemoryStore::Sql(_) | InMemoryStore::Static(_) | InMemoryStore::Http(_) => {
+                Err(trc::StoreEvent::NotSupported.into_err())
+            }
+        }
+    }
+
+    pub async fn renew_lease(
+        &self,
+        prefix: u8,
+        key: &[u8],
+        token: u64,
+        duration: u64,
+    ) -> trc::Result<bool> {
+        #[cfg(stalwart_tests)]
+        crate::dispatch::StoreOps::count_in_memory(self).await;
+
+        let key = KeyValue::<()>::build_key(prefix, key);
+        match self {
+            InMemoryStore::Local(store) => Ok(store.renew_lease(&key, token, duration, now())),
+            #[cfg(feature = "redis")]
+            InMemoryStore::Redis(store) => store.renew_lease(&key, token, duration).await,
+            InMemoryStore::Sql(_) | InMemoryStore::Static(_) | InMemoryStore::Http(_) => {
+                Err(trc::StoreEvent::NotSupported.into_err())
+            }
+        }
+    }
+
+    pub async fn release_lease(&self, prefix: u8, key: &[u8], token: u64) -> trc::Result<bool> {
+        #[cfg(stalwart_tests)]
+        crate::dispatch::StoreOps::count_in_memory(self).await;
+
+        let key = KeyValue::<()>::build_key(prefix, key);
+        match self {
+            InMemoryStore::Local(store) => Ok(store.release_lease(key, token)),
+            #[cfg(feature = "redis")]
+            InMemoryStore::Redis(store) => store.release_lease(&key, token).await,
+            InMemoryStore::Sql(_) | InMemoryStore::Static(_) | InMemoryStore::Http(_) => {
                 Err(trc::StoreEvent::NotSupported.into_err())
             }
         }
@@ -349,99 +309,12 @@ impl InMemoryStore {
     pub async fn remove_lock(&self, prefix: u8, key: &[u8]) -> trc::Result<()> {
         self.key_delete(KeyValue::<()>::build_key(prefix, key))
             .await
-    }
-
-    pub async fn purge_in_memory_store(&self) -> trc::Result<()> {
-        match self {
-            InMemoryStore::Store(store) => {
-                // Delete expired keys and counters
-                let from_key = ValueKey::from(ValueClass::InMemory(InMemoryClass::Key(vec![0u8])));
-                let to_key =
-                    ValueKey::from(ValueClass::InMemory(InMemoryClass::Key(vec![u8::MAX; 10])));
-
-                let current_time = now();
-                let mut expired_keys = Vec::new();
-                let mut expired_counters = Vec::new();
-                store
-                    .iterate(IterateParams::new(from_key, to_key), |key, value| {
-                        let expiry = value.deserialize_be_u64(0).caused_by(trc::location!())?;
-                        if expiry == 0 {
-                            if value
-                                .deserialize_be_u64(U64_LEN)
-                                .caused_by(trc::location!())?
-                                <= current_time
-                            {
-                                expired_counters.push(key.to_vec());
-                            }
-                        } else if expiry <= current_time {
-                            expired_keys.push(key.to_vec());
-                        }
-                        Ok(true)
-                    })
-                    .await
-                    .caused_by(trc::location!())?;
-
-                if !expired_keys.is_empty() {
-                    let mut batch = BatchBuilder::new();
-                    for key in expired_keys {
-                        batch.any_op(Operation::Value {
-                            class: ValueClass::InMemory(InMemoryClass::Key(key)),
-                            op: ValueOp::Clear,
-                        });
-                        if batch.is_large_batch() {
-                            store
-                                .write(batch.build_all())
-                                .await
-                                .caused_by(trc::location!())?;
-                            batch = BatchBuilder::new();
-                        }
-                    }
-                    if !batch.is_empty() {
-                        store
-                            .write(batch.build_all())
-                            .await
-                            .caused_by(trc::location!())?;
-                    }
-                }
-
-                if !expired_counters.is_empty() {
-                    let mut batch = BatchBuilder::new();
-                    for key in expired_counters {
-                        batch.any_op(Operation::Value {
-                            class: ValueClass::InMemory(InMemoryClass::Counter(key.clone())),
-                            op: ValueOp::Clear,
-                        });
-                        batch.any_op(Operation::Value {
-                            class: ValueClass::InMemory(InMemoryClass::Key(key)),
-                            op: ValueOp::Clear,
-                        });
-                        if batch.is_large_batch() {
-                            store
-                                .write(batch.build_all())
-                                .await
-                                .caused_by(trc::location!())?;
-                            batch = BatchBuilder::new();
-                        }
-                    }
-                    if !batch.is_empty() {
-                        store
-                            .write(batch.build_all())
-                            .await
-                            .caused_by(trc::location!())?;
-                    }
-                }
-            }
-            #[cfg(feature = "redis")]
-            InMemoryStore::Redis(_) => {}
-            InMemoryStore::Static(_) | InMemoryStore::Http(_) => {}
-        }
-
-        Ok(())
+            .map(|_| ())
     }
 
     pub fn is_sql(&self) -> bool {
         match self {
-            InMemoryStore::Store(store) => store.is_sql(),
+            InMemoryStore::Sql(store) => store.is_sql(),
             _ => false,
         }
     }
@@ -450,14 +323,29 @@ impl InMemoryStore {
         match self {
             #[cfg(feature = "redis")]
             InMemoryStore::Redis(_) => true,
-            InMemoryStore::Static(_) => false,
+            _ => false,
+        }
+    }
+
+    pub fn is_remote(&self) -> bool {
+        match self {
+            #[cfg(feature = "redis")]
+            InMemoryStore::Redis(_) => true,
+            _ => false,
+        }
+    }
+
+    pub fn supports_chunked_keys(&self) -> bool {
+        match self {
+            #[cfg(feature = "redis")]
+            InMemoryStore::Redis(_) => true,
             _ => false,
         }
     }
 
     pub fn into_store(self) -> Option<Store> {
         match self {
-            InMemoryStore::Store(store) => Some(store),
+            InMemoryStore::Sql(store) => Some(store),
             _ => None,
         }
     }
@@ -519,15 +407,6 @@ impl LookupKey<'_> {
         }
     }
 
-    pub fn into_bytes(self) -> Vec<u8> {
-        match self {
-            LookupKey::String(string) => string.into_bytes(),
-            LookupKey::StringRef(string) => string.as_bytes().to_vec(),
-            LookupKey::Bytes(bytes) => bytes,
-            LookupKey::BytesRef(bytes) => bytes.to_vec(),
-        }
-    }
-
     pub fn as_bytes(&self) -> &[u8] {
         match self {
             LookupKey::String(string) => string.as_bytes(),
@@ -571,43 +450,6 @@ impl<T> KeyValue<T> {
     pub fn expires_opt(mut self, expires: Option<u64>) -> Self {
         self.expires = expires;
         self
-    }
-}
-
-struct Empty;
-
-enum LookupValue<T> {
-    Value(T),
-    None,
-}
-
-impl<T: Deserialize> Deserialize for LookupValue<T> {
-    fn deserialize(bytes: &[u8]) -> trc::Result<Self> {
-        bytes.deserialize_be_u64(0).and_then(|expires| {
-            Ok(if expires > now() {
-                LookupValue::Value(
-                    T::deserialize(bytes.get(U64_LEN..).unwrap_or_default())
-                        .caused_by(trc::location!())?,
-                )
-            } else {
-                LookupValue::None
-            })
-        })
-    }
-}
-
-impl Deserialize for Empty {
-    fn deserialize(_bytes: &[u8]) -> trc::Result<Self> {
-        Ok(Empty)
-    }
-}
-
-impl<T> From<LookupValue<T>> for Option<T> {
-    fn from(value: LookupValue<T>) -> Self {
-        match value {
-            LookupValue::Value(value) => Some(value),
-            LookupValue::None => None,
-        }
     }
 }
 

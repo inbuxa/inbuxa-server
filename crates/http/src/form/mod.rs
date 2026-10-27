@@ -5,22 +5,24 @@
  */
 
 use crate::auth::oauth::FormData;
-use chrono::Utc;
 use common::{
     KV_RATE_LIMIT_CONTACT, Server,
     config::network::{ContactForm, FieldOrDefault},
     network::ip_to_bytes,
     psl,
 };
-use email::message::delivery::{IngestMessage, IngestRecipient, LocalDeliveryStatus, MailDelivery};
+use email::message::delivery::{
+    IngestMessage, IngestRecipient, LocalDeliveryStatus, MailDelivery, SenderAuthentication,
+};
 use http_proto::*;
 use hyper::StatusCode;
-use mail_auth::common::cache::NoCache;
+use mail_auth::NoCache;
 use mail_builder::{
     MessageBuilder,
     headers::{
         HeaderType,
         address::{Address, EmailAddress},
+        date::Date,
     },
     mime::make_boundary,
 };
@@ -28,6 +30,7 @@ use serde_json::json;
 use std::{borrow::Cow, fmt::Write, future::Future};
 use store::write::BatchBuilder;
 use trc::AddContext;
+use types::blob_hash::BlobHash;
 
 pub trait FormHandler: Sync + Send {
     fn handle_contact_form(
@@ -54,7 +57,6 @@ impl FormHandler for Server {
                     KV_RATE_LIMIT_CONTACT,
                     &ip_to_bytes(&session.remote_ip),
                     rate,
-                    false,
                 )
                 .await
                 .caused_by(trc::location!())?
@@ -101,7 +103,7 @@ impl FormHandler for Server {
                     .smtp
                     .resolvers
                     .dns
-                    .mx_lookup(domain, None::<&NoCache<_, _>>)
+                    .mx_lookup(domain, None::<&NoCache>)
                     .await
                     .is_err()
                 {
@@ -128,11 +130,7 @@ impl FormHandler for Server {
                     body.push_str("\r\n");
                 }
             }
-            let _ = write!(
-                &mut body,
-                "Date: {}\r\n",
-                Utc::now().format("%a, %d %b %Y %T %z")
-            );
+            let _ = write!(&mut body, "Date: {}\r\n", Date::now().to_rfc822());
             let _ = write!(
                 &mut body,
                 "IP: {}:{}\r\n",
@@ -169,14 +167,14 @@ impl FormHandler for Server {
 
             // Reserve and write blob
             let (message_blob, blob_hold) = self
-                .put_temporary_blob(u32::MAX, &message, 60)
+                .hold_blob(u32::MAX, BlobHash::generate(&message), &message, 60)
                 .await
                 .caused_by(trc::location!())?;
 
             for result in self
                 .deliver_message(IngestMessage {
                     sender_address: from_email,
-                    sender_authenticated: false,
+                    sender_authentication: SenderAuthentication::Unauthenticated,
                     recipients: form
                         .rcpt_to
                         .iter()
@@ -206,9 +204,9 @@ impl FormHandler for Server {
 
             // Remove blob hold
             let mut batch = BatchBuilder::new();
-            batch.clear(blob_hold);
+            blob_hold.release(&mut batch);
             self.store()
-                .write(batch.build_all())
+                .write_batch(&mut batch)
                 .await
                 .caused_by(trc::location!())?;
 

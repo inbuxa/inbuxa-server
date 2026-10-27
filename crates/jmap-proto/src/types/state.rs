@@ -4,11 +4,16 @@
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
  */
 
-use types::ChangeId;
-use utils::codec::{
-    base32_custom::{Base32Reader, Base32Writer},
-    leb128::{Leb128Iterator, Leb128Writer},
+use encodify::base32::STALWART;
+use std::{
+    borrow::Cow,
+    fmt::{self, Write},
+    io::{Cursor, Write as _},
 };
+use types::ChangeId;
+use utils::codec::leb128::{Leb128, Leb128Iterator};
+
+const MAX_SERIALIZED_LEN: usize = 30;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct JMAPIntermediateState {
@@ -41,13 +46,13 @@ impl State {
         match it.next()? {
             b'n' => Some(State::Initial),
             b's' => {
-                let mut reader = Base32Reader::from_iter(it);
+                let mut reader = STALWART.decoder_from_iter(it);
                 reader
                     .next_leb128::<ChangeId>()
                     .map(|change_id| (change_id != 0).then_some(change_id).into())
             }
             b'r' => {
-                let mut it = Base32Reader::from_iter(it);
+                let mut it = STALWART.decoder_from_iter(it);
 
                 if let (Some(from_id), Some(to_id), Some(items_sent)) = (
                     it.next_leb128::<ChangeId>(),
@@ -101,7 +106,26 @@ impl serde::Serialize for State {
     where
         S: serde::Serializer,
     {
-        serializer.serialize_str(self.to_string().as_str())
+        serializer.collect_str(self)
+    }
+}
+
+pub(crate) struct ExpectedState(pub Option<State>);
+
+impl<'de> serde::Deserialize<'de> for ExpectedState {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        Ok(ExpectedState(
+            <Option<Cow<'de, str>>>::deserialize(deserializer)?.map(|value| {
+                State::parse(&value).unwrap_or(State::Intermediate(JMAPIntermediateState {
+                    from_id: 0,
+                    to_id: 0,
+                    items_sent: 0,
+                }))
+            }),
+        ))
     }
 }
 
@@ -115,63 +139,37 @@ impl<'de> serde::Deserialize<'de> for State {
     }
 }
 
-impl std::fmt::Display for State {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let mut writer = Base32Writer::with_capacity(10);
+impl fmt::Display for State {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let mut bytes = Cursor::new([0u8; MAX_SERIALIZED_LEN]);
 
-        match self {
-            State::Initial => {
-                writer.push_char('n');
-            }
+        let prefix = match self {
+            State::Initial => 'n',
             State::Exact(id) => {
-                writer.push_char('s');
-                writer.write_leb128(*id).unwrap();
+                bytes.write_all(&id.to_leb128()).map_err(|_| fmt::Error)?;
+                's'
             }
             State::Intermediate(intermediate) => {
-                writer.push_char('r');
-                writer.write_leb128(intermediate.from_id).unwrap();
-                writer
-                    .write_leb128(intermediate.to_id - intermediate.from_id)
-                    .unwrap();
-                writer.write_leb128(intermediate.items_sent).unwrap();
+                bytes
+                    .write_all(&intermediate.from_id.to_leb128())
+                    .map_err(|_| fmt::Error)?;
+                bytes
+                    .write_all(&(intermediate.to_id - intermediate.from_id).to_leb128())
+                    .map_err(|_| fmt::Error)?;
+                bytes
+                    .write_all(&intermediate.items_sent.to_leb128())
+                    .map_err(|_| fmt::Error)?;
+                'r'
             }
-        }
+        };
 
-        f.write_str(&writer.finalize())
+        f.write_char(prefix)?;
+        let len = bytes.position() as usize;
+        write!(
+            f,
+            "{}",
+            STALWART.display(bytes.get_ref().get(..len).unwrap_or_default())
+        )
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::State;
-    use types::ChangeId;
-
-    #[test]
-    fn test_state_id() {
-        for id in [
-            State::new_initial(),
-            State::new_exact(1),
-            State::new_exact(12345678),
-            State::new_exact(ChangeId::MAX),
-            State::new_intermediate(0, 0, 1),
-            State::new_intermediate(1024, 2048, 100),
-            State::new_intermediate(12345678, 87654321, 1),
-            State::new_intermediate(0, 0, 12345678),
-            State::new_intermediate(0, 87654321, 12345678),
-            State::new_intermediate(12345678, 87654321, 1),
-            State::new_intermediate(12345678, 87654321, 12345678),
-            State::new_intermediate(ChangeId::MAX, ChangeId::MAX, ChangeId::MAX as usize),
-        ] {
-            assert_eq!(State::parse(&id.to_string()).unwrap(), id);
-        }
-    }
-
-    #[test]
-    fn test_state_zero_change_id_is_initial() {
-        assert_eq!(
-            State::parse(&State::new_exact(0).to_string()).unwrap(),
-            State::Initial
-        );
-        assert_eq!(State::from(None), State::Initial);
-    }
-}

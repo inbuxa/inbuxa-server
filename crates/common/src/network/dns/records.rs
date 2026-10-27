@@ -4,15 +4,22 @@
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
  */
 
-use crate::{Server, config::network::Pacc, network::dkim::generate_dkim_dns_record};
+use crate::{
+    Server,
+    config::network::Pacc,
+    network::{
+        acme::persist::{PersistRecordBuilder, persist_validation_names},
+        dkim::generate_dkim_dns_record,
+    },
+};
 use ahash::{AHashMap, AHashSet};
-use base64::{Engine, engine::general_purpose};
 use dns_update::{
     CAARecord, DnsRecord, KeyValue, MXRecord, NamedDnsRecord, SRVRecord, TLSARecord, TlsaCertUsage,
     TlsaMatching, TlsaSelector, bind::BindSerializer,
 };
+use encodify::base64::STANDARD;
 use registry::schema::{
-    enums::{DnsRecordType, ServiceProtocol},
+    enums::{AcmeChallengeType, DnsRecordType, ServiceProtocol},
     prelude::{ObjectType, Property},
     structs::{AcmeProvider, CertificateManagement, DkimSignature, DnsManagement, Domain},
 };
@@ -130,13 +137,14 @@ impl Server {
 
                         records.push(NamedDnsRecord {
                             name: format!("_mta-sts.{domain_name}."),
-                            record: DnsRecord::TXT(format!("v=STSv1; id={}", policy.id)),
+                            record: DnsRecord::TXT(format!("v=STSv1; id={}", policy.policy.id)),
                         });
                     }
                 }
                 DnsRecordType::AutoConfig => {
                     let pacc_digest = Sha256::digest(&self.get_pacc_for_domain(domain_name).await?);
-                    let pacc_digest_encoded = general_purpose::STANDARD.encode(pacc_digest);
+                    let mut pacc_record = String::from("v=UAAC1; a=sha256; d=");
+                    STANDARD.encode_append(pacc_digest, &mut pacc_record);
 
                     records.push(NamedDnsRecord {
                         name: format!("ua-auto-config.{domain_name}."),
@@ -144,9 +152,7 @@ impl Server {
                     });
                     records.push(NamedDnsRecord {
                         name: format!("_ua-auto-config.{domain_name}."),
-                        record: DnsRecord::TXT(format!(
-                            "v=UAAC1; a=sha256; d={pacc_digest_encoded}"
-                        )),
+                        record: DnsRecord::TXT(pacc_record),
                     });
                 }
                 DnsRecordType::AutoConfigLegacy => {
@@ -214,20 +220,33 @@ impl Server {
                             .registry()
                             .object::<AcmeProvider>(props.acme_provider_id)
                             .await?
-                        && let Ok(provider_url) = Url::parse(&provider.directory)
-                        && let Some(provider_name) = provider_domain(&provider_url)
                     {
-                        records.push(NamedDnsRecord {
-                            name: format!("{domain_name}."),
-                            record: DnsRecord::CAA(CAARecord::Issue {
-                                issuer_critical: false,
-                                name: provider_name.to_string().into(),
-                                options: vec![KeyValue {
-                                    key: "accounturi".to_string(),
-                                    value: provider.account_uri.clone(),
-                                }],
-                            }),
-                        });
+                        let directory_url = Url::parse(&provider.directory).ok();
+                        let fallback_issuer = directory_url.as_ref().and_then(provider_domain);
+                        let caa_issuers = if provider.caa_identities.is_empty() {
+                            fallback_issuer.as_slice()
+                        } else {
+                            &[]
+                        };
+
+                        for issuer in provider
+                            .caa_identities
+                            .iter()
+                            .map(String::as_str)
+                            .chain(caa_issuers.iter().copied())
+                        {
+                            records.push(NamedDnsRecord {
+                                name: format!("{domain_name}."),
+                                record: DnsRecord::CAA(CAARecord::Issue {
+                                    issuer_critical: false,
+                                    name: issuer.to_string().into(),
+                                    options: vec![KeyValue {
+                                        key: "accounturi".to_string(),
+                                        value: provider.account_uri.clone(),
+                                    }],
+                                }),
+                            });
+                        }
 
                         if let Some(uri) = &domain.report_address_uri
                             && uri.starts_with("mailto:")
@@ -246,19 +265,34 @@ impl Server {
                             });
                         }
 
-                        // ACME DNS-PERSIST-01 validation record
-                        records.push(NamedDnsRecord {
-                            name: format!("_validation-persist.{domain_name}."),
-                            record: DnsRecord::TXT(format!(
-                                "{provider_name}; accounturi={}{}",
-                                provider.account_uri,
-                                if props.subject_alternative_names.is_empty() {
-                                    "; policy=wildcard"
-                                } else {
-                                    ""
+                        if provider.challenge_type == AcmeChallengeType::DnsPersist01 {
+                            match PersistRecordBuilder::new(&provider) {
+                                Ok(builder) => {
+                                    for (name, wildcard) in persist_validation_names(
+                                        domain_name,
+                                        props.subject_alternative_names.as_slice(),
+                                    ) {
+                                        if let Some(record) = builder.build(&name, wildcard) {
+                                            records.push(NamedDnsRecord {
+                                                name: format!("_validation-persist.{name}."),
+                                                record: DnsRecord::TXT(record),
+                                            });
+                                        }
+                                    }
                                 }
-                            )),
-                        });
+                                Err(err) => {
+                                    trc::error!(
+                                        trc::AcmeEvent::Error
+                                            .into_err()
+                                            .reason(err)
+                                            .details(format!(
+                                                "Skipping DNS-PERSIST-01 records for {domain_name}"
+                                            ))
+                                            .caused_by(trc::location!())
+                                    );
+                                }
+                            }
+                        }
                     }
                 }
                 DnsRecordType::Tlsa => {
@@ -382,24 +416,26 @@ impl Server {
     }
 
     pub async fn get_pacc_for_domain(&self, domain_name: &str) -> trc::Result<String> {
-        self.get_directory_for_domain(domain_name)
-            .await
-            .caused_by(trc::location!())
-            .map(|directory| {
-                directory
-                    .and_then(|directory| {
-                        directory
-                            .oidc_discovery_document()
-                            .map(|doc| self.core.network.info.pacc.build(&doc.url))
-                    })
-                    .unwrap_or_else(|| {
-                        self.core
-                            .network
-                            .info
-                            .pacc
-                            .build(&self.core.network.http.url_https)
-                    })
-            })
+        let pacc = &self.core.network.info.pacc;
+        Ok(
+            match self
+                .get_directory_for_domain(domain_name)
+                .await
+                .caused_by(trc::location!())?
+            {
+                Some(directory) if directory.has_bearer_token_support() => {
+                    match directory.oidc_discovery_document() {
+                        Some(discovery)
+                            if discovery.conformance.serves_oauth_public(pacc.oauth_scopes) =>
+                        {
+                            pacc.build(&discovery.document.issuer)
+                        }
+                        _ => pacc.password_only.clone(),
+                    }
+                }
+                _ => pacc.build(&self.core.network.http.url_https),
+            },
+        )
     }
 }
 
@@ -414,16 +450,6 @@ impl Pacc {
     }
 }
 
-#[inline(always)]
-#[allow(unused)]
 fn provider_domain(url: &Url) -> Option<&str> {
-    #[cfg(feature = "test_mode")]
-    {
-        Some("pebble.letsencrypt.org")
-    }
-
-    #[cfg(not(feature = "test_mode"))]
-    {
-        url.host_str().and_then(psl::domain_str)
-    }
+    url.host_str().and_then(psl::domain_str)
 }

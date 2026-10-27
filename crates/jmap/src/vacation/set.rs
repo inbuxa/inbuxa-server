@@ -6,7 +6,9 @@
 
 use super::get::VacationResponseGet;
 use crate::changes::state::StateManager;
-use common::{Server, auth::AccessToken, storage::index::ObjectIndexBuilder};
+use common::{
+    Server, auth::AccessToken, ipc::CacheInvalidation, storage::index::ObjectIndexBuilder,
+};
 use email::sieve::{SieveScript, VacationResponse, ingest::SieveScriptIngest};
 use jmap_proto::{
     error::set::{SetError, SetErrorType},
@@ -22,11 +24,12 @@ use mail_parser::decoders::html::html_to_text;
 use std::borrow::Cow;
 use std::future::Future;
 use store::{
-    Serialize, SerializeInfallible, ValueKey,
-    write::{AlignedBytes, Archive, Archiver, BatchBuilder},
+    ValueKey,
+    write::{Archive, ArchiveBytes, BatchBuilder, PendingId},
 };
 use trc::AddContext;
 use types::{
+    blob_hash::BlobHash,
     collection::{Collection, SyncCollection},
     field::PrincipalField,
     id::Id,
@@ -109,7 +112,7 @@ impl VacationResponseSet for Server {
             let (mut sieve, prev_sieve) = if let Some(document_id) = document_id {
                 let prev_sieve = self
                     .store()
-                    .get_value::<Archive<AlignedBytes>>(ValueKey::archive(
+                    .get_value::<Archive<ArchiveBytes>>(ValueKey::archive(
                         account_id,
                         Collection::SieveScript,
                         document_id,
@@ -132,9 +135,8 @@ impl VacationResponseSet for Server {
                 (
                     SieveScript {
                         name: "vacation".into(),
-                        blob_hash: Default::default(),
-                        size: 0,
                         vacation_response: VacationResponse::default().into(),
+                        ..Default::default()
                     },
                     None,
                 )
@@ -247,51 +249,52 @@ impl VacationResponseSet for Server {
             let mut obj = ObjectIndexBuilder::new()
                 .with_current_opt(prev_sieve)
                 .with_changes(sieve)
-                .with_changed_by(access_token.account_tenant_ids());
+                .with_changed_by(access_token.changed_by());
 
             // Update id
-            let document_id = if let Some(document_id) = document_id {
-                batch.with_document(document_id);
-                document_id
-            } else {
-                let document_id = self
-                    .store()
-                    .assign_document_ids(account_id, Collection::SieveScript, 1)
-                    .await
-                    .caused_by(trc::location!())?;
-                batch.with_document(document_id);
-                document_id
+            let document_id = match document_id {
+                Some(document_id) => {
+                    batch.with_document(document_id);
+                    PendingId::Assigned(document_id)
+                }
+                None => {
+                    let slot = batch.reserve_document_id(account_id, Collection::SieveScript);
+                    batch.create_document(slot);
+                    PendingId::Slot(slot)
+                }
             };
 
             // Create sieve script only if there are changes
             if build_script {
                 // Upload new blob
+                let script = self.build_script(obj.changes_mut().unwrap())?;
                 let (blob_hash, blob_hold) = self
-                    .put_temporary_blob(
-                        account_id,
-                        &self.build_script(obj.changes_mut().unwrap())?,
-                        60,
-                    )
+                    .hold_blob(account_id, BlobHash::generate(&script), &script, 60)
                     .await?;
                 obj.changes_mut().unwrap().blob_hash = blob_hash;
-                batch.clear(blob_hold);
+                blob_hold.release(&mut batch);
             };
             batch.custom(obj).caused_by(trc::location!())?;
 
             // Deactivate other sieve scripts
-            let was_active = active_script_id == Some(document_id);
+            let was_active = document_id
+                .assigned()
+                .filter(|document_id| active_script_id == Some(*document_id));
+            let mut active_script_changed = false;
             if is_active {
-                if !was_active {
+                if was_active.is_none() {
                     batch
                         .with_collection(Collection::Principal)
-                        .with_document(0)
-                        .set(PrincipalField::ActiveScriptId, document_id.serialize());
+                        .with_document(0);
+                    batch.set(PrincipalField::ActiveScriptId, document_id);
+                    active_script_changed = true;
                 }
-            } else if was_active {
+            } else if let Some(active_id) = was_active {
                 batch
                     .with_collection(Collection::Principal)
                     .with_document(0)
-                    .clear(PrincipalField::ActiveScriptId);
+                    .clear_if_equals(PrincipalField::ActiveScriptId, active_id);
+                active_script_changed = true;
             }
 
             // Write changes
@@ -299,9 +302,14 @@ impl VacationResponseSet for Server {
                 response.new_state = Some(State::Exact(
                     self.commit_batch(batch)
                         .await
-                        .and_then(|ids| ids.last_change_id(account_id))
+                        .map(|ids| ids.last_change_id(account_id, SyncCollection::SieveScript))
                         .caused_by(trc::location!())?,
                 ));
+                if active_script_changed {
+                    self.invalidate_caches(CacheInvalidation::ActiveSieveScript(account_id).into())
+                        .await
+                        .caused_by(trc::location!())?;
+                }
             }
 
             // Add result
@@ -421,16 +429,8 @@ impl VacationResponseSet for Server {
 
         match self.core.sieve.untrusted_compiler.compile(&script) {
             Ok(compiled_script) => {
-                // Update blob length
                 obj.size = script.len() as u32;
-
-                // Serialize script
-                script.extend(
-                    Archiver::new(compiled_script)
-                        .untrusted()
-                        .serialize()
-                        .caused_by(trc::location!())?,
-                );
+                obj.set_script(&compiled_script);
 
                 Ok(script)
             }

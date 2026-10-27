@@ -4,8 +4,18 @@
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
  */
 
-use crate::{api::acl::JmapRights, calendar::Availability, changes::state::JmapCacheState};
-use calcard::jscalendar::{JSCalendarAlertAction, JSCalendarRelativeTo, JSCalendarType};
+use crate::{
+    api::{
+        acl::JmapRights,
+        metadata::{MetadataDocuments, MetadataType, ObjectMetadata, select_properties},
+    },
+    calendar::Availability,
+    changes::state::JmapCacheState,
+};
+use calcard::{
+    icalendar::ICalendarDuration,
+    jscalendar::{JSCalendarAlertAction, JSCalendarRelativeTo, JSCalendarType},
+};
 use common::{Server, auth::AccessToken, sharing::EffectiveAcl};
 use groupware::{
     cache::GroupwareCache,
@@ -15,14 +25,15 @@ use groupware::{
     },
 };
 use jmap_proto::{
-    method::get::{GetRequest, GetResponse},
+    method::get::{GetRequest, GetResponse, all_ids},
     object::calendar::{self, CalendarProperty, CalendarValue, IncludeInAvailability},
+    request::capability::CapabilityIds,
 };
 use jmap_tools::{Key, Map, Value};
 use store::{
     ValueKey,
     roaring::RoaringBitmap,
-    write::{AlignedBytes, Archive, ValueClass},
+    write::{Archive, ArchiveBytes, ValueClass},
 };
 use trc::AddContext;
 use types::{
@@ -36,6 +47,7 @@ pub trait CalendarGet: Sync + Send {
         &self,
         request: GetRequest<calendar::Calendar>,
         access_token: &AccessToken,
+        using: CapabilityIds,
     ) -> impl Future<Output = trc::Result<GetResponse<calendar::Calendar>>> + Send;
 }
 
@@ -44,28 +56,39 @@ impl CalendarGet for Server {
         &self,
         mut request: GetRequest<calendar::Calendar>,
         access_token: &AccessToken,
+        using: CapabilityIds,
     ) -> trc::Result<GetResponse<calendar::Calendar>> {
         let (ids, not_found_ids) = request.unwrap_ids(self.core.jmap.get_max_objects)?;
-        let properties = request.unwrap_properties(&[
-            CalendarProperty::Id,
-            CalendarProperty::Name,
-            CalendarProperty::Description,
-            CalendarProperty::Color,
-            CalendarProperty::SortOrder,
-            CalendarProperty::IsSubscribed,
-            CalendarProperty::IsVisible,
-            CalendarProperty::IsDefault,
-            CalendarProperty::IncludeInAvailability,
-            CalendarProperty::DefaultAlertsWithTime,
-            CalendarProperty::DefaultAlertsWithoutTime,
-            CalendarProperty::TimeZone,
-            CalendarProperty::ShareWith,
-            CalendarProperty::MyRights,
-        ]);
+        let (properties, selection) = select_properties(
+            &mut request,
+            &[
+                CalendarProperty::Id,
+                CalendarProperty::Name,
+                CalendarProperty::Description,
+                CalendarProperty::Color,
+                CalendarProperty::SortOrder,
+                CalendarProperty::IsSubscribed,
+                CalendarProperty::IsVisible,
+                CalendarProperty::IsDefault,
+                CalendarProperty::IncludeInAvailability,
+                CalendarProperty::DefaultAlertsWithTime,
+                CalendarProperty::DefaultAlertsWithoutTime,
+                CalendarProperty::TimeZone,
+                CalendarProperty::ShareWith,
+                CalendarProperty::MyRights,
+            ],
+            using,
+        )?;
+        let metadata = ObjectMetadata::new(self, access_token, using, MetadataType::Calendar);
+        let metadata_get = metadata.get(selection);
+        let metadata_slots = metadata_get.as_ref().map_or(0, |get| {
+            usize::from(get.wants_shared()) + usize::from(get.wants_private())
+        });
         let account_id = request.account_id.document_id();
+        let sampled = metadata.viewer_change_id(self, account_id).await?;
         let personal_id = access_token.personal_id(account_id, Collection::Calendar);
         let cache = self
-            .fetch_dav_resources(
+            .fetch_groupware_resources(
                 access_token.account_id(),
                 account_id,
                 SyncCollection::Calendar,
@@ -77,30 +100,51 @@ impl CalendarGet for Server {
         } else {
             cache.shared_containers(access_token, [Acl::Read, Acl::ReadItems], true)
         };
-        let default_calendar_id = self
-            .store()
-            .get_value::<u32>(ValueKey {
-                account_id,
-                collection: Collection::Principal.into(),
-                document_id: 0,
-                class: ValueClass::Property(PrincipalField::DefaultCalendarId.into()),
-            })
-            .await
-            .caused_by(trc::location!())?
-            .or_else(|| cache.document_ids(true).min());
+        let default_calendar_id = if properties.contains(&CalendarProperty::IsDefault) {
+            self.store()
+                .get_value::<u32>(ValueKey {
+                    account_id,
+                    collection: Collection::Principal.into(),
+                    document_id: 0,
+                    class: ValueClass::Property(PrincipalField::DefaultCalendarId.into()),
+                })
+                .await
+                .caused_by(trc::location!())?
+                .or_else(|| cache.document_ids(true).min())
+        } else {
+            None
+        };
 
         let ids = if let Some(ids) = ids {
             ids
         } else {
-            calendar_ids
-                .iter()
-                .take(self.core.jmap.get_max_objects)
-                .map(Into::into)
-                .collect::<Vec<_>>()
+            all_ids(
+                calendar_ids.iter().map(Into::into),
+                self.core.jmap.get_max_objects,
+            )?
+        };
+        let mut metadata_values = match &metadata_get {
+            Some(get) => {
+                let mut documents = MetadataDocuments::default();
+                for document_id in ids
+                    .iter()
+                    .map(|id| id.document_id())
+                    .filter(|document_id| calendar_ids.contains(*document_id))
+                {
+                    documents.insert(
+                        document_id,
+                        cache
+                            .container_resource_by_id(document_id)
+                            .map_or_else(Default::default, |resource| resource.metadata_kinds()),
+                    );
+                }
+                Some(metadata.load(self, account_id, get, &documents).await?)
+            }
+            None => None,
         };
         let mut response = GetResponse {
             account_id: request.account_id.into(),
-            state: cache.get_state(true).into(),
+            state: sampled.state(cache.get_state(true)).into(),
             list: Vec::with_capacity(ids.len()),
             not_found: not_found_ids,
         };
@@ -114,7 +158,7 @@ impl CalendarGet for Server {
             }
             let _calendar = if let Some(calendar) = self
                 .store()
-                .get_value::<Archive<AlignedBytes>>(ValueKey::archive(
+                .get_value::<Archive<ArchiveBytes>>(ValueKey::archive(
                     account_id,
                     Collection::Calendar,
                     document_id,
@@ -129,7 +173,9 @@ impl CalendarGet for Server {
             let calendar = _calendar
                 .unarchive::<Calendar>()
                 .caused_by(trc::location!())?;
-            let mut result = Map::with_capacity(properties.len());
+            let personal_preferences = calendar.personal_preferences(personal_id);
+            let personal_flags = calendar.personal_flags(personal_id, is_owner);
+            let mut result = Map::with_capacity(properties.len() + metadata_slots);
             for property in &properties {
                 match property {
                     CalendarProperty::Id => {
@@ -138,7 +184,11 @@ impl CalendarGet for Server {
                     CalendarProperty::Name => {
                         result.insert_unchecked(
                             CalendarProperty::Name,
-                            calendar.preferences(personal_id).name.to_string(),
+                            calendar
+                                .preferences(personal_id)
+                                .map_or_else(String::new, |preferences| {
+                                    preferences.name.to_string()
+                                }),
                         );
                     }
                     CalendarProperty::Description => {
@@ -146,15 +196,14 @@ impl CalendarGet for Server {
                             CalendarProperty::Description,
                             calendar
                                 .preferences(personal_id)
-                                .description
-                                .as_ref()
-                                .map(|v| v.to_string()),
+                                .and_then(|preferences| preferences.description.as_ref())
+                                .map(|description| description.to_string()),
                         );
                     }
                     CalendarProperty::SortOrder => {
                         result.insert_unchecked(
                             CalendarProperty::SortOrder,
-                            calendar.preferences(personal_id).sort_order.to_native(),
+                            personal_preferences.map_or(0, |p| p.sort_order.to_native()),
                         );
                     }
                     CalendarProperty::IsDefault => {
@@ -166,9 +215,7 @@ impl CalendarGet for Server {
                     CalendarProperty::IsSubscribed => {
                         result.insert_unchecked(
                             CalendarProperty::IsSubscribed,
-                            Value::Bool(
-                                calendar.preferences(personal_id).flags & CALENDAR_SUBSCRIBED != 0,
-                            ),
+                            Value::Bool(personal_flags & CALENDAR_SUBSCRIBED != 0),
                         );
                     }
                     CalendarProperty::Color => {
@@ -176,31 +223,27 @@ impl CalendarGet for Server {
                             CalendarProperty::Color,
                             calendar
                                 .preferences(personal_id)
-                                .color
-                                .as_ref()
-                                .map(|c| c.to_string()),
+                                .and_then(|preferences| preferences.color.as_ref())
+                                .map(|color| color.to_string()),
                         );
                     }
                     CalendarProperty::IsVisible => {
                         result.insert_unchecked(
                             CalendarProperty::IsVisible,
-                            Value::Bool(
-                                calendar.preferences(personal_id).flags & CALENDAR_INVISIBLE == 0,
-                            ),
+                            Value::Bool(personal_flags & CALENDAR_INVISIBLE == 0),
                         );
                     }
                     CalendarProperty::IncludeInAvailability => {
                         result.insert_unchecked(
                             CalendarProperty::IncludeInAvailability,
                             Value::Element(CalendarValue::IncludeInAvailability(
-                                IncludeInAvailability::from_flags(
-                                    calendar.preferences(personal_id).flags.to_native(),
-                                )
-                                .unwrap_or(if is_owner {
-                                    IncludeInAvailability::All
-                                } else {
-                                    IncludeInAvailability::None
-                                }),
+                                IncludeInAvailability::from_flags(personal_flags).unwrap_or(
+                                    if is_owner {
+                                        IncludeInAvailability::All
+                                    } else {
+                                        IncludeInAvailability::None
+                                    },
+                                ),
                             )),
                         );
                     }
@@ -229,8 +272,7 @@ impl CalendarGet for Server {
                             CalendarProperty::TimeZone,
                             calendar
                                 .preferences(personal_id)
-                                .time_zone
-                                .tz()
+                                .and_then(|preferences| preferences.time_zone.tz())
                                 .map(|tz| Value::Element(CalendarValue::Timezone(tz)))
                                 .unwrap_or(Value::Null),
                         );
@@ -262,6 +304,9 @@ impl CalendarGet for Server {
                     }
                 }
             }
+            if let Some(values) = &mut metadata_values {
+                values.insert_into(document_id, &mut result);
+            }
             response.list.push(result.into());
         }
 
@@ -275,8 +320,23 @@ fn default_alarm_to_value(
     Key<'static, CalendarProperty>,
     Value<'static, CalendarProperty, CalendarValue>,
 ) {
+    default_alert_value(
+        alarm.id.as_str(),
+        alarm.offset.to_native(),
+        alarm.flags.to_native(),
+    )
+}
+
+pub(crate) fn default_alert_value(
+    id: &str,
+    offset: ICalendarDuration,
+    flags: u16,
+) -> (
+    Key<'static, CalendarProperty>,
+    Value<'static, CalendarProperty, CalendarValue>,
+) {
     (
-        Key::Owned(alarm.id.to_string()),
+        Key::Owned(id.to_string()),
         Value::Object(Map::from(vec![
             (
                 Key::Property(CalendarProperty::Type),
@@ -284,7 +344,7 @@ fn default_alarm_to_value(
             ),
             (
                 Key::Property(CalendarProperty::Action),
-                Value::Element(CalendarValue::Action(if alarm.flags & ALERT_EMAIL != 0 {
+                Value::Element(CalendarValue::Action(if flags & ALERT_EMAIL != 0 {
                     JSCalendarAlertAction::Email
                 } else {
                     JSCalendarAlertAction::Display
@@ -299,12 +359,12 @@ fn default_alarm_to_value(
                     ),
                     (
                         Key::Property(CalendarProperty::Offset),
-                        Value::Element(CalendarValue::Duration(alarm.offset.to_native())),
+                        Value::Element(CalendarValue::Duration(offset)),
                     ),
                     (
                         Key::Property(CalendarProperty::RelativeTo),
                         Value::Element(CalendarValue::RelativeTo(
-                            if alarm.flags & ALERT_RELATIVE_TO_END != 0 {
+                            if flags & ALERT_RELATIVE_TO_END != 0 {
                                 JSCalendarRelativeTo::End
                             } else {
                                 JSCalendarRelativeTo::Start

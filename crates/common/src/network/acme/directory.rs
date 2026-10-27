@@ -7,16 +7,18 @@
 // Adapted from rustls-acme (https://github.com/FlorianUekermann/rustls-acme), licensed under MIT/Apache-2.0.
 
 use super::jose::{
-    key_authorization, key_authorization_sha256, key_authorization_sha256_base64, sign,
+    decode_account_key, key_authorization, key_authorization_sha256,
+    key_authorization_sha256_base64, sign,
 };
-use crate::network::acme::http::{get_header, https, parse_alternate_links, parse_retry_after};
+use crate::network::acme::http::{
+    acme_client, get_header, https, parse_alternate_links, parse_retry_after, read_body,
+};
 use crate::network::acme::{
     AcmeError, AcmeResult, Auth, AuthStatus, Challenge, ChallengeType, Directory, Identifier,
     Order, SerializedCert,
 };
-use aws_lc_rs::signature::{ECDSA_P256_SHA256_FIXED_SIGNING, EcdsaKeyPair, EcdsaSigningAlgorithm};
-use base64::Engine;
-use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+use aws_lc_rs::signature::EcdsaKeyPair;
+use encodify::base64::URL_SAFE_NO_PAD;
 use rcgen::{CustomExtension, KeyPair, PKCS_ECDSA_P256_SHA256};
 use registry::schema::structs::AcmeProvider;
 use reqwest::Method;
@@ -25,6 +27,7 @@ use serde_json::json;
 use std::time::Duration;
 use store::Serialize;
 use store::write::Archiver;
+use utils::outbound::OutboundClient;
 
 pub const ACME_TLS_ALPN_NAME: &[u8] = b"acme-tls/1";
 
@@ -34,8 +37,8 @@ pub struct AcmeRequestBuilder {
     pub directory: Directory,
     pub kid: String,
     pub challenge: ChallengeType,
-    pub max_retries: u32,
     pub preferred_chain: Option<String>,
+    client: OutboundClient,
 }
 
 pub struct AcmeResponse<L, B> {
@@ -45,29 +48,19 @@ pub struct AcmeResponse<L, B> {
     pub alternates: Vec<String>,
 }
 
-static ALG: &EcdsaSigningAlgorithm = &ECDSA_P256_SHA256_FIXED_SIGNING;
-
 impl AcmeRequestBuilder {
     pub async fn new(provider: AcmeProvider) -> AcmeResult<Self> {
-        let directory =
-            Directory::discover(&provider.directory, provider.max_retries as u32).await?;
-        let key_pair = EcdsaKeyPair::from_pkcs8(
-            ALG,
-            &URL_SAFE_NO_PAD
-                .decode(&provider.account_key)
-                .map_err(|err| {
-                    AcmeError::Crypto(format!("Failed to decode account key: {}", err))
-                })?,
-        )
-        .map_err(|err| AcmeError::Crypto(format!("Failed to create ECDSA key pair: {}", err)))?;
+        let client = acme_client(&provider);
+        let directory = Directory::discover(&client, &provider.directory).await?;
+        let key_pair = decode_account_key(&provider.account_key)?;
 
         Ok(Self {
             key_pair,
             directory,
             kid: provider.account_uri,
             challenge: provider.challenge_type.into(),
-            max_retries: provider.max_retries as u32,
             preferred_chain: provider.preferred_chain,
+            client,
         })
     }
 
@@ -79,17 +72,17 @@ impl AcmeRequestBuilder {
         let body = sign(
             &self.key_pair,
             Some(&self.kid),
-            self.directory.nonce(self.max_retries).await?,
+            self.directory.nonce(&self.client).await?,
             url.as_ref(),
             payload,
         )?;
-        let response = https(url.as_ref(), Method::POST, Some(body), self.max_retries).await?;
+        let response = https(&self.client, url.as_ref(), Method::POST, Some(body)).await?;
 
         Ok(AcmeResponse {
             location: get_header(&response, "Location").ok(),
             retry_after: parse_retry_after(&response),
             alternates: parse_alternate_links(&response),
-            body: response.text().await?,
+            body: read_body(response).await?,
         })
     }
 
@@ -134,7 +127,9 @@ impl AcmeRequestBuilder {
         url: impl AsRef<str>,
         csr: Vec<u8>,
     ) -> AcmeResult<AcmeResponse<Option<String>, Order>> {
-        let payload = format!("{{\"csr\":\"{}\"}}", URL_SAFE_NO_PAD.encode(csr));
+        let mut payload = String::from("{\"csr\":\"");
+        URL_SAFE_NO_PAD.encode_append(csr, &mut payload);
+        payload.push_str("\"}");
         AcmeResponse::parse(self.request(&url, &payload).await?)
     }
 
@@ -188,19 +183,17 @@ impl AcmeRequestBuilder {
 }
 
 impl Directory {
-    pub async fn discover(url: impl AsRef<str>, max_retries: u32) -> AcmeResult<Self> {
-        serde_json::from_str(
-            &https(url, Method::GET, None, max_retries)
-                .await?
-                .text()
-                .await?,
-        )
-        .map_err(Into::into)
+    pub async fn discover(client: &OutboundClient, url: impl AsRef<str>) -> AcmeResult<Self> {
+        let mut directory: Directory = serde_json::from_str(
+            &read_body(https(client, url.as_ref(), Method::GET, None).await?).await?,
+        )?;
+        directory.meta.normalize();
+        Ok(directory)
     }
 
-    pub async fn nonce(&self, max_retries: u32) -> AcmeResult<String> {
+    pub async fn nonce(&self, client: &OutboundClient) -> AcmeResult<String> {
         get_header(
-            &https(&self.new_nonce.as_str(), Method::HEAD, None, max_retries).await?,
+            &https(client, &self.new_nonce, Method::HEAD, None).await?,
             "replay-nonce",
         )
     }
@@ -225,7 +218,7 @@ impl<L, T: DeserializeOwned> AcmeResponse<L, T> {
 }
 
 impl<L, T> AcmeResponse<L, T> {
-    pub fn assert_reasonable_retry_after(self, max_retries: u32) -> AcmeResult<Self> {
+    pub fn assert_reasonable_retry_after(self) -> AcmeResult<Self> {
         if let Some(retry_after) = self.retry_after
             && retry_after > Duration::from_secs(10 * 60)
         {
@@ -236,7 +229,6 @@ impl<L, T> AcmeResponse<L, T> {
             );
 
             return Err(AcmeError::Backoff {
-                max_retries,
                 wait: retry_after.into(),
             });
         }

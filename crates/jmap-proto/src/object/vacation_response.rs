@@ -9,8 +9,9 @@ use crate::{
     types::date::UTCDate,
 };
 use jmap_tools::{Element, Key, Property};
+use serde::{Serialize, Serializer};
 use std::{borrow::Cow, str::FromStr};
-use types::id::Id;
+use types::{id::Id, text::Text};
 
 #[derive(Debug, Clone, Default)]
 pub struct VacationResponse;
@@ -49,6 +50,10 @@ impl Property for VacationResponseProperty {
         }
         .into()
     }
+
+    fn key_eq(&self, other: &Self) -> bool {
+        self == other
+    }
 }
 
 impl Element for VacationResponseValue {
@@ -73,23 +78,37 @@ impl Element for VacationResponseValue {
     }
 
     fn to_cow(&self) -> Cow<'static, str> {
+        self.text().to_cow()
+    }
+
+    fn serialize_text<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
         match self {
-            VacationResponseValue::Id(id) => id.to_string().into(),
-            VacationResponseValue::Date(utcdate) => utcdate.to_string().into(),
+            VacationResponseValue::Date(date) => date.serialize(serializer),
+            value => value.text().serialize(serializer),
+        }
+    }
+}
+
+impl VacationResponseValue {
+    pub fn text(&self) -> Text<'_> {
+        match self {
+            VacationResponseValue::Id(id) => Text::Id(*id),
+            VacationResponseValue::Date(utcdate) => Text::Display(utcdate),
         }
     }
 }
 
 impl VacationResponseProperty {
     fn parse(value: &str) -> Option<Self> {
-        hashify::tiny_map!(value.as_bytes(),
-            b"id" => VacationResponseProperty::Id,
-            b"isEnabled" => VacationResponseProperty::IsEnabled,
-            b"fromDate" => VacationResponseProperty::FromDate,
-            b"toDate" => VacationResponseProperty::ToDate,
-            b"textBody" => VacationResponseProperty::TextBody,
-            b"htmlBody" => VacationResponseProperty::HtmlBody,
-            b"subject" => VacationResponseProperty::Subject,
+        hashify::fnc_map!(value.as_bytes(),
+            b"id" => Some(VacationResponseProperty::Id),
+            b"isEnabled" => Some(VacationResponseProperty::IsEnabled),
+            b"fromDate" => Some(VacationResponseProperty::FromDate),
+            b"toDate" => Some(VacationResponseProperty::ToDate),
+            b"textBody" => Some(VacationResponseProperty::TextBody),
+            b"htmlBody" => Some(VacationResponseProperty::HtmlBody),
+            b"subject" => Some(VacationResponseProperty::Subject),
+            _ => None,
         )
     }
 }

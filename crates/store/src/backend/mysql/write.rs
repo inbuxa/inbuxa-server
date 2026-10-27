@@ -4,57 +4,108 @@
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
  */
 
+mod reads;
+
+use self::reads::{ReadSet, missing_read, unprefixed};
 use super::{
-    DELETE_CHUNK_SIZE, MIN_DELETE_CHUNK_SIZE, MysqlStore, into_error, is_chunk_too_large_error,
+    DELETE_CHUNK_SIZE, ER_DUP_ENTRY, ER_LOCK_DEADLOCK, ER_LOCK_WAIT_TIMEOUT, MIN_DELETE_CHUNK_SIZE,
+    MysqlStore, into_error, is_chunk_too_large_error, sql::SubspaceSql,
 };
 use crate::{
-    IndexKey, Key, LogKey, SUBSPACE_COUNTER, SUBSPACE_IN_MEMORY_COUNTER, SUBSPACE_QUOTA,
-    SUBSPACE_REGISTRY_IDX,
+    Key, Shape, Subspace, WITH_SUBSPACE,
     write::{
-        AssignedIds, Batch, MAX_COMMIT_ATTEMPTS, MAX_COMMIT_TIME, MergeResult, Operation,
-        ValueClass, ValueOp,
+        Advance, AssignedIds, Batch, BatchCursor, ChunkedRetry, LogSet, MAX_COMMIT_ATTEMPTS,
+        MAX_COMMIT_TIME, MergeResult, NewKeyAsserts, Operation, SetValue, ValueOp, commit_backoff,
+        exhausted,
     },
 };
-use ahash::AHashMap;
-use mysql_async::{Conn, Error, IsolationLevel, TxOpts, params, prelude::Queryable};
-use rand::RngExt;
-use std::time::{Duration, Instant};
+use mysql_async::{Conn, Error, ServerError, TxOpts, prelude::Queryable};
+use std::{borrow::Cow, time::Instant};
 
 #[derive(Debug)]
 enum CommitError {
     Mysql(mysql_async::Error),
     Internal(trc::Error),
-    //Retry,
+}
+
+struct AutocommitWrite<'x> {
+    subspace: Subspace,
+    key: Vec<u8>,
+    op: AutocommitOp<'x>,
+}
+
+enum AutocommitOp<'x> {
+    Set(&'x mut SetValue),
+    SetPresence,
+    Add(i64),
+    AddAndGet(i64),
+    Clear,
+}
+
+enum WriteShape<'x, 'y> {
+    Autocommit(AutocommitWrite<'x>),
+    Transaction(&'x mut Batch<'y>),
 }
 
 impl MysqlStore {
-    pub(crate) async fn write(&self, mut batch: Batch<'_>) -> trc::Result<AssignedIds> {
+    pub(crate) async fn write(
+        &self,
+        mut batch: Batch<'_>,
+        assigned_ids: &mut AssignedIds,
+    ) -> trc::Result<()> {
         let start = Instant::now();
         let mut retry_count = 0;
+        let mut new_key_asserts = NewKeyAsserts::CheckedByInsert;
         let mut conn = self.conn_pool.get_conn().await.map_err(into_error)?;
+        let mark = assigned_ids.mark();
+        let mut shape = match AutocommitWrite::parse(&mut batch, assigned_ids) {
+            Some(write) => WriteShape::Autocommit(write),
+            None => WriteShape::Transaction(&mut batch),
+        };
 
         loop {
-            let err = match self.write_trx(&mut conn, &mut batch).await {
-                Ok(result) => {
-                    return Ok(result);
+            assigned_ids.rollback(mark);
+            let result = match &mut shape {
+                WriteShape::Autocommit(write) => {
+                    self.write_autocommit(&mut conn, write, assigned_ids).await
+                }
+                WriteShape::Transaction(batch) => {
+                    self.write_trx(&mut conn, batch, assigned_ids, new_key_asserts)
+                        .await
+                }
+            };
+            let err = match result {
+                Ok(()) => {
+                    return Ok(());
                 }
                 Err(err) => err,
             };
 
-            let _ = conn.query_drop("ROLLBACK;").await;
-
             match err {
                 CommitError::Mysql(Error::Server(err))
-                    if [1062, 1213].contains(&err.code)
+                    if [ER_LOCK_DEADLOCK, ER_LOCK_WAIT_TIMEOUT, ER_DUP_ENTRY]
+                        .contains(&err.code)
                         && retry_count < MAX_COMMIT_ATTEMPTS
-                        && start.elapsed() < MAX_COMMIT_TIME => {}
-                /*CommitError::Retry => {
-                    if retry_count > MAX_COMMIT_ATTEMPTS || start.elapsed() > MAX_COMMIT_TIME {
-                        return Err(trc::StoreEvent::AssertValueFailed
-                            .into_err()
-                            .caused_by(trc::location!()));
+                        && start.elapsed() < MAX_COMMIT_TIME =>
+                {
+                    if err.code == ER_DUP_ENTRY {
+                        new_key_asserts = NewKeyAsserts::Read;
                     }
-                }*/
+                }
+                CommitError::Mysql(Error::Server(err)) if err.code == ER_DUP_ENTRY => {
+                    return Err(trc::StoreEvent::AssertValueFailed
+                        .into_err()
+                        .reason("Unique violation")
+                        .caused_by(trc::location!()));
+                }
+                CommitError::Mysql(
+                    err @ Error::Server(ServerError {
+                        code: ER_LOCK_DEADLOCK | ER_LOCK_WAIT_TIMEOUT,
+                        ..
+                    }),
+                ) => {
+                    return Err(exhausted(into_error(err), retry_count));
+                }
                 CommitError::Mysql(err) => {
                     return Err(into_error(err));
                 }
@@ -63,105 +114,134 @@ impl MysqlStore {
                 }
             }
 
-            let backoff = rand::rng().random_range(50..=300);
-            tokio::time::sleep(Duration::from_millis(backoff)).await;
+            #[cfg(stalwart_tests)]
+            crate::write::record_retry(retry_count);
+            tokio::time::sleep(commit_backoff(retry_count)).await;
             retry_count += 1;
         }
+    }
+
+    async fn write_autocommit(
+        &self,
+        conn: &mut Conn,
+        write: &mut AutocommitWrite<'_>,
+        result: &mut AssignedIds,
+    ) -> Result<(), CommitError> {
+        let stmts = self.sql.get(write.subspace);
+        let key = &write.key;
+
+        match &mut write.op {
+            AutocommitOp::Set(value) => {
+                let value = value.resolve(result)?;
+                let s = conn.prep(&*stmts.upsert_value).await?;
+                conn.exec_drop(&s, (key, &*value)).await?;
+                if conn.affected_rows() == 0 {
+                    return Err(trc::StoreEvent::AssertValueFailed
+                        .into_err()
+                        .caused_by(trc::location!())
+                        .into());
+                }
+            }
+            AutocommitOp::SetPresence => {
+                let s = conn.prep(&*stmts.insert_presence).await?;
+                conn.exec_drop(&s, (key,)).await?;
+            }
+            AutocommitOp::Add(by) if *by >= 0 => {
+                let s = conn.prep(&*stmts.increment).await?;
+                conn.exec_drop(&s, (key, *by)).await?;
+            }
+            AutocommitOp::Add(by) => {
+                let s = conn.prep(&*stmts.decrement).await?;
+                conn.exec_drop(&s, (*by, key)).await?;
+            }
+            AutocommitOp::AddAndGet(by) => {
+                let s = conn.prep(&*stmts.increment_returning).await?;
+                conn.exec_drop(&s, (key, *by, *by)).await?;
+                result.push_counter_id(
+                    conn.last_insert_id().ok_or_else(missing_last_insert_id)? as i64
+                );
+            }
+            AutocommitOp::Clear => {
+                let s = conn.prep(&*stmts.delete_key).await?;
+                conn.exec_drop(&s, (key,)).await?;
+            }
+        }
+
+        Ok(())
     }
 
     async fn write_trx(
         &self,
         conn: &mut Conn,
         batch: &mut Batch<'_>,
-    ) -> Result<AssignedIds, CommitError> {
-        let has_changes = !batch.changes.is_empty();
-        let mut account_id = u32::MAX;
-        let mut collection = u8::MAX;
-        let mut document_id = u32::MAX;
-        let mut change_id = 0u64;
-        let mut asserted_values = AHashMap::new();
-        let mut tx_opts = TxOpts::default();
-        tx_opts
-            .with_consistent_snapshot(false)
-            .with_isolation_level(IsolationLevel::ReadCommitted);
-        let mut trx = conn.start_transaction(tx_opts).await?;
-        let mut result = AssignedIds::default();
+        result: &mut AssignedIds,
+        new_key_asserts: NewKeyAsserts,
+    ) -> Result<(), CommitError> {
+        let sql = &*self.sql;
+        let mut trx = conn.start_transaction(TxOpts::default()).await?;
+        let mut log_buf = Vec::new();
+        let mut log_scratch = Vec::new();
 
-        if has_changes {
-            for &account_id in batch.changes.keys() {
-                let key = ValueClass::ChangeId.serialize(account_id, 0, 0, 0);
-                let s = trx
-                    .prep(concat!(
-                        "INSERT INTO n (k, v) VALUES (:k, LAST_INSERT_ID(1)) ",
-                        "ON DUPLICATE KEY UPDATE v = LAST_INSERT_ID(v + 1)"
-                    ))
+        if batch.has_id_allocations() {
+            let incr = trx
+                .prep(&*sql.get(Subspace::Counter).increment_returning)
+                .await?;
+            let mut key_buf = Vec::with_capacity(16);
+
+            for allocation in batch.id_allocations() {
+                key_buf.clear();
+                allocation.serialize_key_into(&mut key_buf, 0);
+                let increment_by = allocation.increment_by();
+                trx.exec_drop(&incr, (&key_buf, increment_by, increment_by))
                     .await?;
-                trx.exec_drop(&s, params! {"k" => key}).await?;
-                let s = trx.prep("SELECT LAST_INSERT_ID()").await?;
-                let change_id = trx.exec_first::<i64, _, _>(&s, ()).await?.ok_or_else(|| {
-                    mysql_async::Error::Io(mysql_async::IoError::Io(std::io::Error::other(
-                        "LAST_INSERT_ID() did not return a value",
-                    )))
-                })?;
-                result.push_change_id(account_id, change_id as u64);
+                let counter = trx.last_insert_id().ok_or_else(missing_last_insert_id)? as i64;
+                if let Err(err) = result.apply(allocation, counter) {
+                    trx.rollback().await?;
+                    return Err(err.into());
+                }
             }
         }
 
-        for op in batch.ops.iter_mut() {
-            match op {
-                Operation::AccountId {
-                    account_id: account_id_,
-                } => {
-                    account_id = *account_id_;
-                    if has_changes {
-                        change_id = result.set_current_change_id(account_id)?;
-                    }
-                }
-                Operation::Collection {
-                    collection: collection_,
-                } => {
-                    collection = u8::from(*collection_);
-                }
-                Operation::DocumentId {
-                    document_id: document_id_,
-                } => {
-                    document_id = *document_id_;
-                }
-                Operation::Value { class, op } => {
-                    let key = class.serialize(account_id, collection, document_id, 0);
-                    let subspace = class.subspace(collection);
-                    let table = char::from(subspace);
+        let mut key_buf = Vec::with_capacity(64);
+        let mut reads = ReadSet::collect(batch, result, &mut key_buf, new_key_asserts);
+        if reads.needs_fetch() {
+            reads.fetch(&mut trx, sql).await?;
+        }
+
+        let mut cursor = BatchCursor::new(batch);
+        let index_stmts = sql.get(Subspace::Indexes);
+        let log_stmts = sql.get(Subspace::Logs);
+        for (op_index, op) in batch.ops.iter_mut().enumerate() {
+            match cursor.advance(op, result) {
+                Advance::Cursor => {}
+                Advance::Value { class, op } => {
+                    cursor.value_key(class, &mut key_buf, WITH_SUBSPACE);
+                    let slot = reads.find(&key_buf);
+                    let key = unprefixed(&key_buf);
+                    let subspace = cursor.subspace(class);
+                    let stmts = sql.get(subspace);
 
                     match op {
-                        ValueOp::Set(value) => {
-                            if subspace != SUBSPACE_REGISTRY_IDX {
-                                let exists = asserted_values.get(&key);
-                                let s = if let Some(exists) = exists {
-                                    if *exists {
-                                        trx.prep(format!(
-                                            "UPDATE {} SET v = :v WHERE k = :k",
-                                            table
-                                        ))
-                                        .await?
-                                    } else {
-                                        trx.prep(format!(
-                                            "INSERT INTO {} (k, v) VALUES (:k, :v)",
-                                            table
-                                        ))
-                                        .await?
+                        ValueOp::Set(set_value) => {
+                            let value = set_value.resolve(result)?;
+                            let value = &*value;
+                            if !matches!(subspace.shape(), Shape::Presence) {
+                                let updated = match slot.filter(|slot| reads.is_asserted(*slot)) {
+                                    Some(slot) if reads.exists(slot) => {
+                                        let s = trx.prep(&*stmts.update_value).await?;
+                                        trx.exec_drop(&s, (value, key)).await
                                     }
-                                } else {
-                                    trx
-                            .prep(
-                                format!("INSERT INTO {} (k, v) VALUES (:k, :v) ON DUPLICATE KEY UPDATE v = VALUES(v)", table),
-                            )
-                            .await?
+                                    Some(_) => {
+                                        let s = trx.prep(&*stmts.insert_value).await?;
+                                        trx.exec_drop(&s, (key, value)).await
+                                    }
+                                    None => {
+                                        let s = trx.prep(&*stmts.upsert_value).await?;
+                                        trx.exec_drop(&s, (key, value)).await
+                                    }
                                 };
 
-                                match trx
-                                    .exec_drop(&s, params! {"k" => key, "v" => &*value})
-                                    .await
-                                {
+                                match updated {
                                     Ok(_) => {
                                         if trx.affected_rows() == 0 {
                                             trx.rollback().await?;
@@ -176,198 +256,116 @@ impl MysqlStore {
                                         return Err(err.into());
                                     }
                                 }
+
+                                if let Some(slot) = slot {
+                                    reads.written(slot, op_index, Cow::Borrowed(value));
+                                }
                             } else {
-                                let s = trx.prep("INSERT IGNORE INTO b (k) VALUES (?)").await?;
+                                let s = trx.prep(&*stmts.insert_presence).await?;
                                 trx.exec_drop(&s, (key,)).await?;
                             }
                         }
-                        ValueOp::SetFnc(set_op) => {
-                            let value = (set_op.fnc)(&set_op.params, &result)?;
-                            let exists = asserted_values.get(&key);
-                            let s = if let Some(exists) = exists {
-                                if *exists {
-                                    trx.prep(format!("UPDATE {} SET v = :v WHERE k = :k", table))
-                                        .await?
-                                } else {
-                                    trx.prep(format!(
-                                        "INSERT INTO {} (k, v) VALUES (:k, :v)",
-                                        table
-                                    ))
-                                    .await?
-                                }
-                            } else {
-                                trx
-                            .prep(
-                                format!("INSERT INTO {} (k, v) VALUES (:k, :v) ON DUPLICATE KEY UPDATE v = VALUES(v)", table),
-                            )
-                            .await?
-                            };
-
-                            match trx.exec_drop(&s, params! {"k" => key, "v" => &value}).await {
-                                Ok(_) => {
-                                    if trx.affected_rows() == 0 {
-                                        trx.rollback().await?;
-                                        return Err(trc::StoreEvent::AssertValueFailed
-                                            .into_err()
-                                            .caused_by(trc::location!())
-                                            .into());
-                                    }
-                                }
-                                Err(err) => {
-                                    trx.rollback().await?;
-                                    return Err(err.into());
-                                }
-                            }
-                        }
                         ValueOp::MergeFnc(merge_op) => {
-                            let s = trx
-                                .prep(format!("SELECT v FROM {} WHERE k = ? FOR UPDATE", table))
-                                .await?;
-                            let (exists, merge_result) = trx
-                                .exec_first::<Vec<u8>, _, _>(&s, (&key,))
-                                .await?
-                                .map(|bytes| {
-                                    (merge_op.fnc)(&merge_op.params, &result, Some(bytes.as_ref()))
-                                        .map(|v| (true, v))
-                                        .map_err(CommitError::from)
-                                })
-                                .unwrap_or_else(|| {
-                                    (merge_op.fnc)(&merge_op.params, &result, None)
-                                        .map(|v| (false, v))
-                                        .map_err(CommitError::from)
-                                })?;
+                            let slot = slot.ok_or_else(missing_read)?;
+                            let exists = reads.exists(slot);
 
-                            let s = if exists {
-                                trx.prep(format!("UPDATE {} SET v = :v WHERE k = :k", table))
-                                    .await?
-                            } else {
-                                trx.prep(format!("INSERT INTO {} (k, v) VALUES (:k, :v)", table))
-                                    .await?
-                            };
-
-                            match merge_result {
+                            match (merge_op.0)(result, reads.value(slot)?)? {
                                 MergeResult::Update(value) => {
-                                    if let Err(err) =
-                                        trx.exec_drop(&s, params! {"k" => key, "v" => &value}).await
-                                    {
+                                    let updated = if exists {
+                                        let s = trx.prep(&*stmts.update_value).await?;
+                                        trx.exec_drop(&s, (&value, key)).await
+                                    } else {
+                                        let s = trx.prep(&*stmts.insert_value).await?;
+                                        trx.exec_drop(&s, (key, &value)).await
+                                    };
+
+                                    if let Err(err) = updated {
                                         trx.rollback().await?;
                                         return Err(err.into());
                                     }
+
+                                    reads.written(slot, op_index, Cow::Owned(value));
                                 }
                                 MergeResult::Delete if exists => {
-                                    // Update asserted value
-                                    if let Some(exists) = asserted_values.get_mut(&key) {
-                                        *exists = false;
-                                    }
-
-                                    let s = trx
-                                        .prep(format!("DELETE FROM {} WHERE k = ?", table))
-                                        .await?;
+                                    let s = trx.prep(&*stmts.delete_key).await?;
                                     trx.exec_drop(&s, (key,)).await?;
+                                    reads.cleared(slot);
                                 }
-                                _ => (),
+                                MergeResult::Delete | MergeResult::Skip => (),
                             }
                         }
                         ValueOp::AtomicAdd(by) => {
                             if *by >= 0 {
-                                let s = trx
-                                    .prep(format!(
-                                        concat!(
-                                            "INSERT INTO {} (k, v) VALUES (?, ?) ",
-                                            "ON DUPLICATE KEY UPDATE v = v + VALUES(v)"
-                                        ),
-                                        table
-                                    ))
-                                    .await?;
+                                let s = trx.prep(&*stmts.increment).await?;
                                 trx.exec_drop(&s, (key, &*by)).await?;
                             } else {
-                                let s = trx
-                                    .prep(format!("UPDATE {table} SET v = v + ? WHERE k = ?"))
-                                    .await?;
+                                let s = trx.prep(&*stmts.decrement).await?;
                                 trx.exec_drop(&s, (&*by, key)).await?;
                             }
                         }
                         ValueOp::AddAndGet(by) => {
-                            let s = trx
-                                .prep(format!(
-                                    concat!(
-                                        "INSERT INTO {} (k, v) VALUES (:k, LAST_INSERT_ID(:v)) ",
-                                        "ON DUPLICATE KEY UPDATE v = LAST_INSERT_ID(v + :v)"
-                                    ),
-                                    table
-                                ))
-                                .await?;
-                            trx.exec_drop(&s, params! {"k" => key, "v" => &*by}).await?;
-                            let s = trx.prep("SELECT LAST_INSERT_ID()").await?;
+                            let s = trx.prep(&*stmts.increment_returning).await?;
+                            trx.exec_drop(&s, (key, *by, *by)).await?;
                             result.push_counter_id(
-                                trx.exec_first::<i64, _, _>(&s, ()).await?.ok_or_else(|| {
-                                    mysql_async::Error::Io(mysql_async::IoError::Io(
-                                        std::io::Error::other(
-                                            "LAST_INSERT_ID() did not return a value",
-                                        ),
-                                    ))
-                                })?,
+                                trx.last_insert_id().ok_or_else(missing_last_insert_id)? as i64,
                             );
                         }
                         ValueOp::Clear => {
-                            // Update asserted value
-                            if let Some(exists) = asserted_values.get_mut(&key) {
-                                *exists = false;
-                            }
-
-                            let s = trx
-                                .prep(format!("DELETE FROM {} WHERE k = ?", table))
-                                .await?;
+                            let s = trx.prep(&*stmts.delete_key).await?;
                             trx.exec_drop(&s, (key,)).await?;
+                            if let Some(slot) = slot {
+                                reads.cleared(slot);
+                            }
                         }
                     }
                 }
-                Operation::Index { field, key, set } => {
-                    let key = IndexKey {
-                        account_id,
-                        collection,
-                        document_id,
-                        field: *field,
-                        key: &*key,
-                    }
-                    .serialize(0);
+                Advance::Index { field, key, set } => {
+                    cursor.index_key(field, key, &mut key_buf, 0);
+                    let key = &key_buf;
 
-                    let s = if *set {
-                        trx.prep("INSERT IGNORE INTO i (k) VALUES (?)").await?
+                    let s = if set {
+                        trx.prep(&*index_stmts.insert_presence).await?
                     } else {
-                        trx.prep("DELETE FROM i WHERE k = ?").await?
+                        trx.prep(&*index_stmts.delete_key).await?
                     };
                     trx.exec_drop(&s, (key,)).await?;
                 }
-                Operation::Log { collection, set } => {
-                    let key = LogKey {
-                        account_id,
-                        collection: u8::from(*collection),
-                        change_id,
+                Advance::Log { collection, set } => {
+                    cursor.log_key(collection, result, &mut key_buf, WITH_SUBSPACE);
+                    let value = match set {
+                        LogSet::Bytes(bytes) => &*bytes,
+                        LogSet::Pending(changes) => {
+                            changes.serialize_into(
+                                collection.is_prefixed(),
+                                result,
+                                &mut log_scratch,
+                                &mut log_buf,
+                            );
+                            &log_buf
+                        }
+                    };
+
+                    let s = trx.prep(&*log_stmts.upsert_value).await?;
+                    trx.exec_drop(&s, (unprefixed(&key_buf), value)).await?;
+                    if let Some(slot) = reads.find(&key_buf) {
+                        reads.written(slot, op_index, Cow::Borrowed(value));
                     }
-                    .serialize(0);
-
-                    let s = trx
-                        .prep("INSERT INTO l (k, v) VALUES (?, ?) ON DUPLICATE KEY UPDATE v = VALUES(v)")
-                        .await?;
-
-                    trx.exec_drop(&s, (key, &*set)).await?;
                 }
-                Operation::AssertValue {
+                Advance::ClearRange { subspace, from, to } => {
+                    reads.clear_range(subspace, from, to);
+                    let s = trx.prep(&*sql.get(subspace).delete_range).await?;
+                    trx.exec_drop(&s, (from, to)).await?;
+                }
+                Advance::Assert {
                     class,
                     assert_value,
                 } => {
-                    let key = class.serialize(account_id, collection, document_id, 0);
-                    let table = char::from(class.subspace(collection));
-
-                    let s = trx
-                        .prep(format!("SELECT v FROM {} WHERE k = ? FOR UPDATE", table))
-                        .await?;
-                    let (exists, matches) = trx
-                        .exec_first::<Vec<u8>, _, _>(&s, (&key,))
-                        .await?
-                        .map(|bytes| (true, assert_value.matches(&bytes)))
-                        .unwrap_or_else(|| (false, assert_value.is_none()));
+                    cursor.value_key(class, &mut key_buf, WITH_SUBSPACE);
+                    let slot = reads.find(&key_buf).ok_or_else(missing_read)?;
+                    let matches = match reads.value(slot)? {
+                        Some(value) => assert_value.matches(value),
+                        None => assert_value.is_none(),
+                    };
                     if !matches {
                         trx.rollback().await?;
                         return Err(trc::StoreEvent::AssertValueFailed
@@ -375,18 +373,38 @@ impl MysqlStore {
                             .caused_by(trc::location!())
                             .into());
                     }
-                    asserted_values.insert(key, exists);
+                    reads.asserted(slot);
                 }
             }
         }
 
-        trx.commit().await.map(|_| result).map_err(Into::into)
+        if !batch.bounds.is_empty() {
+            let incr = trx
+                .prep(&*sql.get(Subspace::Counter).increment_returning)
+                .await?;
+            for bound in batch.bounds {
+                key_buf.clear();
+                bound.serialize_key_into(&mut key_buf, 0);
+                trx.exec_drop(&incr, (&key_buf, bound.by, bound.by)).await?;
+                let value = trx.last_insert_id().ok_or_else(missing_last_insert_id)? as i64;
+                if let Err(err) = bound.verify(value) {
+                    trx.rollback().await?;
+                    return Err(err.into());
+                }
+            }
+        }
+
+        trx.commit().await.map_err(Into::into)
     }
 
     pub(crate) async fn purge_store(&self) -> trc::Result<()> {
         let mut conn = self.conn_pool.get_conn().await.map_err(into_error)?;
-        for subspace in [SUBSPACE_QUOTA, SUBSPACE_COUNTER, SUBSPACE_IN_MEMORY_COUNTER] {
-            purge_table(&mut conn, char::from(subspace)).await?;
+        for subspace in Subspace::ALL
+            .iter()
+            .copied()
+            .filter(|subspace| matches!(subspace.shape(), Shape::Counter))
+        {
+            purge_table(&mut conn, self.sql.get(subspace)).await?;
         }
 
         Ok(())
@@ -394,34 +412,49 @@ impl MysqlStore {
 
     pub(crate) async fn delete_range(&self, from: impl Key, to: impl Key) -> trc::Result<()> {
         let mut conn = self.conn_pool.get_conn().await.map_err(into_error)?;
-        let table = char::from(from.subspace());
+        let stmts = self.sql.get(from.subspace());
         let mut from = from.serialize(0);
         let to = to.serialize(0);
 
-        let delete = conn
-            .prep(format!("DELETE FROM {table} WHERE k >= ? AND k < ?"))
+        let mut retry = ChunkedRetry::bounded(DELETE_CHUNK_SIZE, MIN_DELETE_CHUNK_SIZE);
+
+        let delete_limit = conn
+            .prep(&*stmts.delete_range_limit)
             .await
             .map_err(into_error)?;
-        let mut chunk_size = DELETE_CHUNK_SIZE;
+        match conn
+            .exec_drop(&delete_limit, (&from, &to, DELETE_CHUNK_SIZE as u64))
+            .await
+        {
+            Ok(_) if conn.affected_rows() < DELETE_CHUNK_SIZE as u64 => return Ok(()),
+            Ok(_) => (),
+            Err(err) if is_chunk_too_large_error(&err) => {
+                if !retry.degrade().await {
+                    return Err(into_error(err));
+                }
+            }
+            Err(err) => return Err(into_error(err)),
+        }
+
+        let delete = conn.prep(&*stmts.delete_range).await.map_err(into_error)?;
+        let boundary = conn
+            .prep(&*stmts.range_boundary)
+            .await
+            .map_err(into_error)?;
 
         loop {
-            let boundary = conn
-                .prep(format!(
-                    "SELECT k FROM {table} WHERE k >= ? AND k < ? ORDER BY k ASC LIMIT 1 OFFSET {chunk_size}"
-                ))
-                .await
-                .map_err(into_error)?;
+            let chunk_size = retry.chunk_size().unwrap_or(DELETE_CHUNK_SIZE) as u64;
 
             loop {
                 let next = match conn
-                    .exec_first::<Vec<u8>, _, _>(&boundary, (&from, &to))
+                    .exec_first::<Vec<u8>, _, _>(&boundary, (&from, &to, chunk_size))
                     .await
                 {
                     Ok(next) => next,
-                    Err(err)
-                        if is_chunk_too_large_error(&err) && chunk_size > MIN_DELETE_CHUNK_SIZE =>
-                    {
-                        chunk_size = (chunk_size / 2).max(MIN_DELETE_CHUNK_SIZE);
+                    Err(err) if is_chunk_too_large_error(&err) => {
+                        if !retry.degrade().await {
+                            return Err(into_error(err));
+                        }
                         break;
                     }
                     Err(err) => return Err(into_error(err)),
@@ -431,11 +464,11 @@ impl MysqlStore {
                     .exec_drop(&delete, (&from, next.as_ref().unwrap_or(&to)))
                     .await
                 {
-                    Ok(_) => (),
-                    Err(err)
-                        if is_chunk_too_large_error(&err) && chunk_size > MIN_DELETE_CHUNK_SIZE =>
-                    {
-                        chunk_size = (chunk_size / 2).max(MIN_DELETE_CHUNK_SIZE);
+                    Ok(_) => retry.progressed(),
+                    Err(err) if is_chunk_too_large_error(&err) => {
+                        if !retry.degrade().await {
+                            return Err(into_error(err));
+                        }
                         break;
                     }
                     Err(err) => return Err(into_error(err)),
@@ -450,11 +483,8 @@ impl MysqlStore {
     }
 }
 
-async fn purge_table(conn: &mut Conn, table: char) -> trc::Result<()> {
-    let s = conn
-        .prep(format!("DELETE FROM {table} WHERE v = 0"))
-        .await
-        .map_err(into_error)?;
+async fn purge_table(conn: &mut Conn, stmts: &SubspaceSql) -> trc::Result<()> {
+    let s = conn.prep(&*stmts.purge_zero).await.map_err(into_error)?;
 
     match conn.exec_drop(&s, ()).await {
         Ok(_) => return Ok(()),
@@ -463,33 +493,33 @@ async fn purge_table(conn: &mut Conn, table: char) -> trc::Result<()> {
     }
 
     let purge = conn
-        .prep(format!(
-            "DELETE FROM {table} WHERE v = 0 AND k >= ? AND k < ?"
-        ))
+        .prep(&*stmts.purge_zero_range)
         .await
         .map_err(into_error)?;
     let purge_last = conn
-        .prep(format!("DELETE FROM {table} WHERE v = 0 AND k >= ?"))
+        .prep(&*stmts.purge_zero_from)
         .await
         .map_err(into_error)?;
-    let mut chunk_size = DELETE_CHUNK_SIZE;
+    let boundary = conn
+        .prep(&*stmts.purge_boundary)
+        .await
+        .map_err(into_error)?;
+    let mut retry = ChunkedRetry::bounded(DELETE_CHUNK_SIZE, MIN_DELETE_CHUNK_SIZE);
     let mut from = Vec::new();
 
     loop {
-        let boundary = conn
-            .prep(format!(
-                "SELECT k FROM {table} WHERE k >= ? ORDER BY k ASC LIMIT 1 OFFSET {chunk_size}"
-            ))
-            .await
-            .map_err(into_error)?;
+        let chunk_size = retry.chunk_size().unwrap_or(DELETE_CHUNK_SIZE) as u64;
 
         loop {
-            let next = match conn.exec_first::<Vec<u8>, _, _>(&boundary, (&from,)).await {
+            let next = match conn
+                .exec_first::<Vec<u8>, _, _>(&boundary, (&from, chunk_size))
+                .await
+            {
                 Ok(next) => next,
-                Err(err)
-                    if is_chunk_too_large_error(&err) && chunk_size > MIN_DELETE_CHUNK_SIZE =>
-                {
-                    chunk_size = (chunk_size / 2).max(MIN_DELETE_CHUNK_SIZE);
+                Err(err) if is_chunk_too_large_error(&err) => {
+                    if !retry.degrade().await {
+                        return Err(into_error(err));
+                    }
                     break;
                 }
                 Err(err) => return Err(into_error(err)),
@@ -501,11 +531,11 @@ async fn purge_table(conn: &mut Conn, table: char) -> trc::Result<()> {
             };
 
             match result {
-                Ok(_) => (),
-                Err(err)
-                    if is_chunk_too_large_error(&err) && chunk_size > MIN_DELETE_CHUNK_SIZE =>
-                {
-                    chunk_size = (chunk_size / 2).max(MIN_DELETE_CHUNK_SIZE);
+                Ok(_) => retry.progressed(),
+                Err(err) if is_chunk_too_large_error(&err) => {
+                    if !retry.degrade().await {
+                        return Err(into_error(err));
+                    }
                     break;
                 }
                 Err(err) => return Err(into_error(err)),
@@ -519,6 +549,12 @@ async fn purge_table(conn: &mut Conn, table: char) -> trc::Result<()> {
     }
 }
 
+fn missing_last_insert_id() -> mysql_async::Error {
+    mysql_async::Error::Io(mysql_async::IoError::Io(std::io::Error::other(
+        "LAST_INSERT_ID() did not return a value",
+    )))
+}
+
 impl From<trc::Error> for CommitError {
     fn from(err: trc::Error) -> Self {
         CommitError::Internal(err)
@@ -530,3 +566,65 @@ impl From<mysql_async::Error> for CommitError {
         CommitError::Mysql(err)
     }
 }
+
+impl<'x> AutocommitWrite<'x> {
+    fn parse(batch: &'x mut Batch<'_>, ids: &mut AssignedIds) -> Option<Self> {
+        if batch.has_allocations() {
+            return None;
+        }
+
+        let mut writes = batch.ops.iter().filter(|op| {
+            !matches!(
+                op,
+                Operation::AccountId { .. }
+                    | Operation::Collection { .. }
+                    | Operation::DocumentId { .. }
+            )
+        });
+        if writes.next().is_none() || writes.next().is_some() {
+            return None;
+        }
+
+        let mut cursor = BatchCursor::new(batch);
+        for op in batch.ops.iter_mut() {
+            match cursor.advance(op, ids) {
+                Advance::Cursor => {}
+                Advance::Value { class, op } => {
+                    let subspace = cursor.subspace(class);
+                    let op = match op {
+                        ValueOp::Set(_) if matches!(subspace.shape(), Shape::Presence) => {
+                            AutocommitOp::SetPresence
+                        }
+                        ValueOp::Set(value) => AutocommitOp::Set(value),
+                        ValueOp::AtomicAdd(by) => AutocommitOp::Add(*by),
+                        ValueOp::AddAndGet(by) => AutocommitOp::AddAndGet(*by),
+                        ValueOp::Clear => AutocommitOp::Clear,
+                        ValueOp::MergeFnc(_) => return None,
+                    };
+                    return Some(AutocommitWrite {
+                        subspace,
+                        key: cursor.value_key_owned(class, 0),
+                        op,
+                    });
+                }
+                Advance::Index { field, key, set } => {
+                    return Some(AutocommitWrite {
+                        subspace: Subspace::Indexes,
+                        key: cursor.index_key_owned(field, key, 0),
+                        op: if set {
+                            AutocommitOp::SetPresence
+                        } else {
+                            AutocommitOp::Clear
+                        },
+                    });
+                }
+                Advance::Log { .. } | Advance::Assert { .. } | Advance::ClearRange { .. } => {
+                    return None;
+                }
+            }
+        }
+
+        None
+    }
+}
+

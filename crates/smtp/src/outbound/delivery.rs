@@ -20,111 +20,131 @@ use crate::queue::spool::{DSN_RETRY, SmtpSpool};
 use crate::queue::throttle::IsAllowed;
 use crate::queue::{
     Error, FROM_REPORT, HostResponse, MessageWrapper, Metadata, QueueEnvelope, QueuedMessage,
-    Status,
+    Status, eval_strategy,
 };
 use crate::reporting::send::MtaReportSend;
 use crate::{queue::ErrorDetails, reporting::tls::TlsRptOptions};
 use ahash::AHashMap;
-use common::Server;
 use common::config::smtp::queue::RoutingStrategy;
+use common::config::smtp::resolver::MtaStsFailureKind;
 use common::config::{server::ServerProtocol, smtp::report::AggregateFrequency};
 use common::ipc::{PolicyType, QueueEvent, QueueEventStatus, TlsEvent};
-use compact_str::ToCompactString;
+use common::{Server, expr::Bump};
+use compact_str::{CompactString, ToCompactString, format_compact};
 use mail_auth::RecordSet;
-use mail_auth::{
-    mta_sts::TlsRpt,
-    report::tlsrpt::{FailureDetails, ResultType},
-};
+use mail_auth::mta_sts::TlsRptRecord;
 use smtp_proto::MAIL_REQUIRETLS;
+use smtp_report::tlsrpt::{FailureDetails, FailureType};
 use std::sync::Arc;
 use std::{
     net::{IpAddr, Ipv4Addr, SocketAddr},
     time::Instant,
 };
 use store::write::{BatchBuilder, QueueClass, ValueClass, now};
+use tokio::sync::OnceCell;
 use trc::{DaneEvent, DeliveryEvent, MtaStsEvent, ServerEvent, TlsRptEvent};
 
 impl QueuedMessage {
     pub fn try_deliver(self, server: Server) {
+        #[cfg(stalwart_tests)]
+        let probe_started = crate::queue::probe::DispatchProbe::dispatched();
+
         tokio::spawn(async move {
             // Lock queue event
             let queue_id = self.queue_id;
             let status = if server.try_lock_event(queue_id, self.queue_name).await {
-                if let Some(mut message) = server.read_message(queue_id, self.queue_name).await {
-                    // Generate span id
-                    message.span_id = server.inner.data.span_id_gen.generate();
-                    let span_id = message.span_id;
+                match server.read_message(queue_id, self.queue_name).await {
+                    Ok(Some(mut message)) => {
+                        // Generate span id
+                        message.span_id = server.inner.data.span_id_gen.generate();
+                        let span_id = message.span_id;
 
-                    trc::event!(
-                        Delivery(DeliveryEvent::AttemptStart),
-                        SpanId = message.span_id,
-                        QueueId = message.queue_id,
-                        QueueName = message.queue_name.to_string(),
-                        From = if !message.message.return_path.is_empty() {
-                            trc::Value::String(message.message.return_path.as_ref().into())
-                        } else {
-                            trc::Value::String("<>".into())
-                        },
-                        To = message
-                            .message
-                            .recipients
-                            .iter()
-                            .filter_map(|r| {
-                                if matches!(
-                                    r.status,
-                                    Status::Scheduled | Status::TemporaryFailure(_)
-                                ) && r.queue == message.queue_name
-                                {
-                                    Some(trc::Value::String(r.address().into()))
-                                } else {
-                                    None
-                                }
-                            })
-                            .collect::<Vec<_>>(),
-                        Size = message.message.size,
-                        Total = message.message.recipients.len(),
-                    );
+                        trc::event!(
+                            Delivery(DeliveryEvent::AttemptStart),
+                            SpanId = message.span_id,
+                            QueueId = message.queue_id,
+                            QueueName = message.queue_name.to_compact_string(),
+                            From = if !message.message.return_path.is_empty() {
+                                trc::Value::String(message.message.return_path.as_ref().into())
+                            } else {
+                                trc::Value::String("<>".into())
+                            },
+                            To = message
+                                .message
+                                .recipients
+                                .iter()
+                                .filter_map(|r| {
+                                    if matches!(
+                                        r.status,
+                                        Status::Scheduled | Status::TemporaryFailure(_)
+                                    ) && r.queue == message.queue_name
+                                    {
+                                        Some(trc::Value::String(r.address().into()))
+                                    } else {
+                                        None
+                                    }
+                                })
+                                .collect::<Vec<_>>(),
+                            Size = message.message.size,
+                            Total = message.message.recipients.len(),
+                        );
 
-                    // Attempt delivery
-                    let start_time = Instant::now();
-                    let queue_event = Box::pin(self.deliver_task(server.clone(), message)).await;
+                        // Attempt delivery
+                        let start_time = Instant::now();
+                        let queue_event = self.deliver_task(server.clone(), message).await;
 
-                    trc::event!(
-                        Delivery(DeliveryEvent::AttemptEnd),
-                        SpanId = span_id,
-                        Elapsed = start_time.elapsed(),
-                    );
+                        trc::event!(
+                            Delivery(DeliveryEvent::AttemptEnd),
+                            SpanId = span_id,
+                            Elapsed = start_time.elapsed(),
+                        );
 
-                    // Unlock event
-                    server.unlock_event(queue_id, self.queue_name).await;
+                        // Unlock event
+                        server.unlock_event(queue_id, self.queue_name).await;
 
-                    queue_event
-                } else {
-                    // Message no longer exists, delete queue event.
-                    let mut batch = BatchBuilder::new();
-                    batch.clear(ValueClass::Queue(QueueClass::MessageEvent(
-                        store::write::QueueEvent {
-                            due: self.due,
-                            queue_id: self.queue_id,
-                            queue_name: self.queue_name.into_inner(),
-                        },
-                    )));
+                        queue_event
+                    }
+                    Ok(None) => {
+                        // Message no longer exists, delete queue event.
+                        let mut batch = BatchBuilder::new();
+                        batch.clear(ValueClass::Queue(QueueClass::MessageEvent(
+                            store::write::QueueEvent {
+                                due: self.due,
+                                queue_id: self.queue_id,
+                                queue_name: self.queue_name.into_inner(),
+                            },
+                        )));
 
-                    if let Err(err) = server.store().write(batch.build_all()).await {
+                        if let Err(err) = server.store().write_batch(&mut batch).await {
+                            trc::error!(
+                                err.details("Failed to delete queue event.")
+                                    .caused_by(trc::location!())
+                            );
+                        }
+
+                        // Unlock event
+                        server.unlock_event(queue_id, self.queue_name).await;
+
+                        QueueEventStatus::Completed
+                    }
+                    Err(err) => {
                         trc::error!(
-                            err.details("Failed to delete queue event.")
+                            err.details("Failed to read message.")
+                                .ctx(trc::Key::QueueId, queue_id)
                                 .caused_by(trc::location!())
                         );
+
+                        server.unlock_event(queue_id, self.queue_name).await;
+
+                        QueueEventStatus::Locked
                     }
-
-                    // Unlock event
-                    server.unlock_event(queue_id, self.queue_name).await;
-
-                    QueueEventStatus::Completed
                 }
             } else {
                 QueueEventStatus::Locked
             };
+
+            #[cfg(stalwart_tests)]
+            crate::queue::probe::DispatchProbe::completed(probe_started);
 
             // Notify queue manager
             if server
@@ -193,7 +213,7 @@ impl QueuedMessage {
             if let Err(retry_at) = server.is_allowed(throttle, &message, message.span_id).await {
                 trc::event!(
                     Delivery(DeliveryEvent::RateLimitExceeded),
-                    Id = throttle.id.to_string(),
+                    Name = throttle.id.to_compact_string(),
                     SpanId = span_id,
                     NextRetry = trc::Value::Timestamp(retry_at)
                 );
@@ -207,10 +227,10 @@ impl QueuedMessage {
                         && rcpt.queue == message.queue_name
                     {
                         rcpt.retry.due = retry_at;
-                        rcpt.status = Status::TemporaryFailure(ErrorDetails {
+                        rcpt.status = Status::TemporaryFailure(Box::new(ErrorDetails {
                             entity: "localhost".into(),
                             details: Error::RateLimited,
-                        });
+                        }));
                     }
                 }
 
@@ -223,16 +243,22 @@ impl QueuedMessage {
         // Group recipients by route
         let queue_config = &server.core.smtp.queue;
         let now_ = now();
+        let mut arena = Bump::new();
         let mut routes: AHashMap<(&str, &RoutingStrategy, Option<&[u8]>), Vec<usize>> =
             AHashMap::new();
-        let mut has_rcpt_headers = false;
         let mut default_rcpt_header = None;
+        let mut rcpt_header_by_idx: Vec<Option<&[u8]>> = Vec::new();
         for metadata in message.message.metadata.iter() {
             if let Metadata::Headers { value, id } = metadata {
-                has_rcpt_headers = true;
                 if *id == u64::MAX {
-                    default_rcpt_header = Some(value.as_ref());
-                    break;
+                    default_rcpt_header.get_or_insert(value.as_ref());
+                } else if let Ok(idx) = usize::try_from(*id) {
+                    if rcpt_header_by_idx.is_empty() {
+                        rcpt_header_by_idx.resize(message.message.recipients.len(), None);
+                    }
+                    if let Some(slot) = rcpt_header_by_idx.get_mut(idx) {
+                        slot.get_or_insert(value.as_ref());
+                    }
                 }
             }
         }
@@ -244,26 +270,21 @@ impl QueuedMessage {
                 && rcpt.queue == message.queue_name
             {
                 let envelope = QueueEnvelope::new(&message.message, rcpt);
-                let route = server.get_route_or_default(
-                    &server
-                        .eval_if::<String, _>(&queue_config.route, &envelope, message.span_id)
-                        .await
-                        .unwrap_or_else(|| "default".to_string()),
+                let route = eval_strategy(
+                    &server,
+                    &queue_config.route,
+                    &envelope,
+                    &mut arena,
                     message.span_id,
-                );
+                    Server::get_route_or_default,
+                )
+                .await;
 
-                // Map RCPT headers
-                let mut rcpt_headers = default_rcpt_header;
-                if has_rcpt_headers {
-                    for metadata in message.message.metadata.iter() {
-                        if let Metadata::Headers { value, id } = metadata
-                            && *id == rcpt_idx as u64
-                        {
-                            rcpt_headers = Some(value.as_ref());
-                            break;
-                        }
-                    }
-                }
+                let rcpt_headers = rcpt_header_by_idx
+                    .get(rcpt_idx)
+                    .copied()
+                    .flatten()
+                    .or(default_rcpt_header);
 
                 routes
                     .entry((rcpt.domain_part(), route, rcpt_headers))
@@ -274,11 +295,12 @@ impl QueuedMessage {
 
         let no_ip = IpAddr::V4(Ipv4Addr::new(0, 0, 0, 0));
         let mut delivery_results: Vec<DeliveryResult> = Vec::new();
+        let message_blob = OnceCell::new();
         'next_route: for ((domain, route, rcpt_headers), rcpt_idxs) in routes {
             trc::event!(
                 Delivery(DeliveryEvent::DomainDeliveryStart),
                 SpanId = message.span_id,
-                Domain = domain.to_string(),
+                Domain = CompactString::from(domain),
             );
 
             // Build envelope
@@ -293,9 +315,9 @@ impl QueuedMessage {
                 {
                     trc::event!(
                         Delivery(DeliveryEvent::RateLimitExceeded),
-                        Id = throttle.id.to_string(),
+                        Name = throttle.id.to_compact_string(),
                         SpanId = span_id,
-                        Domain = domain.to_string(),
+                        Domain = CompactString::from(domain),
                     );
 
                     delivery_results.push(DeliveryResult::rate_limited(rcpt_idxs, retry_at));
@@ -321,13 +343,15 @@ impl QueuedMessage {
             };
 
             // Prepare TLS strategy
-            let mut tls_strategy = server.get_tls_or_default(
-                &server
-                    .eval_if::<String, _>(&queue_config.tls, &envelope, message.span_id)
-                    .await
-                    .unwrap_or_else(|| "default".to_string()),
+            let mut tls_strategy = eval_strategy(
+                &server,
+                &queue_config.tls,
+                &envelope,
+                &mut arena,
                 message.span_id,
-            );
+                Server::get_tls_or_default,
+            )
+            .await;
 
             // Obtain TLS reporting
             let tls_report = if is_smtp
@@ -338,6 +362,7 @@ impl QueuedMessage {
                     .eval_if(
                         &server.core.smtp.report.tls.send,
                         &envelope,
+                        &mut arena,
                         message.span_id,
                     )
                     .await
@@ -352,7 +377,7 @@ impl QueuedMessage {
                             .smtp
                             .resolvers
                             .dns
-                            .txt_lookup::<TlsRpt>(
+                            .txt_lookup::<TlsRptRecord>(
                                 format!("_smtp._tls.{domain}."),
                                 Some(&server.inner.cache.dns_txt),
                             )
@@ -362,14 +387,14 @@ impl QueuedMessage {
                                 trc::event!(
                                     TlsRpt(TlsRptEvent::RecordFetch),
                                     SpanId = message.span_id,
-                                    Domain = domain.to_string(),
+                                    Domain = CompactString::from(domain),
                                     Details = record
                                         .rua
                                         .iter()
                                         .map(|uri| trc::Value::from(match uri {
                                             mail_auth::mta_sts::ReportUri::Mail(uri)
                                             | mail_auth::mta_sts::ReportUri::Http(uri) =>
-                                                uri.to_string(),
+                                                CompactString::from(uri),
                                         }))
                                         .collect::<Vec<_>>(),
                                     Elapsed = time.elapsed(),
@@ -381,7 +406,7 @@ impl QueuedMessage {
                                 trc::event!(
                                     TlsRpt(TlsRptEvent::RecordNotFound),
                                     SpanId = message.span_id,
-                                    Domain = domain.to_string(),
+                                    Domain = CompactString::from(domain),
                                     Elapsed = time.elapsed(),
                                 );
                                 None
@@ -390,7 +415,7 @@ impl QueuedMessage {
                                 trc::event!(
                                     TlsRpt(TlsRptEvent::RecordFetchError),
                                     SpanId = message.span_id,
-                                    Domain = domain.to_string(),
+                                    Domain = CompactString::from(domain),
                                     CausedBy = trc::Error::from(err),
                                     Elapsed = time.elapsed(),
                                 );
@@ -415,9 +440,9 @@ impl QueuedMessage {
                         trc::event!(
                             MtaSts(MtaStsEvent::PolicyFetch),
                             SpanId = message.span_id,
-                            Domain = domain.to_string(),
+                            Domain = CompactString::from(domain),
                             Strict = mta_sts_policy.enforce(),
-                            Details = mta_sts_policy
+                            Hostname = mta_sts_policy
                                 .mx
                                 .iter()
                                 .map(|mx| trc::Value::String(mx.to_compact_string()))
@@ -439,11 +464,11 @@ impl QueuedMessage {
                                         server.schedule_report(TlsEvent {
                                             policy: PolicyType::Sts(None),
                                             domain: domain.to_string(),
-                                            failure: FailureDetails::new(ResultType::Other)
-                                                .with_failure_reason_code(
-                                                    "MTA-STS is required and no policy was found.",
-                                                )
-                                                .into(),
+                                            failure: FailureDetails {
+                                                failure_reason_code: Some("MTA-STS is required and no policy was found.".into()),
+                                                ..FailureDetails::new(FailureType::Other)
+                                            }
+                                            .into(),
                                             tls_record: tls_report.record.clone(),
                                             interval: tls_report.interval,
                                             span_id: message.span_id,
@@ -459,9 +484,11 @@ impl QueuedMessage {
                                         .schedule_report(TlsEvent {
                                             policy: PolicyType::Sts(None),
                                             domain: domain.to_string(),
-                                            failure: FailureDetails::new(&err)
-                                                .with_failure_reason_code(err.to_string())
-                                                .into(),
+                                            failure: FailureDetails {
+                                                failure_reason_code: Some(err.to_string()),
+                                                ..FailureDetails::new(&err)
+                                            }
+                                            .into(),
                                             tls_record: tls_report.record.clone(),
                                             interval: tls_report.interval,
                                             span_id: message.span_id,
@@ -478,7 +505,7 @@ impl QueuedMessage {
                                 trc::event!(
                                     MtaSts(MtaStsEvent::PolicyNotFound),
                                     SpanId = message.span_id,
-                                    Domain = domain.to_string(),
+                                    Domain = CompactString::from(domain),
                                     Strict = strict,
                                     Elapsed = time.elapsed(),
                                 );
@@ -487,7 +514,7 @@ impl QueuedMessage {
                                 trc::event!(
                                     MtaSts(MtaStsEvent::PolicyFetchError),
                                     SpanId = message.span_id,
-                                    Domain = domain.to_string(),
+                                    Domain = CompactString::from(domain),
                                     CausedBy = trc::Error::from(err.clone()),
                                     Strict = strict,
                                     Elapsed = time.elapsed(),
@@ -497,8 +524,18 @@ impl QueuedMessage {
                                 trc::event!(
                                     MtaSts(MtaStsEvent::PolicyFetchError),
                                     SpanId = message.span_id,
-                                    Domain = domain.to_string(),
-                                    Reason = err.to_string(),
+                                    Domain = CompactString::from(domain),
+                                    Reason = err.to_compact_string(),
+                                    Strict = strict,
+                                    Elapsed = time.elapsed(),
+                                );
+                            }
+                            mta_sts::Error::Destination(err) => {
+                                trc::event!(
+                                    MtaSts(MtaStsEvent::PolicyFetchError),
+                                    SpanId = message.span_id,
+                                    Domain = CompactString::from(domain),
+                                    Reason = err.as_str(),
                                     Strict = strict,
                                     Elapsed = time.elapsed(),
                                 );
@@ -507,8 +544,23 @@ impl QueuedMessage {
                                 trc::event!(
                                     MtaSts(MtaStsEvent::InvalidPolicy),
                                     SpanId = message.span_id,
-                                    Domain = domain.to_string(),
+                                    Domain = CompactString::from(domain),
                                     Reason = reason.clone(),
+                                    Strict = strict,
+                                    Elapsed = time.elapsed(),
+                                );
+                            }
+                            mta_sts::Error::Backoff(failure) => {
+                                trc::event!(
+                                    MtaSts(if failure.kind == MtaStsFailureKind::InvalidPolicy {
+                                        MtaStsEvent::InvalidPolicy
+                                    } else {
+                                        MtaStsEvent::PolicyFetchError
+                                    }),
+                                    SpanId = message.span_id,
+                                    Domain = CompactString::from(domain),
+                                    Reason = failure.reason.to_string(),
+                                    Details = "Policy fetch skipped during back-off",
                                     Strict = strict,
                                     Elapsed = time.elapsed(),
                                 );
@@ -553,13 +605,13 @@ impl QueuedMessage {
                         trc::event!(
                             Delivery(DeliveryEvent::MxLookupFailed),
                             SpanId = message.span_id,
-                            Domain = domain.to_string(),
+                            Domain = CompactString::from(domain),
                             Details = "No MX records were found, attempting implicit MX.",
                             Elapsed = time.elapsed(),
                         );
 
                         RecordSet {
-                            rrset: Arc::new([]),
+                            records: Arc::new([]),
                             dnssec_status: DnssecStatus::Indeterminate,
                         }
                     }
@@ -567,7 +619,7 @@ impl QueuedMessage {
                         trc::event!(
                             Delivery(DeliveryEvent::MxLookupFailed),
                             SpanId = message.span_id,
-                            Domain = domain.to_string(),
+                            Domain = CompactString::from(domain),
                             CausedBy = trc::Error::from(err.clone()),
                             Elapsed = time.elapsed(),
                         );
@@ -584,8 +636,8 @@ impl QueuedMessage {
                     trc::event!(
                         Delivery(DeliveryEvent::MxLookup),
                         SpanId = message.span_id,
-                        Domain = domain.to_string(),
-                        Details = remote_hosts_
+                        Domain = CompactString::from(domain),
+                        Hostname = remote_hosts_
                             .iter()
                             .map(|h| trc::Value::String(h.hostname().into()))
                             .collect::<Vec<_>>(),
@@ -596,17 +648,17 @@ impl QueuedMessage {
                     trc::event!(
                         Delivery(DeliveryEvent::NullMx),
                         SpanId = message.span_id,
-                        Domain = domain.to_string(),
+                        Domain = CompactString::from(domain),
                         Elapsed = time.elapsed(),
                     );
 
                     delivery_results.push(DeliveryResult::domain(
-                        Status::PermanentFailure(ErrorDetails {
+                        Status::PermanentFailure(Box::new(ErrorDetails {
                             entity: domain.into(),
                             details: Error::DnsError(
                                 "Domain does not accept messages (null MX)".into(),
                             ),
-                        }),
+                        })),
                         rcpt_idxs,
                     ));
                     continue 'next_route;
@@ -627,10 +679,14 @@ impl QueuedMessage {
                                 .schedule_report(TlsEvent {
                                     policy: mta_sts_policy.into(),
                                     domain: domain.to_string(),
-                                    failure: FailureDetails::new(ResultType::ValidationFailure)
-                                        .with_receiving_mx_hostname(envelope.mx)
-                                        .with_failure_reason_code("MX not authorized by policy.")
-                                        .into(),
+                                    failure: FailureDetails {
+                                        receiving_mx_hostname: Some(envelope.mx.into()),
+                                        failure_reason_code: Some(
+                                            "MX not authorized by policy.".into(),
+                                        ),
+                                        ..FailureDetails::new(FailureType::ValidationFailure)
+                                    }
+                                    .into(),
                                     tls_record: tls_report.record.clone(),
                                     interval: tls_report.interval,
                                     span_id: message.span_id,
@@ -641,8 +697,8 @@ impl QueuedMessage {
                         trc::event!(
                             MtaSts(MtaStsEvent::NotAuthorized),
                             SpanId = message.span_id,
-                            Domain = domain.to_string(),
-                            Hostname = envelope.mx.to_string(),
+                            Domain = CompactString::from(domain),
+                            Hostname = CompactString::from(envelope.mx),
                             Details = mta_sts_policy
                                 .mx
                                 .iter()
@@ -652,21 +708,21 @@ impl QueuedMessage {
                         );
 
                         if strict {
-                            last_status = Status::PermanentFailure(ErrorDetails {
+                            last_status = Status::PermanentFailure(Box::new(ErrorDetails {
                                 entity: envelope.mx.into(),
                                 details: Error::MtaStsError(
                                     format!("MX {:?} not authorized by policy.", envelope.mx)
                                         .into_boxed_str(),
                                 ),
-                            });
+                            }));
                             continue 'next_host;
                         }
                     } else {
                         trc::event!(
                             MtaSts(MtaStsEvent::Authorized),
                             SpanId = message.span_id,
-                            Domain = domain.to_string(),
-                            Hostname = envelope.mx.to_string(),
+                            Domain = CompactString::from(domain),
+                            Hostname = CompactString::from(envelope.mx),
                             Details = mta_sts_policy
                                 .mx
                                 .iter()
@@ -678,13 +734,15 @@ impl QueuedMessage {
                 }
 
                 // Update TLS strategy
-                tls_strategy = server.get_tls_or_default(
-                    &server
-                        .eval_if::<String, _>(&queue_config.tls, &envelope, message.span_id)
-                        .await
-                        .unwrap_or_else(|| "default".to_string()),
+                tls_strategy = eval_strategy(
+                    &server,
+                    &queue_config.tls,
+                    &envelope,
+                    &mut arena,
                     message.span_id,
-                );
+                    Server::get_tls_or_default,
+                )
+                .await;
 
                 let validated_host;
                 let remote_host = if mx_unvalidated && tls_strategy.try_dane() {
@@ -727,9 +785,9 @@ impl QueuedMessage {
                         trc::event!(
                             Delivery(DeliveryEvent::IpLookup),
                             SpanId = message.span_id,
-                            Domain = domain.to_string(),
-                            Hostname = envelope.mx.to_string(),
-                            Details = resolved
+                            Domain = CompactString::from(domain),
+                            Hostname = CompactString::from(envelope.mx),
+                            Ip = resolved
                                 .ips
                                 .iter()
                                 .map(|ip| trc::Value::from(*ip))
@@ -744,9 +802,9 @@ impl QueuedMessage {
                         trc::event!(
                             Delivery(DeliveryEvent::IpLookupFailed),
                             SpanId = message.span_id,
-                            Domain = domain.to_string(),
-                            Hostname = envelope.mx.to_string(),
-                            Details = status.to_string(),
+                            Domain = CompactString::from(domain),
+                            Hostname = CompactString::from(envelope.mx),
+                            Details = status.to_compact_string(),
                             Elapsed = time.elapsed(),
                         );
 
@@ -757,7 +815,11 @@ impl QueuedMessage {
 
                 // Lookup DANE policy
                 let mut dane_requires_encryption = false;
-                let dane_policy = if tls_strategy.try_dane() && is_smtp {
+                let dane_policy = if tls_strategy.try_dane()
+                    && is_smtp
+                    && (matches!(remote_host, NextHop::MX { .. })
+                        || tls_strategy.is_dane_required())
+                {
                     let time = Instant::now();
                     let strict = tls_strategy.is_dane_required();
 
@@ -775,9 +837,9 @@ impl QueuedMessage {
                                         trc::event!(
                                             Dane(DaneEvent::TlsaRecordFetch),
                                             SpanId = message.span_id,
-                                            Domain = domain.to_string(),
-                                            Hostname = envelope.mx.to_string(),
-                                            Details = format!("{tlsa:?}"),
+                                            Domain = CompactString::from(domain),
+                                            Hostname = CompactString::from(envelope.mx),
+                                            Details = format_compact!("{tlsa:?}"),
                                             Strict = strict,
                                             Elapsed = time.elapsed(),
                                         );
@@ -787,9 +849,9 @@ impl QueuedMessage {
                                         trc::event!(
                                             Dane(DaneEvent::TlsaRecordInvalid),
                                             SpanId = message.span_id,
-                                            Domain = domain.to_string(),
-                                            Hostname = envelope.mx.to_string(),
-                                            Details = format!("{tlsa:?}"),
+                                            Domain = CompactString::from(domain),
+                                            Hostname = CompactString::from(envelope.mx),
+                                            Details = format_compact!("{tlsa:?}"),
                                             Strict = strict,
                                             Elapsed = time.elapsed(),
                                         );
@@ -800,13 +862,17 @@ impl QueuedMessage {
                                                 .schedule_report(TlsEvent {
                                                     policy: tlsa.into(),
                                                     domain: domain.to_string(),
-                                                    failure: FailureDetails::new(
-                                                        ResultType::TlsaInvalid,
-                                                    )
-                                                    .with_receiving_mx_hostname(envelope.mx)
-                                                    .with_failure_reason_code(
-                                                        "Invalid TLSA record.",
-                                                    )
+                                                    failure: FailureDetails {
+                                                        receiving_mx_hostname: Some(
+                                                            envelope.mx.into(),
+                                                        ),
+                                                        failure_reason_code: Some(
+                                                            "Invalid TLSA record.".into(),
+                                                        ),
+                                                        ..FailureDetails::new(
+                                                            FailureType::TlsaInvalid,
+                                                        )
+                                                    }
                                                     .into(),
                                                     tls_record: tls_report.record.clone(),
                                                     interval: tls_report.interval,
@@ -816,12 +882,13 @@ impl QueuedMessage {
                                         }
 
                                         if strict {
-                                            last_status = Status::TemporaryFailure(ErrorDetails {
-                                                entity: envelope.mx.into(),
-                                                details: Error::DaneError(
-                                                    "No valid TLSA records were found".into(),
-                                                ),
-                                            });
+                                            last_status =
+                                                Status::TemporaryFailure(Box::new(ErrorDetails {
+                                                    entity: envelope.mx.into(),
+                                                    details: Error::DaneError(
+                                                        "No valid TLSA records were found".into(),
+                                                    ),
+                                                }));
                                             continue 'next_host;
                                         }
 
@@ -833,8 +900,8 @@ impl QueuedMessage {
                                     trc::event!(
                                         Dane(DaneEvent::BogusDnssecRecord),
                                         SpanId = message.span_id,
-                                        Domain = domain.to_string(),
-                                        Hostname = envelope.mx.to_string(),
+                                        Domain = CompactString::from(domain),
+                                        Hostname = CompactString::from(envelope.mx),
                                         Details = "TLSA",
                                         Strict = strict,
                                         Elapsed = time.elapsed(),
@@ -846,13 +913,15 @@ impl QueuedMessage {
                                             .schedule_report(TlsEvent {
                                                 policy: PolicyType::Tlsa(None),
                                                 domain: domain.to_string(),
-                                                failure: FailureDetails::new(
-                                                    ResultType::DnssecInvalid,
-                                                )
-                                                .with_receiving_mx_hostname(envelope.mx)
-                                                .with_failure_reason_code(
-                                                    "Bogus TLSA records were found.",
-                                                )
+                                                failure: FailureDetails {
+                                                    receiving_mx_hostname: Some(envelope.mx.into()),
+                                                    failure_reason_code: Some(
+                                                        "Bogus TLSA records were found.".into(),
+                                                    ),
+                                                    ..FailureDetails::new(
+                                                        FailureType::DnssecInvalid,
+                                                    )
+                                                }
                                                 .into(),
                                                 tls_record: tls_report.record.clone(),
                                                 interval: tls_report.interval,
@@ -861,20 +930,21 @@ impl QueuedMessage {
                                             .await;
                                     }
 
-                                    last_status = Status::TemporaryFailure(ErrorDetails {
-                                        entity: envelope.mx.into(),
-                                        details: Error::DaneError(
-                                            "Bogus TLSA records were found".into(),
-                                        ),
-                                    });
+                                    last_status =
+                                        Status::TemporaryFailure(Box::new(ErrorDetails {
+                                            entity: envelope.mx.into(),
+                                            details: Error::DaneError(
+                                                "Bogus TLSA records were found".into(),
+                                            ),
+                                        }));
                                     continue 'next_host;
                                 }
                                 Ok(TlsaResult::Missing) => {
                                     trc::event!(
                                         Dane(DaneEvent::TlsaRecordNotDnssecSigned),
                                         SpanId = message.span_id,
-                                        Domain = domain.to_string(),
-                                        Hostname = envelope.mx.to_string(),
+                                        Domain = CompactString::from(domain),
+                                        Hostname = CompactString::from(envelope.mx),
                                         Strict = strict,
                                         Elapsed = time.elapsed(),
                                     );
@@ -886,13 +956,17 @@ impl QueuedMessage {
                                                 .schedule_report(TlsEvent {
                                                     policy: PolicyType::Tlsa(None),
                                                     domain: domain.to_string(),
-                                                    failure: FailureDetails::new(
-                                                        ResultType::DaneRequired,
-                                                    )
-                                                    .with_receiving_mx_hostname(envelope.mx)
-                                                    .with_failure_reason_code(
-                                                        "No TLSA DNSSEC records found.",
-                                                    )
+                                                    failure: FailureDetails {
+                                                        receiving_mx_hostname: Some(
+                                                            envelope.mx.into(),
+                                                        ),
+                                                        failure_reason_code: Some(
+                                                            "No TLSA DNSSEC records found.".into(),
+                                                        ),
+                                                        ..FailureDetails::new(
+                                                            FailureType::DaneRequired,
+                                                        )
+                                                    }
                                                     .into(),
                                                     tls_record: tls_report.record.clone(),
                                                     interval: tls_report.interval,
@@ -901,12 +975,13 @@ impl QueuedMessage {
                                                 .await;
                                         }
 
-                                        last_status = Status::TemporaryFailure(ErrorDetails {
-                                            entity: envelope.mx.into(),
-                                            details: Error::DaneError(
-                                                "No TLSA DNSSEC records found".into(),
-                                            ),
-                                        });
+                                        last_status =
+                                            Status::TemporaryFailure(Box::new(ErrorDetails {
+                                                entity: envelope.mx.into(),
+                                                details: Error::DaneError(
+                                                    "No TLSA DNSSEC records found".into(),
+                                                ),
+                                            }));
                                         continue 'next_host;
                                     }
                                     None
@@ -923,8 +998,8 @@ impl QueuedMessage {
                                         trc::event!(
                                             Dane(DaneEvent::TlsaRecordNotFound),
                                             SpanId = message.span_id,
-                                            Domain = domain.to_string(),
-                                            Hostname = envelope.mx.to_string(),
+                                            Domain = CompactString::from(domain),
+                                            Hostname = CompactString::from(envelope.mx),
                                             Strict = strict,
                                             Elapsed = time.elapsed(),
                                         );
@@ -936,13 +1011,18 @@ impl QueuedMessage {
                                                     .schedule_report(TlsEvent {
                                                         policy: PolicyType::Tlsa(None),
                                                         domain: domain.to_string(),
-                                                        failure: FailureDetails::new(
-                                                            ResultType::DaneRequired,
-                                                        )
-                                                        .with_receiving_mx_hostname(envelope.mx)
-                                                        .with_failure_reason_code(
-                                                            "No TLSA records found for MX.",
-                                                        )
+                                                        failure: FailureDetails {
+                                                            receiving_mx_hostname: Some(
+                                                                envelope.mx.into(),
+                                                            ),
+                                                            failure_reason_code: Some(
+                                                                "No TLSA records found for MX."
+                                                                    .into(),
+                                                            ),
+                                                            ..FailureDetails::new(
+                                                                FailureType::DaneRequired,
+                                                            )
+                                                        }
                                                         .into(),
                                                         tls_record: tls_report.record.clone(),
                                                         interval: tls_report.interval,
@@ -951,12 +1031,13 @@ impl QueuedMessage {
                                                     .await;
                                             }
 
-                                            last_status = Status::TemporaryFailure(ErrorDetails {
-                                                entity: envelope.mx.into(),
-                                                details: Error::DaneError(
-                                                    "No TLSA records found".into(),
-                                                ),
-                                            });
+                                            last_status =
+                                                Status::TemporaryFailure(Box::new(ErrorDetails {
+                                                    entity: envelope.mx.into(),
+                                                    details: Error::DaneError(
+                                                        "No TLSA records found".into(),
+                                                    ),
+                                                }));
                                             continue 'next_host;
                                         }
                                         None
@@ -964,8 +1045,8 @@ impl QueuedMessage {
                                         trc::event!(
                                             Dane(DaneEvent::TlsaRecordFetchError),
                                             SpanId = message.span_id,
-                                            Domain = domain.to_string(),
-                                            Hostname = envelope.mx.to_string(),
+                                            Domain = CompactString::from(domain),
+                                            Hostname = CompactString::from(envelope.mx),
                                             CausedBy = trc::Error::from(err.clone()),
                                             Strict = strict,
                                             Elapsed = time.elapsed(),
@@ -982,8 +1063,8 @@ impl QueuedMessage {
                             trc::event!(
                                 Dane(DaneEvent::BogusDnssecRecord),
                                 SpanId = message.span_id,
-                                Domain = domain.to_string(),
-                                Hostname = envelope.mx.to_string(),
+                                Domain = CompactString::from(domain),
+                                Hostname = CompactString::from(envelope.mx),
                                 Details = dnssec_entity,
                                 Strict = strict,
                                 Elapsed = time.elapsed(),
@@ -995,12 +1076,14 @@ impl QueuedMessage {
                                     .schedule_report(TlsEvent {
                                         policy: PolicyType::Tlsa(None),
                                         domain: domain.to_string(),
-                                        failure: FailureDetails::new(ResultType::DnssecInvalid)
-                                            .with_receiving_mx_hostname(envelope.mx)
-                                            .with_failure_reason_code(format!(
+                                        failure: FailureDetails {
+                                            receiving_mx_hostname: Some(envelope.mx.into()),
+                                            failure_reason_code: Some(format!(
                                                 "Bogus {dnssec_entity} records were found."
-                                            ))
-                                            .into(),
+                                            )),
+                                            ..FailureDetails::new(FailureType::DnssecInvalid)
+                                        }
+                                        .into(),
                                         tls_record: tls_report.record.clone(),
                                         interval: tls_report.interval,
                                         span_id: message.span_id,
@@ -1008,20 +1091,20 @@ impl QueuedMessage {
                                     .await;
                             }
 
-                            last_status = Status::TemporaryFailure(ErrorDetails {
+                            last_status = Status::TemporaryFailure(Box::new(ErrorDetails {
                                 entity: envelope.mx.into(),
                                 details: Error::DaneError(
                                     format!("Bogus {dnssec_entity} records were found").into(),
                                 ),
-                            });
+                            }));
                             continue 'next_host;
                         }
                         _ => {
                             trc::event!(
                                 Dane(DaneEvent::TlsaRecordNotDnssecSigned),
                                 SpanId = message.span_id,
-                                Domain = domain.to_string(),
-                                Hostname = envelope.mx.to_string(),
+                                Domain = CompactString::from(domain),
+                                Hostname = CompactString::from(envelope.mx),
                                 Strict = strict,
                                 Elapsed = time.elapsed(),
                             );
@@ -1033,12 +1116,15 @@ impl QueuedMessage {
                                         .schedule_report(TlsEvent {
                                             policy: PolicyType::Tlsa(None),
                                             domain: domain.to_string(),
-                                            failure: FailureDetails::new(ResultType::DaneRequired)
-                                                .with_receiving_mx_hostname(envelope.mx)
-                                                .with_failure_reason_code(
-                                                    "MX host is not in a DNSSEC signed zone.",
-                                                )
-                                                .into(),
+                                            failure: FailureDetails {
+                                                receiving_mx_hostname: Some(envelope.mx.into()),
+                                                failure_reason_code: Some(
+                                                    "MX host is not in a DNSSEC signed zone."
+                                                        .into(),
+                                                ),
+                                                ..FailureDetails::new(FailureType::DaneRequired)
+                                            }
+                                            .into(),
                                             tls_record: tls_report.record.clone(),
                                             interval: tls_report.interval,
                                             span_id: message.span_id,
@@ -1046,12 +1132,12 @@ impl QueuedMessage {
                                         .await;
                                 }
 
-                                last_status = Status::TemporaryFailure(ErrorDetails {
+                                last_status = Status::TemporaryFailure(Box::new(ErrorDetails {
                                     entity: envelope.mx.into(),
                                     details: Error::DaneError(
                                         "No TLSA DNSSEC records found".into(),
                                     ),
-                                });
+                                }));
                                 continue 'next_host;
                             }
                             None
@@ -1063,8 +1149,24 @@ impl QueuedMessage {
 
                 // Try each IP address
                 'next_ip: for remote_ip in remote_ips {
-                    // Throttle remote host
                     envelope.remote_ip = remote_ip;
+
+                    // Obtain connection parameters
+                    let conn_strategy = eval_strategy(
+                        &server,
+                        &queue_config.connection,
+                        &envelope,
+                        &mut arena,
+                        message.span_id,
+                        Server::get_connection_or_default,
+                    )
+                    .await;
+
+                    // Set source IP, if any
+                    let ip_host = conn_strategy.source_ip(remote_ip.is_ipv4());
+                    envelope.local_ip = ip_host.map_or(no_ip, |ip_host| ip_host.ip);
+
+                    // Throttle remote host
                     for throttle in &queue_config.outbound_limiters.remote {
                         if let Err(retry_at) = server
                             .is_allowed(throttle, &envelope, message.span_id)
@@ -1073,7 +1175,7 @@ impl QueuedMessage {
                             trc::event!(
                                 Delivery(DeliveryEvent::RateLimitExceeded),
                                 SpanId = message.span_id,
-                                Id = throttle.id.to_string(),
+                                Name = throttle.id.to_compact_string(),
                                 RemoteIp = remote_ip,
                             );
                             delivery_results
@@ -1082,26 +1184,9 @@ impl QueuedMessage {
                         }
                     }
 
-                    // Obtain connection parameters
-                    let conn_strategy = server.get_connection_or_default(
-                        &server
-                            .eval_if::<String, _>(
-                                &queue_config.connection,
-                                &envelope,
-                                message.span_id,
-                            )
-                            .await
-                            .unwrap_or_else(|| "default".to_string()),
-                        message.span_id,
-                    );
-
-                    // Set source IP, if any
-                    let ip_host = conn_strategy.source_ip(remote_ip.is_ipv4());
-
                     // Connect
                     let time = Instant::now();
                     let mut smtp_client = match if let Some(ip_host) = ip_host {
-                        envelope.local_ip = ip_host.ip;
                         SmtpClient::connect_using(
                             ip_host.ip,
                             SocketAddr::new(remote_ip, remote_host.port()),
@@ -1110,7 +1195,6 @@ impl QueuedMessage {
                         )
                         .await
                     } else {
-                        envelope.local_ip = no_ip;
                         SmtpClient::connect(
                             SocketAddr::new(remote_ip, remote_host.port()),
                             conn_strategy.timeout_connect,
@@ -1122,8 +1206,8 @@ impl QueuedMessage {
                             trc::event!(
                                 Delivery(DeliveryEvent::Connect),
                                 SpanId = message.span_id,
-                                Domain = domain.to_string(),
-                                Hostname = envelope.mx.to_string(),
+                                Domain = CompactString::from(domain),
+                                Hostname = CompactString::from(envelope.mx),
                                 LocalIp = envelope.local_ip,
                                 RemoteIp = remote_ip,
                                 RemotePort = remote_host.port(),
@@ -1136,8 +1220,8 @@ impl QueuedMessage {
                             trc::event!(
                                 Delivery(DeliveryEvent::ConnectError),
                                 SpanId = message.span_id,
-                                Domain = domain.to_string(),
-                                Hostname = envelope.mx.to_string(),
+                                Domain = CompactString::from(domain),
+                                Hostname = CompactString::from(envelope.mx),
                                 LocalIp = envelope.local_ip,
                                 RemoteIp = remote_ip,
                                 RemotePort = remote_host.port(),
@@ -1164,6 +1248,7 @@ impl QueuedMessage {
                         local_hostname,
                         conn_strategy,
                         capabilities: None,
+                        message_blob: &message_blob,
                     };
 
                     // Prepare TLS connector
@@ -1192,9 +1277,9 @@ impl QueuedMessage {
                             trc::event!(
                                 Delivery(DeliveryEvent::GreetingFailed),
                                 SpanId = message.span_id,
-                                Domain = domain.to_string(),
-                                Hostname = envelope.mx.to_string(),
-                                Details = status.to_string(),
+                                Domain = CompactString::from(domain),
+                                Hostname = CompactString::from(envelope.mx),
+                                Details = status.to_compact_string(),
                             );
 
                             last_status = status;
@@ -1208,8 +1293,8 @@ impl QueuedMessage {
                                 trc::event!(
                                     Delivery(DeliveryEvent::Ehlo),
                                     SpanId = message.span_id,
-                                    Domain = domain.to_string(),
-                                    Hostname = envelope.mx.to_string(),
+                                    Domain = CompactString::from(domain),
+                                    Hostname = CompactString::from(envelope.mx),
                                     Details = capabilities.capabilities(),
                                     Elapsed = time.elapsed(),
                                 );
@@ -1220,9 +1305,9 @@ impl QueuedMessage {
                                 trc::event!(
                                     Delivery(DeliveryEvent::EhloRejected),
                                     SpanId = message.span_id,
-                                    Domain = domain.to_string(),
-                                    Hostname = envelope.mx.to_string(),
-                                    Details = status.to_string(),
+                                    Domain = CompactString::from(domain),
+                                    Hostname = CompactString::from(envelope.mx),
+                                    Details = status.to_compact_string(),
                                     Elapsed = time.elapsed(),
                                 );
 
@@ -1243,16 +1328,16 @@ impl QueuedMessage {
                                     trc::event!(
                                         Delivery(DeliveryEvent::StartTls),
                                         SpanId = message.span_id,
-                                        Domain = domain.to_string(),
-                                        Hostname = envelope.mx.to_string(),
-                                        Version = format!(
+                                        Domain = CompactString::from(domain),
+                                        Hostname = CompactString::from(envelope.mx),
+                                        Version = format_compact!(
                                             "{:?}",
                                             smtp_client
                                                 .tls_connection()
                                                 .protocol_version()
                                                 .unwrap()
                                         ),
-                                        Details = format!(
+                                        Cipher = format_compact!(
                                             "{:?}",
                                             smtp_client
                                                 .tls_connection()
@@ -1277,14 +1362,19 @@ impl QueuedMessage {
                                                 .schedule_report(TlsEvent {
                                                     policy: dane_policy.into(),
                                                     domain: domain.to_string(),
-                                                    failure: FailureDetails::new(
-                                                        ResultType::ValidationFailure,
-                                                    )
-                                                    .with_receiving_mx_hostname(envelope.mx)
-                                                    .with_receiving_ip(remote_ip)
-                                                    .with_failure_reason_code(
-                                                        "No matching certificates found.",
-                                                    )
+                                                    failure: FailureDetails {
+                                                        receiving_mx_hostname: Some(
+                                                            envelope.mx.into(),
+                                                        ),
+                                                        receiving_ip: Some(remote_ip),
+                                                        failure_reason_code: Some(
+                                                            "No matching certificates found."
+                                                                .into(),
+                                                        ),
+                                                        ..FailureDetails::new(
+                                                            FailureType::ValidationFailure,
+                                                        )
+                                                    }
                                                     .into(),
                                                     tls_record: tls_report.record.clone(),
                                                     interval: tls_report.interval,
@@ -1335,14 +1425,15 @@ impl QueuedMessage {
                                     trc::event!(
                                         Delivery(DeliveryEvent::StartTlsUnavailable),
                                         SpanId = message.span_id,
-                                        Domain = domain.to_string(),
-                                        Hostname = envelope.mx.to_string(),
+                                        Domain = CompactString::from(domain),
+                                        Hostname = CompactString::from(envelope.mx),
                                         Code = response.as_ref().map(|r| r.code()),
-                                        Details = response
-                                            .as_ref()
-                                            .map(|r| r.message().as_ref())
-                                            .unwrap_or("STARTTLS was not advertised by host")
-                                            .to_string(),
+                                        Details = CompactString::from(
+                                            response
+                                                .as_ref()
+                                                .map(|r| r.message().as_ref())
+                                                .unwrap_or("STARTTLS was not advertised by host")
+                                        ),
                                         Elapsed = time.elapsed(),
                                     );
 
@@ -1351,12 +1442,14 @@ impl QueuedMessage {
                                             .schedule_report(TlsEvent {
                                                 policy: (&mta_sts_policy, &dane_policy).into(),
                                                 domain: domain.to_string(),
-                                                failure: FailureDetails::new(
-                                                    ResultType::StartTlsNotSupported,
-                                                )
-                                                .with_receiving_mx_hostname(envelope.mx)
-                                                .with_receiving_ip(remote_ip)
-                                                .with_failure_reason_code(reason)
+                                                failure: FailureDetails {
+                                                    receiving_mx_hostname: Some(envelope.mx.into()),
+                                                    receiving_ip: Some(remote_ip),
+                                                    failure_reason_code: Some(reason),
+                                                    ..FailureDetails::new(
+                                                        FailureType::StartTlsNotSupported,
+                                                    )
+                                                }
                                                 .into(),
                                                 tls_record: tls_report.record.clone(),
                                                 interval: tls_report.interval,
@@ -1387,8 +1480,8 @@ impl QueuedMessage {
                                     trc::event!(
                                         Delivery(DeliveryEvent::StartTlsError),
                                         SpanId = message.span_id,
-                                        Domain = domain.to_string(),
-                                        Hostname = envelope.mx.to_string(),
+                                        Domain = CompactString::from(domain),
+                                        Hostname = CompactString::from(envelope.mx),
                                         Reason = from_mail_send_error(&error),
                                         Elapsed = time.elapsed(),
                                     );
@@ -1401,12 +1494,14 @@ impl QueuedMessage {
                                             .schedule_report(TlsEvent {
                                                 policy: (&mta_sts_policy, &dane_policy).into(),
                                                 domain: domain.to_string(),
-                                                failure: FailureDetails::new(
-                                                    ResultType::CertificateNotTrusted,
-                                                )
-                                                .with_receiving_mx_hostname(envelope.mx)
-                                                .with_receiving_ip(remote_ip)
-                                                .with_failure_reason_code(error.to_string())
+                                                failure: FailureDetails {
+                                                    receiving_mx_hostname: Some(envelope.mx.into()),
+                                                    receiving_ip: Some(remote_ip),
+                                                    failure_reason_code: Some(error.to_string()),
+                                                    ..FailureDetails::new(
+                                                        FailureType::CertificateNotTrusted,
+                                                    )
+                                                }
                                                 .into(),
                                                 tls_record: tls_report.record.clone(),
                                                 interval: tls_report.interval,
@@ -1428,8 +1523,8 @@ impl QueuedMessage {
                             trc::event!(
                                 Delivery(DeliveryEvent::StartTlsDisabled),
                                 SpanId = message.span_id,
-                                Domain = domain.to_string(),
-                                Hostname = envelope.mx.to_string(),
+                                Domain = CompactString::from(domain),
+                                Hostname = CompactString::from(envelope.mx),
                             );
 
                             message
@@ -1452,8 +1547,8 @@ impl QueuedMessage {
                                     trc::event!(
                                         Delivery(DeliveryEvent::ImplicitTlsError),
                                         SpanId = message.span_id,
-                                        Domain = domain.to_string(),
-                                        Hostname = envelope.mx.to_string(),
+                                        Domain = CompactString::from(domain),
+                                        Hostname = CompactString::from(envelope.mx),
                                         Reason = from_mail_send_error(&error),
                                     );
 
@@ -1468,8 +1563,8 @@ impl QueuedMessage {
                             trc::event!(
                                 Delivery(DeliveryEvent::GreetingFailed),
                                 SpanId = message.span_id,
-                                Domain = domain.to_string(),
-                                Hostname = envelope.mx.to_string(),
+                                Domain = CompactString::from(domain),
+                                Hostname = CompactString::from(envelope.mx),
                                 Details = from_error_status(&status),
                             );
 
@@ -1497,15 +1592,19 @@ impl QueuedMessage {
             // Update status
             delivery_results.push(DeliveryResult::domain(last_status, rcpt_idxs));
         }
+        drop(message_blob);
 
         // Apply status changes
         for delivery_result in delivery_results {
             match delivery_result {
                 DeliveryResult::Domain { status, rcpt_idxs } => {
-                    for rcpt_idx in rcpt_idxs {
-                        message
-                            .set_rcpt_status(status.clone(), rcpt_idx, &server)
-                            .await;
+                    if let Some((&last_idx, rcpt_idxs)) = rcpt_idxs.split_last() {
+                        for &rcpt_idx in rcpt_idxs {
+                            message
+                                .set_rcpt_status(status.clone(), rcpt_idx, &server)
+                                .await;
+                        }
+                        message.set_rcpt_status(status, last_idx, &server).await;
                     }
                 }
                 DeliveryResult::Account { status, rcpt_idx } => {
@@ -1583,8 +1682,8 @@ impl MessageWrapper {
                         Delivery(DeliveryEvent::Failed),
                         SpanId = self.span_id,
                         QueueId = self.queue_id,
-                        QueueName = self.queue_name.as_str().to_string(),
-                        To = rcpt.address().to_string(),
+                        QueueName = CompactString::from(self.queue_name.as_str()),
+                        To = CompactString::from(rcpt.address()),
                         Reason = from_error_details(&err.details),
                         Details = trc::Value::Timestamp(now),
                         Expires = rcpt
@@ -1602,8 +1701,8 @@ impl MessageWrapper {
                         Delivery(DeliveryEvent::Failed),
                         SpanId = self.span_id,
                         QueueId = self.queue_id,
-                        QueueName = self.queue_name.as_str().to_string(),
-                        To = rcpt.address().to_string(),
+                        QueueName = CompactString::from(self.queue_name.as_str()),
+                        To = CompactString::from(rcpt.address()),
                         Reason = "Message expired without any delivery attempts made.",
                         Details = trc::Value::Timestamp(now),
                         Expires = rcpt
@@ -1613,12 +1712,12 @@ impl MessageWrapper {
                         NextDsn = trc::Value::Timestamp(rcpt.notify.due),
                     );
 
-                    rcpt.status = Status::PermanentFailure(ErrorDetails {
+                    rcpt.status = Status::PermanentFailure(Box::new(ErrorDetails {
                         entity: rcpt.domain_part().into(),
                         details: Error::Io(
                             "Message expired without any delivery attempts made.".into(),
                         ),
-                    });
+                    }));
                 }
                 Status::Completed(_) | Status::PermanentFailure(_) => (),
                 _ => {
@@ -1645,14 +1744,17 @@ impl MessageWrapper {
         self.message.recipients[rcpt_idx].status = status;
 
         if needs_retry {
+            let mut arena = Bump::new();
             let envelope = QueueEnvelope::new(&self.message, &self.message.recipients[rcpt_idx]);
-            let queue = server.get_queue_or_default(
-                &server
-                    .eval_if::<String, _>(&server.core.smtp.queue.queue, &envelope, self.span_id)
-                    .await
-                    .unwrap_or_else(|| "default".to_string()),
+            let queue = eval_strategy(
+                server,
+                &server.core.smtp.queue.queue,
+                &envelope,
+                &mut arena,
                 self.span_id,
-            );
+                Server::get_queue_or_default,
+            )
+            .await;
             let rcpt = &mut self.message.recipients[rcpt_idx];
             rcpt.retry.due = now()
                 + queue.retry[std::cmp::min(rcpt.retry.inner as usize, queue.retry.len() - 1)];
@@ -1665,9 +1767,9 @@ impl MessageWrapper {
     pub fn set_rcpt_rate_limit(&mut self, rcpt_idx: usize, retry_at: u64) {
         let rcpt = &mut self.message.recipients[rcpt_idx];
         rcpt.retry.due = retry_at;
-        rcpt.status = Status::TemporaryFailure(ErrorDetails {
+        rcpt.status = Status::TemporaryFailure(Box::new(ErrorDetails {
             entity: "localhost".into(),
             details: Error::RateLimited,
-        });
+        }));
     }
 }

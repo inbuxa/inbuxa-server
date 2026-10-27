@@ -7,10 +7,11 @@
 use crate::{Server, manager::application::Resource};
 use quick_xml::Reader;
 use quick_xml::XmlVersion;
+use quick_xml::escape::escape;
 use quick_xml::events::Event;
 use registry::schema::{enums::ServiceProtocol, structs::Service};
-use std::{borrow::Cow, fmt::Write};
-use utils::map::vec_map::VecMap;
+use std::fmt::Write;
+use utils::{map::vec_map::VecMap, sanitize_email};
 
 impl Server {
     pub async fn handle_autodiscover_request(
@@ -89,6 +90,8 @@ fn build_autodiscover_response(
     default_host: &str,
     services: &VecMap<ServiceProtocol, Service>,
 ) -> String {
+    let emailaddress = escape(emailaddress);
+
     // Build XML response
     let mut config = String::with_capacity(1024);
     let _ = writeln!(&mut config, "<?xml version=\"1.0\" encoding=\"UTF-8\"?>");
@@ -173,16 +176,13 @@ fn parse_autodiscover_request(bytes: &[u8]) -> Result<AutodiscoverRequest, Strin
             match reader.read_event_into(&mut buf) {
                 Ok(Event::Start(e)) => {
                     let found_tag_name = e.name();
-                    if tag_name
-                        .as_bytes()
-                        .eq_ignore_ascii_case(found_tag_name.as_ref())
-                    {
+                    if tag_name.eq_ignore_ascii_case(found_tag_name.into_inner()) {
                         continue 'outer;
                     } else {
                         return Err(format!(
                             "Expected tag {}, found unexpected tag {} at position {}.",
                             tag_name,
-                            String::from_utf8_lossy(found_tag_name.as_ref()),
+                            found_tag_name.into_inner(),
                             reader.buffer_position()
                         ));
                     }
@@ -213,27 +213,47 @@ fn parse_autodiscover_request(bytes: &[u8]) -> Result<AutodiscoverRequest, Strin
         match reader.read_event_into(&mut buf) {
             Ok(Event::Start(e)) => {
                 let local_name = e.local_name();
-                let field = hashify::tiny_map_ignore_case!(local_name.as_ref(),
-                    b"EMailAddress" => RequestField::EmailAddress,
-                    b"AcceptableResponseSchema" => RequestField::ResponseSchema,
-                );
+                let field =
+                    hashify::map_ignore_case!(local_name.into_inner().as_bytes(), RequestField,
+                        b"EMailAddress" => RequestField::EmailAddress,
+                        b"AcceptableResponseSchema" => RequestField::ResponseSchema,
+                    )
+                    .copied();
 
                 let value = match reader.read_event_into(&mut value_buf) {
                     Ok(Event::End(_)) => None,
                     Ok(event) => {
                         let value = match event {
-                            Event::Text(text) => text
-                                .xml_content(XmlVersion::Implicit1_0)
-                                .ok()
-                                .map(Cow::into_owned),
+                            Event::Text(text) => {
+                                Some(text.xml_content(XmlVersion::Implicit1_0).into_owned())
+                            }
                             _ => None,
                         };
-                        reader
-                            .read_to_end_into(e.name(), &mut value_buf)
-                            .map_err(|err| {
-                                format!("Error at position {}: {:?}", reader.buffer_position(), err)
-                            })?;
-                        value
+                        let is_closed = value.is_some()
+                            && matches!(
+                                reader.read_event_into(&mut value_buf).map_err(|err| {
+                                    format!(
+                                        "Error at position {}: {:?}",
+                                        reader.buffer_position(),
+                                        err
+                                    )
+                                })?,
+                                Event::End(_)
+                            );
+                        if is_closed {
+                            value
+                        } else {
+                            reader
+                                .read_to_end_into(e.name(), &mut value_buf)
+                                .map_err(|err| {
+                                    format!(
+                                        "Error at position {}: {:?}",
+                                        reader.buffer_position(),
+                                        err
+                                    )
+                                })?;
+                            None
+                        }
                     }
                     Err(err) => {
                         return Err(format!(
@@ -266,183 +286,15 @@ fn parse_autodiscover_request(bytes: &[u8]) -> Result<AutodiscoverRequest, Strin
         }
     }
 
-    match email {
-        Some(email) if email.contains('@') => Ok(AutodiscoverRequest {
-            email: email.trim().to_lowercase(),
+    match email.as_deref().and_then(sanitize_email) {
+        Some(email) => Ok(AutodiscoverRequest {
+            email,
             response_schema,
         }),
-        _ => Err(format!(
+        None => Err(format!(
             "Expected email address, found unexpected value at position {}.",
             reader.buffer_position()
         )),
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::{AutodiscoverRequest, ResponseSchema, parse_autodiscover_request};
-
-    #[test]
-    fn parse_autodiscover() {
-        const OUTLOOK: &str =
-            "http://schemas.microsoft.com/exchange/autodiscover/outlook/responseschema/2006a";
-        const MOBILESYNC: &str =
-            "http://schemas.microsoft.com/exchange/autodiscover/mobilesync/responseschema/2006";
-
-        for (request, expected) in [
-            (
-                format!(
-                    r#"<?xml version="1.0" encoding="utf-8"?>
-            <Autodiscover xmlns="http://schemas.microsoft.com/exchange/autodiscover/outlook/requestschema/2006">
-                <Request>
-                        <EMailAddress>Email@Example.com</EMailAddress>
-                        <AcceptableResponseSchema>{OUTLOOK}</AcceptableResponseSchema>
-                </Request>
-            </Autodiscover>"#
-                ),
-                ResponseSchema::Outlook,
-            ),
-            (
-                format!(
-                    r#"<Autodiscover xmlns="http://schemas.microsoft.com/exchange/autodiscover/outlook/requestschema/2006">
-                <Request>
-                        <AcceptableResponseSchema>{OUTLOOK}</AcceptableResponseSchema>
-                        <EMailAddress>email@example.com</EMailAddress>
-                </Request>
-            </Autodiscover>"#
-                ),
-                ResponseSchema::Outlook,
-            ),
-            (
-                r#"<Autodiscover>
-                <Request>
-                        <EMailAddress>email@example.com</EMailAddress>
-                </Request>
-            </Autodiscover>"#
-                    .to_string(),
-                ResponseSchema::Outlook,
-            ),
-            (
-                format!(
-                    r#"<?xml version="1.0" encoding="utf-8"?>
-            <Autodiscover xmlns="http://schemas.microsoft.com/exchange/autodiscover/mobilesync/requestschema/2006">
-                <Request>
-                        <EMailAddress>email@example.com</EMailAddress>
-                        <AcceptableResponseSchema>{MOBILESYNC}</AcceptableResponseSchema>
-                </Request>
-            </Autodiscover>"#
-                ),
-                ResponseSchema::Unsupported,
-            ),
-            (
-                format!(
-                    r#"<Autodiscover>
-                <Request>
-                        <LegacyDN>/o=Example/ou=Users/cn=email</LegacyDN>
-                        <Unknown><Nested>value</Nested><Empty/></Unknown>
-                        <AcceptableResponseSchema>{MOBILESYNC}</AcceptableResponseSchema>
-                        <EMailAddress>email@example.com</EMailAddress>
-                </Request>
-            </Autodiscover>"#
-                ),
-                ResponseSchema::Unsupported,
-            ),
-        ] {
-            assert_eq!(
-                parse_autodiscover_request(request.as_bytes()).expect("valid request"),
-                AutodiscoverRequest {
-                    email: "email@example.com".to_string(),
-                    response_schema: expected,
-                },
-                "{request}"
-            );
-        }
-
-        for request in [
-            "",
-            "<Autodiscover><Request></Request></Autodiscover>",
-            "<Autodiscover><Request><EMailAddress>no-domain</EMailAddress></Request></Autodiscover>",
-            "<Autodiscover><Request><EMailAddress>email@example.com</Request></Autodiscover>",
-            "<Request><EMailAddress>email@example.com</EMailAddress></Request>",
-        ] {
-            assert!(
-                parse_autodiscover_request(request.as_bytes()).is_err(),
-                "{request}"
-            );
-        }
-    }
-
-    #[test]
-    fn autodiscover_encryption() {
-        use registry::schema::{enums::ServiceProtocol, structs::Service};
-        use utils::map::vec_map::VecMap;
-
-        fn tag<'x>(block: &'x str, name: &str) -> &'x str {
-            block
-                .split_once(&format!("<{name}>"))
-                .and_then(|(_, rest)| rest.split_once(&format!("</{name}>")))
-                .map(|(value, _)| value)
-                .unwrap()
-        }
-
-        for (cleartext, expected) in [
-            (
-                false,
-                vec![
-                    ("IMAP", "993", "on", "SSL"),
-                    ("POP3", "995", "on", "SSL"),
-                    ("SMTP", "465", "on", "SSL"),
-                ],
-            ),
-            (
-                true,
-                vec![
-                    ("IMAP", "993", "on", "SSL"),
-                    ("IMAP", "143", "off", "TLS"),
-                    ("POP3", "995", "on", "SSL"),
-                    ("POP3", "110", "off", "TLS"),
-                    ("SMTP", "465", "on", "SSL"),
-                    ("SMTP", "587", "off", "TLS"),
-                ],
-            ),
-        ] {
-            let services: VecMap<ServiceProtocol, Service> = [
-                ServiceProtocol::Imap,
-                ServiceProtocol::Pop3,
-                ServiceProtocol::Smtp,
-                ServiceProtocol::Jmap,
-            ]
-            .into_iter()
-            .map(|protocol| {
-                (
-                    protocol,
-                    Service {
-                        hostname: None,
-                        cleartext,
-                    },
-                )
-            })
-            .collect();
-            let response = super::build_autodiscover_response(
-                "user@example.com",
-                "mail.example.com",
-                &services,
-            );
-
-            assert_eq!(
-                response
-                    .split("<Protocol>")
-                    .skip(1)
-                    .map(|block| (
-                        tag(block, "Type"),
-                        tag(block, "Port"),
-                        tag(block, "SSL"),
-                        tag(block, "Encryption"),
-                    ))
-                    .collect::<Vec<_>>(),
-                expected,
-                "cleartext: {cleartext}"
-            );
-        }
-    }
-}

@@ -69,6 +69,8 @@ pub struct StateChange {
     pub types: Bitmap<DataType>,
 }
 
+const _: () = assert!(size_of::<StateChange>() <= 24);
+
 impl StateChange {
     pub fn new(account_id: u32) -> Self {
         Self {
@@ -161,6 +163,9 @@ impl DataType {
             (SyncCollection::Identity, _) => DataType::Identity.into(),
             (SyncCollection::EmailSubmission, _) => DataType::EmailSubmission.into(),
             (SyncCollection::SieveScript, _) => DataType::SieveScript.into(),
+            (SyncCollection::CalendarEventNotification, _) => {
+                DataType::CalendarEventNotification.into()
+            }
             _ => None,
         }
     }
@@ -168,7 +173,7 @@ impl DataType {
 
 impl DataType {
     pub fn parse(value: &str) -> Option<Self> {
-        hashify::tiny_map!(value.as_bytes(),
+        hashify::map!(value.as_bytes(), DataType,
             b"Email" => DataType::Email,
             b"EmailDelivery" => DataType::EmailDelivery,
             b"EmailSubmission" => DataType::EmailSubmission,
@@ -193,6 +198,7 @@ impl DataType {
             b"ParticipantIdentity" => DataType::ParticipantIdentity,
             b"CalendarAlert" => DataType::CalendarAlert,
         )
+        .copied()
     }
 
     pub fn as_str(&self) -> &'static str {

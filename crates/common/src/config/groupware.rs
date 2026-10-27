@@ -4,11 +4,12 @@
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
  */
 
+use crate::storage::dav::canonical_calcard_segment;
 use calcard::vcard::VCardVersion;
 use registry::schema::{
     enums::VCardVersion as RegistryVCardVersion,
     structs::{
-        AddressBook, Calendar, CalendarAlarm, CalendarScheduling, DataRetention, FileStorage,
+        AddressBook, Calendar, CalendarAlarm, CalendarScheduling, DataRetention, FileStorage, Rate,
         Sharing, SystemSettings, WebDav,
     },
 };
@@ -20,7 +21,6 @@ use utils::template::Template;
 pub struct GroupwareConfig {
     // DAV settings
     pub max_request_size: usize,
-    pub dead_property_size: Option<usize>,
     pub live_property_size: usize,
     pub max_lock_timeout: u64,
     pub max_locks_per_user: usize,
@@ -31,6 +31,11 @@ pub struct GroupwareConfig {
     pub max_ical_size: usize,
     pub max_ical_instances: usize,
     pub max_ical_attendees_per_instance: usize,
+    pub max_calendars_per_event: usize,
+    pub max_expanded_query_duration: u64,
+    pub max_availability_duration: u64,
+    pub availability_rate: Option<Rate>,
+    pub max_attachments_size: usize,
     pub default_calendar_name: Option<String>,
     pub default_calendar_display_name: Option<String>,
     pub alarms_enabled: bool,
@@ -50,7 +55,9 @@ pub struct GroupwareConfig {
 
     // Addressbook settings
     pub max_vcard_size: usize,
+    pub max_media_size: usize,
     pub vcard_version: VCardVersion,
+    pub max_address_books_per_card: usize,
     pub default_addressbook_name: Option<String>,
     pub default_addressbook_display_name: Option<String>,
 
@@ -101,21 +108,38 @@ impl GroupwareConfig {
         let system = bp.setting_infallible::<SystemSettings>().await;
 
         GroupwareConfig {
-            max_request_size: dav.request_max_size as usize,
-            dead_property_size: dav.dead_property_max_size.map(|v| v as usize),
-            live_property_size: dav.live_property_max_size as usize,
+            max_request_size: dav.max_request_size as usize,
+            live_property_size: dav.max_live_property_size as usize,
             assisted_discovery: dav.enable_assisted_discovery,
             max_lock_timeout: dav.max_lock_timeout.into_inner().as_secs(),
             max_locks_per_user: dav.max_locks as usize,
             max_results: dav.max_results as usize,
-            default_calendar_name: calendar.default_href_name,
-            default_calendar_display_name: calendar.default_display_name,
-            default_addressbook_name: book.default_href_name,
-            default_addressbook_display_name: book.default_display_name,
+            default_calendar_name: calendar
+                .default_href_name
+                .as_deref()
+                .map(|name| canonical_calcard_segment(name).into_owned()),
+            default_calendar_display_name: calendar
+                .default_display_name
+                .or(calendar.default_href_name),
+            default_addressbook_name: book
+                .default_href_name
+                .as_deref()
+                .map(|name| canonical_calcard_segment(name).into_owned()),
+            default_addressbook_display_name: book.default_display_name.or(book.default_href_name),
             max_ical_size: calendar.max_i_calendar_size as usize,
             max_ical_instances: calendar.max_recurrence_expansions as usize,
             max_ical_attendees_per_instance: calendar.max_attendees as usize,
+            max_calendars_per_event: calendar.max_calendars_per_event as usize,
+            max_expanded_query_duration: calendar
+                .max_expanded_query_duration
+                .into_inner()
+                .as_secs(),
+            max_availability_duration: calendar.max_availability_duration.into_inner().as_secs(),
+            availability_rate: calendar.availability_rate_limit,
+            max_attachments_size: calendar.max_attachments_size as usize,
             max_vcard_size: book.max_v_card_size as usize,
+            max_media_size: book.max_media_size as usize,
+            max_address_books_per_card: book.max_address_books_per_card as usize,
             vcard_version: match book.v_card_version {
                 RegistryVCardVersion::V3 => VCardVersion::V3_0,
                 RegistryVCardVersion::V4 => VCardVersion::V4_0,
@@ -125,7 +149,7 @@ impl GroupwareConfig {
             alarms_minimum_interval: alarm.min_trigger_interval.into_inner().as_secs() as i64,
             alarms_allow_external_recipients: alarm.allow_external_rcpts,
             alarms_from_name: alarm.from_name,
-            alarms_from_email: alarm.from_email,
+            alarms_from_email: alarm.from_address,
             alarms_template: Template::parse(include_str!(concat!(
                 env!("CARGO_MANIFEST_DIR"),
                 "/../../resources/html-templates/calendar-alarm.html.min"
@@ -133,7 +157,7 @@ impl GroupwareConfig {
             .expect("Failed to parse calendar template"),
             itip_enabled: sched.enable,
             itip_auto_add: sched.auto_add_invitations,
-            itip_inbound_max_ical_size: sched.itip_max_size as usize,
+            itip_inbound_max_ical_size: sched.max_itip_size as usize,
             itip_outbound_max_recipients: sched.max_recipients as usize,
             itip_inbox_auto_expunge: dr
                 .expunge_scheduling_inbox_after
@@ -195,89 +219,3 @@ impl FromStr for CalendarTemplateVariable {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::CalendarTemplateVariable;
-    use utils::template::Template;
-
-    const TEMPLATES: [(&str, &str, &str); 2] = [
-        (
-            "calendar-invite.html",
-            include_str!(concat!(
-                env!("CARGO_MANIFEST_DIR"),
-                "/../../resources/html-templates/calendar-invite.html"
-            )),
-            include_str!(concat!(
-                env!("CARGO_MANIFEST_DIR"),
-                "/../../resources/html-templates/calendar-invite.html.min"
-            )),
-        ),
-        (
-            "calendar-alarm.html",
-            include_str!(concat!(
-                env!("CARGO_MANIFEST_DIR"),
-                "/../../resources/html-templates/calendar-alarm.html"
-            )),
-            include_str!(concat!(
-                env!("CARGO_MANIFEST_DIR"),
-                "/../../resources/html-templates/calendar-alarm.html.min"
-            )),
-        ),
-    ];
-
-    // Every `{{...}}` token in a template, in order of appearance
-    fn tokens(contents: &str) -> Vec<&str> {
-        let mut tokens = Vec::new();
-        let mut rest = contents;
-
-        while let Some((_, after)) = rest.split_once("{{") {
-            match after.split_once("}}") {
-                Some((token, tail)) => {
-                    tokens.push(token.trim());
-                    rest = tail;
-                }
-                None => break,
-            }
-        }
-
-        tokens
-    }
-
-    #[test]
-    fn shipped_calendar_templates_parse() {
-        for (name, source, minified) in TEMPLATES {
-            Template::<CalendarTemplateVariable>::parse(source)
-                .unwrap_or_else(|err| panic!("{name} failed to parse: {err}"));
-            Template::<CalendarTemplateVariable>::parse(minified)
-                .unwrap_or_else(|err| panic!("{name}.min failed to parse: {err}"));
-        }
-    }
-
-    #[test]
-    fn minified_calendar_templates_are_in_sync() {
-        for (name, source, minified) in TEMPLATES {
-            let source = tokens(source);
-            assert!(source.len() > 10, "{name} yielded no tokens to compare");
-            assert_eq!(
-                source,
-                tokens(minified),
-                "{name}.min is stale, re-run resources/scripts/minify_html.sh"
-            );
-        }
-    }
-
-    #[test]
-    fn calendar_template_tokens_are_single_line() {
-        // A newline inside `{{...}}` makes the parser reject the block
-        for (name, source, minified) in TEMPLATES {
-            for (suffix, contents) in [("", source), (".min", minified)] {
-                for token in tokens(contents) {
-                    assert!(
-                        !token.contains('\n') && !token.contains('\r'),
-                        "{name}{suffix} has a multi-line token: {token:?}"
-                    );
-                }
-            }
-        }
-    }
-}

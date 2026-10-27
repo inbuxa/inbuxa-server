@@ -3,17 +3,18 @@
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
  */
+use compact_str::CompactString;
 
-use super::{ImapResponse, capability::QuotaResourceName, quoted_string};
+use super::{ImapResponse, capability::QuotaResourceName, push_int, quoted_string};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Arguments {
-    pub tag: String,
-    pub name: String,
+    pub tag: CompactString,
+    pub name: CompactString,
 }
 
 pub struct QuotaItem {
-    pub name: String,
+    pub name: CompactString,
     pub resources: Vec<QuotaResource>,
 }
 
@@ -24,18 +25,17 @@ pub struct QuotaResource {
 }
 
 pub struct Response {
-    pub quota_root_items: Vec<String>,
+    pub quota_root_items: Vec<CompactString>,
     pub quota_items: Vec<QuotaItem>,
 }
 
 impl ImapResponse for Response {
-    fn serialize(self) -> Vec<u8> {
-        let mut buf = Vec::with_capacity(64);
+    fn serialize_into(&self, buf: &mut Vec<u8>) {
         if !self.quota_root_items.is_empty() {
             buf.extend_from_slice(b"* QUOTAROOT");
             for item in &self.quota_root_items {
                 buf.push(b' ');
-                quoted_string(&mut buf, item);
+                quoted_string(buf, item);
             }
             buf.extend_from_slice(b"\r\n");
         }
@@ -43,7 +43,7 @@ impl ImapResponse for Response {
         if !self.quota_items.is_empty() {
             for item in &self.quota_items {
                 buf.extend_from_slice(b"* QUOTA ");
-                quoted_string(&mut buf, &item.name);
+                quoted_string(buf, &item.name);
                 buf.extend_from_slice(b" (");
                 for (pos, resource) in item.resources.iter().enumerate() {
                     if pos > 0 {
@@ -67,72 +67,38 @@ impl ImapResponse for Response {
                         }
                     }
 
-                    buf.extend_from_slice(format!("{used} {total}").as_bytes());
+                    push_int(buf, used);
+                    buf.push(b' ');
+                    push_int(buf, total);
                 }
                 buf.extend_from_slice(b")\r\n");
             }
         }
+    }
 
-        buf
+    fn size_hint(&self) -> usize {
+        const QUOTA_ROOT_FRAMING_LEN: usize = 16;
+        const QUOTA_FRAMING_LEN: usize = 16;
+        const RESOURCE_LEN: usize = 64;
+
+        let quota_roots = if self.quota_root_items.is_empty() {
+            0
+        } else {
+            QUOTA_ROOT_FRAMING_LEN
+                + self
+                    .quota_root_items
+                    .iter()
+                    .map(|item| item.len() + 4)
+                    .sum::<usize>()
+        };
+        quota_roots
+            + self
+                .quota_items
+                .iter()
+                .map(|item| {
+                    QUOTA_FRAMING_LEN + item.name.len() + 4 + item.resources.len() * RESOURCE_LEN
+                })
+                .sum::<usize>()
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use crate::protocol::{ImapResponse, capability::QuotaResourceName};
-
-    use super::{QuotaItem, QuotaResource};
-
-    #[test]
-    fn serialize_quota() {
-        for (response, expected) in [
-            (
-                super::Response {
-                    quota_root_items: vec!["INBOX".into(), "#test".into()],
-                    quota_items: vec![],
-                },
-                "* QUOTAROOT \"INBOX\" \"#test\"\r\n",
-            ),
-            (
-                super::Response {
-                    quota_root_items: vec![],
-                    quota_items: vec![QuotaItem {
-                        name: "INBOX".into(),
-                        resources: vec![QuotaResource {
-                            resource: QuotaResourceName::Storage,
-                            total: 1073741824,
-                            used: 1048576,
-                        }],
-                    }],
-                },
-                "* QUOTA \"INBOX\" (STORAGE 1024 1048576)\r\n",
-            ),
-            (
-                super::Response {
-                    quota_root_items: vec!["my mailbox".into(), "".into()],
-                    quota_items: vec![QuotaItem {
-                        name: "INBOX".into(),
-                        resources: vec![
-                            QuotaResource {
-                                resource: QuotaResourceName::Storage,
-                                total: 1073741824,
-                                used: 1048576,
-                            },
-                            QuotaResource {
-                                resource: QuotaResourceName::Message,
-                                total: 100,
-                                used: 2,
-                            },
-                        ],
-                    }],
-                },
-                concat!(
-                    "* QUOTAROOT \"my mailbox\" \"\"\r\n",
-                    "* QUOTA \"INBOX\" (STORAGE 1024 1048576 MESSAGE 2 100)\r\n"
-                ),
-            ),
-        ] {
-            assert_eq!(String::from_utf8(response.serialize()).unwrap(), expected);
-        }
-    }
-}

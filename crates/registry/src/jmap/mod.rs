@@ -45,7 +45,6 @@ pub struct JsonPointerPatch<'x> {
     pos: usize,
     validators: &'x [StringValidator],
     is_create: bool,
-    can_set_tenant: bool,
     can_set_account: bool,
 }
 
@@ -66,6 +65,18 @@ pub trait RegistryJsonEnumPatch: Debug {
     -> PatchResult<'x>;
 }
 
+#[derive(Clone, Copy, Default, Debug)]
+pub struct ValueOptions {
+    pub include_secrets: bool,
+}
+
 pub trait IntoValue {
     fn into_value(self) -> JmapValue<'static>;
+
+    fn into_value_with(self, _opts: ValueOptions) -> JmapValue<'static>
+    where
+        Self: Sized,
+    {
+        self.into_value()
+    }
 }

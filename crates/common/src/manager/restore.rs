@@ -14,15 +14,14 @@ use std::{
     path::{Path, PathBuf},
 };
 use store::{
-    BlobStore, IterateParams, SUBSPACE_BLOBS, SUBSPACE_COUNTER, SUBSPACE_INDEXES, SUBSPACE_QUOTA,
-    SUBSPACE_REGISTRY_PK, Store, U32_LEN,
+    BlobStore, IterateParams, Shape, Store, Subspace, U32_LEN,
     write::{
         AnyClass, AnyKey, BatchBuilder, ValueClass,
         key::{DeserializeBigEndian, is_node_id_key},
     },
 };
 use types::{collection::Collection, field::Field};
-use utils::{UnwrapFailure, failed};
+use utils::{UnwrapFailure, exit_failed, failed};
 
 impl Core {
     pub async fn restore(&self, src: PathBuf) {
@@ -59,7 +58,7 @@ impl Core {
             for path in conflicts {
                 eprintln!("  {}", path.display());
             }
-            std::process::exit(1);
+            exit_failed();
         }
 
         let mut tasks = Vec::new();
@@ -77,7 +76,7 @@ impl Core {
     }
 }
 
-async fn subspace_has_data(store: &Store, subspace: u8) -> bool {
+async fn subspace_has_data(store: &Store, subspace: Subspace) -> bool {
     let mut has_data = false;
     store
         .iterate(
@@ -91,9 +90,10 @@ async fn subspace_has_data(store: &Store, subspace: u8) -> bool {
                     key: vec![u8::MAX; 32],
                 },
             )
-            .no_values(),
+            .no_values()
+            .expect_rows(2),
             |key, _| {
-                if subspace == SUBSPACE_REGISTRY_PK && is_node_id_key(key) {
+                if subspace == Subspace::System && is_node_id_key(key) {
                     Ok(true)
                 } else {
                     has_data = true;
@@ -113,7 +113,7 @@ async fn restore_file(store: Store, blob_store: BlobStore, path: &Path) {
     let mut batch = BatchBuilder::new();
 
     match reader.subspace {
-        SUBSPACE_BLOBS => {
+        Subspace::Blobs => {
             while let Some((key, value)) = reader.next() {
                 blob_store
                     .put_blob(&key, &value, CompressionAlgo::Lz4)
@@ -121,7 +121,7 @@ async fn restore_file(store: Store, blob_store: BlobStore, path: &Path) {
                     .failed("Failed to write blob");
             }
         }
-        SUBSPACE_COUNTER | SUBSPACE_QUOTA => {
+        subspace if matches!(subspace.shape(), Shape::Counter) => {
             while let Some((key, value)) = reader.next() {
                 batch.add(
                     ValueClass::Any(AnyClass {
@@ -136,14 +136,14 @@ async fn restore_file(store: Store, blob_store: BlobStore, path: &Path) {
                 );
                 if batch.is_large_batch() {
                     store
-                        .write(batch.build_all())
+                        .write_batch(&mut batch)
                         .await
                         .failed("Failed to write batch");
                     batch = BatchBuilder::new();
                 }
             }
         }
-        SUBSPACE_INDEXES => {
+        Subspace::Indexes => {
             while let Some((key, _)) = reader.next() {
                 let account_id = key
                     .as_slice()
@@ -168,7 +168,7 @@ async fn restore_file(store: Store, blob_store: BlobStore, path: &Path) {
 
                 if batch.is_large_batch() {
                     store
-                        .write(batch.build_all())
+                        .write_batch(&mut batch)
                         .await
                         .failed("Failed to write batch");
                     batch = BatchBuilder::new();
@@ -186,7 +186,7 @@ async fn restore_file(store: Store, blob_store: BlobStore, path: &Path) {
                 );
                 if batch.is_large_batch() {
                     store
-                        .write(batch.build_all())
+                        .write_batch(&mut batch)
                         .await
                         .failed("Failed to write batch");
                     batch = BatchBuilder::new();
@@ -197,14 +197,14 @@ async fn restore_file(store: Store, blob_store: BlobStore, path: &Path) {
 
     if !batch.is_empty() {
         store
-            .write(batch.build_all())
+            .write_batch(&mut batch)
             .await
             .failed("Failed to write batch");
     }
 }
 
 struct KeyValueReader {
-    subspace: u8,
+    subspace: Subspace,
     file: FrameDecoder<BufReader<File>>,
 }
 
@@ -223,7 +223,8 @@ impl KeyValueReader {
 
         file.read_exact(&mut buf)
             .failed(&format!("Failed to read subspace from {path:?}"));
-        let subspace = buf[0];
+        let subspace = Subspace::try_from_byte(buf[0])
+            .unwrap_or_else(|| failed(&format!("Unknown subspace in {path:?}")));
 
         let mut buf = [0u8; 4];
         file.read_exact(&mut buf)

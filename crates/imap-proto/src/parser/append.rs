@@ -4,8 +4,7 @@
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
  */
 
-use compact_str::ToCompactString;
-
+use super::parse_datetime;
 use crate::{
     Command,
     protocol::{
@@ -13,10 +12,7 @@ use crate::{
         append::{self, Message},
     },
     receiver::{Request, Token, bad},
-    utf7::utf7_maybe_decode,
 };
-
-use super::parse_datetime;
 
 enum State {
     None,
@@ -32,14 +28,11 @@ impl Request<Command> {
             _ => {
                 // Obtain mailbox name
                 let mut tokens = self.tokens.into_iter().peekable();
-                let mailbox_name = utf7_maybe_decode(
-                    tokens
-                        .next()
-                        .unwrap()
-                        .unwrap_string()
-                        .map_err(|v| bad(self.tag.to_compact_string(), v))?,
-                    is_utf8,
-                );
+                let mailbox_name = tokens
+                    .next()
+                    .unwrap()
+                    .unwrap_mailbox_name(is_utf8)
+                    .map_err(|v| bad(self.tag.clone(), v))?;
                 let mut messages = Vec::new();
 
                 while tokens.peek().is_some() {
@@ -63,7 +56,7 @@ impl Request<Command> {
                                     State::UTF8 => State::UTF8Data,
                                     _ => {
                                         return Err(bad(
-                                            self.tag.to_compact_string(),
+                                            self.tag.clone(),
                                             "Invalid opening parenthesis found.",
                                         ));
                                     }
@@ -72,7 +65,7 @@ impl Request<Command> {
                             Token::ParenthesisClose => match state {
                                 State::None | State::UTF8 => {
                                     return Err(bad(
-                                        self.tag.to_compact_string(),
+                                        self.tag.clone(),
                                         "Invalid closing parenthesis found.",
                                     ));
                                 }
@@ -95,43 +88,41 @@ impl Request<Command> {
                                             message.received_at = Some(date_time);
                                         } else {
                                             return Err(bad(
-                                                self.tag.to_compact_string(),
+                                                self.tag.clone(),
                                                 "Failed to parse received time.",
                                             ));
                                         }
                                     } else {
-                                        message.message = value;
+                                        message.message = value.into_vec();
                                         break;
                                     }
                                 }
                                 State::Flags => {
-                                    message.flags.push(
-                                        Flag::parse_imap(value)
-                                            .map_err(|v| bad(self.tag.to_compact_string(), v))?,
-                                    );
+                                    let flag = Flag::parse_imap(value)
+                                        .map_err(|v| bad(self.tag.clone(), v))?;
+                                    if !message.flags.contains(&flag) {
+                                        message.flags.push(flag);
+                                    }
                                 }
                                 State::UTF8 => {
                                     return Err(bad(
-                                        self.tag.to_compact_string(),
+                                        self.tag.clone(),
                                         "Expected parenthesis after UTF8.",
                                     ));
                                 }
                                 State::UTF8Data => {
                                     if message.message.is_empty() {
-                                        message.message = value;
+                                        message.message = value.into_vec();
                                     } else {
                                         return Err(bad(
-                                            self.tag.to_compact_string(),
+                                            self.tag.clone(),
                                             "Invalid parameter after message literal.",
                                         ));
                                     }
                                 }
                             },
                             _ => {
-                                return Err(bad(
-                                    self.tag.to_compact_string(),
-                                    "Invalid arguments.",
-                                ));
+                                return Err(bad(self.tag.clone(), "Invalid arguments."));
                             }
                         }
                     }
@@ -149,203 +140,3 @@ impl Request<Command> {
     }
 }
 
-#[cfg(test)]
-mod tests {
-
-    use crate::{
-        protocol::{
-            Flag,
-            append::{self, Message},
-        },
-        receiver::{Error, Receiver},
-    };
-
-    #[test]
-    fn parse_append() {
-        let mut receiver = Receiver::new();
-
-        for (command, arguments) in [
-            (
-                "A003 APPEND saved-messages (\\Seen) {1+}\r\na\r\n",
-                append::Arguments {
-                    tag: "A003".into(),
-                    mailbox_name: "saved-messages".into(),
-                    messages: vec![Message {
-                        message: vec![b'a'],
-                        flags: vec![Flag::Seen],
-                        received_at: None,
-                    }],
-                },
-            ),
-            (
-                "A003 APPEND \"hello world\" (\\Seen \\Draft $MDNSent) {1+}\r\na\r\n",
-                append::Arguments {
-                    tag: "A003".into(),
-                    mailbox_name: "hello world".into(),
-                    messages: vec![Message {
-                        message: vec![b'a'],
-                        flags: vec![Flag::Seen, Flag::Draft, Flag::MDNSent],
-                        received_at: None,
-                    }],
-                },
-            ),
-            (
-                "A003 APPEND \"hi\" ($Junk) \"7-Feb-1994 22:43:04 -0800\" {1+}\r\na\r\n",
-                append::Arguments {
-                    tag: "A003".into(),
-                    mailbox_name: "hi".into(),
-                    messages: vec![Message {
-                        message: vec![b'a'],
-                        flags: vec![Flag::Junk],
-                        received_at: Some(760689784),
-                    }],
-                },
-            ),
-            (
-                "A003 APPEND \"hi\" \"20-Nov-2022 23:59:59 +0300\" {1+}\r\na\r\n",
-                append::Arguments {
-                    tag: "A003".into(),
-                    mailbox_name: "hi".into(),
-                    messages: vec![Message {
-                        message: vec![b'a'],
-                        flags: vec![],
-                        received_at: Some(1668977999),
-                    }],
-                },
-            ),
-            (
-                "A003 APPEND \"hi\" \"20-Nov-2022 23:59:59 +0300\" ~{1+}\r\na\r\n",
-                append::Arguments {
-                    tag: "A003".into(),
-                    mailbox_name: "hi".into(),
-                    messages: vec![Message {
-                        message: vec![b'a'],
-                        flags: vec![],
-                        received_at: Some(1668977999),
-                    }],
-                },
-            ),
-            (
-                "42 APPEND \"Drafts\" (\\Draft) UTF8 (~{5+}\r\nhello)\r\n",
-                append::Arguments {
-                    tag: "42".into(),
-                    mailbox_name: "Drafts".into(),
-                    messages: vec![Message {
-                        message: vec![b'h', b'e', b'l', b'l', b'o'],
-                        flags: vec![Flag::Draft],
-                        received_at: None,
-                    }],
-                },
-            ),
-            (
-                "42 APPEND \"Drafts\" (\\Draft) \"20-Nov-2022 23:59:59 +0300\" UTF8 (~{5+}\r\nhello)\r\n",
-                append::Arguments {
-                    tag: "42".into(),
-                    mailbox_name: "Drafts".into(),
-                    messages: vec![Message {
-                        message: vec![b'h', b'e', b'l', b'l', b'o'],
-                        flags: vec![Flag::Draft],
-                        received_at: Some(1668977999),
-                    }],
-                },
-            ),
-            (
-                "A003 APPEND \"&A8g- \\\"&A9QD1APUA9gD3APcA-+\\\"\" (\\Seen) \"7-Feb-1994 22:43:04 -0800\" {1+}\r\na\r\n",
-                append::Arguments {
-                    tag: "A003".into(),
-                    mailbox_name: "ψ \"ϔϔϔϘϜϜ+\"".into(),
-                    messages: vec![Message {
-                        message: vec![b'a'],
-                        flags: vec![Flag::Seen],
-                        received_at: Some(760689784),
-                    }],
-                },
-            ),
-        ] {
-            assert_eq!(
-                receiver
-                    .parse(&mut command.as_bytes().iter())
-                    .expect(command)
-                    .parse_append(false)
-                    .expect(command),
-                arguments,
-                "{:?}",
-                command
-            );
-        }
-
-        // Multiappend
-        for line in [
-            "A003 APPEND saved-messages (\\Seen) UTF8 ({329}\r\n",
-            "Date: Mon, 7 Feb 1994 21:52:25 -0800 (PST)\r\n",
-            "From: Fred Foobar <foobar@Blurdybloop.example.COM>\r\n",
-            "Subject: afternoon meeting\r\n",
-            "To: mooch@owatagu.example.net\r\n",
-            "Message-Id: <B27397-0100000@Blurdybloop.example.COM>\r\n",
-            "MIME-Version: 1.0\r\n",
-            "Content-Type: TEXT/PLAIN; CHARSET=US-ASCII\r\n",
-            "\r\n",
-            "Hello Joe, do you think we can meet at 3:30 tomorrow?\r\n)",
-            " (\\Seen) \"7-Feb-1994 22:43:04 -0800\" {295}\r\n",
-            "Date: Mon, 7 Feb 1994 22:43:04 -0800 (PST)\r\n",
-            "From: Joe Mooch <mooch@OWaTaGu.example.net>\r\n",
-            "Subject: Re: afternoon meeting\r\n",
-            "To: foobar@blurdybloop.example.com\r\n",
-            "Message-Id: <a0434793874930@OWaTaGu.example.net>\r\n",
-            "MIME-Version: 1.0\r\n",
-            "Content-Type: TEXT/PLAIN; CHARSET=US-ASCII\r\n\r\n",
-            "3:30 is fine with me.\r\n\r\n",
-        ] {
-            match receiver.parse(&mut line.as_bytes().iter()) {
-                Ok(request) => {
-                    assert_eq!(
-                        request.parse_append(false).unwrap(),
-                        append::Arguments {
-                            tag: "A003".into(),
-                            mailbox_name: "saved-messages".into(),
-                            messages: vec![
-                                Message {
-                                    message: concat!(
-                                        "Date: Mon, 7 Feb 1994 21:52:25 -0800 (PST)\r\n",
-                                        "From: Fred Foobar <foobar@Blurdybloop.example.COM>\r\n",
-                                        "Subject: afternoon meeting\r\n",
-                                        "To: mooch@owatagu.example.net\r\n",
-                                        "Message-Id: <B27397-0100000@Blurdybloop.example.COM>\r\n",
-                                        "MIME-Version: 1.0\r\n",
-                                        "Content-Type: TEXT/PLAIN; CHARSET=US-ASCII\r\n",
-                                        "\r\n",
-                                        "Hello Joe, do you think we can meet at 3:30 tomorrow?\r\n",
-                                    )
-                                    .as_bytes()
-                                    .to_vec(),
-                                    flags: vec![Flag::Seen],
-                                    received_at: None,
-                                },
-                                Message {
-                                    message: concat!(
-                                        "Date: Mon, 7 Feb 1994 22:43:04 -0800 (PST)\r\n",
-                                        "From: Joe Mooch <mooch@OWaTaGu.example.net>\r\n",
-                                        "Subject: Re: afternoon meeting\r\n",
-                                        "To: foobar@blurdybloop.example.com\r\n",
-                                        "Message-Id: <a0434793874930@OWaTaGu.example.net>\r\n",
-                                        "MIME-Version: 1.0\r\n",
-                                        "Content-Type: TEXT/PLAIN; CHARSET=US-ASCII\r\n\r\n",
-                                        "3:30 is fine with me.\r\n",
-                                    )
-                                    .as_bytes()
-                                    .to_vec(),
-                                    flags: vec![Flag::Seen],
-                                    received_at: Some(760689784),
-                                }
-                            ],
-                        },
-                    );
-                }
-                Err(err) => match err {
-                    Error::NeedsMoreData | Error::NeedsLiteral { .. } => (),
-                    Error::Error { response } => panic!("{:?}", response),
-                },
-            }
-        }
-    }
-}

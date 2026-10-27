@@ -9,31 +9,44 @@ use crate::{
     DavError, DavMethod,
     common::{
         ExtractETag,
+        dead::{
+            ContainerRequest, ContainerWrites, copy_growth, edited_container, read_container,
+            stored_entry_of,
+        },
         lock::{LockRequestHandler, ResourceState},
         uri::{DavUriResource, UriResource},
     },
-    file::{DavFileResource, FileItemId},
+    file::{DavFileResource, FileItemId, file_name_from_uri, is_symlink},
 };
 use common::{
-    DavResourcePath, DavResources, Server, auth::AccessToken, storage::index::ObjectIndexBuilder,
+    DavResourcePath, GroupwareResources, Server,
+    auth::{AccessToken, AccountCache, ChangedBy},
+    storage::{
+        batch::MAX_BATCH_DOCUMENTS,
+        dav::{FilePresence, MAX_FILE_NODE_DEPTH},
+        index::ObjectIndexBuilder,
+        metadata::{ContainerCleanup, StoredContainer, StoredEntry},
+    },
 };
 use dav_proto::{Depth, RequestHeaders};
 use groupware::{DestroyArchive, cache::GroupwareCache, file::FileNode};
 use http_proto::HttpResponse;
 use hyper::StatusCode;
+use registry::schema::enums::StorageQuota;
 use std::sync::Arc;
 use store::{
     ValueKey,
-    write::{AlignedBytes, Archive},
+    write::{Archive, ArchiveBytes, metadata::MetadataBuf},
 };
 use store::{
     ahash::AHashMap,
-    write::{BatchBuilder, now},
+    write::{BatchBuilder, Slot},
 };
 use trc::AddContext;
 use types::{
     acl::Acl,
     collection::{Collection, SyncCollection, VanishedCollection},
+    metadata::MetadataKinds,
 };
 
 pub(crate) trait FileCopyMoveRequestHandler: Sync + Send {
@@ -59,34 +72,29 @@ impl FileCopyMoveRequestHandler for Server {
             .into_owned_uri()?;
         let from_account_id = from_resource_.account_id;
         let from_resources = self
-            .fetch_dav_resources(
+            .fetch_groupware_resources(
                 access_token.account_id(),
                 from_account_id,
                 SyncCollection::FileNode,
             )
             .await
             .caused_by(trc::location!())?;
-        let from_resource = from_resources.map_resource::<FileItemId>(&from_resource_)?;
-        let from_resource_name = from_resource_.resource.unwrap();
-
-        // Validate source ACLs
-        if !access_token.is_member(from_account_id) {
-            let shared = from_resources.shared_containers(
-                access_token,
-                if is_move {
-                    [Acl::Read, Acl::Delete].as_slice().iter().copied()
-                } else {
-                    [Acl::Read].as_slice().iter().copied()
-                },
-                false,
-            );
-
-            for resource in from_resources.subtree(from_resource_.resource.unwrap()) {
-                if !shared.contains(resource.document_id()) {
-                    return Err(DavError::Code(StatusCode::FORBIDDEN));
-                }
-            }
+        let from_access = (!access_token.is_member(from_account_id))
+            .then(|| from_resources.file_access(access_token));
+        if let Some(access) = &from_access
+            && let Some(path) = from_resource_.resource
+        {
+            from_resources.hide_undiscoverable(
+                &access.discoverable,
+                path,
+                StatusCode::NOT_FOUND,
+                StatusCode::NOT_FOUND,
+            )?;
         }
+        let from_resource = from_resources.map_resource::<FileItemId>(&from_resource_)?;
+        let from_resource_name = from_resource_
+            .resource
+            .ok_or(DavError::Code(StatusCode::NOT_FOUND))?;
 
         // Validate destination
         let destination = self
@@ -104,10 +112,11 @@ impl FileCopyMoveRequestHandler for Server {
         let to_account_id = destination
             .account_id
             .ok_or(DavError::Code(StatusCode::BAD_GATEWAY))?;
-        let to_resources = if to_account_id == from_account_id {
+        let is_same_account = to_account_id == from_account_id;
+        let to_resources = if is_same_account {
             from_resources.clone()
         } else {
-            self.fetch_dav_resources(
+            self.fetch_groupware_resources(
                 access_token.account_id(),
                 to_account_id,
                 SyncCollection::FileNode,
@@ -120,62 +129,104 @@ impl FileCopyMoveRequestHandler for Server {
         let destination_resource_name = destination
             .resource
             .ok_or(DavError::Code(StatusCode::BAD_GATEWAY))?;
-        if from_account_id == to_account_id
-            && (from_resource_name == destination_resource_name
-                || from_resource_name
-                    .strip_prefix(destination_resource_name)
-                    .is_some_and(|v| v.is_empty() || v.starts_with('/')))
-        {
-            return Ok(HttpResponse::new(StatusCode::BAD_GATEWAY));
+        if is_same_account {
+            if is_same_or_descendant(from_resource_name, destination_resource_name) {
+                return Ok(HttpResponse::new(StatusCode::BAD_GATEWAY));
+            } else if is_same_or_descendant(destination_resource_name, from_resource_name) {
+                return Err(DavError::Code(StatusCode::FORBIDDEN));
+            }
+        }
+
+        let to_access_owned = (!is_same_account && !access_token.is_member(to_account_id))
+            .then(|| to_resources.file_access(access_token));
+        let to_access = if is_same_account {
+            from_access.as_ref()
+        } else {
+            to_access_owned.as_ref()
+        };
+        if let Some(access) = to_access {
+            to_resources.hide_undiscoverable(
+                &access.discoverable,
+                destination_resource_name,
+                StatusCode::FORBIDDEN,
+                StatusCode::CONFLICT,
+            )?;
         }
 
         // Check if the resource exists
+        let parent = to_resources.map_directory_parent(destination_resource_name)?;
         let mut delete_destination = None;
-        let mut destination = if let Some((destination, new_name)) =
-            to_resources.map_parent(destination_resource_name)
-        {
-            if let Some(mut existing_destination) = to_resources
-                .by_path(destination_resource_name)
-                .map(Destination::from_dav_resource)
-            {
-                if !headers.overwrite_fail {
-                    existing_destination.account_id = to_account_id;
-                    delete_destination = Some(existing_destination);
-                } else {
-                    return Ok(HttpResponse::new(StatusCode::PRECONDITION_FAILED));
-                }
+        if let Some(existing) = to_resources.by_path(destination_resource_name) {
+            if is_symlink(&existing) {
+                return Err(DavError::Code(StatusCode::CONFLICT));
+            } else if headers.overwrite_fail {
+                return Ok(HttpResponse::new(StatusCode::PRECONDITION_FAILED));
             }
-
-            let mut destination = destination
-                .map(Destination::from_dav_resource)
-                .unwrap_or_default();
-            destination.new_name = Some(new_name.to_string());
-            destination
-        } else {
-            return Err(DavError::Code(StatusCode::CONFLICT));
+            delete_destination = Some(ExistingDestination {
+                document_id: existing.document_id(),
+                is_container: existing.is_container(),
+            });
+        }
+        let name = file_name_from_uri(
+            headers
+                .destination
+                .ok_or(DavError::Code(StatusCode::BAD_GATEWAY))?,
+        )?;
+        let copy_depth = match (is_move, headers.depth) {
+            (false, Depth::Zero) => 0,
+            (false, Depth::One) => 1,
+            _ => usize::MAX,
         };
+        if destination_resource_name.split('/').count()
+            + subtree_height(&from_resources, from_resource_name, copy_depth)
+            > MAX_FILE_NODE_DEPTH
+        {
+            return Err(DavError::Code(StatusCode::FORBIDDEN));
+        }
+        let mut destination = parent
+            .map(Destination::from_dav_resource)
+            .unwrap_or_default();
+        destination.new_name = Some(name);
         destination.account_id = to_account_id;
+        let changes_parent =
+            !is_same_account || from_resource.resource.parent_id != destination.document_id;
+
+        // Validate source ACLs
+        if let Some(access) = &from_access {
+            let removes_source = is_move && !is_same_account;
+            if from_resources.subtree(from_resource_name).any(|resource| {
+                !access.has_acl(resource.document_id(), Acl::Read)
+                    || (removes_source
+                        && !access.may_delete(resource.document_id(), resource.parent_id()))
+            }) || (is_move
+                && (!access.has_acl(from_resource.resource.document_id, Acl::Modify)
+                    || (changes_parent
+                        && !removes_source
+                        && from_resource
+                            .resource
+                            .parent_id
+                            .is_none_or(|parent_id| !access.has_acl(parent_id, Acl::RemoveItems)))))
+            {
+                return Err(DavError::Code(StatusCode::FORBIDDEN));
+            }
+        }
 
         // Validate destination ACLs
-        if let Some(document_id) = destination.document_id {
-            if let Some(delete_destination) = &delete_destination
-                && !access_token.is_member(to_account_id)
-                && !to_resources.has_access_to_container(
-                    access_token,
-                    delete_destination.document_id.unwrap(),
-                    Acl::Delete,
-                )
+        if let Some(to_access) = to_access {
+            let adds_to_parent = changes_parent || !is_move;
+            if (adds_to_parent
+                && destination
+                    .document_id
+                    .is_none_or(|parent_id| !to_access.has_acl(parent_id, Acl::AddItems)))
+                || (delete_destination.is_some()
+                    && !to_access.may_destroy(
+                        to_resources
+                            .subtree(destination_resource_name)
+                            .map(|resource| (resource.document_id(), resource.parent_id())),
+                    ))
             {
                 return Err(DavError::Code(StatusCode::FORBIDDEN));
             }
-
-            if !access_token.is_member(to_account_id)
-                && !to_resources.has_access_to_container(access_token, document_id, Acl::Modify)
-            {
-                return Err(DavError::Code(StatusCode::FORBIDDEN));
-            }
-        } else if !access_token.is_member(to_account_id) {
-            return Err(DavError::Code(StatusCode::FORBIDDEN));
         }
 
         // Validate headers
@@ -196,8 +247,7 @@ impl FileCopyMoveRequestHandler for Server {
                     document_id: Some(
                         delete_destination
                             .as_ref()
-                            .and_then(|d| d.document_id)
-                            .unwrap_or(u32::MAX),
+                            .map_or(u32::MAX, |existing| existing.document_id),
                     ),
                     path: destination_resource_name,
                     ..Default::default()
@@ -212,42 +262,88 @@ impl FileCopyMoveRequestHandler for Server {
         )
         .await?;
 
-        if delete_destination.is_none()
-            && from_account_id == destination.account_id
-            && from_resource.resource.parent_id == destination.document_id
-            && destination.new_name.is_some()
-            && is_move
-        {
+        let from_href = from_resources
+            .by_path(from_resource_name)
+            .map(|resource| from_resources.format_resource(resource))
+            .unwrap_or_default();
+
+        if delete_destination.is_none() && !changes_parent && is_move {
             // Rename
-            let from_resource_path = if from_resource.resource.is_container {
-                from_resources.format_collection(from_resource_name)
-            } else {
-                from_resources.format_item(from_resource_name)
-            };
             return rename_item(
                 self,
                 access_token,
+                &from_resources,
                 from_resource,
-                from_resource_path,
+                from_resource_name,
+                from_href,
                 destination,
             )
             .await;
         }
 
         // Validate quota
-        if !is_move || from_account_id != to_account_id {
+        let mut quota = None;
+        if !is_move || !is_same_account {
             let space_needed = from_resources
                 .subtree(from_resource_name)
                 .map(|a| a.size() as u64)
                 .sum::<u64>();
-            self.has_available_quota(self.account(to_account_id).await?.as_ref(), space_needed)
-                .await?;
+            let to_account = self.account(to_account_id).await?;
+
+            let files_limit = self.object_quota_limit(&to_account, StorageQuota::MaxFiles);
+            let folders_limit = self.object_quota_limit(&to_account, StorageQuota::MaxFolders);
+            let is_item_overwrite = delete_destination
+                .as_ref()
+                .is_some_and(|d| !d.is_container && !from_resource.resource.is_container);
+            if (files_limit.is_some() || folders_limit.is_some()) && !is_item_overwrite {
+                let (created_files, created_folders) = if !from_resource.resource.is_container {
+                    (1, 0)
+                } else {
+                    match (is_move, headers.depth) {
+                        (false, Depth::Zero) => (0, 1),
+                        (false, Depth::One) => {
+                            count_nodes(from_resources.subtree_with_depth(from_resource_name, 1))
+                        }
+                        _ => count_nodes(from_resources.subtree(from_resource_name)),
+                    }
+                };
+                let (deleted_files, deleted_folders) = if delete_destination.is_some() {
+                    count_nodes(to_resources.subtree(destination_resource_name))
+                } else {
+                    (0, 0)
+                };
+                let new_files = created_files.saturating_sub(deleted_files);
+                let new_folders = created_folders.saturating_sub(deleted_folders);
+
+                if new_files > 0 || new_folders > 0 {
+                    let used_folders = to_resources.resources.count(true);
+                    let used_files = to_resources.resources.len().saturating_sub(used_folders);
+                    if new_files > 0 {
+                        self.assert_object_quota(
+                            &to_account,
+                            StorageQuota::MaxFiles,
+                            new_files,
+                            || used_files,
+                        )?;
+                    }
+                    if new_folders > 0 {
+                        self.assert_object_quota(
+                            &to_account,
+                            StorageQuota::MaxFolders,
+                            new_folders,
+                            || used_folders,
+                        )?;
+                    }
+                }
+            }
+            quota = Some((to_account, space_needed));
         }
 
         // Delete collection
         let is_overwrite = delete_destination
             .as_ref()
             .is_some_and(|d| d.is_container || from_resource.resource.is_container);
+        let mut overwritten = None;
         if is_overwrite {
             delete_destination = None;
             // Find ids to delete
@@ -256,19 +352,29 @@ impl FileCopyMoveRequestHandler for Server {
                 .collect::<Vec<_>>();
             if !ids.is_empty() {
                 ids.sort_unstable_by_key(|b| std::cmp::Reverse(b.hierarchy_seq()));
-                let mut sorted_ids = Vec::with_capacity(ids.len());
-                sorted_ids.extend(ids.into_iter().map(|a| a.document_id()));
-                DestroyArchive(sorted_ids)
-                    .delete(
-                        self,
-                        access_token.account_tenant_ids(),
-                        destination.account_id,
-                        None,
+                let cleanup = self
+                    .preload_container_cleanup(
+                        access_token.changed_by(),
+                        to_account_id,
+                        Collection::FileNode,
+                        &ids.iter()
+                            .filter(|a| !a.resource.metadata_kinds().is_empty())
+                            .map(|a| a.document_id())
+                            .collect(),
                     )
                     .await
                     .caused_by(trc::location!())?;
+                let mut sorted_ids = Vec::with_capacity(ids.len());
+                sorted_ids.extend(ids.into_iter().map(|a| a.document_id()));
+                overwritten = Some(Overwritten {
+                    changed_by: access_token.changed_by(),
+                    account_id: to_account_id,
+                    ids: sorted_ids,
+                    cleanup,
+                });
             }
         }
+        let transfer = Transfer { quota, overwritten };
 
         match (from_resource.resource.is_container, is_move) {
             (true, true) => {
@@ -278,8 +384,10 @@ impl FileCopyMoveRequestHandler for Server {
                     from_resources,
                     from_resource,
                     from_resource_name,
+                    from_href,
                     destination,
                     headers.depth,
+                    transfer,
                 )
                 .await
             }
@@ -290,20 +398,24 @@ impl FileCopyMoveRequestHandler for Server {
                     from_resources,
                     from_resource,
                     from_resource_name,
+                    from_href,
                     destination,
                     headers.depth,
                     false,
+                    transfer,
                 )
                 .await
             }
             (false, true) => {
-                if let Some(delete_destination) = delete_destination {
+                if let Some(existing) = delete_destination {
                     overwrite_and_delete_item(
                         self,
                         access_token,
                         from_resource,
-                        from_resources.format_item(from_resource_name),
-                        delete_destination,
+                        from_href,
+                        existing.document_id,
+                        destination,
+                        transfer,
                     )
                     .await
                 } else {
@@ -311,18 +423,26 @@ impl FileCopyMoveRequestHandler for Server {
                         self,
                         access_token,
                         from_resource,
-                        from_resources.format_item(from_resource_name),
+                        from_href,
                         destination,
+                        transfer,
                     )
                     .await
                 }
             }
-
             (false, false) => {
-                if let Some(delete_destination) = delete_destination {
-                    overwrite_item(self, access_token, from_resource, delete_destination).await
+                if let Some(existing) = delete_destination {
+                    overwrite_item(
+                        self,
+                        access_token,
+                        from_resource,
+                        existing.document_id,
+                        destination,
+                        transfer,
+                    )
+                    .await
                 } else {
-                    copy_item(self, access_token, from_resource, destination).await
+                    copy_item(self, access_token, from_resource, destination, transfer).await
                 }
             }
         }
@@ -336,34 +456,94 @@ impl FileCopyMoveRequestHandler for Server {
     }
 }
 
-#[derive(Debug)]
+fn is_same_or_descendant(path: &str, ancestor: &str) -> bool {
+    path.strip_prefix(ancestor)
+        .is_some_and(|rest| rest.is_empty() || rest.starts_with('/'))
+}
+
+fn subtree_height(resources: &GroupwareResources, path: &str, depth: usize) -> usize {
+    if depth == 0 {
+        return 0;
+    }
+    let base = path.split('/').count();
+    resources
+        .subtree(path)
+        .map(|resource| resource.path().split('/').count().saturating_sub(base))
+        .max()
+        .unwrap_or_default()
+        .min(depth)
+}
+
+fn count_nodes<'x>(nodes: impl Iterator<Item = DavResourcePath<'x>>) -> (usize, usize) {
+    nodes.fold((0, 0), |(files, folders), node| {
+        if node.is_container() {
+            (files, folders + 1)
+        } else {
+            (files + 1, folders)
+        }
+    })
+}
+
+#[derive(Debug, Default)]
 pub(crate) struct Destination {
     pub account_id: u32,
     pub new_name: Option<String>,
     pub document_id: Option<u32>,
-    pub is_container: bool,
 }
 
-impl Default for Destination {
-    fn default() -> Self {
-        Self {
-            account_id: Default::default(),
-            document_id: Default::default(),
-            new_name: Default::default(),
-            is_container: true,
+#[derive(Debug)]
+struct ExistingDestination {
+    document_id: u32,
+    is_container: bool,
+}
+
+struct Transfer {
+    quota: Option<(Arc<AccountCache>, u64)>,
+    overwritten: Option<Overwritten>,
+}
+
+struct Overwritten {
+    changed_by: ChangedBy,
+    account_id: u32,
+    ids: Vec<u32>,
+    cleanup: ContainerCleanup,
+}
+
+impl Transfer {
+    async fn prepare(self, server: &Server, growth: u64) -> crate::Result<()> {
+        if let Some((account, bytes)) = &self.quota {
+            server
+                .has_available_quota(account, bytes.saturating_add(growth))
+                .await?;
         }
+        if let Some(overwritten) = self.overwritten {
+            DestroyArchive(overwritten.ids)
+                .delete(
+                    server,
+                    overwritten.changed_by,
+                    overwritten.account_id,
+                    &overwritten.cleanup,
+                    None,
+                )
+                .await
+                .caused_by(trc::location!())?;
+        }
+        Ok(())
     }
 }
 
 // Moves a container under an existing container
+#[allow(clippy::too_many_arguments)]
 async fn move_container(
     server: &Server,
     access_token: &AccessToken,
-    from_resources: Arc<DavResources>,
+    from_resources: Arc<GroupwareResources>,
     from_resource: UriResource<u32, FileItemId>,
     from_resource_name: &str,
+    from_href: String,
     destination: Destination,
     depth: Depth,
+    transfer: Transfer,
 ) -> crate::Result<HttpResponse> {
     let from_account_id = from_resource.account_id;
     let to_account_id = destination.account_id;
@@ -371,9 +551,10 @@ async fn move_container(
     let parent_id = destination.document_id.map(|id| id + 1).unwrap_or(0);
 
     if from_account_id == to_account_id {
+        transfer.prepare(server, 0).await?;
         let node_ = server
             .store()
-            .get_value::<Archive<AlignedBytes>>(ValueKey::archive(
+            .get_value::<Archive<ArchiveBytes>>(ValueKey::archive(
                 from_account_id,
                 Collection::FileNode,
                 from_document_id,
@@ -392,7 +573,7 @@ async fn move_container(
         let mut batch = BatchBuilder::new();
         let etag = new_node
             .update(
-                access_token.account_tenant_ids(),
+                access_token.changed_by(),
                 node,
                 from_account_id,
                 from_document_id,
@@ -401,10 +582,10 @@ async fn move_container(
             )
             .caused_by(trc::location!())?
             .etag();
-        batch.with_account_id(from_account_id).log_vanished_item(
-            VanishedCollection::FileNode,
-            from_resources.format_collection(from_resource_name),
-        );
+        from_resources.log_descendant_updates(&mut batch, from_account_id, from_resource_name);
+        batch
+            .with_account_id(from_account_id)
+            .log_vanished_item(VanishedCollection::FileNode, from_href);
         server
             .commit_batch(batch)
             .await
@@ -418,9 +599,11 @@ async fn move_container(
             from_resources,
             from_resource,
             from_resource_name,
+            from_href,
             destination,
             depth,
             true,
+            transfer,
         )
         .await
     }
@@ -430,16 +613,18 @@ async fn move_container(
 async fn copy_container(
     server: &Server,
     access_token: &AccessToken,
-    from_resources: Arc<DavResources>,
+    from_resources: Arc<GroupwareResources>,
     from_resource: UriResource<u32, FileItemId>,
     from_resource_name: &str,
+    from_href: String,
     mut destination: Destination,
     depth: Depth,
     delete_source: bool,
+    transfer: Transfer,
 ) -> crate::Result<HttpResponse> {
     let infinity_copy = match depth {
         Depth::Zero if !delete_source => {
-            return copy_item(server, access_token, from_resource, destination).await;
+            return copy_item(server, access_token, from_resource, destination, transfer).await;
         }
         Depth::One if !delete_source => false,
         _ => true,
@@ -450,17 +635,31 @@ async fn copy_container(
     let parent_id = destination.document_id.map(|id| id + 1).unwrap_or(0);
 
     // Obtain files to copy
+    let mut container_request = ContainerRequest::default();
+    let mut select = |r: DavResourcePath<'_>| {
+        if !r.resource.metadata_kinds().is_empty() {
+            container_request.insert(from_account_id, Collection::FileNode, r.document_id());
+        }
+        (r.document_id(), r.hierarchy_seq())
+    };
     let mut copy_files = if infinity_copy {
         from_resources
             .subtree(from_resource_name)
-            .map(|r| (r.document_id(), r.hierarchy_seq()))
+            .map(&mut select)
             .collect::<Vec<_>>()
     } else {
         from_resources
             .subtree_with_depth(from_resource_name, 1)
-            .map(|r| (r.document_id(), r.hierarchy_seq()))
+            .map(&mut select)
             .collect::<Vec<_>>()
     };
+    let containers = container_request
+        .load(server)
+        .await
+        .caused_by(trc::location!())?;
+    transfer.prepare(server, containers.stored_len()).await?;
+    let mut copies = ContainerWrites::new(to_account_id, Collection::FileNode);
+    let mut removals = ContainerWrites::new(from_account_id, Collection::FileNode);
 
     // Top-down copy
     let mut batch = BatchBuilder::new();
@@ -471,65 +670,85 @@ async fn copy_container(
         Vec::new()
     };
     copy_files.sort_unstable_by_key(|a| a.1);
-    let now = now() as i64;
-    let mut next_document_id = server
-        .store()
-        .assign_document_ids(to_account_id, Collection::FileNode, copy_files.len() as u64)
-        .await
-        .caused_by(trc::location!())?;
-    for (document_id, _) in copy_files.into_iter() {
-        let node_ = server
-            .store()
-            .get_value::<Archive<AlignedBytes>>(ValueKey::archive(
-                from_account_id,
-                Collection::FileNode,
-                document_id,
-            ))
+    let mut new_slots = batch
+        .reserve_document_ids(to_account_id, Collection::FileNode, copy_files.len() as u32)
+        .iter();
+    let mut chunk_ids = Vec::with_capacity(copy_files.len().min(MAX_BATCH_DOCUMENTS));
+    for chunk in copy_files.chunks(MAX_BATCH_DOCUMENTS) {
+        chunk_ids.clear();
+        chunk_ids.extend(chunk.iter().map(|(document_id, _)| *document_id));
+        chunk_ids.sort_unstable();
+        chunk_ids.dedup();
+        let mut archives = server
+            .archive_chunk(from_account_id, Collection::FileNode, &chunk_ids, None)
             .await
-            .caused_by(trc::location!())?
-            .ok_or(DavError::Code(StatusCode::NOT_FOUND))?
-            .into_deserialized::<FileNode>()
             .caused_by(trc::location!())?;
+        for (&(document_id, _), new_slot) in chunk.iter().zip(new_slots.by_ref()) {
+            let node_ = archives
+                .take_archive(document_id)
+                .ok_or(DavError::Code(StatusCode::NOT_FOUND))?
+                .into_deserialized::<FileNode>()
+                .caused_by(trc::location!())?;
 
-        // Build node
-        let mut node = if !delete_source {
-            node_.inner
-        } else {
-            let node = node_.inner.clone();
-            delete_files.push((document_id, node_));
-            node
-        };
-        node.modified = now;
-        node.created = now;
-        if let Some(new_name) = destination.new_name.take() {
-            node.name = new_name;
+            // Build node
+            let mut node = if !delete_source {
+                node_.inner
+            } else {
+                let node = node_.inner.clone();
+                delete_files.push((document_id, node_));
+                node
+            };
+            let container = containers.get(from_account_id, Collection::FileNode, document_id);
+            node.set_presence(file_presence(container));
+            let set_accessed = node.accessed == 0;
+            node.stamp_insert(true, true, set_accessed);
+            node.acls.clear();
+            if let Some(new_name) = destination.new_name.take() {
+                node.name = new_name;
+            }
+            let pending_parent = id_map.get(&node.parent_id).copied();
+            if pending_parent.is_none() {
+                node.parent_id = parent_id;
+            }
+
+            // Prepare write batch
+            if let Some(container) = container {
+                copies
+                    .copy(server, container, new_slot, None, &mut batch)
+                    .await
+                    .caused_by(trc::location!())?;
+            }
+            let builder = ObjectIndexBuilder::<(), _>::new()
+                .with_changes(node)
+                .with_changed_by(access_token.changed_by());
+            batch
+                .with_account_id(to_account_id)
+                .with_collection(Collection::FileNode)
+                .create_document(new_slot)
+                .custom(builder.with_pending_id_opt(pending_parent))
+                .caused_by(trc::location!())?
+                .commit_point();
+            id_map.insert(document_id + 1, new_slot);
         }
-        node.parent_id = if let Some(&prev_document_id) = id_map.get(&node.parent_id) {
-            prev_document_id
-        } else {
-            parent_id
-        };
-
-        // Prepare write batch
-        let new_document_id = next_document_id;
-        next_document_id -= 1;
-        batch
-            .with_account_id(to_account_id)
-            .with_collection(Collection::FileNode)
-            .with_document(new_document_id)
-            .custom(
-                ObjectIndexBuilder::<(), _>::new()
-                    .with_changes(node)
-                    .with_changed_by(access_token.account_tenant_ids()),
-            )
-            .caused_by(trc::location!())?
-            .commit_point();
-        id_map.insert(document_id + 1, new_document_id + 1);
     }
 
     // Delete nodes
     if !delete_files.is_empty() {
         for (document_id, node) in delete_files.into_iter().rev() {
+            if let Some(container) =
+                containers.get(from_account_id, Collection::FileNode, document_id)
+            {
+                removals
+                    .clear(
+                        server,
+                        document_id,
+                        StoredContainer::from(container),
+                        &mut batch,
+                    )
+                    .await
+                    .caused_by(trc::location!())?;
+            }
+
             // Delete record
             batch
                 .with_account_id(from_account_id)
@@ -537,16 +756,15 @@ async fn copy_container(
                 .with_document(document_id)
                 .custom(
                     ObjectIndexBuilder::<_, ()>::new()
-                        .with_changed_by(access_token.account_tenant_ids())
+                        .with_changed_by(access_token.changed_by())
                         .with_current(node),
                 )
                 .caused_by(trc::location!())?
                 .commit_point();
         }
-        batch.with_account_id(from_account_id).log_vanished_item(
-            VanishedCollection::FileNode,
-            from_resources.format_collection(from_resource_name),
-        );
+        batch
+            .with_account_id(from_account_id)
+            .log_vanished_item(VanishedCollection::FileNode, from_href);
     }
 
     // Write changes
@@ -561,22 +779,24 @@ async fn copy_container(
 }
 
 // Overwrites the contents of one file with another, then deletes the original
+#[allow(clippy::too_many_arguments)]
 async fn overwrite_and_delete_item(
     server: &Server,
     access_token: &AccessToken,
     from_resource: UriResource<u32, FileItemId>,
     from_resource_path: String,
+    to_document_id: u32,
     destination: Destination,
+    transfer: Transfer,
 ) -> crate::Result<HttpResponse> {
     let from_account_id = from_resource.account_id;
     let to_account_id = destination.account_id;
     let from_document_id = from_resource.resource.document_id;
-    let to_document_id = destination.document_id.unwrap();
 
     // dest_node is the current file at the destination
     let dest_node_ = server
         .store()
-        .get_value::<Archive<AlignedBytes>>(ValueKey::archive(
+        .get_value::<Archive<ArchiveBytes>>(ValueKey::archive(
             to_account_id,
             Collection::FileNode,
             to_document_id,
@@ -592,7 +812,7 @@ async fn overwrite_and_delete_item(
     // source_node is the file to be copied
     let source_node__ = server
         .store()
-        .get_value::<Archive<AlignedBytes>>(ValueKey::archive(
+        .get_value::<Archive<ArchiveBytes>>(ValueKey::archive(
             from_account_id,
             Collection::FileNode,
             from_document_id,
@@ -606,17 +826,30 @@ async fn overwrite_and_delete_item(
     let mut source_node = source_node_
         .deserialize::<FileNode>()
         .caused_by(trc::location!())?;
-    source_node.name = if let Some(new_name) = destination.new_name {
-        new_name
-    } else {
-        dest_node.inner.name.to_string()
-    };
+    if let Some(new_name) = destination.new_name {
+        source_node.name = new_name;
+    }
+    if from_account_id != to_account_id {
+        source_node.acls.clear();
+    }
     source_node.parent_id = dest_node.inner.parent_id.into();
 
     let mut batch = BatchBuilder::new();
+    let source = replace_container(
+        server,
+        from_account_id,
+        from_document_id,
+        &mut source_node,
+        to_account_id,
+        to_document_id,
+        dest_node.inner.metadata_kinds(),
+        transfer,
+        &mut batch,
+    )
+    .await?;
     let etag = source_node
         .update(
-            access_token.account_tenant_ids(),
+            access_token.changed_by(),
             dest_node,
             to_account_id,
             to_document_id,
@@ -625,14 +858,26 @@ async fn overwrite_and_delete_item(
         )
         .caused_by(trc::location!())?
         .etag();
+    let cleanup = server
+        .container_cleanup_from(
+            access_token.changed_by(),
+            from_account_id,
+            Collection::FileNode,
+            source,
+        )
+        .await
+        .caused_by(trc::location!())?;
     DestroyArchive(source_node_)
-        .delete(
-            access_token.account_tenant_ids(),
+        .delete_with_cleanup(
+            server,
+            access_token.changed_by(),
             from_account_id,
             from_document_id,
             &mut batch,
             from_resource_path,
+            &cleanup,
         )
+        .await
         .caused_by(trc::location!())?;
     server
         .commit_batch(batch)
@@ -647,17 +892,18 @@ async fn overwrite_item(
     server: &Server,
     access_token: &AccessToken,
     from_resource: UriResource<u32, FileItemId>,
+    to_document_id: u32,
     destination: Destination,
+    transfer: Transfer,
 ) -> crate::Result<HttpResponse> {
     let from_account_id = from_resource.account_id;
     let to_account_id = destination.account_id;
     let from_document_id = from_resource.resource.document_id;
-    let to_document_id = destination.document_id.unwrap();
 
     // dest_node is the current file at the destination
     let dest_node_ = server
         .store()
-        .get_value::<Archive<AlignedBytes>>(ValueKey::archive(
+        .get_value::<Archive<ArchiveBytes>>(ValueKey::archive(
             to_account_id,
             Collection::FileNode,
             to_document_id,
@@ -673,7 +919,7 @@ async fn overwrite_item(
     // source_node is the file to be copied
     let mut source_node = server
         .store()
-        .get_value::<Archive<AlignedBytes>>(ValueKey::archive(
+        .get_value::<Archive<ArchiveBytes>>(ValueKey::archive(
             from_account_id,
             Collection::FileNode,
             from_document_id,
@@ -683,16 +929,27 @@ async fn overwrite_item(
         .ok_or(DavError::Code(StatusCode::NOT_FOUND))?
         .deserialize::<FileNode>()
         .caused_by(trc::location!())?;
-    source_node.name = if let Some(new_name) = destination.new_name {
-        new_name
-    } else {
-        dest_node.inner.name.to_string()
-    };
+    if let Some(new_name) = destination.new_name {
+        source_node.name = new_name;
+    }
+    source_node.acls.clear();
     source_node.parent_id = dest_node.inner.parent_id.into();
     let mut batch = BatchBuilder::new();
+    replace_container(
+        server,
+        from_account_id,
+        from_document_id,
+        &mut source_node,
+        to_account_id,
+        to_document_id,
+        dest_node.inner.metadata_kinds(),
+        transfer,
+        &mut batch,
+    )
+    .await?;
     let etag = source_node
         .update(
-            access_token.account_tenant_ids(),
+            access_token.changed_by(),
             dest_node,
             to_account_id,
             to_document_id,
@@ -716,6 +973,7 @@ async fn move_item(
     from_resource: UriResource<u32, FileItemId>,
     from_resource_path: String,
     destination: Destination,
+    transfer: Transfer,
 ) -> crate::Result<HttpResponse> {
     let from_account_id = from_resource.account_id;
     let to_account_id = destination.account_id;
@@ -724,7 +982,7 @@ async fn move_item(
 
     let node_ = server
         .store()
-        .get_value::<Archive<AlignedBytes>>(ValueKey::archive(
+        .get_value::<Archive<ArchiveBytes>>(ValueKey::archive(
             from_account_id,
             Collection::FileNode,
             from_document_id,
@@ -744,10 +1002,10 @@ async fn move_item(
     let mut batch = BatchBuilder::new();
     let etag = if from_account_id == to_account_id {
         // Destination is in the same account: just update the parent id
-        batch.log_vanished_item(VanishedCollection::FileNode, from_resource_path);
-        new_node
+        transfer.prepare(server, 0).await?;
+        let etag = new_node
             .update(
-                access_token.account_tenant_ids(),
+                access_token.changed_by(),
                 node,
                 from_account_id,
                 from_document_id,
@@ -755,17 +1013,27 @@ async fn move_item(
                 &mut batch,
             )
             .caused_by(trc::location!())?
-            .etag()
+            .etag();
+        batch.log_vanished_item(VanishedCollection::FileNode, from_resource_path);
+        etag
     } else {
         // Destination is in a different account: insert a new node, then delete the old one
-        let to_document_id = server
-            .store()
-            .assign_document_ids(to_account_id, Collection::FileNode, 1)
-            .await
-            .caused_by(trc::location!())?;
+        new_node.acls.clear();
+        let to_document_id = batch.reserve_document_id(to_account_id, Collection::FileNode);
+        let source = copy_node_container(
+            server,
+            from_account_id,
+            from_document_id,
+            &mut new_node,
+            to_account_id,
+            to_document_id,
+            transfer,
+            &mut batch,
+        )
+        .await?;
         let etag = new_node
             .insert(
-                access_token.account_tenant_ids(),
+                access_token.changed_by(),
                 to_account_id,
                 to_document_id,
                 true,
@@ -774,14 +1042,26 @@ async fn move_item(
             )
             .caused_by(trc::location!())?
             .etag();
+        let cleanup = server
+            .container_cleanup_from(
+                access_token.changed_by(),
+                from_account_id,
+                Collection::FileNode,
+                source,
+            )
+            .await
+            .caused_by(trc::location!())?;
         DestroyArchive(node)
-            .delete(
-                access_token.account_tenant_ids(),
+            .delete_with_cleanup(
+                server,
+                access_token.changed_by(),
                 from_account_id,
                 from_document_id,
                 &mut batch,
                 from_resource_path,
+                &cleanup,
             )
+            .await
             .caused_by(trc::location!())?;
         etag
     };
@@ -799,6 +1079,7 @@ async fn copy_item(
     access_token: &AccessToken,
     from_resource: UriResource<u32, FileItemId>,
     destination: Destination,
+    transfer: Transfer,
 ) -> crate::Result<HttpResponse> {
     let from_account_id = from_resource.account_id;
     let to_account_id = destination.account_id;
@@ -807,7 +1088,7 @@ async fn copy_item(
 
     let mut node = server
         .store()
-        .get_value::<Archive<AlignedBytes>>(ValueKey::archive(
+        .get_value::<Archive<ArchiveBytes>>(ValueKey::archive(
             from_account_id,
             Collection::FileNode,
             from_document_id,
@@ -818,18 +1099,26 @@ async fn copy_item(
         .deserialize::<FileNode>()
         .caused_by(trc::location!())?;
     node.parent_id = parent_id;
+    node.acls.clear();
     if let Some(new_name) = destination.new_name {
         node.name = new_name;
     }
     let mut batch = BatchBuilder::new();
-    let to_document_id = server
-        .store()
-        .assign_document_ids(to_account_id, Collection::FileNode, 1)
-        .await
-        .caused_by(trc::location!())?;
+    let to_document_id = batch.reserve_document_id(to_account_id, Collection::FileNode);
+    copy_node_container(
+        server,
+        from_account_id,
+        from_document_id,
+        &mut node,
+        to_account_id,
+        to_document_id,
+        transfer,
+        &mut batch,
+    )
+    .await?;
     let etag = node
         .insert(
-            access_token.account_tenant_ids(),
+            access_token.changed_by(),
             to_account_id,
             to_document_id,
             true,
@@ -850,7 +1139,9 @@ async fn copy_item(
 async fn rename_item(
     server: &Server,
     access_token: &AccessToken,
+    from_resources: &GroupwareResources,
     from_resource: UriResource<u32, FileItemId>,
+    from_resource_name: &str,
     from_resource_path: String,
     destination: Destination,
 ) -> crate::Result<HttpResponse> {
@@ -859,7 +1150,7 @@ async fn rename_item(
 
     let node_ = server
         .store()
-        .get_value::<Archive<AlignedBytes>>(ValueKey::archive(
+        .get_value::<Archive<ArchiveBytes>>(ValueKey::archive(
             from_account_id,
             Collection::FileNode,
             from_document_id,
@@ -877,7 +1168,7 @@ async fn rename_item(
     let mut batch = BatchBuilder::new();
     let etag = new_node
         .update(
-            access_token.account_tenant_ids(),
+            access_token.changed_by(),
             node,
             from_account_id,
             from_document_id,
@@ -886,7 +1177,12 @@ async fn rename_item(
         )
         .caused_by(trc::location!())?
         .etag();
-    batch.log_vanished_item(VanishedCollection::FileNode, from_resource_path);
+    if from_resource.resource.is_container {
+        from_resources.log_descendant_updates(&mut batch, from_account_id, from_resource_name);
+    }
+    batch
+        .with_account_id(from_account_id)
+        .log_vanished_item(VanishedCollection::FileNode, from_resource_path);
     server
         .commit_batch(batch)
         .await
@@ -895,12 +1191,116 @@ async fn rename_item(
     Ok(HttpResponse::new(StatusCode::CREATED).with_etag_opt(etag))
 }
 
+fn file_presence(container: Option<&MetadataBuf>) -> FilePresence {
+    container.map_or(FilePresence::NONE, |container| {
+        FilePresence::from_view(&container.view())
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn copy_node_container(
+    server: &Server,
+    from_account_id: u32,
+    from_document_id: u32,
+    node: &mut FileNode,
+    to_account_id: u32,
+    to_document_id: Slot,
+    transfer: Transfer,
+    batch: &mut BatchBuilder,
+) -> crate::Result<Option<StoredEntry>> {
+    let source = read_container(
+        server,
+        from_account_id,
+        Collection::FileNode,
+        from_document_id,
+        node.metadata_kinds(),
+    )
+    .await
+    .caused_by(trc::location!())?;
+    node.set_presence(file_presence(source.as_ref()));
+    transfer
+        .prepare(
+            server,
+            source
+                .as_ref()
+                .map_or(0, |source| copy_growth(source, None)),
+        )
+        .await?;
+    if let Some(source) = &source {
+        ContainerWrites::new(to_account_id, Collection::FileNode)
+            .copy(server, source, to_document_id, None, batch)
+            .await
+            .caused_by(trc::location!())?;
+    }
+    Ok(source
+        .as_ref()
+        .map(|source| StoredEntry::from_container(from_document_id, source)))
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn replace_container(
+    server: &Server,
+    from_account_id: u32,
+    from_document_id: u32,
+    node: &mut FileNode,
+    to_account_id: u32,
+    to_document_id: u32,
+    to_kinds: MetadataKinds,
+    transfer: Transfer,
+    batch: &mut BatchBuilder,
+) -> crate::Result<Option<StoredEntry>> {
+    let source = read_container(
+        server,
+        from_account_id,
+        Collection::FileNode,
+        from_document_id,
+        node.metadata_kinds(),
+    )
+    .await
+    .caused_by(trc::location!())?;
+    let previous = stored_entry_of(
+        server,
+        to_account_id,
+        Collection::FileNode,
+        to_document_id,
+        to_kinds,
+    )
+    .await
+    .caused_by(trc::location!())?;
+    node.set_presence(file_presence(source.as_ref()));
+    transfer
+        .prepare(
+            server,
+            source
+                .as_ref()
+                .map_or(0, |source| copy_growth(source, previous.as_ref())),
+        )
+        .await?;
+
+    let mut writes = ContainerWrites::new(to_account_id, Collection::FileNode);
+    match (&source, previous) {
+        (Some(source), previous) => {
+            let previous = previous
+                .map(|previous| edited_container(previous, to_account_id, to_kinds))
+                .transpose()?;
+            writes
+                .copy(server, source, to_document_id, previous, batch)
+                .await
+        }
+        (None, Some(previous)) => writes.release(server, previous, batch).await,
+        (None, None) => Ok(()),
+    }
+    .caused_by(trc::location!())?;
+    Ok(source
+        .as_ref()
+        .map(|source| StoredEntry::from_container(from_document_id, source)))
+}
+
 impl FromDavResource for Destination {
     fn from_dav_resource(item: DavResourcePath<'_>) -> Self {
         Destination {
             account_id: u32::MAX,
             document_id: Some(item.document_id()),
-            is_container: item.is_container(),
             new_name: None,
         }
     }

@@ -4,6 +4,10 @@
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
  */
 
+use crate::{
+    config::mailstore::limits::{EmailLimits, MAX_HEADER_ENTRIES},
+    storage::ObjectQuota,
+};
 use ahash::{AHashMap, AHashSet};
 use nlp::language::Language;
 use registry::{
@@ -23,13 +27,13 @@ use registry::{
 use std::time::Duration;
 use store::{
     registry::bootstrap::Bootstrap,
-    search::{CalendarSearchField, ContactSearchField, EmailSearchField, SearchField},
+    search::{
+        CalendarSearchField, ContactSearchField, EmailSearchField, FileSearchField, SearchField,
+    },
     write::SearchIndex,
 };
 use types::special_use::SpecialUse;
 use utils::cron::SimpleCron;
-
-use crate::storage::ObjectQuota;
 
 #[derive(Clone)]
 pub struct EmailConfig {
@@ -39,6 +43,7 @@ pub struct EmailConfig {
 
     pub mailbox_max_depth: usize,
     pub mailbox_name_max_len: usize,
+    pub limits: EmailLimits,
 
     pub mail_attachments_max_size: usize,
     pub mail_max_size: usize,
@@ -57,7 +62,9 @@ pub struct EmailConfig {
     pub encrypt_append: bool,
 
     pub index_batch_size: usize,
+    pub index_concurrency: usize,
     pub index_fields: AHashMap<SearchIndex, AHashSet<SearchField>>,
+    pub extract_limits: ExtractLimits,
 
     pub max_objects: ObjectQuota,
     pub compression: CompressionAlgo,
@@ -65,6 +72,18 @@ pub struct EmailConfig {
     pub account_purge_frequency: SimpleCron,
     pub data_purge_frequency: SimpleCron,
     pub blob_purge_frequency: SimpleCron,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ExtractLimits {
+    pub max_document_size: usize,
+    pub max_text_size: usize,
+    pub max_decompressed_size: u64,
+    pub max_part_size: u64,
+    pub max_parts: usize,
+    pub max_archive_entries: usize,
+    pub max_pdf_objects: usize,
+    pub max_rtf_depth: usize,
 }
 
 #[derive(Clone, Debug)]
@@ -116,7 +135,6 @@ impl EmailConfig {
             (StorageQuota::MaxSieveScripts, sieve.max_scripts),
             (StorageQuota::MaxEmailIdentities, email.max_identities),
             (StorageQuota::MaxEmailSubmissions, email.max_submissions),
-            (StorageQuota::MaxMaskedAddresses, email.max_masked_addresses),
             (StorageQuota::MaxAppPasswords, auth.max_app_passwords),
             (StorageQuota::MaxApiKeys, auth.max_api_keys),
             (StorageQuota::MaxPublicKeys, email.max_public_keys),
@@ -211,10 +229,6 @@ impl EmailConfig {
                             SearchEmailField::Subject => EmailSearchField::Subject,
                             SearchEmailField::Body => EmailSearchField::Body,
                             SearchEmailField::Attachment => EmailSearchField::Attachment,
-                            SearchEmailField::ReceivedAt => EmailSearchField::ReceivedAt,
-                            SearchEmailField::SentAt => EmailSearchField::SentAt,
-                            SearchEmailField::Size => EmailSearchField::Size,
-                            SearchEmailField::HasAttachment => EmailSearchField::HasAttachment,
                             SearchEmailField::Headers => EmailSearchField::Headers,
                         })
                     })
@@ -239,10 +253,15 @@ impl EmailConfig {
                             SearchContactField::OnlineService => ContactSearchField::OnlineService,
                             SearchContactField::Address => ContactSearchField::Address,
                             SearchContactField::Note => ContactSearchField::Note,
-                            SearchContactField::Uid => ContactSearchField::Uid,
                         })
                     })
                     .collect(),
+            );
+        }
+        if search.index_files {
+            index_fields.insert(
+                SearchIndex::File,
+                AHashSet::from_iter([SearchField::File(FileSearchField::Content)]),
             );
         }
         if search.index_calendar {
@@ -258,11 +277,20 @@ impl EmailConfig {
                             SearchCalendarField::Location => CalendarSearchField::Location,
                             SearchCalendarField::Owner => CalendarSearchField::Owner,
                             SearchCalendarField::Attendee => CalendarSearchField::Attendee,
-                            SearchCalendarField::Start => CalendarSearchField::Start,
-                            SearchCalendarField::Uid => CalendarSearchField::Uid,
                         })
                     })
                     .collect(),
+            );
+        }
+
+        let header_count = (email.max_header_count as usize).min(MAX_HEADER_ENTRIES);
+        if header_count < email.max_header_count as usize {
+            bp.build_warning(
+                ObjectType::Email.singleton(),
+                format!(
+                    "maxHeaderCount {} exceeds the supported maximum, using {header_count}",
+                    email.max_header_count
+                ),
             );
         }
 
@@ -271,6 +299,13 @@ impl EmailConfig {
                 .unwrap_or(Language::English),
             mailbox_max_depth: email.max_mailbox_depth as usize,
             mailbox_name_max_len: email.max_mailbox_name_length as usize,
+            limits: EmailLimits {
+                mailboxes_per_email: email.max_mailboxes_per_email as usize,
+                keywords_per_email: email.max_flags_per_email as usize,
+                keyword_length: email.max_flag_length as usize,
+                header_count,
+                header_size: email.max_header_size as usize,
+            },
             mail_attachments_max_size: email.max_attachment_size as usize,
             mail_max_size: email.max_message_size as usize,
             mail_autoexpunge_after: dr.expunge_trash_after.map(|d| d.into_inner().as_secs()),
@@ -282,8 +317,19 @@ impl EmailConfig {
             sieve_max_script_name: sieve.max_script_name_length as usize,
             encrypt: email.encrypt_at_rest,
             encrypt_append: email.encrypt_on_append,
-            index_batch_size: search.index_batch_size as usize,
+            index_batch_size: std::cmp::max(search.index_batch_size as usize, 1),
+            index_concurrency: std::cmp::max(search.max_concurrent_index_tasks as usize, 1),
             index_fields,
+            extract_limits: ExtractLimits {
+                max_document_size: search.max_extract_document_size as usize,
+                max_text_size: search.max_extract_text_size as usize,
+                max_decompressed_size: search.max_extract_decompressed_size,
+                max_part_size: search.max_extract_part_size,
+                max_parts: search.max_extract_parts as usize,
+                max_archive_entries: search.max_extract_archive_entries as usize,
+                max_pdf_objects: search.max_extract_pdf_objects as usize,
+                max_rtf_depth: search.max_extract_rtf_depth as usize,
+            },
             max_objects,
             default_folders,
             shared_folder,

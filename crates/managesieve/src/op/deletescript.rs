@@ -54,7 +54,7 @@ impl<T: SessionStream> Session<T> {
                 trc::event!(
                     ManageSieve(trc::ManageSieveEvent::DeleteScript),
                     SpanId = self.session_id,
-                    Id = name,
+                    Script = name,
                     DocumentId = document_id,
                     Elapsed = op_start.elapsed()
                 );

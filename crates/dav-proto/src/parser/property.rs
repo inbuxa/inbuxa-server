@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
  */
 
-use super::{DavParser, RawElement, Token, XmlValueParser, tokenizer::Tokenizer};
+use super::{RawElement, Token, XmlValueParser, tokenizer::Tokenizer, value::InheritedLang};
 use crate::schema::{
     Attribute, AttributeValue, Element, NamedElement, Namespace,
     property::{
@@ -21,7 +21,7 @@ use calcard::{
     vcard::{VCardParameterName, VCardProperty, VCardVersion},
 };
 use mail_parser::DateTime;
-use types::{TimeRange, dead_property::DeadProperty};
+use types::TimeRange;
 
 impl Tokenizer<'_> {
     pub(crate) fn collect_properties(
@@ -61,17 +61,18 @@ impl Tokenizer<'_> {
                         version,
                     }));
                 }
-                Token::ElementStart { name, .. } => {
-                    if let Some(property) = DavProperty::from_element(name) {
-                        elements.push(property);
-                    }
+                Token::ElementStart { name, raw } => {
+                    elements.push(match DavProperty::from_element(name) {
+                        Some(property) => property,
+                        None => DavProperty::Dead(raw.dead_name()?),
+                    });
                     self.expect_element_end()?;
                 }
                 Token::ElementEnd => {
                     break;
                 }
-                Token::UnknownElement(name) => {
-                    elements.push(DavProperty::DeadProperty((&name).into()));
+                Token::UnknownElement(raw) => {
+                    elements.push(DavProperty::Dead(raw.dead_name()?));
                     self.expect_element_end()?;
                 }
                 token => return Err(token.into_unexpected()),
@@ -290,14 +291,15 @@ impl Tokenizer<'_> {
     }
 }
 
-impl Tokenizer<'_> {
+impl<'x> Tokenizer<'x> {
     pub(crate) fn collect_property_values(
         &mut self,
-        elements: &mut Vec<DavPropertyValue>,
+        mut push: impl FnMut(DavPropertyValue),
+        lang: &mut InheritedLang<'_, 'x>,
     ) -> crate::parser::Result<()> {
         loop {
             match self.token()? {
-                Token::ElementStart { name, .. } => {
+                Token::ElementStart { name, raw } => {
                     if let Some(property) = DavProperty::from_element(name) {
                         let value = match property {
                             DavProperty::WebDav(WebDavProperty::ResourceType) => {
@@ -366,20 +368,16 @@ impl Tokenizer<'_> {
                                 .unwrap_or(DavValue::Null),
                         };
 
-                        elements.push(DavPropertyValue { property, value });
+                        push(DavPropertyValue { property, value });
                     } else {
-                        // Ignore unknown elements
-                        self.seek_element_end()?;
+                        push(self.collect_dead_property(&raw, lang.get()?)?);
                     }
                 }
                 Token::ElementEnd | Token::Eof => {
                     break;
                 }
                 Token::UnknownElement(raw) => {
-                    elements.push(DavPropertyValue {
-                        property: DavProperty::DeadProperty((&raw).into()),
-                        value: DavValue::DeadProperty(DeadProperty::parse(self)?),
-                    });
+                    push(self.collect_dead_property(&raw, lang.get()?)?);
                 }
                 token => return Err(token.into_unexpected()),
             }
@@ -387,10 +385,22 @@ impl Tokenizer<'_> {
 
         Ok(())
     }
+
+    fn collect_dead_property(
+        &mut self,
+        raw: &RawElement<'x>,
+        lang: Option<&str>,
+    ) -> crate::parser::Result<DavPropertyValue> {
+        Ok(DavPropertyValue {
+            property: DavProperty::Dead(raw.dead_name()?),
+            value: DavValue::Dead(Box::new(self.collect_xml_value(raw, lang)?)),
+        })
+    }
 }
 
 pub(crate) trait TimeRangeFromRaw {
     fn from_raw(raw: &RawElement<'_>) -> super::Result<Option<TimeRange>>;
+    fn from_raw_strict(raw: &RawElement<'_>) -> super::Result<Option<TimeRange>>;
 }
 
 impl TimeRangeFromRaw for TimeRange {
@@ -421,6 +431,33 @@ impl TimeRangeFromRaw for TimeRange {
         } else {
             Ok(None)
         }
+    }
+
+    fn from_raw_strict(raw: &RawElement<'_>) -> super::Result<Option<Self>> {
+        let mut range = TimeRange {
+            start: i64::MIN,
+            end: i64::MAX,
+        };
+        let mut has_bounds = false;
+
+        for attribute in raw.attributes::<ICalendarDateTime>() {
+            match attribute? {
+                Attribute::Start(start) => {
+                    range.start = start.0;
+                    has_bounds = true;
+                }
+                Attribute::End(end) => {
+                    range.end = end.0;
+                    has_bounds = true;
+                }
+                Attribute::Unknown { param, .. } if param == "start" || param == "end" => {
+                    return Ok(None);
+                }
+                _ => {}
+            }
+        }
+
+        Ok((has_bounds && range.start < range.end).then_some(range))
     }
 }
 

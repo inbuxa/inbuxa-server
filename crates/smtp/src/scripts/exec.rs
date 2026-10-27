@@ -4,13 +4,14 @@
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
  */
 
-use std::{sync::Arc, time::SystemTime};
+use std::time::SystemTime;
 
 use common::network::SessionStream;
 
-use mail_auth::common::resolver::ToReverseName;
+use mail_auth::dns::ToReverseName;
 use sieve::{Envelope, Sieve, runtime::Variable};
 use smtp_proto::*;
+use utils::text::lowercase;
 
 use crate::{core::Session, inbound::AuthResult};
 
@@ -20,12 +21,12 @@ impl<T: SessionStream> Session<T> {
     pub fn build_script_parameters(&self, stage: &'static str) -> ScriptParameters<'_> {
         let (tls_version, tls_cipher) = self.stream.tls_version_and_cipher();
         let mut params = ScriptParameters::new()
-            .set_variable("remote_ip", self.data.remote_ip.to_string())
+            .set_variable("remote_ip", self.data.remote_ip_str.as_str())
             .set_variable("remote_ip.reverse", self.data.remote_ip.to_reverse_name())
-            .set_variable("helo_domain", self.data.helo_domain.as_str().to_lowercase())
+            .set_variable("helo_domain", lowercase(&self.data.helo_domain))
             .set_variable(
                 "authenticated_as",
-                self.authenticated_as().unwrap_or_default().to_string(),
+                self.authenticated_as().unwrap_or_default(),
             )
             .set_variable(
                 "now",
@@ -47,8 +48,7 @@ impl<T: SessionStream> Session<T> {
                 self.data
                     .asn_geo_data
                     .country
-                    .as_ref()
-                    .map(|r| r.as_str())
+                    .as_deref()
                     .unwrap_or_default(),
             )
             .set_variable(
@@ -73,28 +73,26 @@ impl<T: SessionStream> Session<T> {
         if let Some(ip_rev) = &self.data.iprev {
             params = params.set_variable("iprev.result", ip_rev.result().as_str());
             if let Some(ptr) = ip_rev.ptr.as_ref().and_then(|addrs| addrs.first()) {
-                params = params.set_variable(
-                    "iprev.ptr",
-                    ptr.strip_suffix('.').unwrap_or(ptr).to_lowercase(),
-                );
+                params = params
+                    .set_variable("iprev.ptr", lowercase(ptr.strip_suffix('.').unwrap_or(ptr)));
             }
         }
 
         if let Some(mail_from) = &self.data.mail_from {
             params
                 .envelope
-                .push((Envelope::From, mail_from.address_lcase.to_string().into()));
+                .push((Envelope::From, mail_from.address_lcase.as_str().into()));
             if let Some(env_id) = &mail_from.dsn_info {
                 params
                     .envelope
-                    .push((Envelope::Envid, env_id.as_str().to_lowercase().into()));
+                    .push((Envelope::Envid, lowercase(env_id).into()));
             }
 
             if stage != "data" {
                 if let Some(rcpt) = self.data.rcpt_to.last() {
                     params
                         .envelope
-                        .push((Envelope::To, rcpt.address_lcase.to_string().into()));
+                        .push((Envelope::To, rcpt.address_lcase.as_str().into()));
                     if let Some(orcpt) = rcpt.orcpt_parameter() {
                         params.envelope.push((Envelope::Orcpt, orcpt.into()));
                     }
@@ -106,7 +104,7 @@ impl<T: SessionStream> Session<T> {
                 let mut has_orcpts = false;
 
                 for rcpt in &self.data.rcpt_to {
-                    recipients.push(Variable::from(rcpt.address_lcase.to_string()));
+                    recipients.push(Variable::from(rcpt.address_lcase.as_str()));
                     orcpts.push(match rcpt.orcpt_parameter() {
                         Some(orcpt) => {
                             has_orcpts = true;
@@ -155,19 +153,18 @@ impl<T: SessionStream> Session<T> {
     pub async fn run_script(
         &self,
         script_id: String,
-        script: Arc<Sieve>,
+        script: &Sieve<'_>,
         params: ScriptParameters<'_>,
     ) -> ScriptResult {
-        Box::pin(
-            self.server.run_script(
+        self.server
+            .run_script(
                 script_id,
                 script,
                 params
                     .with_session_id(self.data.session_id)
                     .with_envelope(&self.server, self, self.data.session_id)
                     .await,
-            ),
-        )
-        .await
+            )
+            .await
     }
 }

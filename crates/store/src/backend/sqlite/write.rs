@@ -4,89 +4,102 @@
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
  */
 
-use super::{SqliteStore, into_error};
+use super::{SqliteStore, into_error, sql::SqlStatements};
 use crate::{
-    IndexKey, Key, LogKey, SUBSPACE_COUNTER, SUBSPACE_IN_MEMORY_COUNTER, SUBSPACE_QUOTA,
-    SUBSPACE_REGISTRY_IDX,
-    write::{AssignedIds, Batch, MergeResult, Operation, ValueClass, ValueOp},
+    Key, Shape, Subspace,
+    write::{
+        Advance, AssignedIds, Batch, BatchCursor, LogSet, MAX_COMMIT_ATTEMPTS, MAX_COMMIT_TIME,
+        MergeResult, ValueOp, commit_backoff,
+    },
 };
-use rusqlite::{OptionalExtension, TransactionBehavior, params};
+use rusqlite::{ErrorCode, OptionalExtension, Transaction, TransactionBehavior, params};
+use std::time::Instant;
 use trc::AddContext;
 
 impl SqliteStore {
-    pub(crate) async fn write(&self, batch: Batch<'_>) -> trc::Result<AssignedIds> {
+    pub(crate) async fn write(
+        &self,
+        mut batch: Batch<'_>,
+        assigned_ids: &mut AssignedIds,
+    ) -> trc::Result<()> {
+        let mut retry_count = 0;
+        let start = Instant::now();
+        let mark = assigned_ids.mark();
+
+        loop {
+            if self.write_once(&mut batch, assigned_ids, mark).await? {
+                return Ok(());
+            } else if retry_count >= MAX_COMMIT_ATTEMPTS || start.elapsed() >= MAX_COMMIT_TIME {
+                return Err(trc::StoreEvent::SqliteError
+                    .into_err()
+                    .details("Database is locked")
+                    .caused_by(trc::location!()));
+            }
+
+            #[cfg(stalwart_tests)]
+            crate::write::record_retry(retry_count);
+            tokio::time::sleep(commit_backoff(retry_count)).await;
+            retry_count += 1;
+        }
+    }
+
+    fn write_once(
+        &self,
+        batch: &mut Batch<'_>,
+        assigned_ids: &mut AssignedIds,
+        mark: crate::write::AssignedIdsMark,
+    ) -> impl Future<Output = trc::Result<bool>> {
         let manager = self.conn_pool.clone();
-        self.spawn_worker(move || {
+        let sql = &*self.sql;
+
+        self.block_writer(move || {
             let mut conn = manager.get().map_err(into_error)?;
 
-            let mut account_id = u32::MAX;
-            let mut collection = u8::MAX;
-            let mut document_id = u32::MAX;
-            let mut change_id = 0u64;
-            let trx = conn
-                .transaction_with_behavior(TransactionBehavior::Immediate)
-                .map_err(into_error)
-                .caused_by(trc::location!())?;
-            let mut result = AssignedIds::default();
-            let has_changes = !batch.changes.is_empty();
+            let mut cursor = BatchCursor::new(batch);
+            let trx = match conn.transaction_with_behavior(TransactionBehavior::Immediate) {
+                Ok(trx) => trx,
+                Err(err) if is_busy(&err) => return Ok(false),
+                Err(err) => return Err(into_error(err)).caused_by(trc::location!()),
+            };
+            let result = &mut *assigned_ids;
+            result.rollback(mark);
+            let mut log_buf = Vec::new();
+            let mut log_scratch = Vec::new();
 
-            if has_changes {
-                for &account_id in batch.changes.keys() {
-                    let key = ValueClass::ChangeId.serialize(account_id, 0, 0, 0);
-                    let change_id = trx
-                        .prepare_cached(concat!(
-                            "INSERT INTO n (k, v) VALUES (?, ?) ",
-                            "ON CONFLICT(k) DO UPDATE SET v = v + ",
-                            "excluded.v RETURNING v"
-                        ))
-                        .map_err(into_error)
-                        .caused_by(trc::location!())?
-                        .query_row(params![&key, &1i64], |row| row.get::<_, i64>(0))
-                        .map_err(into_error)
-                        .caused_by(trc::location!())?;
-                    result.push_change_id(account_id, change_id as u64);
+            if batch.has_allocations() {
+                let mut key_buf = Vec::with_capacity(16);
+
+                for allocation in batch.allocations() {
+                    key_buf.clear();
+                    allocation.serialize_key_into(&mut key_buf, 0);
+                    let last_id = incr_counter(&trx, sql, &key_buf, allocation.increment_by())?;
+                    result.apply(allocation, last_id)?;
                 }
             }
 
+            let mut key_buf = Vec::with_capacity(64);
             for op in batch.ops.iter_mut() {
-                match op {
-                    Operation::AccountId {
-                        account_id: account_id_,
-                    } => {
-                        account_id = *account_id_;
-                        if has_changes {
-                            change_id = result.set_current_change_id(account_id)?;
-                        }
-                    }
-                    Operation::Collection {
-                        collection: collection_,
-                    } => {
-                        collection = u8::from(*collection_);
-                    }
-                    Operation::DocumentId {
-                        document_id: document_id_,
-                    } => {
-                        document_id = *document_id_;
-                    }
-                    Operation::Value { class, op } => {
-                        let key = class.serialize(account_id, collection, document_id, 0);
-                        let subspace = class.subspace(collection);
-                        let table = char::from(subspace);
+                match cursor.advance(op, result) {
+                    Advance::Cursor => {}
+                    Advance::Value { class, op } => {
+                        cursor.value_key(class, &mut key_buf, 0);
+                        let key = &key_buf;
+                        let subspace = cursor.subspace(class);
+                        let stmts = sql.get(subspace);
 
                         match op {
-                            ValueOp::Set(value) => {
-                                if subspace != SUBSPACE_REGISTRY_IDX {
-                                    trx.prepare_cached(&format!(
-                                        "INSERT OR REPLACE INTO {} (k, v) VALUES (?, ?)",
-                                        table
-                                    ))
-                                    .map_err(into_error)
-                                    .caused_by(trc::location!())?
-                                    .execute([&key, value])
-                                    .map_err(into_error)
-                                    .caused_by(trc::location!())?;
+                            ValueOp::Set(set_value) => {
+                                let value = set_value.resolve(result)?;
+                                let value = &*value;
+                                if !matches!(subspace.shape(), Shape::Presence) {
+                                    trx.prepare_cached(&stmts.upsert_value)
+                                        .map_err(into_error)
+                                        .caused_by(trc::location!())?
+                                        .execute([key.as_slice(), value])
+                                        .map_err(into_error)
+                                        .caused_by(trc::location!())?;
                                 } else {
-                                    trx.prepare_cached("INSERT OR IGNORE INTO b (k) VALUES (?)")
+                                    trx.prepare_cached(&stmts.insert_presence)
                                         .map_err(into_error)
                                         .caused_by(trc::location!())?
                                         .execute([&key])
@@ -94,107 +107,71 @@ impl SqliteStore {
                                         .caused_by(trc::location!())?;
                                 }
                             }
-                            ValueOp::SetFnc(set_op) => {
-                                let value = (set_op.fnc)(&set_op.params, &result)?;
-                                trx.prepare_cached(&format!(
-                                    "INSERT OR REPLACE INTO {} (k, v) VALUES (?, ?)",
-                                    table
-                                ))
-                                .map_err(into_error)
-                                .caused_by(trc::location!())?
-                                .execute([&key, &value])
-                                .map_err(into_error)
-                                .caused_by(trc::location!())?;
-                            }
                             ValueOp::MergeFnc(merge_op) => {
                                 let merge_result = trx
-                                    .prepare_cached(&format!("SELECT v FROM {} WHERE k = ?", table))
+                                    .prepare_cached(&stmts.get_value)
                                     .map_err(into_error)
                                     .caused_by(trc::location!())?
                                     .query_row([&key], |row| {
-                                        Ok((merge_op.fnc)(
-                                            &merge_op.params,
-                                            &result,
+                                        Ok((merge_op.0)(
+                                            &*result,
                                             Some(row.get_ref(0)?.as_bytes()?),
                                         ))
                                     })
                                     .optional()
                                     .map_err(into_error)
                                     .caused_by(trc::location!())?
-                                    .unwrap_or_else(|| {
-                                        (merge_op.fnc)(&merge_op.params, &result, None)
-                                    })?;
+                                    .unwrap_or_else(|| (merge_op.0)(&*result, None))?;
 
                                 match merge_result {
                                     MergeResult::Update(value) => {
-                                        trx.prepare_cached(&format!(
-                                            "INSERT OR REPLACE INTO {} (k, v) VALUES (?, ?)",
-                                            table
-                                        ))
-                                        .map_err(into_error)
-                                        .caused_by(trc::location!())?
-                                        .execute([&key, &value])
-                                        .map_err(into_error)
-                                        .caused_by(trc::location!())?;
+                                        trx.prepare_cached(&stmts.upsert_value)
+                                            .map_err(into_error)
+                                            .caused_by(trc::location!())?
+                                            .execute([key, &value])
+                                            .map_err(into_error)
+                                            .caused_by(trc::location!())?;
                                     }
                                     MergeResult::Delete => {
-                                        trx.prepare_cached(&format!(
-                                            "DELETE FROM {} WHERE k = ?",
-                                            table
-                                        ))
-                                        .map_err(into_error)
-                                        .caused_by(trc::location!())?
-                                        .execute([&key])
-                                        .map_err(into_error)
-                                        .caused_by(trc::location!())?;
+                                        trx.prepare_cached(&stmts.delete_key)
+                                            .map_err(into_error)
+                                            .caused_by(trc::location!())?
+                                            .execute([&key])
+                                            .map_err(into_error)
+                                            .caused_by(trc::location!())?;
                                     }
                                     MergeResult::Skip => (),
                                 }
                             }
                             ValueOp::AtomicAdd(by) => {
                                 if *by >= 0 {
-                                    trx.prepare_cached(&format!(
-                                        concat!(
-                                            "INSERT INTO {} (k, v) VALUES (?, ?) ",
-                                            "ON CONFLICT(k) DO UPDATE SET v = v + excluded.v"
-                                        ),
-                                        table
-                                    ))
-                                    .map_err(into_error)
-                                    .caused_by(trc::location!())?
-                                    .execute(params![&key, *by])
-                                    .map_err(into_error)
-                                    .caused_by(trc::location!())?;
+                                    trx.prepare_cached(&stmts.increment)
+                                        .map_err(into_error)
+                                        .caused_by(trc::location!())?
+                                        .execute(params![&key, *by])
+                                        .map_err(into_error)
+                                        .caused_by(trc::location!())?;
                                 } else {
-                                    trx.prepare_cached(&format!(
-                                        "UPDATE {table} SET v = v + ? WHERE k = ?"
-                                    ))
-                                    .map_err(into_error)
-                                    .caused_by(trc::location!())?
-                                    .execute(params![*by, &key])
-                                    .map_err(into_error)
-                                    .caused_by(trc::location!())?;
+                                    trx.prepare_cached(&stmts.decrement)
+                                        .map_err(into_error)
+                                        .caused_by(trc::location!())?
+                                        .execute(params![*by, &key])
+                                        .map_err(into_error)
+                                        .caused_by(trc::location!())?;
                                 }
                             }
                             ValueOp::AddAndGet(by) => {
                                 result.push_counter_id(
-                                    trx.prepare_cached(&format!(
-                                        concat!(
-                                            "INSERT INTO {} (k, v) VALUES (?, ?) ",
-                                            "ON CONFLICT(k) DO UPDATE SET v = v + ",
-                                            "excluded.v RETURNING v"
-                                        ),
-                                        table
-                                    ))
-                                    .map_err(into_error)
-                                    .caused_by(trc::location!())?
-                                    .query_row(params![&key, &*by], |row| row.get::<_, i64>(0))
-                                    .map_err(into_error)
-                                    .caused_by(trc::location!())?,
+                                    trx.prepare_cached(&stmts.increment_returning)
+                                        .map_err(into_error)
+                                        .caused_by(trc::location!())?
+                                        .query_row(params![&key, &*by], |row| row.get::<_, i64>(0))
+                                        .map_err(into_error)
+                                        .caused_by(trc::location!())?,
                                 );
                             }
                             ValueOp::Clear => {
-                                trx.prepare_cached(&format!("DELETE FROM {} WHERE k = ?", table))
+                                trx.prepare_cached(&stmts.delete_key)
                                     .map_err(into_error)
                                     .caused_by(trc::location!())?
                                     .execute([&key])
@@ -203,25 +180,21 @@ impl SqliteStore {
                             }
                         }
                     }
-                    Operation::Index { field, key, set } => {
-                        let key = IndexKey {
-                            account_id,
-                            collection,
-                            document_id,
-                            field: *field,
-                            key: &*key,
-                        }
-                        .serialize(0);
+                    Advance::Index { field, key, set } => {
+                        cursor.index_key(field, key, &mut key_buf, 0);
+                        let key = &key_buf;
 
-                        if *set {
-                            trx.prepare_cached("INSERT OR IGNORE INTO i (k) VALUES (?)")
+                        let stmts = sql.get(Subspace::Indexes);
+
+                        if set {
+                            trx.prepare_cached(&stmts.insert_presence)
                                 .map_err(into_error)
                                 .caused_by(trc::location!())?
                                 .execute([&key])
                                 .map_err(into_error)
                                 .caused_by(trc::location!())?;
                         } else {
-                            trx.prepare_cached("DELETE FROM i WHERE k = ?")
+                            trx.prepare_cached(&stmts.delete_key)
                                 .map_err(into_error)
                                 .caused_by(trc::location!())?
                                 .execute([&key])
@@ -229,30 +202,46 @@ impl SqliteStore {
                                 .caused_by(trc::location!())?;
                         }
                     }
-                    Operation::Log { collection, set } => {
-                        let key = LogKey {
-                            account_id,
-                            collection: u8::from(*collection),
-                            change_id,
-                        }
-                        .serialize(0);
+                    Advance::Log { collection, set } => {
+                        cursor.log_key(collection, result, &mut key_buf, 0);
+                        let key = &key_buf;
+                        let value = match set {
+                            LogSet::Bytes(bytes) => &*bytes,
+                            LogSet::Pending(changes) => {
+                                changes.serialize_into(
+                                    collection.is_prefixed(),
+                                    result,
+                                    &mut log_scratch,
+                                    &mut log_buf,
+                                );
+                                &log_buf
+                            }
+                        };
 
-                        trx.prepare_cached("INSERT OR REPLACE INTO l (k, v) VALUES (?, ?)")
+                        trx.prepare_cached(&sql.get(Subspace::Logs).upsert_value)
                             .map_err(into_error)
                             .caused_by(trc::location!())?
-                            .execute([&key, set])
+                            .execute([key.as_slice(), value.as_slice()])
                             .map_err(into_error)
                             .caused_by(trc::location!())?;
                     }
-                    Operation::AssertValue {
+                    Advance::ClearRange { subspace, from, to } => {
+                        trx.prepare_cached(&sql.get(subspace).delete_range)
+                            .map_err(into_error)
+                            .caused_by(trc::location!())?
+                            .execute([from, to])
+                            .map_err(into_error)
+                            .caused_by(trc::location!())?;
+                    }
+                    Advance::Assert {
                         class,
                         assert_value,
                     } => {
-                        let key = class.serialize(account_id, collection, document_id, 0);
-                        let table = char::from(class.subspace(collection));
+                        cursor.value_key(class, &mut key_buf, 0);
+                        let key = &key_buf;
 
                         let matches = trx
-                            .prepare_cached(&format!("SELECT v FROM {} WHERE k = ?", table))
+                            .prepare_cached(&sql.get(cursor.subspace(class)).get_value)
                             .map_err(into_error)
                             .caused_by(trc::location!())?
                             .query_row([&key], |row| {
@@ -274,17 +263,26 @@ impl SqliteStore {
                 }
             }
 
-            trx.commit().map(|_| result).map_err(into_error)
+            match trx.commit() {
+                Ok(()) => Ok(true),
+                Err(err) if is_busy(&err) => Ok(false),
+                Err(err) => Err(into_error(err)).caused_by(trc::location!()),
+            }
         })
-        .await
     }
 
-    pub(crate) async fn purge_store(&self) -> trc::Result<()> {
+    pub(crate) fn purge_store(&self) -> impl Future<Output = trc::Result<()>> {
         let manager = self.conn_pool.clone();
+        let sql = self.sql.clone();
+
         self.spawn_worker(move || {
             let conn = manager.get().map_err(into_error)?;
-            for subspace in [SUBSPACE_QUOTA, SUBSPACE_COUNTER, SUBSPACE_IN_MEMORY_COUNTER] {
-                conn.prepare_cached(&format!("DELETE FROM {} WHERE v = 0", char::from(subspace),))
+            for subspace in Subspace::ALL
+                .iter()
+                .copied()
+                .filter(|subspace| matches!(subspace.shape(), Shape::Counter))
+            {
+                conn.prepare_cached(&sql.get(subspace).purge_zero)
                     .map_err(into_error)
                     .caused_by(trc::location!())?
                     .execute([])
@@ -292,28 +290,58 @@ impl SqliteStore {
                     .caused_by(trc::location!())?;
             }
 
+            conn.execute_batch("PRAGMA wal_checkpoint(TRUNCATE);")
+                .map_err(into_error)
+                .caused_by(trc::location!())?;
+
             Ok(())
         })
-        .await
     }
 
-    pub(crate) async fn delete_range(&self, from: impl Key, to: impl Key) -> trc::Result<()> {
+    pub(crate) fn delete_range(
+        &self,
+        from: impl Key,
+        to: impl Key,
+    ) -> impl Future<Output = trc::Result<()>> {
         let manager = self.conn_pool.clone();
+        let sql = self.sql.clone();
+        let subspace = from.subspace();
+        let from = from.serialize(0);
+        let to = to.serialize(0);
+
         self.spawn_worker(move || {
             let conn = manager.get().map_err(into_error)?;
 
-            conn.prepare_cached(&format!(
-                "DELETE FROM {} WHERE k >= ? AND k < ?",
-                char::from(from.subspace()),
-            ))
-            .map_err(into_error)
-            .caused_by(trc::location!())?
-            .execute([from.serialize(0), to.serialize(0)])
-            .map_err(into_error)
-            .caused_by(trc::location!())?;
+            conn.prepare_cached(&sql.get(subspace).delete_range)
+                .map_err(into_error)
+                .caused_by(trc::location!())?
+                .execute([from, to])
+                .map_err(into_error)
+                .caused_by(trc::location!())?;
 
             Ok(())
         })
-        .await
     }
+}
+
+fn incr_counter(
+    trx: &Transaction<'_>,
+    sql: &SqlStatements,
+    key: &[u8],
+    by: i64,
+) -> trc::Result<i64> {
+    trx.prepare_cached(&sql.get(Subspace::Counter).increment_returning)
+        .map_err(into_error)
+        .caused_by(trc::location!())?
+        .query_row(params![&key, &by], |row| row.get::<_, i64>(0))
+        .map_err(into_error)
+        .caused_by(trc::location!())
+}
+
+fn is_busy(err: &rusqlite::Error) -> bool {
+    matches!(
+        err,
+        rusqlite::Error::SqliteFailure(err, _)
+            if matches!(err.code, ErrorCode::DatabaseBusy | ErrorCode::DatabaseLocked)
+    )
 }

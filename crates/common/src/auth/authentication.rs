@@ -7,16 +7,22 @@
 use crate::{
     Server,
     auth::{
-        AccessToken, AuthRequest, DomainCache,
+        AccessToken, AuthRequest, DomainCache, TokenScope,
         credential::{ApiKey, AppPassword},
-        oauth::{GrantType, token::TOKEN_HEADER},
+        oauth::{
+            GrantType,
+            scope::OAuthScopes,
+            token::{TOKEN_HEADER, assert_credential_version},
+        },
     },
 };
-use base64::{Engine, engine::general_purpose};
+use compact_str::CompactString;
 use directory::{
     Credentials, Directory, Recipient,
+    backend::oidc::{ExternalToken, TokenAccess, TokenContext},
     core::secret::{SecretVerificationResult, verify_mfa_secret_hash, verify_secret_hash},
 };
+use encodify::base64::URL_SAFE_NO_PAD;
 use registry::schema::{
     enums::Permission,
     structs::{self, Credential},
@@ -25,6 +31,11 @@ use serde::Deserialize;
 use std::{borrow::Cow, net::IpAddr, sync::Arc};
 use store::write::now;
 use trc::AddContext;
+
+pub struct Authenticated {
+    pub access_token: AccessToken,
+    pub expires_in: Option<u64>,
+}
 
 pub struct UsernameParts {
     pub account: Username,
@@ -38,15 +49,38 @@ pub struct Username {
 }
 
 impl Server {
-    pub async fn authenticate(&self, req: &AuthRequest) -> trc::Result<AccessToken> {
-        match Box::pin(self.route_auth_request(req))
-            .await
-            .and_then(|token| token.assert_has_permission(Permission::Authenticate))
-        {
-            Ok(token) => Ok(token),
+    pub async fn authenticate(&self, req: &AuthRequest) -> trc::Result<Authenticated> {
+        let result = match &req.credentials {
+            Credentials::Basic {
+                username,
+                secret,
+                mfa_token,
+            } => self
+                .authenticate_basic(req, username, secret, mfa_token.as_deref())
+                .await
+                .map(|access_token| Authenticated {
+                    access_token,
+                    expires_in: None,
+                }),
+            Credentials::Bearer { username, token } => {
+                self.authenticate_bearer(req, username.as_deref(), token)
+                    .await
+            }
+        };
+
+        match result.and_then(|authenticated| {
+            authenticated
+                .access_token
+                .assert_has_permission(Permission::Authenticate)
+                .map(|access_token| Authenticated {
+                    access_token,
+                    expires_in: authenticated.expires_in,
+                })
+        }) {
+            Ok(authenticated) => Ok(authenticated),
             Err(err) => {
                 // Random delay to mitigate user enumeration attacks
-                #[cfg(not(feature = "test_mode"))]
+                #[cfg(not(stalwart_tests))]
                 {
                     use store::rand::{self, RngExt};
 
@@ -54,314 +88,439 @@ impl Server {
                     tokio::time::sleep(std::time::Duration::from_millis(delay)).await;
                 }
 
-                if matches!(
-                    err.as_ref(),
-                    trc::EventType::Auth(trc::AuthEvent::Failed)
-                        | trc::EventType::Security(trc::SecurityEvent::IpUnauthorized)
-                ) && self.has_auth_fail2ban()
-                    && self
-                        .is_auth_fail2banned(req.remote_ip, req.username())
-                        .await?
-                {
-                    Err(trc::SecurityEvent::AuthenticationBan
-                        .into_err()
-                        .ctx(trc::Key::RemoteIp, req.remote_ip)
-                        .ctx_opt(trc::Key::AccountName, req.username().map(|s| s.to_string())))
-                } else {
-                    Err(err.ctx(trc::Key::RemoteIp, req.remote_ip))
-                }
+                Err(self.auth_failure(err, req.remote_ip, req.username()).await)
             }
         }
     }
 
-    async fn route_auth_request(&self, req: &AuthRequest) -> trc::Result<AccessToken> {
-        match &req.credentials {
-            Credentials::Basic {
-                username,
-                secret,
-                mfa_token,
-            } => {
-                let mut username = UsernameParts::new(username);
-
-                // Try to authenticate as fallback admin if configured
-                if let Some((fallback_user, fallback_hash)) = &self.registry().recovery_admin()
-                    && username.auth_as().address() == fallback_user
-                {
-                    return if verify_secret_hash(fallback_hash, secret.as_bytes()).await? {
-                        if username.is_master() {
-                            let address = username.account().address();
-                            if let Some(account_id) =
-                                self.impersonated_account_id(username.account()).await?
-                            {
-                                trc::event!(
-                                    Auth(trc::AuthEvent::Success),
-                                    AccountName = address.to_string(),
-                                    AccountId = account_id,
-                                    SpanId = req.session_id,
-                                    Details = fallback_user.to_string(),
-                                );
-
-                                self.access_token(account_id)
-                                    .await
-                                    .and_then(|token| AccessToken::new(token, req.remote_ip))
-                            } else {
-                                Err(trc::AuthEvent::Failed
-                                    .into_err()
-                                    .ctx(trc::Key::AccountName, address.to_string())
-                                    .reason("Master user account not found for fallback admin authentication"))
-                            }
-                        } else {
-                            trc::event!(
-                                Auth(trc::AuthEvent::Success),
-                                AccountName = fallback_user.to_string(),
-                                SpanId = req.session_id,
-                            );
-
-                            Ok(AccessToken::new_admin())
-                        }
-                    } else {
-                        Err(trc::AuthEvent::Failed
-                            .into_err()
-                            .ctx(trc::Key::AccountName, fallback_user.to_string())
-                            .ctx(trc::Key::SpanId, req.session_id)
-                            .reason("Fallback admin authentication failed"))
-                    };
-                }
-
-                // Add domain if missing, use the default domain
-                self.add_missing_domain(&mut username.account);
-                if let Some(master_user) = &mut username.master_user {
-                    self.add_missing_domain(master_user);
-                }
-
-                // Obtain domain
-                let auth_as = username.auth_as();
-                let auth_as_address = auth_as.address();
-                let auth_as_local = auth_as.local();
-                let auth_as_domain = auth_as.domain().unwrap();
-                let domain = self.resolve_domain(auth_as_domain).await?;
-
-                // Authenticate app passwords
-                if let Some(app_pass) = AppPassword::parse(secret) {
-                    if username.is_master() {
-                        return Err(trc::AuthEvent::Failed
-                            .into_err()
-                            .ctx(trc::Key::AccountName, auth_as_address.to_string())
-                            .ctx(trc::Key::SpanId, req.session_id)
-                            .reason("App passwords cannot be used for impersonation"));
-                    }
-                    return if let Some(account_id) =
-                        self.account_id_from_parts(auth_as_local, domain.id).await?
-                    {
-                        self.validate_credential(
-                            account_id,
-                            app_pass.credential_id,
-                            app_pass.secret.as_ref(),
-                            req.remote_ip,
-                            req.session_id,
-                        )
-                        .await
-                    } else {
-                        Err(trc::AuthEvent::Failed
-                            .into_err()
-                            .ctx(trc::Key::AccountName, auth_as_address.to_string())
-                            .reason("App password authentication failed: account not found"))
-                    };
-                }
-
-                // Obtain external directory, if any
-                let mut is_alias_login = false;
-                let token = if let Some(directory) = self.get_directory_for_cached_domain(&domain) {
-                    let directory_account = if username.is_master() {
-                        directory
-                            .authenticate(&Credentials::Basic {
-                                username: auth_as_address.to_string(),
-                                secret: secret.clone(),
-                                mfa_token: mfa_token.clone(),
-                            })
-                            .await?
-                    } else {
-                        directory.authenticate(&req.credentials).await?
-                    };
-
-                    is_alias_login = directory_account.email != auth_as_address;
-                    self.build_directory_token(directory_account, req.remote_ip)
-                        .await
-                } else if let Some(account_id) =
-                    self.account_id_from_parts(auth_as_local, domain.id).await?
-                {
-                    if let Some(account) = self
-                        .registry()
-                        .object::<structs::Account>(account_id.into())
-                        .await?
-                        .and_then(|account| account.into_user())
-                    {
-                        let Some(credential) = account.password_credential() else {
-                            return Err(trc::AuthEvent::Failed
-                                .into_err()
-                                .ctx(trc::Key::AccountName, auth_as_address.to_string())
-                                .ctx(trc::Key::AccountId, account_id)
-                                .ctx(trc::Key::SpanId, req.session_id)
-                                .reason("Password credential not found for account"));
-                        };
-
-                        match verify_mfa_secret_hash(
-                            credential.otp_auth.as_deref(),
-                            mfa_token.as_deref(),
-                            credential.secret.as_str(),
-                            secret,
-                        )
-                        .await?
-                        {
-                            SecretVerificationResult::Valid => {
-                                is_alias_login = account.name != auth_as_local;
-                                self.access_token(account_id)
-                                    .await
-                                    .and_then(|token| AccessToken::new(token, req.remote_ip))
-                            }
-                            SecretVerificationResult::Invalid => Err(trc::AuthEvent::Failed
-                                .into_err()
-                                .ctx(trc::Key::AccountName, auth_as_address.to_string())
-                                .ctx(trc::Key::AccountId, account_id)
-                                .ctx(trc::Key::SpanId, req.session_id)
-                                .reason("Authentication failed")),
-                            SecretVerificationResult::MissingMfaToken => {
-                                Err(trc::AuthEvent::MfaRequired
-                                    .into_err()
-                                    .ctx(trc::Key::AccountName, auth_as_address.to_string())
-                                    .ctx(trc::Key::AccountId, account_id)
-                                    .ctx(trc::Key::SpanId, req.session_id)
-                                    .reason("MFA token required"))
-                            }
-                        }
-                    } else {
-                        Err(trc::AuthEvent::Error
-                            .into_err()
-                            .ctx(trc::Key::AccountName, auth_as_address.to_string())
-                            .ctx(trc::Key::AccountId, account_id)
-                            .reason("Account not found in registry"))
-                    }
-                } else {
-                    Err(trc::AuthEvent::Failed
+    pub async fn auth_failure(
+        &self,
+        err: trc::Error,
+        remote_ip: IpAddr,
+        username: Option<&str>,
+    ) -> trc::Error {
+        if matches!(
+            err.as_ref(),
+            trc::EventType::Auth(trc::AuthEvent::Failed)
+                | trc::EventType::Security(trc::SecurityEvent::IpUnauthorized)
+        ) && self.has_auth_fail2ban()
+        {
+            match self.is_auth_fail2banned(remote_ip, username).await {
+                Ok(true) => {
+                    return trc::SecurityEvent::AuthenticationBan
                         .into_err()
-                        .ctx(trc::Key::AccountName, auth_as_address.to_string())
-                        .reason("Account not found"))
-                }?;
-
-                // Enforce alias login restrictions
-                if is_alias_login && !token.has_permission(Permission::AuthenticateWithAlias) {
-                    return Err(trc::AuthEvent::Failed
-                        .into_err()
-                        .ctx(trc::Key::AccountName, auth_as_address.to_string())
-                        .ctx(trc::Key::AccountId, token.account_id())
-                        .ctx(trc::Key::SpanId, req.session_id)
-                        .reason("Authenticated using an email alias but account does not have AuthenticateAlias permission"));
+                        .ctx(trc::Key::RemoteIp, remote_ip)
+                        .ctx_opt(trc::Key::AccountName, username.map(CompactString::from));
                 }
+                Ok(false) => {}
+                Err(err) => return err,
+            }
+        }
 
-                // Validate master user access
+        err.details_to_reason().ctx(trc::Key::RemoteIp, remote_ip)
+    }
+
+    async fn authenticate_basic(
+        &self,
+        req: &AuthRequest,
+        username: &str,
+        secret: &str,
+        mfa_token: Option<&str>,
+    ) -> trc::Result<AccessToken> {
+        let mut username = UsernameParts::new(username);
+
+        // Try to authenticate as fallback admin if configured
+        if let Some((fallback_user, fallback_hash)) = &self.registry().recovery_admin()
+            && username.auth_as().address() == fallback_user
+        {
+            return if verify_secret_hash(
+                &self.inner.data.password_verifier,
+                fallback_hash,
+                secret.as_bytes(),
+            )
+            .await?
+            {
                 if username.is_master() {
-                    token.assert_has_permissions(&[
-                        Permission::Impersonate,
-                        Permission::Authenticate,
-                    ])?;
                     let address = username.account().address();
-                    let master_address = auth_as_address;
                     if let Some(account_id) =
                         self.impersonated_account_id(username.account()).await?
                     {
                         trc::event!(
                             Auth(trc::AuthEvent::Success),
-                            AccountName = address.to_string(),
+                            AccountName = CompactString::from(address),
                             AccountId = account_id,
                             SpanId = req.session_id,
-                            Details = master_address.to_string(),
+                            Address = CompactString::from(fallback_user),
                         );
 
                         self.access_token(account_id)
                             .await
-                            .map(AccessToken::new_maybe_invalid)
+                            .and_then(|token| AccessToken::new(token, req.remote_ip))
                     } else {
                         Err(trc::AuthEvent::Failed
                             .into_err()
-                            .ctx(trc::Key::AccountName, address.to_string())
-                            .details(master_address.to_string())
-                            .reason("Master user account not found"))
+                            .ctx(trc::Key::AccountName, CompactString::from(address))
+                            .reason(
+                                "Master user account not found for fallback admin authentication",
+                            ))
                     }
                 } else {
                     trc::event!(
                         Auth(trc::AuthEvent::Success),
-                        AccountName = auth_as_address.to_string(),
-                        AccountId = token.account_id(),
+                        AccountName = CompactString::from(fallback_user),
                         SpanId = req.session_id,
                     );
 
-                    Ok(token)
+                    Ok(AccessToken::new_admin())
                 }
+            } else {
+                Err(trc::AuthEvent::Failed
+                    .into_err()
+                    .ctx(trc::Key::AccountName, CompactString::from(fallback_user))
+                    .ctx(trc::Key::SpanId, req.session_id)
+                    .reason("Fallback admin authentication failed"))
+            };
+        }
+
+        // Add domain if missing, use the default domain
+        self.add_missing_domain(&mut username.account);
+        if let Some(master_user) = &mut username.master_user {
+            self.add_missing_domain(master_user);
+        }
+
+        // Obtain domain
+        let auth_as = username.auth_as();
+        let auth_as_address = auth_as.address();
+        let auth_as_local = auth_as.local();
+        let auth_as_domain = auth_as.domain().unwrap();
+        let domain = self.resolve_domain(auth_as_domain).await?;
+
+        // Authenticate app passwords
+        if let Some(app_pass) = AppPassword::parse(secret) {
+            if username.is_master() {
+                return Err(trc::AuthEvent::Failed
+                    .into_err()
+                    .ctx(trc::Key::AccountName, CompactString::from(auth_as_address))
+                    .ctx(trc::Key::SpanId, req.session_id)
+                    .reason("App passwords cannot be used for impersonation"));
             }
-            Credentials::Bearer { username, token } => {
-                // Handle API key authentication
-                if let Some(key) = ApiKey::parse(token) {
-                    return self
-                        .validate_credential(
-                            key.account_id,
-                            key.credential_id,
-                            key.secret.as_ref(),
-                            req.remote_ip,
-                            req.session_id,
-                        )
-                        .await;
-                }
+            return if let Some(account_id) =
+                self.account_id_from_parts(auth_as_local, domain.id).await?
+            {
+                self.validate_credential(
+                    account_id,
+                    app_pass.credential_id,
+                    app_pass.secret.as_ref(),
+                    req.remote_ip,
+                    req.session_id,
+                )
+                .await
+            } else {
+                Err(trc::AuthEvent::Failed
+                    .into_err()
+                    .ctx(trc::Key::AccountName, CompactString::from(auth_as_address))
+                    .reason("App password authentication failed: account not found"))
+            };
+        }
 
-                #[cfg(feature = "dev_mode")]
-                if std::env::var("API_TOKEN_ADMIN").is_ok_and(|admin_token| &admin_token == token) {
-                    return Ok(AccessToken::new_admin());
-                }
+        // Obtain external directory, if any
+        let mut is_alias_login = false;
+        let token = if let Some(directory) = self.get_directory_for_cached_domain(&domain) {
+            let directory_account = if username.is_master() {
+                directory
+                    .authenticate(
+                        &Credentials::Basic {
+                            username: auth_as_address.to_string(),
+                            secret: secret.to_string(),
+                            mfa_token: mfa_token.map(String::from),
+                        },
+                        &self.inner.data.password_verifier,
+                    )
+                    .await?
+            } else {
+                directory
+                    .authenticate(&req.credentials, &self.inner.data.password_verifier)
+                    .await?
+            };
 
-                // Obtain external directory, if any. When no username is supplied
-                // (e.g. HTTP bearer auth), peek at the JWT claims to find the
-                // user's domain so per-domain OIDC directories are reachable.
-                let directory = match username.as_deref().map(UsernameParts::new) {
-                    Some(username) => match username.auth_as().domain() {
-                        Some(domain_name) => self.get_directory_for_domain(domain_name).await?,
-                        None => self.get_directory_for_token(token).await?,
-                    },
-                    None => self.get_directory_for_token(token).await?,
+            self.assert_account_directory(&directory_account.email, directory)
+                .await?;
+            is_alias_login = directory_account.email != auth_as_address;
+            self.build_directory_token(directory_account, req.remote_ip)
+                .await
+        } else if let Some(account_id) =
+            self.account_id_from_parts(auth_as_local, domain.id).await?
+        {
+            if let Some(account) = self
+                .registry()
+                .object::<structs::Account>(account_id.into())
+                .await?
+                .and_then(|account| account.into_user())
+            {
+                let Some(credential) = account.password_credential() else {
+                    return Err(trc::AuthEvent::Failed
+                        .into_err()
+                        .ctx(trc::Key::AccountName, CompactString::from(auth_as_address))
+                        .ctx(trc::Key::AccountId, account_id)
+                        .ctx(trc::Key::SpanId, req.session_id)
+                        .reason("Password credential not found for account"));
                 };
 
-                // Try external directory authentication first if supported, then fallback to internal OAuth.
-                let mut external_error = None;
-                if let Some(directory) = directory
-                    && directory.has_bearer_token_support()
+                match verify_mfa_secret_hash(
+                    &self.inner.data.password_verifier,
+                    credential.otp_url.as_deref(),
+                    mfa_token,
+                    credential.secret.as_str(),
+                    secret,
+                )
+                .await?
                 {
-                    match directory.authenticate(&req.credentials).await {
-                        Ok(result) => {
-                            return self.build_directory_token(result, req.remote_ip).await;
-                        }
-                        Err(err) => {
-                            external_error = Some(err);
-                        }
+                    SecretVerificationResult::Valid => {
+                        is_alias_login = account.name != auth_as_local;
+                        self.access_token(account_id)
+                            .await
+                            .and_then(|token| AccessToken::new(token, req.remote_ip))
                     }
+                    SecretVerificationResult::Invalid => Err(trc::AuthEvent::Failed
+                        .into_err()
+                        .ctx(trc::Key::AccountName, CompactString::from(auth_as_address))
+                        .ctx(trc::Key::AccountId, account_id)
+                        .ctx(trc::Key::SpanId, req.session_id)
+                        .reason("Authentication failed")),
+                    SecretVerificationResult::MissingMfaToken => Err(trc::AuthEvent::MfaRequired
+                        .into_err()
+                        .ctx(trc::Key::AccountName, CompactString::from(auth_as_address))
+                        .ctx(trc::Key::AccountId, account_id)
+                        .ctx(trc::Key::SpanId, req.session_id)
+                        .reason("MFA token required")),
                 }
+            } else {
+                Err(trc::AuthEvent::Error
+                    .into_err()
+                    .ctx(trc::Key::AccountName, CompactString::from(auth_as_address))
+                    .ctx(trc::Key::AccountId, account_id)
+                    .reason("Account not found in registry"))
+            }
+        } else {
+            Err(trc::AuthEvent::Failed
+                .into_err()
+                .ctx(trc::Key::AccountName, CompactString::from(auth_as_address))
+                .reason("Account not found"))
+        }?;
 
-                // Internal OAuth
-                match self
-                    .validate_access_token(GrantType::AccessToken.into(), token)
+        // Enforce alias login restrictions
+        if is_alias_login && !token.has_permission(Permission::AuthenticateWithAlias) {
+            return Err(trc::AuthEvent::Failed
+                .into_err()
+                .ctx(trc::Key::AccountName, CompactString::from(auth_as_address))
+                .ctx(trc::Key::AccountId, token.account_id())
+                .ctx(trc::Key::SpanId, req.session_id)
+                .reason("Authenticated using an email alias but account does not have AuthenticateAlias permission"));
+        }
+
+        // Validate master user access
+        if username.is_master() {
+            token.assert_has_permissions(&[Permission::Impersonate, Permission::Authenticate])?;
+            let address = username.account().address();
+            let master_address = auth_as_address;
+            if let Some(account_id) = self.impersonated_account_id(username.account()).await? {
+                trc::event!(
+                    Auth(trc::AuthEvent::Success),
+                    AccountName = CompactString::from(address),
+                    AccountId = account_id,
+                    SpanId = req.session_id,
+                    Address = CompactString::from(master_address),
+                );
+
+                self.access_token(account_id)
                     .await
-                {
-                    Ok(token_info) => self
-                        .access_token(token_info.account_id)
+                    .map(AccessToken::new_maybe_invalid)
+            } else {
+                Err(trc::AuthEvent::Failed
+                    .into_err()
+                    .ctx(trc::Key::AccountName, CompactString::from(address))
+                    .ctx(trc::Key::Address, CompactString::from(master_address))
+                    .reason("Master user account not found"))
+            }
+        } else {
+            trc::event!(
+                Auth(trc::AuthEvent::Success),
+                AccountName = CompactString::from(auth_as_address),
+                AccountId = token.account_id(),
+                SpanId = req.session_id,
+            );
+
+            Ok(token)
+        }
+    }
+
+    async fn authenticate_bearer(
+        &self,
+        req: &AuthRequest,
+        username: Option<&str>,
+        token: &str,
+    ) -> trc::Result<Authenticated> {
+        // Handle API key authentication
+        if let Some(key) = ApiKey::parse(token) {
+            return self
+                .validate_credential(
+                    key.account_id,
+                    key.credential_id,
+                    key.secret.as_ref(),
+                    req.remote_ip,
+                    req.session_id,
+                )
+                .await
+                .map(|access_token| Authenticated {
+                    access_token,
+                    expires_in: None,
+                });
+        }
+
+        #[cfg(feature = "dev_mode")]
+        if std::env::var("API_TOKEN_ADMIN").is_ok_and(|admin_token| admin_token == token) {
+            return Ok(Authenticated {
+                access_token: AccessToken::new_admin(),
+                expires_in: None,
+            });
+        }
+
+        if token.starts_with(TOKEN_HEADER) {
+            return self.authenticate_oauth_token(token, req.remote_ip).await;
+        }
+
+        // Obtain external directory, if any. When no username is supplied
+        // (e.g. HTTP bearer auth), peek at the JWT claims to find the
+        // user's domain so per-domain OIDC directories are reachable.
+        let directory = self.bearer_directory(username, token).await?;
+
+        // Try external directory authentication first if supported, then fallback to internal OAuth.
+        let mut external_error = None;
+        if let Some(directory) = directory
+            && directory.has_bearer_token_support()
+        {
+            match self.authenticate_external_token(directory, token).await {
+                Ok(external) => {
+                    self.assert_account_directory(&external.account.email, directory)
+                        .await?;
+                    let token_scope = match external.access {
+                        TokenAccess::Unrestricted => None,
+                        TokenAccess::Scoped(scopes) => Some(TokenScope::External {
+                            scopes: OAuthScopes::from_external(scopes),
+                        }),
+                    };
+                    let expires_in = external.expires_at.map(|exp| exp.saturating_sub(now()));
+                    return self
+                        .build_directory_token(external.account, req.remote_ip)
                         .await
-                        .and_then(|token| AccessToken::new(token, req.remote_ip)),
-                    Err(err) => {
-                        if let Some(external_error) = external_error {
-                            Err(external_error)
-                        } else {
-                            Err(err)
-                        }
-                    }
+                        .map(|access_token| Authenticated {
+                            access_token: access_token.with_token_scope(token_scope),
+                            expires_in,
+                        });
+                }
+                Err(err) => {
+                    external_error = Some(err);
                 }
             }
         }
+
+        // Internal OAuth
+        match self.authenticate_oauth_token(token, req.remote_ip).await {
+            Ok(authenticated) => Ok(authenticated),
+            Err(err) => {
+                if let Some(external_error) = external_error {
+                    Err(external_error)
+                } else {
+                    Err(err)
+                }
+            }
+        }
+    }
+
+    pub async fn authenticate_external_token(
+        &self,
+        directory: &Directory,
+        token: &str,
+    ) -> trc::Result<ExternalToken> {
+        let resources = &self.core.network.resources;
+        let applications = &self.inner.data.applications;
+        let app_policy = self.app_origin_policy(None);
+        directory
+            .authenticate_token(
+                token,
+                &TokenContext {
+                    is_resource: &|audience| {
+                        let audience = audience.strip_suffix('/').unwrap_or(audience);
+                        resources
+                            .identifiers
+                            .iter()
+                            .any(|identifier| identifier.eq_ignore_ascii_case(audience))
+                    },
+                    is_first_party: &|client_id| {
+                        applications.is_first_party_client(client_id, app_policy)
+                    },
+                },
+            )
+            .await
+    }
+
+    async fn assert_account_directory(
+        &self,
+        email: &str,
+        directory: &Arc<Directory>,
+    ) -> trc::Result<()> {
+        let account_directory = match email.rsplit_once('@') {
+            Some((_, domain)) => self
+                .get_directory_for_domain(domain)
+                .await
+                .caused_by(trc::location!())?,
+            None => None,
+        };
+        if account_directory
+            .is_some_and(|account_directory| Arc::ptr_eq(account_directory, directory))
+        {
+            Ok(())
+        } else {
+            Err(trc::AuthEvent::Failed
+                .into_err()
+                .ctx(trc::Key::AccountName, CompactString::from(email))
+                .reason(
+                    "The account's domain is not served by the directory that authenticated it",
+                ))
+        }
+    }
+
+    async fn authenticate_oauth_token(
+        &self,
+        token: &str,
+        remote_ip: IpAddr,
+    ) -> trc::Result<Authenticated> {
+        let token_info = self
+            .decode_access_token(GrantType::AccessToken.into(), token)
+            .map_err(|err| {
+                if err.matches(trc::EventType::Auth(trc::AuthEvent::Error)) {
+                    trc::AuthEvent::Failed.into_err().caused_by(err)
+                } else {
+                    err
+                }
+            })?;
+        let Some(grant) = token_info.grant else {
+            return Err(trc::AuthEvent::Failed
+                .into_err()
+                .details("Access token is not bound to an OAuth grant"));
+        };
+        let inner = self.access_token(token_info.account_id).await?;
+        assert_credential_version(token_info.credential_version, inner.credential_version())?;
+        let token_scope = self
+            .oauth_grant_scope(grant.id, token_info.account_id)
+            .await?;
+
+        AccessToken::renew(inner, None, Some(token_scope), remote_ip).map(|access_token| {
+            Authenticated {
+                access_token,
+                expires_in: Some(token_info.expires_in),
+            }
+        })
     }
 
     async fn impersonated_account_id(&self, username: &Username) -> trc::Result<Option<u32>> {
@@ -376,7 +535,7 @@ impl Server {
             && let Some(directory) = self.get_directory_for_cached_domain(&domain_cache)
             && let Recipient::Account(account) = directory.recipient(address).await?
         {
-            return Ok(Some(Box::pin(self.synchronize_account(account)).await?.id));
+            return Ok(Some(self.synchronize_account(account).await?.id));
         }
 
         Ok(None)
@@ -406,7 +565,13 @@ impl Server {
                 })
             {
                 if credential.credential_id.document_id() == credential_id {
-                    if !verify_secret_hash(&credential.secret, secret).await? {
+                    if !verify_secret_hash(
+                        &self.inner.data.password_verifier,
+                        &credential.secret,
+                        secret,
+                    )
+                    .await?
+                    {
                         return Err(trc::AuthEvent::Failed
                             .into_err()
                             .ctx(trc::Key::AccountName, account.name)
@@ -478,7 +643,7 @@ impl Server {
         } else {
             Err(trc::AuthEvent::Failed
                 .into_err()
-                .ctx(trc::Key::Details, domain_name.to_string())
+                .ctx(trc::Key::Domain, CompactString::from(domain_name))
                 .reason("Domain not found"))
         }
     }
@@ -487,7 +652,7 @@ impl Server {
         if address.domain().is_none() {
             trc::event!(
                 Auth(trc::AuthEvent::Warning),
-                AccountName = address.address().to_string(),
+                AccountName = CompactString::from(address.address()),
                 Reason = "No domain in username",
             );
             address.domain_start = address.name.len() + 1;
@@ -500,16 +665,38 @@ impl Server {
         account: directory::Account,
         remote_ip: IpAddr,
     ) -> trc::Result<AccessToken> {
-        let account = Box::pin(self.synchronize_account(account)).await?;
+        let account = self.synchronize_account(account).await?;
         self.access_token_from_account(account.id, account.account)
             .await
             .and_then(|token| AccessToken::new(token, remote_ip))
     }
 
+    pub(crate) async fn bearer_directory(
+        &self,
+        username: Option<&str>,
+        token: &str,
+    ) -> trc::Result<Option<&Arc<Directory>>> {
+        let username = username.map(UsernameParts::new);
+        match username
+            .as_ref()
+            .and_then(|username| username.auth_as().domain())
+        {
+            Some(domain_name) => self.get_directory_for_domain(domain_name).await,
+            None => self.get_directory_for_token(token).await,
+        }
+    }
+
+    #[cfg_attr(not(feature = "enterprise"), allow(unused_variables))]
     pub async fn get_directory_for_domain(
         &self,
         domain_name: &str,
     ) -> trc::Result<Option<&Arc<Directory>>> {
+
+        Ok(self.get_default_directory())
+    }
+
+    #[cfg_attr(not(feature = "enterprise"), allow(unused_variables))]
+    pub async fn get_directory_for_host(&self, host: &str) -> trc::Result<Option<&Arc<Directory>>> {
 
         Ok(self.get_default_directory())
     }
@@ -531,11 +718,13 @@ impl Server {
         }
     }
 
+    #[cfg_attr(not(feature = "enterprise"), allow(unused_variables))]
     fn get_directory_for_issuer(&self, issuer: &str) -> Option<&Arc<Directory>> {
 
         None
     }
 
+    #[cfg_attr(not(feature = "enterprise"), allow(unused_variables))]
     pub fn get_directory_for_cached_domain(&self, domain: &DomainCache) -> Option<&Arc<Directory>> {
 
         self.get_default_directory()
@@ -568,7 +757,7 @@ impl<'x> JwtClaims<'x> {
             return None;
         }
 
-        general_purpose::URL_SAFE_NO_PAD.decode(payload).ok()
+        URL_SAFE_NO_PAD.decode(payload).ok()
     }
 
     fn parse(payload: &'x [u8]) -> Option<Self> {
@@ -684,75 +873,3 @@ impl AuthRequest {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn jwt(payload: &str) -> String {
-        format!(
-            "eyJhbGciOiJSUzI1NiJ9.{}.c2lnbmF0dXJl",
-            general_purpose::URL_SAFE_NO_PAD.encode(payload)
-        )
-    }
-
-    fn hints(token: &str) -> Option<(Option<String>, Option<String>)> {
-        let payload = JwtClaims::decode_payload(token)?;
-        let claims = JwtClaims::parse(&payload)?;
-
-        Some((
-            claims.domain().map(str::to_string),
-            claims.iss.as_deref().map(str::to_string),
-        ))
-    }
-
-    #[test]
-    fn jwt_claims_are_extracted() {
-        for (payload, domain, issuer) in [
-            (
-                r#"{"iss":"https://idp.example.org","email":"John@Example.ORG"}"#,
-                Some("Example.ORG"),
-                Some("https://idp.example.org"),
-            ),
-            (
-                r#"{"preferred_username":"jane@example.net","upn":"jane@example.com"}"#,
-                Some("example.net"),
-                None,
-            ),
-            (
-                r#"{"email":"broken@","upn":"jane@example.com"}"#,
-                Some("example.com"),
-                None,
-            ),
-            (
-                r#"{"iss":"https://idp.example.org","sub":"5db2d1b6","aud":["a","b"],"scope":"openid"}"#,
-                None,
-                Some("https://idp.example.org"),
-            ),
-            (r#"{"sub":"5db2d1b6"}"#, None, None),
-            (r#"{"email":"jane@example.net"}"#, Some("example.net"), None),
-        ] {
-            assert_eq!(
-                hints(&jwt(payload)),
-                Some((domain.map(str::to_string), issuer.map(str::to_string))),
-                "Unexpected claims for {payload}"
-            );
-        }
-    }
-
-    #[test]
-    fn non_jwt_tokens_are_ignored() {
-        for token in [
-            "sw1.eyJhbGciOiJSUzI1NiJ9.eyJpc3MiOiJodHRwczovL2lkcC5leGFtcGxlLm9yZyJ9",
-            "sw1.eyJhbGciOiJSUzI1NiJ9",
-            "opaque-token",
-            "one.two",
-            "one.two.three.four",
-            "",
-        ] {
-            assert!(
-                JwtClaims::decode_payload(token).is_none(),
-                "Token {token:?} was parsed as a JWT"
-            );
-        }
-    }
-}

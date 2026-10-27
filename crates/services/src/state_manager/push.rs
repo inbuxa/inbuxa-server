@@ -15,7 +15,6 @@ use common::{
     ipc::{PushEvent, PushNotification},
 };
 use email::push::{PushSubscription, PushSubscriptions, Urgency};
-use reqwest::Client;
 use std::{
     collections::hash_map::Entry,
     sync::Arc,
@@ -24,15 +23,31 @@ use std::{
 use store::{
     ValueKey,
     ahash::{AHashMap, AHashSet},
-    write::{AlignedBytes, Archive, now},
+    write::{Archive, ArchiveBytes, now},
 };
 use tokio::sync::mpsc;
 use trc::{AddContext, PushSubscriptionEvent, ServerEvent};
 use types::{collection::Collection, field::PrincipalField, id::Id};
+use utils::outbound::OutboundClient;
 
 pub fn spawn_push_manager(inner: Arc<Inner>) -> mpsc::Sender<Event> {
     let (push_tx_, mut push_rx) = mpsc::channel::<Event>(IPC_CHANNEL_BUFFER);
     let push_tx = push_tx_.clone();
+    let (register_tx, mut register_rx) = mpsc::unbounded_channel::<PushEvent>();
+    let router_tx = inner.ipc.push_tx.clone();
+
+    tokio::spawn(async move {
+        while let Some(event) = register_rx.recv().await {
+            if router_tx.send(event).await.is_err() {
+                trc::event!(
+                    Server(ServerEvent::ThreadError),
+                    Details = "Error sending push server registration.",
+                    CausedBy = trc::location!()
+                );
+                break;
+            }
+        }
+    });
 
     tokio::spawn(async move {
         let mut push_servers: AHashMap<Id, PushRegistration> = AHashMap::default();
@@ -110,16 +125,11 @@ pub fn spawn_push_manager(inner: Arc<Inner>) -> mpsc::Sender<Event> {
 
                 // Subscribe to push events
                 if !account_push_ids.is_empty()
-                    && server
-                        .inner
-                        .ipc
-                        .push_tx
-                        .clone()
+                    && register_tx
                         .send(PushEvent::PushServerRegister {
                             activate: account_push_ids.keys().copied().collect(),
                             expired: vec![],
                         })
-                        .await
                         .is_err()
                 {
                     trc::event!(
@@ -244,7 +254,7 @@ pub fn spawn_push_manager(inner: Arc<Inner>) -> mpsc::Sender<Event> {
                         if let Some(subscription) = newest_unverified {
                             let current_time = Instant::now();
 
-                            #[cfg(feature = "test_mode")]
+                            #[cfg(stalwart_tests)]
                             if subscription.url.contains("skip_checks") {
                                 last_verify.remove(&account_id);
                             }
@@ -335,16 +345,11 @@ pub fn spawn_push_manager(inner: Arc<Inner>) -> mpsc::Sender<Event> {
                             }
                         }
                         if (!active_account_ids.is_empty() || !inactive_account_ids.is_empty())
-                            && server
-                                .inner
-                                .ipc
-                                .push_tx
-                                .clone()
+                            && register_tx
                                 .send(PushEvent::PushServerRegister {
                                     activate: active_account_ids,
                                     expired: inactive_account_ids,
                                 })
-                                .await
                                 .is_err()
                         {
                             trc::event!(
@@ -355,7 +360,7 @@ pub fn spawn_push_manager(inner: Arc<Inner>) -> mpsc::Sender<Event> {
                         }
                     }
                     Event::Push { notification } => {
-                        let account_id = notification.account_id();
+                        let account_id = notification.recipient();
                         if let Some(ids) = account_push_ids.get_mut(&account_id) {
                             let current_time = now();
                             let mut remove_ids = Vec::new();
@@ -415,16 +420,11 @@ pub fn spawn_push_manager(inner: Arc<Inner>) -> mpsc::Sender<Event> {
                                 }
                                 if ids.is_empty() {
                                     account_push_ids.remove(&account_id);
-                                    if server
-                                        .inner
-                                        .ipc
-                                        .push_tx
-                                        .clone()
+                                    if register_tx
                                         .send(PushEvent::PushServerRegister {
                                             activate: vec![],
                                             expired: vec![account_id],
                                         })
-                                        .await
                                         .is_err()
                                     {
                                         trc::event!(
@@ -528,7 +528,7 @@ pub fn spawn_push_manager(inner: Arc<Inner>) -> mpsc::Sender<Event> {
 }
 
 fn send_verification(
-    push_client: &Client,
+    push_client: &OutboundClient,
     subscription: Arc<PushSubscription>,
     server: &Server,
     push_timeout: Duration,
@@ -571,7 +571,7 @@ async fn load_push_subscriptions(
 
     if let Some(push_subscriptions) = server
         .store()
-        .get_value::<Archive<AlignedBytes>>(ValueKey::property(
+        .get_value::<Archive<ArchiveBytes>>(ValueKey::property(
             account_id,
             Collection::Principal,
             0,

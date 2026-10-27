@@ -4,12 +4,19 @@
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
  */
 
-use crate::{api::query::QueryResponseBuilder, changes::state::StateManager};
-use common::Server;
+use crate::{
+    api::{
+        metadata::{MetadataType, ObjectMetadata},
+        query::QueryResponseBuilder,
+    },
+    changes::state::StateManager,
+};
+use common::{Server, auth::AccessToken};
 use email::sieve::ingest::SieveScriptIngest;
 use jmap_proto::{
     method::query::{Filter, QueryRequest, QueryResponse},
     object::sieve::{Sieve, SieveComparator, SieveFilter},
+    request::capability::CapabilityIds,
 };
 use std::future::Future;
 use store::{
@@ -28,6 +35,8 @@ pub trait SieveScriptQuery: Sync + Send {
     fn sieve_script_query(
         &self,
         request: QueryRequest<Sieve>,
+        access_token: &AccessToken,
+        using: CapabilityIds,
     ) -> impl Future<Output = trc::Result<QueryResponse>> + Send;
 }
 
@@ -35,8 +44,13 @@ impl SieveScriptQuery for Server {
     async fn sieve_script_query(
         &self,
         mut request: QueryRequest<Sieve>,
+        access_token: &AccessToken,
+        using: CapabilityIds,
     ) -> trc::Result<QueryResponse> {
         let account_id = request.account_id.document_id();
+        let object_metadata =
+            ObjectMetadata::new(self, access_token, using, MetadataType::SieveScript);
+        let sampled = object_metadata.viewer_change_id(self, account_id).await?;
         let mut filters = Vec::with_capacity(request.filter.len());
         let active_script_id = if request
             .filter
@@ -87,6 +101,16 @@ impl SieveScriptQuery for Server {
             .await
             .caused_by(trc::location!())?;
 
+        let metadata =
+            object_metadata.query(request.filter.iter().filter_map(|filter| match filter {
+                Filter::Property(SieveFilter::Metadata(filter)) => Some(filter),
+                _ => None,
+            }))?;
+        let mut metadata_matches = object_metadata
+            .evaluate(self, account_id, &metadata, || &document_ids)
+            .await?
+            .into_iter();
+
         for cond in std::mem::take(&mut request.filter) {
             match cond {
                 Filter::Property(cond) => match cond {
@@ -118,6 +142,9 @@ impl SieveScriptQuery for Server {
                             filters.push(SearchFilter::is_in_set(inactive_set));
                         }
                     }
+                    SieveFilter::Metadata(_) => filters.push(SearchFilter::is_in_set(
+                        metadata_matches.next().unwrap_or_default(),
+                    )),
                     SieveFilter::_T(other) => {
                         return Err(trc::JmapEvent::UnsupportedFilter.into_err().details(other));
                     }
@@ -169,8 +196,10 @@ impl SieveScriptQuery for Server {
         let mut response = QueryResponseBuilder::new(
             results.len() as usize,
             self.core.jmap.query_max_results,
-            self.get_state(account_id, SyncCollection::SieveScript)
-                .await?,
+            sampled.state(
+                self.get_state(account_id, SyncCollection::SieveScript)
+                    .await?,
+            ),
             &request,
         );
 

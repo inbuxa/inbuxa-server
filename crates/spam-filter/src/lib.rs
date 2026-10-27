@@ -8,23 +8,32 @@
 
 pub mod analysis;
 pub mod modules;
+mod texts;
 
 use analysis::ElementLocation;
 use analysis::url::UrlParts;
+use common::expr::Bump;
+use compact_str::CompactString;
 use mail_auth::{
     ArcOutput, DkimOutput, DmarcResult, IprevOutput, SpfOutput, dkim2::Dkim2Output, dmarc::Policy,
 };
-use mail_parser::Message;
+use mail_parser::{Message, PartId};
 use modules::html::HtmlToken;
 use nlp::tokenizers::types::TokenType;
 use std::borrow::Cow;
-use std::collections::HashSet;
 use std::hash::{Hash, Hasher};
 use std::net::{IpAddr, Ipv4Addr};
 use store::ahash::AHashSet;
+use sync_wrapper::SyncWrapper;
+use texts::is_body_part;
+
+pub use texts::{MessageTexts, PartText};
+
+pub type ContextToken<'x> = TokenType<Cow<'x, str>, Box<Email>, Box<UrlParts<'x>>, IpParts>;
 
 pub struct SpamFilterInput<'x> {
     pub message: &'x Message<'x>,
+    pub texts: &'x MessageTexts<'x>,
     pub span_id: u64,
 
     // Sender authentication
@@ -63,8 +72,7 @@ pub struct SpamFilterOutput<'x> {
 
     pub env_from_addr: Email,
     pub env_from_postmaster: bool,
-    pub env_to_orig_addr: HashSet<Email>,
-    pub env_to_rewritten_addr: HashSet<Email>,
+    pub env_to_orig_addr: AHashSet<Email>,
     pub from: Recipient,
     pub recipients_to: Vec<Recipient>,
     pub recipients_cc: Vec<Recipient>,
@@ -75,50 +83,83 @@ pub struct SpamFilterOutput<'x> {
     pub subject_lc: String,
     pub subject_thread: String,
     pub subject_thread_lc: String,
-    pub subject_tokens: Vec<TokenType<Cow<'x, str>, Email, UrlParts<'x>, IpParts>>,
+    pub subject_tokens: Vec<ContextToken<'x>>,
 
     pub ips: AHashSet<ElementLocation<IpAddr>>,
-    pub urls: HashSet<ElementLocation<UrlParts<'x>>>,
-    pub emails: HashSet<ElementLocation<Recipient>>,
-    pub domains: HashSet<ElementLocation<String>>,
+    pub urls: AHashSet<ElementLocation<UrlParts<'x>>>,
+    pub emails: AHashSet<ElementLocation<Recipient>>,
+    pub domains: AHashSet<ElementLocation<String>>,
 
     pub text_parts: Vec<TextPart<'x>>,
 }
 
 #[derive(Debug)]
 pub struct IpParts {
-    ip: Option<IpAddr>,
+    pub ip: Option<IpAddr>,
 }
 
 pub enum TextPart<'x> {
     Plain {
         text_body: &'x str,
-        tokens: Vec<TokenType<Cow<'x, str>, Email, UrlParts<'x>, IpParts>>,
+        tokens: Vec<ContextToken<'x>>,
     },
     Html {
-        html_tokens: Vec<HtmlToken>,
-        text_body: String,
-        tokens: Vec<TokenType<Cow<'x, str>, Email, UrlParts<'x>, IpParts>>,
+        html_tokens: Vec<HtmlToken<'x>>,
+        text_body: &'x str,
+        tokens: Vec<ContextToken<'x>>,
+        hidden_tokens: Vec<ContextToken<'x>>,
     },
     None,
 }
 
 #[derive(Debug, Default)]
 pub struct SpamFilterResult {
-    pub tags: AHashSet<String>,
+    pub tags: AHashSet<CompactString>,
     pub classifier_confidence: Vec<Option<f32>>,
     pub score: f32,
     pub rbl_ip_checks: usize,
     pub rbl_domain_checks: usize,
     pub rbl_url_checks: usize,
     pub rbl_email_checks: usize,
-    pub llm_result: Option<(String, String)>,
+    pub ai: SpamFilterAiResult,
+}
+
+#[derive(Debug, Default)]
+pub struct SpamFilterAiResult {
+    pub gate: Option<AiGate>,
+    pub facts: Option<String>,
+    pub header: Option<String>,
+    pub train_spam: Option<bool>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AiGate {
+    Run,
+    Authenticated,
+    Decided,
+    Condition,
+    NoContent,
+    Unavailable,
+}
+
+impl AiGate {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            AiGate::Run => "run",
+            AiGate::Authenticated => "authenticated",
+            AiGate::Decided => "decided",
+            AiGate::Condition => "condition",
+            AiGate::NoContent => "no-content",
+            AiGate::Unavailable => "unavailable",
+        }
+    }
 }
 
 pub struct SpamFilterContext<'x> {
     pub input: SpamFilterInput<'x>,
     pub output: SpamFilterOutput<'x>,
     pub result: SpamFilterResult,
+    pub arena: SyncWrapper<Bump>,
 }
 
 #[derive(Debug, Clone)]
@@ -142,9 +183,14 @@ pub struct Recipient {
 }
 
 impl<'x> SpamFilterInput<'x> {
-    pub fn from_message(message: &'x Message<'x>, span_id: u64) -> Self {
+    pub fn from_message(
+        message: &'x Message<'x>,
+        texts: &'x MessageTexts<'x>,
+        span_id: u64,
+    ) -> Self {
         Self {
             message,
+            texts,
             span_id,
             arc_result: None,
             spf_ehlo_result: None,
@@ -172,6 +218,30 @@ impl<'x> SpamFilterInput<'x> {
     pub fn train_mode(mut self) -> Self {
         self.is_train = true;
         self
+    }
+
+    pub fn is_text_body(&self, part_id: PartId) -> bool {
+        self.message
+            .part(part_id)
+            .is_some_and(|part| part.message().id() == 0 && part.in_text_body())
+    }
+
+    pub fn is_html_body(&self, part_id: PartId) -> bool {
+        self.message
+            .part(part_id)
+            .is_some_and(|part| part.message().id() == 0 && part.in_html_body())
+    }
+
+    pub fn is_body(&self, part_id: PartId) -> bool {
+        self.message.part(part_id).is_some_and(is_body_part)
+    }
+
+    pub fn first_body_part(&self) -> Option<PartId> {
+        self.message
+            .text_body()
+            .next()
+            .or_else(|| self.message.html_body().next())
+            .map(|part| part.id())
     }
 }
 

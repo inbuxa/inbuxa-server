@@ -5,10 +5,17 @@
  */
 
 use super::{ArchivedEmailSubmission, EmailSubmission};
-use common::storage::index::{IndexValue, IndexableAndSerializableObject, IndexableObject};
+use common::storage::index::{
+    IndexValue, IndexableAndSerializableObject, IndexableObject, SerializableObject,
+    serialize_object,
+};
+use registry::schema::enums::StorageQuota;
 use store::{
     U32_LEN, U64_LEN,
-    write::{IndexPropertyClass, ValueClass, key::KeySerializer},
+    write::{
+        ArchiveCompression, BatchBuilder, Compression, Dictionary, IndexPropertyClass, Slot,
+        ValueClass, key::KeySerializer,
+    },
 };
 use types::{collection::SyncCollection, field::EmailSubmissionField};
 
@@ -33,6 +40,7 @@ impl IndexableObject for EmailSubmission {
                 sync_collection: SyncCollection::EmailSubmission,
                 prefix: None,
             },
+            IndexValue::ObjectCount(StorageQuota::MaxEmailSubmissions),
         ]
         .into_iter()
     }
@@ -59,6 +67,7 @@ impl IndexableObject for &ArchivedEmailSubmission {
                 sync_collection: SyncCollection::EmailSubmission,
                 prefix: None,
             },
+            IndexValue::ObjectCount(StorageQuota::MaxEmailSubmissions),
         ]
         .into_iter()
     }
@@ -67,5 +76,15 @@ impl IndexableObject for &ArchivedEmailSubmission {
 impl IndexableAndSerializableObject for EmailSubmission {
     fn is_versioned() -> bool {
         false
+    }
+}
+
+impl ArchiveCompression for EmailSubmission {
+    const COMPRESSION: Compression = Compression::Zstd(Some(Dictionary::Common));
+}
+
+impl SerializableObject for EmailSubmission {
+    fn serialize_into(self, batch: &mut BatchBuilder, pending_id: Option<Slot>) -> trc::Result<()> {
+        serialize_object(self, batch, pending_id)
     }
 }

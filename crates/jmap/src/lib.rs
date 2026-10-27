@@ -5,6 +5,7 @@
  */
 
 #![warn(clippy::large_futures)]
+#![recursion_limit = "256"]
 
 use jmap_proto::object::JmapObjectId;
 use jmap_tools::{Element, Property, Value};

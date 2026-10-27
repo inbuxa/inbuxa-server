@@ -10,7 +10,10 @@ use crate::{
 };
 use common::config::{
     server::ServerProtocol,
-    smtp::queue::{HostOrIp, MxConfig, RelayConfig},
+    smtp::{
+        queue::{HostOrIp, MxConfig, RelayConfig},
+        resolver::MtaStsFailureKind,
+    },
 };
 use directory::Credentials;
 use mail_auth::{DnssecStatus, IpLookupStrategy};
@@ -52,38 +55,38 @@ impl Status<HostResponse<Box<str>>, ErrorDetails> {
             | ClientError::MissingCredentials
             | ClientError::MissingMailFrom
             | ClientError::MissingRcptTo
-            | ClientError::Timeout => Status::TemporaryFailure(ErrorDetails {
+            | ClientError::Timeout => Status::TemporaryFailure(Box::new(ErrorDetails {
                 entity: hostname.into(),
                 details: Error::ConnectionError(err.to_string().into_boxed_str()),
-            }),
+            })),
 
             ClientError::UnexpectedReply(response) => {
                 if response.severity() == Severity::PermanentNegativeCompletion {
-                    Status::PermanentFailure(ErrorDetails {
+                    Status::PermanentFailure(Box::new(ErrorDetails {
                         entity: hostname.into(),
-                        details: Error::UnexpectedResponse(UnexpectedResponse {
+                        details: Error::UnexpectedResponse(Box::new(UnexpectedResponse {
                             command: command.trim().into(),
                             response: response.into_box(),
-                        }),
-                    })
+                        })),
+                    }))
                 } else {
-                    Status::TemporaryFailure(ErrorDetails {
+                    Status::TemporaryFailure(Box::new(ErrorDetails {
                         entity: hostname.into(),
-                        details: Error::UnexpectedResponse(UnexpectedResponse {
+                        details: Error::UnexpectedResponse(Box::new(UnexpectedResponse {
                             command: command.trim().into(),
                             response: response.into_box(),
-                        }),
-                    })
+                        })),
+                    }))
                 }
             }
 
             ClientError::InvalidChallenge
             | ClientError::UnsupportedAuthMechanism
             | ClientError::InvalidTLSName
-            | ClientError::MissingStartTls => Status::PermanentFailure(ErrorDetails {
+            | ClientError::MissingStartTls => Status::PermanentFailure(Box::new(ErrorDetails {
                 entity: hostname.into(),
                 details: Error::ConnectionError(err.to_string().into_boxed_str()),
-            }),
+            })),
         }
     }
 
@@ -91,83 +94,83 @@ impl Status<HostResponse<Box<str>>, ErrorDetails> {
         let entity = hostname.into();
         if let Some(response) = response {
             if response.severity() == Severity::PermanentNegativeCompletion {
-                Status::PermanentFailure(ErrorDetails {
+                Status::PermanentFailure(Box::new(ErrorDetails {
                     entity,
-                    details: Error::UnexpectedResponse(UnexpectedResponse {
+                    details: Error::UnexpectedResponse(Box::new(UnexpectedResponse {
                         command: "STARTTLS".into(),
                         response,
-                    }),
-                })
+                    })),
+                }))
             } else {
-                Status::TemporaryFailure(ErrorDetails {
+                Status::TemporaryFailure(Box::new(ErrorDetails {
                     entity,
-                    details: Error::UnexpectedResponse(UnexpectedResponse {
+                    details: Error::UnexpectedResponse(Box::new(UnexpectedResponse {
                         command: "STARTTLS".into(),
                         response,
-                    }),
-                })
+                    })),
+                }))
             }
         } else {
-            Status::PermanentFailure(ErrorDetails {
+            Status::PermanentFailure(Box::new(ErrorDetails {
                 entity,
                 details: Error::TlsError("STARTTLS not advertised by host.".into()),
-            })
+            }))
         }
     }
 
     pub fn from_tls_error(hostname: &str, err: ClientError) -> Self {
         match err {
-            ClientError::InvalidTLSName => Status::PermanentFailure(ErrorDetails {
+            ClientError::InvalidTLSName => Status::PermanentFailure(Box::new(ErrorDetails {
                 entity: hostname.into(),
                 details: Error::TlsError("Invalid hostname".into()),
-            }),
-            ClientError::Timeout => Status::TemporaryFailure(ErrorDetails {
+            })),
+            ClientError::Timeout => Status::TemporaryFailure(Box::new(ErrorDetails {
                 entity: hostname.into(),
                 details: Error::TlsError("TLS handshake timed out".into()),
-            }),
-            ClientError::Tls(err) => Status::TemporaryFailure(ErrorDetails {
+            })),
+            ClientError::Tls(err) => Status::TemporaryFailure(Box::new(ErrorDetails {
                 entity: hostname.into(),
                 details: Error::TlsError(format!("Handshake failed: {err}").into_boxed_str()),
-            }),
-            ClientError::Io(err) => Status::TemporaryFailure(ErrorDetails {
+            })),
+            ClientError::Io(err) => Status::TemporaryFailure(Box::new(ErrorDetails {
                 entity: hostname.into(),
                 details: Error::TlsError(format!("I/O error: {err}").into_boxed_str()),
-            }),
-            _ => Status::PermanentFailure(ErrorDetails {
+            })),
+            _ => Status::PermanentFailure(Box::new(ErrorDetails {
                 entity: hostname.into(),
                 details: Error::TlsError("Other TLS error".into()),
-            }),
+            })),
         }
     }
 
     pub fn timeout(hostname: &str, stage: &str) -> Self {
-        Status::TemporaryFailure(ErrorDetails {
+        Status::TemporaryFailure(Box::new(ErrorDetails {
             entity: hostname.into(),
             details: Error::ConnectionError(format!("Timeout while {stage}").into_boxed_str()),
-        })
+        }))
     }
 
     pub fn local_error() -> Self {
-        Status::TemporaryFailure(ErrorDetails {
+        Status::TemporaryFailure(Box::new(ErrorDetails {
             entity: "localhost".into(),
             details: Error::ConnectionError("Could not deliver message locally.".into()),
-        })
+        }))
     }
 
     pub fn from_mail_auth_error(entity: &str, err: mail_auth::Error) -> Self {
         match &err {
             mail_auth::Error::Dns(mail_auth::DnsError::RecordNotFound(code)) => {
-                Status::PermanentFailure(ErrorDetails {
+                Status::PermanentFailure(Box::new(ErrorDetails {
                     entity: entity.into(),
                     details: Error::DnsError(
                         format!("Domain not found: {code:?}").into_boxed_str(),
                     ),
-                })
+                }))
             }
-            _ => Status::TemporaryFailure(ErrorDetails {
+            _ => Status::TemporaryFailure(Box::new(ErrorDetails {
                 entity: entity.into(),
                 details: Error::DnsError(err.to_string().into_boxed_str()),
-            }),
+            })),
         }
     }
 
@@ -175,59 +178,79 @@ impl Status<HostResponse<Box<str>>, ErrorDetails> {
         match &err {
             mta_sts::Error::Dns(err) => match err {
                 mail_auth::Error::Dns(mail_auth::DnsError::RecordNotFound(code)) => {
-                    Status::PermanentFailure(ErrorDetails {
+                    Status::PermanentFailure(Box::new(ErrorDetails {
                         entity: entity.into(),
                         details: Error::MtaStsError(
                             format!("Record not found: {code:?}").into_boxed_str(),
                         ),
-                    })
+                    }))
                 }
                 mail_auth::Error::Dns(mail_auth::DnsError::InvalidRecordType) => {
-                    Status::PermanentFailure(ErrorDetails {
+                    Status::PermanentFailure(Box::new(ErrorDetails {
                         entity: entity.into(),
                         details: Error::MtaStsError("Failed to parse MTA-STS DNS record.".into()),
-                    })
+                    }))
                 }
-                _ => Status::TemporaryFailure(ErrorDetails {
+                _ => Status::TemporaryFailure(Box::new(ErrorDetails {
                     entity: entity.into(),
                     details: Error::MtaStsError(
                         format!("DNS lookup error: {err}").into_boxed_str(),
                     ),
-                }),
+                })),
             },
             mta_sts::Error::Http(err) => {
                 if err.is_timeout() {
-                    Status::TemporaryFailure(ErrorDetails {
+                    Status::TemporaryFailure(Box::new(ErrorDetails {
                         entity: entity.into(),
                         details: Error::MtaStsError("Timeout fetching policy.".into()),
-                    })
+                    }))
                 } else if err.is_connect() {
-                    Status::TemporaryFailure(ErrorDetails {
+                    Status::TemporaryFailure(Box::new(ErrorDetails {
                         entity: entity.into(),
                         details: Error::MtaStsError("Could not reach policy host.".into()),
-                    })
+                    }))
                 } else if err.is_status()
                     & err
                         .status()
                         .is_some_and(|s| s == reqwest::StatusCode::NOT_FOUND)
                 {
-                    Status::PermanentFailure(ErrorDetails {
+                    Status::PermanentFailure(Box::new(ErrorDetails {
                         entity: entity.into(),
                         details: Error::MtaStsError("Policy not found.".into()),
-                    })
+                    }))
                 } else {
-                    Status::TemporaryFailure(ErrorDetails {
+                    Status::TemporaryFailure(Box::new(ErrorDetails {
                         entity: entity.into(),
                         details: Error::MtaStsError("Failed to fetch policy.".into()),
-                    })
+                    }))
                 }
             }
-            mta_sts::Error::InvalidPolicy(err) => Status::PermanentFailure(ErrorDetails {
+            mta_sts::Error::Destination(err) => Status::PermanentFailure(Box::new(ErrorDetails {
                 entity: entity.into(),
                 details: Error::MtaStsError(
-                    format!("Failed to parse policy: {err}").into_boxed_str(),
+                    format!("Policy host rejected: {err}").into_boxed_str(),
                 ),
-            }),
+            })),
+            mta_sts::Error::InvalidPolicy(err) => {
+                Status::PermanentFailure(Box::new(ErrorDetails {
+                    entity: entity.into(),
+                    details: Error::MtaStsError(
+                        format!("Failed to parse policy: {err}").into_boxed_str(),
+                    ),
+                }))
+            }
+            mta_sts::Error::Backoff(failure) => {
+                let details = Box::new(ErrorDetails {
+                    entity: entity.into(),
+                    details: Error::MtaStsError(failure.reason.clone()),
+                });
+                match failure.kind {
+                    MtaStsFailureKind::TemporaryFetchError => Status::TemporaryFailure(details),
+                    MtaStsFailureKind::PermanentFetchError | MtaStsFailureKind::InvalidPolicy => {
+                        Status::PermanentFailure(details)
+                    }
+                }
+            }
         }
     }
 }
@@ -297,9 +320,9 @@ impl NextHop<'_> {
     #[inline(always)]
     fn port(&self) -> u16 {
         match self {
-            #[cfg(feature = "test_mode")]
+            #[cfg(stalwart_tests)]
             NextHop::MX { .. } => 9925,
-            #[cfg(not(feature = "test_mode"))]
+            #[cfg(not(stalwart_tests))]
             NextHop::MX { .. } => 25,
             NextHop::Relay(host) => host.port,
         }
@@ -308,7 +331,7 @@ impl NextHop<'_> {
     #[inline(always)]
     fn allow_loopback(&self) -> bool {
         match self {
-            NextHop::MX { .. } => cfg!(feature = "test_mode"),
+            NextHop::MX { .. } => cfg!(stalwart_tests),
             NextHop::Relay(_) => true,
         }
     }
@@ -323,11 +346,11 @@ impl NextHop<'_> {
 
     #[inline(always)]
     fn allow_invalid_certs(&self) -> bool {
-        #[cfg(feature = "test_mode")]
+        #[cfg(stalwart_tests)]
         {
             true
         }
-        #[cfg(not(feature = "test_mode"))]
+        #[cfg(not(stalwart_tests))]
         match self {
             NextHop::MX { .. } => false,
             NextHop::Relay(host) => host.tls_allow_invalid_certs,

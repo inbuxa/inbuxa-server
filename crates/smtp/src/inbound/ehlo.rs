@@ -5,14 +5,9 @@
  */
 
 use crate::{core::Session, scripts::ScriptResult};
-use common::{
-    config::smtp::session::{Mechanism, Stage},
-    network::SessionStream,
-};
-use mail_auth::{
-    SpfResult,
-    spf::verify::{HasValidLabels, SpfParameters},
-};
+use common::{config::smtp::session::Stage, network::SessionStream};
+use compact_str::CompactString;
+use mail_auth::{SpfResult, dns::has_valid_labels, spf::verify::SpfParameters};
 use smtp_proto::*;
 use std::{
     borrow::Cow,
@@ -26,11 +21,11 @@ impl<T: SessionStream> Session<T> {
 
         if domain != self.data.helo_domain {
             // Reject non-FQDN EHLO domains - simply checks that the hostname has at least one dot
-            if self.params.ehlo_reject_non_fqdn && !domain.as_ref().has_valid_labels() {
+            if self.params.ehlo_reject_non_fqdn && !has_valid_labels(domain.as_ref()) {
                 trc::event!(
                     Smtp(SmtpEvent::InvalidEhlo),
                     SpanId = self.data.session_id,
-                    Domain = domain.as_ref().to_string(),
+                    Domain = CompactString::from(domain.as_ref()),
                 );
 
                 return self.write(b"550 5.5.0 Invalid EHLO domain.\r\n").await;
@@ -39,7 +34,7 @@ impl<T: SessionStream> Session<T> {
             trc::event!(
                 Smtp(SmtpEvent::Ehlo),
                 SpanId = self.data.session_id,
-                Domain = domain.as_ref().to_string(),
+                Domain = CompactString::from(domain.as_ref()),
             );
 
             // SPF check
@@ -47,20 +42,20 @@ impl<T: SessionStream> Session<T> {
                 std::mem::replace(&mut self.data.helo_domain, domain.into_owned());
             if self.params.spf_ehlo.verify() {
                 let time = Instant::now();
-                let spf_output = self
-                    .server
-                    .core
-                    .smtp
-                    .resolvers
-                    .dns
-                    .verify_spf(self.server.inner.cache.build_auth_parameters(
-                        SpfParameters::verify_ehlo(
-                            self.data.remote_ip,
-                            &self.data.helo_domain,
-                            &self.hostname,
-                        ),
-                    ))
-                    .await;
+                let spf_output =
+                    self.server
+                        .core
+                        .smtp
+                        .resolvers
+                        .dns
+                        .verify_spf(self.server.inner.cache.build_auth_parameters(
+                            SpfParameters::helo(
+                                self.data.remote_ip,
+                                &self.data.helo_domain,
+                                &self.hostname,
+                            ),
+                        ))
+                        .await;
 
                 trc::event!(
                     Smtp(if matches!(spf_output.result(), SpfResult::Pass) {
@@ -88,12 +83,7 @@ impl<T: SessionStream> Session<T> {
 
             // Sieve filtering
             if let Some((script, script_id)) = self
-                .server
-                .eval_if::<String, _>(
-                    &self.server.core.smtp.session.ehlo.script,
-                    self,
-                    self.data.session_id,
-                )
+                .eval_if::<String>(&self.server.core.smtp.session.ehlo.script)
                 .await
                 .and_then(|name| {
                     self.server
@@ -101,11 +91,7 @@ impl<T: SessionStream> Session<T> {
                         .map(|s| (s, name))
                 })
                 && let ScriptResult::Reject(message) = self
-                    .run_script(
-                        script_id,
-                        script.clone(),
-                        self.build_script_parameters("ehlo"),
-                    )
+                    .run_script(script_id, script, self.build_script_parameters("ehlo"))
                     .await
             {
                 self.data.mail_from = None;
@@ -149,88 +135,48 @@ impl<T: SessionStream> Session<T> {
             response.capabilities |= EXT_START_TLS;
         }
         let ec = &self.server.core.smtp.session.extensions;
-        let ac = &self.server.core.smtp.session.auth;
         let dc = &self.server.core.smtp.session.data;
 
         // Pipelining
-        if self
-            .server
-            .eval_if(&ec.pipelining, self, self.data.session_id)
-            .await
-            .unwrap_or(true)
-        {
+        if self.eval_if(&ec.pipelining).await.unwrap_or(true) {
             response.capabilities |= EXT_PIPELINING;
         }
 
         // Chunking
-        if self
-            .server
-            .eval_if(&ec.chunking, self, self.data.session_id)
-            .await
-            .unwrap_or(true)
-        {
+        if self.eval_if(&ec.chunking).await.unwrap_or(true) {
             response.capabilities |= EXT_CHUNKING;
         }
 
         // Address Expansion
-        if self
-            .server
-            .eval_if(&ec.expn, self, self.data.session_id)
-            .await
-            .unwrap_or(false)
-        {
+        if self.eval_if(&ec.expn).await.unwrap_or(false) {
             response.capabilities |= EXT_EXPN;
         }
 
         // Recipient Verification
-        if self
-            .server
-            .eval_if(&ec.vrfy, self, self.data.session_id)
-            .await
-            .unwrap_or(false)
-        {
+        if self.eval_if(&ec.vrfy).await.unwrap_or(false) {
             response.capabilities |= EXT_VRFY;
         }
 
         // Require TLS
-        if self
-            .server
-            .eval_if(&ec.requiretls, self, self.data.session_id)
-            .await
-            .unwrap_or(true)
-        {
+        if self.eval_if(&ec.requiretls).await.unwrap_or(true) {
             response.capabilities |= EXT_REQUIRE_TLS;
         }
 
         // DSN
-        if self
-            .server
-            .eval_if(&ec.dsn, self, self.data.session_id)
-            .await
-            .unwrap_or(false)
-        {
+        if self.eval_if(&ec.dsn).await.unwrap_or(false) {
             response.capabilities |= EXT_DSN;
         }
 
         // Authentication
         if !self.is_authenticated() {
-            response.auth_mechanisms = self
-                .server
-                .eval_if::<Mechanism, _>(&ac.mechanisms, self, self.data.session_id)
-                .await
-                .unwrap_or_default()
-                .into();
+            response.auth_mechanisms = self.sasl_mechanisms().await;
             if response.auth_mechanisms != 0 {
                 response.capabilities |= EXT_AUTH;
             }
         }
 
         // Future release
-        if let Some(value) = self
-            .server
-            .eval_if::<Duration, _>(&ec.future_release, self, self.data.session_id)
-            .await
-        {
+        if let Some(value) = self.eval_if::<Duration>(&ec.future_release).await {
             response.capabilities |= EXT_FUTURE_RELEASE;
             response.future_release_interval = value.as_secs();
             response.future_release_datetime = SystemTime::now()
@@ -241,29 +187,20 @@ impl<T: SessionStream> Session<T> {
         }
 
         // Deliver By
-        if let Some(value) = self
-            .server
-            .eval_if::<Duration, _>(&ec.deliver_by, self, self.data.session_id)
-            .await
-        {
+        if let Some(value) = self.eval_if::<Duration>(&ec.deliver_by).await {
             response.capabilities |= EXT_DELIVER_BY;
             response.deliver_by = value.as_secs();
         }
 
         // Priority
-        if let Some(value) = self
-            .server
-            .eval_if::<MtPriority, _>(&ec.mt_priority, self, self.data.session_id)
-            .await
-        {
+        if let Some(value) = self.eval_if::<MtPriority>(&ec.mt_priority).await {
             response.capabilities |= EXT_MT_PRIORITY;
             response.mt_priority = value;
         }
 
         // Size
         response.size = self
-            .server
-            .eval_if(&dc.max_message_size, self, self.data.session_id)
+            .eval_if(&dc.max_message_size)
             .await
             .unwrap_or(25 * 1024 * 1024);
         if response.size > 0 {
@@ -271,11 +208,7 @@ impl<T: SessionStream> Session<T> {
         }
 
         // No soliciting
-        if let Some(value) = self
-            .server
-            .eval_if::<String, _>(&ec.no_soliciting, self, self.data.session_id)
-            .await
-        {
+        if let Some(value) = self.eval_if::<String>(&ec.no_soliciting).await {
             response.capabilities |= EXT_NO_SOLICITING;
             response.no_soliciting = if !value.is_empty() {
                 value.to_string().into()

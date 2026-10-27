@@ -15,7 +15,7 @@ use serde_json::json;
 
 use crate::{
     DownloadResponse, HtmlResponse, HttpResponse, HttpResponseBody, JsonProblemResponse,
-    JsonResponse, ToHttpResponse,
+    JsonResponse, ToHttpResponse, body::PrefixedBody,
 };
 
 impl HttpResponse {
@@ -121,10 +121,17 @@ impl HttpResponse {
         self.with_content_length(body_len)
     }
 
-    pub fn with_binary_body(mut self, body: impl Into<Vec<u8>>) -> Self {
+    pub fn with_binary_body(mut self, body: impl Into<Bytes>) -> Self {
         let body = body.into();
         let body_len = body.len();
         self.body = HttpResponseBody::Binary(body);
+        self.with_content_length(body_len)
+    }
+
+    pub fn with_prefixed_body(mut self, prefix: Bytes, body: Bytes) -> Self {
+        let body = PrefixedBody::new(prefix, body);
+        let body_len = body.len();
+        self.body = HttpResponseBody::Prefixed(body);
         self.with_content_length(body_len)
     }
 
@@ -204,10 +211,33 @@ impl HttpResponse {
         self
     }
 
+    pub fn with_sandbox_policy(mut self) -> Self {
+        self.builder = self
+            .builder
+            .header(header::X_CONTENT_TYPE_OPTIONS, "nosniff")
+            .header(
+                header::CONTENT_SECURITY_POLICY,
+                "default-src 'none'; sandbox",
+            );
+        self
+    }
+
+    pub fn with_image_sandbox_policy(mut self) -> Self {
+        self.builder = self
+            .builder
+            .header(header::X_CONTENT_TYPE_OPTIONS, "nosniff")
+            .header(
+                header::CONTENT_SECURITY_POLICY,
+                "default-src 'none'; style-src 'unsafe-inline'; sandbox",
+            );
+        self
+    }
+
     pub fn size(&self) -> usize {
         match &self.body {
             HttpResponseBody::Text(value) => value.len(),
             HttpResponseBody::Binary(value) => value.len(),
+            HttpResponseBody::Prefixed(value) => value.len(),
             _ => 0,
         }
     }
@@ -222,11 +252,12 @@ impl HttpResponse {
                     .map_err(|never| match never {})
                     .boxed(),
             ),
-            HttpResponseBody::Binary(body) => self.builder.body(
-                Full::new(Bytes::from(body))
-                    .map_err(|never| match never {})
-                    .boxed(),
-            ),
+            HttpResponseBody::Binary(body) => self
+                .builder
+                .body(Full::new(body).map_err(|never| match never {}).boxed()),
+            HttpResponseBody::Prefixed(body) => self
+                .builder
+                .body(body.map_err(|never| match never {}).boxed()),
             HttpResponseBody::Empty => {
                 let has_content_length = self
                     .builder
@@ -289,18 +320,21 @@ impl<T: serde::Serialize> ToHttpResponse for JsonResponse<T> {
 
 impl ToHttpResponse for DownloadResponse {
     fn into_http_response(self) -> HttpResponse {
-        HttpResponse::new(StatusCode::OK)
+        let response = HttpResponse::new(StatusCode::OK)
             .with_content_type(self.content_type)
             .with_content_disposition(format!(
                 "attachment; filename=\"{}\"",
                 self.filename.replace('\"', "\\\"")
             ))
-            .with_cache_control("private, immutable, max-age=31536000")
-            .with_binary_body(self.blob)
+            .with_cache_control("private, immutable, max-age=31536000");
+        match self.prefix {
+            Some(prefix) => response.with_prefixed_body(prefix, self.blob),
+            None => response.with_binary_body(self.blob),
+        }
     }
 }
 
-impl ToHttpResponse for Resource<Vec<u8>> {
+impl<T: Into<Bytes>> ToHttpResponse for Resource<T> {
     fn into_http_response(self) -> HttpResponse {
         HttpResponse::new(StatusCode::OK)
             .with_content_type(self.content_type.as_ref())

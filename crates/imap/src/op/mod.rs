@@ -5,6 +5,8 @@
  */
 
 use ::store::query::log::Query;
+use common::config::mailstore::limits::EmailLimitError;
+use compact_str::CompactString;
 use imap_proto::ResponseCode;
 
 pub mod acl;
@@ -22,6 +24,7 @@ pub mod idle;
 pub mod list;
 pub mod login;
 pub mod logout;
+pub mod metadata;
 pub mod namespace;
 pub mod noop;
 pub mod quota;
@@ -42,6 +45,19 @@ trait ToModSeq {
     fn to_modseq(&self) -> u64;
 }
 
+trait IntoImapError {
+    fn into_imap_error(self) -> trc::Error;
+}
+
+impl IntoImapError for EmailLimitError {
+    fn into_imap_error(self) -> trc::Error {
+        trc::ImapEvent::Error
+            .into_err()
+            .details(self.to_string())
+            .code(ResponseCode::Limit)
+    }
+}
+
 impl FromModSeq for Query {
     fn from_modseq(modseq: u64) -> Self {
         if modseq > 0 {
@@ -60,10 +76,11 @@ impl ToModSeq for u64 {
 
 #[macro_export]
 macro_rules! spawn_op {
-    ($data:expr, $($code:tt)*) => {
+    ($permit:expr, $data:expr, $($code:tt)*) => {
         {
 
-        tokio::spawn(async move {
+        let permit = $permit;
+        let op = async move {
             let data = &($data);
 
             if let Err(err) = (async {
@@ -73,7 +90,17 @@ macro_rules! spawn_op {
             {
                 let _ = data.write_error(err).await;
             }
-        });
+        };
+
+        match permit {
+            Some(permit) => {
+                tokio::spawn(async move {
+                    let _permit: tokio::sync::OwnedSemaphorePermit = permit;
+                    op.await;
+                });
+            }
+            None => op.await,
+        }
 
         Ok(())}
     };
@@ -88,12 +115,12 @@ impl<T> ImapContext<T> for trc::Result<T> {
             Ok(value) => Ok(value),
             Err(err) => Err(
                 if !err.matches(trc::EventType::Imap(trc::ImapEvent::Error)) {
-                    err.ctx(trc::Key::Id, tag.to_string())
+                    err.ctx(trc::Key::Id, CompactString::from(tag))
                         .ctx(trc::Key::Details, "Internal Server Error")
                         .ctx(trc::Key::Code, ResponseCode::ContactAdmin)
                         .ctx(trc::Key::CausedBy, location)
                 } else {
-                    err.ctx(trc::Key::Id, tag.to_string())
+                    err.ctx(trc::Key::Id, CompactString::from(tag))
                 },
             ),
         }

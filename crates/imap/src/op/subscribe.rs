@@ -3,20 +3,20 @@
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
  */
+use compact_str::CompactString;
 
 use super::ImapContext;
-use crate::{
-    core::{Session, SessionData},
-    spawn_op,
-};
-use common::{network::SessionStream, storage::index::ObjectIndexBuilder};
+use crate::core::{Session, SessionData};
+use common::network::SessionStream;
+use email::mailbox::merge_subscription;
 use imap_proto::{Command, ResponseCode, StatusResponse, receiver::Request};
 use registry::schema::enums::Permission;
 use std::time::Instant;
 use store::{
     ValueKey,
-    write::{AlignedBytes, Archive, BatchBuilder},
+    write::{Archive, ArchiveBytes, BatchBuilder},
 };
+use tokio::sync::OwnedSemaphorePermit;
 use types::collection::Collection;
 
 impl<T: SessionStream> Session<T> {
@@ -24,6 +24,7 @@ impl<T: SessionStream> Session<T> {
         &mut self,
         request: Request<Command>,
         is_subscribe: bool,
+        _permit: Option<OwnedSemaphorePermit>,
     ) -> trc::Result<()> {
         // Validate access
         self.assert_has_permission(Permission::ImapSubscribe)?;
@@ -32,30 +33,29 @@ impl<T: SessionStream> Session<T> {
         let arguments = request.parse_subscribe(self.is_utf8)?;
         let data = self.state.session_data();
 
-        spawn_op!(data, {
-            let response = data
-                .subscribe_folder(
-                    arguments.tag,
-                    arguments.mailbox_name,
-                    is_subscribe,
-                    op_start,
-                )
-                .await?;
+        let response = data
+            .subscribe_folder(
+                arguments.tag,
+                arguments.mailbox_name,
+                is_subscribe,
+                op_start,
+            )
+            .await?;
 
-            data.write_bytes(response.into_bytes()).await
-        })
+        data.write_bytes(response.into_bytes()).await
     }
 }
 
 impl<T: SessionStream> SessionData<T> {
     pub async fn subscribe_folder(
         &self,
-        tag: String,
-        mailbox_name: String,
+        tag: CompactString,
+        mailbox_name: CompactString,
         subscribe: bool,
         op_start: Instant,
     ) -> trc::Result<StatusResponse> {
         // Refresh mailboxes
+        self.expire_folders_of(&mailbox_name);
         self.synchronize_mailboxes(false)
             .await
             .imap_ctx(&tag, trc::location!())?;
@@ -74,29 +74,28 @@ impl<T: SessionStream> SessionData<T> {
         };
 
         // Verify if mailbox is already subscribed/unsubscribed
-        for account in self.mailboxes.lock().iter_mut() {
-            if account.account_id == account_id {
-                if let Some(mailbox) = account.mailbox_state.get(&mailbox_id)
-                    && mailbox.is_subscribed == subscribe
-                {
-                    return Err(trc::ImapEvent::Error
-                        .into_err()
-                        .details(if subscribe {
-                            "Mailbox is already subscribed."
-                        } else {
-                            "Mailbox is already unsubscribed."
-                        })
-                        .id(tag));
-                }
-                break;
-            }
+        if self
+            .mailboxes
+            .lock()
+            .iter()
+            .find(|account| account.account_id == account_id)
+            .is_some_and(|account| account.is_subscribed(mailbox_id, self.account_id) == subscribe)
+        {
+            return Err(trc::ImapEvent::Error
+                .into_err()
+                .details(if subscribe {
+                    "Mailbox is already subscribed."
+                } else {
+                    "Mailbox is already unsubscribed."
+                })
+                .id(tag));
         }
 
         // Obtain mailbox
         let mailbox_ = self
             .server
             .store()
-            .get_value::<Archive<AlignedBytes>>(ValueKey::archive(
+            .get_value::<Archive<ArchiveBytes>>(ValueKey::archive(
                 account_id,
                 Collection::Mailbox,
                 mailbox_id,
@@ -115,41 +114,19 @@ impl<T: SessionStream> SessionData<T> {
             .to_unarchived::<email::mailbox::Mailbox>()
             .imap_ctx(&tag, trc::location!())?;
 
-        if (subscribe && !mailbox.inner.is_subscribed(self.account_id))
-            || (!subscribe && mailbox.inner.is_subscribed(self.account_id))
-        {
+        if mailbox.inner.is_subscribed(self.account_id) != subscribe {
             // Build batch
-            let mut new_mailbox = mailbox.deserialize().imap_ctx(&tag, trc::location!())?;
-            if subscribe {
-                new_mailbox.subscribers.push(self.account_id);
-            } else {
-                new_mailbox.remove_subscriber(self.account_id);
-            }
             let mut batch = BatchBuilder::new();
             batch
                 .with_account_id(account_id)
                 .with_collection(Collection::Mailbox)
-                .with_document(mailbox_id)
-                .custom(
-                    ObjectIndexBuilder::new()
-                        .with_current(mailbox)
-                        .with_changes(new_mailbox),
-                )
-                .imap_ctx(&tag, trc::location!())?;
+                .with_document(mailbox_id);
+            merge_subscription(&mut batch, self.account_id, subscribe);
             self.server
                 .commit_batch(batch)
                 .await
                 .imap_ctx(&tag, trc::location!())?;
-
-            // Update mailbox cache
-            for account in self.mailboxes.lock().iter_mut() {
-                if account.account_id == account_id {
-                    if let Some(mailbox) = account.mailbox_state.get_mut(&mailbox_id) {
-                        mailbox.is_subscribed = subscribe;
-                    }
-                    break;
-                }
-            }
+            self.expire_folders(account_id);
         }
 
         trc::event!(

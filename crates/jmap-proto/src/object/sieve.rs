@@ -5,12 +5,17 @@
  */
 
 use crate::{
-    object::{AnyId, DeserializeArguments, JmapObject, JmapObjectId, MaybeReference, parse_ref},
-    request::reference::MaybeIdReference,
+    object::{
+        AnyId, DeserializeArguments, JmapObject, JmapObjectId, MaybeReference,
+        metadata::{MetadataFilter, MetadataProperty, MetadataRoot, property_names},
+        parse_ref,
+    },
+    request::{deserialize::CowStr, reference::MaybeIdReference},
 };
-use jmap_tools::{Element, Key, Property};
+use jmap_tools::{Element, JsonPointer, Key, PointerDepth, Property};
+use serde::{Serialize, Serializer};
 use std::{borrow::Cow, str::FromStr};
-use types::{blob::BlobId, id::Id};
+use types::{blob::BlobId, id::Id, text::Text};
 
 #[derive(Debug, Clone, Default)]
 pub struct Sieve;
@@ -21,6 +26,9 @@ pub enum SieveProperty {
     Name,
     BlobId,
     IsActive,
+    Metadata,
+    PrivateMetadata,
+    Pointer(JsonPointer<SieveProperty>),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -31,18 +39,43 @@ pub enum SieveValue {
 }
 
 impl Property for SieveProperty {
-    fn try_parse(_: Option<&Key<'_, Self>>, value: &str) -> Option<Self> {
-        SieveProperty::parse(value)
+    fn try_parse(key: Option<&Key<'_, Self>>, value: &str) -> Option<Self> {
+        Self::try_parse_nested(key, value, PointerDepth::default())
+    }
+
+    fn try_parse_nested(
+        key: Option<&Key<'_, Self>>,
+        value: &str,
+        depth: PointerDepth,
+    ) -> Option<Self> {
+        match key {
+            Some(_) => SieveProperty::parse_nested_name(value),
+            None => SieveProperty::parse(value, Some(depth)),
+        }
+    }
+
+    fn is_opaque(&self) -> bool {
+        self.metadata_root().is_some()
     }
 
     fn to_cow(&self) -> Cow<'static, str> {
-        match self {
-            SieveProperty::BlobId => "blobId",
-            SieveProperty::Id => "id",
-            SieveProperty::Name => "name",
-            SieveProperty::IsActive => "isActive",
+        self.text().to_cow()
+    }
+
+    fn key_eq(&self, other: &Self) -> bool {
+        if self.has_dynamic_text() || other.has_dynamic_text() {
+            self.text().eq_text(other.text())
+        } else {
+            self == other
         }
-        .into()
+    }
+
+    fn key_eq_str(&self, other: &str) -> bool {
+        self.text().eq_str(other)
+    }
+
+    fn serialize_text<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        self.text().serialize(serializer)
     }
 }
 
@@ -70,22 +103,80 @@ impl Element for SieveValue {
     }
 
     fn to_cow(&self) -> Cow<'static, str> {
+        self.text().to_cow()
+    }
+
+    fn serialize_text<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        self.text().serialize(serializer)
+    }
+}
+
+impl SieveValue {
+    pub fn text(&self) -> Text<'_> {
         match self {
-            SieveValue::Id(id) => id.to_string().into(),
-            SieveValue::BlobId(blob_id) => blob_id.to_string().into(),
-            SieveValue::IdReference(r) => format!("#{r}").into(),
+            SieveValue::Id(id) => Text::Id(*id),
+            SieveValue::BlobId(blob_id) => Text::Display(blob_id),
+            SieveValue::IdReference(r) => Text::Reference(r),
         }
     }
 }
 
 impl SieveProperty {
-    fn parse(value: &str) -> Option<Self> {
-        hashify::tiny_map!(value.as_bytes(),
-            b"id" => SieveProperty::Id,
-            b"name" => SieveProperty::Name,
-            b"blobId" => SieveProperty::BlobId,
-            b"isActive" => SieveProperty::IsActive,
-        )
+    pub fn text(&self) -> Text<'_> {
+        Text::Static(match self {
+            SieveProperty::BlobId => "blobId",
+            SieveProperty::Id => "id",
+            SieveProperty::Name => "name",
+            SieveProperty::IsActive => "isActive",
+            SieveProperty::Metadata => "metadata",
+            SieveProperty::PrivateMetadata => "privateMetadata",
+            SieveProperty::Pointer(json_pointer) => return Text::Display(json_pointer),
+        })
+    }
+
+    fn has_dynamic_text(&self) -> bool {
+        matches!(self, SieveProperty::Pointer(_))
+    }
+
+    property_names!(
+        SieveProperty,
+        "id" => SieveProperty::Id,
+        "name" => SieveProperty::Name,
+        "blobId" => SieveProperty::BlobId,
+        "isActive" => SieveProperty::IsActive,
+    );
+
+    fn parse(value: &str, patch_depth: Option<PointerDepth>) -> Option<Self> {
+        SieveProperty::parse_name(value).or_else(|| {
+            patch_depth
+                .filter(|_| value.contains('/'))
+                .and_then(|depth| JsonPointer::parse_nested(value, depth))
+                .map(SieveProperty::Pointer)
+        })
+    }
+}
+
+impl MetadataProperty for SieveProperty {
+    fn as_metadata_root(&self) -> Option<MetadataRoot> {
+        match self {
+            SieveProperty::Metadata => Some(MetadataRoot::Shared),
+            SieveProperty::PrivateMetadata => Some(MetadataRoot::Private),
+            _ => None,
+        }
+    }
+
+    fn as_pointer(&self) -> Option<&JsonPointer<Self>> {
+        match self {
+            SieveProperty::Pointer(pointer) => Some(pointer),
+            _ => None,
+        }
+    }
+
+    fn from_metadata_root(root: MetadataRoot) -> Self {
+        match root {
+            MetadataRoot::Shared => SieveProperty::Metadata,
+            MetadataRoot::Private => SieveProperty::PrivateMetadata,
+        }
     }
 }
 
@@ -120,7 +211,12 @@ impl FromStr for SieveProperty {
     type Err = ();
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
-        SieveProperty::parse(s).ok_or(())
+        SieveProperty::parse(s, None)
+            .or_else(|| {
+                MetadataRoot::from_selector(s)
+                    .map(|_| SieveProperty::Pointer(JsonPointer::parse(s)))
+            })
+            .ok_or(())
     }
 }
 
@@ -152,6 +248,7 @@ impl JmapObject for Sieve {
 pub enum SieveFilter {
     Name(String),
     IsActive(bool),
+    Metadata(MetadataFilter),
     _T(String),
 }
 
@@ -175,8 +272,13 @@ impl<'de> DeserializeArguments<'de> for SieveFilter {
                 *self = SieveFilter::IsActive(map.next_value()?);
             },
             _ => {
-                *self = SieveFilter::_T(key.to_string());
-                let _ = map.next_value::<serde::de::IgnoredAny>()?;
+                *self = match MetadataFilter::try_deserialize(key, map)? {
+                    Some(filter) => SieveFilter::Metadata(filter),
+                    None => {
+                        let _ = map.next_value::<serde::de::IgnoredAny>()?;
+                        SieveFilter::_T(key.to_string())
+                    }
+                };
             }
         );
 
@@ -190,7 +292,7 @@ impl<'de> DeserializeArguments<'de> for SieveComparator {
         A: serde::de::MapAccess<'de>,
     {
         if key == "property" {
-            let value = map.next_value::<Cow<str>>()?;
+            let value = map.next_value::<CowStr>()?.0;
             hashify::fnc_map!(value.as_bytes(),
                 b"name" => {
                     *self = SieveComparator::Name;
@@ -199,7 +301,7 @@ impl<'de> DeserializeArguments<'de> for SieveComparator {
                     *self = SieveComparator::IsActive;
                 },
                 _ => {
-                    *self = SieveComparator::_T(key.to_string());
+                    *self = SieveComparator::_T(value.into_owned());
                 }
             );
         } else {

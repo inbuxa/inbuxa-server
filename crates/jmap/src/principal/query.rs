@@ -4,11 +4,14 @@
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
  */
 
-use crate::api::query::QueryResponseBuilder;
+use crate::{api::query::QueryResponseBuilder, principal::get::PrincipalGet};
 use common::{Server, auth::AccessToken};
+use compact_str::ToCompactString;
+use groupware::decode_mailto_address;
 use jmap_proto::{
     method::query::{Filter, QueryRequest, QueryResponse},
     object::principal::{Principal, PrincipalFilter, PrincipalType},
+    request::capability::{Capability, CapabilityIds},
     types::state::State,
 };
 use registry::{
@@ -26,12 +29,14 @@ use store::{
     write::SearchIndex,
 };
 use trc::AddContext;
+use utils::sanitize_email;
 
 pub trait PrincipalQuery: Sync + Send {
     fn principal_query(
         &self,
         request: QueryRequest<Principal>,
         access_token: &AccessToken,
+        using: CapabilityIds,
     ) -> impl Future<Output = trc::Result<QueryResponse>> + Send;
 }
 
@@ -40,59 +45,73 @@ impl PrincipalQuery for Server {
         &self,
         mut request: QueryRequest<Principal>,
         access_token: &AccessToken,
+        using: CapabilityIds,
     ) -> trc::Result<QueryResponse> {
         if !self.core.groupware.allow_directory_query
-            && !access_token.has_permission(Permission::JmapPrincipalQuery)
+            && !access_token.has_permission(Permission::SysAccountQuery)
         {
             return Err(trc::JmapEvent::Forbidden
                 .into_err()
-                .details("The administrator has disabled directory queries.".to_string()));
+                .details("The administrator has disabled directory queries."));
         }
 
-        let principal_ids = self
-            .registry()
-            .query::<RoaringBitmap>(
-                RegistryQuery::new(ObjectType::Account).with_tenant(access_token.tenant_id()),
+        let query = RegistryQuery::new(ObjectType::Account);
+        let principal_ids = if request.filter.is_empty()
+            || request.filter.iter().any(|cond| {
+                matches!(
+                    cond,
+                    Filter::Not | Filter::Property(PrincipalFilter::AccountIds(_))
+                )
+            }) {
+            Some(
+                self.registry()
+                    .query::<RoaringBitmap>(query)
+                    .await
+                    .caused_by(trc::location!())?,
             )
-            .await
-            .caused_by(trc::location!())?;
+        } else {
+            None
+        };
 
         let mut filters = Vec::with_capacity(request.filter.len());
         for cond in std::mem::take(&mut request.filter) {
             match cond {
                 Filter::Property(cond) => match cond {
                     PrincipalFilter::Name(name) | PrincipalFilter::Email(name) => {
+                        let account_id = self.account_id_from_email(&name, false).await?;
                         filters.push(SearchFilter::is_in_set(
-                            match self.account_id_from_email(&name, false).await? {
-                                Some(account_id) => {
-                                    RoaringBitmap::from_sorted_iter([account_id]).unwrap()
+                            visible_principal_ids(self, access_token, account_id).await?,
+                        ));
+                    }
+                    PrincipalFilter::CalendarAddress(address)
+                        if using.contains(Capability::PrincipalsAvailability) =>
+                    {
+                        let account_id =
+                            match sanitize_email(decode_mailto_address(&address).as_ref()) {
+                                Some(address) => {
+                                    self.account_id_from_email(&address, false).await?
                                 }
-                                None => RoaringBitmap::new(),
-                            },
+                                None => None,
+                            };
+                        filters.push(SearchFilter::is_in_set(
+                            visible_principal_ids(self, access_token, account_id).await?,
                         ));
                     }
                     PrincipalFilter::AccountIds(ids) => {
                         filters.push(SearchFilter::is_in_set(
                             ids.into_iter()
-                                .filter_map(|id| {
-                                    let id = id.document_id();
-                                    if principal_ids.contains(id) {
-                                        Some(id)
-                                    } else {
-                                        None
-                                    }
+                                .map(|id| id.document_id())
+                                .filter(|id| {
+                                    principal_ids.as_ref().is_some_and(|ids| ids.contains(*id))
                                 })
                                 .collect::<RoaringBitmap>(),
                         ));
                     }
                     PrincipalFilter::Text(text) => {
+                        let query = RegistryQuery::new(ObjectType::Account);
                         filters.push(SearchFilter::is_in_set(
                             self.registry()
-                                .query::<RoaringBitmap>(
-                                    RegistryQuery::new(ObjectType::Account)
-                                        .with_tenant(access_token.tenant_id())
-                                        .text(Property::Text, text),
-                                )
+                                .query::<RoaringBitmap>(query.text(Property::Text, text))
                                 .await
                                 .caused_by(trc::location!())?,
                         ));
@@ -107,13 +126,10 @@ impl PrincipalQuery for Server {
                             }
                         };
 
+                        let query = RegistryQuery::new(ObjectType::Account);
                         filters.push(SearchFilter::is_in_set(
                             self.registry()
-                                .query::<RoaringBitmap>(
-                                    RegistryQuery::new(ObjectType::Account)
-                                        .equal(Property::Type, typ.to_id())
-                                        .with_tenant(access_token.tenant_id()),
-                                )
+                                .query::<RoaringBitmap>(query.equal(Property::Type, typ.to_id()))
                                 .await
                                 .caused_by(trc::location!())?,
                         ));
@@ -121,7 +137,7 @@ impl PrincipalQuery for Server {
                     other => {
                         return Err(trc::JmapEvent::UnsupportedFilter
                             .into_err()
-                            .details(other.to_string()));
+                            .details(other.to_compact_string()));
                     }
                 },
                 Filter::And => {
@@ -139,9 +155,22 @@ impl PrincipalQuery for Server {
             }
         }
 
+        let mask = principal_ids.unwrap_or_else(|| {
+            filters
+                .iter()
+                .filter_map(|filter| match filter {
+                    SearchFilter::DocumentSet(set) => Some(set),
+                    _ => None,
+                })
+                .fold(RoaringBitmap::new(), |mut mask, set| {
+                    mask |= set;
+                    mask
+                })
+        });
+
         let results = SearchQuery::new(SearchIndex::InMemory)
             .with_filters(filters)
-            .with_mask(principal_ids)
+            .with_mask(mask)
             .filter()
             .into_bitmap();
 
@@ -160,4 +189,22 @@ impl PrincipalQuery for Server {
 
         response.build()
     }
+}
+
+async fn visible_principal_ids(
+    server: &Server,
+    access_token: &AccessToken,
+    account_id: Option<u32>,
+) -> trc::Result<RoaringBitmap> {
+    Ok(match account_id {
+        Some(account_id)
+            if server
+                .visible_principal(access_token, account_id)
+                .await?
+                .is_some() =>
+        {
+            RoaringBitmap::from_iter([account_id])
+        }
+        _ => RoaringBitmap::new(),
+    })
 }

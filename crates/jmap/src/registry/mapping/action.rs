@@ -13,28 +13,29 @@ use common::{
     ipc::{BroadcastEvent, QueueEvent, RegistryChange},
 };
 use jmap_proto::error::set::{SetError, SetErrorType};
-use jmap_tools::{JsonPointer, Key};
+use jmap_tools::{JsonPointer, Key, Value};
 use mail_auth::{
     AuthenticatedMessage, Dkim2Result, DkimResult, DmarcResult, dkim2::Envelope as Dkim2Envelope,
     dmarc::verify::DmarcParameters, spf::verify::SpfParameters,
 };
 use mail_parser::MessageParser;
 use registry::{
-    jmap::{IntoValue, JsonPointerPatch, RegistryJsonPatch},
+    jmap::{IntoValue, JsonPointerPatch, RegistryJsonPatch, RegistryValue},
     schema::{
         enums::{SpamClassifyParameters, SpamClassifyResult, SpamClassifyTagDisposition},
         prelude::{ObjectType, Property},
-        structs::{Action, DmarcTroubleshoot, SpamClassify, SpamClassifyTag},
+        structs::{Action, DmarcTroubleshoot, ReloadSettingsResult, SpamClassify, SpamClassifyTag},
     },
-    types::{EnumImpl, ObjectImpl},
+    types::{EnumImpl, ObjectImpl, map::Map},
 };
 use smtp_proto::{MAIL_BODY_7BIT, MAIL_BODY_8BITMIME, MAIL_BODY_BINARYMIME, MAIL_SMTPUTF8};
 use spam_filter::{
-    SpamFilterInput,
+    MessageTexts, SpamFilterInput,
     analysis::{init::SpamFilterInit, score::SpamFilterAnalyzeScore},
 };
 use std::time::Instant;
 use store::{registry::bootstrap::Bootstrap, write::now};
+use types::id::Id;
 use utils::map::vec_map::VecMap;
 
 pub(crate) async fn action_set(
@@ -77,12 +78,12 @@ pub(crate) async fn action_set(
         }
 
         match action {
-            Action::ReloadSettings
+            Action::ReloadSettings(_)
             | Action::ReloadTlsCertificates
             | Action::ReloadLookupStores
             | Action::ReloadBlockedIps => {
                 let object = match action {
-                    Action::ReloadSettings => ObjectType::DataStore,
+                    Action::ReloadSettings(_) => ObjectType::DataStore,
                     Action::ReloadTlsCertificates => ObjectType::Certificate,
                     Action::ReloadLookupStores => ObjectType::StoreLookup,
                     Action::ReloadBlockedIps => ObjectType::BlockedIp,
@@ -90,11 +91,14 @@ pub(crate) async fn action_set(
                 };
                 #[cfg(target_os = "linux")]
                 ServiceState::Reloading.notify();
-                let result =
-                    Box::pin(set.server.reload_registry(RegistryChange::Reload(object))).await;
+                let result = set
+                    .server
+                    .reload_registry(RegistryChange::Reload(object))
+                    .await;
                 #[cfg(target_os = "linux")]
                 ServiceState::Ready.notify();
                 let result = result?;
+                result.log();
 
                 if !result.has_errors() {
                     set.server
@@ -102,7 +106,32 @@ pub(crate) async fn action_set(
                             object,
                         )))
                         .await;
-                    set.response.created(id, now());
+                    if matches!(action, Action::ReloadSettings(_)) {
+                        let warnings = result
+                            .warnings
+                            .into_iter()
+                            .map(|warning| {
+                                format!(
+                                    "{}: {}",
+                                    warning.object_id.object().as_str(),
+                                    warning.message
+                                )
+                            })
+                            .collect();
+                        let mut result = ReloadSettingsResult {
+                            warnings: Map::new(warnings),
+                        }
+                        .into_value();
+                        if let Some(object) = result.as_object_mut() {
+                            object.as_mut_vec().push((
+                                Key::Property(Property::Id),
+                                Value::Element(RegistryValue::Id(Id::from(now()))),
+                            ));
+                        }
+                        set.response.created.insert(id, result);
+                    } else {
+                        set.response.created(id, now());
+                    }
                 } else {
                     set.response
                         .not_created
@@ -164,19 +193,18 @@ pub(crate) async fn action_set(
                                         | Property::RemoteIp
                                         | Property::EhloDomain
                                         | Property::MailFrom
-                                        | Property::To
+                                        | Property::RcptTo
                                 )
                             )
                         });
                     set.response.created.insert(id, result);
                 } else {
+                    let error = SetError::invalid_properties();
                     set.response.not_created.append(
                         id,
-                        SetError::invalid_properties()
-                            .with_property(Property::Body)
-                            .with_description(
-                                "Failed to parse the message for DMARC troubleshooting".to_string(),
-                            ),
+                        error.with_description(
+                            "Failed to parse the message for DMARC troubleshooting".to_string(),
+                        ),
                     );
                 }
             }
@@ -196,9 +224,9 @@ pub(crate) async fn action_set(
                                         | Property::EhloDomain
                                         | Property::AuthenticatedAs
                                         | Property::IsTls
-                                        | Property::EnvFrom
-                                        | Property::EnvFromParameters
-                                        | Property::EnvRcptTo
+                                        | Property::MailFrom
+                                        | Property::MailFromParameters
+                                        | Property::RcptTo
                                 )
                             )
                         });
@@ -247,11 +275,11 @@ async fn classify_spam(server: &Server, mut request: SpamClassify) -> Option<Spa
     let raw_message = request.message.as_bytes();
     let message = MessageParser::new()
         .parse(raw_message)
-        .filter(|m| m.root_part().headers().iter().any(|h| !h.name.is_other()))?;
+        .filter(|m| m.headers().has_known())?;
 
     let remote_ip = request.remote_ip.into_inner();
     let ehlo_domain = request.ehlo_domain.to_lowercase();
-    let mail_from = request.env_from.to_lowercase();
+    let mail_from = request.mail_from.to_lowercase();
     let mail_from_domain = mail_from.rsplit_once('@').map(|(_, domain)| domain);
     let local_host = &server.core.network.server_name;
 
@@ -264,11 +292,7 @@ async fn classify_spam(server: &Server, mut request: SpamClassify) -> Option<Spa
             server
                 .inner
                 .cache
-                .build_auth_parameters(SpfParameters::verify_ehlo(
-                    remote_ip,
-                    &ehlo_domain,
-                    local_host,
-                )),
+                .build_auth_parameters(SpfParameters::helo(remote_ip, &ehlo_domain, local_host)),
         )
         .await;
 
@@ -337,7 +361,7 @@ async fn classify_spam(server: &Server, mut request: SpamClassify) -> Option<Spa
             server.inner.cache.build_auth_parameters(&auth_message),
             Dkim2Envelope {
                 mail_from: &mail_from,
-                rcpt_to: request.env_rcpt_to.iter(),
+                rcpt_to: request.rcpt_to.iter(),
             },
         )
         .await;
@@ -351,7 +375,7 @@ async fn classify_spam(server: &Server, mut request: SpamClassify) -> Option<Spa
             message: &auth_message,
             dkim_output: &dkim_output,
             dkim2_output: Some(&dkim2_output),
-            rfc5321_mail_from_domain: mail_from_domain.unwrap_or(ehlo_domain.as_str()),
+            mail_from_domain: mail_from_domain.unwrap_or(ehlo_domain.as_str()),
             spf_output: &spf_mail_from_result,
         }))
         .await;
@@ -360,8 +384,10 @@ async fn classify_spam(server: &Server, mut request: SpamClassify) -> Option<Spa
 
     let asn_geo = server.lookup_asn_country(remote_ip).await;
 
+    let texts = MessageTexts::new(&message, server.core.spam.text_limits);
     let input = SpamFilterInput {
         message: &message,
+        texts: &texts,
         span_id: 0,
         arc_result: Some(&arc_output),
         spf_ehlo_result: Some(&spf_ehlo_result),
@@ -375,18 +401,18 @@ async fn classify_spam(server: &Server, mut request: SpamClassify) -> Option<Spa
         ehlo_domain: Some(ehlo_domain.as_str()),
         authenticated_as: request.authenticated_as.as_deref(),
         asn: asn_geo.asn.as_ref().map(|a| a.id),
-        country: asn_geo.country.as_ref().map(|c| c.as_str()),
+        country: asn_geo.country.as_deref(),
         is_tls: request.is_tls,
-        env_from: &request.env_from,
-        env_from_flags: match request.env_from_parameters {
+        env_from: &request.mail_from,
+        env_from_flags: match request.mail_from_parameters {
             Some(SpamClassifyParameters::Bit7) => MAIL_BODY_7BIT,
             Some(SpamClassifyParameters::Bit8Mime8BitMIMEMessageContent) => MAIL_BODY_BINARYMIME,
             Some(SpamClassifyParameters::BinaryMime) => MAIL_BODY_8BITMIME,
             Some(SpamClassifyParameters::SmtpUtf8) => MAIL_SMTPUTF8,
             None => 0,
         },
-        env_rcpt_orig_to: request.env_rcpt_to.iter().map(String::as_str).collect(),
-        env_rcpt_rewritten_to: request.env_rcpt_to.iter().map(String::as_str).collect(),
+        env_rcpt_orig_to: request.rcpt_to.iter().map(String::as_str).collect(),
+        env_rcpt_rewritten_to: request.rcpt_to.iter().map(String::as_str).collect(),
         is_test: true,
         is_train: false,
     };
@@ -409,6 +435,7 @@ async fn classify_spam(server: &Server, mut request: SpamClassify) -> Option<Spa
         SpamFilterAction::Reject | SpamFilterAction::Disabled => SpamClassifyResult::Reject,
     };
 
+
     request.tags = VecMap::with_capacity(ctx.result.tags.len());
     for tag in ctx.result.tags {
         let (score, disposition) = match server.core.spam.lists.scores.get(&tag) {
@@ -417,7 +444,7 @@ async fn classify_spam(server: &Server, mut request: SpamClassify) -> Option<Spa
             _ => (0.0, SpamClassifyTagDisposition::Reject),
         };
         request.tags.append(
-            tag,
+            tag.into_string(),
             SpamClassifyTag {
                 disposition,
                 score: (score as f64).into(),
@@ -449,11 +476,7 @@ async fn dmarc_troubleshoot(
             server
                 .inner
                 .cache
-                .build_auth_parameters(SpfParameters::verify_ehlo(
-                    remote_ip,
-                    &ehlo_domain,
-                    local_host,
-                )),
+                .build_auth_parameters(SpfParameters::helo(remote_ip, &ehlo_domain, local_host)),
         )
         .await;
 
@@ -520,7 +543,7 @@ async fn dmarc_troubleshoot(
             server.inner.cache.build_auth_parameters(&auth_message),
             Dkim2Envelope {
                 mail_from: &mail_from,
-                rcpt_to: request.to.iter(),
+                rcpt_to: request.rcpt_to.iter(),
             },
         )
         .await;
@@ -543,7 +566,7 @@ async fn dmarc_troubleshoot(
             message: &auth_message,
             dkim_output: &dkim_output,
             dkim2_output: Some(&dkim2_output),
-            rfc5321_mail_from_domain: mail_from_domain.unwrap_or(ehlo_domain.as_str()),
+            mail_from_domain: mail_from_domain.unwrap_or(ehlo_domain.as_str()),
             spf_output: &mail_spf_output,
         }))
         .await;

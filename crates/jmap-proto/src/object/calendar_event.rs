@@ -5,16 +5,22 @@
  */
 
 use crate::{
-    object::{AnyId, JmapObject, JmapObjectId},
-    request::{MaybeInvalid, deserialize::DeserializeArguments},
+    object::{
+        AnyId, JmapObject, JmapObjectId,
+        metadata::{MetadataFilter, MetadataProperty, MetadataRoot},
+    },
+    request::{
+        MaybeInvalid,
+        deserialize::{CowStr, DeserializeArguments, next_lowercase_value},
+    },
 };
 use calcard::{
     common::timezone::Tz,
     jscalendar::{JSCalendarDateTime, JSCalendarProperty, JSCalendarValue},
 };
-use jmap_tools::{JsonPointerItem, Key};
+use jmap_tools::{JsonPointer, JsonPointerItem, Key};
 use mail_parser::DateTime;
-use std::{borrow::Cow, str::FromStr};
+use std::borrow::Cow;
 use types::{blob::BlobId, id::Id};
 
 #[derive(Debug, Clone, Default)]
@@ -69,12 +75,11 @@ impl JmapObjectId for JSCalendarValue<Id, BlobId> {
     }
 
     fn try_set_id(&mut self, new_id: AnyId) -> bool {
-        if let AnyId::Id(id) = new_id {
-            *self = JSCalendarValue::Id(id);
-            true
-        } else {
-            false
-        }
+        *self = match new_id {
+            AnyId::Id(id) => JSCalendarValue::Id(id),
+            AnyId::BlobId(id) => JSCalendarValue::BlobId(id),
+        };
+        true
     }
 }
 
@@ -88,16 +93,17 @@ pub enum CalendarEventFilter {
     Description(String),
     Location(String),
     Owner(String),
-    Attendee(String),
+    Participant(String),
     Uid(String),
+    Metadata(MetadataFilter),
     _T(String),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CalendarEventComparator {
-    Start,
+    Id,
     Uid,
-    RecurrenceId,
+    Start,
     Created,
     Updated,
     _T(String),
@@ -108,7 +114,7 @@ pub struct CalendarEventGetArguments {
     pub recurrence_overrides_before: Option<JSCalendarDateTime>,
     pub recurrence_overrides_after: Option<JSCalendarDateTime>,
     pub reduce_participants: Option<bool>,
-    pub time_zone: Option<Tz>,
+    pub time_zone: Option<MaybeInvalid<Tz>>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -119,7 +125,34 @@ pub struct CalendarEventSetArguments {
 #[derive(Debug, Clone, Default)]
 pub struct CalendarEventQueryArguments {
     pub expand_recurrences: Option<bool>,
-    pub time_zone: Option<Tz>,
+    pub time_zone: Option<MaybeInvalid<Tz>>,
+}
+
+impl CalendarEventGetArguments {
+    pub fn resolved_time_zone(&self) -> trc::Result<Tz> {
+        self.time_zone
+            .as_ref()
+            .map_or(Ok(Tz::UTC), MaybeInvalid::to_time_zone)
+    }
+}
+
+impl CalendarEventQueryArguments {
+    pub fn resolved_time_zone(&self) -> trc::Result<Tz> {
+        self.time_zone
+            .as_ref()
+            .map_or(Ok(Tz::UTC), MaybeInvalid::to_time_zone)
+    }
+}
+
+impl MaybeInvalid<Tz> {
+    fn to_time_zone(&self) -> trc::Result<Tz> {
+        match self {
+            MaybeInvalid::Value(tz) => Ok(*tz),
+            MaybeInvalid::Invalid(tz) => Err(trc::JmapEvent::InvalidArguments
+                .into_err()
+                .details(format!("Invalid timeZone {tz:?}"))),
+        }
+    }
 }
 
 impl<'de> DeserializeArguments<'de> for CalendarEventFilter {
@@ -138,29 +171,34 @@ impl<'de> DeserializeArguments<'de> for CalendarEventFilter {
                 *self = CalendarEventFilter::Before(map.next_value::<LocalTime>()?.0);
             },
             b"text" => {
-                *self = CalendarEventFilter::Text(map.next_value::<Cow<str>>()?.to_lowercase());
+                *self = CalendarEventFilter::Text(next_lowercase_value(map)?);
             },
             b"title" => {
-                *self = CalendarEventFilter::Title(map.next_value::<Cow<str>>()?.to_lowercase());
+                *self = CalendarEventFilter::Title(next_lowercase_value(map)?);
             },
             b"description" => {
-                *self = CalendarEventFilter::Description(map.next_value::<Cow<str>>()?.to_lowercase());
+                *self = CalendarEventFilter::Description(next_lowercase_value(map)?);
             },
             b"location" => {
-                *self = CalendarEventFilter::Location(map.next_value::<Cow<str>>()?.to_lowercase());
+                *self = CalendarEventFilter::Location(next_lowercase_value(map)?);
             },
             b"owner" => {
-                *self = CalendarEventFilter::Owner(map.next_value::<Cow<str>>()?.to_lowercase());
+                *self = CalendarEventFilter::Owner(next_lowercase_value(map)?);
             },
-            b"attendee" => {
-                *self = CalendarEventFilter::Attendee(map.next_value::<Cow<str>>()?.to_lowercase());
+            b"participant" => {
+                *self = CalendarEventFilter::Participant(next_lowercase_value(map)?);
             },
             b"uid" => {
                 *self = CalendarEventFilter::Uid(map.next_value()?);
             },
             _ => {
-                *self = CalendarEventFilter::_T(key.to_string());
-                let _ = map.next_value::<serde::de::IgnoredAny>()?;
+                *self = match MetadataFilter::try_deserialize(key, map)? {
+                    Some(filter) => CalendarEventFilter::Metadata(filter),
+                    None => {
+                        let _ = map.next_value::<serde::de::IgnoredAny>()?;
+                        CalendarEventFilter::_T(key.to_string())
+                    }
+                };
             }
         );
         Ok(())
@@ -173,16 +211,16 @@ impl<'de> DeserializeArguments<'de> for CalendarEventComparator {
         A: serde::de::MapAccess<'de>,
     {
         if key == "property" {
-            let value = map.next_value::<Cow<str>>()?;
+            let value = map.next_value::<CowStr>()?.0;
             hashify::fnc_map!(value.as_bytes(),
-                b"start" => {
-                    *self = CalendarEventComparator::Start;
+                b"id" => {
+                    *self = CalendarEventComparator::Id;
                 },
                 b"uid" => {
                     *self = CalendarEventComparator::Uid;
                 },
-                b"recurrenceId" => {
-                    *self = CalendarEventComparator::RecurrenceId;
+                b"start" => {
+                    *self = CalendarEventComparator::Start;
                 },
                 b"created" => {
                     *self = CalendarEventComparator::Created;
@@ -191,7 +229,7 @@ impl<'de> DeserializeArguments<'de> for CalendarEventComparator {
                     *self = CalendarEventComparator::Updated;
                 },
                 _ => {
-                    *self = CalendarEventComparator::_T(value.to_string());
+                    *self = CalendarEventComparator::_T(value.into_owned());
                 }
             );
         } else {
@@ -217,7 +255,7 @@ impl<'de> DeserializeArguments<'de> for CalendarEventGetArguments {
                 self.reduce_participants = map.next_value()?;
             },
             b"timeZone" => {
-                self.time_zone = map.next_value::<Option<&str>>()?.and_then(|s| Tz::from_str(s).ok());
+                self.time_zone = map.next_value()?;
             },
             _ => {
                 let _ = map.next_value::<serde::de::IgnoredAny>()?;
@@ -254,7 +292,7 @@ impl<'de> DeserializeArguments<'de> for CalendarEventQueryArguments {
                 self.expand_recurrences = map.next_value()?;
             },
             b"timeZone" => {
-                self.time_zone = map.next_value::<Option<&str>>()?.and_then(|s| Tz::from_str(s).ok());
+                self.time_zone = map.next_value()?;
             },
             _ => {
                 let _ = map.next_value::<serde::de::IgnoredAny>()?;
@@ -275,8 +313,9 @@ impl CalendarEventFilter {
             CalendarEventFilter::Description(_) => "description",
             CalendarEventFilter::Location(_) => "location",
             CalendarEventFilter::Owner(_) => "owner",
-            CalendarEventFilter::Attendee(_) => "attendee",
+            CalendarEventFilter::Participant(_) => "participant",
             CalendarEventFilter::Uid(_) => "uid",
+            CalendarEventFilter::Metadata(filter) => filter.as_str(),
             CalendarEventFilter::_T(s) => return Cow::Owned(s),
         }
         .into()
@@ -286,9 +325,9 @@ impl CalendarEventFilter {
 impl CalendarEventComparator {
     pub fn into_string(self) -> Cow<'static, str> {
         match self {
-            CalendarEventComparator::Start => "start",
+            CalendarEventComparator::Id => "id",
             CalendarEventComparator::Uid => "uid",
-            CalendarEventComparator::RecurrenceId => "recurrenceId",
+            CalendarEventComparator::Start => "start",
             CalendarEventComparator::Created => "created",
             CalendarEventComparator::Updated => "updated",
             CalendarEventComparator::_T(s) => return Cow::Owned(s),
@@ -328,6 +367,30 @@ impl<'de> serde::Deserialize<'de> for LocalTime {
                 "Invalid datetime: {}",
                 value
             )))
+        }
+    }
+}
+
+impl MetadataProperty for JSCalendarProperty<Id> {
+    fn as_metadata_root(&self) -> Option<MetadataRoot> {
+        match self {
+            JSCalendarProperty::Metadata => Some(MetadataRoot::Shared),
+            JSCalendarProperty::PrivateMetadata => Some(MetadataRoot::Private),
+            _ => None,
+        }
+    }
+
+    fn as_pointer(&self) -> Option<&JsonPointer<Self>> {
+        match self {
+            JSCalendarProperty::Pointer(pointer) => Some(pointer),
+            _ => None,
+        }
+    }
+
+    fn from_metadata_root(root: MetadataRoot) -> Self {
+        match root {
+            MetadataRoot::Shared => JSCalendarProperty::Metadata,
+            MetadataRoot::Private => JSCalendarProperty::PrivateMetadata,
         }
     }
 }

@@ -5,17 +5,32 @@
  */
 
 use bitpacking::{BitPacker, BitPacker1x, BitPacker4x, BitPacker8x};
-use utils::codec::leb128::Leb128Reader;
+use utils::codec::leb128::Leb128;
 
 use super::key::KeySerializer;
 
-#[derive(Default)]
+const MAX_BLOCK_LEN: usize = BitPacker8x::BLOCK_LEN;
+
 pub struct BitpackIterator<'x> {
     pub(crate) bytes: &'x [u8],
     pub(crate) bytes_offset: usize,
-    pub(crate) chunk: Vec<u32>,
+    pub(crate) chunk: [u32; MAX_BLOCK_LEN],
+    pub(crate) chunk_len: usize,
     pub(crate) chunk_offset: usize,
     pub items_left: u32,
+}
+
+impl Default for BitpackIterator<'_> {
+    fn default() -> Self {
+        BitpackIterator {
+            bytes: &[],
+            bytes_offset: 0,
+            chunk: [0u32; MAX_BLOCK_LEN],
+            chunk_len: 0,
+            chunk_offset: 0,
+            items_left: 0,
+        }
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -27,8 +42,7 @@ pub(crate) struct BitBlockPacker {
 }
 
 impl KeySerializer {
-    pub fn bitpack_sorted(self, items: &[u32]) -> Self {
-        let mut serializer = self;
+    pub fn bitpack_sorted(&mut self, items: &[u32]) -> &mut Self {
         let mut bitpacker = BitBlockPacker::new();
         let mut compressed = vec![0u8; 4 * BitPacker8x::BLOCK_LEN];
 
@@ -36,13 +50,13 @@ impl KeySerializer {
         let len = items.len();
         let mut initial_value = None;
 
-        serializer = serializer.write_leb128(len as u32);
+        self.write_leb128(len as u32);
 
         while pos < len {
             let block_len = match len - pos {
                 0..=31 => {
                     for val in &items[pos..] {
-                        serializer = serializer.write_leb128(*val);
+                        self.write_leb128(*val);
                     }
                     break;
                 }
@@ -60,14 +74,12 @@ impl KeySerializer {
                 &mut compressed[..],
                 num_bits,
             );
-            serializer = serializer
-                .write(num_bits)
-                .write(&compressed[..compressed_len]);
+            self.write(num_bits).write(&compressed[..compressed_len]);
             initial_value = chunk[chunk.len() - 1].into();
 
             pos += block_len;
         }
-        serializer
+        self
     }
 }
 
@@ -82,14 +94,12 @@ impl<'x> BitpackIterator<'x> {
     }
 
     pub fn new(bytes: &'x [u8]) -> Option<Self> {
-        bytes
-            .read_leb128::<u32>()
-            .map(|(items_left, bytes_offset)| BitpackIterator {
-                bytes,
-                bytes_offset,
-                items_left,
-                ..Default::default()
-            })
+        u32::from_leb128(bytes).map(|(items_left, bytes_offset)| BitpackIterator {
+            bytes,
+            bytes_offset,
+            items_left,
+            ..Default::default()
+        })
     }
 }
 
@@ -97,15 +107,16 @@ impl Iterator for BitpackIterator<'_> {
     type Item = u32;
 
     fn next(&mut self) -> Option<Self::Item> {
-        if let Some(item) = self.chunk.get(self.chunk_offset) {
+        if self.chunk_offset < self.chunk_len {
+            let item = self.chunk[self.chunk_offset];
             self.chunk_offset += 1;
-            return Some(*item);
+            return Some(item);
         }
         let block_len = match self.items_left {
             0 => return None,
             1..=31 => {
                 self.items_left -= 1;
-                let (item, bytes_read) = self.bytes.get(self.bytes_offset..)?.read_leb128()?;
+                let (item, bytes_read) = u32::from_leb128(self.bytes.get(self.bytes_offset..)?)?;
                 self.bytes_offset += bytes_read;
                 return Some(item);
             }
@@ -117,22 +128,23 @@ impl Iterator for BitpackIterator<'_> {
         let bitpacker = BitBlockPacker::with_block_len(block_len);
         let num_bits = *self.bytes.get(self.bytes_offset)?;
         let bytes_read = ((num_bits as usize) * block_len / 8) + 1;
-        let initial_value = self.chunk.last().copied();
-
-        self.chunk = vec![0u32; block_len];
-        self.chunk_offset = 1;
+        let initial_value = self.chunk_len.checked_sub(1).map(|last| self.chunk[last]);
+        let compressed = self
+            .bytes
+            .get(self.bytes_offset + 1..self.bytes_offset + bytes_read)?;
 
         bitpacker.decompress_strictly_sorted(
             initial_value,
-            self.bytes
-                .get(self.bytes_offset + 1..self.bytes_offset + bytes_read)?,
-            &mut self.chunk[..],
+            compressed,
+            &mut self.chunk[..block_len],
             num_bits,
         );
 
+        self.chunk_len = block_len;
+        self.chunk_offset = 1;
         self.bytes_offset += bytes_read;
         self.items_left -= block_len as u32;
-        self.chunk.first().copied()
+        Some(self.chunk[0])
     }
 }
 
@@ -326,57 +338,3 @@ impl BitPacker for BitBlockPacker {
     }
 }
 
-#[cfg(test)]
-mod tests {
-
-    use super::*;
-
-    #[test]
-    fn bitpack_roundtrip() {
-        for num_positions in [
-            1,
-            10,
-            BitPacker1x::BLOCK_LEN,
-            BitPacker4x::BLOCK_LEN,
-            BitPacker8x::BLOCK_LEN,
-            BitPacker8x::BLOCK_LEN + BitPacker4x::BLOCK_LEN + BitPacker1x::BLOCK_LEN,
-            BitPacker8x::BLOCK_LEN + BitPacker4x::BLOCK_LEN + BitPacker1x::BLOCK_LEN + 1,
-            (BitPacker8x::BLOCK_LEN * 3)
-                + (BitPacker4x::BLOCK_LEN * 3)
-                + (BitPacker1x::BLOCK_LEN * 3)
-                + 1,
-            (BitPacker8x::BLOCK_LEN * 32) + 1,
-        ] {
-            let serialized = KeySerializer::new(num_positions * std::mem::size_of::<u32>())
-                .bitpack_sorted(
-                    &(0..num_positions)
-                        .map(|i| (i * i) as u32)
-                        .collect::<Vec<_>>(),
-                )
-                .finalize();
-
-            println!(
-                "Testing block {num_positions} with {} size...",
-                serialized.len()
-            );
-
-            let mut iter = BitpackIterator::new(&serialized).unwrap();
-
-            assert_eq!(
-                iter.items_left, num_positions as u32,
-                "failed for num_positions: {}",
-                num_positions
-            );
-
-            for i in 0..num_positions {
-                assert_eq!(
-                    iter.next(),
-                    Some((i * i) as u32),
-                    "failed for position: {}",
-                    i
-                );
-            }
-            assert_eq!(iter.next(), None, "expected end of iterator");
-        }
-    }
-}

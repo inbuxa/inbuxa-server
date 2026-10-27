@@ -4,18 +4,20 @@
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
  */
 
-use crate::{Session, protocol::response::Response};
+use crate::{
+    Session,
+    protocol::response::{MessageWriter, Response},
+};
 use common::network::SessionStream;
-use email::message::metadata::MessageMetadata;
+use email::message::metadata::MetadataRow;
 use registry::schema::enums::Permission;
 use std::time::Instant;
-use store::{
-    ValueKey,
-    write::{AlignedBytes, Archive},
-};
+use store::ValueKey;
 use trc::AddContext;
 use types::{collection::Collection, field::EmailField};
 use utils::chained_bytes::ChainedBytes;
+
+const MESSAGE_CHUNK_LEN: usize = 64 * 1024;
 
 impl<T: SessionStream> Session<T> {
     pub async fn handle_fetch(&mut self, msg: u32, lines: Option<u32>) -> trc::Result<()> {
@@ -27,10 +29,10 @@ impl<T: SessionStream> Session<T> {
         let op_start = Instant::now();
         let mailbox = self.state.mailbox();
         if let Some(message) = mailbox.messages.get(msg.saturating_sub(1) as usize) {
-            if let Some(metadata_) = self
+            if let Some(row) = self
                 .server
                 .store()
-                .get_value::<Archive<AlignedBytes>>(ValueKey::property(
+                .get_value::<MetadataRow>(ValueKey::immutable(
                     mailbox.account_id,
                     Collection::Email,
                     message.id,
@@ -39,13 +41,15 @@ impl<T: SessionStream> Session<T> {
                 .await
                 .caused_by(trc::location!())?
             {
-                let metadata = metadata_
-                    .unarchive::<MessageMetadata>()
-                    .caused_by(trc::location!())?;
+                let metadata = row.unarchive().caused_by(trc::location!())?;
+                let headers = row.raw_headers().caused_by(trc::location!())?;
                 if let Some(bytes) = self
                     .server
-                    .blob_store()
-                    .get_blob(metadata.blob_hash.0.as_slice(), 0..usize::MAX)
+                    .fetch_blob(
+                        &metadata.blob_hash(),
+                        0..usize::MAX,
+                        Some(metadata.size() as u64),
+                    )
                     .await
                     .caused_by(trc::location!())?
                 {
@@ -56,16 +60,23 @@ impl<T: SessionStream> Session<T> {
                         Elapsed = op_start.elapsed()
                     );
 
-                    let bytes = ChainedBytes::new(metadata.raw_headers.as_ref())
-                        .with_last(
-                            bytes
-                                .get(metadata.blob_body_offset.to_native() as usize..)
-                                .unwrap_or_default(),
-                        )
-                        .get_full_range();
-
-                    self.write_bytes(Response::Message::<u32> { bytes, lines }.serialize())
-                        .await
+                    match Response::<u32>::message(
+                        ChainedBytes::from_blob(&headers, &bytes, metadata.blob_body_offset()),
+                        metadata.headers_len(),
+                        lines,
+                    ) {
+                        Response::Message(bytes, end) => {
+                            let mut buf = Vec::new();
+                            let mut writer =
+                                MessageWriter::new(bytes, end, &mut buf, MESSAGE_CHUNK_LEN);
+                            while !writer.fill(&mut buf) {
+                                self.write_bytes(&buf).await?;
+                                buf.clear();
+                            }
+                            self.write_bytes(&buf).await
+                        }
+                        response => self.write_bytes(response.serialize()).await,
+                    }
                 } else {
                     Err(trc::Pop3Event::Error
                         .into_err()

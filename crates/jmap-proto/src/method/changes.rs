@@ -18,6 +18,7 @@ pub struct ChangesRequest {
     pub account_id: Id,
     pub since_state: State,
     pub max_changes: Option<usize>,
+    pub ignore_metadata_only_changes: Option<bool>,
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -41,7 +42,6 @@ pub struct ChangesResponse<T: JmapObject> {
     pub destroyed: Vec<Id>,
 
     #[serde(rename = "updatedProperties")]
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub updated_properties: Option<Vec<PropertyWrapper<T::Property>>>,
 }
 
@@ -59,6 +59,9 @@ impl<'de> DeserializeArguments<'de> for ChangesRequest {
             },
             b"maxChanges" => {
                 self.max_changes = map.next_value()?;
+            },
+            b"ignoreMetadataOnlyChanges" => {
+                self.ignore_metadata_only_changes = map.next_value()?;
             },
             _ => {
                 let _ = map.next_value::<serde::de::IgnoredAny>()?;
@@ -83,3 +86,4 @@ impl<T: JmapObject> ChangesResponse<T> {
         !self.created.is_empty() || !self.updated.is_empty() || !self.destroyed.is_empty()
     }
 }
+

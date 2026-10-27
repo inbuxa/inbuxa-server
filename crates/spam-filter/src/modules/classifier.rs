@@ -7,15 +7,16 @@
 use crate::analysis::domain::SpamFilterAnalyzeDomain;
 use crate::analysis::init::SpamFilterInit;
 use crate::analysis::is_trusted_domain;
-use crate::analysis::url::SpamFilterAnalyzeUrl;
+use crate::analysis::url::{SpamFilterAnalyzeUrl, UrlParsed};
 use crate::modules::html::{A, ALT, HREF, HtmlToken, IMG, SRC, TITLE};
 use crate::{Email, SpamFilterContext, TextPart};
-use crate::{Hostname, SpamFilterInput};
+use crate::{Hostname, MessageTexts, SpamFilterInput};
 use common::config::mailstore::spamfilter;
 use common::manager::{SPAM_CLASSIFIER_KEY, SPAM_TRAINER_KEY};
 use common::{Server, config::mailstore::spamfilter::Location, ipc::BroadcastEvent};
+use compact_str::CompactString;
 use mail_auth::DmarcResult;
-use mail_parser::{MessageParser, MimeHeaders};
+use mail_parser::MessageParser;
 use nlp::classifier::feature::{
     CcfhFeature, CcfhFeatureBuilder, FeatureBuilder, FhFeature, FhFeatureBuilder, Sample,
     UnprocessedFeature,
@@ -32,16 +33,18 @@ use std::time::Instant;
 use std::{
     borrow::Cow,
     collections::{HashMap, hash_map::Entry},
-    hash::{Hash, RandomState},
+    hash::Hash,
     sync::Arc,
 };
-use store::ahash::AHashMap;
-use store::rand::seq::SliceRandom;
-use store::write::{BlobLink, RegistryClass, now};
+use store::ahash::{AHashMap, AHashSet, RandomState};
+#[cfg(stalwart_tests)]
+use store::rand::SeedableRng;
+use store::rand::{rngs::StdRng, seq::SliceRandom};
+use store::write::{ArchiveCompression, BlobLink, Compression, RegistryClass, now};
 use store::{
     Deserialize, IterateParams, Serialize, ValueKey,
     write::{
-        AlignedBytes, Archive, Archiver, BatchBuilder, BlobOp, ValueClass,
+        Archive, ArchiveBytes, Archiver, BatchBuilder, BlobOp, ValueClass,
         key::DeserializeBigEndian,
     },
 };
@@ -140,7 +143,7 @@ impl SpamClassifier for Server {
                 .get_blob(SPAM_TRAINER_KEY, 0..usize::MAX)
                 .await
                 .and_then(|archive| match archive {
-                    Some(archive) => <Archive<AlignedBytes> as Deserialize>::deserialize(&archive)
+                    Some(archive) => <Archive<ArchiveBytes> as Deserialize>::deserialize(&archive)
                         .and_then(|archive| archive.deserialize_untrusted::<SpamTrainer>())
                         .map(Some),
                     None => Ok(None),
@@ -207,6 +210,10 @@ impl SpamClassifier for Server {
         let mut seen_samples = AHashMap::new();
         let mut spam_count = 0;
         let mut ham_count = 0;
+        #[cfg(stalwart_tests)]
+        let mut rng = StdRng::seed_from_u64(42);
+        #[cfg(not(stalwart_tests))]
+        let mut rng: StdRng = store::rand::make_rng();
         self.store()
             .iterate(
                 IterateParams::new(from_key, to_key).descending(),
@@ -235,6 +242,7 @@ impl SpamClassifier for Server {
                                     &sample,
                                     is_spam,
                                     config.reservoir_capacity,
+                                    &mut rng,
                                 );
                             } else {
                                 trainer.reservoir.update_counts(is_spam);
@@ -328,7 +336,7 @@ impl SpamClassifier for Server {
             samples.extend(
                 trainer
                     .reservoir
-                    .replay_samples((spam_count - ham_count) as usize, false)
+                    .replay_samples((spam_count - ham_count) as usize, false, &mut rng)
                     .map(|sample| TrainingTask {
                         id: 0,
                         sample: sample.clone(),
@@ -342,7 +350,7 @@ impl SpamClassifier for Server {
             samples.extend(
                 trainer
                     .reservoir
-                    .replay_samples((ham_count - spam_count) as usize, true)
+                    .replay_samples((ham_count - spam_count) as usize, true, &mut rng)
                     .map(|sample| TrainingTask {
                         id: 0,
                         sample: sample.clone(),
@@ -354,7 +362,7 @@ impl SpamClassifier for Server {
         }
 
         let num_samples = samples.len();
-        samples.shuffle(&mut store::rand::rng());
+        samples.shuffle(&mut rng);
 
         // Spawn training task
         let epochs = match trainer
@@ -425,8 +433,10 @@ impl SpamClassifier for Server {
                     );
                     continue;
                 };
-                let mut ctx =
-                    self.spam_filter_init(SpamFilterInput::from_message(&message, 0).train_mode());
+                let texts = MessageTexts::new(&message, self.core.spam.text_limits);
+                let mut ctx = self.spam_filter_init(
+                    SpamFilterInput::from_message(&message, &texts, 0).train_mode(),
+                );
                 self.spam_filter_analyze_domain(&mut ctx).await;
                 self.spam_filter_analyze_url(&mut ctx).await;
                 let mut tokens = self.spam_build_tokens(&ctx).await.0;
@@ -548,12 +558,24 @@ impl SpamClassifier for Server {
                 last_trained_at: now(),
             },
         });
+        let (trainer_bytes, classifier_bytes, classifier) =
+            tokio::task::spawn_blocking(move || {
+                let trainer_bytes = Archiver::new(trainer).serialize();
+                let classifier_bytes = classifier.serialize();
+                (trainer_bytes, classifier_bytes, classifier)
+            })
+            .await
+            .map_err(|err| {
+                trc::EventType::Server(trc::ServerEvent::ThreadError)
+                    .reason(err)
+                    .details("Spam model serialization failed")
+                    .caused_by(trc::location!())
+            })?;
+
         self.blob_store()
             .put_blob(
                 SPAM_TRAINER_KEY,
-                &Archiver::new(trainer)
-                    .serialize()
-                    .caused_by(trc::location!())?,
+                &trainer_bytes.caused_by(trc::location!())?,
                 self.core.email.compression,
             )
             .await
@@ -561,7 +583,7 @@ impl SpamClassifier for Server {
         self.blob_store()
             .put_blob(
                 SPAM_CLASSIFIER_KEY,
-                &classifier.serialize().caused_by(trc::location!())?,
+                &classifier_bytes.caused_by(trc::location!())?,
                 self.core.email.compression,
             )
             .await
@@ -606,6 +628,9 @@ impl SpamClassifier for Server {
                 if config.log_scale {
                     feature_builder.scale(&mut tokens);
                 }
+                let mut base_features = Vec::new();
+                let mut account_features = Vec::new();
+                let mut base_score = None;
 
                 for rcpt in &ctx.input.env_rcpt_rewritten_to {
                     let prediction = if let Some(account_id) = self
@@ -614,12 +639,27 @@ impl SpamClassifier for Server {
                         .caused_by(trc::location!())?
                     {
                         has_prediction = true;
-                        classifier
-                            .predict_proba_sample(&feature_builder.build(
+                        let score = if let Some(score) = base_score {
+                            feature_builder.build_part(
                                 &tokens,
-                                account_id.into(),
+                                Some(account_id),
+                                &mut account_features,
+                            );
+                            score
+                        } else {
+                            feature_builder.build_base_and_account(
+                                &tokens,
+                                account_id,
+                                &mut base_features,
+                                &mut account_features,
+                            );
+                            *base_score.insert(classifier.score(&base_features))
+                        };
+                        classifier
+                            .predict_proba_score(
+                                score.combine(classifier.score(&account_features)),
                                 config.l2_normalize,
-                            ))
+                            )
                             .into()
                     } else {
                         None
@@ -631,11 +671,9 @@ impl SpamClassifier for Server {
                     ctx.result.classifier_confidence = classifier_confidence;
                 } else {
                     // None of the recipients are local, default to global model prediction
-                    let prediction = classifier.predict_proba_sample(&feature_builder.build(
-                        &tokens,
-                        None,
-                        config.l2_normalize,
-                    ));
+                    feature_builder.build_part(&tokens, None, &mut base_features);
+                    let prediction = classifier
+                        .predict_proba_score(classifier.score(&base_features), config.l2_normalize);
                     ctx.result.classifier_confidence =
                         vec![prediction.into(); ctx.input.env_rcpt_rewritten_to.len()];
                 }
@@ -649,6 +687,9 @@ impl SpamClassifier for Server {
                 if config.log_scale {
                     feature_builder.scale(&mut tokens);
                 }
+                let mut base_features = Vec::new();
+                let mut account_features = Vec::new();
+                let mut base_score = None;
 
                 for rcpt in &ctx.input.env_rcpt_rewritten_to {
                     let prediction = if let Some(account_id) = self
@@ -657,12 +698,27 @@ impl SpamClassifier for Server {
                         .caused_by(trc::location!())?
                     {
                         has_prediction = true;
-                        classifier
-                            .predict_proba_sample(&feature_builder.build(
+                        let score = if let Some(score) = base_score {
+                            feature_builder.build_part(
                                 &tokens,
-                                account_id.into(),
+                                Some(account_id),
+                                &mut account_features,
+                            );
+                            score
+                        } else {
+                            feature_builder.build_base_and_account(
+                                &tokens,
+                                account_id,
+                                &mut base_features,
+                                &mut account_features,
+                            );
+                            *base_score.insert(classifier.score(&base_features))
+                        };
+                        classifier
+                            .predict_proba_score(
+                                score.combine(classifier.score(&account_features)),
                                 config.l2_normalize,
-                            ))
+                            )
                             .into()
                     } else {
                         None
@@ -674,11 +730,9 @@ impl SpamClassifier for Server {
                     ctx.result.classifier_confidence = classifier_confidence;
                 } else {
                     // None of the recipients are local, default to global model prediction
-                    let prediction = classifier.predict_proba_sample(&feature_builder.build(
-                        &tokens,
-                        None,
-                        config.l2_normalize,
-                    ));
+                    feature_builder.build_part(&tokens, None, &mut base_features);
+                    let prediction = classifier
+                        .predict_proba_score(classifier.score(&base_features), config.l2_normalize);
                     ctx.result.classifier_confidence =
                         vec![prediction.into(); ctx.input.env_rcpt_rewritten_to.len()];
                 }
@@ -696,7 +750,7 @@ impl SpamClassifier for Server {
                 .iter()
                 .zip(ctx.input.env_rcpt_rewritten_to.iter())
                 .map(|(v, rcpt)| trc::Value::Array(vec![
-                    trc::Value::from(rcpt.to_string()),
+                    trc::Value::from(CompactString::from(*rcpt)),
                     trc::Value::from(*v)
                 ]))
                 .collect::<Vec<_>>(),
@@ -708,49 +762,54 @@ impl SpamClassifier for Server {
     }
 
     async fn spam_build_tokens<'x>(&self, ctx: &'x SpamFilterContext<'_>) -> Tokens<'x> {
-        let mut tokens = Tokens::default();
-
-        // Add From addresses
-        if ctx
-            .input
-            .dmarc_result
-            .as_ref()
-            .is_some_and(|result| **result != DmarcResult::Pass)
-        {
-            tokens.insert(Token::Sender { value: "!".into() });
+        let builder = spam_collect_tokens(ctx);
+        let mut checked = AHashSet::new();
+        let mut trusted: AHashSet<String> = AHashSet::new();
+        for domain in builder.trust_domains() {
+            if checked.insert(domain) && is_trusted_domain(self, domain, ctx.input.span_id).await {
+                trusted.insert(domain.to_string());
+            }
         }
-        for email in [&ctx.output.env_from_addr, &ctx.output.from.email] {
-            tokens.insert_email(email, true);
-        }
+        drop(checked);
 
-        // Add Email addresses
-        for email in &ctx.output.emails {
-            let is_sender = match &email.location {
-                Location::HeaderReplyTo | Location::HeaderDnt => true,
-                Location::BodyText
-                | Location::BodyHtml
-                | Location::Attachment
-                | Location::HeaderSubject => false,
-                _ => continue,
-            };
+        builder.finish(|domain| trusted.contains(domain))
+    }
+}
 
-            if is_sender
-                || !is_trusted_domain(
-                    self,
-                    email.element.email.domain_part.sld_or_default(),
-                    ctx.input.span_id,
-                )
-                .await
-            {
-                tokens.insert_email(&email.element.email, is_sender);
+pub struct TokenBuilder<'x> {
+    tokens: Tokens<'x>,
+    alt_tokens: Tokens<'x>,
+    emails: Vec<&'x Email>,
+    urls: Vec<&'x UrlParsed>,
+    hosts: Vec<Hostname>,
+}
+
+impl<'x> TokenBuilder<'x> {
+    pub fn trust_domains(&self) -> impl Iterator<Item = &str> {
+        self.emails
+            .iter()
+            .map(|email| email.domain_part.sld_or_default())
+            .chain(self.urls.iter().map(|url| url.host.sld_or_default()))
+            .chain(self.hosts.iter().map(|host| host.sld_or_default()))
+    }
+
+    pub fn finish(self, is_trusted: impl Fn(&str) -> bool) -> Tokens<'x> {
+        let TokenBuilder {
+            mut tokens,
+            alt_tokens,
+            emails,
+            urls,
+            hosts,
+        } = self;
+
+        for email in emails {
+            if !is_trusted(email.domain_part.sld_or_default()) {
+                tokens.insert_email(email, false);
             }
         }
 
-        // Add URLs
-        for url in &ctx.output.urls {
-            if let Some(url) = &url.element.url_parsed
-                && !is_trusted_domain(self, url.host.sld_or_default(), ctx.input.span_id).await
-            {
+        for url in urls {
+            if !is_trusted(url.host.sld_or_default()) {
                 if let Some(host) = &url.host.sld {
                     tokens.insert(Token::Url { value: host.into() });
                     if host != &url.host.fqdn {
@@ -770,119 +829,30 @@ impl SpamClassifier for Server {
                     .filter(|v| v.chars().all(|ch| ch.is_alphabetic()))
                 {
                     if token.len() > 2 {
-                        let token = truncate_word(token, MAX_TOKEN_LENGTH);
                         tokens.insert(Token::Url {
-                            value: format!("_{token}").into(),
+                            value: concat_word("_", truncate_word(token, MAX_TOKEN_LENGTH)).into(),
                         });
                     }
                 }
             }
         }
 
-        // Add hostnames
-        for domain in &ctx.output.domains {
-            if matches!(
-                domain.location,
-                Location::HeaderReceived | Location::HeaderMid | Location::Ehlo | Location::Tcp
-            ) {
-                let host = Hostname::new(&domain.element);
-                let host_sld = host.sld_or_default();
+        for host in hosts {
+            let host_sld = host.sld_or_default();
 
-                if !is_trusted_domain(self, host_sld, ctx.input.span_id).await {
-                    if !host_sld.is_empty() && host_sld != host.fqdn {
-                        tokens.insert(Token::Hostname {
-                            value: host_sld.to_string().into(),
-                        });
-                    }
-
+            if !is_trusted(host_sld) {
+                if !host_sld.is_empty() && host_sld != host.fqdn {
                     tokens.insert(Token::Hostname {
-                        value: host.fqdn.into(),
+                        value: host_sld.to_string().into(),
                     });
                 }
+
+                tokens.insert(Token::Hostname {
+                    value: host.fqdn.into(),
+                });
             }
         }
 
-        // Add ASN
-        if let Some(asn) = ctx.input.asn {
-            tokens.insert(Token::Asn {
-                number: asn.to_be_bytes(),
-            });
-        }
-
-        // Add MIME and attachment indicators
-        for part in &ctx.input.message.parts {
-            if let Some(name) = part.attachment_name()
-                && let Some((name, ext)) = name.rsplit_once('.')
-            {
-                if !ext.is_empty() {
-                    tokens.insert(Token::Attachment {
-                        value: lower_prefix("!", truncate_word(ext, MAX_TOKEN_LENGTH)).into(),
-                    });
-                }
-                let name = name.to_lowercase();
-                let word_tokenizer = WordStemTokenizer::new(&name);
-                for token in TypesTokenizer::new(&name) {
-                    if let TokenType::Alphabetic(word) = token.word {
-                        word_tokenizer.tokenize(word, |token| {
-                            tokens.insert(Token::Attachment {
-                                value: format!(
-                                    "_{}",
-                                    truncate_word(token.as_ref(), MAX_TOKEN_LENGTH)
-                                )
-                                .into(),
-                            });
-                        });
-                    }
-                }
-            }
-
-            if let Some(ct) = part.content_type() {
-                let mut ct_lower = String::with_capacity(
-                    ct.c_type.len() + ct.c_subtype.as_ref().map_or(0, |s| s.len()),
-                );
-                for ch in ct.c_type.chars() {
-                    ct_lower.push(ch.to_ascii_lowercase());
-                }
-                if let Some(st) = &ct.c_subtype {
-                    ct_lower.push('/');
-                    for ch in st.chars() {
-                        ct_lower.push(ch.to_ascii_lowercase());
-                    }
-                }
-
-                tokens.insert(Token::MimeType { value: ct_lower });
-            }
-        }
-
-        // Tokenize the subject
-        for token in &ctx.output.subject_tokens {
-            tokens.insert_type(
-                &WordStemTokenizer::new(&ctx.output.subject_thread_lc),
-                token,
-                false,
-            );
-        }
-
-        // Tokenize the text parts
-        let body_idx = ctx
-            .input
-            .message
-            .html_body
-            .first()
-            .or_else(|| ctx.input.message.text_body.first())
-            .map(|idx| *idx as usize);
-        let mut alt_tokens = Tokens::default();
-        for (idx, part) in ctx.output.text_parts.iter().enumerate() {
-            let is_body = Some(idx) == body_idx;
-            if is_body
-                || (!ctx.input.message.text_body.contains(&(idx as u32))
-                    && !ctx.input.message.html_body.contains(&(idx as u32)))
-            {
-                tokens.insert_text_part(part, is_body);
-            } else {
-                alt_tokens.insert_text_part(part, false);
-            }
-        }
         if !alt_tokens.0.is_empty() {
             for (token, count) in alt_tokens.0.into_iter() {
                 if let Entry::Vacant(entry) = tokens.0.entry(token) {
@@ -892,6 +862,143 @@ impl SpamClassifier for Server {
         }
 
         tokens
+    }
+}
+
+pub fn spam_collect_tokens<'x>(ctx: &'x SpamFilterContext<'_>) -> TokenBuilder<'x> {
+    let mut tokens = Tokens::default();
+    let mut emails = Vec::new();
+    let mut urls = Vec::new();
+    let mut hosts = Vec::new();
+
+    // Add From addresses
+    if ctx
+        .input
+        .dmarc_result
+        .as_ref()
+        .is_some_and(|result| **result != DmarcResult::Pass)
+    {
+        tokens.insert(Token::Sender { value: "!".into() });
+    }
+    for email in [&ctx.output.env_from_addr, &ctx.output.from.email] {
+        tokens.insert_email(email, true);
+    }
+
+    // Add Email addresses
+    for email in &ctx.output.emails {
+        let is_sender = match &email.location {
+            Location::HeaderReplyTo | Location::HeaderDnt => true,
+            Location::BodyText
+            | Location::BodyHtml
+            | Location::Attachment
+            | Location::HeaderSubject => false,
+            _ => continue,
+        };
+
+        if is_sender {
+            tokens.insert_email(&email.element.email, true);
+        } else {
+            emails.push(&email.element.email);
+        }
+    }
+
+    // Add URLs
+    for url in &ctx.output.urls {
+        if let Some(url) = &url.element.url_parsed {
+            urls.push(url);
+        }
+    }
+
+    // Add hostnames
+    for domain in &ctx.output.domains {
+        if matches!(
+            domain.location,
+            Location::HeaderReceived | Location::HeaderMid | Location::Ehlo | Location::Tcp
+        ) {
+            hosts.push(Hostname::new(&domain.element));
+        }
+    }
+
+    // Add ASN
+    if let Some(asn) = ctx.input.asn {
+        tokens.insert(Token::Asn {
+            number: asn.to_be_bytes(),
+        });
+    }
+
+    // Add MIME and attachment indicators
+    for part in ctx.input.message.root().parts() {
+        if let Some(name) = part.attachment_name()
+            && let Some((name, ext)) = name.rsplit_once('.')
+        {
+            if !ext.is_empty() {
+                tokens.insert(Token::Attachment {
+                    value: lower_prefix("!", truncate_word(ext, MAX_TOKEN_LENGTH)).into(),
+                });
+            }
+            let name = name.to_lowercase();
+            let word_tokenizer = WordStemTokenizer::new(&name);
+            for token in TypesTokenizer::new(&name) {
+                if let TokenType::Alphabetic(word) = token.word {
+                    word_tokenizer.tokenize(word, |token| {
+                        tokens.insert(Token::Attachment {
+                            value: concat_word(
+                                "_",
+                                truncate_word(token.as_ref(), MAX_TOKEN_LENGTH),
+                            )
+                            .into(),
+                        });
+                    });
+                }
+            }
+        }
+
+        if let Some(ct) = part.content_type() {
+            let mut ct_lower =
+                String::with_capacity(ct.ctype().len() + ct.subtype().map_or(0, |s| s.len() + 1));
+            ct_lower.push_str(ct.ctype());
+            if let Some(st) = ct.subtype() {
+                ct_lower.push('/');
+                ct_lower.push_str(st);
+            }
+            ct_lower.make_ascii_lowercase();
+
+            tokens.insert(Token::MimeType { value: ct_lower });
+        }
+    }
+
+    // Tokenize the subject
+    if !ctx.output.subject_tokens.is_empty() {
+        let subject_tokenizer = WordStemTokenizer::new(&ctx.output.subject_thread_lc);
+        for token in &ctx.output.subject_tokens {
+            tokens.insert_type(&subject_tokenizer, token, false);
+        }
+    }
+
+    // Tokenize the text parts
+    let body_idx = ctx
+        .input
+        .message
+        .html_body()
+        .next()
+        .or_else(|| ctx.input.message.text_body().next())
+        .map(|part| part.id() as usize);
+    let mut alt_tokens = Tokens(HashMap::with_hasher(RandomState::new()));
+    for (idx, part) in ctx.output.text_parts.iter().enumerate() {
+        let is_body = Some(idx) == body_idx;
+        if is_body || !ctx.input.is_body(idx as u32) {
+            tokens.insert_text_part(part, is_body);
+        } else {
+            alt_tokens.insert_text_part(part, false);
+        }
+    }
+
+    TokenBuilder {
+        tokens,
+        alt_tokens,
+        emails,
+        urls,
+        hosts,
     }
 }
 
@@ -930,7 +1037,7 @@ async fn delete_samples(
         if batch.is_large_batch() {
             server
                 .store()
-                .write(batch.build_all())
+                .write_batch(&mut batch)
                 .await
                 .caused_by(trc::location!())?;
             batch = BatchBuilder::new();
@@ -940,7 +1047,7 @@ async fn delete_samples(
     if !batch.is_empty() {
         server
             .store()
-            .write(batch.build_all())
+            .write_batch(&mut batch)
             .await
             .caused_by(trc::location!())?;
     }
@@ -1033,7 +1140,103 @@ impl SpamTrainerClass {
     }
 }
 
-const MAX_TOKEN_LENGTH: usize = 16;
+pub const MAX_TOKEN_LENGTH: usize = 16;
+
+const ASCII_CASE_BUF: usize = 64;
+
+const EXACT_F32_INTEGERS: f64 = 16_777_216.0;
+
+struct WordCounts<'x>(AHashMap<&'x str, u32>);
+
+impl<'x> WordCounts<'x> {
+    fn with_capacity(tokens: usize) -> Self {
+        WordCounts(AHashMap::with_capacity(tokens.div_ceil(8)))
+    }
+
+    #[inline(always)]
+    fn push(&mut self, word: &'x str) {
+        let count = self.0.entry(word).or_insert(0);
+        *count = count.saturating_add(1);
+    }
+}
+
+const ASCII_IGNORED_CATEGORY: u128 = ascii_ignored_category_mask();
+
+const fn ascii_ignored_category_mask() -> u128 {
+    let chars = b" !\"#%&'()*,-./:;?@[\\]_{}";
+    let mut mask = 0u128;
+    let mut idx = 0;
+    while idx < chars.len() {
+        mask |= 1u128 << chars[idx];
+        idx += 1;
+    }
+    mask
+}
+
+#[inline(always)]
+fn is_ascii_ignored_category(ch: char) -> bool {
+    let code = ch as u32;
+    code < 128 && ASCII_IGNORED_CATEGORY & (1u128 << code) != 0
+}
+
+#[inline(always)]
+fn ascii_lowercase<'a>(word: &str, buf: &'a mut [u8; ASCII_CASE_BUF]) -> Cow<'a, str> {
+    if let Some(slot) = buf.get_mut(..word.len()) {
+        for (out, &byte) in slot.iter_mut().zip(word.as_bytes()) {
+            *out = byte.to_ascii_lowercase();
+        }
+        if let Ok(text) = std::str::from_utf8(slot) {
+            return Cow::Borrowed(text);
+        }
+    }
+    Cow::Owned(word.to_ascii_lowercase())
+}
+
+fn lowercase(text: &str) -> Cow<'_, str> {
+    if text.is_ascii() {
+        if text.bytes().any(|byte| byte.is_ascii_uppercase()) {
+            Cow::Owned(text.to_ascii_lowercase())
+        } else {
+            Cow::Borrowed(text)
+        }
+    } else {
+        Cow::Owned(text.to_lowercase())
+    }
+}
+
+fn concat_word(prefix: &str, word: &str) -> String {
+    let mut value = String::with_capacity(prefix.len() + word.len());
+    value.push_str(prefix);
+    value.push_str(word);
+    value
+}
+
+#[inline(always)]
+fn stem_value(stem: Cow<'_, str>) -> Cow<'_, str> {
+    match stem {
+        Cow::Borrowed(text) => Cow::Borrowed(truncate_word(text, MAX_TOKEN_LENGTH)),
+        Cow::Owned(text) if text.len() <= MAX_TOKEN_LENGTH => Cow::Owned(text),
+        Cow::Owned(text) => Cow::Owned(truncate_word(&text, MAX_TOKEN_LENGTH).to_string()),
+    }
+}
+
+#[inline(always)]
+fn owned_stem_value(stem: Cow<'_, str>) -> Cow<'static, str> {
+    match stem {
+        Cow::Owned(text) if text.len() <= MAX_TOKEN_LENGTH => Cow::Owned(text),
+        other => Cow::Owned(truncate_word(other.as_ref(), MAX_TOKEN_LENGTH).to_string()),
+    }
+}
+
+enum WordType<'x> {
+    Alphabetic(&'x str),
+    Alphanumeric(&'x str),
+    UrlNoHost(&'x str),
+    Integer(&'x str),
+    Float(&'x str),
+    Char(char),
+    IpAddr,
+}
 
 #[derive(
     Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize, PartialOrd, Ord,
@@ -1059,13 +1262,14 @@ pub enum Token<'x> {
 pub struct Tokens<'x>(pub HashMap<Token<'x>, f32, RandomState>);
 
 impl<'x> Tokens<'x> {
-    fn insert_text_part(&mut self, part: &'x TextPart<'x>, is_body: bool) {
+    pub fn insert_text_part(&mut self, part: &'x TextPart<'x>, is_body: bool) {
         match part {
             TextPart::Plain { text_body, tokens } => {
                 let word_tokenizer = WordStemTokenizer::new(text_body);
+                let mut words = WordCounts::with_capacity(tokens.len());
 
                 for token in tokens {
-                    self.insert_type(&word_tokenizer, token, is_body);
+                    self.insert_counted(&word_tokenizer, &mut words, token, is_body);
                 }
 
                 if is_body
@@ -1076,16 +1280,20 @@ impl<'x> Tokens<'x> {
                         value: "_null".into(),
                     });
                 }
+
+                self.flush_words(&word_tokenizer, words, is_body);
             }
             TextPart::Html {
                 text_body,
                 tokens,
                 html_tokens,
+                ..
             } => {
                 let word_tokenizer = WordStemTokenizer::new(text_body);
+                let mut words = WordCounts::with_capacity(tokens.len());
 
                 for token in tokens {
-                    self.insert_type(&word_tokenizer, token, is_body);
+                    self.insert_counted(&word_tokenizer, &mut words, token, is_body);
                 }
 
                 if is_body {
@@ -1108,7 +1316,15 @@ impl<'x> Tokens<'x> {
                                 match (*name, value) {
                                     (ALT | TITLE, Some(value)) => {
                                         for token in TypesTokenizer::new(value) {
-                                            self.insert_type(&word_tokenizer, &token.word, is_body);
+                                            if let TokenType::Alphabetic(word) = token.word {
+                                                words.push(word);
+                                            } else {
+                                                self.insert_type_str(
+                                                    &word_tokenizer,
+                                                    &token.word,
+                                                    is_body,
+                                                );
+                                            }
                                         }
                                     }
                                     (SRC, Some(value)) => {
@@ -1127,85 +1343,113 @@ impl<'x> Tokens<'x> {
                         }
                     }
                 }
+
+                self.flush_words(&word_tokenizer, words, is_body);
             }
             TextPart::None => (),
         }
     }
 
-    fn insert_type<T: AsRef<str>, E, U, I>(
+    fn insert_counted<T: AsRef<str>, E, U, I>(
         &mut self,
         word_tokenizer: &WordStemTokenizer,
-        token: &TokenType<T, E, U, I>,
+        words: &mut WordCounts<'x>,
+        token: &'x TokenType<T, E, U, I>,
         is_body: bool,
     ) {
-        match token {
-            TokenType::Alphabetic(word) => {
-                let word = word.as_ref();
-                let mut set: Option<AugmentedScriptSet> = None;
-                let mut has_confusables = false;
-                let mut upper_count = 0;
-                for ch in word.chars() {
-                    if ch.is_uppercase() {
-                        upper_count += 1;
-                    }
+        if let TokenType::Alphabetic(word) = token {
+            words.push(word.as_ref());
+        } else {
+            self.insert_type(word_tokenizer, token, is_body);
+        }
+    }
 
-                    has_confusables |=
-                        !ch.is_ascii() && !std::iter::once(ch).nfc().eq(std::iter::once(ch).nfkc());
-                    set.get_or_insert_default().intersect_with(ch.into());
-                }
-                let is_mixed_script = set.is_some_and(|set| set.is_empty());
+    fn flush_words(
+        &mut self,
+        word_tokenizer: &WordStemTokenizer,
+        words: WordCounts<'x>,
+        is_body: bool,
+    ) {
+        self.0.reserve(words.0.len());
+        for (word, count) in words.0 {
+            self.insert_alphabetic(word_tokenizer, word, is_body, count);
+        }
+    }
 
-                if (is_mixed_script || has_confusables)
-                    && let Ok(cured_word) = decancer::cure(word, decancer::Options::default())
-                {
-                    if word.len() > MAX_TOKEN_LENGTH {
-                        self.insert(Token::Word {
-                            value: truncate_word(cured_word.as_str(), MAX_TOKEN_LENGTH)
-                                .to_string()
-                                .into(),
-                        });
-                    } else {
-                        self.insert(Token::Word {
-                            value: String::from(cured_word).into(),
-                        });
-                    }
-                } else {
-                    let word = word.to_lowercase();
-                    word_tokenizer.tokenize(&word, |token| {
-                        self.insert(Token::Word {
-                            value: truncate_word(token.as_ref(), MAX_TOKEN_LENGTH)
-                                .to_string()
-                                .into(),
-                        });
-                    });
-                }
+    pub fn insert_type<T: AsRef<str>, E, U, I>(
+        &mut self,
+        word_tokenizer: &WordStemTokenizer,
+        token: &'x TokenType<T, E, U, I>,
+        is_body: bool,
+    ) {
+        let word = match token {
+            TokenType::Alphabetic(word) => WordType::Alphabetic(word.as_ref()),
+            TokenType::Alphanumeric(word) => WordType::Alphanumeric(word.as_ref()),
+            TokenType::UrlNoHost(url) => WordType::UrlNoHost(url.as_ref()),
+            TokenType::Integer(word) => WordType::Integer(word.as_ref()),
+            TokenType::Float(word) => WordType::Float(word.as_ref()),
+            TokenType::Other(ch) | TokenType::Punctuation(ch) => WordType::Char(*ch),
+            TokenType::IpAddr(_) => WordType::IpAddr,
+            TokenType::Email(_)
+            | TokenType::Url(_)
+            | TokenType::UrlNoScheme(_)
+            | TokenType::Space => return,
+        };
+        self.insert_word_type(word_tokenizer, word, is_body);
+    }
 
-                if is_body && word.len() == upper_count && word.len() > 3 {
-                    self.insert(Token::Word {
-                        value: "_allcaps".into(),
-                    });
-                }
+    pub fn insert_type_str<E, U, I>(
+        &mut self,
+        word_tokenizer: &WordStemTokenizer,
+        token: &TokenType<&'x str, E, U, I>,
+        is_body: bool,
+    ) {
+        let word = match token {
+            TokenType::Alphabetic(word) => WordType::Alphabetic(word),
+            TokenType::Alphanumeric(word) => WordType::Alphanumeric(word),
+            TokenType::UrlNoHost(url) => WordType::UrlNoHost(url),
+            TokenType::Integer(word) => WordType::Integer(word),
+            TokenType::Float(word) => WordType::Float(word),
+            TokenType::Other(ch) | TokenType::Punctuation(ch) => WordType::Char(*ch),
+            TokenType::IpAddr(_) => WordType::IpAddr,
+            TokenType::Email(_)
+            | TokenType::Url(_)
+            | TokenType::UrlNoScheme(_)
+            | TokenType::Space => return,
+        };
+        self.insert_word_type(word_tokenizer, word, is_body);
+    }
+
+    fn insert_word_type(
+        &mut self,
+        word_tokenizer: &WordStemTokenizer,
+        word: WordType<'x>,
+        is_body: bool,
+    ) {
+        match word {
+            WordType::Alphabetic(word) => {
+                self.insert_alphabetic(word_tokenizer, word, is_body, 1);
             }
-            TokenType::Alphanumeric(word) => {
-                self.insert(Token::from_alphanumeric(word.as_ref()));
+            WordType::Alphanumeric(word) => {
+                self.insert(Token::from_alphanumeric(word));
             }
-            TokenType::UrlNoHost(url) => {
-                for token in url
-                    .as_ref()
-                    .to_lowercase()
+            WordType::UrlNoHost(url) => {
+                for token in lowercase(url)
                     .split(['/', '.', '_'])
                     .filter(|v| v.chars().all(|ch| ch.is_alphabetic()))
                 {
                     if token.len() > 2 {
-                        let token = truncate_word(token, MAX_TOKEN_LENGTH);
                         self.insert(Token::Url {
-                            value: format!("_{token}").into(),
+                            value: concat_word("_", truncate_word(token, MAX_TOKEN_LENGTH)).into(),
                         });
                     }
                 }
             }
-            TokenType::Other(ch) | TokenType::Punctuation(ch) => {
-                let category = get_general_category(*ch);
+            WordType::Char(ch) => {
+                if is_ascii_ignored_category(ch) {
+                    return;
+                }
+                let category = get_general_category(ch);
                 if !matches!(
                     category,
                     GeneralCategory::ClosePunctuation
@@ -1222,33 +1466,140 @@ impl<'x> Tokens<'x> {
                     });
                 }
             }
-            TokenType::Integer(word) => {
-                self.insert(Token::from_number(false, word.as_ref()));
+            WordType::Integer(word) => {
+                self.insert(Token::from_number(false, word));
             }
-            TokenType::Float(word) => {
-                self.insert(Token::from_number(true, word.as_ref()));
+            WordType::Float(word) => {
+                self.insert(Token::from_number(true, word));
             }
-            TokenType::IpAddr(_) => {
+            WordType::IpAddr => {
                 self.insert(Token::Url {
                     value: "!ip".into(),
                 });
             }
-            TokenType::Email(_)
-            | TokenType::Url(_)
-            | TokenType::UrlNoScheme(_)
-            | TokenType::Space => {}
         }
     }
 
-    fn insert(&mut self, token: Token<'x>) {
+    fn insert_alphabetic(
+        &mut self,
+        word_tokenizer: &WordStemTokenizer,
+        word: &'x str,
+        is_body: bool,
+        count: u32,
+    ) {
+        let bytes = word.as_bytes();
+        let mut ascii_bits = 0u8;
+        let mut upper_count = 0usize;
+        for &byte in bytes {
+            ascii_bits |= byte;
+            upper_count += usize::from(byte.wrapping_sub(b'A') < 26);
+        }
+
+        if ascii_bits < 0x80 {
+            if upper_count == 0 {
+                word_tokenizer.tokenize(word, |stem| {
+                    self.add(
+                        Token::Word {
+                            value: stem_value(stem),
+                        },
+                        count,
+                    );
+                });
+                return;
+            }
+
+            let mut buf = [0u8; ASCII_CASE_BUF];
+            let lower = ascii_lowercase(word, &mut buf);
+            word_tokenizer.tokenize(lower.as_ref(), |stem| {
+                self.add(
+                    Token::Word {
+                        value: owned_stem_value(stem),
+                    },
+                    count,
+                );
+            });
+
+            if is_body && bytes.len() == upper_count && bytes.len() > 3 {
+                self.add(
+                    Token::Word {
+                        value: "_allcaps".into(),
+                    },
+                    count,
+                );
+            }
+            return;
+        }
+
+        let mut set: Option<AugmentedScriptSet> = None;
+        let mut needs_cure = false;
+        for ch in word.chars() {
+            if !ch.is_ascii() && !std::iter::once(ch).nfc().eq(std::iter::once(ch).nfkc()) {
+                needs_cure = true;
+                break;
+            }
+            let set = set.get_or_insert_default();
+            set.intersect_with(ch.into());
+            if set.is_empty() {
+                needs_cure = true;
+                break;
+            }
+        }
+
+        if needs_cure && let Ok(cured_word) = decancer::cure(word, decancer::Options::default()) {
+            if word.len() > MAX_TOKEN_LENGTH {
+                self.add(
+                    Token::Word {
+                        value: truncate_word(&cured_word, MAX_TOKEN_LENGTH)
+                            .to_string()
+                            .into(),
+                    },
+                    count,
+                );
+            } else {
+                self.add(
+                    Token::Word {
+                        value: String::from(cured_word).into(),
+                    },
+                    count,
+                );
+            }
+        } else {
+            let lower = word.to_lowercase();
+            word_tokenizer.tokenize(&lower, |stem| {
+                self.add(
+                    Token::Word {
+                        value: owned_stem_value(stem),
+                    },
+                    count,
+                );
+            });
+        }
+    }
+
+    fn add(&mut self, token: Token<'x>, count: u32) {
+        let entry = self.0.entry(token).or_insert(0.0);
+        if f64::from(*entry) + f64::from(count) <= EXACT_F32_INTEGERS {
+            *entry += count as f32;
+        } else {
+            for _ in 0..count {
+                let before = *entry;
+                *entry += 1.0;
+                if *entry == before {
+                    break;
+                }
+            }
+        }
+    }
+
+    pub fn insert(&mut self, token: Token<'x>) {
         *self.0.entry(token).or_insert(0.0) += 1.0;
     }
 
-    fn insert_if_missing(&mut self, token: Token<'x>) {
+    pub fn insert_if_missing(&mut self, token: Token<'x>) {
         self.0.entry(token).or_insert(1.0);
     }
 
-    fn insert_email(&mut self, email: &'x Email, is_sender: bool) {
+    pub fn insert_email(&mut self, email: &'x Email, is_sender: bool) {
         if !email.address.is_empty() {
             if is_sender {
                 self.insert_if_missing(Token::Sender {
@@ -1281,19 +1632,19 @@ impl<'x> Tokens<'x> {
 }
 
 impl Token<'static> {
-    fn from_alphanumeric(s: &str) -> Self {
+    pub fn from_alphanumeric(s: &str) -> Self {
         let mut is_hex = true;
         let mut is_ascii = true;
         let mut digit_count = 0;
 
-        for ch in s.chars() {
-            match ch {
-                'a'..='f' | 'A'..='F' => {}
-                '0'..='9' => {
+        for &byte in s.as_bytes() {
+            match byte {
+                b'a'..=b'f' | b'A'..=b'F' => {}
+                b'0'..=b'9' => {
                     digit_count += 1;
                 }
                 _ => {
-                    is_ascii &= ch.is_ascii();
+                    is_ascii &= byte.is_ascii();
                     is_hex = false;
                 }
             }
@@ -1306,7 +1657,6 @@ impl Token<'static> {
         } else if !is_ascii {
             let word: String = if let Ok(cured) = decancer::cure(s, decancer::Options::default()) {
                 cured
-                    .as_str()
                     .chars()
                     .filter(|ch| ch.is_alphabetic())
                     .take(MAX_TOKEN_LENGTH)
@@ -1321,30 +1671,37 @@ impl Token<'static> {
 
             Token::Word { value: word.into() }
         } else if s.len() > 3 && digit_count == 1 {
-            let word: String = s
-                .chars()
-                .filter(|ch| ch.is_alphabetic())
-                .flat_map(|ch| ch.to_lowercase())
-                .take(MAX_TOKEN_LENGTH)
-                .collect();
+            let mut word = String::with_capacity(MAX_TOKEN_LENGTH.min(s.len()));
+            for &byte in s.as_bytes() {
+                if byte.is_ascii_alphabetic() {
+                    word.push(byte.to_ascii_lowercase() as char);
+                    if word.len() == MAX_TOKEN_LENGTH {
+                        break;
+                    }
+                }
+            }
             Token::Word { value: word.into() }
         } else {
             // Character class counts
             let mut upper = 0u32;
             let mut lower = 0u32;
             let mut digit = 0u32;
-            let mut len = 0;
-            let mut char_types = Vec::with_capacity(len);
-            for c in s.chars() {
-                let char_type = CharType::from_char(c);
-                char_types.push(char_type);
+            let mut run_count = 0u32;
+            let mut previous = None;
+            let bytes = s.as_bytes();
+            let len = bytes.len();
+            for &byte in bytes {
+                let char_type = CharType::from_byte(byte);
                 match char_type {
                     CharType::Upper => upper += 1,
                     CharType::Lower => lower += 1,
                     CharType::Digit => digit += 1,
                     CharType::Other => (),
                 }
-                len += 1;
+                if previous.is_some_and(|previous| previous != char_type) {
+                    run_count += 1;
+                }
+                previous = Some(char_type);
             }
 
             // Determine dominant composition
@@ -1375,7 +1732,7 @@ impl Token<'static> {
 
             // Ratio encoding (which class dominates)
             let max_count = upper.max(lower).max(digit);
-            let dominance = (max_count * 100) / len.min(1) as u32;
+            let dominance = max_count * 100;
             let ratio = match dominance {
                 0..=50 => b'B',  // Balanced
                 51..=75 => b'P', // Partial dominance
@@ -1383,17 +1740,6 @@ impl Token<'static> {
                 _ => b'O',       // One class only (100%)
             };
 
-            // Run code
-            let mut run_count = 0;
-            if len > 1 {
-                let mut prev_type = char_types[0];
-                for &current_type in char_types.iter().skip(1) {
-                    if current_type != prev_type {
-                        run_count += 1;
-                        prev_type = current_type;
-                    }
-                }
-            }
             let run_ratio = (run_count as f64) / ((len - 1) as f64);
             let run_code = match run_ratio {
                 r if r <= 0.1 => b'0', // Very long runs (e.g., AAAABBBB)
@@ -1409,7 +1755,7 @@ impl Token<'static> {
         }
     }
 
-    fn from_number(is_float: bool, num: &str) -> Self {
+    pub fn from_number(is_float: bool, num: &str) -> Self {
         Token::Number {
             code: [
                 if num.starts_with("-") {
@@ -1429,29 +1775,40 @@ impl Token<'static> {
     }
 }
 
-fn lower_prefix(prefix: &str, value: &str) -> String {
+pub fn lower_prefix(prefix: &str, value: &str) -> String {
     let mut result = String::with_capacity(prefix.len() + value.len());
     result.push_str(prefix);
-    for ch in value.chars() {
-        for lower_ch in ch.to_lowercase() {
-            result.push(lower_ch);
+    if value.is_ascii() {
+        let start = result.len();
+        result.push_str(value);
+        result[start..].make_ascii_lowercase();
+    } else {
+        for ch in value.chars() {
+            for lower_ch in ch.to_lowercase() {
+                result.push(lower_ch);
+            }
         }
     }
     result
 }
 
-fn truncate_word(word: &str, max_len: usize) -> &str {
+#[inline(always)]
+pub fn truncate_word(word: &str, max_len: usize) -> &str {
     if word.len() <= max_len {
         word
     } else {
-        let mut pos = 0;
-        for (count, (idx, _)) in word.char_indices().enumerate() {
-            pos = idx;
-            if count == max_len {
-                break;
-            }
+        truncate_word_cold(word, max_len)
+    }
+}
+
+#[inline(never)]
+fn truncate_word_cold(word: &str, max_len: usize) -> &str {
+    match word.char_indices().nth(max_len) {
+        Some((idx, _)) => &word[..idx],
+        None => {
+            let last = word.char_indices().next_back().map_or(0, |(idx, _)| idx);
+            &word[..last]
         }
-        &word[..pos]
     }
 }
 
@@ -1502,11 +1859,12 @@ enum CharType {
 }
 
 impl CharType {
-    fn from_char(c: char) -> CharType {
-        match c {
-            'A'..='Z' => CharType::Upper,
-            'a'..='z' => CharType::Lower,
-            '0'..='9' => CharType::Digit,
+    #[inline(always)]
+    fn from_byte(byte: u8) -> CharType {
+        match byte {
+            b'A'..=b'Z' => CharType::Upper,
+            b'a'..=b'z' => CharType::Lower,
+            b'0'..=b'9' => CharType::Digit,
             _ => CharType::Other,
         }
     }
@@ -1514,6 +1872,11 @@ impl CharType {
 
 impl<'x> Default for Tokens<'x> {
     fn default() -> Self {
-        Tokens(HashMap::with_capacity(128))
+        Tokens(HashMap::with_capacity_and_hasher(128, RandomState::new()))
     }
 }
+
+impl ArchiveCompression for SpamTrainer {
+    const COMPRESSION: Compression = Compression::Zstd(None);
+}
+

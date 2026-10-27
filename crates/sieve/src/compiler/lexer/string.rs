@@ -1,0 +1,761 @@
+/*
+ * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
+ *
+ * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
+ */
+
+use crate::{
+    Envelope, MAX_MATCH_VARIABLES,
+    compiler::{
+        ContentTypePart, ErrorType, HeaderPart, HeaderVariable, MessagePart, Number,
+        ReceivedHostname, ReceivedPart, Value, VariableType,
+        grammar::{
+            AddressPart,
+            expr::{self},
+            instruction::CompilerState,
+        },
+    },
+};
+use mail_parser::HeaderName;
+use std::fmt::Display;
+
+enum State {
+    None,
+    Variable,
+    Encoded {
+        is_unicode: bool,
+        initial_buf_size: usize,
+    },
+}
+
+impl CompilerState<'_> {
+    pub(crate) fn tokenize_string(
+        &mut self,
+        bytes: &[u8],
+        parse_decoded: bool,
+    ) -> Result<Value, ErrorType> {
+        let mut state = State::None;
+        let mut items = Vec::with_capacity(3);
+        let mut last_ch = 0;
+
+        let mut var_start_pos = usize::MAX;
+        let mut var_is_number = true;
+        let mut var_has_namespace = false;
+
+        let mut text_has_digits = true;
+        let mut text_has_dots = false;
+
+        let mut hex_start = usize::MAX;
+        let mut decode_buf = Vec::with_capacity(bytes.len());
+
+        for (pos, &ch) in bytes.iter().enumerate() {
+            let mut is_var_error = false;
+
+            match state {
+                State::None => match ch {
+                    b'{' if last_ch == b'$' => {
+                        decode_buf.pop();
+                        var_start_pos = pos + 1;
+                        var_is_number = true;
+                        var_has_namespace = false;
+                        state = State::Variable;
+                    }
+                    b'.' => {
+                        if text_has_dots {
+                            text_has_digits = false;
+                        } else {
+                            text_has_dots = true;
+                        }
+                        decode_buf.push(ch);
+                    }
+                    b'0'..=b'9' => {
+                        decode_buf.push(ch);
+                    }
+                    _ => {
+                        text_has_digits = false;
+                        decode_buf.push(ch);
+                    }
+                },
+                State::Variable => match ch {
+                    b'a'..=b'z' | b'A'..=b'Z' | b'_' | b'[' | b']' | b'*' | b'-' => {
+                        var_is_number = false;
+                    }
+                    b'.' => {
+                        var_is_number = false;
+                        var_has_namespace = true;
+                    }
+                    b'0'..=b'9' => {}
+                    b'}' if pos > var_start_pos => {
+                        // Add any text before the variable
+                        if !decode_buf.is_empty() {
+                            self.add_value(
+                                &mut items,
+                                &decode_buf,
+                                parse_decoded,
+                                text_has_digits,
+                                text_has_dots,
+                            )?;
+                            decode_buf.clear();
+                            text_has_digits = true;
+                            text_has_dots = false;
+                        }
+
+                        // Parse variable type
+                        let var_name = std::str::from_utf8(&bytes[var_start_pos..pos]).unwrap();
+                        let var_type = if !var_is_number {
+                            self.parse_variable(var_name, var_has_namespace)
+                        } else {
+                            self.parse_match_variable(var_name)
+                        };
+
+                        match var_type {
+                            Ok(Some(var)) => items.push(Value::Variable(var)),
+                            Ok(None) => {}
+                            Err(ErrorType::InvalidNamespace(_) | ErrorType::InvalidEnvelope(_)) => {
+                                is_var_error = true;
+                            }
+                            Err(e) => return Err(e),
+                        }
+
+                        state = State::None;
+                    }
+                    b':' => {
+                        if parse_decoded && !var_has_namespace {
+                            match bytes.get(var_start_pos..pos) {
+                                Some(enc) if enc.eq_ignore_ascii_case(b"hex") => {
+                                    state = State::Encoded {
+                                        is_unicode: false,
+                                        initial_buf_size: decode_buf.len(),
+                                    };
+                                }
+                                Some(enc) if enc.eq_ignore_ascii_case(b"unicode") => {
+                                    state = State::Encoded {
+                                        is_unicode: true,
+                                        initial_buf_size: decode_buf.len(),
+                                    };
+                                }
+                                _ => {
+                                    is_var_error = true;
+                                }
+                            }
+                        } else if var_has_namespace {
+                            var_is_number = false;
+                        } else {
+                            is_var_error = true;
+                        }
+                    }
+                    _ => {
+                        is_var_error = true;
+                    }
+                },
+
+                State::Encoded {
+                    is_unicode,
+                    initial_buf_size,
+                } => match ch {
+                    b'0'..=b'9' | b'a'..=b'f' | b'A'..=b'F' => {
+                        if hex_start == usize::MAX {
+                            hex_start = pos;
+                        }
+                    }
+                    b' ' | b'\t' | b'\r' | b'\n' | b'}' => {
+                        if hex_start != usize::MAX {
+                            let code = std::str::from_utf8(&bytes[hex_start..pos]).unwrap();
+                            hex_start = usize::MAX;
+
+                            if !is_unicode {
+                                if let Ok(ch) = u8::from_str_radix(code, 16) {
+                                    decode_buf.push(ch);
+                                } else {
+                                    is_var_error = true;
+                                }
+                            } else if let Ok(ch) = u32::from_str_radix(code, 16) {
+                                let mut buf = [0; 4];
+                                decode_buf.extend_from_slice(
+                                    char::from_u32(ch)
+                                        .ok_or(ErrorType::InvalidUnicodeSequence(ch))?
+                                        .encode_utf8(&mut buf)
+                                        .as_bytes(),
+                                );
+                            } else {
+                                is_var_error = true;
+                            }
+                        }
+                        if ch == b'}' {
+                            if decode_buf.len() != initial_buf_size {
+                                state = State::None;
+                            } else {
+                                is_var_error = true;
+                            }
+                        }
+                    }
+                    _ => {
+                        is_var_error = true;
+                    }
+                },
+            }
+
+            if is_var_error {
+                if let State::Encoded {
+                    initial_buf_size, ..
+                } = state
+                    && initial_buf_size != decode_buf.len()
+                {
+                    decode_buf.truncate(initial_buf_size);
+                }
+                decode_buf.extend_from_slice(&bytes[var_start_pos - 2..pos + 1]);
+                hex_start = usize::MAX;
+                state = State::None;
+            }
+
+            last_ch = ch;
+        }
+
+        match state {
+            State::Variable => {
+                decode_buf.extend_from_slice(&bytes[var_start_pos - 2..bytes.len()]);
+            }
+            State::Encoded {
+                initial_buf_size, ..
+            } => {
+                if initial_buf_size != decode_buf.len() {
+                    decode_buf.truncate(initial_buf_size);
+                }
+                decode_buf.extend_from_slice(&bytes[var_start_pos - 2..bytes.len()]);
+            }
+            State::None => (),
+        }
+
+        if !decode_buf.is_empty() {
+            self.add_value(
+                &mut items,
+                &decode_buf,
+                parse_decoded,
+                text_has_digits,
+                text_has_dots,
+            )?;
+        }
+
+        Ok(match items.len() {
+            1 => items.pop().unwrap(),
+            0 => self.text(""),
+            _ => Value::List(items.into()),
+        })
+    }
+
+    fn parse_match_variable(&mut self, var_name: &str) -> Result<Option<VariableType>, ErrorType> {
+        let num = var_name
+            .parse()
+            .map_err(|_| ErrorType::InvalidNumber(var_name.to_string()))?;
+        if num < MAX_MATCH_VARIABLES as usize {
+            if self.register_match_var(num) {
+                let total_vars = num + 1;
+                if total_vars > self.vars_match_max {
+                    self.vars_match_max = total_vars;
+                }
+                Ok(Some(VariableType::Match(num as u8)))
+            } else {
+                Ok(None)
+            }
+        } else {
+            Err(ErrorType::InvalidMatchVariable(num))
+        }
+    }
+
+    pub fn parse_variable(
+        &self,
+        var_name: &str,
+        maybe_namespace: bool,
+    ) -> Result<Option<VariableType>, ErrorType> {
+        if !maybe_namespace {
+            if self.is_var_global(var_name) {
+                Ok(Some(VariableType::Global(var_name.to_string())))
+            } else if let Some(var_id) = self.get_local_var(var_name) {
+                Ok(Some(VariableType::Local(var_id)))
+            } else {
+                Ok(None)
+            }
+        } else {
+            let lowercase_name = if var_name.is_ascii() {
+                super::super::grammar::instruction::lowercase(var_name)
+            } else {
+                std::borrow::Cow::Owned(var_name.to_lowercase())
+            };
+            let var = if let Some((namespace, name)) = lowercase_name.split_once('.') {
+                if name.is_empty() {
+                    return Err(ErrorType::InvalidNamespace(var_name.to_string()));
+                }
+
+                let mut var = None;
+                hashify::fnc_map!(namespace.as_bytes(),
+                    "global" => {
+                        var = VariableType::Global(name.to_string()).into();
+                    },
+                    "t" => {
+                        var = VariableType::Global(name.to_string()).into();
+                    },
+                    "env" => {
+                        var = VariableType::Environment(name.to_string()).into();
+                    },
+                    "envelope" => {
+                        var = VariableType::Envelope(
+                            lookup_envelope(name)
+                                .ok_or_else(|| ErrorType::InvalidEnvelope(name.to_string()))?,
+                        )
+                        .into();
+                    },
+                    "header" => {
+                        var = self.parse_header_variable(name)?.into();
+                    },
+                    "body" => {
+                        var = VariableType::Part(
+                            lookup_body_part(name)
+                                .ok_or_else(|| ErrorType::InvalidNamespace(name.to_string()))?,
+                        )
+                        .into();
+                    },
+                    "part" => {
+                        var = VariableType::Part(
+                            lookup_message_part(name)
+                                .ok_or_else(|| ErrorType::InvalidNamespace(name.to_string()))?,
+                        )
+                        .into();
+                    },
+                    _ => {}
+                );
+
+                var.ok_or_else(|| ErrorType::InvalidNamespace(var_name.to_string()))?
+            } else if self.is_var_global(var_name) {
+                VariableType::Global(var_name.to_string())
+            } else if let Some(var_id) = self.get_local_var(var_name) {
+                VariableType::Local(var_id)
+            } else {
+                return Ok(None);
+            };
+
+            Ok(Some(var))
+        }
+    }
+
+    fn parse_header_variable(&self, var_name: &str) -> Result<VariableType, ErrorType> {
+        #[derive(Debug)]
+        enum State {
+            Name,
+            Index,
+            Part,
+            PartIndex,
+        }
+        let mut name = vec![];
+        let mut has_name = false;
+        let mut has_wildcard = false;
+        let mut hdr_name = String::new();
+        let mut hdr_index = String::new();
+        let mut part = String::new();
+        let mut part_index = String::new();
+        let mut state = State::Name;
+
+        for ch in var_name.chars() {
+            match state {
+                State::Name => match ch {
+                    '[' => {
+                        state = if hdr_index.is_empty() {
+                            State::Index
+                        } else if part.is_empty() {
+                            State::PartIndex
+                        } else {
+                            return Err(ErrorType::InvalidExpression(var_name.to_string()));
+                        };
+                        has_name = true;
+                    }
+                    '.' => {
+                        state = State::Part;
+                        has_name = true;
+                    }
+                    ' ' | '\t' | '\r' | '\n' => {}
+                    '*' if !has_wildcard && hdr_name.is_empty() && name.is_empty() => {
+                        has_wildcard = true;
+                    }
+                    ':' if !hdr_name.is_empty() && !has_wildcard => {
+                        name.push(
+                            HeaderName::parse(std::mem::take(&mut hdr_name)).ok_or_else(|| {
+                                ErrorType::InvalidExpression(var_name.to_string())
+                            })?,
+                        );
+                    }
+                    _ if !has_name && !has_wildcard => {
+                        hdr_name.push(ch);
+                    }
+                    _ => {
+                        return Err(ErrorType::InvalidExpression(var_name.to_string()));
+                    }
+                },
+                State::Index => match ch {
+                    ']' => {
+                        state = State::Name;
+                    }
+                    ' ' | '\t' | '\r' | '\n' => {}
+                    _ => {
+                        hdr_index.push(ch);
+                    }
+                },
+                State::Part => match ch {
+                    '[' => {
+                        state = State::PartIndex;
+                    }
+                    ' ' | '\t' | '\r' | '\n' => {}
+                    _ => {
+                        part.push(ch);
+                    }
+                },
+                State::PartIndex => match ch {
+                    ']' => {
+                        state = State::Name;
+                    }
+                    ' ' | '\t' | '\r' | '\n' => {}
+                    _ => {
+                        part_index.push(ch);
+                    }
+                },
+            }
+        }
+
+        if !hdr_name.is_empty() {
+            name.push(
+                HeaderName::parse(hdr_name)
+                    .ok_or_else(|| ErrorType::InvalidExpression(var_name.to_string()))?,
+            );
+        }
+
+        if !name.is_empty() || has_wildcard {
+            Ok(VariableType::Header(HeaderVariable {
+                name: name.into(),
+                part: HeaderPart::try_from(part.as_str())
+                    .map_err(|_| ErrorType::InvalidExpression(var_name.to_string()))?,
+                index_hdr: match hdr_index.as_str() {
+                    "" => {
+                        if !has_wildcard {
+                            -1
+                        } else {
+                            0
+                        }
+                    }
+                    "*" => 0,
+                    _ => hdr_index
+                        .parse()
+                        .map(|v| if v == 0 { 1 } else { v })
+                        .map_err(|_| ErrorType::InvalidExpression(var_name.to_string()))?,
+                },
+                index_part: match part_index.as_str() {
+                    "" => {
+                        if !has_wildcard {
+                            -1
+                        } else {
+                            0
+                        }
+                    }
+                    "*" => 0,
+                    _ => part_index
+                        .parse()
+                        .map(|v| if v == 0 { 1 } else { v })
+                        .map_err(|_| ErrorType::InvalidExpression(var_name.to_string()))?,
+                },
+            }))
+        } else {
+            Err(ErrorType::InvalidExpression(var_name.to_string()))
+        }
+    }
+
+    pub fn parse_expr_fnc_or_var(
+        &self,
+        var_name: &str,
+        maybe_namespace: bool,
+    ) -> Result<expr::Token, String> {
+        match self.parse_variable(var_name, maybe_namespace) {
+            Ok(Some(var)) => Ok(expr::Token::Variable(var)),
+            _ => {
+                if let Some((id, num_args)) = self.compiler.functions.get(var_name) {
+                    Ok(expr::Token::Function {
+                        name: var_name.to_string(),
+                        id: *id,
+                        num_args: *num_args,
+                    })
+                } else {
+                    Err(format!("Invalid variable or function name {var_name:?}"))
+                }
+            }
+        }
+    }
+
+    #[inline(always)]
+    fn add_value(
+        &mut self,
+        items: &mut Vec<Value>,
+        buf: &[u8],
+        parse_decoded: bool,
+        has_digits: bool,
+        has_dots: bool,
+    ) -> Result<(), ErrorType> {
+        if !parse_decoded {
+            let value = if has_digits {
+                if has_dots {
+                    match std::str::from_utf8(buf)
+                        .ok()
+                        .and_then(|v| (v, v.parse::<f64>().ok()?).into())
+                    {
+                        Some((v, n)) if n.to_string() == v => Value::Number(Number::Float(n)),
+                        _ => self.text(String::from_utf8_lossy(buf)),
+                    }
+                } else {
+                    match std::str::from_utf8(buf)
+                        .ok()
+                        .and_then(|v| (v, v.parse::<i64>().ok()?).into())
+                    {
+                        Some((v, n)) if n.to_string() == v => Value::Number(Number::Integer(n)),
+                        _ => self.text(String::from_utf8_lossy(buf)),
+                    }
+                }
+            } else {
+                self.text(String::from_utf8_lossy(buf))
+            };
+            items.push(value);
+        } else {
+            match self.tokenize_string(buf, false)? {
+                Value::List(new_items) => items.extend(new_items),
+                item => items.push(item),
+            }
+        }
+
+        Ok(())
+    }
+}
+
+impl TryFrom<&str> for HeaderPart {
+    type Error = ();
+
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        let (value, subvalue) = value.split_once('.').unwrap_or((value, ""));
+        if value.is_empty() {
+            return Ok(HeaderPart::Text);
+        }
+
+        let mut part = None;
+        hashify::fnc_map!(value.as_bytes(),
+            "text" => {
+                part = HeaderPart::Text.into();
+            },
+            "name" => {
+                part = HeaderPart::Address(AddressPart::Name).into();
+            },
+            "addr" => {
+                part = if !subvalue.is_empty() {
+                    HeaderPart::Address(AddressPart::try_from(subvalue)?)
+                } else {
+                    HeaderPart::Address(AddressPart::All)
+                }
+                .into();
+            },
+            "type" => {
+                part = HeaderPart::ContentType(ContentTypePart::Type).into();
+            },
+            "subtype" => {
+                part = HeaderPart::ContentType(ContentTypePart::Subtype).into();
+            },
+            "attr" => {
+                if !subvalue.is_empty() {
+                    part = HeaderPart::ContentType(ContentTypePart::Attribute(
+                        subvalue.to_string(),
+                    ))
+                    .into();
+                }
+            },
+            "rcvd" => {
+                part = if !subvalue.is_empty() {
+                    HeaderPart::Received(ReceivedPart::try_from(subvalue)?)
+                } else {
+                    HeaderPart::Text
+                }
+                .into();
+            },
+            "id" => {
+                part = HeaderPart::Id.into();
+            },
+            "raw" => {
+                part = HeaderPart::Raw.into();
+            },
+            "raw_name" => {
+                part = HeaderPart::RawName.into();
+            },
+            "date" => {
+                part = HeaderPart::Date.into();
+            },
+            "exists" => {
+                part = HeaderPart::Exists.into();
+            },
+            _ => {}
+        );
+
+        part.ok_or(())
+    }
+}
+
+impl TryFrom<&str> for ReceivedPart {
+    type Error = ();
+
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        lookup_received_part(value).ok_or(())
+    }
+}
+
+impl TryFrom<&str> for AddressPart {
+    type Error = ();
+
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        lookup_address_part(value).ok_or(())
+    }
+}
+
+fn lookup_envelope(input: &str) -> Option<Envelope> {
+    hashify::map!(
+        input.as_bytes(), Envelope,
+        "from" => Envelope::From,
+        "to" => Envelope::To,
+        "by_time_absolute" => Envelope::ByTimeAbsolute,
+        "by_time_relative" => Envelope::ByTimeRelative,
+        "by_mode" => Envelope::ByMode,
+        "by_trace" => Envelope::ByTrace,
+        "notify" => Envelope::Notify,
+        "orcpt" => Envelope::Orcpt,
+        "ret" => Envelope::Ret,
+        "envid" => Envelope::Envid,
+    )
+    .copied()
+}
+
+fn lookup_body_part(input: &str) -> Option<MessagePart> {
+    hashify::map!(
+        input.as_bytes(), MessagePart,
+        "text" => MessagePart::TextBody(false),
+        "html" => MessagePart::HtmlBody(false),
+        "to_text" => MessagePart::TextBody(true),
+        "to_html" => MessagePart::HtmlBody(true),
+    )
+    .copied()
+}
+
+fn lookup_message_part(input: &str) -> Option<MessagePart> {
+    hashify::map!(
+        input.as_bytes(), MessagePart,
+        "text" => MessagePart::Contents,
+        "raw" => MessagePart::Raw,
+    )
+    .copied()
+}
+
+fn lookup_received_part(input: &str) -> Option<ReceivedPart> {
+    hashify::map!(
+        input.as_bytes(), ReceivedPart,
+        "from" => ReceivedPart::From(ReceivedHostname::Any),
+        "from.name" => ReceivedPart::From(ReceivedHostname::Name),
+        "from.ip" => ReceivedPart::From(ReceivedHostname::Ip),
+        "ip" => ReceivedPart::FromIp,
+        "iprev" => ReceivedPart::FromIpRev,
+        "by" => ReceivedPart::By(ReceivedHostname::Any),
+        "by.name" => ReceivedPart::By(ReceivedHostname::Name),
+        "by.ip" => ReceivedPart::By(ReceivedHostname::Ip),
+        "for" => ReceivedPart::For,
+        "with" => ReceivedPart::With,
+        "tls" => ReceivedPart::TlsVersion,
+        "cipher" => ReceivedPart::TlsCipher,
+        "id" => ReceivedPart::Id,
+        "ident" => ReceivedPart::Ident,
+        "date" => ReceivedPart::Date,
+        "date.raw" => ReceivedPart::DateRaw,
+    )
+    .copied()
+}
+
+fn lookup_address_part(input: &str) -> Option<AddressPart> {
+    hashify::map!(
+        input.as_bytes(), AddressPart,
+        "name" => AddressPart::Name,
+        "addr" => AddressPart::All,
+        "all" => AddressPart::All,
+        "addr.domain" => AddressPart::Domain,
+        "addr.local" => AddressPart::LocalPart,
+        "addr.user" => AddressPart::User,
+        "addr.detail" => AddressPart::Detail,
+    )
+    .copied()
+}
+
+impl Display for VariableType {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            VariableType::Local(v) => write!(f, "${{{v}}}"),
+            VariableType::Match(v) => write!(f, "${{{v}}}"),
+            VariableType::Global(v) => write!(f, "${{global.{v}}}"),
+            VariableType::Environment(v) => write!(f, "${{env.{v}}}"),
+
+            VariableType::Envelope(env) => f.write_str(match env {
+                Envelope::From => "${{envelope.from}}",
+                Envelope::To => "${{envelope.to}}",
+                Envelope::ByTimeAbsolute => "${{envelope.by_time_absolute}}",
+                Envelope::ByTimeRelative => "${{envelope.by_time_relative}}",
+                Envelope::ByMode => "${{envelope.by_mode}}",
+                Envelope::ByTrace => "${{envelope.by_trace}}",
+                Envelope::Notify => "${{envelope.notify}}",
+                Envelope::Orcpt => "${{envelope.orcpt}}",
+                Envelope::Ret => "${{envelope.ret}}",
+                Envelope::Envid => "${{envelope.envit}}",
+            }),
+
+            VariableType::Header(hdr) => {
+                write!(
+                    f,
+                    "${{header.{}",
+                    hdr.name.first().map(|h| h.as_str()).unwrap_or_default()
+                )?;
+                if hdr.index_hdr != 0 {
+                    write!(f, "[{}]", hdr.index_hdr)?;
+                } else {
+                    f.write_str("[*]")?;
+                }
+                /*if hdr.part != HeaderPart::Text {
+                    f.write_str(".")?;
+                    f.write_str(match &hdr.part {
+                        HeaderPart::Name => "name",
+                        HeaderPart::Address => "address",
+                        HeaderPart::Type => "type",
+                        HeaderPart::Subtype => "subtype",
+                        HeaderPart::Raw => "raw",
+                        HeaderPart::Date => "date",
+                        HeaderPart::Attribute(attr) => attr.as_str(),
+                        HeaderPart::Text => unreachable!(),
+                    })?;
+                }*/
+                if hdr.index_part != 0 {
+                    write!(f, "[{}]", hdr.index_part)?;
+                } else {
+                    f.write_str("[*]")?;
+                }
+                f.write_str("}")
+            }
+            VariableType::Part(part) => {
+                write!(
+                    f,
+                    "${{{}",
+                    match part {
+                        MessagePart::TextBody(true) => "body.to_text",
+                        MessagePart::TextBody(false) => "body.text",
+                        MessagePart::HtmlBody(true) => "body.to_html",
+                        MessagePart::HtmlBody(false) => "body.html",
+                        MessagePart::Contents => "part.text",
+                        MessagePart::Raw => "part.raw",
+                    }
+                )?;
+                f.write_str("}")
+            }
+        }
+    }
+}
+

@@ -1,6 +1,6 @@
 [package]
 name = "event_macro"
-version = "0.16.27"
+version = "1.0.0"
 edition = "2024"
 
 [lib]
@@ -9,3 +9,6 @@ proc-macro = true
 [dependencies]
 syn = { version = "3.0", features = ["full"] }
 quote = "1.0"
+
+[lints]
+workspace = true

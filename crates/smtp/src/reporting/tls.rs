@@ -4,10 +4,16 @@
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
  */
 
-use super::AggregateTimestamp;
 use crate::{
     queue::RecipientDomain,
-    reporting::{index::InternalReportIndex, send::MtaReportSend},
+    reporting::{
+        ReportAddress,
+        aggregate::{
+            ReportItem, ReportScheduler, ReportWindow, read_tls_policies, report_size_limit,
+        },
+        index::InternalReportIndex,
+        send::MtaReportSend,
+    },
 };
 use common::{
     Server, USER_AGENT,
@@ -15,45 +21,40 @@ use common::{
         report::AggregateFrequency,
         resolver::{Mode, MxPattern, TlsaMatching},
     },
-    ipc::{TlsEvent, ToHash},
+    expr::Bump,
+    ipc::{ReportingEvent, TlsEvent},
 };
-use mail_auth::{
-    flate2::{Compression, write::GzEncoder},
-    mta_sts::{ReportUri, TlsRpt},
-    report::tlsrpt::{FailureDetails, PolicyDetails},
-};
+use compact_str::{CompactString, ToCompactString};
+use mail_auth::mta_sts::{ReportUri, TlsRptRecord};
 use registry::{
     schema::{
         enums::TlsPolicyType,
-        prelude::{ObjectType, Property},
-        structs::{TlsFailureDetails, TlsInternalReport, TlsReport, TlsReportPolicy},
+        prelude::ObjectType,
+        structs::{TlsInternalReport, TlsReport, TlsReportPolicy},
     },
-    types::{EnumImpl, ObjectImpl, datetime::UTCDateTime},
+    types::{EnumImpl, datetime::UTCDateTime},
 };
-use reqwest::header::CONTENT_TYPE;
+use reqwest::{Method, header::CONTENT_TYPE};
+use smtp_report::{
+    ReportEnvelope,
+    flate2::{Compression, write::GzEncoder},
+    tlsrpt::TlsReport as ExportedTlsReport,
+};
 use std::fmt::Write;
-use std::{future::Future, sync::Arc, time::Duration};
+use std::{future::Future, mem, sync::Arc, time::Duration};
 use store::{
-    SerializeInfallible, ValueKey,
-    registry::ObjectIdVersioned,
-    write::{BatchBuilder, RegistryClass, ValueClass, assert::AssertValue},
+    ValueKey,
+    write::{BatchBuilder, RegistryClass, ValueClass},
 };
 use trc::{AddContext, OutgoingReportEvent};
 
 #[derive(Debug, Clone)]
 pub struct TlsRptOptions {
-    pub record: Arc<TlsRpt>,
+    pub record: Arc<TlsRptRecord>,
     pub interval: AggregateFrequency,
 }
 
-#[derive(Debug, rkyv::Serialize, rkyv::Deserialize, rkyv::Archive, serde::Serialize)]
-pub struct TlsFormat {
-    pub rua: Vec<ReportUri>,
-    pub policy: PolicyDetails,
-    pub records: Vec<Option<FailureDetails>>,
-}
-
-#[cfg(feature = "test_mode")]
+#[cfg(stalwart_tests)]
 pub static TLS_HTTP_REPORT: parking_lot::Mutex<Vec<u8>> = parking_lot::Mutex::new(Vec::new());
 
 pub trait TlsReporting: Sync + Send {
@@ -70,7 +71,7 @@ impl TlsReporting for Server {
         let object_id = ObjectType::TlsInternalReport.to_id();
         let key = ValueClass::Registry(RegistryClass::Item { object_id, item_id });
 
-        let Some(report) = self
+        let Some(mut report) = self
             .store()
             .get_value::<TlsInternalReport>(ValueKey::from(key.clone()))
             .await
@@ -78,73 +79,147 @@ impl TlsReporting for Server {
         else {
             return Ok(());
         };
+        let span_id = self.inner.data.span_id_gen.generate();
+        let max_size = self
+            .eval_if(
+                &self.core.smtp.report.tls.max_size,
+                &RecipientDomain::new(report.domain.as_str()),
+                &mut Bump::new(),
+                span_id,
+            )
+            .await;
+        read_tls_policies(
+            self.store(),
+            item_id,
+            &mut report,
+            report_size_limit(max_size),
+        )
+        .await?;
+
+        let mut batch = BatchBuilder::new();
+        batch.clear(key).clear(report.primary_key());
+        let item = ReportItem::new(ObjectType::TlsInternalReport, item_id);
+        item.clear(&mut batch);
+        let now = UTCDateTime::now();
+        if now < report.report.date_range_end {
+            report.report.date_range_end = now;
+        }
 
         // Delete report
-        let mut batch = BatchBuilder::new();
-        batch.clear(key).clear(RegistryClass::PrimaryKey {
-            object_id: object_id.into(),
-            index_id: Property::Domain.to_id(),
-            key: report.domain.as_bytes().to_vec(),
-        });
-        self.core
-            .storage
-            .data
-            .write(batch.build_all())
+        self.store()
+            .write_batch(&mut batch)
             .await
             .caused_by(trc::location!())?;
+        if let Err(err) = item.clear_orphans(self.store()).await {
+            trc::error!(
+                err.span_id(span_id)
+                    .details("Failed to clear orphaned report rows")
+            );
+        }
+        let payload = TlsPayload::build(&mut report, span_id);
 
-        let domain_name = report.domain.as_str();
+        if let Some(payload) = payload {
+            payload.deliver(self, &report, span_id).await;
+        }
+        Ok(())
+    }
+
+    async fn schedule_tls(&self, event: Box<TlsEvent>) {
+        ReportScheduler::default()
+            .process(self, &mut vec![ReportingEvent::Tls(event)])
+            .await;
+    }
+}
+
+struct TlsPayload {
+    json: String,
+    compressed_json: Vec<u8>,
+}
+
+impl TlsPayload {
+    fn build(report: &mut TlsInternalReport, span_id: u64) -> Option<Self> {
+        if report.report.policies.is_empty() {
+            return None;
+        }
         let event_from = report.report.date_range_start.timestamp() as u64;
         let event_to = report.report.date_range_end.timestamp() as u64;
-        let span_id = self.inner.data.span_id_gen.generate();
 
         trc::event!(
             OutgoingReport(OutgoingReportEvent::TlsAggregate),
             SpanId = span_id,
             ReportId = event_from,
-            Domain = domain_name.to_string(),
+            Domain = CompactString::from(report.domain.as_str()),
             RangeFrom = trc::Value::Timestamp(event_from),
             RangeTo = trc::Value::Timestamp(event_to),
         );
 
         // Generate report
-        let exported_report = mail_auth::report::tlsrpt::TlsReport::from(report.report);
-        let json = exported_report.to_json();
-        let mut e = GzEncoder::new(Vec::with_capacity(json.len()), Compression::default());
-        let json = match std::io::Write::write_all(&mut e, json.as_bytes()).and_then(|_| e.finish())
-        {
-            Ok(report) => report,
-            Err(err) => {
-                trc::event!(
-                    OutgoingReport(OutgoingReportEvent::SubmissionError),
-                    SpanId = span_id,
-                    Reason = err.to_string(),
-                    Details = "Failed to compress report"
-                );
+        let json = ExportedTlsReport::from(mem::take(&mut report.report)).to_json();
+        let compressed_json = if !report.http_rua.is_empty() {
+            let mut e = GzEncoder::new(Vec::with_capacity(json.len()), Compression::default());
+            match std::io::Write::write_all(&mut e, json.as_bytes()).and_then(|_| e.finish()) {
+                Ok(report) => report,
+                Err(err) => {
+                    trc::event!(
+                        OutgoingReport(OutgoingReportEvent::SubmissionError),
+                        SpanId = span_id,
+                        Reason = err.to_compact_string(),
+                        Details = "Failed to compress report"
+                    );
 
-                return Ok(());
+                    return None;
+                }
             }
+        } else {
+            Vec::new()
         };
+        Some(TlsPayload {
+            json,
+            compressed_json,
+        })
+    }
+
+    async fn deliver(self, server: &Server, report: &TlsInternalReport, span_id: u64) {
+        let TlsPayload {
+            json,
+            compressed_json,
+        } = self;
+        let domain_name = report.domain.as_str();
 
         // Try delivering report over HTTP
         for uri in report.http_rua.as_slice() {
             {
-                #[cfg(feature = "test_mode")]
+                #[cfg(stalwart_tests)]
                 if uri == "https://127.0.0.1/tls" {
-                    TLS_HTTP_REPORT.lock().extend_from_slice(&json);
+                    TLS_HTTP_REPORT.lock().extend_from_slice(&compressed_json);
 
-                    return Ok(());
+                    return;
                 }
 
-                match self
+                let request = match server
                     .core
                     .smtp
                     .tls_report_client
-                    .post(uri)
+                    .request(Method::POST, uri)
+                {
+                    Ok(request) => request,
+                    Err(err) => {
+                        trc::event!(
+                            OutgoingReport(OutgoingReportEvent::SubmissionError),
+                            SpanId = span_id,
+                            Url = CompactString::from(uri),
+                            Reason = err.as_str(),
+                            Details = "Report URI rejected"
+                        );
+                        continue;
+                    }
+                };
+
+                match request
                     .timeout(Duration::from_secs(2 * 60))
                     .header(reqwest::header::USER_AGENT, USER_AGENT)
                     .header(CONTENT_TYPE, "application/tlsrpt+gzip")
-                    .body(json.to_vec())
+                    .body(compressed_json.clone())
                     .send()
                     .await
                 {
@@ -153,16 +228,16 @@ impl TlsReporting for Server {
                             trc::event!(
                                 OutgoingReport(OutgoingReportEvent::HttpSubmission),
                                 SpanId = span_id,
-                                Url = uri.to_string(),
+                                Url = CompactString::from(uri),
                                 Code = response.status().as_u16(),
                             );
 
-                            return Ok(());
+                            return;
                         } else {
                             trc::event!(
                                 OutgoingReport(OutgoingReportEvent::SubmissionError),
                                 SpanId = span_id,
-                                Url = uri.to_string(),
+                                Url = CompactString::from(uri),
                                 Code = response.status().as_u16(),
                                 Details = "Invalid HTTP response"
                             );
@@ -172,8 +247,8 @@ impl TlsReporting for Server {
                         trc::event!(
                             OutgoingReport(OutgoingReportEvent::SubmissionError),
                             SpanId = span_id,
-                            Url = uri.to_string(),
-                            Reason = err.to_string(),
+                            Url = CompactString::from(uri),
+                            Reason = err.to_compact_string(),
                             Details = "HTTP submission error"
                         );
                     }
@@ -182,312 +257,192 @@ impl TlsReporting for Server {
         }
 
         // Deliver report over SMTP
-        if !report.mail_rua.is_empty() {
-            let config = &self.core.smtp.report.tls;
-            let from_addr = self
-                .eval_if(&config.address, &RecipientDomain::new(domain_name), span_id)
+        let mail_rua = report
+            .mail_rua
+            .iter()
+            .filter(|rcpt| ReportAddress::checked(rcpt.as_str(), span_id).is_some())
+            .map(|rcpt| rcpt.as_str())
+            .collect::<Vec<_>>();
+        if !mail_rua.is_empty() {
+            let config = &server.core.smtp.report.tls;
+            let mut arena = Bump::new();
+            let from_addr = server
+                .eval_if(
+                    &config.address,
+                    &RecipientDomain::new(domain_name),
+                    &mut arena,
+                    span_id,
+                )
                 .await
                 .unwrap_or_else(|| "MAILER-DAEMON@localhost".to_string());
+            let submitter = server
+                .eval_if(
+                    &server.core.smtp.report.submitter,
+                    &RecipientDomain::new(domain_name),
+                    &mut arena,
+                    span_id,
+                )
+                .await
+                .unwrap_or_else(|| "localhost".to_string());
+            let from_name = server
+                .eval_if(
+                    &config.name,
+                    &RecipientDomain::new(domain_name),
+                    &mut arena,
+                    span_id,
+                )
+                .await
+                .unwrap_or_else(|| "Mail Delivery Subsystem".to_string());
             let mut message = Vec::with_capacity(2048);
-            let _ = exported_report.write_rfc5322_from_bytes(
-                domain_name,
-                &self
-                    .eval_if(
-                        &self.core.smtp.report.submitter,
-                        &RecipientDomain::new(domain_name),
-                        span_id,
-                    )
-                    .await
-                    .unwrap_or_else(|| "localhost".to_string()),
-                (
-                    self.eval_if(&config.name, &RecipientDomain::new(domain_name), span_id)
-                        .await
-                        .unwrap_or_else(|| "Mail Delivery Subsystem".to_string())
-                        .as_str(),
-                    from_addr.as_str(),
-                ),
-                report.mail_rua.iter().map(|v| v.as_str()),
-                &json,
-                &mut message,
-            );
-
-            // Send report
-            self.send_report(
-                &from_addr,
-                report.mail_rua.iter().map(|v| v.as_str()),
-                message,
-                &config.sign,
-                false,
-                span_id,
-            )
-            .await;
+            let envelope = ReportEnvelope {
+                from: (from_name.as_str(), from_addr.as_str()).into(),
+                to: mail_rua,
+                submitter: &submitter,
+                report_domain: domain_name,
+                subject: None,
+            };
+            match ExportedTlsReport::write_rfc5322_json(json.as_bytes(), &envelope, &mut message) {
+                Ok(()) => {
+                    server
+                        .send_report(
+                            &from_addr,
+                            envelope.to.iter(),
+                            message,
+                            &config.sign,
+                            false,
+                            span_id,
+                        )
+                        .await;
+                }
+                Err(err) => {
+                    trc::event!(
+                        OutgoingReport(OutgoingReportEvent::SubmissionError),
+                        SpanId = span_id,
+                        Reason = err.to_string(),
+                    );
+                }
+            }
         } else {
             trc::event!(
                 OutgoingReport(OutgoingReportEvent::NoRecipientsFound),
                 SpanId = span_id,
             );
         }
-
-        Ok(())
     }
+}
 
-    async fn schedule_tls(&self, event: Box<TlsEvent>) {
-        let object_id = ObjectType::TlsInternalReport.to_id();
-        let pk = ValueClass::Registry(RegistryClass::PrimaryKey {
-            object_id: object_id.into(),
-            index_id: Property::Domain.to_id(),
-            key: event.domain.as_bytes().to_vec(),
-        });
-        let mut rety_count = 0;
-        let policy_hash = event.policy.to_hash();
+pub(crate) fn tls_report_descriptor(
+    event: &TlsEvent,
+    window: ReportWindow,
+    item: ReportItem,
+) -> TlsInternalReport {
+    let date_range_start = UTCDateTime::from_timestamp(window.start.cast_signed());
+    let mut report = TlsInternalReport {
+        created_at: date_range_start,
+        deliver_at: UTCDateTime::from_timestamp(item.deliver_at(window).cast_signed()),
+        domain: event.domain.clone(),
+        report: TlsReport {
+            date_range_end: UTCDateTime::from_timestamp(window.end.cast_signed()),
+            date_range_start,
+            ..Default::default()
+        },
+        ..Default::default()
+    };
 
-        loop {
-            // Find the report by domain name
-            let mut batch = BatchBuilder::new();
-            let report = match self
-                .store()
-                .get_value::<ObjectIdVersioned>(ValueKey::from(pk.clone()))
-                .await
-            {
-                Ok(Some(object_id_v)) => {
-                    match self
-                        .store()
-                        .get_value::<TlsInternalReport>(ValueKey::from(ValueClass::Registry(
-                            RegistryClass::Item {
-                                object_id,
-                                item_id: object_id_v.object_id.id().id(),
-                            },
-                        )))
-                        .await
-                    {
-                        Ok(Some(report)) => Some((object_id_v, report)),
-                        Ok(None) => {
-                            trc::event!(
-                                OutgoingReport(OutgoingReportEvent::NotFound),
-                                Id = object_id_v.object_id.id().id(),
-                                CausedBy = trc::location!(),
-                                Details = "Failed to find TLS report for domain"
-                            );
-
-                            return;
-                        }
-                        Err(err) => {
-                            trc::error!(
-                                err.caused_by(trc::location!())
-                                    .details("Failed to query registry for TLS report")
-                            );
-                            return;
-                        }
-                    }
-                }
-                Ok(None) => None,
-                Err(err) => {
-                    trc::error!(
-                        err.caused_by(trc::location!())
-                            .details("Failed to query registry for TLS report")
-                    );
-                    return;
-                }
-            };
-
-            // Create report if missing
-            let config = &self.core.smtp.report.tls;
-            let (item_id, mut report) = if let Some((mut object_id_v, report)) = report {
-                batch.assert_value(pk.clone(), AssertValue::U32(object_id_v.version));
-                object_id_v.version += 1;
-                batch.set(pk.clone(), object_id_v.serialize());
-
-                (object_id_v.object_id.id().id(), report)
-            } else {
-                let item_id = self.inner.data.queue_id_gen.generate();
-                let date_range_start = UTCDateTime::now();
-                let date_range_end = UTCDateTime::from_timestamp(
-                    date_range_start.timestamp() + event.interval.as_secs() as i64,
-                );
-
-                let report = TlsInternalReport {
-                    created_at: date_range_start,
-                    deliver_at: date_range_end,
-                    domain: event.domain.clone(),
-                    report: TlsReport {
-                        report_id: format!("{}_{policy_hash}", date_range_start.timestamp()),
-                        organization_name: self
-                            .eval_if::<String, _>(
-                                &config.org_name,
-                                &RecipientDomain::new(&event.domain),
-                                event.span_id,
-                            )
-                            .await
-                            .clone(),
-                        contact_info: self
-                            .eval_if::<String, _>(
-                                &config.contact_info,
-                                &RecipientDomain::new(&event.domain),
-                                event.span_id,
-                            )
-                            .await
-                            .clone(),
-                        date_range_end,
-                        date_range_start,
-                        policies: Default::default(),
-                    },
-                    ..Default::default()
-                };
-
-                report.write_ops(&mut batch, item_id, true);
-
-                (item_id, report)
-            };
-
-            let policy = if let Some(policy) = report
-                .policy_identifiers
-                .as_slice()
-                .iter()
-                .position(|id| *id == policy_hash)
-                .and_then(|idx| report.report.policies.0.inner.get_mut(idx))
-            {
-                &mut policy.value
-            } else {
-                // Create policy
-                let mut policy = TlsReportPolicy {
-                    policy_type: TlsPolicyType::NoPolicyFound,
-                    policy_domain: report.domain.clone(),
-                    ..Default::default()
-                };
-
-                match &event.policy {
-                    common::ipc::PolicyType::Tlsa(tlsa) => {
-                        policy.policy_type = TlsPolicyType::Tlsa;
-                        if let Some(tlsa) = tlsa {
-                            for entry in &tlsa.entries {
-                                policy.policy_strings.push(format!(
-                                    "{} {} {} {}",
-                                    if entry.is_end_entity { 3 } else { 2 },
-                                    i32::from(entry.is_spki),
-                                    match entry.matching {
-                                        TlsaMatching::Full => 0,
-                                        TlsaMatching::Sha256 => 1,
-                                        TlsaMatching::Sha512 => 2,
-                                    },
-                                    entry.data.iter().fold(
-                                        String::with_capacity(64),
-                                        |mut s, b| {
-                                            write!(s, "{b:02X}").ok();
-                                            s
-                                        }
-                                    )
-                                ));
-                            }
-                        }
-                    }
-                    common::ipc::PolicyType::Sts(sts) => {
-                        policy.policy_type = TlsPolicyType::Sts;
-                        if let Some(sts) = sts {
-                            policy.policy_strings.push("version: STSv1".to_string());
-                            policy.policy_strings.push(format!(
-                                "mode: {}",
-                                match sts.mode {
-                                    Mode::Enforce => "enforce",
-                                    Mode::Testing => "testing",
-                                    Mode::None => "none",
-                                }
-                            ));
-                            policy
-                                .policy_strings
-                                .push(format!("max_age: {}", sts.max_age));
-                            for mx in &sts.mx {
-                                let mx = match mx {
-                                    MxPattern::Equals(mx) => mx.to_string(),
-                                    MxPattern::StartsWith(mx) => format!("*.{mx}"),
-                                };
-                                policy.policy_strings.push(format!("mx: {mx}"));
-                                policy.mx_hosts.push(mx);
-                            }
-                        }
-                    }
-                    _ => (),
-                }
-
-                for rua in &event.tls_record.rua {
-                    match rua {
-                        ReportUri::Mail(mail) => {
-                            report.mail_rua.push(mail.clone());
-                        }
-                        ReportUri::Http(uri) => {
-                            report.http_rua.push(uri.clone());
-                        }
-                    }
-                }
-
-                report.policy_identifiers.push(policy_hash);
-                report.report.policies.push(policy);
-                &mut report.report.policies.0.inner.last_mut().unwrap().value
-            };
-
-            // Add failure details
-            if let Some(mut failure) = event.failure.clone().map(TlsFailureDetails::from) {
-                if let Some(idx) = policy
-                    .failure_details
-                    .0
-                    .inner
-                    .iter()
-                    .position(|d| d.value.eq_except_count(&failure))
-                {
-                    policy.failure_details.0.inner[idx]
-                        .value
-                        .failed_session_count += 1;
-                } else {
-                    failure.failed_session_count = 1;
-                    policy.failure_details.push(failure);
-                }
-
-                policy.total_failed_sessions += 1;
-            } else {
-                policy.total_successful_sessions += 1;
+    for rua in &event.tls_record.rua {
+        match rua {
+            ReportUri::Mail(mail) => {
+                report.mail_rua.push(mail.clone());
             }
-
-            // Write entry
-            let report_bytes = report.to_pickled_vec();
-            let max_report_size = self
-                .eval_if(
-                    &config.max_size,
-                    &RecipientDomain::new(&event.domain),
-                    event.span_id,
-                )
-                .await
-                .unwrap_or(5 * 1024 * 1024);
-            if max_report_size != 0 && report_bytes.len() > max_report_size {
-                trc::event!(
-                    OutgoingReport(OutgoingReportEvent::MaxSizeExceeded),
-                    SpanId = event.span_id,
-                    Domain = event.domain.clone(),
-                    Details = report_bytes.len(),
-                    Limit = max_report_size,
-                );
-                return;
-            }
-
-            batch.set(
-                ValueClass::Registry(RegistryClass::Item { object_id, item_id }),
-                report_bytes,
-            );
-
-            match self.core.storage.data.write(batch.build_all()).await {
-                Ok(_) => {
-                    break;
-                }
-                Err(err) => {
-                    if err.is_assertion_failure() && rety_count < 3 {
-                        rety_count += 1;
-                        continue;
-                    }
-                    trc::error!(
-                        err.caused_by(trc::location!())
-                            .details("Failed to write TLS report")
-                    );
-                    break;
-                }
+            ReportUri::Http(uri) => {
+                report.http_rua.push(uri.clone());
             }
         }
     }
+
+    report
+}
+
+pub(crate) async fn complete_tls_report(
+    server: &Server,
+    report: &mut TlsInternalReport,
+    arena: &mut Bump,
+    span_id: u64,
+) {
+    let config = &server.core.smtp.report.tls;
+    let domain = RecipientDomain::new(report.domain.as_str());
+    report.report.report_id = format!(
+        "{}_{}",
+        report.report.date_range_start.timestamp(),
+        server.inner.data.queue_id_gen.generate()
+    );
+    report.report.organization_name = server
+        .eval_if::<String, _>(&config.org_name, &domain, arena, span_id)
+        .await;
+    report.report.contact_info = server
+        .eval_if::<String, _>(&config.contact_info, &domain, arena, span_id)
+        .await;
+}
+
+pub(crate) fn tls_report_policy(event: &TlsEvent) -> TlsReportPolicy {
+    let mut policy = TlsReportPolicy {
+        policy_type: TlsPolicyType::NoPolicyFound,
+        policy_domain: event.domain.clone(),
+        ..Default::default()
+    };
+
+    match &event.policy {
+        common::ipc::PolicyType::Tlsa(tlsa) => {
+            policy.policy_type = TlsPolicyType::Tlsa;
+            if let Some(tlsa) = tlsa {
+                for entry in &tlsa.entries {
+                    policy.policy_strings.push(format!(
+                        "{} {} {} {}",
+                        if entry.is_end_entity { 3 } else { 2 },
+                        i32::from(entry.is_spki),
+                        match entry.matching {
+                            TlsaMatching::Full => 0,
+                            TlsaMatching::Sha256 => 1,
+                            TlsaMatching::Sha512 => 2,
+                        },
+                        entry
+                            .data
+                            .iter()
+                            .fold(String::with_capacity(64), |mut s, b| {
+                                write!(s, "{b:02X}").ok();
+                                s
+                            })
+                    ));
+                }
+            }
+        }
+        common::ipc::PolicyType::Sts(sts) => {
+            policy.policy_type = TlsPolicyType::Sts;
+            if let Some(sts) = sts {
+                policy.policy_strings.push("version: STSv1".to_string());
+                policy.policy_strings.push(format!(
+                    "mode: {}",
+                    match sts.mode {
+                        Mode::Enforce => "enforce",
+                        Mode::Testing => "testing",
+                        Mode::None => "none",
+                    }
+                ));
+                policy
+                    .policy_strings
+                    .push(format!("max_age: {}", sts.max_age));
+                for mx in &sts.mx {
+                    let mx = match mx {
+                        MxPattern::Equals(mx) => mx.to_string(),
+                        MxPattern::StartsWith(mx) => format!("*.{mx}"),
+                    };
+                    policy.policy_strings.push(format!("mx: {mx}"));
+                    policy.mx_hosts.push(mx);
+                }
+            }
+        }
+        _ => (),
+    }
+
+    policy
 }

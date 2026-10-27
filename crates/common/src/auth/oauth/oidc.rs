@@ -6,7 +6,7 @@
 
 use std::fmt;
 
-use jsonwebtoken::Header;
+use jsonwebtoken::{Header, Validation};
 
 use serde::{
     Deserialize, Deserializer, Serialize,
@@ -93,9 +93,13 @@ pub struct StandardClaims {
     #[serde(default)]
     pub email: Option<String>,
 
+    #[serde(default, deserialize_with = "any_bool")]
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub email_verified: bool,
+
     #[serde(skip_serializing_if = "Option::is_none")]
     #[serde(default)]
-    pub description: Option<String>,
+    pub name: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -111,7 +115,25 @@ struct IdTokenClaims {
     private: StandardClaims,
 }
 
+#[derive(Debug, Deserialize)]
+pub struct IdTokenHint {
+    pub sub: String,
+    pub aud: String,
+}
+
 impl Server {
+    pub fn verify_id_token_hint(&self, token: &str, issuer: &str) -> Option<IdTokenHint> {
+        let key = self.core.oauth.oidc_verifying_key.as_ref()?;
+        let mut validation = Validation::new(self.core.oauth.oidc_signature_algorithm);
+        validation.validate_exp = false;
+        validation.validate_aud = false;
+        validation.set_issuer(&[issuer]);
+        validation.set_required_spec_claims(&["iss", "sub", "aud"]);
+        jsonwebtoken::decode::<IdTokenHint>(token, key, &validation)
+            .ok()
+            .map(|data| data.claims)
+    }
+
     pub fn issue_id_token(
         &self,
         subject: impl Into<String>,

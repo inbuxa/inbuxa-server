@@ -4,15 +4,18 @@
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
  */
 
+use crate::calendar::expand::SECONDS_PER_DAY;
 use crate::scheduling::{
     Attendee, Email, InstanceId, ItipDateTime, ItipEntry, ItipEntryValue, ItipError, ItipField,
     ItipParticipant, ItipSnapshot, ItipSnapshots, ItipTime, ItipValue, Organizer, RecurrenceId,
 };
 use ahash::AHashMap;
 use calcard::icalendar::{
-    ICalendar, ICalendarParameterName, ICalendarParameterValue, ICalendarProperty,
-    ICalendarScheduleAgentValue, ICalendarValue, Uri,
+    ICalendar, ICalendarDuration, ICalendarParameterName, ICalendarParameterValue,
+    ICalendarParticipationStatus, ICalendarProperty, ICalendarScheduleAgentValue, ICalendarValue,
+    Uri,
 };
+use std::borrow::Borrow;
 
 pub fn itip_snapshot<'x, 'y>(
     ical: &'x ICalendar,
@@ -56,6 +59,7 @@ pub fn itip_snapshot<'x, 'y>(
                 entries: Default::default(),
                 sequence: Default::default(),
                 request_status: Default::default(),
+                recurrence_time: None,
             };
             let mut instance_id = InstanceId::Main;
 
@@ -266,16 +270,21 @@ pub fn itip_snapshot<'x, 'y>(
                                 }
                             }
 
+                            let tz = tz_resolver
+                                .get_or_insert_with(|| ical.build_tz_resolver())
+                                .resolve_or_default(tz_id);
+                            let start = date
+                                .to_date_time_with_tz(tz)
+                                .map(|dt| dt.timestamp())
+                                .unwrap_or_else(|| date.to_timestamp().unwrap_or_default());
+
+                            sched_comp.recurrence_time = Some(ItipTime {
+                                start,
+                                tz_id: tz.as_id(),
+                            });
                             instance_id = InstanceId::Recurrence(RecurrenceId {
                                 entry_id: entry_id as u16,
-                                date: date
-                                    .to_date_time_with_tz(
-                                        tz_resolver
-                                            .get_or_insert_with(|| ical.build_tz_resolver())
-                                            .resolve_or_default(tz_id),
-                                    )
-                                    .map(|dt| dt.timestamp())
-                                    .unwrap_or_else(|| date.to_timestamp().unwrap_or_default()),
+                                date: start,
                                 this_and_future,
                             });
                         }
@@ -315,7 +324,7 @@ pub fn itip_snapshot<'x, 'y>(
                                         .get_or_insert_with(|| ical.build_tz_resolver())
                                         .resolve_or_default(tz_id);
                                     ItipEntryValue::DateTime(ItipDateTime {
-                                        date: date.as_ref(),
+                                        date,
                                         tz_id,
                                         tz_code: tz.as_id(),
                                         timestamp: date
@@ -361,7 +370,19 @@ pub fn itip_snapshot<'x, 'y>(
     }
 }
 
-impl ItipSnapshots<'_> {
+impl<'x> ItipSnapshots<'x> {
+    pub(crate) fn unanswered(&self) -> ItipSnapshots<'x> {
+        ItipSnapshots {
+            organizer: self.organizer.clone(),
+            uid: self.uid,
+            components: self
+                .components
+                .iter()
+                .map(|(instance_id, instance)| (instance_id.clone(), instance.unanswered()))
+                .collect(),
+        }
+    }
+
     pub fn sender_is_organizer_or_attendee(&self, email: &str) -> bool {
         self.organizer.email.email == email
             || self.components.values().any(|snapshot| {
@@ -380,9 +401,183 @@ impl ItipSnapshots<'_> {
         self.main_instance()
             .unwrap_or_else(|| self.components.values().next().unwrap())
     }
+
+    pub fn matching_instance(
+        &self,
+        instance_id: &InstanceId,
+    ) -> Option<(&InstanceId, &ItipSnapshot<'x>)> {
+        self.components
+            .get_key_value(instance_id)
+            .or_else(|| match instance_id {
+                InstanceId::Recurrence(recurrence_id) => {
+                    self.components
+                        .get_key_value(&InstanceId::Recurrence(RecurrenceId {
+                            this_and_future: !recurrence_id.this_and_future,
+                            ..recurrence_id.clone()
+                        }))
+                }
+                InstanceId::Main => None,
+            })
+    }
+
+    pub fn occurrence_source(&self, recurrence_id: &RecurrenceId) -> Option<&ItipSnapshot<'x>> {
+        self.components
+            .iter()
+            .filter_map(|(instance_id, instance)| match instance_id {
+                InstanceId::Recurrence(covering)
+                    if covering.this_and_future && covering.date <= recurrence_id.date =>
+                {
+                    Some((covering.date, instance))
+                }
+                InstanceId::Recurrence(_) | InstanceId::Main => None,
+            })
+            .max_by_key(|(date, _)| *date)
+            .map(|(_, instance)| instance)
+            .or_else(|| self.components.get(&InstanceId::Main))
+    }
+
+    pub fn instance_time(&self, instance_id: &InstanceId) -> Option<ItipTime> {
+        let instance = self.components.get(instance_id);
+        if let Some(time) = instance.and_then(ItipSnapshot::start_time) {
+            return Some(time);
+        }
+
+        match instance_id {
+            InstanceId::Main => None,
+            InstanceId::Recurrence(recurrence_id) => instance
+                .and_then(|instance| instance.recurrence_time)
+                .or_else(|| {
+                    self.main_instance()
+                        .and_then(ItipSnapshot::start_time)
+                        .map(|master_start| ItipTime {
+                            start: recurrence_id.date,
+                            tz_id: master_start.tz_id,
+                        })
+                }),
+        }
+    }
+
+    pub fn build_instance_summary(
+        &self,
+        instance_id: &InstanceId,
+        include_guests: Option<&Organizer<'_>>,
+        skip_fields: &[ItipField],
+    ) -> Vec<ItipField> {
+        let instance = self.components.get(instance_id);
+        let Some(master) = self.main_instance() else {
+            return instance.map_or_else(Vec::new, |instance| {
+                instance.build_summary(include_guests, skip_fields)
+            });
+        };
+        let InstanceId::Recurrence(recurrence_id) = instance_id else {
+            return master.build_summary(include_guests, skip_fields);
+        };
+
+        let mut fields = Vec::with_capacity(SUMMARY_IDENTITY.len() + 3);
+        for name in SUMMARY_IDENTITY {
+            let source = instance
+                .filter(|instance| instance.entries.iter().any(|entry| entry.name == &name))
+                .unwrap_or(master);
+            fields.extend(source.summary_fields(&name));
+        }
+        if let Some(time) = self.instance_time(instance_id) {
+            fields.push(ItipField {
+                name: ICalendarProperty::Dtstart,
+                value: ItipValue::Time(time),
+            });
+        }
+        if recurrence_id.this_and_future {
+            fields.extend(master.summary_fields(&ICalendarProperty::Rrule));
+        }
+
+        instance
+            .unwrap_or(master)
+            .finish_summary(fields, include_guests, skip_fields)
+    }
+
+    pub fn build_instances_summary(
+        &self,
+        instance_ids: &[impl Borrow<InstanceId>],
+        include_guests: Option<&Organizer<'_>>,
+        skip_fields: &[ItipField],
+    ) -> Vec<ItipField> {
+        let Some((first, rest)) = instance_ids.split_first() else {
+            return Vec::new();
+        };
+        let mut fields = self.build_instance_summary(first.borrow(), include_guests, skip_fields);
+
+        for instance_id in rest {
+            let Some(time) = self.instance_time(instance_id.borrow()) else {
+                continue;
+            };
+            let field = ItipField {
+                name: ICalendarProperty::Dtstart,
+                value: ItipValue::Time(time),
+            };
+            if !fields.contains(&field) && !skip_fields.contains(&field) {
+                fields.push(field);
+            }
+        }
+
+        fields
+    }
 }
 
-impl ItipSnapshot<'_> {
+const SUMMARY_IDENTITY: [ICalendarProperty; 4] = [
+    ICalendarProperty::Summary,
+    ICalendarProperty::Description,
+    ICalendarProperty::Location,
+    ICalendarProperty::Conference,
+];
+
+impl<'x> ItipSnapshot<'x> {
+    pub fn length(&self) -> Option<ICalendarDuration> {
+        let mut start = None;
+        let mut end = None;
+        for entry in &self.entries {
+            match (entry.name, &entry.value) {
+                (ICalendarProperty::Duration, ItipEntryValue::Duration(duration)) => {
+                    return Some((*duration).clone());
+                }
+                (ICalendarProperty::Dtstart, ItipEntryValue::DateTime(date)) => start = Some(date),
+                (ICalendarProperty::Dtend, ItipEntryValue::DateTime(date)) => end = Some(date),
+                _ => {}
+            }
+        }
+        let (start, end) = (start?, end?);
+        let seconds = end.timestamp - start.timestamp;
+        (seconds > 0).then(|| {
+            if start.date.has_time() {
+                ICalendarDuration::from_seconds(seconds)
+            } else {
+                ICalendarDuration::from_days((seconds + SECONDS_PER_DAY / 2) / SECONDS_PER_DAY)
+            }
+        })
+    }
+
+    fn unanswered(&self) -> ItipSnapshot<'x> {
+        ItipSnapshot {
+            comp_id: self.comp_id,
+            comp: self.comp,
+            attendees: self
+                .attendees
+                .iter()
+                .map(|attendee| {
+                    let mut attendee = attendee.clone();
+                    if attendee.email.is_local && attendee.part_stat.is_some() {
+                        attendee.part_stat = Some(&ICalendarParticipationStatus::NeedsAction);
+                    }
+                    attendee
+                })
+                .collect(),
+            dtstamp: self.dtstamp,
+            entries: self.entries.clone(),
+            sequence: self.sequence,
+            request_status: self.request_status.clone(),
+            recurrence_time: self.recurrence_time,
+        }
+    }
+
     pub fn has_local_attendee(&self) -> bool {
         self.attendees
             .iter()
@@ -410,7 +605,7 @@ impl ItipSnapshot<'_> {
         include_guests: Option<&Organizer<'_>>,
         skip_fields: &[ItipField],
     ) -> Vec<ItipField> {
-        let mut fields = Vec::with_capacity(5);
+        let mut fields = Vec::with_capacity(6);
 
         for entry in &self.entries {
             if matches!(
@@ -421,64 +616,81 @@ impl ItipSnapshot<'_> {
                     | ICalendarProperty::Location
                     | ICalendarProperty::Conference
                     | ICalendarProperty::Rrule
-            ) {
-                let value = match &entry.value {
-                    ItipEntryValue::DateTime(dt) => ItipValue::Time(ItipTime {
-                        start: dt.timestamp,
-                        tz_id: dt.tz_code,
-                    }),
-                    ItipEntryValue::RRule(rule) => ItipValue::Rrule(Box::new((*rule).clone())),
-                    ItipEntryValue::Text(value) => ItipValue::Text(value.to_string()),
-                    _ => continue,
-                };
-                let field = ItipField {
+            ) && let Some(value) = entry.value.to_summary_value()
+            {
+                fields.push(ItipField {
                     name: entry.name.clone(),
                     value,
-                };
-
-                if !skip_fields.contains(&field) {
-                    fields.push(field);
-                }
+                });
             }
         }
 
-        if let Some(organizer) = include_guests {
-            let mut attendees = Vec::with_capacity(self.attendees.len());
-            for attendee in &self.attendees {
-                if attendee.email.email != organizer.email.email {
-                    attendees.push(ItipParticipant {
-                        email: attendee.email.email.to_string(),
-                        name: attendee.name.map(|n| n.to_string()),
-                        is_organizer: false,
-                    });
-                }
+        self.finish_summary(fields, include_guests, skip_fields)
+    }
+
+    pub fn guest_field(&self, organizer: &Organizer<'_>) -> ItipField {
+        let mut attendees = Vec::with_capacity(self.attendees.len() + 1);
+        for attendee in &self.attendees {
+            if attendee.email.email != organizer.email.email {
+                attendees.push(ItipParticipant {
+                    email: attendee.email.email.clone(),
+                    name: attendee.name.map(|name| name.to_string()),
+                    is_organizer: false,
+                });
             }
-            attendees.push(ItipParticipant {
-                email: organizer.email.email.to_string(),
-                name: organizer.name.map(|n| n.to_string()),
-                is_organizer: true,
-            });
-            attendees.sort_by(|a, b| {
-                if a.is_organizer && !b.is_organizer {
-                    std::cmp::Ordering::Less
-                } else if !a.is_organizer && b.is_organizer {
-                    std::cmp::Ordering::Greater
-                } else if let (Some(a_name), Some(b_name)) = (a.name.as_deref(), b.name.as_deref())
-                {
-                    match a_name.cmp(b_name) {
-                        std::cmp::Ordering::Equal => a.email.cmp(&b.email),
-                        ord => ord,
-                    }
-                } else {
-                    a.email.cmp(&b.email)
-                }
-            });
+        }
+        attendees.push(ItipParticipant {
+            email: organizer.email.email.clone(),
+            name: organizer.name.map(|name| name.to_string()),
+            is_organizer: true,
+        });
+        attendees.sort_unstable();
 
-            let field = ItipField {
-                name: ICalendarProperty::Attendee,
-                value: ItipValue::Participants(attendees),
-            };
+        ItipField {
+            name: ICalendarProperty::Attendee,
+            value: ItipValue::Participants(attendees),
+        }
+    }
 
+    fn start_time(&self) -> Option<ItipTime> {
+        self.entries
+            .iter()
+            .find_map(|entry| match (entry.name, &entry.value) {
+                (ICalendarProperty::Dtstart, ItipEntryValue::DateTime(start)) => Some(ItipTime {
+                    start: start.timestamp,
+                    tz_id: start.tz_code,
+                }),
+                _ => None,
+            })
+    }
+
+    fn summary_fields<'y>(
+        &'y self,
+        name: &'y ICalendarProperty,
+    ) -> impl Iterator<Item = ItipField> + 'y {
+        self.entries.iter().filter_map(move |entry| {
+            if entry.name != name {
+                return None;
+            }
+            entry.value.to_summary_value().map(|value| ItipField {
+                name: name.clone(),
+                value,
+            })
+        })
+    }
+
+    fn finish_summary(
+        &self,
+        mut fields: Vec<ItipField>,
+        include_guests: Option<&Organizer<'_>>,
+        skip_fields: &[ItipField],
+    ) -> Vec<ItipField> {
+        if !skip_fields.is_empty() {
+            fields.retain(|field| !skip_fields.contains(field));
+        }
+
+        if let Some(organizer) = include_guests {
+            let field = self.guest_field(organizer);
             if !skip_fields.contains(&field) {
                 fields.push(field);
             }
@@ -487,3 +699,18 @@ impl ItipSnapshot<'_> {
         fields
     }
 }
+
+impl ItipEntryValue<'_> {
+    fn to_summary_value(&self) -> Option<ItipValue> {
+        match self {
+            ItipEntryValue::DateTime(date) => Some(ItipValue::Time(ItipTime {
+                start: date.timestamp,
+                tz_id: date.tz_code,
+            })),
+            ItipEntryValue::RRule(rule) => Some(ItipValue::Rrule(Box::new((*rule).clone()))),
+            ItipEntryValue::Text(value) => Some(ItipValue::Text(value.to_string())),
+            _ => None,
+        }
+    }
+}
+

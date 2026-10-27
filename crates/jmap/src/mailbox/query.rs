@@ -4,12 +4,19 @@
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
  */
 
-use crate::{api::query::QueryResponseBuilder, changes::state::JmapCacheState};
+use crate::{
+    api::{
+        metadata::{MetadataType, ObjectMetadata},
+        query::QueryResponseBuilder,
+    },
+    changes::state::JmapCacheState,
+};
 use common::{Server, auth::AccessToken};
 use email::cache::{MessageCacheFetch, mailbox::MailboxCacheAccess};
 use jmap_proto::{
     method::query::{Comparator, Filter, QueryRequest, QueryResponse},
     object::mailbox::{Mailbox, MailboxComparator, MailboxFilter},
+    request::capability::CapabilityIds,
 };
 use std::{collections::BTreeMap, future::Future};
 use store::{
@@ -18,13 +25,15 @@ use store::{
     search::{SearchComparator, SearchFilter, SearchQuery},
     write::SearchIndex,
 };
-use types::{acl::Acl, collection::Collection, special_use::SpecialUse};
+use types::{acl::Acl, collection::Collection, metadata::MetadataKinds, special_use::SpecialUse};
+use utils::text::IgnoreCaseNeedle;
 
 pub trait MailboxQuery: Sync + Send {
     fn mailbox_query(
         &self,
         request: QueryRequest<Mailbox>,
         access_token: &AccessToken,
+        using: CapabilityIds,
     ) -> impl Future<Output = trc::Result<QueryResponse>> + Send;
 }
 
@@ -33,13 +42,46 @@ impl MailboxQuery for Server {
         &self,
         mut request: QueryRequest<Mailbox>,
         access_token: &AccessToken,
+        using: CapabilityIds,
     ) -> trc::Result<QueryResponse> {
         let account_id = request.account_id.document_id();
         let personal_id = access_token.personal_id(account_id, Collection::Mailbox);
         let sort_as_tree = request.arguments.sort_as_tree.unwrap_or(false);
         let filter_as_tree = request.arguments.filter_as_tree.unwrap_or(false);
         let mut filters = Vec::with_capacity(request.filter.len());
+        let object_metadata = ObjectMetadata::new(self, access_token, using, MetadataType::Mailbox);
+        let sampled = object_metadata.viewer_change_id(self, account_id).await?;
         let mailboxes = self.get_cached_messages(account_id).await?;
+        let readable: RoaringBitmap = if access_token.is_shared(account_id) {
+            mailboxes.shared_mailboxes(access_token, Acl::Read)
+        } else {
+            mailboxes
+                .mailboxes
+                .items
+                .iter()
+                .map(|m| m.document_id)
+                .collect()
+        };
+        let metadata =
+            object_metadata.query(request.filter.iter().filter_map(|filter| match filter {
+                Filter::Property(MailboxFilter::Metadata(filter)) => Some(filter),
+                _ => None,
+            }))?;
+        let mut metadata_matches = object_metadata
+            .evaluate(self, account_id, &metadata, || {
+                mailboxes
+                    .mailboxes
+                    .items
+                    .iter()
+                    .filter(|mailbox| {
+                        mailbox.metadata_kinds.contains(MetadataKinds::JMAP)
+                            && readable.contains(mailbox.document_id)
+                    })
+                    .map(|mailbox| mailbox.document_id)
+                    .collect::<RoaringBitmap>()
+            })
+            .await?
+            .into_iter();
 
         for cond in std::mem::take(&mut request.filter) {
             match cond {
@@ -60,20 +102,20 @@ impl MailboxQuery for Server {
                             ));
                         }
                         MailboxFilter::Name(name) => {
-                            #[cfg(any(feature = "dev_mode", feature = "test_mode"))]
+                            #[cfg(any(feature = "dev_mode", stalwart_tests))]
                             {
                                 // Used for concurrent requests tests
                                 if name == "__sleep" {
                                     tokio::time::sleep(std::time::Duration::from_secs(1)).await;
                                 }
                             }
-                            let name = name.to_lowercase();
+                            let name = IgnoreCaseNeedle::new(&name);
                             filters.push(SearchFilter::is_in_set(
                                 mailboxes
                                     .mailboxes
                                     .items
                                     .iter()
-                                    .filter(|mailbox| mailbox.name.to_lowercase().contains(&name))
+                                    .filter(|mailbox| name.contains(&mailbox.name))
                                     .map(|m| m.document_id)
                                     .collect::<RoaringBitmap>(),
                             ));
@@ -127,6 +169,9 @@ impl MailboxQuery for Server {
                                     .collect::<RoaringBitmap>(),
                             ));
                         }
+                        MailboxFilter::Metadata(_) => filters.push(SearchFilter::is_in_set(
+                            metadata_matches.next().unwrap_or_default(),
+                        )),
                         MailboxFilter::_T(other) => {
                             return Err(trc::JmapEvent::UnsupportedFilter
                                 .into_err()
@@ -157,7 +202,7 @@ impl MailboxQuery for Server {
                 .mailboxes
                 .items
                 .iter()
-                .map(|mailbox| (mailbox.path.as_str(), mailbox.document_id))
+                .map(|mailbox| (&*mailbox.path, mailbox.document_id))
                 .collect::<BTreeMap<_, _>>();
             comparators.push(SearchComparator::sorted_set(
                 sorted_set
@@ -182,7 +227,7 @@ impl MailboxQuery for Server {
                         .mailboxes
                         .items
                         .iter()
-                        .map(|mailbox| (mailbox.name.as_str(), mailbox.document_id))
+                        .map(|mailbox| (&*mailbox.name, mailbox.document_id))
                         .collect::<BTreeMap<_, _>>();
 
                     SearchComparator::sorted_set(
@@ -229,16 +274,7 @@ impl MailboxQuery for Server {
         let mut results = SearchQuery::new(SearchIndex::InMemory)
             .with_filters(filters)
             .with_comparators(comparators)
-            .with_mask(if access_token.is_shared(account_id) {
-                mailboxes.shared_mailboxes(access_token, Acl::Read)
-            } else {
-                mailboxes
-                    .mailboxes
-                    .items
-                    .iter()
-                    .map(|m| m.document_id)
-                    .collect()
-            })
+            .with_mask(readable)
             .filter();
 
         // Filter as tree
@@ -248,15 +284,17 @@ impl MailboxQuery for Server {
             for document_id in results.results() {
                 let mut check_id = document_id;
                 for _ in 0..self.core.email.mailbox_max_depth {
-                    if let Some(mailbox) = mailboxes.mailbox_by_id(&check_id) {
-                        if let Some(parent_id) = mailbox.parent_id() {
-                            if results.results().contains(parent_id) {
-                                check_id = parent_id;
-                            } else {
-                                break;
-                            }
-                        } else {
+                    let Some(mailbox) = mailboxes.mailbox_by_id(&check_id) else {
+                        break;
+                    };
+                    match mailbox.parent_id() {
+                        Some(parent_id) if results.results().contains(parent_id) => {
+                            check_id = parent_id;
+                        }
+                        Some(_) => break,
+                        None => {
                             new_results.insert(document_id);
+                            break;
                         }
                     }
                 }
@@ -268,7 +306,7 @@ impl MailboxQuery for Server {
         let mut response = QueryResponseBuilder::new(
             results.results().len() as usize,
             self.core.jmap.query_max_results,
-            mailboxes.get_state(true),
+            sampled.state(mailboxes.get_state(true)),
             &request,
         );
 

@@ -7,7 +7,7 @@ homepage = "https://stalw.art"
 keywords = ["imap", "jmap", "smtp", "email", "mail", "webdav", "server"]
 categories = ["email"]
 license = "AGPL-3.0-only OR LicenseRef-SEL"
-version = "0.16.27"
+version = "1.0.0"
 edition = "2024"
 
 [[bin]]
@@ -20,7 +20,7 @@ coordinator = { path = "../coordinator" }
 jmap = { path = "../jmap" }
 types = { path = "../types" }
 smtp = { path = "../smtp" }
-smtp-proto = { version = "0.2", features = ["rkyv", "serde"] }
+smtp-proto = { path = "../smtp-proto", features = ["rkyv", "serde"] }
 imap = { path = "../imap" }
 pop3 = { path = "../pop3" }
 spam-filter = { path = "../spam-filter" }
@@ -37,15 +37,17 @@ trc = { path = "../trc" }
 utils = { path = "../utils" }
 registry = { path = "../registry" }
 http_proto = { path = "../http-proto" }
-migration = { path = "../migration" }
-tokio = { version = "1.53", features = ["full"] }
-rustls = { version = "0.23.43", default-features = false, features = ["std", "aws_lc_rs", "tls12"] }
+tokio = { version = "1.54", features = ["full"] }
+rustls = { version = "0.23.46", default-features = false, features = ["std", "aws_lc_rs", "tls12"] }
 
 [target.'cfg(all(target_arch = "x86_64", any(target_os = "linux", target_os = "freebsd")))'.dependencies]
-libc = "0.2.189"
+libc = "0.2.191"
 
 [target.'cfg(not(any(target_env = "msvc", target_os = "freebsd")))'.dependencies]
 tikv-jemallocator = "0.7"
+
+[target.'cfg(all(target_os = "linux", target_env = "gnu"))'.dependencies]
+tikv-jemallocator = { version = "0.7", features = ["unprefixed_malloc_on_supported_platforms"] }
 
 [features]
 #default = ["sqlite", "postgres", "mysql", "rocks", "s3", "redis", "azure", "nats", "enterprise", "zenoh", "kafka"]
@@ -57,7 +59,7 @@ postgres = ["store/postgres", "directory/postgres"]
 mysql = ["store/mysql", "directory/mysql"]
 rocks = ["store/rocks"]
 s3 = ["store/s3"]
-redis = ["store/redis", "coordinator/redis"]
+redis = ["store/redis", "coordinator/redis", "common/redis"]
 azure = ["store/azure"]
 nats = ["coordinator/nats"]
 zenoh = ["coordinator/zenoh"]
@@ -75,8 +77,13 @@ enterprise = [ "jmap/enterprise",
                "dav/enterprise",
                "groupware/enterprise",
                "trc/enterprise",
+               "registry/enterprise",
                "services/enterprise",
-               "migration/enterprise" ]
+               "coordinator/enterprise",
+               "imap/enterprise",
+               "pop3/enterprise",
+               "utils/enterprise",
+               "http_proto/enterprise" ]
 dev_mode = [ "common/dev_mode", 
              "trc/dev_mode", 
              "dav/dev_mode",

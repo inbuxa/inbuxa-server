@@ -50,6 +50,7 @@ pub enum State {
     NotAuthenticated {
         auth_failures: u32,
         username: Option<String>,
+        sasl_failure: Option<trc::Error>,
     },
     Authenticated {
         mailbox: Mailbox,
@@ -59,6 +60,13 @@ pub enum State {
 }
 
 impl State {
+    pub fn take_sasl_failure(&mut self) -> Option<trc::Error> {
+        match self {
+            State::NotAuthenticated { sasl_failure, .. } => sasl_failure.take(),
+            _ => None,
+        }
+    }
+
     pub fn mailbox(&self) -> &Mailbox {
         match self {
             State::Authenticated { mailbox, .. } => mailbox,

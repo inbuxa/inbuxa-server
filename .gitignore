@@ -1,4 +1,4 @@
-/target
+target/
 *.failed
 *_failed
 run.sh
@@ -7,4 +7,3 @@ run.sh
 !.gitattributes
 !.github
 !.cargo
-CLAUDE.md

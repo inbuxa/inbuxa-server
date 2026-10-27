@@ -6,20 +6,28 @@
 
 use std::borrow::Cow;
 
-use request::TextMatch;
+pub mod collation;
 pub mod property;
 pub mod request;
 pub mod response;
 
+pub use collation::{Collation, MatchType};
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[cfg_attr(test, derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(
+    all(test, stalwart_tests),
+    derive(serde::Serialize, serde::Deserialize)
+)]
 pub struct NamedElement {
     pub ns: Namespace,
     pub element: Element,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[cfg_attr(test, derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(
+    all(test, stalwart_tests),
+    derive(serde::Serialize, serde::Deserialize)
+)]
 #[repr(u8)]
 pub enum Namespace {
     Dav,
@@ -29,7 +37,10 @@ pub enum Namespace {
 }
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
-#[cfg_attr(test, derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(
+    all(test, stalwart_tests),
+    derive(serde::Serialize, serde::Deserialize)
+)]
 pub struct Namespaces {
     pub(crate) cal: bool,
     pub(crate) card: bool,
@@ -49,12 +60,16 @@ impl Namespaces {
 
 impl Namespace {
     pub fn try_parse(value: &[u8]) -> Option<Self> {
-        hashify::tiny_map!(value,
-            "DAV:" => Namespace::Dav,
-            "urn:ietf:params:xml:ns:caldav" => Namespace::CalDav,
-            "urn:ietf:params:xml:ns:carddav" => Namespace::CardDav,
-            "http://calendarserver.org/ns/" => Namespace::CalendarServer,
-            "http://calendarserver.org/ns" => Namespace::CalendarServer
+        Namespace::try_parse_uri(value).map(|(namespace, _)| *namespace)
+    }
+
+    pub fn try_parse_uri(value: &[u8]) -> Option<&'static (Namespace, &'static str)> {
+        hashify::map!(value, (Namespace, &'static str),
+            "DAV:" => (Namespace::Dav, "DAV:"),
+            "urn:ietf:params:xml:ns:caldav" => (Namespace::CalDav, "urn:ietf:params:xml:ns:caldav"),
+            "urn:ietf:params:xml:ns:carddav" => (Namespace::CardDav, "urn:ietf:params:xml:ns:carddav"),
+            "http://calendarserver.org/ns/" => (Namespace::CalendarServer, "http://calendarserver.org/ns/"),
+            "http://calendarserver.org/ns" => (Namespace::CalendarServer, "http://calendarserver.org/ns")
         )
     }
 
@@ -84,7 +99,10 @@ impl AsRef<str> for Namespace {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[cfg_attr(test, derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(
+    all(test, stalwart_tests),
+    derive(serde::Serialize, serde::Deserialize)
+)]
 pub enum Element {
     Abstract,
     Ace,
@@ -1346,55 +1364,6 @@ impl AttributeValue for String {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-#[cfg_attr(test, derive(serde::Serialize, serde::Deserialize))]
-pub enum Collation {
-    AsciiNumeric,
-    AsciiCasemap,
-    Octet,
-    UnicodeCasemap,
-}
-
-impl Collation {
-    pub fn try_parse(s: &str) -> Option<Self> {
-        hashify::tiny_map!(s.as_bytes(),
-            "i;ascii-numeric" => Collation::AsciiNumeric,
-            "i;ascii-casemap" => Collation::AsciiCasemap,
-            "i;octet" => Collation::Octet,
-            "i;unicode-casemap" => Collation::UnicodeCasemap,
-        )
-    }
-
-    pub fn as_str(&self) -> &'static str {
-        match self {
-            Collation::AsciiNumeric => "i;ascii-numeric",
-            Collation::AsciiCasemap => "i;ascii-casemap",
-            Collation::Octet => "i;octet",
-            Collation::UnicodeCasemap => "i;unicode-casemap",
-        }
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-#[cfg_attr(test, derive(serde::Serialize, serde::Deserialize))]
-pub enum MatchType {
-    Equals,
-    Contains,
-    StartsWith,
-    EndsWith,
-}
-
-impl MatchType {
-    pub fn try_parse(s: &str) -> Option<Self> {
-        hashify::tiny_map!(s.as_bytes(),
-            "equals" => MatchType::Equals,
-            "contains" => MatchType::Contains,
-            "starts-with" => MatchType::StartsWith,
-            "ends-with" => MatchType::EndsWith,
-        )
-    }
-}
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum XsiType {
     String,
@@ -1421,26 +1390,27 @@ pub enum XsiType {
 
 impl XsiType {
     fn from_str(s: &str) -> Option<Self> {
-        hashify::tiny_map!(s.as_bytes(),
-            "xs:string" => XsiType::String,
-            "xs:boolean" => XsiType::Boolean,
-            "xs:decimal" => XsiType::Decimal,
-            "xs:float" => XsiType::Float,
-            "xs:double" => XsiType::Double,
-            "xs:duration" => XsiType::Duration,
-            "xs:dateTime" => XsiType::DateTime,
-            "xs:time" => XsiType::Time,
-            "xs:date" => XsiType::Date,
-            "xs:gYearMonth" => XsiType::GYearMonth,
-            "xs:gYear" => XsiType::GYear,
-            "xs:gMonthDay" => XsiType::GMonthDay,
-            "xs:gDay" => XsiType::GDay,
-            "xs:gMonth" => XsiType::GMonth,
-            "xs:hexBinary" => XsiType::HexBinary,
-            "xs:base64Binary" => XsiType::Base64Binary,
-            "xs:anyURI" => XsiType::AnyUri,
-            "xs:QName" => XsiType::QName,
-            "xs:NOTATION" => XsiType::Notation,
+        hashify::fnc_map!(s.as_bytes(),
+            "xs:string" => Some(XsiType::String),
+            "xs:boolean" => Some(XsiType::Boolean),
+            "xs:decimal" => Some(XsiType::Decimal),
+            "xs:float" => Some(XsiType::Float),
+            "xs:double" => Some(XsiType::Double),
+            "xs:duration" => Some(XsiType::Duration),
+            "xs:dateTime" => Some(XsiType::DateTime),
+            "xs:time" => Some(XsiType::Time),
+            "xs:date" => Some(XsiType::Date),
+            "xs:gYearMonth" => Some(XsiType::GYearMonth),
+            "xs:gYear" => Some(XsiType::GYear),
+            "xs:gMonthDay" => Some(XsiType::GMonthDay),
+            "xs:gDay" => Some(XsiType::GDay),
+            "xs:gMonth" => Some(XsiType::GMonth),
+            "xs:hexBinary" => Some(XsiType::HexBinary),
+            "xs:base64Binary" => Some(XsiType::Base64Binary),
+            "xs:anyURI" => Some(XsiType::AnyUri),
+            "xs:QName" => Some(XsiType::QName),
+            "xs:NOTATION" => Some(XsiType::Notation),
+            _ => None,
         )
     }
 }
@@ -1449,36 +1419,10 @@ struct YesNo;
 
 impl YesNo {
     fn from_str(s: &str) -> Option<bool> {
-        hashify::tiny_map!(s.as_bytes(),
+        hashify::map!(s.as_bytes(), bool,
             "yes" => true,
             "no" => false,
         )
-    }
-}
-
-impl TextMatch {
-    pub fn matches(&self, text: &str) -> bool {
-        match self.collation {
-            Collation::Octet => {
-                (match self.match_type {
-                    MatchType::Equals => text == self.value,
-                    MatchType::Contains => text.contains(&self.value),
-                    MatchType::StartsWith => text.starts_with(&self.value),
-                    MatchType::EndsWith => text.ends_with(&self.value),
-                }) ^ self.negate
-            }
-            _ => {
-                (match self.match_type {
-                    MatchType::Equals => text.to_lowercase() == self.value.to_lowercase(),
-                    MatchType::Contains => text.to_lowercase().contains(&self.value.to_lowercase()),
-                    MatchType::StartsWith => {
-                        text.to_lowercase().starts_with(&self.value.to_lowercase())
-                    }
-                    MatchType::EndsWith => {
-                        text.to_lowercase().ends_with(&self.value.to_lowercase())
-                    }
-                }) ^ self.negate
-            }
-        }
+        .copied()
     }
 }

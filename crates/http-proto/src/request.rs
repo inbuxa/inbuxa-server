@@ -6,10 +6,15 @@
 
 use std::borrow::Cow;
 
-use compact_str::ToCompactString;
+use compact_str::{CompactString, ToCompactString};
 use http_body_util::BodyExt;
+use hyper::body::Body;
 
 use crate::HttpRequest;
+
+const MIN_FIRST_BODY_ALLOCATION: usize = 4 * 1024;
+const MIN_BODY_GROWTH: usize = 64 * 1024;
+const BODY_GROWTH_FACTOR: usize = 4;
 
 #[inline]
 pub fn decode_path_element(item: &str) -> Cow<'_, str> {
@@ -23,16 +28,43 @@ pub async fn fetch_body(
     max_size: usize,
     session_id: u64,
 ) -> Option<Vec<u8>> {
-    let mut bytes = Vec::with_capacity(1024);
+    let declared = req
+        .body()
+        .size_hint()
+        .exact()
+        .and_then(|len| usize::try_from(len).ok())
+        .filter(|&len| max_size == 0 || len <= max_size);
+    let mut bytes = Vec::new();
     while let Some(Ok(frame)) = req.frame().await {
         if let Some(data) = frame.data_ref() {
-            if bytes.len() + data.len() <= max_size || max_size == 0 {
+            let len = bytes.len() + data.len();
+            if len <= max_size || max_size == 0 {
+                if let Some(declared) = declared
+                    && len > bytes.capacity()
+                {
+                    if bytes.capacity() == 0 {
+                        bytes = Vec::with_capacity(
+                            len.saturating_mul(BODY_GROWTH_FACTOR)
+                                .max(MIN_FIRST_BODY_ALLOCATION)
+                                .min(declared)
+                                .max(len),
+                        );
+                    } else {
+                        let target = bytes
+                            .capacity()
+                            .saturating_mul(BODY_GROWTH_FACTOR)
+                            .max(MIN_BODY_GROWTH)
+                            .min(declared)
+                            .max(len);
+                        bytes.reserve_exact(target - bytes.len());
+                    }
+                }
                 bytes.extend_from_slice(data);
             } else {
                 trc::event!(
                     Http(trc::HttpEvent::RequestBody),
                     SpanId = session_id,
-                    Details = req
+                    Headers = req
                         .headers()
                         .iter()
                         .map(|(k, v)| trc::Value::Array(vec![
@@ -40,9 +72,8 @@ pub async fn fetch_body(
                             v.to_str().unwrap_or_default().to_compact_string().into()
                         ]))
                         .collect::<Vec<_>>(),
-                    Contents = std::str::from_utf8(&bytes)
-                        .unwrap_or("[binary data]")
-                        .to_string(),
+                    Contents =
+                        CompactString::from(std::str::from_utf8(&bytes).unwrap_or("[binary data]")),
                     Size = bytes.len(),
                     Limit = max_size,
                 );
@@ -55,7 +86,7 @@ pub async fn fetch_body(
     trc::event!(
         Http(trc::HttpEvent::RequestBody),
         SpanId = session_id,
-        Details = req
+        Headers = req
             .headers()
             .iter()
             .map(|(k, v)| trc::Value::Array(vec![
@@ -63,9 +94,7 @@ pub async fn fetch_body(
                 v.to_str().unwrap_or_default().to_compact_string().into()
             ]))
             .collect::<Vec<_>>(),
-        Contents = std::str::from_utf8(&bytes)
-            .unwrap_or("[binary data]")
-            .to_string(),
+        Contents = CompactString::from(std::str::from_utf8(&bytes).unwrap_or("[binary data]")),
         Size = bytes.len(),
     );
 

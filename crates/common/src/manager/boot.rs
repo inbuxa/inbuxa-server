@@ -8,12 +8,16 @@ use super::{backup::BackupParams, console::store_console};
 use crate::{
     BuildServer, Caches, Core, Data, IPC_CHANNEL_BUFFER, Inner, Ipc,
     config::{
-        network::AsnGeoLookupConfig, server::Listeners, storage::Storage, telemetry::Telemetry,
+        network::AsnGeoLookupConfig,
+        server::{Listeners, listener::recovery_mode_port},
+        storage::Storage,
+        telemetry::Telemetry,
     },
     ipc::{BroadcastEvent, PushEvent, QueueEvent, ReportingEvent, TrainTaskController},
     manager::defaults::BootstrapDefaults,
 };
 use arc_swap::ArcSwap;
+use compact_str::CompactString;
 use std::{
     net::{IpAddr, Ipv4Addr},
     path::PathBuf,
@@ -21,7 +25,7 @@ use std::{
 };
 use store::{RegistryStore, registry::bootstrap::Bootstrap};
 use tokio::sync::{Notify, mpsc};
-use utils::{UnwrapFailure, failed};
+use utils::{UnwrapFailure, failed, runtime};
 
 pub struct BootManager {
     pub bootstrap: Bootstrap,
@@ -141,17 +145,17 @@ impl BootManager {
 
         // Parse storage
         let storage = Storage::parse(&mut bootstrap).await;
+        let (ipc, ipc_rxs) = build_ipc(!storage.coordinator.is_none());
 
         // Parse telemetry
-        let telemetry = Telemetry::parse(&mut bootstrap, &storage).await;
+        let telemetry = Telemetry::parse(&mut bootstrap, &storage, ipc.index_queue_notify()).await;
 
         match import_export {
             StoreOp::None => {
                 // Parse components
-                let core: Box<Core> =
-                    Box::new(Box::pin(Core::parse(&mut bootstrap, storage)).await);
+                let core = Core::parse(&mut bootstrap, storage).await;
                 let data = Data::parse(&mut bootstrap).await;
-                let cache = Caches::parse(&mut bootstrap).await;
+                let (cache, swap_rx) = Caches::parse(&mut bootstrap, &core.storage).await;
 
                 // Enable telemetry
 
@@ -162,22 +166,27 @@ impl BootManager {
                 if bootstrap.registry.is_bootstrap_mode() {
                     trc::event!(
                         Server(trc::ServerEvent::BootstrapMode),
-                        Hostname = bootstrap.registry.local_hostname().to_string(),
-                        Details =
-                            "No configuration file was found. Port 8080 is open for initial setup.",
+                        Hostname = CompactString::from(bootstrap.registry.local_hostname()),
+                        Details = format!(
+                            "No configuration file was found. Port {} is open for initial setup.",
+                            recovery_mode_port()
+                        ),
                         Version = env!("CARGO_PKG_VERSION"),
                     );
                 } else if bootstrap.registry.is_recovery_mode() {
                     trc::event!(
                         Server(trc::ServerEvent::RecoveryMode),
-                        Details = "Port 8080 is open for troubleshooting and recovery.",
-                        Hostname = bootstrap.registry.local_hostname().to_string(),
+                        Details = format!(
+                            "Port {} is open for troubleshooting and recovery.",
+                            recovery_mode_port()
+                        ),
+                        Hostname = CompactString::from(bootstrap.registry.local_hostname()),
                         Version = env!("CARGO_PKG_VERSION"),
                     );
                 } else {
                     trc::event!(
                         Server(trc::ServerEvent::Startup),
-                        Hostname = bootstrap.registry.local_hostname().to_string(),
+                        Hostname = CompactString::from(bootstrap.registry.local_hostname()),
                         Version = env!("CARGO_PKG_VERSION"),
                     );
                 }
@@ -185,12 +194,10 @@ impl BootManager {
                 if core.storage.coordinator.is_enabled() {
                     trc::event!(
                         Cluster(trc::ClusterEvent::Startup),
-                        Id = bootstrap.registry.node_id(),
-                        Type = bootstrap
-                            .registry
-                            .cluster_role()
-                            .unwrap_or("[default]")
-                            .to_string(),
+                        NodeId = bootstrap.registry.node_id(),
+                        Type = CompactString::from(
+                            bootstrap.registry.cluster_role().unwrap_or("[default]")
+                        ),
                         Details = bootstrap.registry.cluster_push_shard()
                     );
                 }
@@ -200,7 +207,6 @@ impl BootManager {
                     core.network.asn_geo_lookup,
                     AsnGeoLookupConfig::Resource { .. }
                 );
-                let (ipc, ipc_rxs) = build_ipc(!core.storage.coordinator.is_none());
                 let inner = Arc::new(Inner {
                     shared_core: ArcSwap::new(Arc::from(core)),
                     data,
@@ -209,6 +215,9 @@ impl BootManager {
                 });
 
                 if !bootstrap.registry.is_recovery_mode() {
+                    // Start the cache swap tier writer
+                    crate::cache::swap::SwapTier::start(&inner, swap_rx);
+
                     // Load spam model
                     if let Err(err) = inner.build_server().spam_model_reload().await {
                         trc::error!(
@@ -243,33 +252,30 @@ impl BootManager {
                 telemetry.enable(false);
 
                 // Parse settings and backup
-                Box::pin(Core::parse(&mut bootstrap, storage))
+                Core::parse(&mut bootstrap, storage)
                     .await
                     .backup(path)
                     .await;
-                std::process::exit(0);
+                drop(bootstrap);
+                runtime::exit(0);
             }
             StoreOp::Import(path) => {
                 // Enable telemetry
                 telemetry.enable(false);
 
                 // Parse settings and restore
-                Box::pin(Core::parse(&mut bootstrap, storage))
+                Core::parse(&mut bootstrap, storage)
                     .await
                     .restore(path)
                     .await;
-                std::process::exit(0);
+                drop(bootstrap);
+                runtime::exit(0);
             }
             StoreOp::Console => {
                 // Store console
-                store_console(
-                    Box::pin(Core::parse(&mut bootstrap, storage))
-                        .await
-                        .storage
-                        .data,
-                )
-                .await;
-                std::process::exit(0);
+                store_console(Core::parse(&mut bootstrap, storage).await.storage.data).await;
+                drop(bootstrap);
+                runtime::exit(0);
             }
         }
     }
@@ -284,10 +290,12 @@ pub fn build_ipc(has_pubsub: bool) -> (Ipc, IpcReceivers) {
     (
         Ipc {
             push_tx,
+            push_subscribers: Default::default(),
             queue_tx,
             report_tx,
             broadcast_tx: has_pubsub.then_some(broadcast_tx),
-            task_tx: Arc::new(Notify::new()),
+            task_tx: Default::default(),
+            index_tx: Arc::new(Notify::new()),
             train_task_controller: Arc::new(TrainTaskController::default()),
         },
         IpcReceivers {

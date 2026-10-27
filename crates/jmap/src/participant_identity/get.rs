@@ -4,16 +4,18 @@
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
  */
 
-use common::Server;
+use crate::participant_identity::set::identity_state;
+use common::{Server, auth::AccessToken};
 use groupware::calendar::{ParticipantIdentities, ParticipantIdentity};
 use jmap_proto::{
-    method::get::{GetRequest, GetResponse},
+    method::get::{GetRequest, GetResponse, all_ids},
     object::participant_identity::{self, ParticipantIdentityProperty, ParticipantIdentityValue},
+    types::state::State,
 };
 use jmap_tools::{Map, Value};
 use store::{
     Serialize, ValueKey,
-    write::{AlignedBytes, Archive, Archiver, BatchBuilder},
+    write::{Archive, ArchiveBytes, Archiver, BatchBuilder},
 };
 use trc::AddContext;
 use types::{collection::Collection, field::PrincipalField, id::Id};
@@ -22,18 +24,20 @@ pub trait ParticipantIdentityGet: Sync + Send {
     fn participant_identity_get(
         &self,
         request: GetRequest<participant_identity::ParticipantIdentity>,
+        access_token: &AccessToken,
     ) -> impl Future<Output = trc::Result<GetResponse<participant_identity::ParticipantIdentity>>> + Send;
 
     fn participant_identity_get_or_create(
         &self,
         account_id: u32,
-    ) -> impl Future<Output = trc::Result<Option<Archive<AlignedBytes>>>> + Send;
+    ) -> impl Future<Output = trc::Result<Option<Archive<ArchiveBytes>>>> + Send;
 }
 
 impl ParticipantIdentityGet for Server {
     async fn participant_identity_get(
         &self,
         mut request: GetRequest<participant_identity::ParticipantIdentity>,
+        access_token: &AccessToken,
     ) -> trc::Result<GetResponse<participant_identity::ParticipantIdentity>> {
         let (ids, not_found_ids) = request.unwrap_ids(self.core.jmap.get_max_objects)?;
         let properties = request.unwrap_properties(&[
@@ -42,12 +46,13 @@ impl ParticipantIdentityGet for Server {
             ParticipantIdentityProperty::CalendarAddress,
             ParticipantIdentityProperty::IsDefault,
         ]);
-        let account_id = request.account_id.document_id();
-        let identities = self.participant_identity_get_or_create(account_id).await?;
+        let identities = self
+            .participant_identity_get_or_create(access_token.account_id())
+            .await?;
 
         let mut response = GetResponse {
             account_id: request.account_id.into(),
-            state: None,
+            state: Some(State::Initial),
             list: Vec::new(),
             not_found: not_found_ids,
         };
@@ -62,16 +67,18 @@ impl ParticipantIdentityGet for Server {
         let identities = identities
             .unarchive::<ParticipantIdentities>()
             .caused_by(trc::location!())?;
+        response.state = Some(identity_state(identities.change_id.to_native()));
 
         let ids = if let Some(ids) = ids {
             ids
         } else {
-            identities
-                .identities
-                .iter()
-                .take(self.core.jmap.get_max_objects)
-                .map(|i| Id::from(i.id.to_native()))
-                .collect::<Vec<_>>()
+            all_ids(
+                identities
+                    .identities
+                    .iter()
+                    .map(|i| Id::from(i.id.to_native())),
+                self.core.jmap.get_max_objects,
+            )?
         };
 
         for id in ids {
@@ -115,10 +122,10 @@ impl ParticipantIdentityGet for Server {
     async fn participant_identity_get_or_create(
         &self,
         account_id: u32,
-    ) -> trc::Result<Option<Archive<AlignedBytes>>> {
+    ) -> trc::Result<Option<Archive<ArchiveBytes>>> {
         if let Some(identities) = self
             .store()
-            .get_value::<Archive<AlignedBytes>>(ValueKey::property(
+            .get_value::<Archive<ArchiveBytes>>(ValueKey::property(
                 account_id,
                 Collection::Principal,
                 0,
@@ -150,6 +157,7 @@ impl ParticipantIdentityGet for Server {
                 .collect(),
             default: 0,
             default_name: name.to_string(),
+            ..Default::default()
         };
 
         let mut batch = BatchBuilder::new();
@@ -167,7 +175,7 @@ impl ParticipantIdentityGet for Server {
         self.commit_batch(batch).await.caused_by(trc::location!())?;
 
         self.store()
-            .get_value::<Archive<AlignedBytes>>(ValueKey::property(
+            .get_value::<Archive<ArchiveBytes>>(ValueKey::property(
                 account_id,
                 Collection::Principal,
                 0,

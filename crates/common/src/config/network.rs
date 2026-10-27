@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
  */
 
-use super::*;
+use super::{resource::ResourceIdentifiers, *};
 use crate::{
     expr::if_block::{BootstrapExprExt, IfBlock},
     network::{
@@ -12,9 +12,11 @@ use crate::{
             Authentication, Configuration, HttpServer, Info, Logo, OAuthPublic, Protocols,
             Provider, TextServer,
         },
+        forwarded::RemoteIpSource,
         security::Security,
     },
 };
+use directory::backend::oidc::ExternalScopes;
 use mail_builder::mime::make_boundary;
 use registry::schema::{
     enums::{AcmeChallengeType, ClusterTaskType, ProviderInfo, ServiceProtocol},
@@ -25,7 +27,10 @@ use registry::schema::{
     },
 };
 use std::{str::FromStr, time::Duration};
-use utils::map::vec_map::VecMap;
+use utils::{map::vec_map::VecMap, memory::available_memory};
+
+const BUFFERED_MEMORY_SHARE: u64 = 4;
+const FALLBACK_BUFFERED_MEMORY: u64 = 1024 * 1024 * 1024;
 
 #[derive(Clone)]
 pub struct Network {
@@ -39,7 +44,10 @@ pub struct Network {
     pub task_manager: TaskManager,
     pub has_acme_tls_challenge: bool,
     pub has_acme_http_challenge: bool,
+    pub max_buffered_memory: u64,
+    pub include_secrets: bool,
     pub info: NetworkInfo,
+    pub resources: ResourceIdentifiers,
 }
 
 #[derive(Clone)]
@@ -53,6 +61,8 @@ pub struct NetworkInfo {
 pub struct Pacc {
     pub prefix: String,
     pub suffix: String,
+    pub password_only: String,
+    pub oauth_scopes: ExternalScopes,
 }
 
 #[derive(Clone)]
@@ -62,7 +72,7 @@ pub struct Http {
     pub url_https: String,
     pub allowed_endpoint: IfBlock,
     pub response_headers: Vec<(hyper::header::HeaderName, hyper::header::HeaderValue)>,
-    pub use_forwarded: bool,
+    pub remote_ip_source: RemoteIpSource,
     pub redirect_root: Option<String>,
 }
 
@@ -99,6 +109,7 @@ pub enum AsnGeoLookupConfig {
         timeout: Duration,
         max_size: usize,
         headers: HeaderMap,
+        allow_invalid_certs: bool,
         asn_resources: Vec<String>,
         geo_resources: Vec<String>,
     },
@@ -320,22 +331,58 @@ impl Network {
             .rsplit_once(SPLIT_HERE)
             .map(|(prefix, suffix)| (prefix.to_string(), suffix.to_string()))
             .unwrap();
+        pacc.authentication = Some(Authentication {
+            oauth_public: None,
+            password: true,
+        });
+        let password_only = serde_json::to_string(&pacc).unwrap_or_default();
+        let mut oauth_scopes = ExternalScopes::MAIL;
+        for service in system.services.keys() {
+            oauth_scopes.insert(match service {
+                ServiceProtocol::Caldav => ExternalScopes::CALENDARS,
+                ServiceProtocol::Carddav => ExternalScopes::CONTACTS,
+                ServiceProtocol::Webdav => ExternalScopes::FILES,
+                _ => ExternalScopes::NONE,
+            });
+        }
+        let server_name = default_hostname.to_string();
+        let http = Http::parse(bp, &http_host).await;
+        let resources = ResourceIdentifiers::build(&http.url_https, &system.services, &server_name);
         let mut network = Network {
             node_id: bp.node_id() as u64,
-            server_name: default_hostname.to_string(),
+            server_name,
             security: Security::parse(bp).await,
             contact_form: ContactForm::parse(bp).await,
             asn_geo_lookup: AsnGeoLookupConfig::parse(bp).await.unwrap_or_default(),
             roles: ClusterRoles::default(),
-            http: Http::parse(bp, &http_host).await,
+            http,
             task_manager: bp.setting_infallible::<TaskManager>().await,
             has_acme_tls_challenge,
             has_acme_http_challenge,
+            max_buffered_memory: system.max_buffered_memory.unwrap_or_else(|| {
+                available_memory().map_or_else(
+                    || {
+                        bp.build_warning(
+                            ObjectType::SystemSettings.singleton(),
+                            "Unable to detect the available memory, using 1 GiB for maxBufferedMemory",
+                        );
+                        FALLBACK_BUFFERED_MEMORY
+                    },
+                    |memory| memory / BUFFERED_MEMORY_SHARE,
+                )
+            }),
+            include_secrets: system.include_secrets,
             info: NetworkInfo {
                 mxs: system.mail_exchangers.into_iter().collect(),
                 services: system.services,
-                pacc: Pacc { prefix, suffix },
+                pacc: Pacc {
+                    prefix,
+                    suffix,
+                    password_only,
+                    oauth_scopes,
+                },
             },
+            resources,
         };
 
         if let Some(role) = &bp.role {
@@ -371,10 +418,7 @@ impl Network {
 }
 
 impl Http {
-    #[cfg_attr(
-        any(feature = "dev_mode", feature = "test_mode"),
-        allow(unused_variables)
-    )]
+    #[cfg_attr(any(feature = "dev_mode", stalwart_tests), allow(unused_variables))]
     pub async fn parse(bp: &mut Bootstrap, server_name: &str) -> Self {
         let http = bp.setting_infallible::<structs::Http>().await;
 
@@ -435,7 +479,7 @@ impl Http {
             ));
         }
 
-        #[cfg(any(feature = "dev_mode", feature = "test_mode"))]
+        #[cfg(any(feature = "dev_mode", stalwart_tests))]
         let server_name = "127.0.0.1";
 
         Http {
@@ -464,7 +508,7 @@ impl Http {
                 http.rate_limit_anonymous
             },
             response_headers: http_headers,
-            use_forwarded: http.use_x_forwarded,
+            remote_ip_source: RemoteIpSource::new(http.client_ip_source, http.forwarded_hops),
             redirect_root: http.redirect_root,
         }
     }
@@ -474,7 +518,7 @@ impl AsnGeoLookupConfig {
     pub async fn parse(bp: &mut Bootstrap) -> Option<Self> {
         match bp.setting_infallible::<Asn>().await {
             Asn::Resource(asn) => Some(AsnGeoLookupConfig::Resource {
-                expires: asn.expires.into_inner(),
+                expires: asn.refresh_interval.into_inner(),
                 timeout: asn.timeout.into_inner(),
                 max_size: asn.max_size as usize,
                 headers: asn
@@ -488,6 +532,7 @@ impl AsnGeoLookupConfig {
                         )
                     })
                     .ok()?,
+                allow_invalid_certs: asn.allow_invalid_certs,
                 asn_resources: asn.asn_urls.into_inner(),
                 geo_resources: asn.geo_urls.into_inner(),
             }),

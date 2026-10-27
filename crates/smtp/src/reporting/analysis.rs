@@ -4,17 +4,15 @@
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
  */
 
-use ahash::AHashSet;
-use common::{Server, psl};
-use mail_auth::{
-    flate2::read::GzDecoder,
-    report::{Feedback, Report, tlsrpt::TlsReport},
-    zip,
-};
-use mail_parser::{Message, MessagePart, MimeHeaders, PartType};
+use common::Server;
+use compact_str::{CompactString, ToCompactString, format_compact};
+use mail_parser::{Message, MessagePart, PartKind};
 use registry::{
     schema::structs::{ArfExternalReport, DmarcExternalReport, TlsExternalReport},
     types::datetime::UTCDateTime,
+};
+use smtp_report::{
+    arf::FeedbackReport, dmarc::AggregateReport, flate2::read::GzDecoder, tlsrpt::TlsReport, zip,
 };
 use std::{
     borrow::Cow,
@@ -22,7 +20,6 @@ use std::{
 };
 use store::write::{BatchBuilder, now};
 use trc::IncomingReportEvent;
-use types::id::Id;
 
 use crate::reporting::{inbound::LogReport, index::ExternalReportIndex};
 
@@ -41,13 +38,26 @@ enum Format<D, T, A> {
 pub(crate) struct ReportData<'x> {
     compression: Compression,
     format: Format<(), (), ()>,
-    data: &'x [u8],
+    data: Cow<'x, [u8]>,
 }
 
 impl<'x> ReportData<'x> {
-    fn from_part(part: &'x MessagePart<'x>) -> Option<Self> {
-        match &part.body {
-            PartType::Text(report) => {
+    fn from_part(part: MessagePart<'x>) -> Option<Self> {
+        let (compression, format) = Self::classify(&part)?;
+        Some(ReportData {
+            compression,
+            format,
+            data: match part.text() {
+                Some(Cow::Borrowed(text)) => Cow::Borrowed(text.as_bytes()),
+                Some(Cow::Owned(text)) => Cow::Owned(text.into_bytes()),
+                None => part.decoded(),
+            },
+        })
+    }
+
+    fn classify(part: &MessagePart<'_>) -> Option<(Compression, Format<(), (), ()>)> {
+        match part.kind() {
+            PartKind::Text => {
                 if part
                     .content_type()
                     .and_then(|ct| ct.subtype())
@@ -57,28 +67,16 @@ impl<'x> ReportData<'x> {
                         .and_then(|n| n.rsplit_once('.'))
                         .is_some_and(|(_, e)| e.eq_ignore_ascii_case("xml"))
                 {
-                    Some(ReportData {
-                        compression: Compression::None,
-                        format: Format::Dmarc(()),
-                        data: report.as_bytes(),
-                    })
+                    Some((Compression::None, Format::Dmarc(())))
                 } else if part.is_content_type("message", "feedback-report") {
-                    Some(ReportData {
-                        compression: Compression::None,
-                        format: Format::Arf(()),
-                        data: report.as_bytes(),
-                    })
+                    Some((Compression::None, Format::Arf(())))
                 } else {
                     None
                 }
             }
-            PartType::Binary(report) | PartType::InlineBinary(report) => {
+            PartKind::Binary | PartKind::InlineBinary => {
                 if part.is_content_type("message", "feedback-report") {
-                    return Some(ReportData {
-                        compression: Compression::None,
-                        format: Format::Arf(()),
-                        data: report.as_ref(),
-                    });
+                    return Some((Compression::None, Format::Arf(())));
                 }
 
                 let subtype = part
@@ -109,25 +107,21 @@ impl<'x> ReportData<'x> {
                     }
                 };
 
-                Some(ReportData {
-                    compression,
-                    format,
-                    data: report.as_ref(),
-                })
+                Some((compression, format))
             }
             _ => None,
         }
     }
 
     fn extract(message: &'x Message<'x>) -> Vec<Self> {
-        message.parts.iter().filter_map(Self::from_part).collect()
+        message.root().parts().filter_map(Self::from_part).collect()
     }
 
     pub(crate) fn is_present(message: &Message<'_>) -> bool {
         message
-            .parts
-            .iter()
-            .any(|part| ReportData::from_part(part).is_some())
+            .root()
+            .parts()
+            .any(|part| ReportData::classify(&part).is_some())
     }
 }
 
@@ -146,7 +140,7 @@ impl AnalyzeReport for Server {
                 .unwrap_or_default()
                 .into();
             let to: Vec<String> = message.to().map_or_else(Vec::new, |a| {
-                a.iter()
+                a.mailboxes()
                     .filter_map(|a| a.address())
                     .map(|a| a.into())
                     .collect()
@@ -157,16 +151,16 @@ impl AnalyzeReport for Server {
 
             for report in reports {
                 let data = match report.compression {
-                    Compression::None => Cow::Borrowed(report.data),
+                    Compression::None => report.data,
                     Compression::Gzip => {
-                        match read_capped(GzDecoder::new(report.data), 0, max_size) {
+                        match read_capped(GzDecoder::new(report.data.as_ref()), 0, max_size) {
                             Ok(buf) => Cow::Owned(buf),
                             Err(err) => {
                                 trc::event!(
                                     IncomingReport(IncomingReportEvent::DecompressError),
                                     SpanId = session_id,
-                                    From = from.to_string(),
-                                    Reason = err.to_string(),
+                                    From = CompactString::from(&from),
+                                    Reason = err.to_compact_string(),
                                     CausedBy = trc::location!()
                                 );
 
@@ -196,8 +190,8 @@ impl AnalyzeReport for Server {
                                 trc::event!(
                                     IncomingReport(IncomingReportEvent::DecompressError),
                                     SpanId = session_id,
-                                    From = from.to_string(),
-                                    Reason = err.to_string(),
+                                    From = CompactString::from(&from),
+                                    Reason = err.to_compact_string(),
                                     CausedBy = trc::location!()
                                 );
                                 continue;
@@ -206,8 +200,8 @@ impl AnalyzeReport for Server {
                                 trc::event!(
                                     IncomingReport(IncomingReportEvent::DecompressError),
                                     SpanId = session_id,
-                                    From = from.to_string(),
-                                    Reason = err.to_string(),
+                                    From = CompactString::from(&from),
+                                    Reason = err.to_compact_string(),
                                     CausedBy = trc::location!()
                                 );
                                 continue;
@@ -217,7 +211,7 @@ impl AnalyzeReport for Server {
                 };
 
                 let report = match report.format {
-                    Format::Dmarc(_) => match Report::parse_xml(&data) {
+                    Format::Dmarc(_) => match AggregateReport::parse_xml(&data) {
                         Ok(report) => {
                             // Log
                             report.log();
@@ -227,8 +221,8 @@ impl AnalyzeReport for Server {
                             trc::event!(
                                 IncomingReport(IncomingReportEvent::DmarcParseFailed),
                                 SpanId = session_id,
-                                From = from.to_string(),
-                                Reason = err,
+                                From = CompactString::from(&from),
+                                Reason = err.to_compact_string(),
                                 CausedBy = trc::location!()
                             );
 
@@ -245,25 +239,26 @@ impl AnalyzeReport for Server {
                             trc::event!(
                                 IncomingReport(IncomingReportEvent::TlsRpcParseFailed),
                                 SpanId = session_id,
-                                From = from.to_string(),
-                                Reason = format!("{err:?}"),
+                                From = CompactString::from(&from),
+                                Reason = format_compact!("{err:?}"),
                                 CausedBy = trc::location!()
                             );
 
                             continue;
                         }
                     },
-                    Format::Arf(_) => match Feedback::parse_arf(&data) {
-                        Some(report) => {
+                    Format::Arf(_) => match FeedbackReport::parse_arf(&data) {
+                        Ok(report) => {
                             // Log
                             report.log();
                             Format::Arf(report.into_owned())
                         }
-                        None => {
+                        Err(err) => {
                             trc::event!(
                                 IncomingReport(IncomingReportEvent::ArfParseFailed),
                                 SpanId = session_id,
-                                From = from.to_string(),
+                                From = CompactString::from(&from),
+                                Reason = err.to_compact_string(),
                                 CausedBy = trc::location!()
                             );
 
@@ -280,68 +275,44 @@ impl AnalyzeReport for Server {
 
                     match report {
                         Format::Dmarc(report) => {
+                            #[cfg_attr(not(feature = "enterprise"), allow(unused_mut))]
                             let mut report = DmarcExternalReport {
                                 from,
                                 to: to.into(),
                                 subject,
-                                member_tenant_id: None,
                                 expires_at: UTCDateTime::from_timestamp(expires as i64),
                                 received_at: UTCDateTime::now(),
                                 report: report.into(),
                             };
-                            report.member_tenant_id = tenant_ids(
-                                &core,
-                                report
-                                    .domains()
-                                    .filter_map(psl::domain_str)
-                                    .collect::<AHashSet<_>>(),
-                            )
-                            .await;
                             report.write_ops(&mut batch, item_id, true);
                         }
                         Format::Tls(report) => {
+                            #[cfg_attr(not(feature = "enterprise"), allow(unused_mut))]
                             let mut report = TlsExternalReport {
                                 from,
                                 to: to.into(),
                                 subject,
-                                member_tenant_id: None,
                                 expires_at: UTCDateTime::from_timestamp(expires as i64),
                                 received_at: UTCDateTime::now(),
                                 report: report.into(),
                             };
-                            report.member_tenant_id = tenant_ids(
-                                &core,
-                                report
-                                    .domains()
-                                    .filter_map(psl::domain_str)
-                                    .collect::<AHashSet<_>>(),
-                            )
-                            .await;
                             report.write_ops(&mut batch, item_id, true);
                         }
                         Format::Arf(report) => {
+                            #[cfg_attr(not(feature = "enterprise"), allow(unused_mut))]
                             let mut report = ArfExternalReport {
                                 from,
                                 to: to.into(),
                                 subject,
-                                member_tenant_id: None,
                                 expires_at: UTCDateTime::from_timestamp(expires as i64),
                                 received_at: UTCDateTime::now(),
                                 report: report.into(),
                             };
-                            report.member_tenant_id = tenant_ids(
-                                &core,
-                                report
-                                    .domains()
-                                    .filter_map(psl::domain_str)
-                                    .collect::<AHashSet<_>>(),
-                            )
-                            .await;
                             report.write_ops(&mut batch, item_id, true);
                         }
                     }
 
-                    if let Err(err) = core.core.storage.data.write(batch.build_all()).await
+                    if let Err(err) = core.core.storage.data.write_batch(&mut batch).await
                         && !err.is_assertion_failure()
                     {
                         trc::error!(
@@ -357,33 +328,6 @@ impl AnalyzeReport for Server {
     }
 }
 
-async fn tenant_ids(server: &Server, domains: AHashSet<&str>) -> Option<Id> {
-    let mut tenant_ids = Vec::with_capacity(domains.len());
-    for domain in domains {
-        if let Some(tenant_id) = server
-            .domain(domain)
-            .await
-            .map_err(|err| {
-                trc::error!(
-                    err.caused_by(trc::location!())
-                        .details("Failed to lookup domain")
-                );
-            })
-            .unwrap_or_default()
-            .and_then(|domain| domain.id_tenant)
-            .map(Id::from)
-            && !tenant_ids.contains(&tenant_id)
-        {
-            tenant_ids.push(tenant_id);
-        }
-    }
-
-    if tenant_ids.len() == 1 {
-        tenant_ids.into_iter().next()
-    } else {
-        None
-    }
-}
 
 fn read_capped(
     reader: impl Read,

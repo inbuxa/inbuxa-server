@@ -4,8 +4,15 @@
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
  */
 
+use crate::changes::state::JmapCacheState;
 use common::{Server, auth::AccessToken};
-use groupware::{DestroyArchive, cache::GroupwareCache, calendar::CalendarEventNotification};
+use groupware::{
+    cache::GroupwareCache,
+    calendar::{
+        CalendarEventNotification,
+        notification::{CalendarNotificationDismiss, CalendarNotificationViewers},
+    },
+};
 use http_proto::HttpSessionData;
 use jmap_proto::{
     error::set::SetError,
@@ -16,7 +23,7 @@ use jmap_proto::{
 };
 use store::{
     ValueKey,
-    write::{AlignedBytes, Archive, BatchBuilder},
+    write::{Archive, ArchiveBytes, BatchBuilder},
 };
 use trc::AddContext;
 use types::collection::{Collection, SyncCollection};
@@ -41,13 +48,19 @@ impl CalendarEventNotificationSet for Server {
     ) -> trc::Result<SetResponse<calendar_event_notification::CalendarEventNotification>> {
         let account_id = request.account_id.document_id();
         let cache = self
-            .fetch_dav_resources(
+            .fetch_groupware_resources(
                 access_token.account_id(),
                 account_id,
                 SyncCollection::CalendarEventNotification,
             )
             .await?;
-        let mut response = SetResponse::from_request(&request, self.core.jmap.set_max_objects)?;
+        let mut response = SetResponse::from_request(&request, self.core.jmap.set_max_objects)?
+            .with_state(cache.assert_state(false, &request.if_in_state)?);
+
+        let viewer = self
+            .notification_viewer(access_token, account_id)
+            .await
+            .caused_by(trc::location!())?;
 
         let mut batch = BatchBuilder::new();
         for (id, _) in request.unwrap_create() {
@@ -69,14 +82,18 @@ impl CalendarEventNotificationSet for Server {
         for id in request.unwrap_destroy().into_valid() {
             let document_id = id.document_id();
 
-            if !cache.has_item_id(&document_id) {
+            if !cache.item_by_id(document_id).is_some_and(|resource| {
+                resource
+                    .notification()
+                    .is_some_and(|notification| viewer.can_view(&notification))
+            }) {
                 response.not_destroyed.append(id, SetError::not_found());
                 continue;
             };
 
             let _event = if let Some(event) = self
                 .store()
-                .get_value::<Archive<AlignedBytes>>(ValueKey::archive(
+                .get_value::<Archive<ArchiveBytes>>(ValueKey::archive(
                     account_id,
                     Collection::CalendarEventNotification,
                     document_id,
@@ -92,13 +109,8 @@ impl CalendarEventNotificationSet for Server {
                 .to_unarchived::<CalendarEventNotification>()
                 .caused_by(trc::location!())?;
 
-            DestroyArchive(event)
-                .delete(
-                    access_token.account_tenant_ids(),
-                    account_id,
-                    document_id,
-                    &mut batch,
-                )
+            self.dismiss_notification(access_token, account_id, document_id, event, &mut batch)
+                .await
                 .caused_by(trc::location!())?;
 
             response.destroyed.push(id);
@@ -109,7 +121,9 @@ impl CalendarEventNotificationSet for Server {
             let change_id = self
                 .commit_batch(batch)
                 .await
-                .and_then(|ids| ids.last_change_id(account_id))
+                .map(|ids| {
+                    ids.last_change_id(account_id, SyncCollection::CalendarEventNotification)
+                })
                 .caused_by(trc::location!())?;
 
             response.new_state = State::Exact(change_id).into();

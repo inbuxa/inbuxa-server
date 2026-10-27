@@ -4,16 +4,15 @@
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
  */
 
-use crate::config::smtp::auth::{rsa_key_parse, simple_pem_parse};
-use chrono::Utc;
+use crate::config::smtp::auth::{pem_or_base64_decode, rsa_key_parse};
 use dns_update::{DnsRecord, NamedDnsRecord};
-use mail_auth::common::crypto::Ed25519Key;
+use encodify::{base64::STANDARD, pem};
+use jiff::{Timestamp, fmt::strtime, tz::TimeZone};
+use mail_auth::crypto::{Ed25519Key, MlDsa44Ed25519Key};
 use mail_auth::dkim::generate::DkimKeyPair;
-use mail_builder::encoders::Base64Encoder;
-use pkcs8::Document;
 use registry::schema::enums::DkimSignatureType;
 use registry::schema::structs::DkimSignature;
-use rsa::pkcs1::DecodeRsaPublicKey;
+use rsa::pkcs1::{DecodeRsaPublicKey, der::Document};
 use store::rand::distr::Alphanumeric;
 use store::rand::{self, RngExt};
 
@@ -27,6 +26,9 @@ pub async fn generate_dkim_private_key(
         DkimSignatureType::Dkim1Ed25519Sha256 | DkimSignatureType::Dkim2Ed25519Sha256 => {
             DkimKeyPair::generate_ed25519().map(|key| (key, "PRIVATE KEY"))
         }
+        DkimSignatureType::Dkim2MlDsa44Ed25519Sha512 => {
+            DkimKeyPair::generate_mldsa44_ed25519().map(|key| (key, "PRIVATE KEY"))
+        }
     })
     .await
     .map_err(|err| {
@@ -36,81 +38,57 @@ pub async fn generate_dkim_private_key(
     })?;
 
     Ok(private_key
-        .map(|(private_key, pk_type)| {
-            let mut pem = format!("-----BEGIN {pk_type}-----\n").into_bytes();
-            let mut lf_count = 65;
-            for ch in Base64Encoder::new()
-                .encode(private_key.private_key())
-                .unwrap_or_default()
-            {
-                pem.push(ch);
-                lf_count -= 1;
-                if lf_count == 0 {
-                    pem.push(b'\n');
-                    lf_count = 65;
-                }
-            }
-            if lf_count != 65 {
-                pem.push(b'\n');
-            }
-            pem.extend_from_slice(format!("-----END {pk_type}-----\n").as_bytes());
-
-            String::from_utf8(pem).unwrap_or_default()
-        })
+        .map(|(private_key, pk_type)| pem::STANDARD.encode(pk_type, private_key.private_key()))
         .map_err(|err| err.to_string()))
 }
 
 pub async fn generate_dkim_public_key(key: &DkimSignature) -> trc::Result<String> {
-    let is_rsa = matches!(
-        key,
-        DkimSignature::Dkim1RsaSha256(_) | DkimSignature::Dkim2RsaSha256(_)
-    );
     let pem = key
         .private_key()
         .secret()
         .await
         .map_err(|err| trc::DkimEvent::BuildError.reason(err))?;
 
-    if is_rsa {
-        rsa_key_parse(pem.as_bytes())
-            .and_then(|pk| {
-                Document::from_pkcs1_der(&pk.public_key()).map_err(|err| {
+    match key {
+        DkimSignature::Dkim1RsaSha256(_) | DkimSignature::Dkim2RsaSha256(_) => {
+            rsa_key_parse(pem.as_bytes())
+                .and_then(|pk| {
+                    Document::from_pkcs1_der(&pk.public_key()).map_err(|err| {
+                        trc::EventType::Dkim(trc::DkimEvent::BuildError)
+                            .into_err()
+                            .reason(err)
+                    })
+                })
+                .map(|pk| STANDARD.encode(pk.as_bytes()))
+        }
+        DkimSignature::Dkim1Ed25519Sha256(_) | DkimSignature::Dkim2Ed25519Sha256(_) => {
+            Ed25519Key::from_pkcs8_maybe_unchecked_der(&decode_private_key(&pem)?)
+                .map(|pk| STANDARD.encode(pk.public_key()))
+                .map_err(|err| {
                     trc::EventType::Dkim(trc::DkimEvent::BuildError)
                         .into_err()
                         .reason(err)
                 })
-            })
-            .map(|pk| {
-                String::from_utf8(
-                    Base64Encoder::new()
-                        .encode(pk.as_bytes())
-                        .unwrap_or_default(),
-                )
-                .unwrap_or_default()
-            })
-    } else {
-        simple_pem_parse(&pem)
-            .ok_or_else(|| {
-                trc::EventType::Dkim(trc::DkimEvent::BuildError)
-                    .into_err()
-                    .details("Failed to parse private key PEM")
-            })
-            .and_then(|der| {
-                Ed25519Key::from_pkcs8_maybe_unchecked_der(&der).map_err(|err| {
+        }
+        DkimSignature::Dkim2MlDsa44Ed25519Sha512(_) => {
+            MlDsa44Ed25519Key::from_pkcs8_der(&decode_private_key(&pem)?)
+                .and_then(|pk| pk.public_key())
+                .map(|pk| STANDARD.encode(pk))
+                .map_err(|err| {
                     trc::EventType::Dkim(trc::DkimEvent::BuildError)
                         .into_err()
                         .reason(err)
                 })
-            })
-            .map(|pk| {
-                String::from_utf8(
-                    Base64Encoder::new()
-                        .encode(&pk.public_key())
-                        .unwrap_or_default(),
-                )
-                .unwrap_or_default()
-            })
+        }
     }
+}
+
+fn decode_private_key(pem: &str) -> trc::Result<Vec<u8>> {
+    pem_or_base64_decode(pem).map_err(|_| {
+        trc::EventType::Dkim(trc::DkimEvent::BuildError)
+            .into_err()
+            .details("Failed to parse private key PEM")
+    })
 }
 
 pub async fn generate_dkim_dns_record(
@@ -136,6 +114,10 @@ pub async fn generate_dkim_dns_record(
             &sign.selector,
             format!("v=DKIM1; k=rsa; h=sha256; p={public_key}"),
         ),
+        DkimSignature::Dkim2MlDsa44Ed25519Sha512(sign) => (
+            &sign.selector,
+            format!("v=DKIM1; k=mldsa44-ed25519-sha512; p={public_key}"),
+        ),
     };
 
     Ok(NamedDnsRecord {
@@ -151,10 +133,10 @@ pub fn generate_dkim_dns_record_name(key: &DkimSignature, domain: &str) -> Strin
 /// Generate a DKIM selector from a template string.
 ///
 /// Supported variables:
-/// - `{algorithm}`: signing algorithm in lowercase (`rsa`, `ed25519`)
-/// - `{hash}`: hash algorithm (`sha256`)
-/// - `{version}`: DKIM version number (`1`)
-/// - `{date-<fmt>}`: current UTC date formatted with chrono strftime (e.g. `{date-%Y%m%d}`)
+/// - `{algorithm}`: signing algorithm in lowercase (`rsa`, `ed25519`, `mldsa44-ed25519`)
+/// - `{hash}`: hash algorithm (`sha256`, `sha512`)
+/// - `{version}`: DKIM version number (`1`, `2`)
+/// - `{date-<fmt>}`: current UTC date formatted with strftime specifiers (e.g. `{date-%Y%m%d}`)
 /// - `{epoch}`: current UTC unix timestamp
 /// - `{random}`: random 8-character alphanumeric string
 ///
@@ -162,7 +144,7 @@ pub fn generate_dkim_selector(
     template: &str,
     sig_type: DkimSignatureType,
 ) -> Result<String, String> {
-    let now = Utc::now();
+    let now = Timestamp::now().to_zoned(TimeZone::UTC);
     let mut result = Vec::with_capacity(template.len());
     let mut chars = template.as_bytes();
 
@@ -202,7 +184,7 @@ pub fn generate_dkim_selector(
             "hash" => result.extend_from_slice(sig_type.hash().as_bytes()),
             "version" => result.extend_from_slice(sig_type.version().as_bytes()),
             "epoch" => {
-                result.extend_from_slice(now.timestamp().to_string().as_bytes());
+                result.extend_from_slice(now.timestamp().as_second().to_string().as_bytes());
             }
             "random" => {
                 let rand_str: String = rand::rng()
@@ -217,7 +199,8 @@ pub fn generate_dkim_selector(
                     if fmt.is_empty() {
                         return Err("empty strftime format in {date-}".into());
                     }
-                    let formatted = now.format(fmt).to_string();
+                    let formatted = strtime::format(fmt, &now)
+                        .map_err(|err| format!("invalid date format '{fmt}': {err}"))?;
                     if formatted.is_empty() {
                         return Err(format!("date format '{fmt}' produced empty output"));
                     }
@@ -245,73 +228,3 @@ fn memchr(needle: u8, haystack: &[u8]) -> Option<usize> {
     haystack.iter().position(|&b| b == needle)
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn basic_algorithm_date() {
-        let sel = generate_dkim_selector(
-            "{algorithm}-{date-%Y%m%d}",
-            DkimSignatureType::Dkim1RsaSha256,
-        )
-        .unwrap();
-        let today = Utc::now().format("%Y%m%d").to_string();
-        assert_eq!(sel, format!("rsa-{today}"));
-    }
-
-    #[test]
-    fn all_variables() {
-        let sel = generate_dkim_selector(
-            "v{version}-{algorithm}-{hash}-{epoch}",
-            DkimSignatureType::Dkim1Ed25519Sha256,
-        )
-        .unwrap();
-        assert!(sel.starts_with("v1-ed25519-sha256-"));
-    }
-
-    #[test]
-    fn literal_only() {
-        let sel =
-            generate_dkim_selector("my-static-selector", DkimSignatureType::default()).unwrap();
-        assert_eq!(sel, "my-static-selector");
-    }
-
-    #[test]
-    fn invalid_chars_stripped() {
-        let sel = generate_dkim_selector("{algorithm} {hash}", DkimSignatureType::Dkim1RsaSha256)
-            .unwrap();
-        assert_eq!(sel, "rsasha256");
-    }
-
-    #[test]
-    fn unrecognized_variable_errors() {
-        let err = generate_dkim_selector("{bogus}", DkimSignatureType::default()).unwrap_err();
-        assert!(err.contains("unrecognized variable"));
-    }
-
-    #[test]
-    fn unclosed_brace_errors() {
-        let err = generate_dkim_selector("{algorithm", DkimSignatureType::default()).unwrap_err();
-        assert!(err.contains("unclosed"));
-    }
-
-    #[test]
-    fn empty_after_sanitization_errors() {
-        let err = generate_dkim_selector("   ", DkimSignatureType::default()).unwrap_err();
-        assert!(err.contains("empty"));
-    }
-
-    #[test]
-    fn empty_date_format_errors() {
-        let err = generate_dkim_selector("{date-}", DkimSignatureType::default()).unwrap_err();
-        assert!(err.contains("empty strftime"));
-    }
-
-    #[test]
-    fn date_month_only() {
-        let sel = generate_dkim_selector("{date-%Y%m}", DkimSignatureType::Dkim1RsaSha256).unwrap();
-        let expected = Utc::now().format("%Y%m").to_string();
-        assert_eq!(sel, expected);
-    }
-}

@@ -270,6 +270,7 @@ jobs:
             type=ref,event=branch,prefix=branch-
             type=edge,branch=main
             type=semver,pattern=v{{major}}.{{minor}}
+            type=semver,pattern=v{{major}}
 
       - name: Build Artifact
         id: bake

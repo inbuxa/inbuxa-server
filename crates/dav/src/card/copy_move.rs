@@ -6,32 +6,43 @@
 
 use super::assert_is_unique_uid;
 use crate::{
-    DavError, DavMethod,
+    DavError, DavErrorCondition, DavMethod,
     common::{
+        ContainerOperation, assert_parent_limit,
+        dead::{
+            ContainerRequest, ContainerWrites, DeadContainers, check_growth, container_kinds,
+            copy_growth, read_container,
+        },
         lock::{LockRequestHandler, ResourceState},
         uri::DavUriResource,
     },
     file::DavFileResource,
 };
-use common::{DavName, Server, auth::AccessToken};
-use dav_proto::{Depth, RequestHeaders};
+use common::{
+    DavName, GroupwareResources, Server,
+    auth::AccessToken,
+    storage::{batch::MAX_BATCH_DOCUMENTS, index::PresenceFlags, metadata::StoredEntry},
+};
+use dav_proto::{Depth, RequestHeaders, schema::response::CardCondition};
 use groupware::{
     DestroyArchive,
     cache::GroupwareCache,
-    contact::{AddressBook, AddressBookPreferences, ContactCard},
+    contact::{AddressBook, AddressBookPreferences, ContactCard, ContactCardContent},
 };
 use http_proto::HttpResponse;
 use hyper::StatusCode;
-use store::write::BatchBuilder;
+use registry::schema::enums::StorageQuota;
+use store::write::{BatchBuilder, PendingId};
 use store::{
     ValueKey,
-    write::{AlignedBytes, Archive, ValueClass},
+    write::{Archive, ArchiveBytes},
 };
 use trc::AddContext;
 use types::{
     acl::Acl,
     collection::{Collection, SyncCollection, VanishedCollection},
-    field::PrincipalField,
+    field::{ContactField, PrincipalField},
+    metadata::MetadataKinds,
 };
 
 pub(crate) trait CardCopyMoveRequestHandler: Sync + Send {
@@ -57,7 +68,7 @@ impl CardCopyMoveRequestHandler for Server {
             .into_owned_uri()?;
         let from_account_id = from_resource_.account_id;
         let from_resources = self
-            .fetch_dav_resources(
+            .fetch_groupware_resources(
                 access_token.account_id(),
                 from_account_id,
                 SyncCollection::AddressBook,
@@ -105,7 +116,7 @@ impl CardCopyMoveRequestHandler for Server {
         let to_resources = if to_account_id == from_account_id {
             from_resources.clone()
         } else {
-            self.fetch_dav_resources(
+            self.fetch_groupware_resources(
                 access_token.account_id(),
                 to_account_id,
                 SyncCollection::AddressBook,
@@ -177,24 +188,20 @@ impl CardCopyMoveRequestHandler for Server {
                         .filter(|r| !r.is_container())
                         .map(|r| r.document_id())
                         .collect::<Vec<_>>();
-                    let to_document_ids = to_resources
+                    let to_children = to_resources
                         .subtree(destination_resource_name)
                         .filter(|r| !r.is_container())
-                        .map(|r| r.document_id())
+                        .map(|r| (r.document_id(), r.resource.metadata_kinds()))
                         .collect::<Vec<_>>();
 
                     // Validate ACLs
                     if !access_token.is_member(to_account_id)
                         || (!access_token.is_member(from_account_id)
-                            && !from_resources.has_access_to_container(
-                                access_token,
-                                from_resource.document_id(),
-                                if is_move {
-                                    Acl::RemoveItems
-                                } else {
-                                    Acl::ReadItems
-                                },
-                            ))
+                            && !from_resources
+                                .container_acl(access_token, from_resource.document_id())
+                                .contains_all(
+                                    ContainerOperation::from_move(is_move).required_acls(),
+                                ))
                     {
                         return Err(DavError::Code(StatusCode::FORBIDDEN));
                     }
@@ -203,13 +210,15 @@ impl CardCopyMoveRequestHandler for Server {
                     copy_container(
                         self,
                         access_token,
+                        &from_resources,
+                        &to_resources,
                         from_account_id,
                         from_resource.document_id(),
                         from_children_ids,
                         from_resources.format_collection(from_resource_name),
                         to_account_id,
                         to_resource.document_id().into(),
-                        to_document_ids,
+                        to_children,
                         new_name,
                         is_move,
                     )
@@ -232,11 +241,9 @@ impl CardCopyMoveRequestHandler for Server {
                             },
                         ))
                         || (!access_token.is_member(to_account_id)
-                            && !to_resources.has_access_to_container(
-                                access_token,
-                                to_addressbook_id,
-                                Acl::RemoveItems,
-                            ))
+                            && !to_resources
+                                .container_acl(access_token, to_addressbook_id)
+                                .contains_all([Acl::AddItems, Acl::RemoveItems].into_iter()))
                     {
                         return Err(DavError::Code(StatusCode::FORBIDDEN));
                     }
@@ -245,6 +252,7 @@ impl CardCopyMoveRequestHandler for Server {
                         move_card(
                             self,
                             access_token,
+                            &to_resources,
                             from_account_id,
                             from_resource.document_id(),
                             from_addressbook_id,
@@ -259,6 +267,7 @@ impl CardCopyMoveRequestHandler for Server {
                         copy_card(
                             self,
                             access_token,
+                            &to_resources,
                             from_account_id,
                             from_resource.document_id(),
                             to_account_id,
@@ -312,6 +321,7 @@ impl CardCopyMoveRequestHandler for Server {
                         move_card(
                             self,
                             access_token,
+                            &to_resources,
                             from_account_id,
                             from_resource.document_id(),
                             from_addressbook_id,
@@ -338,6 +348,7 @@ impl CardCopyMoveRequestHandler for Server {
                     copy_card(
                         self,
                         access_token,
+                        &to_resources,
                         from_account_id,
                         from_resource.document_id(),
                         to_account_id,
@@ -360,15 +371,9 @@ impl CardCopyMoveRequestHandler for Server {
 
                 // Validate ACLs
                 if !access_token.is_member(from_account_id)
-                    && !from_resources.has_access_to_container(
-                        access_token,
-                        from_resource.document_id(),
-                        if is_move {
-                            Acl::RemoveItems
-                        } else {
-                            Acl::ReadItems
-                        },
-                    )
+                    && !from_resources
+                        .container_acl(access_token, from_resource.document_id())
+                        .contains_all(ContainerOperation::from_move(is_move).required_acls())
                 {
                     return Err(DavError::Code(StatusCode::FORBIDDEN));
                 }
@@ -384,6 +389,8 @@ impl CardCopyMoveRequestHandler for Server {
                         copy_container(
                             self,
                             access_token,
+                            &from_resources,
+                            &to_resources,
                             from_account_id,
                             from_resource.document_id(),
                             if headers.depth != Depth::Zero {
@@ -414,6 +421,8 @@ impl CardCopyMoveRequestHandler for Server {
                     copy_container(
                         self,
                         access_token,
+                        &from_resources,
+                        &to_resources,
                         from_account_id,
                         from_resource.document_id(),
                         if headers.depth != Depth::Zero {
@@ -441,6 +450,7 @@ impl CardCopyMoveRequestHandler for Server {
 async fn copy_card(
     server: &Server,
     access_token: &AccessToken,
+    to_resources: &GroupwareResources,
     from_account_id: u32,
     from_document_id: u32,
     to_account_id: u32,
@@ -451,7 +461,7 @@ async fn copy_card(
     // Fetch card
     let card_ = server
         .store()
-        .get_value::<Archive<AlignedBytes>>(ValueKey::archive(
+        .get_value::<Archive<ArchiveBytes>>(ValueKey::archive(
             from_account_id,
             Collection::ContactCard,
             from_document_id,
@@ -466,21 +476,27 @@ async fn copy_card(
 
     // Validate UID
     assert_is_unique_uid(
-        server,
-        server
-            .fetch_dav_resources(
-                access_token.account_id(),
-                to_account_id,
-                SyncCollection::AddressBook,
-            )
-            .await
-            .caused_by(trc::location!())?
-            .as_ref(),
-        to_account_id,
+        to_resources,
         to_addressbook_id,
-        card.inner.card.uid(),
-    )
-    .await?;
+        Some(card.inner.uid.as_str()).filter(|uid| !uid.is_empty()),
+    )?;
+    if from_account_id == to_account_id
+        && card
+            .inner
+            .names
+            .iter()
+            .any(|name| name.parent_id == to_addressbook_id)
+    {
+        return Err(DavError::Condition(DavErrorCondition::new(
+            StatusCode::FORBIDDEN,
+            CardCondition::NoUidConflict(
+                to_resources
+                    .format_resource_path_by_parent(from_document_id, to_addressbook_id)
+                    .unwrap_or_default()
+                    .into(),
+            ),
+        )));
+    }
 
     if from_account_id == to_account_id {
         let mut new_card = card
@@ -490,12 +506,18 @@ async fn copy_card(
             name: new_name.to_string(),
             parent_id: to_addressbook_id,
         });
+        assert_parent_limit(
+            card.inner.names.len(),
+            new_card.names.len(),
+            server.core.groupware.max_address_books_per_card,
+        )?;
         new_card
-            .update(
-                access_token.account_tenant_ids(),
+            .update_meta(
+                access_token.changed_by(),
                 card,
                 from_account_id,
                 from_document_id,
+                None,
                 &mut batch,
             )
             .caused_by(trc::location!())?;
@@ -507,16 +529,65 @@ async fn copy_card(
             name: new_name.to_string(),
             parent_id: to_addressbook_id,
         }];
-        let to_document_id = server
+        let container = read_container(
+            server,
+            from_account_id,
+            Collection::ContactCard,
+            from_document_id,
+            new_card.metadata_kinds(),
+        )
+        .await
+        .caused_by(trc::location!())?;
+        check_growth(
+            server,
+            to_account_id,
+            container
+                .as_ref()
+                .map_or(0, |container| copy_growth(container, None)),
+        )
+        .await
+        .caused_by(trc::location!())?;
+        new_card.set_metadata_kinds(container_kinds(container.as_ref()));
+        let content_ = server
             .store()
-            .assign_document_ids(to_account_id, Collection::ContactCard, 1)
+            .get_value::<Archive<ArchiveBytes>>(ValueKey::property(
+                from_account_id,
+                Collection::ContactCard,
+                from_document_id,
+                ContactField::Content,
+            ))
             .await
+            .caused_by(trc::location!())?
+            .ok_or(DavError::Code(StatusCode::NOT_FOUND))?;
+        let new_content = content_
+            .deserialize::<ContactCardContent>()
             .caused_by(trc::location!())?;
+
+        if to_document_id.is_none() {
+            server.assert_object_quota(
+                &*server.account(to_account_id).await?,
+                StorageQuota::MaxContactCards,
+                1,
+                || to_resources.resources.count(false),
+            )?;
+        }
+
+        let to_document_id = batch.reserve_document_id(to_account_id, Collection::ContactCard);
+        if let Some(container) = &container {
+            let mut copies = ContainerWrites::new(to_account_id, Collection::ContactCard);
+            copies
+                .copy(server, container, to_document_id, None, &mut batch)
+                .await
+                .caused_by(trc::location!())?;
+        }
         new_card
             .insert(
-                access_token.account_tenant_ids(),
+                new_content,
+                server.core.groupware.vcard_version,
+                access_token.changed_by(),
                 to_account_id,
                 to_document_id,
+                None,
                 &mut batch,
             )
             .caused_by(trc::location!())?;
@@ -526,7 +597,7 @@ async fn copy_card(
         // Overwrite card on destination
         let card_ = server
             .store()
-            .get_value::<Archive<AlignedBytes>>(ValueKey::archive(
+            .get_value::<Archive<ArchiveBytes>>(ValueKey::archive(
                 to_account_id,
                 Collection::ContactCard,
                 to_document_id,
@@ -540,13 +611,15 @@ async fn copy_card(
 
             DestroyArchive(card)
                 .delete(
-                    access_token.account_tenant_ids(),
+                    server,
+                    access_token.changed_by(),
                     to_account_id,
                     to_document_id,
                     to_addressbook_id,
                     None,
                     &mut batch,
                 )
+                .await
                 .caused_by(trc::location!())?;
         }
 
@@ -559,7 +632,6 @@ async fn copy_card(
         .commit_batch(batch)
         .await
         .caused_by(trc::location!())?;
-    server.notify_task_queue();
 
     response
 }
@@ -568,6 +640,7 @@ async fn copy_card(
 async fn move_card(
     server: &Server,
     access_token: &AccessToken,
+    to_resources: &GroupwareResources,
     from_account_id: u32,
     from_document_id: u32,
     from_addressbook_id: u32,
@@ -580,7 +653,7 @@ async fn move_card(
     // Fetch card
     let card_ = server
         .store()
-        .get_value::<Archive<AlignedBytes>>(ValueKey::archive(
+        .get_value::<Archive<ArchiveBytes>>(ValueKey::archive(
             from_account_id,
             Collection::ContactCard,
             from_document_id,
@@ -598,21 +671,10 @@ async fn move_card(
         || to_document_id.is_none()
     {
         assert_is_unique_uid(
-            server,
-            server
-                .fetch_dav_resources(
-                    access_token.account_id(),
-                    to_account_id,
-                    SyncCollection::AddressBook,
-                )
-                .await
-                .caused_by(trc::location!())?
-                .as_ref(),
-            to_account_id,
+            to_resources,
             to_addressbook_id,
-            card.inner.card.uid(),
-        )
-        .await?;
+            Some(card.inner.uid.as_str()).filter(|uid| !uid.is_empty()),
+        )?;
     }
 
     let mut batch = BatchBuilder::new();
@@ -640,11 +702,12 @@ async fn move_card(
             parent_id: to_addressbook_id,
         });
         new_card
-            .update(
-                access_token.account_tenant_ids(),
+            .update_meta(
+                access_token.changed_by(),
                 card.clone(),
                 from_account_id,
                 from_document_id,
+                None,
                 &mut batch,
             )
             .caused_by(trc::location!())?;
@@ -657,28 +720,94 @@ async fn move_card(
             name: new_name.to_string(),
             parent_id: to_addressbook_id,
         }];
+        let container = read_container(
+            server,
+            from_account_id,
+            Collection::ContactCard,
+            from_document_id,
+            new_card.metadata_kinds(),
+        )
+        .await
+        .caused_by(trc::location!())?;
+        check_growth(
+            server,
+            to_account_id,
+            container
+                .as_ref()
+                .map_or(0, |container| copy_growth(container, None)),
+        )
+        .await
+        .caused_by(trc::location!())?;
+        new_card.set_metadata_kinds(container_kinds(container.as_ref()));
 
+        let source_cleanup = server
+            .container_cleanup_from(
+                access_token.changed_by(),
+                from_account_id,
+                Collection::ContactCard,
+                container
+                    .as_ref()
+                    .map(|container| StoredEntry::from_container(from_document_id, container)),
+            )
+            .await
+            .caused_by(trc::location!())?;
         DestroyArchive(card)
-            .delete(
-                access_token.account_tenant_ids(),
+            .delete_with_cleanup(
+                server,
+                access_token.changed_by(),
                 from_account_id,
                 from_document_id,
                 from_addressbook_id,
+                None,
                 from_resource_path.into(),
+                &source_cleanup,
                 &mut batch,
             )
-            .caused_by(trc::location!())?;
-
-        let to_document_id = server
-            .store()
-            .assign_document_ids(to_account_id, Collection::ContactCard, 1)
             .await
             .caused_by(trc::location!())?;
+
+        let content_ = server
+            .store()
+            .get_value::<Archive<ArchiveBytes>>(ValueKey::property(
+                from_account_id,
+                Collection::ContactCard,
+                from_document_id,
+                ContactField::Content,
+            ))
+            .await
+            .caused_by(trc::location!())?
+            .ok_or(DavError::Code(StatusCode::NOT_FOUND))?;
+        let new_content = content_
+            .deserialize::<ContactCardContent>()
+            .caused_by(trc::location!())?;
+
+        let to_account = server.account(to_account_id).await?;
+        if to_document_id.is_none()
+            && server
+                .object_quota_limit(&to_account, StorageQuota::MaxContactCards)
+                .is_some()
+        {
+            server.assert_object_quota(&to_account, StorageQuota::MaxContactCards, 1, || {
+                to_resources.resources.count(false)
+            })?;
+        }
+
+        let to_document_id = batch.reserve_document_id(to_account_id, Collection::ContactCard);
+        if let Some(container) = &container {
+            let mut copies = ContainerWrites::new(to_account_id, Collection::ContactCard);
+            copies
+                .copy(server, container, to_document_id, None, &mut batch)
+                .await
+                .caused_by(trc::location!())?;
+        }
         new_card
             .insert(
-                access_token.account_tenant_ids(),
+                new_content,
+                server.core.groupware.vcard_version,
+                access_token.changed_by(),
                 to_account_id,
                 to_document_id,
+                None,
                 &mut batch,
             )
             .caused_by(trc::location!())?;
@@ -688,7 +817,7 @@ async fn move_card(
         // Overwrite card on destination
         let card_ = server
             .store()
-            .get_value::<Archive<AlignedBytes>>(ValueKey::archive(
+            .get_value::<Archive<ArchiveBytes>>(ValueKey::archive(
                 to_account_id,
                 Collection::ContactCard,
                 to_document_id,
@@ -702,13 +831,15 @@ async fn move_card(
 
             DestroyArchive(card)
                 .delete(
-                    access_token.account_tenant_ids(),
+                    server,
+                    access_token.changed_by(),
                     to_account_id,
                     to_document_id,
                     to_addressbook_id,
                     None,
                     &mut batch,
                 )
+                .await
                 .caused_by(trc::location!())?;
         }
 
@@ -721,7 +852,6 @@ async fn move_card(
         .commit_batch(batch)
         .await
         .caused_by(trc::location!())?;
-    server.notify_task_queue();
 
     response
 }
@@ -739,7 +869,7 @@ async fn rename_card(
     // Fetch card
     let card_ = server
         .store()
-        .get_value::<Archive<AlignedBytes>>(ValueKey::archive(
+        .get_value::<Archive<ArchiveBytes>>(ValueKey::archive(
             account_id,
             Collection::ContactCard,
             document_id,
@@ -764,11 +894,12 @@ async fn rename_card(
 
     let mut batch = BatchBuilder::new();
     new_card
-        .update(
-            access_token.account_tenant_ids(),
+        .update_meta(
+            access_token.changed_by(),
             card,
             account_id,
             document_id,
+            None,
             &mut batch,
         )
         .caused_by(trc::location!())?;
@@ -777,7 +908,6 @@ async fn rename_card(
         .commit_batch(batch)
         .await
         .caused_by(trc::location!())?;
-    server.notify_task_queue();
 
     Ok(HttpResponse::new(StatusCode::CREATED))
 }
@@ -786,20 +916,22 @@ async fn rename_card(
 async fn copy_container(
     server: &Server,
     access_token: &AccessToken,
+    from_resources: &GroupwareResources,
+    to_resources: &GroupwareResources,
     from_account_id: u32,
     from_document_id: u32,
     from_children_ids: Vec<u32>,
     from_resource_path: String,
     to_account_id: u32,
     to_document_id: Option<u32>,
-    to_children_ids: Vec<u32>,
+    to_children: Vec<(u32, MetadataKinds)>,
     new_name: &str,
     remove_source: bool,
 ) -> crate::Result<HttpResponse> {
     // Fetch book
     let book_ = server
         .store()
-        .get_value::<Archive<AlignedBytes>>(ValueKey::archive(
+        .get_value::<Archive<ArchiveBytes>>(ValueKey::archive(
             from_account_id,
             Collection::AddressBook,
             from_document_id,
@@ -813,40 +945,84 @@ async fn copy_container(
     let mut book = old_book
         .deserialize::<AddressBook>()
         .caused_by(trc::location!())?;
+    let book_container = read_container(
+        server,
+        from_account_id,
+        Collection::AddressBook,
+        from_document_id,
+        old_book.inner.metadata_kinds(),
+    )
+    .await
+    .caused_by(trc::location!())?;
+    book.set_metadata_kinds(container_kinds(book_container.as_ref()));
+    let card_containers = if from_account_id != to_account_id {
+        let mut request = ContainerRequest::default();
+        for &document_id in &from_children_ids {
+            if from_resources
+                .item_by_id(document_id)
+                .is_some_and(|item| !item.metadata_kinds().is_empty())
+            {
+                request.insert(from_account_id, Collection::ContactCard, document_id);
+            }
+        }
+        request.load(server).await.caused_by(trc::location!())?
+    } else {
+        DeadContainers::default()
+    };
+    let mut card_copies = ContainerWrites::new(to_account_id, Collection::ContactCard);
+    let source_cleanup = server
+        .container_cleanup_from(
+            access_token.changed_by(),
+            from_account_id,
+            Collection::ContactCard,
+            card_containers
+                .stored_entries(from_account_id, Collection::ContactCard)
+                .filter(|_| remove_source),
+        )
+        .await
+        .caused_by(trc::location!())?;
+    check_growth(
+        server,
+        to_account_id,
+        book_container
+            .as_ref()
+            .map_or(0, |container| copy_growth(container, None))
+            + card_containers.stored_len(),
+    )
+    .await
+    .caused_by(trc::location!())?;
+
+    // Validate quota
+    let to_account = server.account(to_account_id).await?;
+    let has_container_quota = to_document_id.is_none()
+        && server
+            .object_quota_limit(&to_account, StorageQuota::MaxAddressBooks)
+            .is_some();
+    let has_item_quota = from_account_id != to_account_id
+        && server
+            .object_quota_limit(&to_account, StorageQuota::MaxContactCards)
+            .is_some();
+    let to_resources = (has_container_quota || has_item_quota).then_some(to_resources);
+    if has_container_quota && let Some(to_resources) = &to_resources {
+        server.assert_object_quota(&to_account, StorageQuota::MaxAddressBooks, 1, || {
+            to_resources.resources.count(true)
+        })?;
+    }
+    let deleted_cards = match &to_resources {
+        Some(to_resources) if has_item_quota => to_children
+            .iter()
+            .filter(|(document_id, _)| {
+                to_resources
+                    .resources
+                    .find(*document_id, false)
+                    .is_some_and(|item| item.child_names().len() <= 1)
+            })
+            .count(),
+        _ => 0,
+    };
 
     // Prepare write batch
     let mut batch = BatchBuilder::new();
-
-    if remove_source {
-        DestroyArchive(old_book)
-            .delete(
-                access_token.account_tenant_ids(),
-                from_account_id,
-                from_document_id,
-                from_resource_path.into(),
-                &mut batch,
-            )
-            .caused_by(trc::location!())?;
-
-        // Reset default address book id
-        let default_book_id = server
-            .store()
-            .get_value::<u32>(ValueKey {
-                account_id: from_account_id,
-                collection: Collection::Principal.into(),
-                document_id: 0,
-                class: ValueClass::Property(PrincipalField::DefaultAddressBookId.into()),
-            })
-            .await
-            .caused_by(trc::location!())?;
-        if default_book_id.is_some_and(|id| id == from_document_id) {
-            batch
-                .with_account_id(from_account_id)
-                .with_collection(Collection::Principal)
-                .with_document(0)
-                .clear(PrincipalField::DefaultAddressBookId);
-        }
-    }
 
     let preference = book.preferences.into_iter().next().unwrap();
     book.name = new_name.to_string();
@@ -864,7 +1040,7 @@ async fn copy_container(
         // Overwrite destination
         let book_ = server
             .store()
-            .get_value::<Archive<AlignedBytes>>(ValueKey::archive(
+            .get_value::<Archive<ArchiveBytes>>(ValueKey::archive(
                 to_account_id,
                 Collection::AddressBook,
                 to_document_id,
@@ -875,14 +1051,31 @@ async fn copy_container(
             let book = book_
                 .to_unarchived::<AddressBook>()
                 .caused_by(trc::location!())?;
+            let cleanup = server
+                .preload_container_cleanup(
+                    access_token.changed_by(),
+                    to_account_id,
+                    Collection::ContactCard,
+                    &to_children
+                        .iter()
+                        .filter(|(_, kinds)| !kinds.is_empty())
+                        .map(|(document_id, _)| *document_id)
+                        .collect(),
+                )
+                .await
+                .caused_by(trc::location!())?;
 
             DestroyArchive(book)
                 .delete_with_cards(
                     server,
-                    access_token.account_tenant_ids(),
+                    access_token.changed_by(),
                     to_account_id,
                     to_document_id,
-                    to_children_ids,
+                    to_children
+                        .into_iter()
+                        .map(|(document_id, _)| document_id)
+                        .collect(),
+                    &cleanup,
                     None,
                     &mut batch,
                 )
@@ -890,16 +1083,20 @@ async fn copy_container(
                 .caused_by(trc::location!())?;
         }
 
-        to_document_id
+        PendingId::Assigned(to_document_id)
     } else {
-        server
-            .store()
-            .assign_document_ids(to_account_id, Collection::AddressBook, 1)
-            .await
-            .caused_by(trc::location!())?
+        PendingId::Slot(batch.reserve_document_id(to_account_id, Collection::AddressBook))
     };
+    let parent_id = to_document_id;
+    if let Some(container) = &book_container {
+        let mut copies = ContainerWrites::new(to_account_id, Collection::AddressBook);
+        copies
+            .copy(server, container, to_document_id, None, &mut batch)
+            .await
+            .caused_by(trc::location!())?;
+    }
     book.insert(
-        access_token.account_tenant_ids(),
+        access_token.changed_by(),
         to_account_id,
         to_document_id,
         &mut batch,
@@ -908,107 +1105,185 @@ async fn copy_container(
 
     // Copy children
     let mut required_space = 0;
-    for from_child_document_id in from_children_ids {
-        if let Some(card_) = server
-            .store()
-            .get_value::<Archive<AlignedBytes>>(ValueKey::archive(
+    let mut created_cards = 0;
+    let mut from_children_ids = from_children_ids;
+    from_children_ids.sort_unstable();
+    from_children_ids.dedup();
+    let is_cross_account = from_account_id != to_account_id;
+    for chunk in from_children_ids.chunks(MAX_BATCH_DOCUMENTS) {
+        let mut archives = server
+            .archive_chunk(
                 from_account_id,
                 Collection::ContactCard,
-                from_child_document_id,
-            ))
-            .await?
-        {
-            let card = card_
-                .to_unarchived::<ContactCard>()
-                .caused_by(trc::location!())?;
-            let mut new_name = None;
-
-            for name in card.inner.names.iter() {
-                if name.parent_id == to_document_id {
-                    continue;
-                } else if name.parent_id == from_document_id {
-                    new_name = Some(name.name.to_string());
-                }
-            }
-            let new_name = if let Some(new_name) = new_name {
-                DavName {
-                    name: new_name,
-                    parent_id: to_document_id,
-                }
-            } else {
-                continue;
-            };
-            let card = card_
-                .to_unarchived::<ContactCard>()
-                .caused_by(trc::location!())?;
-            let mut new_card = card
-                .deserialize::<ContactCard>()
-                .caused_by(trc::location!())?;
-
-            if from_account_id == to_account_id {
-                if remove_source {
-                    new_card
-                        .names
-                        .retain(|name| name.parent_id != from_document_id);
-                }
-
-                new_card.names.push(new_name);
-                new_card
-                    .update(
-                        access_token.account_tenant_ids(),
-                        card,
-                        from_account_id,
-                        from_child_document_id,
-                        &mut batch,
-                    )
+                chunk,
+                is_cross_account.then_some((ContactField::Content.field(), chunk)),
+            )
+            .await
+            .caused_by(trc::location!())?;
+        for &from_child_document_id in chunk {
+            if let Some(card_) = archives.take_archive(from_child_document_id) {
+                let card = card_
+                    .to_unarchived::<ContactCard>()
                     .caused_by(trc::location!())?;
-            } else {
-                if remove_source {
-                    DestroyArchive(card)
-                        .delete(
-                            access_token.account_tenant_ids(),
+                let mut new_name = None;
+
+                for name in card.inner.names.iter() {
+                    if parent_id
+                        .assigned()
+                        .is_some_and(|parent| name.parent_id == parent)
+                    {
+                        continue;
+                    } else if name.parent_id == from_document_id {
+                        new_name = Some(name.name.to_string());
+                    }
+                }
+                let new_name = if let Some(new_name) = new_name {
+                    DavName {
+                        name: new_name,
+                        parent_id: parent_id.assigned().unwrap_or_default(),
+                    }
+                } else {
+                    continue;
+                };
+                let mut new_card = card
+                    .deserialize::<ContactCard>()
+                    .caused_by(trc::location!())?;
+
+                if from_account_id == to_account_id {
+                    if remove_source {
+                        new_card
+                            .names
+                            .retain(|name| name.parent_id != from_document_id);
+                    }
+
+                    new_card.names.push(new_name);
+                    assert_parent_limit(
+                        card.inner.names.len(),
+                        new_card.names.len(),
+                        server.core.groupware.max_address_books_per_card,
+                    )?;
+                    new_card
+                        .update_meta(
+                            access_token.changed_by(),
+                            card,
                             from_account_id,
                             from_child_document_id,
-                            from_document_id,
-                            None,
+                            parent_id.slot(),
+                            &mut batch,
+                        )
+                        .caused_by(trc::location!())?;
+                } else {
+                    let content_ = archives
+                        .take_value(from_child_document_id)
+                        .ok_or(DavError::Code(StatusCode::NOT_FOUND))?;
+                    let new_content = content_
+                        .deserialize::<ContactCardContent>()
+                        .caused_by(trc::location!())?;
+
+                    if remove_source {
+                        DestroyArchive(card)
+                            .delete_with_cleanup(
+                                server,
+                                access_token.changed_by(),
+                                from_account_id,
+                                from_child_document_id,
+                                from_document_id,
+                                Some(content_),
+                                None,
+                                &source_cleanup,
+                                &mut batch,
+                            )
+                            .await
+                            .caused_by(trc::location!())?;
+                    }
+
+                    let to_document_id =
+                        batch.reserve_document_id(to_account_id, Collection::ContactCard);
+                    let container = card_containers.get(
+                        from_account_id,
+                        Collection::ContactCard,
+                        from_child_document_id,
+                    );
+                    new_card.set_metadata_kinds(container_kinds(container));
+                    if let Some(container) = container {
+                        card_copies
+                            .copy(server, container, to_document_id, None, &mut batch)
+                            .await
+                            .caused_by(trc::location!())?;
+                    }
+                    new_card.names = vec![new_name];
+                    required_space += new_card.size as u64;
+                    created_cards += 1;
+                    new_card
+                        .insert(
+                            new_content,
+                            server.core.groupware.vcard_version,
+                            access_token.changed_by(),
+                            to_account_id,
+                            to_document_id,
+                            parent_id.slot(),
                             &mut batch,
                         )
                         .caused_by(trc::location!())?;
                 }
-
-                let to_document_id = server
-                    .store()
-                    .assign_document_ids(to_account_id, Collection::ContactCard, 1)
-                    .await
-                    .caused_by(trc::location!())?;
-                new_card.names = vec![new_name];
-                required_space += new_card.size as u64;
-                new_card
-                    .insert(
-                        access_token.account_tenant_ids(),
-                        to_account_id,
-                        to_document_id,
-                        &mut batch,
-                    )
-                    .caused_by(trc::location!())?;
             }
         }
     }
 
+    if has_item_quota
+        && created_cards > deleted_cards
+        && let Some(to_resources) = &to_resources
+    {
+        server.assert_object_quota(
+            &to_account,
+            StorageQuota::MaxContactCards,
+            created_cards - deleted_cards,
+            || to_resources.resources.count(false),
+        )?;
+    }
+
     if from_account_id != to_account_id && required_space > 0 {
         server
-            .has_available_quota(
-                server.account(to_account_id).await?.as_ref(),
-                required_space,
-            )
+            .has_available_quota(&to_account, required_space)
             .await?;
+    }
+
+    if remove_source {
+        let book_cleanup = server
+            .container_cleanup_from(
+                access_token.changed_by(),
+                from_account_id,
+                Collection::AddressBook,
+                book_container
+                    .as_ref()
+                    .map(|container| StoredEntry::from_container(from_document_id, container)),
+            )
+            .await
+            .caused_by(trc::location!())?;
+        DestroyArchive(old_book)
+            .delete_with_cleanup(
+                server,
+                access_token.changed_by(),
+                from_account_id,
+                from_document_id,
+                from_resource_path.into(),
+                &book_cleanup,
+                &mut batch,
+            )
+            .await
+            .caused_by(trc::location!())?;
+
+        batch
+            .with_account_id(from_account_id)
+            .with_collection(Collection::Principal)
+            .with_document(0)
+            .clear_if_equals(PrincipalField::DefaultAddressBookId, from_document_id);
     }
 
     server
         .commit_batch(batch)
         .await
         .caused_by(trc::location!())?;
-    server.notify_task_queue();
 
     if !is_overwrite {
         Ok(HttpResponse::new(StatusCode::CREATED))
@@ -1029,7 +1304,7 @@ async fn rename_container(
     // Fetch book
     let book_ = server
         .store()
-        .get_value::<Archive<AlignedBytes>>(ValueKey::archive(
+        .get_value::<Archive<ArchiveBytes>>(ValueKey::archive(
             account_id,
             Collection::AddressBook,
             document_id,
@@ -1048,7 +1323,7 @@ async fn rename_container(
     let mut batch = BatchBuilder::new();
     new_book
         .update(
-            access_token.account_tenant_ids(),
+            access_token.changed_by(),
             book,
             account_id,
             document_id,
@@ -1060,7 +1335,6 @@ async fn rename_container(
         .commit_batch(batch)
         .await
         .caused_by(trc::location!())?;
-    server.notify_task_queue();
 
     Ok(HttpResponse::new(StatusCode::CREATED))
 }

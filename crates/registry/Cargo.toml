@@ -1,6 +1,6 @@
 [package]
 name = "registry"
-version = "0.16.27"
+version = "1.0.0"
 edition = "2024"
 
 [dependencies]
@@ -8,16 +8,17 @@ utils = { path =  "../utils" }
 trc = { path = "../trc" }
 types = { path = "../types" }
 serde = { version = "1.0", features = ["derive"]}
-hashify = "0.2.9"
+hashify = "0.3"
 ahash = { version = "0.8" }
-jmap-tools = { version = "0.1" }
-mail-auth = { version = "0.13" }
-tokio = { version = "1.53", features = ["fs"] }
+jmap-tools = { path = "../jmap-tools" }
+mail-auth = { version = "0.14" }
+smtp-report = { path = "../smtp-report" }
+tokio = { version = "1.54", features = ["fs"] }
 lz4_flex = { version = "0.14", features = ["alloc"], default-features = false }
+compact_str = "0.10.0"
 
 [features]
-test_mode = []
-enterprise = []
+enterprise = ["trc/enterprise", "utils/enterprise"]
 
 [lints]
 workspace = true

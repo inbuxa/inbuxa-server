@@ -4,7 +4,10 @@
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
  */
 
-use crate::network::webpush::{Vapid, VapidKey};
+use crate::{
+    config::metadata::MetadataConfig,
+    network::webpush::{Vapid, VapidKey},
+};
 use jmap_proto::request::capability::BaseCapabilities;
 use registry::schema::{prelude::ObjectType, structs::Jmap};
 use std::time::Duration;
@@ -54,7 +57,7 @@ pub struct JmapConfig {
 }
 
 impl JmapConfig {
-    pub async fn parse(bp: &mut Bootstrap) -> Self {
+    pub async fn parse(bp: &mut Bootstrap, metadata: &MetadataConfig) -> Self {
         let jmap = bp.setting_infallible::<Jmap>().await;
         let web_push_key = jmap
             .web_push_key
@@ -78,14 +81,14 @@ impl JmapConfig {
             });
 
         let mut jmap = JmapConfig {
-            query_max_results: jmap.query_max_results as usize,
-            changes_max_results: jmap.changes_max_results as usize,
-            snippet_max_results: jmap.snippet_max_results as usize,
+            query_max_results: jmap.max_query_results as usize,
+            changes_max_results: jmap.max_changes_results as usize,
+            snippet_max_results: jmap.max_snippet_results as usize,
             request_max_size: jmap.max_request_size as usize,
             request_max_calls: jmap.max_method_calls as usize,
             request_max_concurrent: jmap.max_concurrent_requests,
-            get_max_objects: jmap.get_max_results as usize,
-            set_max_objects: jmap.set_max_objects as usize,
+            get_max_objects: jmap.max_get_results as usize,
+            set_max_objects: jmap.max_set_objects as usize,
             upload_max_size: jmap.max_upload_size as usize,
             upload_max_concurrent: jmap.max_concurrent_uploads,
             upload_tmp_quota_size: jmap.upload_quota as usize,
@@ -99,7 +102,7 @@ impl JmapConfig {
             web_socket_timeout: jmap.websocket_timeout.into_inner(),
             web_socket_heartbeat: jmap.websocket_heartbeat.into_inner(),
             push_attempt_interval: jmap.push_attempt_wait.into_inner(),
-            push_attempts_max: jmap.push_max_attempts as u32,
+            push_attempts_max: jmap.max_push_attempts as u32,
             push_retry_interval: jmap.push_retry_wait.into_inner(),
             push_timeout: jmap.push_request_timeout.into_inner(),
             push_verify_timeout: jmap.push_verify_timeout.into_inner(),
@@ -128,7 +131,7 @@ impl JmapConfig {
             .map(|key| Vapid::new(key, web_push_contact));
 
         // Add capabilities
-        jmap.add_capabilities(bp).await;
+        jmap.add_capabilities(bp, metadata).await;
         jmap
     }
 }

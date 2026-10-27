@@ -4,11 +4,9 @@
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
  */
 
-use std::ops::Range;
-
-use mysql_async::prelude::Queryable;
-
 use super::{MysqlStore, into_error};
+use mysql_async::prelude::Queryable;
+use std::ops::Range;
 
 impl MysqlStore {
     pub(crate) async fn get_blob(

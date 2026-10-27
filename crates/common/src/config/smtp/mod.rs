@@ -20,6 +20,7 @@ use registry::{
     types::id::ObjectId,
 };
 use store::registry::bootstrap::Bootstrap;
+use utils::outbound::{OutboundClient, OutboundPolicy, Redirects};
 
 #[derive(Clone)]
 pub struct SmtpConfig {
@@ -28,12 +29,12 @@ pub struct SmtpConfig {
     pub resolvers: Resolvers,
     pub mail_auth: MailAuthConfig,
     pub report: ReportConfig,
-    pub mta_sts_client: reqwest::Client,
-    pub tls_report_client: reqwest::Client,
+    pub mta_sts_client: OutboundClient,
+    pub tls_report_client: OutboundClient,
 }
 
 #[derive(Debug, Clone)]
-//#[cfg_attr(feature = "test_mode", derive(PartialEq, Eq))]
+//#[cfg_attr(stalwart_tests, derive(PartialEq, Eq))]
 pub struct QueueRateLimiter {
     pub id: ObjectId,
     pub expr: IfBlock,
@@ -54,19 +55,29 @@ pub const THROTTLE_HELO_DOMAIN: u16 = 1 << 9;
 
 impl SmtpConfig {
     pub async fn parse(bp: &mut Bootstrap) -> Self {
+        let queue = QueueConfig::parse(bp).await;
+        let resolvers = Resolvers::parse(bp).await;
+        let mail_auth = MailAuthConfig::parse(bp).await;
+        let report = Box::new(ReportConfig::parse(bp).await);
+        let session = SessionConfig::parse(bp).await;
         let config = Self {
-            session: SessionConfig::parse(bp).await,
-            queue: QueueConfig::parse(bp).await,
-            resolvers: Resolvers::parse(bp).await,
-            mail_auth: MailAuthConfig::parse(bp).await,
-            report: ReportConfig::parse(bp).await,
-            mta_sts_client: utils::http::http_client_builder(false)
-                .pool_max_idle_per_host(0)
-                .user_agent(crate::USER_AGENT)
-                .redirect(reqwest::redirect::Policy::none())
-                .build()
-                .unwrap_or_default(),
-            tls_report_client: utils::http::unpooled_http_client(false),
+            session,
+            queue,
+            resolvers,
+            mail_auth,
+            report: *report,
+            mta_sts_client: OutboundClient::new(
+                utils::http::http_client_builder(false)
+                    .pool_max_idle_per_host(0)
+                    .user_agent(crate::USER_AGENT),
+                OutboundPolicy::PublicOnly,
+                Redirects::None,
+            ),
+            tls_report_client: OutboundClient::new(
+                utils::http::http_client_builder(false).pool_max_idle_per_host(0),
+                OutboundPolicy::PublicOnly,
+                Redirects::None,
+            ),
         };
 
         if !config.resolvers.dnssec_available

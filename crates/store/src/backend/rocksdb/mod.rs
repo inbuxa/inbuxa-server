@@ -4,37 +4,62 @@
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
  */
 
+use crate::{Subspace, backend::worker::BlockingPermits};
+use rocksdb::{BoundColumnFamily, MultiThreaded, OptimisticTransactionDB};
 use std::sync::Arc;
 
-use rocksdb::{BoundColumnFamily, MultiThreaded, OptimisticTransactionDB};
-
-use crate::{SUBSPACE_BLOBS, SUBSPACE_INDEXES, SUBSPACE_LOGS};
-
 pub mod blob;
+mod blob_gc;
+mod cache;
 pub mod main;
 pub mod read;
+mod slots;
 pub mod write;
 
-static CF_LOGS: &str = unsafe { std::str::from_utf8_unchecked(&[SUBSPACE_LOGS]) };
-static CF_INDEXES: &str = unsafe { std::str::from_utf8_unchecked(&[SUBSPACE_INDEXES]) };
-static CF_BLOBS: &str = unsafe { std::str::from_utf8_unchecked(&[SUBSPACE_BLOBS]) };
+static CF_BLOBS: &str = Subspace::Blobs.name();
 
 pub(crate) trait CfHandle {
-    fn subspace_handle(&self, subspace: u8) -> Arc<BoundColumnFamily<'_>>;
+    fn subspace_handle(&self, subspace: Subspace) -> Arc<BoundColumnFamily<'_>>;
 }
 
 impl CfHandle for OptimisticTransactionDB<MultiThreaded> {
     #[inline(always)]
-    fn subspace_handle(&self, subspace: u8) -> Arc<BoundColumnFamily<'_>> {
-        let subspace = &[subspace];
-        self.cf_handle(unsafe { std::str::from_utf8_unchecked(subspace) })
-            .unwrap()
+    fn subspace_handle(&self, subspace: Subspace) -> Arc<BoundColumnFamily<'_>> {
+        self.cf_handle(subspace.name()).unwrap()
+    }
+}
+
+const CF_SLOTS: usize = u8::MAX as usize + 1;
+
+pub(crate) struct CfCache<'db> {
+    db: &'db OptimisticTransactionDB<MultiThreaded>,
+    handles: [Option<Arc<BoundColumnFamily<'db>>>; CF_SLOTS],
+}
+
+impl<'db> CfCache<'db> {
+    pub(crate) fn new(db: &'db OptimisticTransactionDB<MultiThreaded>) -> Self {
+        Self {
+            db,
+            handles: [const { None }; CF_SLOTS],
+        }
+    }
+
+    #[inline(always)]
+    pub(crate) fn get(&mut self, subspace: Subspace) -> &Arc<BoundColumnFamily<'db>> {
+        let db = self.db;
+
+        self.handles[subspace.byte() as usize].get_or_insert_with(|| db.subspace_handle(subspace))
     }
 }
 
 pub struct RocksDbStore {
     db: Arc<OptimisticTransactionDB<MultiThreaded>>,
     worker_pool: rayon::ThreadPool,
+    blocking: BlockingPermits,
+    blob_gc: blob_gc::BlobGcState,
+    counter_slots: slots::CounterSlots,
+    #[cfg(stalwart_tests)]
+    probe: probe::RocksDbProbe,
 }
 
 #[inline(always)]

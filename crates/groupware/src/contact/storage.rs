@@ -4,77 +4,128 @@
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
  */
 
-use super::{AddressBook, ArchivedAddressBook, ArchivedContactCard, ContactCard};
+use super::{
+    AddressBook, ArchivedAddressBook, ArchivedContactCard, ArchivedContactCardContent, ContactCard,
+    ContactCardContent,
+};
 use crate::DestroyArchive;
-use common::{Server, auth::AccountTenantIds, storage::index::ObjectIndexBuilder};
+use calcard::vcard::VCardVersion;
+use common::{
+    Server,
+    auth::ChangedBy,
+    storage::{
+        batch::MAX_BATCH_DOCUMENTS,
+        index::{GroupwareWrite, ObjectIndexBuilder, SplitCurrent, SplitUpdate},
+        metadata::ContainerCleanup,
+    },
+};
 use store::{
     ValueKey,
-    write::{AlignedBytes, Archive, BatchBuilder, now},
+    write::{Archive, ArchiveBytes, BatchBuilder, PendingId, Slot, now},
 };
 use trc::AddContext;
-use types::collection::{Collection, VanishedCollection};
+use types::{
+    collection::{Collection, VanishedCollection},
+    field::ContactField,
+};
 
 impl ContactCard {
-    pub fn update<'x>(
+    #[allow(clippy::too_many_arguments)]
+    pub fn update_full(
         self,
-        changed_by: AccountTenantIds,
+        content: ContactCardContent,
+        version: VCardVersion,
+        changed_by: ChangedBy,
         card: Archive<&ArchivedContactCard>,
+        card_content: &ArchivedContactCardContent,
         account_id: u32,
         document_id: u32,
-        batch: &'x mut BatchBuilder,
-    ) -> trc::Result<&'x mut BatchBuilder> {
+        parent_id: Option<Slot>,
+        batch: &mut BatchBuilder,
+    ) -> trc::Result<String> {
         let mut new_card = self;
-
-        // Build card
         new_card.modified = now() as i64;
 
-        // Prepare write batch
+        let update = SplitUpdate::full(card, card_content, new_card, content, version)?;
+        let etag = update.etag();
+
         batch
             .with_account_id(account_id)
             .with_collection(Collection::ContactCard)
             .with_document(document_id)
-            .custom(
-                ObjectIndexBuilder::new()
-                    .with_current(card)
-                    .with_changes(new_card)
-                    .with_changed_by(changed_by),
-            )
-            .map(|b| b.commit_point())
+            .custom(update.into_builder(changed_by, parent_id))?
+            .commit_point();
+
+        Ok(etag)
     }
 
-    pub fn insert(
+    pub fn update_meta(
         self,
-        changed_by: AccountTenantIds,
+        changed_by: ChangedBy,
+        card: Archive<&ArchivedContactCard>,
         account_id: u32,
         document_id: u32,
+        parent_id: Option<Slot>,
         batch: &mut BatchBuilder,
-    ) -> trc::Result<&mut BatchBuilder> {
+    ) -> trc::Result<String> {
+        let mut new_card = self;
+        new_card.modified = now() as i64;
+
+        let update = SplitUpdate::meta_only(card, new_card);
+        let etag = update.etag();
+
+        batch
+            .with_account_id(account_id)
+            .with_collection(Collection::ContactCard)
+            .with_document(document_id)
+            .custom(update.into_builder(changed_by, parent_id))?
+            .commit_point();
+
+        Ok(etag)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn insert(
+        self,
+        content: ContactCardContent,
+        version: VCardVersion,
+        changed_by: ChangedBy,
+        account_id: u32,
+        document_id: impl Into<PendingId>,
+        parent_id: Option<Slot>,
+        batch: &mut BatchBuilder,
+    ) -> trc::Result<String> {
         // Build card
         let mut card = self;
         let now = now() as i64;
         card.modified = now;
         card.created = now;
 
-        // Prepare write batch
+        let changes = GroupwareWrite::full(card, content, version)?;
+        let etag = format!("\"{}\"", changes.meta().etag);
+
         batch
             .with_account_id(account_id)
             .with_collection(Collection::ContactCard)
-            .with_document(document_id)
+            .with_pending_document(document_id.into())
             .custom(
                 ObjectIndexBuilder::<(), _>::new()
-                    .with_changes(card)
-                    .with_changed_by(changed_by),
-            )
-            .map(|b| b.commit_point())
+                    .with_changes(changes)
+                    .with_changed_by(changed_by)
+                    .with_pending_id_opt(parent_id),
+            )?
+            .commit_point();
+
+        Ok(etag)
     }
 }
 
 impl AddressBook {
     pub fn insert(
         self,
-        changed_by: AccountTenantIds,
+        changed_by: ChangedBy,
         account_id: u32,
-        document_id: u32,
+        document_id: impl Into<PendingId>,
         batch: &mut BatchBuilder,
     ) -> trc::Result<&mut BatchBuilder> {
         // Build address book
@@ -87,7 +138,7 @@ impl AddressBook {
         batch
             .with_account_id(account_id)
             .with_collection(Collection::AddressBook)
-            .with_document(document_id)
+            .with_pending_document(document_id.into())
             .custom(
                 ObjectIndexBuilder::<(), _>::new()
                     .with_changes(book)
@@ -98,7 +149,7 @@ impl AddressBook {
 
     pub fn update<'x>(
         self,
-        changed_by: AccountTenantIds,
+        changed_by: ChangedBy,
         book: Archive<&ArchivedAddressBook>,
         account_id: u32,
         document_id: u32,
@@ -128,53 +179,107 @@ impl DestroyArchive<Archive<&ArchivedAddressBook>> {
     pub async fn delete_with_cards(
         self,
         server: &Server,
-        changed_by: AccountTenantIds,
+        changed_by: ChangedBy,
         account_id: u32,
         document_id: u32,
-        children_ids: Vec<u32>,
+        mut children_ids: Vec<u32>,
+        cleanup: &ContainerCleanup,
         delete_path: Option<String>,
         batch: &mut BatchBuilder,
     ) -> trc::Result<()> {
         // Process deletions
         let addressbook_id = document_id;
-        for document_id in children_ids {
-            if let Some(card_) = server
-                .store()
-                .get_value::<Archive<AlignedBytes>>(ValueKey::archive(
+        children_ids.sort_unstable();
+        children_ids.dedup();
+        for chunk in children_ids.chunks(MAX_BATCH_DOCUMENTS) {
+            let mut archives = server
+                .archive_chunk(
                     account_id,
                     Collection::ContactCard,
-                    document_id,
-                ))
-                .await?
-            {
+                    chunk,
+                    Some((ContactField::Content.field(), chunk)),
+                )
+                .await
+                .caused_by(trc::location!())?;
+            for &document_id in chunk {
+                let Some(card_) = archives.take_archive(document_id) else {
+                    continue;
+                };
                 DestroyArchive(
                     card_
                         .to_unarchived::<ContactCard>()
                         .caused_by(trc::location!())?,
                 )
-                .delete(
+                .remove(
+                    server,
                     changed_by,
                     account_id,
                     document_id,
                     addressbook_id,
+                    archives.take_value(document_id),
                     None,
+                    cleanup,
                     batch,
-                )?;
+                )
+                .await?;
             }
         }
 
-        self.delete(changed_by, account_id, document_id, delete_path, batch)
+        self.delete(
+            server,
+            changed_by,
+            account_id,
+            document_id,
+            delete_path,
+            batch,
+        )
+        .await
     }
 
-    pub fn delete(
+    pub async fn delete(
         self,
-        changed_by: AccountTenantIds,
+        server: &Server,
+        changed_by: ChangedBy,
         account_id: u32,
         document_id: u32,
         delete_path: Option<String>,
         batch: &mut BatchBuilder,
     ) -> trc::Result<()> {
+        self.delete_with_cleanup(
+            server,
+            changed_by,
+            account_id,
+            document_id,
+            delete_path,
+            &ContainerCleanup::empty(Collection::AddressBook),
+            batch,
+        )
+        .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub async fn delete_with_cleanup(
+        self,
+        server: &Server,
+        changed_by: ChangedBy,
+        account_id: u32,
+        document_id: u32,
+        delete_path: Option<String>,
+        cleanup: &ContainerCleanup,
+        batch: &mut BatchBuilder,
+    ) -> trc::Result<()> {
         let book = self.0;
+        server
+            .release_or_read(
+                cleanup,
+                batch,
+                changed_by,
+                account_id,
+                document_id,
+                book.inner.metadata_kinds(),
+            )
+            .await?;
+
         // Delete addressbook
         batch
             .with_account_id(account_id)
@@ -198,13 +303,69 @@ impl DestroyArchive<Archive<&ArchivedAddressBook>> {
 }
 
 impl DestroyArchive<Archive<&ArchivedContactCard>> {
-    pub fn delete(
+    #[allow(clippy::too_many_arguments)]
+    pub async fn delete(
         self,
-        changed_by: AccountTenantIds,
+        server: &Server,
+        changed_by: ChangedBy,
         account_id: u32,
         document_id: u32,
         addressbook_id: u32,
         delete_path: Option<String>,
+        batch: &mut BatchBuilder,
+    ) -> trc::Result<()> {
+        self.remove(
+            server,
+            changed_by,
+            account_id,
+            document_id,
+            addressbook_id,
+            None,
+            delete_path,
+            &ContainerCleanup::empty(Collection::ContactCard),
+            batch,
+        )
+        .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub async fn delete_with_cleanup(
+        self,
+        server: &Server,
+        changed_by: ChangedBy,
+        account_id: u32,
+        document_id: u32,
+        addressbook_id: u32,
+        content: Option<Archive<ArchiveBytes>>,
+        delete_path: Option<String>,
+        cleanup: &ContainerCleanup,
+        batch: &mut BatchBuilder,
+    ) -> trc::Result<()> {
+        self.remove(
+            server,
+            changed_by,
+            account_id,
+            document_id,
+            addressbook_id,
+            content,
+            delete_path,
+            cleanup,
+            batch,
+        )
+        .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn remove(
+        self,
+        server: &Server,
+        changed_by: ChangedBy,
+        account_id: u32,
+        document_id: u32,
+        addressbook_id: u32,
+        content: Option<Archive<ArchiveBytes>>,
+        delete_path: Option<String>,
+        cleanup: &ContainerCleanup,
         batch: &mut BatchBuilder,
     ) -> trc::Result<()> {
         let card = self.0;
@@ -224,23 +385,35 @@ impl DestroyArchive<Archive<&ArchivedContactCard>> {
                     .deserialize::<ContactCard>()
                     .caused_by(trc::location!())?;
                 new_card.names.swap_remove(delete_idx);
+                let update = SplitUpdate::meta_only(card, new_card);
                 batch
                     .with_document(document_id)
-                    .custom(
-                        ObjectIndexBuilder::new()
-                            .with_changed_by(changed_by)
-                            .with_current(card)
-                            .with_changes(new_card),
-                    )
+                    .custom(update.into_builder(changed_by, None))
                     .caused_by(trc::location!())?;
             } else {
                 // Delete card
+                let content_ = match content {
+                    Some(content) => Some(content),
+                    None => card_content(server, account_id, document_id).await?,
+                };
+                server
+                    .release_or_read(
+                        cleanup,
+                        batch,
+                        changed_by,
+                        account_id,
+                        document_id,
+                        card.inner.metadata_kinds(),
+                    )
+                    .await?;
                 batch
+                    .with_account_id(account_id)
+                    .with_collection(Collection::ContactCard)
                     .with_document(document_id)
                     .custom(
                         ObjectIndexBuilder::<_, ()>::new()
                             .with_changed_by(changed_by)
-                            .with_current(card),
+                            .with_current(card_current(card, content_.as_ref())?),
                     )
                     .caused_by(trc::location!())?;
             }
@@ -255,13 +428,52 @@ impl DestroyArchive<Archive<&ArchivedContactCard>> {
         Ok(())
     }
 
-    pub fn delete_all(
+    pub async fn delete_all(
         self,
-        changed_by: AccountTenantIds,
+        server: &Server,
+        changed_by: ChangedBy,
         account_id: u32,
         document_id: u32,
         batch: &mut BatchBuilder,
     ) -> trc::Result<()> {
+        self.remove_all(
+            server,
+            changed_by,
+            account_id,
+            document_id,
+            None,
+            &ContainerCleanup::empty(Collection::ContactCard),
+            batch,
+        )
+        .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub async fn remove_all(
+        self,
+        server: &Server,
+        changed_by: ChangedBy,
+        account_id: u32,
+        document_id: u32,
+        content: Option<Archive<ArchiveBytes>>,
+        cleanup: &ContainerCleanup,
+        batch: &mut BatchBuilder,
+    ) -> trc::Result<()> {
+        let content_ = match content {
+            Some(content) => Some(content),
+            None => card_content(server, account_id, document_id).await?,
+        };
+        server
+            .release_or_read(
+                cleanup,
+                batch,
+                changed_by,
+                account_id,
+                document_id,
+                self.0.inner.metadata_kinds(),
+            )
+            .await?;
+
         batch
             .with_account_id(account_id)
             .with_collection(Collection::ContactCard)
@@ -269,11 +481,44 @@ impl DestroyArchive<Archive<&ArchivedContactCard>> {
             .custom(
                 ObjectIndexBuilder::<_, ()>::new()
                     .with_changed_by(changed_by)
-                    .with_current(self.0),
+                    .with_current(card_current(self.0, content_.as_ref())?),
             )
             .caused_by(trc::location!())
             .map(|b| {
                 b.commit_point();
             })
+    }
+}
+
+async fn card_content(
+    server: &Server,
+    account_id: u32,
+    document_id: u32,
+) -> trc::Result<Option<Archive<ArchiveBytes>>> {
+    server
+        .store()
+        .get_value::<Archive<ArchiveBytes>>(ValueKey::property(
+            account_id,
+            Collection::ContactCard,
+            document_id,
+            ContactField::Content,
+        ))
+        .await
+        .caused_by(trc::location!())
+}
+
+fn card_current<'x>(
+    card: Archive<&'x ArchivedContactCard>,
+    content: Option<&'x Archive<ArchiveBytes>>,
+) -> trc::Result<SplitCurrent<'x, ArchivedContactCard>> {
+    match content {
+        Some(content) => content
+            .to_unarchived::<ContactCardContent>()
+            .caused_by(trc::location!())
+            .map(|content| SplitCurrent::Full {
+                meta: card,
+                content: content.inner,
+            }),
+        None => Ok(SplitCurrent::MetaOnly(card)),
     }
 }

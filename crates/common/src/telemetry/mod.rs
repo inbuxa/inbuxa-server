@@ -69,33 +69,10 @@ impl Telemetry {
         Collector::set_metrics(self.metrics);
         Collector::reload();
     }
-
-    #[cfg(feature = "test_mode")]
-    pub fn test_tracer(level: trc::Level) {
-        let mut interests = trc::ipc::subscriber::Interests::default();
-        for event in trc::EventType::variants() {
-            if level.is_contained(event.level()) {
-                interests.set(*event);
-            }
-        }
-
-        spawn_console_tracer(
-            SubscriberBuilder::new("stderr".to_string())
-                .with_interests(interests.clone())
-                .with_lossy(false),
-            crate::config::telemetry::ConsoleTracer {
-                ansi: true,
-                multiline: false,
-                buffered: false,
-            },
-        );
-
-        Collector::union_interests(interests);
-        Collector::reload();
-    }
 }
 
 impl TelemetrySubscriberType {
+    #[cfg_attr(not(feature = "enterprise"), allow(unused_variables))]
     pub fn spawn(self, builder: SubscriberBuilder, is_enterprise: bool) {
         match self {
             TelemetrySubscriberType::ConsoleTracer(settings) => {
@@ -111,3 +88,4 @@ impl TelemetrySubscriberType {
         }
     }
 }
+

@@ -9,11 +9,15 @@ use common::{
     config::smtp::queue::QueueName,
     network::{ServerInstance, stream::NullIo},
     storage::index::ObjectIndexBuilder,
+    storage::quota::ObjectQuotaUsage,
 };
 use email::{
     identity::Identity,
-    message::metadata::{ArchivedMetadataHeaderName, ArchivedMetadataHeaderValue, MessageMetadata},
-    submission::{Address, Delivered, DeliveryStatus, EmailSubmission, UndoStatus},
+    message::metadata::{HeaderId, MetadataRow},
+    submission::{
+        Address, Delivered, DeliveryResults, DeliveryStatus, EmailSubmission, QUEUED_REPLY,
+        UndoStatus,
+    },
 };
 use jmap_proto::{
     error::set::{SetError, SetErrorType},
@@ -28,8 +32,10 @@ use jmap_proto::{
     types::{date::UTCDate, state::State},
 };
 use jmap_tools::{Key, Map, Value};
+use registry::schema::enums::StorageQuota;
 use smtp::{
     core::{Session, SessionData},
+    inbound::data::MessageOrigin,
     queue::spool::SmtpSpool,
 };
 use smtp_proto::{MailFrom, RcptTo, request::parser::Rfc5321Parser};
@@ -37,10 +43,14 @@ use std::{borrow::Cow, future::Future};
 use std::{collections::HashMap, sync::Arc, time::Duration};
 use store::{
     ValueKey,
-    write::{AlignedBytes, Archive, BatchBuilder, now},
+    write::{Archive, ArchiveBytes, BatchBuilder, now},
 };
 use trc::AddContext;
-use types::{collection::Collection, field::EmailField, id::Id};
+use types::{
+    collection::{Collection, SyncCollection},
+    field::EmailField,
+    id::Id,
+};
 use utils::{map::vec_map::VecMap, sanitize_email};
 
 pub trait EmailSubmissionSet: Sync + Send {
@@ -73,11 +83,40 @@ impl EmailSubmissionSet for Server {
         let mut response = SetResponse::from_request(&request, self.core.jmap.set_max_objects)?;
         let will_destroy = response.collect_will_destroy(request.unwrap_destroy());
 
+        // Obtain submission quota
+        let limit = if request.has_creates() {
+            let account = self.account(account_id).await.caused_by(trc::location!())?;
+            self.object_quota_limit(&account, StorageQuota::MaxEmailSubmissions)
+        } else {
+            None
+        };
+        let quota = match limit {
+            Some(limit) => ObjectQuotaUsage {
+                used: self
+                    .object_count(account_id, StorageQuota::MaxEmailSubmissions)
+                    .await?,
+                limit,
+            },
+            None => ObjectQuotaUsage::unlimited(),
+        };
+
         // Process creates
         let mut success_email_ids = HashMap::new();
         let mut changed_email_ids = HashMap::new();
         let mut batch = BatchBuilder::new();
+        let mut pending_creates = Vec::new();
         for (id, object) in request.unwrap_create() {
+            if !quota.has_room(pending_creates.len()) {
+                response.not_created.append(
+                    id,
+                    SetError::new(SetErrorType::OverQuota).with_description(concat!(
+                        "There are too many email submissions, ",
+                        "please delete some before adding a new one."
+                    )),
+                );
+                continue;
+            }
+
             match self
                 .send_message(account_id, &response, instance, object)
                 .await?
@@ -97,39 +136,16 @@ impl EmailSubmissionSet for Server {
                     };
 
                     // Insert record
-                    let document_id = self
-                        .store()
-                        .assign_document_ids(account_id, Collection::EmailSubmission, 1)
-                        .await
-                        .caused_by(trc::location!())?;
+                    let slot = batch.reserve_document_id(account_id, Collection::EmailSubmission);
                     batch
                         .with_account_id(account_id)
                         .with_collection(Collection::EmailSubmission)
-                        .with_document(document_id)
+                        .create_document(slot)
                         .custom(ObjectIndexBuilder::<(), _>::new().with_changes(submission))
                         .caused_by(trc::location!())?
                         .commit_point();
 
-                    response.created.insert(
-                        id,
-                        Value::Object(
-                            Map::with_capacity(3)
-                                .with_key_value(
-                                    EmailSubmissionProperty::Id,
-                                    Value::Element(Id::from(document_id).into()),
-                                )
-                                .with_key_value(
-                                    EmailSubmissionProperty::SendAt,
-                                    Value::Element(EmailSubmissionValue::Date(
-                                        UTCDate::from_timestamp(send_at as i64),
-                                    )),
-                                )
-                                .with_key_value(
-                                    EmailSubmissionProperty::UndoStatus,
-                                    Value::Element(EmailSubmissionValue::UndoStatus(undo_status)),
-                                ),
-                        ),
-                    );
+                    pending_creates.push((id, slot, send_at, undo_status));
                 }
                 Err(err) => {
                     response.not_created.append(id, err);
@@ -156,7 +172,7 @@ impl EmailSubmissionSet for Server {
             let document_id = id.document_id();
             let submission = if let Some(submission) = self
                 .store()
-                .get_value::<Archive<AlignedBytes>>(ValueKey::archive(
+                .get_value::<Archive<ArchiveBytes>>(ValueKey::archive(
                     account_id,
                     Collection::EmailSubmission,
                     document_id,
@@ -214,11 +230,24 @@ impl EmailSubmissionSet for Server {
 
             match undo_status {
                 Some(email_submission::UndoStatus::Canceled) => {
-                    if let Some(queue_message) =
-                        self.read_message(queue_id, QueueName::default()).await
+                    if let Some((queue_message, version)) = self
+                        .read_message_versioned(queue_id, QueueName::default())
+                        .await
                     {
                         // Delete message from queue
-                        queue_message.remove(self, None).await;
+                        let prev_events = queue_message.message.next_events();
+                        if let Some(description) = queue_message
+                            .remove_registry(self, prev_events, version)
+                            .await
+                            .failure("The message could not be removed from the queue.")
+                        {
+                            response.not_updated.append(
+                                id,
+                                SetError::new(SetErrorType::CannotUnsend)
+                                    .with_description(description),
+                            );
+                            continue 'update;
+                        }
 
                         // Update record
                         let mut new_submission = submission.inner.clone();
@@ -270,7 +299,7 @@ impl EmailSubmissionSet for Server {
             let document_id = id.document_id();
             if let Some(submission) = self
                 .store()
-                .get_value::<Archive<AlignedBytes>>(ValueKey::archive(
+                .get_value::<Archive<ArchiveBytes>>(ValueKey::archive(
                     account_id,
                     Collection::EmailSubmission,
                     document_id,
@@ -285,13 +314,17 @@ impl EmailSubmissionSet for Server {
                     u32::from(submission.inner.thread_id),
                     u32::from(submission.inner.email_id),
                 );
+                let queue_id = submission.inner.queue_id.as_ref().map(u64::from);
                 batch
                     .with_account_id(account_id)
                     .with_collection(Collection::EmailSubmission)
                     .with_document(document_id)
                     .custom(ObjectIndexBuilder::<_, ()>::new().with_current(submission))
-                    .caused_by(trc::location!())?
-                    .commit_point();
+                    .caused_by(trc::location!())?;
+                if let Some(queue_id) = queue_id {
+                    DeliveryResults::clear(&mut batch, account_id, queue_id);
+                }
+                batch.commit_point();
                 changed_email_ids.insert(id, email_id);
                 response.destroyed.push(id);
             } else {
@@ -301,12 +334,34 @@ impl EmailSubmissionSet for Server {
 
         // Write changes
         if !batch.is_empty() {
-            let change_id = self
-                .commit_batch(batch)
-                .await
-                .and_then(|ids| ids.last_change_id(account_id))
-                .caused_by(trc::location!())?;
-            response.new_state = State::Exact(change_id).into();
+            let assigned_ids = self.commit_batch(batch).await.caused_by(trc::location!())?;
+            response.new_state = State::Exact(
+                assigned_ids.last_change_id(account_id, SyncCollection::EmailSubmission),
+            )
+            .into();
+
+            for (id, slot, send_at, undo_status) in pending_creates {
+                response.created.insert(
+                    id,
+                    Value::Object(
+                        Map::with_capacity(3)
+                            .with_key_value(
+                                EmailSubmissionProperty::Id,
+                                Value::Element(Id::from(assigned_ids.slot(slot)).into()),
+                            )
+                            .with_key_value(
+                                EmailSubmissionProperty::SendAt,
+                                Value::Element(EmailSubmissionValue::Date(
+                                    UTCDate::from_timestamp(send_at as i64),
+                                )),
+                            )
+                            .with_key_value(
+                                EmailSubmissionProperty::UndoStatus,
+                                Value::Element(EmailSubmissionValue::UndoStatus(undo_status)),
+                            ),
+                    ),
+                );
+            }
         }
 
         // On success
@@ -508,7 +563,7 @@ impl EmailSubmissionSet for Server {
         // Fetch identity's mailFrom
         let identity_mail_from = if let Some(identity) = self
             .store()
-            .get_value::<Archive<AlignedBytes>>(ValueKey::archive(
+            .get_value::<Archive<ArchiveBytes>>(ValueKey::archive(
                 account_id,
                 Collection::Identity,
                 submission.identity_id,
@@ -547,83 +602,49 @@ impl EmailSubmissionSet for Server {
         };
 
         // Obtain message metadata
-        let metadata_ = if let Some(metadata) = self
+        let Some(row) = self
             .store()
-            .get_value::<Archive<AlignedBytes>>(ValueKey::property(
+            .get_value::<MetadataRow>(ValueKey::immutable(
                 account_id,
                 Collection::Email,
                 submission.email_id,
                 EmailField::Metadata,
             ))
             .await?
-        {
-            metadata
-        } else {
+        else {
             return Ok(Err(SetError::invalid_properties()
                 .with_property(EmailSubmissionProperty::EmailId)
                 .with_description("Email not found.")));
         };
-        let metadata = metadata_
-            .unarchive::<MessageMetadata>()
-            .caused_by(trc::location!())?;
+        let metadata = row.unarchive().caused_by(trc::location!())?;
 
         // Add recipients to envelope if missing
-        let mut bcc_header = None;
         if rcpt_to.is_empty() {
-            for header in metadata.contents[0].parts[0].headers.iter() {
-                if matches!(
-                    header.name,
-                    ArchivedMetadataHeaderName::To
-                        | ArchivedMetadataHeaderName::Cc
-                        | ArchivedMetadataHeaderName::Bcc
-                ) {
-                    if matches!(header.name, ArchivedMetadataHeaderName::Bcc) {
-                        bcc_header = Some(header);
-                    }
-                    match &header.value {
-                        ArchivedMetadataHeaderValue::AddressList(addr) => {
-                            for address in addr.iter() {
-                                if let Some(address) = address
-                                    .address
-                                    .as_ref()
-                                    .map(|v| v.as_ref())
-                                    .and_then(sanitize_email)
-                                    && !rcpt_to.iter().any(|rcpt| rcpt.address == address)
-                                {
-                                    submission.envelope.rcpt_to.push(Address {
-                                        email: address.to_string(),
-                                        parameters: None,
-                                    });
-                                    rcpt_to.push(RcptTo {
-                                        address: Cow::Owned(address),
-                                        ..Default::default()
-                                    });
-                                }
-                            }
-                        }
-                        ArchivedMetadataHeaderValue::AddressGroup(groups) => {
-                            for group in groups.iter() {
-                                for address in group.addresses.iter() {
-                                    if let Some(address) = address
-                                        .address
-                                        .as_ref()
-                                        .map(|v| v.as_ref())
-                                        .and_then(sanitize_email)
-                                        && !rcpt_to.iter().any(|rcpt| rcpt.address == address)
-                                    {
-                                        submission.envelope.rcpt_to.push(Address {
-                                            email: address.to_string(),
-                                            parameters: None,
-                                        });
-                                        rcpt_to.push(RcptTo {
-                                            address: Cow::Owned(address),
-                                            ..Default::default()
-                                        });
-                                    }
-                                }
-                            }
-                        }
-                        _ => {}
+            let headers = row.raw_headers().caused_by(trc::location!())?;
+            for header in metadata.root().root_part().headers().iter() {
+                if !matches!(header.id(), HeaderId::TO | HeaderId::CC | HeaderId::BCC) {
+                    continue;
+                }
+                let Some(raw) = header.raw_value(&headers) else {
+                    continue;
+                };
+                let parsed = mail_parser::HeaderForm::Addresses.parse(raw);
+                let Some(list) = parsed.value().as_address() else {
+                    continue;
+                };
+                for address in list
+                    .mailboxes()
+                    .filter_map(|mailbox| mailbox.address().and_then(sanitize_email))
+                {
+                    if !rcpt_to.iter().any(|rcpt| rcpt.address == address) {
+                        submission.envelope.rcpt_to.push(Address {
+                            email: address.to_string(),
+                            parameters: None,
+                        });
+                        rcpt_to.push(RcptTo {
+                            address: Cow::Owned(address),
+                            ..Default::default()
+                        });
                     }
                 }
             }
@@ -632,11 +653,6 @@ impl EmailSubmissionSet for Server {
                 return Ok(Err(SetError::new(SetErrorType::NoRecipients)
                     .with_description("No recipients found in email.")));
             }
-        } else {
-            bcc_header = metadata.contents[0].parts[0]
-                .headers
-                .iter()
-                .find(|header| matches!(header.name, ArchivedMetadataHeaderName::Bcc));
         }
 
         // Update sendAt
@@ -649,36 +665,36 @@ impl EmailSubmissionSet for Server {
         };
 
         // Obtain raw message
-        let mut message = if let Some(message) = self
-            .blob_store()
-            .get_blob(metadata.blob_hash.0.as_slice(), 0..usize::MAX)
+        let Some(blob) = self
+            .fetch_blob(
+                &metadata.blob_hash(),
+                0..usize::MAX,
+                Some(metadata.size() as u64),
+            )
             .await?
-        {
-            if message.len() > self.core.email.mail_max_size {
-                return Ok(Err(SetError::new(SetErrorType::InvalidEmail)
-                    .with_description(format!(
-                        "Message exceeds maximum size of {} bytes.",
-                        self.core.email.mail_max_size
-                    ))));
-            }
-
-            message
-        } else {
+        else {
             return Ok(Err(SetError::invalid_properties()
                 .with_property(EmailSubmissionProperty::EmailId)
                 .with_description("Blob for email not found.")));
         };
-
-        // Remove BCC header if present
-        if let Some(bcc_header) = bcc_header {
-            let mut new_message = Vec::with_capacity(message.len());
-            let range = bcc_header.name_value_range();
-            new_message.extend_from_slice(&message[..range.start]);
-            new_message.extend_from_slice(&message[range.end..]);
-            message = new_message;
+        if blob.len() > self.core.email.mail_max_size {
+            return Ok(Err(SetError::new(SetErrorType::InvalidEmail)
+                .with_description(format!(
+                    "Message exceeds maximum size of {} bytes.",
+                    self.core.email.mail_max_size
+                ))));
         }
 
+        // Remove BCC header if present
+        let stripped = match metadata.strip_root_fields(&blob, HeaderId::BCC) {
+            Cow::Owned(stripped) => Some(stripped),
+            Cow::Borrowed(_) => None,
+        };
+        let (raw_message, message_memory) = blob.into_parts();
+        let message = stripped.unwrap_or(raw_message);
+
         // Begin local SMTP session
+        let origin = MessageOrigin::Submission { account_id };
         let mut session = Session::<NullIo>::local(
             self.clone(),
             instance.clone(),
@@ -719,7 +735,8 @@ impl EmailSubmissionSet for Server {
             // DATA
             if has_success {
                 session.data.message = message;
-                let response = session.queue_message().await;
+                session.data.message_memory = Some(message_memory);
+                let response = session.queue_message(origin).await;
                 if let smtp::core::State::Accepted(queue_id) = session.state {
                     Ok((responses, Some(queue_id)))
                 } else {
@@ -761,7 +778,7 @@ impl EmailSubmissionSet for Server {
                                 },
                                 smtp_reply: response
                                     .map(|s| s.to_string())
-                                    .unwrap_or_else(|| "250 2.1.5 Queued".to_string()),
+                                    .unwrap_or_else(|| QUEUED_REPLY.to_string()),
                                 displayed: false,
                             },
                         )

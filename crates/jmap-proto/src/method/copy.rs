@@ -6,15 +6,15 @@
 
 use crate::{
     error::set::SetError,
-    object::{JmapObject, blob::BlobProperty},
+    object::{JmapObject, JmapObjectId, blob::BlobProperty},
     request::{
         MaybeInvalid,
         deserialize::{DeserializeArguments, deserialize_request},
-        reference::MaybeIdReference,
     },
-    types::state::State,
+    response::Response,
+    types::state::{ExpectedState, State},
 };
-use jmap_tools::{Key, Map, Value};
+use jmap_tools::{Element, Key, Map, ObjectAsVec, Property, Value};
 use serde::{Deserialize, Deserializer, Serialize};
 use types::{blob::BlobId, id::Id};
 use utils::map::vec_map::VecMap;
@@ -25,7 +25,7 @@ pub struct CopyRequest<'x, T: JmapObject> {
     pub if_from_in_state: Option<State>,
     pub account_id: Id,
     pub if_in_state: Option<State>,
-    pub create: VecMap<MaybeIdReference<Id>, Value<'x, T::Property, T::Element>>,
+    pub create: VecMap<String, Value<'x, T::Property, T::Element>>,
     pub on_success_destroy_original: Option<bool>,
     pub destroy_from_if_in_state: Option<State>,
     pub arguments: T::CopyArguments,
@@ -47,11 +47,15 @@ pub struct CopyResponse<T: JmapObject> {
 
     #[serde(rename = "created")]
     #[serde(skip_serializing_if = "VecMap::is_empty")]
-    pub created: VecMap<Id, Value<'static, T::Property, T::Element>>,
+    pub created: VecMap<String, Value<'static, T::Property, T::Element>>,
 
     #[serde(rename = "notCreated")]
     #[serde(skip_serializing_if = "VecMap::is_empty")]
-    pub not_created: VecMap<Id, SetError<T::Property>>,
+    pub not_created: VecMap<String, SetError<T::Property>>,
+
+    #[serde(rename = "destroyed")]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub destroyed: Option<Option<Vec<Id>>>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -88,13 +92,13 @@ impl<'de, T: JmapObject> DeserializeArguments<'de> for CopyRequest<'de, T> {
                 self.account_id = crate::request::deserialize_account_id(map)?;
             },
             b"ifInState" => {
-                self.if_in_state = map.next_value()?;
+                self.if_in_state = map.next_value::<ExpectedState>()?.0;
             },
             b"fromAccountId" => {
                 self.from_account_id = crate::request::deserialize_account_id(map)?;
             },
             b"ifFromInState" => {
-                self.if_from_in_state = map.next_value()?;
+                self.if_from_in_state = map.next_value::<ExpectedState>()?.0;
             },
             b"create" => {
                 self.create = map.next_value()?;
@@ -103,7 +107,7 @@ impl<'de, T: JmapObject> DeserializeArguments<'de> for CopyRequest<'de, T> {
                 self.on_success_destroy_original = map.next_value()?;
             },
             b"destroyFromIfInState" => {
-                self.destroy_from_if_in_state = map.next_value()?;
+                self.destroy_from_if_in_state = map.next_value::<ExpectedState>()?.0;
             },
             _ => {
                 self.arguments.deserialize_argument(key, map)?;
@@ -172,14 +176,71 @@ impl<'de, T: JmapObject> Default for CopyRequest<'de, T> {
 }
 
 impl<T: JmapObject> CopyResponse<T> {
-    pub fn created(&mut self, id: Id, document_id: impl Into<T::Id>) {
+    pub fn created(&mut self, id: String, document_id: impl Into<T::Id>) {
+        self.created_with_properties(id, document_id, []);
+    }
+
+    pub fn created_with_properties(
+        &mut self,
+        id: String,
+        document_id: impl Into<T::Id>,
+        properties: impl IntoIterator<Item = (T::Property, Value<'static, T::Property, T::Element>)>,
+    ) {
         let document_id = document_id.into();
-        self.created.append(
-            id,
-            Value::Object(Map::from(vec![(
-                Key::Property(T::ID_PROPERTY),
-                Value::Element(document_id.into()),
-            )])),
-        );
+        let mut object = Map::from(vec![(
+            Key::Property(T::ID_PROPERTY),
+            Value::Element(document_id.into()),
+        )]);
+        for (property, value) in properties {
+            object.insert(property, value);
+        }
+        self.created.append(id, Value::Object(object));
+    }
+
+    pub fn update_created_ids(&self, response: &mut Response) {
+        for (create_id, obj) in &self.created {
+            if let Value::Object(obj) = obj
+                && let Some(Value::Element(id)) = obj.get(&Key::Property(T::ID_PROPERTY))
+                && let Some(id) = id.as_any_id()
+            {
+                response.created_ids.insert(create_id.clone(), id);
+            }
+        }
     }
 }
+
+pub trait CopySourceId<P: Property> {
+    fn source_id(&self, id_property: P) -> Option<Id>;
+
+    fn take_source_id(&mut self, id_property: P) -> Result<Id, SetError<P>>;
+}
+
+impl<P: Property, E: Element<Property = P> + JmapObjectId> CopySourceId<P> for Value<'_, P, E> {
+    fn source_id(&self, id_property: P) -> Option<Id> {
+        self.as_object()
+            .and_then(|object| object.get(&Key::Property(id_property)))
+            .and_then(Value::as_element)
+            .and_then(JmapObjectId::as_id)
+    }
+
+    fn take_source_id(&mut self, id_property: P) -> Result<Id, SetError<P>> {
+        let key = Key::Property(id_property.clone());
+        self.as_object_mut()
+            .map(ObjectAsVec::as_mut_vec)
+            .and_then(|entries| {
+                entries
+                    .iter()
+                    .position(|(entry, _)| *entry == key)
+                    .map(|position| entries.remove(position).1)
+            })
+            .as_ref()
+            .and_then(Value::as_element)
+            .and_then(JmapObjectId::as_id)
+            .ok_or_else(|| {
+                SetError::invalid_properties()
+                    .with_property(id_property)
+                    .with_description("Missing or invalid \"id\" property.")
+            })
+    }
+}
+

@@ -8,12 +8,9 @@ use crate::{
     Session, State,
     protocol::{Command, Mechanism, request::Error},
 };
-use common::{
-    KV_RATE_LIMIT_IMAP,
-    network::{SessionResult, SessionStream},
-};
+use common::network::{SessionResult, SessionStream};
 use directory::Credentials;
-use trc::{AddContext, SecurityEvent};
+use trc::SecurityEvent;
 
 impl<T: SessionStream> Session<T> {
     pub async fn ingest(&mut self, bytes: &[u8]) -> SessionResult {
@@ -29,6 +26,21 @@ impl<T: SessionStream> Session<T> {
 
         loop {
             match self.receiver.parse(&mut bytes) {
+                Ok(_) | Err(Error::Parse(_))
+                    if matches!(
+                        self.state,
+                        State::NotAuthenticated {
+                            sasl_failure: Some(_),
+                            ..
+                        }
+                    ) =>
+                {
+                    if let Some(failure) = self.state.take_sasl_failure()
+                        && !self.write_err(failure).await
+                    {
+                        return SessionResult::Close;
+                    }
+                }
                 Ok(request) => {
                     // Group delete requests when possible
                     match (request, requests.last_mut()) {
@@ -100,11 +112,14 @@ impl<T: SessionStream> Session<T> {
                                 } else {
                                     unreachable!()
                                 };
-                            Box::pin(self.handle_auth(Credentials::Basic {
-                                username,
-                                secret: string,
-                                mfa_token: None,
-                            }))
+                            self.authenticate(
+                                Credentials::Basic {
+                                    username,
+                                    secret: string,
+                                    mfa_token: None,
+                                },
+                                None,
+                            )
                             .await
                             .map(|_| SessionResult::Continue)
                         }
@@ -147,11 +162,10 @@ impl<T: SessionStream> Session<T> {
                             self.handle_stls().await.map(|_| SessionResult::UpgradeTls)
                         }
                         Command::Utf8 => self.handle_utf8().await.map(|_| SessionResult::Continue),
-                        Command::Auth { mechanism, params } => {
-                            Box::pin(self.handle_sasl(mechanism, params))
-                                .await
-                                .map(|_| SessionResult::Continue)
-                        }
+                        Command::Auth { mechanism, params } => self
+                            .handle_sasl(mechanism, params)
+                            .await
+                            .map(|_| SessionResult::Continue),
                         Command::Apop { .. } => Err(trc::Pop3Event::Error
                             .into_err()
                             .details("APOP not supported.")),
@@ -181,10 +195,7 @@ impl<T: SessionStream> Session<T> {
     ) -> trc::Result<Command<String, Mechanism>> {
         match &command {
             Command::Capa | Command::Quit | Command::Noop => Ok(command),
-            Command::Auth {
-                mechanism: Mechanism::Plain,
-                ..
-            }
+            Command::Auth { .. }
             | Command::User { .. }
             | Command::Pass { .. }
             | Command::Apop { .. } => {
@@ -202,15 +213,6 @@ impl<T: SessionStream> Session<T> {
                             .into_err()
                             .details("Cannot authenticate over plain-text."))
                     }
-                } else {
-                    Err(trc::Pop3Event::Error
-                        .into_err()
-                        .details("Already authenticated."))
-                }
-            }
-            Command::Auth { .. } => {
-                if let State::NotAuthenticated { .. } = &self.state {
-                    Ok(command)
                 } else {
                     Err(trc::Pop3Event::Error
                         .into_err()
@@ -236,28 +238,11 @@ impl<T: SessionStream> Session<T> {
             | Command::Utf8
             | Command::Stat
             | Command::Rset => {
-                if let State::Authenticated { mailbox, .. } = &self.state {
-                    if let Some(rate) = &self.server.core.imap.rate_requests {
-                        if self
-                            .server
-                            .in_memory_store()
-                            .is_rate_allowed(
-                                KV_RATE_LIMIT_IMAP,
-                                &mailbox.account_id.to_be_bytes(),
-                                rate,
-                                true,
-                            )
-                            .await
-                            .caused_by(trc::location!())?
-                            .is_none()
-                        {
-                            Ok(command)
-                        } else {
-                            Err(trc::LimitEvent::TooManyRequests.into_err())
-                        }
-                    } else {
-                        Ok(command)
-                    }
+                if let State::Authenticated { access_token, .. } = &self.state {
+                    self.server
+                        .is_imap_request_allowed(access_token)
+                        .await
+                        .map(|_| command)
                 } else {
                     Err(trc::Pop3Event::Error
                         .into_err()

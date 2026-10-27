@@ -4,9 +4,11 @@
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
  */
 
-use crate::{Server, auth::AccessToken};
+use super::{GrantType, scope::OAuthScopes};
+use crate::Server;
+use registry::schema::enums::OAuthClientKind;
 use serde::{Deserialize, Serialize};
-use trc::{AddContext, AuthEvent, EventType};
+use trc::{AuthEvent, EventType};
 
 #[derive(Debug, Default, Clone, Eq, PartialEq, Deserialize, Serialize)]
 pub struct OAuthIntrospect {
@@ -47,26 +49,9 @@ pub struct OAuthIntrospect {
 }
 
 impl Server {
-    pub async fn introspect_access_token(
-        &self,
-        token: &str,
-        access_token: &AccessToken,
-    ) -> trc::Result<OAuthIntrospect> {
-        match self.validate_access_token(None, token).await {
-            Ok(token_info) => Ok(OAuthIntrospect {
-                active: true,
-                username: self
-                    .account(access_token.account_id())
-                    .await
-                    .caused_by(trc::location!())?
-                    .name()
-                    .to_string()
-                    .into(),
-                token_type: Some("bearer".into()),
-                exp: Some(token_info.expiry as i64),
-                iat: Some(token_info.issued_at as i64),
-                ..Default::default()
-            }),
+    pub async fn introspect_access_token(&self, token: &str) -> trc::Result<OAuthIntrospect> {
+        match self.introspect_grant_token(token).await {
+            Ok(introspect) => Ok(introspect),
             Err(err)
                 if matches!(
                     err.event_type(),
@@ -75,7 +60,51 @@ impl Server {
             {
                 Ok(OAuthIntrospect::default())
             }
-            Err(err) => Err(err),
+            Err(err) => Err(err.caused_by(trc::location!())),
         }
+    }
+
+    async fn introspect_grant_token(&self, token: &str) -> trc::Result<OAuthIntrospect> {
+        let token_info = self.validate_access_token(None, token).await?;
+        let token_type = match token_info.grant_type {
+            GrantType::AccessToken => "bearer",
+            GrantType::RefreshToken => "refresh_token",
+            _ => return Ok(OAuthIntrospect::default()),
+        };
+        let Some(presented) = token_info.grant else {
+            return Ok(OAuthIntrospect::default());
+        };
+        let Some(stored) = self
+            .oauth_grant(presented.id)
+            .await?
+            .filter(|stored| stored.account_id() == token_info.account_id)
+        else {
+            return Ok(OAuthIntrospect::default());
+        };
+        if (token_info.grant_type == GrantType::RefreshToken
+            && !stored.is_current(presented.generation))
+            || (token_info.credential_expired
+                && stored.grant.client_kind != OAuthClientKind::FirstParty)
+        {
+            return Ok(OAuthIntrospect::default());
+        }
+
+        let scope = match token_info.claims.filter(|claims| !claims.is_empty()) {
+            Some(scope) if token_info.grant_type == GrantType::RefreshToken => scope,
+            _ => OAuthScopes::from_registry(stored.grant.scopes.iter()).to_wire(),
+        };
+        let account = self.account(token_info.account_id).await?;
+
+        Ok(OAuthIntrospect {
+            active: true,
+            scope: (!scope.is_empty()).then_some(scope),
+            client_id: stored.grant.client_id.into(),
+            username: account.name().to_string().into(),
+            sub: token_info.account_id.to_string().into(),
+            token_type: Some(token_type.into()),
+            exp: Some(token_info.expiry as i64),
+            iat: Some(token_info.issued_at as i64),
+            ..Default::default()
+        })
     }
 }

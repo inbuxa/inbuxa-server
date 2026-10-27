@@ -4,14 +4,27 @@
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
  */
 
-use super::{LdapDirectory, LdapMappings};
-use crate::{Account, Credentials, Group, IntoError, Recipient, core::secret::verify_secret_hash};
-use ldap3::{Ldap, LdapConnAsync, ResultEntry, Scope, SearchEntry};
+use super::{
+    LdapDirectory, LdapMappings,
+    pool::{is_transport_error, with_conn},
+};
+use crate::{
+    Account, Credentials, Group, IntoError, Recipient,
+    core::{secret::verify_secret_hash, verifier::PasswordVerifier},
+};
+use compact_str::CompactString;
+use deadpool::managed::Object;
+use ldap3::{Ldap, ResultEntry, Scope, SearchEntry};
+use std::time::Duration;
 use store::xxhash_rust;
 use utils::sanitize_email;
 
 impl LdapDirectory {
-    pub async fn authenticate(&self, credentials: &Credentials) -> trc::Result<Account> {
+    pub async fn authenticate(
+        &self,
+        credentials: &Credentials,
+        verifier: &PasswordVerifier,
+    ) -> trc::Result<Account> {
         let (username, secret) = match credentials {
             Credentials::Basic {
                 username, secret, ..
@@ -21,87 +34,114 @@ impl LdapDirectory {
         if secret.is_empty() {
             return Err(trc::AuthEvent::Failed
                 .into_err()
-                .details("Empty secret rejected"));
+                .reason("Empty secret rejected"));
         }
-        let mut conn = self.pool.get().await.map_err(|err| err.into_error())?;
-
-        let mut result = if self.auth_bind {
-            let filter = self.mappings.filter_login.build(username);
-            if let Some(mut result) = self.find_object(&mut conn, &filter).await? {
-                // Perform bind auth using the found dn
-                let (auth_bind_conn, mut ldap) = LdapConnAsync::with_settings(
-                    self.pool.manager().settings.clone(),
-                    &self.pool.manager().address,
-                )
+        let filter = self.mappings.filter_login.build(username);
+        let login = {
+            let mut conn = self.pool.get().await.map_err(|err| err.into_error())?;
+            match self
+                .authenticate_on(&mut conn.ldap, &filter, username, secret)
                 .await
-                .map_err(|err| err.into_error().caused_by(trc::location!()))?;
-
-                ldap3::drive!(auth_bind_conn);
-
-                if ldap
-                    .simple_bind(&result.dn, secret)
-                    .await
-                    .map_err(|err| err.into_error().caused_by(trc::location!()))?
-                    .success()
-                    .is_ok()
-                {
-                    if result.account.email.is_empty() {
-                        result.account.email =
-                            sanitize_email(username).unwrap_or_else(|| username.to_lowercase());
-                    }
-                    result
-                } else {
-                    return Err(trc::AuthEvent::Failed
-                        .into_err()
-                        .details("Secret rejected during auth bind using lookup filter")
-                        .details(vec![result.dn, filter]));
+            {
+                Err(err)
+                | Ok(LdapLogin::VerifyHash {
+                    groups: Err(err), ..
+                }) if is_transport_error(&err) => {
+                    trc::event!(
+                        Store(trc::StoreEvent::LdapWarning),
+                        Reason = "LDAP operation failed, retrying on a new connection",
+                        CausedBy = err
+                    );
+                    drop(Object::take(conn));
+                    let mut conn = self.pool.get().await.map_err(|err| err.into_error())?;
+                    self.authenticate_on(&mut conn.ldap, &filter, username, secret)
+                        .await
                 }
-            } else {
-                return Err(trc::AuthEvent::Failed
-                    .into_err()
-                    .details("Auth bind lookup filter yielded no results")
-                    .details(vec![filter]));
+                login => login,
             }
-        } else {
-            let filter = self.mappings.filter_login.build(username);
-            if let Some(mut result) = self.find_object(&mut conn, &filter).await? {
-                if let Some(account_secret) = &result.account.secret {
-                    if !verify_secret_hash(account_secret, secret.as_bytes()).await? {
-                        return Err(trc::AuthEvent::Failed
-                            .into_err()
-                            .details("Invalid credentials")
-                            .details(vec![filter]));
-                    }
-                } else {
-                    return Err(trc::AuthEvent::Error
-                        .into_err()
-                        .details("Account does not have a secret")
-                        .details(vec![filter]));
-                }
-                if result.account.email.is_empty() {
-                    result.account.email =
-                        sanitize_email(username).unwrap_or_else(|| username.to_lowercase());
-                }
-                result
-            } else {
-                return Err(trc::AuthEvent::Failed
-                    .into_err()
-                    .details("Authentication filter yielded no results")
-                    .details(vec![filter]));
+        }?;
+
+        match login {
+            LdapLogin::Bound(account) => Ok(account),
+            LdapLogin::VerifyHash {
+                account,
+                hash,
+                groups,
+            } => {
+                let verified = verify_secret_hash(verifier, &hash, secret.as_bytes()).await?;
+                hash_login(account, hash, groups, verified, filter)
             }
-        };
-
-        self.add_group_membership(&mut conn, &mut result).await?;
-
-        Ok(result.account)
+        }
     }
 
     pub async fn recipient(&self, address: &str) -> trc::Result<Recipient> {
-        let mut conn = self.pool.get().await.map_err(|err| err.into_error())?;
-        let filter = self.mappings.filter_mailbox.build(address);
-        if let Some(mut result) = self.find_object(&mut conn, &filter).await? {
+        with_conn!(&self.pool, |conn| self.recipient_on(conn, address))
+    }
+
+    async fn authenticate_on(
+        &self,
+        conn: &mut Ldap,
+        filter: &str,
+        username: &str,
+        secret: &str,
+    ) -> trc::Result<LdapLogin> {
+        let Some(mut result) = self.find_object(conn, filter).await? else {
+            return Err(trc::AuthEvent::Failed
+                .into_err()
+                .reason(if self.bind_pool.is_some() {
+                    "Auth bind lookup filter yielded no results"
+                } else {
+                    "Authentication filter yielded no results"
+                })
+                .ctx(trc::Key::Query, filter.to_string()));
+        };
+
+        let hash = if let Some(bind_pool) = &self.bind_pool {
+            let is_bound: bool = with_conn!(bind_pool, |bind_conn| bind_on(
+                bind_conn,
+                &result.dn,
+                secret,
+                self.timeout
+            ))?;
+            if !is_bound {
+                return Err(trc::AuthEvent::Failed
+                    .into_err()
+                    .reason("Secret rejected during auth bind using lookup filter")
+                    .ctx(trc::Key::Name, result.dn)
+                    .ctx(trc::Key::Query, filter.to_string()));
+            }
+            None
+        } else {
+            Some(result.account.secret.take().ok_or_else(|| {
+                trc::AuthEvent::Failed
+                    .into_err()
+                    .reason("Account does not have a secret")
+                    .ctx(trc::Key::Query, filter.to_string())
+            })?)
+        };
+
+        if result.account.email.is_empty() {
+            result.account.email =
+                sanitize_email(username).unwrap_or_else(|| username.to_lowercase());
+        }
+
+        let groups = self.add_group_membership(conn, &mut result).await;
+
+        match hash {
+            Some(hash) => Ok(LdapLogin::VerifyHash {
+                account: result.account,
+                hash,
+                groups,
+            }),
+            None => groups.map(|()| LdapLogin::Bound(result.account)),
+        }
+    }
+
+    async fn recipient_on(&self, conn: &mut Ldap, address: &str) -> trc::Result<Recipient> {
+        let filter = self.mappings.filter_recipient.build(address);
+        if let Some(mut result) = self.find_object(conn, &filter).await? {
             if !result.is_group {
-                self.add_group_membership(&mut conn, &mut result).await?;
+                self.add_group_membership(conn, &mut result).await?;
                 Ok(Recipient::Account(result.account))
             } else {
                 Ok(Recipient::Group(Group {
@@ -114,7 +154,7 @@ impl LdapDirectory {
             trc::event!(
                 Store(trc::StoreEvent::LdapWarning),
                 Reason = "Mailbox filter yielded no results",
-                Details = filter
+                Query = filter
             );
             Ok(Recipient::Invalid)
         }
@@ -129,6 +169,7 @@ impl LdapDirectory {
             let mut groups = Vec::new();
             for name in group_dns.into_iter().filter(|name| name.contains('=')) {
                 let (rs, _res) = conn
+                    .with_timeout(self.timeout)
                     .search(
                         &name,
                         Scope::Base,
@@ -159,6 +200,7 @@ impl LdapDirectory {
         } else if let Some(filter) = &self.mappings.filter_member_of {
             let filter = filter.build(&result.dn);
             let rs = conn
+                .with_timeout(self.timeout)
                 .search(
                     &self.mappings.base_dn,
                     Scope::Subtree,
@@ -180,7 +222,7 @@ impl LdapDirectory {
                                 trc::event!(
                                     Store(trc::StoreEvent::LdapWarning),
                                     Reason = "Group entry missing valid email attribute",
-                                    Details = v
+                                    Address = v
                                 );
                                 None
                             })
@@ -203,27 +245,57 @@ impl LdapDirectory {
 
 impl LdapDirectory {
     async fn find_object(&self, conn: &mut Ldap, filter: &str) -> trc::Result<Option<LdapResult>> {
-        conn.search(
-            &self.mappings.base_dn,
-            Scope::Subtree,
-            filter,
-            &self.mappings.attrs_principal,
-        )
-        .await
-        .map_err(|err| err.into_error().caused_by(trc::location!()))?
-        .success()
-        .map(|(rs, _)| {
-            trc::event!(
-                Store(trc::StoreEvent::LdapQuery),
-                Details = filter.to_string(),
-                Result = rs.first().map(result_to_trace).unwrap_or_default()
-            );
+        conn.with_timeout(self.timeout)
+            .search(
+                &self.mappings.base_dn,
+                Scope::Subtree,
+                filter,
+                &self.mappings.attrs_principal,
+            )
+            .await
+            .map_err(|err| err.into_error().caused_by(trc::location!()))?
+            .success()
+            .map(|(rs, _)| {
+                trc::event!(
+                    Store(trc::StoreEvent::LdapQuery),
+                    Query = CompactString::from(filter),
+                    Result = rs.first().map(result_to_trace).unwrap_or_default()
+                );
 
-            rs.into_iter()
-                .next()
-                .map(|entry| self.mappings.map_entry(SearchEntry::construct(entry)))
+                rs.into_iter()
+                    .next()
+                    .map(|entry| self.mappings.map_entry(SearchEntry::construct(entry)))
+            })
+            .map_err(|err| err.into_error().caused_by(trc::location!()))
+    }
+}
+
+enum LdapLogin {
+    Bound(Account),
+    VerifyHash {
+        account: Account,
+        hash: String,
+        groups: trc::Result<()>,
+    },
+}
+
+fn hash_login(
+    mut account: Account,
+    hash: String,
+    groups: trc::Result<()>,
+    verified: bool,
+    filter: String,
+) -> trc::Result<Account> {
+    if verified {
+        groups.map(|()| {
+            account.secret = Some(hash);
+            account
         })
-        .map_err(|err| err.into_error().caused_by(trc::location!()))
+    } else {
+        Err(trc::AuthEvent::Failed
+            .into_err()
+            .reason("Invalid credentials")
+            .ctx(trc::Key::Query, filter))
     }
 }
 
@@ -296,6 +368,16 @@ impl LdapMappings {
     }
 }
 
+async fn bind_on(conn: &mut Ldap, dn: &str, secret: &str, timeout: Duration) -> trc::Result<bool> {
+    Ok(conn
+        .with_timeout(timeout)
+        .simple_bind(dn, secret)
+        .await
+        .map_err(|err| err.into_error().caused_by(trc::location!()))?
+        .success()
+        .is_ok())
+}
+
 fn result_to_trace(rs: &ResultEntry) -> trc::Value {
     let se = SearchEntry::construct(rs.clone());
     se.attrs
@@ -305,3 +387,4 @@ fn result_to_trace(rs: &ResultEntry) -> trc::Value {
         .collect::<Vec<_>>()
         .into()
 }
+

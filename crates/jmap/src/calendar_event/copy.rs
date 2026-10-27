@@ -5,36 +5,62 @@
  */
 
 use crate::{
-    calendar_event::{CalendarSyntheticId, set::CalendarEventSet},
+    api::metadata::{
+        MetadataPatches, MetadataPreload, MetadataType, MetadataWriter, NewMetadata, ObjectMetadata,
+    },
+    calendar_event::{
+        CalendarSyntheticId, JSCalendarEntries, UidIndex, detach_iana_timezones,
+        privacy::assert_privacy_access,
+        server_set::{PendingBlobIds, ServerSetValues},
+        set::{CalendarEventSet, CopiedEvent, EventSetContext, EventSource, too_many_events},
+    },
     changes::state::JmapCacheState,
 };
-use calcard::jscalendar::JSCalendarProperty;
-use common::{Server, auth::AccessToken};
-use groupware::{cache::GroupwareCache, calendar::CalendarEvent};
+use calcard::{icalendar::ICalendar, jscalendar::JSCalendarProperty};
+use common::{Server, auth::AccessToken, storage::dav::CachedUid};
+use groupware::{
+    cache::GroupwareCache,
+    calendar::{
+        CalendarEventContent, CalendarEventData, EVENT_HIDE_ATTENDEES, EVENT_SECRET,
+        EventPreferences,
+        alerts::DefaultAlertsResolver,
+        identity::{CalendarAddresses, EventOwnership, ParticipantIdentityAddresses},
+        participants::VisibleParticipants,
+        privacy::{EventPrivacy, EventViewer},
+        rights::EventAcl,
+        storage::NotificationQuota,
+        user::UserDataView,
+    },
+};
 use http_proto::HttpSessionData;
 use jmap_proto::{
     error::set::SetError,
     method::{
-        copy::{CopyRequest, CopyResponse},
+        copy::{CopyRequest, CopyResponse, CopySourceId},
         set::SetRequest,
     },
     object::calendar_event,
     request::{
-        Call, IntoValid, MaybeInvalid, RequestMethod, SetRequestMethod,
+        Call, MaybeInvalid, RequestMethod, SetRequestMethod,
+        capability::CapabilityIds,
         method::{MethodFunction, MethodName, MethodObject},
         reference::MaybeResultReference,
     },
     types::state::State,
 };
+use jmap_tools::{Key, Value};
+use registry::schema::enums::StorageQuota;
+use std::borrow::Cow;
 use store::{
     ValueKey,
-    roaring::RoaringBitmap,
-    write::{AlignedBytes, Archive, BatchBuilder},
+    write::{Archive, ArchiveBytes, BatchBuilder, Slot, serialize::rkyv_deserialize},
 };
 use trc::AddContext;
 use types::{
     acl::Acl,
     collection::{Collection, SyncCollection},
+    field::CalendarEventField,
+    metadata::MetadataKinds,
 };
 use utils::map::vec_map::VecMap;
 
@@ -45,6 +71,7 @@ pub trait JmapCalendarEventCopy: Sync + Send {
         access_token: &AccessToken,
         next_call: &mut Option<Call<RequestMethod<'x>>>,
         session: &HttpSessionData,
+        using: CapabilityIds,
     ) -> impl Future<Output = trc::Result<CopyResponse<calendar_event::CalendarEvent>>> + Send;
 }
 
@@ -55,6 +82,7 @@ impl JmapCalendarEventCopy for Server {
         access_token: &AccessToken,
         next_call: &mut Option<Call<RequestMethod<'x>>>,
         _session: &HttpSessionData,
+        using: CapabilityIds,
     ) -> trc::Result<CopyResponse<calendar_event::CalendarEvent>> {
         let account_id = request.account_id.document_id();
         let from_account_id = request.from_account_id.document_id();
@@ -64,15 +92,17 @@ impl JmapCalendarEventCopy for Server {
                 .into_err()
                 .details("From accountId is equal to fromAccountId"));
         }
+        let metadata = ObjectMetadata::new(self, access_token, using, MetadataType::CalendarEvent);
+        let sampled = metadata.viewer_change_id(self, account_id).await?;
         let cache = self
-            .fetch_dav_resources(
+            .fetch_groupware_resources(
                 access_token.account_id(),
                 account_id,
                 SyncCollection::Calendar,
             )
             .await
             .caused_by(trc::location!())?;
-        let old_state = cache.assert_state(false, &request.if_in_state)?;
+        let old_state = sampled.assert_state(cache.get_state(false), &request.if_in_state)?;
         let mut response = CopyResponse {
             from_account_id: request.from_account_id,
             account_id: request.account_id,
@@ -80,113 +110,284 @@ impl JmapCalendarEventCopy for Server {
             old_state,
             created: VecMap::with_capacity(request.create.len()),
             not_created: VecMap::new(),
+            destroyed: None,
         };
 
+        let from_sampled = metadata.viewer_change_id(self, from_account_id).await?;
         let from_cache = self
-            .fetch_dav_resources(
+            .fetch_groupware_resources(
                 access_token.account_id(),
                 from_account_id,
                 SyncCollection::Calendar,
             )
             .await
             .caused_by(trc::location!())?;
-        let from_calendar_event_ids = if access_token.is_member(from_account_id) {
-            from_cache.document_ids(false).collect::<RoaringBitmap>()
-        } else {
-            from_cache.shared_items(access_token, [Acl::ReadItems], true)
+        from_sampled.assert_state(from_cache.get_state(false), &request.if_from_in_state)?;
+        let is_from_owner = access_token.is_member(from_account_id);
+        let from_personal_id = access_token.personal_id(from_account_id, Collection::Calendar);
+        let shared_from_event_ids = (!is_from_owner).then(|| {
+            let mut shared_ids = from_cache.shared_items(access_token, [Acl::ReadItems], true);
+            shared_ids -= from_cache.event_ids_with_flags(EVENT_SECRET);
+            shared_ids
+        });
+        let is_readable_source = |document_id: u32| match &shared_from_event_ids {
+            Some(ids) => ids.contains(document_id),
+            None => from_cache.has_item_id(&document_id),
         };
 
-        let can_add_calendars = if access_token.is_shared(account_id) {
-            cache
-                .shared_containers(access_token, [Acl::AddItems], true)
-                .into()
-        } else {
-            None
-        };
+        let is_shared = access_token.is_shared(account_id);
+        let can_add_calendars =
+            is_shared.then(|| cache.shared_containers(access_token, [Acl::AddItems], true));
         let on_success_delete = request.on_success_destroy_original.unwrap_or(false);
         let mut destroy_ids = Vec::new();
+        let mut created_slots: Vec<(String, Slot, ServerSetValues)> = Vec::new();
 
         // Obtain account info
         let account_info = self
-            .account_info(access_token.account_id())
+            .account_info(account_id)
             .await
             .caused_by(trc::location!())?;
+        let identities = if is_shared {
+            self.account_identity_addresses(access_token.account_id())
+                .await
+                .caused_by(trc::location!())?
+        } else {
+            CalendarAddresses::default()
+        };
+        let mut viewer_identities = None;
+        let viewer = metadata.viewer();
+        let mut metadata_writer = MetadataWriter::new(metadata, account_id);
+        let mut preload = MetadataPreload::default();
+        let mut creates = Vec::with_capacity(request.create.len());
+        for (create_id, mut create) in request.create {
+            let source_id = create.take_source_id(JSCalendarProperty::Id);
+            let patches = metadata_writer.extract(MetadataPatches::for_create(), &mut create);
+            if let (Ok(source_id), Ok(_)) = (&source_id, &patches)
+                && !source_id.is_synthetic()
+                && is_readable_source(source_id.document_id())
+            {
+                let document_id = source_id.document_id();
+                let kinds = from_cache
+                    .item_by_id(document_id)
+                    .map_or(MetadataKinds::NONE, |resource| resource.metadata_kinds());
+                if viewer.is_some() || !kinds.is_empty() {
+                    preload.insert_source(document_id, kinds);
+                }
+            }
+            creates.push((create_id, source_id, create, patches));
+        }
+        metadata_writer
+            .preload(self, from_account_id, preload)
+            .await?;
+        let uid_index = UidIndex::new(
+            &cache,
+            creates.iter().filter_map(|(_, source_id, create, _)| {
+                match create.as_object_and_get(&Key::Property(JSCalendarProperty::Uid)) {
+                    Some(Value::Str(uid)) => Some(uid.cached_uid()),
+                    _ => source_id.as_ref().ok().and_then(|source_id| {
+                        from_cache
+                            .resources
+                            .find(source_id.document_id(), false)
+                            .and_then(|resource| resource.uid())
+                            .map(Cow::Borrowed)
+                    }),
+                }
+            }),
+        );
+
+        // Obtain quota
+        let account = self.account(account_id).await.caused_by(trc::location!())?;
+        let quota = self.object_quota_usage(&account, StorageQuota::MaxCalendarEvents, || {
+            cache.resources.count(false)
+        });
 
         // Prepare batch
         let mut batch = BatchBuilder::new();
+        let mut context = EventSetContext {
+            cache: &cache,
+            access_token,
+            account_id,
+            account_info: &account_info,
+            send_scheduling_messages: false,
+            can_add_calendars: can_add_calendars.as_ref(),
+            identities: &identities,
+            uid_index,
+            will_destroy: Vec::new(),
+            default_alerts: DefaultAlertsResolver::with_resources(account_id, cache.clone()),
+            notification_quota: NotificationQuota::default(),
+            disk_quota: self
+                .disk_quota_budget(&account)
+                .await
+                .caused_by(trc::location!())?,
+            metadata: metadata_writer,
+        };
 
-        'create: for (id, create) in request.create.into_valid() {
-            let from_calendar_event_id = id.document_id();
-            if !from_calendar_event_ids.contains(from_calendar_event_id) {
+        'create: for (create_id, source_id, create, patches) in creates {
+            if !quota.has_room(created_slots.len()) {
+                response.not_created.append(create_id, too_many_events());
+                continue;
+            }
+            let source_id = match source_id {
+                Ok(source_id) => source_id,
+                Err(err) => {
+                    response.not_created.append(create_id, err);
+                    continue;
+                }
+            };
+            let patches = match patches {
+                Ok(patches) => patches,
+                Err(err) => {
+                    response.not_created.append(create_id, err);
+                    continue;
+                }
+            };
+
+            let from_calendar_event_id = source_id.document_id();
+            if !is_readable_source(from_calendar_event_id) {
                 response.not_created.append(
-                    id,
+                    create_id,
                     SetError::not_found().with_description(format!(
                         "Item {} not found in account {}.",
-                        id, response.from_account_id
+                        source_id, response.from_account_id
                     )),
                 );
                 continue;
             }
-            if id.is_synthetic() {
+            if source_id.is_synthetic() {
                 response.not_created.append(
-                    id,
+                    create_id,
                     SetError::invalid_properties()
                         .with_property(JSCalendarProperty::Id)
                         .with_description(format!(
-                            "Item {} is a synthetic id and cannot be copied.",
-                            id
+                            "Item {source_id} is a synthetic id and cannot be copied."
                         )),
                 );
                 continue;
             }
 
-            let Some(_calendar_event) = self
+            let source_resource = from_cache.resources.find(from_calendar_event_id, false);
+            let Some((flags, source_resource)) = source_resource
+                .as_ref()
+                .and_then(|resource| resource.event_flags().map(|flags| (flags, resource)))
+            else {
+                response.not_created.append(
+                    create_id,
+                    SetError::not_found().with_description(format!(
+                        "Item {} not found in account {}.",
+                        source_id, response.from_account_id
+                    )),
+                );
+                continue;
+            };
+            if let Err(err) = assert_privacy_access(
+                EventPrivacy::from_flags(flags),
+                EventViewer::new(is_from_owner),
+            ) {
+                response.not_created.append(create_id, err);
+                continue;
+            }
+            let Some(content) = self
                 .store()
-                .get_value::<Archive<AlignedBytes>>(ValueKey::archive(
+                .get_value::<Archive<ArchiveBytes>>(ValueKey::property(
                     from_account_id,
                     Collection::CalendarEvent,
                     from_calendar_event_id,
+                    CalendarEventField::Content,
                 ))
                 .await?
             else {
                 response.not_created.append(
-                    id,
+                    create_id,
                     SetError::not_found().with_description(format!(
                         "Item {} not found in account {}.",
-                        id, response.from_account_id
+                        source_id, response.from_account_id
                     )),
                 );
                 continue;
             };
 
-            let calendar_event = _calendar_event
-                .deserialize::<CalendarEvent>()
+            let content = content
+                .unarchive::<CalendarEventContent>()
                 .caused_by(trc::location!())?;
+            let preferences = content.preferences(from_personal_id);
+            let use_default_alerts =
+                preferences.is_some_and(|preferences| preferences.use_default_alerts());
+            let mut event = if is_from_owner {
+                rkyv_deserialize::<_, ICalendar>(&content.data.event)
+            } else {
+                preferences
+                    .map(rkyv_deserialize::<_, EventPreferences>)
+                    .transpose()
+                    .and_then(|preferences| {
+                        rkyv_deserialize::<_, CalendarEventData>(&content.data).map(|mut data| {
+                            data.apply_user_data(preferences.as_ref(), UserDataView::Full);
+                            data.event
+                        })
+                    })
+            }
+            .caused_by(trc::location!())?;
+            detach_iana_timezones(&mut event);
+            let hidden_acl = (!is_from_owner && flags & EVENT_HIDE_ATTENDEES != 0)
+                .then(|| {
+                    EventAcl::for_calendars(
+                        &from_cache,
+                        access_token,
+                        source_resource
+                            .child_names()
+                            .iter()
+                            .map(|calendar| calendar.parent_id),
+                    )
+                })
+                .filter(|acl| !acl.may_write(EventOwnership::NotOwner));
+            let participant_filter = match hidden_acl {
+                Some(acl) => {
+                    if !is_shared && viewer_identities.is_none() {
+                        viewer_identities = Some(
+                            self.account_identity_addresses(access_token.account_id())
+                                .await
+                                .caused_by(trc::location!())?,
+                        );
+                    }
+                    let viewer = viewer_identities.as_ref().unwrap_or(&identities);
+                    (!acl.may_write(viewer.event_ownership(&event))).then_some(viewer)
+                }
+                None => None,
+            };
+            let mut event = event.into_jscalendar();
+            if let Some(identities) = participant_filter {
+                for entry in event.entries_mut() {
+                    entry.retain_visible_participants(identities);
+                }
+            }
+            let source = EventSource::Copy(CopiedEvent {
+                event,
+                flags,
+                use_default_alerts,
+            });
 
             match self
                 .create_calendar_event(
-                    &cache,
+                    &mut context,
                     &mut batch,
-                    access_token,
-                    account_id,
-                    &account_info,
-                    false,
-                    &can_add_calendars,
-                    calendar_event.data.event.into_jscalendar(),
+                    source,
                     create,
+                    Some(NewMetadata::Copy {
+                        patches,
+                        source_id: from_calendar_event_id,
+                    }),
                 )
                 .await?
             {
-                Ok(document_id) => {
-                    response.created(id, document_id);
+                Ok((slot, server_set)) => {
+                    created_slots.push((create_id, slot, server_set));
 
                     // Add to destroy list
                     if on_success_delete {
-                        destroy_ids.push(MaybeInvalid::Value(id));
+                        destroy_ids.push(MaybeInvalid::Value(source_id));
                     }
                 }
                 Err(err) => {
-                    response.not_created.append(id, err);
+                    response.not_created.append(create_id, err);
                     continue 'create;
                 }
             }
@@ -194,14 +395,30 @@ impl JmapCalendarEventCopy for Server {
 
         // Write changes
         if !batch.is_empty() {
-            let change_id = self
-                .commit_batch(batch)
-                .await
-                .and_then(|ids| ids.last_change_id(account_id))
-                .caused_by(trc::location!())?;
-            self.notify_task_queue();
+            let assigned_ids = match context.metadata.commit(self, batch).await {
+                Ok(assigned_ids) => assigned_ids,
+                Err(err) if err.is_assertion_failure() => {
+                    for (create_id, _, _) in created_slots {
+                        response.not_created.append(
+                            create_id,
+                            SetError::forbidden().with_description(
+                                "Another process modified this calendar event, please try again.",
+                            ),
+                        );
+                    }
+                    return Ok(response);
+                }
+                Err(err) => return Err(err.caused_by(trc::location!())),
+            };
 
-            response.new_state = State::Exact(change_id);
+            for (create_id, slot, mut server_set) in created_slots {
+                let document_id = assigned_ids.slot(slot);
+                server_set.resolve_document_id(document_id);
+                response.created_with_properties(create_id, document_id, server_set);
+            }
+
+            response.new_state =
+                State::Exact(assigned_ids.last_change_id(account_id, SyncCollection::Calendar));
         }
 
         // Destroy ids

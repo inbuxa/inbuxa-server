@@ -65,6 +65,7 @@ impl ShareNotificationGet for Server {
 
         let mut account_cache: AHashMap<u32, Arc<AccountCache>> = AHashMap::new();
 
+        let has_ids = request.ids.is_some();
         let mut ids = if let Some(ids) = request.ids.take() {
             let ids = ids.unwrap();
             if ids.len() <= self.core.jmap.get_max_objects {
@@ -86,7 +87,6 @@ impl ShareNotificationGet for Server {
         } else {
             AHashSet::new()
         };
-        let has_ids = !ids.is_empty();
 
         if min_id == u64::MAX {
             min_id = SnowflakeIdGenerator::from_duration(
@@ -109,22 +109,27 @@ impl ShareNotificationGet for Server {
             not_found: vec![],
         };
         let mut notifications = Vec::new();
+        let params = IterateParams::new(
+            LogKey {
+                account_id,
+                collection: SyncCollection::ShareNotification.into(),
+                change_id: min_id,
+            },
+            LogKey {
+                account_id,
+                collection: SyncCollection::ShareNotification.into(),
+                change_id: max_id.saturating_add(1),
+            },
+        )
+        .descending();
 
         self.store()
             .iterate(
-                IterateParams::new(
-                    LogKey {
-                        account_id,
-                        collection: SyncCollection::ShareNotification.into(),
-                        change_id: min_id,
-                    },
-                    LogKey {
-                        account_id,
-                        collection: SyncCollection::ShareNotification.into(),
-                        change_id: max_id.saturating_add(1),
-                    },
-                )
-                .descending(),
+                match (has_ids, ids.is_empty()) {
+                    (false, _) => params.limit(self.core.jmap.get_max_objects.saturating_add(1)),
+                    (true, true) => params.only_first(),
+                    (true, false) => params,
+                },
                 |key, value| {
                     let change_id = key.deserialize_be_u64(key.len() - U64_LEN)?;
                     if response.state.is_none() {
@@ -139,11 +144,14 @@ impl ShareNotificationGet for Server {
                     }
 
                     Ok((!has_ids || !ids.is_empty())
-                        && notifications.len() < self.core.jmap.get_max_objects)
+                        && notifications.len() <= self.core.jmap.get_max_objects)
                 },
             )
             .await
             .caused_by(trc::location!())?;
+        if notifications.len() > self.core.jmap.get_max_objects {
+            return Err(trc::JmapEvent::RequestTooLarge.into_err());
+        }
 
         for (change_id, notification) in notifications {
             let changed_by_account =
@@ -252,7 +260,7 @@ fn map_rights(
             for right in CalendarRight::all_rights() {
                 obj.insert_unchecked(
                     Key::Borrowed(right.as_str()),
-                    Value::Bool(right.to_acl().iter().all(|acl| rights.contains(*acl))),
+                    Value::Bool(right.is_granted(&rights)),
                 );
             }
         }
@@ -260,7 +268,7 @@ fn map_rights(
             for right in AddressBookRight::all_rights() {
                 obj.insert_unchecked(
                     Key::Borrowed(right.as_str()),
-                    Value::Bool(right.to_acl().iter().all(|acl| rights.contains(*acl))),
+                    Value::Bool(right.is_granted(&rights)),
                 );
             }
         }
@@ -268,7 +276,7 @@ fn map_rights(
             for right in FileNodeRight::all_rights() {
                 obj.insert_unchecked(
                     Key::Borrowed(right.as_str()),
-                    Value::Bool(right.to_acl().iter().all(|acl| rights.contains(*acl))),
+                    Value::Bool(right.is_granted(&rights)),
                 );
             }
         }
@@ -276,7 +284,7 @@ fn map_rights(
             for right in MailboxRight::all_rights() {
                 obj.insert_unchecked(
                     Key::Borrowed(right.as_str()),
-                    Value::Bool(right.to_acl().iter().all(|acl| rights.contains(*acl))),
+                    Value::Bool(right.is_granted(&rights)),
                 );
             }
         }

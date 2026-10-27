@@ -4,18 +4,25 @@
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
  */
 
-use crate::{api::acl::JmapRights, changes::state::JmapCacheState};
+use crate::{
+    api::{
+        acl::JmapRights,
+        metadata::{MetadataDocuments, MetadataType, ObjectMetadata, select_properties},
+    },
+    changes::state::JmapCacheState,
+};
 use common::{Server, auth::AccessToken, sharing::EffectiveAcl};
 use groupware::{cache::GroupwareCache, contact::AddressBook};
 use jmap_proto::{
-    method::get::{GetRequest, GetResponse},
+    method::get::{GetRequest, GetResponse, all_ids},
     object::addressbook::{self, AddressBookProperty, AddressBookValue},
+    request::capability::CapabilityIds,
 };
 use jmap_tools::{Map, Value};
 use store::{
     ValueKey,
     roaring::RoaringBitmap,
-    write::{AlignedBytes, Archive, ValueClass},
+    write::{Archive, ArchiveBytes, ValueClass},
 };
 use trc::AddContext;
 use types::{
@@ -29,6 +36,7 @@ pub trait AddressBookGet: Sync + Send {
         &self,
         request: GetRequest<addressbook::AddressBook>,
         access_token: &AccessToken,
+        using: CapabilityIds,
     ) -> impl Future<Output = trc::Result<GetResponse<addressbook::AddressBook>>> + Send;
 }
 
@@ -37,22 +45,33 @@ impl AddressBookGet for Server {
         &self,
         mut request: GetRequest<addressbook::AddressBook>,
         access_token: &AccessToken,
+        using: CapabilityIds,
     ) -> trc::Result<GetResponse<addressbook::AddressBook>> {
         let (ids, not_found_ids) = request.unwrap_ids(self.core.jmap.get_max_objects)?;
-        let properties = request.unwrap_properties(&[
-            AddressBookProperty::Id,
-            AddressBookProperty::Name,
-            AddressBookProperty::Description,
-            AddressBookProperty::SortOrder,
-            AddressBookProperty::IsDefault,
-            AddressBookProperty::IsSubscribed,
-            AddressBookProperty::ShareWith,
-            AddressBookProperty::MyRights,
-        ]);
+        let (properties, selection) = select_properties(
+            &mut request,
+            &[
+                AddressBookProperty::Id,
+                AddressBookProperty::Name,
+                AddressBookProperty::Description,
+                AddressBookProperty::SortOrder,
+                AddressBookProperty::IsDefault,
+                AddressBookProperty::IsSubscribed,
+                AddressBookProperty::ShareWith,
+                AddressBookProperty::MyRights,
+            ],
+            using,
+        )?;
+        let metadata = ObjectMetadata::new(self, access_token, using, MetadataType::AddressBook);
+        let metadata_get = metadata.get(selection);
+        let metadata_slots = metadata_get.as_ref().map_or(0, |get| {
+            usize::from(get.wants_shared()) + usize::from(get.wants_private())
+        });
         let account_id = request.account_id.document_id();
+        let sampled = metadata.viewer_change_id(self, account_id).await?;
         let personal_id = access_token.personal_id(account_id, Collection::AddressBook);
         let cache = self
-            .fetch_dav_resources(
+            .fetch_groupware_resources(
                 access_token.account_id(),
                 account_id,
                 SyncCollection::AddressBook,
@@ -63,30 +82,51 @@ impl AddressBookGet for Server {
         } else {
             cache.shared_containers(access_token, [Acl::Read, Acl::ReadItems], true)
         };
-        let default_address_book_id = self
-            .store()
-            .get_value::<u32>(ValueKey {
-                account_id,
-                collection: Collection::Principal.into(),
-                document_id: 0,
-                class: ValueClass::Property(PrincipalField::DefaultAddressBookId.into()),
-            })
-            .await
-            .caused_by(trc::location!())?
-            .or_else(|| cache.document_ids(true).min());
+        let default_address_book_id = if properties.contains(&AddressBookProperty::IsDefault) {
+            self.store()
+                .get_value::<u32>(ValueKey {
+                    account_id,
+                    collection: Collection::Principal.into(),
+                    document_id: 0,
+                    class: ValueClass::Property(PrincipalField::DefaultAddressBookId.into()),
+                })
+                .await
+                .caused_by(trc::location!())?
+                .or_else(|| cache.document_ids(true).min())
+        } else {
+            None
+        };
 
         let ids = if let Some(ids) = ids {
             ids
         } else {
-            address_book_ids
-                .iter()
-                .take(self.core.jmap.get_max_objects)
-                .map(Into::into)
-                .collect::<Vec<_>>()
+            all_ids(
+                address_book_ids.iter().map(Into::into),
+                self.core.jmap.get_max_objects,
+            )?
+        };
+        let mut metadata_values = match &metadata_get {
+            Some(get) => {
+                let mut documents = MetadataDocuments::default();
+                for document_id in ids
+                    .iter()
+                    .map(|id| id.document_id())
+                    .filter(|document_id| address_book_ids.contains(*document_id))
+                {
+                    documents.insert(
+                        document_id,
+                        cache
+                            .container_resource_by_id(document_id)
+                            .map_or_else(Default::default, |resource| resource.metadata_kinds()),
+                    );
+                }
+                Some(metadata.load(self, account_id, get, &documents).await?)
+            }
+            None => None,
         };
         let mut response = GetResponse {
             account_id: request.account_id.into(),
-            state: cache.get_state(true).into(),
+            state: sampled.state(cache.get_state(true)).into(),
             list: Vec::with_capacity(ids.len()),
             not_found: not_found_ids,
         };
@@ -100,7 +140,7 @@ impl AddressBookGet for Server {
             }
             let _address_book = if let Some(address_book) = self
                 .store()
-                .get_value::<Archive<AlignedBytes>>(ValueKey::archive(
+                .get_value::<Archive<ArchiveBytes>>(ValueKey::archive(
                     account_id,
                     Collection::AddressBook,
                     document_id,
@@ -115,7 +155,7 @@ impl AddressBookGet for Server {
             let address_book = _address_book
                 .unarchive::<AddressBook>()
                 .caused_by(trc::location!())?;
-            let mut result = Map::with_capacity(properties.len());
+            let mut result = Map::with_capacity(properties.len() + metadata_slots);
             for property in &properties {
                 match property {
                     AddressBookProperty::Id => {
@@ -188,6 +228,9 @@ impl AddressBookGet for Server {
                         result.insert_unchecked(property.clone(), Value::Null);
                     }
                 }
+            }
+            if let Some(values) = &mut metadata_values {
+                values.insert_into(document_id, &mut result);
             }
             response.list.push(result.into());
         }

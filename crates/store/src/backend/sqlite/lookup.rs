@@ -4,20 +4,22 @@
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
  */
 
+use super::{SqliteStore, into_error};
+use crate::{IntoRows, QueryResult, QueryType, Value, backend::worker::Access};
 use rusqlite::{Row, Rows, ToSql, types::FromSql};
 
-use crate::{IntoRows, QueryResult, QueryType, Value};
-
-use super::{SqliteStore, into_error};
-
 impl SqliteStore {
-    pub(crate) async fn sql_query<T: QueryResult>(
+    pub(crate) fn sql_query<T: QueryResult>(
         &self,
         query: &str,
         params_: &[Value<'_>],
-    ) -> trc::Result<T> {
+    ) -> impl Future<Output = trc::Result<T>> {
         let manager = self.conn_pool.clone();
-        self.spawn_worker(move || {
+        let access = match T::query_type() {
+            QueryType::Execute => Access::Write,
+            QueryType::Exists | QueryType::QueryAll | QueryType::QueryOne => Access::Read,
+        };
+        self.block(access, move || {
             let conn = manager.get().map_err(into_error)?;
             let mut s = conn.prepare_cached(query).map_err(into_error)?;
             let params = params_
@@ -42,7 +44,6 @@ impl SqliteStore {
                 )),
             }
         })
-        .await
     }
 }
 
@@ -97,10 +98,7 @@ impl IntoRows for Rows<'_> {
             .map(|s| {
                 (
                     s.column_count(),
-                    s.column_names()
-                        .into_iter()
-                        .map(String::from)
-                        .collect::<Vec<_>>(),
+                    s.column_names().map(String::from).collect::<Vec<_>>(),
                 )
             })
             .unwrap_or((0, Vec::new()));

@@ -27,7 +27,6 @@ impl<'x> JsonPointerPatch<'x> {
             pos: 0,
             validators: &[],
             is_create: false,
-            can_set_tenant: false,
             can_set_account: false,
         }
     }
@@ -38,7 +37,6 @@ impl<'x> JsonPointerPatch<'x> {
             pos: 0,
             validators: &[],
             is_create: self.is_create,
-            can_set_tenant: self.can_set_tenant,
             can_set_account: self.can_set_account,
         }
     }
@@ -49,7 +47,6 @@ impl<'x> JsonPointerPatch<'x> {
             pos: 0,
             validators: &[],
             is_create: self.is_create,
-            can_set_tenant: self.can_set_tenant,
             can_set_account: self.can_set_account,
         }
     }
@@ -59,10 +56,6 @@ impl<'x> JsonPointerPatch<'x> {
         self
     }
 
-    pub fn with_can_set_tenant(mut self, can_set_tenant: bool) -> Self {
-        self.can_set_tenant = can_set_tenant;
-        self
-    }
 
     pub fn with_can_set_account(mut self, can_set_account: bool) -> Self {
         self.can_set_account = can_set_account;
@@ -127,16 +120,6 @@ impl<'x> JsonPointerPatch<'x> {
         ))
     }
 
-    pub fn assert_can_set_tenant(self) -> Result<Self, PatchError> {
-        if self.can_set_tenant {
-            Ok(self)
-        } else {
-            Err(PatchError::new(
-                self.cloned(),
-                "Cannot modify memberTenantId property",
-            ))
-        }
-    }
 
     pub fn assert_can_set_account(self) -> Result<Self, PatchError> {
         if self.can_set_account {

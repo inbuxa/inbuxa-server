@@ -5,7 +5,7 @@
  */
 
 use super::query::CalendarQueryHandler;
-use crate::{DavError, calendar::query::is_resource_in_time_range, common::uri::DavUriResource};
+use crate::{DavError, calendar::query::EventTimeRange, common::uri::DavUriResource};
 use calcard::{
     common::{PartialDateTime, timezone::Tz},
     icalendar::{
@@ -16,26 +16,35 @@ use calcard::{
         ICalendarProperty, ICalendarTransparency, ICalendarValue,
     },
 };
-use common::{DavResourcePath, DavResources, PROD_ID, Server, auth::AccessToken};
+use common::{
+    DavResourcePath, GroupwareResourceRef, GroupwareResources, PROD_ID, Server, auth::AccessToken,
+};
 use dav_proto::{RequestHeaders, schema::request::FreeBusyQuery};
-use groupware::{cache::GroupwareCache, calendar::CalendarEvent};
+use groupware::{
+    cache::GroupwareCache,
+    calendar::{
+        CalendarEventContent,
+        availability::{AvailabilityCalendars, ComponentBusy, Inclusion, PrincipalRole},
+        identity::ParticipantIdentityAddresses,
+        privacy::EventPrivacy,
+    },
+};
 use http_proto::HttpResponse;
 use hyper::StatusCode;
 use std::str::FromStr;
 use store::{
-    ValueKey,
-    write::{AlignedBytes, Archive},
-};
-use store::{
     ahash::AHashMap,
+    roaring::RoaringBitmap,
     write::{now, serialize::rkyv_deserialize},
 };
 use trc::AddContext;
 use types::{
-    TimeRange,
+    OverlapCondition, TimeRange,
     acl::Acl,
     collection::{Collection, SyncCollection},
+    field::CalendarEventField,
 };
+use utils::map::bitmap::Bitmap;
 
 pub(crate) trait CalendarFreebusyRequestHandler: Sync + Send {
     fn handle_calendar_freebusy_request(
@@ -49,10 +58,21 @@ pub(crate) trait CalendarFreebusyRequestHandler: Sync + Send {
         &self,
         access_token: &AccessToken,
         request: FreeBusyQuery,
-        resources: &DavResources,
+        resources: &GroupwareResources,
         account_id: u32,
-        resource: DavResourcePath<'_>,
+        scope: FreeBusyScope<'_>,
     ) -> impl Future<Output = crate::Result<ICalendar>> + Send;
+}
+
+pub(crate) enum FreeBusyScope<'x> {
+    Collection(DavResourcePath<'x>),
+    Account(AvailabilityCalendars<'x>),
+}
+
+struct SelectedEvent {
+    privacy: EventPrivacy,
+    tz: Tz,
+    attending_only: bool,
 }
 
 impl CalendarFreebusyRequestHandler for Server {
@@ -64,12 +84,18 @@ impl CalendarFreebusyRequestHandler for Server {
     ) -> crate::Result<HttpResponse> {
         // Validate URI
         let resource_ = self
-            .validate_uri(access_token, headers.uri)
+            .parse_uri(headers.uri, StatusCode::NOT_FOUND)
             .await?
             .into_owned_uri()?;
         let account_id = resource_.account_id;
+        let has_account_access = access_token.has_access(account_id, resource_.collection);
+        let access_error = if has_account_access {
+            StatusCode::NOT_FOUND
+        } else {
+            StatusCode::FORBIDDEN
+        };
         let resources = self
-            .fetch_dav_resources(
+            .fetch_groupware_resources(
                 access_token.account_id(),
                 account_id,
                 SyncCollection::Calendar,
@@ -82,208 +108,312 @@ impl CalendarFreebusyRequestHandler for Server {
                     .resource
                     .ok_or(DavError::Code(StatusCode::METHOD_NOT_ALLOWED))?,
             )
-            .ok_or(DavError::Code(StatusCode::NOT_FOUND))?;
+            .filter(|resource| {
+                has_account_access
+                    || (resource.is_container()
+                        && resources.has_access_to_container(
+                            access_token,
+                            resource.document_id(),
+                            Bitmap::from_iter([Acl::ReadItems, Acl::SchedulingReadFreeBusy]),
+                        ))
+            })
+            .ok_or(DavError::Code(access_error))?;
         if !resource.is_container() {
             return Err(DavError::Code(StatusCode::METHOD_NOT_ALLOWED));
         }
 
-        self.build_freebusy_object(access_token, request, &resources, account_id, resource)
-            .await
-            .map(|ical| {
-                HttpResponse::new(StatusCode::OK)
-                    .with_content_type("text/calendar; charset=utf-8")
-                    .with_text_body(ical.to_string())
-            })
+        self.build_freebusy_object(
+            access_token,
+            request,
+            &resources,
+            account_id,
+            FreeBusyScope::Collection(resource),
+        )
+        .await
+        .map(|ical| {
+            HttpResponse::new(StatusCode::OK)
+                .with_content_type("text/calendar; charset=utf-8")
+                .with_text_body(ical.to_string())
+        })
     }
 
     async fn build_freebusy_object(
         &self,
         access_token: &AccessToken,
         request: FreeBusyQuery,
-        resources: &DavResources,
+        resources: &GroupwareResources,
         account_id: u32,
-        resource: DavResourcePath<'_>,
+        scope: FreeBusyScope<'_>,
     ) -> crate::Result<ICalendar> {
-        // Obtain shared ids
-        let shared_ids = if !access_token.is_member(account_id) {
-            resources
-                .shared_items(
-                    access_token,
-                    [Acl::ReadItems, Acl::SchedulingReadFreeBusy],
-                    false,
-                )
-                .into()
-        } else {
-            None
+        let is_owner = access_token.is_member(account_id);
+        let event_privacy = |resource: &GroupwareResourceRef<'_>| {
+            if is_owner {
+                EventPrivacy::Public
+            } else {
+                EventPrivacy::from_flags(resource.event_flags().unwrap_or_default())
+            }
         };
 
-        // Build FreeBusy component
-        let default_tz = resource
-            .resource
-            .calendar_preferences(account_id)
-            .map(|p| p.tz)
-            .unwrap_or(Tz::UTC);
         let mut entries = Vec::with_capacity(6);
         if let Some(range) = request.range {
             entries.push(ICalendarEntry {
                 name: ICalendarProperty::Dtstart,
                 params: vec![],
-                values: vec![ICalendarValue::PartialDateTime(Box::new(
+                values: [ICalendarValue::PartialDateTime(
                     PartialDateTime::from_utc_timestamp(range.start),
-                ))],
+                )]
+                .into(),
             });
             entries.push(ICalendarEntry {
                 name: ICalendarProperty::Dtend,
                 params: vec![],
-                values: vec![ICalendarValue::PartialDateTime(Box::new(
+                values: [ICalendarValue::PartialDateTime(
                     PartialDateTime::from_utc_timestamp(range.end),
-                ))],
+                )]
+                .into(),
             });
             entries.push(ICalendarEntry {
                 name: ICalendarProperty::Dtstamp,
                 params: vec![],
-                values: vec![ICalendarValue::PartialDateTime(Box::new(
+                values: [ICalendarValue::PartialDateTime(
                     PartialDateTime::from_utc_timestamp(now() as i64),
-                ))],
+                )]
+                .into(),
             });
 
-            let document_ids = resources
-                .children(resource.document_id())
-                .filter(|resource| {
-                    shared_ids
-                        .as_ref()
-                        .is_none_or(|ids| ids.contains(resource.document_id()))
-                        && is_resource_in_time_range(resource.resource, &range)
-                })
-                .map(|resource| resource.document_id())
-                .collect::<Vec<_>>();
+            let mut document_ids = RoaringBitmap::new();
+            let mut selected = AHashMap::new();
+            let mut role = PrincipalRole::Owner;
+            match scope {
+                FreeBusyScope::Collection(collection) => {
+                    let shared_acls =
+                        Bitmap::from_iter([Acl::ReadItems, Acl::SchedulingReadFreeBusy]);
+                    let tz = collection
+                        .resource
+                        .calendar_preferences(account_id)
+                        .map_or(Tz::UTC, |p| p.tz);
+                    for resource in resources.children(collection.document_id()) {
+                        let privacy = event_privacy(&resource.resource);
+                        if privacy != EventPrivacy::Secret
+                            && (is_owner
+                                || resources.is_shared_item(
+                                    &resource.resource,
+                                    access_token,
+                                    &shared_acls,
+                                    true,
+                                ))
+                            && resource.resource.resource.is_in_time_range(&range)
+                        {
+                            let document_id = resource.document_id();
+                            document_ids.insert(document_id);
+                            selected.insert(
+                                document_id,
+                                SelectedEvent {
+                                    privacy,
+                                    tz,
+                                    attending_only: false,
+                                },
+                            );
+                        }
+                    }
+                }
+                FreeBusyScope::Account(mut calendars) => {
+                    role = calendars.role();
+                    for resource in resources.resources.iter() {
+                        if !resource.resource.is_in_time_range(&range) {
+                            continue;
+                        }
+                        let privacy = event_privacy(&resource);
+                        if privacy == EventPrivacy::Secret {
+                            continue;
+                        }
+                        let Some(calendar) = calendars.relevant_calendar(resource.child_names())
+                        else {
+                            continue;
+                        };
+                        let document_id = resource.document_id();
+                        document_ids.insert(document_id);
+                        selected.insert(
+                            document_id,
+                            SelectedEvent {
+                                privacy,
+                                tz: calendar.tz,
+                                attending_only: calendar.inclusion == Inclusion::Attending,
+                            },
+                        );
+                    }
+                }
+            }
+            let identities = if selected.values().any(|event| event.attending_only) {
+                Some(
+                    self.account_identity_addresses(account_id)
+                        .await
+                        .caused_by(trc::location!())?,
+                )
+            } else {
+                None
+            };
 
             let mut fb_entries: AHashMap<ICalendarFreeBusyType, Vec<(i64, i64)>> =
-                AHashMap::with_capacity(document_ids.len());
+                AHashMap::with_capacity(4);
             let max_instances = self.core.groupware.max_ical_instances;
             let mut total_instances: usize = 0;
 
-            for document_id in document_ids {
-                let Some(archive) = self
-                    .store()
-                    .get_value::<Archive<AlignedBytes>>(ValueKey::archive(
-                        account_id,
-                        Collection::CalendarEvent,
-                        document_id,
-                    ))
-                    .await
-                    .caused_by(trc::location!())?
-                else {
-                    continue;
-                };
-                let event = archive
-                    .unarchive::<CalendarEvent>()
-                    .caused_by(trc::location!())?;
+            if !document_ids.is_empty() {
+                self.archives(
+                    account_id,
+                    Collection::CalendarEvent,
+                    CalendarEventField::Content.field(),
+                    &document_ids,
+                    |document_id, archive| {
+                        let Some(&SelectedEvent {
+                            privacy,
+                            tz: default_tz,
+                            attending_only,
+                        }) = selected.get(&document_id)
+                        else {
+                            return Ok(true);
+                        };
+                        let event = archive
+                            .unarchive::<CalendarEventContent>()
+                            .caused_by(trc::location!())?;
 
-                /*
-                   Only VEVENT components without a TRANSP property or with the TRANSP
-                   property set to OPAQUE, and VFREEBUSY components SHOULD be considered
-                   in generating the free busy time information.
-                */
-                let mut components = event
-                    .data
-                    .event
-                    .components
-                    .iter()
-                    .enumerate()
-                    .filter(|(_, comp)| {
-                        (matches!(comp.component_type, ArchivedICalendarComponentType::VEvent)
-                            && comp
-                                .transparency()
-                                .is_none_or(|t| t == &ICalendarTransparency::Opaque))
-                            || matches!(
-                                comp.component_type,
-                                ArchivedICalendarComponentType::VFreebusy
-                            )
-                    })
-                    .peekable();
-
-                if components.peek().is_none() {
-                    continue;
-                }
-
-                let events =
-                    CalendarQueryHandler::new(event, Some(range), default_tz).into_expanded_times();
-
-                if events.is_empty() {
-                    continue;
-                }
-
-                total_instances = total_instances.saturating_add(events.len());
-                if total_instances > max_instances {
-                    return Err(DavError::Code(StatusCode::PAYLOAD_TOO_LARGE));
-                }
-
-                for (component_id, component) in components {
-                    let component_id = component_id as u32;
-                    match component.component_type {
-                        ArchivedICalendarComponentType::VEvent => {
-                            let fbtype = match component.status() {
-                                Some(ArchivedICalendarStatus::Cancelled) => continue,
-                                Some(ArchivedICalendarStatus::Tentative) => {
-                                    ICalendarFreeBusyType::BusyTentative
+                        /*
+                           Only VEVENT components without a TRANSP property or with the TRANSP
+                           property set to OPAQUE, and VFREEBUSY components SHOULD be considered
+                           in generating the free busy time information.
+                        */
+                        let mut components = event
+                            .data
+                            .event
+                            .components
+                            .iter()
+                            .enumerate()
+                            .filter(|(_, comp)| match comp.component_type {
+                                ArchivedICalendarComponentType::VEvent => {
+                                    comp.transparency()
+                                        .is_none_or(|t| t == &ICalendarTransparency::Opaque)
+                                        && (!attending_only
+                                            || identities.as_ref().is_some_and(|identities| {
+                                                ComponentBusy::parse(comp, identities, role)
+                                                    .is_some_and(|busy| busy.is_attending())
+                                            }))
                                 }
-                                _ => ICalendarFreeBusyType::Busy,
-                            };
+                                ArchivedICalendarComponentType::VFreebusy => !attending_only,
+                                _ => false,
+                            })
+                            .peekable();
 
-                            let mut events_in_range = Vec::new();
-                            for event in &events {
-                                if event.comp_id == component_id
-                                    && range.is_in_range(false, event.start, event.end)
-                                {
-                                    events_in_range.push((event.start, event.end));
-                                }
-                            }
-
-                            if !events_in_range.is_empty() {
-                                fb_entries
-                                    .entry(fbtype)
-                                    .or_default()
-                                    .extend(events_in_range);
-                            }
+                        if components.peek().is_none() {
+                            return Ok(true);
                         }
-                        ArchivedICalendarComponentType::VFreebusy => {
-                            for entry in component.entries.iter() {
-                                if matches!(entry.name, ArchivedICalendarProperty::Freebusy) {
-                                    let mut fb_in_range =
-                                        freebusy_in_range_utc(entry, &range, default_tz).peekable();
-                                    if fb_in_range.peek().is_some() {
-                                        let fb_type = entry
-                                            .params
-                                            .iter()
-                                            .find_map(|param| {
-                                                if let (
-                                                    ArchivedICalendarParameterName::Fbtype,
-                                                    ArchivedICalendarParameterValue::Fbtype(param),
-                                                ) = (&param.name, &param.value)
-                                                {
-                                                    rkyv_deserialize(param).ok()
-                                                } else {
-                                                    None
-                                                }
-                                            })
-                                            .unwrap_or(ICalendarFreeBusyType::Busy);
 
-                                        fb_entries.entry(fb_type).or_default().extend(fb_in_range);
+                        let events = CalendarQueryHandler::new(event, Some(range), default_tz);
+
+                        if events.expanded_times.is_empty() {
+                            return Ok(true);
+                        }
+
+                        total_instances =
+                            total_instances.saturating_add(events.expanded_times.len());
+                        if total_instances > max_instances {
+                            return Ok(false);
+                        }
+
+                        for (component_id, component) in components {
+                            let component_id = component_id as u32;
+                            match component.component_type {
+                                ArchivedICalendarComponentType::VEvent => {
+                                    let fbtype = match component.status() {
+                                        Some(ArchivedICalendarStatus::Cancelled) => continue,
+                                        Some(ArchivedICalendarStatus::Tentative)
+                                            if privacy.is_public() =>
+                                        {
+                                            ICalendarFreeBusyType::BusyTentative
+                                        }
+                                        _ => ICalendarFreeBusyType::Busy,
+                                    };
+
+                                    let mut events_in_range = events
+                                        .expansions_of(component_id)
+                                        .iter()
+                                        .filter(|event| {
+                                            event.start < event.end
+                                                && range.is_in_range(
+                                                    OverlapCondition::Event,
+                                                    event.start,
+                                                    event.end,
+                                                )
+                                        })
+                                        .map(|event| (event.start, event.end))
+                                        .peekable();
+
+                                    if events_in_range.peek().is_some() {
+                                        fb_entries
+                                            .entry(fbtype)
+                                            .or_default()
+                                            .extend(events_in_range);
                                     }
                                 }
+                                ArchivedICalendarComponentType::VFreebusy => {
+                                    for entry in component.entries.iter() {
+                                        if matches!(entry.name, ArchivedICalendarProperty::Freebusy)
+                                        {
+                                            let mut fb_in_range =
+                                                freebusy_in_range_utc(entry, &range, default_tz)
+                                                    .peekable();
+                                            if fb_in_range.peek().is_some() {
+                                                let fb_type = entry
+                                                    .params
+                                                    .iter()
+                                                    .find_map(|param| {
+                                                        if let (
+                                                            ArchivedICalendarParameterName::Fbtype,
+                                                            ArchivedICalendarParameterValue::Fbtype(
+                                                                param,
+                                                            ),
+                                                        ) = (&param.name, &param.value)
+                                                        {
+                                                            rkyv_deserialize(param).ok()
+                                                        } else {
+                                                            None
+                                                        }
+                                                    })
+                                                    .filter(|fb_type| {
+                                                        privacy.is_public()
+                                                            || *fb_type
+                                                                == ICalendarFreeBusyType::Free
+                                                    })
+                                                    .unwrap_or(ICalendarFreeBusyType::Busy);
+
+                                                fb_entries
+                                                    .entry(fb_type)
+                                                    .or_default()
+                                                    .extend(fb_in_range);
+                                            }
+                                        }
+                                    }
+                                }
+                                _ => {}
                             }
                         }
-                        _ => {}
-                    }
-                }
+
+                        Ok(true)
+                    },
+                )
+                .await
+                .caused_by(trc::location!())?;
+            }
+
+            if total_instances > max_instances {
+                return Err(DavError::Code(StatusCode::PAYLOAD_TOO_LARGE));
             }
 
             for (fbtype, events_in_range) in fb_entries {
                 entries.push(ICalendarEntry {
                     name: ICalendarProperty::Freebusy,
                     params: vec![ICalendarParameter::fbtype(fbtype)],
-                    values: merge_intervals(events_in_range),
+                    values: merge_intervals(events_in_range).into(),
                 });
             }
         }
@@ -297,12 +427,12 @@ impl CalendarFreebusyRequestHandler for Server {
                         ICalendarEntry {
                             name: ICalendarProperty::Version,
                             params: vec![],
-                            values: vec![ICalendarValue::Text("2.0".to_string())],
+                            values: [ICalendarValue::Text("2.0".to_string())].into(),
                         },
                         ICalendarEntry {
                             name: ICalendarProperty::Prodid,
                             params: vec![],
-                            values: vec![ICalendarValue::Text(PROD_ID.to_string())],
+                            values: [ICalendarValue::Text(PROD_ID.to_string())].into(),
                         },
                     ],
                     component_ids: vec![1],
@@ -346,10 +476,10 @@ fn merge_intervals(mut intervals: Vec<(i64, i64)>) -> Vec<ICalendarValue> {
 }
 
 fn build_ical_value(from: i64, to: i64) -> ICalendarValue {
-    ICalendarValue::Period(ICalendarPeriod::Range {
+    ICalendarValue::Period(Box::new(ICalendarPeriod::Range {
         start: PartialDateTime::from_utc_timestamp(from),
         end: PartialDateTime::from_utc_timestamp(to),
-    })
+    }))
 }
 
 pub(crate) fn freebusy_in_range(
@@ -367,7 +497,7 @@ pub(crate) fn freebusy_in_range(
             period.time_range(tz).and_then(|(start, end)| {
                 let start = start.timestamp();
                 let end = end.timestamp();
-                if range.is_in_range(false, start, end) {
+                if range.overlaps(start, end) {
                     rkyv_deserialize(value).ok()
                 } else {
                     None
@@ -394,7 +524,7 @@ fn freebusy_in_range_utc(
             period.time_range(tz).and_then(|(start, end)| {
                 let start = start.timestamp();
                 let end = end.timestamp();
-                if range.is_in_range(false, start, end) {
+                if start < end && range.overlaps(start, end) {
                     Some((start, end))
                 } else {
                     None

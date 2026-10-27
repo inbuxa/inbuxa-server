@@ -20,6 +20,10 @@ impl Server {
         #[cfg(not(feature = "enterprise"))]
         let is_enterprise = false;
 
+        if is_enterprise {
+            self.inner.refresh_live_gauges();
+        }
+
         // Add counters
         for counter in Collector::collect_counters(is_enterprise) {
             let mut metric = MetricFamily::default();

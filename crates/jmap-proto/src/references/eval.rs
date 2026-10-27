@@ -11,7 +11,10 @@ use crate::{
         jsptr::{EvalResults, ResponsePtr},
     },
     request::reference::ResultReference,
-    response::{ChangesResponseMethod, GetResponseMethod, Response, ResponseMethod},
+    response::{
+        ChangesResponseMethod, CopyResponseMethod, GetResponseMethod, Response, ResponseMethod,
+        SetResponseMethod,
+    },
 };
 use compact_str::format_compact;
 use jmap_tools::{Element, Key, Property, Value};
@@ -128,11 +131,80 @@ impl Response<'_> {
                         ChangesResponseMethod::ShareNotification(response) => {
                             response.eval_jptr(path, &mut results)
                         }
+                        ChangesResponseMethod::ParticipantIdentity(response) => {
+                            response.eval_jptr(path, &mut results)
+                        }
                     },
                     ResponseMethod::Query(response) => response.eval_jptr(path, &mut results),
                     ResponseMethod::QueryChanges(response) => {
                         response.eval_jptr(path, &mut results)
                     }
+                    ResponseMethod::Set(response) => match response {
+                        SetResponseMethod::Email(response) => {
+                            response.eval_jptr(path, &mut results)
+                        }
+                        SetResponseMethod::Mailbox(response) => {
+                            response.eval_jptr(path, &mut results)
+                        }
+                        SetResponseMethod::Identity(response) => {
+                            response.eval_jptr(path, &mut results)
+                        }
+                        SetResponseMethod::EmailSubmission(response) => {
+                            response.eval_jptr(path, &mut results)
+                        }
+                        SetResponseMethod::PushSubscription(response) => {
+                            response.eval_jptr(path, &mut results)
+                        }
+                        SetResponseMethod::Sieve(response) => {
+                            response.eval_jptr(path, &mut results)
+                        }
+                        SetResponseMethod::VacationResponse(response) => {
+                            response.eval_jptr(path, &mut results)
+                        }
+                        SetResponseMethod::AddressBook(response) => {
+                            response.eval_jptr(path, &mut results)
+                        }
+                        SetResponseMethod::ContactCard(response) => {
+                            response.eval_jptr(path, &mut results)
+                        }
+                        SetResponseMethod::FileNode(response) => {
+                            response.eval_jptr(path, &mut results)
+                        }
+                        SetResponseMethod::ShareNotification(response) => {
+                            response.eval_jptr(path, &mut results)
+                        }
+                        SetResponseMethod::Calendar(response) => {
+                            response.eval_jptr(path, &mut results)
+                        }
+                        SetResponseMethod::CalendarEvent(response) => {
+                            response.eval_jptr(path, &mut results)
+                        }
+                        SetResponseMethod::CalendarEventNotification(response) => {
+                            response.eval_jptr(path, &mut results)
+                        }
+                        SetResponseMethod::ParticipantIdentity(response) => {
+                            response.eval_jptr(path, &mut results)
+                        }
+                        SetResponseMethod::Registry(response) => {
+                            response.eval_jptr(path, &mut results)
+                        }
+                    },
+                    ResponseMethod::Copy(response) => match response {
+                        CopyResponseMethod::Email(response) => {
+                            response.eval_jptr(path, &mut results)
+                        }
+                        CopyResponseMethod::ContactCard(response) => {
+                            response.eval_jptr(path, &mut results)
+                        }
+                        CopyResponseMethod::CalendarEvent(response) => {
+                            response.eval_jptr(path, &mut results)
+                        }
+                        CopyResponseMethod::FileNode(response) => {
+                            response.eval_jptr(path, &mut results)
+                        }
+                        CopyResponseMethod::Blob(_) => false,
+                    },
+                    ResponseMethod::ImportEmail(response) => response.eval_jptr(path, &mut results),
                     _ => false,
                 };
 
@@ -206,10 +278,13 @@ where
                                 .details("Id reference points to invalid type."));
                         }
                     } else if let Graph::Some { child_id, graph } = graph {
-                        graph
-                            .entry(child_id.to_string())
-                            .or_insert_with(Vec::new)
-                            .push(id_ref.to_string());
+                        let id_ref = id_ref.to_string();
+                        match graph.get_mut(*child_id) {
+                            Some(parents) => parents.push(id_ref),
+                            None => {
+                                graph.insert(child_id.to_string(), vec![id_ref]);
+                            }
+                        }
                     } else {
                         return Err(trc::JmapEvent::InvalidResultReference
                             .into_err()

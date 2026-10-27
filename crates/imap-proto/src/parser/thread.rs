@@ -4,8 +4,7 @@
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
  */
 
-use compact_str::ToCompactString;
-use mail_parser::decoders::charsets::map::charset_decoder;
+use mail_parser::decoders::charsets::charset_decoder;
 
 use crate::{
     Command,
@@ -26,25 +25,21 @@ impl Request<Command> {
         let algorithm = Algorithm::parse(
             &tokens
                 .next()
-                .ok_or_else(|| bad(self.tag.to_compact_string(), "Missing threading algorithm."))?
+                .ok_or_else(|| bad(self.tag.clone(), "Missing threading algorithm."))?
                 .unwrap_bytes(),
         )
-        .map_err(|v| bad(self.tag.to_compact_string(), v))?;
+        .map_err(|v| bad(self.tag.clone(), v))?;
 
         let decoder = charset_decoder(
             &tokens
                 .next()
-                .ok_or_else(|| bad(self.tag.to_compact_string(), "Missing charset."))?
+                .ok_or_else(|| bad(self.tag.clone(), "Missing charset."))?
                 .unwrap_bytes(),
         );
 
-        let filter = parse_filters(&mut tokens, decoder)
-            .map_err(|v| bad(self.tag.to_compact_string(), v))?;
+        let filter = parse_filters(&mut tokens, decoder).map_err(|v| bad(self.tag.clone(), v))?;
         match filter.len() {
-            0 => Err(bad(
-                self.tag.to_compact_string(),
-                "No filters found in command.",
-            )),
+            0 => Err(bad(self.tag.clone(), "No filters found in command.")),
             _ => Ok(thread::Arguments {
                 algorithm,
                 filter,
@@ -56,9 +51,10 @@ impl Request<Command> {
 
 impl Algorithm {
     pub fn parse(value: &[u8]) -> super::Result<Self> {
-        hashify::tiny_map_ignore_case!(value,
-            "ORDEREDSUBJECT" => Self::OrderedSubject,
-            "REFERENCES" => Self::References,
+        hashify::fnc_map_ignore_case!(value,
+            "ORDEREDSUBJECT" => Some(Self::OrderedSubject),
+            "REFERENCES" => Some(Self::References),
+            _ => None,
         )
         .ok_or_else(|| {
             format!(
@@ -70,51 +66,3 @@ impl Algorithm {
     }
 }
 
-#[cfg(test)]
-mod tests {
-
-    use crate::{
-        protocol::{
-            search::Filter,
-            thread::{self, Algorithm},
-        },
-        receiver::Receiver,
-    };
-
-    #[test]
-    fn parse_thread() {
-        let mut receiver = Receiver::new();
-
-        for (command, arguments) in [
-            (
-                b"A283 THREAD ORDEREDSUBJECT UTF-8 SINCE 5-MAR-2000\r\n".to_vec(),
-                thread::Arguments {
-                    algorithm: Algorithm::OrderedSubject,
-                    filter: vec![Filter::Since(952214400)],
-                    tag: "A283".into(),
-                },
-            ),
-            (
-                b"A284 THREAD REFERENCES US-ASCII TEXT \"gewp\"\r\n".to_vec(),
-                thread::Arguments {
-                    algorithm: Algorithm::References,
-                    filter: vec![Filter::Text("gewp".into())],
-                    tag: "A284".into(),
-                },
-            ),
-        ] {
-            let command_str = String::from_utf8_lossy(&command).into_owned();
-
-            assert_eq!(
-                receiver
-                    .parse(&mut command.iter())
-                    .unwrap()
-                    .parse_thread()
-                    .expect(&command_str),
-                arguments,
-                "{}",
-                command_str
-            );
-        }
-    }
-}

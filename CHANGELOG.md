@@ -2,6 +2,61 @@
 
 All notable changes to this project will be documented in this file. This project adheres to [Semantic Versioning](http://semver.org/).
 
+## [1.0.0] - 2026-10-26
+
+This version includes **multiple breaking changes** and a new database layout, so existing v0.16.x deployments cannot be upgraded in place. Please read the [migration documentation](https://stalw.art/docs/migration/upgrade-0-16/) for more information on how to migrate from v0.16.x.
+
+## Added
+- Full-text search:
+  - Text extraction and indexing of PDF, Microsoft Office (`docx`, `xlsx`, `pptx`), OpenDocument (`odt`, `ods`, `odp`), EPUB and RTF documents found in attachments and files.
+  - Full-text search of file storage contents.
+  - Index queue with per-partition status, concurrency control, retries and index rebuilds.
+- Metadata:
+  - JMAP Object Metadata ([draft-ietf-jmap-metadata-04](https://datatracker.ietf.org/doc/html/draft-ietf-jmap-metadata-04)) for e-mails, mailboxes, Sieve scripts, calendars, events, address books, contacts and files.
+  - IMAP `METADATA` extension ([RFC 5464](https://www.rfc-editor.org/rfc/rfc5464.html)).
+- DKIM2:
+  - Post-quantum composite signatures using `ML-DSA-44` and `Ed25519` with `SHA-512`.
+  - Configurable `Message-Instance` hash algorithms (`SHA-256` and `SHA-512`).
+- OAuth and OIDC:
+  - OAuth Client ID Metadata Documents ([draft-ietf-oauth-client-id-metadata-document-02](https://datatracker.ietf.org/doc/html/draft-ietf-oauth-client-id-metadata-document-02)).
+  - OAuth scopes (`mail`, `contacts`, `calendars` and `files`) per client and grant.
+  - Connected applications: users can list and revoke the applications authorized to access their account.
+  - First-party clients, post-logout redirect URIs and per-client grant types.
+  - External OIDC directories: audience matching, opaque token validation via UserInfo or token introspection and a policy for unscoped tokens.
+- Caching:
+  - Redesigned cache subsystem with a dedicated tier for large accounts.
+  - Cache snapshots can be swapped to local disk, Redis or the blob store.
+- Built-in local in-memory store for single-node deployments.
+- Azure Blob Storage authentication using shared keys, SAS tokens, client secrets, managed identities or workload identities.
+- Secondary LDAP servers for failover.
+- SSRF protection for outbound HTTP requests (webhooks, OIDC discovery, AI and DNS providers).
+- Configurable client IP source (`X-Forwarded-For` or `Forwarded`) and number of trusted proxy hops.
+- Memory budget for buffered data.
+- Configurable limits for e-mail headers, keywords and mailboxes per message, calendars, address books and spam filter text processing.
+- TLS options for Kafka and NATS cluster coordinators.
+- Automatic cleanup of per-user data after a share is revoked.
+- AI (*Enterprise*):
+  - AI models from multiple providers: OpenAI-compatible endpoints (OpenAI, Azure, vLLM, llama.cpp), Anthropic, Google Gemini and Ollama, with per-model rate limits, concurrency caps, timeouts and reasoning levels.
+  - AI spam classifier with structured verdicts, model tiers with escalation, training from AI verdicts and optional web search.
+
+## Changed
+- New database layout: the key layout was redesigned and the database schema version is now tied to the edition (AGPL-only or AGPL/SEL). Data must be migrated from v0.16.x using the migration tool.
+- Settings schema: multiple objects, fields and enumeration values were renamed, restructured (AI models, OIDC directories, Azure Blob Storage, HTTP forwarded headers) or removed, and internal identifiers were renumbered. See [SCHEMA_CHANGES.md](https://github.com/stalwartlabs/stalwart-migrate/blob/main/SCHEMA_CHANGES.md) for the full list.
+- Telemetry: New events and metrics were added and event identifiers were renumbered. See [SCHEMA_CHANGES.md](https://github.com/stalwartlabs/stalwart-migrate/blob/main/SCHEMA_CHANGES.md).
+- OAuth: The [OAuth Profile for Open Public Clients](https://datatracker.ietf.org/doc/draft-ietf-mailmaint-oauth-public/) is now fully enforced. If you use an external OIDC provider, make sure it conforms to the draft; otherwise mail clients such as Apple Mail will stop working with it as they adopt the profile. Ask your provider to add support, or, at your own risk, relax the corresponding security checks.
+- Updated IETF drafts:
+  - DKIM2 to [draft-ietf-dkim-dkim2-spec-07](https://datatracker.ietf.org/doc/html/draft-ietf-dkim-dkim2-spec-07).
+  - JMAP for Calendars to [draft-ietf-jmap-calendars-33](https://datatracker.ietf.org/doc/html/draft-ietf-jmap-calendars-33).
+  - JMAP for File Storage to [draft-ietf-jmap-filenode-18](https://datatracker.ietf.org/doc/html/draft-ietf-jmap-filenode-18).
+  - JSCalendar to [draft-ietf-calext-jscalendarbis-22](https://datatracker.ietf.org/doc/html/draft-ietf-calext-jscalendarbis-22) and [draft-ietf-calext-jscalendar-icalendar-28](https://datatracker.ietf.org/doc/html/draft-ietf-calext-jscalendar-icalendar-28).
+  - iCalendar tasks to [draft-ietf-calext-ical-tasks-17](https://datatracker.ietf.org/doc/html/draft-ietf-calext-ical-tasks-17).
+  - IMAP object identifiers to [draft-ietf-mailmaint-imap-objectid-bis-08](https://datatracker.ietf.org/doc/html/draft-ietf-mailmaint-imap-objectid-bis-08).
+- Performance improvements in storage backends, expression evaluation, IMAP parsing, spam filter tokenization and search.
+- Development: Test suites (unit, integration, conformance and stress) are now kept in a private repository, and new features are developed privately before release. The source code of every release remains public under the AGPL-3.0. [Learn why](https://stalw.art/blog/protecting-stalwart/)
+
+## Fixed
+- Multiple bug and security fixes.
+
 ## [0.16.27] - 2026-10-18
 
 If you are upgrading from v0.16.x, replace the binary (or run `docker pull`). If you are upgrading from v0.15.x and below, please read the [upgrading documentation](https://github.com/stalwartlabs/stalwart/blob/main/UPGRADING/v0_16.md) for more information on how to upgrade from previous versions.

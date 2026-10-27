@@ -9,10 +9,11 @@ use common::{Server, auth::AccessToken, storage::index::ObjectIndexBuilder};
 use store::write::BatchBuilder;
 use store::{
     ValueKey,
-    write::{AlignedBytes, Archive},
+    roaring::RoaringBitmap,
+    write::{Archive, ArchiveBytes},
 };
 use trc::AddContext;
-use types::{collection::Collection, field::SieveField};
+use types::collection::Collection;
 
 pub trait SieveScriptDelete: Sync + Send {
     fn sieve_script_delete(
@@ -35,7 +36,7 @@ impl SieveScriptDelete for Server {
         // Fetch record
         if let Some(obj_) = self
             .store()
-            .get_value::<Archive<AlignedBytes>>(ValueKey::archive(
+            .get_value::<Archive<ArchiveBytes>>(ValueKey::archive(
                 account_id,
                 Collection::SieveScript,
                 document_id,
@@ -43,18 +44,29 @@ impl SieveScriptDelete for Server {
             .await?
         {
             // Delete record
+            let script = obj_
+                .to_unarchived::<SieveScript>()
+                .caused_by(trc::location!())?;
             batch
                 .with_account_id(account_id)
-                .with_collection(Collection::SieveScript)
+                .with_collection(Collection::SieveScript);
+            if !script.inner.metadata_kinds().is_empty() {
+                self.preload_container_cleanup(
+                    access_token.changed_by(),
+                    account_id,
+                    Collection::SieveScript,
+                    &RoaringBitmap::from_iter([document_id]),
+                )
+                .await
+                .caused_by(trc::location!())?
+                .release_or_assert_absent(batch, account_id, document_id);
+            }
+            batch
                 .with_document(document_id)
-                .clear(SieveField::Ids)
                 .custom(
                     ObjectIndexBuilder::<_, ()>::new()
-                        .with_current(
-                            obj_.to_unarchived::<SieveScript>()
-                                .caused_by(trc::location!())?,
-                        )
-                        .with_changed_by(access_token.account_tenant_ids()),
+                        .with_current(script)
+                        .with_changed_by(access_token.changed_by()),
                 )
                 .caused_by(trc::location!())?
                 .commit_point();

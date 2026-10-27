@@ -4,17 +4,25 @@
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
  */
 
-use super::{FromModSeq, ToModSeq};
 use crate::{
-    core::{ImapId, SavedSearch, SelectedMailbox, Session, SessionData},
+    core::{Resolved, Row, SavedSearch, SelectedMailbox, Session, SessionData},
     spawn_op,
 };
-use common::network::SessionStream;
-use email::cache::{MessageCacheFetch, email::MessageCacheAccess};
+use common::{MessageStoreCache, network::SessionStream};
+use email::{
+    cache::{
+        MessageCacheFetch,
+        email::{MessageCacheAccess, SearchOperator},
+    },
+    message::{
+        index::subject::search_subject_query,
+        sortkeys::{EmailSortKeys, MessageCacheField, MessageComparator, MessageSortField},
+    },
+};
 use imap_proto::{
     Command, ResponseCode, ResponseType, StatusResponse,
     protocol::{
-        Sequence,
+        ObjectId, Sequence,
         search::{self, Arguments, Comparator, Filter, Response, ResultOption},
     },
     receiver::Request,
@@ -22,19 +30,16 @@ use imap_proto::{
 use mail_parser::HeaderName;
 use nlp::language::Language;
 use registry::schema::enums::Permission;
-use std::{str::FromStr, sync::Arc, time::Instant};
+use std::{sync::Arc, time::Instant};
 use store::{
-    query::log::Query,
     roaring::RoaringBitmap,
-    search::{
-        EmailSearchField, SearchComparator, SearchFilter, SearchOperator, SearchQuery, SearchValue,
-    },
+    search::{EmailSearchField, KeyValueMatch, SearchFilter, SearchQuery},
     write::{SearchIndex, now},
 };
+use tokio::sync::OwnedSemaphorePermit;
 use tokio::sync::watch;
 use trc::AddContext;
-use types::{collection::SyncCollection, id::Id, keyword::Keyword};
-use utils::map::vec_map::VecMap;
+use types::keyword::Keyword;
 
 impl<T: SessionStream> Session<T> {
     pub async fn handle_search(
@@ -42,6 +47,7 @@ impl<T: SessionStream> Session<T> {
         request: Request<Command>,
         is_sort: bool,
         is_uid: bool,
+        permit: Option<OwnedSemaphorePermit>,
     ) -> trc::Result<()> {
         let op_start = Instant::now();
         let mut arguments = if !is_sort {
@@ -84,7 +90,7 @@ impl<T: SessionStream> Session<T> {
                 (None, None)
             };
 
-        spawn_op!(data, {
+        spawn_op!(permit, data, {
             let tag = std::mem::take(&mut arguments.tag);
             let bytes = match data
                 .search(
@@ -135,12 +141,21 @@ impl<T: SessionStream> SessionData<T> {
         &self,
         arguments: Arguments,
         mailbox: Arc<SelectedMailbox>,
-        results_tx: Option<watch::Sender<Arc<Vec<ImapId>>>>,
-        prev_saved_search: Option<Option<Arc<Vec<ImapId>>>>,
+        results_tx: Option<watch::Sender<Arc<Vec<Row>>>>,
+        prev_saved_search: Option<Option<Arc<Vec<Row>>>>,
         is_uid: bool,
         message_limit: u32,
         op_start: Instant,
     ) -> trc::Result<(search::Response, Option<u32>)> {
+        let cache = self
+            .server
+            .get_cached_messages(mailbox.id.account_id)
+            .await
+            .caused_by(trc::location!())?;
+        self.sync_view(&mailbox, &cache, None)
+            .await
+            .caused_by(trc::location!())?;
+
         // Run query
         let is_sort = arguments.sort.is_some();
         let (result_set, include_highest_modseq) = self
@@ -148,72 +163,81 @@ impl<T: SessionStream> SessionData<T> {
                 arguments.filter,
                 arguments.sort.unwrap_or_default(),
                 &mailbox,
+                &cache,
                 &prev_saved_search,
             )
             .await?;
-
-        // Obtain modseq
-        let highest_modseq = if include_highest_modseq {
-            self.synchronize_messages(&mailbox)
-                .await?
-                .to_modseq()
-                .into()
-        } else {
-            None
-        };
-
         // Sort and map ids
-        let mut min: Option<(u32, ImapId)> = None;
-        let mut max: Option<(u32, ImapId)> = None;
-        let mut total = 0;
-        let results_len = result_set.len();
-        let mut saved_results = if results_tx.is_some() {
-            Some(Vec::with_capacity(results_len))
-        } else {
-            None
-        };
-        let mut imap_ids = Vec::with_capacity(results_len);
+        let find_min = arguments.result_options.contains(&ResultOption::Min);
+        let find_max = arguments.result_options.contains(&ResultOption::Max);
         let return_all = arguments.result_options.is_empty()
             || arguments.result_options.contains(&ResultOption::All);
-        mailbox.map_search_results(
-            result_set.into_iter(),
+        let mut results = SearchResults {
             is_uid,
-            return_all
-                || (saved_results.is_some()
+            find_min,
+            find_max,
+            collect_all: return_all
+                || (results_tx.is_some()
                     && arguments.result_options.contains(&ResultOption::Count)),
-            arguments.result_options.contains(&ResultOption::Min),
-            arguments.result_options.contains(&ResultOption::Max),
-            &mut min,
-            &mut max,
-            &mut total,
-            &mut imap_ids,
-            &mut saved_results,
-        );
+            min: None,
+            max: None,
+            total: 0,
+            imap_ids: Vec::with_capacity(result_set.len()),
+            modseq_cache: include_highest_modseq.then_some(&cache),
+            highest_modseq: None,
+            saved_results: results_tx
+                .is_some()
+                .then(|| Vec::with_capacity(result_set.len())),
+        };
+        {
+            let view = mailbox.view.lock();
+            if !is_sort && result_set.len() > view.len() / 8 {
+                let set = RoaringBitmap::from_iter(result_set);
+                view.map_result_set(&set, |resolved| results.push(resolved));
+            } else {
+                for document_id in result_set {
+                    if let Some(resolved) = view.map_result(document_id) {
+                        results.push(resolved);
+                    }
+                }
+            }
+        }
+        results.finish();
+        let SearchResults {
+            min,
+            max,
+            total,
+            mut imap_ids,
+            mut saved_results,
+            highest_modseq,
+            ..
+        } = results;
+
         // RFC 9738 exempts SORT, whose ordering is meaningless once truncated
         let mut limited_uid = None;
         if !is_sort {
-            imap_ids.sort_unstable();
-
             let message_limit = message_limit as usize;
             if imap_ids.len() > message_limit {
-                let threshold = imap_ids[imap_ids.len() - message_limit];
-                imap_ids.drain(..imap_ids.len() - message_limit);
-                limited_uid = if is_uid {
+                let cutoff = imap_ids.len() - message_limit;
+                let (_, threshold, _) = imap_ids.select_nth_unstable(cutoff);
+                let threshold = *threshold;
+                imap_ids.drain(..cutoff);
+                imap_ids.sort_unstable();
+                let threshold_uid = if is_uid {
                     Some(threshold)
                 } else {
-                    mailbox.seqnum_to_uid(threshold)
+                    mailbox.view.lock().seqnum_to_uid(threshold)
                 };
+                limited_uid = threshold_uid;
 
                 // RFC 9738 requires the saved search to be truncated to match
-                if let Some(saved_results) = saved_results.as_mut() {
-                    saved_results.retain(|imap_id| {
-                        if is_uid {
-                            imap_id.uid >= threshold
-                        } else {
-                            imap_id.seqnum >= threshold
-                        }
-                    });
+                if let (Some(saved_results), Some(threshold_uid)) =
+                    (saved_results.as_mut(), threshold_uid)
+                {
+                    saved_results.retain(|row| row.uid >= threshold_uid);
                 }
+            } else {
+                imap_ids.sort_unstable();
             }
         }
 
@@ -243,8 +267,8 @@ impl<T: SessionStream> SessionData<T> {
         Ok((
             Response {
                 is_uid,
-                min: min.map(|(id, _)| id),
-                max: max.map(|(id, _)| id),
+                min: min.map(|resolved| resolved.imap_id(is_uid)),
+                max: max.map(|resolved| resolved.imap_id(is_uid)),
                 count: if arguments.result_options.contains(&ResultOption::Count) {
                     Some(total)
                 } else {
@@ -264,58 +288,48 @@ impl<T: SessionStream> SessionData<T> {
         imap_filter: Vec<Filter>,
         imap_comparator: Vec<Comparator>,
         mailbox: &SelectedMailbox,
-        prev_saved_search: &Option<Option<Arc<Vec<ImapId>>>>,
+        cache: &MessageStoreCache,
+        prev_saved_search: &Option<Option<Arc<Vec<Row>>>>,
     ) -> trc::Result<(Vec<u32>, bool)> {
         // Obtain message ids
         let mut filters = Vec::with_capacity(imap_filter.len() + 1);
-        let cache = self
-            .server
-            .get_cached_messages(mailbox.id.account_id)
-            .await
-            .caused_by(trc::location!())?;
-        let message_ids = RoaringBitmap::from_iter(
-            cache
-                .in_mailbox(mailbox.id.mailbox_id)
-                .map(|m| m.document_id),
-        );
+        let message_ids = mailbox.view.lock().document_ids();
 
         // Convert query
         let mut include_highest_modseq = false;
         for filter in imap_filter {
             match filter {
                 Filter::Sequence(sequence, uid_filter) => {
-                    let mut set = RoaringBitmap::new();
-                    if let (Sequence::SavedSearch, Some(prev_saved_search)) =
+                    let resolved = if let (Sequence::SavedSearch, Some(prev_saved_search)) =
                         (&sequence, &prev_saved_search)
                     {
                         if let Some(prev_saved_search) = prev_saved_search {
-                            let state = mailbox.state.lock();
-                            for imap_id in prev_saved_search.iter() {
-                                if let Some(id) = state.uid_to_id.get(&imap_id.uid) {
-                                    set.insert(*id);
-                                }
-                            }
+                            mailbox.view.lock().resolve(
+                                &sequence,
+                                true,
+                                Some(prev_saved_search.as_slice()),
+                            )
                         } else {
                             return Err(trc::ImapEvent::Error
                                 .into_err()
                                 .details("No saved search found."));
                         }
                     } else {
-                        for id in mailbox.sequence_to_ids(&sequence, uid_filter).await?.keys() {
-                            set.insert(*id);
-                        }
-                    }
-                    filters.push(SearchFilter::is_in_set(set));
+                        mailbox.resolve(&sequence, uid_filter).await?
+                    };
+                    filters.push(SearchFilter::is_in_set(RoaringBitmap::from_iter(
+                        resolved.iter().map(|resolved| resolved.id),
+                    )));
                 }
                 Filter::UidAfter(uid) => {
                     filters.push(SearchFilter::is_in_set(match uid.checked_add(1) {
-                        Some(min) => mailbox.uids_in_range(Some(min), None),
+                        Some(min) => mailbox.view.lock().uids_in_range(Some(min), None),
                         None => RoaringBitmap::new(),
                     }));
                 }
                 Filter::UidBefore(uid) => {
                     filters.push(SearchFilter::is_in_set(if uid > 1 {
-                        mailbox.uids_in_range(None, Some(uid - 1))
+                        mailbox.view.lock().uids_in_range(None, Some(uid - 1))
                     } else {
                         RoaringBitmap::new()
                     }));
@@ -327,104 +341,147 @@ impl<T: SessionStream> SessionData<T> {
                     filters.push(SearchFilter::is_in_set(RoaringBitmap::from_iter(
                         cache
                             .with_keyword(&Keyword::Answered)
-                            .map(|m| m.document_id),
+                            .map(|m| m.document_id()),
                     )));
                 }
                 Filter::Before(date) => {
-                    filters.push(SearchFilter::lt(EmailSearchField::ReceivedAt, date));
+                    filters.push(SearchFilter::is_in_set(RoaringBitmap::from_iter(
+                        cache
+                            .received(date, SearchOperator::LowerThan)
+                            .map(|m| m.document_id()),
+                    )));
                 }
                 Filter::Deleted => {
                     filters.push(SearchFilter::is_in_set(RoaringBitmap::from_iter(
-                        cache.with_keyword(&Keyword::Deleted).map(|m| m.document_id),
+                        cache
+                            .with_keyword(&Keyword::Deleted)
+                            .map(|m| m.document_id()),
                     )));
                 }
                 Filter::Draft => {
                     filters.push(SearchFilter::is_in_set(RoaringBitmap::from_iter(
-                        cache.with_keyword(&Keyword::Draft).map(|m| m.document_id),
+                        cache.with_keyword(&Keyword::Draft).map(|m| m.document_id()),
                     )));
                 }
                 Filter::Flagged => {
                     filters.push(SearchFilter::is_in_set(RoaringBitmap::from_iter(
-                        cache.with_keyword(&Keyword::Flagged).map(|m| m.document_id),
+                        cache
+                            .with_keyword(&Keyword::Flagged)
+                            .map(|m| m.document_id()),
                     )));
                 }
                 Filter::Keyword(keyword) => {
                     filters.push(SearchFilter::is_in_set(RoaringBitmap::from_iter(
                         cache
                             .with_keyword(&Keyword::from(keyword))
-                            .map(|m| m.document_id),
+                            .map(|m| m.document_id()),
                     )));
                 }
                 Filter::Larger(size) => {
-                    filters.push(SearchFilter::gt(EmailSearchField::Size, size));
+                    filters.push(SearchFilter::is_in_set(RoaringBitmap::from_iter(
+                        cache
+                            .size(size, SearchOperator::GreaterThan)
+                            .map(|m| m.document_id()),
+                    )));
                 }
                 Filter::On(date) => {
-                    filters.push(SearchFilter::And);
-                    filters.push(SearchFilter::ge(EmailSearchField::ReceivedAt, date));
-                    filters.push(SearchFilter::lt(EmailSearchField::ReceivedAt, date + 86400));
-                    filters.push(SearchFilter::End);
+                    let date_from = date as u64;
+                    let date_to = date_from + 86400;
+                    filters.push(SearchFilter::is_in_set(RoaringBitmap::from_iter(
+                        cache
+                            .emails
+                            .iter()
+                            .filter(|m| m.received_at() >= date_from && m.received_at() < date_to)
+                            .map(|m| m.document_id()),
+                    )));
                 }
                 Filter::Seen => {
                     filters.push(SearchFilter::is_in_set(RoaringBitmap::from_iter(
-                        cache.with_keyword(&Keyword::Seen).map(|m| m.document_id),
+                        cache.with_keyword(&Keyword::Seen).map(|m| m.document_id()),
                     )));
                 }
                 Filter::SentBefore(date) => {
-                    filters.push(SearchFilter::lt(EmailSearchField::SentAt, date));
+                    filters.push(SearchFilter::is_in_set(RoaringBitmap::from_iter(
+                        cache
+                            .sent(date, SearchOperator::LowerThan)
+                            .map(|m| m.document_id()),
+                    )));
                 }
                 Filter::SentOn(date) => {
-                    filters.push(SearchFilter::And);
-                    filters.push(SearchFilter::ge(EmailSearchField::SentAt, date));
-                    filters.push(SearchFilter::lt(EmailSearchField::SentAt, date + 86400));
-                    filters.push(SearchFilter::End);
+                    let date_from = date;
+                    let date_to = date_from + 86400;
+                    filters.push(SearchFilter::is_in_set(RoaringBitmap::from_iter(
+                        cache
+                            .emails
+                            .iter()
+                            .filter(|m| {
+                                let sent_at = m.received_at() as i64 + m.sent_at() as i64;
+                                sent_at >= date_from && sent_at < date_to
+                            })
+                            .map(|m| m.document_id()),
+                    )));
                 }
                 Filter::SentSince(date) => {
-                    filters.push(SearchFilter::ge(EmailSearchField::SentAt, date));
+                    filters.push(SearchFilter::is_in_set(RoaringBitmap::from_iter(
+                        cache
+                            .sent(date, SearchOperator::GreaterEqualThan)
+                            .map(|m| m.document_id()),
+                    )));
                 }
                 Filter::Since(date) => {
-                    filters.push(SearchFilter::ge(EmailSearchField::ReceivedAt, date));
+                    filters.push(SearchFilter::is_in_set(RoaringBitmap::from_iter(
+                        cache
+                            .received(date, SearchOperator::GreaterEqualThan)
+                            .map(|m| m.document_id()),
+                    )));
                 }
                 Filter::Smaller(size) => {
-                    filters.push(SearchFilter::lt(EmailSearchField::Size, size));
+                    filters.push(SearchFilter::is_in_set(RoaringBitmap::from_iter(
+                        cache
+                            .size(size, SearchOperator::LowerThan)
+                            .map(|m| m.document_id()),
+                    )));
                 }
                 Filter::Unanswered => {
                     filters.push(SearchFilter::is_in_set(RoaringBitmap::from_iter(
                         cache
                             .without_keyword(&Keyword::Answered)
-                            .map(|m| m.document_id),
+                            .map(|m| m.document_id()),
                     )));
                 }
                 Filter::Undeleted => {
                     filters.push(SearchFilter::is_in_set(RoaringBitmap::from_iter(
                         cache
                             .without_keyword(&Keyword::Deleted)
-                            .map(|m| m.document_id),
+                            .map(|m| m.document_id()),
                     )));
                 }
                 Filter::Undraft => {
                     filters.push(SearchFilter::is_in_set(RoaringBitmap::from_iter(
                         cache
                             .without_keyword(&Keyword::Draft)
-                            .map(|m| m.document_id),
+                            .map(|m| m.document_id()),
                     )));
                 }
                 Filter::Unflagged => {
                     filters.push(SearchFilter::is_in_set(RoaringBitmap::from_iter(
                         cache
                             .without_keyword(&Keyword::Flagged)
-                            .map(|m| m.document_id),
+                            .map(|m| m.document_id()),
                     )));
                 }
                 Filter::Unkeyword(keyword) => {
                     filters.push(SearchFilter::is_in_set(RoaringBitmap::from_iter(
                         cache
                             .without_keyword(&Keyword::from(keyword))
-                            .map(|m| m.document_id),
+                            .map(|m| m.document_id()),
                     )));
                 }
                 Filter::Unseen => {
                     filters.push(SearchFilter::is_in_set(RoaringBitmap::from_iter(
-                        cache.without_keyword(&Keyword::Seen).map(|m| m.document_id),
+                        cache
+                            .without_keyword(&Keyword::Seen)
+                            .map(|m| m.document_id()),
                     )));
                 }
                 Filter::Recent => {
@@ -447,61 +504,57 @@ impl<T: SessionStream> SessionData<T> {
                     filters.push(SearchFilter::End);*/
                 }
                 Filter::Older(secs) => {
-                    filters.push(SearchFilter::le(
-                        EmailSearchField::ReceivedAt,
-                        now().saturating_sub(secs as u64),
-                    ));
+                    filters.push(SearchFilter::is_in_set(RoaringBitmap::from_iter(
+                        cache
+                            .received(
+                                now().saturating_sub(secs as u64) as i64,
+                                SearchOperator::LowerThan,
+                            )
+                            .map(|m| m.document_id()),
+                    )));
                 }
                 Filter::Younger(secs) => {
-                    filters.push(SearchFilter::ge(
-                        EmailSearchField::ReceivedAt,
-                        now().saturating_sub(secs as u64),
-                    ));
+                    filters.push(SearchFilter::is_in_set(RoaringBitmap::from_iter(
+                        cache
+                            .received(
+                                now().saturating_sub(secs as u64) as i64,
+                                SearchOperator::GreaterEqualThan,
+                            )
+                            .map(|m| m.document_id()),
+                    )));
                 }
                 Filter::ModSeq((modseq, _)) => {
-                    let mut set = RoaringBitmap::new();
-                    for id in self
-                        .server
-                        .store()
-                        .changes(
-                            mailbox.id.account_id,
-                            SyncCollection::Email.into(),
-                            Query::from_modseq(modseq),
-                        )
-                        .await?
-                        .changes
-                        .into_iter()
-                        .filter_map(|change| change.try_unwrap_item_id())
-                    {
-                        let id = (id & u32::MAX as u64) as u32;
-                        if message_ids.contains(id) {
-                            set.insert(id);
-                        }
-                    }
-                    filters.push(SearchFilter::is_in_set(set));
+                    let mailbox_id = mailbox.id.mailbox_id;
+                    filters.push(SearchFilter::is_in_set(RoaringBitmap::from_iter(
+                        cache
+                            .emails
+                            .iter()
+                            .filter(|m| m.change_id() + 1 >= modseq && m.has_mailbox_id(mailbox_id))
+                            .map(|m| m.document_id()),
+                    )));
                     include_highest_modseq = true;
                 }
                 Filter::EmailId(id) => {
-                    if let Ok(id) = Id::from_str(&id) {
-                        filters.push(SearchFilter::is_in_set(
-                            RoaringBitmap::from_sorted_iter([id.document_id()]).unwrap(),
-                        ));
-                    } else {
-                        return Err(trc::ImapEvent::Error
-                            .into_err()
-                            .details(format!("Failed to parse email id '{id}'.",)));
+                    let mut matches = RoaringBitmap::new();
+                    if let Some(id) = ObjectId::decode_id(id.as_bytes())
+                        && cache
+                            .email_by_id(&id.document_id())
+                            .is_some_and(|message| message.thread_id() == id.prefix_id())
+                    {
+                        matches.insert(id.document_id());
                     }
+                    filters.push(SearchFilter::is_in_set(matches));
                 }
                 Filter::ThreadId(id) => {
-                    if let Ok(id) = Id::from_str(&id) {
-                        filters.push(SearchFilter::is_in_set(RoaringBitmap::from_iter(
-                            cache.in_thread(id.document_id()).map(|m| m.document_id),
-                        )));
-                    } else {
-                        return Err(trc::ImapEvent::Error
-                            .into_err()
-                            .details(format!("Failed to parse thread id '{id}'.",)));
-                    }
+                    let matches = match ObjectId::decode_id(id.as_bytes())
+                        .and_then(|id| u32::try_from(id.id()).ok())
+                    {
+                        Some(thread_id) => RoaringBitmap::from_iter(
+                            cache.in_thread(thread_id).map(|m| m.document_id()),
+                        ),
+                        None => RoaringBitmap::new(),
+                    };
+                    filters.push(SearchFilter::is_in_set(matches));
                 }
                 Filter::Bcc(text) => {
                     filters.push(SearchFilter::has_text(
@@ -535,10 +588,14 @@ impl<T: SessionStream> SessionData<T> {
                     if let Some(header) = HeaderName::parse(header) {
                         match header {
                             HeaderName::Subject => {
-                                filters.push(SearchFilter::has_text_detect(
-                                    EmailSearchField::Subject,
+                                let (text, language) = Language::detect_non_ascii(
                                     value,
                                     self.server.core.email.default_language,
+                                );
+                                filters.push(SearchFilter::has_text(
+                                    EmailSearchField::Subject,
+                                    search_subject_query(&text),
+                                    language,
                                 ));
                             }
                             header @ (HeaderName::From
@@ -558,27 +615,25 @@ impl<T: SessionStream> SessionData<T> {
                                 ));
                             }
                             header => {
-                                let op = if matches!(
+                                let op = if value.is_empty() {
+                                    KeyValueMatch::Exists
+                                } else if matches!(
                                     header,
                                     HeaderName::MessageId
                                         | HeaderName::InReplyTo
                                         | HeaderName::References
                                         | HeaderName::ResentMessageId
-                                ) || value.is_empty()
-                                {
-                                    SearchOperator::Equal
+                                ) {
+                                    KeyValueMatch::Equals(value)
                                 } else {
-                                    SearchOperator::Contains
+                                    KeyValueMatch::Contains(value)
                                 };
 
-                                filters.push(SearchFilter::cond(
-                                    EmailSearchField::Headers,
+                                filters.push(SearchFilter::KeyValue {
+                                    field: EmailSearchField::Headers.into(),
+                                    key: header.as_str().to_lowercase(),
                                     op,
-                                    SearchValue::KeyValues(
-                                        VecMap::with_capacity(1)
-                                            .with_append(header.as_str().to_lowercase(), value),
-                                    ),
-                                ));
+                                });
                             }
                         }
                     }
@@ -586,7 +641,7 @@ impl<T: SessionStream> SessionData<T> {
                 Filter::Subject(text) => {
                     filters.push(SearchFilter::has_text_detect(
                         EmailSearchField::Subject,
-                        text,
+                        search_subject_query(&text),
                         self.server.core.email.default_language,
                     ));
                 }
@@ -658,41 +713,48 @@ impl<T: SessionStream> SessionData<T> {
         let mut comparators = Vec::with_capacity(imap_comparator.len());
         for comparator in imap_comparator {
             comparators.push(match comparator.sort {
-                search::Sort::Arrival => {
-                    SearchComparator::field(EmailSearchField::ReceivedAt, comparator.ascending)
-                }
+                search::Sort::Arrival => MessageComparator::Cache {
+                    field: MessageCacheField::ReceivedAt,
+                    ascending: comparator.ascending,
+                },
                 search::Sort::Cc => {
                     return Err(trc::ImapEvent::Error
                         .into_err()
                         .details("Sorting by CC is not supported."));
                 }
-                search::Sort::Date => {
-                    SearchComparator::field(EmailSearchField::SentAt, comparator.ascending)
-                }
-                search::Sort::From | search::Sort::DisplayFrom => {
-                    SearchComparator::field(EmailSearchField::From, comparator.ascending)
-                }
-                search::Sort::Size => {
-                    SearchComparator::field(EmailSearchField::Size, comparator.ascending)
-                }
-                search::Sort::Subject => {
-                    SearchComparator::field(EmailSearchField::Subject, comparator.ascending)
-                }
-                search::Sort::To | search::Sort::DisplayTo => {
-                    SearchComparator::field(EmailSearchField::To, comparator.ascending)
-                }
+                search::Sort::Date => MessageComparator::Cache {
+                    field: MessageCacheField::SentAt,
+                    ascending: comparator.ascending,
+                },
+                search::Sort::From | search::Sort::DisplayFrom => MessageComparator::SortKey {
+                    field: MessageSortField::From,
+                    ascending: comparator.ascending,
+                },
+                search::Sort::Size => MessageComparator::Cache {
+                    field: MessageCacheField::Size,
+                    ascending: comparator.ascending,
+                },
+                search::Sort::Subject => MessageComparator::SortKey {
+                    field: MessageSortField::Subject,
+                    ascending: comparator.ascending,
+                },
+                search::Sort::To | search::Sort::DisplayTo => MessageComparator::SortKey {
+                    field: MessageSortField::To,
+                    ascending: comparator.ascending,
+                },
             });
         }
 
         // Run query
         self.server
-            .search_store()
-            .query_account(
+            .query_emails(
+                mailbox.id.account_id,
+                cache,
                 SearchQuery::new(SearchIndex::Email)
                     .with_filters(filters)
-                    .with_comparators(comparators)
                     .with_account_id(mailbox.id.account_id)
                     .with_mask(message_ids),
+                comparators,
             )
             .await
             .map(|res| (res, include_highest_modseq))
@@ -700,8 +762,69 @@ impl<T: SessionStream> SessionData<T> {
     }
 }
 
+struct SearchResults<'x> {
+    is_uid: bool,
+    find_min: bool,
+    find_max: bool,
+    collect_all: bool,
+    min: Option<Resolved>,
+    max: Option<Resolved>,
+    total: u32,
+    imap_ids: Vec<u32>,
+    saved_results: Option<Vec<Row>>,
+    modseq_cache: Option<&'x MessageStoreCache>,
+    highest_modseq: Option<u64>,
+}
+
+impl SearchResults<'_> {
+    fn push(&mut self, resolved: Resolved) {
+        let id = resolved.imap_id(self.is_uid);
+        if self.find_min && self.min.is_none_or(|min| id < min.imap_id(self.is_uid)) {
+            self.min = Some(resolved);
+        }
+        if self.find_max && self.max.is_none_or(|max| id > max.imap_id(self.is_uid)) {
+            self.max = Some(resolved);
+        }
+        if self.collect_all || !(self.find_min || self.find_max) {
+            self.imap_ids.push(id);
+            self.track_modseq(&resolved);
+            if let Some(saved) = self.saved_results.as_mut() {
+                saved.push(resolved.row());
+            }
+        }
+        self.total += 1;
+    }
+
+    fn finish(&mut self) {
+        if (self.find_min || self.find_max) && !self.collect_all {
+            let max = self.max.filter(|max| {
+                self.min
+                    .is_none_or(|min| min.imap_id(self.is_uid) != max.imap_id(self.is_uid))
+            });
+            for resolved in [self.min, max].into_iter().flatten() {
+                self.imap_ids.push(resolved.imap_id(self.is_uid));
+                self.track_modseq(&resolved);
+                if let Some(saved) = self.saved_results.as_mut() {
+                    saved.push(resolved.row());
+                }
+            }
+        }
+    }
+
+    fn track_modseq(&mut self, resolved: &Resolved) {
+        if let Some(cache) = self.modseq_cache
+            && let Some(item) = cache.email_by_id(&resolved.id)
+        {
+            let modseq = item.change_id() + 1;
+            if self.highest_modseq.is_none_or(|highest| modseq > highest) {
+                self.highest_modseq = Some(modseq);
+            }
+        }
+    }
+}
+
 impl SelectedMailbox {
-    pub async fn get_saved_search(&self) -> Option<Arc<Vec<ImapId>>> {
+    pub async fn get_saved_search(&self) -> Option<Arc<Vec<Row>>> {
         let mut rx = match &*self.saved_search.lock() {
             SavedSearch::InFlight { rx } => rx.clone(),
             SavedSearch::Results { items } => {
@@ -715,66 +838,10 @@ impl SelectedMailbox {
         let v = rx.borrow();
         Some(v.clone())
     }
-
-    #[allow(clippy::too_many_arguments)]
-    pub fn map_search_results(
-        &self,
-        ids: impl Iterator<Item = u32>,
-        is_uid: bool,
-        collect_all: bool,
-        find_min: bool,
-        find_max: bool,
-        min: &mut Option<(u32, ImapId)>,
-        max: &mut Option<(u32, ImapId)>,
-        total: &mut u32,
-        imap_ids: &mut Vec<u32>,
-        saved_results: &mut Option<Vec<ImapId>>,
-    ) {
-        let state = self.state.lock();
-        let find_min_or_max = find_min || find_max;
-        for document_id in ids {
-            if let Some((id, imap_id)) = state.map_result_id(document_id, is_uid) {
-                if find_min {
-                    if let Some((prev_min, _)) = min {
-                        if id < *prev_min {
-                            *min = Some((id, imap_id));
-                        }
-                    } else {
-                        *min = Some((id, imap_id));
-                    }
-                }
-                if find_max {
-                    if let Some((prev_max, _)) = max {
-                        if id > *prev_max {
-                            *max = Some((id, imap_id));
-                        }
-                    } else {
-                        *max = Some((id, imap_id));
-                    }
-                }
-                if collect_all || !find_min_or_max {
-                    imap_ids.push(id);
-                    if let Some(r) = saved_results.as_mut() {
-                        r.push(imap_id)
-                    }
-                }
-                *total += 1;
-            }
-        }
-        if find_min_or_max && !collect_all {
-            let max = max.filter(|(max_id, _)| min.is_none_or(|(min_id, _)| min_id != *max_id));
-            for (id, imap_id) in [*min, max].into_iter().flatten() {
-                imap_ids.push(id);
-                if let Some(r) = saved_results.as_mut() {
-                    r.push(imap_id)
-                }
-            }
-        }
-    }
 }
 
 impl SavedSearch {
-    pub async fn unwrap(&self) -> Option<Arc<Vec<ImapId>>> {
+    pub async fn unwrap(&self) -> Option<Arc<Vec<Row>>> {
         match self {
             SavedSearch::InFlight { rx } => {
                 let mut rx = rx.clone();

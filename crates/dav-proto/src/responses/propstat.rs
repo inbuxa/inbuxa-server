@@ -33,7 +33,7 @@ impl Display for Prop {
 }
 
 impl PropStat {
-    #[cfg(test)]
+    #[cfg(all(test, stalwart_tests))]
     pub(crate) fn new(prop: impl Into<DavPropertyValue>) -> Self {
         PropStat {
             prop: Prop(List(vec![prop.into()])),

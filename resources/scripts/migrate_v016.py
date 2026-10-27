@@ -1105,7 +1105,7 @@ class Converter:
             "secret": password,
         }
         if otp is not None:
-            cred["otpAuth"] = otp
+            cred["otpUrl"] = otp
         return {"0": cred}
 
     def _build_member_group_ids(self, p: dict[str, Any]) -> dict[str, bool]:
@@ -1510,7 +1510,7 @@ class Converter:
             body["transactionTimeout"] = tt
         return body
 
-    def _build_sql_common(self, sub: dict[str, str]) -> dict[str, Any]:
+    def _build_sql_common(self, sub: dict[str, str], timeout_key: str) -> dict[str, Any]:
         out: dict[str, Any] = {}
         host = sub.get("host", "").strip()
         if not host:
@@ -1535,7 +1535,7 @@ class Converter:
             out["allowInvalidCerts"] = tls_invalid
         tout = parse_duration_ms(sub.get("timeout"))
         if tout is not None:
-            out["timeout"] = tout
+            out[timeout_key] = tout
         pmc = parse_int(sub.get("pool.max-connections"))
         if pmc is not None:
             out["poolMaxConnections"] = pmc
@@ -1549,7 +1549,7 @@ class Converter:
         for_search: bool = False,
     ) -> dict[str, Any]:
         body = {"@type": "PostgreSql"}
-        body.update(self._build_sql_common(sub))
+        body.update(self._build_sql_common(sub, "connectTimeout"))
         return body
 
     def _build_mysql(
@@ -1560,7 +1560,7 @@ class Converter:
         for_search: bool = False,
     ) -> dict[str, Any]:
         body = {"@type": "MySql"}
-        body.update(self._build_sql_common(sub))
+        body.update(self._build_sql_common(sub, "idleTimeout"))
         map_ = parse_size_bytes(sub.get("max-allowed-packet"))
         if map_ is not None:
             body["maxAllowedPacket"] = map_
@@ -1575,9 +1575,11 @@ class Converter:
         if not bucket:
             raise ConvertError("s3 store missing required 'bucket'")
         body["bucket"] = bucket
-        body["accessKey"] = public_string_optional(sub.get("access-key", "").strip())
+        body["accessKeyId"] = public_string_optional(sub.get("access-key", "").strip())
         body["secretKey"] = secret_key_optional(sub.get("secret-key"))
-        body["securityToken"] = secret_key_optional(sub.get("security-token"))
+        body["sessionToken"] = secret_key_optional(
+            sub.get("session-token") or sub.get("security-token")
+        )
         profile = sub.get("profile", "").strip()
         if profile:
             body["profile"] = profile
@@ -1595,8 +1597,8 @@ class Converter:
         if endpoint:
             body["region"] = {
                 "@type": "Custom",
-                "customEndpoint": endpoint,
-                "customRegion": region_raw or "custom",
+                "url": endpoint,
+                "region": region_raw or "custom",
             }
         elif region_raw in _S3_REGION_MAP:
             body["region"] = {"@type": _S3_REGION_MAP[region_raw]}
@@ -1604,8 +1606,8 @@ class Converter:
 
             body["region"] = {
                 "@type": "Custom",
-                "customEndpoint": "",
-                "customRegion": region_raw,
+                "url": "",
+                "region": region_raw,
             }
         return body
 
@@ -1619,7 +1621,7 @@ class Converter:
         if not cont:
             raise ConvertError("azure store missing required 'container'")
         body["container"] = cont
-        body["accessKey"] = secret_key_optional(sub.get("azure-access-key"))
+        body["accountKey"] = secret_key_optional(sub.get("azure-access-key"))
         body["sasToken"] = secret_key_optional(sub.get("sas-token"))
         kp = sub.get("key-prefix", "").strip()
         if kp:
@@ -1649,7 +1651,7 @@ class Converter:
         body: dict[str, Any] = {"@type": "Redis", "url": urls[0]}
         to = parse_duration_ms(sub.get("timeout"))
         if to is not None:
-            body["timeout"] = to
+            body["connectTimeout"] = to
         return body
 
     def _build_redis_cluster(self, sub: dict[str, str]) -> dict[str, Any]:
@@ -1681,7 +1683,7 @@ class Converter:
             body["protocolVersion"] = _REDIS_PROTOCOL_MAP[pv]
         to = parse_duration_ms(sub.get("timeout"))
         if to is not None:
-            body["timeout"] = to
+            body["connectTimeout"] = to
         return body
 
     def _build_http_auth(self, sub: dict[str, str]) -> dict[str, Any]:
@@ -1743,7 +1745,7 @@ class Converter:
             "apiKey": secret_key_optional(ak),
         }
         if lu:
-            body["logoUrl"] = lu
+            body["logo"] = lu
         return body
 
     def _build_system_settings(self) -> dict[str, Any] | None:

@@ -4,25 +4,34 @@
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
  */
 
-use crate::changes::state::JmapCacheState;
-use calcard::jscontact::{JSContactProperty, JSContactValue, import::ConversionOptions};
-use common::{Server, auth::AccessToken};
-use groupware::{cache::GroupwareCache, contact::ContactCard};
+use crate::{
+    api::{
+        budget::GetBudget,
+        metadata::{MetadataDocuments, MetadataType, ObjectMetadata, select_properties},
+    },
+    blob::embedded::{EmbeddedBlobIds, import_error},
+    changes::state::JmapCacheState,
+};
+use calcard::jscontact::{JSContactProperty, JSContactValue, import::ImportOptions};
+use common::{
+    Server,
+    auth::AccessToken,
+    network::memory::MemoryReservation,
+    storage::batch::{DocumentBatch, Lookup, MAX_BATCH_BYTES, MAX_BATCH_DOCUMENTS},
+};
+use groupware::{cache::GroupwareCache, contact::ContactCardContent};
 use jmap_proto::{
-    method::get::{GetRequest, GetResponse},
+    method::get::{GetRequest, GetResponse, all_ids},
     object::contact,
+    request::capability::CapabilityIds,
 };
 use jmap_tools::{Map, Value};
-use store::{
-    ValueKey,
-    roaring::RoaringBitmap,
-    write::{AlignedBytes, Archive},
-};
 use trc::AddContext;
 use types::{
     acl::Acl,
     blob::BlobId,
     collection::{Collection, SyncCollection},
+    field::ContactField,
     id::Id,
 };
 
@@ -31,6 +40,8 @@ pub trait ContactCardGet: Sync + Send {
         &self,
         request: GetRequest<contact::ContactCard>,
         access_token: &AccessToken,
+        using: CapabilityIds,
+        reservation: &mut MemoryReservation,
     ) -> impl Future<Output = trc::Result<GetResponse<contact::ContactCard>>> + Send;
 }
 
@@ -39,42 +50,73 @@ impl ContactCardGet for Server {
         &self,
         mut request: GetRequest<contact::ContactCard>,
         access_token: &AccessToken,
+        using: CapabilityIds,
+        reservation: &mut MemoryReservation,
     ) -> trc::Result<GetResponse<contact::ContactCard>> {
         let (ids, not_found_ids) = request.unwrap_ids(self.core.jmap.get_max_objects)?;
         let return_all_properties = request.properties.is_none();
-        let properties =
-            request.unwrap_properties(&[JSContactProperty::Id, JSContactProperty::AddressBookIds]);
+        let (properties, selection) = select_properties(
+            &mut request,
+            &[JSContactProperty::Id, JSContactProperty::AddressBookIds],
+            using,
+        )?;
+        let metadata = ObjectMetadata::new(self, access_token, using, MetadataType::ContactCard);
+        let metadata_get = metadata.get(selection);
         let account_id = request.account_id.document_id();
+        let sampled = metadata.viewer_change_id(self, account_id).await?;
         let cache = self
-            .fetch_dav_resources(
+            .fetch_groupware_resources(
                 access_token.account_id(),
                 account_id,
                 SyncCollection::AddressBook,
             )
             .await?;
-        let contact_ids = if access_token.is_member(account_id) {
-            cache.document_ids(false).collect::<RoaringBitmap>()
-        } else {
-            cache.shared_items(access_token, [Acl::ReadItems], true)
+        let shared_contact_ids = (!access_token.is_member(account_id))
+            .then(|| cache.shared_items(access_token, [Acl::ReadItems], true));
+        let readable_contact = |document_id: u32| {
+            shared_contact_ids
+                .as_ref()
+                .is_none_or(|ids| ids.contains(document_id))
+                .then(|| cache.item_by_id(document_id))
+                .flatten()
         };
         let ids = if let Some(ids) = ids {
             ids
+        } else if let Some(shared_contact_ids) = &shared_contact_ids {
+            all_ids(
+                shared_contact_ids.iter().map(Into::into),
+                self.core.jmap.get_max_objects,
+            )?
         } else {
-            contact_ids
-                .iter()
-                .take(self.core.jmap.get_max_objects)
-                .map(Into::into)
-                .collect::<Vec<_>>()
+            all_ids(
+                cache.document_ids(false).map(Into::into),
+                self.core.jmap.get_max_objects,
+            )?
+        };
+        let mut metadata_values = match &metadata_get {
+            Some(get) => {
+                let mut documents = MetadataDocuments::default();
+                for id in &ids {
+                    let document_id = id.document_id();
+                    if let Some(resource) = readable_contact(document_id) {
+                        documents.insert(document_id, resource.metadata_kinds());
+                    }
+                }
+                Some(metadata.load(self, account_id, get, &documents).await?)
+            }
+            None => None,
         };
         let mut response = GetResponse {
             account_id: request.account_id.into(),
-            state: cache.get_state(false).into(),
+            state: sampled.state(cache.get_state(false)).into(),
             list: Vec::with_capacity(ids.len()),
             not_found: not_found_ids,
         };
         let mut return_id = return_all_properties;
         let mut return_address_book_ids = return_all_properties;
         let mut return_converted_props = !return_all_properties;
+        let mut return_blob_ids = return_all_properties;
+        let mut needs_content = return_all_properties;
 
         if !return_all_properties {
             for property in &properties {
@@ -87,73 +129,128 @@ impl ContactCardGet for Server {
                     }
                     JSContactProperty::VCard => {
                         return_converted_props = true;
+                        return_blob_ids = true;
+                        needs_content = true;
                     }
-                    _ => {}
+                    JSContactProperty::Media | JSContactProperty::Localizations => {
+                        return_blob_ids = true;
+                        needs_content = true;
+                    }
+                    _ => {
+                        needs_content = true;
+                    }
                 }
             }
         }
 
-        for id in ids {
-            // Obtain the contact object
-            let document_id = id.document_id();
-            if !contact_ids.contains(document_id) {
-                response.push_not_found(id);
-                continue;
+        let mut budget = GetBudget::new(reservation);
+        let mut batch = DocumentBatch::new(MAX_BATCH_BYTES);
+        for chunk in ids.chunks(MAX_BATCH_DOCUMENTS) {
+            batch.reset();
+            if needs_content {
+                for id in chunk {
+                    if readable_contact(id.document_id()).is_some() {
+                        batch.request(id.document_id());
+                    }
+                }
             }
 
-            let _contact = if let Some(contact) = self
-                .store()
-                .get_value::<Archive<AlignedBytes>>(ValueKey::archive(
+            loop {
+                self.read_archive_batch(
                     account_id,
                     Collection::ContactCard,
-                    document_id,
-                ))
-                .await?
-            {
-                contact
-            } else {
-                response.push_not_found(id);
-                continue;
-            };
-
-            let contact = _contact
-                .deserialize::<ContactCard>()
-                .caused_by(trc::location!())?;
-
-            let jscontact = contact
-                .card
-                .into_jscontact_with_options::<Id, BlobId>(
-                    ConversionOptions::default().include_vcard_parameters(return_converted_props),
+                    ContactField::Content.into(),
+                    &mut batch,
                 )
-                .into_inner();
-            let mut result = if return_all_properties {
-                jscontact.into_object().unwrap()
-            } else {
-                Map::from_iter(
-                    jscontact
-                        .into_expanded_object()
-                        .filter(|(k, _)| k.as_property().is_some_and(|p| properties.contains(p))),
-                )
-            };
+                .await?;
 
-            if return_id {
-                result.insert_unchecked(
-                    JSContactProperty::Id,
-                    Value::Element(JSContactValue::Id(id)),
-                );
-            }
+                for &id in chunk {
+                    let document_id = id.document_id();
+                    let Some(resource) = readable_contact(document_id) else {
+                        if batch.is_first_round() {
+                            response.push_not_found(id);
+                        }
+                        continue;
+                    };
 
-            if return_address_book_ids {
-                let mut obj = Map::with_capacity(contact.names.len());
-                for id in contact.names.iter() {
-                    obj.insert_unchecked(JSContactProperty::IdValue(Id::from(id.parent_id)), true);
+                    let mut result = if needs_content {
+                        let content = match batch.lookup(document_id) {
+                            Lookup::Found(content) => content,
+                            Lookup::Missing => {
+                                response.push_not_found(id);
+                                continue;
+                            }
+                            Lookup::Skip => continue,
+                        };
+                        budget.add_archive(content.as_bytes().len(), 1)?;
+                        let content = content
+                            .deserialize::<ContactCardContent>()
+                            .caused_by(trc::location!())?;
+
+                        let options =
+                            ImportOptions::new().include_vcard_parameters(return_converted_props);
+                        let jscontact = if return_blob_ids {
+                            content.card.into_jscontact_with::<Id, BlobId, _>(
+                                options.with_blob_id_generator(EmbeddedBlobIds::new(
+                                    account_id,
+                                    Collection::ContactCard,
+                                    document_id,
+                                )),
+                            )
+                        } else {
+                            content.card.into_jscontact_with::<Id, BlobId, _>(options)
+                        }
+                        .map_err(import_error)?
+                        .into_inner();
+
+                        if return_all_properties {
+                            jscontact.into_object().unwrap()
+                        } else {
+                            Map::from_iter(jscontact.into_expanded_object().filter(|(k, _)| {
+                                k.as_property().is_some_and(|p| properties.contains(p))
+                            }))
+                        }
+                    } else if batch.is_first_round() {
+                        Map::with_capacity(2)
+                    } else {
+                        continue;
+                    };
+
+                    if return_id {
+                        result.insert_unchecked(
+                            JSContactProperty::Id,
+                            Value::Element(JSContactValue::Id(id)),
+                        );
+                    }
+
+                    if return_address_book_ids {
+                        let names = resource.child_names();
+                        let mut obj = Map::with_capacity(names.len());
+                        for name in names {
+                            obj.insert_unchecked(
+                                JSContactProperty::IdValue(Id::from(name.parent_id)),
+                                true,
+                            );
+                        }
+                        result.insert_unchecked(
+                            JSContactProperty::AddressBookIds,
+                            Value::Object(obj),
+                        );
+                    }
+                    if let Some(values) = &mut metadata_values {
+                        values.insert_into(document_id, &mut result);
+                    }
+
+                    response.list.push(result.into());
                 }
-                result.insert_unchecked(JSContactProperty::AddressBookIds, Value::Object(obj));
-            }
 
-            response.list.push(result.into());
+                if !batch.next_round() {
+                    break;
+                }
+            }
         }
 
+        budget.commit();
         Ok(response)
     }
 }

@@ -6,12 +6,13 @@
 
 use crate::{
     object::{AnyId, JmapObject, JmapObjectId},
-    request::deserialize::DeserializeArguments,
+    request::deserialize::{CowStr, DeserializeArguments},
     types::date::UTCDate,
 };
 use jmap_tools::{Element, Key, Property};
+use serde::{Serialize, Serializer};
 use std::{borrow::Cow, fmt::Display, str::FromStr};
-use types::{id::Id, type_state::DataType};
+use types::{id::Id, text::Text, type_state::DataType};
 
 #[derive(Debug, Clone, Default)]
 pub struct ShareNotification;
@@ -61,6 +62,17 @@ impl Property for ShareNotificationProperty {
         }
         .into()
     }
+
+    fn key_eq(&self, other: &Self) -> bool {
+        self == other
+            || matches!(
+                (self, other),
+                (
+                    ShareNotificationProperty::Name | ShareNotificationProperty::ChangedByName,
+                    ShareNotificationProperty::Name | ShareNotificationProperty::ChangedByName
+                )
+            )
+    }
 }
 
 impl Element for ShareNotificationValue {
@@ -86,28 +98,42 @@ impl Element for ShareNotificationValue {
     }
 
     fn to_cow(&self) -> Cow<'static, str> {
+        self.text().to_cow()
+    }
+
+    fn serialize_text<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
         match self {
-            ShareNotificationValue::Id(id) => id.to_string().into(),
-            ShareNotificationValue::Date(date) => date.to_string().into(),
-            ShareNotificationValue::ObjectType(ty) => ty.as_str().into(),
+            ShareNotificationValue::Date(date) => date.serialize(serializer),
+            value => value.text().serialize(serializer),
+        }
+    }
+}
+
+impl ShareNotificationValue {
+    pub fn text(&self) -> Text<'_> {
+        match self {
+            ShareNotificationValue::Id(id) => Text::Id(*id),
+            ShareNotificationValue::Date(date) => Text::Display(date),
+            ShareNotificationValue::ObjectType(ty) => Text::Static(ty.as_str()),
         }
     }
 }
 
 impl ShareNotificationProperty {
     fn parse(value: &str) -> Option<Self> {
-        hashify::tiny_map!(value.as_bytes(),
-            b"id" => ShareNotificationProperty::Id,
-            b"created" => ShareNotificationProperty::Created,
-            b"changedBy" => ShareNotificationProperty::ChangedBy,
-            b"name" => ShareNotificationProperty::ChangedByName,
-            b"email" => ShareNotificationProperty::ChangedByEmail,
-            b"principalId" => ShareNotificationProperty::ChangedByPrincipalId,
-            b"objectType" => ShareNotificationProperty::ObjectType,
-            b"objectAccountId" => ShareNotificationProperty::ObjectAccountId,
-            b"objectId" => ShareNotificationProperty::ObjectId,
-            b"oldRights" => ShareNotificationProperty::OldRights,
-            b"newRights" => ShareNotificationProperty::NewRights
+        hashify::fnc_map!(value.as_bytes(),
+            b"id" => Some(ShareNotificationProperty::Id),
+            b"created" => Some(ShareNotificationProperty::Created),
+            b"changedBy" => Some(ShareNotificationProperty::ChangedBy),
+            b"name" => Some(ShareNotificationProperty::ChangedByName),
+            b"email" => Some(ShareNotificationProperty::ChangedByEmail),
+            b"principalId" => Some(ShareNotificationProperty::ChangedByPrincipalId),
+            b"objectType" => Some(ShareNotificationProperty::ObjectType),
+            b"objectAccountId" => Some(ShareNotificationProperty::ObjectAccountId),
+            b"objectId" => Some(ShareNotificationProperty::ObjectId),
+            b"oldRights" => Some(ShareNotificationProperty::OldRights),
+            b"newRights" => Some(ShareNotificationProperty::NewRights),
+            _ => None
         )
     }
 }
@@ -192,13 +218,13 @@ impl<'de> DeserializeArguments<'de> for ShareNotificationComparator {
         A: serde::de::MapAccess<'de>,
     {
         if key == "property" {
-            let value = map.next_value::<Cow<str>>()?;
+            let value = map.next_value::<CowStr>()?.0;
             hashify::fnc_map!(value.as_bytes(),
                 b"created" => {
                     *self = ShareNotificationComparator::Created;
                 },
                 _ => {
-                    *self = ShareNotificationComparator::_T(value.to_string());
+                    *self = ShareNotificationComparator::_T(value.into_owned());
                 }
             );
         } else {

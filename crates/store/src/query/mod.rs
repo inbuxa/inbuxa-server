@@ -7,17 +7,29 @@
 pub mod acl;
 pub mod log;
 
-use crate::{IterateParams, Key};
+use crate::{Fetch, IterateParams, Key};
 
 impl<T: Key> IterateParams<T> {
     pub fn new(begin: T, end: T) -> Self {
         IterateParams {
             begin,
             end,
-            first: false,
             ascending: true,
             values: true,
+            fetch: Fetch::All,
         }
+    }
+
+    pub fn expect_rows(mut self, rows: usize) -> Self {
+        if !matches!(self.fetch, Fetch::Limit(_)) {
+            self.fetch = Fetch::Expect(u32::try_from(rows).unwrap_or(u32::MAX));
+        }
+        self
+    }
+
+    pub fn limit(mut self, rows: usize) -> Self {
+        self.fetch = Fetch::Limit(u32::try_from(rows).unwrap_or(u32::MAX));
+        self
     }
 
     pub fn set_ascending(mut self, ascending: bool) -> Self {
@@ -40,9 +52,8 @@ impl<T: Key> IterateParams<T> {
         self
     }
 
-    pub fn only_first(mut self) -> Self {
-        self.first = true;
-        self
+    pub fn only_first(self) -> Self {
+        self.limit(1)
     }
 
     pub fn no_values(mut self) -> Self {

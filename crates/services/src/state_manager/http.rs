@@ -12,6 +12,7 @@ use super::{
 use crate::state_manager::{PushBatch, PushRegistration};
 use calcard::jscalendar::JSCalendarDateTime;
 use common::{Server, ipc::PushNotification, network::webpush::Vapid};
+use compact_str::{CompactString, ToCompactString};
 use email::push::{PushSubscription, Urgency};
 use jmap_proto::{
     object::email::{EmailProperty, EmailValue},
@@ -20,17 +21,18 @@ use jmap_proto::{
 };
 use jmap_tools::Value;
 use reqwest::{
-    Client, Url,
+    Method,
     header::{AUTHORIZATION, CONTENT_ENCODING, CONTENT_TYPE},
-    redirect::Policy,
 };
-use std::net::IpAddr;
 use std::time::{Duration, Instant};
 use store::write::now;
 use tokio::sync::mpsc;
 use trc::PushSubscriptionEvent;
 use types::id::Id;
-use utils::map::vec_map::VecMap;
+use utils::{
+    map::vec_map::VecMap,
+    outbound::{OutboundClient, OutboundPolicy, Redirects},
+};
 
 const MAX_ERROR_RESPONSE_LEN: usize = 1024;
 const MAX_REDIRECTS: usize = 4;
@@ -48,7 +50,7 @@ impl PushRegistration {
     pub fn send(
         &mut self,
         id: Id,
-        push_client: &Client,
+        push_client: &OutboundClient,
         push_tx: mpsc::Sender<Event>,
         push_timeout: Duration,
         server: Server,
@@ -70,10 +72,10 @@ impl PushRegistration {
 
             for notification in &batch.notifications {
                 match notification {
-                    PushNotification::StateChange(_) => {}
+                    PushNotification::StateChange(_) | PushNotification::ViewerStateChange(_) => {}
                     PushNotification::CalendarAlert(calendar_alert) => {
                         let payload = PushObject::CalendarAlert {
-                            account_id: calendar_alert.account_id.into(),
+                            account_id: calendar_alert.event_account_id.into(),
                             calendar_event_id: calendar_alert.event_id.into(),
                             uid: calendar_alert.uid.clone(),
                             recurrence_id: calendar_alert.recurrence_id.map(|timestamp| {
@@ -204,7 +206,8 @@ impl PushRegistration {
                     .notifications
                     .into_iter()
                     .filter(|notification| match notification {
-                        PushNotification::StateChange(_) => false,
+                        PushNotification::StateChange(_)
+                        | PushNotification::ViewerStateChange(_) => false,
                         PushNotification::EmailPush(email_push) => {
                             failed_email_pushes.contains(&email_push.account_id)
                         }
@@ -222,7 +225,7 @@ impl PushRegistration {
 }
 
 async fn post_object(
-    push_client: &Client,
+    push_client: &OutboundClient,
     subscription: &PushSubscription,
     object: &PushObject,
     push_timeout: Duration,
@@ -253,35 +256,37 @@ async fn post_object(
     }
 }
 
-pub(crate) fn build_push_client() -> Client {
-    utils::http::http_client_builder(cfg!(feature = "test_mode"))
-        .redirect(Policy::custom(|attempt| match attempt.previous().last() {
-            Some(previous) if is_same_organization(previous, attempt.url()) => {
-                if attempt.previous().len() > MAX_REDIRECTS {
-                    attempt.error("Too many redirects.")
-                } else {
-                    attempt.follow()
-                }
-            }
-            _ => attempt.stop(),
-        }))
-        .build()
-        .unwrap_or_default()
+pub(crate) fn build_push_client() -> OutboundClient {
+    OutboundClient::new(
+        utils::http::http_client_builder(cfg!(stalwart_tests)),
+        OutboundPolicy::PublicOnly,
+        Redirects::SameOrganization(MAX_REDIRECTS),
+    )
 }
 
 pub(crate) async fn http_request(
-    push_client: &Client,
+    push_client: &OutboundClient,
     details: &PushSubscription,
     mut body: Vec<u8>,
     push_timeout: Duration,
     vapid: Option<&Vapid>,
     urgency: Urgency,
 ) -> bool {
-    let mut client = push_client
-        .post(details.url.as_str())
-        .timeout(push_timeout)
-        .header("TTL", "86400")
-        .header("Urgency", urgency.as_str());
+    let mut client = match push_client.request(Method::POST, &details.url) {
+        Ok(client) => client,
+        Err(err) => {
+            trc::event!(
+                PushSubscription(PushSubscriptionEvent::Error),
+                Details = "Push subscription URL rejected",
+                Url = CompactString::from(&details.url),
+                Reason = err.as_str()
+            );
+            return true;
+        }
+    }
+    .timeout(push_timeout)
+    .header("TTL", "86400")
+    .header("Urgency", urgency.as_str());
 
     if let Some(authorization) = vapid.and_then(|vapid| vapid.authorization(&details.url, now())) {
         client = client.header(AUTHORIZATION, authorization);
@@ -301,7 +306,7 @@ pub(crate) async fn http_request(
                 trc::event!(
                     PushSubscription(PushSubscriptionEvent::Error),
                     Details = "Failed to encrypt push subscription",
-                    Url = details.url.to_string(),
+                    Url = CompactString::from(&details.url),
                     Reason = err
                 );
                 return true;
@@ -321,7 +326,7 @@ pub(crate) async fn http_request(
             if status.is_success() {
                 trc::event!(
                     PushSubscription(PushSubscriptionEvent::Success),
-                    Url = details.url.to_string()
+                    Url = CompactString::from(&details.url)
                 );
 
                 true
@@ -332,7 +337,7 @@ pub(crate) async fn http_request(
                 trc::event!(
                     PushSubscription(PushSubscriptionEvent::Error),
                     Details = "HTTP POST failed",
-                    Url = details.url.to_string(),
+                    Url = CompactString::from(&details.url),
                     Code = status.as_u16(),
                     Reason = reason,
                 );
@@ -344,98 +349,11 @@ pub(crate) async fn http_request(
             trc::event!(
                 PushSubscription(PushSubscriptionEvent::Error),
                 Details = "HTTP POST failed",
-                Url = details.url.to_string(),
-                Reason = err.to_string()
+                Url = CompactString::from(&details.url),
+                Reason = err.to_compact_string()
             );
 
             false
-        }
-    }
-}
-
-fn is_same_organization(previous: &Url, next: &Url) -> bool {
-    if previous.scheme() == next.scheme()
-        && let (Some(previous_host), Some(next_host)) = (previous.host_str(), next.host_str())
-    {
-        if is_ip_literal(previous_host) || is_ip_literal(next_host) {
-            previous_host == next_host
-        } else {
-            match (psl::domain_str(previous_host), psl::domain_str(next_host)) {
-                (Some(previous_domain), Some(next_domain)) => previous_domain == next_domain,
-                _ => previous_host == next_host,
-            }
-        }
-    } else {
-        false
-    }
-}
-
-fn is_ip_literal(host: &str) -> bool {
-    host.strip_prefix('[')
-        .and_then(|host| host.strip_suffix(']'))
-        .unwrap_or(host)
-        .parse::<IpAddr>()
-        .is_ok()
-}
-
-#[cfg(test)]
-mod tests {
-    use super::is_same_organization;
-    use reqwest::Url;
-
-    #[test]
-    fn same_organization_redirects() {
-        for (previous, next, expected) in [
-            (
-                "https://push.example.org/a",
-                "https://push.example.org/b",
-                true,
-            ),
-            (
-                "https://push.example.org/a",
-                "https://push2.example.org/b",
-                true,
-            ),
-            ("https://push.example.org/a", "https://example.org/b", true),
-            (
-                "https://push.example.org/a",
-                "https://push.example.org:8443/b",
-                true,
-            ),
-            (
-                "https://push.example.org/a",
-                "https://push.evil.org/b",
-                false,
-            ),
-            (
-                "https://push.example.org/a",
-                "http://push.example.org/b",
-                false,
-            ),
-            (
-                "https://push.example.co.uk/a",
-                "https://evil.co.uk/b",
-                false,
-            ),
-            ("https://1.2.3.4/a", "https://1.2.3.4/b", true),
-            ("https://1.2.3.4/a", "https://5.6.7.8/b", false),
-            ("https://1.2.3.4/a", "https://5.6.3.4/b", false),
-            ("https://1.2.3.4/a", "https://127.0.0.1/b", false),
-            ("https://[2606:4700::1111]/a", "https://[::1]/b", false),
-            (
-                "https://[2606:4700::1111]/a",
-                "https://[2606:4700::1111]/b",
-                true,
-            ),
-        ] {
-            let previous = Url::parse(previous).unwrap();
-            let next = Url::parse(next).unwrap();
-
-            assert_eq!(
-                is_same_organization(&previous, &next),
-                expected,
-                "{previous} -> {next}"
-            );
         }
     }
 }

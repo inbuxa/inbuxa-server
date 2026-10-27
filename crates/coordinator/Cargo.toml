@@ -1,26 +1,27 @@
 [package]
 name = "coordinator"
-version = "0.16.27"
+version = "1.0.0"
 edition = "2024"
 
 [dependencies]
 store = { path =  "../store" }
 registry = { path =  "../registry" }
+utils = { path =  "../utils", optional = true }
 trc = { path = "../trc" }
 futures = { version = "0.3", optional = true }
-tokio = { version = "1.53", features = ["sync", "fs", "io-util"] }
+tokio = { version = "1.54", features = ["sync", "fs", "io-util"] }
 async-nats = { version = "0.50", default-features = false, features = ["server_2_10", "server_2_11", "aws-lc-rs"], optional = true }
-zenoh = { version = "1.10.0", default-features = false, features = ["auth_pubkey", "transport_multilink", "transport_compression", "transport_quic", "transport_tcp", "transport_tls", "transport_udp"], optional = true }
-rdkafka = { version = "0.39", features = ["cmake-build"], optional = true }
-redis = { version = "1.6", features = [ "tokio-comp", "tokio-rustls-comp", "tls-rustls-insecure", "tls-rustls", "cluster-async", "sentinel"], optional = true }
+zenoh = { version = "1.10.1", default-features = false, features = ["auth_pubkey", "transport_multilink", "transport_compression", "transport_quic", "transport_tcp", "transport_tls", "transport_udp"], optional = true }
+rdkafka = { version = "0.39", features = ["cmake-build", "ssl"], optional = true }
+redis = { version = "1.8", features = [ "tokio-comp", "tokio-rustls-comp", "tls-rustls-insecure", "tls-rustls", "cluster-async", "sentinel"], optional = true }
+deadpool = { version = "0.13", default-features = false, features = ["managed"], optional = true }
 
 [features]
-nats = ["async-nats", "futures"]
+nats = ["async-nats", "futures", "dep:utils"]
 zenoh = ["dep:zenoh"]
-kafka = ["rdkafka"]
-redis = ["dep:redis", "futures"]
-enterprise = []
-test_mode = []
+kafka = ["rdkafka", "futures"]
+redis = ["dep:redis", "dep:deadpool", "futures", "store/redis"]
+enterprise = ["store/enterprise", "registry/enterprise", "utils?/enterprise", "trc/enterprise"]
 
 [lints]
 workspace = true

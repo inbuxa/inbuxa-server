@@ -6,8 +6,11 @@
 
 use crate::core::throttle::NewKey;
 use common::{
-    KV_RATE_LIMIT_SMTP, Server, config::smtp::QueueRateLimiter, expr::functions::ResolveVariable,
+    KV_RATE_LIMIT_SMTP, Server,
+    config::smtp::QueueRateLimiter,
+    expr::{Bump, functions::ResolveVariable},
 };
+use compact_str::ToCompactString;
 use std::future::Future;
 use store::write::now;
 
@@ -27,9 +30,10 @@ impl IsAllowed for Server {
         envelope: &impl ResolveVariable,
         session_id: u64,
     ) -> Result<(), u64> {
+        let mut arena = Bump::new();
         if throttle.expr.is_empty()
             || self
-                .eval_if(&throttle.expr, envelope, session_id)
+                .eval_if(&throttle.expr, envelope, &mut arena, session_id)
                 .await
                 .unwrap_or(false)
         {
@@ -37,18 +41,16 @@ impl IsAllowed for Server {
 
             match self
                 .in_memory_store()
-                .is_rate_allowed(KV_RATE_LIMIT_SMTP, key.as_ref(), &throttle.rate, false)
+                .is_rate_allowed(KV_RATE_LIMIT_SMTP, key.as_ref(), &throttle.rate)
                 .await
             {
                 Ok(Some(next_refill)) => {
                     trc::event!(
                         Queue(trc::QueueEvent::RateLimitExceeded),
                         SpanId = session_id,
-                        Id = throttle.id.to_string(),
-                        Limit = vec![
-                            trc::Value::from(throttle.rate.count),
-                            trc::Value::from(throttle.rate.period.into_inner())
-                        ],
+                        Name = throttle.id.to_compact_string(),
+                        Limit = throttle.rate.count,
+                        Period = throttle.rate.period.into_inner(),
                     );
 
                     return Err(now() + next_refill);

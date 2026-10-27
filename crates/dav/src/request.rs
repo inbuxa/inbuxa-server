@@ -24,7 +24,7 @@ use crate::{
         acl::DavAclHandler,
         lock::{LockRequest, LockRequestHandler},
         propfind::PropFindRequestHandler,
-        uri::DavUriResource,
+        uri::{DavUriResource, UriResource, canonical_dav_uri},
     },
     file::{
         copy_move::FileCopyMoveRequestHandler, delete::FileDeleteRequestHandler,
@@ -33,26 +33,38 @@ use crate::{
     },
     principal::{matching::PrincipalMatching, propsearch::PrincipalPropSearch},
 };
-use common::{Server, auth::AccessToken};
+use common::{Server, auth::AccessToken, network::memory::MEMORY_RETRY_AFTER};
 use compact_str::{CompactString, ToCompactString};
 use dav_proto::{
     RequestHeaders,
-    parser::{DavParser, tokenizer::Tokenizer},
+    parser::{DavParser, FilterError, header::strip_query_and_fragment, tokenizer::Tokenizer},
     schema::{
         Namespace,
-        property::WebDavProperty,
+        property::{DavProperty, PrincipalProperty, WebDavProperty},
         request::{Acl, LockInfo, MkCol, PropFind, PropertyUpdate, Report},
         response::{
-            BaseCondition, ErrorResponse, List, PrincipalSearchProperty, PrincipalSearchPropertySet,
+            BaseCondition, CalCondition, CardCondition, ErrorResponse, PrincipalSearchProperty,
+            PrincipalSearchPropertySet,
         },
     },
 };
 use http_proto::{HttpRequest, HttpResponse, HttpSessionData, request::fetch_body};
 use hyper::{StatusCode, header};
 use registry::schema::enums::Permission;
-use std::time::Instant;
+use std::{
+    ops::RangeInclusive,
+    time::{Duration, Instant},
+};
+use store::{
+    rand::{self, RngExt},
+    write::unavailable_retry_after,
+};
 use trc::{EventType, LimitEvent, StoreEvent, WebDavEvent};
-use types::collection::Collection;
+use types::collection::{Collection, SyncCollection};
+
+const MAX_CONFLICT_RETRIES: u32 = 3;
+const CONFLICT_RETRY_BACKOFF_MS: RangeInclusive<u64> = 1..=15;
+const CONFLICT_RETRY_AFTER: u64 = 1;
 
 pub trait DavRequestHandler: Sync + Send {
     fn handle_dav_request(
@@ -72,7 +84,7 @@ pub(crate) trait DavRequestDispatcher: Sync + Send {
         access_token: AccessToken,
         resource: DavResourceName,
         method: DavMethod,
-        body: Vec<u8>,
+        body: &[u8],
     ) -> impl Future<Output = crate::Result<HttpResponse>> + Send;
 }
 
@@ -83,12 +95,12 @@ impl DavRequestDispatcher for Server {
         access_token: AccessToken,
         resource: DavResourceName,
         method: DavMethod,
-        body: Vec<u8>,
+        body: &[u8],
     ) -> crate::Result<HttpResponse> {
         // Dispatch
         match method {
             DavMethod::PROPFIND => {
-                let request = PropFind::parse(&mut Tokenizer::new(&body))?;
+                let request = PropFind::parse(&mut Tokenizer::new(body))?;
 
                 self.handle_propfind_request(&access_token, headers, request)
                     .await
@@ -150,7 +162,7 @@ impl DavRequestDispatcher for Server {
                 }
                 DavResourceName::Principal => Err(DavError::Code(StatusCode::METHOD_NOT_ALLOWED)),
             },
-            DavMethod::REPORT => match Report::parse(&mut Tokenizer::new(&body))? {
+            DavMethod::REPORT => match Report::parse(&mut Tokenizer::new(body))? {
                 Report::SyncCollection(sync_collection) => {
                     // Validate permissions
                     let access_token =
@@ -178,17 +190,6 @@ impl DavRequestDispatcher for Server {
                 }
                 Report::AclPrincipalPropSet(report) => {
                     // Validate permissions
-                    if !self.core.groupware.allow_directory_query
-                        && !access_token.has_permission(Permission::DavPrincipalAcl)
-                    {
-                        return Err(DavError::Condition(
-                            DavErrorCondition::new(
-                                StatusCode::FORBIDDEN,
-                                BaseCondition::NeedPrivileges(List(Default::default())),
-                            )
-                            .with_details("The administrator has disabled directory queries."),
-                        ));
-                    }
                     let access_token =
                         access_token.assert_has_permission(Permission::DavPrincipalAcl)?;
 
@@ -197,17 +198,6 @@ impl DavRequestDispatcher for Server {
                 }
                 Report::PrincipalMatch(report) => {
                     // Validate permissions
-                    if !self.core.groupware.allow_directory_query
-                        && !access_token.has_permission(Permission::DavPrincipalMatch)
-                    {
-                        return Err(DavError::Condition(
-                            DavErrorCondition::new(
-                                StatusCode::FORBIDDEN,
-                                BaseCondition::NeedPrivileges(List(Default::default())),
-                            )
-                            .with_details("The administrator has disabled directory queries."),
-                        ));
-                    }
                     let access_token =
                         access_token.assert_has_permission(Permission::DavPrincipalMatch)?;
 
@@ -217,18 +207,6 @@ impl DavRequestDispatcher for Server {
                 Report::PrincipalPropertySearch(report) => {
                     if resource == DavResourceName::Principal {
                         // Validate permissions
-                        if !self.core.groupware.allow_directory_query
-                            && !access_token.has_permission(Permission::DavPrincipalSearch)
-                        {
-                            return Err(DavError::Condition(
-                                DavErrorCondition::new(
-                                    StatusCode::FORBIDDEN,
-                                    BaseCondition::NeedPrivileges(List(Default::default())),
-                                )
-                                .with_details("The administrator has disabled directory queries."),
-                            ));
-                        }
-
                         let access_token =
                             access_token.assert_has_permission(Permission::DavPrincipalSearch)?;
 
@@ -245,10 +223,19 @@ impl DavRequestDispatcher for Server {
                             .assert_has_permission(Permission::DavPrincipalSearchPropSet)?;
 
                         Ok(HttpResponse::new(StatusCode::OK).with_xml_body(
-                            PrincipalSearchPropertySet::new(vec![PrincipalSearchProperty::new(
-                                WebDavProperty::DisplayName,
-                                "Account or Group name",
-                            )])
+                            PrincipalSearchPropertySet::new(vec![
+                                PrincipalSearchProperty::new(
+                                    WebDavProperty::DisplayName,
+                                    "Account or Group name",
+                                ),
+                                PrincipalSearchProperty::new(
+                                    DavProperty::Principal(
+                                        PrincipalProperty::CalendarUserAddressSet,
+                                    ),
+                                    "Calendar user address",
+                                ),
+                            ])
+                            .with_namespace(Namespace::CalDav)
                             .to_string(),
                         ))
                     } else {
@@ -289,7 +276,15 @@ impl DavRequestDispatcher for Server {
 
                     self.handle_dav_query(
                         &access_token,
-                        DavQuery::multiget(report, Collection::Calendar, headers),
+                        DavQuery::multiget(
+                            report,
+                            if resource == DavResourceName::Scheduling {
+                                Collection::CalendarEventNotification
+                            } else {
+                                Collection::Calendar
+                            },
+                            headers,
+                        ),
                     )
                     .await
                 }
@@ -326,7 +321,7 @@ impl DavRequestDispatcher for Server {
                 }
             },
             DavMethod::PROPPATCH => {
-                let request = PropertyUpdate::parse(&mut Tokenizer::new(&body))?;
+                let request = PropertyUpdate::parse(&mut Tokenizer::new(body))?;
                 match resource {
                     DavResourceName::Card => {
                         // Validate permissions
@@ -359,7 +354,7 @@ impl DavRequestDispatcher for Server {
             }
             DavMethod::MKCOL => {
                 let request = if !body.is_empty() {
-                    Some(MkCol::parse(&mut Tokenizer::new(&body))?)
+                    Some(MkCol::parse(&mut Tokenizer::new(body))?)
                 } else {
                     None
                 };
@@ -527,7 +522,7 @@ impl DavRequestDispatcher for Server {
                     self.handle_calendar_mkcol_request(
                         &access_token,
                         headers,
-                        Some(MkCol::parse(&mut Tokenizer::new(&body))?),
+                        Some(MkCol::parse(&mut Tokenizer::new(body))?),
                     )
                     .await
                 }
@@ -546,7 +541,7 @@ impl DavRequestDispatcher for Server {
                     &access_token,
                     headers,
                     if !body.is_empty() {
-                        LockRequest::Lock(LockInfo::parse(&mut Tokenizer::new(&body))?)
+                        LockRequest::Lock(LockInfo::parse(&mut Tokenizer::new(body))?)
                     } else {
                         LockRequest::Refresh
                     },
@@ -577,7 +572,7 @@ impl DavRequestDispatcher for Server {
                 self.handle_acl_request(
                     &access_token,
                     headers,
-                    Acl::parse(&mut Tokenizer::new(&body))?,
+                    Acl::parse(&mut Tokenizer::new(body))?,
                 )
                 .await
             }
@@ -629,16 +624,63 @@ impl DavRequestHandler for Server {
         };
 
         // Parse headers
-        let mut headers = RequestHeaders::new(request.uri().path());
+        let mut destinations = request.headers().get_all("destination").iter();
+        let destination = destinations.next().and_then(|value| value.to_str().ok());
+        if destinations.next().is_some() {
+            return HttpResponse::new(StatusCode::BAD_REQUEST);
+        }
+        let raw_uri = request.uri().path();
+        let (uri, canonical_destination) = match (
+            canonical_dav_uri(raw_uri),
+            destination
+                .map(|value| canonical_dav_uri(strip_query_and_fragment(value)))
+                .transpose(),
+        ) {
+            (Ok(uri), Ok(destination)) => (uri, destination),
+            _ => return HttpResponse::new(StatusCode::BAD_REQUEST),
+        };
+        let mut headers = RequestHeaders::new(&uri);
+        headers.raw_uri = raw_uri;
         for (key, value) in request.headers() {
             headers.parse(key.as_str(), value.to_str().unwrap_or_default());
         }
+        if let Some(destination) = canonical_destination.as_deref() {
+            headers.destination = Some(destination);
+        }
 
         let start_time = Instant::now();
-        match self
-            .dispatch_dav_request(&headers, access_token, resource, method, body)
-            .await
-        {
+        let mut retries = 0;
+        let result = loop {
+            match self
+                .dispatch_dav_request(&headers, access_token.clone(), resource, method, &body)
+                .await
+            {
+                Err(DavError::Internal(err))
+                    if err.is_assertion_failure()
+                        && method.is_write()
+                        && retries < MAX_CONFLICT_RETRIES =>
+                {
+                    retries += 1;
+                    let collection = SyncCollection::from(Collection::from(resource));
+                    for uri in [Some(headers.uri), headers.destination]
+                        .into_iter()
+                        .flatten()
+                    {
+                        if let Ok(UriResource {
+                            account_id: Some(account_id),
+                            ..
+                        }) = self.validate_uri(&access_token, uri).await
+                        {
+                            self.inner.mark_cache_stale(account_id, collection);
+                        }
+                    }
+                    let backoff = rand::rng().random_range(CONFLICT_RETRY_BACKOFF_MS);
+                    tokio::time::sleep(Duration::from_millis(backoff)).await;
+                }
+                result => break result,
+            }
+        };
+        match result {
             Ok(response) => {
                 let event = WebDavEvent::from(method);
 
@@ -647,7 +689,7 @@ impl DavRequestHandler for Server {
                     SpanId = session.session_id,
                     Url = headers.uri.to_compact_string(),
                     Type = resource.name(),
-                    Details = &headers,
+                    Headers = &headers,
                     Result = response.status().as_u16(),
                     Elapsed = start_time.elapsed(),
                 );
@@ -656,6 +698,7 @@ impl DavRequestHandler for Server {
             }
             Err(DavError::Internal(err)) => {
                 let err_type = err.event_type();
+                let retry_after = unavailable_retry_after(&err);
 
                 trc::error!(
                     err.span_id(session.session_id)
@@ -664,26 +707,36 @@ impl DavRequestHandler for Server {
                         .ctx(trc::Key::Elapsed, start_time.elapsed())
                 );
 
+                #[cfg(not(feature = "enterprise"))]
+                let is_over_quota = matches!(err_type, EventType::Limit(LimitEvent::Quota));
+
                 match err_type {
-                    EventType::Limit(LimitEvent::Quota | LimitEvent::TenantQuota) => {
-                        HttpResponse::new(StatusCode::PRECONDITION_FAILED)
-                            .with_xml_body(
-                                ErrorResponse::new(BaseCondition::QuotaNotExceeded)
-                                    .with_namespace(match resource {
-                                        DavResourceName::Card => Namespace::CardDav,
-                                        DavResourceName::Cal | DavResourceName::Scheduling => {
-                                            Namespace::CalDav
-                                        }
-                                        DavResourceName::File | DavResourceName::Principal => {
-                                            Namespace::Dav
-                                        }
-                                    })
-                                    .to_string(),
-                            )
-                            .with_no_cache()
-                    }
+                    _ if is_over_quota => HttpResponse::new(StatusCode::INSUFFICIENT_STORAGE)
+                        .with_xml_body(
+                            ErrorResponse::new(BaseCondition::QuotaNotExceeded)
+                                .with_namespace(match resource {
+                                    DavResourceName::Card => Namespace::CardDav,
+                                    DavResourceName::Cal | DavResourceName::Scheduling => {
+                                        Namespace::CalDav
+                                    }
+                                    DavResourceName::File | DavResourceName::Principal => {
+                                        Namespace::Dav
+                                    }
+                                })
+                                .to_string(),
+                        )
+                        .with_no_cache(),
                     EventType::Store(StoreEvent::AssertValueFailed) => {
-                        HttpResponse::new(StatusCode::CONFLICT)
+                        HttpResponse::new(StatusCode::SERVICE_UNAVAILABLE)
+                            .with_header("Retry-After", CONFLICT_RETRY_AFTER.to_string())
+                    }
+                    _ if let Some(retry_after) = retry_after => {
+                        HttpResponse::new(StatusCode::SERVICE_UNAVAILABLE)
+                            .with_header("Retry-After", retry_after.to_string())
+                    }
+                    EventType::Limit(LimitEvent::MemoryBudget) => {
+                        HttpResponse::new(StatusCode::SERVICE_UNAVAILABLE)
+                            .with_header("Retry-After", MEMORY_RETRY_AFTER.to_string())
                     }
                     EventType::Security(_) => HttpResponse::new(StatusCode::FORBIDDEN),
                     _ => HttpResponse::new(StatusCode::INTERNAL_SERVER_ERROR),
@@ -701,7 +754,7 @@ impl DavRequestHandler for Server {
                     SpanId = session.session_id,
                     Url = headers.uri.to_compact_string(),
                     Type = resource.name(),
-                    Details = &headers,
+                    Headers = &headers,
                     Result = result.as_u16(),
                     Reason = err.to_compact_string(),
                     Elapsed = start_time.elapsed(),
@@ -717,7 +770,7 @@ impl DavRequestHandler for Server {
                     SpanId = session.session_id,
                     Url = headers.uri.to_compact_string(),
                     Type = resource.name(),
-                    Details = &headers,
+                    Headers = &headers,
                     Code = condition.code.as_u16(),
                     Result = CompactString::const_new(condition.condition.display_name()),
                     Reason = condition.details,
@@ -748,7 +801,7 @@ impl DavRequestHandler for Server {
                     SpanId = session.session_id,
                     Url = headers.uri.to_compact_string(),
                     Type = resource.name(),
-                    Details = &headers,
+                    Headers = &headers,
                     Result = code.as_u16(),
                     Elapsed = start_time.elapsed(),
                 );
@@ -761,7 +814,33 @@ impl DavRequestHandler for Server {
 
 impl From<dav_proto::parser::Error> for DavError {
     fn from(err: dav_proto::parser::Error) -> Self {
-        DavError::Parse(err)
+        match err {
+            dav_proto::parser::Error::Filter(FilterError::Invalid(Namespace::CalDav)) => {
+                DavErrorCondition::new(StatusCode::FORBIDDEN, CalCondition::ValidFilter).into()
+            }
+            dav_proto::parser::Error::Filter(FilterError::UnsupportedCollation(
+                Namespace::CalDav,
+                collation,
+            )) => DavErrorCondition::new(
+                StatusCode::FORBIDDEN,
+                CalCondition::SupportedCollation(collation),
+            )
+            .into(),
+            dav_proto::parser::Error::Filter(FilterError::UnsupportedCollation(_, collation)) => {
+                DavErrorCondition::new(
+                    StatusCode::FORBIDDEN,
+                    CardCondition::SupportedCollation(collation),
+                )
+                .into()
+            }
+            dav_proto::parser::Error::Filter(FilterError::TooComplex(Namespace::CalDav)) => {
+                DavErrorCondition::new(StatusCode::FORBIDDEN, CalCondition::SupportedFilter).into()
+            }
+            dav_proto::parser::Error::Filter(FilterError::TooComplex(_)) => {
+                DavErrorCondition::new(StatusCode::FORBIDDEN, CardCondition::SupportedFilter).into()
+            }
+            err => DavError::Parse(err),
+        }
     }
 }
 

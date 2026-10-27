@@ -9,8 +9,9 @@ use crate::{
     request::deserialize::DeserializeArguments,
 };
 use jmap_tools::{Element, Key, Property};
+use serde::{Serialize, Serializer};
 use std::{borrow::Cow, str::FromStr};
-use types::{blob::BlobId, id::Id};
+use types::{blob::BlobId, id::Id, text::Text};
 
 #[derive(Debug, Clone, Default)]
 pub struct Blob;
@@ -73,6 +74,10 @@ impl Property for BlobProperty {
         }
         .into()
     }
+
+    fn key_eq(&self, other: &Self) -> bool {
+        self == other
+    }
 }
 
 impl Element for BlobValue {
@@ -94,28 +99,39 @@ impl Element for BlobValue {
     }
 
     fn to_cow(&self) -> Cow<'static, str> {
+        self.text().to_cow()
+    }
+
+    fn serialize_text<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        self.text().serialize(serializer)
+    }
+}
+
+impl BlobValue {
+    pub fn text(&self) -> Text<'_> {
         match self {
-            BlobValue::BlobId(blob_id) => blob_id.to_string().into(),
-            BlobValue::IdReference(r) => format!("#{r}").into(),
+            BlobValue::BlobId(blob_id) => Text::Display(blob_id),
+            BlobValue::IdReference(r) => Text::Reference(r),
         }
     }
 }
 
 impl BlobProperty {
     fn parse(value: &str) -> Option<Self> {
-        hashify::tiny_map!(value.as_bytes(),
-            b"blobId" => BlobProperty::BlobId,
-            b"id" => BlobProperty::Id,
-            b"size" => BlobProperty::Size,
-            b"type" => BlobProperty::Type,
-            b"isEncodingProblem" => BlobProperty::IsEncodingProblem,
-            b"isTruncated" => BlobProperty::IsTruncated,
-            b"data:asText" => BlobProperty::Data(DataProperty::AsText),
-            b"data:asBase64" => BlobProperty::Data(DataProperty::AsBase64),
-            b"data" => BlobProperty::Data(DataProperty::Default),
-            b"digest:sha" => BlobProperty::Digest(DigestProperty::Sha),
-            b"digest:sha-256" => BlobProperty::Digest(DigestProperty::Sha256),
-            b"digest:sha-512" => BlobProperty::Digest(DigestProperty::Sha512),
+        hashify::fnc_map!(value.as_bytes(),
+            b"blobId" => Some(BlobProperty::BlobId),
+            b"id" => Some(BlobProperty::Id),
+            b"size" => Some(BlobProperty::Size),
+            b"type" => Some(BlobProperty::Type),
+            b"isEncodingProblem" => Some(BlobProperty::IsEncodingProblem),
+            b"isTruncated" => Some(BlobProperty::IsTruncated),
+            b"data:asText" => Some(BlobProperty::Data(DataProperty::AsText)),
+            b"data:asBase64" => Some(BlobProperty::Data(DataProperty::AsBase64)),
+            b"data" => Some(BlobProperty::Data(DataProperty::Default)),
+            b"digest:sha" => Some(BlobProperty::Digest(DigestProperty::Sha)),
+            b"digest:sha-256" => Some(BlobProperty::Digest(DigestProperty::Sha256)),
+            b"digest:sha-512" => Some(BlobProperty::Digest(DigestProperty::Sha512)),
+            _ => None,
         )
     }
 }

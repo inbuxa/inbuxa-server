@@ -45,7 +45,6 @@ impl Server {
         &self,
         permissions: &structs::Permissions,
         role_ids: &[Id],
-        tenant_id: Option<u32>,
     ) -> trc::Result<PermissionsGroup> {
         // Calculate effective permissions
         let (mut permissions, roles) = match permissions {
@@ -73,25 +72,16 @@ impl Server {
         access_token: &AccessToken,
         account: &Account,
     ) -> trc::Result<Result<(), Vec<Permission>>> {
-        let (permissions, role_ids, tenant_id) = match account {
+        let (permissions, role_ids) = match account {
             Account::User(account) => (
                 &account.permissions,
                 match &account.roles {
                     UserRoles::User => self.core.network.security.default_role_ids_user.as_slice(),
                     UserRoles::Admin => {
-                        if access_token.tenant_id().is_none() {
-                            self.core.network.security.default_role_ids_admin.as_slice()
-                        } else {
-                            self.core
-                                .network
-                                .security
-                                .default_role_ids_tenant
-                                .as_slice()
-                        }
+                        self.core.network.security.default_role_ids_admin.as_slice()
                     }
                     UserRoles::Custom(custom_roles) => custom_roles.role_ids.as_slice(),
                 },
-                account.member_tenant_id.map(|t| t.document_id()),
             ),
             Account::Group(account) => (
                 &account.permissions,
@@ -99,13 +89,13 @@ impl Server {
                     .roles
                     .role_ids()
                     .unwrap_or(self.core.network.security.default_role_ids_group.as_slice()),
-                account.member_tenant_id.map(|t| t.document_id()),
             ),
         };
 
-        self.effective_permissions(permissions, role_ids, tenant_id)
-            .await
-            .map(|permissions| access_token.can_grant_permissions(permissions.finalize()))
+        #[cfg(not(feature = "enterprise"))]
+        let permissions = self.effective_permissions(permissions, role_ids).await?;
+
+        Ok(access_token.can_grant_permissions(permissions.finalize()))
     }
 }
 
@@ -114,7 +104,7 @@ impl AccessToken {
         &self,
         mut requested_permissions: Permissions,
     ) -> Result<(), Vec<Permission>> {
-        requested_permissions.difference(self.permissions_bits());
+        requested_permissions.difference(&self.effective_permissions());
         if requested_permissions.is_empty() {
             Ok(())
         } else {
@@ -153,7 +143,6 @@ impl PermissionsListBuilder for Permissions {
 pub struct DefaultPermissions {
     pub user: Vec<Permission>,
     pub group: Vec<Permission>,
-    pub tenant: Vec<Permission>,
     pub superuser: Vec<Permission>,
 }
 
@@ -199,30 +188,22 @@ impl Default for DefaultPermissions {
         let mut default = Self {
             user: Default::default(),
             group: Default::default(),
-            tenant: Default::default(),
             superuser: Default::default(),
         };
 
-        for permission_id in 0..Permission::COUNT {
-            let permission = Permission::from_id(permission_id as u16).unwrap();
+        for &permission in Permission::ALL {
             match permission {
-                Permission::Authenticate
-                | Permission::AuthenticateWithAlias
-                | Permission::InteractAi => {
+                Permission::Authenticate | Permission::AuthenticateWithAlias => {
                     default.user.push(permission);
                     default.superuser.push(permission);
-                    default.tenant.push(permission);
                 }
                 Permission::Impersonate
                 | Permission::UnlimitedRequests
-                | Permission::UnlimitedUploads
-                | Permission::LiveMetrics
-                | Permission::LiveTracing => {
+                | Permission::UnlimitedUploads => {
                     default.superuser.push(permission);
                 }
                 Permission::FetchAnyBlob | Permission::LiveDeliveryTest => {
                     default.superuser.push(permission);
-                    default.tenant.push(permission);
                 }
                 permission => {
                     let name = permission.as_str();
@@ -248,6 +229,7 @@ impl Default for DefaultPermissions {
                     } else if name.starts_with("sysAccountPassword")
                         || name.starts_with("sysApiKey")
                         || name.starts_with("sysAppPassword")
+                        || name.starts_with("sysOAuthGrant")
                     {
                         default.user.push(permission);
                         default.superuser.push(permission);
@@ -262,7 +244,6 @@ impl Default for DefaultPermissions {
                         || name.starts_with("sysDnsServer")
                         || name.starts_with("sysQueuedMessage")
                     {
-                        default.tenant.push(permission);
                         default.superuser.push(permission);
                     } else {
                         default.superuser.push(permission);

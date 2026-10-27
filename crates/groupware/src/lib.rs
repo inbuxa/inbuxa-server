@@ -7,16 +7,23 @@
 #![warn(clippy::large_futures)]
 
 use calcard::common::timezone::Tz;
-use common::DavResources;
-use percent_encoding::{AsciiSet, CONTROLS, percent_decode_str, utf8_percent_encode};
+use common::GroupwareResources;
+pub use common::storage::dav::RFC_3986;
+use percent_encoding::percent_decode_str;
 use std::borrow::Cow;
-use types::collection::{Collection, SyncCollection};
+use types::{
+    collection::{Collection, SyncCollection},
+    metadata::MetadataKinds,
+};
 
 pub mod cache;
 pub mod calendar;
 pub mod contact;
 pub mod file;
+pub mod metadata;
 pub mod scheduling;
+
+pub const METADATA_KINDS: MetadataKinds = MetadataKinds::JMAP.union(MetadataKinds::DAV);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DavResourceName {
@@ -27,84 +34,95 @@ pub enum DavResourceName {
     Scheduling,
 }
 
-pub const RFC_3986: &AsciiSet = &CONTROLS
-    .add(b' ')
-    .add(b'!')
-    .add(b'"')
-    .add(b'#')
-    .add(b'$')
-    .add(b'%')
-    .add(b'&')
-    .add(b'\'')
-    .add(b'(')
-    .add(b')')
-    .add(b'*')
-    .add(b'+')
-    .add(b',')
-    .add(b'/')
-    .add(b':')
-    .add(b';')
-    .add(b'<')
-    .add(b'=')
-    .add(b'>')
-    .add(b'?')
-    .add(b'@')
-    .add(b'[')
-    .add(b'\\')
-    .add(b']')
-    .add(b'^')
-    .add(b'`')
-    .add(b'{')
-    .add(b'|')
-    .add(b'}');
+pub struct SizeWriter(usize);
 
-fn is_pchar(byte: u8) -> bool {
-    matches!(byte,
-        b'A'..=b'Z'
-            | b'a'..=b'z'
-            | b'0'..=b'9'
-            | b'-'
-            | b'.'
-            | b'_'
-            | b'~'
-            | b'!'
-            | b'$'
-            | b'&'
-            | b'\''
-            | b'('
-            | b')'
-            | b'*'
-            | b'+'
-            | b','
-            | b';'
-            | b'='
-            | b':'
-            | b'@')
+impl std::fmt::Write for SizeWriter {
+    fn write_str(&mut self, text: &str) -> std::fmt::Result {
+        self.0 += text.len();
+        Ok(())
+    }
 }
 
-pub fn is_uri_segment(name: &str) -> bool {
-    let mut bytes = name.as_bytes().iter();
+impl SizeWriter {
+    pub fn ical(ical: &calcard::icalendar::ICalendar) -> usize {
+        let mut writer = SizeWriter(0);
+        let _ = ical.write_to(&mut writer);
+        writer.0
+    }
 
-    while let Some(&byte) = bytes.next() {
-        if byte == b'%' {
-            if !bytes.next().is_some_and(u8::is_ascii_hexdigit)
-                || !bytes.next().is_some_and(u8::is_ascii_hexdigit)
-            {
-                return false;
+    pub fn vcard(vcard: &calcard::vcard::VCard, version: calcard::vcard::VCardVersion) -> usize {
+        let mut writer = SizeWriter(0);
+        let _ = vcard.write_to(&mut writer, version);
+        writer.0
+    }
+}
+
+#[derive(Default)]
+pub struct MetaHasher(store::xxhash_rust::xxh3::Xxh3);
+
+impl MetaHasher {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn bytes(&mut self, value: &[u8]) -> &mut Self {
+        self.0.update(&(value.len() as u64).to_le_bytes());
+        self.0.update(value);
+        self
+    }
+
+    pub fn str(&mut self, value: &str) -> &mut Self {
+        self.bytes(value.as_bytes())
+    }
+
+    pub fn opt_str(&mut self, value: Option<&str>) -> &mut Self {
+        match value {
+            Some(value) => {
+                self.0.update(&[1]);
+                self.str(value)
             }
-        } else if !is_pchar(byte) {
-            return false;
+            None => {
+                self.0.update(&[0]);
+                self
+            }
         }
     }
 
-    true
-}
+    pub fn u8(&mut self, value: u8) -> &mut Self {
+        self.0.update(&[value]);
+        self
+    }
 
-pub fn encode_path_segment(name: &str) -> Cow<'_, str> {
-    if is_uri_segment(name) {
-        Cow::Borrowed(name)
-    } else {
-        utf8_percent_encode(name, RFC_3986).into()
+    pub fn u16(&mut self, value: u16) -> &mut Self {
+        self.0.update(&value.to_le_bytes());
+        self
+    }
+
+    pub fn u32(&mut self, value: u32) -> &mut Self {
+        self.0.update(&value.to_le_bytes());
+        self
+    }
+
+    pub fn i64(&mut self, value: i64) -> &mut Self {
+        self.0.update(&value.to_le_bytes());
+        self
+    }
+
+    pub fn opt_u32(&mut self, value: Option<u32>) -> &mut Self {
+        match value {
+            Some(value) => {
+                self.0.update(&[1]);
+                self.u32(value)
+            }
+            None => {
+                self.0.update(&[0]);
+                self
+            }
+        }
+    }
+
+    pub fn finish(&self) -> u32 {
+        self.0.digest() as u32
     }
 }
 
@@ -112,13 +130,14 @@ pub struct DestroyArchive<T>(pub T);
 
 impl DavResourceName {
     pub fn parse(service: &str) -> Option<Self> {
-        hashify::tiny_map!(service.as_bytes(),
+        hashify::map!(service.as_bytes(), DavResourceName,
             "card" => DavResourceName::Card,
             "cal" => DavResourceName::Cal,
             "file" => DavResourceName::File,
             "pal" => DavResourceName::Principal,
             "itip" => DavResourceName::Scheduling,
         )
+        .copied()
     }
 
     pub fn base_path(&self) -> &'static str {
@@ -193,11 +212,10 @@ pub trait DavCalendarResource {
     fn calendar_default_tz(&self, calendar_id: u32, account_id: u32) -> Option<Tz>;
 }
 
-impl DavCalendarResource for DavResources {
+impl DavCalendarResource for GroupwareResources {
     fn calendar_default_tz(&self, calendar_id: u32, account_id: u32) -> Option<Tz> {
         self.container_resource_by_id(calendar_id)
-            .and_then(|c| c.calendar_preferences(account_id))
-            .map(|p| p.tz)
+            .and_then(|c| c.calendar_preferences(account_id).map(|p| p.tz))
     }
 }
 
@@ -225,63 +243,4 @@ pub fn extract_addr_spec(value: &str) -> Option<&str> {
         .and_then(|(_, rest)| rest.split_once('>'))
         .map(|(addr, _)| addr.trim())
         .filter(|addr| !addr.is_empty())
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn path_segments_from_uris_are_preserved() {
-        for name in [
-            "readme.txt",
-            "My%20Folder",
-            "%C3%9Cnterlagen.txt",
-            "file(1).txt",
-            "a+b.txt",
-            "Q&A.txt",
-            "it's.txt",
-            "mail@host.txt",
-            "a:b.txt",
-            "notes;v=2,rev=3!$*=.txt",
-            "~backup_1-2.txt",
-        ] {
-            assert!(is_uri_segment(name), "{name:?}");
-            assert_eq!(encode_path_segment(name), name);
-        }
-    }
-
-    #[test]
-    fn path_segments_from_names_are_encoded() {
-        for (name, expected) in [
-            ("My Folder", "My%20Folder"),
-            ("Ünterlagen.txt", "%C3%9Cnterlagen.txt"),
-            ("Ünterlagen 2026.txt", "%C3%9Cnterlagen%202026.txt"),
-            ("100%", "100%25"),
-            ("100%2", "100%252"),
-            ("100%zz", "100%25zz"),
-            ("a/b.txt", "a%2Fb.txt"),
-            ("a<b>c.txt", "a%3Cb%3Ec.txt"),
-            ("a\"b#c?d.txt", "a%22b%23c%3Fd.txt"),
-            ("a\tb.txt", "a%09b.txt"),
-        ] {
-            assert!(!is_uri_segment(name), "{name:?}");
-            assert_eq!(encode_path_segment(name), expected, "{name:?}");
-        }
-    }
-
-    #[test]
-    fn encoded_path_segments_are_stable() {
-        for name in [
-            "My Folder",
-            "Ünterlagen 2026.txt",
-            "100%",
-            "a/b.txt",
-            "file(1).txt",
-        ] {
-            let encoded = encode_path_segment(name).into_owned();
-            assert!(is_uri_segment(&encoded), "{encoded:?}");
-            assert_eq!(encode_path_segment(&encoded), encoded, "{name:?}");
-        }
-    }
 }

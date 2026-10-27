@@ -37,7 +37,8 @@ Key features:
 - **Email** server with complete protocol support:
   - JMAP: 
     * [JMAP for Mail](https://datatracker.ietf.org/doc/html/rfc8621) server.
-    * [JMAP for Sieve Scripts](https://www.ietf.org/archive/id/draft-ietf-jmap-sieve-22.html).
+    * [JMAP for Sieve Scripts](https://www.rfc-editor.org/rfc/rfc9661.html).
+    * [JMAP Object Metadata](https://datatracker.ietf.org/doc/html/draft-ietf-jmap-metadata-04) for e-mails, mailboxes, calendars, contacts, files and Sieve scripts.
     * [WebSocket](https://datatracker.ietf.org/doc/html/rfc8887), [Blob Management](https://www.rfc-editor.org/rfc/rfc9404.html) and [Quotas](https://www.rfc-editor.org/rfc/rfc9425.html) extensions.
   - IMAP:
     * [IMAP4rev2](https://datatracker.ietf.org/doc/html/rfc9051) and [IMAP4rev1](https://datatracker.ietf.org/doc/html/rfc3501) server.
@@ -47,7 +48,7 @@ Key features:
     - [POP3](https://datatracker.ietf.org/doc/html/rfc1939) server.
     - [STLS](https://datatracker.ietf.org/doc/html/rfc2595) and [SASL](https://datatracker.ietf.org/doc/html/rfc5034) support as well as other [extensions](https://datatracker.ietf.org/doc/html/rfc2449).
   - SMTP:
-    * SMTP server with built-in [DMARC](https://datatracker.ietf.org/doc/html/rfc7489), [DKIMv2](https://datatracker.ietf.org/doc/draft-ietf-dkim-dkim2-spec/), [DKIMv1](https://datatracker.ietf.org/doc/html/rfc6376), [SPF](https://datatracker.ietf.org/doc/html/rfc7208) and [ARC](https://datatracker.ietf.org/doc/html/rfc8617) support for message authentication.
+    * SMTP server with built-in [DMARC](https://datatracker.ietf.org/doc/html/rfc7489), [DKIMv2](https://datatracker.ietf.org/doc/draft-ietf-dkim-dkim2-spec/) (including post-quantum signatures), [DKIMv1](https://datatracker.ietf.org/doc/html/rfc6376), [SPF](https://datatracker.ietf.org/doc/html/rfc7208) and [ARC](https://datatracker.ietf.org/doc/html/rfc8617) support for message authentication.
     * Strong transport security through [DANE](https://datatracker.ietf.org/doc/html/rfc6698), [MTA-STS](https://datatracker.ietf.org/doc/html/rfc8461) and [SMTP TLS](https://datatracker.ietf.org/doc/html/rfc8460) reporting.
     * Automated DKIM key rotation and management.
     * Inbound throttling and filtering with granular configuration rules, sieve scripting, MTA hooks and milter integration.
@@ -56,19 +57,19 @@ Key features:
 - **Collaboration** server:
   - Calendaring and scheduling:
     - [CalDAV](https://datatracker.ietf.org/doc/html/rfc4791) and [CalDAV Scheduling](https://datatracker.ietf.org/doc/html/rfc6638) support.
-    - [JMAP for Calendars](https://datatracker.ietf.org/doc/html/draft-ietf-jmap-calendars-24) support.
+    - [JMAP for Calendars](https://datatracker.ietf.org/doc/html/draft-ietf-jmap-calendars-32) support.
   - Contact management:
     - [CardDAV](https://datatracker.ietf.org/doc/html/rfc6352) support.
     - [JMAP for Contacts](https://datatracker.ietf.org/doc/html/rfc9610) support.
   - File storage:
     - [WebDAV](https://datatracker.ietf.org/doc/html/rfc4918) support.
-    - [JMAP for File Storage](https://datatracker.ietf.org/doc/html/draft-ietf-jmap-filenode-03) support.
+    - [JMAP for File Storage](https://datatracker.ietf.org/doc/html/draft-ietf-jmap-filenode-17) support.
   - Sharing with fine-grained access controls:
     - [WebDAV ACL](https://datatracker.ietf.org/doc/html/rfc3744) support.
     - [JMAP Sharing](https://datatracker.ietf.org/doc/html/rfc9670) support.
 - **Spam** and **Phishing** built-in filter:
   - Comprehensive set of filtering **rules** on par with popular solutions.
-  - LLM-driven spam filtering and message analysis.
+  - AI spam classifier with support for OpenAI-compatible, Anthropic, Google Gemini and Ollama models.
   - Statistical **spam classifier** with collaborative filtering, automatic training capabilities and address book integration.
   - DNS Blocklists (**DNSBLs**) checking of IP addresses, domains, and hashes.
   - Collaborative digest-based spam filtering with **Pyzor**.
@@ -80,6 +81,7 @@ Key features:
 - **Flexible**:
   - Pluggable storage backends with **RocksDB**, **FoundationDB**, **PostgreSQL**, **mySQL**, **SQLite**, **S3-Compatible**, **Azure** and **Redis** support.
   - Full-text search available in 17 languages using the built-in search engine or via **Meilisearch**, **ElasticSearch**, **OpenSearch**, **PostgreSQL** or **mySQL** backends.
+  - Text extraction and indexing of **PDF**, **Microsoft Office**, **OpenDocument**, **EPUB** and **RTF** documents.
   - Sieve scripting language with support for all [registered extensions](https://www.iana.org/assignments/sieve-extensions/sieve-extensions.xhtml).
   - Email aliases, mailing lists, subaddressing and catch-all addresses support.
   - Automated DNS management.
@@ -90,6 +92,7 @@ Key features:
   - Encryption at rest with **S/MIME** or **OpenPGP**.
   - Automatic TLS certificate provisioning with [ACME](https://datatracker.ietf.org/doc/html/rfc8555) using `TLS-ALPN-01`, `DNS-01`, `DNS-PERSIST-01` or `HTTP-01` challenges.
   - Automated blocking of IP addresses that attack, abuse or scan the server for exploits.
+  - SSRF protection for outbound requests.
   - Rate limiting.
   - Security audited (read the [report](https://stalw.art/blog/security-audit)).
   - Memory safe (thanks to Rust).
@@ -99,9 +102,11 @@ Key features:
   - Peer-to-peer cluster coordination or with **Kafka**, **Redpanda**, **NATS** or **Redis**.
   - **Kubernetes**, **Apache Mesos** and **Docker Swarm** support for automated scaling and container orchestration.
   - Read replicas, sharded blob storage and in-memory data stores for high performance and low latency.
+  - Tiered caching with snapshots that can be swapped to disk, Redis or the blob store.
 - **Authentication and Authorization**:
   - **OpenID Connect** authentication.
   - OAuth 2.0 authorization with [authorization code](https://www.rfc-editor.org/rfc/rfc8628) and [device authorization](https://www.rfc-editor.org/rfc/rfc8628) flows.
+  - OAuth scopes, connected applications management and [Client ID Metadata Documents](https://datatracker.ietf.org/doc/draft-ietf-oauth-client-id-metadata-document/).
   - **LDAP**, **OIDC**, **SQL** or built-in authentication backend support.
   - System for Cross-domain Identity Management ([SCIM](https://www.rfc-editor.org/info/rfc7643/)) v2 for automated provisioning.
   - Two-factor authentication with Time-based One-Time Passwords (`2FA-TOTP`) 
@@ -129,7 +134,7 @@ Key features:
 
 ## Presentation
 
-**Want a deeper dive?** Need to explain to your boss why Stalwart is the perfect fit? Whether you're evaluating options, making a case to your team, or simply curious about how it all works under the hood, these slides walk you through the key features, architecture, and benefits of Stalwart. Browse the [slides](https://stalw.art/slides) to see what makes it stand out.
+Whether you are evaluating options, presenting Stalwart to your team or your boss, or just curious about how it works under the hood, the [slides](https://stalw.art/slides) walk you through its key features, architecture and benefits.
 
 ## Get Started
 
@@ -141,27 +146,40 @@ Install Stalwart on your server by following the instructions for your platform:
 
 All documentation is available at [stalw.art/docs](https://stalw.art/docs/install/get-started).
 
-## Support
+## Where do I get support?
 
-If you are having problems running Stalwart, found a bug, or just have a question, please head to the [Stalwart Support Portal](https://support.stalw.art) at [support.stalw.art](https://support.stalw.art). 
-Additionally, you may purchase an [Enterprise License](https://stalw.art/enterprise) to obtain priority support from Stalwart Labs LLC, including response-time commitments and a private Priority Support area on the portal.
+If you run into a problem, find a bug or have a question, head to the [Stalwart Support Portal](https://support.stalw.art). It is free for everyone, and our team answers.
 
-## Contributing
+Organizations that need more can purchase an [Enterprise license](https://stalw.art/enterprise) for priority support from Stalwart Labs LLC, with response-time commitments and a private Priority Support area on the portal.
 
-We welcome contributions, but to keep the project maintainable there are a few things to know before opening a pull request. Because of the high volume of low-quality, AI-generated submissions, pull requests are limited to a list of vouched contributors; to be added, post at [support.stalw.art](https://support.stalw.art) describing the change you would like to submit, together with a link to the proposed change. At this stage only bug fixes and translations are accepted, and new features are not, unless they involve just a few lines of code.
-For the full guidelines, please read [CONTRIBUTING.md](CONTRIBUTING.md).
+## Why isn't everything AGPL?
 
-## Roadmap
+About 85% of Stalwart's features are free and open source under the AGPL-3.0. The rest make up the [Enterprise edition](https://stalw.art/enterprise/), and are mostly features that matter to large organizations and hosting providers running Stalwart at scale, such as multi-tenancy, SCIM provisioning, sharded storage and live telemetry. The full breakdown is on the [comparison page](https://stalw.art/compare/).
 
-Stalwart has reached an exciting point in its journey, it’s now **feature complete**. All the core functionality and open standard email and collaboration protocols that we set out to support are in place. In other words, Stalwart already does everything you’d expect from a modern, standards-compliant mail and collaboration platform.
+Stalwart is built by a full-time professional team, not as a side project, and open source sponsorship covers only a small fraction of what that costs. Enterprise subscriptions pay for the work that every Stalwart user benefits from:
 
-The next major milestone is all about refinement: finalizing the database schema and focusing on performance optimizations to ensure everything runs as efficiently and reliably as possible. Once that’s done, we’ll be ready to roll out version **1.0**.
+- The engineers who maintain and extend the Community edition, with a new release every week.
+- Security fixes within 24 hours of a report, and an independent security audit every time a large part of Stalwart is rewritten.
+- Free community support at [support.stalw.art](https://support.stalw.art).
+- Stress tests and benchmarks on dozens of cloud servers at a time across many regions.
+- Work on email standards at the IETF, where we are the authors of multiple Internet-Drafts in progress.
 
-Of course, development doesn’t stop there. The community has contributed hundreds of great ideas for improvements and new features, everything from subtle usability tweaks to entirely new integrations. You can see the full list of proposals over on our [GitHub issues](https://github.com/stalwartlabs/stalwart/issues?q=is%3Aissue+is%3Aopen+sort%3Areactions-%2B1-desc+label%3Aenhancement). If there’s something you’d like to see prioritized, just give it a thumbs up as we plan to implement enhancements based on the community’s votes.
+The Community edition is complete and open source, and it will stay that way:
 
-## Sponsorship
+- Stalwart remains licensed under the AGPL-3.0.
+- No existing open source feature will ever be moved to the Enterprise edition.
+- Most new features go to the Community edition.
 
-Your support is crucial in helping us continue to improve the project, add new features, and maintain the highest level of quality. By [becoming a sponsor](https://opencollective.com/stalwart), you help fund the development and future of Stalwart. As a thank-you, sponsors who contribute $5 per month or more will automatically receive a [Enterprise edition](https://stalw.art/enterprise/) license. And, sponsors who contribute $30 per month or more, also have access to [Premium Support](https://stalw.art/support) from Stalwart Labs.
+If you find Stalwart useful, there are two ways to help keep it free. If your organization needs Enterprise features, [subscribe to the Enterprise edition](https://stalw.art/pricing/). Otherwise, you can [become a sponsor on OpenCollective](https://opencollective.com/stalwart): sponsors who contribute $5 per month or more automatically receive an Enterprise license, and those who contribute $30 per month or more also get access to [Premium Support](https://stalw.art/support) from Stalwart Labs. Thank you!
+
+## How can I contribute?
+
+Contributions are welcome, with a few rules that keep the project maintainable:
+
+- Because of the high volume of low-quality, AI-generated submissions, only vouched contributors can open pull requests. To be added to the list, post at [support.stalw.art](https://support.stalw.art) describing the change you would like to submit, with a link to it.
+- For now, only bug fixes and translations are accepted. New features are not, unless they are just a few lines of code.
+
+The full guidelines are in [CONTRIBUTING.md](CONTRIBUTING.md). You can also help without writing code: report bugs, answer questions on the support portal, or tell others about Stalwart.
 
 ## Funding
 
@@ -169,8 +187,6 @@ Part of the development of this project was funded through:
 
 - [NGI0 Entrust Fund](https://nlnet.nl/entrust), a fund established by [NLnet](https://nlnet.nl/) with financial support from the European Commission's [Next Generation Internet](https://ngi.eu/) programme, under the aegis of DG Communications Networks, Content and Technology under grant agreement No 101069594.
 - [NGI Zero Core](https://nlnet.nl/NGI0/), a fund established by [NLnet](https://nlnet.nl/) with financial support from the European Commission's programme, under the aegis of DG Communications Networks, Content and Technology under grant agreement No 101092990.
-
-If you find the project useful you can help by [becoming a sponsor](https://opencollective.com/stalwart). Thank you!
 
 ## License
 

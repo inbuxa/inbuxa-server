@@ -8,8 +8,9 @@ use crate::registry::{
     EnterpriseRegistry,
     mapping::{
         RegistryGetResponse, account::account_get, bootstrap::bootstrap_get,
-        cluster::cluster_node_get, log::log_get, queued_message::queued_message_get,
-        report::report_get, spam_sample::spam_sample_get, task::task_get,
+        cluster::cluster_node_get, index_queue::index_queue_status_get, log::log_get,
+        queued_message::queued_message_get, report::report_get, spam_sample::spam_sample_get,
+        task::task_get,
     },
 };
 use common::{Server, auth::AccessToken, network::dkim::generate_dkim_public_key};
@@ -19,13 +20,10 @@ use jmap_proto::{
 };
 use jmap_tools::Key;
 use registry::{
-    jmap::{IntoValue, JmapValue, RegistryValue},
+    jmap::{IntoValue, JmapValue, RegistryValue, ValueOptions},
     schema::{
         enums::Permission,
-        prelude::{
-            OBJ_FILTER_ACCOUNT, OBJ_FILTER_TENANT, OBJ_SINGLETON, Object, ObjectInner, ObjectType,
-            Property,
-        },
+        prelude::{OBJ_FILTER_ACCOUNT, OBJ_SINGLETON, Object, ObjectInner, ObjectType, Property},
         structs::Account,
     },
     types::id::ObjectId,
@@ -61,14 +59,11 @@ impl RegistryGet for Server {
         self.assert_enterprise_object(object_type)?;
 
         let object_flags = object_type.flags();
-        let is_tenant_filtered =
-            (object_flags & OBJ_FILTER_TENANT) != 0 && access_token.tenant_id().is_some();
         let is_account_filtered = (object_flags & OBJ_FILTER_ACCOUNT) != 0
             && !access_token.has_permission(Permission::Impersonate);
         let (ids, not_found_ids) = request.unwrap_ids(self.core.jmap.get_max_objects)?;
         let has_properties = request.properties.is_some();
         let mut get = RegistryGetResponse {
-            access_token,
             server: self,
             account_id: request.account_id.document_id(),
             object_type,
@@ -88,7 +83,6 @@ impl RegistryGet for Server {
                 not_found: not_found_ids,
             },
             object_flags,
-            is_tenant_filtered,
             is_account_filtered,
         };
         if has_properties {
@@ -98,8 +92,6 @@ impl RegistryGet for Server {
         match object_type {
             ObjectType::AcmeProvider
             | ObjectType::AddressBook
-            | ObjectType::AiModel
-            | ObjectType::Alert
             | ObjectType::AllowedIp
             | ObjectType::Application
             | ObjectType::Asn
@@ -120,7 +112,6 @@ impl RegistryGet for Server {
             | ObjectType::DnsResolver
             | ObjectType::DnsServer
             | ObjectType::Email
-            | ObjectType::Enterprise
             | ObjectType::EventTracingLevel
             | ObjectType::FileStorage
             | ObjectType::Http
@@ -132,8 +123,8 @@ impl RegistryGet for Server {
             | ObjectType::SystemSettings
             | ObjectType::MemoryLookupKey
             | ObjectType::MemoryLookupKeyValue
+            | ObjectType::Metadata
             | ObjectType::Metrics
-            | ObjectType::MetricsStore
             | ObjectType::MtaConnectionStrategy
             | ObjectType::MtaDeliverySchedule
             | ObjectType::MtaExtensions
@@ -171,7 +162,6 @@ impl RegistryGet for Server {
             | ObjectType::SpamDnsblServer
             | ObjectType::SpamDnsblSettings
             | ObjectType::SpamFileExtension
-            | ObjectType::SpamLlm
             | ObjectType::SpamPyzor
             | ObjectType::SpamRule
             | ObjectType::SpamSettings
@@ -181,166 +171,23 @@ impl RegistryGet for Server {
             | ObjectType::TaskManager
             | ObjectType::TlsReportSettings
             | ObjectType::Tracer
-            | ObjectType::TracingStore
             | ObjectType::WebDav
             | ObjectType::WebHook
             | ObjectType::Account
             | ObjectType::DsnReportSettings
             | ObjectType::MailingList
             | ObjectType::OAuthClient
+            | ObjectType::OAuthGrant
             | ObjectType::Role
-            | ObjectType::Tenant
-            | ObjectType::MaskedEmail
             | ObjectType::PublicKey
             | ObjectType::DkimSignature
-            | ObjectType::Domain => {
-                let is_singleton = (get.object_flags & OBJ_SINGLETON) != 0;
-
-                let ids = if let Some(ids) = get.ids.take() {
-                    ids
-                } else {
-                    self.registry()
-                        .query::<Vec<Id>>(
-                            RegistryQuery::new(object_type)
-                                .with_tenant(access_token.tenant_id())
-                                .with_account_opt(is_account_filtered.then_some(get.account_id))
-                                .with_limit(self.core.jmap.get_max_objects),
-                        )
-                        .await
-                        .caused_by(trc::location!())?
-                };
-                get.response.list.reserve(ids.len());
-
-                for id in ids {
-                    let object = if let Some(object) = self
-                        .registry()
-                        .get(ObjectId::new(object_type, id))
-                        .await
-                        .caused_by(trc::location!())?
-                    {
-                        if (is_tenant_filtered
-                            && access_token.tenant_id().map(Id::from)
-                                != object.inner.member_tenant_id())
-                            || (is_account_filtered
-                                && object.inner.account_id() != Some(Id::from(get.account_id)))
-                        {
-                            get.not_found(id);
-                            continue;
-                        }
-                        object
-                    } else if id.is_singleton() && is_singleton {
-                        Object::from(object_type)
-                    } else {
-                        get.not_found(id);
-                        continue;
-                    };
-
-                    let mut extra_properties: VecMap<Property, _> = VecMap::new();
-                    match &object.inner {
-                        ObjectInner::DkimSignature(obj)
-                            if get.properties.is_empty()
-                                || get.properties.contains(&Property::PublicKey) =>
-                        {
-                            if let Ok(public_key) = generate_dkim_public_key(obj).await {
-                                extra_properties
-                                    .append(Property::PublicKey, JmapValue::Str(public_key.into()));
-                            }
-                        }
-                        ObjectInner::Account(obj) => {
-                            if get.properties.is_empty()
-                                || get.properties.contains(&Property::UsedDiskQuota)
-                            {
-                                let quota = self.get_used_quota_account(id.document_id()).await?;
-                                extra_properties.append(
-                                    Property::UsedDiskQuota,
-                                    JmapValue::Number(quota.into()),
-                                );
-                            }
-                            if get.properties.is_empty()
-                                || get.properties.contains(&Property::EmailAddress)
-                            {
-                                let (name, domain_id) = match &obj {
-                                    Account::User(obj) => (obj.name.as_str(), obj.domain_id),
-                                    Account::Group(obj) => (obj.name.as_str(), obj.domain_id),
-                                };
-                                let domain = self.domain_by_id(domain_id.document_id()).await?;
-                                let email = format!(
-                                    "{}@{}",
-                                    name,
-                                    domain.as_ref().map(|d| d.name()).unwrap_or_default()
-                                );
-                                extra_properties
-                                    .append(Property::EmailAddress, JmapValue::Str(email.into()));
-                            }
-                        }
-                        ObjectInner::MailingList(obj)
-                            if get.properties.is_empty()
-                                || get.properties.contains(&Property::EmailAddress) =>
-                        {
-                            let domain = self.domain_by_id(obj.domain_id.document_id()).await?;
-                            let email = format!(
-                                "{}@{}",
-                                obj.name,
-                                domain.as_ref().map(|d| d.name()).unwrap_or_default()
-                            );
-                            extra_properties
-                                .append(Property::EmailAddress, JmapValue::Str(email.into()));
-                        }
-                        ObjectInner::Tenant(obj)
-                            if get.properties.is_empty()
-                                || get.properties.contains(&Property::UsedDiskQuota) =>
-                        {
-                            let quota = self.get_used_quota_tenant(id.document_id()).await?;
-                            extra_properties
-                                .append(Property::UsedDiskQuota, JmapValue::Number(quota.into()));
-                        }
-                        ObjectInner::Domain(obj)
-                            if get.properties.is_empty()
-                                || get.properties.contains(&Property::DnsZoneFile) =>
-                        {
-                            extra_properties.append(
-                                Property::DnsZoneFile,
-                                JmapValue::Str(self.build_bind_dns_records(id, obj).await?.into()),
-                            );
-                        }
-                        ObjectInner::AcmeProvider(obj)
-                            if get.properties.is_empty()
-                                || get.properties.contains(&Property::Description) =>
-                        {
-                            let mut description = obj.directory.clone();
-                            let account = obj
-                                .account_uri
-                                .rsplit('/')
-                                .find(|segment| !segment.is_empty())
-                                .unwrap_or(obj.account_uri.as_str());
-                            if !account.is_empty() {
-                                description.push_str(" (");
-                                description.push_str(account);
-                                description.push(')');
-                            }
-                            extra_properties
-                                .append(Property::Description, JmapValue::Str(description.into()));
-                        }
-                        _ => {}
-                    }
-
-                    let mut object = object.into_value();
-                    if !extra_properties.is_empty()
-                        && let JmapValue::Object(obj) = &mut object
-                    {
-                        for (key, value) in extra_properties {
-                            obj.insert_unchecked(key, value);
-                        }
-                    }
-
-                    get.insert(id, object);
-                }
-
-                Ok(get.into_response())
-            }
+            | ObjectType::Domain => registry_object_get(get).await,
             ObjectType::QueuedMessage => {
                 queued_message_get(get).await.map(|get| get.into_response())
             }
+            ObjectType::IndexQueueStatus => index_queue_status_get(get)
+                .await
+                .map(|get| get.into_response()),
             ObjectType::Task => task_get(get).await.map(|get| get.into_response()),
             ObjectType::ClusterNode => cluster_node_get(get).await.map(|get| get.into_response()),
             ObjectType::ArfExternalReport
@@ -359,19 +206,135 @@ impl RegistryGet for Server {
             | ObjectType::AccountPassword
             | ObjectType::AppPassword => account_get(get).await.map(|get| get.into_response()),
             ObjectType::Action => Ok(get.not_found_any().into_response()),
-            #[cfg(not(feature = "enterprise"))]
-            _ => Ok(get.not_found_any().into_response()),
         }
     }
+}
+
+async fn registry_object_get(
+    mut get: RegistryGetResponse<'_>,
+) -> trc::Result<GetResponse<Registry>> {
+    let server = get.server;
+    let value_options = ValueOptions {
+        include_secrets: server.core.network.include_secrets,
+    };
+    let object_type = get.object_type;
+    let is_account_filtered = get.is_account_filtered;
+    let is_singleton = (get.object_flags & OBJ_SINGLETON) != 0;
+
+    let query = RegistryQuery::new(object_type);
+    let ids = if let Some(ids) = get.ids.take() {
+        ids
+    } else {
+        server
+            .registry()
+            .query::<Vec<Id>>(
+                query
+                    .with_account_opt(is_account_filtered.then_some(get.account_id))
+                    .with_limit(server.core.jmap.get_max_objects),
+            )
+            .await
+            .caused_by(trc::location!())?
+    };
+    get.response.list.reserve(ids.len());
+
+    for id in ids {
+        let object = if let Some(object) = server
+            .registry()
+            .get(ObjectId::new(object_type, id))
+            .await
+            .caused_by(trc::location!())?
+        {
+            #[cfg(not(feature = "enterprise"))]
+            let is_tenant_mismatch = false;
+            if is_tenant_mismatch
+                || (is_account_filtered
+                    && object.inner.account_id() != Some(Id::from(get.account_id)))
+            {
+                get.not_found(id);
+                continue;
+            }
+            object
+        } else if id.is_singleton() && is_singleton {
+            Object::from(object_type)
+        } else {
+            get.not_found(id);
+            continue;
+        };
+
+        let mut extra_properties: VecMap<Property, _> = VecMap::new();
+        match &object.inner {
+            ObjectInner::DkimSignature(obj)
+                if get.properties.is_empty() || get.properties.contains(&Property::PublicKey) =>
+            {
+                if let Ok(public_key) = generate_dkim_public_key(obj).await {
+                    extra_properties.append(Property::PublicKey, JmapValue::Str(public_key.into()));
+                }
+            }
+            ObjectInner::Account(obj) => {
+                if get.properties.is_empty() || get.properties.contains(&Property::UsedDiskQuota) {
+                    let quota = server.get_used_quota_account(id.document_id()).await?;
+                    extra_properties
+                        .append(Property::UsedDiskQuota, JmapValue::Number(quota.into()));
+                }
+                if get.properties.is_empty() || get.properties.contains(&Property::EmailAddress) {
+                    let (name, domain_id) = match obj.as_ref() {
+                        Account::User(obj) => (obj.name.as_str(), obj.domain_id),
+                        Account::Group(obj) => (obj.name.as_str(), obj.domain_id),
+                    };
+                    let domain = server.domain_by_id(domain_id.document_id()).await?;
+                    let email = format!(
+                        "{}@{}",
+                        name,
+                        domain.as_ref().map(|d| d.name()).unwrap_or_default()
+                    );
+                    extra_properties.append(Property::EmailAddress, JmapValue::Str(email.into()));
+                }
+            }
+            ObjectInner::MailingList(obj)
+                if get.properties.is_empty()
+                    || get.properties.contains(&Property::EmailAddress) =>
+            {
+                let domain = server.domain_by_id(obj.domain_id.document_id()).await?;
+                let email = format!(
+                    "{}@{}",
+                    obj.name,
+                    domain.as_ref().map(|d| d.name()).unwrap_or_default()
+                );
+                extra_properties.append(Property::EmailAddress, JmapValue::Str(email.into()));
+            }
+            ObjectInner::Domain(obj)
+                if get.properties.is_empty() || get.properties.contains(&Property::DnsZoneFile) =>
+            {
+                extra_properties.append(
+                    Property::DnsZoneFile,
+                    JmapValue::Str(server.build_bind_dns_records(id, obj).await?.into()),
+                );
+            }
+            _ => {}
+        }
+
+        let mut object = object.into_value_with(value_options);
+        if !extra_properties.is_empty()
+            && let JmapValue::Object(obj) = &mut object
+        {
+            for (key, value) in extra_properties {
+                obj.insert_unchecked(key, value);
+            }
+        }
+
+        get.insert(id, object);
+    }
+
+    Ok(get.into_response())
 }
 
 impl RegistryGetResponse<'_> {
     pub fn insert(&mut self, id: Id, mut object: JmapValue<'static>) {
         let object_map = object.as_object_mut().unwrap();
 
-        if self.is_tenant_filtered && self.access_token.tenant_id().is_some() {
-            object_map.remove(&Key::Property(Property::MemberTenantId));
-        } else if self.is_account_filtered {
+        #[cfg(not(feature = "enterprise"))]
+        let is_tenant_removed = false;
+        if !is_tenant_removed && self.is_account_filtered {
             object_map.remove(&Key::Property(Property::AccountId));
         }
 

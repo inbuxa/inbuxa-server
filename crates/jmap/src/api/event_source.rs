@@ -5,7 +5,11 @@
  */
 
 use crate::api::IntoPushObject;
-use common::{LONG_1D_SLUMBER, Server, auth::AccessToken, ipc::PushNotification};
+use common::{
+    LONG_1D_SLUMBER, Server,
+    auth::AccessToken,
+    ipc::{PushNotification, ViewerStateChange},
+};
 use http_body_util::{StreamBody, combinators::BoxBody};
 use http_proto::*;
 use hyper::{
@@ -77,9 +81,9 @@ impl EventSourceHandler for Server {
         }
 
         let mut ping = if ping > 0 {
-            #[cfg(not(feature = "test_mode"))]
+            #[cfg(not(stalwart_tests))]
             let interval = std::cmp::max(ping, 30);
-            #[cfg(feature = "test_mode")]
+            #[cfg(stalwart_tests)]
             let interval = ping;
             let interval_duration = Duration::from_secs(interval as u64);
 
@@ -97,7 +101,8 @@ impl EventSourceHandler for Server {
         };
 
         // Register with push manager
-        let mut push_rx = self.subscribe_push_manager(&access_token, types).await?;
+        access_token.restrict_data_types(&mut types);
+        let mut push_rx = self.subscribe_push_manager(&access_token, types);
         let mut changed: VecMap<Id, VecMap<DataType, State>> = VecMap::new();
         let throttle = self.core.jmap.event_source_throttle;
 
@@ -108,16 +113,20 @@ impl EventSourceHandler for Server {
                 let mut last_message = Instant::now() - throttle;
                 let mut timeout =
                     ping.as_ref().map(|p| p.interval).unwrap_or(LONG_1D_SLUMBER);
+                let mut notifications = Vec::new();
 
                 loop {
-                    match tokio::time::timeout(timeout, push_rx.recv()).await {
-                        Ok(Some(notification)) => {
+                    match tokio::time::timeout(timeout, push_rx.recv(&mut notifications)).await {
+                        Ok(true) => for notification in notifications.drain(..) {
                             match notification {
-                                PushNotification::StateChange(state_change) => {
+                                PushNotification::StateChange(state_change)
+                                | PushNotification::ViewerStateChange(ViewerStateChange {
+                                    change: state_change,
+                                    ..
+                                }) => {
+                                    let states = changed.get_mut_or_insert(state_change.account_id.into());
                                     for type_state in state_change.types {
-                                        changed
-                                            .get_mut_or_insert(state_change.account_id.into())
-                                            .set(type_state, State::Exact(state_change.change_id));
+                                        states.set(type_state, State::Exact(state_change.change_id));
                                     }
                                 }
                                 PushNotification::CalendarAlert(calendar_alert) => {
@@ -128,15 +137,14 @@ impl EventSourceHandler for Server {
                                 }
                                 PushNotification::EmailPush(email_push) => {
                                     let state_change = email_push.to_state_change();
+                                    let states = changed.get_mut_or_insert(state_change.account_id.into());
                                     for type_state in state_change.types {
-                                        changed
-                                            .get_mut_or_insert(state_change.account_id.into())
-                                            .set(type_state, State::Exact(state_change.change_id));
+                                        states.set(type_state, State::Exact(state_change.change_id));
                                     }
                                 }
                             }
-                        }
-                        Ok(None) => {
+                        },
+                        Ok(false) => {
                             break;
                         }
                         Err(_) => (),

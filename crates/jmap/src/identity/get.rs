@@ -4,11 +4,12 @@
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
  */
 
+use super::StoredIdentities;
 use crate::changes::state::StateManager;
 use common::{Server, storage::index::ObjectIndexBuilder};
 use email::identity::{ArchivedEmailAddress, Identity};
 use jmap_proto::{
-    method::get::{GetRequest, GetResponse},
+    method::get::{GetRequest, GetResponse, all_ids},
     object::identity::{self, IdentityProperty, IdentityValue},
 };
 use jmap_tools::{Map, Value};
@@ -16,14 +17,13 @@ use std::{collections::BTreeSet, future::Future};
 use store::{
     SerializeInfallible, ValueKey,
     rkyv::{option::ArchivedOption, vec::ArchivedVec},
-    roaring::RoaringBitmap,
-    write::{AlignedBytes, Archive, BatchBuilder, assert::AssertValue},
+    write::{BatchBuilder, assert::AssertValue},
     xxhash_rust::xxh3::Xxh3,
 };
 use trc::AddContext;
 use types::{
     collection::{Collection, SyncCollection},
-    field::{Field, IdentityField, PrincipalField},
+    field::{Field, PrincipalField},
 };
 
 pub trait IdentityGet: Sync + Send {
@@ -35,7 +35,12 @@ pub trait IdentityGet: Sync + Send {
     fn identity_get_or_create(
         &self,
         account_id: u32,
-    ) -> impl Future<Output = trc::Result<RoaringBitmap>> + Send;
+    ) -> impl Future<Output = trc::Result<StoredIdentities>> + Send;
+
+    fn identities(
+        &self,
+        account_id: u32,
+    ) -> impl Future<Output = trc::Result<StoredIdentities>> + Send;
 }
 
 impl IdentityGet for Server {
@@ -55,15 +60,14 @@ impl IdentityGet for Server {
             IdentityProperty::MayDelete,
         ]);
         let account_id = request.account_id.document_id();
-        let identity_ids = self.identity_get_or_create(account_id).await?;
+        let identities = self.identity_get_or_create(account_id).await?;
         let ids = if let Some(ids) = ids {
             ids
         } else {
-            identity_ids
-                .iter()
-                .take(self.core.jmap.get_max_objects)
-                .map(Into::into)
-                .collect::<Vec<_>>()
+            all_ids(
+                identities.iter().map(|(document_id, _)| document_id.into()),
+                self.core.jmap.get_max_objects,
+            )?
         };
         let mut response = GetResponse {
             account_id: request.account_id.into(),
@@ -77,26 +81,11 @@ impl IdentityGet for Server {
 
         for id in ids {
             // Obtain the identity object
-            let document_id = id.document_id();
-            if !identity_ids.contains(document_id) {
-                response.push_not_found(id);
-                continue;
-            }
-            let _identity = if let Some(identity) = self
-                .store()
-                .get_value::<Archive<AlignedBytes>>(ValueKey::archive(
-                    account_id,
-                    Collection::Identity,
-                    document_id,
-                ))
-                .await?
-            {
-                identity
-            } else {
+            let Some(identity) = identities.get(id.document_id()) else {
                 response.push_not_found(id);
                 continue;
             };
-            let identity = _identity
+            let identity = identity
                 .unarchive::<Identity>()
                 .caused_by(trc::location!())?;
             let mut result = Map::with_capacity(properties.len());
@@ -148,7 +137,7 @@ impl IdentityGet for Server {
         Ok(response)
     }
 
-    async fn identity_get_or_create(&self, account_id: u32) -> trc::Result<RoaringBitmap> {
+    async fn identity_get_or_create(&self, account_id: u32) -> trc::Result<StoredIdentities> {
         // Obtain account info
         let account_info = self
             .account_info(account_id)
@@ -176,45 +165,31 @@ impl IdentityGet for Server {
             ))
             .await
             .caused_by(trc::location!())?;
+        let identities = self.identities(account_id).await?;
 
-        let mut identity_ids = self
-            .document_ids(account_id, Collection::Identity, IdentityField::DocumentId)
-            .await?;
         if stored_hash == Some(addresses_hash) {
-            return Ok(identity_ids);
+            return Ok(identities);
         }
 
         // Determine which addresses are missing and which identities are no longer valid
         let member_of = &account_info.account().id_member_of;
         let mut missing_addresses = addresses.clone();
-        let mut obsolete_ids = Vec::new();
-        for document_id in &identity_ids {
-            if let Some(identity) = self
-                .store()
-                .get_value::<Archive<AlignedBytes>>(ValueKey::archive(
-                    account_id,
-                    Collection::Identity,
-                    document_id,
-                ))
+        let mut obsolete = Vec::new();
+        for (document_id, archive) in identities.iter() {
+            let identity = archive
+                .to_unarchived::<Identity>()
+                .caused_by(trc::location!())?;
+            let email = identity.inner.email.as_str();
+
+            if addresses.contains(email) {
+                missing_addresses.remove(email);
+            } else if !self
+                .account_id_from_email(email, true)
                 .await
                 .caused_by(trc::location!())?
+                .is_some_and(|id| id == account_id || member_of.contains(&id))
             {
-                let email = identity
-                    .unarchive::<Identity>()
-                    .caused_by(trc::location!())?
-                    .email
-                    .as_str();
-
-                if addresses.contains(email) {
-                    missing_addresses.remove(email);
-                } else if !self
-                    .account_id_from_email(email, true)
-                    .await
-                    .caused_by(trc::location!())?
-                    .is_some_and(|id| id == account_id || member_of.contains(&id))
-                {
-                    obsolete_ids.push(document_id);
-                }
+                obsolete.push((document_id, identity));
             }
         }
 
@@ -226,26 +201,19 @@ impl IdentityGet for Server {
         // Create identities for the new addresses
         if !missing_addresses.is_empty() {
             let name = account_info.description().unwrap_or(account_info.name());
-            let mut next_document_id = self
-                .store()
-                .assign_document_ids(
-                    account_id,
-                    Collection::Identity,
-                    missing_addresses.len() as u64,
-                )
-                .await
-                .caused_by(trc::location!())?;
-            for email in missing_addresses {
+            let slots = batch.reserve_document_ids(
+                account_id,
+                Collection::Identity,
+                missing_addresses.len() as u32,
+            );
+            for (email, slot) in missing_addresses.into_iter().zip(slots.iter()) {
                 let name = if name.is_empty() {
                     email.to_string()
                 } else {
                     name.to_string()
                 };
-                let document_id = next_document_id;
-                next_document_id -= 1;
                 batch
-                    .with_document(document_id)
-                    .tag(IdentityField::DocumentId)
+                    .create_document(slot)
                     .custom(ObjectIndexBuilder::<(), _>::new().with_changes(Identity {
                         name,
                         email: email.to_string(),
@@ -253,19 +221,16 @@ impl IdentityGet for Server {
                     }))
                     .caused_by(trc::location!())?
                     .commit_point();
-                identity_ids.insert(document_id);
             }
         }
 
         // Delete identities whose address no longer belongs to this account
-        for document_id in obsolete_ids {
+        for (document_id, identity) in obsolete {
             batch
                 .with_document(document_id)
-                .untag(IdentityField::DocumentId)
-                .clear(Field::ARCHIVE)
-                .log_item_delete(SyncCollection::Identity, None)
+                .custom(ObjectIndexBuilder::<_, ()>::new().with_current(identity))
+                .caused_by(trc::location!())?
                 .commit_point();
-            identity_ids.remove(document_id);
         }
 
         batch
@@ -281,13 +246,29 @@ impl IdentityGet for Server {
             );
 
         match self.commit_batch(batch).await {
-            Ok(_) => Ok(identity_ids),
-            Err(err) if err.is_assertion_failure() => self
-                .document_ids(account_id, Collection::Identity, IdentityField::DocumentId)
-                .await
-                .caused_by(trc::location!()),
-            Err(err) => Err(err.caused_by(trc::location!())),
+            Ok(_) => {}
+            Err(err) if err.is_assertion_failure() => {}
+            Err(err) => return Err(err.caused_by(trc::location!())),
         }
+
+        self.identities(account_id).await
+    }
+
+    async fn identities(&self, account_id: u32) -> trc::Result<StoredIdentities> {
+        let mut identities = StoredIdentities::default();
+        self.archives(
+            account_id,
+            Collection::Identity,
+            Field::ARCHIVE,
+            &(),
+            |document_id, archive| {
+                identities.push(document_id, archive);
+                Ok(true)
+            },
+        )
+        .await
+        .caused_by(trc::location!())
+        .map(|_| identities)
     }
 }
 

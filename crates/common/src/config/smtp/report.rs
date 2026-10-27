@@ -22,6 +22,7 @@ use std::{str::FromStr, time::Duration};
 #[derive(Clone)]
 pub struct ReportConfig {
     pub submitter: IfBlock,
+    pub domain: Option<String>,
     pub analysis: ReportAnalysis,
 
     pub dkim: Report,
@@ -89,6 +90,7 @@ impl ReportConfig {
                 ObjectType::ReportSettings.singleton(),
                 &report.ctx_outbound_report_submitter(),
             ),
+            domain: report.outbound_report_domain,
             analysis: ReportAnalysis {
                 addresses: report
                     .inbound_report_addresses
@@ -97,7 +99,7 @@ impl ReportConfig {
                     .collect(),
                 forward: report.inbound_report_forwarding,
                 store: dr.hold_mta_reports_for.map(|d| d.into_inner()),
-                max_size: std::cmp::max(report.inbound_report_max_size, 1024) as usize,
+                max_size: std::cmp::max(report.max_inbound_report_size, 1024) as usize,
             },
             dkim: Report {
                 name: bp.compile_expr(
@@ -192,7 +194,7 @@ impl ReportConfig {
                 ),
                 max_size: bp.compile_expr(
                     ObjectType::DmarcReportSettings.singleton(),
-                    &dmarc.ctx_aggregate_max_report_size(),
+                    &dmarc.ctx_max_aggregate_report_size(),
                 ),
             },
             tls: AggregateReport {

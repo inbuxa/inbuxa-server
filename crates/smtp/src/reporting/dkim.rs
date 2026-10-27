@@ -4,12 +4,15 @@
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
  */
 
-use crate::{core::Session, reporting::send::MtaReportSend};
-use common::network::SessionStream;
-use mail_auth::{
-    AuthenticatedMessage, AuthenticationResults, DkimOutput, common::verify::VerifySignature,
+use crate::{
+    core::Session,
+    reporting::{ReportAddress, send::MtaReportSend},
 };
+use common::{expr::Bump, network::SessionStream};
+use compact_str::CompactString;
+use mail_auth::{AuthenticatedMessage, AuthenticationResults, DkimOutput};
 use registry::schema::structs::Rate;
+use smtp_report::{ReportEnvelope, arf::FeedbackReport};
 use trc::OutgoingReportEvent;
 
 impl<T: SessionStream> Session<T> {
@@ -21,6 +24,10 @@ impl<T: SessionStream> Session<T> {
         rejected: bool,
         output: &DkimOutput<'_>,
     ) {
+        if ReportAddress::checked(rcpt, self.data.session_id).is_none() {
+            return;
+        }
+
         // Generate report
         let signature = if let Some(signature) = output.signature() {
             signature
@@ -30,7 +37,7 @@ impl<T: SessionStream> Session<T> {
 
         if self
             .server
-            .is_local_report_domain(signature.domain(), self.data.session_id)
+            .is_local_report_domain(&signature.d, self.data.session_id)
             .await
         {
             return;
@@ -41,57 +48,73 @@ impl<T: SessionStream> Session<T> {
             trc::event!(
                 OutgoingReport(OutgoingReportEvent::DkimRateLimited),
                 SpanId = self.data.session_id,
-                To = rcpt.to_string(),
-                Limit = vec![
-                    trc::Value::from(rate.count),
-                    trc::Value::from(rate.period.into_inner())
-                ],
+                To = CompactString::from(rcpt),
+                Limit = rate.count,
+                Period = rate.period.into_inner(),
             );
 
             return;
         }
 
         let config = &self.server.core.smtp.report.dkim;
+        let mut arena = Bump::new();
         let from_addr = self
             .server
-            .eval_if(&config.address, self, self.data.session_id)
+            .eval_if(&config.address, self, &mut arena, self.data.session_id)
             .await
             .unwrap_or_else(|| "MAILER-DAEMON@localhost".to_string());
+        let from_name = self
+            .server
+            .eval_if(&config.name, self, &mut arena, self.data.session_id)
+            .await
+            .unwrap_or_else(|| "Mail Delivery Subsystem".to_string());
+        let subject = self
+            .server
+            .eval_if(&config.subject, self, &mut arena, self.data.session_id)
+            .await
+            .unwrap_or_else(|| "DKIM Report".to_string());
         let mut report = Vec::with_capacity(128);
-        self.new_auth_failure(output.result().into(), rejected)
-            .with_authentication_results(
+        if let Err(err) = (FeedbackReport {
+            authentication_results: vec![
                 AuthenticationResults::new(&self.hostname)
-                    .with_dkim_result(output, message.from())
-                    .to_string(),
-            )
-            .with_dkim_domain(signature.domain())
-            .with_dkim_selector(signature.selector())
-            .with_dkim_identity(signature.identity())
-            .with_headers(std::str::from_utf8(message.raw_headers()).unwrap_or_default())
-            .write_rfc5322(
-                (
-                    self.server
-                        .eval_if(&config.name, self, self.data.session_id)
-                        .await
-                        .unwrap_or_else(|| "Mail Delivery Subsystem".to_string())
-                        .as_str(),
-                    from_addr.as_str(),
-                ),
-                rcpt,
-                &self
-                    .server
-                    .eval_if(&config.subject, self, self.data.session_id)
-                    .await
-                    .unwrap_or_else(|| "DKIM Report".to_string()),
-                &mut report,
-            )
-            .ok();
+                    .with_dkim_result(output, message.first_from_address())
+                    .to_string()
+                    .into(),
+            ],
+            dkim_domain: Some(signature.d.as_str().into()),
+            dkim_selector: Some(signature.s.as_str().into()),
+            dkim_identity: Some(signature.identity().into()),
+            headers: Some(
+                std::str::from_utf8(message.raw_headers())
+                    .unwrap_or_default()
+                    .into(),
+            ),
+            ..self.new_auth_failure(output.result().into(), rejected)
+        })
+        .write_rfc5322(
+            &ReportEnvelope {
+                from: (from_name.as_str(), from_addr.as_str()).into(),
+                to: vec![rcpt],
+                submitter: &self.hostname,
+                report_domain: "",
+                subject: Some(&subject),
+            },
+            &mut report,
+        ) {
+            trc::event!(
+                OutgoingReport(OutgoingReportEvent::SubmissionError),
+                SpanId = self.data.session_id,
+                To = CompactString::from(rcpt),
+                Reason = err.to_string(),
+            );
+            return;
+        }
 
         trc::event!(
             OutgoingReport(OutgoingReportEvent::DkimReport),
             SpanId = self.data.session_id,
-            From = from_addr.to_string(),
-            To = rcpt.to_string(),
+            From = CompactString::from(&from_addr),
+            To = CompactString::from(rcpt),
         );
 
         // Send report

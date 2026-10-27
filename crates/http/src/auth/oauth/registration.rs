@@ -8,34 +8,36 @@ use super::ErrorType;
 use crate::auth::authenticate::Authenticator;
 use common::{
     Server,
-    auth::{
-        BuildAccessToken,
-        oauth::{
-            client_id::{ClientMeta, decode_client_id, encode_client_id, scopes_to_mask},
-            registration::{
-                ClientRegistrationError, ClientRegistrationRequest, ClientRegistrationResponse,
-                TokenEndpointAuthMethod, redirect_uri_matches, validate_grant_metadata,
-                validate_redirect_uri,
-            },
+    auth::oauth::{
+        CLIENT_ID_MAX_LEN,
+        client::ResolvedClient,
+        client_id::{ClientMeta, encode_client_id},
+        registration::{
+            ClientRegistrationError, ClientRegistrationRequest, ClientRegistrationResponse,
+            TokenEndpointAuthMethod, parse_grant_type, parse_oauth_scope, validate_client_name,
+            validate_grant_metadata, validate_oauth_client, validate_public_client_metadata,
+            validate_redirect_uri,
         },
+        scope::OAuthScopes,
     },
 };
+use compact_str::CompactString;
 use directory::core::secret::{hash_secret, verify_secret_hash};
 use http_proto::{request::fetch_body, *};
 use hyper::StatusCode;
+use jmap::registry::mapping::oauth_client::is_superuser;
 use registry::schema::{
-    enums::{PasswordHashAlgorithm, Permission},
-    prelude::{ObjectType, Property, UTCDateTime},
+    enums::{OAuthGrantType, PasswordHashAlgorithm, Permission},
+    prelude::UTCDateTime,
     structs::OAuthClient,
 };
-use std::future::Future;
+use std::{future::Future, net::IpAddr};
 use store::{
     rand::{RngExt, distr::Alphanumeric, rng},
     registry::write::{RegistryWrite, RegistryWriteResult},
     write::now,
 };
 use trc::{AddContext, AuthEvent};
-use types::id::Id;
 
 pub trait ClientRegistrationHandler: Sync + Send {
     fn handle_oauth_registration_request(
@@ -44,26 +46,20 @@ pub trait ClientRegistrationHandler: Sync + Send {
         session: HttpSessionData,
     ) -> impl Future<Output = trc::Result<HttpResponse>> + Send;
 
-    fn validate_client_registration(
-        &self,
-        client_id: &str,
-        redirect_uri: Option<&str>,
-        account_id: u32,
-    ) -> impl Future<Output = trc::Result<Option<ErrorType>>> + Send;
-
     fn verify_client_secret(
         &self,
-        client_id: &str,
+        client: &ResolvedClient,
         client_secret: Option<&str>,
+        remote_ip: IpAddr,
     ) -> impl Future<Output = trc::Result<Option<ErrorType>>> + Send;
 }
+
 impl ClientRegistrationHandler for Server {
     async fn handle_oauth_registration_request(
         &self,
         req: &mut HttpRequest,
         session: HttpSessionData,
     ) -> trc::Result<HttpResponse> {
-        // Parse request
         let body = fetch_body(req, 20 * 1024, session.session_id).await;
         let request = serde_json::from_slice::<ClientRegistrationRequest>(
             body.as_deref().unwrap_or_default(),
@@ -72,7 +68,6 @@ impl ClientRegistrationHandler for Server {
             trc::EventType::Resource(trc::ResourceEvent::BadParameters).from_json_error(err)
         })?;
 
-        // Validate redirect URIs and grant metadata (RFC 7591 + OAuth Public Clients profile)
         if request.redirect_uris.is_empty() {
             return Ok(registration_error(
                 ClientRegistrationError::invalid_redirect_uri(
@@ -80,35 +75,28 @@ impl ClientRegistrationHandler for Server {
                 ),
             ));
         }
-        for uri in &request.redirect_uris {
-            if let Err(err) = validate_redirect_uri(uri) {
-                return Ok(registration_error(err));
-            }
-        }
-        if let Err(err) = validate_grant_metadata(&request) {
+        if let Err(err) =
+            validate_grant_metadata(&request).and_then(|_| validate_client_name(&request))
+        {
             return Ok(registration_error(err));
         }
 
-        let is_public = matches!(
+        if matches!(
             request.token_endpoint_auth_method,
             None | Some(TokenEndpointAuthMethod::None)
-        );
-
-        if is_public {
-            // Public client: issue a stateless, self-describing client id with no database write
-            if self.core.oauth.allow_anonymous_client_registration {
-                self.is_http_anonymous_request_allowed(session.remote_ip)
-                    .await?;
-            } else {
-                let (_, access_token) = self.authenticate_headers(req, &session).await?;
-                access_token.enforce_permission(Permission::OAuthClientRegistration)?;
+        ) {
+            if let Err(err) = validate_public_client_metadata(&request) {
+                return Ok(registration_error(err));
             }
+
+            self.is_http_anonymous_request_allowed(session.remote_ip)
+                .await?;
 
             let client_id = encode_client_id(
                 self.core.oauth.oauth_key.as_bytes(),
                 &ClientMeta {
                     redirect_uris: request.redirect_uris.clone(),
-                    scope_mask: scopes_to_mask(request.scope.as_deref().unwrap_or_default()),
+                    scopes: OAuthScopes::parse(request.scope.as_deref().unwrap_or_default()),
                     client_name: request.client_name.clone(),
                 },
             )
@@ -119,6 +107,13 @@ impl ClientRegistrationHandler for Server {
                     .reason(err)
                     .caused_by(trc::location!())
             })?;
+            if client_id.len() > CLIENT_ID_MAX_LEN {
+                return Ok(registration_error(
+                    ClientRegistrationError::invalid_client_metadata(
+                        "The client metadata is too large to be encoded in a client id.",
+                    ),
+                ));
+            }
 
             trc::event!(
                 Auth(AuthEvent::ClientRegistration),
@@ -139,47 +134,101 @@ impl ClientRegistrationHandler for Server {
             .into_http_response());
         }
 
-        // Confidential client: authenticate and persist the registration
-        let (_, access_token) = self.authenticate_headers(req, &session).await?;
-        access_token.enforce_permission(Permission::OAuthClientRegistration)?;
-        let tenant_id = access_token.tenant_id();
+        for uri in &request.redirect_uris {
+            if let Err(err) = validate_redirect_uri(uri) {
+                return Ok(registration_error(err));
+            }
+        }
+        if !matches!(
+            request.token_endpoint_auth_method,
+            Some(
+                TokenEndpointAuthMethod::ClientSecretBasic
+                    | TokenEndpointAuthMethod::ClientSecretPost
+            )
+        ) {
+            return Ok(registration_error(
+                ClientRegistrationError::invalid_client_metadata(
+                    "token_endpoint_auth_method must be none, client_secret_basic or client_secret_post.",
+                ),
+            ));
+        }
 
-        // Generate client ID
+        let access_token = self.authenticate_headers(req, &session).await?.access_token;
+        access_token.enforce_permission(Permission::SysOAuthClientCreate)?;
+
+        let mut scopes = Vec::new();
+        for scope in request
+            .scope
+            .as_deref()
+            .unwrap_or_default()
+            .split_ascii_whitespace()
+            .filter_map(parse_oauth_scope)
+        {
+            if !scopes.contains(&scope) {
+                scopes.push(scope);
+            }
+        }
+        let mut grant_types = Vec::new();
+        for grant_type in &request.grant_types {
+            match parse_grant_type(grant_type) {
+                Some(grant_type) if !grant_types.contains(&grant_type) => {
+                    grant_types.push(grant_type)
+                }
+                Some(_) => {}
+                None => {
+                    return Ok(registration_error(
+                        ClientRegistrationError::invalid_client_metadata("Unsupported grant type."),
+                    ));
+                }
+            }
+        }
+        if grant_types.is_empty() {
+            grant_types = vec![
+                OAuthGrantType::AuthorizationCode,
+                OAuthGrantType::RefreshToken,
+            ];
+        }
+
         let client_id = rng()
             .sample_iter(Alphanumeric)
             .take(20)
             .map(|ch| char::from(ch.to_ascii_lowercase()))
             .collect::<String>();
+        let mut client = OAuthClient {
+            client_id: client_id.clone(),
+            description: request.client_name.clone(),
+            contacts: request.contacts.clone().into(),
+            redirect_uris: request.redirect_uris.clone().into(),
+            logo: request.logo_uri.clone(),
+            created_at: UTCDateTime::now(),
+            first_party: false,
+            scopes: scopes.into(),
+            grant_types: grant_types.into(),
+            ..Default::default()
+        };
 
-        // Generate client secret
+        if let Err((_, err)) = validate_oauth_client(&client, is_superuser(&access_token)) {
+            return Ok(registration_error(err));
+        }
+
         let client_secret = rng()
             .sample_iter(Alphanumeric)
             .take(48)
             .map(char::from)
             .collect::<String>();
-        let secret_hash = hash_secret(
-            PasswordHashAlgorithm::Argon2id,
-            client_secret.clone().into_bytes(),
-        )
-        .await
-        .caused_by(trc::location!())?;
+        client.secret = Some(
+            hash_secret(
+                &self.inner.data.password_verifier,
+                PasswordHashAlgorithm::Argon2id,
+                client_secret.clone().into_bytes(),
+            )
+            .await
+            .caused_by(trc::location!())?,
+        );
 
         let result = self
             .registry()
-            .write(RegistryWrite::insert(
-                &OAuthClient {
-                    client_id: client_id.clone(),
-                    description: request.client_name.clone(),
-                    contacts: request.contacts.clone().into(),
-                    member_tenant_id: tenant_id.map(|id| Id::new(id as u64)),
-                    redirect_uris: request.redirect_uris.clone().into(),
-                    logo: request.logo_uri.clone(),
-                    secret: Some(secret_hash),
-                    created_at: UTCDateTime::now(),
-                    ..Default::default()
-                }
-                .into(),
-            ))
+            .write(RegistryWrite::insert(&client.into()))
             .await
             .caused_by(trc::location!())?;
 
@@ -187,13 +236,13 @@ impl ClientRegistrationHandler for Server {
             return Err(trc::StoreEvent::UnexpectedError
                 .into_err()
                 .details("Failed to register OAuth client.")
-                .reason(result.to_string())
+                .reason(result)
                 .caused_by(trc::location!()));
         }
 
         trc::event!(
             Auth(AuthEvent::ClientRegistration),
-            Id = client_id.to_string(),
+            Id = CompactString::from(&client_id),
             RemoteIp = session.remote_ip
         );
 
@@ -212,119 +261,37 @@ impl ClientRegistrationHandler for Server {
         .into_http_response())
     }
 
-    async fn validate_client_registration(
-        &self,
-        client_id: &str,
-        redirect_uri: Option<&str>,
-        account_id: u32,
-    ) -> trc::Result<Option<ErrorType>> {
-        // Stateless client ids are self-describing and validated at the authorization endpoint
-        if decode_client_id(self.core.oauth.oauth_key.as_bytes(), client_id).is_some() {
-            return Ok(None);
-        }
-        if !self.core.oauth.require_client_authentication {
-            return Ok(None);
-        }
-
-        // Fetch client registration
-        let found_registration = if let Some(client_id) = self
-            .registry()
-            .primary_key(
-                ObjectType::OAuthClient.into(),
-                Property::ClientId,
-                client_id.as_bytes().to_vec(),
-            )
-            .await?
-        {
-            if let Some(redirect_uri) = redirect_uri {
-                let client = self
-                    .registry()
-                    .object::<OAuthClient>(client_id.id())
-                    .await?
-                    .ok_or_else(|| {
-                        trc::StoreEvent::UnexpectedError
-                            .into_err()
-                            .details("OAuth client not found.")
-                            .caused_by(trc::location!())
-                            .ctx(trc::Key::Id, client_id.id().id())
-                    })?;
-                if client
-                    .redirect_uris
-                    .iter()
-                    .any(|uri| redirect_uri_matches(uri, redirect_uri))
-                {
-                    return Ok(None);
-                }
-            } else {
-                // Device flow does not require a redirect URI
-
-                return Ok(None);
-            }
-
-            true
-        } else {
-            false
-        };
-
-        // Check if the account is allowed to override client registration
-        if self
-            .access_token(account_id)
-            .await
-            .caused_by(trc::location!())?
-            .build()
-            .has_permission(Permission::OAuthClientOverride)
-        {
-            return Ok(None);
-        }
-
-        Ok(Some(if found_registration {
-            ErrorType::InvalidClient
-        } else {
-            ErrorType::InvalidRequest
-        }))
-    }
-
     async fn verify_client_secret(
         &self,
-        client_id: &str,
+        client: &ResolvedClient,
         client_secret: Option<&str>,
+        remote_ip: IpAddr,
     ) -> trc::Result<Option<ErrorType>> {
-        // Stateless and unregistered clients have no secret to verify
-        if decode_client_id(self.core.oauth.oauth_key.as_bytes(), client_id).is_some() {
-            return Ok(None);
-        }
-        let Some(client_id) = self
-            .registry()
-            .primary_key(
-                ObjectType::OAuthClient.into(),
-                Property::ClientId,
-                client_id.as_bytes().to_vec(),
-            )
-            .await?
-        else {
-            return Ok(None);
-        };
-        let Some(client) = self
-            .registry()
-            .object::<OAuthClient>(client_id.id())
-            .await
-            .caused_by(trc::location!())?
-        else {
-            return Ok(None);
-        };
-
-        match client.secret.as_deref() {
-            Some(hash) if !hash.is_empty() => match client_secret {
-                Some(secret)
-                    if verify_secret_hash(hash, secret.as_bytes())
-                        .await
-                        .caused_by(trc::location!())? =>
+        match (client.secret_hash(), client_secret) {
+            (Some(hash), Some(secret))
+                if verify_secret_hash(
+                    &self.inner.data.password_verifier,
+                    hash,
+                    secret.as_bytes(),
+                )
+                .await
+                .caused_by(trc::location!())? =>
+            {
+                Ok(None)
+            }
+            (Some(_), secret) => {
+                if secret.is_some()
+                    && self.has_auth_fail2ban()
+                    && self.is_auth_fail2banned(remote_ip, None).await?
                 {
-                    Ok(None)
+                    Err(trc::SecurityEvent::AuthenticationBan
+                        .into_err()
+                        .ctx(trc::Key::RemoteIp, remote_ip))
+                } else {
+                    Ok(Some(ErrorType::InvalidClient))
                 }
-                _ => Ok(Some(ErrorType::InvalidClient)),
-            },
-            _ => Ok(None),
+            }
+            (None, _) => Ok(None),
         }
     }
 }

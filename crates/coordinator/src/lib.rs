@@ -6,6 +6,7 @@
 
 #![warn(clippy::large_futures)]
 
+use std::marker::PhantomData;
 #[allow(unused_imports)]
 use std::sync::Arc;
 
@@ -27,28 +28,50 @@ pub enum Coordinator {
     None,
 }
 
-pub enum PubSubStream {
+pub enum Publisher {
     #[cfg(feature = "redis")]
-    Redis(crate::backend::redis::pubsub::RedisPubSubStream),
-    #[cfg(feature = "redis")]
-    RedisCluster(crate::backend::redis::pubsub::RedisClusterPubSubStream),
+    Redis(backend::redis::pubsub::RedisPublisher),
     #[cfg(feature = "nats")]
-    Nats(crate::backend::nats::pubsub::NatsPubSubStream),
+    Nats(backend::nats::pubsub::NatsPublisher),
     #[cfg(feature = "zenoh")]
-    Zenoh(crate::backend::zenoh::pubsub::ZenohPubSubStream),
+    Zenoh(backend::zenoh::pubsub::ZenohPublisher),
     #[cfg(feature = "kafka")]
-    Kafka(crate::backend::kafka::pubsub::KafkaPubSubStream),
+    Kafka(backend::kafka::pubsub::KafkaPublisher),
     Unimplemented,
 }
 
-pub enum Msg {
+pub enum Subscription {
+    #[cfg(feature = "redis")]
+    Redis(backend::redis::pubsub::RedisSubscription),
+    #[cfg(feature = "nats")]
+    Nats(async_nats::Subscriber),
+    #[cfg(feature = "zenoh")]
+    Zenoh(backend::zenoh::pubsub::ZenohSubscription),
+    #[cfg(feature = "kafka")]
+    Kafka(backend::kafka::pubsub::KafkaSubscription),
+    Unimplemented,
+}
+
+pub enum PubSubStream<'x> {
+    #[cfg(feature = "redis")]
+    Redis(&'x mut backend::redis::pubsub::RedisSubscription),
+    #[cfg(feature = "nats")]
+    Nats(&'x mut async_nats::Subscriber),
+    #[cfg(feature = "zenoh")]
+    Zenoh(&'x backend::zenoh::pubsub::ZenohSubscription),
+    #[cfg(feature = "kafka")]
+    Kafka(backend::kafka::pubsub::KafkaStream<'x>),
+    Unimplemented(PhantomData<&'x ()>),
+}
+
+pub enum Msg<'x> {
     #[cfg(feature = "redis")]
     Redis(redis::Msg),
     #[cfg(feature = "nats")]
     Nats(async_nats::Message),
     #[cfg(feature = "zenoh")]
-    Zenoh(Vec<u8>),
+    Zenoh(backend::zenoh::pubsub::ZenohMsg),
     #[cfg(feature = "kafka")]
-    Kafka(Vec<u8>),
-    Unimplemented,
+    Kafka(rdkafka::message::BorrowedMessage<'x>),
+    Unimplemented(PhantomData<&'x ()>),
 }

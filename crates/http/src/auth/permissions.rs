@@ -48,77 +48,56 @@ impl AccountApiHandler for Server {
             false
         };
         let is_recovery_admin = access_token.account_id() == RECOVERY_ADMIN_ID;
-        let permissions = if !self.registry().is_bootstrap_mode()
-            && let Some(scope) = access_token.access_scope()
-        {
-            let mut permissions = scope.permissions.clone();
+        let permissions =
+            if !self.registry().is_bootstrap_mode() && access_token.access_scope().is_some() {
+                let mut permissions = access_token.effective_permissions().into_owned();
 
-            for p in [
-                Permission::SysDmarcInternalReportUpdate,
-                Permission::SysDmarcInternalReportCreate,
-                Permission::SysDmarcExternalReportUpdate,
-                Permission::SysDmarcExternalReportCreate,
-                Permission::SysTlsInternalReportUpdate,
-                Permission::SysTlsInternalReportCreate,
-                Permission::SysTlsExternalReportUpdate,
-                Permission::SysTlsExternalReportCreate,
-                Permission::SysArfExternalReportCreate,
-                Permission::SysArfExternalReportUpdate,
-                Permission::SysQueuedMessageCreate,
-                Permission::SysLogCreate,
-                Permission::SysLogDestroy,
-                Permission::SysLogUpdate,
-                Permission::SysClusterNodeCreate,
-                Permission::SysClusterNodeUpdate,
-                Permission::SysClusterNodeDestroy,
-                Permission::SysBootstrapGet,
-                Permission::SysBootstrapUpdate,
-            ] {
-                permissions.clear(p.to_id() as usize);
-            }
-
-            if !self.core.groupware.allow_directory_query {
-                for p in [
-                    Permission::JmapPrincipalQuery,
-                    Permission::JmapPrincipalQueryChanges,
-                    Permission::JmapPrincipalGet,
-                    Permission::JmapPrincipalGetAvailability,
-                    Permission::JmapPrincipalChanges,
-                ] {
+                for p in [Permission::SysBootstrapGet, Permission::SysBootstrapUpdate] {
                     permissions.clear(p.to_id() as usize);
                 }
-            }
 
-            if is_external_directory || is_recovery_admin {
-                permissions.clear(Permission::SysAccountPasswordGet.to_id() as usize);
-                permissions.clear(Permission::SysAccountPasswordUpdate.to_id() as usize);
-            }
-
-            if is_recovery_admin {
-                for p in [
-                    Permission::SysAccountSettingsGet,
-                    Permission::SysAccountSettingsUpdate,
-                    Permission::SysApiKeyCreate,
-                    Permission::SysApiKeyUpdate,
-                    Permission::SysApiKeyDestroy,
-                    Permission::SysApiKeyQuery,
-                    Permission::SysApiKeyGet,
-                    Permission::SysAppPasswordCreate,
-                    Permission::SysAppPasswordUpdate,
-                    Permission::SysAppPasswordDestroy,
-                    Permission::SysAppPasswordQuery,
-                    Permission::SysAppPasswordGet,
-                ] {
-                    permissions.clear(p.to_id() as usize);
+                if !self.core.groupware.allow_directory_query
+                    && !access_token.has_permission(Permission::SysAccountQuery)
+                {
+                    for p in [
+                        Permission::JmapPrincipalQuery,
+                        Permission::JmapPrincipalQueryChanges,
+                        Permission::JmapPrincipalChanges,
+                    ] {
+                        permissions.clear(p.to_id() as usize);
+                    }
                 }
-            }
 
-            permissions.build_permissions_list()
-        } else if self.registry().is_bootstrap_mode() {
-            vec![Permission::SysBootstrapGet, Permission::SysBootstrapUpdate]
-        } else {
-            Vec::new()
-        };
+                if is_external_directory || is_recovery_admin {
+                    permissions.clear(Permission::SysAccountPasswordGet.to_id() as usize);
+                    permissions.clear(Permission::SysAccountPasswordUpdate.to_id() as usize);
+                }
+
+                if is_recovery_admin {
+                    for p in [
+                        Permission::SysAccountSettingsGet,
+                        Permission::SysAccountSettingsUpdate,
+                        Permission::SysApiKeyCreate,
+                        Permission::SysApiKeyUpdate,
+                        Permission::SysApiKeyDestroy,
+                        Permission::SysApiKeyQuery,
+                        Permission::SysApiKeyGet,
+                        Permission::SysAppPasswordCreate,
+                        Permission::SysAppPasswordUpdate,
+                        Permission::SysAppPasswordDestroy,
+                        Permission::SysAppPasswordQuery,
+                        Permission::SysAppPasswordGet,
+                    ] {
+                        permissions.clear(p.to_id() as usize);
+                    }
+                }
+
+                permissions.build_permissions_list()
+            } else if self.registry().is_bootstrap_mode() {
+                vec![Permission::SysBootstrapGet, Permission::SysBootstrapUpdate]
+            } else {
+                Vec::new()
+            };
 
         Ok(JsonResponse::new(Account {
             permissions,

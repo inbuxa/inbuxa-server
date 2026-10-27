@@ -16,7 +16,7 @@ use ahash::AHashMap;
 use directory::Credentials;
 use mail_auth::IpLookupStrategy;
 use registry::schema::{
-    enums::{self, ExpressionConstant, ExpressionVariable, MtaRequiredOrOptional},
+    enums::{self, ExpressionVariable, MtaRequiredOrOptional},
     prelude::ObjectType,
     structs::{
         DsnReportSettings, MtaConnectionStrategy, MtaDeliveryExpiration, MtaDeliverySchedule,
@@ -322,9 +322,9 @@ impl QueueConfig {
             let mut source_ipv4 = Vec::new();
             let mut source_ipv6 = Vec::new();
 
-            for ip_host in obj.object.source_ips {
+            for ip_host in obj.object.local_ips {
                 let ip_host = IpAndHost {
-                    ip: ip_host.source_ip.into_inner(),
+                    ip: ip_host.local_ip.into_inner(),
                     host: ip_host.ehlo_hostname,
                 };
                 if ip_host.ip.is_ipv4() {
@@ -380,13 +380,13 @@ impl QueueConfig {
                     queue.routing_strategy.insert(
                         route.name,
                         RoutingStrategy::Relay(RelayConfig {
-                            address: if let Ok(ip) = route.address.parse() {
+                            address: if let Ok(ip) = route.host.parse() {
                                 HostOrIp::Ip(IpStr {
                                     ip,
-                                    ip_str: route.address.into(),
+                                    ip_str: route.host.into(),
                                 })
                             } else {
-                                HostOrIp::Host(route.address.into())
+                                HostOrIp::Host(route.host.into())
                             },
                             port: route.port as u16,
                             protocol: match route.protocol {
@@ -623,46 +623,6 @@ impl QueueQuotas {
     }
 }
 
-impl<'x> TryFrom<Variable<'x>> for RequireOptional {
-    type Error = ();
-
-    fn try_from(value: Variable<'x>) -> Result<Self, Self::Error> {
-        match value {
-            Variable::Constant(ExpressionConstant::Optional) => Ok(RequireOptional::Optional),
-            Variable::Constant(ExpressionConstant::Require) => Ok(RequireOptional::Require),
-            Variable::Constant(ExpressionConstant::Disable) => Ok(RequireOptional::Disable),
-            _ => Err(()),
-        }
-    }
-}
-
-impl<'x> TryFrom<Variable<'x>> for IpLookupStrategy {
-    type Error = ();
-
-    fn try_from(value: Variable<'x>) -> Result<Self, Self::Error> {
-        match value {
-            Variable::Constant(value) => match value {
-                ExpressionConstant::Ipv4Only => Ok(IpLookupStrategy::Ipv4Only),
-                ExpressionConstant::Ipv6Only => Ok(IpLookupStrategy::Ipv6Only),
-                ExpressionConstant::Ipv6ThenIpv4 => Ok(IpLookupStrategy::Ipv6thenIpv4),
-                ExpressionConstant::Ipv4ThenIpv6 => Ok(IpLookupStrategy::Ipv4thenIpv6),
-                _ => Err(()),
-            },
-            Variable::String(value) => {
-                match value.as_str() {
-                    "ipv4_only" => Ok(IpLookupStrategy::Ipv4Only),
-                    "ipv6_only" => Ok(IpLookupStrategy::Ipv6Only),
-                    //"ipv4_and_ipv6" => IpLookupStrategy::Ipv4AndIpv6,
-                    "ipv6_then_ipv4" => Ok(IpLookupStrategy::Ipv6thenIpv4),
-                    "ipv4_then_ipv6" => Ok(IpLookupStrategy::Ipv4thenIpv6),
-                    _ => Err(()),
-                }
-            }
-            _ => Err(()),
-        }
-    }
-}
-
 impl std::fmt::Debug for RelayConfig {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("RelayConfig")
@@ -779,6 +739,12 @@ impl ArchivedQueueName {
 impl Default for QueueName {
     fn default() -> Self {
         DEFAULT_QUEUE_NAME
+    }
+}
+
+impl From<[u8; 8]> for QueueName {
+    fn from(name: [u8; 8]) -> Self {
+        QueueName(name)
     }
 }
 

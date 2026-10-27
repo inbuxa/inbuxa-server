@@ -5,8 +5,9 @@
  */
 
 use jmap_tools::{Element, Key, Property};
+use serde::{Serialize, Serializer};
 use std::{borrow::Cow, str::FromStr};
-use types::id::Id;
+use types::{id::Id, text::Text};
 
 #[derive(Debug, Clone, Default)]
 pub struct SearchSnippet;
@@ -36,6 +37,10 @@ impl Property for SearchSnippetProperty {
         }
         .into()
     }
+
+    fn key_eq(&self, other: &Self) -> bool {
+        self == other
+    }
 }
 
 impl Element for SearchSnippetValue {
@@ -55,18 +60,29 @@ impl Element for SearchSnippetValue {
     }
 
     fn to_cow(&self) -> Cow<'static, str> {
+        self.text().to_cow()
+    }
+
+    fn serialize_text<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        self.text().serialize(serializer)
+    }
+}
+
+impl SearchSnippetValue {
+    pub fn text(&self) -> Text<'_> {
         match self {
-            SearchSnippetValue::Id(id) => id.to_string().into(),
+            SearchSnippetValue::Id(id) => Text::Id(*id),
         }
     }
 }
 
 impl SearchSnippetProperty {
     fn parse(value: &str) -> Option<Self> {
-        hashify::tiny_map!(value.as_bytes(),
-            b"emailId" => SearchSnippetProperty::EmailId,
-            b"subject" => SearchSnippetProperty::Subject,
-            b"preview" => SearchSnippetProperty::Preview,
+        hashify::fnc_map!(value.as_bytes(),
+            b"emailId" => Some(SearchSnippetProperty::EmailId),
+            b"subject" => Some(SearchSnippetProperty::Subject),
+            b"preview" => Some(SearchSnippetProperty::Preview),
+            _ => None,
         )
     }
 }

@@ -28,9 +28,55 @@ members = [
     "crates/utils",
     "crates/common",
     "crates/trc",
-    "crates/migration",
-    "tests",
+    "crates/text-extract",
+    "crates/smtp-proto",
+    "crates/smtp-report",
+    "crates/calcard",
+    "crates/sieve",
+    "crates/jmap-tools",
+    "crates/s3",
 ]
+default-members = [
+    "crates/main",
+    "crates/types",
+    "crates/http",
+    "crates/http-proto",
+    "crates/jmap",
+    "crates/jmap-proto",
+    "crates/email",
+    "crates/imap",
+    "crates/imap-proto",
+    "crates/smtp",
+    "crates/managesieve",
+    "crates/pop3",
+    "crates/dav-proto",
+    "crates/scim-proto",
+    "crates/scim",
+    "crates/dav",
+    "crates/groupware",
+    "crates/spam-filter",
+    "crates/nlp",
+    "crates/store",
+    "crates/coordinator",
+    "crates/directory",
+    "crates/registry",
+    "crates/services",
+    "crates/utils",
+    "crates/common",
+    "crates/trc",
+    "crates/text-extract",
+    "crates/smtp-proto",
+    "crates/smtp-report",
+    "crates/calcard",
+    "crates/sieve",
+    "crates/jmap-tools",
+]
+
+[workspace.dependencies]
+rkyv = { version = "0.8.18", features = ["little_endian", "unaligned"] }
+
+[workspace.lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(stalwart_tests)'] }
 
 [workspace.lints.clippy]
 result_unit_err = "allow"
@@ -45,6 +91,12 @@ panic = 'unwind'
 debug-assertions = true
 overflow-checks = false
 rpath = false
+
+[profile.dev.package.argon2]
+opt-level = 3
+
+[profile.dev.package.blake2]
+opt-level = 3
 
 [profile.release]
 opt-level = 3

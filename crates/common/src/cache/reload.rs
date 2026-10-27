@@ -31,6 +31,10 @@ pub struct ReloadResult {
 
 impl Server {
     pub async fn reload_registry(&self, change: RegistryChange) -> trc::Result<ReloadResult> {
+        Box::pin(self.reload(change)).await
+    }
+
+    async fn reload(&self, change: RegistryChange) -> trc::Result<ReloadResult> {
         let mut bootstrap = Bootstrap::new(self.registry().clone()).await;
         let object = match change {
             RegistryChange::Insert(id) => {
@@ -45,8 +49,7 @@ impl Server {
                         if expires_at > now() {
                             let mut ips = self.inner.data.blocked_ips.write();
                             if let Some(ip) = ip.address.try_to_ip() {
-                                ips.blocked_ip_addresses
-                                    .insert(IpWithTtl::new(ip, expires_at));
+                                ips.block(ip, expires_at);
                             } else {
                                 ips.blocked_ip_networks
                                     .push(IpWithTtl::new(ip.address, expires_at));
@@ -104,8 +107,6 @@ impl Server {
                     data: storage.data.clone(),
                     blob: storage.blob.clone(),
                     search: storage.search.clone(),
-                    metrics: storage.metrics.clone(),
-                    tracing: storage.tracing.clone(),
                     memory: storage.memory.clone(),
                     coordinator: storage.coordinator.clone(),
                     directory: directory.default_directory,
@@ -113,10 +114,15 @@ impl Server {
                 };
 
                 // Parse tracers
-                let tracers = Telemetry::parse(&mut bootstrap, &storage).await;
+                let tracers = Telemetry::parse(
+                    &mut bootstrap,
+                    &storage,
+                    self.inner.ipc.index_queue_notify(),
+                )
+                .await;
 
                 if bootstrap.errors.is_empty() {
-                    let core = Box::pin(Core::parse(&mut bootstrap, storage)).await;
+                    let core = Core::parse(&mut bootstrap, storage).await;
 
                     if bootstrap.errors.is_empty() {
                         let mut servers = Listeners::parse(&mut bootstrap).await;

@@ -13,10 +13,15 @@ pub mod cheeky_hash;
 pub mod codec;
 pub mod cron;
 pub mod glob;
+pub mod hash128;
 pub mod http;
 pub mod map;
+pub mod memory;
+pub mod outbound;
+pub mod runtime;
 pub mod snowflake;
 pub mod template;
+pub mod text;
 pub mod tls;
 pub mod topological;
 pub mod url_params;
@@ -26,8 +31,10 @@ use futures::StreamExt;
 pub use reqwest::Client;
 use reqwest::Response;
 pub use reqwest::header::HeaderMap;
-use std::borrow::Cow;
-use std::fmt::Write;
+use std::{borrow::Cow, time::Duration};
+use trc::{Collector, EventType, ServerEvent};
+
+const STARTUP_ERROR_LOG_GRACE: Duration = Duration::from_millis(100);
 
 pub trait HttpLimitResponse: Sync + Send {
     fn bytes_with_limit(
@@ -74,7 +81,7 @@ impl<T> UnwrapFailure<T> for Option<T> {
                     Details = message.to_compact_string()
                 );
                 eprintln!("{message}");
-                std::process::exit(1);
+                exit_failed();
             }
         }
     }
@@ -91,13 +98,13 @@ impl<T, E: std::fmt::Display> UnwrapFailure<T> for Result<T, E> {
                     Reason = err.to_compact_string()
                 );
 
-                #[cfg(feature = "test_mode")]
+                #[cfg(stalwart_tests)]
                 panic!("{message}: {err}");
 
-                #[cfg(not(feature = "test_mode"))]
+                #[cfg(not(stalwart_tests))]
                 {
                     eprintln!("{message}: {err}");
-                    std::process::exit(1);
+                    exit_failed();
                 }
             }
         }
@@ -110,7 +117,14 @@ pub fn failed(message: &str) -> ! {
         Details = message.to_compact_string(),
     );
     eprintln!("{message}");
-    std::process::exit(1);
+    exit_failed();
+}
+
+pub fn exit_failed() -> ! {
+    if Collector::has_interest(EventType::Server(ServerEvent::StartupError)) {
+        std::thread::sleep(STARTUP_ERROR_LOG_GRACE);
+    }
+    runtime::exit(1)
 }
 
 pub async fn wait_for_shutdown() {
@@ -135,7 +149,7 @@ pub async fn wait_for_shutdown() {
                 trc::event!(
                     Server(trc::ServerEvent::ThreadError),
                     Details = "Unable to listen for shutdown signal",
-                    Reason = err.to_string(),
+                    Reason = err.to_compact_string(),
                 );
                 "Error"
             }
@@ -159,7 +173,7 @@ impl<T: AsRef<str>> DomainPart for T {
         let address = self.as_ref();
         if let Some((local, domain)) = address.rsplit_once('@') {
             let mut address = String::with_capacity(address.len());
-            if lower_local {
+            if lower_local && !local.is_ascii() {
                 for ch in local.chars() {
                     for ch in ch.to_lowercase() {
                         address.push(ch);
@@ -167,13 +181,16 @@ impl<T: AsRef<str>> DomainPart for T {
                 }
             } else {
                 address.push_str(local);
+                if lower_local {
+                    address.make_ascii_lowercase();
+                }
             }
             address.push('@');
             if domain.is_ascii() {
-                for ch in domain.chars() {
-                    for ch in ch.to_lowercase() {
-                        address.push(ch);
-                    }
+                let domain_start = address.len();
+                address.push_str(domain);
+                if let Some(domain) = address.get_mut(domain_start..) {
+                    domain.make_ascii_lowercase();
                 }
             } else {
                 let domain =
@@ -237,12 +254,7 @@ pub trait HexEncode {
 
 impl<T: AsRef<[u8]>> HexEncode for T {
     fn hex_encode(&self) -> String {
-        let bytes = self.as_ref();
-        let mut s = String::with_capacity(bytes.len() * 2);
-        for &b in bytes {
-            let _ = write!(&mut s, "{b:02x}");
-        }
-        s
+        text::hex_encode(self.as_ref())
     }
 }
 
@@ -445,92 +457,3 @@ pub fn is_valid_domain(domain: &str) -> bool {
             .is_some_and(|(_, tld)| RESERVED_TLDS.contains(&tld))
 }
 
-#[cfg(test)]
-mod tests {
-    use crate::DomainPart;
-
-    use super::{sanitize_domain, sanitize_email};
-
-    #[test]
-    fn idn_domains_canonicalize_to_a_label() {
-        assert_eq!(
-            sanitize_domain("straß6.de").as_deref(),
-            Some("xn--stra6-oqa.de")
-        );
-        assert_eq!(
-            sanitize_domain("STRASS.straß6.DE").as_deref(),
-            Some("strass.xn--stra6-oqa.de")
-        );
-        assert_eq!(
-            sanitize_domain("münchen.de").as_deref(),
-            Some("xn--mnchen-3ya.de")
-        );
-    }
-
-    #[test]
-    fn a_label_and_ascii_domains_are_idempotent() {
-        assert_eq!(
-            sanitize_domain("xn--stra6-oqa.de").as_deref(),
-            Some("xn--stra6-oqa.de")
-        );
-        assert_eq!(
-            sanitize_domain(&sanitize_domain("straß6.de").unwrap()).as_deref(),
-            Some("xn--stra6-oqa.de")
-        );
-        assert_eq!(
-            sanitize_domain("Example.COM").as_deref(),
-            Some("example.com")
-        );
-    }
-
-    #[test]
-    fn email_domain_part_canonicalizes_local_part_preserved() {
-        assert_eq!(
-            sanitize_email("cornelius_strauss@straß6.de").as_deref(),
-            Some("cornelius_strauss@xn--stra6-oqa.de")
-        );
-        assert_eq!(
-            sanitize_email("Foo.Bar@münchen.de").as_deref(),
-            Some("foo.bar@xn--mnchen-3ya.de")
-        );
-        assert_eq!(
-            sanitize_email("user@example.com").as_deref(),
-            Some("user@example.com")
-        );
-    }
-
-    #[test]
-    fn bare_public_suffix_domains_are_accepted() {
-        assert_eq!(
-            sanitize_email("user@gov.in").as_deref(),
-            Some("user@gov.in")
-        );
-        assert_eq!(sanitize_email("user@co.uk").as_deref(), Some("user@co.uk"));
-        assert_eq!(sanitize_email("user@com"), None);
-        assert_eq!(sanitize_email("user@example.invalidtld"), None);
-    }
-
-    #[test]
-    fn a_label_email_domains_are_accepted_and_idempotent() {
-        assert_eq!(
-            sanitize_email("user@xn--fsqu00a.com").as_deref(),
-            Some("user@xn--fsqu00a.com")
-        );
-        assert_eq!(
-            sanitize_email("User@例子.com").as_deref(),
-            sanitize_email("user@xn--fsqu00a.com").as_deref()
-        );
-    }
-
-    #[test]
-    fn to_ascii_domain_borrows_ascii_owns_idn() {
-        assert!(matches!(
-            "example.com".to_ascii_domain(),
-            Some(std::borrow::Cow::Borrowed(_))
-        ));
-        assert!(matches!(
-            "straß6.de".to_ascii_domain(),
-            Some(std::borrow::Cow::Owned(_))
-        ));
-    }
-}

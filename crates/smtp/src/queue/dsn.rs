@@ -10,9 +10,10 @@ use super::{
     Recipient, Status,
 };
 use crate::inbound::dkim::DkimSign;
-use crate::queue::spool::{DSN_RETRY, QueueParams};
-use crate::queue::{MessageWrapper, UnexpectedResponse};
-use common::Server;
+use crate::queue::spool::{DSN_RETRY, QueueOutcome, QueueParams};
+use crate::queue::{MessageWrapper, UnexpectedResponse, eval_strategy};
+use common::{Server, expr::Bump};
+use compact_str::{CompactString, ToCompactString};
 use email::message::delivery::ORCPT_ADDR_TYPE;
 use mail_builder::MessageBuilder;
 use mail_builder::headers::HeaderType;
@@ -66,6 +67,7 @@ impl SendDsn for Server {
                             .with_dkim_signers(dkim_signers),
                     )
                     .await
+                    == QueueOutcome::Queued
                 {
                     message.mark_dsn_sent();
                 } else {
@@ -101,7 +103,7 @@ impl SendDsn for Server {
                         To = rcpt.address.clone(),
                         Hostname = response.hostname.clone(),
                         Code = response.response.code,
-                        Details = response.response.message.to_string(),
+                        Details = CompactString::from(&*response.response.message),
                     );
                 }
                 Status::TemporaryFailure(response) if rcpt.notify.due <= now => {
@@ -110,7 +112,7 @@ impl SendDsn for Server {
                         SpanId = message.span_id,
                         To = rcpt.address.clone(),
                         Hostname = response.entity.clone(),
-                        Details = response.details.to_string(),
+                        Details = response.details.to_compact_string(),
                         NextRetry = trc::Value::Timestamp(rcpt.retry.due),
                         Expires = rcpt
                             .expiration_time(message.message.created)
@@ -124,7 +126,7 @@ impl SendDsn for Server {
                         SpanId = message.span_id,
                         To = rcpt.address.clone(),
                         Hostname = response.entity.clone(),
-                        Details = response.details.to_string(),
+                        Details = response.details.to_compact_string(),
                         Total = rcpt.retry.inner,
                     );
                 }
@@ -269,18 +271,20 @@ impl MessageWrapper {
         }
 
         // Obtain hostname and sender addresses
+        let mut arena = Bump::new();
         let from_name = server
-            .eval_if(&config.dsn.name, &self.message, self.span_id)
+            .eval_if(&config.dsn.name, &self.message, &mut arena, self.span_id)
             .await
             .unwrap_or_else(|| String::from("Mail Delivery Subsystem"));
         let from_addr = server
-            .eval_if(&config.dsn.address, &self.message, self.span_id)
+            .eval_if(&config.dsn.address, &self.message, &mut arena, self.span_id)
             .await
             .unwrap_or_else(|| String::from("MAILER-DAEMON@localhost"));
         let reporting_mta = server
             .eval_if(
                 &server.core.smtp.report.submitter,
                 &self.message,
+                &mut arena,
                 self.span_id,
             )
             .await
@@ -376,6 +380,7 @@ impl MessageWrapper {
     pub async fn update_next_dsn(&mut self, server: &Server, status: DsnStatus) {
         let now = now();
         let mut notify_changes = Vec::new();
+        let mut arena = Bump::new();
         for (rcpt_idx, rcpt) in self.message.recipients.iter().enumerate() {
             if matches!(
                 &rcpt.status,
@@ -389,11 +394,15 @@ impl MessageWrapper {
 
                 let envelope = QueueEnvelope::new(&self.message, rcpt);
 
-                let queue_id = server
-                    .eval_if::<String, _>(&server.core.smtp.queue.queue, &envelope, self.span_id)
-                    .await
-                    .unwrap_or_else(|| "default".to_string());
-                let queue = server.get_queue_or_default(&queue_id, self.span_id);
+                let queue = eval_strategy(
+                    server,
+                    &server.core.smtp.queue.queue,
+                    &envelope,
+                    &mut arena,
+                    self.span_id,
+                    Server::get_queue_or_default,
+                )
+                .await;
 
                 if let Some(next_notify) =
                     queue.notify.get((rcpt.notify.inner + 1) as usize).copied()

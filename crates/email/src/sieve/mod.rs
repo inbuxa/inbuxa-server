@@ -4,22 +4,42 @@
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
  */
 
-use common::KV_SIEVE_ID;
 use sieve::Sieve;
-use std::sync::Arc;
-use store::{blake3, write::ArchiveVersion};
-use types::blob_hash::BlobHash;
+use store::{
+    SerializeInfallible, U32_LEN, ValueKey, blake3,
+    write::{Archive, ArchiveBytes, ArchiveVersion, BatchBuilder, IndexPropertyClass, ValueClass},
+};
+use trc::AddContext;
+use types::{blob_hash::BlobHash, collection::Collection, field::SieveField};
+use utils::hash128::Hash128;
 
 pub mod delete;
 pub mod index;
 pub mod ingest;
 
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct ActiveScript {
     pub document_id: u32,
     pub version: ArchiveVersion,
-    pub script_name: String,
-    pub script: Arc<Sieve>,
+    pub script: Bytecode,
+}
+
+#[derive(Debug)]
+pub enum Bytecode {
+    Stored(Archive<ArchiveBytes>),
+    Compiled(Vec<u8>),
+}
+
+impl ActiveScript {
+    pub fn bytecode(&self) -> trc::Result<&[u8]> {
+        match &self.script {
+            Bytecode::Stored(archive) => archive
+                .unarchive::<SieveScript>()
+                .caused_by(trc::location!())
+                .map(|script| script.script.as_ref()),
+            Bytecode::Compiled(bytes) => Ok(bytes),
+        }
+    }
 }
 
 #[derive(
@@ -31,6 +51,8 @@ pub struct SieveScript {
     pub blob_hash: BlobHash,
     pub size: u32,
     pub vacation_response: Option<VacationResponse>,
+    pub script: Vec<u8>,
+    pub metadata_flags: u8,
 }
 
 #[derive(
@@ -52,6 +74,8 @@ impl SieveScript {
             blob_hash,
             vacation_response: None,
             size: 0,
+            script: Vec::new(),
+            metadata_flags: 0,
         }
     }
 
@@ -74,31 +98,83 @@ impl SieveScript {
         self.vacation_response = Some(vacation_response);
         self
     }
+
+    pub fn with_script(mut self, script: &Sieve<'_>) -> Self {
+        self.set_script(script);
+        self
+    }
+
+    pub fn set_script(&mut self, script: &Sieve<'_>) {
+        self.script = script.to_bytes();
+    }
 }
 
-#[derive(Debug, Default, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Hash)]
 #[repr(transparent)]
-pub struct SeenIdHash(pub [u8; 32]);
+pub struct SeenIdHash(pub Hash128);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SeenId {
+    pub hash: SeenIdHash,
+    pub expires_at: u64,
+}
+
+const SEEN_ID_DOCUMENT_ID: u32 = 0;
+const SEEN_ID_HASH_OFFSET: usize = U32_LEN + 3;
 
 impl SeenIdHash {
-    pub fn new(account_id: u32, hash: u32, id: &str) -> Self {
+    pub fn new(script_hash: u32, id: &str) -> Self {
         let mut hasher = blake3::Hasher::new();
-        hasher.update(&account_id.to_be_bytes());
-        hasher.update(&hash.to_be_bytes());
+        hasher.update(&script_hash.to_be_bytes());
         hasher.update(id.as_bytes());
-        SeenIdHash(hasher.finalize().into())
+        let mut hash = [0u8; Hash128::LEN];
+        hasher.finalize_xof().fill(&mut hash);
+        SeenIdHash(Hash128::from_be_bytes(hash))
     }
 
-    pub fn key(&self) -> Vec<u8> {
-        let mut result = Vec::with_capacity(self.0.len() + 1);
-        result.push(KV_SIEVE_ID);
-        result.extend_from_slice(&self.0);
-        result
+    pub fn class(&self) -> ValueClass {
+        ValueClass::IndexProperty(IndexPropertyClass::Hash {
+            property: SieveField::SeenId.into(),
+            hash: self.0,
+        })
+    }
+
+    pub fn key(&self, account_id: u32) -> ValueKey<ValueClass> {
+        ValueKey {
+            account_id,
+            collection: Collection::SieveScript.into(),
+            document_id: SEEN_ID_DOCUMENT_ID,
+            class: self.class(),
+        }
+    }
+
+    pub fn account_range(account_id: u32) -> (ValueKey<ValueClass>, ValueKey<ValueClass>) {
+        (
+            SeenIdHash(Hash128::default()).key(account_id),
+            SeenIdHash(Hash128::from(u128::MAX)).key(account_id),
+        )
+    }
+
+    pub fn from_key(key: &[u8]) -> Option<Self> {
+        key.get(SEEN_ID_HASH_OFFSET..SEEN_ID_HASH_OFFSET + Hash128::LEN)
+            .and_then(Hash128::from_be_slice)
+            .map(SeenIdHash)
+    }
+
+    pub fn with_context(account_id: u32, batch: &mut BatchBuilder) -> &mut BatchBuilder {
+        batch
+            .with_account_id(account_id)
+            .with_collection(Collection::SieveScript)
+            .with_document(SEEN_ID_DOCUMENT_ID)
     }
 }
 
-impl AsRef<[u8]> for SeenIdHash {
-    fn as_ref(&self) -> &[u8] {
-        &self.0
+impl SeenId {
+    pub fn write_all(seen_ids: &[SeenId], account_id: u32, batch: &mut BatchBuilder) {
+        let batch = SeenIdHash::with_context(account_id, batch);
+        for seen_id in seen_ids {
+            batch.set(seen_id.hash.class(), seen_id.expires_at.serialize());
+        }
     }
 }
+

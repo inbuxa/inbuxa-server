@@ -4,9 +4,7 @@
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
  */
 
-use crate::registry::mapping::{
-    ObjectResponse, RegistrySetResponse, ValidationResult, principal::validate_tenant_quota,
-};
+use crate::registry::mapping::{ObjectResponse, ValidationResult};
 use common::network::acme::{
     ParsedCert,
     account::{EabSettings, acme_create_account},
@@ -15,31 +13,23 @@ use jmap_proto::error::set::SetError;
 use registry::{
     jmap::JmapValue,
     schema::{
-        enums::TenantStorageQuota,
         prelude::Property,
         structs::{AcmeProvider, Certificate},
     },
-    types::{datetime::UTCDateTime, map::Map},
+    types::map::Map,
 };
-use utils::map::vec_map::VecMap;
+use utils::{map::vec_map::VecMap, outbound::OutboundPolicy};
 
 pub(crate) async fn validate_acme_provider(
-    set: &RegistrySetResponse<'_>,
     provider: &mut AcmeProvider,
     unpatched_properties: VecMap<Property, JmapValue<'_>>,
+    outbound_policy: OutboundPolicy,
 ) -> ValidationResult {
-    let response = match validate_tenant_quota(
-        set.server,
-        set.access_token,
-        TenantStorageQuota::MaxAcmeProviders,
-    )
-    .await?
-    {
-        Ok(response) => response,
-        Err(err) => {
-            return Ok(Err(err));
-        }
-    };
+    if let Err(err) = validate_acme_directory(provider, outbound_policy) {
+        return Ok(Err(err));
+    }
+
+    let response = ObjectResponse::default();
 
     // Obtain EAB credentials
     let mut eab_key_id = None;
@@ -89,10 +79,8 @@ pub(crate) async fn validate_certificate(
         match cert.certificate.value().await {
             Ok(pem) => match ParsedCert::parse(pem.as_ref()) {
                 Ok(parsed) => {
-                    cert.not_valid_after =
-                        UTCDateTime::from_timestamp(parsed.valid_not_after.timestamp());
-                    cert.not_valid_before =
-                        UTCDateTime::from_timestamp(parsed.valid_not_before.timestamp());
+                    cert.not_valid_after = parsed.valid_not_after;
+                    cert.not_valid_before = parsed.valid_not_before;
                     cert.issuer = parsed.issuer;
                     cert.subject_alternative_names = Map::new(parsed.sans);
 
@@ -109,4 +97,18 @@ pub(crate) async fn validate_certificate(
     } else {
         Ok(Ok(ObjectResponse::default()))
     }
+}
+
+pub(crate) fn validate_acme_directory(
+    provider: &AcmeProvider,
+    outbound_policy: OutboundPolicy,
+) -> Result<(), SetError<Property>> {
+    outbound_policy
+        .parse_url(&provider.directory)
+        .map(|_| ())
+        .map_err(|err| {
+            SetError::invalid_properties()
+                .with_property(Property::Directory)
+                .with_description(err.as_str())
+        })
 }

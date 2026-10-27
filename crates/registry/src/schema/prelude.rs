@@ -8,6 +8,7 @@ pub use crate::jmap::JmapValue;
 pub use crate::jmap::MaybeUnpatched;
 pub use crate::jmap::PatchResult;
 pub use crate::jmap::RegistryJsonEnumPatch;
+pub use crate::jmap::ValueOptions;
 pub use crate::jmap::{
     JsonPointerPatch, RegistryJsonPatch, RegistryJsonPropertyPatch, patch::object_type,
 };
@@ -21,7 +22,9 @@ pub use crate::types::datetime::UTCDateTime;
 pub use crate::types::duration::Duration;
 pub use crate::types::error::*;
 pub use crate::types::float::Float;
-pub use crate::types::index::{IndexBuilder, IndexSchema, IndexSchemaType, IndexSchemaValueType};
+pub use crate::types::index::{
+    IndexBuilder, IndexSchema, IndexSchemaType, IndexSchemaValueType, IndexValue,
+};
 pub use crate::types::ipaddr::IpAddr;
 pub use crate::types::ipmask::IpAddrOrMask;
 pub use crate::types::list::List;
@@ -31,7 +34,6 @@ pub use crate::types::string::StringValidator;
 pub use serde::{Deserialize, Serialize};
 pub use std::borrow::Cow;
 pub use std::str::FromStr;
-use std::sync::LazyLock;
 pub use types::blob::BlobId;
 pub use types::id::Id;
 pub use utils::map::vec_map::VecMap;
@@ -55,19 +57,11 @@ pub const OBJ_SINGLETON: u64 = 1;
 pub const OBJ_SEQ_ID: u64 = 1 << 1;
 pub const OBJ_FILTER_ACCOUNT: u64 = 1 << 2;
 pub const OBJ_FILTER_TENANT: u64 = 1 << 3;
+pub const OBJ_NOT_STORED: u64 = 1 << 4;
+pub const OBJ_NO_GET: u64 = 1 << 5;
+pub const OBJ_NO_CREATE: u64 = 1 << 6;
+pub const OBJ_NO_UPDATE: u64 = 1 << 7;
+pub const OBJ_NO_DESTROY: u64 = 1 << 8;
+pub const OBJ_NO_QUERY: u64 = 1 << 9;
 
 pub const MASKED_PASSWORD: &str = "****";
-
-// Temporary migration aid, will be removed by v1.
-pub static INCLUDE_SECRETS: LazyLock<bool> = LazyLock::new(|| {
-    std::env::var("STALWART_INCLUDE_SECRETS")
-        .is_ok_and(|v| v == "1" || v.eq_ignore_ascii_case("true"))
-});
-
-pub fn secret_value(value: impl IntoValue) -> JmapValue<'static> {
-    if *INCLUDE_SECRETS {
-        value.into_value()
-    } else {
-        JmapValue::Str(MASKED_PASSWORD.into())
-    }
-}

@@ -39,7 +39,8 @@ pub enum Acl {
     ModifyItemsOwn = 13,
     ModifyPrivateProperties = 14,
     ModifyRSVP = 15,
-    None = 16,
+    ModifyMetadata = 16,
+    None = 17,
 }
 
 #[derive(
@@ -60,6 +61,20 @@ pub struct AclGrant {
 }
 
 impl Acl {
+    pub const WRITE: Bitmap<Acl> = Bitmap::from_bits(
+        1 << Acl::Modify as u64
+            | 1 << Acl::Delete as u64
+            | 1 << Acl::AddItems as u64
+            | 1 << Acl::ModifyItems as u64
+            | 1 << Acl::RemoveItems as u64
+            | 1 << Acl::CreateChild as u64
+            | 1 << Acl::ModifyItemsOwn as u64
+            | 1 << Acl::ModifyRSVP as u64
+            | 1 << Acl::ModifyMetadata as u64
+            | 1 << Acl::Share as u64
+            | 1 << Acl::Submit as u64,
+    );
+
     fn as_str(&self) -> &'static str {
         match self {
             Acl::Read => "read",
@@ -79,6 +94,7 @@ impl Acl {
             Acl::SchedulingInvite => "schedulingInvite",
             Acl::SchedulingReply => "schedulingReply",
             Acl::ModifyRSVP => "modifyRSVP",
+            Acl::ModifyMetadata => "modifyMetadata",
         }
     }
 }
@@ -133,6 +149,7 @@ impl From<u64> for Acl {
             13 => Acl::ModifyItemsOwn,
             14 => Acl::ModifyPrivateProperties,
             15 => Acl::ModifyRSVP,
+            16 => Acl::ModifyMetadata,
             _ => Acl::None,
         }
     }

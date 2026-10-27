@@ -7,24 +7,24 @@
 use crate::{
     DavError, DavMethod,
     common::{
-        ETag,
         lock::{LockRequestHandler, ResourceState},
         uri::DavUriResource,
     },
-    file::DavFileResource,
+    file::{DavFileResource, file_etag},
 };
-use common::{Server, auth::AccessToken, sharing::EffectiveAcl};
+use common::{Server, auth::AccessToken, storage::dav::FILE_DEFAULT_MEDIA_TYPE};
 use dav_proto::{RequestHeaders, schema::property::Rfc1123DateTime};
 use groupware::{cache::GroupwareCache, file::FileNode};
 use http_proto::HttpResponse;
 use hyper::StatusCode;
 use store::{
     ValueKey,
-    write::{AlignedBytes, Archive, now},
+    write::{Archive, ArchiveBytes, now},
 };
 use trc::AddContext;
 use types::{
     acl::Acl,
+    blob_hash::BlobHash,
     collection::{Collection, SyncCollection},
 };
 
@@ -51,19 +51,29 @@ impl FileGetRequestHandler for Server {
             .into_owned_uri()?;
         let account_id = resource_.account_id;
         let files = self
-            .fetch_dav_resources(
+            .fetch_groupware_resources(
                 access_token.account_id(),
                 account_id,
                 SyncCollection::FileNode,
             )
             .await
             .caused_by(trc::location!())?;
+        if !access_token.is_member(account_id)
+            && let Some(path) = resource_.resource
+        {
+            files.hide_undiscoverable_for(
+                access_token,
+                path,
+                StatusCode::NOT_FOUND,
+                StatusCode::NOT_FOUND,
+            )?;
+        }
         let resource = files.map_resource(&resource_)?;
 
         // Fetch node
         let node_ = self
             .store()
-            .get_value::<Archive<AlignedBytes>>(ValueKey::archive(
+            .get_value::<Archive<ArchiveBytes>>(ValueKey::archive(
                 account_id,
                 Collection::FileNode,
                 resource.resource,
@@ -75,14 +85,16 @@ impl FileGetRequestHandler for Server {
 
         // Validate ACL
         if !access_token.is_member(account_id)
-            && !node.acls.effective_acl(access_token).contains(Acl::Read)
+            && !files
+                .file_acl(access_token, resource.resource)
+                .contains(Acl::Read)
         {
             return Err(DavError::Code(StatusCode::FORBIDDEN));
         }
 
-        let (hash, size, content_type) = if let Some(file) = node.file.as_ref() {
+        let (hash, size, content_type) = if let Some(file) = node.file() {
             (
-                file.blob_hash.0.as_ref(),
+                BlobHash::from(&file.blob_hash),
                 u32::from(file.size) as usize,
                 file.media_type.as_ref().map(|s| s.as_str()),
             )
@@ -91,7 +103,7 @@ impl FileGetRequestHandler for Server {
         };
 
         // Validate headers
-        let etag = node_.etag();
+        let etag = file_etag(node);
         self.validate_headers(
             access_token,
             headers,
@@ -135,7 +147,7 @@ impl FileGetRequestHandler for Server {
         };
 
         let response = HttpResponse::new(StatusCode::OK)
-            .with_content_type(content_type.unwrap_or("application/octet-stream"))
+            .with_content_type(content_type.unwrap_or(FILE_DEFAULT_MEDIA_TYPE))
             .with_etag(etag)
             .with_last_modified(last_modified)
             .with_accept_ranges();
@@ -145,8 +157,11 @@ impl FileGetRequestHandler for Server {
         }
 
         let contents = self
-            .blob_store()
-            .get_blob(hash, byte_range.clone().unwrap_or(0..usize::MAX))
+            .fetch_blob(
+                &hash,
+                byte_range.clone().unwrap_or(0..usize::MAX),
+                Some(size as u64),
+            )
             .await
             .caused_by(trc::location!())?
             .ok_or(DavError::Code(StatusCode::NOT_FOUND))?;

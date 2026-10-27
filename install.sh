@@ -15,6 +15,16 @@ set -u
 readonly BASE_URL="https://github.com/stalwartlabs/stalwart/releases/latest/download"
 
 main() {
+    local _arg
+    for _arg in "$@"; do
+        case "$_arg" in
+            -h|--help)
+                print_usage
+                exit 0
+                ;;
+        esac
+    done
+
     downloader --check
     need_cmd uname
     need_cmd mktemp
@@ -24,6 +34,7 @@ main() {
     need_cmd rm
     need_cmd tar
     need_cmd cp
+    need_cmd mv
     need_cmd hostname
 
     # Require root
@@ -90,6 +101,11 @@ main() {
     _config_file="${_conf_dir}/config.json"
     _env_file="${_conf_dir}/stalwart.env"
 
+    local _upgrade=""
+    if [ -e "$_config_file" ]; then
+        _upgrade="1"
+    fi
+
     # Detect architecture
     get_architecture || return 1
     local _arch="$RETVAL"
@@ -112,8 +128,9 @@ main() {
     if [ "$_component" = "stalwart-foundationdb" ]; then
         _src_name="stalwart-foundationdb"
     fi
-    ensure cp "${_tmp}/${_src_name}" "$_bin_file"
-    ensure chmod 0755 "$_bin_file"
+    ensure cp "${_tmp}/${_src_name}" "${_bin_file}.new"
+    ensure chmod 0755 "${_bin_file}.new"
+    ensure mv -f "${_bin_file}.new" "$_bin_file"
     ensure rm -rf "$_tmp"
 
     # Create env file if absent (preserve user edits on reinstall)
@@ -138,7 +155,7 @@ main() {
                 create_service_linux_systemd "$_bin_file" "$_config_file" "$_env_file" "$_account"
                 _service_type="systemd"
             else
-                create_service_linux_initd "$_bin_file" "$_config_file" "$_env_file" "$_account"
+                create_service_linux_initd "$_bin_file" "$_config_file" "$_env_file" "$_account" "$_log_dir"
                 _service_type="initd"
             fi
             ;;
@@ -153,9 +170,15 @@ main() {
     esac
 
     # Completion message
-    local _host
+    local _host _port
     _host="$(hostname -f 2>/dev/null || hostname)"
+    _port="$(sed -n 's/^STALWART_RECOVERY_MODE_PORT=\([0-9][0-9]*\).*/\1/p' "$_env_file" 2>/dev/null | tail -n 1)"
     say ""
+    if [ -n "$_upgrade" ]; then
+        say "🎉 Upgrade complete! The service was restarted with the new binary."
+        say ""
+        return 0
+    fi
     say "🎉 Installation complete!"
     say ""
     say "Stalwart is running in bootstrap mode. A temporary administrator"
@@ -167,8 +190,7 @@ main() {
             say "     journalctl -u stalwart -n 200 | grep -A8 'bootstrap mode'"
             ;;
         initd)
-            say "     grep -A8 'bootstrap mode' /var/log/syslog 2>/dev/null \\"
-            say "       || grep -A8 'bootstrap mode' /var/log/messages"
+            say "     grep -A8 'bootstrap mode' ${_log_dir}/stalwart.log"
             ;;
         launchd)
             say "     sudo log show --predicate 'process == \"stalwart\"' --last 5m"
@@ -181,7 +203,7 @@ main() {
     say "   Or set STALWART_RECOVERY_ADMIN=admin:<password> in"
     say "   ${_env_file} and restart the service to pin a credential."
     say ""
-    say "   Finish setup at: http://${_host}:8080/admin"
+    say "   Finish setup at: http://${_host}:${_port:-8080}/admin"
     say ""
 
     return 0
@@ -222,7 +244,8 @@ write_env_file() {
 #STALWART_HOSTNAME=mail.example.com
 
 # Override the public base URL published in OAuth, OIDC, and JMAP discovery
-# documents. Accepts scheme, host, optional port, and optional path prefix.
+# documents. Accepts scheme, host and optional port; serving Stalwart under a
+# path prefix is not supported.
 #STALWART_PUBLIC_URL=https://mail.example.com
 
 # Enable bootstrap / recovery mode on startup. Accepted: 1, true. Default: false.
@@ -317,7 +340,22 @@ EOF
 }
 
 create_service_linux_initd() {
-    local _bin="$1" _config="$2" _env="$3" _user="$4"
+    local _bin="$1" _config="$2" _env="$3" _user="$4" _log_dir="$5"
+    local _start_opts _start_env=""
+    if check_cmd setcap && setcap cap_net_bind_service=+ep "$_bin"; then
+        _start_opts="--chuid ${_user}:${_user}"
+    else
+        _start_opts=""
+        _start_env="export RUN_AS_USER=${_user} RUN_AS_GROUP=${_user}"
+    fi
+    local _output_opts _daemon_args
+    if start-stop-daemon --help 2>&1 | grep -q -- '--output'; then
+        _output_opts='--output $LOGFILE'
+        _daemon_args='$DAEMON_ARGS'
+    else
+        _output_opts='--startas /bin/sh'
+        _daemon_args='-c "exec $DAEMON $DAEMON_ARGS >> $LOGFILE 2>&1"'
+    fi
     cat > /etc/init.d/stalwart <<EOF
 #!/bin/sh
 ### BEGIN INIT INFO
@@ -328,7 +366,7 @@ create_service_linux_initd() {
 # Default-Stop:      0 1 6
 # Short-Description: Stalwart Server
 # Description:       Starts and stops the Stalwart Server
-# Conflicts:         postfix sendmail
+# Conflicts:         postfix sendmail exim4
 ### END INIT INFO
 
 PATH=/sbin:/usr/sbin:/bin:/usr/bin
@@ -341,6 +379,7 @@ DAEMON_ARGS="--config=${_config}"
 ENV_FILE=${_env}
 PIDFILE=/var/run/stalwart.pid
 ULIMIT_NOFILE=65536
+LOGFILE=${_log_dir}/stalwart.log
 
 [ -x "\$DAEMON" ] || exit 0
 
@@ -351,14 +390,15 @@ if [ -r "\$ENV_FILE" ]; then
 fi
 
 ulimit -n \$ULIMIT_NOFILE
+${_start_env}
 
 do_start()
 {
     start-stop-daemon --start --quiet --pidfile \$PIDFILE --exec \$DAEMON --test > /dev/null \\
         || return 1
     start-stop-daemon --start --quiet --pidfile \$PIDFILE --exec \$DAEMON \\
-        --background --make-pidfile --chuid ${_user}:${_user} \\
-        -- \$DAEMON_ARGS \\
+        --background --make-pidfile ${_output_opts} ${_start_opts} \\
+        -- ${_daemon_args} \\
         || return 2
 }
 
@@ -418,8 +458,22 @@ esac
 exit 0
 EOF
     chmod +x /etc/init.d/stalwart
+    if [ -d /etc/logrotate.d ]; then
+        cat > /etc/logrotate.d/stalwart <<EOF
+${_log_dir}/stalwart.log {
+    su ${_user} ${_user}
+    weekly
+    rotate 4
+    compress
+    delaycompress
+    missingok
+    notifempty
+    copytruncate
+}
+EOF
+    fi
     update-rc.d stalwart defaults
-    service stalwart start
+    service stalwart restart
 }
 
 create_service_macos() {
@@ -493,9 +547,10 @@ load_rc_config \$name
 : \${stalwart_fdlimit:="65536"}
 
 pidfile="/var/run/stalwart.pid"
+supervisor_pidfile="/var/run/stalwart_daemon.pid"
 procname="${_bin}"
 command="/usr/sbin/daemon"
-command_args="-f -o \${stalwart_logfile} -p \${pidfile} ${_bin} --config=\${stalwart_config}"
+command_args="-f -H -o \${stalwart_logfile} -p \${pidfile} -P \${supervisor_pidfile} ${_bin} --config=\${stalwart_config}"
 sig_stop="INT"
 start_precmd="stalwart_precmd"
 
@@ -518,6 +573,10 @@ stalwart_precmd()
 run_rc_command "\$1"
 EOF
     chmod +x /usr/local/etc/rc.d/stalwart
+    ensure mkdir -p /usr/local/etc/newsyslog.conf.d
+    cat > /usr/local/etc/newsyslog.conf.d/stalwart.conf <<EOF
+${_log_dir}/stalwart.log ${_user}:${_user} 640 4 * \$W0D0 JC /var/run/stalwart_daemon.pid 1
+EOF
     sysrc stalwart_enable=YES
     service stalwart stop > /dev/null 2>&1 || true
     service stalwart start

@@ -10,7 +10,7 @@ use crate::{
     spawn_op,
 };
 use common::{
-    auth::AccessToken, ipc::CacheInvalidation, network::SessionStream, sharing::EffectiveAcl,
+    auth::AccessToken, network::SessionStream, sharing::EffectiveAcl,
     storage::index::ObjectIndexBuilder,
 };
 use compact_str::ToCompactString;
@@ -25,8 +25,9 @@ use registry::schema::enums::Permission;
 use std::time::Instant;
 use store::{
     ValueKey,
-    write::{AlignedBytes, Archive, BatchBuilder},
+    write::{Archive, ArchiveBytes, BatchBuilder},
 };
+use tokio::sync::OwnedSemaphorePermit;
 use trc::AddContext;
 use types::{
     acl::{Acl, AclGrant},
@@ -35,7 +36,11 @@ use types::{
 use utils::map::bitmap::Bitmap;
 
 impl<T: SessionStream> Session<T> {
-    pub async fn handle_get_acl(&mut self, request: Request<Command>) -> trc::Result<()> {
+    pub async fn handle_get_acl(
+        &mut self,
+        request: Request<Command>,
+        permit: Option<OwnedSemaphorePermit>,
+    ) -> trc::Result<()> {
         // Validate access
         self.assert_has_permission(Permission::ImapAclGet)?;
 
@@ -44,7 +49,7 @@ impl<T: SessionStream> Session<T> {
         let is_utf8 = self.version.is_rev2() || self.is_utf8;
         let data = self.state.session_data();
 
-        spawn_op!(data, {
+        spawn_op!(permit, data, {
             let (mailbox_id, mailbox_, _) = data
                 .get_acl_mailbox(&arguments, true)
                 .await
@@ -64,22 +69,7 @@ impl<T: SessionStream> Session<T> {
                     .name()
                     .to_string();
 
-                permissions.push((
-                    account_name,
-                    vec![
-                        Rights::Read,
-                        Rights::Lookup,
-                        Rights::Insert,
-                        Rights::DeleteMessages,
-                        Rights::Expunge,
-                        Rights::Seen,
-                        Rights::Write,
-                        Rights::CreateMailbox,
-                        Rights::DeleteMailbox,
-                        Rights::Post,
-                        Rights::Administer,
-                    ],
-                ));
+                permissions.push((account_name, Rights::from_acl(Bitmap::all()).collect()));
             }
 
             for item in mailbox.inner.acls.iter() {
@@ -88,55 +78,19 @@ impl<T: SessionStream> Session<T> {
                     continue;
                 }
 
-                let mut rights = Vec::new();
-
-                for acl in Bitmap::from(&item.grants) {
-                    match acl {
-                        Acl::Read => {
-                            rights.push(Rights::Lookup);
-                        }
-                        Acl::Modify => {
-                            rights.push(Rights::CreateMailbox);
-                        }
-                        Acl::Delete => {
-                            rights.push(Rights::DeleteMailbox);
-                        }
-                        Acl::ReadItems => {
-                            rights.push(Rights::Read);
-                        }
-                        Acl::AddItems => {
-                            rights.push(Rights::Insert);
-                        }
-                        Acl::ModifyItems => {
-                            rights.push(Rights::Write);
-                            rights.push(Rights::Seen);
-                        }
-                        Acl::RemoveItems => {
-                            rights.push(Rights::DeleteMessages);
-                            rights.push(Rights::Expunge);
-                        }
-                        Acl::CreateChild => {
-                            rights.push(Rights::CreateMailbox);
-                        }
-                        Acl::Share => {
-                            rights.push(Rights::Administer);
-                        }
-                        Acl::Submit => {
-                            rights.push(Rights::Post);
-                        }
-                        _ => (),
-                    }
-                }
-
-                let account_name = data
+                let Some(account) = data
                     .server
-                    .account(item.account_id.into())
+                    .try_account(item.account_id.into())
                     .await
                     .imap_ctx(&arguments.tag, trc::location!())?
-                    .name()
-                    .to_string();
+                else {
+                    continue;
+                };
 
-                permissions.push((account_name, rights));
+                permissions.push((
+                    account.name().to_string(),
+                    Rights::from_acl(Bitmap::from(&item.grants)).collect(),
+                ));
             }
 
             trc::event!(
@@ -154,7 +108,7 @@ impl<T: SessionStream> Session<T> {
                     .with_tag(arguments.tag)
                     .serialize(
                         GetAclResponse {
-                            mailbox_name: arguments.mailbox_name.to_string(),
+                            mailbox_name: arguments.mailbox_name.clone(),
                             permissions,
                         }
                         .into_bytes(is_utf8),
@@ -164,16 +118,20 @@ impl<T: SessionStream> Session<T> {
         })
     }
 
-    pub async fn handle_my_rights(&mut self, request: Request<Command>) -> trc::Result<()> {
+    pub async fn handle_my_rights(
+        &mut self,
+        request: Request<Command>,
+        permit: Option<OwnedSemaphorePermit>,
+    ) -> trc::Result<()> {
         // Validate access
         self.assert_has_permission(Permission::ImapMyRights)?;
 
         let op_start = Instant::now();
         let arguments = request.parse_acl(self.is_utf8)?;
-        let data = self.state.session_data();
         let is_utf8 = self.version.is_rev2() || self.is_utf8;
+        let data = self.state.session_data();
 
-        spawn_op!(data, {
+        spawn_op!(permit, data, {
             let (mailbox_id, mailbox_, access_token) = data
                 .get_acl_mailbox(&arguments, false)
                 .await
@@ -181,49 +139,12 @@ impl<T: SessionStream> Session<T> {
             let mailbox = mailbox_
                 .to_unarchived::<email::mailbox::Mailbox>()
                 .imap_ctx(&arguments.tag, trc::location!())?;
-            let rights = if access_token.is_shared(mailbox_id.account_id) {
-                let acl = mailbox.inner.acls.effective_acl(&access_token);
-                let mut rights = Vec::with_capacity(5);
-                if acl.contains(Acl::ReadItems) {
-                    rights.push(Rights::Read);
-                    rights.push(Rights::Lookup);
-                }
-                if acl.contains(Acl::AddItems) {
-                    rights.push(Rights::Insert);
-                }
-                if acl.contains(Acl::RemoveItems) {
-                    rights.push(Rights::DeleteMessages);
-                    rights.push(Rights::Expunge);
-                }
-                if acl.contains(Acl::ModifyItems) {
-                    rights.push(Rights::Seen);
-                    rights.push(Rights::Write);
-                }
-                if acl.contains(Acl::CreateChild) {
-                    rights.push(Rights::CreateMailbox);
-                }
-                if acl.contains(Acl::Delete) {
-                    rights.push(Rights::DeleteMailbox);
-                }
-                if acl.contains(Acl::Submit) {
-                    rights.push(Rights::Post);
-                }
-                rights
+            let acl = if access_token.is_shared(mailbox_id.account_id) {
+                mailbox.inner.acls.effective_acl(&access_token)
             } else {
-                vec![
-                    Rights::Read,
-                    Rights::Lookup,
-                    Rights::Insert,
-                    Rights::DeleteMessages,
-                    Rights::Expunge,
-                    Rights::Seen,
-                    Rights::Write,
-                    Rights::CreateMailbox,
-                    Rights::DeleteMailbox,
-                    Rights::Post,
-                    Rights::Administer,
-                ]
+                Bitmap::all()
             };
+            let rights = Rights::from_acl(acl).collect::<Vec<_>>();
 
             trc::event!(
                 Imap(trc::ImapEvent::MyRights),
@@ -243,7 +164,7 @@ impl<T: SessionStream> Session<T> {
                     .with_tag(arguments.tag)
                     .serialize(
                         MyRightsResponse {
-                            mailbox_name: arguments.mailbox_name.to_string(),
+                            mailbox_name: arguments.mailbox_name.clone(),
                             rights,
                         }
                         .into_bytes(is_utf8),
@@ -253,7 +174,11 @@ impl<T: SessionStream> Session<T> {
         })
     }
 
-    pub async fn handle_set_acl(&mut self, request: Request<Command>) -> trc::Result<()> {
+    pub async fn handle_set_acl(
+        &mut self,
+        request: Request<Command>,
+        _permit: Option<OwnedSemaphorePermit>,
+    ) -> trc::Result<()> {
         // Validate access
         self.assert_has_permission(Permission::ImapAclSet)?;
 
@@ -262,139 +187,136 @@ impl<T: SessionStream> Session<T> {
         let arguments = request.parse_acl(self.is_utf8)?;
         let data = self.state.session_data();
 
-        spawn_op!(data, {
-            // Validate mailbox
-            let (mailbox_id, current_mailbox, _) = data
-                .get_acl_mailbox(&arguments, true)
-                .await
-                .imap_ctx(&arguments.tag, trc::location!())?;
-            let current_mailbox = current_mailbox
-                .into_deserialized::<email::mailbox::Mailbox>()
-                .imap_ctx(&arguments.tag, trc::location!())?;
-
-            // Obtain principal id
-            let acl_account_id = data
-                .server
-                .account_id_from_email(arguments.identifier.as_ref().unwrap(), false)
-                .await
-                .imap_ctx(&arguments.tag, trc::location!())?
-                .ok_or_else(|| {
-                    trc::ImapEvent::Error
-                        .into_err()
-                        .details("Account does not exist")
-                        .id(arguments.tag.to_string())
-                        .caused_by(trc::location!())
-                })?;
-
-            // Prepare changes
-            let mut mailbox = current_mailbox.inner.clone();
-            let (op, rights) = arguments
-                .mod_rights
-                .map(|mr| {
-                    (
-                        mr.op,
-                        Bitmap::from_iter(mr.rights.into_iter().map(Acl::from)),
-                    )
-                })
-                .unwrap_or_else(|| (ModRightsOp::Replace, Bitmap::new()));
-
-            if let Some(item) = mailbox
-                .acls
-                .iter_mut()
-                .find(|item| item.account_id == acl_account_id)
-            {
-                match op {
-                    ModRightsOp::Replace => {
-                        if !rights.is_empty() {
-                            item.grants = rights;
-                        } else {
-                            mailbox
-                                .acls
-                                .retain(|item| item.account_id != acl_account_id);
-                        }
-                    }
-                    ModRightsOp::Add => {
-                        item.grants.union(&rights);
-                    }
-                    ModRightsOp::Remove => {
-                        for right in rights {
-                            item.grants.remove(right);
-                        }
-                        if item.grants.is_empty() {
-                            mailbox
-                                .acls
-                                .retain(|item| item.account_id != acl_account_id);
-                        }
-                    }
-                }
-            } else if !rights.is_empty() {
-                match op {
-                    ModRightsOp::Add | ModRightsOp::Replace => {
-                        mailbox.acls.push(AclGrant {
-                            account_id: acl_account_id,
-                            grants: rights,
-                        });
-                    }
-                    ModRightsOp::Remove => (),
-                }
-            }
-
-            if mailbox.acls.len() > data.server.core.groupware.max_shares_per_item {
-                return Err(trc::ImapEvent::Error
-                    .into_err()
-                    .details("Maximum shares per item exceeded")
-                    .caused_by(trc::location!()));
-            }
-
-            let grants = mailbox
-                .acls
-                .iter()
-                .map(|r| trc::Value::from(r.account_id))
-                .collect::<Vec<_>>();
-
-            // Write changes
-            let mut batch = BatchBuilder::new();
-            batch
-                .with_account_id(mailbox_id.account_id)
-                .with_collection(Collection::Mailbox)
-                .with_document(mailbox_id.mailbox_id)
-                .custom(
-                    ObjectIndexBuilder::new()
-                        .with_changes(mailbox)
-                        .with_current(current_mailbox),
-                )
-                .imap_ctx(&arguments.tag, trc::location!())?;
-
-            if !batch.is_empty() {
-                data.server
-                    .commit_batch(batch)
-                    .await
-                    .imap_ctx(&arguments.tag, trc::location!())?;
-            }
-
-            // Invalidate ACLs
-            data.server
-                .invalidate_caches(CacheInvalidation::AccessToken(acl_account_id).into())
-                .await
-                .imap_ctx(&arguments.tag, trc::location!())?;
-
-            trc::event!(
-                Imap(trc::ImapEvent::SetAcl),
-                SpanId = data.session_id,
-                MailboxName = arguments.mailbox_name.clone(),
-                AccountId = mailbox_id.account_id,
-                MailboxId = mailbox_id.mailbox_id,
-                Details = grants,
-                Elapsed = op_start.elapsed()
-            );
-
-            data.write_bytes(
-                StatusResponse::completed(command)
-                    .with_tag(arguments.tag)
-                    .into_bytes(),
-            )
+        // Validate mailbox
+        #[cfg_attr(not(feature = "enterprise"), allow(unused_variables))]
+        let (mailbox_id, current_mailbox, access_token) = data
+            .get_acl_mailbox(&arguments, true)
             .await
-        })
+            .imap_ctx(&arguments.tag, trc::location!())?;
+        let current_mailbox = current_mailbox
+            .into_deserialized::<email::mailbox::Mailbox>()
+            .imap_ctx(&arguments.tag, trc::location!())?;
+
+        // Obtain principal id
+        let acl_account_id = data
+            .server
+            .account_id_from_email(arguments.identifier.as_ref().unwrap(), false)
+            .await
+            .imap_ctx(&arguments.tag, trc::location!())?
+            .ok_or_else(|| {
+                trc::ImapEvent::Error
+                    .into_err()
+                    .details("Account does not exist")
+                    .id(arguments.tag.clone())
+                    .caused_by(trc::location!())
+            })?;
+
+        // Prepare changes
+        let mut mailbox = current_mailbox.inner.clone();
+        let (op, rights) = arguments
+            .mod_rights
+            .map(|mr| {
+                (
+                    mr.op,
+                    Bitmap::from_iter(
+                        mr.rights
+                            .iter()
+                            .flat_map(|right| right.to_acl().iter().copied()),
+                    ),
+                )
+            })
+            .unwrap_or_else(|| (ModRightsOp::Replace, Bitmap::new()));
+
+        if let Some(item) = mailbox
+            .acls
+            .iter_mut()
+            .find(|item| item.account_id == acl_account_id)
+        {
+            match op {
+                ModRightsOp::Replace => {
+                    if !rights.is_empty() {
+                        item.grants = rights;
+                    } else {
+                        mailbox
+                            .acls
+                            .retain(|item| item.account_id != acl_account_id);
+                    }
+                }
+                ModRightsOp::Add => {
+                    item.grants.union(&rights);
+                }
+                ModRightsOp::Remove => {
+                    item.grants.difference(&rights);
+                    if item.grants.is_empty() {
+                        mailbox
+                            .acls
+                            .retain(|item| item.account_id != acl_account_id);
+                    }
+                }
+            }
+        } else if !rights.is_empty() && matches!(op, ModRightsOp::Add | ModRightsOp::Replace) {
+            #[cfg_attr(not(feature = "enterprise"), allow(unused_variables))]
+            let grantee = data
+                .server
+                .account(acl_account_id)
+                .await
+                .imap_ctx(&arguments.tag, trc::location!())?;
+            mailbox.acls.push(AclGrant {
+                account_id: acl_account_id,
+                grants: rights,
+            });
+        }
+
+        if mailbox.acls.len() > data.server.core.groupware.max_shares_per_item {
+            return Err(trc::ImapEvent::Error
+                .into_err()
+                .details("Maximum shares per item exceeded")
+                .caused_by(trc::location!()));
+        }
+
+        let grants = mailbox
+            .acls
+            .iter()
+            .map(|r| trc::Value::from(r.account_id))
+            .collect::<Vec<_>>();
+
+        // Write changes
+        let mut batch = BatchBuilder::new();
+        batch
+            .with_account_id(mailbox_id.account_id)
+            .with_collection(Collection::Mailbox)
+            .with_document(mailbox_id.mailbox_id)
+            .custom(
+                ObjectIndexBuilder::new()
+                    .with_changes(mailbox)
+                    .with_current(current_mailbox),
+            )
+            .imap_ctx(&arguments.tag, trc::location!())?;
+
+        if !batch.is_empty() {
+            data.server
+                .commit_batch(batch)
+                .await
+                .imap_ctx(&arguments.tag, trc::location!())?;
+            data.expire_folders(mailbox_id.account_id);
+        }
+
+        trc::event!(
+            Imap(trc::ImapEvent::SetAcl),
+            SpanId = data.session_id,
+            MailboxName = arguments.mailbox_name.clone(),
+            AccountId = mailbox_id.account_id,
+            MailboxId = mailbox_id.mailbox_id,
+            Details = grants,
+            Elapsed = op_start.elapsed()
+        );
+
+        data.write_bytes(
+            StatusResponse::completed(command)
+                .with_tag(arguments.tag)
+                .into_bytes(),
+        )
+        .await
     }
 
     pub async fn handle_list_rights(&mut self, request: Request<Command>) -> trc::Result<()> {
@@ -427,6 +349,7 @@ impl<T: SessionStream> Session<T> {
                             vec![Rights::CreateMailbox],
                             vec![Rights::DeleteMailbox],
                             vec![Rights::Post],
+                            vec![Rights::Annotate],
                             vec![Rights::Administer],
                         ],
                     }
@@ -452,12 +375,16 @@ impl<T: SessionStream> SessionData<T> {
         &self,
         arguments: &Arguments,
         validate: bool,
-    ) -> trc::Result<(MailboxId, Archive<AlignedBytes>, AccessToken)> {
+    ) -> trc::Result<(MailboxId, Archive<ArchiveBytes>, AccessToken)> {
+        self.expire_folders_of(&arguments.mailbox_name);
+        self.synchronize_mailboxes(false)
+            .await
+            .caused_by(trc::location!())?;
         if let Some(mailbox) = self.get_mailbox_by_name(&arguments.mailbox_name) {
             if let Some(values) = self
                 .server
                 .store()
-                .get_value::<Archive<AlignedBytes>>(ValueKey::archive(
+                .get_value::<Archive<ArchiveBytes>>(ValueKey::archive(
                     mailbox.account_id,
                     Collection::Mailbox,
                     mailbox.mailbox_id,

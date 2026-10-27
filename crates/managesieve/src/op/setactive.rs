@@ -6,7 +6,7 @@
 
 use std::time::Instant;
 
-use common::network::SessionStream;
+use common::{ipc::CacheInvalidation, network::SessionStream};
 use imap_proto::receiver::Request;
 use registry::schema::enums::Permission;
 use store::{SerializeInfallible, write::BatchBuilder};
@@ -53,11 +53,15 @@ impl<T: SessionStream> Session<T> {
             .commit_batch(batch)
             .await
             .caused_by(trc::location!())?;
+        self.server
+            .invalidate_caches(CacheInvalidation::ActiveSieveScript(account_id).into())
+            .await
+            .caused_by(trc::location!())?;
 
         trc::event!(
             ManageSieve(trc::ManageSieveEvent::SetActive),
             SpanId = self.session_id,
-            Id = name,
+            Script = name,
             Elapsed = op_start.elapsed()
         );
 

@@ -19,11 +19,14 @@ impl<T: SessionStream> Session<T> {
         if !self.stream.is_tls() {
             response.extend_from_slice(b"\"STARTTLS\"\r\n");
         }
-        if self.stream.is_tls() || self.server.core.imap.allow_plain_auth {
+        let is_tls = self.stream.is_tls();
+        if !is_tls && !self.server.core.imap.allow_plain_auth {
+            response.extend_from_slice(b"\"SASL\" \"\"\r\n");
+        } else if self.server.accepts_bearer_tokens(is_tls) {
             response.extend_from_slice(b"\"SASL\" \"PLAIN OAUTHBEARER XOAUTH2\"\r\n");
         } else {
-            response.extend_from_slice(b"\"SASL\" \"OAUTHBEARER XOAUTH2\"\r\n");
-        };
+            response.extend_from_slice(b"\"SASL\" \"PLAIN\"\r\n");
+        }
         if let Some(sieve) =
             self.server
                 .core

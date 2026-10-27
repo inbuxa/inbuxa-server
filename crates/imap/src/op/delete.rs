@@ -5,10 +5,7 @@
  */
 
 use super::ImapContext;
-use crate::{
-    core::{Session, SessionData},
-    spawn_op,
-};
+use crate::core::{Session, SessionData};
 use common::network::SessionStream;
 use email::mailbox::destroy::{MailboxDestroy, MailboxDestroyError};
 use imap_proto::{
@@ -16,32 +13,35 @@ use imap_proto::{
 };
 use registry::schema::enums::Permission;
 use std::time::Instant;
+use tokio::sync::OwnedSemaphorePermit;
 
 impl<T: SessionStream> Session<T> {
-    pub async fn handle_delete(&mut self, requests: Vec<Request<Command>>) -> trc::Result<()> {
+    pub async fn handle_delete(
+        &mut self,
+        requests: Vec<Request<Command>>,
+        _permit: Option<OwnedSemaphorePermit>,
+    ) -> trc::Result<()> {
         // Validate access
         self.assert_has_permission(Permission::ImapDelete)?;
 
         let data = self.state.session_data();
         let is_utf8 = self.is_utf8;
 
-        spawn_op!(data, {
-            for request in requests {
-                match request.parse_delete(is_utf8) {
-                    Ok(argument) => match data.delete_folder(argument).await {
-                        Ok(response) => {
-                            data.write_bytes(response.into_bytes()).await?;
-                        }
-                        Err(error) => {
-                            data.write_error(error).await?;
-                        }
-                    },
-                    Err(response) => data.write_error(response).await?,
-                }
+        for request in requests {
+            match request.parse_delete(is_utf8) {
+                Ok(argument) => match data.delete_folder(argument).await {
+                    Ok(response) => {
+                        data.write_bytes(response.into_bytes()).await?;
+                    }
+                    Err(error) => {
+                        data.write_error(error).await?;
+                    }
+                },
+                Err(response) => data.write_error(response).await?,
             }
+        }
 
-            Ok(())
-        })
+        Ok(())
     }
 }
 
@@ -50,6 +50,7 @@ impl<T: SessionStream> SessionData<T> {
         let op_start = Instant::now();
 
         // Refresh mailboxes
+        self.expire_folders_of(&arguments.mailbox_name);
         self.synchronize_mailboxes(false)
             .await
             .imap_ctx(&arguments.tag, trc::location!())?;
@@ -74,7 +75,7 @@ impl<T: SessionStream> SessionData<T> {
 
         if let Err(err) = self
             .server
-            .mailbox_destroy(account_id, mailbox_id, &access_token, true)
+            .mailbox_destroy(account_id, mailbox_id, &access_token, true, None)
             .await
             .imap_ctx(&arguments.tag, trc::location!())?
         {
@@ -104,14 +105,7 @@ impl<T: SessionStream> SessionData<T> {
                 .id(arguments.tag));
         }
 
-        // Update mailbox cache
-        for account in self.mailboxes.lock().iter_mut() {
-            if account.account_id == account_id {
-                account.mailbox_names.remove(&arguments.mailbox_name);
-                account.mailbox_state.remove(&mailbox_id);
-                break;
-            }
-        }
+        self.expire_folders(account_id);
 
         trc::event!(
             Imap(trc::ImapEvent::DeleteMailbox),

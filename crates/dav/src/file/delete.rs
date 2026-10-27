@@ -10,14 +10,16 @@ use crate::{
         lock::{LockRequestHandler, ResourceState},
         uri::DavUriResource,
     },
+    file::DavFileResource,
 };
 use common::{Server, auth::AccessToken};
 use dav_proto::RequestHeaders;
 use groupware::{DestroyArchive, cache::GroupwareCache};
 use http_proto::HttpResponse;
 use hyper::StatusCode;
+use store::roaring::RoaringBitmap;
 use trc::AddContext;
-use types::{acl::Acl, collection::SyncCollection};
+use types::collection::{Collection, SyncCollection};
 
 pub(crate) trait FileDeleteRequestHandler: Sync + Send {
     fn handle_file_delete_request(
@@ -44,7 +46,7 @@ impl FileDeleteRequestHandler for Server {
             .filter(|r| !r.is_empty())
             .ok_or(DavError::Code(StatusCode::FORBIDDEN))?;
         let resources = self
-            .fetch_dav_resources(
+            .fetch_groupware_resources(
                 access_token.account_id(),
                 account_id,
                 SyncCollection::FileNode,
@@ -52,30 +54,46 @@ impl FileDeleteRequestHandler for Server {
             .await
             .caused_by(trc::location!())?;
 
+        let access =
+            (!access_token.is_member(account_id)).then(|| resources.file_access(access_token));
+        if let Some(access) = &access {
+            resources.hide_undiscoverable(
+                &access.discoverable,
+                delete_path,
+                StatusCode::NOT_FOUND,
+                StatusCode::NOT_FOUND,
+            )?;
+        }
+
         // Find ids to delete
         let mut ids = resources.subtree(delete_path).collect::<Vec<_>>();
-        if ids.is_empty() {
+        if ids.is_empty() || ids.first().is_some_and(super::is_symlink) {
             return Err(DavError::Code(StatusCode::NOT_FOUND));
         }
 
         // Sort ids descending from the deepest to the root
         ids.sort_unstable_by_key(|b| std::cmp::Reverse(b.hierarchy_seq()));
-        let (document_id, full_delete_path) = ids
+        let Some((document_id, full_delete_path)) = ids
             .last()
             .map(|a| (a.document_id(), resources.format_resource(*a)))
-            .unwrap();
-        let mut sorted_ids = Vec::with_capacity(ids.len());
-        sorted_ids.extend(ids.into_iter().map(|a| a.document_id()));
+        else {
+            return Err(DavError::Code(StatusCode::NOT_FOUND));
+        };
 
         // Validate ACLs
-        if !access_token.is_member(account_id) {
-            let permissions = resources.shared_containers(access_token, [Acl::Delete], false);
-            if permissions.len() < sorted_ids.len() as u64
-                || !sorted_ids.iter().all(|id| permissions.contains(*id))
-            {
-                return Err(DavError::Code(StatusCode::FORBIDDEN));
-            }
+        if let Some(access) = &access
+            && !access.may_destroy(ids.iter().map(|a| (a.document_id(), a.parent_id())))
+        {
+            return Err(DavError::Code(StatusCode::FORBIDDEN));
         }
+
+        let flagged = ids
+            .iter()
+            .filter(|a| !a.resource.metadata_kinds().is_empty())
+            .map(|a| a.document_id())
+            .collect::<RoaringBitmap>();
+        let mut sorted_ids = Vec::with_capacity(ids.len());
+        sorted_ids.extend(ids.into_iter().map(|a| a.document_id()));
 
         // Validate headers
         self.validate_headers(
@@ -93,11 +111,21 @@ impl FileDeleteRequestHandler for Server {
         )
         .await?;
 
+        let cleanup = self
+            .preload_container_cleanup(
+                access_token.changed_by(),
+                account_id,
+                Collection::FileNode,
+                &flagged,
+            )
+            .await
+            .caused_by(trc::location!())?;
         DestroyArchive(sorted_ids)
             .delete(
                 self,
-                access_token.account_tenant_ids(),
+                access_token.changed_by(),
                 account_id,
+                &cleanup,
                 full_delete_path.into(),
             )
             .await?;

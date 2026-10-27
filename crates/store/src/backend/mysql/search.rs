@@ -5,102 +5,136 @@
  */
 
 use crate::{
+    U64_LEN,
     backend::{
         MAX_TOKEN_LENGTH,
         mysql::{
             DELETE_CHUNK_SIZE, MIN_DELETE_CHUNK_SIZE, MysqlSearchField, MysqlStore, into_error,
             is_chunk_too_large_error,
+            read::{MAX_POINT_KEYS, POINT_BUCKETS},
         },
     },
     search::{
-        IndexDocument, SearchComparator, SearchDocumentId, SearchFilter, SearchOperator,
-        SearchQuery, SearchValue,
+        IndexDocument, KeyValueMatch, SearchFilter, SearchQuery, SearchResults, SearchValue,
+        TextMatch,
     },
     write::SearchIndex,
 };
-use mysql_async::{IsolationLevel, TxOpts, Value, prelude::Queryable};
+use mysql_async::{TxOpts, Value, prelude::Queryable};
 use nlp::tokenizers::word::WordTokenizer;
-use std::fmt::Write;
+use roaring::RoaringBitmap;
+use std::{cmp::Ordering, fmt::Write};
+
+const ROW_BUCKETS: [usize; 5] = [256, 64, 16, 4, 1];
+const MAX_BATCH_ROWS: usize = ROW_BUCKETS[0];
+const MAX_BATCH_BYTES: usize = 4 * 1024 * 1024;
 
 impl MysqlStore {
-    pub async fn index(&self, documents: Vec<IndexDocument>) -> trc::Result<()> {
+    pub async fn index(&self, mut documents: Vec<IndexDocument>) -> trc::Result<()> {
+        documents.sort_by_key(|document| document.index as u8);
+        let mut batches = row_batches(documents).into_iter();
         let mut conn = self.conn_pool.get_conn().await.map_err(into_error)?;
-        let mut tx_opts = TxOpts::default();
-        tx_opts
-            .with_consistent_snapshot(false)
-            .with_isolation_level(IsolationLevel::ReadCommitted);
-        let mut trx = conn.start_transaction(tx_opts).await.map_err(into_error)?;
 
-        for document in documents {
-            let index = document.index;
-            let primary_keys = index.primary_keys();
-            let all_fields = index.all_fields();
-            let mut fields = document.fields;
-            let mut values = Vec::with_capacity(fields.len() + 2);
-            let mut query = format!("INSERT INTO {} (", index.mysql_table());
-
-            for (i, field) in primary_keys.iter().chain(all_fields).enumerate() {
-                if i > 0 {
-                    query.push(',');
+        match (batches.next(), batches.len()) {
+            (Some(batch), 0) => conn
+                .exec_drop(batch.statement(), batch.values)
+                .await
+                .map_err(into_error),
+            (Some(batch), _) => {
+                let mut trx = conn
+                    .start_transaction(TxOpts::default())
+                    .await
+                    .map_err(into_error)?;
+                for batch in std::iter::once(batch).chain(batches) {
+                    trx.exec_drop(batch.statement(), batch.values)
+                        .await
+                        .map_err(into_error)?;
                 }
-                query.push_str(field.column());
+                trx.commit().await.map_err(into_error)
             }
-
-            query.push_str(") VALUES (");
-
-            for (i, field) in primary_keys.iter().chain(all_fields).enumerate() {
-                if i > 0 {
-                    query.push(',');
-                }
-
-                if let Some(value) = fields.remove(field) {
-                    query.push('?');
-                    values.push(value);
-                } else {
-                    query.push_str("NULL");
-                }
-            }
-
-            query.push_str(") ON DUPLICATE KEY UPDATE ");
-            for (i, field) in all_fields.iter().enumerate() {
-                if i > 0 {
-                    query.push(',');
-                }
-                let column = field.column();
-                let _ = write!(&mut query, "{column} = VALUES({column})");
-            }
-
-            let s = trx.prep(&query).await.map_err(into_error)?;
-
-            trx.exec_drop(&s, values).await.map_err(into_error)?;
+            (None, _) => Ok(()),
         }
-
-        trx.commit().await.map_err(into_error)
     }
 
-    pub async fn query<R: SearchDocumentId>(
+    pub async fn query<R: SearchResults>(
         &self,
         index: SearchIndex,
         filters: &[SearchFilter],
-        sort: &[SearchComparator],
-    ) -> trc::Result<Vec<R>> {
+    ) -> trc::Result<R> {
         let mut query = format!(
             "SELECT {} FROM {}",
             R::field().column(),
             index.mysql_table()
         );
         let params = build_filter(&mut query, filters);
-        if !sort.is_empty() {
-            build_sort(&mut query, sort);
-        }
-
         let mut conn = self.conn_pool.get_conn().await.map_err(into_error)?;
         let s = conn.prep(query).await.map_err(into_error)?;
 
         conn.exec::<i64, _, _>(s, params)
             .await
-            .map(|r| r.into_iter().map(|r| R::from_u64(r as u64)).collect())
+            .map(|r| {
+                let mut results = R::default();
+                for id in r {
+                    results.insert(id as u64);
+                }
+                results
+            })
             .map_err(into_error)
+    }
+
+    pub async fn filter_candidates(
+        &self,
+        index: SearchIndex,
+        filters: &[SearchFilter],
+        candidates: &[u32],
+    ) -> trc::Result<RoaringBitmap> {
+        let mut base = format!("SELECT docid FROM {}", index.mysql_table());
+        let params = build_filter(&mut base, filters);
+        base.push_str(if filters.is_empty() {
+            " WHERE docid IN (?"
+        } else {
+            " AND docid IN (?"
+        });
+        let mut conn = self.conn_pool.get_conn().await.map_err(into_error)?;
+        let mut results = RoaringBitmap::new();
+        let mut query = String::with_capacity(base.len() + 2 * MAX_POINT_KEYS);
+
+        for chunk in candidates.chunks(MAX_POINT_KEYS) {
+            let Some(&last) = chunk.last() else {
+                continue;
+            };
+            let slots = POINT_BUCKETS
+                .into_iter()
+                .find(|bucket| *bucket >= chunk.len())
+                .unwrap_or(MAX_POINT_KEYS);
+            query.clear();
+            query.push_str(&base);
+            for _ in 1..slots {
+                query.push_str(",?");
+            }
+            query.push(')');
+
+            let mut values = Vec::with_capacity(params.len() + slots);
+            values.extend(params.iter().cloned());
+            values.extend(
+                chunk
+                    .iter()
+                    .chain(std::iter::repeat_n(&last, slots - chunk.len()))
+                    .map(|document_id| Value::Int(i64::from(*document_id))),
+            );
+            let s = conn.prep(&query).await.map_err(into_error)?;
+            for document_id in conn
+                .exec::<i64, _, _>(s, values)
+                .await
+                .map_err(into_error)?
+            {
+                if let Ok(document_id) = u32::try_from(document_id) {
+                    results.insert(document_id);
+                }
+            }
+        }
+
+        Ok(results)
     }
 
     pub async fn unindex(&self, filter: SearchQuery) -> trc::Result<u64> {
@@ -152,7 +186,12 @@ fn build_filter(query: &mut String, filters: &[SearchFilter]) -> Vec<Value> {
 
     for filter in filters {
         match filter {
-            SearchFilter::Operator { field, op, value } => {
+            SearchFilter::Text {
+                field,
+                op,
+                value,
+                language: _,
+            } => {
                 if !is_first {
                     match operator {
                         SearchFilter::And => query.push_str(" AND "),
@@ -163,15 +202,11 @@ fn build_filter(query: &mut String, filters: &[SearchFilter]) -> Vec<Value> {
                     is_first = false;
                 }
 
-                if field.is_text() && matches!(op, SearchOperator::Equal | SearchOperator::Contains)
-                {
-                    let (value, mode) = match (value, op) {
-                        (SearchValue::Text { value, .. }, SearchOperator::Equal) => {
-                            (Value::Bytes(format!("{value:?}").into_bytes()), "BOOLEAN")
-                        }
-                        (SearchValue::Text { value, .. }, ..) => {
+                if field.is_text() {
+                    let text_query = match op {
+                        TextMatch::Exact => format!("{value:?}"),
+                        TextMatch::Standard => {
                             let mut text_query = String::with_capacity(value.len() + 1);
-
                             for item in WordTokenizer::new(value, MAX_TOKEN_LENGTH) {
                                 if !text_query.is_empty() {
                                     text_query.push(' ');
@@ -179,38 +214,89 @@ fn build_filter(query: &mut String, filters: &[SearchFilter]) -> Vec<Value> {
                                 text_query.push('+');
                                 text_query.push_str(&item.word);
                             }
-
-                            (Value::Bytes(text_query.into_bytes()), "BOOLEAN")
+                            text_query
                         }
-                        _ => {
-                            debug_assert!(false, "Invalid search value for text field");
-                            continue;
+                        TextMatch::Prefix => {
+                            let mut text_query = String::with_capacity(value.len() + 2);
+                            for item in WordTokenizer::new(value, MAX_TOKEN_LENGTH) {
+                                if !text_query.is_empty() {
+                                    text_query.push(' ');
+                                }
+                                text_query.push('+');
+                                text_query.push_str(&item.word);
+                                text_query.push('*');
+                            }
+                            text_query
                         }
                     };
-                    let _ = write!(query, "MATCH({}) AGAINST(? IN {mode} MODE)", field.column());
-                    values.push(value);
-                } else if let SearchValue::KeyValues(kv) = value {
-                    let (key, value) = kv.iter().next().unwrap();
-
-                    values.push(Value::Bytes(format!("$.{key:?}").into_bytes()));
-
-                    if !value.is_empty() {
-                        if op == &SearchOperator::Equal {
-                            let _ = write!(query, "JSON_EXTRACT({}, ?) = ?", field.column());
-                            values.push(Value::Bytes(value.as_bytes().to_vec()));
-                        } else {
-                            let _ = write!(query, "JSON_EXTRACT({}, ?) LIKE ?", field.column(),);
-                            values.push(Value::Bytes(format!("%{value}%").into_bytes()));
-                        }
-                    } else {
-                        let _ = write!(query, "JSON_CONTAINS_PATH({}, 'one', ?)", field.column(),);
-                    }
+                    let _ = write!(
+                        query,
+                        "MATCH({}) AGAINST(? IN BOOLEAN MODE)",
+                        field.column()
+                    );
+                    values.push(Value::Bytes(text_query.into_bytes()));
                 } else {
                     query.push_str(field.column());
-                    query.push(' ');
-                    op.write_mysql(query);
-                    values.push(to_mysql(value));
+                    match op {
+                        TextMatch::Prefix => {
+                            let _ = write!(query, " LIKE CONCAT(?, '%')");
+                        }
+                        _ => {
+                            query.push_str(" = ?");
+                        }
+                    }
+                    values.push(Value::Bytes(value.as_bytes().to_vec()));
                 }
+            }
+            SearchFilter::KeyValue { field, key, op } => {
+                if !is_first {
+                    match operator {
+                        SearchFilter::And => query.push_str(" AND "),
+                        SearchFilter::Or => query.push_str(" OR "),
+                        _ => (),
+                    }
+                } else {
+                    is_first = false;
+                }
+
+                values.push(Value::Bytes(format!("$.{key:?}").into_bytes()));
+
+                match op {
+                    KeyValueMatch::Equals(value) => {
+                        let _ = write!(query, "JSON_EXTRACT({}, ?) = ?", field.column());
+                        values.push(Value::Bytes(value.as_bytes().to_vec()));
+                    }
+                    KeyValueMatch::Contains(value) => {
+                        let _ = write!(
+                            query,
+                            "LOWER(JSON_UNQUOTE(JSON_EXTRACT({}, ?))) LIKE ?",
+                            field.column()
+                        );
+                        values.push(Value::Bytes(
+                            format!("%{}%", value.to_lowercase()).into_bytes(),
+                        ));
+                    }
+                    KeyValueMatch::Exists => {
+                        let _ = write!(query, "JSON_CONTAINS_PATH({}, 'one', ?)", field.column());
+                    }
+                }
+            }
+            SearchFilter::Integer { field, op, value } => {
+                if !is_first {
+                    match operator {
+                        SearchFilter::And => query.push_str(" AND "),
+                        SearchFilter::Or => query.push_str(" OR "),
+                        _ => (),
+                    }
+                } else {
+                    is_first = false;
+                }
+                let cmp = match op {
+                    Ordering::Less => "<",
+                    Ordering::Equal => "=",
+                    Ordering::Greater => ">",
+                };
+                let _ = write!(query, "{} {cmp} {value}", field.column());
             }
             SearchFilter::And | SearchFilter::Or => {
                 if !is_first {
@@ -240,7 +326,7 @@ fn build_filter(query: &mut String, filters: &[SearchFilter]) -> Vec<Value> {
                 }
 
                 operator_stack.push((operator, is_first));
-                operator = &SearchFilter::And;
+                operator = &SearchFilter::Or;
                 is_first = true;
                 query.push_str("NOT (");
             }
@@ -253,7 +339,7 @@ fn build_filter(query: &mut String, filters: &[SearchFilter]) -> Vec<Value> {
             SearchFilter::DocumentSet(_) => {
                 debug_assert!(
                     false,
-                    "DocumentSet filters are not supported in Postgres backend"
+                    "DocumentSet filters are not supported in MySQL backend"
                 )
             }
         }
@@ -262,53 +348,114 @@ fn build_filter(query: &mut String, filters: &[SearchFilter]) -> Vec<Value> {
     values
 }
 
-fn build_sort(query: &mut String, sort: &[SearchComparator]) {
-    query.push_str(" ORDER BY ");
-    for (i, comparator) in sort.iter().enumerate() {
-        if i > 0 {
-            query.push_str(", ");
+struct RowBatch {
+    index: SearchIndex,
+    rows: usize,
+    values: Vec<Value>,
+}
+
+impl RowBatch {
+    fn statement(&self) -> String {
+        let index = self.index;
+        let columns = index.primary_keys().iter().chain(index.all_fields());
+        let num_columns = columns.clone().count();
+        let mut query =
+            String::with_capacity(64 + self.rows * (2 * num_columns + 3) + 32 * num_columns);
+        let _ = write!(query, "INSERT INTO {} (", index.mysql_table());
+        for (pos, field) in columns.enumerate() {
+            if pos > 0 {
+                query.push(',');
+            }
+            query.push_str(field.column());
         }
-        match comparator {
-            SearchComparator::Field { field, ascending } => {
-                query.push_str(field.column());
-                if *ascending {
-                    query.push_str(" ASC");
-                } else {
-                    query.push_str(" DESC");
+        query.push_str(") VALUES ");
+        for row in 0..self.rows {
+            if row > 0 {
+                query.push(',');
+            }
+            query.push('(');
+            for column in 0..num_columns {
+                if column > 0 {
+                    query.push(',');
                 }
+                query.push('?');
             }
-            SearchComparator::DocumentSet { .. } | SearchComparator::SortedSet { .. } => {
-                debug_assert!(
-                    false,
-                    "DocumentSet and SortedSet comparators are not supported "
-                );
+            query.push(')');
+        }
+        query.push_str(" ON DUPLICATE KEY UPDATE ");
+        for (pos, field) in index.all_fields().iter().enumerate() {
+            if pos > 0 {
+                query.push(',');
             }
+            let column = field.column();
+            let _ = write!(query, "{column} = VALUES({column})");
+        }
+        query
+    }
+}
+
+fn row_batches(documents: Vec<IndexDocument>) -> Vec<RowBatch> {
+    let mut batches = Vec::new();
+    let mut values = Vec::new();
+    let mut current = None;
+    let mut rows = 0;
+    let mut bytes = 0;
+
+    for mut document in documents {
+        let index = document.index;
+        let row_bytes = document.fields.values().map(value_len).sum::<usize>();
+        if let Some(current) = current
+            && (current != index || rows == MAX_BATCH_ROWS || bytes + row_bytes > MAX_BATCH_BYTES)
+        {
+            split_rows(&mut batches, current, std::mem::take(&mut values), rows);
+            rows = 0;
+            bytes = 0;
+        }
+
+        for field in index.primary_keys().iter().chain(index.all_fields()) {
+            values.push(
+                document
+                    .fields
+                    .remove(field)
+                    .map_or(Value::NULL, Value::from),
+            );
+        }
+        current = Some(index);
+        rows += 1;
+        bytes += row_bytes;
+    }
+
+    if let Some(current) = current {
+        split_rows(&mut batches, current, values, rows);
+    }
+
+    batches
+}
+
+fn split_rows(batches: &mut Vec<RowBatch>, index: SearchIndex, values: Vec<Value>, rows: usize) {
+    let num_columns = values.len() / rows.max(1);
+    let mut values = values.into_iter();
+    let mut remaining = rows;
+    for bucket in ROW_BUCKETS {
+        while remaining >= bucket {
+            batches.push(RowBatch {
+                index,
+                rows: bucket,
+                values: values.by_ref().take(bucket * num_columns).collect(),
+            });
+            remaining -= bucket;
         }
     }
 }
 
-impl SearchOperator {
-    fn write_mysql(&self, query: &mut String) {
-        match self {
-            SearchOperator::LowerThan => {
-                let _ = write!(query, "< ?");
-            }
-            SearchOperator::LowerEqualThan => {
-                let _ = write!(query, "<= ?");
-            }
-            SearchOperator::GreaterThan => {
-                let _ = write!(query, "> ?");
-            }
-            SearchOperator::GreaterEqualThan => {
-                let _ = write!(query, ">= ?");
-            }
-            SearchOperator::Equal => {
-                let _ = write!(query, "= ?");
-            }
-            SearchOperator::Contains => {
-                let _ = write!(query, "LIKE '%' CONCAT('%', ?, '%')");
-            }
-        }
+fn value_len(value: &SearchValue) -> usize {
+    match value {
+        SearchValue::Text { value, .. } => value.len(),
+        SearchValue::KeyValues(values) => values
+            .iter()
+            .map(|(key, value)| key.len() + value.len())
+            .sum(),
+        SearchValue::Int(_) | SearchValue::Uint(_) | SearchValue::Boolean(_) => U64_LEN,
     }
 }
 
@@ -331,17 +478,5 @@ impl From<SearchValue> for Value {
             SearchValue::Uint(i) => Value::Int(i as i64),
             SearchValue::Boolean(b) => Value::Int(b as i64),
         }
-    }
-}
-
-fn to_mysql(value: &SearchValue) -> Value {
-    match value {
-        SearchValue::Text { value, .. } => Value::Bytes(value.as_bytes().to_vec()),
-        SearchValue::KeyValues(vec_map) => serde_json::to_string(&vec_map)
-            .map(|v| Value::Bytes(v.into_bytes()))
-            .unwrap_or(Value::NULL),
-        SearchValue::Int(i) => Value::Int(*i),
-        SearchValue::Uint(i) => Value::Int(*i as i64),
-        SearchValue::Boolean(b) => Value::Int(*b as i64),
     }
 }

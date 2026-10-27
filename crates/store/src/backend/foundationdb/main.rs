@@ -13,6 +13,10 @@ use std::sync::Arc;
 
 static FDB_NETWORK: Mutex<Option<NetworkAutoStop>> = Mutex::new(None);
 
+extern "C" fn stop_fdb_network() {
+    drop(FDB_NETWORK.lock().take());
+}
+
 impl FdbStore {
     pub async fn open(config: structs::FoundationDbStore) -> Result<Store, String> {
         {
@@ -26,6 +30,7 @@ impl FdbStore {
                         .map_err(|err| format!("Failed to boot FoundationDB: {err:?}"))?
                 };
                 *guard = Some(network);
+                unsafe { libc::atexit(stop_fdb_network) };
             }
         }
 
@@ -60,6 +65,7 @@ impl FdbStore {
         Ok(Store::FoundationDb(Arc::new(Self {
             db,
             version: Default::default(),
+            windows: Default::default(),
         })))
     }
 }

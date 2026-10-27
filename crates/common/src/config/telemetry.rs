@@ -5,12 +5,15 @@
  */
 
 use crate::config::storage::Storage;
+use crate::ipc::IndexQueueNotify;
 use ahash::{AHashMap, AHashSet};
-use base64::{Engine, engine::general_purpose::STANDARD};
+use aws_lc_rs::constant_time::verify_slices_are_equal;
+use encodify::base64::STANDARD;
 use hyper::HeaderMap;
 use opentelemetry::{InstrumentationScope, KeyValue};
 use opentelemetry_otlp::{
-    LogExporter, MetricExporter, SpanExporter, WithExportConfig, WithHttpConfig,
+    LogExporter, MetricExporter, SpanExporter, WithExportConfig, WithHttpConfig, WithTonicConfig,
+    tonic_types::metadata::MetadataMap,
 };
 use opentelemetry_sdk::{Resource, metrics::Temporality};
 use opentelemetry_semantic_conventions::resource::SERVICE_VERSION;
@@ -19,9 +22,17 @@ use registry::schema::{
     prelude::ObjectType,
     structs::{self, EventTracingLevel, MetricsPrometheus, Tracer, WebHook},
 };
-use std::{collections::HashMap, str::FromStr, sync::Arc, time::Duration};
+use serde::Serialize;
+use std::{
+    collections::HashMap,
+    hash::{DefaultHasher, Hash, Hasher},
+    str::FromStr,
+    sync::Arc,
+    time::Duration,
+};
 use store::registry::bootstrap::Bootstrap;
 use trc::{EventType, Level, MetricType, TelemetryEvent, ipc::subscriber::Interests};
+use utils::http::http_client_builder;
 
 #[derive(Debug)]
 pub struct TelemetrySubscriber {
@@ -115,15 +126,48 @@ pub struct Metrics {
     pub log_path: Option<String>,
 }
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub struct PrometheusMetrics {
-    pub auth: Option<String>,
+    pub auth: PrometheusAuth,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PrometheusAuth {
+    None,
+    Basic(Box<str>),
+}
+
+impl PrometheusAuth {
+    fn new(username: Option<&str>, secret: Option<&str>) -> Result<Self, &'static str> {
+        match (
+            username.filter(|username| !username.is_empty()),
+            secret.filter(|secret| !secret.is_empty()),
+        ) {
+            (None, None) => Ok(PrometheusAuth::None),
+            (Some(username), Some(secret)) => Ok(PrometheusAuth::Basic(
+                STANDARD
+                    .encode(format!("{username}:{secret}"))
+                    .into_boxed_str(),
+            )),
+            (Some(_), None) => Err("Prometheus authUsername is set but authSecret is not"),
+            (None, Some(_)) => Err("Prometheus authSecret is set but authUsername is not"),
+        }
+    }
+
+    pub fn is_authorized(&self, basic_credentials: Option<&str>) -> bool {
+        match self {
+            PrometheusAuth::None => true,
+            PrometheusAuth::Basic(expected) => basic_credentials.is_some_and(|credentials| {
+                verify_slices_are_equal(expected.as_bytes(), credentials.as_bytes()).is_ok()
+            }),
+        }
+    }
 }
 
 impl Telemetry {
-    pub async fn parse(bp: &mut Bootstrap, storage: &Storage) -> Self {
+    pub async fn parse(bp: &mut Bootstrap, storage: &Storage, index_tx: IndexQueueNotify) -> Self {
         let mut telemetry = Telemetry {
-            tracers: Tracers::parse(bp, storage).await,
+            tracers: Tracers::parse(bp, storage, index_tx).await,
             metrics: Interests::default(),
         };
 
@@ -140,8 +184,42 @@ impl Telemetry {
     }
 }
 
+macro_rules! strip_interests {
+    ($tracer:expr) => {{
+        $tracer.enable = true;
+        $tracer.lossy = false;
+        $tracer.events = Default::default();
+        $tracer.events_policy = Default::default();
+    }};
+    ($tracer:expr, level) => {{
+        strip_interests!($tracer);
+        $tracer.level = Default::default();
+    }};
+}
+
+fn sink_fingerprint<T: Serialize>(value: &T) -> u64 {
+    let mut hasher = DefaultHasher::new();
+    serde_json::to_vec(value)
+        .unwrap_or_default()
+        .hash(&mut hasher);
+    hasher.finish()
+}
+
+fn tracer_sink_fingerprint(tracer: &Tracer) -> u64 {
+    let mut tracer = tracer.clone();
+    match &mut tracer {
+        Tracer::Log(t) => strip_interests!(t, level),
+        Tracer::Stdout(t) => strip_interests!(t, level),
+        Tracer::Journal(t) => strip_interests!(t, level),
+        Tracer::OtelHttp(t) => strip_interests!(t, level),
+        Tracer::OtelGrpc(t) => strip_interests!(t, level),
+    }
+    sink_fingerprint(&tracer)
+}
+
 impl Tracers {
-    pub async fn parse(bp: &mut Bootstrap, storage: &Storage) -> Self {
+    #[cfg_attr(not(feature = "enterprise"), allow(unused_variables))]
+    pub async fn parse(bp: &mut Bootstrap, storage: &Storage, index_tx: IndexQueueNotify) -> Self {
         let mut custom_levels = AHashMap::new();
         let mut tracers: Vec<TelemetrySubscriber> = Vec::new();
         let mut global_interests = Interests::default();
@@ -156,6 +234,7 @@ impl Tracers {
             for tracer in bp.list_infallible::<Tracer>().await {
                 let id = tracer.id;
                 let tracer = tracer.object;
+                let sink = tracer_sink_fingerprint(&tracer);
                 let level;
                 let lossy;
                 let events;
@@ -272,15 +351,33 @@ impl Tracers {
 
                         let mut span_exporter = SpanExporter::builder()
                             .with_http()
-                            .with_endpoint(tracer.endpoint.clone())
+                            .with_endpoint(tracer.url.clone())
                             .with_timeout(tracer.timeout.into_inner());
                         let mut log_exporter = LogExporter::builder()
                             .with_http()
-                            .with_endpoint(tracer.endpoint)
+                            .with_endpoint(tracer.url)
                             .with_timeout(tracer.timeout.into_inner());
                         if !headers.is_empty() {
                             span_exporter = span_exporter.with_headers(headers.clone());
                             log_exporter = log_exporter.with_headers(headers);
+                        }
+                        if tracer.allow_invalid_certs {
+                            match http_client_builder(true)
+                                .timeout(tracer.timeout.into_inner())
+                                .build()
+                            {
+                                Ok(client) => {
+                                    span_exporter = span_exporter.with_http_client(client.clone());
+                                    log_exporter = log_exporter.with_http_client(client);
+                                }
+                                Err(err) => {
+                                    bp.build_error(
+                                        id,
+                                        format!("Failed to build OpenTelemetry HTTP client: {err}"),
+                                    );
+                                    continue;
+                                }
+                            }
                         }
 
                         match (span_exporter.build(), log_exporter.build()) {
@@ -316,15 +413,32 @@ impl Tracers {
                         events_policy = tracer.events_policy;
                         enable = tracer.enable;
 
+                        let metadata = match tracer
+                            .http_auth
+                            .build_headers(tracer.http_headers, None)
+                            .await
+                        {
+                            Ok(headers) => MetadataMap::from_headers(headers),
+                            Err(err) => {
+                                bp.build_error(
+                                    id,
+                                    format!("Failed to build OpenTelemetry gRPC metadata: {err}"),
+                                );
+                                continue;
+                            }
+                        };
+
                         let mut span_exporter = SpanExporter::builder()
                             .with_tonic()
                             .with_protocol(opentelemetry_otlp::Protocol::Grpc)
-                            .with_timeout(tracer.timeout.into_inner());
+                            .with_timeout(tracer.timeout.into_inner())
+                            .with_metadata(metadata.clone());
                         let mut log_exporter = LogExporter::builder()
                             .with_tonic()
                             .with_protocol(opentelemetry_otlp::Protocol::Grpc)
-                            .with_timeout(tracer.timeout.into_inner());
-                        if let Some(endpoint) = tracer.endpoint {
+                            .with_timeout(tracer.timeout.into_inner())
+                            .with_metadata(metadata);
+                        if let Some(endpoint) = tracer.url {
                             span_exporter = span_exporter.with_endpoint(endpoint.clone());
                             log_exporter = log_exporter.with_endpoint(endpoint);
                         }
@@ -364,7 +478,7 @@ impl Tracers {
 
                 // Create tracer
                 let mut tracer = TelemetrySubscriber {
-                    id: format!("t_{}", id.id()),
+                    id: format!("t_{}_{sink:x}", id.id()),
                     interests: Default::default(),
                     lossy,
                     typ,
@@ -414,6 +528,11 @@ impl Tracers {
             for hook in bp.list_infallible::<WebHook>().await {
                 let id = hook.id;
                 let hook = hook.object;
+                let sink = {
+                    let mut hook = hook.clone();
+                    strip_interests!(hook, level);
+                    sink_fingerprint(&hook)
+                };
 
                 if !hook.enable {
                     continue;
@@ -433,7 +552,7 @@ impl Tracers {
 
                 // Build tracer
                 let mut tracer = TelemetrySubscriber {
-                    id: format!("w_{}", id.id()),
+                    id: format!("w_{}_{sink:x}", id.id()),
                     interests: Default::default(),
                     lossy: hook.lossy,
                     typ: TelemetrySubscriberType::Webhook(WebhookTracer {
@@ -463,8 +582,16 @@ impl Tracers {
                 };
 
                 // Parse webhook events
+                let level = Level::from(hook.level);
                 apply_events(hook.events, hook.events_policy, |event_type| {
-                    if event_type != EventType::Telemetry(TelemetryEvent::WebhookError) {
+                    if event_type != EventType::Telemetry(TelemetryEvent::WebhookError)
+                        && level.is_contained(
+                            custom_levels
+                                .get(&event_type)
+                                .copied()
+                                .unwrap_or(event_type.level()),
+                        )
+                    {
                         tracer.interests.set(event_type);
                         global_interests.set(event_type);
                     }
@@ -473,7 +600,7 @@ impl Tracers {
                 if !tracer.interests.is_empty() {
                     tracers.push(tracer);
                 } else {
-                    bp.build_error(id, "No events enabled for webhook");
+                    bp.build_warning(id, "No events enabled for webhook");
                 }
             }
 
@@ -551,27 +678,30 @@ impl Metrics {
         Metrics {
             prometheus: match metrics.prometheus {
                 MetricsPrometheus::Enabled(prom) => {
-                    let secret = prom
-                        .auth_secret
-                        .secret()
-                        .await
-                        .map_err(|err| {
+                    let auth = match prom.auth_secret.secret().await {
+                        Ok(secret) => {
+                            PrometheusAuth::new(prom.auth_username.as_deref(), secret.as_deref())
+                                .map_err(|err| err.to_string())
+                        }
+                        Err(err) => {
+                            Err(format!("Unable to retrieve Prometheus auth secret: {err}"))
+                        }
+                    };
+                    match auth {
+                        Ok(auth) => Some(PrometheusMetrics { auth }),
+                        Err(err) => {
                             bp.build_error(
                                 ObjectType::Metrics.singleton(),
-                                format!("Unable to retrieve Prometheus auth secret: {err}"),
+                                format!("{err}, Prometheus endpoint disabled"),
                             );
-                        })
-                        .unwrap_or_default();
-                    Some(PrometheusMetrics {
-                        auth: prom.auth_username.and_then(|user| {
-                            secret.map(|secret| STANDARD.encode(format!("{user}:{secret}")))
-                        }),
-                    })
+                            None
+                        }
+                    }
                 }
                 MetricsPrometheus::Disabled => None,
             },
             otel: match metrics.open_telemetry {
-                structs::MetricsOtel::Http(otel) => {
+                structs::MetricsOtel::Http(otel) => 'otel: {
                     let headers = match otel.http_auth.build_headers(otel.http_headers, None).await
                     {
                         Ok(headers) => headers
@@ -592,10 +722,27 @@ impl Metrics {
                     let mut exporter = MetricExporter::builder()
                         .with_temporality(Temporality::Delta)
                         .with_http()
-                        .with_endpoint(otel.endpoint)
+                        .with_endpoint(otel.url)
                         .with_timeout(otel.timeout.into_inner());
                     if !headers.is_empty() {
                         exporter = exporter.with_headers(headers);
+                    }
+                    if otel.allow_invalid_certs {
+                        match http_client_builder(true)
+                            .timeout(otel.timeout.into_inner())
+                            .build()
+                        {
+                            Ok(client) => {
+                                exporter = exporter.with_http_client(client);
+                            }
+                            Err(err) => {
+                                bp.build_error(
+                                    ObjectType::Metrics.singleton(),
+                                    format!("Failed to build OpenTelemetry HTTP client: {err}"),
+                                );
+                                break 'otel None;
+                            }
+                        }
                     }
 
                     match exporter.build() {
@@ -620,7 +767,7 @@ impl Metrics {
                         .with_tonic()
                         .with_protocol(opentelemetry_otlp::Protocol::Grpc)
                         .with_timeout(otel.timeout.into_inner());
-                    if let Some(endpoint) = otel.endpoint {
+                    if let Some(endpoint) = otel.url {
                         exporter = exporter.with_endpoint(endpoint);
                     }
 
@@ -714,3 +861,4 @@ impl std::fmt::Debug for OtelMetrics {
             .finish()
     }
 }
+

@@ -6,11 +6,12 @@
 
 use crate::{
     object::{AnyId, JmapObject, JmapObjectId},
-    request::deserialize::DeserializeArguments,
+    request::deserialize::{CowStr, DeserializeArguments},
 };
 use jmap_tools::{Element, Key, Property};
+use serde::{Serialize, Serializer};
 use std::{borrow::Cow, str::FromStr};
-use types::{id::Id, type_state::DataType};
+use types::{id::Id, text::Text, type_state::DataType};
 
 #[derive(Debug, Clone, Default)]
 pub struct Quota;
@@ -55,21 +56,26 @@ impl Property for QuotaProperty {
         }
         .into()
     }
+
+    fn key_eq(&self, other: &Self) -> bool {
+        self == other
+    }
 }
 
 impl QuotaProperty {
     fn parse(value: &str) -> Option<Self> {
-        hashify::tiny_map!(value.as_bytes(),
-            b"id" => QuotaProperty::Id,
-            b"resourceType" => QuotaProperty::ResourceType,
-            b"used" => QuotaProperty::Used,
-            b"name" => QuotaProperty::Name,
-            b"scope" => QuotaProperty::Scope,
-            b"types" => QuotaProperty::Types,
-            b"hardLimit" => QuotaProperty::HardLimit,
-            b"warnLimit" => QuotaProperty::WarnLimit,
-            b"softLimit" => QuotaProperty::SoftLimit,
-            b"description" => QuotaProperty::Description,
+        hashify::fnc_map!(value.as_bytes(),
+            b"id" => Some(QuotaProperty::Id),
+            b"resourceType" => Some(QuotaProperty::ResourceType),
+            b"used" => Some(QuotaProperty::Used),
+            b"name" => Some(QuotaProperty::Name),
+            b"scope" => Some(QuotaProperty::Scope),
+            b"types" => Some(QuotaProperty::Types),
+            b"hardLimit" => Some(QuotaProperty::HardLimit),
+            b"warnLimit" => Some(QuotaProperty::WarnLimit),
+            b"softLimit" => Some(QuotaProperty::SoftLimit),
+            b"description" => Some(QuotaProperty::Description),
+            _ => None,
         )
     }
 }
@@ -90,9 +96,19 @@ impl Element for QuotaValue {
     }
 
     fn to_cow(&self) -> Cow<'static, str> {
+        self.text().to_cow()
+    }
+
+    fn serialize_text<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        self.text().serialize(serializer)
+    }
+}
+
+impl QuotaValue {
+    pub fn text(&self) -> Text<'_> {
         match self {
-            QuotaValue::Id(id) => id.to_string().into(),
-            QuotaValue::Types(data_type) => data_type.as_str().into(),
+            QuotaValue::Id(id) => Text::Id(*id),
+            QuotaValue::Types(data_type) => Text::Static(data_type.as_str()),
         }
     }
 }
@@ -180,7 +196,7 @@ impl<'de> DeserializeArguments<'de> for QuotaComparator {
         A: serde::de::MapAccess<'de>,
     {
         if key == "property" {
-            let value = map.next_value::<Cow<str>>()?;
+            let value = map.next_value::<CowStr>()?.0;
             hashify::fnc_map!(value.as_bytes(),
                 b"name" => {
                     *self = QuotaComparator::Name;
@@ -192,7 +208,7 @@ impl<'de> DeserializeArguments<'de> for QuotaComparator {
                     *self = QuotaComparator::Used;
                 },
                 _ => {
-                    *self = QuotaComparator::_T(key.to_string());
+                    *self = QuotaComparator::_T(value.into_owned());
                 }
             );
         } else {

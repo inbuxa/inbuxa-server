@@ -6,19 +6,21 @@
 
 use crate::USER_AGENT;
 use hyper::HeaderMap;
-use mail_auth::flate2;
+use smtp_report::flate2;
 use std::{
     io::{BufReader, Read},
     time::Duration,
 };
 use utils::HttpLimitResponse;
 
+pub mod app_client;
 pub mod application;
 pub mod backup;
 pub mod boot;
 pub mod console;
 pub mod defaults;
 pub mod restore;
+pub mod schema;
 #[cfg(target_os = "linux")]
 pub mod systemd;
 
@@ -30,22 +32,24 @@ pub async fn fetch_resource(
     headers: Option<HeaderMap>,
     timeout: Duration,
     max_size: usize,
+    allow_invalid_certs: bool,
 ) -> Result<Vec<u8>, String> {
     if let Some(path) = url.strip_prefix("file://") {
         tokio::fs::read(path)
             .await
             .map_err(|err| format!("Failed to read {path}: {err}"))
     } else {
-        let response = utils::http::http_client_builder(is_localhost_url(url))
-            .timeout(timeout)
-            .user_agent(USER_AGENT)
-            .build()
-            .unwrap_or_default()
-            .get(url)
-            .headers(headers.unwrap_or_default())
-            .send()
-            .await
-            .map_err(|err| format!("Failed to fetch {url}: {err}"))?;
+        let response =
+            utils::http::http_client_builder(allow_invalid_certs || is_localhost_url(url))
+                .timeout(timeout)
+                .user_agent(USER_AGENT)
+                .build()
+                .unwrap_or_default()
+                .get(url)
+                .headers(headers.unwrap_or_default())
+                .send()
+                .await
+                .map_err(|err| format!("Failed to fetch {url}: {err}"))?;
 
         if response.status().is_success() {
             response

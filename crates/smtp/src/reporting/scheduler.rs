@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
  */
 
-use super::{dmarc::DmarcReporting, tls::TlsReporting};
+use super::aggregate::{REPORT_BURST, ReportScheduler};
 use common::{BuildServer, Inner, ipc::ReportingEvent};
 use std::sync::Arc;
 use tokio::sync::mpsc;
@@ -16,12 +16,11 @@ pub trait SpawnReport {
 impl SpawnReport for mpsc::Receiver<ReportingEvent> {
     fn spawn(mut self, inner: Arc<Inner>) {
         tokio::spawn(async move {
-            while let Some(event) = self.recv().await {
-                let server = inner.build_server();
-                match event {
-                    ReportingEvent::Dmarc(event) => server.schedule_dmarc(event).await,
-                    ReportingEvent::Tls(event) => server.schedule_tls(event).await,
-                    ReportingEvent::Stop => break,
+            let mut scheduler = ReportScheduler::default();
+            let mut events = Vec::with_capacity(REPORT_BURST);
+            while self.recv_many(&mut events, REPORT_BURST).await > 0 {
+                if scheduler.process(&inner.build_server(), &mut events).await {
+                    break;
                 }
             }
         });

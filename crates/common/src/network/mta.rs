@@ -17,14 +17,15 @@ use crate::{
             },
         },
     },
-    expr::{Variable, functions::ResolveVariable},
+    expr::{Bump, Variable, functions::ResolveVariable},
     manager::SPAM_CLASSIFIER_KEY,
     network::RcptResolution,
 };
 use ahash::AHashSet;
+use compact_str::{CompactString, ToCompactString};
 use directory::Recipient;
 use mail_auth::IpLookupStrategy;
-use registry::schema::{enums::ExpressionVariable, structs::MaskedEmail};
+use registry::schema::enums::ExpressionVariable;
 use sieve::Sieve;
 use std::{
     borrow::Cow,
@@ -33,11 +34,11 @@ use std::{
 };
 use store::{
     Deserialize, IterateParams, ValueKey,
-    write::{AlignedBytes, Archive, QueueClass, ValueClass, now},
+    write::{Archive, ArchiveBytes, QueueClass, ValueClass},
 };
 use trc::{AddContext, SpamEvent};
-use types::id::Id;
 use utils::DomainPart;
+
 
 impl Server {
     pub async fn rcpt_resolve(
@@ -60,10 +61,12 @@ impl Server {
         if domain.flags & DOMAIN_FLAG_SUB_ADDRESSING != 0 {
             if let Some(sub_addressing) = &domain.sub_addressing_custom {
                 // Custom sub-addressing resolution
+                let mut arena = Bump::new();
                 if let Some(result) = self
                     .eval_if::<String, _>(
                         sub_addressing,
                         &AddressResolver(local_part.as_ref()),
+                        &mut arena,
                         session_id,
                     )
                     .await
@@ -87,22 +90,34 @@ impl Server {
             } else {
                 Cow::Borrowed(rcpt)
             };
+            let accept = |address: Cow<'_, str>| {
+                if is_subaddressed {
+                    RcptResolution::Rewrite(address.into_owned())
+                } else {
+                    RcptResolution::Accept
+                }
+            };
+
+            if self
+                .inner
+                .cache
+                .directory_recipients
+                .get(address.as_ref())
+                .is_some()
+            {
+                return Ok(accept(address));
+            }
+
             match directory.recipient(address.as_ref()).await? {
                 Recipient::Account(account) => {
-                    Box::pin(self.synchronize_account(account)).await?;
-                    return Ok(if is_subaddressed {
-                        RcptResolution::Rewrite(address.into_owned())
-                    } else {
-                        RcptResolution::Accept
-                    });
+                    self.synchronize_account(account).await?;
+                    self.cache_directory_recipient(address.as_ref());
+                    return Ok(accept(address));
                 }
                 Recipient::Group(group) => {
-                    Box::pin(self.synchronize_group(group)).await?;
-                    return Ok(if is_subaddressed {
-                        RcptResolution::Rewrite(address.into_owned())
-                    } else {
-                        RcptResolution::Accept
-                    });
+                    self.synchronize_group(group).await?;
+                    self.cache_directory_recipient(address.as_ref());
+                    return Ok(accept(address));
                 }
                 Recipient::Invalid => {}
             }
@@ -172,28 +187,42 @@ impl Server {
         list_id: u32,
         recipients: Arc<[Box<str>]>,
     ) -> trc::Result<Arc<[Box<str>]>> {
-        let mut has_nested = false;
-        for member in recipients.iter() {
-            if let Some(EmailCache::MailingList(_)) = self.rcpt_id_from_email(member).await? {
-                has_nested = true;
+        let mut first_nested = None;
+        for (index, member) in recipients.iter().enumerate() {
+            if let Some(EmailCache::MailingList(nested_id)) =
+                self.rcpt_id_from_email(member).await?
+            {
+                first_nested = Some((index, nested_id));
                 break;
             }
         }
-        if !has_nested {
+        let Some((mut start, nested_id)) = first_nested else {
             return Ok(recipients);
-        }
+        };
 
         let mut expanded = Vec::with_capacity(recipients.len());
         let mut seen: AHashSet<Box<str>> = AHashSet::with_capacity(recipients.len());
         let mut visited = AHashSet::from_iter([list_id]);
         let mut pending: Vec<Arc<[Box<str>]>> = Vec::new();
-        let mut members = recipients;
+        let mut resolved = Some(nested_id);
 
+        for member in recipients.get(..start).unwrap_or_default() {
+            if seen.insert(member.to_canonical_address().into()) {
+                expanded.push(member.clone());
+            }
+        }
+
+        let mut members = recipients;
         loop {
-            for member in members.iter() {
-                if let Some(EmailCache::MailingList(nested_id)) =
-                    self.rcpt_id_from_email(member).await?
-                {
+            for member in members.get(start..).unwrap_or_default() {
+                let nested_id = match resolved.take() {
+                    Some(nested_id) => Some(nested_id),
+                    None => match self.rcpt_id_from_email(member).await? {
+                        Some(EmailCache::MailingList(nested_id)) => Some(nested_id),
+                        _ => None,
+                    },
+                };
+                if let Some(nested_id) = nested_id {
                     if !visited.insert(nested_id) {
                         continue;
                     }
@@ -212,6 +241,7 @@ impl Server {
                 break;
             };
             members = next;
+            start = 0;
         }
 
         Ok(expanded.into())
@@ -227,7 +257,7 @@ impl Server {
         } else {
             trc::event!(
                 Dkim(trc::DkimEvent::SignerNotFound),
-                Id = domain.to_string(),
+                Id = CompactString::from(domain),
                 SpanId = session_id,
             );
 
@@ -235,11 +265,11 @@ impl Server {
         }
     }
 
-    pub fn get_trusted_sieve_script(&self, name: &str, session_id: u64) -> Option<&Arc<Sieve>> {
+    pub fn get_trusted_sieve_script(&self, name: &str, session_id: u64) -> Option<&Sieve<'static>> {
         self.core.sieve.trusted_script(name).or_else(|| {
             trc::event!(
                 Sieve(trc::SieveEvent::ScriptNotFound),
-                Id = name.to_string(),
+                Script = CompactString::from(name),
                 SpanId = session_id,
             );
 
@@ -247,11 +277,15 @@ impl Server {
         })
     }
 
-    pub fn get_untrusted_sieve_script(&self, name: &str, session_id: u64) -> Option<&Arc<Sieve>> {
+    pub fn get_untrusted_sieve_script(
+        &self,
+        name: &str,
+        session_id: u64,
+    ) -> Option<&Sieve<'static>> {
         self.core.sieve.untrusted_script(name).or_else(|| {
             trc::event!(
                 Sieve(trc::SieveEvent::ScriptNotFound),
-                Id = name.to_string(),
+                Script = CompactString::from(name),
                 SpanId = session_id,
             );
 
@@ -277,7 +311,7 @@ impl Server {
                 _ => {
                     trc::event!(
                         Smtp(trc::SmtpEvent::IdNotFound),
-                        Id = name.to_string(),
+                        Name = CompactString::from(name),
                         Details = "Gateway not found",
                         SpanId = session_id,
                     );
@@ -297,7 +331,7 @@ impl Server {
                 if name != &DEFAULT_QUEUE_NAME {
                     trc::event!(
                         Smtp(trc::SmtpEvent::IdNotFound),
-                        Id = name.to_string(),
+                        Name = name.to_compact_string(),
                         Details = "Virtual queue not found",
                     );
                 }
@@ -333,7 +367,7 @@ impl Server {
                 if name != "default" {
                     trc::event!(
                         Smtp(trc::SmtpEvent::IdNotFound),
-                        Id = name.to_string(),
+                        Name = CompactString::from(name),
                         Details = "Queue strategy not found",
                         SpanId = session_id,
                     );
@@ -361,7 +395,7 @@ impl Server {
                 if name != "default" {
                     trc::event!(
                         Smtp(trc::SmtpEvent::IdNotFound),
-                        Id = name.to_string(),
+                        Name = CompactString::from(name),
                         Details = "TLS strategy not found",
                         SpanId = session_id,
                     );
@@ -393,7 +427,7 @@ impl Server {
                 if name != "default" {
                     trc::event!(
                         Smtp(trc::SmtpEvent::IdNotFound),
-                        Id = name.to_string(),
+                        Name = CompactString::from(name),
                         Details = "Connection strategy not found",
                         SpanId = session_id,
                     );
@@ -410,7 +444,7 @@ impl Server {
                 .get_blob(SPAM_CLASSIFIER_KEY, 0..usize::MAX)
                 .await
                 .and_then(|archive| match archive {
-                    Some(archive) => <Archive<AlignedBytes> as Deserialize>::deserialize(&archive)
+                    Some(archive) => <Archive<ArchiveBytes> as Deserialize>::deserialize(&archive)
                         .and_then(|archive| archive.deserialize_untrusted::<SpamClassifier>())
                         .map(Some),
                     None => Ok(None),
@@ -459,16 +493,20 @@ impl Server {
             .caused_by(trc::location!())
             .map(|_| total)
     }
+
+    fn cache_directory_recipient(&self, address: &str) {
+        self.inner.cache.directory_recipients.insert(
+            address.into(),
+            (),
+            self.inner.cache.directory_recipients_ttl,
+        );
+    }
 }
 
 pub struct AddressResolver<'x>(pub &'x str);
 
 impl ResolveVariable for AddressResolver<'_> {
-    fn resolve_variable(&'_ self, _: ExpressionVariable) -> crate::expr::Variable<'_> {
+    fn resolve_variable<'a>(&'a self, _: ExpressionVariable, _: &'a Bump) -> Variable<'a> {
         Variable::from(self.0)
-    }
-
-    fn resolve_global(&self, _: &str) -> Variable<'_> {
-        Variable::Integer(0)
     }
 }

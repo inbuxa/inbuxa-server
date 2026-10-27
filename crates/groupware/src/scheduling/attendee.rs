@@ -6,7 +6,7 @@
 
 use crate::scheduling::{
     Email, InstanceId, ItipEntries, ItipEntryValue, ItipError, ItipMessage, ItipSnapshot,
-    ItipSnapshots, ItipSummary,
+    ItipSnapshots, ItipSummary, RecurrenceId,
     itip::{
         ItipExportAs, can_attendee_modify_property, itip_add_tz, itip_build_envelope,
         itip_export_component,
@@ -39,6 +39,7 @@ pub(crate) fn attendee_handle_update(
     let mut email_rcpt = AHashSet::new();
     let mut new_delegates = AHashSet::new();
     let mut part_stat = &ICalendarParticipationStatus::NeedsAction;
+    let mut replied_instances: Vec<InstanceId> = Vec::new();
 
     for (instance_id, instance) in &new_itip.components {
         if let Some(old_instance) = old_itip.components.get(instance_id) {
@@ -48,8 +49,7 @@ pub(crate) fn attendee_handle_update(
                 {
                     // Distinguish a genuine add/remove of a restricted property from a value-only drift
                     // caused by a client re-encoding the same property
-                    let old_name_counts = count_entry_names(&old_instance.entries);
-                    let new_name_counts = count_entry_names(&instance.entries);
+                    let mut name_counts = None;
 
                     // Check added fields
                     let mut send_update = false;
@@ -77,6 +77,11 @@ pub(crate) fn attendee_handle_update(
                                     message.components[0].component_ids.push(comp_id);
                                     message.components.push(cancel_comp);
                                     mail_from = Some(&attendee_email.email);
+                                    replied_instances.push(InstanceId::Recurrence(RecurrenceId {
+                                        entry_id: 0,
+                                        date: date.timestamp,
+                                        this_and_future: false,
+                                    }));
                                 }
                             }
                             _ => {
@@ -85,8 +90,15 @@ pub(crate) fn attendee_handle_update(
                                     &instance.comp.component_type,
                                     new_entry.name,
                                 ) {
-                                    if name_count(&new_name_counts, new_entry.name)
-                                        > name_count(&old_name_counts, new_entry.name)
+                                    if name_counts
+                                        .get_or_insert_with(|| {
+                                            NameCounts::new(
+                                                &instance.comp.component_type,
+                                                &old_instance.entries,
+                                                &instance.entries,
+                                            )
+                                        })
+                                        .is_added(new_entry.name)
                                     {
                                         return Err(ItipError::CannotModifyProperty(
                                             new_entry.name.clone(),
@@ -149,8 +161,10 @@ pub(crate) fn attendee_handle_update(
                             &dt_stamp,
                             instance.sequence.unwrap_or_default(),
                             ItipExportAs::Attendee(attendee_entry_uids),
+                            None,
                         ));
                         mail_from = Some(&local_attendee.email.email);
+                        replied_instances.push(instance_id.clone());
                     }
 
                     // Check removed fields
@@ -158,8 +172,15 @@ pub(crate) fn attendee_handle_update(
                         if !can_attendee_modify_property(
                             &instance.comp.component_type,
                             removed_entry.name,
-                        ) && name_count(&old_name_counts, removed_entry.name)
-                            > name_count(&new_name_counts, removed_entry.name)
+                        ) && name_counts
+                            .get_or_insert_with(|| {
+                                NameCounts::new(
+                                    &instance.comp.component_type,
+                                    &old_instance.entries,
+                                    &instance.entries,
+                                )
+                            })
+                            .is_removed(removed_entry.name)
                         {
                             // Removing these properties is not allowed
                             return Err(ItipError::CannotModifyProperty(
@@ -202,8 +223,10 @@ pub(crate) fn attendee_handle_update(
                 &dt_stamp,
                 instance.sequence.unwrap_or_default(),
                 ItipExportAs::Attendee(attendee_entry_uids),
+                None,
             ));
             mail_from = Some(&local_attendee.email.email);
+            replied_instances.push(instance_id.clone());
         } else {
             return Err(ItipError::CannotModifyInstance);
         }
@@ -226,6 +249,7 @@ pub(crate) fn attendee_handle_update(
                     message.components[0].component_ids.push(comp_id);
                     message.components.push(cancel_comp);
                     mail_from = Some(&attendee_email.email);
+                    replied_instances.push(instance_id.clone());
                 }
             } else {
                 // Removing instances is not allowed
@@ -240,15 +264,20 @@ pub(crate) fn attendee_handle_update(
         // Add timezones if needed
         itip_add_tz(&mut message, new_ical);
 
+        replied_instances.sort_unstable();
+        replied_instances.dedup();
+
         let mut responses = vec![ItipMessage {
             from: from.to_string(),
             from_organizer: false,
             to: email_rcpt.into_iter().map(|e| e.to_string()).collect(),
             summary: ItipSummary::Rsvp {
                 part_stat: part_stat.clone(),
-                current: new_itip
-                    .main_instance_or_default()
-                    .build_summary(Some(&new_itip.organizer), &[]),
+                current: new_itip.build_instances_summary(
+                    &replied_instances,
+                    Some(&new_itip.organizer),
+                    &[],
+                ),
             },
             message,
         }];
@@ -363,15 +392,111 @@ pub(crate) fn attendee_decline<'x>(
     })
 }
 
-fn count_entry_names<'x>(entries: &'x ItipEntries<'x>) -> AHashMap<&'x ICalendarProperty, usize> {
-    let mut counts = AHashMap::with_capacity(entries.len());
-    for entry in entries {
-        *counts.entry(entry.name).or_insert(0) += 1;
+pub(crate) struct OrganizerSequences(Vec<(u16, Option<i64>)>);
+
+impl OrganizerSequences {
+    pub(crate) fn of(old_itip: &ItipSnapshots<'_>, new_itip: &ItipSnapshots<'_>) -> Self {
+        OrganizerSequences(
+            new_itip
+                .components
+                .iter()
+                .filter_map(|(instance_id, instance)| {
+                    let sequence = match (old_itip.components.get(instance_id), instance_id) {
+                        (Some(old_instance), _) => old_instance.sequence,
+                        (None, InstanceId::Recurrence(recurrence_id)) => {
+                            old_itip.occurrence_source(recurrence_id)?.sequence
+                        }
+                        (None, InstanceId::Main) => return None,
+                    };
+                    (sequence.unwrap_or_default() != instance.sequence.unwrap_or_default())
+                        .then_some((instance.comp_id, sequence))
+                })
+                .collect(),
+        )
     }
-    counts
+
+    pub(crate) fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+
+    pub(crate) fn restore(self, ical: &mut ICalendar) {
+        for (comp_id, sequence) in self.0 {
+            let Some(component) = ical.components.get_mut(usize::from(comp_id)) else {
+                continue;
+            };
+            match sequence {
+                Some(sequence) => match component.property_mut(&ICalendarProperty::Sequence) {
+                    Some(entry) => entry.values = [ICalendarValue::Integer(sequence)].into(),
+                    None => component.add_sequence(sequence),
+                },
+                None => component
+                    .entries
+                    .retain(|entry| entry.name != ICalendarProperty::Sequence),
+            }
+        }
+    }
 }
 
-#[inline]
-fn name_count(counts: &AHashMap<&ICalendarProperty, usize>, name: &ICalendarProperty) -> usize {
-    counts.get(name).copied().unwrap_or(0)
+struct NameCounts<'x> {
+    old: AHashMap<&'x ICalendarProperty, usize>,
+    new: AHashMap<&'x ICalendarProperty, usize>,
+    duration_slot: &'static ICalendarProperty,
 }
+
+impl<'x> NameCounts<'x> {
+    fn new(
+        component_type: &ICalendarComponentType,
+        old: &ItipEntries<'x>,
+        new: &ItipEntries<'x>,
+    ) -> Self {
+        let duration_slot = match component_type {
+            ICalendarComponentType::VEvent => &ICalendarProperty::Dtend,
+            ICalendarComponentType::VTodo => &ICalendarProperty::Due,
+            _ => &ICalendarProperty::Duration,
+        };
+        NameCounts {
+            old: Self::count(old, duration_slot),
+            new: Self::count(new, duration_slot),
+            duration_slot,
+        }
+    }
+
+    fn count(
+        entries: &ItipEntries<'x>,
+        duration_slot: &'static ICalendarProperty,
+    ) -> AHashMap<&'x ICalendarProperty, usize> {
+        let mut counts = AHashMap::with_capacity(entries.len());
+        for entry in entries {
+            *counts
+                .entry(Self::slot(entry.name, duration_slot))
+                .or_insert(0) += 1;
+        }
+        counts
+    }
+
+    fn slot<'y>(
+        name: &'y ICalendarProperty,
+        duration_slot: &'static ICalendarProperty,
+    ) -> &'y ICalendarProperty {
+        if matches!(name, ICalendarProperty::Duration) {
+            duration_slot
+        } else {
+            name
+        }
+    }
+
+    fn get(counts: &AHashMap<&ICalendarProperty, usize>, name: &ICalendarProperty) -> usize {
+        counts.get(name).copied().unwrap_or(0)
+    }
+
+    fn is_added(&self, name: &ICalendarProperty) -> bool {
+        let slot = Self::slot(name, self.duration_slot);
+        Self::get(&self.new, slot) > Self::get(&self.old, slot)
+    }
+
+    fn is_removed(&self, name: &ICalendarProperty) -> bool {
+        let slot = Self::slot(name, self.duration_slot);
+        Self::get(&self.old, slot) > Self::get(&self.new, slot)
+    }
+}
+

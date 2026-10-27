@@ -1,0 +1,45 @@
+/*
+ * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
+ *
+ * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
+ */
+
+use crate::compiler::{
+    CompileError, Value,
+    grammar::{
+        Capability,
+        instruction::{CompilerState, Instruction},
+    },
+    lexer::{Token, word::Word},
+};
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(
+    any(all(test, stalwart_tests), feature = "serde"),
+    derive(serde::Serialize, serde::Deserialize)
+)]
+pub(crate) struct Keep {
+    pub flags: Box<[Value]>,
+}
+
+impl CompilerState<'_> {
+    pub(crate) fn parse_keep(&mut self) -> Result<(), CompileError> {
+        let cmd = Instruction::Keep(Box::new(Keep {
+            flags: match self.tokens.peek().map(|r| r.map(|t| &t.token)) {
+                Some(Ok(Token::Tag(Word::Flags))) => {
+                    let token_info = self.tokens.next().unwrap().unwrap();
+                    self.validate_argument(
+                        0,
+                        Capability::Imap4Flags.into(),
+                        token_info.line_num,
+                        token_info.line_pos,
+                    )?;
+                    self.parse_strings(false)?.into()
+                }
+                _ => Vec::new().into(),
+            },
+        }));
+        self.instructions.push(cmd);
+        Ok(())
+    }
+}

@@ -9,19 +9,30 @@ use std::{
     fmt::{Display, Formatter},
 };
 
-use quick_xml::events::BytesStart;
+use quick_xml::events::{BytesStart, Event};
 use tokenizer::Tokenizer;
 
 use crate::schema::{Element, NamedElement, Namespace};
+use types::metadata::XmlError;
 
 pub mod header;
 pub mod property;
 pub mod tokenizer;
+pub mod value;
 
 #[derive(Debug, Clone)]
 pub enum Error {
     Xml(Box<quick_xml::Error>),
     UnexpectedToken(Box<UnexpectedToken>),
+    Filter(FilterError),
+    Value(XmlError),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum FilterError {
+    Invalid(Namespace),
+    UnsupportedCollation(Namespace, String),
+    TooComplex(Namespace),
 }
 
 #[derive(Debug, Clone)]
@@ -42,13 +53,14 @@ pub enum Token<'x> {
     Bytes(Cow<'x, [u8]>),
     Text(Cow<'x, str>),
     UnknownElement(RawElement<'x>),
+    Content(Event<'x>),
     Eof,
 }
 
 #[derive(Debug, Clone)]
 pub struct RawElement<'x> {
     pub element: BytesStart<'x>,
-    pub namespace: Option<Cow<'static, [u8]>>,
+    pub namespace: Option<Cow<'static, str>>,
 }
 
 pub trait DavParser: Sized {
@@ -101,6 +113,7 @@ impl Token<'_> {
             Token::Bytes(bytes) => Token::Bytes(bytes.into_owned().into()),
             Token::Text(text) => Token::Text(text.into_owned().into()),
             Token::UnknownElement(raw) => Token::UnknownElement(raw.into_owned()),
+            Token::Content(event) => Token::Content(event.into_owned()),
             Token::Eof => Token::Eof,
         }
     }
@@ -124,11 +137,11 @@ impl<'x> RawElement<'x> {
     pub fn with_namespace(self, namespace: quick_xml::name::Namespace<'_>) -> Self {
         RawElement {
             element: self.element,
-            namespace: Some(Cow::Owned(namespace.into_inner().to_vec())),
+            namespace: Some(Cow::Owned(namespace.into_inner().to_string())),
         }
     }
 
-    pub fn with_namespace_static(self, namespace: &'static [u8]) -> Self {
+    pub fn with_namespace_static(self, namespace: &'static str) -> Self {
         RawElement {
             element: self.element,
             namespace: Some(Cow::Borrowed(namespace)),
@@ -143,7 +156,7 @@ impl<'x> RawElement<'x> {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, stalwart_tests))]
 impl PartialEq for Token<'_> {
     fn eq(&self, other: &Self) -> bool {
         match (self, other) {
@@ -167,12 +180,24 @@ impl PartialEq for Token<'_> {
             (Self::Bytes(l0), Self::Bytes(r0)) => l0 == r0,
             (Self::Text(l0), Self::Text(r0)) => l0 == r0,
             (Self::UnknownElement(l0), Self::UnknownElement(r0)) => {
-                let l0: &[u8] = l0.element.as_ref();
-                let r0: &[u8] = r0.element.as_ref();
+                let l0: &str = &l0.element;
+                let r0: &str = &r0.element;
                 l0.eq_ignore_ascii_case(r0)
             }
             _ => core::mem::discriminant(self) == core::mem::discriminant(other),
         }
+    }
+}
+
+impl From<FilterError> for Error {
+    fn from(err: FilterError) -> Self {
+        Error::Filter(err)
+    }
+}
+
+impl Error {
+    pub fn invalid_filter(namespace: Namespace) -> Self {
+        Error::Filter(FilterError::Invalid(namespace))
     }
 }
 
@@ -205,6 +230,12 @@ impl Display for Error {
                 }
                 Ok(())
             }
+            Error::Filter(FilterError::Invalid(_)) => write!(f, "Invalid filter"),
+            Error::Filter(FilterError::UnsupportedCollation(_, collation)) => {
+                write!(f, "Unsupported collation: {collation}")
+            }
+            Error::Filter(FilterError::TooComplex(_)) => write!(f, "Filter is too complex"),
+            Error::Value(err) => write!(f, "Invalid property value: {err}"),
         }
     }
 }

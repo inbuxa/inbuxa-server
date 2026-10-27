@@ -16,23 +16,29 @@ use calcard::{
 };
 use types::{
     TimeRange,
-    dead_property::{DeadElementTag, DeadProperty},
+    metadata::{EncodedDavValue, XmlName, XmlValue},
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-#[cfg_attr(test, derive(serde::Serialize, serde::Deserialize))]
-#[cfg_attr(test, serde(tag = "type", content = "data"))]
+#[cfg_attr(
+    all(test, stalwart_tests),
+    derive(serde::Serialize, serde::Deserialize)
+)]
+#[cfg_attr(all(test, stalwart_tests), serde(tag = "type", content = "data"))]
 pub enum DavProperty {
     WebDav(WebDavProperty),
     CardDav(CardDavProperty),
     CalDav(CalDavProperty),
     Principal(PrincipalProperty),
-    DeadProperty(DeadElementTag),
+    Dead(XmlName<'static>),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-#[cfg_attr(test, derive(serde::Serialize, serde::Deserialize))]
-#[cfg_attr(test, serde(tag = "type", content = "data"))]
+#[cfg_attr(
+    all(test, stalwart_tests),
+    derive(serde::Serialize, serde::Deserialize)
+)]
+#[cfg_attr(all(test, stalwart_tests), serde(tag = "type", content = "data"))]
 pub enum WebDavProperty {
     CreationDate,
     DisplayName,
@@ -65,8 +71,11 @@ pub enum WebDavProperty {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-#[cfg_attr(test, derive(serde::Serialize, serde::Deserialize))]
-#[cfg_attr(test, serde(tag = "type", content = "data"))]
+#[cfg_attr(
+    all(test, stalwart_tests),
+    derive(serde::Serialize, serde::Deserialize)
+)]
+#[cfg_attr(all(test, stalwart_tests), serde(tag = "type", content = "data"))]
 pub enum CardDavProperty {
     AddressbookDescription,
     SupportedAddressData,
@@ -74,13 +83,16 @@ pub enum CardDavProperty {
     MaxResourceSize,
     AddressData {
         properties: Vec<CardDavPropertyName>,
-        #[cfg_attr(test, serde(skip))]
+        #[cfg_attr(all(test, stalwart_tests), serde(skip))]
         version: Option<VCardVersion>,
     },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-#[cfg_attr(test, derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(
+    all(test, stalwart_tests),
+    derive(serde::Serialize, serde::Deserialize)
+)]
 pub struct CardDavPropertyName {
     pub group: Option<String>,
     pub name: VCardProperty,
@@ -88,8 +100,11 @@ pub struct CardDavPropertyName {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-#[cfg_attr(test, derive(serde::Serialize, serde::Deserialize))]
-#[cfg_attr(test, serde(tag = "type", content = "data"))]
+#[cfg_attr(
+    all(test, stalwart_tests),
+    derive(serde::Serialize, serde::Deserialize)
+)]
+#[cfg_attr(all(test, stalwart_tests), serde(tag = "type", content = "data"))]
 pub enum CalDavProperty {
     CalendarDescription,
     CalendarTimezone,
@@ -110,8 +125,11 @@ pub enum CalDavProperty {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-#[cfg_attr(test, derive(serde::Serialize, serde::Deserialize))]
-#[cfg_attr(test, serde(tag = "type", content = "data"))]
+#[cfg_attr(
+    all(test, stalwart_tests),
+    derive(serde::Serialize, serde::Deserialize)
+)]
+#[cfg_attr(all(test, stalwart_tests), serde(tag = "type", content = "data"))]
 pub enum PrincipalProperty {
     AlternateURISet,
     PrincipalURL,
@@ -127,7 +145,10 @@ pub enum PrincipalProperty {
 }
 
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
-#[cfg_attr(test, derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(
+    all(test, stalwart_tests),
+    derive(serde::Serialize, serde::Deserialize)
+)]
 pub struct CalendarData {
     pub properties: Vec<CalDavPropertyName>,
     pub expand: Option<TimeRange>,
@@ -136,7 +157,10 @@ pub struct CalendarData {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-#[cfg_attr(test, derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(
+    all(test, stalwart_tests),
+    derive(serde::Serialize, serde::Deserialize)
+)]
 pub struct CalDavPropertyName {
     pub component: Option<ICalendarComponentType>,
     pub name: Option<ICalendarProperty>,
@@ -144,12 +168,18 @@ pub struct CalDavPropertyName {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-#[cfg_attr(test, derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(
+    all(test, stalwart_tests),
+    derive(serde::Serialize, serde::Deserialize)
+)]
 #[repr(transparent)]
 pub struct Rfc1123DateTime(pub(crate) i64);
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-#[cfg_attr(test, derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(
+    all(test, stalwart_tests),
+    derive(serde::Serialize, serde::Deserialize)
+)]
 pub enum DavValue {
     Timestamp(i64),
     Rfc1123Date(Rfc1123DateTime),
@@ -170,14 +200,21 @@ pub enum DavValue {
     Acl(List<Ace>),
     AclRestrictions(AclRestrictions),
     Response(Box<Response>),
-    DeadProperty(DeadProperty),
+    Dead(Box<XmlValue<'static>>),
+    #[cfg_attr(all(test, stalwart_tests), serde(skip))]
+    DeadEncoded(EncodedDavValue),
     SupportedAddressData,
     SupportedCalendarData,
+    Opaque,
+    Transparent,
     Null,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-#[cfg_attr(test, derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(
+    all(test, stalwart_tests),
+    derive(serde::Serialize, serde::Deserialize)
+)]
 pub enum ReportSet {
     SyncCollection,
     ExpandProperty,
@@ -193,18 +230,27 @@ pub enum ReportSet {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-#[cfg_attr(test, derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(
+    all(test, stalwart_tests),
+    derive(serde::Serialize, serde::Deserialize)
+)]
 pub struct Comp(pub ICalendarComponentType);
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-#[cfg_attr(test, derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(
+    all(test, stalwart_tests),
+    derive(serde::Serialize, serde::Deserialize)
+)]
 pub struct SupportedCollation {
     pub collation: Collation,
     pub namespace: Namespace,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-#[cfg_attr(test, derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(
+    all(test, stalwart_tests),
+    derive(serde::Serialize, serde::Deserialize)
+)]
 pub enum ResourceType {
     Collection,
     Principal,
@@ -215,48 +261,70 @@ pub enum ResourceType {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-#[cfg_attr(test, derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(
+    all(test, stalwart_tests),
+    derive(serde::Serialize, serde::Deserialize)
+)]
 pub struct LockDiscovery(pub List<ActiveLock>);
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-#[cfg_attr(test, derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(
+    all(test, stalwart_tests),
+    derive(serde::Serialize, serde::Deserialize)
+)]
 pub struct ActiveLock {
     pub lock_scope: LockScope,
     pub lock_type: LockType,
     pub depth: Depth,
-    pub owner: Option<DeadProperty>,
+    #[cfg_attr(all(test, stalwart_tests), serde(skip))]
+    pub owner: Option<EncodedDavValue>,
     pub timeout: Timeout,
     pub lock_token: Option<Href>,
     pub lock_root: Href,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-#[cfg_attr(test, derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(
+    all(test, stalwart_tests),
+    derive(serde::Serialize, serde::Deserialize)
+)]
 pub struct SupportedLock(pub List<LockEntry>);
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-#[cfg_attr(test, derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(
+    all(test, stalwart_tests),
+    derive(serde::Serialize, serde::Deserialize)
+)]
 pub struct LockEntry {
     pub lock_scope: LockScope,
     pub lock_type: LockType,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-#[cfg_attr(test, derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(
+    all(test, stalwart_tests),
+    derive(serde::Serialize, serde::Deserialize)
+)]
 pub enum LockType {
     Write,
     Other,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-#[cfg_attr(test, derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(
+    all(test, stalwart_tests),
+    derive(serde::Serialize, serde::Deserialize)
+)]
 pub enum LockScope {
     Exclusive,
     Shared,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
-#[cfg_attr(test, derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(
+    all(test, stalwart_tests),
+    derive(serde::Serialize, serde::Deserialize)
+)]
 pub enum Privilege {
     Read,
     Write,
@@ -392,7 +460,7 @@ impl DavProperty {
                 | DavProperty::WebDav(WebDavProperty::GetContentLanguage)
                 | DavProperty::WebDav(WebDavProperty::GetContentLength)
                 | DavProperty::WebDav(WebDavProperty::GetContentType)
-                | DavProperty::DeadProperty(_)
+                | DavProperty::Dead(_)
         )
     }
 }

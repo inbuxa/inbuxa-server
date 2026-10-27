@@ -12,17 +12,22 @@ use crate::{
     write::SearchIndex,
 };
 use mysql_async::Pool;
-use std::fmt::Display;
+use std::{fmt::Display, sync::Arc};
+
+use self::sql::SqlStatements;
 
 pub mod blob;
 pub mod lookup;
 pub mod main;
+mod pooled;
 pub mod read;
 pub mod search;
+pub mod sql;
 pub mod write;
 
 pub struct MysqlStore {
     pub(crate) conn_pool: Pool,
+    pub(crate) sql: Arc<SqlStatements>,
 }
 
 #[inline(always)]
@@ -30,15 +35,19 @@ fn into_error(err: impl Display) -> trc::Error {
     trc::StoreEvent::MysqlError.reason(err)
 }
 
+const ER_DUP_ENTRY: u16 = 1062;
 const ER_UNKNOWN_ERROR: u16 = 1105;
 const ER_TRANS_CACHE_FULL: u16 = 1197;
 const ER_LOCK_WAIT_TIMEOUT: u16 = 1205;
+const ER_LOCK_DEADLOCK: u16 = 1213;
 const ER_LOCK_TABLE_FULL: u16 = 1206;
 const ER_STATEMENT_TIMEOUT: u16 = 1969;
 const ER_QUERY_TIMEOUT: u16 = 3024;
 
 pub(crate) const DELETE_CHUNK_SIZE: usize = 1000;
 pub(crate) const MIN_DELETE_CHUNK_SIZE: usize = 10;
+pub(crate) const ITERATE_CHUNK_SIZE: usize = 1000;
+pub(crate) const MIN_ITERATE_CHUNK_SIZE: usize = 10;
 
 #[inline(always)]
 pub(crate) fn is_timeout_error(err: &mysql_async::Error) -> bool {
@@ -89,19 +98,12 @@ impl MysqlSearchField for EmailSearchField {
             EmailSearchField::Subject => "subj",
             EmailSearchField::Body => "body",
             EmailSearchField::Attachment => "atta",
-            EmailSearchField::ReceivedAt => "rcvd",
-            EmailSearchField::SentAt => "sent",
-            EmailSearchField::Size => "size",
-            EmailSearchField::HasAttachment => "hatt",
             EmailSearchField::Headers => "hdrs",
         }
     }
 
     fn column_type(&self) -> &'static str {
         match self {
-            EmailSearchField::ReceivedAt | EmailSearchField::SentAt => "BIGINT",
-            EmailSearchField::Size => "INT",
-            EmailSearchField::HasAttachment => "BOOLEAN",
             EmailSearchField::Headers => "JSON",
             EmailSearchField::From => "TEXT",
             EmailSearchField::To => "TEXT",
@@ -122,16 +124,11 @@ impl MysqlSearchField for CalendarSearchField {
             CalendarSearchField::Location => "locn",
             CalendarSearchField::Owner => "ownr",
             CalendarSearchField::Attendee => "atnd",
-            CalendarSearchField::Start => "strt",
-            CalendarSearchField::Uid => "uid",
         }
     }
 
     fn column_type(&self) -> &'static str {
-        match self {
-            CalendarSearchField::Start => "BIGINT NOT NULL",
-            _ => "TEXT",
-        }
+        "TEXT"
     }
 }
 
@@ -148,13 +145,12 @@ impl MysqlSearchField for ContactSearchField {
             ContactSearchField::Address => "addr",
             ContactSearchField::Note => "note",
             ContactSearchField::Kind => "kind",
-            ContactSearchField::Uid => "uid",
         }
     }
 
     fn column_type(&self) -> &'static str {
         match self {
-            ContactSearchField::Kind | ContactSearchField::Uid => "TEXT",
+            ContactSearchField::Kind => "TEXT",
             _ => "TEXT",
         }
     }
@@ -163,14 +159,12 @@ impl MysqlSearchField for ContactSearchField {
 impl MysqlSearchField for FileSearchField {
     fn column(&self) -> &'static str {
         match self {
-            FileSearchField::Name => "name",
             FileSearchField::Content => "body",
         }
     }
 
     fn column_type(&self) -> &'static str {
         match self {
-            FileSearchField::Name => "TEXT",
             FileSearchField::Content => "MEDIUMTEXT",
         }
     }

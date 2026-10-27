@@ -6,7 +6,8 @@
 
 use crate::blob::UploadResponse;
 use calcard::jscalendar::JSCalendarDateTime;
-use common::ipc::{CalendarAlert, PushNotification};
+use common::ipc::{CalendarAlert, PushNotification, ViewerStateChange};
+use common::network::memory::MEMORY_RETRY_AFTER;
 use http_proto::{HttpResponse, JsonResponse, ToHttpResponse};
 use hyper::StatusCode;
 use jmap_proto::{
@@ -15,12 +16,17 @@ use jmap_proto::{
     response::{Response, status::PushObject},
     types::state::State,
 };
+use store::write::unavailable_retry_after;
 use types::{id::Id, type_state::DataType};
 use utils::map::vec_map::VecMap;
 
 pub mod acl;
 pub mod auth;
+pub mod budget;
 pub mod event_source;
+pub mod metadata;
+pub mod parent_ref;
+pub mod pending_creates;
 pub mod query;
 pub mod request;
 pub mod session;
@@ -37,7 +43,20 @@ pub trait ToJmapHttpResponse {
 
 impl ToJmapHttpResponse for Response<'_> {
     fn into_http_response(self) -> HttpResponse {
-        JsonResponse::new(self).into_http_response()
+        match self.to_json() {
+            Ok(body) => HttpResponse::new(StatusCode::OK)
+                .with_content_type("application/json; charset=utf-8")
+                .with_text_body(body),
+            Err(err) => {
+                trc::error!(
+                    trc::ResourceEvent::Error
+                        .into_err()
+                        .details("Failed to serialize JMAP response")
+                        .reason(err)
+                );
+                RequestError::internal_server_error().into_http_response()
+            }
+        }
     }
 }
 
@@ -120,7 +139,9 @@ impl ToRequestError for trc::Error {
                             .with_rate_limit(policy)
                     }
                     trc::LimitEvent::Quota => RequestError::over_quota(),
-                    trc::LimitEvent::TenantQuota => RequestError::tenant_over_quota(),
+                    trc::LimitEvent::MemoryBudget => {
+                        RequestError::unavailable().with_retry_after(MEMORY_RETRY_AFTER)
+                    }
                     trc::LimitEvent::BlobQuota => {
                         let mut err = RequestError::over_blob_quota(
                             total.unwrap_or(0) as usize,
@@ -190,6 +211,9 @@ impl ToRequestError for trc::Error {
                     RequestError::internal_server_error()
                 }
             },
+            trc::EventType::Store(_) if let Some(retry_after) = unavailable_retry_after(self) => {
+                RequestError::unavailable().with_retry_after(retry_after)
+            }
             trc::EventType::Resource(cause) => match cause {
                 trc::ResourceEvent::NotFound => RequestError::not_found(),
                 trc::ResourceEvent::BadParameters => RequestError::blank(
@@ -216,7 +240,11 @@ pub(crate) fn notifications_into_push_objects(
     let mut objects = Vec::with_capacity(notifications.len());
     for notification in notifications {
         match notification {
-            PushNotification::StateChange(state_change) => {
+            PushNotification::StateChange(state_change)
+            | PushNotification::ViewerStateChange(ViewerStateChange {
+                change: state_change,
+                ..
+            }) => {
                 for type_state in state_change.types {
                     changed
                         .get_mut_or_insert(state_change.account_id.into())
@@ -246,7 +274,7 @@ pub(crate) fn notifications_into_push_objects(
 impl IntoPushObject for CalendarAlert {
     fn into_push_object(self) -> PushObject {
         PushObject::CalendarAlert {
-            account_id: self.account_id.into(),
+            account_id: self.event_account_id.into(),
             calendar_event_id: self.event_id.into(),
             uid: self.uid,
             recurrence_id: self

@@ -36,6 +36,7 @@ pub fn xml_pretty_print(xml_string: &str) -> String {
 #[derive(Debug, Default, PartialEq, Eq)]
 pub struct RequestHeaders<'x> {
     pub uri: &'x str,
+    pub raw_uri: &'x str,
     pub depth: Depth,
     pub timeout: Timeout,
     pub content_type: Option<&'x str>,
@@ -87,8 +88,11 @@ pub enum Condition<'x> {
 }
 
 #[derive(Debug, Default, PartialEq, Eq, Clone, Copy)]
-#[cfg_attr(test, derive(serde::Serialize, serde::Deserialize))]
-#[cfg_attr(test, serde(tag = "type", content = "data"))]
+#[cfg_attr(
+    all(test, stalwart_tests),
+    derive(serde::Serialize, serde::Deserialize)
+)]
+#[cfg_attr(all(test, stalwart_tests), serde(tag = "type", content = "data"))]
 pub enum Timeout {
     Infinite,
     Second(u64),
@@ -97,7 +101,10 @@ pub enum Timeout {
 }
 
 #[derive(Debug, Default, PartialEq, Eq, Clone, Copy)]
-#[cfg_attr(test, derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(
+    all(test, stalwart_tests),
+    derive(serde::Serialize, serde::Deserialize)
+)]
 pub enum Depth {
     Zero,
     One,

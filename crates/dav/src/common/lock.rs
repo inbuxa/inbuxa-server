@@ -4,28 +4,30 @@
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
  */
 
-use super::ETag;
-use super::uri::{DavUriResource, OwnedUri, UriResource, Urn};
+use super::quoted_etag;
+use super::uri::{DavUriResource, OwnedUri, SyncToken, UriResource, Urn, canonical_dav_uri};
+use crate::file::is_symlink;
 use crate::{DavError, DavErrorCondition, DavMethod};
 use common::KV_LOCK_DAV;
-use common::{Server, auth::AccessToken};
+use common::{GroupwareResources, Server, auth::AccessToken};
 use dav_proto::schema::property::{ActiveLock, LockScope, WebDavProperty};
 use dav_proto::schema::request::DavPropertyValue;
 use dav_proto::schema::response::{BaseCondition, List, PropResponse};
 use dav_proto::{Condition, Depth, Timeout};
 use dav_proto::{RequestHeaders, schema::request::LockInfo};
-use groupware::cache::GroupwareCache;
+use groupware::{cache::GroupwareCache, calendar::privacy::EventPrivacy};
 use http_proto::HttpResponse;
 use hyper::StatusCode;
-use std::collections::HashMap;
-use store::ValueKey;
+use std::borrow::Cow;
+use std::sync::Arc;
 use store::dispatch::lookup::KeyValue;
 use store::write::serialize::rkyv_deserialize;
-use store::write::{AlignedBytes, Archive, Archiver, now};
+use store::write::{Archive, ArchiveBytes, ArchiveCompression, Archiver, Compression, now};
 use store::{Serialize, U32_LEN};
 use trc::AddContext;
-use types::collection::Collection;
-use types::dead_property::DeadProperty;
+use types::collection::{Collection, SyncCollection};
+use types::metadata::{DavValueView, EncodedDavValue, XmlValue};
+use utils::map::vec_map::VecMap;
 
 #[derive(Debug, Default, Clone)]
 pub struct ResourceState<'x> {
@@ -40,7 +42,11 @@ pub struct ResourceState<'x> {
 
 #[derive(Debug, Default, Clone, rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)]
 pub(crate) struct LockData {
-    locks: HashMap<String, LockItems>,
+    locks: VecMap<String, LockItems>,
+}
+
+impl ArchiveCompression for LockData {
+    const COMPRESSION: Compression = Compression::None;
 }
 
 #[derive(Debug, Default, Clone, rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)]
@@ -54,7 +60,7 @@ pub(crate) struct LockItem {
     expires: u64,
     depth_infinity: bool,
     exclusive: bool,
-    owner_dav: Option<DeadProperty>,
+    owner_dav: Option<Box<[u8]>>,
 }
 
 struct LockCache<'x> {
@@ -65,7 +71,8 @@ struct LockCache<'x> {
 
 enum LockArchive<'x> {
     Unarchived(&'x ArchivedLockData),
-    Archived(Archive<AlignedBytes>),
+    Archived(Archive<ArchiveBytes>),
+    Absent,
 }
 
 #[derive(Default)]
@@ -117,14 +124,6 @@ impl LockRequestHandler for Server {
             return Err(DavError::Code(StatusCode::FORBIDDEN));
         }
 
-        let resources = vec![ResourceState {
-            account_id,
-            collection: resource.collection,
-            path: resource_path,
-            ..Default::default()
-        }];
-
-        let mut base_path = None;
         let is_lock_request = !matches!(lock_info, LockRequest::Unlock);
         let if_lock_token = headers
             .if_
@@ -138,9 +137,40 @@ impl LockRequestHandler for Server {
                 }
             })
             .unwrap_or_default();
+        let is_file = resource.collection == Collection::FileNode;
+        let is_new_lock = is_lock_request && if_lock_token == 0;
+        let lock_status = if is_file || is_new_lock {
+            match self
+                .fetch_groupware_resources(
+                    access_token.account_id(),
+                    account_id,
+                    SyncCollection::from(resource.collection),
+                )
+                .await
+                .caused_by(trc::location!())?
+                .by_path(resource_path)
+            {
+                Some(existing) if is_file && is_symlink(&existing) => {
+                    return Err(DavError::Code(StatusCode::NOT_FOUND));
+                }
+                None if is_new_lock => StatusCode::CREATED,
+                _ => StatusCode::OK,
+            }
+        } else {
+            StatusCode::OK
+        };
+
+        let resources = vec![ResourceState {
+            account_id,
+            collection: resource.collection,
+            path: resource_path,
+            ..Default::default()
+        }];
+
+        let mut base_path = None;
         let mut lock_data = if let Some(lock_data) = self
             .in_memory_store()
-            .key_get::<Archive<AlignedBytes>>(resource_hash.as_slice())
+            .key_get::<Archive<ArchiveBytes>>(resource_hash.as_slice())
             .await
             .caused_by(trc::location!())?
         {
@@ -152,7 +182,7 @@ impl LockRequestHandler for Server {
                 access_token,
                 headers,
                 resources,
-                LockCaches::new_shared(account_id, resource.collection, lock_data),
+                LockCaches::new_shared(account_id, resource.collection, Some(lock_data)),
                 if is_lock_request {
                     DavMethod::LOCK
                 } else {
@@ -188,11 +218,10 @@ impl LockRequestHandler for Server {
                 }
 
                 // Validate lock_info
-                if lock_info.owner.as_ref().is_some_and(|o| {
-                    o.size() > self.core.groupware.dead_property_size.unwrap_or(512)
-                }) {
-                    return Err(DavError::Code(StatusCode::PAYLOAD_TOO_LARGE));
-                }
+                check_owner_size(
+                    lock_info.owner.as_ref(),
+                    self.core.metadata.limits().max_entry_size,
+                )?;
 
                 if self.core.groupware.max_locks_per_user > 0
                     && lock_data
@@ -217,7 +246,7 @@ impl LockRequestHandler for Server {
                 access_token,
                 headers,
                 resources,
-                Default::default(),
+                LockCaches::new_shared(account_id, resource.collection, None),
                 DavMethod::LOCK,
             )
             .await?;
@@ -252,10 +281,7 @@ impl LockRequestHandler for Server {
                     return Err(DavError::Code(StatusCode::PRECONDITION_FAILED));
                 }
             } else {
-                let locks = lock_data
-                    .locks
-                    .entry(resource_path.to_string())
-                    .or_insert_with(Default::default);
+                let locks = lock_data.locks.get_mut_or_insert(resource_path.to_string());
                 locks.0.push(LockItem::default());
                 locks.0.last_mut().unwrap()
             };
@@ -263,35 +289,36 @@ impl LockRequestHandler for Server {
             lock_item.expires = expires;
             if let LockRequest::Lock(lock_info) = lock_info {
                 // Validate lock_info
-                if lock_info.owner.as_ref().is_some_and(|o| {
-                    o.size() > self.core.groupware.dead_property_size.unwrap_or(512)
-                }) {
-                    return Err(DavError::Code(StatusCode::PAYLOAD_TOO_LARGE));
-                }
+                check_owner_size(
+                    lock_info.owner.as_ref(),
+                    self.core.metadata.limits().max_entry_size,
+                )?;
 
                 lock_item.lock_id = store::rand::random::<u64>() ^ expires;
                 lock_item.owner = access_token.account_id();
                 lock_item.depth_infinity = matches!(headers.depth, Depth::Infinity);
-                lock_item.owner_dav = lock_info.owner;
+                lock_item.owner_dav = lock_info
+                    .owner
+                    .as_ref()
+                    .map(XmlValue::encode)
+                    .transpose()
+                    .map_err(|_| DavError::Code(StatusCode::BAD_REQUEST))?
+                    .map(Vec::into_boxed_slice);
                 lock_item.exclusive = matches!(lock_info.lock_scope, LockScope::Exclusive);
             }
 
             let base_path = base_path.get_or_insert_with(|| headers.base_uri().unwrap_or_default());
             let active_lock = lock_item.to_active_lock(format!("{base_path}/{resource_path}"));
 
-            HttpResponse::new(if if_lock_token == 0 {
-                StatusCode::CREATED
-            } else {
-                StatusCode::OK
-            })
-            .with_lock_token(&active_lock.lock_token.as_ref().unwrap().0)
-            .with_xml_body(
-                PropResponse::new(vec![DavPropertyValue::new(
-                    WebDavProperty::LockDiscovery,
-                    vec![active_lock],
-                )])
-                .to_string(),
-            )
+            HttpResponse::new(lock_status)
+                .with_lock_token(&active_lock.lock_token.as_ref().unwrap().0)
+                .with_xml_body(
+                    PropResponse::new(vec![DavPropertyValue::new(
+                        WebDavProperty::LockDiscovery,
+                        vec![active_lock],
+                    )])
+                    .to_string(),
+                )
         } else {
             let lock_id = headers
                 .lock_token
@@ -322,7 +349,7 @@ impl LockRequestHandler for Server {
                             .serialize()
                             .caused_by(trc::location!())?,
                     )
-                    .expires(max_expire),
+                    .expires(max_expire.saturating_sub(now)),
                 )
                 .await
                 .caused_by(trc::location!())?;
@@ -345,6 +372,11 @@ impl LockRequestHandler for Server {
         method: DavMethod,
     ) -> crate::Result<()> {
         let no_if_headers = headers.if_.is_empty();
+        let if_resources = headers
+            .if_
+            .iter()
+            .map(|if_| if_.resource.map(canonical_if_resource))
+            .collect::<Vec<_>>();
         match method {
             DavMethod::GET | DavMethod::HEAD if no_if_headers => {
                 // Return early for GET/HEAD requests without If headers
@@ -382,32 +414,35 @@ impl LockRequestHandler for Server {
             DavMethod::GET | DavMethod::HEAD | DavMethod::LOCK | DavMethod::UNLOCK
         ) {
             let mut base_path = None;
+            let submitted_tokens = headers
+                .if_
+                .iter()
+                .flat_map(|if_| if_.list.iter())
+                .filter_map(|cond| match cond {
+                    Condition::StateToken { token, .. } => Some(*token),
+                    _ => None,
+                })
+                .collect::<Vec<_>>();
 
-            'outer: for (pos, resource) in resources.iter().enumerate() {
+            for (pos, resource) in resources.iter().enumerate() {
                 if pos == 0 && matches!(method, DavMethod::COPY) {
                     continue;
                 }
 
                 if let Some(idx) = locks.find_cache_pos(self, resource).await? {
-                    let mut failed_locks = Vec::new();
-
-                    for (lock_path, lock_item) in locks.find_locks_by_pos(idx, resource, true)? {
-                        let lock_token = lock_item.urn().to_string();
-                        if headers.if_.iter().any(|if_| {
-                            if_.resource
-                                .is_none_or(|r| {
-                                    r.trim_end_matches('/').ends_with(lock_path)})
-                                && if_.list.iter().any(|cond| matches!(cond, Condition::StateToken { token, .. } if token == &lock_token))
-                        }) {
-                            break 'outer;
-                        } else {
-                            let base_path = base_path.get_or_insert_with(|| {
-                                headers.base_uri()
-                                    .unwrap_or_default()
-                            });
-                            failed_locks.push(format!("{base_path}/{lock_path}").into());
-                        }
-                    }
+                    let failed_locks = locks
+                        .find_locks_by_pos(idx, resource, true)?
+                        .into_iter()
+                        .filter(|(_, lock_item)| {
+                            let lock_token = lock_item.urn().to_string();
+                            !submitted_tokens.contains(&lock_token.as_str())
+                        })
+                        .map(|(lock_path, _)| {
+                            let base_path = base_path
+                                .get_or_insert_with(|| headers.base_uri().unwrap_or_default());
+                            format!("{base_path}/{lock_path}").into()
+                        })
+                        .collect::<Vec<_>>();
 
                     if !failed_locks.is_empty() {
                         lock_response = Err(DavErrorCondition::new(
@@ -432,15 +467,16 @@ impl LockRequestHandler for Server {
             path: "",
             ..Default::default()
         };
+        let mut cached_resources: Option<(u32, SyncCollection, Arc<GroupwareResources>)> = None;
 
-        'outer: for if_ in &headers.if_ {
+        'outer: for (if_, if_resource) in headers.if_.iter().zip(&if_resources) {
             if if_.list.is_empty() {
                 continue;
             }
 
             let mut resource_state = &mut resource_not_found;
 
-            if let Some(resource) = if_.resource {
+            if let Some(resource) = if_resource.as_deref() {
                 if let Some(resource) = self
                     .validate_uri(access_token, resource)
                     .await
@@ -523,17 +559,38 @@ impl LockRequestHandler for Server {
 
                     if let Some(document_id) =
                         resource_state.document_id.filter(|&id| id != u32::MAX)
-                        && let Some(archive) = self
-                            .store()
-                            .get_value::<Archive<AlignedBytes>>(ValueKey::archive(
-                                resource_state.account_id,
-                                resource_state.collection,
-                                document_id,
-                            ))
-                            .await
-                            .caused_by(trc::location!())?
                     {
-                        resource_state.etag = archive.etag().into();
+                        let resources = groupware_resources_cached(
+                            self,
+                            access_token,
+                            resource_state.account_id,
+                            resource_state.collection,
+                            &mut cached_resources,
+                        )
+                        .await?;
+
+                        let resource = match resource_state.collection {
+                            Collection::Calendar | Collection::AddressBook => {
+                                resources.container_resource_by_id(document_id)
+                            }
+                            Collection::CalendarEvent
+                            | Collection::ContactCard
+                            | Collection::CalendarEventNotification => {
+                                resources.item_by_id(document_id)
+                            }
+                            _ => resources.resources.find_any(document_id),
+                        };
+
+                        let is_owner = access_token.is_member(resource_state.account_id);
+                        if let Some(resource) = resource.filter(|resource| {
+                            is_owner
+                                || EventPrivacy::from_flags(
+                                    resource.event_flags().unwrap_or_default(),
+                                )
+                                .is_public()
+                        }) {
+                            resource_state.etag = quoted_etag(resource.etag().into()).into();
+                        }
                     }
                 }
 
@@ -552,16 +609,16 @@ impl LockRequestHandler for Server {
 
                 // Fetch sync token
                 if needs_sync_token && resource_state.sync_token.is_none() {
-                    let id = self
-                        .fetch_dav_resources(
-                            access_token.account_id(),
-                            resource_state.account_id,
-                            resource_state.collection.into(),
-                        )
-                        .await
-                        .caused_by(trc::location!())?
-                        .highest_change_id;
-                    resource_state.sync_token = Some(Urn::Sync { id, seq: 0 }.to_string());
+                    let id = groupware_resources_cached(
+                        self,
+                        access_token,
+                        resource_state.account_id,
+                        resource_state.collection,
+                        &mut cached_resources,
+                    )
+                    .await?
+                    .highest_change_id;
+                    resource_state.sync_token = Some(Urn::Sync(SyncToken::State(id)).to_string());
                 }
             }
 
@@ -619,28 +676,38 @@ impl LockRequestHandler for Server {
 
 impl LockData {
     pub fn remove_lock(&mut self, lock_id: u64) -> bool {
-        for (lock_path, lock_items) in self.locks.iter_mut() {
-            for (idx, lock_item) in lock_items.0.iter().enumerate() {
-                if lock_item.lock_id == lock_id {
-                    lock_items.0.swap_remove(idx);
-                    if lock_items.0.is_empty() {
-                        let lock_path = lock_path.clone();
-                        self.locks.remove(&lock_path);
-                    }
-                    return true;
-                }
-            }
+        let Some((pos, idx)) = self
+            .locks
+            .inner
+            .iter()
+            .enumerate()
+            .find_map(|(pos, entry)| {
+                entry
+                    .value
+                    .0
+                    .iter()
+                    .position(|lock_item| lock_item.lock_id == lock_id)
+                    .map(|idx| (pos, idx))
+            })
+        else {
+            return false;
+        };
+
+        let lock_items = &mut self.locks.inner[pos].value;
+        lock_items.0.swap_remove(idx);
+        if lock_items.0.is_empty() {
+            self.locks.swap_remove(pos);
         }
 
-        false
+        true
     }
 
     pub fn remove_expired(&mut self) -> u64 {
         let mut max_expire = 0;
         let now = now();
 
-        self.locks.retain(|_, locks| {
-            locks.0.retain(|lock| {
+        self.locks.inner.retain_mut(|entry| {
+            entry.value.0.retain(|lock| {
                 if lock.expires > now {
                     max_expire = std::cmp::max(max_expire, lock.expires);
                     true
@@ -649,7 +716,7 @@ impl LockData {
                 }
             });
 
-            !locks.0.is_empty()
+            !entry.value.0.is_empty()
         });
 
         max_expire
@@ -657,13 +724,23 @@ impl LockData {
 }
 
 impl<'x> LockArchive<'x> {
-    fn unarchive(&'x self) -> trc::Result<&'x ArchivedLockData> {
+    fn new(lock_data: Option<&'x ArchivedLockData>) -> Self {
+        lock_data.map_or(LockArchive::Absent, LockArchive::Unarchived)
+    }
+
+    fn unarchive(&'x self) -> trc::Result<Option<&'x ArchivedLockData>> {
         match self {
-            LockArchive::Unarchived(archived_lock_data) => Ok(archived_lock_data),
-            LockArchive::Archived(archive) => {
-                archive.unarchive::<LockData>().caused_by(trc::location!())
-            }
+            LockArchive::Unarchived(archived_lock_data) => Ok(Some(archived_lock_data)),
+            LockArchive::Archived(archive) => archive
+                .unarchive::<LockData>()
+                .caused_by(trc::location!())
+                .map(Some),
+            LockArchive::Absent => Ok(None),
         }
+    }
+
+    fn is_absent(&self) -> bool {
+        matches!(self, LockArchive::Absent)
     }
 }
 
@@ -671,13 +748,13 @@ impl<'x> LockCaches<'x> {
     pub(self) fn new_shared(
         account_id: u32,
         collection: Collection,
-        lock_data: &'x ArchivedLockData,
+        lock_data: Option<&'x ArchivedLockData>,
     ) -> Self {
         Self {
             caches: vec![LockCache {
                 account_id,
                 collection,
-                lock_archive: LockArchive::Unarchived(lock_data),
+                lock_archive: LockArchive::new(lock_data),
             }],
         }
     }
@@ -690,7 +767,7 @@ impl<'x> LockCaches<'x> {
                 Ok(LockCache {
                     account_id: cache.account_id,
                     collection: cache.collection,
-                    lock_archive: LockArchive::Unarchived(
+                    lock_archive: LockArchive::new(
                         cache.lock_archive.unarchive().caused_by(trc::location!())?,
                     ),
                 })
@@ -713,17 +790,19 @@ impl<'x> LockCaches<'x> {
         server: &Server,
         resource_state: &ResourceState<'_>,
     ) -> trc::Result<Option<usize>> {
-        if let Some(idx) = self.is_cached(resource_state) {
-            Ok(Some(idx))
+        let pos = if let Some(pos) = self.is_cached(resource_state) {
+            pos
         } else if resource_state.collection != Collection::None {
-            if self.insert_lock_data(server, resource_state).await? {
-                Ok(Some(self.caches.len() - 1))
-            } else {
-                Ok(None)
-            }
+            self.insert_lock_data(server, resource_state).await?
         } else {
-            Ok(None)
-        }
+            return Ok(None);
+        };
+
+        Ok(self
+            .caches
+            .get(pos)
+            .filter(|cache| !cache.lock_archive.is_absent())
+            .map(|_| pos))
     }
 
     fn find_locks_by_pos(
@@ -732,34 +811,48 @@ impl<'x> LockCaches<'x> {
         resource_state: &'x ResourceState<'_>,
         include_children: bool,
     ) -> trc::Result<Vec<(&'x str, &'x ArchivedLockItem)>> {
-        self.caches[pos]
+        let Some(cache) = self.caches.get(pos) else {
+            return Ok(Vec::new());
+        };
+
+        Ok(cache
             .lock_archive
-            .unarchive()
+            .unarchive()?
             .map(|l| l.find_locks(resource_state.path, include_children))
+            .unwrap_or_default())
     }
 
     async fn insert_lock_data(
         &mut self,
         server: &Server,
         resource_state: &ResourceState<'_>,
-    ) -> trc::Result<bool> {
-        if let Some(lock_archive) = server
+    ) -> trc::Result<usize> {
+        let lock_archive = server
             .in_memory_store()
-            .key_get::<Archive<AlignedBytes>>(resource_state.lock_key().as_slice())
+            .key_get::<Archive<ArchiveBytes>>(resource_state.lock_key().as_slice())
             .await
             .caused_by(trc::location!())?
-        {
-            self.caches.push(LockCache {
-                account_id: resource_state.account_id,
-                collection: resource_state.collection,
-                lock_archive: LockArchive::Archived(lock_archive),
-            });
+            .map_or(LockArchive::Absent, LockArchive::Archived);
+        self.caches.push(LockCache {
+            account_id: resource_state.account_id,
+            collection: resource_state.collection,
+            lock_archive,
+        });
 
-            Ok(true)
-        } else {
-            Ok(false)
-        }
+        Ok(self.caches.len() - 1)
     }
+}
+
+fn check_owner_size(owner: Option<&XmlValue<'_>>, max_size: usize) -> crate::Result<()> {
+    match owner.map(XmlValue::encoded_len) {
+        Some(Ok(size)) if size > max_size => Err(DavError::Code(StatusCode::PAYLOAD_TOO_LARGE)),
+        Some(Err(_)) => Err(DavError::Code(StatusCode::BAD_REQUEST)),
+        _ => Ok(()),
+    }
+}
+
+fn owner_value(bytes: &[u8]) -> Option<EncodedDavValue> {
+    DavValueView::parse(bytes).map(|owner| owner.to_encoded())
 }
 
 impl LockItem {
@@ -777,13 +870,43 @@ impl LockItem {
         } else {
             Depth::Zero
         })
-        .with_owner_opt(self.owner_dav.clone())
+        .with_owner_opt(self.owner_dav.as_deref().and_then(owner_value))
         .with_timeout(self.expires.saturating_sub(now()))
         .with_lock_token(self.urn().to_string())
     }
 
     pub fn urn(&self) -> Urn {
         Urn::Lock(self.lock_id)
+    }
+}
+
+impl LockData {
+    pub fn active_locks(&self, resource: &str, base_uri: &str) -> Vec<ActiveLock> {
+        let now = now();
+        let mut resource_part = resource;
+        let mut active_locks = Vec::new();
+
+        loop {
+            if let Some(locks) = self.locks.get(resource_part) {
+                active_locks.extend(
+                    locks
+                        .0
+                        .iter()
+                        .filter(|lock| {
+                            lock.expires > now && (resource == resource_part || lock.depth_infinity)
+                        })
+                        .map(|lock| lock.to_active_lock(format!("{base_uri}/{resource_part}"))),
+                );
+            }
+
+            if let Some((resource_part_, _)) = resource_part.rsplit_once('/') {
+                resource_part = resource_part_;
+            } else {
+                break;
+            }
+        }
+
+        active_locks
     }
 }
 
@@ -837,25 +960,6 @@ impl ArchivedLockData {
 }
 
 impl ArchivedLockItem {
-    pub fn to_active_lock(&self, href: String) -> ActiveLock {
-        ActiveLock::new(
-            href,
-            if self.exclusive {
-                LockScope::Exclusive
-            } else {
-                LockScope::Shared
-            },
-        )
-        .with_depth(if self.depth_infinity {
-            Depth::Infinity
-        } else {
-            Depth::Zero
-        })
-        .with_owner_opt(self.owner_dav.as_ref().map(Into::into))
-        .with_timeout(u64::from(self.expires).saturating_sub(now()))
-        .with_lock_token(self.urn().to_string())
-    }
-
     pub fn urn(&self) -> Urn {
         Urn::Lock(self.lock_id.into())
     }
@@ -871,6 +975,35 @@ impl ResourceState<'_> {
     pub fn lock_key(&self) -> Vec<u8> {
         build_lock_key(self.account_id, self.collection.main_collection())
     }
+}
+
+fn canonical_if_resource(uri: &str) -> Cow<'_, str> {
+    canonical_dav_uri(uri).unwrap_or(Cow::Borrowed(uri))
+}
+
+async fn groupware_resources_cached(
+    server: &Server,
+    access_token: &AccessToken,
+    account_id: u32,
+    collection: Collection,
+    cache: &mut Option<(u32, SyncCollection, Arc<GroupwareResources>)>,
+) -> trc::Result<Arc<GroupwareResources>> {
+    let sync_collection = SyncCollection::from(collection);
+
+    if let Some((cached_account_id, cached_collection, resources)) = cache.as_ref()
+        && *cached_account_id == account_id
+        && *cached_collection == sync_collection
+    {
+        return Ok(resources.clone());
+    }
+
+    let resources = server
+        .fetch_groupware_resources(access_token.account_id(), account_id, sync_collection)
+        .await
+        .caused_by(trc::location!())?;
+    *cache = Some((account_id, sync_collection, resources.clone()));
+
+    Ok(resources)
 }
 
 pub(crate) fn build_lock_key(account_id: u32, collection: Collection) -> Vec<u8> {
@@ -890,3 +1023,4 @@ impl PartialEq for ResourceState<'_> {
 }
 
 impl Eq for ResourceState<'_> {}
+

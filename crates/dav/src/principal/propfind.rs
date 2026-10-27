@@ -7,7 +7,10 @@
 use super::CurrentUserPrincipal;
 use crate::{
     DavResourceName,
-    common::propfind::{PropFindRequestHandler, SyncTokenUrn},
+    common::{
+        propfind::{PropFindRequestHandler, SyncTokenUrn},
+        quoted_etag,
+    },
 };
 use common::{
     Server,
@@ -25,6 +28,7 @@ use dav_proto::schema::{
 use groupware::RFC_3986;
 use groupware::cache::GroupwareCache;
 use hyper::StatusCode;
+use registry::schema::enums::Permission;
 use std::borrow::Cow;
 use trc::AddContext;
 use types::collection::Collection;
@@ -118,7 +122,19 @@ impl PrincipalPropFind for Server {
             let mut fields = Vec::with_capacity(properties.len());
             let mut fields_not_found = Vec::new();
 
-            let account = self.account(account_id).await.caused_by(trc::location!())?;
+            let Some(account) = self
+                .try_account(account_id)
+                .await
+                .caused_by(trc::location!())?
+            else {
+                continue;
+            };
+            if !account.is_same_tenant(access_token)
+                && !access_token.is_member(account_id)
+                && !access_token.has_permission(Permission::SysAccountQuery)
+            {
+                continue;
+            }
 
             // Fetch quota
             let quota = if needs_quota {
@@ -179,7 +195,7 @@ impl PrincipalPropFind for Server {
                         }
                         WebDavProperty::SyncToken if !is_principal => {
                             let sync_token = self
-                                .fetch_dav_resources(
+                                .fetch_groupware_resources(
                                     access_token.account_id(),
                                     account_id,
                                     collection.into(),
@@ -192,7 +208,7 @@ impl PrincipalPropFind for Server {
                         }
                         WebDavProperty::GetCTag if !is_principal => {
                             let ctag = self
-                                .fetch_dav_resources(
+                                .fetch_groupware_resources(
                                     access_token.account_id(),
                                     account_id,
                                     collection.into(),
@@ -203,7 +219,7 @@ impl PrincipalPropFind for Server {
 
                             fields.push(DavPropertyValue::new(
                                 property.clone(),
-                                DavValue::String(format!("\"{ctag}\"")),
+                                DavValue::String(quoted_etag(ctag)),
                             ));
                         }
                         WebDavProperty::Owner => {
@@ -379,12 +395,20 @@ impl PrincipalPropFind for Server {
     async fn owner_href(&self, account_info: &AccountCache, account_id: u32) -> trc::Result<Href> {
         if account_info.account_id() == account_id {
             Ok(account_info.current_user_principal())
-        } else {
-            let account_info = self.account(account_id).await.caused_by(trc::location!())?;
+        } else if let Some(account_info) = self
+            .try_account(account_id)
+            .await
+            .caused_by(trc::location!())?
+        {
             Ok(Href(format!(
                 "{}/{}/",
                 DavResourceName::Principal.base_path(),
                 percent_encoding::utf8_percent_encode(account_info.name(), RFC_3986),
+            )))
+        } else {
+            Ok(Href(format!(
+                "{}/_{account_id}/",
+                DavResourceName::Principal.base_path(),
             )))
         }
     }

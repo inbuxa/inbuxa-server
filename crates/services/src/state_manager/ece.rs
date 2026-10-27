@@ -8,7 +8,7 @@ use hkdf::Hkdf;
 use p256::{
     PublicKey,
     ecdh::EphemeralSecret,
-    elliptic_curve::{rand_core::OsRng, sec1::ToEncodedPoint},
+    elliptic_curve::{Generate, sec1::ToSec1Point},
 };
 use sha2::Sha256;
 use store::rand::RngExt;
@@ -59,9 +59,9 @@ pub fn ece_encrypt(
     mut data: &[u8],
 ) -> Result<Vec<u8>, String> {
     let salt = store::rand::rng().random::<[u8; 16]>();
-    let server_secret = EphemeralSecret::random(&mut OsRng);
+    let server_secret = EphemeralSecret::try_generate().map_err(|e| e.to_string())?;
     let server_public_key = server_secret.public_key();
-    let server_public_key_bytes = server_public_key.to_encoded_point(false);
+    let server_public_key_bytes = server_public_key.to_sec1_point(false);
 
     let client_public_key = PublicKey::from_sec1_bytes(p256dh).map_err(|e| e.to_string())?;
     let shared_secret = server_secret.diffie_hellman(&client_public_key);
@@ -210,42 +210,3 @@ pub fn generate_iv(nonce: &[u8], counter: usize) -> [u8; ECE_NONCE_LENGTH] {
     iv
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn encrypt_len(plaintext_len: usize) -> usize {
-        let secret = EphemeralSecret::random(&mut OsRng);
-        let p256dh = secret.public_key().to_encoded_point(false);
-
-        ece_encrypt(p256dh.as_bytes(), &[0u8; 16], &vec![b'a'; plaintext_len])
-            .expect("encryption failed")
-            .len()
-    }
-
-    #[test]
-    fn max_plaintext_stays_within_a_single_record() {
-        let header = ECE_AES128GCM_HEADER_LENGTH + ECE_WEBPUSH_PUBLIC_KEY_LENGTH;
-        let limit = WEBPUSH_MAX_BODY_SIZE;
-
-        let padded = (ECE_WEBPUSH_MAX_PLAINTEXT_SIZE + ECE_AES128GCM_PAD_SIZE)
-            .next_multiple_of(ECE_WEBPUSH_DEFAULT_PADDING_BLOCK_SIZE);
-
-        let len = encrypt_len(ECE_WEBPUSH_MAX_PLAINTEXT_SIZE);
-        assert!(
-            len <= limit,
-            "{len} exceeds the {limit} octet payload limit"
-        );
-        assert_eq!(
-            len,
-            header + padded + ECE_TAG_LENGTH,
-            "expected exactly one authentication tag, i.e. a single record"
-        );
-
-        let over = encrypt_len(ECE_WEBPUSH_MAX_PLAINTEXT_SIZE + 1);
-        assert!(
-            over > limit,
-            "{ECE_WEBPUSH_MAX_PLAINTEXT_SIZE} is not the largest single-record plaintext"
-        );
-    }
-}

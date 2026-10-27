@@ -11,12 +11,15 @@ use crate::registry::{
         account::account_set,
         action::action_set,
         bootstrap::bootstrap_set,
+        cluster::{validate_coordinator, validate_in_memory_store},
         dkim::validate_dkim_signature,
         domain::{validate_dns_server, validate_domain},
+        index_queue::index_queue_status_set,
         map_bootstrap_error,
+        oauth_client::validate_oauth_client_object,
         principal::{
-            AccountUpdate, schedule_account_destruction, validate_account, validate_role,
-            validate_tenant_quota,
+            AccountUpdate, schedule_account_destruction, validate_account, validate_account_access,
+            validate_role,
         },
         public_key::validate_public_key,
         queued_message::queued_message_set,
@@ -24,15 +27,16 @@ use crate::registry::{
         sieve::validate_sieve_script,
         spam_sample::spam_sample_set,
         task::task_set,
-        tls::{validate_acme_provider, validate_certificate},
+        tls::{validate_acme_directory, validate_acme_provider, validate_certificate},
     },
 };
 use common::{
-    Server, auth::AccessToken, cache::invalidate::CacheInvalidationBuilder,
-    expr::if_block::BootstrapExprExt, ipc::CacheInvalidation,
-    manager::application::WebApplicationManager,
+    Server,
+    auth::AccessToken,
+    cache::invalidate::CacheInvalidationBuilder,
+    expr::if_block::BootstrapExprExt,
+    manager::{app_client::validate_url_prefix, application::WebApplicationManager},
 };
-use directory::core::secret::{hash_secret, is_password_hash};
 use http_proto::HttpSessionData;
 use jmap_proto::{
     error::set::{SetError, SetErrorType},
@@ -45,18 +49,14 @@ use jmap_tools::{JsonPointer, JsonPointerItem, Key};
 use registry::{
     jmap::{JmapValue, JsonPointerPatch, MaybeUnpatched, RegistryValue},
     schema::{
-        enums::{Permission, TenantStorageQuota},
-        prelude::{
-            OBJ_FILTER_ACCOUNT, OBJ_FILTER_TENANT, OBJ_SINGLETON, Object, ObjectInner, ObjectType,
-            Property,
-        },
-        structs::{
-            Certificate, DkimSignature, DnsServer, Domain, PublicKey, Role, SieveSystemScript,
-            SieveUserScript, Task,
-        },
+        enums::Permission,
+        prelude::{OBJ_FILTER_ACCOUNT, OBJ_SINGLETON, Object, ObjectInner, ObjectType, Property},
+        structs::{Certificate, DkimSignature, DnsServer, Domain, PublicKey, Role, Task},
     },
     types::id::ObjectId,
 };
+use services::task_manager::reconcile::schedule_replacing;
+use services::task_manager::tasks::rebuild_shares::RevokeAccountGrants;
 use std::borrow::Cow;
 use store::{
     registry::{
@@ -67,7 +67,7 @@ use store::{
 };
 use trc::AddContext;
 use types::id::Id;
-use utils::map::vec_map::VecMap;
+use utils::{map::vec_map::VecMap, outbound::OutboundPolicy};
 
 pub trait RegistrySet: Sync + Send {
     fn registry_set(
@@ -77,6 +77,449 @@ pub trait RegistrySet: Sync + Send {
         access_token: &AccessToken,
         session: &HttpSessionData,
     ) -> impl Future<Output = trc::Result<SetResponse<Registry>>> + Send;
+}
+
+async fn registry_object_set(
+    mut set: RegistrySetResponse<'_>,
+) -> trc::Result<SetResponse<Registry>> {
+    let server = set.server;
+    let access_token = set.access_token;
+    let object_type = set.object_type;
+    let object_flags = object_type.flags();
+    let is_singleton = (object_flags & OBJ_SINGLETON) != 0;
+    let has_account_id = (object_flags & OBJ_FILTER_ACCOUNT) != 0;
+    let can_set_account = access_token.has_permission(Permission::Impersonate);
+    let is_account_filtered = set.is_account_filtered;
+    // Bundle modifications together
+    let mut modifications = Vec::with_capacity(set.create.len() + set.update.len());
+    for (id, value) in set.create.drain() {
+        if is_singleton
+            && let Some(object) = server
+                .registry()
+                .get(ObjectId::new(object_type, Id::singleton()))
+                .await
+                .caused_by(trc::location!())?
+        {
+            modifications.push((
+                Modification::Create {
+                    client_id: id,
+                    object: Some(object),
+                },
+                value,
+                Object::from(set.object_type),
+            ));
+        } else {
+            modifications.push((
+                Modification::Create {
+                    client_id: id,
+                    object: None,
+                },
+                value,
+                Object::from(set.object_type),
+            ));
+        }
+    }
+    for (id, value) in set.update.drain(..) {
+        if let Some(object) = server
+            .registry()
+            .get(ObjectId::new(object_type, id))
+            .await
+            .caused_by(trc::location!())?
+        {
+            #[cfg(not(feature = "enterprise"))]
+            let is_tenant_mismatch = false;
+            if is_tenant_mismatch
+                || (is_account_filtered
+                    && object.inner.account_id() != Some(Id::from(set.account_id)))
+            {
+                set.response.not_updated.append(id, SetError::not_found());
+                continue;
+            }
+
+            modifications.push((
+                Modification::Update {
+                    id,
+                    object: object.clone(),
+                },
+                value,
+                object,
+            ));
+        } else if is_singleton {
+            modifications.push((
+                Modification::Update {
+                    id,
+                    object: Object::from(set.object_type),
+                },
+                value,
+                Object::from(set.object_type),
+            ));
+        } else {
+            set.response.not_updated.append(id, SetError::not_found());
+        }
+    }
+
+    // Process modifications
+    let mut cache_invalidator = CacheInvalidationBuilder::default();
+    'outer: for (modification, mut value, mut new_object) in modifications {
+        // Initial validations
+        let is_create = matches!(modification, Modification::Create { .. });
+        let mut unpatched_properties = VecMap::new();
+
+        if let Err(err) = set.response.resolve_self_references(&mut value, 0, true) {
+            set.failed(modification, err);
+            continue 'outer;
+        };
+
+        if is_create
+            || value
+                .as_object()
+                .unwrap()
+                .get(&Key::Property(Property::Type))
+                .and_then(|v| v.as_str())
+                .is_some_and(|t| new_object.object_variant().is_some_and(|v| v != t))
+        {
+            // Patch object
+            let ptr = JsonPointer::new(vec![]);
+            let patch = JsonPointerPatch::new(&ptr).with_create(true);
+            match new_object.patch(patch.with_can_set_account(can_set_account), value) {
+                Ok(MaybeUnpatched::Patched) => {}
+                Ok(MaybeUnpatched::Unpatched { property, value }) => {
+                    unpatched_properties.append(property, value);
+                }
+                Ok(MaybeUnpatched::UnpatchedMany { properties }) => {
+                    unpatched_properties = properties;
+                }
+                Err(err) => {
+                    set.failed(modification, err.into());
+                    continue 'outer;
+                }
+            }
+
+            // Add tenantId for tenant filtered objects
+
+            // Add accountId
+            if has_account_id {
+                new_object.inner.set_account_id(set.account_id.into());
+            }
+        } else {
+            for (key, value) in value.into_expanded_object() {
+                let ptr = match key {
+                    Key::Property(Property::Type) => {
+                        continue;
+                    }
+                    Key::Property(prop) => {
+                        JsonPointer::new(vec![JsonPointerItem::Key(Key::Property(prop))])
+                    }
+                    Key::Borrowed(other) => JsonPointer::parse(other),
+                    Key::Owned(other) => JsonPointer::parse(&other),
+                };
+
+                // Patch object
+                let patch = JsonPointerPatch::new(&ptr).with_create(false);
+                match new_object.patch(patch.with_can_set_account(can_set_account), value) {
+                    Ok(MaybeUnpatched::Patched) => {}
+                    Ok(MaybeUnpatched::Unpatched { property, value }) => {
+                        unpatched_properties.append(property, value);
+                    }
+                    Ok(MaybeUnpatched::UnpatchedMany { properties }) => {
+                        if unpatched_properties.is_empty() {
+                            unpatched_properties = properties;
+                        } else {
+                            unpatched_properties.extend(properties);
+                        }
+                    }
+                    Err(err) => {
+                        set.failed(modification, err.into());
+                        continue 'outer;
+                    }
+                }
+            }
+        }
+
+        // Validate objects
+        let mut tasks = Vec::new();
+        #[cfg(not(feature = "enterprise"))]
+        let outbound_policy = OutboundPolicy::Trusted;
+        let result = match &mut new_object.inner {
+            ObjectInner::Account(account) => {
+                validate_account(server, access_token, account, modification.as_account()).await?
+            }
+            ObjectInner::Role(role) => {
+                validate_role(access_token, role, modification.as_role()).await?
+            }
+            ObjectInner::PublicKey(key) => {
+                validate_public_key(&set, key, modification.as_public_key()).await?
+            }
+            ObjectInner::DkimSignature(key) => {
+                validate_dkim_signature(key, modification.as_dkim_signature()).await?
+            }
+            ObjectInner::Domain(domain) => {
+                validate_domain(
+                    &set,
+                    domain,
+                    modification.as_domain(),
+                    outbound_policy,
+                    &mut tasks,
+                )
+                .await?
+            }
+            ObjectInner::DnsServer(dns) => {
+                validate_dns_server(&set, dns, modification.as_dns_server(), outbound_policy)
+                    .await?
+            }
+            ObjectInner::InMemoryStore(store) => validate_in_memory_store(server, store).await?,
+            ObjectInner::Coordinator(coordinator) => {
+                validate_coordinator(server, coordinator).await?
+            }
+            ObjectInner::OAuthClient(client) => {
+                validate_oauth_client_object(server, access_token, client).await?
+            }
+            ObjectInner::Application(app) => app
+                .url_prefix
+                .iter()
+                .find_map(|prefix| validate_url_prefix(prefix).err())
+                .map_or_else(
+                    || Ok(ObjectResponse::default()),
+                    |err| {
+                        Err(SetError::invalid_properties()
+                            .with_property(Property::UrlPrefix)
+                            .with_description(err))
+                    },
+                ),
+            ObjectInner::AcmeProvider(provider) if is_create => {
+                validate_acme_provider(provider, unpatched_properties, outbound_policy).await?
+            }
+            ObjectInner::AcmeProvider(provider) => {
+                validate_acme_directory(provider, outbound_policy)
+                    .map(|_| ObjectResponse::default())
+            }
+            ObjectInner::Certificate(cert) => {
+                validate_certificate(cert, modification.as_certificate()).await?
+            }
+            ObjectInner::SieveUserScript(script) => {
+                validate_sieve_script(
+                    set.server,
+                    &script.contents,
+                    modification.as_sieve_script(),
+                    false,
+                )
+                .await?
+            }
+            ObjectInner::SieveSystemScript(script) => {
+                validate_sieve_script(
+                    set.server,
+                    &script.contents,
+                    modification.as_sieve_script(),
+                    true,
+                )
+                .await?
+            }
+            _ => Ok(ObjectResponse::default()),
+        };
+
+        let mut response = match result {
+            Ok(response) => response,
+            Err(err) => {
+                set.failed(modification, err);
+                continue 'outer;
+            }
+        };
+
+        // Validate expressions
+        if let Some(expressions) = new_object.inner.expression_ctxs() {
+            let mut bp = Bootstrap::new_uninitialized(server.registry().clone());
+
+            for expression in expressions {
+                bp.compile_expr(ObjectId::new(object_type, 0u64.into()), &expression);
+                if !bp.errors.is_empty() {
+                    set.failed(
+                        modification,
+                        map_bootstrap_error(bp.errors)
+                            .with_object_id_opt(None)
+                            .with_property(expression.property),
+                    );
+                    continue 'outer;
+                }
+            }
+        }
+
+        // Save object
+        let result = match &modification {
+            Modification::Create { client_id, object } => {
+                if let Some(object) = object {
+                    if object.inner != new_object.inner {
+                        server
+                            .registry()
+                            .write(RegistryWrite::update(Id::singleton(), &new_object, object))
+                            .await?
+                    } else {
+                        set.response.created(client_id.to_string(), Id::singleton());
+                        continue;
+                    }
+                } else {
+                    server
+                        .registry()
+                        .write(RegistryWrite::Insert {
+                            object: &new_object,
+                            id: response.id,
+                        })
+                        .await?
+                }
+            }
+            Modification::Update { id, object } => {
+                if object.inner != new_object.inner {
+                    if !(is_singleton && object.revision == 0) {
+                        server
+                            .registry()
+                            .write(RegistryWrite::update(*id, &new_object, object))
+                            .await?
+                    } else {
+                        server
+                            .registry()
+                            .write(RegistryWrite::insert(&new_object))
+                            .await?
+                    }
+                } else {
+                    set.response.updated.append(*id, None);
+                    continue;
+                }
+            }
+        };
+
+        let object_id = match (modification, result) {
+            (Modification::Update { id, object }, RegistryWriteResult::Success(_)) => {
+                cache_invalidator.process_update(id, &object, &new_object);
+                if let (ObjectInner::Application(previous), ObjectInner::Application(updated)) =
+                    (&object.inner, &new_object.inner)
+                    && previous.resource_url != updated.resource_url
+                    && let Err(err) = WebApplicationManager::delete_bundle(server, id).await
+                {
+                    trc::error!(err.details("Failed to delete cached application bundle"));
+                }
+                set.response.updated.append(
+                    id,
+                    if !response.object.is_empty() {
+                        Some(JmapValue::Object(response.object))
+                    } else {
+                        None
+                    },
+                );
+                Some(id)
+            }
+            (Modification::Create { client_id, .. }, RegistryWriteResult::Success(id)) => {
+                cache_invalidator.process_create(&new_object);
+                response.object.insert(Property::Id, RegistryValue::Id(id));
+                set.response
+                    .created
+                    .insert(client_id, JmapValue::Object(response.object));
+                Some(id)
+            }
+            (Modification::Update { id, .. }, err) => {
+                set.response.not_updated.append(id, map_write_error(err));
+                None
+            }
+            (Modification::Create { client_id, .. }, err) => {
+                set.response
+                    .not_created
+                    .append(client_id, map_write_error(err));
+                None
+            }
+        };
+
+        // Dispatch tasks
+        if !tasks.is_empty()
+            && let Some(object_id) = object_id
+        {
+            let mut batch = BatchBuilder::new();
+            for mut task in tasks.drain(..) {
+                match &mut task {
+                    Task::AcmeRenewal(task) => task.domain_id = object_id,
+                    Task::DkimManagement(task) => task.domain_id = object_id,
+                    Task::DnsManagement(task) => task.domain_id = object_id,
+                    _ => unreachable!(),
+                }
+                schedule_replacing(set.server, &mut batch, task).await?;
+            }
+            set.server.commit_batch(batch).await?;
+        }
+    }
+
+    #[cfg(not(feature = "enterprise"))]
+    const ACCOUNT_ORPHAN_TYPES: &[ObjectType] = &[ObjectType::PublicKey, ObjectType::OAuthGrant];
+
+    // Process destroy
+    for id in set.destroy.drain(..) {
+        let object_id = ObjectId::new(object_type, id);
+        if let Some(object) = server
+            .registry()
+            .get(object_id)
+            .await
+            .caused_by(trc::location!())?
+            .filter(|object| {
+                #[cfg(not(feature = "enterprise"))]
+                let is_tenant_mismatch = false;
+                !(is_tenant_mismatch
+                    || (is_account_filtered
+                        && object.inner.account_id() != Some(Id::from(set.account_id))))
+            })
+        {
+            if let ObjectInner::Account(account) = &object.inner
+                && let Err(err) = validate_account_access(server, access_token, account).await?
+            {
+                set.response.not_destroyed.append(id, err);
+                continue;
+            }
+
+            match server
+                .registry()
+                .write(RegistryWrite::Delete {
+                    object_id,
+                    object: Some(&object),
+                    allowed_orphan_types: if object_type == ObjectType::Account {
+                        ACCOUNT_ORPHAN_TYPES
+                    } else {
+                        &[]
+                    },
+                })
+                .await?
+            {
+                RegistryWriteResult::Success(_) => {
+                    if let ObjectInner::Account(account) = &object.inner {
+                        for sharee_id in server
+                            .revoke_account_grants(id.document_id())
+                            .await
+                            .caused_by(trc::location!())?
+                        {
+                            server
+                                .invalidate_grantee(&mut cache_invalidator, sharee_id)
+                                .await;
+                        }
+
+                        schedule_account_destruction(set.server, id, account).await?;
+                    }
+
+                    if matches!(object.inner, ObjectInner::Application(_))
+                        && let Err(err) = WebApplicationManager::delete_bundle(server, id).await
+                    {
+                        trc::error!(err.details("Failed to delete cached application bundle"));
+                    }
+
+                    cache_invalidator.process_delete(id, &object);
+                    set.response.destroyed.push(id);
+                }
+                err => {
+                    set.response.not_destroyed.append(id, map_write_error(err));
+                }
+            }
+        } else {
+            set.response.not_destroyed.append(id, SetError::not_found());
+        }
+    }
+
+    // Finalize cache invalidation
+    server.invalidate_caches(cache_invalidator).await?;
+
+    Ok(set.into_response())
 }
 
 #[allow(clippy::large_enum_variant)]
@@ -111,9 +554,6 @@ impl RegistrySet for Server {
         let object_flags = object_type.flags();
         let is_singleton = (object_flags & OBJ_SINGLETON) != 0;
         let has_account_id = (object_flags & OBJ_FILTER_ACCOUNT) != 0;
-        let is_tenant_filtered =
-            (object_flags & OBJ_FILTER_TENANT) != 0 && access_token.tenant_id().is_some();
-        let can_set_tenant = access_token.tenant_id().is_none();
         let can_set_account = access_token.has_permission(Permission::Impersonate);
         let is_account_filtered = has_account_id && !can_set_account;
 
@@ -161,7 +601,6 @@ impl RegistrySet for Server {
             account_id: request.account_id.document_id(),
             object_type,
             response,
-            is_tenant_filtered,
             is_account_filtered,
             create,
             update,
@@ -183,7 +622,6 @@ impl RegistrySet for Server {
             | ObjectType::DmarcReportSettings
             | ObjectType::DnsResolver
             | ObjectType::Email
-            | ObjectType::Enterprise
             | ObjectType::FileStorage
             | ObjectType::Http
             | ObjectType::HttpForm
@@ -191,8 +629,8 @@ impl RegistrySet for Server {
             | ObjectType::InMemoryStore
             | ObjectType::Jmap
             | ObjectType::SystemSettings
+            | ObjectType::Metadata
             | ObjectType::Metrics
-            | ObjectType::MetricsStore
             | ObjectType::MtaConnectionStrategy
             | ObjectType::MtaExtensions
             | ObjectType::MtaInboundSession
@@ -216,18 +654,14 @@ impl RegistrySet for Server {
             | ObjectType::SieveUserInterpreter
             | ObjectType::SpamClassifier
             | ObjectType::SpamDnsblSettings
-            | ObjectType::SpamLlm
             | ObjectType::SpamPyzor
             | ObjectType::SpamSettings
             | ObjectType::SpfReportSettings
             | ObjectType::TaskManager
             | ObjectType::TlsReportSettings
-            | ObjectType::TracingStore
             | ObjectType::WebDav
             | ObjectType::DsnReportSettings
             | ObjectType::AcmeProvider
-            | ObjectType::AiModel
-            | ObjectType::Alert
             | ObjectType::AllowedIp
             | ObjectType::Application
             | ObjectType::BlockedIp
@@ -259,471 +693,12 @@ impl RegistrySet for Server {
             | ObjectType::WebHook
             | ObjectType::PublicKey
             | ObjectType::DkimSignature
-            | ObjectType::MaskedEmail
             | ObjectType::Account
             | ObjectType::MailingList
             | ObjectType::OAuthClient
+            | ObjectType::OAuthGrant
             | ObjectType::Role
-            | ObjectType::Tenant
-            | ObjectType::Domain => {
-                // Bundle modifications together
-                let mut modifications = Vec::with_capacity(set.create.len() + set.update.len());
-                for (id, value) in set.create.drain() {
-                    if is_singleton
-                        && let Some(object) = self
-                            .registry()
-                            .get(ObjectId::new(object_type, Id::singleton()))
-                            .await
-                            .caused_by(trc::location!())?
-                    {
-                        modifications.push((
-                            Modification::Create {
-                                client_id: id,
-                                object: Some(object),
-                            },
-                            value,
-                            Object::from(set.object_type),
-                        ));
-                    } else {
-                        modifications.push((
-                            Modification::Create {
-                                client_id: id,
-                                object: None,
-                            },
-                            value,
-                            Object::from(set.object_type),
-                        ));
-                    }
-                }
-                for (id, value) in set.update.drain(..) {
-                    if let Some(object) = self
-                        .registry()
-                        .get(ObjectId::new(object_type, id))
-                        .await
-                        .caused_by(trc::location!())?
-                    {
-                        if (is_tenant_filtered
-                            && access_token.tenant_id().map(Id::from)
-                                != object.inner.member_tenant_id())
-                            || (is_account_filtered
-                                && object.inner.account_id() != Some(Id::from(set.account_id)))
-                        {
-                            set.response.not_updated.append(id, SetError::not_found());
-                            continue;
-                        }
-
-                        modifications.push((
-                            Modification::Update {
-                                id,
-                                object: object.clone(),
-                            },
-                            value,
-                            object,
-                        ));
-                    } else if is_singleton {
-                        modifications.push((
-                            Modification::Update {
-                                id,
-                                object: Object::from(set.object_type),
-                            },
-                            value,
-                            Object::from(set.object_type),
-                        ));
-                    } else {
-                        set.response.not_updated.append(id, SetError::not_found());
-                    }
-                }
-
-                // Process modifications
-                let mut cache_invalidator = CacheInvalidationBuilder::default();
-                'outer: for (modification, mut value, mut new_object) in modifications {
-                    // Initial validations
-                    let is_create = matches!(modification, Modification::Create { .. });
-                    let mut unpatched_properties = VecMap::new();
-
-                    if let Err(err) = set.response.resolve_self_references(&mut value, 0, true) {
-                        set.failed(modification, err);
-                        continue 'outer;
-                    };
-
-                    if is_create
-                        || value
-                            .as_object()
-                            .unwrap()
-                            .get(&Key::Property(Property::Type))
-                            .and_then(|v| v.as_str())
-                            .is_some_and(|t| new_object.object_variant().is_some_and(|v| v != t))
-                    {
-                        // Patch object
-                        match new_object.patch(
-                            JsonPointerPatch::new(&JsonPointer::new(vec![]))
-                                .with_create(true)
-                                .with_can_set_tenant(can_set_tenant)
-                                .with_can_set_account(can_set_account),
-                            value,
-                        ) {
-                            Ok(MaybeUnpatched::Patched) => {}
-                            Ok(MaybeUnpatched::Unpatched { property, value }) => {
-                                unpatched_properties.append(property, value);
-                            }
-                            Ok(MaybeUnpatched::UnpatchedMany { properties }) => {
-                                unpatched_properties = properties;
-                            }
-                            Err(err) => {
-                                set.failed(modification, err.into());
-                                continue 'outer;
-                            }
-                        }
-
-                        // Add tenantId for tenant filtered objects
-                        if is_tenant_filtered && let Some(tenant_id) = set.access_token.tenant_id()
-                        {
-                            new_object.inner.set_member_tenant_id(tenant_id.into());
-                        }
-
-                        // Add accountId
-                        if has_account_id {
-                            new_object.inner.set_account_id(set.account_id.into());
-                        }
-                    } else {
-                        for (key, value) in value.into_expanded_object() {
-                            let ptr = match key {
-                                Key::Property(Property::Type) => {
-                                    continue;
-                                }
-                                Key::Property(prop) => {
-                                    JsonPointer::new(vec![JsonPointerItem::Key(Key::Property(
-                                        prop,
-                                    ))])
-                                }
-                                Key::Borrowed(other) => JsonPointer::parse(other),
-                                Key::Owned(other) => JsonPointer::parse(&other),
-                            };
-
-                            // Patch object
-                            match new_object.patch(
-                                JsonPointerPatch::new(&ptr)
-                                    .with_create(false)
-                                    .with_can_set_tenant(can_set_tenant)
-                                    .with_can_set_account(can_set_account),
-                                value,
-                            ) {
-                                Ok(MaybeUnpatched::Patched) => {}
-                                Ok(MaybeUnpatched::Unpatched { property, value }) => {
-                                    unpatched_properties.append(property, value);
-                                }
-                                Ok(MaybeUnpatched::UnpatchedMany { properties }) => {
-                                    if unpatched_properties.is_empty() {
-                                        unpatched_properties = properties;
-                                    } else {
-                                        unpatched_properties.extend(properties);
-                                    }
-                                }
-                                Err(err) => {
-                                    set.failed(modification, err.into());
-                                    continue 'outer;
-                                }
-                            }
-                        }
-                    }
-
-                    // Validate objects
-                    let mut tasks = Vec::new();
-                    let result = match &mut new_object.inner {
-                        ObjectInner::Account(account) => {
-                            validate_account(self, access_token, account, modification.as_account())
-                                .await?
-                        }
-                        ObjectInner::Role(role) => {
-                            validate_role(self, access_token, role, modification.as_role()).await?
-                        }
-                        ObjectInner::PublicKey(key) => {
-                            validate_public_key(&set, key, modification.as_public_key()).await?
-                        }
-                        ObjectInner::DkimSignature(key) => {
-                            validate_dkim_signature(&set, key, modification.as_dkim_signature())
-                                .await?
-                        }
-                        ObjectInner::Domain(domain) => {
-                            validate_domain(&set, domain, modification.as_domain(), &mut tasks)
-                                .await?
-                        }
-                        ObjectInner::DnsServer(dns) => {
-                            validate_dns_server(&set, dns, modification.as_dns_server()).await?
-                        }
-                        ObjectInner::MailingList(_) if is_create => {
-                            validate_tenant_quota(
-                                self,
-                                access_token,
-                                TenantStorageQuota::MaxMailingLists,
-                            )
-                            .await?
-                        }
-                        ObjectInner::OAuthClient(client) => {
-                            if let Some(secret) = client.secret.as_mut()
-                                && !secret.is_empty()
-                                && !(matches!(secret.as_bytes().first(), Some(&b'$' | &b'{'))
-                                    && is_password_hash(secret))
-                            {
-                                *secret = hash_secret(
-                                    set.server.core.network.security.password_hash_algorithm,
-                                    std::mem::take(secret).into_bytes(),
-                                )
-                                .await
-                                .caused_by(trc::location!())?;
-                            }
-                            if is_create {
-                                validate_tenant_quota(
-                                    self,
-                                    access_token,
-                                    TenantStorageQuota::MaxOauthClients,
-                                )
-                                .await?
-                            } else {
-                                Ok(ObjectResponse::default())
-                            }
-                        }
-                        ObjectInner::Directory(_) if is_create => {
-                            validate_tenant_quota(
-                                self,
-                                access_token,
-                                TenantStorageQuota::MaxDirectories,
-                            )
-                            .await?
-                        }
-                        ObjectInner::AcmeProvider(provider) if is_create => {
-                            validate_acme_provider(&set, provider, unpatched_properties).await?
-                        }
-                        ObjectInner::Certificate(cert) => {
-                            validate_certificate(cert, modification.as_certificate()).await?
-                        }
-                        ObjectInner::SieveUserScript(SieveUserScript { contents, .. }) => {
-                            validate_sieve_script(
-                                set.server,
-                                contents,
-                                modification.as_sieve_script(),
-                                false,
-                            )
-                            .await?
-                        }
-                        ObjectInner::SieveSystemScript(SieveSystemScript { contents, .. }) => {
-                            validate_sieve_script(
-                                set.server,
-                                contents,
-                                modification.as_sieve_script(),
-                                true,
-                            )
-                            .await?
-                        }
-                        _ => Ok(ObjectResponse::default()),
-                    };
-
-                    let mut response = match result {
-                        Ok(response) => response,
-                        Err(err) => {
-                            set.failed(modification, err);
-                            continue 'outer;
-                        }
-                    };
-
-                    // Validate expressions
-                    if let Some(expressions) = new_object.inner.expression_ctxs() {
-                        let mut bp = Bootstrap::new_uninitialized(self.registry().clone());
-
-                        for expression in expressions {
-                            bp.compile_expr(ObjectId::new(object_type, 0u64.into()), &expression);
-                            if !bp.errors.is_empty() {
-                                set.failed(
-                                    modification,
-                                    map_bootstrap_error(bp.errors)
-                                        .with_object_id_opt(None)
-                                        .with_property(expression.property),
-                                );
-                                continue 'outer;
-                            }
-                        }
-                    }
-
-                    // Save object
-                    let result = match &modification {
-                        Modification::Create { client_id, object } => {
-                            if let Some(object) = object {
-                                if object.inner != new_object.inner {
-                                    self.registry()
-                                        .write(RegistryWrite::update(
-                                            Id::singleton(),
-                                            &new_object,
-                                            object,
-                                        ))
-                                        .await?
-                                } else {
-                                    set.response.created(client_id.to_string(), Id::singleton());
-                                    continue;
-                                }
-                            } else {
-                                self.registry()
-                                    .write(RegistryWrite::Insert {
-                                        object: &new_object,
-                                        id: response.id,
-                                    })
-                                    .await?
-                            }
-                        }
-                        Modification::Update { id, object } => {
-                            if object.inner != new_object.inner {
-                                if !(is_singleton && object.revision == 0) {
-                                    self.registry()
-                                        .write(RegistryWrite::update(*id, &new_object, object))
-                                        .await?
-                                } else {
-                                    self.registry()
-                                        .write(RegistryWrite::insert(&new_object))
-                                        .await?
-                                }
-                            } else {
-                                set.response.updated.append(*id, None);
-                                continue;
-                            }
-                        }
-                    };
-
-                    let object_id = match (modification, result) {
-                        (Modification::Update { id, object }, RegistryWriteResult::Success(_)) => {
-                            cache_invalidator.process_update(id, &object, &new_object);
-                            if let (
-                                ObjectInner::Application(previous),
-                                ObjectInner::Application(updated),
-                            ) = (&object.inner, &new_object.inner)
-                                && previous.resource_url != updated.resource_url
-                                && let Err(err) =
-                                    WebApplicationManager::delete_bundle(self, id).await
-                            {
-                                trc::error!(
-                                    err.details("Failed to delete cached application bundle")
-                                );
-                            }
-                            set.response.updated.append(
-                                id,
-                                if !response.object.is_empty() {
-                                    Some(JmapValue::Object(response.object))
-                                } else {
-                                    None
-                                },
-                            );
-                            Some(id)
-                        }
-                        (
-                            Modification::Create { client_id, .. },
-                            RegistryWriteResult::Success(id),
-                        ) => {
-                            cache_invalidator.process_create(&new_object);
-                            response.object.insert(Property::Id, RegistryValue::Id(id));
-                            set.response
-                                .created
-                                .insert(client_id, JmapValue::Object(response.object));
-                            Some(id)
-                        }
-                        (Modification::Update { id, .. }, err) => {
-                            set.response.not_updated.append(id, map_write_error(err));
-                            None
-                        }
-                        (Modification::Create { client_id, .. }, err) => {
-                            set.response
-                                .not_created
-                                .append(client_id, map_write_error(err));
-                            None
-                        }
-                    };
-
-                    // Dispatch tasks
-                    if !tasks.is_empty()
-                        && let Some(object_id) = object_id
-                    {
-                        let mut batch = BatchBuilder::new();
-                        for mut task in tasks.drain(..) {
-                            match &mut task {
-                                Task::AcmeRenewal(task) => task.domain_id = object_id,
-                                Task::DkimManagement(task) => task.domain_id = object_id,
-                                Task::DnsManagement(task) => task.domain_id = object_id,
-                                _ => unreachable!(),
-                            }
-                            batch.schedule_task(task);
-                        }
-                        set.server.store().write(batch.build_all()).await?;
-                        set.server.notify_task_queue();
-                    }
-                }
-
-                // Process destroy
-                for id in set.destroy.drain(..) {
-                    let object_id = ObjectId::new(object_type, id);
-                    if let Some(object) = self
-                        .registry()
-                        .get(object_id)
-                        .await
-                        .caused_by(trc::location!())?
-                        .filter(|object| {
-                            !((is_tenant_filtered
-                                && access_token.tenant_id().map(Id::from)
-                                    != object.inner.member_tenant_id())
-                                || (is_account_filtered
-                                    && object.inner.account_id() != Some(Id::from(set.account_id))))
-                        })
-                    {
-                        match self
-                            .registry()
-                            .write(RegistryWrite::Delete {
-                                object_id,
-                                object: Some(&object),
-                                allowed_orphan_types: if object_type == ObjectType::Account {
-                                    &[ObjectType::PublicKey, ObjectType::MaskedEmail]
-                                } else {
-                                    &[]
-                                },
-                            })
-                            .await?
-                        {
-                            RegistryWriteResult::Success(_) => {
-                                if let ObjectInner::Account(account) = &object.inner {
-                                    for sharee_id in self
-                                        .store()
-                                        .acl_revoke_all(id.document_id())
-                                        .await
-                                        .caused_by(trc::location!())?
-                                    {
-                                        cache_invalidator
-                                            .invalidate(CacheInvalidation::AccessToken(sharee_id));
-                                    }
-
-                                    schedule_account_destruction(set.server, id, account).await?;
-                                }
-
-                                if matches!(object.inner, ObjectInner::Application(_))
-                                    && let Err(err) =
-                                        WebApplicationManager::delete_bundle(self, id).await
-                                {
-                                    trc::error!(
-                                        err.details("Failed to delete cached application bundle")
-                                    );
-                                }
-
-                                cache_invalidator.process_delete(id, &object);
-                                set.response.destroyed.push(id);
-                            }
-                            err => {
-                                set.response.not_destroyed.append(id, map_write_error(err));
-                            }
-                        }
-                    } else {
-                        set.response.not_destroyed.append(id, SetError::not_found());
-                    }
-                }
-
-                // Finalize cache invalidation
-                self.invalidate_caches(cache_invalidator).await?;
-
-                Ok(set.into_response())
-            }
+            | ObjectType::Domain => registry_object_set(set).await,
             ObjectType::ArfExternalReport
             | ObjectType::DmarcExternalReport
             | ObjectType::TlsExternalReport
@@ -737,35 +712,28 @@ impl RegistrySet for Server {
             ObjectType::AccountSettings
             | ObjectType::ApiKey
             | ObjectType::AccountPassword
-            | ObjectType::AppPassword => Box::pin(account_set(set))
-                .await
-                .map(|set| set.into_response()),
+            | ObjectType::AppPassword => account_set(set).await.map(|set| set.into_response()),
 
             ObjectType::QueuedMessage => {
                 queued_message_set(set).await.map(|set| set.into_response())
             }
 
-            ObjectType::Task => task_set(set).await.map(|set| set.into_response()),
-
-            ObjectType::Action => Box::pin(action_set(set))
+            ObjectType::IndexQueueStatus => index_queue_status_set(set)
                 .await
                 .map(|set| set.into_response()),
+
+            ObjectType::Task => task_set(set).await.map(|set| set.into_response()),
+
+            ObjectType::Action => action_set(set).await.map(|set| set.into_response()),
 
             ObjectType::Bootstrap => Box::pin(bootstrap_set(set))
                 .await
                 .map(|set| set.into_response()),
 
-            ObjectType::Log | ObjectType::Metric | ObjectType::Trace | ObjectType::ClusterNode => {
+            ObjectType::Log | ObjectType::ClusterNode => {
                 set.fail_all_create("Telemetry objects cannot be created");
                 set.fail_all_update("Telemetry objects cannot be modified");
                 set.fail_all_destroy("Telemetry objects cannot be deleted");
-                Ok(set.into_response())
-            }
-            #[cfg(not(feature = "enterprise"))]
-            _ => {
-                set.fail_all_create("Enterprise objects cannot be created");
-                set.fail_all_update("Enterprise objects cannot be modified");
-                set.fail_all_destroy("Enterprise objects cannot be deleted");
                 Ok(set.into_response())
             }
         }
@@ -878,6 +846,7 @@ impl Modification {
         }
     }
 
+
     fn as_dns_server(&self) -> Option<&DnsServer> {
         match self {
             Modification::Create { .. } => None,
@@ -902,10 +871,8 @@ impl Modification {
         match self {
             Modification::Create { .. } => None,
             Modification::Update { object, .. } => match &object.inner {
-                ObjectInner::SieveUserScript(SieveUserScript { contents, .. })
-                | ObjectInner::SieveSystemScript(SieveSystemScript { contents, .. }) => {
-                    Some(contents.as_str())
-                }
+                ObjectInner::SieveUserScript(script) => Some(script.contents.as_str()),
+                ObjectInner::SieveSystemScript(script) => Some(script.contents.as_str()),
                 _ => None,
             },
         }

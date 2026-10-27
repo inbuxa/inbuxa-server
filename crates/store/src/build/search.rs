@@ -16,7 +16,13 @@ impl SearchStore {
     pub async fn build(bp: &mut Bootstrap) -> Option<Self> {
         let result = match bp.setting_infallible::<structs::SearchStore>().await {
             structs::SearchStore::Default => {
-                return Some(SearchStore::Store(bp.data_store.clone()));
+                return Some(match bp.data_store.clone() {
+                    #[cfg(feature = "postgres")]
+                    crate::Store::PostgreSQL(store) => SearchStore::PostgreSQL(store),
+                    #[cfg(feature = "mysql")]
+                    crate::Store::MySQL(store) => SearchStore::MySQL(store),
+                    store => SearchStore::Store(store),
+                });
             }
             structs::SearchStore::ElasticSearch(elastic_search_store) => {
                 ElasticSearchStore::open(elastic_search_store).await
@@ -34,13 +40,19 @@ impl SearchStore {
             structs::SearchStore::PostgreSql(postgre_sql_store) => {
                 crate::backend::postgres::PostgresStore::open(postgre_sql_store)
                     .await
-                    .map(SearchStore::Store)
+                    .map(|store| match store {
+                        crate::Store::PostgreSQL(store) => SearchStore::PostgreSQL(store),
+                        _ => unreachable!(),
+                    })
             }
             #[cfg(feature = "mysql")]
             structs::SearchStore::MySql(my_sql_store) => {
                 crate::backend::mysql::MysqlStore::open(my_sql_store)
                     .await
-                    .map(SearchStore::Store)
+                    .map(|store| match store {
+                        crate::Store::MySQL(store) => SearchStore::MySQL(store),
+                        _ => unreachable!(),
+                    })
             }
             _ => Err("Binary was not compiled with the selected search store backend".to_string()),
         };

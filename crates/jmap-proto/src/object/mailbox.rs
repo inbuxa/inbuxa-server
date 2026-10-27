@@ -6,13 +6,19 @@
 
 use crate::{
     object::{
-        AnyId, JmapObject, JmapObjectId, JmapRight, JmapSharedObject, MaybeReference, parse_ref,
+        AnyId, JmapObject, JmapObjectId, JmapRight, JmapSharedObject, MaybeReference,
+        metadata::{MetadataFilter, MetadataProperty, MetadataRoot, property_names},
+        parse_ref,
     },
-    request::{deserialize::DeserializeArguments, reference::MaybeIdReference},
+    request::{
+        deserialize::{CowStr, DeserializeArguments},
+        reference::MaybeIdReference,
+    },
 };
-use jmap_tools::{Element, JsonPointer, JsonPointerItem, Key, Property};
+use jmap_tools::{Element, JsonPointer, JsonPointerItem, Key, PointerDepth, Property};
+use serde::{Serialize, Serializer};
 use std::{borrow::Cow, str::FromStr};
-use types::{acl::Acl, id::Id, special_use::SpecialUse};
+use types::{acl::Acl, id::Id, special_use::SpecialUse, text::Text};
 
 #[derive(Debug, Clone, Default)]
 pub struct Mailbox;
@@ -31,6 +37,8 @@ pub enum MailboxProperty {
     ShareWith,
     MyRights,
     IsSubscribed,
+    Metadata,
+    PrivateMetadata,
 
     // Other
     IdValue(Id),
@@ -50,6 +58,7 @@ pub enum MailboxRight {
     MaySubmit,
     MayDelete,
     MayShare,
+    MaySetMetadata,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -61,38 +70,48 @@ pub enum MailboxValue {
 
 impl Property for MailboxProperty {
     fn try_parse(key: Option<&Key<'_, Self>>, value: &str) -> Option<Self> {
-        let allow_patch = key.is_none();
-        if let Some(Key::Property(key)) = key {
-            match key.patch_or_prop() {
+        Self::try_parse_nested(key, value, PointerDepth::default())
+    }
+
+    fn try_parse_nested(
+        key: Option<&Key<'_, Self>>,
+        value: &str,
+        depth: PointerDepth,
+    ) -> Option<Self> {
+        match key {
+            Some(Key::Property(key)) => match key.patch_or_prop() {
                 MailboxProperty::ShareWith => {
                     Id::from_str(value).ok().map(MailboxProperty::IdValue)
                 }
-                _ => MailboxProperty::parse(value, allow_patch),
-            }
-        } else {
-            MailboxProperty::parse(value, allow_patch)
+                _ => MailboxProperty::parse_nested_name(value),
+            },
+            Some(_) => MailboxProperty::parse_nested_name(value),
+            None => MailboxProperty::parse(value, Some(depth)),
         }
     }
 
+    fn is_opaque(&self) -> bool {
+        self.metadata_root().is_some()
+    }
+
     fn to_cow(&self) -> Cow<'static, str> {
-        match self {
-            MailboxProperty::Id => "id",
-            MailboxProperty::IsSubscribed => "isSubscribed",
-            MailboxProperty::MyRights => "myRights",
-            MailboxProperty::Name => "name",
-            MailboxProperty::ParentId => "parentId",
-            MailboxProperty::Role => "role",
-            MailboxProperty::SortOrder => "sortOrder",
-            MailboxProperty::TotalEmails => "totalEmails",
-            MailboxProperty::TotalThreads => "totalThreads",
-            MailboxProperty::UnreadEmails => "unreadEmails",
-            MailboxProperty::UnreadThreads => "unreadThreads",
-            MailboxProperty::ShareWith => "shareWith",
-            MailboxProperty::Rights(mailbox_right) => mailbox_right.as_str(),
-            MailboxProperty::Pointer(json_pointer) => return json_pointer.to_string().into(),
-            MailboxProperty::IdValue(id) => return id.to_string().into(),
+        self.text().to_cow()
+    }
+
+    fn key_eq(&self, other: &Self) -> bool {
+        if self.has_dynamic_text() || other.has_dynamic_text() {
+            self.text().eq_text(other.text())
+        } else {
+            self == other
         }
-        .into()
+    }
+
+    fn key_eq_str(&self, other: &str) -> bool {
+        self.text().eq_str(other)
+    }
+
+    fn serialize_text<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        self.text().serialize(serializer)
     }
 }
 
@@ -109,6 +128,7 @@ impl MailboxRight {
             MailboxRight::MaySubmit => "maySubmit",
             MailboxRight::MayDelete => "mayDelete",
             MailboxRight::MayShare => "mayShare",
+            MailboxRight::MaySetMetadata => "maySetMetadata",
         }
     }
 }
@@ -133,46 +153,89 @@ impl Element for MailboxValue {
     }
 
     fn to_cow(&self) -> Cow<'static, str> {
+        self.text().to_cow()
+    }
+
+    fn serialize_text<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        self.text().serialize(serializer)
+    }
+}
+
+impl MailboxValue {
+    pub fn text(&self) -> Text<'_> {
         match self {
-            MailboxValue::Id(id) => id.to_string().into(),
-            MailboxValue::IdReference(r) => format!("#{r}").into(),
-            MailboxValue::Role(special_use) => special_use.as_str().unwrap_or_default().into(),
+            MailboxValue::Id(id) => Text::Id(*id),
+            MailboxValue::IdReference(r) => Text::Reference(r),
+            MailboxValue::Role(special_use) => {
+                Text::Static(special_use.as_str().unwrap_or_default())
+            }
         }
     }
 }
 
 impl MailboxProperty {
-    fn parse(value: &str, allow_patch: bool) -> Option<Self> {
-        hashify::tiny_map!(value.as_bytes(),
-            b"id" => MailboxProperty::Id,
-            b"name" => MailboxProperty::Name,
-            b"parentId" => MailboxProperty::ParentId,
-            b"role" => MailboxProperty::Role,
-            b"sortOrder" => MailboxProperty::SortOrder,
-            b"totalEmails" => MailboxProperty::TotalEmails,
-            b"unreadEmails" => MailboxProperty::UnreadEmails,
-            b"totalThreads" => MailboxProperty::TotalThreads,
-            b"unreadThreads" => MailboxProperty::UnreadThreads,
-            b"shareWith" => MailboxProperty::ShareWith,
-            b"myRights" => MailboxProperty::MyRights,
-            b"mayReadItems" => MailboxProperty::Rights(MailboxRight::MayReadItems),
-            b"mayAddItems" => MailboxProperty::Rights(MailboxRight::MayAddItems),
-            b"mayRemoveItems" => MailboxProperty::Rights(MailboxRight::MayRemoveItems),
-            b"maySetSeen" => MailboxProperty::Rights(MailboxRight::MaySetSeen),
-            b"maySetKeywords" => MailboxProperty::Rights(MailboxRight::MaySetKeywords),
-            b"mayCreateChild" => MailboxProperty::Rights(MailboxRight::MayCreateChild),
-            b"mayRename" => MailboxProperty::Rights(MailboxRight::MayRename),
-            b"maySubmit" => MailboxProperty::Rights(MailboxRight::MaySubmit),
-            b"mayDelete" => MailboxProperty::Rights(MailboxRight::MayDelete),
-            b"mayShare" => MailboxProperty::Rights(MailboxRight::MayShare),
-            b"isSubscribed" => MailboxProperty::IsSubscribed,
+    pub fn text(&self) -> Text<'_> {
+        Text::Static(match self {
+            MailboxProperty::Id => "id",
+            MailboxProperty::IsSubscribed => "isSubscribed",
+            MailboxProperty::MyRights => "myRights",
+            MailboxProperty::Name => "name",
+            MailboxProperty::ParentId => "parentId",
+            MailboxProperty::Role => "role",
+            MailboxProperty::SortOrder => "sortOrder",
+            MailboxProperty::TotalEmails => "totalEmails",
+            MailboxProperty::TotalThreads => "totalThreads",
+            MailboxProperty::UnreadEmails => "unreadEmails",
+            MailboxProperty::UnreadThreads => "unreadThreads",
+            MailboxProperty::ShareWith => "shareWith",
+            MailboxProperty::Metadata => "metadata",
+            MailboxProperty::PrivateMetadata => "privateMetadata",
+            MailboxProperty::Rights(mailbox_right) => mailbox_right.as_str(),
+            MailboxProperty::Pointer(json_pointer) => return Text::Display(json_pointer),
+            MailboxProperty::IdValue(id) => return Text::Id(*id),
+        })
+    }
+
+    fn has_dynamic_text(&self) -> bool {
+        matches!(
+            self,
+            MailboxProperty::Pointer(_) | MailboxProperty::IdValue(_)
         )
-        .or_else(|| {
-            if allow_patch && value.contains('/') {
-                MailboxProperty::Pointer(JsonPointer::parse(value)).into()
-            } else {
-                None
-            }
+    }
+
+    property_names!(
+        MailboxProperty,
+        "id" => MailboxProperty::Id,
+        "name" => MailboxProperty::Name,
+        "parentId" => MailboxProperty::ParentId,
+        "role" => MailboxProperty::Role,
+        "sortOrder" => MailboxProperty::SortOrder,
+        "totalEmails" => MailboxProperty::TotalEmails,
+        "unreadEmails" => MailboxProperty::UnreadEmails,
+        "totalThreads" => MailboxProperty::TotalThreads,
+        "unreadThreads" => MailboxProperty::UnreadThreads,
+        "shareWith" => MailboxProperty::ShareWith,
+        "myRights" => MailboxProperty::MyRights,
+        "mayReadItems" => MailboxProperty::Rights(MailboxRight::MayReadItems),
+        "mayAddItems" => MailboxProperty::Rights(MailboxRight::MayAddItems),
+        "mayRemoveItems" => MailboxProperty::Rights(MailboxRight::MayRemoveItems),
+        "maySetSeen" => MailboxProperty::Rights(MailboxRight::MaySetSeen),
+        "maySetKeywords" => MailboxProperty::Rights(MailboxRight::MaySetKeywords),
+        "mayCreateChild" => MailboxProperty::Rights(MailboxRight::MayCreateChild),
+        "mayRename" => MailboxProperty::Rights(MailboxRight::MayRename),
+        "maySubmit" => MailboxProperty::Rights(MailboxRight::MaySubmit),
+        "mayDelete" => MailboxProperty::Rights(MailboxRight::MayDelete),
+        "mayShare" => MailboxProperty::Rights(MailboxRight::MayShare),
+        "maySetMetadata" => MailboxProperty::Rights(MailboxRight::MaySetMetadata),
+        "isSubscribed" => MailboxProperty::IsSubscribed,
+    );
+
+    fn parse(value: &str, patch_depth: Option<PointerDepth>) -> Option<Self> {
+        MailboxProperty::parse_name(value).or_else(|| {
+            patch_depth
+                .filter(|_| value.contains('/'))
+                .and_then(|depth| JsonPointer::parse_nested(value, depth))
+                .map(MailboxProperty::Pointer)
         })
     }
 
@@ -183,6 +246,30 @@ impl MailboxProperty {
             prop
         } else {
             self
+        }
+    }
+}
+
+impl MetadataProperty for MailboxProperty {
+    fn as_metadata_root(&self) -> Option<MetadataRoot> {
+        match self {
+            MailboxProperty::Metadata => Some(MetadataRoot::Shared),
+            MailboxProperty::PrivateMetadata => Some(MetadataRoot::Private),
+            _ => None,
+        }
+    }
+
+    fn as_pointer(&self) -> Option<&JsonPointer<Self>> {
+        match self {
+            MailboxProperty::Pointer(pointer) => Some(pointer),
+            _ => None,
+        }
+    }
+
+    fn from_metadata_root(root: MetadataRoot) -> Self {
+        match root {
+            MetadataRoot::Shared => MailboxProperty::Metadata,
+            MetadataRoot::Private => MailboxProperty::PrivateMetadata,
         }
     }
 }
@@ -238,7 +325,12 @@ impl FromStr for MailboxProperty {
     type Err = ();
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
-        MailboxProperty::parse(s, false).ok_or(())
+        MailboxProperty::parse(s, None)
+            .or_else(|| {
+                MetadataRoot::from_selector(s)
+                    .map(|_| MailboxProperty::Pointer(JsonPointer::parse(s)))
+            })
+            .ok_or(())
     }
 }
 
@@ -309,6 +401,7 @@ pub enum MailboxFilter {
     Role(Option<SpecialUse>),
     HasAnyRole(bool),
     IsSubscribed(bool),
+    Metadata(MetadataFilter),
     _T(String),
 }
 
@@ -342,8 +435,13 @@ impl<'de> DeserializeArguments<'de> for MailboxFilter {
                 *self = MailboxFilter::IsSubscribed(map.next_value()?);
             },
             _ => {
-                *self = MailboxFilter::_T(key.to_string());
-                let _ = map.next_value::<serde::de::IgnoredAny>()?;
+                *self = match MetadataFilter::try_deserialize(key, map)? {
+                    Some(filter) => MailboxFilter::Metadata(filter),
+                    None => {
+                        let _ = map.next_value::<serde::de::IgnoredAny>()?;
+                        MailboxFilter::_T(key.to_string())
+                    }
+                };
             }
         );
 
@@ -357,7 +455,7 @@ impl<'de> DeserializeArguments<'de> for MailboxComparator {
         A: serde::de::MapAccess<'de>,
     {
         if key == "property" {
-            let value = map.next_value::<Cow<str>>()?;
+            let value = map.next_value::<CowStr>()?.0;
             hashify::fnc_map!(value.as_bytes(),
                 b"sortOrder" => {
                     *self = MailboxComparator::SortOrder;
@@ -369,7 +467,7 @@ impl<'de> DeserializeArguments<'de> for MailboxComparator {
                     *self = MailboxComparator::ParentId;
                 },
                 _ => {
-                    *self = MailboxComparator::_T(key.to_string());
+                    *self = MailboxComparator::_T(value.into_owned());
                 }
             );
         } else {
@@ -459,6 +557,7 @@ impl JmapRight for MailboxRight {
             MailboxRight::MaySubmit => &[Acl::Submit],
             MailboxRight::MayDelete => &[Acl::Delete],
             MailboxRight::MayShare => &[Acl::Share],
+            MailboxRight::MaySetMetadata => &[Acl::ModifyMetadata],
         }
     }
 
@@ -474,6 +573,7 @@ impl JmapRight for MailboxRight {
             MailboxRight::MaySubmit,
             MailboxRight::MayDelete,
             MailboxRight::MayShare,
+            MailboxRight::MaySetMetadata,
         ]
     }
 }

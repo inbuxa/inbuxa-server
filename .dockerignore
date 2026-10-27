@@ -3,7 +3,6 @@
 
 // Allow what is needed
 !crates
-!tests
 !resources
 
 !.cargo

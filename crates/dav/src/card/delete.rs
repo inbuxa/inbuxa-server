@@ -7,7 +7,7 @@
 use crate::{
     DavError, DavMethod,
     common::{
-        ETag,
+        ContainerOperation, ETag,
         lock::{LockRequestHandler, ResourceState},
         uri::DavUriResource,
     },
@@ -21,10 +21,10 @@ use groupware::{
 };
 use http_proto::HttpResponse;
 use hyper::StatusCode;
-use store::write::{BatchBuilder, ValueClass};
+use store::write::BatchBuilder;
 use store::{
     ValueKey,
-    write::{AlignedBytes, Archive},
+    write::{Archive, ArchiveBytes},
 };
 use trc::AddContext;
 use types::{
@@ -58,7 +58,7 @@ impl CardDeleteRequestHandler for Server {
             .filter(|r| !r.is_empty())
             .ok_or(DavError::Code(StatusCode::FORBIDDEN))?;
         let resources = self
-            .fetch_dav_resources(
+            .fetch_groupware_resources(
                 access_token.account_id(),
                 account_id,
                 SyncCollection::AddressBook,
@@ -77,7 +77,7 @@ impl CardDeleteRequestHandler for Server {
         if delete_resource.is_container() {
             let book_ = self
                 .store()
-                .get_value::<Archive<AlignedBytes>>(ValueKey::archive(
+                .get_value::<Archive<ArchiveBytes>>(ValueKey::archive(
                     account_id,
                     Collection::AddressBook,
                     document_id,
@@ -96,7 +96,7 @@ impl CardDeleteRequestHandler for Server {
                     .inner
                     .acls
                     .effective_acl(access_token)
-                    .contains_all([Acl::Delete, Acl::RemoveItems].into_iter())
+                    .contains_all(ContainerOperation::Remove.required_acls())
             {
                 return Err(DavError::Code(StatusCode::FORBIDDEN));
             }
@@ -119,17 +119,35 @@ impl CardDeleteRequestHandler for Server {
             .await?;
 
             // Delete addressbook and cards
+            let children = resources
+                .subtree(delete_path)
+                .filter(|r| !r.is_container())
+                .map(|r| (r.document_id(), r.resource.metadata_kinds()))
+                .collect::<Vec<_>>();
+            let cleanup = self
+                .preload_container_cleanup(
+                    access_token.changed_by(),
+                    account_id,
+                    Collection::ContactCard,
+                    &children
+                        .iter()
+                        .filter(|(_, kinds)| !kinds.is_empty())
+                        .map(|(document_id, _)| *document_id)
+                        .collect(),
+                )
+                .await
+                .caused_by(trc::location!())?;
             DestroyArchive(book)
                 .delete_with_cards(
                     self,
-                    access_token.account_tenant_ids(),
+                    access_token.changed_by(),
                     account_id,
                     document_id,
-                    resources
-                        .subtree(delete_path)
-                        .filter(|r| !r.is_container())
-                        .map(|r| r.document_id())
-                        .collect::<Vec<_>>(),
+                    children
+                        .into_iter()
+                        .map(|(document_id, _)| document_id)
+                        .collect(),
+                    &cleanup,
                     resources.format_resource(delete_resource).into(),
                     &mut batch,
                 )
@@ -137,23 +155,11 @@ impl CardDeleteRequestHandler for Server {
                 .caused_by(trc::location!())?;
 
             // Reset default address book id
-            let default_book_id = self
-                .store()
-                .get_value::<u32>(ValueKey {
-                    account_id,
-                    collection: Collection::Principal.into(),
-                    document_id: 0,
-                    class: ValueClass::Property(PrincipalField::DefaultAddressBookId.into()),
-                })
-                .await
-                .caused_by(trc::location!())?;
-            if default_book_id.is_some_and(|id| id == document_id) {
-                batch
-                    .with_account_id(account_id)
-                    .with_collection(Collection::Principal)
-                    .with_document(0)
-                    .clear(PrincipalField::DefaultAddressBookId);
-            }
+            batch
+                .with_account_id(account_id)
+                .with_collection(Collection::Principal)
+                .with_document(0)
+                .clear_if_equals(PrincipalField::DefaultAddressBookId, document_id);
         } else {
             // Validate ACL
             let addressbook_id = delete_resource.parent_id().unwrap();
@@ -169,7 +175,7 @@ impl CardDeleteRequestHandler for Server {
 
             let card_ = self
                 .store()
-                .get_value::<Archive<AlignedBytes>>(ValueKey::archive(
+                .get_value::<Archive<ArchiveBytes>>(ValueKey::archive(
                     account_id,
                     Collection::ContactCard,
                     document_id,
@@ -177,6 +183,9 @@ impl CardDeleteRequestHandler for Server {
                 .await
                 .caused_by(trc::location!())?
                 .ok_or(DavError::Code(StatusCode::NOT_FOUND))?;
+            let card = card_
+                .to_unarchived::<ContactCard>()
+                .caused_by(trc::location!())?;
 
             // Validate headers
             self.validate_headers(
@@ -186,7 +195,7 @@ impl CardDeleteRequestHandler for Server {
                     account_id,
                     collection: Collection::ContactCard,
                     document_id: document_id.into(),
-                    etag: card_.etag().into(),
+                    etag: format!("\"{}\"", card.inner.etag.to_native()).into(),
                     path: delete_path,
                     ..Default::default()
                 }],
@@ -196,24 +205,21 @@ impl CardDeleteRequestHandler for Server {
             .await?;
 
             // Delete card
-            DestroyArchive(
-                card_
-                    .to_unarchived::<ContactCard>()
-                    .caused_by(trc::location!())?,
-            )
-            .delete(
-                access_token.account_tenant_ids(),
-                account_id,
-                document_id,
-                addressbook_id,
-                resources.format_resource(delete_resource).into(),
-                &mut batch,
-            )
-            .caused_by(trc::location!())?;
+            DestroyArchive(card)
+                .delete(
+                    self,
+                    access_token.changed_by(),
+                    account_id,
+                    document_id,
+                    addressbook_id,
+                    resources.format_resource(delete_resource).into(),
+                    &mut batch,
+                )
+                .await
+                .caused_by(trc::location!())?;
         }
 
         self.commit_batch(batch).await.caused_by(trc::location!())?;
-        self.notify_task_queue();
 
         Ok(HttpResponse::new(StatusCode::NO_CONTENT))
     }
