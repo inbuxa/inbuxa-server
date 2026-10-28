@@ -2,6 +2,8 @@
  * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
+ *
+ * Modified by Coffey Labs in 2026 for INBUXA.
  */
 
 use crate::{
@@ -138,7 +140,7 @@ impl AddressBookProperty {
         )
         .or_else(|| {
             if allow_patch && value.contains('/') {
-                AddressBookProperty::Pointer(JsonPointer::parse(value)).into()
+                super::parse_nested_pointer(value).map(AddressBookProperty::Pointer)
             } else {
                 None
             }
