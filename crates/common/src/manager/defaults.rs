@@ -613,6 +613,8 @@ async fn insert_safe_defaults(bp: &mut Bootstrap) -> trc::Result<()> {
 /// of never; spam training samples are kept 90 days instead of 180; Pyzor,
 /// which sends a digest of each message's text to a public server, is off;
 /// delivery history is kept 14 days instead of 30.
+// Test builds leave out the caller (`cfg(not(feature = "test_mode"))`).
+#[cfg_attr(feature = "test_mode", allow(dead_code))]
 fn new_install_privacy_defaults(
     security: &mut Security,
     classifier: &mut SpamClassifier,

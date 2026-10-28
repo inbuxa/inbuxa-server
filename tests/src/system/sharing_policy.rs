@@ -95,7 +95,7 @@ impl Account {
 #[ignore]
 #[tokio::test(flavor = "multi_thread")]
 pub async fn sharing_policy_tests() {
-    let mut test = TestServerBuilder::new("sharing_policy_tests")
+    let test = TestServerBuilder::new("sharing_policy_tests")
         .await
         .with_default_listeners()
         .await
