@@ -197,6 +197,20 @@ pub async fn test(
         .await
         .assert_contains("contents");
 
+    // inbuxa: CLOSE expunges too, so it needs the same rights as EXPUNGE.
+    // Without them the mailbox is closed and nothing is removed.
+    imap_john.send("CLOSE").await;
+    imap_john.assert_read(Type::Tagged, ResponseType::Ok).await;
+    imap_john
+        .send("SELECT \"Shared Folders/jane.smith@example.com/INBOX\"")
+        .await;
+    imap_john.assert_read(Type::Tagged, ResponseType::Ok).await;
+    imap_john.send("UID FETCH 1 (PREVIEW)").await;
+    imap_john
+        .assert_read(Type::Tagged, ResponseType::Ok)
+        .await
+        .assert_contains("contents");
+
     imap_bill.send("UID EXPUNGE").await;
     imap_bill.assert_read(Type::Tagged, ResponseType::Ok).await;
 
