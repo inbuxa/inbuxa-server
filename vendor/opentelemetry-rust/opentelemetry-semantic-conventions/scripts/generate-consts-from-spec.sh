@@ -1,0 +1,79 @@
+#!/bin/bash
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+CRATE_DIR="${SCRIPT_DIR}/../"
+
+# freeze the spec version and generator version to make generation reproducible
+SPEC_VERSION=1.42.0
+WEAVER_VERSION=v0.24.1
+
+cd "$CRATE_DIR"
+
+rm -rf semantic-conventions || true
+mkdir semantic-conventions
+cd semantic-conventions
+
+git init
+git remote add origin https://github.com/open-telemetry/semantic-conventions.git
+git fetch origin "v$SPEC_VERSION"
+git reset --hard FETCH_HEAD
+cd "$CRATE_DIR"
+
+SED=(sed -i)
+if [[ "$(uname)" = "Darwin" ]]; then
+  SED=(sed -i "")
+fi
+
+# Keep `SCHEMA_URL` key in sync with spec version
+"${SED[@]}" "s/\(opentelemetry.io\/schemas\/\)[^\"]*\"/\1$SPEC_VERSION\"/" scripts/templates/registry/rust/weaver.yaml
+
+docker run --rm \
+  --mount type=bind,source=$CRATE_DIR/semantic-conventions/model,target=/home/weaver/source,readonly \
+  --mount type=bind,source=$CRATE_DIR/scripts/templates,target=/home/weaver/templates,readonly \
+  --mount type=bind,source=$CRATE_DIR/src,target=/home/weaver/target \
+  otel/weaver:$WEAVER_VERSION \
+  registry generate \
+  --registry=/home/weaver/source \
+  --templates=/home/weaver/templates \
+  rust \
+  /home/weaver/target/
+
+# handle doc generation failures
+"${SED[@]}" 's/\[2\]\.$//' src/attribute.rs # remove trailing [2] from few of the doc comments
+
+# handle escaping ranges like [0,n] / [0.0, ...] in descriptions/notes which will cause broken intra-doc links
+# unescape any mistakenly escaped ranges which actually contained a link (not that we currently have any)
+expression='
+  s/\[([a-zA-Z0-9\.\s]+,[a-zA-Z0-9\.\s]+)\]/\\[\1\\]/g
+  s/\\\[([^\]]+)\]\(([^)]+)\)/[\1](\2)/g
+'
+
+"${SED[@]}" -E "${expression}" src/metric.rs
+"${SED[@]}" -E "${expression}" src/attribute.rs
+
+# Fix unclosed HTML tag warnings for <key> in doc comments.
+# Rustdoc treats <key> as an unclosed HTML tag and fails the build with -D warnings.
+# We replace <key> with Markdown code formatting `key` to prevent the error.
+# TODO: This workaround should be removed once the upstream generator handles this correctly.
+"${SED[@]}" 's/<key>/`key`/g' src/attribute.rs
+
+# Patch: rustdoc warns about bare URLs in doc comments. 
+# The following line wraps the specific Kubernetes ResourceRequirements URL with <...> 
+# as suggested by rustdoc warnings, so it becomes a clickable link and the warning goes away.
+"${SED[@]}" -E 's|(/// See )(https://kubernetes.io/docs/reference/generated/kubernetes-api/v[0-9]+\.[0-9]+/#resourcerequirements-v1-core)( for details)|\1<\2>\3|g' src/metric.rs
+
+# Tag unlabeled fenced code blocks in doc comments as `text` so rustdoc doesn't
+# try to compile them as Rust. Some semconv descriptions include pseudo-code
+# (e.g. with `←` arrows) that breaks `cargo test --doc`.
+# TODO: Remove once the upstream generator emits language-tagged fences.
+awk '
+  /^\/\/\/ ```$/ {
+    if (in_block) { print; in_block = 0 }
+    else { sub(/```/, "```text"); print; in_block = 1 }
+    next
+  }
+  { print }
+' src/attribute.rs > src/attribute.rs.tmp && mv src/attribute.rs.tmp src/attribute.rs
+
+cargo fmt
