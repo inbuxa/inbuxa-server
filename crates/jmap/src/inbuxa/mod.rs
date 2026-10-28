@@ -9,32 +9,32 @@
 
 pub mod access;
 pub mod account_lock;
-pub mod legal_hold;
-pub mod mail_rule;
-pub mod security_acceptance;
-pub mod deliverability; // inbuxa: the deliverability check
-pub mod scheduled_reports; // inbuxa: scheduled reports and the weekly digest
-pub mod journal;
-pub mod journal_entry;
-pub mod held_message;
-pub mod dlp_settings;
-pub mod hold_export;
-pub mod hold_export_api;
+pub mod ai_limits;
 pub mod audit;
 pub mod audit_log;
-pub mod ai_limits;
-pub mod log_settings;
 pub mod data_inventory;
+pub mod deleted_account;
+pub mod deliverability; // inbuxa: the deliverability check
 pub mod directory_test;
-pub mod webhook_test;
+pub mod dlp_settings;
 pub mod explanation;
+pub mod fastmail;
+pub mod front_ends;
+pub mod held_message;
+pub mod hold_export;
+pub mod hold_export_api;
+pub mod journal;
+pub mod journal_entry;
+pub mod legal_hold;
+pub mod log_settings;
+pub mod mail_rule;
+pub mod masked_email;
 pub mod masked_secrets; // inbuxa: "****" is never saved as a secret
 pub mod protocol_policy;
-pub mod tenant_protocol_policy;
+pub mod scheduled_reports; // inbuxa: scheduled reports and the weekly digest
+pub mod security_acceptance;
 pub mod sharing_policy;
-pub mod front_ends;
-pub mod deleted_account;
-pub mod fastmail;
-pub mod masked_email;
 pub mod telemetry;
+pub mod tenant_protocol_policy;
 pub mod undelete;
+pub mod webhook_test;

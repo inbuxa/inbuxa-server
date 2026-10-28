@@ -17,9 +17,9 @@ use common::telemetry::{metrics::store::MetricsStore, tracers::store::TracingSto
 use registry::schema::{
     prelude::{ObjectType, Property},
     structs::{
-        Alert, AlertEmail, AlertEvent, AlertEventProperties, CertificateManagement,
-        DkimManagement, DnsManagement, Domain, Expression, MetricsStore as MetricsStoreSetting,
-        MtaStageAuth, Search, Tenant, TracingStore as TracingStoreSetting, UserRoles,
+        Alert, AlertEmail, AlertEvent, AlertEventProperties, CertificateManagement, DkimManagement,
+        DnsManagement, Domain, Expression, MetricsStore as MetricsStoreSetting, MtaStageAuth,
+        Search, Tenant, TracingStore as TracingStoreSetting, UserRoles,
     },
 };
 use serde_json::{Value, json};
@@ -39,9 +39,16 @@ pub async fn test(test: &mut TestServer) {
         .jmap_method_call("x:DataRetention/get", json!({"ids": ["singleton"]}))
         .await;
     let retention = &retention.list()[0];
-    assert_eq!(retention["holdTracesFor"], 30 * 86_400_000u64, "test 1: {retention}");
+    assert_eq!(
+        retention["holdTracesFor"],
+        30 * 86_400_000u64,
+        "test 1: {retention}"
+    );
     assert_eq!(retention["holdMetricsFor"], 90 * 86_400_000u64, "test 1");
-    assert_eq!(retention["metricsCollectionInterval"]["@type"], "Hourly", "test 1");
+    assert_eq!(
+        retention["metricsCollectionInterval"]["@type"], "Hourly",
+        "test 1"
+    );
     for object in ["x:TracingStore/get", "x:MetricsStore/get"] {
         let store = admin
             .jmap_method_call(object, json!({"ids": ["singleton"]}))
@@ -68,7 +75,11 @@ pub async fn test(test: &mut TestServer) {
         .iter()
         .filter(|s| s["metric"] == "cluster.publisher-error")
         .collect::<Vec<_>>();
-    assert_eq!(errors.last().map(|s| &s["count"]), Some(&json!(7)), "test 3: {errors:?}");
+    assert_eq!(
+        errors.last().map(|s| &s["count"]),
+        Some(&json!(7)),
+        "test 3: {errors:?}"
+    );
     let memory = samples
         .iter()
         .filter(|s| s["metric"] == "server.memory" && s["@type"] == "Gauge")
@@ -89,8 +100,13 @@ pub async fn test(test: &mut TestServer) {
     let histograms = Collector::collect_histograms()
         .map(|h| h.id())
         .collect::<Vec<_>>();
-    let gauges = Collector::collect_gauges().map(|g| g.id()).collect::<Vec<_>>();
-    assert!(gauges.contains(&MetricType::QueueCount), "test 5: queue.count gauge");
+    let gauges = Collector::collect_gauges()
+        .map(|g| g.id())
+        .collect::<Vec<_>>();
+    assert!(
+        gauges.contains(&MetricType::QueueCount),
+        "test 5: queue.count gauge"
+    );
     let _ = histograms;
 
     // Acceptance tests 7 to 9: what a trace holds
@@ -119,7 +135,11 @@ pub async fn test(test: &mut TestServer) {
         .jmap_method_call("x:Trace/get", json!({"ids": null}))
         .await;
     let traces = traces.list().to_vec();
-    assert_eq!(traces.len(), 2, "test 7: the probe left no trace: {traces:?}");
+    assert_eq!(
+        traces.len(),
+        2,
+        "test 7: the probe left no trace: {traces:?}"
+    );
     for trace in &traces {
         let events = trace["events"].as_array().cloned().unwrap_or_else(|| {
             trace["events"]
@@ -142,9 +162,9 @@ pub async fn test(test: &mut TestServer) {
         "test 9: from, {traces:?}"
     );
     assert!(
-        traces
-            .iter()
-            .any(|t| t["to"].as_str().is_some_and(|to| to.contains("mon@example.org"))),
+        traces.iter().any(|t| t["to"]
+            .as_str()
+            .is_some_and(|to| to.contains("mon@example.org"))),
         "test 9: to"
     );
 
@@ -229,7 +249,10 @@ pub async fn test(test: &mut TestServer) {
         .jmap_method_call("x:Trace/set", json!({"create": {"i0": {"events": []}}}))
         .await;
     assert!(
-        response.0.pointer("/methodResponses/0/1/notCreated/i0").is_some(),
+        response
+            .0
+            .pointer("/methodResponses/0/1/notCreated/i0")
+            .is_some(),
         "test 24: create refused"
     );
 
@@ -246,7 +269,10 @@ pub async fn test(test: &mut TestServer) {
     let response = admin
         .jmap_method_call("x:Trace/query", json!({"filter": {"text": "example.org"}}))
         .await;
-    assert!(response.to_string().contains("unsupportedFilter"), "test 11: {response:?}");
+    assert!(
+        response.to_string().contains("unsupportedFilter"),
+        "test 11: {response:?}"
+    );
     let response = admin
         .jmap_method_call(
             "x:Trace/query",
@@ -278,7 +304,12 @@ pub async fn test(test: &mut TestServer) {
         let auth = admin.basic_auth();
         let url = format!("{base}/api/token/{kind}");
         async move {
-            let response = http.get(url).header("authorization", auth).send().await.unwrap();
+            let response = http
+                .get(url)
+                .header("authorization", auth)
+                .send()
+                .await
+                .unwrap();
             assert_eq!(response.status(), 200, "test 16: token for {kind}");
             response.text().await.unwrap()
         }
@@ -326,7 +357,10 @@ pub async fn test(test: &mut TestServer) {
     lmtp.quit().await;
     let frame = reader.await.unwrap();
     let events: Value = serde_json::from_str(&frame).unwrap();
-    assert!(events.as_array().is_some_and(|e| !e.is_empty()), "test 14: {frame}");
+    assert!(
+        events.as_array().is_some_and(|e| !e.is_empty()),
+        "test 14: {frame}"
+    );
     assert!(!frame.contains("raw-input"), "test 14: no raw I/O");
     assert!(frame.contains("keyValues"), "test 14: x:TraceEvent shape");
 
@@ -334,7 +368,9 @@ pub async fn test(test: &mut TestServer) {
     let mut open = Vec::new();
     for _ in 0..8 {
         let response = http
-            .get(format!("{base}/api/live/metrics?token={metrics_token}&interval=60"))
+            .get(format!(
+                "{base}/api/live/metrics?token={metrics_token}&interval=60"
+            ))
             .send()
             .await
             .unwrap();
@@ -342,7 +378,9 @@ pub async fn test(test: &mut TestServer) {
         open.push(response);
     }
     let ninth = http
-        .get(format!("{base}/api/live/metrics?token={metrics_token}&interval=60"))
+        .get(format!(
+            "{base}/api/live/metrics?token={metrics_token}&interval=60"
+        ))
         .send()
         .await
         .unwrap();
@@ -380,7 +418,11 @@ pub async fn test(test: &mut TestServer) {
     let before = fired();
     Collector::update_gauge(MetricType::DomainCount, 100);
     test.server.process_alerts().await.unwrap();
-    assert_eq!(fired(), before + 1.0, "test 19: an underscore condition fires");
+    assert_eq!(
+        fired(),
+        before + 1.0,
+        "test 19: an underscore condition fires"
+    );
     test.server.process_alerts().await.unwrap();
     assert_eq!(fired(), before + 1.0, "test 20: once while it holds");
     Collector::update_gauge(MetricType::DomainCount, 1);
@@ -484,8 +526,16 @@ pub async fn monitoring_compat() {
         .jmap_method_call("x:DataRetention/get", json!({"ids": ["singleton"]}))
         .await;
     let retention = &retention.list()[0];
-    assert_eq!(retention["holdTracesFor"], 30 * 86_400_000u64, "{retention}");
-    assert_eq!(retention["holdMetricsFor"], 90 * 86_400_000u64, "{retention}");
+    assert_eq!(
+        retention["holdTracesFor"],
+        30 * 86_400_000u64,
+        "{retention}"
+    );
+    assert_eq!(
+        retention["holdMetricsFor"],
+        90 * 86_400_000u64,
+        "{retention}"
+    );
     assert_eq!(retention["metricsCollectionInterval"]["@type"], "Hourly");
     for object in ["x:TracingStore/get", "x:MetricsStore/get"] {
         let store = admin
@@ -588,4 +638,3 @@ pub async fn monitoring_tests() {
         test.temp_dir.delete();
     }
 }
-

@@ -123,9 +123,12 @@ jobs:
       # Current stable, as Gitea's rust:1 image is.
       - id: rust
         run: |
-          rustup toolchain install stable --profile minimal
+          rustup toolchain install stable --profile minimal --component rustfmt
           rustup default stable
           echo "version=$(rustc -V | cut -d' ' -f2)" >> "$GITHUB_OUTPUT"
+      # One formatting for the whole tree, so a change's diff is only its own
+      # lines. Before the build: it fails in seconds.
+      - run: cargo fmt --all --check
       - run: sudo apt-get update -qq && sudo apt-get install -y -qq --no-install-recommends clang >/dev/null
       # Cargo's download cache and the dev/test target dir, keyed on the
       # lockfile and the compiler. Saved from main only, so the one cache

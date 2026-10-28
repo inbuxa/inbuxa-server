@@ -124,7 +124,9 @@ impl Element for ProtocolPolicyValue {
 
     fn try_parse<P>(key: &Key<'_, Self::Property>, value: &str) -> Option<Self> {
         match key {
-            Key::Property(ProtocolPolicyProperty::Id) => Id::from_str(value).ok().map(ProtocolPolicyValue::Id),
+            Key::Property(ProtocolPolicyProperty::Id) => {
+                Id::from_str(value).ok().map(ProtocolPolicyValue::Id)
+            }
             _ => None,
         }
     }

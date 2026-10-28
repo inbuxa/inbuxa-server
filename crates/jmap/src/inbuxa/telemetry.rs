@@ -19,10 +19,7 @@ use common::telemetry::metrics::store::{MaybeMetric, StoredMetric};
 use jmap_proto::types::state::State;
 use registry::{
     jmap::{IntoValue, JmapValue},
-    schema::{
-        prelude::Property,
-        structs::Metric,
-    },
+    schema::{prelude::Property, structs::Metric},
     types::datetime::UTCDateTime,
 };
 use store::{
@@ -59,7 +56,11 @@ fn to_value(sample: StoredMetric) -> JmapValue<'static> {
     if let JmapValue::Object(obj) = &mut value {
         obj.insert_unchecked(
             Property::Timestamp,
-            JmapValue::Str(UTCDateTime::from_timestamp(timestamp as i64).to_string().into()),
+            JmapValue::Str(
+                UTCDateTime::from_timestamp(timestamp as i64)
+                    .to_string()
+                    .into(),
+            ),
         );
         // Histograms are running totals per node; without this a reader
         // diffs one node's total against another's
@@ -86,7 +87,10 @@ pub(crate) async fn metric_get(
                     .ok()
                     .flatten()
                     .and_then(|MaybeMetric(metric)| metric)
-                    .map(|metric| StoredMetric { id: id.id(), metric });
+                    .map(|metric| StoredMetric {
+                        id: id.id(),
+                        metric,
+                    });
                 match sample {
                     Some(sample) if !expired(server, sample.id).await => {
                         get.insert(id, to_value(sample))
@@ -141,45 +145,46 @@ pub(crate) async fn metric_query(
     let (mut from_id, mut to_id) = (0u64, u64::MAX);
     let mut metrics: Option<Vec<MetricType>> = None;
     let mut bad = false;
-    req.request.extract_filters(|property, op, value| match property {
-        Property::Timestamp => {
-            let Some(ts) = timestamp_of(&value) else {
-                return false;
-            };
-            // The ids of second `ts` run from `first_id_at(ts)` up to, not
-            // including, `first_id_at(ts + 1)`
-            let at = SnowflakeIdGenerator::first_id_at;
-            match op {
-                RegistryFilterOp::GreaterThan => from_id = from_id.max(at(ts + 1)),
-                RegistryFilterOp::GreaterEqualThan => from_id = from_id.max(at(ts)),
-                RegistryFilterOp::LowerThan => to_id = to_id.min(at(ts).saturating_sub(1)),
-                RegistryFilterOp::LowerEqualThan => {
-                    to_id = to_id.min(at(ts + 1).saturating_sub(1))
+    req.request
+        .extract_filters(|property, op, value| match property {
+            Property::Timestamp => {
+                let Some(ts) = timestamp_of(&value) else {
+                    return false;
+                };
+                // The ids of second `ts` run from `first_id_at(ts)` up to, not
+                // including, `first_id_at(ts + 1)`
+                let at = SnowflakeIdGenerator::first_id_at;
+                match op {
+                    RegistryFilterOp::GreaterThan => from_id = from_id.max(at(ts + 1)),
+                    RegistryFilterOp::GreaterEqualThan => from_id = from_id.max(at(ts)),
+                    RegistryFilterOp::LowerThan => to_id = to_id.min(at(ts).saturating_sub(1)),
+                    RegistryFilterOp::LowerEqualThan => {
+                        to_id = to_id.min(at(ts + 1).saturating_sub(1))
+                    }
+                    _ => return false,
                 }
-                _ => return false,
+                true
             }
-            true
-        }
-        Property::Metric => {
-            let names = match &value {
-                serde_json::Value::String(name) => vec![name.as_str()],
-                serde_json::Value::Array(list) => {
-                    list.iter().filter_map(|v| v.as_str()).collect()
+            Property::Metric => {
+                let names = match &value {
+                    serde_json::Value::String(name) => vec![name.as_str()],
+                    serde_json::Value::Array(list) => {
+                        list.iter().filter_map(|v| v.as_str()).collect()
+                    }
+                    _ => return false,
+                };
+                let mut parsed = Vec::with_capacity(names.len());
+                for name in names {
+                    match MetricType::parse(name) {
+                        Some(metric) => parsed.push(metric),
+                        None => bad = true,
+                    }
                 }
-                _ => return false,
-            };
-            let mut parsed = Vec::with_capacity(names.len());
-            for name in names {
-                match MetricType::parse(name) {
-                    Some(metric) => parsed.push(metric),
-                    None => bad = true,
-                }
+                metrics.get_or_insert_with(Vec::new).extend(parsed);
+                true
             }
-            metrics.get_or_insert_with(Vec::new).extend(parsed);
-            true
-        }
-        _ => false,
-    })?;
+            _ => false,
+        })?;
     if bad {
         return Err(trc::JmapEvent::UnsupportedFilter
             .into_err()
@@ -270,8 +275,8 @@ fn trace_to_value(id: u64, trace: Trace) -> JmapValue<'static> {
             }
         }
     }
-    let timestamp = first_timestamp
-        .unwrap_or_else(|| SnowflakeIdGenerator::to_timestamp(id) as i64);
+    let timestamp =
+        first_timestamp.unwrap_or_else(|| SnowflakeIdGenerator::to_timestamp(id) as i64);
     let mut value = trace.into_value();
     if let JmapValue::Object(obj) = &mut value {
         obj.insert_unchecked(
@@ -308,7 +313,9 @@ pub(crate) async fn read_trace(server: &common::Server, id: u64) -> trc::Result<
     }
     Ok(server
         .tracing_store()
-        .get_value::<MaybeTrace>(ValueKey::from(ValueClass::Telemetry(TelemetryClass::Span(id))))
+        .get_value::<MaybeTrace>(ValueKey::from(ValueClass::Telemetry(TelemetryClass::Span(
+            id,
+        ))))
         .await?
         .and_then(|MaybeTrace(trace)| trace))
 }
@@ -374,7 +381,11 @@ async fn trace_ids(
             let id = key.deserialize_be_u64(0)?;
             if let Some(trace) = decode_trace(value)
                 && event.is_none_or(|event| {
-                    trace.events.iter().next().is_some_and(|first| first.event == event)
+                    trace
+                        .events
+                        .iter()
+                        .next()
+                        .is_some_and(|first| first.event == event)
                 })
             {
                 ids.push(id);
@@ -396,65 +407,66 @@ pub(crate) async fn trace_query(
     let (mut from_id, mut to_id) = (0u64, u64::MAX);
     let mut event = None;
     let mut search: Vec<SearchFilter> = Vec::new();
-    req.request.extract_filters(|property, op, value| match property {
-        Property::Timestamp => {
-            let Some(ts) = timestamp_of(&value) else {
-                return false;
-            };
-            let at = SnowflakeIdGenerator::first_id_at;
-            match op {
-                RegistryFilterOp::GreaterThan => from_id = from_id.max(at(ts + 1)),
-                RegistryFilterOp::GreaterEqualThan => from_id = from_id.max(at(ts)),
-                RegistryFilterOp::LowerThan => to_id = to_id.min(at(ts).saturating_sub(1)),
-                RegistryFilterOp::LowerEqualThan => {
-                    to_id = to_id.min(at(ts + 1).saturating_sub(1))
+    req.request
+        .extract_filters(|property, op, value| match property {
+            Property::Timestamp => {
+                let Some(ts) = timestamp_of(&value) else {
+                    return false;
+                };
+                let at = SnowflakeIdGenerator::first_id_at;
+                match op {
+                    RegistryFilterOp::GreaterThan => from_id = from_id.max(at(ts + 1)),
+                    RegistryFilterOp::GreaterEqualThan => from_id = from_id.max(at(ts)),
+                    RegistryFilterOp::LowerThan => to_id = to_id.min(at(ts).saturating_sub(1)),
+                    RegistryFilterOp::LowerEqualThan => {
+                        to_id = to_id.min(at(ts + 1).saturating_sub(1))
+                    }
+                    _ => return false,
                 }
-                _ => return false,
-            }
-            true
-        }
-        Property::Event => match value.as_str().and_then(EventType::parse) {
-            Some(parsed) => {
-                event = Some(parsed);
                 true
             }
-            None => false,
-        },
-        Property::Text => match value.as_str() {
-            Some(text) => {
-                search.push(SearchFilter::has_text(
-                    TracingSearchField::Keywords,
-                    text.to_lowercase(),
-                    nlp::language::Language::None,
-                ));
-                true
-            }
-            None => false,
-        },
-        // The queue id column is an integer on every search backend, and
-        // holds a trace's first queue id; the keywords carry all of them
-        Property::QueueId => match value
-            .as_str()
-            .and_then(|v| v.trim().parse::<u64>().ok())
-            .or_else(|| value.as_u64())
-        {
-            Some(queue_id) => {
-                search.extend([
-                    SearchFilter::Or,
-                    SearchFilter::eq(TracingSearchField::QueueId, queue_id),
-                    SearchFilter::has_text(
+            Property::Event => match value.as_str().and_then(EventType::parse) {
+                Some(parsed) => {
+                    event = Some(parsed);
+                    true
+                }
+                None => false,
+            },
+            Property::Text => match value.as_str() {
+                Some(text) => {
+                    search.push(SearchFilter::has_text(
                         TracingSearchField::Keywords,
-                        queue_id.to_string(),
+                        text.to_lowercase(),
                         nlp::language::Language::None,
-                    ),
-                    SearchFilter::End,
-                ]);
-                true
-            }
-            None => false,
-        },
-        _ => false,
-    })?;
+                    ));
+                    true
+                }
+                None => false,
+            },
+            // The queue id column is an integer on every search backend, and
+            // holds a trace's first queue id; the keywords carry all of them
+            Property::QueueId => match value
+                .as_str()
+                .and_then(|v| v.trim().parse::<u64>().ok())
+                .or_else(|| value.as_u64())
+            {
+                Some(queue_id) => {
+                    search.extend([
+                        SearchFilter::Or,
+                        SearchFilter::eq(TracingSearchField::QueueId, queue_id),
+                        SearchFilter::has_text(
+                            TracingSearchField::Keywords,
+                            queue_id.to_string(),
+                            nlp::language::Language::None,
+                        ),
+                        SearchFilter::End,
+                    ]);
+                    true
+                }
+                None => false,
+            },
+            _ => false,
+        })?;
 
     let params = req
         .request

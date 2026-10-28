@@ -9,10 +9,7 @@
 //! destroyed for good through `inbuxa:DeletedAccount/get` and `/set`.
 
 use common::{
-    Server,
-    auth::AccessToken,
-    cache::invalidate::CacheInvalidationBuilder,
-    ipc::CacheInvalidation,
+    Server, auth::AccessToken, cache::invalidate::CacheInvalidationBuilder, ipc::CacheInvalidation,
 };
 use directory::core::secret::hash_secret;
 use inbuxa_features::undelete::{
@@ -63,7 +60,10 @@ const ALL: &[P] = &[
 ];
 
 /// The addresses an object answers to, with the property that names each.
-async fn addresses_of(server: &Server, inner: &ObjectInner) -> trc::Result<Vec<(Property, String)>> {
+async fn addresses_of(
+    server: &Server,
+    inner: &ObjectInner,
+) -> trc::Result<Vec<(Property, String)>> {
     let (name, domain_id, aliases) = match inner {
         ObjectInner::Account(Account::User(account)) => {
             (&account.name, account.domain_id, &account.aliases)
@@ -130,11 +130,9 @@ pub async fn keep(server: &Server, id: Id, account: &Account) -> trc::Result<Opt
     // not undelete keeps accounts; its holds name it from now on
     let member = inbuxa_features::hold::Member::of(account_id, &inner);
     let held = match &member {
-        Some(member) => {
-            !inbuxa_features::hold::covering(server.store(), member)
-                .await?
-                .is_empty()
-        }
+        Some(member) => !inbuxa_features::hold::covering(server.store(), member)
+            .await?
+            .is_empty(),
         None => false,
     };
     let period = retention(server.registry()).await?.accounts;
@@ -153,8 +151,18 @@ pub async fn keep(server: &Server, id: Id, account: &Account) -> trc::Result<Opt
         .map(|(_, address)| address)
         .collect();
     let (domain_id, name, account_type, tenant) = match account {
-        Account::User(a) => (a.domain_id, a.name.clone(), AccountType::User, a.member_tenant_id),
-        Account::Group(a) => (a.domain_id, a.name.clone(), AccountType::Group, a.member_tenant_id),
+        Account::User(a) => (
+            a.domain_id,
+            a.name.clone(),
+            AccountType::User,
+            a.member_tenant_id,
+        ),
+        Account::Group(a) => (
+            a.domain_id,
+            a.name.clone(),
+            AccountType::Group,
+            a.member_tenant_id,
+        ),
     };
 
     // UD-17a: its shares are suspended both ways
@@ -309,7 +317,9 @@ pub async fn set(
         for (key, value) in value.into_expanded_object() {
             match (&key, value) {
                 (Key::Property(P::Restore), Value::Bool(value)) => restore = value,
-                (Key::Property(P::Password), Value::Str(value)) => password = Some(value.into_owned()),
+                (Key::Property(P::Password), Value::Str(value)) => {
+                    password = Some(value.into_owned())
+                }
                 (Key::Property(P::Password), Value::Null) => password = None,
                 _ => invalid = Some(key.into_owned()),
             }
@@ -348,8 +358,9 @@ pub async fn set(
             {
                 response.not_destroyed.append(
                     id,
-                    SetError::forbidden()
-                        .with_description("A legal hold applies to this account, so its data stays."),
+                    SetError::forbidden().with_description(
+                        "A legal hold applies to this account, so its data stays.",
+                    ),
                 );
             }
             Some(kept) if may_reach(access_token, &kept, Permission::SysAccountDestroy) => {
@@ -384,7 +395,9 @@ async fn restore_account(
     let Some(ObjectInner::Account(mut account)) = PickledStream::new(&kept.record)
         .and_then(|mut stream| ObjectInner::unpickle(ObjectType::Account, &mut stream))
     else {
-        return Ok(Err(SetError::forbidden().with_description("The kept record can't be read.")));
+        return Ok(Err(
+            SetError::forbidden().with_description("The kept record can't be read.")
+        ));
     };
 
     // A user comes back with a new password; its other credentials stay
@@ -430,7 +443,11 @@ async fn restore_account(
     }
 
     // The restorer may only bring back what it could grant
-    if server.can_set_permissions(access_token, &account).await?.is_err() {
+    if server
+        .can_set_permissions(access_token, &account)
+        .await?
+        .is_err()
+    {
         return Ok(Err(SetError::forbidden().with_description(
             "You can't grant the permissions this account holds.",
         )));
@@ -492,7 +509,9 @@ async fn restore_account(
     // Its destruction is off
     let mut batch = BatchBuilder::new();
     batch
-        .clear(ValueClass::TaskQueue(TaskQueueClass::Task { id: kept.task_id }))
+        .clear(ValueClass::TaskQueue(TaskQueueClass::Task {
+            id: kept.task_id,
+        }))
         .clear(ValueClass::TaskQueue(TaskQueueClass::Due {
             id: kept.task_id,
             due: kept.kept_until,

@@ -758,7 +758,11 @@ impl<T: SessionStream> Session<T> {
             super::mailflow::Checked::Accept => (None, Vec::new()),
             super::mailflow::Checked::Changed { message, envelope } => (message, envelope),
             // §2.6: queued, but not due for a century; a reviewer releases it
-            super::mailflow::Checked::Hold { draft, message, envelope } => {
+            super::mailflow::Checked::Hold {
+                draft,
+                message,
+                envelope,
+            } => {
                 self.data.future_release = inbuxa_features::mailflow::held::HOLD_SECONDS;
                 held_draft = Some(draft);
                 (message, envelope)
@@ -914,7 +918,8 @@ impl<T: SessionStream> Session<T> {
                 self.audit_queued_send_as(queue_id).await;
                 if let (Some(draft), Some((sender, recipients, size))) = (held_draft, held_envelope)
                 {
-                    self.record_held(queue_id, draft, sender, recipients, size).await;
+                    self.record_held(queue_id, draft, sender, recipients, size)
+                        .await;
                     format!("250 2.0.0 Held for review, id {queue_id:x}.\r\n")
                         .into_bytes()
                         .into()

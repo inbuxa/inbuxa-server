@@ -305,7 +305,8 @@ pub(crate) async fn set(mut set: RegistrySetResponse<'_>) -> trc::Result<Registr
                     item.archived_until().timestamp().max(0) as u64,
                 ) =>
             {
-                let mut why = "A legal hold applies to this item, so it can't be deleted.".to_string();
+                let mut why =
+                    "A legal hold applies to this item, so it can't be deleted.".to_string();
                 if set
                     .access_token
                     .has_permission(registry::schema::enums::Permission::SysLegalHoldGet)

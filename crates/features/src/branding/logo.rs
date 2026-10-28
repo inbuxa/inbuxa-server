@@ -99,7 +99,11 @@ fn data_url(value: &str) -> Result<(String, Vec<u8>), &'static str> {
     let rest = value.get(5..).ok_or("not a data URL")?;
     let (header, data) = rest.split_once(',').ok_or("a data URL needs a comma")?;
     let mut params = header.split(';');
-    let media_type = params.next().unwrap_or_default().trim().to_ascii_lowercase();
+    let media_type = params
+        .next()
+        .unwrap_or_default()
+        .trim()
+        .to_ascii_lowercase();
     if !params.any(|p| p.trim().eq_ignore_ascii_case("base64")) {
         return Err("a data URL logo must be base64");
     }
@@ -182,9 +186,7 @@ pub enum Source {
 /// tenant's, then the server-wide one. Unusable values are skipped with a
 /// `registry.build-warning` (BT-4). The built-in logo is the caller's last
 /// resort.
-pub fn chain<'x>(
-    candidates: impl IntoIterator<Item = (Source, Option<&'x str>)>,
-) -> Vec<Logo> {
+pub fn chain<'x>(candidates: impl IntoIterator<Item = (Source, Option<&'x str>)>) -> Vec<Logo> {
     let mut logos = Vec::new();
     for (source, value) in candidates {
         let Some(value) = value.filter(|v| !v.trim().is_empty()) else {
@@ -284,7 +286,10 @@ mod tests {
     #[test]
     fn chain_order_and_embedding() {
         let png = data("image/png", PNG);
-        let svg = data("image/svg+xml", b"<svg xmlns='http://www.w3.org/2000/svg'/>");
+        let svg = data(
+            "image/svg+xml",
+            b"<svg xmlns='http://www.w3.org/2000/svg'/>",
+        );
         let logos = chain([
             (Source::Domain(1), Some("admin")),
             (Source::Tenant(2), Some(svg.as_str())),

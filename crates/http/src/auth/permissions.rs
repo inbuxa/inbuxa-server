@@ -39,7 +39,6 @@ impl AccountApiHandler for Server {
     ) -> trc::Result<HttpResponse> {
         let edition = "oss";
 
-
         let account_info = self.account_info(access_token.account_id()).await?;
         let is_external_directory = if let Some(domain_name) = account_info.name().try_domain_part()
             && self.get_directory_for_domain(domain_name).await?.is_some()

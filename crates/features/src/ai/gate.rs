@@ -263,30 +263,64 @@ mod tests {
     fn pauses_after_failures_then_probes() {
         let gate = Gate::default();
         for n in 1..=FAILURES_TO_PAUSE {
-            let t = gate.try_start(7, None, LIMITS).unwrap().finish(false, LIMITS.backoff);
+            let t = gate
+                .try_start(7, None, LIMITS)
+                .unwrap()
+                .finish(false, LIMITS.backoff);
             assert_eq!(t, (n == FAILURES_TO_PAUSE).then_some(Transition::Paused));
         }
         assert_eq!(gate.try_start(7, None, LIMITS).err(), Some(Refused::Paused));
         std::thread::sleep(Duration::from_millis(60));
         // One probe, and nobody else while it's out
-        let probe = gate.try_start(7, None, Limits { max_concurrent: 4, ..LIMITS }).unwrap();
+        let probe = gate
+            .try_start(
+                7,
+                None,
+                Limits {
+                    max_concurrent: 4,
+                    ..LIMITS
+                },
+            )
+            .unwrap();
         assert_eq!(
-            gate.try_start(7, None, Limits { max_concurrent: 4, ..LIMITS }).err(),
+            gate.try_start(
+                7,
+                None,
+                Limits {
+                    max_concurrent: 4,
+                    ..LIMITS
+                }
+            )
+            .err(),
             Some(Refused::Paused)
         );
-        assert_eq!(probe.finish(true, LIMITS.backoff), Some(Transition::Resumed));
+        assert_eq!(
+            probe.finish(true, LIMITS.backoff),
+            Some(Transition::Resumed)
+        );
         assert!(gate.try_start(7, None, LIMITS).is_ok());
     }
 
     #[test]
     fn account_limits() {
         let gate = Gate::default();
-        let limits = Limits { max_concurrent: 4, ..LIMITS };
+        let limits = Limits {
+            max_concurrent: 4,
+            ..LIMITS
+        };
         let first = gate.try_start(1, Some(9), limits).unwrap();
-        assert_eq!(gate.try_start(1, Some(9), limits).err(), Some(Refused::OneAtATime));
+        assert_eq!(
+            gate.try_start(1, Some(9), limits).err(),
+            Some(Refused::OneAtATime)
+        );
         first.finish(true, limits.backoff);
-        gate.try_start(1, Some(9), limits).unwrap().finish(true, limits.backoff);
-        assert_eq!(gate.try_start(1, Some(9), limits).err(), Some(Refused::HourlyLimit));
+        gate.try_start(1, Some(9), limits)
+            .unwrap()
+            .finish(true, limits.backoff);
+        assert_eq!(
+            gate.try_start(1, Some(9), limits).err(),
+            Some(Refused::HourlyLimit)
+        );
         // Other accounts and trusted scripts aren't affected
         assert!(gate.try_start(1, Some(10), limits).is_ok());
         assert!(gate.try_start(1, None, limits).is_ok());
@@ -295,17 +329,26 @@ mod tests {
     #[test]
     fn explanations_leave_a_slot_for_mail() {
         let gate = Gate::default();
-        let limits = Limits { max_concurrent: 2, ..LIMITS };
+        let limits = Limits {
+            max_concurrent: 2,
+            ..LIMITS
+        };
         // Idle: an explanation may start
         let explain = gate.try_start_explain(1, 9, limits, 30).unwrap();
         // Mail still gets the last slot
         let mail = gate.try_start(1, None, limits).unwrap();
         drop(explain);
         // One classification in flight, two slots: explaining would use the last
-        assert_eq!(gate.try_start_explain(1, 9, limits, 30).err(), Some(Refused::Busy));
+        assert_eq!(
+            gate.try_start_explain(1, 9, limits, 30).err(),
+            Some(Refused::Busy)
+        );
         drop(mail);
         // With one slot, an explanation runs only when the node is idle
-        let one = Limits { max_concurrent: 1, ..LIMITS };
+        let one = Limits {
+            max_concurrent: 1,
+            ..LIMITS
+        };
         let e = gate.try_start_explain(1, 9, one, 30).unwrap();
         assert_eq!(gate.try_start(1, None, one).err(), Some(Refused::Busy));
         drop(e);
@@ -314,11 +357,20 @@ mod tests {
     #[test]
     fn explanations_counted_apart() {
         let gate = Gate::default();
-        let limits = Limits { max_concurrent: 8, account_calls_per_hour: 1, ..LIMITS };
+        let limits = Limits {
+            max_concurrent: 8,
+            account_calls_per_hour: 1,
+            ..LIMITS
+        };
         for _ in 0..2 {
-            gate.try_start_explain(1, 9, limits, 2).unwrap().finish(true, limits.backoff);
+            gate.try_start_explain(1, 9, limits, 2)
+                .unwrap()
+                .finish(true, limits.backoff);
         }
-        assert_eq!(gate.try_start_explain(1, 9, limits, 2).err(), Some(Refused::HourlyLimit));
+        assert_eq!(
+            gate.try_start_explain(1, 9, limits, 2).err(),
+            Some(Refused::HourlyLimit)
+        );
         // The same administrator's scripts have their own count
         let script = gate.try_start(1, Some(9), limits).unwrap();
         assert_eq!(gate.in_flight(), 1);

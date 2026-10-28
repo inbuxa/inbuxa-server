@@ -80,7 +80,10 @@ pub async fn logo(server: &Server, req: &HttpRequest) -> trc::Result<HttpRespons
 /// `GET /calendar/rsvp`: the operator's page byte for byte if one is set,
 /// else the built-in, with headers that keep the token on the server
 /// (BT-20, BT-21).
-pub async fn rsvp_page(server: &Server, built_in_gzipped: &'static [u8]) -> trc::Result<HttpResponse> {
+pub async fn rsvp_page(
+    server: &Server,
+    built_in_gzipped: &'static [u8],
+) -> trc::Result<HttpResponse> {
     let response = match templates::rsvp_page(server.registry()).await? {
         Some(page) => HttpResponse::new(StatusCode::OK).with_binary_body(page.into_bytes()),
         None => HttpResponse::new(StatusCode::OK)

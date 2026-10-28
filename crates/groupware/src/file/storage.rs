@@ -89,7 +89,10 @@ impl DestroyArchive<Archive<&ArchivedFileNode>> {
             batch,
             account_id,
             document_id,
-            &self.0.deserialize::<FileNode>().caused_by(trc::location!())?,
+            &self
+                .0
+                .deserialize::<FileNode>()
+                .caused_by(trc::location!())?,
         )?;
 
         // Prepare write batch
@@ -158,9 +161,7 @@ impl DestroyArchive<Vec<u32>> {
                     batch,
                     account_id,
                     document_id,
-                    &node
-                        .deserialize::<FileNode>()
-                        .caused_by(trc::location!())?,
+                    &node.deserialize::<FileNode>().caused_by(trc::location!())?,
                 )?;
 
                 // Delete record

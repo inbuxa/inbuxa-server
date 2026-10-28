@@ -351,7 +351,7 @@ impl Server {
             )),
         )
         .await
-            .caused_by(trc::location!())?
+        .caused_by(trc::location!())?
         else {
             return Ok(());
         };
@@ -435,7 +435,12 @@ impl Server {
         let now = now() as i64;
         let mut expired = Vec::new();
         for ip in self.registry().list::<BlockedIp>().await? {
-            if ip.object.expires_at.as_ref().is_some_and(|at| at.timestamp() <= now) {
+            if ip
+                .object
+                .expires_at
+                .as_ref()
+                .is_some_and(|at| at.timestamp() <= now)
+            {
                 let address = ip.object.address.clone();
                 let object = Object {
                     inner: ip.object.into(),

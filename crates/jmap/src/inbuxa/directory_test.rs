@@ -59,7 +59,9 @@ pub fn assert_allowed(access_token: &AccessToken) -> trc::Result<()> {
 }
 
 fn bad(details: &'static str) -> trc::Error {
-    trc::ResourceEvent::BadParameters.into_err().details(details)
+    trc::ResourceEvent::BadParameters
+        .into_err()
+        .details(details)
 }
 
 pub async fn test(server: &Server, body: &Value) -> trc::Result<Value> {

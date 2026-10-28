@@ -84,6 +84,9 @@ jobs:
           jobs=$(awk '$1 != "max" { printf "%d", $1 / $2 }' /sys/fs/cgroup/cpu.max 2>/dev/null)
           echo "CARGO_BUILD_JOBS=${jobs:-$(nproc)}" >> "$GITHUB_ENV"
           echo "cargo jobs: ${jobs:-$(nproc)}; cache: $(du -sh /cache 2>/dev/null | cut -f1)"
+      # One formatting for the whole tree, so a change's diff is only its own
+      # lines. Before the build: it fails in seconds.
+      - run: rustup component add rustfmt && cargo fmt --all --check
       - run: apt-get update -qq && apt-get install -y -qq --no-install-recommends clang >/dev/null
       - run: cargo build -p inbuxa --locked
       # --no-run: the workflow compiled every test target without running them,

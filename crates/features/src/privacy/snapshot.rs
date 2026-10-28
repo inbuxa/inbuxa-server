@@ -94,11 +94,7 @@ pub async fn get(data: &Store, taken_at: u64) -> trc::Result<Option<Snapshot>> {
 pub async fn list(data: &Store, after: u64, before: u64) -> trc::Result<Vec<u64>> {
     let mut times = Vec::new();
     data.iterate(
-        IterateParams::new(
-            ValueKey::from(class(after)),
-            ValueKey::from(class(before)),
-        )
-        .no_values(),
+        IterateParams::new(ValueKey::from(class(after)), ValueKey::from(class(before))).no_values(),
         |key, _| {
             times.push(key.deserialize_be_u64(key.len() - U64_LEN)?);
             Ok(true)
@@ -150,6 +146,9 @@ mod tests {
         .unwrap();
         assert_eq!(changed["kind"], "settingChanged");
         assert_eq!(changed["setting"], "x:DataRetention");
-        assert_eq!(serde_json::to_value(Trigger::Daily).unwrap()["kind"], "daily");
+        assert_eq!(
+            serde_json::to_value(Trigger::Daily).unwrap()["kind"],
+            "daily"
+        );
     }
 }

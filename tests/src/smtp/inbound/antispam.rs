@@ -6,23 +6,19 @@
  * Modified by Coffey Labs in 2026 for INBUXA.
  */
 
+use crate::utils::http_server::{HttpMessage, spawn_mock_http_server};
+use crate::utils::{dns::DnsCache, server::TestServerBuilder};
+use ahash::AHashSet;
 use common::enterprise::llm::{
     ChatCompletionChoice, ChatCompletionRequest, ChatCompletionResponse, Message,
 };
-use spam_filter::analysis::llm::SpamFilterAnalyzeLlm;
-use crate::utils::http_server::{HttpMessage, spawn_mock_http_server};
-use http_proto::{JsonResponse, ToHttpResponse};
-use hyper::Method;
-use crate::utils::{
-    dns::DnsCache,
-    server::TestServerBuilder,
-};
-use ahash::AHashSet;
 use common::{
     Server,
     auth::{AccountCache, AccountInfo},
     config::mailstore::spamfilter::SpamFilterAction,
 };
+use http_proto::{JsonResponse, ToHttpResponse};
+use hyper::Method;
 use mail_auth::{
     ArcOutput, DkimOutput, DkimResult, DmarcResult, DnssecStatus, IprevOutput, IprevResult, MX,
     SpfOutput, SpfResult, dkim::Signature, dmarc::Policy,
@@ -42,6 +38,7 @@ use registry::{
 use serde_json::json;
 use smtp::core::SessionAddress;
 use smtp_proto::{MAIL_BODY_8BITMIME, MAIL_SMTPUTF8};
+use spam_filter::analysis::llm::SpamFilterAnalyzeLlm;
 use spam_filter::{
     SpamFilterInput,
     analysis::{
@@ -49,12 +46,11 @@ use spam_filter::{
         dmarc::SpamFilterAnalyzeDmarc, domain::SpamFilterAnalyzeDomain,
         ehlo::SpamFilterAnalyzeEhlo, from::SpamFilterAnalyzeFrom,
         headers::SpamFilterAnalyzeHeaders, html::SpamFilterAnalyzeHtml, init::SpamFilterInit,
-        ip::SpamFilterAnalyzeIp, messageid::SpamFilterAnalyzeMid,
-        mime::SpamFilterAnalyzeMime, pyzor::SpamFilterAnalyzePyzor,
-        received::SpamFilterAnalyzeReceived, recipient::SpamFilterAnalyzeRecipient,
-        replyto::SpamFilterAnalyzeReplyTo, rules::SpamFilterAnalyzeRules,
-        score::SpamFilterAnalyzeScore, subject::SpamFilterAnalyzeSubject,
-        url::SpamFilterAnalyzeUrl,
+        ip::SpamFilterAnalyzeIp, messageid::SpamFilterAnalyzeMid, mime::SpamFilterAnalyzeMime,
+        pyzor::SpamFilterAnalyzePyzor, received::SpamFilterAnalyzeReceived,
+        recipient::SpamFilterAnalyzeRecipient, replyto::SpamFilterAnalyzeReplyTo,
+        rules::SpamFilterAnalyzeRules, score::SpamFilterAnalyzeScore,
+        subject::SpamFilterAnalyzeSubject, url::SpamFilterAnalyzeUrl,
     },
     modules::{
         classifier::{SpamClassifier, Token},

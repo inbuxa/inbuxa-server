@@ -30,7 +30,9 @@ pub fn is_local_ip(ip: IpAddr) -> bool {
             ip.is_loopback()
                 || (ip.segments()[0] & 0xfe00) == 0xfc00
                 || (ip.segments()[0] & 0xffc0) == 0xfe80
-                || ip.to_ipv4_mapped().is_some_and(|v4| is_local_ip(IpAddr::V4(v4)))
+                || ip
+                    .to_ipv4_mapped()
+                    .is_some_and(|v4| is_local_ip(IpAddr::V4(v4)))
         }
     }
 }
@@ -41,8 +43,7 @@ pub fn classify(url: &str) -> Option<bool> {
     let Some(host) = host(url) else {
         return Some(false);
     };
-    if host.eq_ignore_ascii_case("localhost") || host.to_ascii_lowercase().ends_with(".localhost")
-    {
+    if host.eq_ignore_ascii_case("localhost") || host.to_ascii_lowercase().ends_with(".localhost") {
         return Some(true);
     }
     match host.parse::<IpAddr>() {
@@ -80,6 +81,9 @@ mod tests {
             assert_eq!(classify(remote), Some(false), "{remote}");
         }
         assert_eq!(classify("https://mail.example.net/v1"), None);
-        assert_eq!(host("https://mail.example.net:8443/v1?x"), Some("mail.example.net"));
+        assert_eq!(
+            host("https://mail.example.net:8443/v1?x"),
+            Some("mail.example.net")
+        );
     }
 }

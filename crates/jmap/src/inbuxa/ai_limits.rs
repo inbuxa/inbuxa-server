@@ -57,10 +57,14 @@ fn to_value(limits: &Limits, properties: &[P]) -> LValue {
             P::Id => Value::Element(AiLimitsValue::Id(Id::singleton())),
             P::SpamMaxAdded => Value::Number((limits.spam_max_added).into()),
             P::SpamMaxSubtracted => Value::Number((limits.spam_max_subtracted).into()),
-            P::SpamCallCeiling => Value::Number((limits.spam_call_ceiling.into_inner().as_millis() as u64).into()),
+            P::SpamCallCeiling => {
+                Value::Number((limits.spam_call_ceiling.into_inner().as_millis() as u64).into())
+            }
             P::MaxConcurrentCalls => Value::Number((limits.max_concurrent_calls).into()),
             P::MaxContentBytes => Value::Number((limits.max_content_bytes).into()),
-            P::FailureBackoff => Value::Number((limits.failure_backoff.into_inner().as_millis() as u64).into()),
+            P::FailureBackoff => {
+                Value::Number((limits.failure_backoff.into_inner().as_millis() as u64).into())
+            }
             P::UserCallsPerHour => Value::Number((limits.user_calls_per_hour).into()),
             P::ExplainEnabled => Value::Bool(limits.explain_enabled),
             P::ExplainModelId => match limits.explain_model_id {
@@ -68,7 +72,9 @@ fn to_value(limits: &Limits, properties: &[P]) -> LValue {
                 None => Value::Null,
             },
             P::ExplainCallsPerHour => Value::Number((limits.explain_calls_per_hour).into()),
-            P::ExplainCeiling => Value::Number((limits.explain_ceiling.into_inner().as_millis() as u64).into()),
+            P::ExplainCeiling => {
+                Value::Number((limits.explain_ceiling.into_inner().as_millis() as u64).into())
+            }
         };
         out.insert_unchecked(Key::Property(property.clone()), value);
     }
@@ -106,9 +112,17 @@ pub async fn get(
     Ok(response)
 }
 
-fn apply(limits: &mut Limits, property: &P, value: &Value<'_, P, AiLimitsValue>) -> Result<(), String> {
+fn apply(
+    limits: &mut Limits,
+    property: &P,
+    value: &Value<'_, P, AiLimitsValue>,
+) -> Result<(), String> {
     let number = || value.as_f64().ok_or_else(|| "must be a number".to_string());
-    let whole = || value.as_u64().ok_or_else(|| "must be a whole number".to_string());
+    let whole = || {
+        value
+            .as_u64()
+            .ok_or_else(|| "must be a whole number".to_string())
+    };
     match property {
         P::SpamMaxAdded => limits.spam_max_added = number()?,
         P::SpamMaxSubtracted => limits.spam_max_subtracted = number()?,
@@ -118,7 +132,9 @@ fn apply(limits: &mut Limits, property: &P, value: &Value<'_, P, AiLimitsValue>)
         P::FailureBackoff => limits.failure_backoff = Duration::from_millis(whole()?),
         P::UserCallsPerHour => limits.user_calls_per_hour = whole()?,
         P::ExplainEnabled => {
-            limits.explain_enabled = value.as_bool().ok_or_else(|| "must be true or false".to_string())?
+            limits.explain_enabled = value
+                .as_bool()
+                .ok_or_else(|| "must be true or false".to_string())?
         }
         P::ExplainModelId => match value {
             Value::Element(AiLimitsValue::Id(id)) => limits.explain_model_id = Some(id.id()),
@@ -160,7 +176,9 @@ pub async fn set(
     assert_server_level(access_token)?;
     let mut response = SetResponse::from_request(&request, server.core.jmap.set_max_objects)?;
     for (client_id, _) in request.unwrap_create() {
-        response.not_created.append(client_id, SetError::singleton());
+        response
+            .not_created
+            .append(client_id, SetError::singleton());
     }
     for id in request.unwrap_destroy().into_valid() {
         response.not_destroyed.append(id, SetError::singleton());

@@ -9,7 +9,9 @@
 //! alias, and a trained spam filter moves to its new keys.
 
 use crate::utils::server::TestServerBuilder;
-use common::manager::{SPAM_CLASSIFIER_KEY, SPAM_TRAINER_KEY, first_party::WEB_INTERFACE_CLIENT_ID};
+use common::manager::{
+    SPAM_CLASSIFIER_KEY, SPAM_TRAINER_KEY, first_party::WEB_INTERFACE_CLIENT_ID,
+};
 use registry::{
     schema::{
         enums::CompressionAlgo,
@@ -76,14 +78,20 @@ async fn renamed_identifiers() {
         (OLD_TRAINER_KEY, &b"trainer"[..]),
         (OLD_CLASSIFIER_KEY, &b"classifier"[..]),
     ] {
-        blobs.put_blob(key, data, CompressionAlgo::None).await.unwrap();
+        blobs
+            .put_blob(key, data, CompressionAlgo::None)
+            .await
+            .unwrap();
     }
     migration::try_migrate(&test.server).await.unwrap();
     for (old, new, data) in [
         (OLD_TRAINER_KEY, SPAM_TRAINER_KEY, &b"trainer"[..]),
         (OLD_CLASSIFIER_KEY, SPAM_CLASSIFIER_KEY, &b"classifier"[..]),
     ] {
-        assert_eq!(blobs.get_blob(new, 0..usize::MAX).await.unwrap().as_deref(), Some(data));
+        assert_eq!(
+            blobs.get_blob(new, 0..usize::MAX).await.unwrap().as_deref(),
+            Some(data)
+        );
         assert_eq!(blobs.get_blob(old, 0..usize::MAX).await.unwrap(), None);
     }
 
@@ -101,12 +109,22 @@ async fn renamed_identifiers() {
             .as_deref(),
         Some(&b"classifier"[..])
     );
-    assert_eq!(blobs.get_blob(OLD_CLASSIFIER_KEY, 0..usize::MAX).await.unwrap(), None);
+    assert_eq!(
+        blobs
+            .get_blob(OLD_CLASSIFIER_KEY, 0..usize::MAX)
+            .await
+            .unwrap(),
+        None
+    );
 
     // With nothing left to move, starting again changes nothing.
     migration::try_migrate(&test.server).await.unwrap();
     assert_eq!(
-        blobs.get_blob(SPAM_TRAINER_KEY, 0..usize::MAX).await.unwrap().as_deref(),
+        blobs
+            .get_blob(SPAM_TRAINER_KEY, 0..usize::MAX)
+            .await
+            .unwrap()
+            .as_deref(),
         Some(&b"trainer"[..])
     );
 }

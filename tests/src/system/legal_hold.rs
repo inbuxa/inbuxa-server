@@ -36,13 +36,18 @@ impl Account {
         if arguments.get("accountId").is_none() {
             arguments["accountId"] = self.id_string().into();
         }
-        let response = self.jmap_request(USING, json!([[method, arguments, "0"]])).await;
+        let response = self
+            .jmap_request(USING, json!([[method, arguments, "0"]]))
+            .await;
         let call = response
             .0
             .pointer("/methodResponses/0")
             .cloned()
             .unwrap_or_else(|| panic!("{method}: {}", response.0));
-        (call[0].as_str().unwrap_or_default().to_string(), call[1].clone())
+        (
+            call[0].as_str().unwrap_or_default().to_string(),
+            call[1].clone(),
+        )
     }
 
     async fn hold_set(&self, arguments: Value) -> Value {
@@ -71,10 +76,22 @@ pub async fn test(test: &mut TestServer) {
     println!("Running legal hold tests...");
     let admin = test.account("admin@example.com");
     let custodian = admin
-        .create_user_account("custodian@example.com", "custodian-secret-2201", "Custodian", &[], vec![])
+        .create_user_account(
+            "custodian@example.com",
+            "custodian-secret-2201",
+            "Custodian",
+            &[],
+            vec![],
+        )
         .await;
     let other = admin
-        .create_user_account("other@example.com", "other-secret-7310", "Other", &[], vec![])
+        .create_user_account(
+            "other@example.com",
+            "other-secret-7310",
+            "Other",
+            &[],
+            vec![],
+        )
         .await;
     let custodian_id = custodian.id_string().to_string();
     let other_id = other.id_string().to_string();
@@ -84,17 +101,26 @@ pub async fn test(test: &mut TestServer) {
         .hold_set(json!({"create": {"h": {"name": "Matter 4411",
             "scope": {"accounts": [custodian_id]}}}}))
         .await;
-    assert_eq!(response["notCreated"]["h"]["type"], "invalidProperties", "AU-12: {response}");
+    assert_eq!(
+        response["notCreated"]["h"]["type"], "invalidProperties",
+        "AU-12: {response}"
+    );
     let response = admin
         .hold_set(json!({"reason": "Counsel's letter", "create": {"h": {
             "scope": {"accounts": [custodian_id]}}}}))
         .await;
-    assert_eq!(response["notCreated"]["h"]["type"], "invalidProperties", "LH-1 name: {response}");
+    assert_eq!(
+        response["notCreated"]["h"]["type"], "invalidProperties",
+        "LH-1 name: {response}"
+    );
     let response = admin
         .hold_set(json!({"reason": "Counsel's letter", "create": {"h": {
             "name": "Matter 4411", "scope": {}}}}))
         .await;
-    assert_eq!(response["notCreated"]["h"]["type"], "invalidProperties", "LH-1 scope: {response}");
+    assert_eq!(
+        response["notCreated"]["h"]["type"], "invalidProperties",
+        "LH-1 scope: {response}"
+    );
     let response = admin
         .hold_set(json!({"reason": "Counsel's letter", "create": {"h": {
             "name": "Matter 4411", "scope": {"accounts": ["zzzzzz"]}}}}))
@@ -109,7 +135,10 @@ pub async fn test(test: &mut TestServer) {
             "from": "2026-06-30T00:00:00Z", "to": "2026-01-01T00:00:00Z",
             "scope": {"accounts": [custodian_id]}}}}))
         .await;
-    assert_eq!(response["notCreated"]["h"]["type"], "invalidProperties", "LH-3 backwards: {response}");
+    assert_eq!(
+        response["notCreated"]["h"]["type"], "invalidProperties",
+        "LH-3 backwards: {response}"
+    );
 
     // LH-1: placed, with a reference and a range
     let response = admin
@@ -128,14 +157,20 @@ pub async fn test(test: &mut TestServer) {
     assert_eq!(hold["scope"]["accounts"], json!([custodian_id]), "{hold}");
     assert_eq!(hold["from"], "2026-01-01T00:00:00Z", "{hold}");
     assert_eq!(hold["released"], false, "{hold}");
-    assert!(hold["placedBy"].as_str().is_some_and(|by| by.contains("admin")), "{hold}");
+    assert!(
+        hold["placedBy"]
+            .as_str()
+            .is_some_and(|by| by.contains("admin")),
+        "{hold}"
+    );
 
     // AU-12: every later change needs a reason too
     let response = admin
         .hold_set(json!({"update": {hold_id.as_str(): {"name": "Renamed"}}}))
         .await;
     assert_eq!(
-        response["notUpdated"][hold_id.as_str()]["type"], "invalidProperties",
+        response["notUpdated"][hold_id.as_str()]["type"],
+        "invalidProperties",
         "AU-12: {response}"
     );
 
@@ -145,30 +180,46 @@ pub async fn test(test: &mut TestServer) {
             "from": "2026-03-01T00:00:00Z"}}}))
         .await;
     assert_eq!(
-        response["notUpdated"][hold_id.as_str()]["type"], "invalidProperties",
+        response["notUpdated"][hold_id.as_str()]["type"],
+        "invalidProperties",
         "LH-3 narrowed: {response}"
     );
     let response = admin
-        .hold_set(json!({"reason": "Counsel widened the matter", "update": {hold_id.as_str(): {
-            "from": "2025-01-01T00:00:00Z", "to": null}}}))
+        .hold_set(
+            json!({"reason": "Counsel widened the matter", "update": {hold_id.as_str(): {
+            "from": "2025-01-01T00:00:00Z", "to": null}}}),
+        )
         .await;
-    assert!(response["updated"].get(hold_id.as_str()).is_some(), "LH-3 widened: {response}");
+    assert!(
+        response["updated"].get(hold_id.as_str()).is_some(),
+        "LH-3 widened: {response}"
+    );
     let hold = admin.hold_get(&hold_id).await;
     assert_eq!(hold["from"], "2025-01-01T00:00:00Z", "{hold}");
-    assert_eq!(hold["to"], Value::Null, "LH-3: an open end catches mail to come: {hold}");
+    assert_eq!(
+        hold["to"],
+        Value::Null,
+        "LH-3: an open end catches mail to come: {hold}"
+    );
 
     // The scope grows, and never shrinks
     let response = admin
-        .hold_set(json!({"reason": "Second custodian", "update": {hold_id.as_str(): {
-            "scope": {"accounts": [custodian_id, other_id]}}}}))
+        .hold_set(
+            json!({"reason": "Second custodian", "update": {hold_id.as_str(): {
+            "scope": {"accounts": [custodian_id, other_id]}}}}),
+        )
         .await;
-    assert!(response["updated"].get(hold_id.as_str()).is_some(), "scope grown: {response}");
+    assert!(
+        response["updated"].get(hold_id.as_str()).is_some(),
+        "scope grown: {response}"
+    );
     let response = admin
         .hold_set(json!({"reason": "Drop one", "update": {hold_id.as_str(): {
             "scope": {"accounts": [other_id]}}}}))
         .await;
     assert_eq!(
-        response["notUpdated"][hold_id.as_str()]["type"], "invalidProperties",
+        response["notUpdated"][hold_id.as_str()]["type"],
+        "invalidProperties",
         "scope shrunk: {response}"
     );
 
@@ -177,7 +228,8 @@ pub async fn test(test: &mut TestServer) {
         .hold_set(json!({"reason": "Delete it", "destroy": [hold_id]}))
         .await;
     assert_eq!(
-        response["notDestroyed"][hold_id.as_str()]["type"], "forbidden",
+        response["notDestroyed"][hold_id.as_str()]["type"],
+        "forbidden",
         "LH-13: {response}"
     );
 
@@ -225,7 +277,10 @@ pub async fn test(test: &mut TestServer) {
     let (name, response) = t_admin
         .hold_call("inbuxa:LegalHold/get", json!({"ids": null}))
         .await;
-    assert_eq!(name, "error", "LH-13: a tenant administrator read holds: {response}");
+    assert_eq!(
+        name, "error",
+        "LH-13: a tenant administrator read holds: {response}"
+    );
     let (name, response) = t_admin
         .hold_call(
             "inbuxa:LegalHold/set",
@@ -233,7 +288,10 @@ pub async fn test(test: &mut TestServer) {
                 "scope": {"accounts": [t_admin.id_string()]}}}}),
         )
         .await;
-    assert_eq!(name, "error", "LH-13: a tenant administrator placed a hold: {response}");
+    assert_eq!(
+        name, "error",
+        "LH-13: a tenant administrator placed a hold: {response}"
+    );
 
     // Test 7, LH-2: a hold on a domain reaches an account created there
     // later, and keeps it by name when it moves to another domain
@@ -266,7 +324,13 @@ pub async fn test(test: &mut TestServer) {
         .unwrap_or_else(|| panic!("LH-1 domain hold: {response}"))
         .to_string();
     let mover = admin
-        .create_user_account("mover@held.example.net", "mover-secret-8812", "Mover", &[], vec![])
+        .create_user_account(
+            "mover@held.example.net",
+            "mover-secret-8812",
+            "Mover",
+            &[],
+            vec![],
+        )
         .await;
     assert_eq!(
         admin.hold_get(&domain_hold).await["scope"]["accounts"],
@@ -301,7 +365,13 @@ pub async fn test(test: &mut TestServer) {
         .create_user_account("held@example.com", "held-secret-4419", "Held", &[], vec![])
         .await;
     let ranged = admin
-        .create_user_account("ranged@example.com", "ranged-secret-5530", "Ranged", &[], vec![])
+        .create_user_account(
+            "ranged@example.com",
+            "ranged-secret-5530",
+            "Ranged",
+            &[],
+            vec![],
+        )
         .await;
     let response = admin
         .hold_set(json!({"reason": "Preserve everything", "create": {
@@ -313,7 +383,10 @@ pub async fn test(test: &mut TestServer) {
         .as_str()
         .unwrap_or_else(|| panic!("LH-1: {response}"))
         .to_string();
-    assert!(response["created"]["r"]["id"].is_string(), "LH-1: {response}");
+    assert!(
+        response["created"]["r"]["id"].is_string(),
+        "LH-1: {response}"
+    );
 
     let held_client = held.jmap_client().await;
     let ranged_client = ranged.jmap_client().await;
@@ -341,7 +414,10 @@ pub async fn test(test: &mut TestServer) {
                     "name": {"full": "Kept Contact"}}}}),
             )
             .await;
-        let card = created["created"]["c"]["id"].as_str().unwrap_or_default().to_string();
+        let card = created["created"]["c"]["id"]
+            .as_str()
+            .unwrap_or_default()
+            .to_string();
         let (_, destroyed) = ranged
             .hold_call("ContactCard/set", json!({"destroy": [card]}))
             .await;
@@ -349,15 +425,21 @@ pub async fn test(test: &mut TestServer) {
     }
     test.wait_for_tasks().await;
 
-    let is_held = |item: &Value| item["archivedUntil"].as_str().is_some_and(|u| u.starts_with("9999-"));
+    let is_held = |item: &Value| {
+        item["archivedUntil"]
+            .as_str()
+            .is_some_and(|u| u.starts_with("9999-"))
+    };
     let kept = held.archived_items().await;
     assert!(
-        kept.iter().any(|i| i["subject"] == "Held whole" && is_held(i)),
+        kept.iter()
+            .any(|i| i["subject"] == "Held whole" && is_held(i)),
         "test 6, LH-4: a held account's mail wasn't kept: {kept:?}"
     );
     let kept = ranged.archived_items().await;
     assert!(
-        kept.iter().any(|i| i["subject"] == "Inside the range" && is_held(i)),
+        kept.iter()
+            .any(|i| i["subject"] == "Inside the range" && is_held(i)),
         "LH-3: mail inside the range wasn't kept: {kept:?}"
     );
     assert!(
@@ -365,7 +447,8 @@ pub async fn test(test: &mut TestServer) {
         "LH-3: mail outside the range was kept, with undelete off: {kept:?}"
     );
     assert!(
-        kept.iter().any(|i| i["name"] == "Kept Contact" && is_held(i)),
+        kept.iter()
+            .any(|i| i["name"] == "Kept Contact" && is_held(i)),
         "LH-3: a contact wasn't kept whole: {kept:?}"
     );
 
@@ -384,7 +467,13 @@ pub async fn test(test: &mut TestServer) {
         )
         .await;
     let frozen = admin
-        .create_user_account("frozen@example.com", "frozen-secret-9031", "Frozen", &[], vec![])
+        .create_user_account(
+            "frozen@example.com",
+            "frozen-secret-9031",
+            "Frozen",
+            &[],
+            vec![],
+        )
         .await;
     let frozen_client = frozen.jmap_client().await;
     let doomed = import(&frozen_client, "Deleted before the hold", None).await;
@@ -421,7 +510,10 @@ pub async fn test(test: &mut TestServer) {
     let summary = &response["list"][0];
     assert_eq!(summary["accountsCovered"], 1, "LH-9: {response}");
     assert_eq!(summary["itemsHeld"], 1, "LH-9: {response}");
-    assert!(summary["sizeHeld"].as_u64().is_some_and(|s| s > 0), "LH-9: {response}");
+    assert!(
+        summary["sizeHeld"].as_u64().is_some_and(|s| s > 0),
+        "LH-9: {response}"
+    );
     // LH-14: the holds on one account, for the console's Held badge
     let (_, response) = admin
         .hold_call(
@@ -431,10 +523,18 @@ pub async fn test(test: &mut TestServer) {
         .await;
     let mut names = response["list"]
         .as_array()
-        .map(|l| l.iter().filter_map(|h| h["name"].as_str()).collect::<Vec<_>>())
+        .map(|l| {
+            l.iter()
+                .filter_map(|h| h["name"].as_str())
+                .collect::<Vec<_>>()
+        })
         .unwrap_or_default();
     names.sort_unstable();
-    assert_eq!(names, vec!["Matter 7001", "Matter 7002"], "LH-14: {response}");
+    assert_eq!(
+        names,
+        vec!["Matter 7001", "Matter 7002"],
+        "LH-14: {response}"
+    );
 
     // LH-12: collect what the hold keeps, as a ZIP with its manifest
     import(&frozen_client, "Still in the inbox", None).await;
@@ -478,27 +578,36 @@ pub async fn test(test: &mut TestServer) {
         .download(export["blobId"].as_str().unwrap())
         .await
         .unwrap();
-    assert_eq!(export["size"].as_u64(), Some(bytes.len() as u64), "{export}");
+    assert_eq!(
+        export["size"].as_u64(),
+        Some(bytes.len() as u64),
+        "{export}"
+    );
     let mut zip = zip::ZipArchive::new(std::io::Cursor::new(bytes)).unwrap();
     let names = (0..zip.len())
         .map(|i| zip.by_index(i).unwrap().name().to_string())
         .collect::<Vec<_>>();
     assert!(
-        names.iter().any(|n| n.starts_with("frozen@example.com/mail/") && n.ends_with(".eml")),
+        names
+            .iter()
+            .any(|n| n.starts_with("frozen@example.com/mail/") && n.ends_with(".eml")),
         "LH-12: live mail missing: {names:?}"
-    );
-    assert!(
-        names.iter().any(|n| n.starts_with("frozen@example.com/archived/email/")),
-        "LH-12: the kept deleted mail is missing: {names:?}"
     );
     assert!(
         names
             .iter()
-            .all(|n| n.starts_with("frozen@example.com/") || n.starts_with("manifest.") || n == "exceptions.csv"),
+            .any(|n| n.starts_with("frozen@example.com/archived/email/")),
+        "LH-12: the kept deleted mail is missing: {names:?}"
+    );
+    assert!(
+        names.iter().all(|n| n.starts_with("frozen@example.com/")
+            || n.starts_with("manifest.")
+            || n == "exceptions.csv"),
         "LH-12: an account the hold doesn't cover was exported: {names:?}"
     );
     let mut manifest = String::new();
-    std::io::Read::read_to_string(&mut zip.by_name("manifest.csv").unwrap(), &mut manifest).unwrap();
+    std::io::Read::read_to_string(&mut zip.by_name("manifest.csv").unwrap(), &mut manifest)
+        .unwrap();
     let mut hash = String::new();
     std::io::Read::read_to_string(&mut zip.by_name("manifest.sha256").unwrap(), &mut hash).unwrap();
     use sha2::Digest;
@@ -506,10 +615,17 @@ pub async fn test(test: &mut TestServer) {
         .iter()
         .map(|b| format!("{b:02x}"))
         .collect();
-    assert!(hash.starts_with(&expected), "LH-12: the manifest's hash doesn't match");
-    assert!(manifest.contains(",true,"), "LH-12: nothing marked archived: {manifest}");
+    assert!(
+        hash.starts_with(&expected),
+        "LH-12: the manifest's hash doesn't match"
+    );
+    assert!(
+        manifest.contains(",true,"),
+        "LH-12: nothing marked archived: {manifest}"
+    );
     let mut exceptions = String::new();
-    std::io::Read::read_to_string(&mut zip.by_name("exceptions.csv").unwrap(), &mut exceptions).unwrap();
+    std::io::Read::read_to_string(&mut zip.by_name("exceptions.csv").unwrap(), &mut exceptions)
+        .unwrap();
     assert_eq!(
         exceptions, "path,account,kind,folder,date,archived,reason\n",
         "LH-12: items the hold covers couldn't be read"
@@ -530,7 +646,8 @@ pub async fn test(test: &mut TestServer) {
         .hold_call("x:ArchivedItem/set", json!({"destroy": [item_id]}))
         .await;
     assert_eq!(
-        response["notDestroyed"][item_id.as_str()]["type"], "forbidden",
+        response["notDestroyed"][item_id.as_str()]["type"],
+        "forbidden",
         "test 6, LH-7: the owner destroyed a held item: {response}"
     );
     assert!(
@@ -549,17 +666,24 @@ pub async fn test(test: &mut TestServer) {
     );
 
     admin
-        .hold_set(json!({"reason": "First settled", "update": {first.as_str(): {"released": true}}}))
+        .hold_set(
+            json!({"reason": "First settled", "update": {first.as_str(): {"released": true}}}),
+        )
         .await;
     assert!(
         is_held(&archived(frozen.archived_items().await)),
         "test 9, LH-11: releasing one hold of two freed the item"
     );
     admin
-        .hold_set(json!({"reason": "Second settled", "update": {second.as_str(): {"released": true}}}))
+        .hold_set(
+            json!({"reason": "Second settled", "update": {second.as_str(): {"released": true}}}),
+        )
         .await;
     let item = archived(frozen.archived_items().await);
-    assert!(!is_held(&item), "LH-10: the last release left it held: {item}");
+    assert!(
+        !is_held(&item),
+        "LH-10: the last release left it held: {item}"
+    );
     let (_, response) = admin
         .hold_call(
             "inbuxa:HoldExport/set",
@@ -570,7 +694,10 @@ pub async fn test(test: &mut TestServer) {
         response["notCreated"]["x"]["type"], "invalidProperties",
         "LH-12: a released hold was exported: {response}"
     );
-    let until = item["archivedUntil"].as_str().unwrap_or_default().to_string();
+    let until = item["archivedUntil"]
+        .as_str()
+        .unwrap_or_default()
+        .to_string();
     let grace = chrono::Utc::now() + chrono::Duration::days(29);
     assert!(
         until > grace.format("%Y-%m-%dT%H:%M:%S").to_string(),
@@ -591,14 +718,17 @@ pub async fn test(test: &mut TestServer) {
         .await;
     let entry = kept(list.clone()).unwrap_or_else(|| panic!("test 8, LH-8: not kept: {list}"));
     assert!(
-        entry["keptUntil"].as_str().is_some_and(|u| u.starts_with("9999-")),
+        entry["keptUntil"]
+            .as_str()
+            .is_some_and(|u| u.starts_with("9999-")),
         "test 8, LH-8: kept with an expiry: {entry}"
     );
     let (_, response) = admin
         .hold_call("inbuxa:DeletedAccount/set", json!({"destroy": [held_id]}))
         .await;
     assert_eq!(
-        response["notDestroyed"][held_id.as_str()]["type"], "forbidden",
+        response["notDestroyed"][held_id.as_str()]["type"],
+        "forbidden",
         "test 8, LH-8: destroy-now wasn't refused: {response}"
     );
     // Its hold names it now, so no domain or tenant move can drop it
@@ -610,12 +740,15 @@ pub async fn test(test: &mut TestServer) {
     );
     // Release: the data is destroyed 30 days later, not before
     admin
-        .hold_set(json!({"reason": "Matter closed", "update": {whole_hold.as_str(): {"released": true}}}))
+        .hold_set(
+            json!({"reason": "Matter closed", "update": {whole_hold.as_str(): {"released": true}}}),
+        )
         .await;
     let (_, list) = admin
         .hold_call("inbuxa:DeletedAccount/get", json!({"ids": null}))
         .await;
-    let entry = kept(list.clone()).unwrap_or_else(|| panic!("test 8, LH-10: gone at release: {list}"));
+    let entry =
+        kept(list.clone()).unwrap_or_else(|| panic!("test 8, LH-10: gone at release: {list}"));
     let until = entry["keptUntil"].as_str().unwrap_or_default().to_string();
     let grace = chrono::Utc::now() + chrono::Duration::days(29);
     assert!(
@@ -628,13 +761,19 @@ pub async fn test(test: &mut TestServer) {
         .hold_set(json!({"update": {hold_id.as_str(): {"released": true}}}))
         .await;
     assert_eq!(
-        response["notUpdated"][hold_id.as_str()]["type"], "invalidProperties",
+        response["notUpdated"][hold_id.as_str()]["type"],
+        "invalidProperties",
         "AU-12 release: {response}"
     );
     let response = admin
-        .hold_set(json!({"reason": "Matter settled", "update": {hold_id.as_str(): {"released": true}}}))
+        .hold_set(
+            json!({"reason": "Matter settled", "update": {hold_id.as_str(): {"released": true}}}),
+        )
         .await;
-    assert!(response["updated"].get(hold_id.as_str()).is_some(), "LH-10: {response}");
+    assert!(
+        response["updated"].get(hold_id.as_str()).is_some(),
+        "LH-10: {response}"
+    );
     let hold = admin.hold_get(&hold_id).await;
     assert_eq!(hold["released"], true, "{hold}");
     assert_eq!(hold["releaseReason"], "Matter settled", "{hold}");
@@ -643,14 +782,16 @@ pub async fn test(test: &mut TestServer) {
         .hold_set(json!({"reason": "Rename", "update": {hold_id.as_str(): {"name": "After"}}}))
         .await;
     assert_eq!(
-        response["notUpdated"][hold_id.as_str()]["type"], "invalidProperties",
+        response["notUpdated"][hold_id.as_str()]["type"],
+        "invalidProperties",
         "LH-1: a released hold changed: {response}"
     );
     let response = admin
         .hold_set(json!({"reason": "Undo", "update": {hold_id.as_str(): {"released": false}}}))
         .await;
     assert_eq!(
-        response["notUpdated"][hold_id.as_str()]["type"], "invalidProperties",
+        response["notUpdated"][hold_id.as_str()]["type"],
+        "invalidProperties",
         "LH-10: a released hold came back: {response}"
     );
 
@@ -671,8 +812,15 @@ pub async fn test(test: &mut TestServer) {
         .iter()
         .filter_map(|r| r["reason"].as_str())
         .collect::<Vec<_>>();
-    for reason in ["Counsel's letter", "Counsel widened the matter", "Matter settled"] {
-        assert!(reasons.contains(&reason), "AU-12: {reason:?} not recorded: {reasons:?}");
+    for reason in [
+        "Counsel's letter",
+        "Counsel widened the matter",
+        "Matter settled",
+    ] {
+        assert!(
+            reasons.contains(&reason),
+            "AU-12: {reason:?} not recorded: {reasons:?}"
+        );
     }
     // AU-1.9: an export is recorded with its reason
     let (_, query) = admin
@@ -682,12 +830,15 @@ pub async fn test(test: &mut TestServer) {
         )
         .await;
     let (_, exports) = admin
-        .hold_call("inbuxa:AuditEvent/get", json!({"ids": query["ids"].clone()}))
+        .hold_call(
+            "inbuxa:AuditEvent/get",
+            json!({"ids": query["ids"].clone()}),
+        )
         .await;
     assert!(
-        exports["list"]
-            .as_array()
-            .is_some_and(|l| l.iter().any(|r| r["reason"] == "Production to opposing counsel")),
+        exports["list"].as_array().is_some_and(|l| l
+            .iter()
+            .any(|r| r["reason"] == "Production to opposing counsel")),
         "AU-1.9: the export isn't recorded: {exports}"
     );
     // A release is recorded under the hold's name, from before to after
@@ -698,18 +849,24 @@ pub async fn test(test: &mut TestServer) {
         .unwrap_or_else(|| panic!("the first release isn't recorded: {list:?}"));
     assert_eq!(release["target"]["name"], "Matter 7001", "{release}");
     assert!(
-        release["changes"]
-            .as_array()
-            .is_some_and(|c| c.iter().any(|c| c["field"] == "released" && c["before"] == false && c["after"] == true)),
+        release["changes"].as_array().is_some_and(|c| c
+            .iter()
+            .any(|c| c["field"] == "released" && c["before"] == false && c["after"] == true)),
         "the release doesn't read before/after: {release}"
     );
 
     // Accounts are named by their full address, not the bare local part
     let (_, query) = admin
-        .hold_call("inbuxa:AuditEvent/query", json!({"filter": {"targetKind": "x:Account"}}))
+        .hold_call(
+            "inbuxa:AuditEvent/query",
+            json!({"filter": {"targetKind": "x:Account"}}),
+        )
         .await;
     let (_, accounts) = admin
-        .hold_call("inbuxa:AuditEvent/get", json!({"ids": query["ids"].clone()}))
+        .hold_call(
+            "inbuxa:AuditEvent/get",
+            json!({"ids": query["ids"].clone()}),
+        )
         .await;
     assert!(
         accounts["list"]

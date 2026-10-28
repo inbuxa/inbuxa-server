@@ -217,20 +217,18 @@ async fn build_blob_store(typ: BlobStoreType, path: &str) -> BlobStore {
             ..Default::default()
         }),
         // inbuxa: scale-out storage (ST-16): three FileSystem members
-        BlobStoreType::Sharded => {
-            BlobStore::Sharded(registry::schema::structs::ShardedBlobStore {
-                stores: (1..=3)
-                    .map(|n| {
-                        let dir = format!("{path}/shard-{n}");
-                        std::fs::create_dir_all(&dir).unwrap();
-                        registry::schema::structs::BlobStoreBase::FileSystem(FileSystemStore {
-                            path: dir,
-                            ..Default::default()
-                        })
+        BlobStoreType::Sharded => BlobStore::Sharded(registry::schema::structs::ShardedBlobStore {
+            stores: (1..=3)
+                .map(|n| {
+                    let dir = format!("{path}/shard-{n}");
+                    std::fs::create_dir_all(&dir).unwrap();
+                    registry::schema::structs::BlobStoreBase::FileSystem(FileSystemStore {
+                        path: dir,
+                        ..Default::default()
                     })
-                    .collect(),
-            })
-        }
+                })
+                .collect(),
+        }),
         _ => unreachable!(),
     }
 }

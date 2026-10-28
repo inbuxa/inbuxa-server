@@ -39,7 +39,11 @@ impl Server {
     /// inbuxa: MA-C: whether people in `owner`'s tenant may share their mail
     /// (the server's switch, narrowed by the tenant's).
     pub async fn mail_sharing_allowed(&self, owner: u32) -> trc::Result<bool> {
-        let tenant_id = self.account(owner).await.ok().and_then(|account| account.id_tenant);
+        let tenant_id = self
+            .account(owner)
+            .await
+            .ok()
+            .and_then(|account| account.id_tenant);
         Ok(
             inbuxa_features::security::sharing_policy::effective_for(self.store(), tenant_id)
                 .await
@@ -157,14 +161,15 @@ impl Server {
                             // and always count.
                             if collection == Collection::Mailbox {
                                 let owner = acl_item.to_account_id;
-                                let honored = match mail_shares_honored.iter().find(|(id, _)| *id == owner) {
-                                    Some((_, honored)) => *honored,
-                                    None => {
-                                        let honored = self.mail_shares_honored(owner).await?;
-                                        mail_shares_honored.push((owner, honored));
-                                        honored
-                                    }
-                                };
+                                let honored =
+                                    match mail_shares_honored.iter().find(|(id, _)| *id == owner) {
+                                        Some((_, honored)) => *honored,
+                                        None => {
+                                            let honored = self.mail_shares_honored(owner).await?;
+                                            mail_shares_honored.push((owner, honored));
+                                            honored
+                                        }
+                                    };
                                 if !honored {
                                     continue;
                                 }
@@ -211,7 +216,10 @@ impl Server {
                         Collection::ContactCard,
                         Collection::FileNode,
                     ]);
-                    match access_to.iter_mut().find(|a| a.account_id == delegation.account_id) {
+                    match access_to
+                        .iter_mut()
+                        .find(|a| a.account_id == delegation.account_id)
+                    {
                         Some(entry) => entry.collections.union(&whole),
                         None => access_to.push(AccessTo {
                             account_id: delegation.account_id,

@@ -448,7 +448,10 @@ impl SpamFilterLists {
         }
 
         // inbuxa: AI-2: at start and each reload, models off this network are flagged
-        for model in bp.list_infallible::<registry::schema::structs::AiModel>().await {
+        for model in bp
+            .list_infallible::<registry::schema::structs::AiModel>()
+            .await
+        {
             crate::enterprise::llm::warn_if_remote(&model.object).await;
         }
 

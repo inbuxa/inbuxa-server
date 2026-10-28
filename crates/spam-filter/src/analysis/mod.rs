@@ -25,8 +25,8 @@ pub mod from;
 pub mod headers;
 pub mod html;
 pub mod init;
-pub mod llm; // inbuxa: AI spam classification
 pub mod ip;
+pub mod llm; // inbuxa: AI spam classification
 pub mod messageid;
 pub mod mime;
 mod mime_types;
@@ -38,7 +38,6 @@ pub mod rules;
 pub mod score;
 pub mod subject;
 pub mod url;
-
 
 impl SpamFilterInput<'_> {
     pub fn header_as_address(&self, header: &Header<'_>) -> Option<Cow<'_, str>> {

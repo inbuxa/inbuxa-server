@@ -275,7 +275,12 @@ impl<T: SessionStream> SessionData<T> {
                                     account_id,
                                     document_id,
                                     metadata.inner.size.to_native() as u64,
-                                    metadata.inner.mailboxes.iter().map(|m| m.mailbox_id.to_native()).collect(),
+                                    metadata
+                                        .inner
+                                        .mailboxes
+                                        .iter()
+                                        .map(|m| m.mailbox_id.to_native())
+                                        .collect(),
                                     inbuxa_features::undelete::email::keywords_to_keep(
                                         metadata.inner.keywords.iter().map(|k| k.to_string()),
                                     ),

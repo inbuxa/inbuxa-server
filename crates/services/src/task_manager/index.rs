@@ -12,9 +12,8 @@ use email::{
     cache::MessageCacheFetch,
     message::metadata::{MESSAGE_RECEIVED_MASK, MessageMetadata},
 };
-use inbuxa_features::undelete;
-use types::blob_hash::BlobHash;
 use groupware::{cache::GroupwareCache, calendar::CalendarEvent, contact::ContactCard};
+use inbuxa_features::undelete;
 use registry::{
     schema::{
         enums::IndexDocumentType,
@@ -34,6 +33,7 @@ use store::{
     },
 };
 use trc::{AddContext, TaskManagerEvent};
+use types::blob_hash::BlobHash;
 use types::{
     collection::{Collection, SyncCollection},
     field::EmailField,
@@ -223,7 +223,9 @@ impl SearchIndexTask for Server {
                     };
                     // inbuxa: UD-1: a noted file, event or contact is archived
                     if let Some(kind) = match task.document_type {
-                        IndexDocumentType::Calendar => Some(undelete::groupware::Kind::CalendarEvent),
+                        IndexDocumentType::Calendar => {
+                            Some(undelete::groupware::Kind::CalendarEvent)
+                        }
                         IndexDocumentType::Contacts => Some(undelete::groupware::Kind::ContactCard),
                         IndexDocumentType::File => Some(undelete::groupware::Kind::File),
                         IndexDocumentType::Email => None,
@@ -581,7 +583,6 @@ async fn build_contact_document(
     }
 }
 
-
 // inbuxa: MON-16: a trace's search document, when trace search is on
 async fn build_tracing_span_document(
     server: &Server,
@@ -683,7 +684,11 @@ pub fn trace_search_document(
                 {
                     let text = text.to_lowercase();
                     if seen.insert(format!("k:{text}")) {
-                        document.index_text(TracingSearchField::Keywords, &text, nlp::language::Language::None);
+                        document.index_text(
+                            TracingSearchField::Keywords,
+                            &text,
+                            nlp::language::Language::None,
+                        );
                         // An address's domain, so a domain search finds it
                         if let Some((_, domain)) = text.rsplit_once('@')
                             && seen.insert(format!("k:{domain}"))
@@ -741,10 +746,19 @@ async fn archive_noted(
                 .into_err()
                 .details("Invalid blob hash in undelete note")
         })?,
-        (None, None) => return undelete::groupware::clear(data, kind, account_id, document_id).await,
+        (None, None) => {
+            return undelete::groupware::clear(data, kind, account_id, document_id).await;
+        }
     };
-    undelete::groupware::archive(data, server.registry(), account_id, note, blob_hash, retention)
-        .await?;
+    undelete::groupware::archive(
+        data,
+        server.registry(),
+        account_id,
+        note,
+        blob_hash,
+        retention,
+    )
+    .await?;
     undelete::groupware::clear(data, kind, account_id, document_id).await
 }
 

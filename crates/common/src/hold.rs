@@ -11,11 +11,11 @@
 
 use crate::Server;
 use ahash::AHashMap;
+use inbuxa_features::undelete::data::{self as undelete_data, KeptAccount};
 use inbuxa_features::{
     hold::{self, HELD_UNTIL, Hold, Keeping, Member, is_held_until},
     undelete::records,
 };
-use inbuxa_features::undelete::data::{self as undelete_data, KeptAccount};
 use registry::{
     pickle::PickledStream,
     schema::{
@@ -87,8 +87,10 @@ impl Server {
         let data = self.store();
         let registry = self.registry();
         let holds = hold::active(data).await?;
-        let mut summaries: AHashMap<u32, HoldSummary> =
-            holds.iter().map(|h| (h.id, HoldSummary::default())).collect();
+        let mut summaries: AHashMap<u32, HoldSummary> = holds
+            .iter()
+            .map(|h| (h.id, HoldSummary::default()))
+            .collect();
         if holds.is_empty() {
             return Ok(summaries);
         }
@@ -123,7 +125,9 @@ impl Server {
             let size = match &item {
                 ArchivedItem::Email(email) => email.size,
                 ArchivedItem::FileNode(_) => match undelete_data::extra(data, id).await? {
-                    Some(inbuxa_features::undelete::data::Extra::FileNode { size, .. }) => size as u64,
+                    Some(inbuxa_features::undelete::data::Extra::FileNode { size, .. }) => {
+                        size as u64
+                    }
                     _ => 0,
                 },
                 _ => 0,
@@ -190,7 +194,11 @@ impl Server {
                 // An account that's gone can't be placed in a domain or
                 // tenant any more: None, and its items are left as they are
                 let known = self.account(account_id).await.is_ok();
-                let value = if known { Some(self.keeping(account_id).await?) } else { None };
+                let value = if known {
+                    Some(self.keeping(account_id).await?)
+                } else {
+                    None
+                };
                 keeping.insert(account_id, value);
             }
             let until = item.archived_until().timestamp().max(0) as u64;
@@ -200,8 +208,9 @@ impl Server {
                     ArchivedItem::Email(email) => {
                         keeping.covers(Some(email.received_at.timestamp().max(0) as u64))
                     }
-                    ArchivedItem::CalendarEvent(event) => keeping
-                        .covers_event(event.start_time.map(|t| t.timestamp().max(0) as u64)),
+                    ArchivedItem::CalendarEvent(event) => {
+                        keeping.covers_event(event.start_time.map(|t| t.timestamp().max(0) as u64))
+                    }
                     _ => keeping.covers(None),
                 },
                 // Gone: release only once no hold is active anywhere
@@ -226,7 +235,9 @@ impl Server {
             .await?
             .accounts;
         for (account_id, mut kept) in undelete_data::kept_accounts(data).await? {
-            let covered = !hold::covering(data, &kept_member(account_id, &kept)).await?.is_empty();
+            let covered = !hold::covering(data, &kept_member(account_id, &kept))
+                .await?
+                .is_empty();
             let held = is_held_until(kept.kept_until);
             let until = if covered && !held {
                 settled.accounts_frozen += 1;
@@ -249,9 +260,11 @@ impl Server {
 
     /// LH-8: whether a hold covers a deleted account undelete keeps.
     pub async fn is_kept_held(&self, account_id: u32, kept: &KeptAccount) -> trc::Result<bool> {
-        Ok(!hold::covering(self.store(), &kept_member(account_id, kept))
-            .await?
-            .is_empty())
+        Ok(
+            !hold::covering(self.store(), &kept_member(account_id, kept))
+                .await?
+                .is_empty(),
+        )
     }
 
     /// Every account an active hold covers now. Empty, without looking at

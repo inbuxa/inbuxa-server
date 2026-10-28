@@ -174,15 +174,14 @@ impl RequestHandler for Server {
                     _ => None,
                 };
                 // inbuxa: AU-1.6: which accounts it reached by impersonation
-                let method_call = crate::inbuxa::audit::collect_access(Box::pin(
-                    self.handle_method_call(
+                let method_call =
+                    crate::inbuxa::audit::collect_access(Box::pin(self.handle_method_call(
                         call.method,
                         call.name,
                         access_token,
                         &mut next_call,
                         session,
-                    ),
-                ));
+                    )));
                 let result = if eligible {
                     store::backend::scaleout::replica::replica_read(
                         access_token.all_ids().map(|account_id| {
@@ -220,17 +219,18 @@ impl RequestHandler for Server {
                         }
                         if makes_containers
                             && result.is_ok()
-                            && let Err(err) =
-                                email::inbuxa_lock::reconcile(self, account_id).await
+                            && let Err(err) = email::inbuxa_lock::reconcile(self, account_id).await
                         {
-                            trc::error!(err.details("Failed to grant a lock's delegates on new folders"));
+                            trc::error!(
+                                err.details("Failed to grant a lock's delegates on new folders")
+                            );
                         }
                     } else {
-                        self.audit_foreign_access(access_token, account_id, false).await;
+                        self.audit_foreign_access(access_token, account_id, false)
+                            .await;
                     }
                 }
-                match result
-                {
+                match result {
                     Ok(mut method_response) => {
                         match &mut method_response {
                             ResponseMethod::Set(set_response) => {
@@ -534,7 +534,9 @@ impl RequestHandler for Server {
                 // inbuxa: legal hold exports (LH-12)
                 GetRequestMethod::HoldExport(mut req) => {
                     resolve_account_id(&mut req.account_id, method_name.obj, access_token)?;
-                    crate::inbuxa::hold_export_api::get(self, *req).await?.into()
+                    crate::inbuxa::hold_export_api::get(self, *req)
+                        .await?
+                        .into()
                 }
                 GetRequestMethod::LegalHold(mut req) => {
                     resolve_account_id(&mut req.account_id, method_name.obj, access_token)?;
@@ -543,12 +545,16 @@ impl RequestHandler for Server {
                 // inbuxa: mail held for review
                 GetRequestMethod::HeldMessage(mut req) => {
                     resolve_account_id(&mut req.account_id, method_name.obj, access_token)?;
-                    crate::inbuxa::held_message::get(self, access_token, *req).await?.into()
+                    crate::inbuxa::held_message::get(self, access_token, *req)
+                        .await?
+                        .into()
                 }
                 // inbuxa: DLP and mail flow rules
                 GetRequestMethod::MailRule(mut req) => {
                     resolve_account_id(&mut req.account_id, method_name.obj, access_token)?;
-                    crate::inbuxa::mail_rule::get(self, access_token, *req).await?.into()
+                    crate::inbuxa::mail_rule::get(self, access_token, *req)
+                        .await?
+                        .into()
                 }
                 // inbuxa: accepted security to-do items
                 GetRequestMethod::SecurityAcceptance(mut req) => {
@@ -592,7 +598,9 @@ impl RequestHandler for Server {
                 // inbuxa: journaling
                 GetRequestMethod::Journal(mut req) => {
                     resolve_account_id(&mut req.account_id, method_name.obj, access_token)?;
-                    crate::inbuxa::journal::get(self, access_token, *req).await?.into()
+                    crate::inbuxa::journal::get(self, access_token, *req)
+                        .await?
+                        .into()
                 }
                 GetRequestMethod::JournalEntry(mut req) => {
                     resolve_account_id(&mut req.account_id, method_name.obj, access_token)?;
@@ -906,7 +914,9 @@ impl RequestHandler for Server {
                         None,
                         None,
                         *req,
-                        |req| Box::pin(crate::inbuxa::deleted_account::set(self, access_token, req)),
+                        |req| {
+                            Box::pin(crate::inbuxa::deleted_account::set(self, access_token, req))
+                        },
                     )
                     .await?
                     .into()
@@ -973,7 +983,13 @@ impl RequestHandler for Server {
                         None,
                         None,
                         *req,
-                        |req| Box::pin(crate::inbuxa::audit_log::settings_set(self, access_token, req)),
+                        |req| {
+                            Box::pin(crate::inbuxa::audit_log::settings_set(
+                                self,
+                                access_token,
+                                req,
+                            ))
+                        },
                     )
                     .await?
                     .into()
@@ -1031,7 +1047,9 @@ impl RequestHandler for Server {
                         None,
                         reason,
                         *req,
-                        |req| Box::pin(crate::inbuxa::hold_export_api::set(self, access_token, req)),
+                        |req| {
+                            Box::pin(crate::inbuxa::hold_export_api::set(self, access_token, req))
+                        },
                     )
                     .await?
                     .into()
@@ -1248,9 +1266,14 @@ impl RequestHandler for Server {
                 }
                 SetRequestMethod::JournalVerification(mut req) => {
                     resolve_account_id(&mut req.account_id, method_name.obj, access_token)?;
-                    crate::inbuxa::journal_entry::verification_set(self, access_token, session, *req)
-                        .await?
-                        .into()
+                    crate::inbuxa::journal_entry::verification_set(
+                        self,
+                        access_token,
+                        session,
+                        *req,
+                    )
+                    .await?
+                    .into()
                 }
                 // inbuxa: inbuxa:Explanation/set ("Explain this")
                 SetRequestMethod::Explanation(mut req) => {
@@ -1271,7 +1294,9 @@ impl RequestHandler for Server {
                         None,
                         None,
                         *req,
-                        |req| Box::pin(crate::inbuxa::protocol_policy::set(self, access_token, req)),
+                        |req| {
+                            Box::pin(crate::inbuxa::protocol_policy::set(self, access_token, req))
+                        },
                     )
                     .await?
                     .into()
@@ -1288,7 +1313,13 @@ impl RequestHandler for Server {
                         None,
                         None,
                         *req,
-                        |req| Box::pin(crate::inbuxa::tenant_protocol_policy::set(self, access_token, req)),
+                        |req| {
+                            Box::pin(crate::inbuxa::tenant_protocol_policy::set(
+                                self,
+                                access_token,
+                                req,
+                            ))
+                        },
                     )
                     .await?
                     .into()

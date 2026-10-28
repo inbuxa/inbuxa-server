@@ -182,7 +182,10 @@ impl AddressBookGet for Server {
                                     address_book.acls.effective_acl(access_token),
                                 )
                             } else {
-                                JmapRights::owner_rights::<addressbook::AddressBook>(access_token, account_id)
+                                JmapRights::owner_rights::<addressbook::AddressBook>(
+                                    access_token,
+                                    account_id,
+                                )
                             },
                         );
                     }

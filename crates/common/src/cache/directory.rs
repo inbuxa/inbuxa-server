@@ -248,7 +248,6 @@ impl Server {
                     ..Default::default()
                 }));
 
-
                 // inbuxa: DIR-15
                 self.check_tenant_limits(&account).await?;
                 match self
@@ -421,7 +420,6 @@ impl Server {
                     ..Default::default()
                 }));
 
-
                 // inbuxa: DIR-15
                 self.check_tenant_limits(&account).await?;
                 match self
@@ -484,7 +482,11 @@ impl Server {
             Ok(_) => Ok(()),
             Err(err) => Err(trc::AuthEvent::Failed
                 .into_err()
-                .details(err.description().unwrap_or("A tenant limit is reached").to_string())
+                .details(
+                    err.description()
+                        .unwrap_or("A tenant limit is reached")
+                        .to_string(),
+                )
                 .reason("The directory's account can't be created")),
         }
     }

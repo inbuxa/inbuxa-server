@@ -11,10 +11,8 @@
 
 use crate::{cache::GroupwareCache, calendar::Calendar, contact::AddressBook, file::FileNode};
 use common::{
-    DavResourceMetadata, Server,
-    auth::AccountTenantIds,
-    cache::invalidate::CacheInvalidationBuilder,
-    ipc::CacheInvalidation,
+    DavResourceMetadata, Server, auth::AccountTenantIds,
+    cache::invalidate::CacheInvalidationBuilder, ipc::CacheInvalidation,
 };
 use inbuxa_features::lock::{self, Lock, Replaced};
 use store::{
@@ -36,7 +34,11 @@ pub const DAV_COLLECTIONS: [Collection; 3] = [
 pub async fn changed_by(server: &Server, account_id: u32) -> AccountTenantIds {
     AccountTenantIds {
         account_id,
-        tenant_id: server.account(account_id).await.ok().and_then(|a| a.id_tenant),
+        tenant_id: server
+            .account(account_id)
+            .await
+            .ok()
+            .and_then(|a| a.id_tenant),
     }
 }
 

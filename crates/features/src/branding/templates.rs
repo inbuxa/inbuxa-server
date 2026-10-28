@@ -221,7 +221,10 @@ mod tests {
             ("{{#if header}}x", "never closed"),
             ("{{unknown}}", "Unknown variable"),
             ("{{!header}}", "raw output"),
-            ("{{#each actions}}{{#each attendees}}{{/each attendees}}{{/each actions}}", "inside another"),
+            (
+                "{{#each actions}}{{#each attendees}}{{/each attendees}}{{/each actions}}",
+                "inside another",
+            ),
             ("{{/if header}}", "closes no open"),
             ("{{#if header}}{{/if footer}}", "doesn't close"),
             ("{{#if header}}{{/each header}}", "doesn't close"),
@@ -231,7 +234,11 @@ mod tests {
             let err = check(bad).unwrap_err();
             assert!(err.contains(why), "{bad}: {err}");
         }
-        assert!(check(&"x".repeat(300 * 1024)).unwrap_err().contains("256 KiB"));
+        assert!(
+            check(&"x".repeat(300 * 1024))
+                .unwrap_err()
+                .contains("256 KiB")
+        );
     }
 
     #[test]
@@ -239,7 +246,10 @@ mod tests {
         let template = parse::<String>("{{!event_title}}|{{event_title}}").unwrap();
         let mut vars = utils::template::Variables::<String, String>::new();
         vars.insert_single("event_title".into(), "<b>x</b>".into());
-        assert_eq!(template.eval(&vars), "&lt;b&gt;x&lt;/b&gt;|&lt;b&gt;x&lt;/b&gt;");
+        assert_eq!(
+            template.eval(&vars),
+            "&lt;b&gt;x&lt;/b&gt;|&lt;b&gt;x&lt;/b&gt;"
+        );
     }
 
     #[test]

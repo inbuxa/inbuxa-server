@@ -46,13 +46,8 @@ use registry::{
     types::{EnumImpl, datetime::UTCDateTime, id::ObjectId},
 };
 use smtp::queue::spool::SmtpSpool;
+use std::{io::Read, str::FromStr, sync::OnceLock, time::Instant};
 use tokio::sync::mpsc::UnboundedSender;
-use std::{
-    io::Read,
-    str::FromStr,
-    sync::OnceLock,
-    time::Instant,
-};
 use types::id::Id;
 
 type EValue = Value<'static, P, ExplanationValue>;
@@ -105,8 +100,7 @@ fn invalid_subject(why: impl Into<String>) -> SetError<P> {
 /// The prepared answers this release ships (EX-26), read once.
 fn prepared() -> &'static Prepared {
     static PREPARED: OnceLock<Prepared> = OnceLock::new();
-    static PREPARED_JSON: &[u8] =
-        include_bytes!("../../../../resources/explain/settings.json.gz");
+    static PREPARED_JSON: &[u8] = include_bytes!("../../../../resources/explain/settings.json.gz");
     PREPARED.get_or_init(|| {
         let mut json = Vec::new();
         match GzDecoder::new(PREPARED_JSON).read_to_end(&mut json) {
@@ -322,7 +316,10 @@ pub async fn answer(
             temperature: model.temperature.into_inner(),
             max_tokens: explain::MAX_TOKENS,
             // EX-13
-            timeout: model.timeout.into_inner().min(limits.explain_ceiling.into_inner()),
+            timeout: model
+                .timeout
+                .into_inner()
+                .min(limits.explain_ceiling.into_inner()),
             explain: Some(Explain {
                 calls_per_hour: limits.explain_calls_per_hour.min(u32::MAX as u64) as u32,
                 subject: subject.type_name(),
@@ -338,9 +335,8 @@ pub async fn answer(
         }
         Err(Failure::Refused(Refused::Paused)) => return Err(server_fail("paused")),
         Err(Failure::Refused(Refused::HourlyLimit)) => {
-            return Err(SetError::new(SetErrorType::RateLimit).with_description(
-                "You've asked for as many explanations as this hour allows.",
-            ));
+            return Err(SetError::new(SetErrorType::RateLimit)
+                .with_description("You've asked for as many explanations as this hour allows."));
         }
         Err(Failure::Timeout) => return Err(server_fail("timeout")),
         Err(_) => return Err(server_fail("unavailable")),
@@ -449,7 +445,11 @@ async fn facts(
                 return Ok(Err(error));
             }
         }
-        Subject::SpamVerdict { result, score, tags } => {
+        Subject::SpamVerdict {
+            result,
+            score,
+            tags,
+        } => {
             if SpamClassifyResult::parse(result).is_none() {
                 return Ok(Err(invalid_subject("result isn't a spam filter result.")));
             }
@@ -459,12 +459,14 @@ async fn facts(
             let scores = &server.core.spam.lists.scores;
             let mut weighed: Vec<(&String, f64, &'static str)> = tags
                 .iter()
-                .map(|(name, _): (&String, &TagScore)| match scores.get(name.as_str()) {
-                    Some(SpamFilterAction::Allow(s)) => (name, *s as f64, "score"),
-                    Some(SpamFilterAction::Reject) => (name, f64::MAX, "rejects the message"),
-                    Some(SpamFilterAction::Discard) => (name, f64::MAX, "discards the message"),
-                    _ => (name, 0.0, "no score of its own"),
-                })
+                .map(
+                    |(name, _): (&String, &TagScore)| match scores.get(name.as_str()) {
+                        Some(SpamFilterAction::Allow(s)) => (name, *s as f64, "score"),
+                        Some(SpamFilterAction::Reject) => (name, f64::MAX, "rejects the message"),
+                        Some(SpamFilterAction::Discard) => (name, f64::MAX, "discards the message"),
+                        _ => (name, 0.0, "no score of its own"),
+                    },
+                )
                 .collect();
             weighed.sort_by(|a, b| b.1.abs().total_cmp(&a.1.abs()).then_with(|| a.0.cmp(b.0)));
             for (name, weight, how) in weighed.iter().take(MAX_PROMPT_TAGS) {
@@ -477,7 +479,10 @@ async fn facts(
             if weighed.len() > MAX_PROMPT_TAGS {
                 facts.push(
                     "Other tags",
-                    format!("{} more, each weighing less", weighed.len() - MAX_PROMPT_TAGS),
+                    format!(
+                        "{} more, each weighing less",
+                        weighed.len() - MAX_PROMPT_TAGS
+                    ),
                 );
             }
             facts.ground(
@@ -487,23 +492,26 @@ a negative one toward legitimate mail. The result follows the total against the 
             );
         }
         Subject::LogEntry { log_id } => {
-            let not_found = || SetError::not_found().with_description("That log entry isn't on this node.");
-            let (Some(path), Ok(id)) = (server.core.metrics.log_path.clone(), Id::from_str(log_id)) else {
+            let not_found =
+                || SetError::not_found().with_description("That log entry isn't on this node.");
+            let (Some(path), Ok(id)) = (server.core.metrics.log_path.clone(), Id::from_str(log_id))
+            else {
                 return Ok(Err(not_found()));
             };
-            let entries = tokio::task::spawn_blocking(move || read_log_entries(path, Some(vec![id]), 1))
-                .await
-                .map_err(|err| {
-                    trc::EventType::Server(trc::ServerEvent::ThreadError)
-                        .reason(err)
-                        .caused_by(trc::location!())
-                })?
-                .map_err(|err| {
-                    trc::EventType::Telemetry(trc::TelemetryEvent::LogError)
-                        .reason(err)
-                        .details("Failed to read log files")
-                        .caused_by(trc::location!())
-                })?;
+            let entries =
+                tokio::task::spawn_blocking(move || read_log_entries(path, Some(vec![id]), 1))
+                    .await
+                    .map_err(|err| {
+                        trc::EventType::Server(trc::ServerEvent::ThreadError)
+                            .reason(err)
+                            .caused_by(trc::location!())
+                    })?
+                    .map_err(|err| {
+                        trc::EventType::Telemetry(trc::TelemetryEvent::LogError)
+                            .reason(err)
+                            .details("Failed to read log files")
+                            .caused_by(trc::location!())
+                    })?;
             let Some((_, log)) = entries.into_iter().next() else {
                 return Ok(Err(not_found()));
             };
@@ -521,7 +529,8 @@ a negative one toward legitimate mail. The result follows the total against the 
             ground_event(&mut facts, event);
         }
         Subject::StoredTraceEvent { trace_id, index } => {
-            let not_found = || SetError::not_found().with_description("That trace is no longer stored.");
+            let not_found =
+                || SetError::not_found().with_description("That trace is no longer stored.");
             let Ok(id) = Id::from_str(trace_id) else {
                 return Ok(Err(not_found()));
             };
@@ -533,7 +542,9 @@ a negative one toward legitimate mail. The result follows the total against the 
             };
             let opened_by = trace.events.iter().next().map(|e| e.event.as_str());
             let Some(event) = trace.events.iter().nth(*index) else {
-                return Ok(Err(invalid_subject("That trace has no event at that index.")));
+                return Ok(Err(invalid_subject(
+                    "That trace has no event at that index.",
+                )));
             };
             let name = event.event.as_str();
             if explain::is_raw_event(name) {
@@ -580,18 +591,23 @@ a negative one toward legitimate mail. The result follows the total against the 
             property,
         } => {
             let Some(object_type) = ObjectType::parse(&object[2..]) else {
-                return Ok(Err(invalid_subject(format!("{object} isn't a settings object."))));
+                return Ok(Err(invalid_subject(format!(
+                    "{object} isn't a settings object."
+                ))));
             };
             if NOT_SETTINGS.contains(&object_type) {
                 return Ok(Err(invalid_subject(format!("{object} isn't a setting."))));
             }
             // Explain can't show what the administrator couldn't open
             if !access_token.has_permission(object_type.get_permission()) {
-                return Ok(Err(SetError::forbidden()
-                    .with_description(format!("You don't have permission to view {object}."))));
+                return Ok(Err(SetError::forbidden().with_description(format!(
+                    "You don't have permission to view {object}."
+                ))));
             }
             let Some(info) = schema().and_then(|s| s.property(object, property)) else {
-                return Ok(Err(invalid_subject(format!("{object} has no property {property}."))));
+                return Ok(Err(invalid_subject(format!(
+                    "{object} has no property {property}."
+                ))));
             };
             // EX-9: refused, not explained with the value hidden
             if info.secret {
@@ -604,7 +620,11 @@ a negative one toward legitimate mail. The result follows the total against the 
                 return Ok(Err(not_found()));
             };
             // A singleton never saved holds its defaults, as its /get shows it
-            let stored = match server.registry().get(ObjectId::new(object_type, id)).await? {
+            let stored = match server
+                .registry()
+                .get(ObjectId::new(object_type, id))
+                .await?
+            {
                 Some(stored) => stored,
                 None if id.is_singleton() && object_type.flags() & OBJ_SINGLETON != 0 => {
                     Object::from(object_type)
@@ -612,7 +632,10 @@ a negative one toward legitimate mail. The result follows the total against the 
                 None => return Ok(Err(not_found())),
             };
             let stored = serde_json::to_value(stored.into_value()).unwrap_or_default();
-            let current = stored.get(property.as_str()).cloned().unwrap_or(serde_json::Value::Null);
+            let current = stored
+                .get(property.as_str())
+                .cloned()
+                .unwrap_or(serde_json::Value::Null);
             push_setting(&mut facts, object, property, &info, &current);
         }
     }
@@ -622,7 +645,11 @@ a negative one toward legitimate mail. The result follows the total against the 
 /// A failed recipient's facts and grounding (EX-7, EX-9). Addresses are
 /// sent, since a failure often turns on them; the message itself, its
 /// subject and body, never are: they aren't read.
-fn delivery_facts(facts: &mut Facts, message: &QueuedMessage, recipient: &str) -> Result<(), SetError<P>> {
+fn delivery_facts(
+    facts: &mut Facts,
+    message: &QueuedMessage,
+    recipient: &str,
+) -> Result<(), SetError<P>> {
     let Some((address, rcpt)) = message
         .recipients
         .iter()
@@ -641,16 +668,35 @@ fn delivery_facts(facts: &mut Facts, message: &QueuedMessage, recipient: &str) -
     };
     facts.push("Sender (return path)", &message.return_path);
     facts.push("Recipient", address);
-    facts.push("Status", if temporary { "Temporary failure" } else { "Permanent failure" });
+    facts.push(
+        "Status",
+        if temporary {
+            "Temporary failure"
+        } else {
+            "Permanent failure"
+        },
+    );
     facts.push("Error type", error.error_type.as_str());
     facts.push("Error", error.error_message.as_deref().unwrap_or_default());
-    facts.push("Command that failed", error.error_command.as_deref().unwrap_or_default());
-    facts.push("Remote host", error.response_hostname.as_deref().unwrap_or_default());
+    facts.push(
+        "Command that failed",
+        error.error_command.as_deref().unwrap_or_default(),
+    );
+    facts.push(
+        "Remote host",
+        error.response_hostname.as_deref().unwrap_or_default(),
+    );
     if let Some(code) = error.response_code {
         facts.push("Remote reply code", code.to_string());
     }
-    facts.push("Enhanced status code", error.response_enhanced.as_deref().unwrap_or_default());
-    facts.push("Remote reply", error.response_message.as_deref().unwrap_or_default());
+    facts.push(
+        "Enhanced status code",
+        error.response_enhanced.as_deref().unwrap_or_default(),
+    );
+    facts.push(
+        "Remote reply",
+        error.response_message.as_deref().unwrap_or_default(),
+    );
     push_recipient_timing(facts, rcpt, temporary);
     facts.push("Message size", format!("{} bytes", message.size));
     facts.push("Queued at", message.created_at.to_string());
@@ -664,8 +710,9 @@ fn delivery_facts(facts: &mut Facts, message: &QueuedMessage, recipient: &str) -
 }
 
 fn raw_refused() -> SetError<P> {
-    SetError::forbidden()
-        .with_description("Raw protocol traffic isn't sent to the model: it can hold messages and passwords.")
+    SetError::forbidden().with_description(
+        "Raw protocol traffic isn't sent to the model: it can hold messages and passwords.",
+    )
 }
 
 fn push_recipient_timing(facts: &mut Facts, rcpt: &QueuedRecipient, temporary: bool) {
@@ -734,8 +781,18 @@ mod tests {
         assert!(!enabled.secret);
         assert!(!enabled.description.is_empty());
         // EX-9: a secret, and an object with a secret inside one variant
-        assert!(schema.property("x:AccountPassword", "secret").unwrap().secret);
-        assert!(schema.property("x:AcmeProvider", "accountKey").unwrap().secret);
+        assert!(
+            schema
+                .property("x:AccountPassword", "secret")
+                .unwrap()
+                .secret
+        );
+        assert!(
+            schema
+                .property("x:AcmeProvider", "accountKey")
+                .unwrap()
+                .secret
+        );
         assert!(schema.property("x:AiModel", "httpAuth").unwrap().secret);
         // Events carry an explanation
         let (label, text) = schema.event("delivery.start-tls-disabled").unwrap();
@@ -790,7 +847,10 @@ mod tests {
         // Acceptance test 4: the addresses and the reply, grounded in RFC 3463
         assert!(text.contains("sender@example.org") && text.contains("rcpt@example.com"));
         assert!(text.contains("5.7.26") && text.contains("Permanent failure"));
-        assert!(!text.contains("Next attempt"), "no retry for a permanent failure");
+        assert!(
+            !text.contains("Next attempt"),
+            "no retry for a permanent failure"
+        );
         assert_eq!(facts.grounded, vec!["rfc3463"]);
         assert!(facts.grounding.iter().any(|g| g.starts_with("x.7.26:")));
         // A recipient that hasn't failed, or isn't there
@@ -829,8 +889,8 @@ mod tests {
                 continue;
             }
             // As a live question reads it: the object, serialized
-            let default = serde_json::to_value(Object::from(object_type).into_value())
-                .unwrap_or_default();
+            let default =
+                serde_json::to_value(Object::from(object_type).into_value()).unwrap_or_default();
             let Some(map) = default.as_object() else {
                 continue;
             };
@@ -864,9 +924,21 @@ mod tests {
     fn prepared_questions_are_well_formed() {
         let questions = prepared_questions();
         assert!(questions.len() > 500, "found {}", questions.len());
-        assert!(questions.iter().any(|(o, p, _)| o == "x:Domain" && p == "dnsManagement"));
-        assert!(!questions.iter().any(|(o, p, _)| o == "x:AiModel" && p == "httpAuth"));
-        assert!(!questions.iter().any(|(o, p, _)| o == "x:Account" && p == "createdAt"));
+        assert!(
+            questions
+                .iter()
+                .any(|(o, p, _)| o == "x:Domain" && p == "dnsManagement")
+        );
+        assert!(
+            !questions
+                .iter()
+                .any(|(o, p, _)| o == "x:AiModel" && p == "httpAuth")
+        );
+        assert!(
+            !questions
+                .iter()
+                .any(|(o, p, _)| o == "x:Account" && p == "createdAt")
+        );
     }
 
     /// Writes `resources/explain/settings.json.gz` (EX-26). Run before a
@@ -887,15 +959,24 @@ mod tests {
         use inbuxa_features::ai::explain::memory::{key, key_hex};
         use std::io::Write;
         let urls = std::env::var("INBUXA_PREPARE_MODEL_URL").expect("INBUXA_PREPARE_MODEL_URL");
-        let urls = urls.split(',').map(str::trim).filter(|u| !u.is_empty()).map(String::from).collect::<Vec<_>>();
+        let urls = urls
+            .split(',')
+            .map(str::trim)
+            .filter(|u| !u.is_empty())
+            .map(String::from)
+            .collect::<Vec<_>>();
         let model = std::env::var("INBUXA_PREPARE_MODEL").expect("INBUXA_PREPARE_MODEL");
         let release = std::env::var("INBUXA_PREPARE_RELEASE").expect("INBUXA_PREPARE_RELEASE");
-        let concurrency = std::env::var("INBUXA_PREPARE_CONCURRENCY").unwrap_or_else(|_| "4".into());
+        let concurrency =
+            std::env::var("INBUXA_PREPARE_CONCURRENCY").unwrap_or_else(|_| "4".into());
         let concurrency = concurrency
             .split(',')
             .map(|c| c.trim().parse::<usize>().unwrap_or(4).max(1))
             .collect::<Vec<_>>();
-        let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../../resources/explain/settings.json.gz");
+        let path = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../resources/explain/settings.json.gz"
+        );
 
         let mut answers = prepared().answers.clone();
         let wanted = prepared_questions()
@@ -924,7 +1005,11 @@ mod tests {
         let results = runtime.block_on(async {
             let mut set = tokio::task::JoinSet::new();
             for (i, url) in urls.iter().enumerate() {
-                let workers = concurrency.get(i).or(concurrency.last()).copied().unwrap_or(4);
+                let workers = concurrency
+                    .get(i)
+                    .or(concurrency.last())
+                    .copied()
+                    .unwrap_or(4);
                 for _ in 0..workers {
                     let (client, url, model, queue) =
                         (client.clone(), url.clone(), model.clone(), queue.clone());
@@ -986,7 +1071,10 @@ mod tests {
         let asked = results.len();
         answers.extend(results);
         // Only answers for questions this release still has
-        let keep = wanted.iter().map(|(_, _, _, k)| k.clone()).collect::<std::collections::HashSet<_>>();
+        let keep = wanted
+            .iter()
+            .map(|(_, _, _, k)| k.clone())
+            .collect::<std::collections::HashSet<_>>();
         answers.retain(|k, _| keep.contains(k));
         let mut sorted = answers.into_iter().collect::<Vec<_>>();
         sorted.sort();

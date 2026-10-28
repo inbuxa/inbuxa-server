@@ -49,8 +49,8 @@ pub async fn ai_calibration() {
         .ok()
         .and_then(|l| l.parse::<usize>().ok())
         .unwrap_or(2_048);
-    let mut out = std::fs::File::create(std::env::var("CALIB_OUT").expect("CALIB_OUT"))
-        .expect("output file");
+    let mut out =
+        std::fs::File::create(std::env::var("CALIB_OUT").expect("CALIB_OUT")).expect("output file");
 
     let categories = ["Unsolicited", "Commercial", "Harmful", "Legitimate"].map(String::from);
     let confidence = ["High", "Medium", "Low"].map(String::from);

@@ -238,7 +238,8 @@ pub async fn test(test: &mut TestServer) {
         .id();
     let sharer = Account::new("auditshare@example.org", share_secret, &[], "", sharer_id);
     let mail = ["urn:ietf:params:jmap:core", "urn:ietf:params:jmap:mail"];
-    let get_mailboxes = json!([["Mailbox/get", {"accountId": sharer.id_string(), "ids": null}, "0"]]);
+    let get_mailboxes =
+        json!([["Mailbox/get", {"accountId": sharer.id_string(), "ids": null}, "0"]]);
     let mailboxes = sharer.jmap_request(&mail, get_mailboxes.clone()).await;
     let inbox = mailboxes
         .0
@@ -741,7 +742,10 @@ impl Account {
             )
             .await;
         assert!(
-            response.0.pointer("/methodResponses/1/1/created/s").is_some(),
+            response
+                .0
+                .pointer("/methodResponses/1/1/created/s")
+                .is_some(),
             "send as {from}: {}",
             response.0
         );

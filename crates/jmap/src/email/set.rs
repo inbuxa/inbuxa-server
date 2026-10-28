@@ -1155,8 +1155,9 @@ impl EmailSet for Server {
             for destroy_id in will_destroy {
                 response.not_destroyed.append(
                     destroy_id,
-                    SetError::forbidden()
-                        .with_description("A delegate at this level can move mail but not delete it."),
+                    SetError::forbidden().with_description(
+                        "A delegate at this level can move mail but not delete it.",
+                    ),
                 );
             }
         } else if !will_destroy.is_empty() {

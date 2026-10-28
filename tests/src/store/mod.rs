@@ -16,10 +16,10 @@ pub mod query;
 pub mod registry;
 #[cfg(feature = "postgres")]
 pub mod replica; // inbuxa: read replicas
-#[cfg(feature = "mysql")]
-pub mod replica_mysql; // inbuxa: read replicas on MySQL
 #[cfg(all(feature = "postgres", feature = "redis"))]
 pub mod replica_cluster; // inbuxa: read replicas across nodes
+#[cfg(feature = "mysql")]
+pub mod replica_mysql; // inbuxa: read replicas on MySQL
 pub mod scaleout; // inbuxa: scale-out storage
 #[cfg(feature = "postgres")]
 pub mod search_gin; // inbuxa: GIN indexes without a pending list

@@ -19,6 +19,7 @@ use directory::{
     Credentials, Directory, Recipient,
     core::secret::{SecretVerificationResult, verify_mfa_secret_hash, verify_secret_hash},
 };
+use inbuxa_features::audit::Via;
 use registry::schema::{
     enums::Permission,
     structs::{self, Credential},
@@ -26,7 +27,6 @@ use registry::schema::{
 use serde::Deserialize;
 use std::{borrow::Cow, net::IpAddr, sync::Arc};
 use store::write::now;
-use inbuxa_features::audit::Via;
 use trc::AddContext;
 
 pub struct UsernameParts {
@@ -363,7 +363,11 @@ impl Server {
                         )
                         .await
                         // inbuxa: AU-5
-                        .map(|token| token.with_origin(Via::ApiKey { id: key.credential_id }));
+                        .map(|token| {
+                            token.with_origin(Via::ApiKey {
+                                id: key.credential_id,
+                            })
+                        });
                 }
 
                 #[cfg(feature = "dev_mode")]
@@ -391,9 +395,9 @@ impl Server {
                         Ok(result) => {
                             // inbuxa: DIR-7: the token must be the named user's, or
                             // the named address an alias it may sign in with
-                            let named = username
-                                .as_deref()
-                                .map(|name| UsernameParts::new(name).auth_as().address().to_lowercase());
+                            let named = username.as_deref().map(|name| {
+                                UsernameParts::new(name).auth_as().address().to_lowercase()
+                            });
                             let is_alias = match &named {
                                 Some(named) if !named.eq_ignore_ascii_case(&result.email) => {
                                     if !result
@@ -414,7 +418,8 @@ impl Server {
                             let token = self
                                 .build_directory_token(directory, result, req.remote_ip)
                                 .await?;
-                            if is_alias && !token.has_permission(Permission::AuthenticateWithAlias) {
+                            if is_alias && !token.has_permission(Permission::AuthenticateWithAlias)
+                            {
                                 return Err(trc::AuthEvent::Failed
                                     .into_err()
                                     .ctx(trc::Key::AccountId, token.account_id())
@@ -476,7 +481,8 @@ impl Server {
             && let Recipient::Account(account) = directory.recipient(address).await?
         {
             // inbuxa: DIR-6
-            self.assert_directory_serves(directory, &account.email).await?;
+            self.assert_directory_serves(directory, &account.email)
+                .await?;
             return Ok(Some(Box::pin(self.synchronize_account(account)).await?.id));
         }
 
@@ -603,7 +609,8 @@ impl Server {
         remote_ip: IpAddr,
     ) -> trc::Result<AccessToken> {
         // inbuxa: DIR-6
-        self.assert_directory_serves(directory, &account.email).await?;
+        self.assert_directory_serves(directory, &account.email)
+            .await?;
         let account = Box::pin(self.synchronize_account(account)).await?;
         self.access_token_from_account(account.id, account.account)
             .await
@@ -698,10 +705,12 @@ impl Server {
 pub fn unavailable_directory() -> &'static Arc<Directory> {
     static UNAVAILABLE: std::sync::OnceLock<Arc<Directory>> = std::sync::OnceLock::new();
     UNAVAILABLE.get_or_init(|| {
-        Arc::new(Directory::Unavailable(directory::UnavailableDirectory::new(
-            registry::schema::enums::DirectoryType::Ldap,
-            "The directory named by the domain doesn't exist",
-        )))
+        Arc::new(Directory::Unavailable(
+            directory::UnavailableDirectory::new(
+                registry::schema::enums::DirectoryType::Ldap,
+                "The directory named by the domain doesn't exist",
+            ),
+        ))
     })
 }
 

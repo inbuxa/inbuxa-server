@@ -112,7 +112,9 @@ pub async fn set(
     assert_server_level(access_token)?;
     let mut response = SetResponse::from_request(&request, server.core.jmap.set_max_objects)?;
     for (client_id, _) in request.unwrap_create() {
-        response.not_created.append(client_id, SetError::singleton());
+        response
+            .not_created
+            .append(client_id, SetError::singleton());
     }
     for id in request.unwrap_destroy().into_valid() {
         response.not_destroyed.append(id, SetError::singleton());

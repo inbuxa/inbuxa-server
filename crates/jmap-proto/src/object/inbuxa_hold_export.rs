@@ -103,7 +103,9 @@ impl Element for HoldExportValue {
 
     fn try_parse<P>(key: &Key<'_, Self::Property>, value: &str) -> Option<Self> {
         match key {
-            Key::Property(HoldExportProperty::Id) => Id::from_str(value).ok().map(HoldExportValue::Id),
+            Key::Property(HoldExportProperty::Id) => {
+                Id::from_str(value).ok().map(HoldExportValue::Id)
+            }
             _ => None,
         }
     }

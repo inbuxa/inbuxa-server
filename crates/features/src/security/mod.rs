@@ -13,8 +13,8 @@
 pub mod acceptance;
 pub mod front_ends;
 pub mod legacy_use;
-pub mod log_files;
 pub mod listeners;
+pub mod log_files;
 pub mod protocol_policy;
 pub mod sharing_policy;
 pub mod tenant_protocol_policy;

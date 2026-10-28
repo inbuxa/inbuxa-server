@@ -20,11 +20,7 @@
 //! None of this touches the host's firewall or any port-forward (LP-20).
 
 use crate::security::protocol_policy::{ProtocolPolicy, SavedListener};
-use registry::schema::{
-    enums::NetworkListenerProtocol,
-    prelude::Object,
-    structs::NetworkListener,
-};
+use registry::schema::{enums::NetworkListenerProtocol, prelude::Object, structs::NetworkListener};
 use store::{
     RegistryStore,
     registry::write::{RegistryWrite, RegistryWriteResult},
@@ -125,7 +121,10 @@ pub async fn reopen(
         let object: NetworkListener = match serde_json::from_value(listener.object.clone()) {
             Ok(object) => object,
             Err(err) => {
-                failed.push((listener.clone(), format!("saved listener unreadable: {err}")));
+                failed.push((
+                    listener.clone(),
+                    format!("saved listener unreadable: {err}"),
+                ));
                 continue;
             }
         };

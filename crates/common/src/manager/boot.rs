@@ -165,7 +165,6 @@ impl BootManager {
 
                 // Enable telemetry
 
-
                 telemetry.enable();
 
                 if bootstrap.registry.is_bootstrap_mode() {

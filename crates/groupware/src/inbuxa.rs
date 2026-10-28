@@ -76,7 +76,11 @@ pub fn note_event(
             blob_hash: None,
             extra: Extra::CalendarEvent {
                 calendar_ids: event.names.iter().map(|n| n.parent_id).collect(),
-                name: event.names.first().map(|n| n.name.clone()).unwrap_or_default(),
+                name: event
+                    .names
+                    .first()
+                    .map(|n| n.name.clone())
+                    .unwrap_or_default(),
             },
         },
     )
@@ -101,7 +105,11 @@ pub fn note_card(
             blob_hash: None,
             extra: Extra::ContactCard {
                 address_book_ids: card.names.iter().map(|n| n.parent_id).collect(),
-                name: card.names.first().map(|n| n.name.clone()).unwrap_or_default(),
+                name: card
+                    .names
+                    .first()
+                    .map(|n| n.name.clone())
+                    .unwrap_or_default(),
             },
         },
     )

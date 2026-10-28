@@ -107,7 +107,10 @@ impl AiLimits {
         if self.explain_ceiling.into_inner().as_secs() < 1
             || self.explain_ceiling.into_inner().as_secs() > 600
         {
-            return Err(("explainCeiling", "must be from 1 second to 10 minutes".into()));
+            return Err((
+                "explainCeiling",
+                "must be from 1 second to 10 minutes".into(),
+            ));
         }
         Ok(())
     }

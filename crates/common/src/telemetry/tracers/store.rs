@@ -16,8 +16,8 @@ use registry::{
     schema::{
         prelude::{ObjectInner, ObjectType},
         structs::{
-            Task, TaskIndexTrace, TaskStatus, Trace, TraceKeyValue, TraceValue,
-            TraceValueString, TraceValueUnsignedInt,
+            Task, TaskIndexTrace, TaskStatus, Trace, TraceKeyValue, TraceValue, TraceValueString,
+            TraceValueUnsignedInt,
         },
     },
 };
@@ -96,12 +96,14 @@ impl store::Deserialize for MaybeTrace {
 fn is_stored_span(event: EventType) -> bool {
     matches!(
         event,
-        EventType::Smtp(SmtpEvent::ConnectionStart) | EventType::Delivery(DeliveryEvent::AttemptStart)
+        EventType::Smtp(SmtpEvent::ConnectionStart)
+            | EventType::Delivery(DeliveryEvent::AttemptStart)
     )
 }
 
 fn is_mail_from(event: EventType) -> bool {
-    event.as_str().starts_with("smtp.mail-from") || event == EventType::Smtp(SmtpEvent::MultipleMailFrom)
+    event.as_str().starts_with("smtp.mail-from")
+        || event == EventType::Smtp(SmtpEvent::MultipleMailFrom)
 }
 
 struct Span {
@@ -183,7 +185,9 @@ pub(crate) fn spawn_store_tracer(builder: SubscriberBuilder, tracing: Store, dat
                 }
                 let is_end = typ.is_span_end();
                 // MON-12: info and above, never raw I/O
-                if !typ.is_raw_io() && (is_end || event.inner.level as usize >= Level::Info as usize) {
+                if !typ.is_raw_io()
+                    && (is_end || event.inner.level as usize >= Level::Info as usize)
+                {
                     if span.events.len() < MAX_EVENTS - 1 || is_end {
                         span.events.push(event);
                     } else {

@@ -9,11 +9,7 @@
 //! message scored as if the classifier were off.
 
 use crate::{SpamFilterContext, TextPart};
-use common::{
-    Server,
-    config::mailstore::spamfilter::SpamFilterAction,
-    enterprise::llm::Call,
-};
+use common::{Server, config::mailstore::spamfilter::SpamFilterAction, enterprise::llm::Call};
 use inbuxa_features::ai::{answer, request};
 use registry::schema::structs::SpamLlm;
 use std::future::Future;
@@ -109,10 +105,8 @@ impl SpamFilterAnalyzeLlm for Server {
         };
         if let Some(classified) = answer::parse(&reply, &rules) {
             ctx.result.tags.insert(classified.tag.clone());
-            ctx.result.llm_result = Some((
-                classified.tag,
-                classified.explanation.unwrap_or_default(),
-            ));
+            ctx.result.llm_result =
+                Some((classified.tag, classified.explanation.unwrap_or_default()));
             ctx.result.llm_bounds = Some((
                 limits.spam_max_added as f32,
                 limits.spam_max_subtracted as f32,

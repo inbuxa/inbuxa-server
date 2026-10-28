@@ -616,8 +616,7 @@ impl RegistrySet for Server {
                         } => Some(object),
                         Modification::Create { object: None, .. } => None,
                     };
-                    if let Err(err) =
-                        inbuxa_features::branding::writes::check(before, &new_object)
+                    if let Err(err) = inbuxa_features::branding::writes::check(before, &new_object)
                     {
                         set.failed(modification, err);
                         continue 'outer;
@@ -941,7 +940,7 @@ impl RegistrySet for Server {
                         "x:{}",
                         registry::types::EnumImpl::as_str(&object_type)
                     ))
-                        .await;
+                    .await;
                 }
                 Ok(response)
             }

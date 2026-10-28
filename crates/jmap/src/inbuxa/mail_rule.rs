@@ -126,7 +126,9 @@ fn to_value(rule: &Rule, properties: &[P]) -> RValue {
 
 /// A rule as sent: its JSON object, top-level keys only those a client may
 /// set.
-fn client_json(value: Value<'_, P, MailRuleValue>) -> Result<serde_json::Map<String, serde_json::Value>, SetError<P>> {
+fn client_json(
+    value: Value<'_, P, MailRuleValue>,
+) -> Result<serde_json::Map<String, serde_json::Value>, SetError<P>> {
     let mut map = serde_json::Map::new();
     for (key, value) in value.into_expanded_object() {
         match &key {

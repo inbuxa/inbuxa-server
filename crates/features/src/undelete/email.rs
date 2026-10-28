@@ -58,7 +58,11 @@ pub fn note(
             mailboxes,
             keywords,
             held_ranges: keeping.ranges.clone(),
-            otherwise_until: if keeping.is_held() { otherwise_until } else { None },
+            otherwise_until: if keeping.is_held() {
+                otherwise_until
+            } else {
+                None
+            },
         },
     )
 }

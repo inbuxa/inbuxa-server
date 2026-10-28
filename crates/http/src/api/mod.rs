@@ -118,7 +118,12 @@ impl ManagementApi for Server {
                     })?;
                 let question =
                     jmap::inbuxa::explanation::question(self, &access_token, &subject).await?;
-                Ok(explain_stream(self.clone(), access_token, question, in_flight))
+                Ok(explain_stream(
+                    self.clone(),
+                    access_token,
+                    question,
+                    in_flight,
+                ))
             }
             // inbuxa: try a saved directory before anything signs in through it
             "directory" if is_post && path.get(1).copied() == Some("test") => {

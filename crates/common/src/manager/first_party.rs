@@ -90,12 +90,7 @@ pub fn first_party_clients(
         let redirect_uris = app
             .url_prefix
             .iter()
-            .map(|prefix| {
-                format!(
-                    "{base_url}/{}/oauth/callback",
-                    prefix.trim_matches('/')
-                )
-            })
+            .map(|prefix| format!("{base_url}/{}/oauth/callback", prefix.trim_matches('/')))
             .collect::<Vec<_>>();
         if redirect_uris.is_empty() {
             continue;
@@ -244,8 +239,14 @@ pub async fn ensure_first_party_clients(bp: &mut Bootstrap) -> trc::Result<()> {
         .map(|app| app.object)
         .collect::<Vec<_>>();
     let stored = front_ends::get(&bp.data_store).await?;
-    let admin_urls: Vec<String> = env("ADMIN_URL").into_iter().chain(stored.admin_url.clone()).collect();
-    let webmail_urls: Vec<String> = env("WEBMAIL_URL").into_iter().chain(stored.webmail_url.clone()).collect();
+    let admin_urls: Vec<String> = env("ADMIN_URL")
+        .into_iter()
+        .chain(stored.admin_url.clone())
+        .collect();
+    let webmail_urls: Vec<String> = env("WEBMAIL_URL")
+        .into_iter()
+        .chain(stored.webmail_url.clone())
+        .collect();
     let webmail_secret = env("WEBMAIL_CLIENT_SECRET")
         .map(ClientSecret::Plain)
         .or_else(|| stored.webmail_secret_hash.clone().map(ClientSecret::Hash));
@@ -258,7 +259,13 @@ pub async fn ensure_first_party_clients(bp: &mut Bootstrap) -> trc::Result<()> {
     let admin_urls: Vec<&str> = admin_urls.iter().map(String::as_str).collect();
     let webmail_urls: Vec<&str> = webmail_urls.iter().map(String::as_str).collect();
 
-    for client in first_party_clients(&base_url, &applications, &admin_urls, &webmail_urls, webmail_secret) {
+    for client in first_party_clients(
+        &base_url,
+        &applications,
+        &admin_urls,
+        &webmail_urls,
+        webmail_secret,
+    ) {
         ensure_client(bp, client).await?;
     }
 
@@ -282,7 +289,11 @@ async fn retire_legacy_web_interface_client(bp: &mut Bootstrap) -> trc::Result<(
         let current = Object::with_revision(ObjectInner::from(app.object), app.revision);
         let result = bp
             .registry
-            .write(RegistryWrite::update(app.id.id(), &updated.into(), &current))
+            .write(RegistryWrite::update(
+                app.id.id(),
+                &updated.into(),
+                &current,
+            ))
             .await?;
         if !matches!(result, RegistryWriteResult::Success(_)) {
             return Err(trc::StoreEvent::UnexpectedError
@@ -422,7 +433,13 @@ mod tests {
 
     #[test]
     fn web_interface_gets_one_uri_per_prefix() {
-        let clients = first_party_clients("https://mail.example.org/", &[web_interface()], &[], &[], None);
+        let clients = first_party_clients(
+            "https://mail.example.org/",
+            &[web_interface()],
+            &[],
+            &[],
+            None,
+        );
         assert_eq!(
             clients,
             vec![FirstPartyClient {
@@ -447,7 +464,10 @@ mod tests {
         let clients = first_party_clients("https://h", &[disabled, named], &[], &[], None);
         assert_eq!(clients.len(), 1);
         assert_eq!(clients[0].client_id, "custom");
-        assert_eq!(clients[0].redirect_uris, vec!["https://h/portal/oauth/callback"]);
+        assert_eq!(
+            clients[0].redirect_uris,
+            vec!["https://h/portal/oauth/callback"]
+        );
     }
 
     #[test]
@@ -461,19 +481,40 @@ mod tests {
         );
         assert_eq!(clients.len(), 2);
         assert_eq!(clients[0].client_id, ADMIN_CLIENT_ID);
-        assert_eq!(clients[0].redirect_uris, vec!["https://admin.example.org/oauth/callback"]);
+        assert_eq!(
+            clients[0].redirect_uris,
+            vec!["https://admin.example.org/oauth/callback"]
+        );
         assert_eq!(clients[0].secret, None);
         assert_eq!(clients[1].client_id, WEBMAIL_CLIENT_ID);
-        assert_eq!(clients[1].redirect_uris, vec!["https://webmail.example.org/api/auth/callback"]);
-        assert_eq!(clients[1].secret, Some(ClientSecret::Plain("s3cret".into())));
+        assert_eq!(
+            clients[1].redirect_uris,
+            vec!["https://webmail.example.org/api/auth/callback"]
+        );
+        assert_eq!(
+            clients[1].secret,
+            Some(ClientSecret::Plain("s3cret".into()))
+        );
     }
 
     #[test]
     fn origins() {
-        assert_eq!(origin_of("https://Admin.Example.org/"), Some("https://admin.example.org".into()));
-        assert_eq!(origin_of("https://admin.example.org:443/x"), Some("https://admin.example.org".into()));
-        assert_eq!(origin_of("http://localhost:5173"), Some("http://localhost:5173".into()));
-        assert_eq!(origin_of("https://h:8443/app"), Some("https://h:8443".into()));
+        assert_eq!(
+            origin_of("https://Admin.Example.org/"),
+            Some("https://admin.example.org".into())
+        );
+        assert_eq!(
+            origin_of("https://admin.example.org:443/x"),
+            Some("https://admin.example.org".into())
+        );
+        assert_eq!(
+            origin_of("http://localhost:5173"),
+            Some("http://localhost:5173".into())
+        );
+        assert_eq!(
+            origin_of("https://h:8443/app"),
+            Some("https://h:8443".into())
+        );
         assert_eq!(origin_of("ftp://h"), None);
         assert_eq!(origin_of("not a url"), None);
         assert_eq!(origin_of(""), None);
@@ -481,7 +522,13 @@ mod tests {
 
     #[test]
     fn webmail_needs_a_secret() {
-        let clients = first_party_clients("https://h", &[], &[" "], &["https://w"], Some(ClientSecret::Plain(String::new())));
+        let clients = first_party_clients(
+            "https://h",
+            &[],
+            &[" "],
+            &["https://w"],
+            Some(ClientSecret::Plain(String::new())),
+        );
         assert!(clients.is_empty());
         let clients = first_party_clients("https://h", &[], &[], &["https://w"], None);
         assert!(clients.is_empty());
@@ -493,7 +540,11 @@ mod tests {
         let clients = first_party_clients(
             "https://h",
             &[],
-            &["https://admin.a.example", "https://admin.b.example/", "https://admin.a.example/"],
+            &[
+                "https://admin.a.example",
+                "https://admin.b.example/",
+                "https://admin.a.example/",
+            ],
             &["https://webmail.b.example"],
             Some(ClientSecret::Hash("$argon2id$x".into())),
         );
@@ -504,7 +555,10 @@ mod tests {
                 "https://admin.b.example/oauth/callback"
             ]
         );
-        assert_eq!(clients[1].secret, Some(ClientSecret::Hash("$argon2id$x".into())));
+        assert_eq!(
+            clients[1].secret,
+            Some(ClientSecret::Hash("$argon2id$x".into()))
+        );
     }
 
     #[test]

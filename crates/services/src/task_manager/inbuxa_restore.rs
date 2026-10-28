@@ -100,13 +100,12 @@ pub(crate) async fn restore_other(
                 .fetch_dav_resources(account_id, account_id, SyncCollection::FileNode)
                 .await?;
             // Back to its folder if that still exists, else the root
-            let parent_id = if parent_id > 0
-                && resources.container_resource_by_id(parent_id - 1).is_some()
-            {
-                parent_id
-            } else {
-                0
-            };
+            let parent_id =
+                if parent_id > 0 && resources.container_resource_by_id(parent_id - 1).is_some() {
+                    parent_id
+                } else {
+                    0
+                };
             let parent = parent_id.checked_sub(1);
             let name = free(&name, &names_under(&resources, parent));
             let document_id = server
@@ -197,7 +196,10 @@ pub(crate) async fn restore_other(
                 Some(id) => id,
                 None => match resources.document_ids(true).next() {
                     Some(id) => id,
-                    None => match server.create_default_addressbook(&account, &account).await? {
+                    None => match server
+                        .create_default_addressbook(&account, &account)
+                        .await?
+                    {
                         Some(id) => id,
                         None => return Ok(Some("The account has no address book.".into())),
                     },
@@ -257,14 +259,17 @@ pub(crate) async fn restore_other(
     server.commit_batch(batch).await?;
 
     // UD-9: the record goes once the item is back
-    undelete::records::remove(&server.core.storage.data, server.registry(), item_id, item)
-        .await?;
+    undelete::records::remove(&server.core.storage.data, server.registry(), item_id, item).await?;
     Ok(None)
 }
 
 /// The result of a restore that couldn't happen: the item stays archived,
 /// and a new request can try again (UD-10).
-pub(crate) async fn not_restored(server: &Server, item_id: Id, reason: String) -> trc::Result<TaskResult> {
+pub(crate) async fn not_restored(
+    server: &Server,
+    item_id: Id,
+    reason: String,
+) -> trc::Result<TaskResult> {
     let mut batch = BatchBuilder::new();
     undelete::data::clear_restore_requested(&mut batch, item_id);
     server.core.storage.data.write(batch.build_all()).await?;

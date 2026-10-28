@@ -55,12 +55,20 @@ impl Response<'_> {
                 GetRequestMethod::AccountLock(request) => request.resolve_references(self)?,
                 GetRequestMethod::LegalHold(request) => request.resolve_references(self)?,
                 GetRequestMethod::MailRule(request) => request.resolve_references(self)?,
-                GetRequestMethod::SecurityAcceptance(request) => request.resolve_references(self)?,
-                GetRequestMethod::DeliverabilityReport(request) => request.resolve_references(self)?,
-                GetRequestMethod::DeliverabilitySettings(request) => request.resolve_references(self)?,
+                GetRequestMethod::SecurityAcceptance(request) => {
+                    request.resolve_references(self)?
+                }
+                GetRequestMethod::DeliverabilityReport(request) => {
+                    request.resolve_references(self)?
+                }
+                GetRequestMethod::DeliverabilitySettings(request) => {
+                    request.resolve_references(self)?
+                }
                 GetRequestMethod::ReportExport(request) => request.resolve_references(self)?,
                 GetRequestMethod::ScheduledReport(request) => request.resolve_references(self)?,
-                GetRequestMethod::ScheduledReportSettings(request) => request.resolve_references(self)?,
+                GetRequestMethod::ScheduledReportSettings(request) => {
+                    request.resolve_references(self)?
+                }
                 GetRequestMethod::Journal(request) => request.resolve_references(self)?,
                 GetRequestMethod::JournalEntry(request) => request.resolve_references(self)?,
                 GetRequestMethod::HeldMessage(request) => request.resolve_references(self)?,
@@ -69,9 +77,7 @@ impl Response<'_> {
                 GetRequestMethod::TenantProtocolPolicy(request) => {
                     request.resolve_references(self)?
                 }
-                GetRequestMethod::SharingPolicy(request) => {
-                    request.resolve_references(self)?
-                }
+                GetRequestMethod::SharingPolicy(request) => request.resolve_references(self)?,
                 GetRequestMethod::FrontEnds(request) => request.resolve_references(self)?,
                 GetRequestMethod::Principal(request) => request.resolve_references(self)?,
                 GetRequestMethod::Quota(request) => request.resolve_references(self)?,
@@ -161,9 +167,7 @@ impl Response<'_> {
                 SetRequestMethod::ScheduledReportSettings(request) => {
                     request.resolve_references(self, 1, false)?
                 }
-                SetRequestMethod::Journal(request) => {
-                    request.resolve_references(self, 1, false)?
-                }
+                SetRequestMethod::Journal(request) => request.resolve_references(self, 1, false)?,
                 SetRequestMethod::JournalExport(request) => {
                     request.resolve_references(self, 1, false)?
                 }

@@ -9,17 +9,18 @@
 
 use crate::utils::{
     account::Account,
-    webdav::DummyWebDavClient,
     imap::{ImapConnection, Type},
     jmap::{JmapResponse, JmapUtils},
     pop3::{self, Pop3Connection},
     server::{TestServer, TestServerBuilder},
     smtp::SmtpConnection,
+    webdav::DummyWebDavClient,
 };
 use email::{
     mailbox::{INBOX_ID, TRASH_ID},
     message::delete::EmailDeletion,
 };
+use hyper::StatusCode;
 use imap_proto::ResponseType;
 use jmap_client::client::{Client, Credentials};
 use registry::{
@@ -29,7 +30,6 @@ use registry::{
     },
     types::duration::Duration,
 };
-use hyper::StatusCode;
 use serde_json::{Value, json};
 use store::{
     Deserialize, IterateParams, ValueKey,
@@ -341,14 +341,20 @@ pub async fn test(test: &mut TestServer) {
         user.request_restore(item.object_id()).await;
     }
     test.wait_for_tasks().await;
-    dav.request("GET", &format!("/dav/file/{home}/Folder/notes%20%28restored%29.txt"), "")
-        .await
-        .with_status(StatusCode::OK)
-        .with_body("Some notes.");
+    dav.request(
+        "GET",
+        &format!("/dav/file/{home}/Folder/notes%20%28restored%29.txt"),
+        "",
+    )
+    .await
+    .with_status(StatusCode::OK)
+    .with_body("Some notes.");
     dav.request("GET", &event, "")
         .await
         .with_status(StatusCode::OK);
-    dav.request("GET", &card, "").await.with_status(StatusCode::OK);
+    dav.request("GET", &card, "")
+        .await
+        .with_status(StatusCode::OK);
     let restored = client
         .sieve_script_query(
             jmap_client::sieve::query::Filter::name("Filters").into(),
@@ -357,11 +363,17 @@ pub async fn test(test: &mut TestServer) {
         .await
         .unwrap();
     let restored = client
-        .sieve_script_get(restored.ids().first().expect("test 6: script"), None::<Vec<_>>)
+        .sieve_script_get(
+            restored.ids().first().expect("test 6: script"),
+            None::<Vec<_>>,
+        )
         .await
         .unwrap()
         .unwrap();
-    assert!(!restored.is_active(), "test 6: a restored script is inactive");
+    assert!(
+        !restored.is_active(),
+        "test 6: a restored script is inactive"
+    );
     assert!(
         user.archived()
             .await
@@ -438,11 +450,23 @@ pub async fn test(test: &mut TestServer) {
         .create_user_account("gone@example.org", SECRET, "Gone", &[], vec![])
         .await;
     let gone_id = gone.id();
-    import(&gone.jmap_client().await, "Kept with the account", &[INBOX_ID], &[]).await;
+    import(
+        &gone.jmap_client().await,
+        "Kept with the account",
+        &[INBOX_ID],
+        &[],
+    )
+    .await;
     share_inbox(&gone, user.id()).await;
     share_inbox(&user, gone_id).await;
-    assert!(has_access(test, user.id(), gone_id).await, "test 14: shared");
-    assert!(has_access(test, gone_id, user.id()).await, "test 14: shared");
+    assert!(
+        has_access(test, user.id(), gone_id).await,
+        "test 14: shared"
+    );
+    assert!(
+        has_access(test, gone_id, user.id()).await,
+        "test 14: shared"
+    );
 
     admin
         .registry_destroy(ObjectType::Account, [gone_id])
@@ -467,9 +491,18 @@ pub async fn test(test: &mut TestServer) {
         reply.iter().any(|line| line.starts_with("550 5.1.2")),
         "test 14: mail refused, {reply:?}"
     );
-    assert!(!has_access(test, user.id(), gone_id).await, "test 14: suspended");
-    assert!(!has_access(test, gone_id, user.id()).await, "test 14: suspended");
-    assert!(pending_destroy(test, gone_id).await, "test 14: destruction due");
+    assert!(
+        !has_access(test, user.id(), gone_id).await,
+        "test 14: suspended"
+    );
+    assert!(
+        !has_access(test, gone_id, user.id()).await,
+        "test 14: suspended"
+    );
+    assert!(
+        pending_destroy(test, gone_id).await,
+        "test 14: destruction due"
+    );
 
     // Its name is held (UD-16)
     let domain_id = admin
@@ -516,13 +549,28 @@ pub async fn test(test: &mut TestServer) {
 
     // Restored with the same id, its mail and its shares
     let response = admin
-        .deleted_account_set(json!({"update": {gone_id.to_string(): {"restore": true, "password": SECRET}}}))
+        .deleted_account_set(
+            json!({"update": {gone_id.to_string(): {"restore": true, "password": SECRET}}}),
+        )
         .await;
     response.updated_id(gone_id);
-    assert_eq!(gone.count_with_subject("Kept with the account").await, 1, "test 14: data intact");
-    assert!(has_access(test, user.id(), gone_id).await, "test 14: reinstated");
-    assert!(has_access(test, gone_id, user.id()).await, "test 14: reinstated");
-    assert!(!pending_destroy(test, gone_id).await, "test 14: destruction off");
+    assert_eq!(
+        gone.count_with_subject("Kept with the account").await,
+        1,
+        "test 14: data intact"
+    );
+    assert!(
+        has_access(test, user.id(), gone_id).await,
+        "test 14: reinstated"
+    );
+    assert!(
+        has_access(test, gone_id, user.id()).await,
+        "test 14: reinstated"
+    );
+    assert!(
+        !pending_destroy(test, gone_id).await,
+        "test 14: destruction off"
+    );
     assert!(admin.deleted_accounts().await.is_empty());
     test.wait_for_tasks().await;
 

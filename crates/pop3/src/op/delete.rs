@@ -109,7 +109,10 @@ impl<T: SessionStream> Session<T> {
                 }
                 if not_deleted.is_empty() {
                     self.write_ok(format!(
-                        concat!(types::brand!(), " POP3 bids you farewell ({} messages deleted)."),
+                        concat!(
+                            types::brand!(),
+                            " POP3 bids you farewell ({} messages deleted)."
+                        ),
                         num_deleted
                     ))
                     .await?;
@@ -121,11 +124,15 @@ impl<T: SessionStream> Session<T> {
                     .await?;
                 }
             } else {
-                self.write_ok(concat!(types::brand!(), " POP3 bids you farewell (no messages deleted)."))
-                    .await?;
+                self.write_ok(concat!(
+                    types::brand!(),
+                    " POP3 bids you farewell (no messages deleted)."
+                ))
+                .await?;
             }
         } else {
-            self.write_ok(concat!(types::brand!(), " POP3 bids you farewell.")).await?;
+            self.write_ok(concat!(types::brand!(), " POP3 bids you farewell."))
+                .await?;
         }
 
         trc::event!(

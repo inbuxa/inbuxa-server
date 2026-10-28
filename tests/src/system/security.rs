@@ -261,12 +261,23 @@ pub async fn test(test: &mut TestServer) {
         got.0
     );
     let set = log_set(json!(14)).await;
-    assert!(set.0.pointer("/methodResponses/0/1/updated/singleton").is_some(), "{}", set.0);
+    assert!(
+        set.0
+            .pointer("/methodResponses/0/1/updated/singleton")
+            .is_some(),
+        "{}",
+        set.0
+    );
     let got = log_get().await;
-    assert_eq!(got.0.pointer("/methodResponses/0/1/list/0/keepForDays"), Some(&json!(14)));
+    assert_eq!(
+        got.0.pointer("/methodResponses/0/1/list/0/keepForDays"),
+        Some(&json!(14))
+    );
     let refused = log_set(json!(0)).await;
     assert_eq!(
-        refused.0.pointer("/methodResponses/0/1/notUpdated/singleton/type"),
+        refused
+            .0
+            .pointer("/methodResponses/0/1/notUpdated/singleton/type"),
         Some(&json!("invalidProperties")),
         "{}",
         refused.0
@@ -286,7 +297,11 @@ pub async fn test(test: &mut TestServer) {
         )
         .await;
     assert!(
-        query.0.pointer("/methodResponses/0/1/ids").and_then(|ids| ids.as_array()).is_some_and(|ids| ids.len() >= 2),
+        query
+            .0
+            .pointer("/methodResponses/0/1/ids")
+            .and_then(|ids| ids.as_array())
+            .is_some_and(|ids| ids.len() >= 2),
         "log settings changes aren't recorded: {}",
         query.0
     );

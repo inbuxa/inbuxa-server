@@ -113,170 +113,172 @@ impl<T: SessionStream> Session<T> {
                     .collect::<Vec<_>>(),
                 _ => Vec::new(),
             };
-            let dispatch = async { match request.command {
-                Command::List | Command::Lsub => self
-                    .handle_list(request)
-                    .await
-                    .map(|_| SessionResult::Continue),
-                Command::Select | Command::Examine => self
-                    .handle_select(request)
-                    .await
-                    .map(|_| SessionResult::Continue),
-                Command::Create => self
-                    .handle_create(group_requests(&mut requests, vec![request]))
-                    .await
-                    .map(|_| SessionResult::Continue),
-                Command::Delete => self
-                    .handle_delete(group_requests(&mut requests, vec![request]))
-                    .await
-                    .map(|_| SessionResult::Continue),
-                Command::Rename => self
-                    .handle_rename(request)
-                    .await
-                    .map(|_| SessionResult::Continue),
-                Command::Status => self
-                    .handle_status(group_requests(&mut requests, vec![request]))
-                    .await
-                    .map(|_| SessionResult::Continue),
-                Command::Append => self
-                    .handle_append(request)
-                    .await
-                    .map(|_| SessionResult::Continue),
-                Command::Close => self
-                    .handle_close(request)
-                    .await
-                    .map(|_| SessionResult::Continue),
-                Command::Unselect => self
-                    .handle_unselect(request)
-                    .await
-                    .map(|_| SessionResult::Continue),
-                Command::Expunge(is_uid) => self
-                    .handle_expunge(request, is_uid)
-                    .await
-                    .map(|_| SessionResult::Continue),
-                Command::Search(is_uid) => self
-                    .handle_search(request, false, is_uid)
-                    .await
-                    .map(|_| SessionResult::Continue),
-                Command::Fetch(_) => self
-                    .handle_fetch(group_requests(&mut requests, vec![request]))
-                    .await
-                    .map(|_| SessionResult::Continue),
-                Command::Store(is_uid) => self
-                    .handle_store(request, is_uid, !has_expunge)
-                    .await
-                    .map(|_| SessionResult::Continue),
-                Command::Copy(is_uid) => self
-                    .handle_copy_move(request, false, is_uid)
-                    .await
-                    .map(|_| SessionResult::Continue),
-                Command::Move(is_uid) => self
-                    .handle_copy_move(request, true, is_uid)
-                    .await
-                    .map(|_| SessionResult::Continue),
-                Command::Sort(is_uid) => self
-                    .handle_search(request, true, is_uid)
-                    .await
-                    .map(|_| SessionResult::Continue),
-                Command::Thread(is_uid) => self
-                    .handle_thread(request, is_uid)
-                    .await
-                    .map(|_| SessionResult::Continue),
-                Command::Idle => self
-                    .handle_idle(request)
-                    .await
-                    .map(|_| SessionResult::Continue),
-                Command::Subscribe => self
-                    .handle_subscribe(request, true)
-                    .await
-                    .map(|_| SessionResult::Continue),
-                Command::Unsubscribe => self
-                    .handle_subscribe(request, false)
-                    .await
-                    .map(|_| SessionResult::Continue),
-                Command::Namespace => self
-                    .handle_namespace(request)
-                    .await
-                    .map(|_| SessionResult::Continue),
-                Command::Authenticate => Box::pin(self.handle_authenticate(request))
-                    .await
-                    .map(|_| SessionResult::Continue),
-                Command::Login => Box::pin(self.handle_login(request))
-                    .await
-                    .map(|_| SessionResult::Continue),
-                Command::Capability => self
-                    .handle_capability(request)
-                    .await
-                    .map(|_| SessionResult::Continue),
-                Command::Enable => self
-                    .handle_enable(request)
-                    .await
-                    .map(|_| SessionResult::Continue),
-                Command::StartTls => self
-                    .write_bytes(
-                        StatusResponse::ok("Begin TLS negotiation now")
-                            .with_tag(request.tag)
-                            .into_bytes(),
-                    )
-                    .await
-                    .map(|_| SessionResult::UpgradeTls),
-                Command::Noop => self
-                    .handle_noop(request)
-                    .await
-                    .map(|_| SessionResult::Continue),
-                Command::Check => self
-                    .handle_noop(request)
-                    .await
-                    .map(|_| SessionResult::Continue),
-                Command::Logout => self
-                    .handle_logout(request)
-                    .await
-                    .map(|_| SessionResult::Close),
-                Command::SetAcl => self
-                    .handle_set_acl(request)
-                    .await
-                    .map(|_| SessionResult::Continue),
-                Command::DeleteAcl => self
-                    .handle_set_acl(request)
-                    .await
-                    .map(|_| SessionResult::Continue),
-                Command::GetAcl => self
-                    .handle_get_acl(request)
-                    .await
-                    .map(|_| SessionResult::Continue),
-                Command::ListRights => self
-                    .handle_list_rights(request)
-                    .await
-                    .map(|_| SessionResult::Continue),
-                Command::MyRights => self
-                    .handle_my_rights(request)
-                    .await
-                    .map(|_| SessionResult::Continue),
-                Command::GetQuota => self
-                    .handle_get_quota(request)
-                    .await
-                    .map(|_| SessionResult::Continue),
-                Command::GetQuotaRoot => self
-                    .handle_get_quota_root(request)
-                    .await
-                    .map(|_| SessionResult::Continue),
-                Command::Unauthenticate => self
-                    .handle_unauthenticate(request)
-                    .await
-                    .map(|_| SessionResult::Continue),
-                Command::Id => self
-                    .handle_id(request)
-                    .await
-                    .map(|_| SessionResult::Continue),
-                Command::GetJmapAccess => self
-                    .handle_jmap_access(request)
-                    .await
-                    .map(|_| SessionResult::Continue),
-                Command::UidBatches => self
-                    .handle_uidbatches(request)
-                    .await
-                    .map(|_| SessionResult::Continue),
-            } };
+            let dispatch = async {
+                match request.command {
+                    Command::List | Command::Lsub => self
+                        .handle_list(request)
+                        .await
+                        .map(|_| SessionResult::Continue),
+                    Command::Select | Command::Examine => self
+                        .handle_select(request)
+                        .await
+                        .map(|_| SessionResult::Continue),
+                    Command::Create => self
+                        .handle_create(group_requests(&mut requests, vec![request]))
+                        .await
+                        .map(|_| SessionResult::Continue),
+                    Command::Delete => self
+                        .handle_delete(group_requests(&mut requests, vec![request]))
+                        .await
+                        .map(|_| SessionResult::Continue),
+                    Command::Rename => self
+                        .handle_rename(request)
+                        .await
+                        .map(|_| SessionResult::Continue),
+                    Command::Status => self
+                        .handle_status(group_requests(&mut requests, vec![request]))
+                        .await
+                        .map(|_| SessionResult::Continue),
+                    Command::Append => self
+                        .handle_append(request)
+                        .await
+                        .map(|_| SessionResult::Continue),
+                    Command::Close => self
+                        .handle_close(request)
+                        .await
+                        .map(|_| SessionResult::Continue),
+                    Command::Unselect => self
+                        .handle_unselect(request)
+                        .await
+                        .map(|_| SessionResult::Continue),
+                    Command::Expunge(is_uid) => self
+                        .handle_expunge(request, is_uid)
+                        .await
+                        .map(|_| SessionResult::Continue),
+                    Command::Search(is_uid) => self
+                        .handle_search(request, false, is_uid)
+                        .await
+                        .map(|_| SessionResult::Continue),
+                    Command::Fetch(_) => self
+                        .handle_fetch(group_requests(&mut requests, vec![request]))
+                        .await
+                        .map(|_| SessionResult::Continue),
+                    Command::Store(is_uid) => self
+                        .handle_store(request, is_uid, !has_expunge)
+                        .await
+                        .map(|_| SessionResult::Continue),
+                    Command::Copy(is_uid) => self
+                        .handle_copy_move(request, false, is_uid)
+                        .await
+                        .map(|_| SessionResult::Continue),
+                    Command::Move(is_uid) => self
+                        .handle_copy_move(request, true, is_uid)
+                        .await
+                        .map(|_| SessionResult::Continue),
+                    Command::Sort(is_uid) => self
+                        .handle_search(request, true, is_uid)
+                        .await
+                        .map(|_| SessionResult::Continue),
+                    Command::Thread(is_uid) => self
+                        .handle_thread(request, is_uid)
+                        .await
+                        .map(|_| SessionResult::Continue),
+                    Command::Idle => self
+                        .handle_idle(request)
+                        .await
+                        .map(|_| SessionResult::Continue),
+                    Command::Subscribe => self
+                        .handle_subscribe(request, true)
+                        .await
+                        .map(|_| SessionResult::Continue),
+                    Command::Unsubscribe => self
+                        .handle_subscribe(request, false)
+                        .await
+                        .map(|_| SessionResult::Continue),
+                    Command::Namespace => self
+                        .handle_namespace(request)
+                        .await
+                        .map(|_| SessionResult::Continue),
+                    Command::Authenticate => Box::pin(self.handle_authenticate(request))
+                        .await
+                        .map(|_| SessionResult::Continue),
+                    Command::Login => Box::pin(self.handle_login(request))
+                        .await
+                        .map(|_| SessionResult::Continue),
+                    Command::Capability => self
+                        .handle_capability(request)
+                        .await
+                        .map(|_| SessionResult::Continue),
+                    Command::Enable => self
+                        .handle_enable(request)
+                        .await
+                        .map(|_| SessionResult::Continue),
+                    Command::StartTls => self
+                        .write_bytes(
+                            StatusResponse::ok("Begin TLS negotiation now")
+                                .with_tag(request.tag)
+                                .into_bytes(),
+                        )
+                        .await
+                        .map(|_| SessionResult::UpgradeTls),
+                    Command::Noop => self
+                        .handle_noop(request)
+                        .await
+                        .map(|_| SessionResult::Continue),
+                    Command::Check => self
+                        .handle_noop(request)
+                        .await
+                        .map(|_| SessionResult::Continue),
+                    Command::Logout => self
+                        .handle_logout(request)
+                        .await
+                        .map(|_| SessionResult::Close),
+                    Command::SetAcl => self
+                        .handle_set_acl(request)
+                        .await
+                        .map(|_| SessionResult::Continue),
+                    Command::DeleteAcl => self
+                        .handle_set_acl(request)
+                        .await
+                        .map(|_| SessionResult::Continue),
+                    Command::GetAcl => self
+                        .handle_get_acl(request)
+                        .await
+                        .map(|_| SessionResult::Continue),
+                    Command::ListRights => self
+                        .handle_list_rights(request)
+                        .await
+                        .map(|_| SessionResult::Continue),
+                    Command::MyRights => self
+                        .handle_my_rights(request)
+                        .await
+                        .map(|_| SessionResult::Continue),
+                    Command::GetQuota => self
+                        .handle_get_quota(request)
+                        .await
+                        .map(|_| SessionResult::Continue),
+                    Command::GetQuotaRoot => self
+                        .handle_get_quota_root(request)
+                        .await
+                        .map(|_| SessionResult::Continue),
+                    Command::Unauthenticate => self
+                        .handle_unauthenticate(request)
+                        .await
+                        .map(|_| SessionResult::Continue),
+                    Command::Id => self
+                        .handle_id(request)
+                        .await
+                        .map(|_| SessionResult::Continue),
+                    Command::GetJmapAccess => self
+                        .handle_jmap_access(request)
+                        .await
+                        .map(|_| SessionResult::Continue),
+                    Command::UidBatches => self
+                        .handle_uidbatches(request)
+                        .await
+                        .map(|_| SessionResult::Continue),
+                }
+            };
             let result = if replica_accounts.is_empty() {
                 dispatch.await
             } else {

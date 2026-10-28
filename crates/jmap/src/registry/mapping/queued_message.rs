@@ -51,8 +51,9 @@ use utils::map::vec_map::VecMap;
 
 /// inbuxa: held mail is the review queue's to decide.
 fn held_refusal() -> SetError<Property> {
-    SetError::forbidden()
-        .with_description("This message is held for review: release or reject it under Compliance, Held mail.")
+    SetError::forbidden().with_description(
+        "This message is held for review: release or reject it under Compliance, Held mail.",
+    )
 }
 
 pub(crate) async fn queued_message_set(

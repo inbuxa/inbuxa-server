@@ -333,7 +333,9 @@ pub async fn build_itip_template(
     .await
     .ok()
     .flatten();
-    let template = custom.as_ref().unwrap_or(&server.core.groupware.itip_template);
+    let template = custom
+        .as_ref()
+        .unwrap_or(&server.core.groupware.itip_template);
     let formatter = TextFormatter::new(account_info.locale().as_str())?;
     let locale = formatter.locale;
 

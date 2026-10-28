@@ -222,9 +222,7 @@ impl<'de> Visitor<'de> for CallVisitor {
                 }
             },
             (MethodFunction::Get, MethodObject::SharingPolicy) => match seq.next_element() {
-                Ok(Some(value)) => {
-                    RequestMethod::Get(GetRequestMethod::SharingPolicy(value))
-                }
+                Ok(Some(value)) => RequestMethod::Get(GetRequestMethod::SharingPolicy(value)),
                 Err(err) => RequestMethod::invalid(err),
                 Ok(None) => {
                     return Err(de::Error::invalid_length(1, &self));
@@ -440,9 +438,7 @@ impl<'de> Visitor<'de> for CallVisitor {
                 }
             },
             (MethodFunction::Set, MethodObject::SharingPolicy) => match seq.next_element() {
-                Ok(Some(value)) => {
-                    RequestMethod::Set(SetRequestMethod::SharingPolicy(value))
-                }
+                Ok(Some(value)) => RequestMethod::Set(SetRequestMethod::SharingPolicy(value)),
                 Err(err) => RequestMethod::invalid(err),
                 Ok(None) => {
                     return Err(de::Error::invalid_length(1, &self));
@@ -710,28 +706,38 @@ impl<'de> Visitor<'de> for CallVisitor {
             },
             // inbuxa: the deliverability check
             (MethodFunction::Get, MethodObject::DeliverabilityReport) => match seq.next_element() {
-                Ok(Some(value)) => RequestMethod::Get(GetRequestMethod::DeliverabilityReport(value)),
+                Ok(Some(value)) => {
+                    RequestMethod::Get(GetRequestMethod::DeliverabilityReport(value))
+                }
                 Err(err) => RequestMethod::invalid(err),
                 Ok(None) => {
                     return Err(de::Error::invalid_length(1, &self));
                 }
             },
             (MethodFunction::Set, MethodObject::DeliverabilityReport) => match seq.next_element() {
-                Ok(Some(value)) => RequestMethod::Set(SetRequestMethod::DeliverabilityReport(value)),
+                Ok(Some(value)) => {
+                    RequestMethod::Set(SetRequestMethod::DeliverabilityReport(value))
+                }
                 Err(err) => RequestMethod::invalid(err),
                 Ok(None) => {
                     return Err(de::Error::invalid_length(1, &self));
                 }
             },
-            (MethodFunction::Get, MethodObject::DeliverabilitySettings) => match seq.next_element() {
-                Ok(Some(value)) => RequestMethod::Get(GetRequestMethod::DeliverabilitySettings(value)),
+            (MethodFunction::Get, MethodObject::DeliverabilitySettings) => match seq.next_element()
+            {
+                Ok(Some(value)) => {
+                    RequestMethod::Get(GetRequestMethod::DeliverabilitySettings(value))
+                }
                 Err(err) => RequestMethod::invalid(err),
                 Ok(None) => {
                     return Err(de::Error::invalid_length(1, &self));
                 }
             },
-            (MethodFunction::Set, MethodObject::DeliverabilitySettings) => match seq.next_element() {
-                Ok(Some(value)) => RequestMethod::Set(SetRequestMethod::DeliverabilitySettings(value)),
+            (MethodFunction::Set, MethodObject::DeliverabilitySettings) => match seq.next_element()
+            {
+                Ok(Some(value)) => {
+                    RequestMethod::Set(SetRequestMethod::DeliverabilitySettings(value))
+                }
                 Err(err) => RequestMethod::invalid(err),
                 Ok(None) => {
                     return Err(de::Error::invalid_length(1, &self));
@@ -751,20 +757,28 @@ impl<'de> Visitor<'de> for CallVisitor {
                     return Err(de::Error::invalid_length(1, &self));
                 }
             },
-            (MethodFunction::Get, MethodObject::ScheduledReportSettings) => match seq.next_element() {
-                Ok(Some(value)) => RequestMethod::Get(GetRequestMethod::ScheduledReportSettings(value)),
-                Err(err) => RequestMethod::invalid(err),
-                Ok(None) => {
-                    return Err(de::Error::invalid_length(1, &self));
+            (MethodFunction::Get, MethodObject::ScheduledReportSettings) => {
+                match seq.next_element() {
+                    Ok(Some(value)) => {
+                        RequestMethod::Get(GetRequestMethod::ScheduledReportSettings(value))
+                    }
+                    Err(err) => RequestMethod::invalid(err),
+                    Ok(None) => {
+                        return Err(de::Error::invalid_length(1, &self));
+                    }
                 }
-            },
-            (MethodFunction::Set, MethodObject::ScheduledReportSettings) => match seq.next_element() {
-                Ok(Some(value)) => RequestMethod::Set(SetRequestMethod::ScheduledReportSettings(value)),
-                Err(err) => RequestMethod::invalid(err),
-                Ok(None) => {
-                    return Err(de::Error::invalid_length(1, &self));
+            }
+            (MethodFunction::Set, MethodObject::ScheduledReportSettings) => {
+                match seq.next_element() {
+                    Ok(Some(value)) => {
+                        RequestMethod::Set(SetRequestMethod::ScheduledReportSettings(value))
+                    }
+                    Err(err) => RequestMethod::invalid(err),
+                    Ok(None) => {
+                        return Err(de::Error::invalid_length(1, &self));
+                    }
                 }
-            },
+            }
             (MethodFunction::Get, MethodObject::ReportExport) => match seq.next_element() {
                 Ok(Some(value)) => RequestMethod::Get(GetRequestMethod::ReportExport(value)),
                 Err(err) => RequestMethod::invalid(err),

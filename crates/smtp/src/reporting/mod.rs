@@ -14,8 +14,8 @@ pub mod analysis;
 pub mod dkim;
 pub mod dmarc;
 pub mod inbound;
-pub mod index;
 pub mod inbuxa_send; // inbuxa: signed server-built mail (scheduled-reports spec, RP-14)
+pub mod index;
 pub mod scheduler;
 pub mod send;
 pub mod shared; // inbuxa: reports written by every node

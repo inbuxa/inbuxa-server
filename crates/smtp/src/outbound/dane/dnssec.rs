@@ -898,7 +898,9 @@ mod tests {
     #[ignore]
     async fn validated_lookup_follows_signed_cname_for_tlsa() {
         use mail_auth::hickory_resolver::{
-            config::{CLOUDFLARE, ConnectionConfig, NameServerConfig, ResolverConfig, ResolverOpts},
+            config::{
+                CLOUDFLARE, ConnectionConfig, NameServerConfig, ResolverConfig, ResolverOpts,
+            },
             net::runtime::TokioRuntimeProvider,
         };
 
@@ -927,16 +929,20 @@ mod tests {
         let query = name("_25._tcp.mail.usefulinsight.com.");
 
         let direct = dnssec.lookup(query.clone(), RecordType::TLSA).await;
-        eprintln!("hickory alone: {:?}", direct.as_ref().err().map(|e| e.to_string()));
+        eprintln!(
+            "hickory alone: {:?}",
+            direct.as_ref().err().map(|e| e.to_string())
+        );
 
         let err = match validated_lookup(&dnssec, &plain, query, RecordType::TLSA).await {
-            Ok(validated) => panic!("expected no TLSA record, got {:?}", validated.lookup.answers()),
+            Ok(validated) => panic!(
+                "expected no TLSA record, got {:?}",
+                validated.lookup.answers()
+            ),
             Err(err) => err,
         };
         let denial = NegativeAnswer::from_error(&err).expect("a denial of existence");
         assert_eq!(denial.response_code, ResponseCode::NoError);
         assert_ne!(denial.dnssec_status, DnssecStatus::Bogus);
     }
-
 }
-

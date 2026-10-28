@@ -52,7 +52,11 @@ pub async fn task_lock_tests() {
     let started = Instant::now();
     server.notify_task_queue();
     tokio::time::sleep(Duration::from_secs(3)).await;
-    assert_eq!(pending(&server, &ids).await, ids.len(), "held by the other node");
+    assert_eq!(
+        pending(&server, &ids).await,
+        ids.len(),
+        "held by the other node"
+    );
     wait_until_done(&server, &ids, Duration::from_secs(LOCK_EXPIRY + 10)).await;
     let elapsed = started.elapsed();
     assert!(
@@ -129,7 +133,10 @@ pub async fn task_lock_tests() {
     let [id] = new_task_ids(1)[..] else {
         unreachable!()
     };
-    assert!(!server.try_lock_task(id).await, "a stopping node claims nothing");
+    assert!(
+        !server.try_lock_task(id).await,
+        "a stopping node claims nothing"
+    );
 
     for id in ids {
         let _ = server

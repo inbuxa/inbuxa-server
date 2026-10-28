@@ -160,10 +160,7 @@ pub async fn get(
         }
         Some(ids) => {
             for id in ids {
-                match u32::try_from(id.id())
-                    .ok()
-                    .map(|id| hold::get(data, id))
-                {
+                match u32::try_from(id.id()).ok().map(|id| hold::get(data, id)) {
                     Some(found) => match found.await? {
                         Some(current) => response.list.push(to_value(
                             &current,
@@ -234,7 +231,10 @@ fn parse_text(
     }
 }
 
-fn parse_date(property: P, value: &Value<'_, P, LegalHoldValue>) -> Result<Option<u64>, SetError<P>> {
+fn parse_date(
+    property: P,
+    value: &Value<'_, P, LegalHoldValue>,
+) -> Result<Option<u64>, SetError<P>> {
     match value {
         Value::Null => Ok(None),
         Value::Str(s) => UTCDate::from_str(s)
@@ -247,7 +247,10 @@ fn parse_date(property: P, value: &Value<'_, P, LegalHoldValue>) -> Result<Optio
 
 /// Reads a scope and checks that every account, group, domain and tenant
 /// it names exists and is the right kind (LH-1).
-async fn parse_scope(server: &Server, value: &Value<'_, P, LegalHoldValue>) -> Result<Scope, SetError<P>> {
+async fn parse_scope(
+    server: &Server,
+    value: &Value<'_, P, LegalHoldValue>,
+) -> Result<Scope, SetError<P>> {
     let Value::Object(map) = value else {
         return Err(invalid(P::Scope, "Expected an object."));
     };
@@ -262,7 +265,10 @@ async fn parse_scope(server: &Server, value: &Value<'_, P, LegalHoldValue>) -> R
             continue;
         }
         let Value::Array(items) = value else {
-            return Err(invalid(P::Scope, &format!("`{name}` must be a list of ids.")));
+            return Err(invalid(
+                P::Scope,
+                &format!("`{name}` must be a list of ids."),
+            ));
         };
         let mut list = Vec::with_capacity(items.len());
         for item in items {
@@ -278,7 +284,10 @@ async fn parse_scope(server: &Server, value: &Value<'_, P, LegalHoldValue>) -> R
         for id in &list {
             let exists = match name.as_str() {
                 "accounts" => server.account(*id).await.is_ok_and(|a| a.is_user_account()),
-                "groups" => server.account(*id).await.is_ok_and(|a| !a.is_user_account()),
+                "groups" => server
+                    .account(*id)
+                    .await
+                    .is_ok_and(|a| !a.is_user_account()),
                 "domains" => server.domain_by_id(*id).await.ok().flatten().is_some(),
                 "tenants" => server.tenant(*id).await.is_ok(),
                 _ => return Err(invalid(P::Scope, &format!("Unknown scope entry `{name}`."))),
@@ -286,7 +295,11 @@ async fn parse_scope(server: &Server, value: &Value<'_, P, LegalHoldValue>) -> R
             if !exists {
                 return Err(invalid(
                     P::Scope,
-                    &format!("No such {} as {}.", name.trim_end_matches('s'), Id::from(*id)),
+                    &format!(
+                        "No such {} as {}.",
+                        name.trim_end_matches('s'),
+                        Id::from(*id)
+                    ),
                 ));
             }
         }
@@ -403,7 +416,9 @@ pub async fn set(
                 Key::Property(P::Description) => {
                     parse_text(P::Description, &value, false).map(|v| next.description = v)
                 }
-                Key::Property(P::Scope) => parse_scope(server, &value).await.map(|v| next.scope = v),
+                Key::Property(P::Scope) => {
+                    parse_scope(server, &value).await.map(|v| next.scope = v)
+                }
                 Key::Property(P::From) => parse_date(P::From, &value).map(|v| next.from = v),
                 Key::Property(P::To) => parse_date(P::To, &value).map(|v| next.to = v),
                 Key::Property(P::Released) => match value {

@@ -103,26 +103,32 @@ pub async fn set_deadline(
     let blob_hash = item.blob_id().hash.clone();
     let before = item.archived_until().timestamp() as u64;
     let mut updated = item.clone();
-    updated.set_archived_until(registry::types::datetime::UTCDateTime::from_timestamp(until as i64));
+    updated.set_archived_until(registry::types::datetime::UTCDateTime::from_timestamp(
+        until as i64,
+    ));
 
     // The new link first, so the kept copy is never unlinked in between
     let mut batch = BatchBuilder::new();
-    batch
-        .with_account_id(account_id)
-        .set(
-            BlobOp::Link {
-                hash: blob_hash.clone(),
-                to: BlobLink::Temporary { until },
-            },
-            vec![],
-        );
+    batch.with_account_id(account_id).set(
+        BlobOp::Link {
+            hash: blob_hash.clone(),
+            to: BlobLink::Temporary { until },
+        },
+        vec![],
+    );
     if before != until {
         batch.clear(BlobOp::Link {
             hash: blob_hash,
             to: BlobLink::Temporary { until: before },
         });
     }
-    data::log_change(&mut batch, account_id, registry.assign_id(), id, Change::Updated);
+    data::log_change(
+        &mut batch,
+        account_id,
+        registry.assign_id(),
+        id,
+        Change::Updated,
+    );
     data.write(batch.build_all())
         .await
         .caused_by(trc::location!())?;
@@ -244,14 +250,21 @@ pub async fn all(data: &Store, registry: &RegistryStore) -> trc::Result<Vec<Id>>
         .map(|id| id.document_id())
         .collect::<Vec<_>>();
     // Deleted accounts still kept have archived items too
-    accounts.extend(data::kept_accounts(data).await?.into_iter().map(|(id, _)| id));
+    accounts.extend(
+        data::kept_accounts(data)
+            .await?
+            .into_iter()
+            .map(|(id, _)| id),
+    );
     accounts.sort_unstable();
     accounts.dedup();
     let mut items = Vec::new();
     for account_id in accounts {
         items.extend(
             registry
-                .query::<Vec<Id>>(RegistryQuery::new(ObjectType::ArchivedItem).with_account(account_id))
+                .query::<Vec<Id>>(
+                    RegistryQuery::new(ObjectType::ArchivedItem).with_account(account_id),
+                )
                 .await
                 .caused_by(trc::location!())?,
         );

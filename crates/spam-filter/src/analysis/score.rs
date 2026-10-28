@@ -13,17 +13,15 @@ use crate::{
         dmarc::SpamFilterAnalyzeDmarc, domain::SpamFilterAnalyzeDomain,
         ehlo::SpamFilterAnalyzeEhlo, from::SpamFilterAnalyzeFrom,
         headers::SpamFilterAnalyzeHeaders, html::SpamFilterAnalyzeHtml, ip::SpamFilterAnalyzeIp,
-        messageid::SpamFilterAnalyzeMid, mime::SpamFilterAnalyzeMime,
+        llm::SpamFilterAnalyzeLlm, messageid::SpamFilterAnalyzeMid, mime::SpamFilterAnalyzeMime,
         pyzor::SpamFilterAnalyzePyzor, received::SpamFilterAnalyzeReceived,
         recipient::SpamFilterAnalyzeRecipient, replyto::SpamFilterAnalyzeReplyTo,
         rules::SpamFilterAnalyzeRules, subject::SpamFilterAnalyzeSubject,
         url::SpamFilterAnalyzeUrl,
-        llm::SpamFilterAnalyzeLlm,
     },
 };
 use common::{Server, config::mailstore::spamfilter::SpamFilterAction};
 use std::{fmt::Write, future::Future, vec};
-
 
 pub trait SpamFilterAnalyzeScore: Sync + Send {
     fn spam_filter_finalize(
@@ -250,7 +248,6 @@ impl SpamFilterAnalyzeScore for Server {
 
         // HTML content analysis
         self.spam_filter_analyze_html(ctx).await;
-
 
         // Spam trap
         self.spam_filter_analyze_spam_trap(ctx).await;

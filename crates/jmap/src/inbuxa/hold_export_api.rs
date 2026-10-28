@@ -51,7 +51,9 @@ fn date(seconds: u64) -> LValue {
 }
 
 fn opt_text(value: &Option<String>) -> LValue {
-    value.as_ref().map_or(Value::Null, |v| Value::Str(v.clone().into()))
+    value
+        .as_ref()
+        .map_or(Value::Null, |v| Value::Str(v.clone().into()))
 }
 
 fn to_value(export: &Export, properties: &[P]) -> LValue {
@@ -146,7 +148,9 @@ pub async fn set(
         for (key, value) in value.into_expanded_object() {
             match (&key, &value) {
                 (Key::Property(P::HoldId), Value::Str(id)) => {
-                    hold_id = Id::from_str(id).ok().and_then(|id| u32::try_from(id.id()).ok())
+                    hold_id = Id::from_str(id)
+                        .ok()
+                        .and_then(|id| u32::try_from(id.id()).ok())
                 }
                 (Key::Property(P::AccountIds), Value::Array(items)) => {
                     for item in items {
@@ -187,7 +191,10 @@ pub async fn set(
         else {
             response.not_created.append(
                 client_id,
-                invalid(P::Reason, "Say why: a reason is required and is kept in the audit log."),
+                invalid(
+                    P::Reason,
+                    "Say why: a reason is required and is kept in the audit log.",
+                ),
             );
             continue;
         };
@@ -204,14 +211,18 @@ pub async fn set(
         if !hold.is_active() {
             response.not_created.append(
                 client_id,
-                invalid(P::HoldId, "That hold was released; export while a hold is in place."),
+                invalid(
+                    P::HoldId,
+                    "That hold was released; export while a hold is in place.",
+                ),
             );
             continue;
         }
         let Some(created_by_id) = actor.account_id else {
-            response
-                .not_created
-                .append(client_id, SetError::forbidden().with_description("Sign in as a person to export."));
+            response.not_created.append(
+                client_id,
+                SetError::forbidden().with_description("Sign in as a person to export."),
+            );
             continue;
         };
         accounts.sort_unstable();
@@ -240,21 +251,26 @@ pub async fn set(
         tokio::spawn(async move {
             let mut done = export.clone();
             match crate::inbuxa::hold_export::build(&server, &hold, &export.accounts).await {
-                Ok((bytes, items)) => match server.put_jmap_blob(export.created_by_id, &bytes).await {
-                    Ok(blob) => {
-                        done.status = ExportStatus::Ready;
-                        done.blob_id = Some(blob.to_string());
-                        done.size = bytes.len() as u64;
-                        done.items = items as u64;
-                        done.sha256 = Some(
-                            Sha256::digest(&bytes).iter().map(|b| format!("{b:02x}")).collect(),
-                        );
+                Ok((bytes, items)) => {
+                    match server.put_jmap_blob(export.created_by_id, &bytes).await {
+                        Ok(blob) => {
+                            done.status = ExportStatus::Ready;
+                            done.blob_id = Some(blob.to_string());
+                            done.size = bytes.len() as u64;
+                            done.items = items as u64;
+                            done.sha256 = Some(
+                                Sha256::digest(&bytes)
+                                    .iter()
+                                    .map(|b| format!("{b:02x}"))
+                                    .collect(),
+                            );
+                        }
+                        Err(err) => {
+                            done.status = ExportStatus::Failed;
+                            done.error = Some(err.to_string());
+                        }
                     }
-                    Err(err) => {
-                        done.status = ExportStatus::Failed;
-                        done.error = Some(err.to_string());
-                    }
-                },
+                }
                 Err(err) => {
                     done.status = ExportStatus::Failed;
                     done.error = Some(
@@ -287,7 +303,8 @@ pub async fn set(
     for id in request.unwrap_destroy() {
         response.not_destroyed.append(
             id,
-            SetError::forbidden().with_description("Exports stay listed; the file expires on its own."),
+            SetError::forbidden()
+                .with_description("Exports stay listed; the file expires on its own."),
         );
     }
     Ok(response)

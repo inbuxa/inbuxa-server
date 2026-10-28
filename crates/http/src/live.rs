@@ -11,8 +11,8 @@
 use common::telemetry::tracers::TraceEvents;
 use http_body_util::{StreamBody, combinators::BoxBody};
 use http_proto::HttpResponse;
-use hyper::{StatusCode, body::Bytes};
 use hyper::body::Frame;
+use hyper::{StatusCode, body::Bytes};
 use registry::{jmap::IntoValue, schema::structs::Trace};
 use std::{
     sync::atomic::{AtomicUsize, Ordering},
@@ -159,51 +159,53 @@ pub fn live_tracing(query: Option<&str>) -> trc::Result<HttpResponse> {
     Collector::reload();
     let subscription = Subscription(id);
 
-    Ok(event_stream(BoxBody::new(StreamBody::new(async_stream::stream! {
-        let _slot = slot;
-        let _subscription = subscription;
-        let ends = Instant::now() + STREAM_LIFETIME;
-        loop {
-            let wait = PING_INTERVAL.min(ends.saturating_duration_since(Instant::now()));
-            if wait.is_zero() {
-                break;
-            }
-            match tokio::time::timeout(wait, rx.recv()).await {
-                Ok(Some(events)) => {
-                    let matching = events
-                        .iter()
-                        .filter(|event| {
-                            let texts = event
-                                .keys
-                                .iter()
-                                .map(|(key, value)| (*key, value_text(value).to_lowercase()))
-                                .collect::<Vec<_>>();
-                            anywhere.as_ref().is_none_or(|needle| {
-                                texts.iter().any(|(_, text)| text.contains(needle.as_str()))
-                            }) && by_key.iter().all(|(key, needle)| {
-                                texts.iter().any(|(k, text)| k == key && text == needle)
+    Ok(event_stream(BoxBody::new(StreamBody::new(
+        async_stream::stream! {
+            let _slot = slot;
+            let _subscription = subscription;
+            let ends = Instant::now() + STREAM_LIFETIME;
+            loop {
+                let wait = PING_INTERVAL.min(ends.saturating_duration_since(Instant::now()));
+                if wait.is_zero() {
+                    break;
+                }
+                match tokio::time::timeout(wait, rx.recv()).await {
+                    Ok(Some(events)) => {
+                        let matching = events
+                            .iter()
+                            .filter(|event| {
+                                let texts = event
+                                    .keys
+                                    .iter()
+                                    .map(|(key, value)| (*key, value_text(value).to_lowercase()))
+                                    .collect::<Vec<_>>();
+                                anywhere.as_ref().is_none_or(|needle| {
+                                    texts.iter().any(|(_, text)| text.contains(needle.as_str()))
+                                }) && by_key.iter().all(|(key, needle)| {
+                                    texts.iter().any(|(k, text)| k == key && text == needle)
+                                })
                             })
-                        })
-                        .map(|event| event.as_ref())
-                        .collect::<Vec<_>>();
-                    if !matching.is_empty() {
-                        let events = Trace::build_trace_events(matching.iter().copied(), matching.len())
-                            .into_iter()
-                            .map(|event| event.into_value())
+                            .map(|event| event.as_ref())
                             .collect::<Vec<_>>();
-                        yield Ok(frame("trace", serde_json::to_string(&events).unwrap_or_default()));
+                        if !matching.is_empty() {
+                            let events = Trace::build_trace_events(matching.iter().copied(), matching.len())
+                                .into_iter()
+                                .map(|event| event.into_value())
+                                .collect::<Vec<_>>();
+                            yield Ok(frame("trace", serde_json::to_string(&events).unwrap_or_default()));
+                        }
                     }
-                }
-                Ok(None) => break,
-                Err(_) => {
-                    if Instant::now() >= ends {
-                        break;
+                    Ok(None) => break,
+                    Err(_) => {
+                        if Instant::now() >= ends {
+                            break;
+                        }
+                        yield Ok(frame("ping", format!("{{\"interval\": {}}}", PING_INTERVAL.as_millis())));
                     }
-                    yield Ok(frame("ping", format!("{{\"interval\": {}}}", PING_INTERVAL.as_millis())));
                 }
             }
-        }
-    }))))
+        },
+    ))))
 }
 
 /// The current totals of the named metrics, all when `names` is empty, in
@@ -255,12 +257,14 @@ pub fn live_metrics(params: &UrlParams<'_>) -> trc::Result<HttpResponse> {
             .filter(|interval| *interval >= 1)
             .unwrap_or(30),
     );
-    Ok(event_stream(BoxBody::new(StreamBody::new(async_stream::stream! {
-        let _slot = slot;
-        let ends = Instant::now() + STREAM_LIFETIME;
-        while Instant::now() < ends {
-            yield Ok(frame("metrics", metric_frame(&names)));
-            tokio::time::sleep(interval).await;
-        }
-    }))))
+    Ok(event_stream(BoxBody::new(StreamBody::new(
+        async_stream::stream! {
+            let _slot = slot;
+            let ends = Instant::now() + STREAM_LIFETIME;
+            while Instant::now() < ends {
+                yield Ok(frame("metrics", metric_frame(&names)));
+                tokio::time::sleep(interval).await;
+            }
+        },
+    ))))
 }

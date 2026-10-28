@@ -265,7 +265,6 @@ pub(crate) async fn task_set(
 
         let due = task.due_timestamp();
 
-
         if let Task::DestroyAccount(_) = task {
             set.response.not_destroyed.append(
                 id,

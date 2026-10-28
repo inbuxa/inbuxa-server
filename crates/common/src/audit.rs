@@ -14,10 +14,10 @@ use crate::{
     auth::{AccessToken, AuthRequest, permissions::DefaultPermissions},
 };
 use directory::Credentials;
-use inbuxa_features::hold::{self, Member};
 use inbuxa_features::audit::{
     Action, Actor, AuditLog, EntryId, Outcome, Record, Target, Via, diff, log, scope,
 };
+use inbuxa_features::hold::{self, Member};
 use registry::{
     jmap::IntoValue,
     schema::{enums::Permission, prelude::ObjectType},
@@ -610,9 +610,10 @@ impl RegistryWriteHook for SystemWrites {
                 )
                 && let Err(err) = hold::keep_moved(&self.data, &before, &after).await
             {
-                trc::error!(err
-                    .account_id(after.account)
-                    .details("Failed to keep a moved account under its legal hold"));
+                trc::error!(
+                    err.account_id(after.account)
+                        .details("Failed to keep a moved account under its legal hold")
+                );
             }
             let subsystem = match scope::current() {
                 Some(scope::Scope::Request | scope::Scope::Quiet) => return,

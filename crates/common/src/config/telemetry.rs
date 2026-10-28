@@ -101,7 +101,6 @@ pub struct WebhookTracer {
     pub client: reqwest::Client,
 }
 
-
 #[derive(Debug)]
 pub enum RotationStrategy {
     Daily,
@@ -426,7 +425,6 @@ impl Tracers {
                     bp.build_warning(id, "No events enabled for tracer");
                 }
             }
-
 
             // Parse webhooks
             for hook in bp.list_infallible::<WebHook>().await {
@@ -881,7 +879,9 @@ mod tests {
     #[test]
     fn a_custom_level_counts() {
         let start = EventType::Smtp(SmtpEvent::ConnectionStart);
-        let custom = [(start, Level::Info)].into_iter().collect::<AHashMap<_, _>>();
+        let custom = [(start, Level::Info)]
+            .into_iter()
+            .collect::<AHashMap<_, _>>();
         assert!(webhook_wants(start, Level::Info, &custom, &AHashSet::new()));
         // Raw I/O raised to info still needs naming
         let raw = EventType::Smtp(SmtpEvent::RawInput);

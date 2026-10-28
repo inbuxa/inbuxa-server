@@ -192,9 +192,10 @@ impl HttpResponse {
     /// that would have been allowed, which fails as an opaque network error
     /// with nothing on the server to show for it.
     pub fn with_private_immutable_cache(mut self) -> Self {
-        self.builder = self
-            .builder
-            .header(header::CACHE_CONTROL, "private, max-age=31536000, immutable");
+        self.builder = self.builder.header(
+            header::CACHE_CONTROL,
+            "private, max-age=31536000, immutable",
+        );
         self
     }
 

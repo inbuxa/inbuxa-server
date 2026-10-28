@@ -218,8 +218,12 @@ mod tests {
 
     #[test]
     fn answers() {
-        let chat = br#"{"choices":[{"message":{"role":"assistant","content":" Legitimate,High,ok \n"}}]}"#;
-        assert_eq!(answer(Kind::Chat, chat).as_deref(), Some("Legitimate,High,ok"));
+        let chat =
+            br#"{"choices":[{"message":{"role":"assistant","content":" Legitimate,High,ok \n"}}]}"#;
+        assert_eq!(
+            answer(Kind::Chat, chat).as_deref(),
+            Some("Legitimate,High,ok")
+        );
         assert_eq!(answer(Kind::Text, chat), None);
         assert_eq!(
             answer(Kind::Text, br#"{"choices":[{"text":"x"}]}"#).as_deref(),
@@ -227,20 +231,32 @@ mod tests {
         );
         assert_eq!(answer(Kind::Chat, b"not json"), None);
         assert_eq!(answer(Kind::Chat, br#"{"choices":[]}"#), None);
-        assert_eq!(answer(Kind::Chat, &vec![b' '; MAX_RESPONSE_BYTES + 1]), None);
+        assert_eq!(
+            answer(Kind::Chat, &vec![b' '; MAX_RESPONSE_BYTES + 1]),
+            None
+        );
     }
 
     #[test]
     fn reads_streamed_answers() {
         let chat = r#"data: {"choices":[{"index":0,"delta":{"content":"Hel"}}]}"#;
-        assert_eq!(stream_line(Kind::Chat, chat), StreamLine::Delta("Hel".into()));
+        assert_eq!(
+            stream_line(Kind::Chat, chat),
+            StreamLine::Delta("Hel".into())
+        );
         let role = r#"data: {"choices":[{"index":0,"delta":{"role":"assistant"}}]}"#;
         assert_eq!(stream_line(Kind::Chat, role), StreamLine::Ignore);
         let text = r#"data: {"choices":[{"index":0,"text":"lo"}]}"#;
-        assert_eq!(stream_line(Kind::Text, text), StreamLine::Delta("lo".into()));
+        assert_eq!(
+            stream_line(Kind::Text, text),
+            StreamLine::Delta("lo".into())
+        );
         assert_eq!(stream_line(Kind::Chat, "data: [DONE]"), StreamLine::Done);
         assert_eq!(stream_line(Kind::Chat, ": keep-alive"), StreamLine::Ignore);
         assert_eq!(stream_line(Kind::Chat, ""), StreamLine::Ignore);
-        assert_eq!(stream_line(Kind::Chat, "data: {not json"), StreamLine::Ignore);
+        assert_eq!(
+            stream_line(Kind::Chat, "data: {not json"),
+            StreamLine::Ignore
+        );
     }
 }
