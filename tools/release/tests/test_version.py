@@ -83,14 +83,18 @@ class SetVersion(unittest.TestCase):
 
     @unittest.skipUnless(shutil.which("cargo"), "no cargo here")
     def test_cargo_accepts_it(self):
-        # In the real tree, since cargo needs every member's sources.
+        # In the real tree, since cargo needs every member's sources. Offline,
+        # so it needs the crates already in cargo's cache: CI's fork-checks
+        # runner has none, so it skips there (the build job uses --locked).
         root = version.ROOT
+        metadata = ["cargo", "metadata", "--locked", "--offline", "--format-version", "1"]
+        if subprocess.run(metadata, cwd=root, capture_output=True).returncode != 0:
+            self.skipTest("cargo can't resolve this tree offline here")
         files = version.set_version("27.1.0-rc.9", root)
         saved = {p: p.read_text() for p in files}
         try:
             self.write(files)
-            run = subprocess.run(["cargo", "metadata", "--locked", "--offline",
-                                  "--format-version", "1"], cwd=root, capture_output=True, text=True)
+            run = subprocess.run(metadata, cwd=root, capture_output=True, text=True)
             self.assertEqual(run.returncode, 0, run.stderr)
         finally:
             self.write(saved)
