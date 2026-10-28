@@ -2,9 +2,11 @@
  * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
+ *
+ * Modified by Coffey Labs in 2026 for INBUXA.
  */
 
-use std::str::CharIndices;
+use std::{collections::VecDeque, str::CharIndices};
 
 use super::Token;
 
@@ -12,7 +14,7 @@ use super::Token;
 pub struct TypesTokenizer<'x> {
     text: &'x str,
     iter: CharIndices<'x>,
-    tokens: Vec<Token<TokenType<&'x str, &'x str, &'x str, &'x str>>>,
+    tokens: VecDeque<Token<TokenType<&'x str, &'x str, &'x str, &'x str>>>,
     peek_pos: usize,
     last_ch_is_space: bool,
     last_token_is_dot: bool,
@@ -101,12 +103,15 @@ impl<'x> Iterator for TypesTokenizer<'x> {
     }
 }
 
+// inbuxa: "[ffff:ffff:ffff:ffff:ffff:ffff:255.255.255.255]"
+const IPV6_LITERAL_MAX_LEN: usize = 47;
+
 impl<'x> TypesTokenizer<'x> {
     pub fn new(text: &'x str) -> Self {
         Self {
             text,
             iter: text.char_indices(),
-            tokens: Vec::new(),
+            tokens: VecDeque::new(),
             eof: false,
             peek_pos: 0,
             last_ch_is_space: false,
@@ -184,7 +189,7 @@ impl<'x> TypesTokenizer<'x> {
         if start_pos != usize::MAX {
             let text = &self.text[start_pos..end_pos];
 
-            self.tokens.push(Token {
+            self.tokens.push_back(Token {
                 word: if has_alpha && has_number {
                     TokenType::Alphanumeric(text)
                 } else if has_alpha {
@@ -196,11 +201,11 @@ impl<'x> TypesTokenizer<'x> {
                 to: end_pos,
             });
             if let Some(stop_char) = stop_char {
-                self.tokens.push(stop_char);
+                self.tokens.push_back(stop_char);
             }
             true
         } else if let Some(stop_char) = stop_char {
-            self.tokens.push(stop_char);
+            self.tokens.push_back(stop_char);
             true
         } else {
             self.eof = true;
@@ -213,7 +218,7 @@ impl<'x> TypesTokenizer<'x> {
             self.consume();
         }
         if !self.tokens.is_empty() {
-            Some(self.tokens.remove(0))
+            self.tokens.pop_front()
         } else {
             None
         }
@@ -582,6 +587,10 @@ impl<'x> TypesTokenizer<'x> {
         let mut last_ch = u8::MAX;
 
         while let Some(token) = self.peek() {
+            // inbuxa: no IPv6 literal is longer than "[" + 45 characters + "]"
+            if token.to - start_pos > IPV6_LITERAL_MAX_LEN {
+                return None;
+            }
             match token.word {
                 TokenType::Integer(_) | TokenType::Alphanumeric(_) => {
                     last_ch = 0;
@@ -2873,5 +2882,37 @@ mod test {
             }
             println!("]),");*/
         }
+    }
+
+    // inbuxa: a bracket that never closes used to buffer everything after it,
+    // and every token after that was taken off the front of the buffer one at a
+    // time, so a long run took time quadratic in its length.
+    #[test]
+    fn unclosed_ipv6_is_linear() {
+        let run = "1:".repeat(100_000);
+        for prefix in ["a@[", "http://["] {
+            let text = format!("{prefix}{run}");
+            let started = std::time::Instant::now();
+            let count = TypesTokenizer::new(&text).count();
+            let elapsed = started.elapsed();
+            assert!(count >= run.len(), "{prefix}: {count} tokens");
+            assert!(
+                elapsed < std::time::Duration::from_secs(2),
+                "{prefix}: {elapsed:?}"
+            );
+        }
+
+        // The longest IPv6 literal still parses
+        let host = "[1234:1234:1234:1234:1234:1234:255.255.255.255]";
+        let email = format!("a@{host}");
+        let url = format!("http://{host}/");
+        assert_eq!(
+            TypesTokenizer::new(&email).next().map(|t| t.word),
+            Some(TokenType::Email(email.as_str()))
+        );
+        assert_eq!(
+            TypesTokenizer::new(&url).next().map(|t| t.word),
+            Some(TokenType::Url(url.as_str()))
+        );
     }
 }
