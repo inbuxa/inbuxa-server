@@ -2,6 +2,8 @@
  * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
+ *
+ * Modified by Coffey Labs in 2026 for INBUXA.
  */
 
 use crate::utils::{jmap::JmapUtils, server::TestServer};
@@ -551,6 +553,91 @@ pub async fn test(test: &TestServer) {
     let renamed_entry = renamed_copy.copied(&jane_folder_id);
     let renamed_copy_id = renamed_entry.id().to_string();
     assert_eq!(renamed_entry.text_field("name"), "copied-here (2)");
+
+    // inbuxa: onExists=replace on copy deleted the existing node with no Delete
+    // check, and even when the copy itself was then refused
+    let john_private_id = john
+        .jmap_create(
+            MethodObject::FileNode,
+            [json!({"name": "private"})],
+            Vec::<(&str, &str)>::new(),
+        )
+        .await
+        .created(0)
+        .id()
+        .to_string();
+    let john_add_only_id = john
+        .jmap_create(
+            MethodObject::FileNode,
+            [json!({
+                "name": "add-only",
+                "shareWith": { &jane_id: { "mayRead": true, "mayAddChildren": true } }
+            })],
+            Vec::<(&str, &str)>::new(),
+        )
+        .await
+        .created(0)
+        .id()
+        .to_string();
+    let response = john
+        .jmap_create(
+            MethodObject::FileNode,
+            [
+                json!({"name": "secret", "parentId": &john_private_id}),
+                json!({"name": "keep", "parentId": &john_add_only_id}),
+            ],
+            Vec::<(&str, &str)>::new(),
+        )
+        .await;
+    let secret_id = response.created(0).id().to_string();
+    let keep_id = response.created(1).id().to_string();
+    for (parent_id, name, existing_id) in [
+        (&john_private_id, "secret", &secret_id),
+        (&john_add_only_id, "keep", &keep_id),
+    ] {
+        let response = jane
+            .jmap_method_calls(json!([[
+                "FileNode/copy",
+                {
+                    "fromAccountId": jane.id_string(),
+                    "accountId": john.id_string(),
+                    "onExists": "replace",
+                    "create": {
+                        &jane_folder_id: { "parentId": parent_id, "name": name }
+                    }
+                },
+                "0"
+            ]]))
+            .await;
+        assert_eq!(
+            john.jmap_get(
+                MethodObject::FileNode,
+                [FileNodeProperty::Id],
+                [existing_id.as_str()],
+            )
+            .await
+            .list()
+            .len(),
+            1,
+            "{name} was deleted: {response:?}"
+        );
+        assert_eq!(
+            response
+                .method_response()
+                .pointer(&format!("/notCreated/{jane_folder_id}/type"))
+                .and_then(|v| v.as_str()),
+            Some("forbidden"),
+            "{name}: {response:?}"
+        );
+    }
+    john.jmap_destroy(
+        MethodObject::FileNode,
+        [john_private_id.as_str(), john_add_only_id.as_str()],
+        [("onDestroyRemoveChildren", true)],
+    )
+    .await
+    .destroyed()
+    .for_each(drop);
 
     jane.jmap_destroy(
         MethodObject::FileNode,
