@@ -2,6 +2,8 @@
  * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
+ *
+ * Modified by Coffey Labs in 2026 for INBUXA.
  */
 
 use super::{ImapContext, ToModSeq};
@@ -50,19 +52,26 @@ impl<T: SessionStream> Session<T> {
             .await
             .imap_ctx(&arguments.tag, trc::location!())?;
 
-        // Resolve the mailbox by its object identifiers (with fallback to the name)
-        let mailbox = arguments
-            .objectid
-            .as_ref()
-            .and_then(
-                |objectid| match (objectid.account_id, objectid.mailbox_id) {
-                    (Some(account_id), Some(mailbox_id)) => {
-                        data.get_mailbox_by_id(account_id.document_id(), mailbox_id.document_id())
-                    }
-                    _ => None,
-                },
+        // Resolve the mailbox by its object identifiers, falling back to the name.
+        // A missing ACCOUNTID means the personal account, and a mailbox the user
+        // may not read is never matched by identifier, so the reply can't reveal it.
+        let mut mailbox = None;
+        if let Some(objectid) = &arguments.objectid
+            && let Some(mailbox_id) = objectid.mailbox_id
+            && let Some(by_id) = data.get_mailbox_by_id(
+                objectid
+                    .account_id
+                    .map_or(data.account_id, |account_id| account_id.document_id()),
+                mailbox_id.document_id(),
             )
-            .or_else(|| data.get_mailbox_by_name(&arguments.mailbox_name));
+            && data
+                .check_mailbox_acl(by_id.account_id, by_id.mailbox_id, Acl::ReadItems)
+                .await
+                .imap_ctx(&arguments.tag, trc::location!())?
+        {
+            mailbox = Some(by_id);
+        }
+        let mailbox = mailbox.or_else(|| data.get_mailbox_by_name(&arguments.mailbox_name));
 
         if let Some(mailbox) = mailbox {
             if !data

@@ -2,6 +2,8 @@
  * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
+ *
+ * Modified by Coffey Labs in 2026 for INBUXA.
  */
 
 use compact_str::{CompactString, ToCompactString, format_compact};
@@ -162,6 +164,7 @@ impl Request<Command> {
                             }
                             Token::Argument(param) if param.eq_ignore_ascii_case(b"OBJECTID") => {
                                 let mut oid = ObjectId::default();
+                                let mut unmatchable = false;
                                 if matches!(tokens.peek(), Some(Token::ParenthesisOpen)) {
                                     tokens.next();
                                     while let Some(token) = tokens.next() {
@@ -181,8 +184,8 @@ impl Request<Command> {
                                                     .ok()
                                                     .and_then(|v| Id::from_str(v).ok());
                                                 hashify::fnc_map_ignore_case!(key.as_slice(),
-                                                    "MAILBOXID" => { oid.mailbox_id = id; },
-                                                    "ACCOUNTID" => { oid.account_id = id; },
+                                                    "MAILBOXID" => { unmatchable |= id.is_none(); oid.mailbox_id = id; },
+                                                    "ACCOUNTID" => { unmatchable |= id.is_none(); oid.account_id = id; },
                                                     "EMAILID" => { oid.email_id = id; },
                                                     "THREADID" => { oid.thread_id = id; },
                                                     _ => {}
@@ -199,6 +202,11 @@ impl Request<Command> {
                                             }
                                         }
                                     }
+                                }
+                                // An identifier this server could never have issued matches
+                                // no mailbox, so selection falls back to the name
+                                if unmatchable {
+                                    oid.mailbox_id = None;
                                 }
                                 objectid = Some(oid);
                             }

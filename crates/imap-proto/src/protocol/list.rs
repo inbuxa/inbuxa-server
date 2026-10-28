@@ -2,12 +2,14 @@
  * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
+ *
+ * Modified by Coffey Labs in 2026 for INBUXA.
  */
 
 use crate::utf7::utf7_encode;
 
 use super::{
-    ImapResponse, quoted_string,
+    ImapResponse, ObjectId, quoted_string,
     status::{Status, StatusItem},
 };
 
@@ -50,6 +52,7 @@ pub enum ReturnOption {
     Children,
     Status(Vec<Status>),
     SpecialUse,
+    ObjectId,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -85,6 +88,7 @@ pub enum ChildInfo {
 pub enum Tag {
     ChildInfo(Vec<ChildInfo>),
     OldName(String),
+    ObjectId(ObjectId),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -199,6 +203,10 @@ impl Tag {
                 quoted_string(buf, old_name);
                 buf.push(b')');
             }
+            Tag::ObjectId(object_id) => {
+                buf.extend_from_slice(b"\"OBJECTID\" ");
+                object_id.serialize_kvpairs(buf);
+            }
         }
     }
 }
@@ -289,9 +297,10 @@ impl ImapResponse for Response {
 mod tests {
 
     use crate::protocol::{
-        ImapResponse,
+        ImapResponse, ObjectId,
         status::{Status, StatusItem, StatusItemType},
     };
+    use types::id::Id;
 
     use super::{Attribute, ChildInfo, ListItem, Tag};
 
@@ -356,6 +365,42 @@ mod tests {
             assert_eq!(response_v2, expected_v2);
             assert_eq!(response_v1, expected_v1);
         }
+    }
+
+    #[test]
+    fn serialize_list_objectid() {
+        let mut buf = Vec::new();
+        ListItem {
+            mailbox_name: "bar".into(),
+            attributes: vec![],
+            tags: vec![Tag::ObjectId(ObjectId {
+                mailbox_id: Some(Id::from(3u32)),
+                account_id: Some(Id::from(1u32)),
+                ..Default::default()
+            })],
+        }
+        .serialize(&mut buf, true, true, false);
+        assert_eq!(
+            String::from_utf8(buf).unwrap(),
+            format!(
+                "* LIST () \"/\" \"bar\" (\"OBJECTID\" (ACCOUNTID {} MAILBOXID {}))\r\n",
+                Id::from(1u32),
+                Id::from(3u32)
+            )
+        );
+
+        // A name with no identifiers gets the empty item
+        let mut buf = Vec::new();
+        ListItem {
+            mailbox_name: "Shared Folders".into(),
+            attributes: vec![Attribute::NoSelect],
+            tags: vec![Tag::ObjectId(ObjectId::default())],
+        }
+        .serialize(&mut buf, true, true, false);
+        assert_eq!(
+            String::from_utf8(buf).unwrap(),
+            "* LIST (\\NoSelect) \"/\" \"Shared Folders\" (\"OBJECTID\" ())\r\n"
+        );
     }
 
     #[test]

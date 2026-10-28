@@ -2,6 +2,8 @@
  * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
+ *
+ * Modified by Coffey Labs in 2026 for INBUXA.
  */
 
 use compact_str::{CompactString, ToCompactString};
@@ -202,6 +204,7 @@ impl ReturnOption {
             "CHILDREN" => Self::Children,
             "STATUS" => Self::Status(Vec::with_capacity(2)),
             "SPECIAL-USE" => Self::SpecialUse,
+            "OBJECTID" => Self::ObjectId,
         )
         .ok_or_else(|| format!("Invalid return option {:?}", String::from_utf8_lossy(value)).into())
     }
@@ -365,6 +368,19 @@ mod tests {
                     return_options: vec![
                         ReturnOption::Children,
                         ReturnOption::Status(vec![Status::Messages]),
+                    ],
+                },
+            ),
+            (
+                "A03 LIST \"\" * RETURN (OBJECTID STATUS (OBJECTID))\r\n",
+                list::Arguments::Extended {
+                    tag: "A03".into(),
+                    reference_name: "".into(),
+                    mailbox_name: vec!["*".into()],
+                    selection_options: vec![],
+                    return_options: vec![
+                        ReturnOption::ObjectId,
+                        ReturnOption::Status(vec![Status::ObjectId]),
                     ],
                 },
             ),
