@@ -18,8 +18,8 @@ use crate::registry::{
         domain::{validate_dns_server, validate_domain},
         map_bootstrap_error,
         principal::{
-            AccountUpdate, schedule_account_destruction, validate_account, validate_role,
-            validate_tenant_quota,
+            AccountUpdate, build_set_error, schedule_account_destruction, validate_account,
+            validate_role, validate_tenant_quota,
         },
         public_key::validate_public_key,
         queued_message::queued_message_set,
@@ -80,6 +80,24 @@ pub trait RegistrySet: Sync + Send {
         access_token: &AccessToken,
         session: &HttpSessionData,
     ) -> impl Future<Output = trc::Result<SetResponse<Registry>>> + Send;
+
+    fn registry_set_from(
+        &self,
+        object_type: ObjectType,
+        request: SetRequest<'_, Registry>,
+        access_token: &AccessToken,
+        session: &HttpSessionData,
+        origin: SetOrigin,
+    ) -> impl Future<Output = trc::Result<SetResponse<Registry>>> + Send;
+}
+
+/// inbuxa: where an `x:*/set` comes from. SCIM manages every account on its
+/// domains, administrators included (SCIM-13), so it isn't held to having
+/// every permission an account has, only to those it gives.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum SetOrigin {
+    Jmap,
+    Scim,
 }
 
 #[allow(clippy::large_enum_variant)]
@@ -98,9 +116,27 @@ impl RegistrySet for Server {
     async fn registry_set(
         &self,
         object_type: ObjectType,
+        request: SetRequest<'_, Registry>,
+        access_token: &AccessToken,
+        session: &HttpSessionData,
+    ) -> trc::Result<SetResponse<Registry>> {
+        Box::pin(self.registry_set_from(
+            object_type,
+            request,
+            access_token,
+            session,
+            SetOrigin::Jmap,
+        ))
+        .await
+    }
+
+    async fn registry_set_from(
+        &self,
+        object_type: ObjectType,
         mut request: SetRequest<'_, Registry>,
         access_token: &AccessToken,
         session: &HttpSessionData,
+        origin: SetOrigin,
     ) -> trc::Result<SetResponse<Registry>> {
         // Initial assertions
         if self.registry().is_bootstrap_mode() && !matches!(object_type, ObjectType::Bootstrap) {
@@ -470,8 +506,14 @@ impl RegistrySet for Server {
                     let mut tasks = Vec::new();
                     let result = match &mut new_object.inner {
                         ObjectInner::Account(account) => {
-                            validate_account(self, access_token, account, modification.as_account())
-                                .await?
+                            validate_account(
+                                self,
+                                access_token,
+                                account,
+                                modification.as_account(),
+                                origin,
+                            )
+                            .await?
                         }
                         ObjectInner::Role(role) => {
                             validate_role(self, access_token, role, modification.as_role()).await?
@@ -837,6 +879,18 @@ impl RegistrySet for Server {
                                     && object.inner.account_id() != Some(Id::from(set.account_id))))
                         })
                     {
+                        // inbuxa: and deletes it only holding every permission
+                        // it has, as for changing it (SCIM-13: SCIM excepted)
+                        if origin == SetOrigin::Jmap
+                            && let ObjectInner::Account(account) = &object.inner
+                            && let Err(missing) =
+                                self.can_set_permissions(access_token, account).await?
+                        {
+                            set.response
+                                .not_destroyed
+                                .append(id, build_set_error(missing));
+                            continue;
+                        }
                         // inbuxa: personal-data catalog: a tenant's compliance
                         // role, while nobody holds it, goes first
                         let role_released = matches!(object.inner, ObjectInner::Tenant(_))

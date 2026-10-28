@@ -1376,6 +1376,15 @@ async fn adoption(test: &TestServer, scim: &ScimTest) {
     assert_eq!(user.roles, structs::UserRoles::Admin, "SCIM-32");
     assert_eq!(user.credentials.len(), 1, "SCIM-32");
     imap_login(&format!("handmade@{SCIM_DOMAIN}"), true).await;
+    // inbuxa: SCIM-13: and its sign-in can be turned off, like anyone's
+    scim.client
+        .patch(
+            &format!("/Users/{id}"),
+            patch_body(json!([{"op": "replace", "path": "active", "value": false}])),
+        )
+        .await
+        .assert_status(200);
+    imap_login(&format!("handmade@{SCIM_DOMAIN}"), false).await;
     scim.destroy(&format!("/Users/{id}")).await;
 }
 
