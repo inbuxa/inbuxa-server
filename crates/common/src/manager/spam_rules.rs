@@ -29,13 +29,14 @@ use store::{
 };
 use trc::AddContext;
 
-/// The version of spam-filter the embedded rules come from.
-pub const BUNDLED_SPAM_RULES_VERSION: &str = "3.0.2";
+/// The version of the embedded rules: the spam-filter release they started
+/// from, then the fork's own revision of them (resources/spam-filter/README.md).
+pub const BUNDLED_SPAM_RULES_VERSION: &str = "3.0.2-inbuxa.1";
 
 /// What's recorded once the bundled rules are loaded: their version, then the
 /// fork's own generation of the update, so a change to how an update applies
 /// runs it once more. Generation 2 fingerprints (upstream v0.16.24).
-pub const BUNDLED_SPAM_RULES_APPLIED: &str = "3.0.2+2";
+pub const BUNDLED_SPAM_RULES_APPLIED: &str = "3.0.2-inbuxa.1+2";
 
 static BUNDLED_SPAM_RULES: &[u8] =
     include_bytes!("../../../../resources/spam-filter/spam-filter-rules.json.gz");
@@ -217,10 +218,15 @@ mod tests {
     }
 
     #[test]
-    fn bundled_rules_parse_and_score_the_ai_tags() {
+    fn bundled_rules_parse_and_score_the_ai_and_dkim2_tags() {
         let rules: serde_json::Value = serde_json::from_slice(&bundled_rules().unwrap()).unwrap();
         let tags = rules["SpamTag"].as_array().unwrap();
-        for (tag, score) in [("LLM_UNSOLICITED_HIGH", 3.0), ("LLM_LEGITIMATE_HIGH", -3.0)] {
+        for (tag, score) in [
+            ("LLM_UNSOLICITED_HIGH", 3.0),
+            ("LLM_LEGITIMATE_HIGH", -3.0),
+            ("DKIM2_ALLOW", -0.2),
+            ("DKIM2_REJECT", 1.0),
+        ] {
             let found = tags.iter().find(|t| t["tag"] == tag).unwrap();
             assert_eq!(found["score"].as_f64(), Some(score), "{tag}");
         }
