@@ -15,7 +15,8 @@ run.sh
 CLAUDE.md
 
 # The cutover rehearsal writes its fixture and state here.
-tools/fork/cutover-rehearsal/__pycache__/
 tools/fork/cutover-rehearsal/before.json
 tools/fork/cutover-rehearsal/phase2_notes.json
-tools/fork/__pycache__/
+
+# Python's bytecode cache, wherever the tools run from.
+__pycache__/
