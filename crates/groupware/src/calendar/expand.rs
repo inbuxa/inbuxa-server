@@ -2,6 +2,8 @@
  * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
+ *
+ * Modified by Coffey Labs in 2026 for INBUXA.
  */
 
 use super::ArchivedCalendarEventData;
@@ -479,5 +481,31 @@ mod tests {
 
         assert_eq!(expansion.len(), 1);
         assert_eq!(keys.into_iter().collect::<Vec<_>>(), [missing]);
+    }
+
+    #[test]
+    fn oversized_rrule_is_not_expanded() {
+        // A yearly rule on every day, hour, minute and second has ~31.6M candidates
+        // in its first year, which the expander buffers (~1.6 GB) before any limit.
+        let list = |n: u32| (0..n).map(|v| v.to_string()).collect::<Vec<_>>().join(",");
+        let ical = format!(
+            "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nPRODID:-//Test//EN\r\n\
+             BEGIN:VEVENT\r\nUID:big@example.com\r\nDTSTAMP:20270101T000000Z\r\n\
+             DTSTART:20270301T090000Z\r\nDTEND:20270301T100000Z\r\n\
+             RRULE:FREQ=YEARLY;BYDAY=MO,TU,WE,TH,FR,SA,SU;BYHOUR={};BYMINUTE={};BYSECOND={}\r\n\
+             END:VEVENT\r\nEND:VCALENDAR\r\n",
+            list(24),
+            list(60),
+            list(60)
+        );
+
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = tx.send(event_data(&ical).time_ranges.len());
+        });
+        let ranges = rx
+            .recv_timeout(std::time::Duration::from_secs(2))
+            .expect("expansion of an oversized RRULE must be refused, not attempted");
+        assert_eq!(ranges, 1, "the base instance is still indexed");
     }
 }

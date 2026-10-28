@@ -2,6 +2,8 @@
  * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
+ *
+ * Modified by Coffey Labs in 2026 for INBUXA.
  */
 
 use super::{
@@ -11,7 +13,10 @@ use super::{
 use crate::calendar::{ComponentTimeRange, alarm::CalendarAlarmType};
 use calcard::{
     common::timezone::Tz,
-    icalendar::{ICalendar, ICalendarComponentType, dates::TimeOrDelta},
+    icalendar::{
+        ICalendar, ICalendarComponentType, ICalendarFrequency, ICalendarRecurrenceRule,
+        ICalendarValue, dates::TimeOrDelta,
+    },
 };
 use compact_str::ToCompactString;
 use indexmap::IndexMap;
@@ -21,6 +26,50 @@ use store::{
 };
 
 const MAX_TIME_SPAN: i64 = u32::MAX as i64;
+
+// calcard builds every candidate of one period (days x BYHOUR x BYMINUTE x
+// BYSECOND) before the expansion limit applies, so a rule is refused when that
+// set is larger than this.
+pub const MAX_RRULE_PERIOD_CANDIDATES: u64 = 50_000;
+
+pub fn rrule_period_candidates(rule: &ICalendarRecurrenceRule) -> u64 {
+    fn distinct(values: &[u8]) -> u64 {
+        let mask = values
+            .iter()
+            .filter(|v| **v < 128)
+            .fold(0u128, |mask, v| mask | (1 << *v));
+        (mask.count_ones() as u64).max(1)
+    }
+
+    let days = match rule.freq {
+        ICalendarFrequency::Yearly => 366,
+        ICalendarFrequency::Monthly => 31,
+        ICalendarFrequency::Weekly => 7,
+        _ => 1,
+    };
+    let seconds = distinct(&rule.bysecond);
+    let minutes = distinct(&rule.byminute);
+    let times = match rule.freq {
+        ICalendarFrequency::Secondly => 1,
+        ICalendarFrequency::Minutely => seconds,
+        ICalendarFrequency::Hourly => minutes * seconds,
+        _ => distinct(&rule.byhour) * minutes * seconds,
+    };
+    days * times
+}
+
+fn is_oversized_rrule(value: &ICalendarValue) -> bool {
+    matches!(value, ICalendarValue::RecurrenceRule(rule)
+        if rrule_period_candidates(rule) > MAX_RRULE_PERIOD_CANDIDATES)
+}
+
+pub fn has_oversized_rrule(ical: &ICalendar) -> bool {
+    ical.components
+        .iter()
+        .flat_map(|comp| comp.entries.iter())
+        .flat_map(|entry| entry.values.iter())
+        .any(is_oversized_rrule)
+}
 
 impl CalendarEventData {
     pub fn new(
@@ -32,7 +81,17 @@ impl CalendarEventData {
         let mut ranges = TimeRanges::default();
         let now = now() as i64;
 
-        let expanded = ical.expand_dates(default_tz, max_expansions);
+        let expanded = if has_oversized_rrule(&ical) {
+            // Index only the base instances of a rule that is too large to expand
+            let mut bounded = ical.clone();
+            for comp in &mut bounded.components {
+                comp.entries
+                    .retain(|entry| !entry.values.iter().any(is_oversized_rrule));
+            }
+            bounded.expand_dates(default_tz, max_expansions)
+        } else {
+            ical.expand_dates(default_tz, max_expansions)
+        };
         let mut groups: IndexMap<(u16, u16, u16, i32), Vec<i64>, RandomState> =
             IndexMap::with_capacity_and_hasher(16, RandomState::default());
         let mut alarms = AHashMap::with_capacity(16);
