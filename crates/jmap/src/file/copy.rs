@@ -39,6 +39,7 @@ use store::{
     write::{AlignedBytes, Archive, BatchBuilder, now},
 };
 use trc::AddContext;
+use types::acl::grants_beyond;
 use types::{
     acl::Acl,
     collection::{Collection, SyncCollection},
@@ -357,8 +358,11 @@ impl FileNodeCopy for Server {
                         file_node.acls = parent_acls;
                     }
                 } else if is_shared
-                    && parent_acls
-                        .is_none_or(|acls| !acls.effective_acl(access_token).contains(Acl::Share))
+                    && parent_acls.is_none_or(|acls| {
+                        // inbuxa: and passes on only the rights it holds itself
+                        let held = acls.effective_acl(access_token);
+                        !held.contains(Acl::Share) || grants_beyond(&held, &file_node.acls, &acls)
+                    })
                 {
                     response.not_created.append(
                         id,

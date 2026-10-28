@@ -32,6 +32,7 @@ use store::{
     write::{AlignedBytes, Archive, BatchBuilder, now},
 };
 use trc::AddContext;
+use types::acl::grants_beyond;
 use types::{
     acl::{Acl, AclGrant},
     blob::BlobId,
@@ -276,8 +277,11 @@ impl FileNodeSet for Server {
                         file_node.acls = parent_acls;
                     }
                 } else if is_shared
-                    && parent_acls
-                        .is_none_or(|acls| !acls.effective_acl(access_token).contains(Acl::Share))
+                    && parent_acls.is_none_or(|acls| {
+                        // inbuxa: and passes on only the rights it holds itself
+                        let held = acls.effective_acl(access_token);
+                        !held.contains(Acl::Share) || grants_beyond(&held, &file_node.acls, &acls)
+                    })
                 {
                     response.not_created.append(
                         id,
@@ -517,6 +521,26 @@ impl FileNodeSet for Server {
                         id,
                         SetError::forbidden()
                             .with_description("You are not allowed to modify this file node."),
+                    );
+                    continue 'update;
+                }
+                // inbuxa: a sharee passes on only the rights it holds itself.
+                if has_acl_changes
+                    && grants_beyond(
+                        &acl,
+                        &new_file_node.acls,
+                        &file_node
+                            .inner
+                            .acls
+                            .iter()
+                            .map(AclGrant::from)
+                            .collect::<Vec<_>>(),
+                    )
+                {
+                    response.not_updated.append(
+                        id,
+                        SetError::forbidden()
+                            .with_description("You can only share rights you hold yourself."),
                     );
                     continue 'update;
                 }

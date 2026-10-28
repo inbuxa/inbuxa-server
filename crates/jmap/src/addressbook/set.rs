@@ -30,6 +30,7 @@ use store::{
     write::{AlignedBytes, Archive, BatchBuilder, ValueClass},
 };
 use trc::AddContext;
+use types::acl::{AclGrant, grants_beyond};
 use types::{
     acl::Acl,
     collection::{Collection, SyncCollection},
@@ -209,6 +210,26 @@ impl AddressBookSet for Server {
                         id,
                         SetError::forbidden()
                             .with_description("You are not allowed to modify this address book."),
+                    );
+                    continue 'update;
+                }
+                // inbuxa: a sharee passes on only the rights it holds itself.
+                if has_acl_changes
+                    && grants_beyond(
+                        &acl,
+                        &new_address_book.acls,
+                        &address_book
+                            .inner
+                            .acls
+                            .iter()
+                            .map(AclGrant::from)
+                            .collect::<Vec<_>>(),
+                    )
+                {
+                    response.not_updated.append(
+                        id,
+                        SetError::forbidden()
+                            .with_description("You can only share rights you hold yourself."),
                     );
                     continue 'update;
                 }

@@ -31,6 +31,7 @@ use store::{
 };
 use store::{ahash::AHashSet, roaring::RoaringBitmap, write::BatchBuilder};
 use trc::AddContext;
+use types::acl::grants_beyond;
 use types::{
     acl::{Acl, AclGrant, ArchivedAclGrant},
     collection::Collection,
@@ -142,6 +143,17 @@ impl DavAclHandler for Server {
         let grants = self
             .validate_and_map_aces(access_token, request, collection)
             .await?;
+
+        // inbuxa: a sharee passes on only the rights it holds itself.
+        if !access_token.is_member(account_id)
+            && grants_beyond(
+                &acls.effective_acl(access_token),
+                &grants,
+                &acls.iter().map(AclGrant::from).collect::<Vec<_>>(),
+            )
+        {
+            return Err(DavError::Code(StatusCode::FORBIDDEN));
+        }
 
         // inbuxa: MT-3: grants stay within the owner's tenant
         let tenant_id = self
