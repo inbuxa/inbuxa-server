@@ -639,6 +639,97 @@ pub async fn test(test: &TestServer) {
     .destroyed()
     .for_each(drop);
 
+    // inbuxa: FileNode/set let a sharee create in any folder it could read, and
+    // move anything it could rename into any folder or to the top (Jane may
+    // remove from "rename-only", so only the destination is refused)
+    let john_read_only_id = john
+        .jmap_create(
+            MethodObject::FileNode,
+            [json!({
+                "name": "read-only",
+                "shareWith": { &jane_id: { "mayRead": true } }
+            })],
+            Vec::<(&str, &str)>::new(),
+        )
+        .await
+        .created(0)
+        .id()
+        .to_string();
+    let john_rename_only_id = john
+        .jmap_create(
+            MethodObject::FileNode,
+            [json!({
+                "name": "rename-only",
+                "shareWith": { &jane_id: { "mayRead": true, "mayRename": true, "mayDelete": true } }
+            })],
+            Vec::<(&str, &str)>::new(),
+        )
+        .await
+        .created(0)
+        .id()
+        .to_string();
+    let doc_id = john
+        .jmap_create(
+            MethodObject::FileNode,
+            [json!({"name": "doc", "parentId": &john_rename_only_id})],
+            Vec::<(&str, &str)>::new(),
+        )
+        .await
+        .created(0)
+        .id()
+        .to_string();
+    let response = jane
+        .jmap_create_account(
+            john,
+            MethodObject::FileNode,
+            [json!({"name": "dropped", "parentId": &john_read_only_id})],
+            Vec::<(&str, &str)>::new(),
+        )
+        .await;
+    assert_eq!(
+        response
+            .method_response()
+            .pointer("/notCreated/i0/type")
+            .and_then(|v| v.as_str()),
+        Some("forbidden"),
+        "{response:?}"
+    );
+    for parent_id in [json!(&john_read_only_id), json!(null)] {
+        let response = jane
+            .jmap_update_account(
+                john,
+                MethodObject::FileNode,
+                [(&doc_id, json!({ "parentId": parent_id }))],
+                Vec::<(&str, &str)>::new(),
+            )
+            .await;
+        assert_eq!(
+            response
+                .method_response()
+                .pointer(&format!("/notUpdated/{doc_id}/type"))
+                .and_then(|v| v.as_str()),
+            Some("forbidden"),
+            "{parent_id}: {response:?}"
+        );
+    }
+    // Renaming in place still works
+    jane.jmap_update_account(
+        john,
+        MethodObject::FileNode,
+        [(&doc_id, json!({ "name": "doc (2)" }))],
+        Vec::<(&str, &str)>::new(),
+    )
+    .await
+    .updated(&doc_id);
+    john.jmap_destroy(
+        MethodObject::FileNode,
+        [john_read_only_id.as_str(), john_rename_only_id.as_str()],
+        [("onDestroyRemoveChildren", true)],
+    )
+    .await
+    .destroyed()
+    .for_each(drop);
+
     jane.jmap_destroy(
         MethodObject::FileNode,
         [&jane_folder_id],
