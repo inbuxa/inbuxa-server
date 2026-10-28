@@ -236,6 +236,46 @@ pub async fn test(test: &mut TestServer) {
         "the expired ban's record is gone"
     );
 
+    // inbuxa: behind a proxy the client is the last hop the proxies didn't
+    // add. A banned client can't pick another address by putting it first.
+    for _ in 0..105 {
+        validate_password_with_ip(
+            "unknown@example.org",
+            "wrong password",
+            "203.0.113.7",
+            false,
+        )
+        .await;
+    }
+    validate_password_with_ip(
+        "user@example.org",
+        "this is a very strong password",
+        "198.51.100.1, 203.0.113.7",
+        false,
+    )
+    .await;
+    let blocked_id = test
+        .server
+        .registry()
+        .primary_key(
+            ObjectType::BlockedIp.into(),
+            Property::Address,
+            IpAddrOrMask::from_ip(Ipv4Addr::new(203, 0, 113, 7).into()).to_index_key(),
+        )
+        .await
+        .unwrap()
+        .expect("the ban is on the address the proxy saw");
+    test.server
+        .registry()
+        .write(RegistryWrite::delete(blocked_id))
+        .await
+        .unwrap()
+        .unwrap_id(trc::location!());
+    test.server
+        .reload_registry(RegistryChange::Delete(blocked_id))
+        .await
+        .unwrap();
+
     // inbuxa: personal-data catalog, D1: how long rotated log files are kept.
     // Unset keeps every file; a value is days; zero is refused; null goes back
     let using = &["urn:ietf:params:jmap:core", "urn:inbuxa:jmap"];
