@@ -2,6 +2,8 @@
  * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
+ *
+ * Modified by Coffey Labs in 2026 for INBUXA.
  */
 
 use std::time::Instant;
@@ -15,15 +17,17 @@ use common::network::SessionStream;
 use imap_proto::{
     Command, StatusResponse,
     protocol::{
-        ImapResponse, ProtocolVersion,
+        ImapResponse, ObjectId, ProtocolVersion,
         list::{
             self, Arguments, Attribute, ChildInfo, ListItem, ReturnOption, SelectionOption, Tag,
         },
+        status::Status,
     },
     receiver::Request,
 };
 use registry::schema::enums::Permission;
 use trc::StoreEvent;
+use types::id::Id;
 
 use super::ImapContext;
 
@@ -43,6 +47,18 @@ impl<T: SessionStream> Session<T> {
 
             request.parse_lsub(self.is_utf8)
         }?;
+
+        // Activate OBJECTID+ when the OBJECTID return option or STATUS attribute is requested
+        if let Arguments::Extended { return_options, .. } = &arguments
+            && return_options.iter().any(|option| match option {
+                ReturnOption::ObjectId => true,
+                ReturnOption::Status(status) => status.contains(&Status::ObjectId),
+                _ => false,
+            })
+            && let Some(enabled) = self.activate_objectid()
+        {
+            self.write_bytes(enabled).await?;
+        }
 
         if !arguments.is_separator_query() {
             let data = self.state.session_data();
@@ -128,6 +144,7 @@ impl<T: SessionStream> SessionData<T> {
         let mut include_subscribed = false;
         let mut include_children = false;
         let mut include_status = None;
+        let mut include_objectid = false;
         for selection_option in &selection_options {
             match selection_option {
                 SelectionOption::Subscribed => {
@@ -158,8 +175,19 @@ impl<T: SessionStream> SessionData<T> {
                 ReturnOption::SpecialUse => {
                     include_special_use = true;
                 }
+                ReturnOption::ObjectId => {
+                    include_objectid = true;
+                }
             }
         }
+        // Names that aren't mailboxes carry the empty OBJECTID item
+        let no_objectid = || {
+            if include_objectid {
+                vec![Tag::ObjectId(ObjectId::default())]
+            } else {
+                vec![]
+            }
+        };
         if recursive_match && !filter_subscribed {
             return Err(trc::ImapEvent::Error
                 .into_err()
@@ -191,7 +219,7 @@ impl<T: SessionStream> SessionData<T> {
                             } else {
                                 vec![Attribute::NoSelect]
                             },
-                            tags: vec![],
+                            tags: no_objectid(),
                         });
                     }
                     added_shared_folder = true;
@@ -204,7 +232,7 @@ impl<T: SessionStream> SessionData<T> {
                         } else {
                             vec![Attribute::NoSelect]
                         },
-                        tags: vec![],
+                        tags: no_objectid(),
                     });
                 }
             }
@@ -258,14 +286,21 @@ impl<T: SessionStream> SessionData<T> {
                                 continue;
                             }
                         }
+                        let mut tags = Vec::new();
+                        if has_recursive_match {
+                            tags.push(Tag::ChildInfo(vec![ChildInfo::Subscribed]));
+                        }
+                        if include_objectid {
+                            tags.push(Tag::ObjectId(ObjectId {
+                                mailbox_id: Some(Id::from(*mailbox_id)),
+                                account_id: Some(Id::from(account.account_id)),
+                                ..Default::default()
+                            }));
+                        }
                         list_items.push(ListItem {
                             mailbox_name: mailbox_name.clone(),
                             attributes,
-                            tags: if !has_recursive_match {
-                                vec![]
-                            } else {
-                                vec![Tag::ChildInfo(vec![ChildInfo::Subscribed])]
-                            },
+                            tags,
                         });
                     }
                 }

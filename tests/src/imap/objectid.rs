@@ -2,6 +2,8 @@
  * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
+ *
+ * Modified by Coffey Labs in 2026 for INBUXA.
  */
 
 use super::{AssertResult, Type};
@@ -138,7 +140,116 @@ pub async fn test(test: &TestServer) {
         .await
         .assert_contains(&format!("MAILBOXID {mailbox_id}"));
 
-    // Cleanup
+    // A MAILBOXID without an ACCOUNTID refers to the personal account
+    imap.send(&format!(
+        "SELECT \"DoesNotExist\" (OBJECTID (MAILBOXID {mailbox_id}))"
+    ))
+    .await;
+    imap.assert_read(Type::Tagged, ResponseType::Ok)
+        .await
+        .assert_contains(&format!("MAILBOXID {mailbox_id}"));
+
+    // An undecodable ACCOUNTID matches nothing, even beside a valid MAILBOXID
+    imap.send(&format!(
+        "SELECT INBOX (OBJECTID (MAILBOXID {mailbox_id} ACCOUNTID 456))"
+    ))
+    .await;
+    imap.assert_read(Type::Tagged, ResponseType::Ok)
+        .await
+        .assert_not_contains(&format!("MAILBOXID {mailbox_id}"));
+
+    // A mailbox the user may see but not read is never selected by identifier:
+    // the server selects by name, so the reply doesn't reveal that it exists
+    let other = test.account("popper@example.com");
+    let other_account_id = other.id_string().to_string();
+    let mut imap_other = other.imap_client().await;
+    imap_other.send("ENABLE OBJECTID+").await;
+    imap_other.assert_read(Type::Tagged, ResponseType::Ok).await;
+    imap_other.send("CREATE \"ObjIdPrivate\"").await;
+    let lines = imap_other.assert_read(Type::Tagged, ResponseType::Ok).await;
+    let private_id = extract_value(&lines, "MAILBOXID ");
+    // SETACL reads the session's mailbox list without refreshing it, so list first
+    imap_other.send("LIST \"\" \"ObjIdPrivate\"").await;
+    imap_other.assert_read(Type::Tagged, ResponseType::Ok).await;
+    imap_other
+        .send("SETACL \"ObjIdPrivate\" jdoe@example.com l")
+        .await;
+    imap_other.assert_read(Type::Tagged, ResponseType::Ok).await;
+    imap.send(&format!(
+        "SELECT \"ObjIdRenamed\" (OBJECTID (MAILBOXID {private_id} ACCOUNTID {other_account_id}))"
+    ))
+    .await;
+    imap.assert_read(Type::Tagged, ResponseType::Ok)
+        .await
+        .assert_contains(&format!("MAILBOXID {mailbox_id}"))
+        .assert_not_contains(&format!("MAILBOXID {private_id}"));
+
+    // LIST RETURN (OBJECTID) activates OBJECTID+ and gives every name the item:
+    // identifiers for mailboxes, the empty item for names that aren't mailboxes
+    let mut imap5 = test.account("jdoe@example.com").imap_client().await;
+    imap5.send("LIST \"\" \"*\" RETURN (OBJECTID)").await;
+    let lines = imap5.assert_read(Type::Tagged, ResponseType::Ok).await;
+    assert!(
+        lines.iter().any(|l| l.contains("ENABLED OBJECTID+")),
+        "LIST RETURN (OBJECTID) did not implicitly activate OBJECTID+: {lines:?}"
+    );
+    assert!(
+        lines.iter().any(|l| l.contains("\"ObjIdRenamed\"")
+            && l.contains(&format!(
+                "(\"OBJECTID\" (ACCOUNTID {account_id} MAILBOXID {mailbox_id}))"
+            ))),
+        "LIST RETURN (OBJECTID) missing the mailbox's identifiers: {lines:?}"
+    );
+    assert!(
+        lines
+            .iter()
+            .any(|l| l.contains("\"Shared Folders\"") && l.contains("(\"OBJECTID\" ())")),
+        "LIST RETURN (OBJECTID) missing the empty item on a \\NoSelect name: {lines:?}"
+    );
+    assert!(
+        lines
+            .iter()
+            .filter(|l| l.starts_with("* LIST "))
+            .all(|l| l.contains("\"OBJECTID\" (")),
+        "LIST RETURN (OBJECTID) must give every name the item: {lines:?}"
+    );
+
+    // The LIST item and a STATUS OBJECTID for the same mailbox agree
+    imap5
+        .send("LIST \"\" \"ObjIdRenamed\" RETURN (OBJECTID STATUS (OBJECTID))")
+        .await;
+    imap5
+        .assert_read(Type::Tagged, ResponseType::Ok)
+        .await
+        .assert_count(&format!("MAILBOXID {mailbox_id}"), 2)
+        .assert_not_contains("ENABLED OBJECTID+");
+
+    // Without the return option, LIST carries no identifiers
+    imap5.send("LIST \"\" \"*\"").await;
+    imap5
+        .assert_read(Type::Tagged, ResponseType::Ok)
+        .await
+        .assert_not_contains("OBJECTID");
+
+    // LIST RETURN (STATUS (OBJECTID)) activates OBJECTID+ too
+    let mut imap6 = test.account("jdoe@example.com").imap_client().await;
+    imap6
+        .send("LIST \"\" \"INBOX\" RETURN (STATUS (OBJECTID))")
+        .await;
+    imap6
+        .assert_read(Type::Tagged, ResponseType::Ok)
+        .await
+        .assert_contains("ENABLED OBJECTID+")
+        .assert_contains(&format!("ACCOUNTID {account_id}"));
+
+    // Cleanup: revoke the share first, since deleting a shared mailbox leaves the
+    // owner's empty prefix in the sharee's list
+    imap_other
+        .send("DELETEACL \"ObjIdPrivate\" jdoe@example.com")
+        .await;
+    imap_other.assert_read(Type::Tagged, ResponseType::Ok).await;
+    imap_other.send("DELETE \"ObjIdPrivate\"").await;
+    imap_other.assert_read(Type::Tagged, ResponseType::Ok).await;
     imap.send("UNSELECT").await;
     imap.assert_read(Type::Tagged, ResponseType::Ok).await;
     imap.send("DELETE \"ObjIdRenamed\"").await;
