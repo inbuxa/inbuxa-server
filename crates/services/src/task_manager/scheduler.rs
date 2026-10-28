@@ -48,7 +48,9 @@ enum Event {
     EvaluateAlerts,
     // inbuxa: settings-reorg: probe the other nodes' ports
     ProbePeerPorts,
-    // inbuxa: re-queue DKIM rotation and ACME renewal tasks a domain is missing
+    // inbuxa: re-queue DKIM rotation and ACME renewal tasks a domain is missing.
+    // Test builds never schedule it (`cfg(not(feature = "test_mode"))`).
+    #[cfg_attr(feature = "test_mode", allow(dead_code))]
     CheckDomainTasks,
 }
 

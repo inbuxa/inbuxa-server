@@ -153,7 +153,7 @@ fn refusal(response: &Value) -> String {
 #[ignore]
 #[tokio::test(flavor = "multi_thread")]
 pub async fn front_ends_tests() {
-    let mut test = TestServerBuilder::new("front_ends_tests")
+    let test = TestServerBuilder::new("front_ends_tests")
         .await
         .with_default_listeners()
         .await
