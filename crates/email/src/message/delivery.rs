@@ -236,9 +236,9 @@ impl MailDelivery for Server {
                 .map(|(raw, hash)| (raw.as_slice(), hash))
                 .unwrap_or((raw_message.as_slice(), &message.message_blob));
             // inbuxa: ME-5: a disabled mask files straight to Trash
-            let to_trash = mask.as_ref().is_some_and(|mask| {
-                mask.state == inbuxa_features::masked_email::State::Disabled
-            });
+            let to_trash = mask
+                .as_ref()
+                .is_some_and(|mask| mask.state == inbuxa_features::masked_email::State::Disabled);
 
             // Obtain access token
             let status = match self.access_token(account_id).await.and_then(|token| {

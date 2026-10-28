@@ -94,7 +94,9 @@ impl Element for ExplanationValue {
 
     fn try_parse<P>(key: &Key<'_, Self::Property>, value: &str) -> Option<Self> {
         match key {
-            Key::Property(ExplanationProperty::Id) => Id::from_str(value).ok().map(ExplanationValue::Id),
+            Key::Property(ExplanationProperty::Id) => {
+                Id::from_str(value).ok().map(ExplanationValue::Id)
+            }
             _ => None,
         }
     }

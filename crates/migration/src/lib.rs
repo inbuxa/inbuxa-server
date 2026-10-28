@@ -144,7 +144,10 @@ async fn is_new_install(server: &Server) -> trc::Result<bool> {
 /// inbuxa: the spam filter's trainer and model blobs, under the names they
 /// had before the fork renamed them (SPEC §2.4), paired with the current ones.
 const RENAMED_SPAM_BLOBS: [(&[u8], &[u8]); 2] = [
-    (b"STALWART_SPAM_TRAIN_DATA.lz4", common::manager::SPAM_TRAINER_KEY),
+    (
+        b"STALWART_SPAM_TRAIN_DATA.lz4",
+        common::manager::SPAM_TRAINER_KEY,
+    ),
     (
         b"STALWART_SPAM_CLASSIFIER_MODEL.lz4",
         common::manager::SPAM_CLASSIFIER_KEY,

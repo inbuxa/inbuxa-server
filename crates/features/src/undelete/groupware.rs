@@ -154,7 +154,12 @@ fn property(text: &str, name: &str) -> Option<String> {
                 break;
             }
         }
-        return Some(value.replace("\\,", ",").replace("\\;", ";").replace("\\n", " "));
+        return Some(
+            value
+                .replace("\\,", ",")
+                .replace("\\;", ";")
+                .replace("\\n", " "),
+        );
     }
     None
 }
@@ -250,7 +255,9 @@ pub fn candidates(name: &str) -> impl Iterator<Item = String> + '_ {
 
 /// The first free name for a restored item (UD-8).
 pub fn free_name(name: &str, is_taken: impl Fn(&str) -> bool) -> String {
-    candidates(name).find(|candidate| !is_taken(candidate)).unwrap()
+    candidates(name)
+        .find(|candidate| !is_taken(candidate))
+        .unwrap()
 }
 
 #[cfg(test)]

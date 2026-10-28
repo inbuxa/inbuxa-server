@@ -554,7 +554,6 @@ async fn build_template(
         account_info.name().to_string()
     };
 
-
     // inbuxa: BT-11, BT-18: the operator's template, read now, else the built-in
     let custom = inbuxa_features::branding::templates::stored(
         server.registry(),
@@ -563,7 +562,9 @@ async fn build_template(
     .await
     .ok()
     .flatten();
-    let template = custom.as_ref().unwrap_or(&server.core.groupware.alarms_template);
+    let template = custom
+        .as_ref()
+        .unwrap_or(&server.core.groupware.alarms_template);
     let formatter = TextFormatter::new(account_info.locale().as_str())?;
     let locale = formatter.locale;
 

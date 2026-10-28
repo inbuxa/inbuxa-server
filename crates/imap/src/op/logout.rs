@@ -16,8 +16,10 @@ impl<T: SessionStream> Session<T> {
     pub async fn handle_logout(&mut self, request: Request<Command>) -> trc::Result<()> {
         let op_start = Instant::now();
 
-        let mut response =
-            StatusResponse::bye(concat!(types::brand!(), " IMAP4rev2 bids you farewell.").to_string()).into_bytes();
+        let mut response = StatusResponse::bye(
+            concat!(types::brand!(), " IMAP4rev2 bids you farewell.").to_string(),
+        )
+        .into_bytes();
 
         trc::event!(
             Imap(trc::ImapEvent::Logout),

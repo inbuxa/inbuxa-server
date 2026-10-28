@@ -130,9 +130,18 @@ impl MailboxDestroy for Server {
                                     account_id,
                                     message_id,
                                     prev_message_data.inner.size.to_native() as u64,
-                                    prev_message_data.inner.mailboxes.iter().map(|m| m.mailbox_id.to_native()).collect(),
+                                    prev_message_data
+                                        .inner
+                                        .mailboxes
+                                        .iter()
+                                        .map(|m| m.mailbox_id.to_native())
+                                        .collect(),
                                     inbuxa_features::undelete::email::keywords_to_keep(
-                                        prev_message_data.inner.keywords.iter().map(|k| k.to_string()),
+                                        prev_message_data
+                                            .inner
+                                            .keywords
+                                            .iter()
+                                            .map(|k| k.to_string()),
                                     ),
                                 )?;
                             }

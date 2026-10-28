@@ -13,11 +13,11 @@ use email::{
     message::ingest::{EmailIngest, IngestEmail, IngestSource},
 };
 use inbuxa_features::undelete;
-use types::keyword::Keyword;
 use mail_parser::MessageParser;
 use registry::schema::{enums::ArchivedItemType, structs::TaskRestoreArchivedItem};
 use store::write::BatchBuilder;
 use trc::AddContext;
+use types::keyword::Keyword;
 
 use crate::task_manager::TaskResult;
 
@@ -163,8 +163,7 @@ async fn restore_item(server: &Server, task: &TaskRestoreArchivedItem) -> trc::R
             {
                 None => Ok(TaskResult::Success(vec![])),
                 Some(reason) => {
-                    crate::task_manager::inbuxa_restore::not_restored(server, item_id, reason)
-                        .await
+                    crate::task_manager::inbuxa_restore::not_restored(server, item_id, reason).await
                 }
             }
         }

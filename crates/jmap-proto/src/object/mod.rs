@@ -21,33 +21,33 @@ pub mod contact;
 pub mod email;
 pub mod email_submission;
 pub mod fastmail_masked_email; // inbuxa: masked email
+pub mod file_node;
+pub mod identity;
 pub mod inbuxa_account_lock; // inbuxa: account lock with delegation
 pub mod inbuxa_ai_limits; // inbuxa: AI spam classification
-pub mod inbuxa_log_settings; // inbuxa: personal-data catalog, D1
-pub mod inbuxa_dlp_settings; // inbuxa: DLP settings
-pub mod inbuxa_data_inventory; // inbuxa: personal-data catalog
-pub mod inbuxa_inventory_snapshot; // inbuxa: personal-data catalog
 pub mod inbuxa_audit; // inbuxa: the audit log
-pub mod inbuxa_legal_hold; // inbuxa: legal hold
-pub mod inbuxa_mail_rule; // inbuxa: DLP and mail flow rules
-pub mod inbuxa_security_acceptance; // inbuxa: accepted security to-do items
+pub mod inbuxa_data_inventory; // inbuxa: personal-data catalog
+pub mod inbuxa_deleted_account; // inbuxa: undelete
 pub mod inbuxa_deliverability_report; // inbuxa: the deliverability check
 pub mod inbuxa_deliverability_settings; // inbuxa: the deliverability check
+pub mod inbuxa_dlp_settings; // inbuxa: DLP settings
+pub mod inbuxa_explanation; // inbuxa: "Explain this" with the local model
+pub mod inbuxa_front_ends; // inbuxa: C-4, where the front ends are
+pub mod inbuxa_held_message; // inbuxa: mail held for review
+pub mod inbuxa_hold_export; // inbuxa: legal hold exports
+pub mod inbuxa_inventory_snapshot; // inbuxa: personal-data catalog
+pub mod inbuxa_journal; // inbuxa: journaling
+pub mod inbuxa_journal_entry; // inbuxa: journaling, search and export
+pub mod inbuxa_legal_hold; // inbuxa: legal hold
+pub mod inbuxa_log_settings; // inbuxa: personal-data catalog, D1
+pub mod inbuxa_mail_rule; // inbuxa: DLP and mail flow rules
+pub mod inbuxa_protocol_policy; // inbuxa: legacy protocols off
 pub mod inbuxa_report_export; // inbuxa: scheduled reports, RP-19
 pub mod inbuxa_scheduled_report; // inbuxa: scheduled reports
 pub mod inbuxa_scheduled_report_settings; // inbuxa: scheduled reports
-pub mod inbuxa_journal; // inbuxa: journaling
-pub mod inbuxa_journal_entry; // inbuxa: journaling, search and export
-pub mod inbuxa_held_message; // inbuxa: mail held for review
-pub mod inbuxa_hold_export; // inbuxa: legal hold exports
-pub mod inbuxa_explanation; // inbuxa: "Explain this" with the local model
-pub mod inbuxa_protocol_policy; // inbuxa: legacy protocols off
-pub mod inbuxa_tenant_protocol_policy; // inbuxa: legacy protocols off, per tenant
+pub mod inbuxa_security_acceptance; // inbuxa: accepted security to-do items
 pub mod inbuxa_sharing_policy; // inbuxa: MA-C, who may share mail
-pub mod inbuxa_front_ends; // inbuxa: C-4, where the front ends are
-pub mod inbuxa_deleted_account; // inbuxa: undelete
-pub mod file_node;
-pub mod identity;
+pub mod inbuxa_tenant_protocol_policy; // inbuxa: legacy protocols off, per tenant
 pub mod mailbox;
 pub mod participant_identity;
 pub mod principal;

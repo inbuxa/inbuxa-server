@@ -48,13 +48,18 @@ const DELEGATE_SECRET: &str = "delegate-secret-9902";
 
 impl Account {
     async fn call(&self, method: &str, arguments: Value) -> (String, Value) {
-        let response = self.jmap_request(USING, json!([[method, arguments, "0"]])).await;
+        let response = self
+            .jmap_request(USING, json!([[method, arguments, "0"]]))
+            .await;
         let call = response
             .0
             .pointer("/methodResponses/0")
             .cloned()
             .unwrap_or_else(|| panic!("{method}: {}", response.0));
-        (call[0].as_str().unwrap_or_default().to_string(), call[1].clone())
+        (
+            call[0].as_str().unwrap_or_default().to_string(),
+            call[1].clone(),
+        )
     }
 
     async fn lock_set(&self, arguments: Value) -> Value {
@@ -83,7 +88,13 @@ pub async fn test(test: &mut TestServer) {
         .create_user_account("owner@example.com", OWNER_SECRET, "Owner", &[], vec![])
         .await;
     let delegate = admin
-        .create_user_account("delegate@example.com", DELEGATE_SECRET, "Delegate", &[], vec![])
+        .create_user_account(
+            "delegate@example.com",
+            DELEGATE_SECRET,
+            "Delegate",
+            &[],
+            vec![],
+        )
         .await;
     let owner_id = owner.id_string().to_string();
 
@@ -136,7 +147,10 @@ pub async fn test(test: &mut TestServer) {
     let response = admin
         .lock_set(json!({"create": {"l": {"accountId": admin.id_string(), "reason": "test"}}}))
         .await;
-    assert_eq!(response["notCreated"]["l"]["type"], "forbidden", "AL-12: {response}");
+    assert_eq!(
+        response["notCreated"]["l"]["type"], "forbidden",
+        "AL-12: {response}"
+    );
 
     // AL-8: send-as needs more than read
     let response = admin
@@ -154,7 +168,11 @@ pub async fn test(test: &mut TestServer) {
             "reason": "Left the company; mail to be reviewed",
             "delegates": [{"accountId": delegate.id_string(), "access": "read"}]}}}))
         .await;
-    assert_eq!(response["created"]["l"]["id"], owner_id.as_str(), "AL-1: {response}");
+    assert_eq!(
+        response["created"]["l"]["id"],
+        owner_id.as_str(),
+        "AL-1: {response}"
+    );
 
     // AL-2: the right password fails as a wrong one does
     let right_password = owner.session_status().await;
@@ -188,10 +206,16 @@ pub async fn test(test: &mut TestServer) {
     for (method, arguments) in [
         ("FileNode/query", json!({"accountId": owner_id})),
         ("Calendar/get", json!({"accountId": owner_id, "ids": null})),
-        ("AddressBook/get", json!({"accountId": owner_id, "ids": null})),
+        (
+            "AddressBook/get",
+            json!({"accountId": owner_id, "ids": null}),
+        ),
     ] {
         let (name, response) = delegate.call(method, arguments).await;
-        assert_eq!(name, method, "AL-7: {method} refused to the delegate: {response}");
+        assert_eq!(
+            name, method,
+            "AL-7: {method} refused to the delegate: {response}"
+        );
     }
 
     // AL-6: reading adds nothing, not even at the top of empty Files
@@ -201,7 +225,10 @@ pub async fn test(test: &mut TestServer) {
             json!({"accountId": owner_id, "create": {"f": {"name": "Notes", "parentId": null}}}),
         )
         .await;
-    assert!(response["created"].get("f").is_none(), "AL-6: a read delegate added a file: {response}");
+    assert!(
+        response["created"].get("f").is_none(),
+        "AL-6: a read delegate added a file: {response}"
+    );
 
     // The delegate reads the mail that arrived
     let (_, found) = delegate
@@ -233,7 +260,8 @@ pub async fn test(test: &mut TestServer) {
             {"accountId": delegate.id_string(), "access": "organize"}]}}}))
         .await;
     assert_eq!(
-        response["notUpdated"][owner_id.as_str()]["type"], "invalidProperties",
+        response["notUpdated"][owner_id.as_str()]["type"],
+        "invalidProperties",
         "AU-12: {response}"
     );
     let response = admin
@@ -259,7 +287,10 @@ pub async fn test(test: &mut TestServer) {
         .unwrap_or_else(|| panic!("AL-7: organize couldn't add to empty Files: {response}"))
         .to_string();
     let (_, response) = delegate
-        .call("FileNode/get", json!({"accountId": owner_id, "ids": [folder_id]}))
+        .call(
+            "FileNode/get",
+            json!({"accountId": owner_id, "ids": [folder_id]}),
+        )
         .await;
     assert_eq!(
         response["list"].as_array().map(Vec::len),
@@ -292,7 +323,10 @@ pub async fn test(test: &mut TestServer) {
         .unwrap_or_else(|| panic!("AL-6: organize couldn't make a folder: {created}"))
         .to_string();
     let (_, mailboxes) = delegate
-        .call("Mailbox/get", json!({"accountId": owner_id, "ids": [folder]}))
+        .call(
+            "Mailbox/get",
+            json!({"accountId": owner_id, "ids": [folder]}),
+        )
         .await;
     assert_eq!(
         mailboxes["list"].as_array().map(Vec::len),
@@ -317,7 +351,8 @@ pub async fn test(test: &mut TestServer) {
         )
         .await;
     assert_eq!(
-        destroyed["notDestroyed"][email_id.as_str()]["type"], "forbidden",
+        destroyed["notDestroyed"][email_id.as_str()]["type"],
+        "forbidden",
         "test 12: organize deleted mail: {destroyed}"
     );
 
@@ -325,7 +360,10 @@ pub async fn test(test: &mut TestServer) {
     let (name, _) = delegate
         .call("Identity/get", json!({"accountId": owner_id, "ids": null}))
         .await;
-    assert_eq!(name, "error", "AL-8: identities of a locked account without send-as");
+    assert_eq!(
+        name, "error",
+        "AL-8: identities of a locked account without send-as"
+    );
 
     // Test 11, AL-4: a Sieve reject is kept instead, and nobody is answered
     admin
@@ -392,18 +430,25 @@ pub async fn test(test: &mut TestServer) {
     );
 
     // AL-10: unlocking needs a reason, then restores everything
-    let response = admin
-        .lock_set(json!({"destroy": [owner_id]}))
-        .await;
+    let response = admin.lock_set(json!({"destroy": [owner_id]})).await;
     assert_eq!(
-        response["notDestroyed"][owner_id.as_str()]["type"], "invalidProperties",
+        response["notDestroyed"][owner_id.as_str()]["type"],
+        "invalidProperties",
         "AU-12: {response}"
     );
     let response = admin
         .lock_set(json!({"reason": "Review done", "destroy": [owner_id]}))
         .await;
-    assert_eq!(response["destroyed"][0], owner_id.as_str(), "AL-10: {response}");
-    assert_eq!(owner.session_status().await, 200, "AL-10: the owner can sign in");
+    assert_eq!(
+        response["destroyed"][0],
+        owner_id.as_str(),
+        "AL-10: {response}"
+    );
+    assert_eq!(
+        owner.session_status().await,
+        200,
+        "AL-10: the owner can sign in"
+    );
     let session = delegate.jmap_session_object().await.0;
     assert!(
         session["accounts"].get(owner_id.as_str()).is_none(),
@@ -435,7 +480,10 @@ pub async fn test(test: &mut TestServer) {
         "Manager files the mail",
         "Review done",
     ] {
-        assert!(reasons.contains(&reason), "AU-12: {reason} missing from {reasons:?}");
+        assert!(
+            reasons.contains(&reason),
+            "AU-12: {reason} missing from {reasons:?}"
+        );
     }
     let (_, query) = admin
         .call(
@@ -463,10 +511,22 @@ async fn shared_mailbox(
 ) {
     println!("Running shared mailbox tests...");
     let support = admin
-        .create_user_account("support@example.com", "support-secret-3317", "Support", &[], vec![])
+        .create_user_account(
+            "support@example.com",
+            "support-secret-3317",
+            "Support",
+            &[],
+            vec![],
+        )
         .await;
     let agent = admin
-        .create_user_account("agent@example.com", "agent-secret-5520", "Agent", &[], vec![])
+        .create_user_account(
+            "agent@example.com",
+            "agent-secret-5520",
+            "Agent",
+            &[],
+            vec![],
+        )
         .await;
     let support_id = support.id_string().to_string();
 
@@ -479,32 +539,52 @@ async fn shared_mailbox(
         .unwrap();
 
     // More people than a lock may have
-    let mut delegates = vec![json!({"accountId": agent.id_string(), "access": "organize", "sendAs": true})];
+    let mut delegates =
+        vec![json!({"accountId": agent.id_string(), "access": "organize", "sendAs": true})];
     for n in 0..11 {
         let name: &'static str = Box::leak(format!("desk{n}@example.com").into_boxed_str());
-        let desk = admin.create_user_account(name, "desk-secret-7781", "Desk", &[], vec![]).await;
+        let desk = admin
+            .create_user_account(name, "desk-secret-7781", "Desk", &[], vec![])
+            .await;
         delegates.push(json!({"accountId": desk.id_string(), "access": "read"}));
     }
 
     // No reason needed
     let response = admin
-        .lock_set(json!({"create": {"s": {"accountId": support_id, "kind": "sharedMailbox",
-            "delegates": delegates}}}))
+        .lock_set(
+            json!({"create": {"s": {"accountId": support_id, "kind": "sharedMailbox",
+            "delegates": delegates}}}),
+        )
         .await;
-    assert_eq!(response["created"]["s"]["id"], support_id.as_str(), "MA-S1: {response}");
+    assert_eq!(
+        response["created"]["s"]["id"],
+        support_id.as_str(),
+        "MA-S1: {response}"
+    );
     let (_, got) = admin
-        .call("inbuxa:AccountLock/get", json!({"accountId": admin.id_string(), "ids": [support_id]}))
+        .call(
+            "inbuxa:AccountLock/get",
+            json!({"accountId": admin.id_string(), "ids": [support_id]}),
+        )
         .await;
     assert_eq!(got["list"][0]["kind"], "sharedMailbox", "MA-S1: {got}");
 
     // Nobody signs in to it
-    assert_ne!(support.session_status().await, 200, "MA-S1: a shared mailbox signed in");
+    assert_ne!(
+        support.session_status().await,
+        200,
+        "MA-S1: a shared mailbox signed in"
+    );
 
     // It says what it is to the people in it
     let session = agent.jmap_session_object().await.0;
-    let delegation = &session["accounts"][support_id.as_str()]["accountCapabilities"]["urn:inbuxa:jmap"]["delegation"];
+    let delegation = &session["accounts"][support_id.as_str()]["accountCapabilities"]["urn:inbuxa:jmap"]
+        ["delegation"];
     assert_eq!(delegation["kind"], "sharedMailbox", "MA-S: {session}");
-    assert_eq!(delegation["locked"], true, "MA-S: front ends that know no kind still see a lock");
+    assert_eq!(
+        delegation["locked"], true,
+        "MA-S: front ends that know no kind still see a lock"
+    );
 
     // Its Sieve replies go out, where a lock's are held back
     lmtp.ingest(
@@ -522,7 +602,10 @@ async fn shared_mailbox(
 
     // The agent answers as support@: sent, and recorded as the agent
     let (_, mailboxes) = agent
-        .call("Mailbox/get", json!({"accountId": support_id, "ids": null, "properties": ["role"]}))
+        .call(
+            "Mailbox/get",
+            json!({"accountId": support_id, "ids": null, "properties": ["role"]}),
+        )
         .await;
     let drafts = mailboxes["list"]
         .as_array()
@@ -532,7 +615,10 @@ async fn shared_mailbox(
         .unwrap_or_else(|| panic!("no Drafts: {mailboxes}"))["id"]
         .clone();
     let (_, identities) = agent
-        .call("Identity/get", json!({"accountId": support_id, "ids": null}))
+        .call(
+            "Identity/get",
+            json!({"accountId": support_id, "ids": null}),
+        )
         .await;
     let identity = identities["list"][0]["id"].clone();
     let send = |reply_to: Option<&str>, subject: &str| {
@@ -553,20 +639,30 @@ async fn shared_mailbox(
                 "create": {"s": {"identityId": identity, "emailId": "#m"}}}, "s"]
         ])
     };
-    let response = agent.jmap_request(USING, send(None, "Re: My order")).await.0;
+    let response = agent
+        .jmap_request(USING, send(None, "Re: My order"))
+        .await
+        .0;
     assert!(
         response.pointer("/methodResponses/1/1/created/s").is_some(),
         "MA-S3: the answer didn't go out: {response}"
     );
     assert_message_delivery(
         smtp_rx,
-        MockMessage::new("<support@example.com>", ["<carol@remote.org>"], "@Re: My order"),
+        MockMessage::new(
+            "<support@example.com>",
+            ["<carol@remote.org>"],
+            "@Re: My order",
+        ),
     )
     .await;
 
     // MA-S3: a reply can't be steered to the agent's own address
     let response = agent
-        .jmap_request(USING, send(Some("agent@example.com"), "Write to me directly"))
+        .jmap_request(
+            USING,
+            send(Some("agent@example.com"), "Write to me directly"),
+        )
         .await
         .0;
     assert_eq!(
@@ -586,7 +682,10 @@ async fn shared_mailbox(
         )
         .await;
     let (_, records) = admin
-        .call("inbuxa:AuditEvent/get", json!({"accountId": admin.id_string(), "ids": query["ids"]}))
+        .call(
+            "inbuxa:AuditEvent/get",
+            json!({"accountId": admin.id_string(), "ids": query["ids"]}),
+        )
         .await;
     let kinds = records["list"]
         .as_array()
@@ -606,7 +705,9 @@ async fn shared_mailbox(
     let mut session = smtp_session();
     session.eval_session_params().await;
     session.ehlo("agent.example.com").await;
-    session.auth_plain("agent@example.com", "agent-secret-5520", "235 2.7.0").await;
+    session
+        .auth_plain("agent@example.com", "agent-secret-5520", "235 2.7.0")
+        .await;
     session
         .send_message(
             "support@example.com",
@@ -617,7 +718,11 @@ async fn shared_mailbox(
         .await;
     assert_message_delivery(
         smtp_rx,
-        MockMessage::new("<support@example.com>", ["<carol@remote.org>"], "@Re: Over SMTP"),
+        MockMessage::new(
+            "<support@example.com>",
+            ["<carol@remote.org>"],
+            "@Re: Over SMTP",
+        ),
     )
     .await;
     // MA-S3: and the reply still can't be steered to the agent
@@ -633,7 +738,9 @@ async fn shared_mailbox(
     let mut session = smtp_session();
     session.eval_session_params().await;
     session.ehlo("desk.example.com").await;
-    session.auth_plain("desk0@example.com", "desk-secret-7781", "235 2.7.0").await;
+    session
+        .auth_plain("desk0@example.com", "desk-secret-7781", "235 2.7.0")
+        .await;
     session.mail_from("support@example.com", "501 5.5.4").await;
     session.mail_from("desk0@example.com", "250").await;
     let (_, query) = admin
@@ -644,7 +751,10 @@ async fn shared_mailbox(
         )
         .await;
     let (_, records) = admin
-        .call("inbuxa:AuditEvent/get", json!({"accountId": admin.id_string(), "ids": query["ids"]}))
+        .call(
+            "inbuxa:AuditEvent/get",
+            json!({"accountId": admin.id_string(), "ids": query["ids"]}),
+        )
         .await;
     let mut kinds = records["list"]
         .as_array()
@@ -653,11 +763,19 @@ async fn shared_mailbox(
         .map(|r| r["target"]["kind"].as_str().unwrap_or_default().to_string())
         .collect::<Vec<_>>();
     kinds.sort();
-    assert_eq!(kinds, ["EmailSubmission", "QueuedMessage"], "MA-D0a over SMTP: {records}");
+    assert_eq!(
+        kinds,
+        ["EmailSubmission", "QueuedMessage"],
+        "MA-D0a over SMTP: {records}"
+    );
 
     // Ending it needs no reason either
     let response = admin.lock_set(json!({"destroy": [support_id]})).await;
-    assert_eq!(response["destroyed"][0], support_id.as_str(), "MA-S: {response}");
+    assert_eq!(
+        response["destroyed"][0],
+        support_id.as_str(),
+        "MA-S: {response}"
+    );
 }
 
 /// Runs these tests alone: `cargo test -p tests account_lock_tests -- --ignored`.

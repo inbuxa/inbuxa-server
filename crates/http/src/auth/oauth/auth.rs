@@ -269,9 +269,9 @@ impl OAuthApiHandler for Server {
                     Some(challenge) => match code_challenge_method.as_deref() {
                         Some("S256") => PkceCodeChallenge::S256(challenge),
                         _ => {
-                            return Err(trc::AuthEvent::Error.into_err().details(
-                                "Unsupported PKCE code_challenge_method: use S256.",
-                            ));
+                            return Err(trc::AuthEvent::Error
+                                .into_err()
+                                .details("Unsupported PKCE code_challenge_method: use S256."));
                         }
                     },
                     None => {

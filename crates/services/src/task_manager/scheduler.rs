@@ -73,7 +73,6 @@ struct Queue {
     heap: BinaryHeap<Action>,
 }
 
-
 pub fn spawn_task_scheduler(inner: Arc<Inner>) {
     tokio::spawn(async move {
         trc::event!(TaskManager(TaskManagerEvent::SchedulerStarted));
@@ -145,7 +144,10 @@ pub fn spawn_task_scheduler(inner: Arc<Inner>) {
             queue.schedule(Instant::now(), Event::CalculateMetrics);
 
             // inbuxa: MON-25: alerts every minute
-            queue.schedule(Instant::now() + Duration::from_secs(60), Event::EvaluateAlerts);
+            queue.schedule(
+                Instant::now() + Duration::from_secs(60),
+                Event::EvaluateAlerts,
+            );
 
             // inbuxa: MON-4: metric history on its own schedule
             queue.schedule(
@@ -163,7 +165,6 @@ pub fn spawn_task_scheduler(inner: Arc<Inner>) {
                 Event::CheckDomainTasks,
             );
         }
-
 
         let mut next_metric_update = Instant::now();
 
@@ -462,7 +463,6 @@ pub fn spawn_task_scheduler(inner: Arc<Inner>) {
                             }
                         }
                     }
-
                 }
             }
 

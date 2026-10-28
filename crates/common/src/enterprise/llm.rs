@@ -16,11 +16,7 @@ use inbuxa_features::ai::{
     locality,
     request::{self, Kind, MAX_RESPONSE_BYTES},
 };
-use registry::schema::{
-    enums::AiModelType,
-    prelude::ObjectType,
-    structs::AiModel,
-};
+use registry::schema::{enums::AiModelType, prelude::ObjectType, structs::AiModel};
 use serde::{Deserialize, Serialize};
 use std::time::{Duration, Instant};
 use store::registry::RegistryQuery;
@@ -375,8 +371,7 @@ pub async fn warn_if_remote(model: &AiModel) {
             match tokio::net::lookup_host((host.as_str(), 443)).await {
                 Ok(addrs) => {
                     let addrs = addrs.map(|a| a.ip()).collect::<Vec<_>>();
-                    !addrs.is_empty()
-                        && addrs.into_iter().all(locality::is_local_ip)
+                    !addrs.is_empty() && addrs.into_iter().all(locality::is_local_ip)
                 }
                 Err(_) => false,
             }
@@ -401,9 +396,7 @@ const ACCOUNT_SCRIPT_CEILING: Duration = Duration::from_secs(60);
 
 /// `llm_prompt(model, prompt, temperature)` (AI-20 to AI-25). The answer as
 /// plain text, or `None`, which the script sees as `false`.
-pub async fn sieve_prompt(
-    ctx: crate::scripts::plugins::PluginContext<'_>,
-) -> Option<String> {
+pub async fn sieve_prompt(ctx: crate::scripts::plugins::PluginContext<'_>) -> Option<String> {
     use registry::schema::enums::Permission;
     use sieve::runtime::Variable;
 

@@ -194,9 +194,7 @@ impl ToRequestError for trc::Error {
                 | trc::SecurityEvent::IpAllowExpired
                 | trc::SecurityEvent::LegacyProtocolsChanged
                 | trc::SecurityEvent::AuditRecorded
-                | trc::SecurityEvent::AuditWriteFailed => {
-                    RequestError::internal_server_error()
-                }
+                | trc::SecurityEvent::AuditWriteFailed => RequestError::internal_server_error(),
             },
             trc::EventType::Resource(cause) => match cause {
                 trc::ResourceEvent::NotFound => RequestError::not_found(),

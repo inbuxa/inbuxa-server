@@ -10,18 +10,17 @@
 
 use crate::utils::{
     account::Account,
-    webdav::DummyWebDavClient,
     server::{TestServer, TestServerBuilder},
+    webdav::DummyWebDavClient,
 };
 use base64::{Engine, engine::general_purpose::STANDARD};
-use calcard::{common::timezone::Tz, icalendar::ICalendarMethod};
 use calcard::icalendar::{ICalendarParticipationStatus, ICalendarProperty};
+use calcard::{common::timezone::Tz, icalendar::ICalendarMethod};
 use email::cache::MessageCacheFetch;
 use groupware::scheduling::{ItipField, ItipParticipant, ItipSummary, ItipTime, ItipValue};
 use hyper::StatusCode;
 use jmap_proto::error::set::SetErrorType;
 use mail_parser::{MessageParser, MimeHeaders};
-use registry::types::EnumImpl;
 use registry::schema::{
     prelude::{Object, ObjectInner, ObjectType, Property},
     structs::{
@@ -29,6 +28,7 @@ use registry::schema::{
         Domain, Enterprise, Tenant, UserRoles,
     },
 };
+use registry::types::EnumImpl;
 use serde_json::json;
 use services::task_manager::imip::build_itip_template;
 use std::{str::FromStr, time::Duration};
@@ -196,14 +196,24 @@ pub async fn test(test: &mut TestServer) {
         );
     }
     assert!(html.contains("lang=\"en"), "test 10: lang in {html}");
-    assert!(html.contains("L[https://meet.example.com/brand]"), "test 10: link in {html}");
+    assert!(
+        html.contains("L[https://meet.example.com/brand]"),
+        "test 10: link in {html}"
+    );
     assert!(html.contains("src=\"cid:"), "test 10: logo_cid in {html}");
-    assert!(html.contains("href=\"webcal"), "test 10: action_url in {html}");
+    assert!(
+        html.contains("href=\"webcal"),
+        "test 10: action_url in {html}"
+    );
     assert!(
         html.contains("T[&lt;b&gt;x&lt;/b&gt;]"),
         "test 10: the title is text, not HTML: {html}"
     );
-    assert_eq!(logo, Some(("image/png".to_string(), PNG.to_vec())), "test 2");
+    assert_eq!(
+        logo,
+        Some(("image/png".to_string(), PNG.to_vec())),
+        "test 2"
+    );
 
     // Acceptance test 3: the tenant's logo, then the domain's own
     admin
@@ -221,7 +231,11 @@ pub async fn test(test: &mut TestServer) {
         .registry_update_object(ObjectType::Domain, t_domain, json!({"logo": gif}))
         .await;
     let answer = get(&admin, "/logo?domain=t-brand.example.org", None).await;
-    assert_eq!(answer.header("content-type"), "image/gif", "test 3: domain wins");
+    assert_eq!(
+        answer.header("content-type"),
+        "image/gif",
+        "test 3: domain wins"
+    );
 
     // Acceptance test 4: a subdomain finds its domain, by parameter or Host
     let by_param = get(&admin, "/logo?domain=mail.t-brand.example.org", None).await;
@@ -244,7 +258,10 @@ pub async fn test(test: &mut TestServer) {
     assert_eq!(answer.status, StatusCode::FOUND, "test 5");
     assert_eq!(answer.header("location"), "https://192.0.2.1/logo.png");
     // TEST-NET-1 never answers: a fetch would hang, a redirect is instant
-    assert!(started.elapsed() < Duration::from_secs(2), "test 5: no fetch");
+    assert!(
+        started.elapsed() < Duration::from_secs(2),
+        "test 5: no fetch"
+    );
     let resource = test
         .server
         .logo_resource("plain-brand.example.org")
@@ -320,7 +337,10 @@ pub async fn test(test: &mut TestServer) {
     )
     .await;
     let body = itip_html(test, &user, &itip_summaries()[0].1).await;
-    assert!(body.contains("RAW[&lt;b&gt;x&lt;/b&gt;]"), "test 13: {body}");
+    assert!(
+        body.contains("RAW[&lt;b&gt;x&lt;/b&gt;]"),
+        "test 13: {body}"
+    );
     store_directly(
         test,
         ObjectInner::CalendarScheduling(CalendarScheduling {
@@ -359,7 +379,10 @@ pub async fn test(test: &mut TestServer) {
     assert_eq!(answer.status, StatusCode::OK, "test 15");
     assert_eq!(answer.body, page.as_bytes(), "test 15: byte for byte");
     assert_eq!(answer.header("referrer-policy"), "no-referrer", "test 15");
-    assert!(answer.header("cache-control").contains("no-store"), "test 15");
+    assert!(
+        answer.header("cache-control").contains("no-store"),
+        "test 15"
+    );
     assert!(
         answer
             .header("content-security-policy")
@@ -600,15 +623,20 @@ async fn alarm_email(test: &TestServer, user: &Account) -> (String, Option<(Stri
     let event = ALARM_EVENT
         .replace("$START", &ical_time(start))
         .replace("$END", &ical_time(start + 3600));
-    DummyWebDavClient::new(account_id, user.name(), SECRET, "alarm@plain-brand.example.org")
-        .request_with_headers(
-            "PUT",
-            "/dav/cal/alarm%40plain-brand.example.org/default/brand-alarm.ics",
-            [("content-type", "text/calendar; charset=utf-8")],
-            event,
-        )
-        .await
-        .with_status(StatusCode::CREATED);
+    DummyWebDavClient::new(
+        account_id,
+        user.name(),
+        SECRET,
+        "alarm@plain-brand.example.org",
+    )
+    .request_with_headers(
+        "PUT",
+        "/dav/cal/alarm%40plain-brand.example.org/default/brand-alarm.ics",
+        [("content-type", "text/calendar; charset=utf-8")],
+        event,
+    )
+    .await
+    .with_status(StatusCode::CREATED);
 
     // The alarm fires 2s before the start
     for _ in 0..40 {
@@ -617,18 +645,21 @@ async fn alarm_email(test: &TestServer, user: &Account) -> (String, Option<(Stri
         if let Some(message) = messages.emails.items.first() {
             let raw = test.fetch_email(account_id, message.document_id).await;
             let message = MessageParser::new().parse(&raw).unwrap();
-            let html = String::from_utf8(
-                message.html_bodies().next().unwrap().contents().to_vec(),
-            )
-            .unwrap();
-            let logo = message.attachments().find(|part| part.content_id().is_some()).map(|part| {
-                (
-                    part.content_type()
-                        .map(|ct| format!("{}/{}", ct.ctype(), ct.subtype().unwrap_or_default()))
-                        .unwrap_or_default(),
-                    part.contents().to_vec(),
-                )
-            });
+            let html = String::from_utf8(message.html_bodies().next().unwrap().contents().to_vec())
+                .unwrap();
+            let logo = message
+                .attachments()
+                .find(|part| part.content_id().is_some())
+                .map(|part| {
+                    (
+                        part.content_type()
+                            .map(|ct| {
+                                format!("{}/{}", ct.ctype(), ct.subtype().unwrap_or_default())
+                            })
+                            .unwrap_or_default(),
+                        part.contents().to_vec(),
+                    )
+                });
             return (html, logo);
         }
     }
@@ -731,7 +762,11 @@ impl Answer {
 
     /// BT-5: every `/logo` answer carries these.
     fn assert_logo_headers(&self, test: &str) {
-        assert_eq!(self.header("cache-control"), "public, max-age=300", "{test}");
+        assert_eq!(
+            self.header("cache-control"),
+            "public, max-age=300",
+            "{test}"
+        );
         assert_eq!(self.header("x-content-type-options"), "nosniff", "{test}");
         assert_eq!(self.header("access-control-allow-origin"), "*", "{test}");
     }

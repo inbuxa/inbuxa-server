@@ -28,7 +28,9 @@ use jmap_proto::{
         get::{GetRequest, GetResponse},
         set::{SetRequest, SetResponse},
     },
-    object::inbuxa_sharing_policy::{SharingPolicy, SharingPolicyProperty as P, SharingPolicyValue},
+    object::inbuxa_sharing_policy::{
+        SharingPolicy, SharingPolicyProperty as P, SharingPolicyValue,
+    },
     request::IntoValid,
 };
 use jmap_tools::{Key, Map, Value};
@@ -37,10 +39,21 @@ use types::id::Id;
 
 type PValue = Value<'static, P, SharingPolicyValue>;
 
-const ALL: &[P] = &[P::Id, P::TenantId, P::MailSharing, P::AddAccounts, P::ChangedAt, P::ChangedBy];
+const ALL: &[P] = &[
+    P::Id,
+    P::TenantId,
+    P::MailSharing,
+    P::AddAccounts,
+    P::ChangedAt,
+    P::ChangedBy,
+];
 
 fn switch_str(on: Option<bool>) -> &'static str {
-    if on.unwrap_or(true) { "enabled" } else { "disabled" }
+    if on.unwrap_or(true) {
+        "enabled"
+    } else {
+        "disabled"
+    }
 }
 
 fn to_value(tenant_id: Option<u32>, policy: &Policy, properties: &[P]) -> PValue {
@@ -81,7 +94,11 @@ async fn reachable(server: &Server, access_token: &AccessToken) -> trc::Result<V
 
 /// Which policy an id names: `None` for the server's.
 fn target(id: Id) -> Option<u32> {
-    if id.is_singleton() { None } else { Some(id.document_id()) }
+    if id.is_singleton() {
+        None
+    } else {
+        Some(id.document_id())
+    }
 }
 
 /// `inbuxa:SharingPolicy/get`.
@@ -114,7 +131,9 @@ pub async fn get(
             }
             Some(tenant_id) if reachable.contains(&tenant_id) => {
                 let policy = sharing_policy::get(data, Some(tenant_id)).await?;
-                response.list.push(to_value(Some(tenant_id), &policy, &properties));
+                response
+                    .list
+                    .push(to_value(Some(tenant_id), &policy, &properties));
             }
             Some(_) => response.push_not_found(id),
         }
@@ -133,13 +152,15 @@ pub async fn set(
     for (client_id, _) in request.unwrap_create() {
         response.not_created.append(
             client_id,
-            SetError::forbidden().with_description("A sharing policy exists with the server or the tenant."),
+            SetError::forbidden()
+                .with_description("A sharing policy exists with the server or the tenant."),
         );
     }
     for id in request.unwrap_destroy().into_valid() {
         response.not_destroyed.append(
             id,
-            SetError::forbidden().with_description("A sharing policy exists with the server or the tenant."),
+            SetError::forbidden()
+                .with_description("A sharing policy exists with the server or the tenant."),
         );
     }
 
@@ -154,8 +175,9 @@ pub async fn set(
             {
                 response.not_updated.append(
                     id,
-                    SetError::forbidden()
-                        .with_description("Only a server administrator changes the server's sharing policy."),
+                    SetError::forbidden().with_description(
+                        "Only a server administrator changes the server's sharing policy.",
+                    ),
                 );
                 continue;
             }
@@ -207,7 +229,9 @@ pub async fn set(
             continue;
         }
 
-        if policy.mail_sharing != previous.mail_sharing || policy.add_accounts != previous.add_accounts {
+        if policy.mail_sharing != previous.mail_sharing
+            || policy.add_accounts != previous.add_accounts
+        {
             policy.changed_at = Some(store::write::now() * 1000);
             policy.changed_by = Some(Id::from(access_token.account_id()).to_string());
             sharing_policy::set(data, tenant_id, &policy).await?;
@@ -219,7 +243,9 @@ pub async fn set(
     if changed {
         // Shares are honored, or not, as tokens are built
         server.invalidate_all_local_caches();
-        server.cluster_broadcast(BroadcastEvent::CacheInvalidateAll).await;
+        server
+            .cluster_broadcast(BroadcastEvent::CacheInvalidateAll)
+            .await;
     }
     Ok(response)
 }

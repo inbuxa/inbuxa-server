@@ -93,7 +93,11 @@ async fn parse_delegates(
     if items.len() > max {
         return Err(invalid(format!("At most {max} delegates.")));
     }
-    let locked_tenant = server.account(locked_id).await.ok().and_then(|a| a.id_tenant);
+    let locked_tenant = server
+        .account(locked_id)
+        .await
+        .ok()
+        .and_then(|a| a.id_tenant);
     let mut delegates: Vec<Delegate> = Vec::with_capacity(items.len());
     for item in items {
         let account_id = item["accountId"]
@@ -139,7 +143,9 @@ async fn parse_delegates(
         // Delegates stay in the locked account's tenant, unless a server
         // administrator says otherwise (AL-5)
         if access_token.tenant_id().is_some() && delegate.id_tenant != locked_tenant {
-            return Err(invalid("A delegate must be in the same organization.".into()));
+            return Err(invalid(
+                "A delegate must be in the same organization.".into(),
+            ));
         }
         if delegates.iter().any(|d| d.account_id == account_id) {
             return Err(invalid("A delegate is listed twice.".into()));
@@ -243,7 +249,9 @@ pub async fn get(
         None => {
             for current in lock::all(data).await? {
                 if in_reach(server, access_token, current.account_id).await {
-                    response.list.push(to_value(server, &current, &properties).await);
+                    response
+                        .list
+                        .push(to_value(server, &current, &properties).await);
                 }
             }
         }
@@ -251,7 +259,9 @@ pub async fn get(
             for id in ids {
                 match lock::get(data, id.document_id()).await? {
                     Some(current) if in_reach(server, access_token, current.account_id).await => {
-                        response.list.push(to_value(server, &current, &properties).await);
+                        response
+                            .list
+                            .push(to_value(server, &current, &properties).await);
                     }
                     _ => response.push_not_found(id),
                 }
@@ -349,13 +359,15 @@ pub async fn set(
             continue;
         }
         let delegates = match delegates_value {
-            Some(value) => match parse_delegates(server, access_token, account_id, kind, value).await {
-                Ok(delegates) => delegates,
-                Err(error) => {
-                    response.not_created.append(client_id, error);
-                    continue;
+            Some(value) => {
+                match parse_delegates(server, access_token, account_id, kind, value).await {
+                    Ok(delegates) => delegates,
+                    Err(error) => {
+                        response.not_created.append(client_id, error);
+                        continue;
+                    }
                 }
-            },
+            }
             None => Vec::new(),
         };
         let mut created = Lock {
@@ -403,8 +415,14 @@ pub async fn set(
         for (key, value) in value.into_expanded_object() {
             match (&key, value) {
                 (Key::Property(P::Delegates), value) => {
-                    match parse_delegates(server, access_token, account_id, current.kind, value.into_owned())
-                        .await
+                    match parse_delegates(
+                        server,
+                        access_token,
+                        account_id,
+                        current.kind,
+                        value.into_owned(),
+                    )
+                    .await
                     {
                         Ok(delegates) => updated.delegates = delegates,
                         Err(error) => {

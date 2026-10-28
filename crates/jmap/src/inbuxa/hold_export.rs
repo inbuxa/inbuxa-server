@@ -18,7 +18,9 @@ use email::{
     cache::MessageCacheFetch,
     message::metadata::{MESSAGE_RECEIVED_MASK, MessageMetadata},
 };
-use groupware::{cache::GroupwareCache, calendar::CalendarEvent, contact::ContactCard, file::FileNode};
+use groupware::{
+    cache::GroupwareCache, calendar::CalendarEvent, contact::ContactCard, file::FileNode,
+};
 use inbuxa_features::{
     hold::{Hold, Keeping, is_held_until},
     undelete::records,
@@ -86,10 +88,20 @@ fn csv(field: &str) -> String {
 fn segment(name: &str) -> String {
     let cleaned: String = name
         .chars()
-        .map(|c| if c == '/' || c == '\\' || c.is_control() { '_' } else { c })
+        .map(|c| {
+            if c == '/' || c == '\\' || c.is_control() {
+                '_'
+            } else {
+                c
+            }
+        })
         .collect();
     let trimmed = cleaned.trim_start_matches('.').trim();
-    if trimmed.is_empty() { "_".into() } else { trimmed.chars().take(120).collect() }
+    if trimmed.is_empty() {
+        "_".into()
+    } else {
+        trimmed.chars().take(120).collect()
+    }
 }
 
 fn date_text(at: Option<i64>) -> String {
@@ -227,12 +239,23 @@ impl Builder {
                 .reason(err)
         };
         self.zip.start_file("manifest.csv", options).map_err(fail)?;
-        self.zip.write_all(manifest.as_bytes()).map_err(|e| fail(e.into()))?;
-        self.zip.start_file("exceptions.csv", options).map_err(fail)?;
-        self.zip.write_all(exceptions.as_bytes()).map_err(|e| fail(e.into()))?;
-        self.zip.start_file("manifest.sha256", options).map_err(fail)?;
         self.zip
-            .write_all(format!("{manifest_hash}  manifest.csv\n{exceptions_hash}  exceptions.csv\n").as_bytes())
+            .write_all(manifest.as_bytes())
+            .map_err(|e| fail(e.into()))?;
+        self.zip
+            .start_file("exceptions.csv", options)
+            .map_err(fail)?;
+        self.zip
+            .write_all(exceptions.as_bytes())
+            .map_err(|e| fail(e.into()))?;
+        self.zip
+            .start_file("manifest.sha256", options)
+            .map_err(fail)?;
+        self.zip
+            .write_all(
+                format!("{manifest_hash}  manifest.csv\n{exceptions_hash}  exceptions.csv\n")
+                    .as_bytes(),
+            )
             .map_err(|e| fail(e.into()))?;
         let items = self.entries.len();
         let bytes = self.zip.finish().map_err(fail)?.into_inner();
@@ -257,7 +280,8 @@ async fn accounts(server: &Server, hold: &Hold, asked: &[u32]) -> trc::Result<Ve
             covered.push(account_id);
         }
     }
-    for (account_id, kept) in inbuxa_features::undelete::data::kept_accounts(server.store()).await? {
+    for (account_id, kept) in inbuxa_features::undelete::data::kept_accounts(server.store()).await?
+    {
         if hold.scope.covers(&kept_member(account_id, &kept)) {
             covered.push(account_id);
         }
@@ -303,7 +327,13 @@ pub async fn build(server: &Server, hold: &Hold, asked: &[u32]) -> trc::Result<(
                 let folder = message
                     .mailboxes
                     .first()
-                    .and_then(|m| cache.mailboxes.items.iter().find(|b| b.document_id == m.mailbox_id))
+                    .and_then(|m| {
+                        cache
+                            .mailboxes
+                            .items
+                            .iter()
+                            .find(|b| b.document_id == m.mailbox_id)
+                    })
                     .map(|b| b.path.clone())
                     .unwrap_or_default();
                 let Some(metadata_) = data
@@ -316,7 +346,15 @@ pub async fn build(server: &Server, hold: &Hold, asked: &[u32]) -> trc::Result<(
                     .await?
                 else {
                     // No date to check against the hold's range, so it's listed
-                    out.missing(mail_path(&folder), &address, "email", &folder, None, false, NO_RECORD);
+                    out.missing(
+                        mail_path(&folder),
+                        &address,
+                        "email",
+                        &folder,
+                        None,
+                        false,
+                        NO_RECORD,
+                    );
                     continue;
                 };
                 let metadata = metadata_
@@ -328,9 +366,15 @@ pub async fn build(server: &Server, hold: &Hold, asked: &[u32]) -> trc::Result<(
                 }
                 let hash = types::blob_hash::BlobHash::from(&metadata.blob_hash);
                 match blob(server, hash.as_slice()).await? {
-                    Some(bytes) => {
-                        out.add(mail_path(&folder), &bytes, &address, "email", &folder, Some(received as i64), false)?
-                    }
+                    Some(bytes) => out.add(
+                        mail_path(&folder),
+                        &bytes,
+                        &address,
+                        "email",
+                        &folder,
+                        Some(received as i64),
+                        false,
+                    )?,
                     None => out.missing(
                         mail_path(&folder),
                         &address,
@@ -357,7 +401,11 @@ pub async fn build(server: &Server, hold: &Hold, asked: &[u32]) -> trc::Result<(
                     let Some(resource) = resources.resources.get(path.resource_idx) else {
                         continue;
                     };
-                    let folder = path.path.rsplit_once('/').map(|(f, _)| f).unwrap_or_default();
+                    let folder = path
+                        .path
+                        .rsplit_once('/')
+                        .map(|(f, _)| f)
+                        .unwrap_or_default();
                     let zip_path = |ext: Option<&str>| {
                         let mut p = format!(
                             "{base}{}/{}",
@@ -366,7 +414,11 @@ pub async fn build(server: &Server, hold: &Hold, asked: &[u32]) -> trc::Result<(
                                 "contact" => "contacts",
                                 _ => "files",
                             },
-                            path.path.split('/').map(segment).collect::<Vec<_>>().join("/")
+                            path.path
+                                .split('/')
+                                .map(segment)
+                                .collect::<Vec<_>>()
+                                .join("/")
                         );
                         if let Some(ext) = ext
                             && !p.ends_with(ext)
@@ -389,12 +441,30 @@ pub async fn build(server: &Server, hold: &Hold, asked: &[u32]) -> trc::Result<(
                                 ))
                                 .await?
                             else {
-                                out.missing(zip_path(Some(".ics")), &address, kind, folder, Some(*start), false, NO_RECORD);
+                                out.missing(
+                                    zip_path(Some(".ics")),
+                                    &address,
+                                    kind,
+                                    folder,
+                                    Some(*start),
+                                    false,
+                                    NO_RECORD,
+                                );
                                 continue;
                             };
-                            let event = event_.unarchive::<CalendarEvent>().caused_by(trc::location!())?;
+                            let event = event_
+                                .unarchive::<CalendarEvent>()
+                                .caused_by(trc::location!())?;
                             let text = event.data.event.to_string();
-                            out.add(zip_path(Some(".ics")), text.as_bytes(), &address, kind, folder, Some(*start), false)?;
+                            out.add(
+                                zip_path(Some(".ics")),
+                                text.as_bytes(),
+                                &address,
+                                kind,
+                                folder,
+                                Some(*start),
+                                false,
+                            )?;
                         }
                         M::ContactCard { .. } => {
                             let Some(card_) = data
@@ -405,13 +475,33 @@ pub async fn build(server: &Server, hold: &Hold, asked: &[u32]) -> trc::Result<(
                                 ))
                                 .await?
                             else {
-                                out.missing(zip_path(Some(".vcf")), &address, kind, folder, None, false, NO_RECORD);
+                                out.missing(
+                                    zip_path(Some(".vcf")),
+                                    &address,
+                                    kind,
+                                    folder,
+                                    None,
+                                    false,
+                                    NO_RECORD,
+                                );
                                 continue;
                             };
-                            let card = card_.unarchive::<ContactCard>().caused_by(trc::location!())?;
+                            let card = card_
+                                .unarchive::<ContactCard>()
+                                .caused_by(trc::location!())?;
                             let mut text = String::with_capacity(256);
-                            let _ = card.card.write_to(&mut text, server.core.groupware.vcard_version);
-                            out.add(zip_path(Some(".vcf")), text.as_bytes(), &address, kind, folder, None, false)?;
+                            let _ = card
+                                .card
+                                .write_to(&mut text, server.core.groupware.vcard_version);
+                            out.add(
+                                zip_path(Some(".vcf")),
+                                text.as_bytes(),
+                                &address,
+                                kind,
+                                folder,
+                                None,
+                                false,
+                            )?;
                         }
                         M::File { size: Some(_), .. } => {
                             let Some(file_) = data
@@ -422,18 +512,50 @@ pub async fn build(server: &Server, hold: &Hold, asked: &[u32]) -> trc::Result<(
                                 ))
                                 .await?
                             else {
-                                out.missing(zip_path(None), &address, kind, folder, None, false, NO_RECORD);
+                                out.missing(
+                                    zip_path(None),
+                                    &address,
+                                    kind,
+                                    folder,
+                                    None,
+                                    false,
+                                    NO_RECORD,
+                                );
                                 continue;
                             };
                             let file = file_.unarchive::<FileNode>().caused_by(trc::location!())?;
                             let Some(props) = file.file.as_ref() else {
-                                out.missing(zip_path(None), &address, kind, folder, None, false, NO_RECORD);
+                                out.missing(
+                                    zip_path(None),
+                                    &address,
+                                    kind,
+                                    folder,
+                                    None,
+                                    false,
+                                    NO_RECORD,
+                                );
                                 continue;
                             };
                             let hash = types::blob_hash::BlobHash::from(&props.blob_hash);
                             match blob(server, hash.as_slice()).await? {
-                                Some(bytes) => out.add(zip_path(None), &bytes, &address, kind, folder, None, false)?,
-                                None => out.missing(zip_path(None), &address, kind, folder, None, false, NO_BLOB),
+                                Some(bytes) => out.add(
+                                    zip_path(None),
+                                    &bytes,
+                                    &address,
+                                    kind,
+                                    folder,
+                                    None,
+                                    false,
+                                )?,
+                                None => out.missing(
+                                    zip_path(None),
+                                    &address,
+                                    kind,
+                                    folder,
+                                    None,
+                                    false,
+                                    NO_BLOB,
+                                ),
                             }
                         }
                         _ => {}
@@ -449,7 +571,9 @@ pub async fn build(server: &Server, hold: &Hold, asked: &[u32]) -> trc::Result<(
             }
             let (kind, ext, date) = match &item {
                 ArchivedItem::Email(e) => ("email", ".eml", Some(e.received_at.timestamp())),
-                ArchivedItem::CalendarEvent(e) => ("event", ".ics", e.start_time.map(|t| t.timestamp())),
+                ArchivedItem::CalendarEvent(e) => {
+                    ("event", ".ics", e.start_time.map(|t| t.timestamp()))
+                }
                 ArchivedItem::ContactCard(_) => ("contact", ".vcf", None),
                 ArchivedItem::FileNode(_) => ("file", "", None),
                 ArchivedItem::SieveScript(_) => ("sieve", ".sieve", None),
@@ -493,43 +617,90 @@ mod tests {
     #[test]
     fn a_zip_carries_its_manifest_and_its_hash() {
         let mut b = Builder::new();
-        b.add("a@example.com/mail/INBOX/b.eml".into(), b"Subject: x\r\n\r\ny", "a@example.com", "email", "INBOX", Some(0), false)
-            .unwrap();
-        b.add("a@example.com/mail/INBOX/b.eml".into(), b"other", "a@example.com", "email", "INBOX", None, true)
-            .unwrap();
+        b.add(
+            "a@example.com/mail/INBOX/b.eml".into(),
+            b"Subject: x\r\n\r\ny",
+            "a@example.com",
+            "email",
+            "INBOX",
+            Some(0),
+            false,
+        )
+        .unwrap();
+        b.add(
+            "a@example.com/mail/INBOX/b.eml".into(),
+            b"other",
+            "a@example.com",
+            "email",
+            "INBOX",
+            None,
+            true,
+        )
+        .unwrap();
         let (bytes, items) = b.finish().unwrap();
         assert_eq!(items, 2);
         let mut zip = zip::ZipArchive::new(Cursor::new(bytes)).unwrap();
         let mut manifest = String::new();
-        std::io::Read::read_to_string(&mut zip.by_name("manifest.csv").unwrap(), &mut manifest).unwrap();
-        assert!(manifest.contains("a@example.com/mail/INBOX/b (2).eml"), "{manifest}");
+        std::io::Read::read_to_string(&mut zip.by_name("manifest.csv").unwrap(), &mut manifest)
+            .unwrap();
+        assert!(
+            manifest.contains("a@example.com/mail/INBOX/b (2).eml"),
+            "{manifest}"
+        );
         let mut hash = String::new();
-        std::io::Read::read_to_string(&mut zip.by_name("manifest.sha256").unwrap(), &mut hash).unwrap();
+        std::io::Read::read_to_string(&mut zip.by_name("manifest.sha256").unwrap(), &mut hash)
+            .unwrap();
         assert!(hash.starts_with(&hex(&Sha256::digest(manifest.as_bytes()))));
         // Nothing missed, and the file says so
         let mut exceptions = String::new();
-        std::io::Read::read_to_string(&mut zip.by_name("exceptions.csv").unwrap(), &mut exceptions).unwrap();
-        assert_eq!(exceptions, "path,account,kind,folder,date,archived,reason\n");
+        std::io::Read::read_to_string(&mut zip.by_name("exceptions.csv").unwrap(), &mut exceptions)
+            .unwrap();
+        assert_eq!(
+            exceptions,
+            "path,account,kind,folder,date,archived,reason\n"
+        );
     }
 
     #[test]
     fn what_cant_be_read_is_listed_not_dropped() {
         let mut b = Builder::new();
-        b.add("a@example.com/mail/INBOX/1.eml".into(), b"Subject: x\r\n\r\ny", "a@example.com", "email", "INBOX", Some(0), false)
-            .unwrap();
-        b.missing("a@example.com/mail/INBOX/2.eml".into(), "a@example.com", "email", "INBOX", Some(0), false, NO_BLOB);
+        b.add(
+            "a@example.com/mail/INBOX/1.eml".into(),
+            b"Subject: x\r\n\r\ny",
+            "a@example.com",
+            "email",
+            "INBOX",
+            Some(0),
+            false,
+        )
+        .unwrap();
+        b.missing(
+            "a@example.com/mail/INBOX/2.eml".into(),
+            "a@example.com",
+            "email",
+            "INBOX",
+            Some(0),
+            false,
+            NO_BLOB,
+        );
         let (bytes, items) = b.finish().unwrap();
         assert_eq!(items, 1, "a missing item isn't counted as collected");
         let mut zip = zip::ZipArchive::new(Cursor::new(bytes)).unwrap();
         assert!(zip.by_name("a@example.com/mail/INBOX/2.eml").is_err());
         let mut exceptions = String::new();
-        std::io::Read::read_to_string(&mut zip.by_name("exceptions.csv").unwrap(), &mut exceptions).unwrap();
+        std::io::Read::read_to_string(&mut zip.by_name("exceptions.csv").unwrap(), &mut exceptions)
+            .unwrap();
         assert!(
-            exceptions.contains("a@example.com/mail/INBOX/2.eml,a@example.com,email,INBOX,") && exceptions.contains(NO_BLOB),
+            exceptions.contains("a@example.com/mail/INBOX/2.eml,a@example.com,email,INBOX,")
+                && exceptions.contains(NO_BLOB),
             "{exceptions}"
         );
         let mut hash = String::new();
-        std::io::Read::read_to_string(&mut zip.by_name("manifest.sha256").unwrap(), &mut hash).unwrap();
-        assert!(hash.contains(&format!("{}  exceptions.csv", hex(&Sha256::digest(exceptions.as_bytes())))));
+        std::io::Read::read_to_string(&mut zip.by_name("manifest.sha256").unwrap(), &mut hash)
+            .unwrap();
+        assert!(hash.contains(&format!(
+            "{}  exceptions.csv",
+            hex(&Sha256::digest(exceptions.as_bytes()))
+        )));
     }
 }

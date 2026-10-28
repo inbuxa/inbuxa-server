@@ -116,7 +116,10 @@ impl Schema {
                 .iter()
                 .find_map(|form| self.label(form, property));
             return Some(PropertyInfo {
-                description: definition["description"].as_str().unwrap_or_default().to_string(),
+                description: definition["description"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .to_string(),
                 label,
                 default: fields["defaults"].get(property).cloned(),
                 allowed,
@@ -154,7 +157,9 @@ impl Schema {
                 {
                     for set in self.field_sets(name) {
                         let properties = &self.0["fields"][&set]["properties"];
-                        for definition in properties.as_object().into_iter().flat_map(|p| p.values()) {
+                        for definition in
+                            properties.as_object().into_iter().flat_map(|p| p.values())
+                        {
                             if self.holds_secret(&definition["type"], seen) {
                                 return true;
                             }

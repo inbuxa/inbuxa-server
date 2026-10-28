@@ -30,8 +30,8 @@ use registry::{
         enums::{DkimRotationStage, Locale, StorageQuota, TenantStorageQuota},
         prelude::{ObjectType, Property},
         structs::{
-            Account, DkimSignature, Domain, EncryptionAtRest, MailingList,
-            Permissions, PublicKey, Role, SubAddressing, Tenant,
+            Account, DkimSignature, Domain, EncryptionAtRest, MailingList, Permissions, PublicKey,
+            Role, SubAddressing, Tenant,
         },
     },
     types::id::ObjectId,

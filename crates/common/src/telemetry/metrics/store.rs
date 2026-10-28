@@ -139,7 +139,9 @@ pub fn sample(calculates: bool) -> Vec<Metric> {
             continue;
         };
         let total = counter.value();
-        let previous = last.insert(metric, (total, 0)).map_or(0, |(count, _)| count);
+        let previous = last
+            .insert(metric, (total, 0))
+            .map_or(0, |(count, _)| count);
         let increase = total.saturating_sub(previous);
         if increase > 0 {
             samples.push(Metric::Counter(MetricCount {

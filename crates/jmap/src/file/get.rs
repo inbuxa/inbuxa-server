@@ -174,7 +174,10 @@ impl FileNodeGet for Server {
                                     file_node.acls.effective_acl(access_token),
                                 )
                             } else {
-                                JmapRights::owner_rights::<file_node::FileNode>(access_token, account_id)
+                                JmapRights::owner_rights::<file_node::FileNode>(
+                                    access_token,
+                                    account_id,
+                                )
                             },
                         );
                     }

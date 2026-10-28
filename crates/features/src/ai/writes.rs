@@ -27,11 +27,17 @@ fn temperature_ok(t: f64) -> bool {
 }
 
 /// Checks an `x:SpamLlm` or `x:AiModel` being written.
-pub async fn check(registry: &RegistryStore, new: &Object) -> trc::Result<Result<(), SetError<Property>>> {
+pub async fn check(
+    registry: &RegistryStore,
+    new: &Object,
+) -> trc::Result<Result<(), SetError<Property>>> {
     match &new.inner {
         ObjectInner::SpamLlm(SpamLlm::Enable(settings)) => {
             if settings.separator.is_empty() {
-                return Ok(Err(refuse(Property::Separator, "The separator can't be empty.")));
+                return Ok(Err(refuse(
+                    Property::Separator,
+                    "The separator can't be empty.",
+                )));
             }
             if settings.categories.iter().count() < 2 {
                 return Ok(Err(refuse(
@@ -50,10 +56,7 @@ pub async fn check(registry: &RegistryStore, new: &Object) -> trc::Result<Result
                 .await?
                 .is_none()
             {
-                return Ok(Err(refuse(
-                    Property::ModelId,
-                    "No AI model has this id.",
-                )));
+                return Ok(Err(refuse(Property::ModelId, "No AI model has this id.")));
             }
         }
         ObjectInner::AiModel(model) => {

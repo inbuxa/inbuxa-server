@@ -624,7 +624,10 @@ impl MailboxSet for Server {
 
             // inbuxa: MA-C: with mail sharing off, nobody here starts or
             // widens a share (narrowing or ending one is always allowed)
-            let before = current.as_ref().map(|m| m.inner.acls.as_slice()).unwrap_or_default();
+            let before = current
+                .as_ref()
+                .map(|m| m.inner.acls.as_slice())
+                .unwrap_or_default();
             let widens = changes.acls.iter().any(|grant| {
                 let had = before
                     .iter()

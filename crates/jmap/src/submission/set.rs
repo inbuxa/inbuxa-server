@@ -157,7 +157,10 @@ impl EmailSubmissionSet for Server {
                                     EmailSubmissionProperty::UndoStatus,
                                     Value::Element(EmailSubmissionValue::UndoStatus(undo_status)),
                                 )
-                                .with_key_value(EmailSubmissionProperty::DlpHeld, Value::Bool(held)),
+                                .with_key_value(
+                                    EmailSubmissionProperty::DlpHeld,
+                                    Value::Bool(held),
+                                ),
                         ),
                     );
                 }
@@ -250,8 +253,9 @@ impl EmailSubmissionSet for Server {
                 {
                     response.not_updated.append(
                         id,
-                        SetError::new(SetErrorType::CannotUnsend)
-                            .with_description("The message is held for review and can't be unsent."),
+                        SetError::new(SetErrorType::CannotUnsend).with_description(
+                            "The message is held for review and can't be unsent.",
+                        ),
                     );
                 }
                 Some(email_submission::UndoStatus::Canceled) => {
@@ -644,7 +648,10 @@ impl EmailSubmissionSet for Server {
                 }
                 match &header.value {
                     ArchivedMetadataHeaderValue::AddressList(addr) => {
-                        named.extend(addr.iter().filter_map(|a| a.address.as_ref().map(|v| v.to_string())));
+                        named.extend(
+                            addr.iter()
+                                .filter_map(|a| a.address.as_ref().map(|v| v.to_string())),
+                        );
                     }
                     ArchivedMetadataHeaderValue::AddressGroup(groups) => {
                         for group in groups.iter() {

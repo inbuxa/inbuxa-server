@@ -55,12 +55,22 @@ pub const INVENTORY_OBJECTS: &[&str] = &[
 /// A store or endpoint object's type and host, from its JSON: local types
 /// stay on the host.
 fn remote_host(value: &Value) -> Option<String> {
-    let kind = value.get("@type").and_then(Value::as_str).unwrap_or_default();
-    if matches!(kind, "" | "RocksDb" | "Sqlite" | "FileSystem" | "Default" | "Disabled") {
+    let kind = value
+        .get("@type")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    if matches!(
+        kind,
+        "" | "RocksDb" | "Sqlite" | "FileSystem" | "Default" | "Disabled"
+    ) {
         return None;
     }
     for key in ["host", "url", "endpoint", "address", "hostname"] {
-        if let Some(host) = value.get(key).and_then(Value::as_str).filter(|h| !h.is_empty()) {
+        if let Some(host) = value
+            .get(key)
+            .and_then(Value::as_str)
+            .filter(|h| !h.is_empty())
+        {
             return Some(host.to_string());
         }
     }
@@ -116,8 +126,14 @@ fn zone_hosts(value: &Value) -> Vec<String> {
 }
 
 impl Server {
-    async fn singleton<T: registry::types::ObjectImpl + From<Object> + Default>(&self) -> trc::Result<T> {
-        Ok(self.registry().object::<T>(Id::singleton()).await?.unwrap_or_default())
+    async fn singleton<T: registry::types::ObjectImpl + From<Object> + Default>(
+        &self,
+    ) -> trc::Result<T> {
+        Ok(self
+            .registry()
+            .object::<T>(Id::singleton())
+            .await?
+            .unwrap_or_default())
     }
 
     /// The facts the catalog is evaluated against, from the live settings.
@@ -134,12 +150,30 @@ impl Server {
         let retention = self.singleton::<DataRetention>().await?;
         for (name, value) in [
             ("x:DataRetention.holdTracesFor", &retention.hold_traces_for),
-            ("x:DataRetention.holdMetricsFor", &retention.hold_metrics_for),
-            ("x:DataRetention.holdMtaReportsFor", &retention.hold_mta_reports_for),
-            ("x:DataRetention.archiveDeletedItemsFor", &retention.archive_deleted_items_for),
-            ("x:DataRetention.archiveDeletedAccountsFor", &retention.archive_deleted_accounts_for),
-            ("x:DataRetention.expungeTrashAfter", &retention.expunge_trash_after),
-            ("x:DataRetention.expungeSubmissionsAfter", &retention.expunge_submissions_after),
+            (
+                "x:DataRetention.holdMetricsFor",
+                &retention.hold_metrics_for,
+            ),
+            (
+                "x:DataRetention.holdMtaReportsFor",
+                &retention.hold_mta_reports_for,
+            ),
+            (
+                "x:DataRetention.archiveDeletedItemsFor",
+                &retention.archive_deleted_items_for,
+            ),
+            (
+                "x:DataRetention.archiveDeletedAccountsFor",
+                &retention.archive_deleted_accounts_for,
+            ),
+            (
+                "x:DataRetention.expungeTrashAfter",
+                &retention.expunge_trash_after,
+            ),
+            (
+                "x:DataRetention.expungeSubmissionsAfter",
+                &retention.expunge_submissions_after,
+            ),
         ] {
             facts.durations.insert(name.into(), days(value.as_ref()));
         }
@@ -167,7 +201,13 @@ impl Server {
         let tracing = self.singleton::<TracingStore>().await?;
         let tracing_on = !matches!(tracing, TracingStore::Disabled);
         let search = self.singleton::<Search>().await?;
-        for id in ["x:Trace", "x:TraceEvent", "x:TraceKeyValue", "x:TraceValueIpAddr", "x:TraceValueString"] {
+        for id in [
+            "x:Trace",
+            "x:TraceEvent",
+            "x:TraceKeyValue",
+            "x:TraceValueIpAddr",
+            "x:TraceValueString",
+        ] {
             facts.collected.insert(id.into(), tracing_on);
         }
         facts
@@ -232,7 +272,9 @@ impl Server {
         }
         facts.collected.insert("log-file".into(), log_on);
         facts.collected.insert("x:Log".into(), log_on);
-        facts.collected.insert("console-and-journal".into(), console_on);
+        facts
+            .collected
+            .insert("console-and-journal".into(), console_on);
         facts.collected.insert("otel-tracer".into(), otel_on);
 
         // Webhooks
@@ -279,7 +321,11 @@ impl Server {
         let mut dnsbl_on = false;
         for server in self.registry().list::<SpamDnsblServer>().await? {
             let value = serde_json::to_value(&server.object).unwrap_or_default();
-            if value.get("enable").and_then(Value::as_bool).unwrap_or(false) {
+            if value
+                .get("enable")
+                .and_then(Value::as_bool)
+                .unwrap_or(false)
+            {
                 dnsbl_on = true;
                 for zone in value.get("zone").map(zone_hosts).unwrap_or_default() {
                     endpoint(&mut facts, "spam-dnsbl", zone);
@@ -289,7 +335,11 @@ impl Server {
         facts.collected.insert("spam-dnsbl".into(), dnsbl_on);
         let pyzor = self.singleton::<SpamPyzor>().await?;
         if pyzor.enable {
-            endpoint(&mut facts, "spam-pyzor", format!("{}:{}", pyzor.host, pyzor.port));
+            endpoint(
+                &mut facts,
+                "spam-pyzor",
+                format!("{}:{}", pyzor.host, pyzor.port),
+            );
         }
         facts.collected.insert("spam-pyzor".into(), pyzor.enable);
 
@@ -312,17 +362,33 @@ impl Server {
         for route in self.registry().list::<MtaRoute>().await? {
             if let MtaRoute::Relay(relay) = route.object {
                 relays = true;
-                endpoint(&mut facts, "relay", format!("{}:{}", relay.address, relay.port));
+                endpoint(
+                    &mut facts,
+                    "relay",
+                    format!("{}:{}", relay.address, relay.port),
+                );
             }
         }
         facts.collected.insert("relay".into(), relays);
 
         // Stores elsewhere
         let stores = [
-            ("data-store", serde_json::to_value(self.singleton::<DataStore>().await.ok()).unwrap_or_default()),
-            ("blob-store", serde_json::to_value(self.singleton::<BlobStore>().await?).unwrap_or_default()),
-            ("search-store", serde_json::to_value(self.singleton::<SearchStore>().await?).unwrap_or_default()),
-            ("in-memory-store", serde_json::to_value(self.singleton::<InMemoryStore>().await?).unwrap_or_default()),
+            (
+                "data-store",
+                serde_json::to_value(self.singleton::<DataStore>().await.ok()).unwrap_or_default(),
+            ),
+            (
+                "blob-store",
+                serde_json::to_value(self.singleton::<BlobStore>().await?).unwrap_or_default(),
+            ),
+            (
+                "search-store",
+                serde_json::to_value(self.singleton::<SearchStore>().await?).unwrap_or_default(),
+            ),
+            (
+                "in-memory-store",
+                serde_json::to_value(self.singleton::<InMemoryStore>().await?).unwrap_or_default(),
+            ),
         ];
         for (place, value) in stores {
             if let Some(host) = remote_host(&value) {
@@ -330,7 +396,13 @@ impl Server {
             }
         }
         if let Some(host) = remote_host(&serde_json::to_value(&tracing).unwrap_or_default()) {
-            for id in ["x:Trace", "x:TraceEvent", "x:TraceKeyValue", "x:TraceValueIpAddr", "x:TraceValueString"] {
+            for id in [
+                "x:Trace",
+                "x:TraceEvent",
+                "x:TraceKeyValue",
+                "x:TraceValueIpAddr",
+                "x:TraceValueString",
+            ] {
                 endpoint(&mut facts, id, host.clone());
             }
         }
@@ -390,7 +462,9 @@ impl Server {
     /// 2026-09-28: snapshots are kept as long as audit records).
     pub async fn purge_inventory_snapshots(&self) -> trc::Result<usize> {
         let data = &self.core.storage.data;
-        let keep = inbuxa_features::audit::log::settings(data).await?.keep_for_secs;
+        let keep = inbuxa_features::audit::log::settings(data)
+            .await?
+            .keep_for_secs;
         snapshot::purge(data, store::write::now().saturating_sub(keep)).await
     }
 }
@@ -402,7 +476,10 @@ mod tests {
 
     #[test]
     fn local_stores_stay_and_others_name_their_host() {
-        assert_eq!(remote_host(&json!({"@type": "RocksDb", "path": "/var/lib"})), None);
+        assert_eq!(
+            remote_host(&json!({"@type": "RocksDb", "path": "/var/lib"})),
+            None
+        );
         assert_eq!(remote_host(&json!({"@type": "Default"})), None);
         assert_eq!(
             remote_host(&json!({"@type": "PostgreSql", "host": "db.example.net"})),
@@ -412,7 +489,10 @@ mod tests {
             remote_host(&json!({"@type": "ElasticSearch", "url": "https://es.example.net:9200"})),
             Some("https://es.example.net:9200".into())
         );
-        assert_eq!(remote_host(&json!({"@type": "S3", "bucket": "mail"})), Some("S3".into()));
+        assert_eq!(
+            remote_host(&json!({"@type": "S3", "bucket": "mail"})),
+            Some("S3".into())
+        );
     }
 
     #[test]
@@ -427,7 +507,10 @@ mod tests {
 
     #[test]
     fn days_round_up() {
-        assert_eq!(days(Some(&Duration::from_millis(86_400_000))), Days::Days(1));
+        assert_eq!(
+            days(Some(&Duration::from_millis(86_400_000))),
+            Days::Days(1)
+        );
         assert_eq!(days(Some(&Duration::from_millis(3_600_000))), Days::Days(1));
         assert_eq!(days(None), Days::Unbounded);
     }

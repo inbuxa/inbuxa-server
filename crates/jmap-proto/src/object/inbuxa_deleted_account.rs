@@ -88,9 +88,9 @@ impl Element for DeletedAccountValue {
             Key::Property(DeletedAccountProperty::Id | DeletedAccountProperty::MemberTenantId) => {
                 Id::from_str(value).ok().map(DeletedAccountValue::Id)
             }
-            Key::Property(DeletedAccountProperty::DeletedAt | DeletedAccountProperty::KeptUntil) => {
-                UTCDate::from_str(value).ok().map(DeletedAccountValue::Date)
-            }
+            Key::Property(
+                DeletedAccountProperty::DeletedAt | DeletedAccountProperty::KeptUntil,
+            ) => UTCDate::from_str(value).ok().map(DeletedAccountValue::Date),
             _ => None,
         }
     }

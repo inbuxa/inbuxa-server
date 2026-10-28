@@ -36,7 +36,10 @@ pub const TTL: Duration = Duration::from_secs(24 * 60 * 60);
 /// every build, which is what lets a release ship prepared answers.
 pub fn key(kind: Kind, facts: &Facts, model: &str) -> u64 {
     // Separators that can't occur in labels, values or notes
-    let mut text = format!("v{PROMPT_VERSION}\u{1d}{}\u{1d}{model}\u{1d}", kind.as_str());
+    let mut text = format!(
+        "v{PROMPT_VERSION}\u{1d}{}\u{1d}{model}\u{1d}",
+        kind.as_str()
+    );
     for (label, value) in &facts.lines {
         text.push_str(label);
         text.push('\u{1f}');
@@ -261,7 +264,10 @@ mod tests {
             &format!("\"promptVersion\":{PROMPT_VERSION}"),
             "\"promptVersion\":1",
         );
-        assert_eq!(Prepared::parse(old.as_bytes()).answer(Kind::Setting, &f), None);
+        assert_eq!(
+            Prepared::parse(old.as_bytes()).answer(Kind::Setting, &f),
+            None
+        );
         assert!(Prepared::parse(b"not json").answers.is_empty());
     }
 }

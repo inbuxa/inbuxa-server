@@ -657,12 +657,20 @@ mod tests {
             security.loiter_ban_period,
             security.scan_ban_period,
         ] {
-            assert_eq!(period.map(|p| p.into_inner().as_millis() as u64), Some(30 * DAY));
+            assert_eq!(
+                period.map(|p| p.into_inner().as_millis() as u64),
+                Some(30 * DAY)
+            );
         }
-        assert_eq!(classifier.hold_samples_for.into_inner().as_millis() as u64, 90 * DAY);
+        assert_eq!(
+            classifier.hold_samples_for.into_inner().as_millis() as u64,
+            90 * DAY
+        );
         assert!(!pyzor.enable);
         assert_eq!(
-            retention.hold_traces_for.map(|p| p.into_inner().as_millis() as u64),
+            retention
+                .hold_traces_for
+                .map(|p| p.into_inner().as_millis() as u64),
             Some(14 * DAY)
         );
     }
@@ -680,7 +688,10 @@ mod tests {
             &mut SpamPyzor::default(),
             &mut retention,
         );
-        assert_eq!(retention.archive_deleted_items_for, before.archive_deleted_items_for);
+        assert_eq!(
+            retention.archive_deleted_items_for,
+            before.archive_deleted_items_for
+        );
         assert_eq!(retention.hold_metrics_for, before.hold_metrics_for);
         assert_eq!(retention.expunge_trash_after, before.expunge_trash_after);
     }

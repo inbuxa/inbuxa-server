@@ -255,7 +255,10 @@ impl CalendarGet for Server {
                                     calendar.acls.effective_acl(access_token),
                                 )
                             } else {
-                                JmapRights::owner_rights::<calendar::Calendar>(access_token, account_id)
+                                JmapRights::owner_rights::<calendar::Calendar>(
+                                    access_token,
+                                    account_id,
+                                )
                             },
                         );
                     }

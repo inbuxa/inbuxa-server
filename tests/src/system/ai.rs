@@ -16,12 +16,12 @@ use crate::utils::{
     sieve::SieveConnection,
     smtp::SmtpConnection,
 };
-use imap_proto::ResponseType;
 use base64::{Engine, engine::general_purpose::STANDARD};
 use common::enterprise::llm::{ChatCompletionChoice, ChatCompletionResponse, Message};
 use email::cache::MessageCacheFetch;
 use http_proto::{HttpResponse, JsonResponse, ToHttpResponse};
 use hyper::StatusCode;
+use imap_proto::ResponseType;
 use registry::schema::{
     enums::AiModelType,
     prelude::{ObjectType, Property},
@@ -72,7 +72,12 @@ impl Stub {
     }
 
     pub(super) fn last(&self) -> (ahash::AHashMap<String, String>, Value) {
-        self.requests.lock().unwrap().last().cloned().expect("a request")
+        self.requests
+            .lock()
+            .unwrap()
+            .last()
+            .cloned()
+            .expect("a request")
     }
 }
 
@@ -170,7 +175,13 @@ pub async fn test(test: &mut TestServer) {
     let (stub, _guard) = spawn_stub(test).await;
 
     // Acceptance test 1: nothing configured, nothing sent (AI-1)
-    assert!(admin.registry_query_all(ObjectType::AiModel).await.is_empty(), "test 1");
+    assert!(
+        admin
+            .registry_query_all(ObjectType::AiModel)
+            .await
+            .is_empty(),
+        "test 1"
+    );
     let response = admin
         .jmap_method_call("x:SpamLlm/get", json!({"ids": ["singleton"]}))
         .await;
@@ -219,7 +230,9 @@ pub async fn test(test: &mut TestServer) {
         "test 3"
     );
     assert!(
-        header(&headers, "X-Spam-Result").unwrap().contains("LLM_UNSOLICITED_HIGH"),
+        header(&headers, "X-Spam-Result")
+            .unwrap()
+            .contains("LLM_UNSOLICITED_HIGH"),
         "AI-14"
     );
 
@@ -229,17 +242,29 @@ pub async fn test(test: &mut TestServer) {
     assert_eq!(messages.len(), 2, "test 6");
     assert_eq!(messages[0]["role"], "system");
     let system = messages[0]["content"].as_str().unwrap();
-    assert!(system.starts_with(PROMPT) && system.contains("data to classify"), "test 6");
+    assert!(
+        system.starts_with(PROMPT) && system.contains("data to classify"),
+        "test 6"
+    );
     let user_text = messages[1]["content"].as_str().unwrap();
-    assert!(user_text.contains("Subject: Commas") && user_text.contains("Buy now."), "test 6");
-    assert!(!user_text.contains("example.org"), "test 6: no addresses: {user_text}");
+    assert!(
+        user_text.contains("Subject: Commas") && user_text.contains("Buy now."),
+        "test 6"
+    );
+    assert!(
+        !user_text.contains("example.org"),
+        "test 6: no addresses: {user_text}"
+    );
     assert!(first.get("user").is_none(), "AI-8: no user field");
     let nonce = user_text
         .strip_prefix("-----BEGIN EMAIL ")
         .and_then(|rest| rest.split_once("-----"))
         .map(|(nonce, _)| nonce.to_string())
         .expect("test 6: the begin marker");
-    assert!(user_text.ends_with(&format!("-----END EMAIL {nonce}-----")), "test 6");
+    assert!(
+        user_text.ends_with(&format!("-----END EMAIL {nonce}-----")),
+        "test 6"
+    );
     deliver_raw(
         &[USER],
         &format!(
@@ -255,11 +280,20 @@ pub async fn test(test: &mut TestServer) {
     let (_, second) = stub.last();
     let user_text = second["messages"][1]["content"].as_str().unwrap();
     assert!(!user_text.contains(&nonce), "test 6: a fresh nonce");
-    assert!(!user_text.contains("SECRET-ATTACHMENT-BYTES"), "test 6: no attachments");
-    assert!(!user_text.contains("remote.example.org"), "test 6: no headers");
+    assert!(
+        !user_text.contains("SECRET-ATTACHMENT-BYTES"),
+        "test 6: no attachments"
+    );
+    assert!(
+        !user_text.contains("remote.example.org"),
+        "test 6: no headers"
+    );
 
     // Acceptance test 4: answers that name nothing configured
-    for (n, answer) in ["Maybe,High,x", "", "no separator here"].into_iter().enumerate() {
+    for (n, answer) in ["Maybe,High,x", "", "no separator here"]
+        .into_iter()
+        .enumerate()
+    {
         stub.set(Mode::Answer(answer.into()));
         let headers = deliver_and_read(test, &user, &format!("No tag {n}"), "Hello.").await;
         assert_eq!(header(&headers, "X-Spam-LLM"), None, "test 4: {answer:?}");
@@ -281,7 +315,10 @@ pub async fn test(test: &mut TestServer) {
     deliver(&[USER], "Long", &"a".repeat(100 * 1024)).await;
     let (_, long) = stub.last();
     let text = long["messages"][1]["content"].as_str().unwrap();
-    assert!(text.len() < 2_048 + 256 && text.contains("[truncated]"), "test 7");
+    assert!(
+        text.len() < 2_048 + 256 && text.contains("[truncated]"),
+        "test 7"
+    );
 
     // Acceptance test 12: a hostile explanation and a planted header
     // AI-12 reads the first line only, so the hostile part rides on a lone CR
@@ -298,12 +335,28 @@ pub async fn test(test: &mut TestServer) {
     )
     .await;
     let headers = header_block(&raw);
-    assert_eq!(headers.matches("X-Spam-LLM:").count(), 1, "test 12: {headers}");
-    assert!(!headers.contains("trust me"), "test 12: the planted header is gone");
-    assert!(!headers.contains("X-Injected"), "test 12: no injected header");
-    assert!(!headers.contains("X-Second-Line"), "test 12: first line only");
+    assert_eq!(
+        headers.matches("X-Spam-LLM:").count(),
+        1,
+        "test 12: {headers}"
+    );
+    assert!(
+        !headers.contains("trust me"),
+        "test 12: the planted header is gone"
+    );
+    assert!(
+        !headers.contains("X-Injected"),
+        "test 12: no injected header"
+    );
+    assert!(
+        !headers.contains("X-Second-Line"),
+        "test 12: first line only"
+    );
     let llm = header(&headers, "X-Spam-LLM").unwrap();
-    assert!(llm.starts_with("LLM_HARMFUL_HIGH (") && llm.contains("=?UTF-8?B?"), "test 12: {llm}");
+    assert!(
+        llm.starts_with("LLM_HARMFUL_HIGH (") && llm.contains("=?UTF-8?B?"),
+        "test 12: {llm}"
+    );
 
     // Acceptance test 11: the model's tag moves the score only so far, and
     // never rejects on its own
@@ -363,7 +416,9 @@ pub async fn test(test: &mut TestServer) {
     stub.set(Mode::Answer("Harmful,High,x".into()));
     let headers = deliver_and_read(test, &user, "Rule", "Hello.").await;
     assert!(
-        header(&headers, "X-Spam-Result").unwrap_or_default().contains("AI_RULE_FIRED"),
+        header(&headers, "X-Spam-Result")
+            .unwrap_or_default()
+            .contains("AI_RULE_FIRED"),
         "test 14: {headers}"
     );
     admin
@@ -377,23 +432,36 @@ pub async fn test(test: &mut TestServer) {
     let before = stub.count();
     let headers = deliver_and_read(test, &user, "Redirect", "Hello.").await;
     assert_eq!(header(&headers, "X-Spam-LLM"), None, "test 15");
-    assert_eq!(stub.count(), before + 1, "test 15: one request, not followed");
+    assert_eq!(
+        stub.count(),
+        before + 1,
+        "test 15: one request, not followed"
+    );
 
     // Acceptance test 8: a model that doesn't answer in time costs nothing
     // The test client waits 1.5s for a reply, so the ceiling is short here
     admin.set_limits(json!({"spamCallCeiling": 500})).await;
-    stub.set(Mode::Sleep(Duration::from_secs(3), "Unsolicited,High,x".into()));
+    stub.set(Mode::Sleep(
+        Duration::from_secs(3),
+        "Unsolicited,High,x".into(),
+    ));
     let started = Instant::now();
     let headers = deliver_and_read(test, &user, "Slow", "Hello.").await;
     assert_eq!(header(&headers, "X-Spam-LLM"), None, "test 8");
-    assert!(started.elapsed() < Duration::from_secs(3), "test 8: within the ceiling");
+    assert!(
+        started.elapsed() < Duration::from_secs(3),
+        "test 8: within the ceiling"
+    );
     tokio::time::sleep(Duration::from_secs(3)).await;
 
     // Acceptance test 10: one slot, two messages at once
     admin
         .set_limits(json!({"spamCallCeiling": 5000, "maxConcurrentCalls": 1}))
         .await;
-    stub.set(Mode::Sleep(Duration::from_millis(1000), "Unsolicited,High,x".into()));
+    stub.set(Mode::Sleep(
+        Duration::from_millis(1000),
+        "Unsolicited,High,x".into(),
+    ));
     let calls_before = stub.count();
     let join_started = Instant::now();
     let (a, b) = tokio::join!(
@@ -402,7 +470,10 @@ pub async fn test(test: &mut TestServer) {
     );
     let _ = (a, b);
     assert_eq!(stub.count() - calls_before, 1, "test 10: one call");
-    assert!(join_started.elapsed() < Duration::from_millis(2500), "test 10: at once");
+    assert!(
+        join_started.elapsed() < Duration::from_millis(2500),
+        "test 10: at once"
+    );
     let tagged = [
         read_by_subject(test, &user, "Concurrent A").await,
         read_by_subject(test, &user, "Concurrent B").await,
@@ -437,7 +508,12 @@ pub async fn test(test: &mut TestServer) {
         STANDARD.encode(format!("\0{USER}\0{SECRET}"))
     ))
     .await;
-    if lmtp.read(1, u8::MAX).await.iter().any(|l| l.starts_with("235")) {
+    if lmtp
+        .read(1, u8::MAX)
+        .await
+        .iter()
+        .any(|l| l.starts_with("235"))
+    {
         lmtp.ingest(
             USER,
             &[USER],
@@ -465,12 +541,12 @@ pub async fn test(test: &mut TestServer) {
         })
         .await;
     let fetched = admin
-        .jmap_method_call(
-            "x:AiModel/get",
-            json!({"ids": [secret_model.to_string()]}),
-        )
+        .jmap_method_call("x:AiModel/get", json!({"ids": [secret_model.to_string()]}))
         .await;
-    assert!(!fetched.to_string().contains("token-from-value"), "test 16: /get");
+    assert!(
+        !fetched.to_string().contains("token-from-value"),
+        "test 16: /get"
+    );
 
     // Acceptance tests 17 and 18: llm_prompt from a user's Sieve script
     let echo = admin
@@ -492,14 +568,26 @@ pub async fn test(test: &mut TestServer) {
     ))
     .await;
     let headers = deliver_and_read(test, &user, "Sieve", "Hello.").await;
-    assert_eq!(header(&headers, "X-Llm-Echo").as_deref(), Some("hello world"), "test 17");
-    assert_eq!(header(&headers, "X-Llm-Unknown").as_deref(), Some("0"), "test 18");
+    assert_eq!(
+        header(&headers, "X-Llm-Echo").as_deref(),
+        Some("hello world"),
+        "test 17"
+    );
+    assert_eq!(
+        header(&headers, "X-Llm-Unknown").as_deref(),
+        Some("0"),
+        "test 18"
+    );
 
     // Acceptance test 19: the account's hourly limit
     admin.set_limits(json!({"userCallsPerHour": 1})).await;
     let before = stub.count();
     let headers = deliver_and_read(test, &user, "Over the limit", "Hello.").await;
-    assert_eq!(header(&headers, "X-Llm-Echo").as_deref(), Some("0"), "test 19");
+    assert_eq!(
+        header(&headers, "X-Llm-Echo").as_deref(),
+        Some("0"),
+        "test 19"
+    );
     assert_eq!(
         stub.count(),
         before + 1,
@@ -512,7 +600,10 @@ pub async fn test(test: &mut TestServer) {
     let (t_admin, t_id, t_domain) = admin.brand_new_tenant_admin().await;
     for (method, args) in [
         ("x:AiModel/get", json!({"ids": null})),
-        ("x:SpamLlm/set", json!({"update": {"singleton": {"@type": "Disable"}}})),
+        (
+            "x:SpamLlm/set",
+            json!({"update": {"singleton": {"@type": "Disable"}}}),
+        ),
     ] {
         let response = t_admin.jmap_method_call(method, args).await;
         let text = response.to_string();
@@ -560,27 +651,28 @@ pub async fn test(test: &mut TestServer) {
         )
         .await;
     let _ = refused;
-    let response = admin.registry_destroy(ObjectType::AiModel, [model_id]).await;
+    let response = admin
+        .registry_destroy(ObjectType::AiModel, [model_id])
+        .await;
     assert!(
         response.to_string().contains("notDestroyed"),
         "AI-18: {response:?}"
     );
 
     // Clean up
-    admin
-        .registry_update_setting(SpamLlm::Disable, &[])
-        .await;
+    admin.registry_update_setting(SpamLlm::Disable, &[]).await;
     for id in ids.into_iter().chain([model_id, secret_model, echo]) {
         admin
             .registry_destroy(ObjectType::AiModel, [id])
             .await
             .assert_destroyed(&[id]);
     }
-    admin.set_limits(json!({
-        "spamCallCeiling": null, "maxConcurrentCalls": null, "failureBackoff": null,
-        "userCallsPerHour": null
-    }))
-    .await;
+    admin
+        .set_limits(json!({
+            "spamCallCeiling": null, "maxConcurrentCalls": null, "failureBackoff": null,
+            "userCallsPerHour": null
+        }))
+        .await;
     admin.destroy_account(t_admin).await;
     admin
         .registry_destroy(ObjectType::Domain, [t_domain])
@@ -781,7 +873,10 @@ impl Account {
             )
             .await;
         assert!(
-            response.0.pointer("/methodResponses/0/1/updated/singleton").is_some(),
+            response
+                .0
+                .pointer("/methodResponses/0/1/updated/singleton")
+                .is_some(),
             "inbuxa:AiLimits/set: {response:?}"
         );
     }
@@ -818,16 +913,17 @@ impl Account {
                 ..Default::default()
             })
             .await;
-        let domain = self.registry_create_object(registry::schema::structs::Domain {
-            name: "ai-t.example.org".into(),
-            is_enabled: true,
-            member_tenant_id: Some(tenant),
-            certificate_management: registry::schema::structs::CertificateManagement::Manual,
-            dns_management: registry::schema::structs::DnsManagement::Manual,
-            dkim_management: registry::schema::structs::DkimManagement::Manual,
-            ..Default::default()
-        })
-        .await;
+        let domain = self
+            .registry_create_object(registry::schema::structs::Domain {
+                name: "ai-t.example.org".into(),
+                is_enabled: true,
+                member_tenant_id: Some(tenant),
+                certificate_management: registry::schema::structs::CertificateManagement::Manual,
+                dns_management: registry::schema::structs::DnsManagement::Manual,
+                dkim_management: registry::schema::structs::DkimManagement::Manual,
+                ..Default::default()
+            })
+            .await;
         let t_admin = self
             .create_user_account("tadmin@ai-t.example.org", SECRET, "T admin", &[], vec![])
             .await;

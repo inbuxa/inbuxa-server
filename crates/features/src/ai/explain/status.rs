@@ -36,7 +36,10 @@ won't help until something changes, and the sender is sent a bounce."
     };
     let mut parts = enhanced.split('.');
     let (_, subject, detail) = (parts.next(), parts.next(), parts.next());
-    if let Some(note) = subject.and_then(|s| s.parse::<u16>().ok()).and_then(subject_note) {
+    if let Some(note) = subject
+        .and_then(|s| s.parse::<u16>().ok())
+        .and_then(subject_note)
+    {
         notes.push(note.to_string());
     }
     if let (Some(subject), Some(detail)) = (subject, detail)
@@ -49,14 +52,20 @@ won't help until something changes, and the sender is sent a bounce."
 
 fn subject_note(subject: u16) -> Option<&'static str> {
     Some(match subject {
-        0 => "Subject x.0 is 'other or undefined': the code alone says little; the reply text matters.",
+        0 => {
+            "Subject x.0 is 'other or undefined': the code alone says little; the reply text matters."
+        }
         1 => "Subject x.1 concerns the address: the mailbox or domain named in the envelope.",
         2 => "Subject x.2 concerns the recipient's mailbox itself: full, disabled, or refusing.",
-        3 => "Subject x.3 concerns the receiving mail system: its capacity, configuration or features.",
+        3 => {
+            "Subject x.3 concerns the receiving mail system: its capacity, configuration or features."
+        }
         4 => "Subject x.4 concerns the network or routing: DNS, connections, or loops.",
         5 => "Subject x.5 concerns the SMTP conversation: a command or its order was refused.",
         6 => "Subject x.6 concerns the message's content or format.",
-        7 => "Subject x.7 concerns security or policy: authentication checks, reputation, or rules on the receiving side.",
+        7 => {
+            "Subject x.7 concerns security or policy: authentication checks, reputation, or rules on the receiving side."
+        }
         _ => return None,
     })
 }
@@ -84,7 +93,9 @@ fn detail_note(subject: &str, detail: &str) -> Option<&'static str> {
         ("7", "23") => "the sender's SPF check failed",
         ("7", "24") => "the SPF check couldn't be completed",
         ("7", "25") => "the sending IP's reverse DNS check failed",
-        ("7", "26") => "several authentication checks failed together, typically SPF and DKIM, so DMARC failed",
+        ("7", "26") => {
+            "several authentication checks failed together, typically SPF and DKIM, so DMARC failed"
+        }
         ("7", "27") => "the sender's domain publishes a null MX, so it can't receive the bounce",
         ("7", "28") => "the sender is sending too much mail to this receiver",
         _ => return None,

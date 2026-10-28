@@ -255,7 +255,9 @@ impl FileNodeSet for Server {
             if has_acl_changes && access_token.is_group_member_only(account_id) {
                 response.not_created.append(
                     id,
-                    SetError::forbidden().with_description("This belongs to a group. Only an administrator can change who has it."),
+                    SetError::forbidden().with_description(
+                        "This belongs to a group. Only an administrator can change who has it.",
+                    ),
                 );
                 continue 'create;
             }
@@ -523,7 +525,9 @@ impl FileNodeSet for Server {
             if has_acl_changes && access_token.is_group_member_only(account_id) {
                 response.not_updated.append(
                     id,
-                    SetError::forbidden().with_description("This belongs to a group. Only an administrator can change who has it."),
+                    SetError::forbidden().with_description(
+                        "This belongs to a group. Only an administrator can change who has it.",
+                    ),
                 );
                 continue 'update;
             }

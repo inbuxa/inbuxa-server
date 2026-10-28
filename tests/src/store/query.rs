@@ -833,8 +833,7 @@ async fn test_trace_documents(store: SearchStore) {
     use registry::schema::{
         enums::SearchTracingField,
         structs::{
-            Trace, TraceEvent, TraceKeyValue, TraceValue, TraceValueString,
-            TraceValueUnsignedInt,
+            Trace, TraceEvent, TraceKeyValue, TraceValue, TraceValueString, TraceValueUnsignedInt,
         },
     };
     use services::task_manager::index::trace_search_document;
@@ -874,7 +873,10 @@ async fn test_trace_documents(store: SearchStore) {
             ),
             event(
                 EventType::Smtp(SmtpEvent::RcptTo),
-                vec![kv_u(Key::QueueId, 9_000_000_001), kv_s(Key::To, "rcpt@example.net")],
+                vec![
+                    kv_u(Key::QueueId, 9_000_000_001),
+                    kv_s(Key::To, "rcpt@example.net"),
+                ],
             ),
             event(
                 EventType::Smtp(SmtpEvent::RcptTo),
@@ -886,7 +888,10 @@ async fn test_trace_documents(store: SearchStore) {
     let delivery = Trace {
         events: vec![event(
             EventType::Delivery(DeliveryEvent::AttemptStart),
-            vec![kv_u(Key::QueueId, 9_000_000_003), kv_s(Key::Hostname, "relay.example.net")],
+            vec![
+                kv_u(Key::QueueId, 9_000_000_003),
+                kv_s(Key::Hostname, "relay.example.net"),
+            ],
         )]
         .into(),
     };
@@ -895,10 +900,10 @@ async fn test_trace_documents(store: SearchStore) {
         trace_search_document(101, &delivery, &fields),
     ];
     assert!(
-        documents
-            .iter()
-            .all(|d| d.has_field(&SearchField::Tracing(TracingSearchField::QueueId))
-                && d.has_field(&SearchField::Tracing(TracingSearchField::EventType))),
+        documents.iter().all(
+            |d| d.has_field(&SearchField::Tracing(TracingSearchField::QueueId))
+                && d.has_field(&SearchField::Tracing(TracingSearchField::EventType))
+        ),
         "trace documents carry a queue id and an event type"
     );
     store.index(documents).await.unwrap();
@@ -935,12 +940,25 @@ async fn test_trace_documents(store: SearchStore) {
             SearchFilter::End,
         ]
     };
-    assert_eq!(query(by_queue_id(9_000_000_001)).await, AHashSet::from_iter([100]));
-    assert_eq!(query(by_queue_id(9_000_000_002)).await, AHashSet::from_iter([100]));
-    assert_eq!(query(by_queue_id(9_000_000_003)).await, AHashSet::from_iter([101]));
+    assert_eq!(
+        query(by_queue_id(9_000_000_001)).await,
+        AHashSet::from_iter([100])
+    );
+    assert_eq!(
+        query(by_queue_id(9_000_000_002)).await,
+        AHashSet::from_iter([100])
+    );
+    assert_eq!(
+        query(by_queue_id(9_000_000_003)).await,
+        AHashSet::from_iter([101])
+    );
     assert_eq!(query(by_queue_id(9_000_000_004)).await, AHashSet::new());
     assert_eq!(
-        query(vec![SearchFilter::eq(TracingSearchField::QueueId, 9_000_000_003u64)]).await,
+        query(vec![SearchFilter::eq(
+            TracingSearchField::QueueId,
+            9_000_000_003u64
+        )])
+        .await,
         AHashSet::from_iter([101])
     );
     // By opening event type

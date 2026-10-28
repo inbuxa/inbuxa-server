@@ -72,18 +72,21 @@ pub async fn test(test: &TestServer) {
             .await
             .list()[0]["myRights"]
             .clone();
-        assert_eq!(rights["mayShare"], false, "MA-D0: {object} myRights {rights}");
-        assert_eq!(rights["mayDelete"], true, "MA-D0: {object} myRights {rights}");
+        assert_eq!(
+            rights["mayShare"], false,
+            "MA-D0: {object} myRights {rights}"
+        );
+        assert_eq!(
+            rights["mayDelete"], true,
+            "MA-D0: {object} myRights {rights}"
+        );
 
         // Shared afterwards: refused
         let response = bill
             .jmap_update_account(
                 sales,
                 object,
-                [(
-                    &id,
-                    json!({format!("shareWith/{robert_id}"): {read: true}}),
-                )],
+                [(&id, json!({format!("shareWith/{robert_id}"): {read: true}}))],
                 Vec::<(&str, &str)>::new(),
             )
             .await;

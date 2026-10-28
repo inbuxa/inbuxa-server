@@ -75,10 +75,7 @@ fn assert_server_level(access_token: &AccessToken) -> trc::Result<()> {
 /// A saved or would-be-closed listener, as the confirmation shows it (LP-16).
 fn listener_value(listener: &SavedListener) -> PValue {
     let mut out = Map::with_capacity(3);
-    out.insert_unchecked(
-        Key::Property(P::Id),
-        Value::Str(listener.id.clone().into()),
-    );
+    out.insert_unchecked(Key::Property(P::Id), Value::Str(listener.id.clone().into()));
     out.insert_unchecked(
         Key::Property(P::LegacyProtocols),
         Value::Str(listener.protocol.clone().into()),
@@ -141,13 +138,9 @@ fn to_value(
                 switch_str(policy.switch(switch_name(property).unwrap_or_default())).into(),
             ),
             P::CloseSubmission => Value::Bool(policy.close_submission),
-            P::SavedListeners => Value::Array(
-                policy
-                    .saved_listeners
-                    .iter()
-                    .map(listener_value)
-                    .collect(),
-            ),
+            P::SavedListeners => {
+                Value::Array(policy.saved_listeners.iter().map(listener_value).collect())
+            }
             P::ChangedAt => policy
                 .changed_at
                 .map(|at| Value::Number(at.into()))
@@ -338,7 +331,9 @@ pub async fn set(
     assert_server_level(access_token)?;
     let mut response = SetResponse::from_request(&request, server.core.jmap.set_max_objects)?;
     for (client_id, _) in request.unwrap_create() {
-        response.not_created.append(client_id, SetError::singleton());
+        response
+            .not_created
+            .append(client_id, SetError::singleton());
     }
     for id in request.unwrap_destroy().into_valid() {
         response.not_destroyed.append(id, SetError::singleton());
@@ -392,7 +387,10 @@ pub async fn set(
             Some(error) => response.not_updated.append(id, error),
             None => {
                 let change = server
-                    .set_protocol_policy(policy, Some(Id::from(access_token.account_id()).to_string()))
+                    .set_protocol_policy(
+                        policy,
+                        Some(Id::from(access_token.account_id()).to_string()),
+                    )
                     .await?;
 
                 // An overruled property is reported, not refused: the value

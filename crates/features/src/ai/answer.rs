@@ -132,7 +132,10 @@ pub fn header(tag: &str, explanation: Option<&str>) -> String {
     let explanation = explanation.map(sanitize).filter(|e| !e.is_empty());
     if let Some(explanation) = explanation {
         let mut words = if explanation.is_ascii() {
-            explanation.split(' ').map(str::to_string).collect::<Vec<_>>()
+            explanation
+                .split(' ')
+                .map(str::to_string)
+                .collect::<Vec<_>>()
         } else {
             encoded_words(&explanation)
         };
@@ -234,7 +237,10 @@ mod tests {
                 explanation: Some("Lots of commas, here".into())
             })
         );
-        assert_eq!(parse("**Harmful**, 'low'.", &r).unwrap().tag, "LLM_HARMFUL_LOW");
+        assert_eq!(
+            parse("**Harmful**, 'low'.", &r).unwrap().tag,
+            "LLM_HARMFUL_LOW"
+        );
         // Test 4: no tag
         for bad in ["Maybe,High,x", "", "no separator here", "Unsolicited,Very"] {
             assert_eq!(parse(bad, &r), None, "{bad}");
@@ -245,7 +251,10 @@ mod tests {
             pos_explanation: None,
             ..rules(&cats, &conf)
         };
-        assert_eq!(parse("Unsolicited,whatever", &r).unwrap().tag, "LLM_UNSOLICITED");
+        assert_eq!(
+            parse("Unsolicited,whatever", &r).unwrap().tag,
+            "LLM_UNSOLICITED"
+        );
     }
 
     #[test]
@@ -268,7 +277,11 @@ mod tests {
         let h = header("LLM_X", Some("Ünïcödé explanation"));
         assert!(h.contains("=?UTF-8?B?") && h.is_ascii(), "{h}");
         // Folded continuation lines start with a space
-        assert!(h.split("\r\n").skip(1).all(|l| l.is_empty() || l.starts_with(' ')));
+        assert!(
+            h.split("\r\n")
+                .skip(1)
+                .all(|l| l.is_empty() || l.starts_with(' '))
+        );
     }
 
     #[test]

@@ -34,7 +34,13 @@ macro_rules! brand_server {
 #[macro_export]
 macro_rules! brand_prodid {
     () => {
-        concat!("-//", $crate::brand!(), "//", $crate::brand_server!(), "//EN")
+        concat!(
+            "-//",
+            $crate::brand!(),
+            "//",
+            $crate::brand_server!(),
+            "//EN"
+        )
     };
 }
 
@@ -97,7 +103,12 @@ macro_rules! brand_version_full {
     // telemetry and the JMAP session's "implementation" field), and the name
     // belongs only in copyright notices and the lineage line.
     () => {
-        concat!($crate::brand_version!(), " (upstream ", env!("CARGO_PKG_VERSION"), ")")
+        concat!(
+            $crate::brand_version!(),
+            " (upstream ",
+            env!("CARGO_PKG_VERSION"),
+            ")"
+        )
     };
 }
 

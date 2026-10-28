@@ -33,20 +33,29 @@ async fn call(account: &Account, method: &str, mut arguments: Value) -> (String,
     if arguments.get("accountId").is_none() {
         arguments["accountId"] = account.id_string().into();
     }
-    let response = account.jmap_request(USING, json!([[method, arguments, "0"]])).await;
+    let response = account
+        .jmap_request(USING, json!([[method, arguments, "0"]]))
+        .await;
     let call = response
         .0
         .pointer("/methodResponses/0")
         .cloned()
         .unwrap_or_else(|| panic!("{method}: {}", response.0));
-    (call[0].as_str().unwrap_or_default().to_string(), call[1].clone())
+    (
+        call[0].as_str().unwrap_or_default().to_string(),
+        call[1].clone(),
+    )
 }
 
 /// The ids of the roles with this name and tenant, as an administrator sees them.
 async fn roles_named(admin: &Account, description: &str, tenant: Option<Id>) -> Vec<Id> {
     let mut found = Vec::new();
     for id in admin
-        .registry_query_ids(ObjectType::Role, Vec::<(&str, &str)>::new(), Vec::<&str>::new())
+        .registry_query_ids(
+            ObjectType::Role,
+            Vec::<(&str, &str)>::new(),
+            Vec::<&str>::new(),
+        )
         .await
     {
         let role = admin.registry_get::<Role>(id).await;
@@ -64,12 +73,22 @@ pub async fn test(test: &mut TestServer) {
     // The server's officer role exists, once
     let officer_role = roles_named(&admin, "Compliance Officer", None).await;
     let user_role = roles_named(&admin, "User", None).await;
-    assert_eq!(officer_role.len(), 1, "one server-level Compliance Officer role");
+    assert_eq!(
+        officer_role.len(),
+        1,
+        "one server-level Compliance Officer role"
+    );
     assert_eq!(user_role.len(), 1);
 
     // A compliance officer: the role carries a user's own permissions too
     let officer = admin
-        .create_user_account("officer@example.com", "officer-secret-4410", "Officer", &[], vec![])
+        .create_user_account(
+            "officer@example.com",
+            "officer-secret-4410",
+            "Officer",
+            &[],
+            vec![],
+        )
         .await;
     admin
         .registry_update_object(
@@ -83,7 +102,10 @@ pub async fn test(test: &mut TestServer) {
 
     // Reads and exports the audit log
     let (name, response) = call(&officer, "inbuxa:AuditEvent/query", json!({})).await;
-    assert_eq!(name, "inbuxa:AuditEvent/query", "the officer reads the audit log: {response}");
+    assert_eq!(
+        name, "inbuxa:AuditEvent/query",
+        "the officer reads the audit log: {response}"
+    );
 
     // Places and releases a hold: that is the role
     let (name, response) = call(
@@ -181,9 +203,15 @@ pub async fn test(test: &mut TestServer) {
         )
         .await;
     let (name, response) = call(&t_officer, "inbuxa:AuditEvent/query", json!({})).await;
-    assert_eq!(name, "inbuxa:AuditEvent/query", "the tenant officer reads the audit log: {response}");
+    assert_eq!(
+        name, "inbuxa:AuditEvent/query",
+        "the tenant officer reads the audit log: {response}"
+    );
     let (name, response) = call(&t_officer, "inbuxa:LegalHold/get", json!({"ids": null})).await;
-    assert_eq!(name, "error", "LH-13: the tenant officer read holds: {response}");
+    assert_eq!(
+        name, "error",
+        "LH-13: the tenant officer read holds: {response}"
+    );
 
     // The data inventory (§6): the officer reads it, facts not verdicts
     let (name, response) = call(&officer, "inbuxa:DataInventory/get", json!({"ids": null})).await;
@@ -195,23 +223,39 @@ pub async fn test(test: &mut TestServer) {
         .iter()
         .filter_map(|i| i["id"].as_str())
         .collect();
-    assert!(ids.contains(&"x:UserAccount") && ids.contains(&"log-file"), "{ids:?}");
+    assert!(
+        ids.contains(&"x:UserAccount") && ids.contains(&"log-file"),
+        "{ids:?}"
+    );
     assert!(inventory["summary"]["collected"].as_u64().unwrap_or(0) > 0);
-    assert!(!inventory.to_string().to_lowercase().contains("complian"), "facts only");
+    assert!(
+        !inventory.to_string().to_lowercase().contains("complian"),
+        "facts only"
+    );
 
     // Somebody without the permission is refused
     let plain = admin
-        .create_user_account("plain@example.com", "plain-secret-1182", "Plain", &[], vec![])
+        .create_user_account(
+            "plain@example.com",
+            "plain-secret-1182",
+            "Plain",
+            &[],
+            vec![],
+        )
         .await;
     let (name, _) = call(&plain, "inbuxa:DataInventory/get", json!({"ids": null})).await;
-    assert_eq!(name, "error", "a user without sysComplianceGet read the inventory");
+    assert_eq!(
+        name, "error",
+        "a user without sysComplianceGet read the inventory"
+    );
 
     // A tenant's officer sees the tenant's slice, and no processors
     let (_, response) = call(&t_officer, "inbuxa:DataInventory/get", json!({"ids": null})).await;
     let slice = &response["list"][0];
     assert!(
-        slice["items"].as_array().is_some_and(|items| !items.is_empty()
-            && items.iter().all(|i| i["scope"] == "tenant")),
+        slice["items"]
+            .as_array()
+            .is_some_and(|items| !items.is_empty() && items.iter().all(|i| i["scope"] == "tenant")),
         "{slice}"
     );
     assert_eq!(slice["processors"], json!([]));
@@ -251,10 +295,14 @@ pub async fn test(test: &mut TestServer) {
     assert!(
         snapshots
             .iter()
-            .any(|s| s["trigger"]["kind"] == "settingChanged" && s["trigger"]["setting"] == "x:WebHook"),
+            .any(|s| s["trigger"]["kind"] == "settingChanged"
+                && s["trigger"]["setting"] == "x:WebHook"),
         "the webhook's snapshot: {snapshots:?}"
     );
-    assert!(snapshots.iter().all(|s| s.get("inventory").is_none()), "left out when not asked");
+    assert!(
+        snapshots.iter().all(|s| s.get("inventory").is_none()),
+        "left out when not asked"
+    );
 
     // A retention change reads through
     let (_, response) = call(
@@ -291,7 +339,9 @@ pub async fn test(test: &mut TestServer) {
     let registry = test.server.registry();
     let store = test.server.store();
     assert!(
-        !common::manager::spam_rules::apply_new_install(registry, store).await.unwrap(),
+        !common::manager::spam_rules::apply_new_install(registry, store)
+            .await
+            .unwrap(),
         "no note, no change"
     );
     let enabled = |response: &Value| response["list"][0]["enable"].clone();
@@ -304,12 +354,20 @@ pub async fn test(test: &mut TestServer) {
             .is_some_and(|p| p.iter().any(|p| p["host"] == "ebl.msbl.org")),
         "the zone, not the hash: {response}"
     );
-    common::manager::spam_rules::mark_new_install(store).await.unwrap();
-    assert!(common::manager::spam_rules::apply_new_install(registry, store).await.unwrap());
+    common::manager::spam_rules::mark_new_install(store)
+        .await
+        .unwrap();
+    assert!(
+        common::manager::spam_rules::apply_new_install(registry, store)
+            .await
+            .unwrap()
+    );
     let (_, response) = call(&admin, "x:SpamDnsblServer/get", json!({"ids": [msbl]})).await;
     assert_eq!(enabled(&response), json!(false), "{response}");
     assert!(
-        !common::manager::spam_rules::apply_new_install(registry, store).await.unwrap(),
+        !common::manager::spam_rules::apply_new_install(registry, store)
+            .await
+            .unwrap(),
         "the note works once"
     );
 
@@ -320,13 +378,29 @@ pub async fn test(test: &mut TestServer) {
             ..Default::default()
         })
         .await;
-    assert_eq!(roles_named(&admin, "Compliance Officer", Some(spare)).await.len(), 1);
-    let (name, response) = call(&admin, "x:Tenant/set", json!({"destroy": [spare.to_string()]})).await;
+    assert_eq!(
+        roles_named(&admin, "Compliance Officer", Some(spare))
+            .await
+            .len(),
+        1
+    );
+    let (name, response) = call(
+        &admin,
+        "x:Tenant/set",
+        json!({"destroy": [spare.to_string()]}),
+    )
+    .await;
     assert!(
-        response["destroyed"].as_array().is_some_and(|d| d.iter().any(|i| i == &json!(spare.to_string()))),
+        response["destroyed"]
+            .as_array()
+            .is_some_and(|d| d.iter().any(|i| i == &json!(spare.to_string()))),
         "the tenant was deleted: {name} {response}"
     );
-    assert!(roles_named(&admin, "Compliance Officer", Some(spare)).await.is_empty());
+    assert!(
+        roles_named(&admin, "Compliance Officer", Some(spare))
+            .await
+            .is_empty()
+    );
 }
 
 #[ignore]

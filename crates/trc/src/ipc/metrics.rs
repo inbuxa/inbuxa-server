@@ -254,10 +254,10 @@ impl Collector {
             &DNS_LOOKUP_TIME,
         ];
         HISTOGRAMS
-        .iter()
-        .copied()
-        .chain(CONNECTION_METRICS.iter().map(|m| &m.elapsed))
-        .filter(|h| h.is_active())
+            .iter()
+            .copied()
+            .chain(CONNECTION_METRICS.iter().map(|m| &m.elapsed))
+            .filter(|h| h.is_active())
     }
 
     #[inline(always)]

@@ -70,7 +70,8 @@ pub struct Catalog {
 /// (`tools/fork/privacy-check.py`), so a parse failure is a build bug.
 pub fn catalog() -> &'static Catalog {
     static CATALOG_PARSED: OnceLock<Catalog> = OnceLock::new();
-    CATALOG_PARSED.get_or_init(|| toml::from_str(CATALOG).expect("resources/privacy/catalog.toml parses"))
+    CATALOG_PARSED
+        .get_or_init(|| toml::from_str(CATALOG).expect("resources/privacy/catalog.toml parses"))
 }
 
 /// A duration setting's live value.
@@ -176,11 +177,14 @@ impl Inventory {
 /// The host part of an endpoint as configured: a URL's host, or the string
 /// itself when it is a bare host or zone.
 pub fn host_of(endpoint: &str) -> String {
-    let rest = endpoint.split_once("://").map_or(endpoint, |(_, rest)| rest);
+    let rest = endpoint
+        .split_once("://")
+        .map_or(endpoint, |(_, rest)| rest);
     let rest = rest.rsplit_once('@').map_or(rest, |(_, host)| host);
     let host = rest.split(['/', '?', '#']).next().unwrap_or(rest);
     let host = if host.starts_with('[') {
-        host.split_once(']').map_or(host, |(h, _)| h.trim_start_matches('['))
+        host.split_once(']')
+            .map_or(host, |(h, _)| h.trim_start_matches('['))
     } else {
         host.rsplit_once(':')
             .filter(|(_, port)| port.chars().all(|c| c.is_ascii_digit()))
@@ -195,7 +199,9 @@ pub fn is_loopback(endpoint: &str) -> bool {
     host == "localhost"
         || host.ends_with(".localhost")
         || host == "::1"
-        || host.parse::<std::net::IpAddr>().is_ok_and(|ip| ip.is_loopback())
+        || host
+            .parse::<std::net::IpAddr>()
+            .is_ok_and(|ip| ip.is_loopback())
 }
 
 fn retention_out(retention: Option<&Retention>, facts: &LiveFacts) -> RetentionOut {
@@ -371,7 +377,9 @@ mod tests {
         facts
             .durations
             .insert("inbuxa:LogSettings.keepForDays".into(), Days::Days(30));
-        facts.endpoints.insert("spam-pyzor".into(), vec!["public.pyzor.org:24441".into()]);
+        facts
+            .endpoints
+            .insert("spam-pyzor".into(), vec!["public.pyzor.org:24441".into()]);
         facts.collected.insert("spam-pyzor".into(), false);
         facts.endpoints.insert(
             "spam-dnsbl".into(),
@@ -386,7 +394,11 @@ mod tests {
         assert_eq!(item(&inventory, "log-file").retention.days, Some(30));
         // Pyzor off: listed, not collected, not a processor
         assert!(!item(&inventory, "spam-pyzor").collected);
-        let hosts: Vec<_> = inventory.processors.iter().map(|p| p.host.as_str()).collect();
+        let hosts: Vec<_> = inventory
+            .processors
+            .iter()
+            .map(|p| p.host.as_str())
+            .collect();
         assert_eq!(hosts, vec!["bl.spamcop.net", "zen.spamhaus.org"]);
         // Nothing personal isn't listed
         assert!(inventory.items.iter().all(|i| i.id != "x:Http"));
@@ -402,8 +414,13 @@ mod tests {
         let archived = item(&inventory, "x:ArchivedEmail");
         assert!(archived.leaves_host);
         assert_eq!(archived.endpoints, vec!["https://s3.example.net/mail"]);
-        assert!(inventory.processors.iter().any(|p| p.host == "s3.example.net"
-            && p.sources.contains(&"x:ArchivedEmail".to_string())));
+        assert!(
+            inventory
+                .processors
+                .iter()
+                .any(|p| p.host == "s3.example.net"
+                    && p.sources.contains(&"x:ArchivedEmail".to_string()))
+        );
         // What lives only in the data store stays
         assert!(!item(&inventory, "x:UserAccount").leaves_host);
     }
@@ -412,9 +429,10 @@ mod tests {
     fn a_hosted_ai_endpoint_is_a_processor_of_content() {
         let mut facts = facts();
         facts.collected.insert("spam-llm".into(), true);
-        facts
-            .endpoints
-            .insert("spam-llm".into(), vec!["https://api.example-ai.com/v1".into()]);
+        facts.endpoints.insert(
+            "spam-llm".into(),
+            vec!["https://api.example-ai.com/v1".into()],
+        );
         let inventory = evaluate(catalog(), &facts, false);
         let ai = inventory
             .processors
@@ -440,7 +458,9 @@ mod tests {
     #[test]
     fn a_tenant_sees_its_slice_and_no_processors() {
         let mut facts = facts();
-        facts.endpoints.insert("spam-dnsbl".into(), vec!["zen.spamhaus.org".into()]);
+        facts
+            .endpoints
+            .insert("spam-dnsbl".into(), vec!["zen.spamhaus.org".into()]);
         let inventory = evaluate(catalog(), &facts, true);
         assert!(inventory.items.iter().all(|i| i.scope == "tenant"));
         assert!(inventory.items.iter().any(|i| i.id == "x:UserAccount"));
@@ -450,7 +470,10 @@ mod tests {
 
     #[test]
     fn hosts_are_read_from_urls_and_bare_names() {
-        assert_eq!(host_of("https://user:pw@Hooks.Example.com:8443/path?x"), "hooks.example.com");
+        assert_eq!(
+            host_of("https://user:pw@Hooks.Example.com:8443/path?x"),
+            "hooks.example.com"
+        );
         assert_eq!(host_of("public.pyzor.org:24441"), "public.pyzor.org");
         assert_eq!(host_of("zen.spamhaus.org."), "zen.spamhaus.org");
         assert_eq!(host_of("http://[::1]:11434/v1"), "::1");
@@ -462,14 +485,20 @@ mod tests {
         assert!(is_loopback("http://127.0.0.1:11434/v1"));
         assert!(is_loopback("http://localhost:8080"));
         assert!(is_loopback("http://[::1]:11434"));
-        assert!(!is_loopback("http://10.77.0.2:11434"), "another node leaves the host");
+        assert!(
+            !is_loopback("http://10.77.0.2:11434"),
+            "another node leaves the host"
+        );
         assert!(!is_loopback("https://api.example-ai.com"));
     }
 
     #[test]
     fn a_configured_endpoint_means_it_leaves() {
         let mut facts = facts();
-        facts.endpoints.insert("x:Trace".into(), vec!["postgres://traces.example.net".into()]);
+        facts.endpoints.insert(
+            "x:Trace".into(),
+            vec!["postgres://traces.example.net".into()],
+        );
         let inventory = evaluate(catalog(), &facts, false);
         assert!(item(&inventory, "x:Trace").leaves_host);
     }
@@ -481,6 +510,9 @@ mod tests {
         let inventory = evaluate(catalog(), &facts, false);
         let summary = inventory.summary();
         assert!(summary.collected > 10);
-        assert!(summary.unbounded >= 1, "sources the catalog marks unbounded");
+        assert!(
+            summary.unbounded >= 1,
+            "sources the catalog marks unbounded"
+        );
     }
 }

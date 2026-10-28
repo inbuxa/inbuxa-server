@@ -9,7 +9,6 @@
 // inbuxa: composite stores (sharded members, read replicas) nest store
 // futures deeply enough to pass rustc's default query depth
 #![recursion_limit = "512"]
-
 #![warn(clippy::large_futures)]
 
 pub mod cache;

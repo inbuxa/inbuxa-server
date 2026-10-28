@@ -6,28 +6,25 @@
  * Modified by Coffey Labs in 2026 for INBUXA.
  */
 
-pub mod antispam;
-pub mod authentication;
+pub mod account_lock; // inbuxa: account lock with delegation
 pub mod ai;
 pub mod ai_calibration;
 pub mod ai_explain;
-pub mod account_lock; // inbuxa: account lock with delegation
-pub mod sharing_policy; // inbuxa: MA-C, who may share mail
-pub mod front_ends; // inbuxa: C-4, where the front ends are
-pub mod legal_hold; // inbuxa: legal hold
-pub mod compliance; // inbuxa: the compliance roles
-pub mod mail_rules; // inbuxa: DLP and mail flow rules
-pub mod security_acceptances; // inbuxa: accepted security to-do items
-pub mod deliverability; // inbuxa: the deliverability check
-pub mod scheduled_reports; // inbuxa: scheduled reports and the weekly digest
-pub mod journal; // inbuxa: journaling
+pub mod antispam;
 pub mod audit; // inbuxa: the audit log
+pub mod authentication;
 pub mod authorization;
 pub mod auto_reload; // inbuxa: registry writes apply at once
 pub mod branding;
+pub mod compliance; // inbuxa: the compliance roles
 pub mod crypto;
+pub mod deliverability; // inbuxa: the deliverability check
 pub mod delivery;
 pub mod directory;
+pub mod front_ends; // inbuxa: C-4, where the front ends are
+pub mod journal; // inbuxa: journaling
+pub mod legal_hold; // inbuxa: legal hold
+pub mod mail_rules; // inbuxa: DLP and mail flow rules
 pub mod masked_email;
 pub mod masked_secrets; // inbuxa: "****" is never saved as a secret
 pub mod monitoring;
@@ -35,10 +32,13 @@ pub mod oidc;
 pub mod purge;
 pub mod quota;
 pub mod reload; // inbuxa: reloads and build errors
+pub mod scheduled_reports; // inbuxa: scheduled reports and the weekly digest
 pub mod security;
+pub mod security_acceptances; // inbuxa: accepted security to-do items
+pub mod sharing_policy; // inbuxa: MA-C, who may share mail
 pub mod task;
-pub mod tracer_reload; // inbuxa: tracers start over when their settings change
 pub mod tenant;
+pub mod tracer_reload; // inbuxa: tracers start over when their settings change
 pub mod undelete;
 
 use crate::utils::server::TestServerBuilder;

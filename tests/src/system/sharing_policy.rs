@@ -24,7 +24,9 @@ const USING: &[&str] = &[
 
 impl Account {
     async fn one(&self, method: &str, arguments: Value) -> Value {
-        let response = self.jmap_request(USING, json!([[method, arguments, "0"]])).await;
+        let response = self
+            .jmap_request(USING, json!([[method, arguments, "0"]]))
+            .await;
         response
             .0
             .pointer("/methodResponses/0")
@@ -62,7 +64,11 @@ impl Account {
     /// Shares the Inbox with `with` (read), or stops with `None` rights.
     async fn share_inbox(&self, with: &Account, read: bool) -> Value {
         let inbox = self.inbox().await;
-        let rights = if read { json!({"mayReadItems": true}) } else { Value::Null };
+        let rights = if read {
+            json!({"mayReadItems": true})
+        } else {
+            Value::Null
+        };
         self.one(
             "Mailbox/set",
             json!({"accountId": self.id_string(),
@@ -116,13 +122,31 @@ pub async fn sharing_policy_tests() {
         })
         .await;
     let ann = admin
-        .create_user_account("ann@school.example.org", "ann-secret-6610", "Ann", &[], vec![])
+        .create_user_account(
+            "ann@school.example.org",
+            "ann-secret-6610",
+            "Ann",
+            &[],
+            vec![],
+        )
         .await;
     let ben = admin
-        .create_user_account("ben@school.example.org", "ben-secret-6611", "Ben", &[], vec![])
+        .create_user_account(
+            "ben@school.example.org",
+            "ben-secret-6611",
+            "Ben",
+            &[],
+            vec![],
+        )
         .await;
     let head = admin
-        .create_user_account("head@school.example.org", "head-secret-6612", "Head", &[], vec![])
+        .create_user_account(
+            "head@school.example.org",
+            "head-secret-6612",
+            "Head",
+            &[],
+            vec![],
+        )
         .await;
     admin
         .registry_update_object(
@@ -155,20 +179,32 @@ pub async fn sharing_policy_tests() {
     let response = head
         .policy(json!({"singleton": {"mailSharing": "disabled"}}))
         .await;
-    assert_eq!(response["notUpdated"]["singleton"]["type"], "forbidden", "MA-13: {response}");
+    assert_eq!(
+        response["notUpdated"]["singleton"]["type"], "forbidden",
+        "MA-13: {response}"
+    );
 
     // MA-11: what was shared gives nothing now, and nothing new is shared
     assert_eq!(ann.mail_sharing().await, false, "MA-11");
     assert!(!ben.sees(&ann).await, "MA-11: an old share still honored");
     let response = ann.share_inbox(&head, true).await;
     assert_eq!(
-        response["notUpdated"].as_object().and_then(|o| o.values().next()).map(|e| e["type"].clone()),
+        response["notUpdated"]
+            .as_object()
+            .and_then(|o| o.values().next())
+            .map(|e| e["type"].clone()),
         Some(json!("forbidden")),
         "MA-11: {response}"
     );
     // MA-12: a shared mailbox isn't anyone's share, and keeps working
     let office = admin
-        .create_user_account("office@school.example.org", "office-secret-6615", "Office", &[], vec![])
+        .create_user_account(
+            "office@school.example.org",
+            "office-secret-6615",
+            "Office",
+            &[],
+            vec![],
+        )
         .await;
     let response = admin
         .one(
@@ -179,11 +215,17 @@ pub async fn sharing_policy_tests() {
         )
         .await;
     assert!(response[1]["created"]["o"].is_object(), "MA-12: {response}");
-    assert!(ben.sees(&office).await, "MA-12: the switch reached a shared mailbox");
+    assert!(
+        ben.sees(&office).await,
+        "MA-12: the switch reached a shared mailbox"
+    );
 
     // Outside the school nothing changed
     let response = carl.share_inbox(&dan, true).await;
-    assert!(response["updated"].is_object(), "MA-C: another tenant's switch reached Carl: {response}");
+    assert!(
+        response["updated"].is_object(),
+        "MA-C: another tenant's switch reached Carl: {response}"
+    );
     assert!(dan.sees(&carl).await, "MA-C");
 
     // A tenant can only be stricter than the server
@@ -199,7 +241,10 @@ pub async fn sharing_policy_tests() {
         "forbidden",
         "MA-C: {response}"
     );
-    assert!(!dan.sees(&carl).await, "MA-C: the server's switch didn't reach Carl's share");
+    assert!(
+        !dan.sees(&carl).await,
+        "MA-C: the server's switch didn't reach Carl's share"
+    );
 
     // Turned back on, the old shares are honored again
     admin
@@ -214,7 +259,10 @@ pub async fn sharing_policy_tests() {
     head.policy(json!({tenant_id.as_str(): {"mailSharing": "disabled"}}))
         .await;
     let response = ann.share_inbox(&ben, false).await;
-    assert!(response["updated"].is_object(), "MA-11: ending a share refused: {response}");
+    assert!(
+        response["updated"].is_object(),
+        "MA-11: ending a share refused: {response}"
+    );
     head.policy(json!({tenant_id.as_str(): {"mailSharing": null}}))
         .await;
     assert!(!ben.sees(&ann).await, "MA-11: the ended share came back");

@@ -127,7 +127,9 @@ impl Element for LegalHoldValue {
 
     fn try_parse<P>(key: &Key<'_, Self::Property>, value: &str) -> Option<Self> {
         match key {
-            Key::Property(LegalHoldProperty::Id) => Id::from_str(value).ok().map(LegalHoldValue::Id),
+            Key::Property(LegalHoldProperty::Id) => {
+                Id::from_str(value).ok().map(LegalHoldValue::Id)
+            }
             _ => None,
         }
     }

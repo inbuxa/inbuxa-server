@@ -156,7 +156,10 @@ mod tests {
 
     #[test]
     fn unset_is_on() {
-        assert_eq!(effective(&SharingPolicy::default(), None), Effective::default());
+        assert_eq!(
+            effective(&SharingPolicy::default(), None),
+            Effective::default()
+        );
         assert_eq!(
             effective(&SharingPolicy::default(), Some(&SharingPolicy::default())),
             Effective::default()
@@ -173,15 +176,22 @@ mod tests {
         assert!(!e.add_accounts, "the tenant's own off holds");
         assert!(looser_than_server(&server, &tenant).is_some());
         // A tenant off under a server on
-        let e = effective(&on_off(Some(true), Some(true)), Some(&on_off(Some(false), None)));
+        let e = effective(
+            &on_off(Some(true), Some(true)),
+            Some(&on_off(Some(false), None)),
+        );
         assert!(!e.mail_sharing && e.add_accounts);
         assert!(looser_than_server(&on_off(None, None), &on_off(Some(true), Some(true))).is_none());
     }
 
     #[test]
     fn keys_stay_apart() {
-        let ValueClass::Any(server) = key(None) else { panic!() };
-        let ValueClass::Any(tenant) = key(Some(7)) else { panic!() };
+        let ValueClass::Any(server) = key(None) else {
+            panic!()
+        };
+        let ValueClass::Any(tenant) = key(Some(7)) else {
+            panic!()
+        };
         assert_eq!(server.key, b"Wp");
         assert_eq!(tenant.key, [b'W', b't', 0, 0, 0, 7]);
     }

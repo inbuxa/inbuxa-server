@@ -146,7 +146,10 @@ pub async fn snapshot_get(
         None => snapshot::list(data, 0, u64::MAX).await?,
         Some(_) => {
             let (ids, _) = request.unwrap_ids(server.core.jmap.get_max_objects)?;
-            ids.unwrap_or_default().into_iter().map(|id| id.id()).collect()
+            ids.unwrap_or_default()
+                .into_iter()
+                .map(|id| id.id())
+                .collect()
         }
     };
     let mut response = GetResponse {
@@ -161,7 +164,11 @@ pub async fn snapshot_get(
             continue;
         };
         let inventory = slice(found.inventory, tenant_only);
-        let summary = if tenant_only { inventory.summary() } else { found.summary };
+        let summary = if tenant_only {
+            inventory.summary()
+        } else {
+            found.summary
+        };
         let mut out = Map::with_capacity(properties.len());
         for property in &properties {
             let value = match property {

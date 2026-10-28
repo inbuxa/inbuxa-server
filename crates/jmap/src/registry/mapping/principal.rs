@@ -38,7 +38,6 @@ pub async fn validate_account(
     mut account: &mut Account,
     old_account: AccountUpdate<'_>,
 ) -> ValidationResult {
-
     let is_external_directory = if let Account::User(account) = account {
         server
             .domain_by_id(account.domain_id.document_id())
@@ -346,7 +345,6 @@ pub(crate) async fn validate_role(
     }
 }
 
-
 pub async fn validate_tenant_quota(
     _server: &Server,
     _access_token: &AccessToken,
@@ -360,7 +358,6 @@ pub async fn schedule_account_destruction(
     account_id: Id,
     account: &Account,
 ) -> trc::Result<()> {
-
     let status = TaskStatus::now();
 
     let (account_domain_id, account_name, account_type) = match account {

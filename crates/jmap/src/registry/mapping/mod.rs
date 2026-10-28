@@ -2,6 +2,8 @@
  * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
+ *
+ * Modified by Coffey Labs in 2026 for INBUXA.
  */
 
 use common::{Server, auth::AccessToken};
@@ -36,7 +38,6 @@ pub mod sieve;
 pub mod spam_sample;
 pub mod task;
 pub mod tls;
-
 
 pub(crate) struct RegistryGetResponse<'x> {
     pub server: &'x Server,

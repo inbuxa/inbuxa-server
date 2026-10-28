@@ -78,7 +78,6 @@ async fn main() -> std::io::Result<()> {
     init.bootstrap.log_errors();
     init.bootstrap.log_warnings();
 
-
     #[cfg(feature = "dev_mode")]
     if std::env::var("INSERT_TEST_DATA").is_ok() {
         let server = init.inner.build_server();

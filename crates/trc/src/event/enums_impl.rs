@@ -3287,7 +3287,9 @@ impl EventType {
             EventType::Cluster(ClusterEvent::MessageSkipped) => "PubSub message skipped",
             EventType::Cluster(ClusterEvent::MessageInvalid) => "Invalid PubSub message",
             EventType::Cluster(ClusterEvent::NodeIdRenewed) => "Node ID renewed",
-            EventType::Cluster(ClusterEvent::NodeIdReassigned) => "Node ID reassigned after its lease was taken",
+            EventType::Cluster(ClusterEvent::NodeIdReassigned) => {
+                "Node ID reassigned after its lease was taken"
+            }
             // inbuxa: coordinator connection
             EventType::Cluster(ClusterEvent::CoordinatorConnected) => "Coordinator connected",
             EventType::Cluster(ClusterEvent::CoordinatorDisconnected) => "Coordinator unavailable",

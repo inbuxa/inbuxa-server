@@ -11,11 +11,11 @@ pub mod metrics;
 pub mod tracers;
 pub mod webhooks;
 
+use ahash::AHashMap;
+use parking_lot::Mutex;
 use tracers::log::spawn_log_tracer;
 use tracers::otel::spawn_otel_tracer;
 use tracers::stdout::spawn_console_tracer;
-use ahash::AHashMap;
-use parking_lot::Mutex;
 use trc::{Collector, ipc::subscriber::SubscriberBuilder};
 use webhooks::spawn_webhook_tracer;
 

@@ -206,10 +206,16 @@ impl Server {
 
     /// Binds and spawns the listeners just put back, so a port opens without a
     /// restart. Returns the names that still need one.
-    async fn spawn_restored_listeners(&self, restored: &[SavedListener]) -> trc::Result<Vec<String>> {
+    async fn spawn_restored_listeners(
+        &self,
+        restored: &[SavedListener],
+    ) -> trc::Result<Vec<String>> {
         let control = &self.inner.data.listener_control;
         if !control.can_spawn() {
-            return Ok(restored.iter().map(|listener| listener.id.clone()).collect());
+            return Ok(restored
+                .iter()
+                .map(|listener| listener.id.clone())
+                .collect());
         }
 
         // Re-parse from the registry rather than from the saved object: the
@@ -251,9 +257,7 @@ impl Server {
             if !wanted.contains(&listener.id.as_str()) || control.is_running(&listener.id) {
                 continue;
             }
-            let acceptor = acceptors
-                .remove(&listener.id)
-                .unwrap_or(TcpAcceptor::Plain);
+            let acceptor = acceptors.remove(&listener.id).unwrap_or(TcpAcceptor::Plain);
             let id = listener.id.clone();
             if control.spawn(listener, acceptor) {
                 spawned.push(id);

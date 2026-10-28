@@ -144,10 +144,7 @@ pub async fn mark_new_install(data: &Store) -> trc::Result<()> {
 /// After rules load: on a new install, switches [`NEW_INSTALL_OFF`] off and
 /// forgets the note, so it happens once. Returns whether anything changed.
 /// An existing server has no note, and keeps every blocklist as it is.
-pub async fn apply_new_install(
-    registry: &store::RegistryStore,
-    data: &Store,
-) -> trc::Result<bool> {
+pub async fn apply_new_install(registry: &store::RegistryStore, data: &Store) -> trc::Result<bool> {
     use registry::schema::{prelude::Object, structs::SpamDnsblServer};
     use store::registry::write::RegistryWrite;
 
@@ -178,7 +175,11 @@ pub async fn apply_new_install(
             revision: server.revision,
         };
         registry
-            .write(RegistryWrite::update(types::id::Id::from(server.id.id()), &new, &old))
+            .write(RegistryWrite::update(
+                types::id::Id::from(server.id.id()),
+                &new,
+                &old,
+            ))
             .await?;
         changed = true;
     }

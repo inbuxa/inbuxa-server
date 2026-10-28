@@ -9,7 +9,6 @@
 // inbuxa: composite stores (sharded members, read replicas) nest store
 // futures deeply enough to pass rustc's default query depth
 #![recursion_limit = "512"]
-
 #![warn(clippy::large_futures)]
 
 use broadcast::publisher::spawn_broadcast_publisher;
@@ -24,9 +23,9 @@ use crate::task_manager::{manager::spawn_task_manager, scheduler::spawn_task_sch
 
 pub mod broadcast;
 // inbuxa: AL-5, delegations end at their date
+pub mod inbuxa_deliverability; // inbuxa: the deliverability check
 pub mod inbuxa_lock_expiry;
 pub mod inbuxa_log_retention; // inbuxa: personal-data catalog, D1
-pub mod inbuxa_deliverability; // inbuxa: the deliverability check
 pub mod inbuxa_scheduled_reports; // inbuxa: scheduled reports and the weekly digest
 pub mod state_manager;
 pub mod task_manager;

@@ -8,7 +8,8 @@
 
 use common::{Server, auth::AccessToken};
 use jmap_proto::request::capability::{
-    Account, Capabilities, Capability, EmptyCapabilities, InbuxaAccountCapabilities, InbuxaDelegatedCapabilities, DelegationInfo, Session,
+    Account, Capabilities, Capability, DelegationInfo, EmptyCapabilities,
+    InbuxaAccountCapabilities, InbuxaDelegatedCapabilities, Session,
 };
 use registry::schema::enums::Permission;
 use std::future::Future;
@@ -79,7 +80,10 @@ impl SessionHandler for Server {
         // inbuxa: ai-explain, EX-1 to EX-4: whether Explain can be offered
         let ai_explain = access_token.has_permission(Permission::SysAiExplain)
             && access_token.tenant_id().is_none()
-            && self.ai_explain_model(&self.ai_limits().await).await.is_some();
+            && self
+                .ai_explain_model(&self.ai_limits().await)
+                .await
+                .is_some();
         // inbuxa: MA-C: what the sharing switches leave this principal
         let sharing = inbuxa_features::security::sharing_policy::effective_for(
             self.store(),

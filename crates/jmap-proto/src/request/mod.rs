@@ -127,12 +127,20 @@ pub enum GetRequestMethod {
     AccountLock(Box<GetRequest<crate::object::inbuxa_account_lock::AccountLock>>),
     LegalHold(Box<GetRequest<crate::object::inbuxa_legal_hold::LegalHold>>),
     MailRule(Box<GetRequest<crate::object::inbuxa_mail_rule::MailRule>>),
-    SecurityAcceptance(Box<GetRequest<crate::object::inbuxa_security_acceptance::SecurityAcceptance>>),
-    DeliverabilityReport(Box<GetRequest<crate::object::inbuxa_deliverability_report::DeliverabilityReport>>),
-    DeliverabilitySettings(Box<GetRequest<crate::object::inbuxa_deliverability_settings::DeliverabilitySettings>>),
+    SecurityAcceptance(
+        Box<GetRequest<crate::object::inbuxa_security_acceptance::SecurityAcceptance>>,
+    ),
+    DeliverabilityReport(
+        Box<GetRequest<crate::object::inbuxa_deliverability_report::DeliverabilityReport>>,
+    ),
+    DeliverabilitySettings(
+        Box<GetRequest<crate::object::inbuxa_deliverability_settings::DeliverabilitySettings>>,
+    ),
     ReportExport(Box<GetRequest<crate::object::inbuxa_report_export::ReportExport>>),
     ScheduledReport(Box<GetRequest<crate::object::inbuxa_scheduled_report::ScheduledReport>>),
-    ScheduledReportSettings(Box<GetRequest<crate::object::inbuxa_scheduled_report_settings::ScheduledReportSettings>>),
+    ScheduledReportSettings(
+        Box<GetRequest<crate::object::inbuxa_scheduled_report_settings::ScheduledReportSettings>>,
+    ),
     Journal(Box<GetRequest<crate::object::inbuxa_journal::Journal>>),
     JournalEntry(Box<GetRequest<crate::object::inbuxa_journal_entry::JournalEntry>>),
     HeldMessage(Box<GetRequest<crate::object::inbuxa_held_message::HeldMessage>>),
@@ -141,9 +149,7 @@ pub enum GetRequestMethod {
     TenantProtocolPolicy(
         Box<GetRequest<crate::object::inbuxa_tenant_protocol_policy::TenantProtocolPolicy>>,
     ),
-    SharingPolicy(
-        Box<GetRequest<crate::object::inbuxa_sharing_policy::SharingPolicy>>,
-    ),
+    SharingPolicy(Box<GetRequest<crate::object::inbuxa_sharing_policy::SharingPolicy>>),
     FrontEnds(Box<GetRequest<crate::object::inbuxa_front_ends::FrontEnds>>),
 }
 
@@ -180,23 +186,34 @@ pub enum SetRequestMethod<'x> {
     SecurityAcceptance(
         Box<SetRequest<'x, crate::object::inbuxa_security_acceptance::SecurityAcceptance>>,
     ),
-    DeliverabilityReport(Box<SetRequest<'x, crate::object::inbuxa_deliverability_report::DeliverabilityReport>>),
-    DeliverabilitySettings(Box<SetRequest<'x, crate::object::inbuxa_deliverability_settings::DeliverabilitySettings>>),
+    DeliverabilityReport(
+        Box<SetRequest<'x, crate::object::inbuxa_deliverability_report::DeliverabilityReport>>,
+    ),
+    DeliverabilitySettings(
+        Box<SetRequest<'x, crate::object::inbuxa_deliverability_settings::DeliverabilitySettings>>,
+    ),
     ReportExport(Box<SetRequest<'x, crate::object::inbuxa_report_export::ReportExport>>),
     ScheduledReport(Box<SetRequest<'x, crate::object::inbuxa_scheduled_report::ScheduledReport>>),
-    ScheduledReportSettings(Box<SetRequest<'x, crate::object::inbuxa_scheduled_report_settings::ScheduledReportSettings>>),
+    ScheduledReportSettings(
+        Box<
+            SetRequest<
+                'x,
+                crate::object::inbuxa_scheduled_report_settings::ScheduledReportSettings,
+            >,
+        >,
+    ),
     Journal(Box<SetRequest<'x, crate::object::inbuxa_journal::Journal>>),
     JournalExport(Box<SetRequest<'x, crate::object::inbuxa_journal_entry::JournalExport>>),
-    JournalVerification(Box<SetRequest<'x, crate::object::inbuxa_journal_entry::JournalVerification>>),
+    JournalVerification(
+        Box<SetRequest<'x, crate::object::inbuxa_journal_entry::JournalVerification>>,
+    ),
     HeldMessage(Box<SetRequest<'x, crate::object::inbuxa_held_message::HeldMessage>>),
     HoldExport(Box<SetRequest<'x, crate::object::inbuxa_hold_export::HoldExport>>),
     ProtocolPolicy(Box<SetRequest<'x, crate::object::inbuxa_protocol_policy::ProtocolPolicy>>),
     TenantProtocolPolicy(
         Box<SetRequest<'x, crate::object::inbuxa_tenant_protocol_policy::TenantProtocolPolicy>>,
     ),
-    SharingPolicy(
-        Box<SetRequest<'x, crate::object::inbuxa_sharing_policy::SharingPolicy>>,
-    ),
+    SharingPolicy(Box<SetRequest<'x, crate::object::inbuxa_sharing_policy::SharingPolicy>>),
     FrontEnds(Box<SetRequest<'x, crate::object::inbuxa_front_ends::FrontEnds>>),
 }
 

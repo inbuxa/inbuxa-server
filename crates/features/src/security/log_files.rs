@@ -237,7 +237,10 @@ mod tests {
         assert_eq!(purge(&dir, "inbuxa.log", 30 * DAY).unwrap(), 1);
         assert!(!old.exists());
         assert!(new.exists());
-        assert!(other.exists(), "a file not named for the log is never touched");
+        assert!(
+            other.exists(),
+            "a file not named for the log is never touched"
+        );
         std::fs::remove_dir_all(&dir).unwrap();
     }
 }

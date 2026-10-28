@@ -432,8 +432,8 @@ impl TaskQueueManager for Server {
                     // whole lifetime again would leave the task stuck for
                     // another hour past its lock if that holder died
                     if let Some(locked) = ipc.locked.get_mut(&id) {
-                        locked.expires =
-                            Instant::now() + Duration::from_secs(claim_recheck_interval(lock_expiry));
+                        locked.expires = Instant::now()
+                            + Duration::from_secs(claim_recheck_interval(lock_expiry));
                     }
                 } else if tx.send(task_job).await.is_err() {
                     trc::event!(
@@ -454,9 +454,10 @@ impl TaskQueueManager for Server {
         let now = Instant::now();
         ipc.locked
             .retain(|_, locked| locked.expires > now && locked.revision == ipc.revision);
-        let sleep_for = Duration::from_secs(next_event.map_or(QUEUE_REFRESH_INTERVAL, |timestamp| {
-            timestamp.saturating_sub(store::write::now())
-        }));
+        let sleep_for =
+            Duration::from_secs(next_event.map_or(QUEUE_REFRESH_INTERVAL, |timestamp| {
+                timestamp.saturating_sub(store::write::now())
+            }));
 
         // inbuxa: wake up when a claim held elsewhere is due to be tried
         // again, rather than only on the next task or refresh
@@ -464,7 +465,9 @@ impl TaskQueueManager for Server {
             .values()
             .map(|locked| locked.expires.saturating_duration_since(now))
             .min()
-            .map_or(sleep_for, |recheck| sleep_for.min(recheck.max(Duration::from_secs(1))))
+            .map_or(sleep_for, |recheck| {
+                sleep_for.min(recheck.max(Duration::from_secs(1)))
+            })
     }
 }
 
@@ -516,8 +519,11 @@ async fn run_task(
     server_instance: Arc<ServerInstance>,
 ) -> TaskResult {
     // inbuxa: AU-1.10: registry writes a task makes are the server's own
-    inbuxa_features::audit::scope::system(task.name(), run_task_unscoped(server, task, server_instance))
-        .await
+    inbuxa_features::audit::scope::system(
+        task.name(),
+        run_task_unscoped(server, task, server_instance),
+    )
+    .await
 }
 
 async fn run_task_unscoped(
@@ -529,12 +535,8 @@ async fn run_task_unscoped(
         Task::CalendarAlarmEmail(task) => {
             server.send_email_alarm(task, server_instance.clone()).await
         }
-        Task::CalendarAlarmNotification(task) => {
-            server.send_display_alarm(task).await
-        }
-        Task::CalendarItipMessage(task) => {
-            server.send_imip(task, server_instance.clone()).await
-        }
+        Task::CalendarAlarmNotification(task) => server.send_display_alarm(task).await,
+        Task::CalendarItipMessage(task) => server.send_imip(task, server_instance.clone()).await,
         Task::MergeThreads(task) => server.merge_threads(task).await,
         Task::DmarcReport(task) => {
             server
@@ -548,18 +550,10 @@ async fn run_task_unscoped(
         }
         Task::RestoreArchivedItem(task) => server.restore_item(task).await,
         Task::DestroyAccount(task) => server.destroy_account(task).await,
-        Task::AccountMaintenance(task) => {
-            server.account_maintenance(task).await
-        }
-        Task::TenantMaintenance(task) => {
-            server.tenant_maintenance(task).await
-        }
-        Task::StoreMaintenance(task) => {
-            server.store_maintenance(task).await
-        }
-        Task::SpamFilterMaintenance(task) => {
-            Box::pin(server.spam_filter_maintenance(task)).await
-        }
+        Task::AccountMaintenance(task) => server.account_maintenance(task).await,
+        Task::TenantMaintenance(task) => server.tenant_maintenance(task).await,
+        Task::StoreMaintenance(task) => server.store_maintenance(task).await,
+        Task::SpamFilterMaintenance(task) => Box::pin(server.spam_filter_maintenance(task)).await,
         Task::AcmeRenewal(task) => server.acme_management(task).await,
         Task::DkimManagement(task_dkim_rotation) => {
             server.dkim_management(task_dkim_rotation).await
@@ -567,9 +561,7 @@ async fn run_task_unscoped(
         Task::DnsManagement(task_dns_management) => {
             server.dns_management(task_dns_management).await
         }
-        Task::IndexDocument(_)
-        | Task::UnindexDocument(_)
-        | Task::IndexTrace(_) => unreachable!(),
+        Task::IndexDocument(_) | Task::UnindexDocument(_) | Task::IndexTrace(_) => unreachable!(),
     }
 }
 
@@ -598,9 +590,9 @@ async fn fetch_enabled_task(server: &Server, job: TaskJob) -> Option<TaskDetails
 async fn fetch_task(server: &Server, job: TaskJob) -> Option<TaskDetails> {
     match server
         .store()
-        .get_value::<Task>(ValueKey::from(ValueClass::TaskQueue(TaskQueueClass::Task {
-            id: job.id,
-        })))
+        .get_value::<Task>(ValueKey::from(ValueClass::TaskQueue(
+            TaskQueueClass::Task { id: job.id },
+        )))
         .await
     {
         Ok(Some(task)) => Some(TaskDetails { task, info: job }),

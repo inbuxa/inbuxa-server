@@ -319,7 +319,9 @@ impl MethodName {
             (MethodFunction::Get, MethodObject::LogSettings) => "inbuxa:LogSettings/get",
             (MethodFunction::Get, MethodObject::DlpSettings) => "inbuxa:DlpSettings/get",
             (MethodFunction::Get, MethodObject::DataInventory) => "inbuxa:DataInventory/get",
-            (MethodFunction::Get, MethodObject::InventorySnapshot) => "inbuxa:InventorySnapshot/get",
+            (MethodFunction::Get, MethodObject::InventorySnapshot) => {
+                "inbuxa:InventorySnapshot/get"
+            }
             (MethodFunction::Set, MethodObject::LogSettings) => "inbuxa:LogSettings/set",
             (MethodFunction::Set, MethodObject::DlpSettings) => "inbuxa:DlpSettings/set",
             (MethodFunction::Set, MethodObject::Explanation) => "inbuxa:Explanation/set",
@@ -334,18 +336,34 @@ impl MethodName {
             (MethodFunction::Set, MethodObject::LegalHold) => "inbuxa:LegalHold/set",
             (MethodFunction::Get, MethodObject::MailRule) => "inbuxa:MailRule/get",
             (MethodFunction::Set, MethodObject::MailRule) => "inbuxa:MailRule/set",
-            (MethodFunction::Get, MethodObject::SecurityAcceptance) => "inbuxa:SecurityAcceptance/get",
-            (MethodFunction::Set, MethodObject::SecurityAcceptance) => "inbuxa:SecurityAcceptance/set",
-            (MethodFunction::Get, MethodObject::DeliverabilityReport) => "inbuxa:DeliverabilityReport/get",
-            (MethodFunction::Set, MethodObject::DeliverabilityReport) => "inbuxa:DeliverabilityReport/set",
-            (MethodFunction::Get, MethodObject::DeliverabilitySettings) => "inbuxa:DeliverabilitySettings/get",
-            (MethodFunction::Set, MethodObject::DeliverabilitySettings) => "inbuxa:DeliverabilitySettings/set",
+            (MethodFunction::Get, MethodObject::SecurityAcceptance) => {
+                "inbuxa:SecurityAcceptance/get"
+            }
+            (MethodFunction::Set, MethodObject::SecurityAcceptance) => {
+                "inbuxa:SecurityAcceptance/set"
+            }
+            (MethodFunction::Get, MethodObject::DeliverabilityReport) => {
+                "inbuxa:DeliverabilityReport/get"
+            }
+            (MethodFunction::Set, MethodObject::DeliverabilityReport) => {
+                "inbuxa:DeliverabilityReport/set"
+            }
+            (MethodFunction::Get, MethodObject::DeliverabilitySettings) => {
+                "inbuxa:DeliverabilitySettings/get"
+            }
+            (MethodFunction::Set, MethodObject::DeliverabilitySettings) => {
+                "inbuxa:DeliverabilitySettings/set"
+            }
             (MethodFunction::Get, MethodObject::ReportExport) => "inbuxa:ReportExport/get",
             (MethodFunction::Set, MethodObject::ReportExport) => "inbuxa:ReportExport/set",
             (MethodFunction::Get, MethodObject::ScheduledReport) => "inbuxa:ScheduledReport/get",
             (MethodFunction::Set, MethodObject::ScheduledReport) => "inbuxa:ScheduledReport/set",
-            (MethodFunction::Get, MethodObject::ScheduledReportSettings) => "inbuxa:ScheduledReportSettings/get",
-            (MethodFunction::Set, MethodObject::ScheduledReportSettings) => "inbuxa:ScheduledReportSettings/set",
+            (MethodFunction::Get, MethodObject::ScheduledReportSettings) => {
+                "inbuxa:ScheduledReportSettings/get"
+            }
+            (MethodFunction::Set, MethodObject::ScheduledReportSettings) => {
+                "inbuxa:ScheduledReportSettings/set"
+            }
             (MethodFunction::Get, MethodObject::Journal) => "inbuxa:Journal/get",
             (MethodFunction::Set, MethodObject::Journal) => "inbuxa:Journal/set",
             (MethodFunction::Get, MethodObject::JournalEntry) => "inbuxa:JournalEntry/get",
@@ -369,12 +387,8 @@ impl MethodName {
             (MethodFunction::Set, MethodObject::TenantProtocolPolicy) => {
                 "inbuxa:TenantProtocolPolicy/set"
             }
-            (MethodFunction::Get, MethodObject::SharingPolicy) => {
-                "inbuxa:SharingPolicy/get"
-            }
-            (MethodFunction::Set, MethodObject::SharingPolicy) => {
-                "inbuxa:SharingPolicy/set"
-            }
+            (MethodFunction::Get, MethodObject::SharingPolicy) => "inbuxa:SharingPolicy/get",
+            (MethodFunction::Set, MethodObject::SharingPolicy) => "inbuxa:SharingPolicy/set",
             (MethodFunction::Get, MethodObject::FrontEnds) => "inbuxa:FrontEnds/get",
             (MethodFunction::Set, MethodObject::FrontEnds) => "inbuxa:FrontEnds/set",
             (method, MethodObject::Registry(obj)) => {

@@ -295,7 +295,9 @@ pub fn merge_grants(
         lock.replaced
             .iter()
             .find(|r| {
-                r.collection == collection_id && r.document_id == document_id && r.delegate == delegate
+                r.collection == collection_id
+                    && r.document_id == document_id
+                    && r.delegate == delegate
             })
             .cloned()
     };
@@ -343,7 +345,9 @@ pub fn merge_grants(
             match had {
                 Some(entry) => replaced.push(entry),
                 None if !is_current(old, delegate.account_id) => {
-                    if let Some(existing) = current.iter().find(|a| a.account_id == delegate.account_id) {
+                    if let Some(existing) =
+                        current.iter().find(|a| a.account_id == delegate.account_id)
+                    {
                         replaced.push(Replaced {
                             collection: collection_id,
                             document_id,
@@ -363,7 +367,10 @@ pub fn merge_grants(
     }
 
     let sorted = |acls: &[AclGrant]| {
-        let mut v = acls.iter().map(|a| (a.account_id, u64::from(a.grants))).collect::<Vec<_>>();
+        let mut v = acls
+            .iter()
+            .map(|a| (a.account_id, u64::from(a.grants)))
+            .collect::<Vec<_>>();
         v.sort();
         v
     };
@@ -488,7 +495,10 @@ pub async fn set(data: &Store, lock: &Lock, previous: Option<&Lock>) -> trc::Res
     if let Some(previous) = previous {
         for delegate in &previous.delegates {
             if lock.delegate(delegate.account_id).is_none() {
-                batch.clear(class(KIND_DELEGATE, &[delegate.account_id, lock.account_id]));
+                batch.clear(class(
+                    KIND_DELEGATE,
+                    &[delegate.account_id, lock.account_id],
+                ));
             }
         }
     }
@@ -498,7 +508,10 @@ pub async fn set(data: &Store, lock: &Lock, previous: Option<&Lock>) -> trc::Res
             vec![],
         );
     }
-    batch.set(class(KIND_LOCK, &[lock.account_id]), Json(lock).serialize()?);
+    batch.set(
+        class(KIND_LOCK, &[lock.account_id]),
+        Json(lock).serialize()?,
+    );
     data.write(batch.build_all())
         .await
         .caused_by(trc::location!())?;
@@ -510,7 +523,10 @@ pub async fn set(data: &Store, lock: &Lock, previous: Option<&Lock>) -> trc::Res
 pub async fn remove(data: &Store, lock: &Lock) -> trc::Result<()> {
     let mut batch = BatchBuilder::new();
     for delegate in &lock.delegates {
-        batch.clear(class(KIND_DELEGATE, &[delegate.account_id, lock.account_id]));
+        batch.clear(class(
+            KIND_DELEGATE,
+            &[delegate.account_id, lock.account_id],
+        ));
     }
     batch.clear(class(KIND_LOCK, &[lock.account_id]));
     data.write(batch.build_all())
@@ -526,17 +542,30 @@ mod tests {
     #[test]
     fn kind_reads_back_and_defaults_to_lock() {
         // MA-S: a lock stored before shared mailboxes existed has no kind
-        let stored = r#"{"accountId":1,"reason":"r","lockedAt":0,"lockedBy":"admin","delegates":[]}"#;
+        let stored =
+            r#"{"accountId":1,"reason":"r","lockedAt":0,"lockedBy":"admin","delegates":[]}"#;
         let lock: Lock = serde_json::from_str(stored).unwrap();
         assert_eq!(lock.kind, Kind::Lock);
-        assert!(!serde_json::to_string(&lock).unwrap().contains("kind"), "a lock is written as before");
+        assert!(
+            !serde_json::to_string(&lock).unwrap().contains("kind"),
+            "a lock is written as before"
+        );
 
-        let shared = Lock { kind: Kind::SharedMailbox, ..lock };
+        let shared = Lock {
+            kind: Kind::SharedMailbox,
+            ..lock
+        };
         let written = serde_json::to_string(&shared).unwrap();
         assert!(written.contains(r#""kind":"sharedMailbox""#), "{written}");
-        assert_eq!(serde_json::from_str::<Lock>(&written).unwrap().kind, Kind::SharedMailbox);
+        assert_eq!(
+            serde_json::from_str::<Lock>(&written).unwrap().kind,
+            Kind::SharedMailbox
+        );
         assert_eq!(Kind::parse("sharedMailbox"), Some(Kind::SharedMailbox));
-        assert_eq!(Kind::SharedMailbox.max_delegates(), MAX_SHARED_MAILBOX_DELEGATES);
+        assert_eq!(
+            Kind::SharedMailbox.max_delegates(),
+            MAX_SHARED_MAILBOX_DELEGATES
+        );
     }
 
     #[test]
@@ -547,7 +576,10 @@ mod tests {
         assert_eq!(parse_key(&any.key, KIND_DELEGATE, 2), Some(vec![7, 9]));
         let mut with_subspace = vec![SUBSPACE_INBUXA];
         with_subspace.extend_from_slice(&any.key);
-        assert_eq!(parse_key(&with_subspace, KIND_DELEGATE, 2), Some(vec![7, 9]));
+        assert_eq!(
+            parse_key(&with_subspace, KIND_DELEGATE, 2),
+            Some(vec![7, 9])
+        );
         assert_eq!(parse_key(&any.key, KIND_LOCK, 2), None);
     }
 
@@ -610,30 +642,92 @@ mod tests {
             vec![],
         );
         let mut replaced = Vec::new();
-        let acls = merge_grants(&current, Collection::Mailbox, 5, false, None, Some(&lock), 0, &mut replaced)
-            .unwrap();
-        assert!(acls.contains(&AclGrant { account_id: 2, grants: full }));
-        assert!(acls.contains(&AclGrant { account_id: 3, grants: read }));
+        let acls = merge_grants(
+            &current,
+            Collection::Mailbox,
+            5,
+            false,
+            None,
+            Some(&lock),
+            0,
+            &mut replaced,
+        )
+        .unwrap();
+        assert!(acls.contains(&AclGrant {
+            account_id: 2,
+            grants: full
+        }));
+        assert!(acls.contains(&AclGrant {
+            account_id: 3,
+            grants: read
+        }));
         assert_eq!(replaced.len(), 1, "only 2 had rights to put back");
         assert_eq!(replaced[0].rights, u64::from(earlier));
 
         // Running it again changes nothing and keeps the note
-        let locked = Lock { replaced: replaced.clone(), ..lock.clone() };
+        let locked = Lock {
+            replaced: replaced.clone(),
+            ..lock.clone()
+        };
         let mut again = Vec::new();
-        assert!(merge_grants(&acls, Collection::Mailbox, 5, false, Some(&locked), Some(&locked), 0, &mut again).is_none());
+        assert!(
+            merge_grants(
+                &acls,
+                Collection::Mailbox,
+                5,
+                false,
+                Some(&locked),
+                Some(&locked),
+                0,
+                &mut again
+            )
+            .is_none()
+        );
         assert_eq!(again, replaced);
 
         // Unlocking puts 2's share back and removes 3
         let mut none = Vec::new();
-        let back = merge_grants(&acls, Collection::Mailbox, 5, false, Some(&locked), None, 0, &mut none).unwrap();
-        assert_eq!(back, vec![AclGrant { account_id: 2, grants: earlier }]);
+        let back = merge_grants(
+            &acls,
+            Collection::Mailbox,
+            5,
+            false,
+            Some(&locked),
+            None,
+            0,
+            &mut none,
+        )
+        .unwrap();
+        assert_eq!(
+            back,
+            vec![AclGrant {
+                account_id: 2,
+                grants: earlier
+            }]
+        );
 
         // Ending one delegation keeps the other
         let fewer = lock_with(vec![delegate(3, Access::Read)], vec![]);
         let mut kept = Vec::new();
-        let after = merge_grants(&acls, Collection::Mailbox, 5, false, Some(&locked), Some(&fewer), 0, &mut kept).unwrap();
-        assert!(after.contains(&AclGrant { account_id: 2, grants: earlier }));
-        assert!(after.contains(&AclGrant { account_id: 3, grants: read }));
+        let after = merge_grants(
+            &acls,
+            Collection::Mailbox,
+            5,
+            false,
+            Some(&locked),
+            Some(&fewer),
+            0,
+            &mut kept,
+        )
+        .unwrap();
+        assert!(after.contains(&AclGrant {
+            account_id: 2,
+            grants: earlier
+        }));
+        assert!(after.contains(&AclGrant {
+            account_id: 3,
+            grants: read
+        }));
     }
 
     #[test]
@@ -655,16 +749,44 @@ mod tests {
 
         // At its `until`, the share it had before comes back, and the note stays
         let mut replaced = Vec::new();
-        let after = merge_grants(&during, Collection::Mailbox, 5, false, Some(&lock), Some(&lock), 300, &mut replaced)
-            .unwrap();
-        assert_eq!(after, vec![AclGrant { account_id: 2, grants: earlier }]);
+        let after = merge_grants(
+            &during,
+            Collection::Mailbox,
+            5,
+            false,
+            Some(&lock),
+            Some(&lock),
+            300,
+            &mut replaced,
+        )
+        .unwrap();
+        assert_eq!(
+            after,
+            vec![AclGrant {
+                account_id: 2,
+                grants: earlier
+            }]
+        );
         assert_eq!(replaced, vec![note.clone()]);
 
         // The next sweep changes nothing, rather than removing that share
-        let swept = Lock { replaced: replaced.clone(), ..lock };
+        let swept = Lock {
+            replaced: replaced.clone(),
+            ..lock
+        };
         let mut again = Vec::new();
         assert!(
-            merge_grants(&after, Collection::Mailbox, 5, false, Some(&swept), Some(&swept), 400, &mut again).is_none()
+            merge_grants(
+                &after,
+                Collection::Mailbox,
+                5,
+                false,
+                Some(&swept),
+                Some(&swept),
+                400,
+                &mut again
+            )
+            .is_none()
         );
         assert_eq!(again, vec![note]);
     }
@@ -676,14 +798,26 @@ mod tests {
             d.until = until;
             d
         };
-        let a = Lock { account_id: 10, ..lock_with(vec![ends_at(2, Some(500)), ends_at(3, None)], vec![]) };
-        let b = Lock { account_id: 11, ..lock_with(vec![ends_at(4, Some(300))], vec![]) };
+        let a = Lock {
+            account_id: 10,
+            ..lock_with(vec![ends_at(2, Some(500)), ends_at(3, None)], vec![])
+        };
+        let b = Lock {
+            account_id: 11,
+            ..lock_with(vec![ends_at(4, Some(300))], vec![])
+        };
         let locks = vec![a, b];
         assert_eq!(next_until(&locks, 100), Some(300));
         assert_eq!(next_until(&locks, 300), Some(500));
         assert_eq!(next_until(&locks, 500), None);
-        assert_eq!(ended_between(&locks, 100, 300).collect::<Vec<_>>(), vec![11]);
-        assert_eq!(ended_between(&locks, 300, 600).collect::<Vec<_>>(), vec![10]);
+        assert_eq!(
+            ended_between(&locks, 100, 300).collect::<Vec<_>>(),
+            vec![11]
+        );
+        assert_eq!(
+            ended_between(&locks, 300, 600).collect::<Vec<_>>(),
+            vec![10]
+        );
         assert!(ended_between(&locks, 600, 900).next().is_none());
     }
 

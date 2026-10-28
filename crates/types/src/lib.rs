@@ -8,8 +8,8 @@
 
 pub mod acl;
 pub mod blob;
-pub mod branding;
 pub mod blob_hash;
+pub mod branding;
 pub mod collection;
 pub mod dead_property;
 pub mod field;

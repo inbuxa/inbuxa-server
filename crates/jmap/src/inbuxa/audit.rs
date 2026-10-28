@@ -140,8 +140,16 @@ where
     // Every inner future is boxed where it's made, never held in this
     // frame: a debug build's stack can't take a copy of registry_set's
     // state on top of the request's own
-    let pending =
-        before_boxed(server, access_token, session, object, registry, reason, &request).await?;
+    let pending = before_boxed(
+        server,
+        access_token,
+        session,
+        object,
+        registry,
+        reason,
+        &request,
+    )
+    .await?;
     let result = scope::request(method(request)).await;
     after(server, pending, &result).await;
     result
@@ -358,7 +366,12 @@ fn id_text(id: &MaybeInvalid<Id>) -> String {
 /// property names.
 /// An account's or a mailing list's name is only its local part, and two
 /// domains' "leslie" would read alike: records name it by its full address.
-async fn full_name(server: &Server, object: &str, value: &Value, name: Option<String>) -> Option<String> {
+async fn full_name(
+    server: &Server,
+    object: &str,
+    value: &Value,
+    name: Option<String>,
+) -> Option<String> {
     let name = name?;
     if !matches!(object, "x:Account" | "x:MailingList") || name.contains('@') {
         return Some(name);
@@ -416,9 +429,15 @@ async fn fork_current(server: &Server, object: &str, id: &MaybeInvalid<Id>) -> O
                 let hold = inbuxa_features::hold::get(data, u32::try_from(id.id()).ok()?)
                     .await
                     .ok()??;
-                let ids = |list: &[u32]| list.iter().map(|id| Id::from(*id).to_string()).collect::<Vec<_>>();
+                let ids = |list: &[u32]| {
+                    list.iter()
+                        .map(|id| Id::from(*id).to_string())
+                        .collect::<Vec<_>>()
+                };
                 let date = |at: Option<u64>| {
-                    at.map(|at| jmap_proto::types::date::UTCDate::from_timestamp(at as i64).to_string())
+                    at.map(|at| {
+                        jmap_proto::types::date::UTCDate::from_timestamp(at as i64).to_string()
+                    })
                 };
                 Some(serde_json::json!({
                     "name": hold.name,
@@ -441,10 +460,9 @@ async fn fork_current(server: &Server, object: &str, id: &MaybeInvalid<Id>) -> O
         // SS-26: an acceptance named by its check and subject
         "inbuxa:SecurityAcceptance" => match id {
             MaybeInvalid::Value(id) => {
-                let acceptance =
-                    security::acceptance::get(data, u32::try_from(id.id()).ok()?)
-                        .await
-                        .ok()??;
+                let acceptance = security::acceptance::get(data, u32::try_from(id.id()).ok()?)
+                    .await
+                    .ok()??;
                 let name = match acceptance.subject.as_str() {
                     "" => acceptance.check.clone(),
                     subject => format!("{} {subject}", acceptance.check),

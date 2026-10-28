@@ -368,10 +368,7 @@ pub async fn test(test: &mut TestServer) {
             resource: vec![],
         })
         .await;
-        assert_ne!(
-            status, 200,
-            "PKCE method {method:?} must not be authorized"
-        );
+        assert_ne!(status, 200, "PKCE method {method:?} must not be authorized");
     }
 
     // Authenticate with the correct password, PKCE (S256), scope and a valid resource indicator

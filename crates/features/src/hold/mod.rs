@@ -76,9 +76,7 @@ impl Keeping {
     pub fn covers(&self, date: Option<u64>) -> bool {
         self.ranges.iter().any(|(from, to)| match date {
             None => true,
-            Some(at) => {
-                from.is_none_or(|from| at >= from) && to.is_none_or(|to| at <= to)
-            }
+            Some(at) => from.is_none_or(|from| at >= from) && to.is_none_or(|to| at <= to),
         })
     }
 
@@ -221,13 +219,21 @@ impl Member {
             return None;
         };
         let mut domains = vec![user.domain_id.document_id()];
-        domains.extend(user.aliases.iter().map(|alias| alias.domain_id.document_id()));
+        domains.extend(
+            user.aliases
+                .iter()
+                .map(|alias| alias.domain_id.document_id()),
+        );
         domains.sort_unstable();
         domains.dedup();
         Some(Member {
             account: account_id,
             domains,
-            groups: user.member_group_ids.iter().map(|id| id.document_id()).collect(),
+            groups: user
+                .member_group_ids
+                .iter()
+                .map(|id| id.document_id())
+                .collect(),
             tenant: user.member_tenant_id.map(|id| id.document_id()),
         })
     }
@@ -308,7 +314,9 @@ impl Refusal {
             Refusal::ScopeShrunk => {
                 "Nothing can be taken out of a hold's scope. To hold less, release it and place a new hold."
             }
-            Refusal::EmptyScope => "A hold has to cover at least one account, group, domain or tenant, or the whole server.",
+            Refusal::EmptyScope => {
+                "A hold has to cover at least one account, group, domain or tenant, or the whole server."
+            }
             Refusal::Backwards => "The range starts after it ends.",
         }
     }
@@ -429,7 +437,11 @@ pub async fn original_deadline(data: &Store, item_id: u64) -> trc::Result<Option
 
 /// Notes (`Some`) or forgets (`None`) an item's deadline from before it
 /// was frozen.
-pub async fn set_original_deadline(data: &Store, item_id: u64, until: Option<u64>) -> trc::Result<()> {
+pub async fn set_original_deadline(
+    data: &Store,
+    item_id: u64,
+    until: Option<u64>,
+) -> trc::Result<()> {
     let mut batch = BatchBuilder::new();
     match until {
         Some(until) => batch.set(original_class(item_id), until.to_be_bytes().to_vec()),
@@ -456,7 +468,10 @@ fn export_class(id: u32) -> ValueClass {
 pub async fn exports(data: &Store) -> trc::Result<Vec<Export>> {
     let mut exports = Vec::new();
     data.iterate(
-        IterateParams::new(ValueKey::from(export_class(0)), ValueKey::from(export_class(u32::MAX))),
+        IterateParams::new(
+            ValueKey::from(export_class(0)),
+            ValueKey::from(export_class(u32::MAX)),
+        ),
         |_, value| {
             if let Ok(Json(export)) = Json::<Export>::deserialize(value) {
                 exports.push(export);
@@ -530,7 +545,11 @@ pub async fn all(data: &Store) -> trc::Result<Vec<Hold>> {
 
 /// The holds still in force.
 pub async fn active(data: &Store) -> trc::Result<Vec<Hold>> {
-    Ok(all(data).await?.into_iter().filter(Hold::is_active).collect())
+    Ok(all(data)
+        .await?
+        .into_iter()
+        .filter(Hold::is_active)
+        .collect())
 }
 
 /// Writes a new hold under the next free id, which it returns. Two nodes
@@ -540,10 +559,7 @@ pub async fn create(data: &Store, hold: &Hold) -> trc::Result<u32> {
     loop {
         attempt += 1;
         let id = all(data).await?.iter().map(|h| h.id).max().unwrap_or(0) + 1;
-        let stored = Hold {
-            id,
-            ..hold.clone()
-        };
+        let stored = Hold { id, ..hold.clone() };
         let mut batch = BatchBuilder::new();
         batch.assert_value(class(id), AssertValue::None);
         batch.set(class(id), Json(&stored).serialize()?);
@@ -639,8 +655,14 @@ mod tests {
 
     #[test]
     fn a_hold_needs_a_scope_and_a_forward_range() {
-        assert_eq!(hold(Scope::default(), None, None).check_new(), Err(Refusal::EmptyScope));
-        assert_eq!(hold(accounts(&[2]), Some(20), Some(10)).check_new(), Err(Refusal::Backwards));
+        assert_eq!(
+            hold(Scope::default(), None, None).check_new(),
+            Err(Refusal::EmptyScope)
+        );
+        assert_eq!(
+            hold(accounts(&[2]), Some(20), Some(10)).check_new(),
+            Err(Refusal::Backwards)
+        );
         let mut ok = hold(accounts(&[3, 2, 3]), None, None);
         assert_eq!(ok.check_new(), Ok(()));
         assert_eq!(ok.scope.accounts, vec![2, 3], "sorted, once each");
@@ -660,7 +682,11 @@ mod tests {
 
         let open = hold(accounts(&[2]), None, None);
         let mut closed = hold(accounts(&[2]), Some(1), None);
-        assert_eq!(open.check_update(&mut closed), Err(Refusal::Narrowed), "an open end stays open");
+        assert_eq!(
+            open.check_update(&mut closed),
+            Err(Refusal::Narrowed),
+            "an open end stays open"
+        );
     }
 
     #[test]
@@ -688,7 +714,14 @@ mod tests {
         let mut shrunk = hold(accounts(&[2, 3]), None, None);
         assert_eq!(current.check_update(&mut shrunk), Err(Refusal::ScopeShrunk));
 
-        let server = hold(Scope { server: true, ..Default::default() }, None, None);
+        let server = hold(
+            Scope {
+                server: true,
+                ..Default::default()
+            },
+            None,
+            None,
+        );
         let mut less = hold(accounts(&[2]), None, None);
         assert_eq!(server.check_update(&mut less), Err(Refusal::ScopeShrunk));
     }
@@ -716,7 +749,10 @@ mod tests {
         assert!(ranged.covers_date(100) && ranged.covers_date(200));
         assert!(!ranged.covers_date(99) && !ranged.covers_date(201));
         let open_ended = hold(accounts(&[2]), Some(100), None);
-        assert!(open_ended.covers_date(u64::MAX), "no `to` also catches mail still to come");
+        assert!(
+            open_ended.covers_date(u64::MAX),
+            "no `to` also catches mail still to come"
+        );
     }
 
     #[test]
@@ -729,15 +765,44 @@ mod tests {
         };
         let reaches = |scope: Scope| scope.covers(&member);
         assert!(reaches(accounts(&[9])));
-        assert!(reaches(Scope { domains: vec![4], ..Default::default() }), "an alias's domain counts");
-        assert!(reaches(Scope { groups: vec![20], ..Default::default() }));
-        assert!(reaches(Scope { tenants: vec![7], ..Default::default() }));
-        assert!(reaches(Scope { server: true, ..Default::default() }));
-        assert!(!reaches(Scope { domains: vec![5], tenants: vec![8], ..Default::default() }));
+        assert!(
+            reaches(Scope {
+                domains: vec![4],
+                ..Default::default()
+            }),
+            "an alias's domain counts"
+        );
+        assert!(reaches(Scope {
+            groups: vec![20],
+            ..Default::default()
+        }));
+        assert!(reaches(Scope {
+            tenants: vec![7],
+            ..Default::default()
+        }));
+        assert!(reaches(Scope {
+            server: true,
+            ..Default::default()
+        }));
+        assert!(!reaches(Scope {
+            domains: vec![5],
+            tenants: vec![8],
+            ..Default::default()
+        }));
 
         // LH-2: leaving the held domain would free it, so the hold must name it
-        let held = hold(Scope { domains: vec![3], ..Default::default() }, None, None);
-        let moved = Member { domains: vec![6], ..member.clone() };
+        let held = hold(
+            Scope {
+                domains: vec![3],
+                ..Default::default()
+            },
+            None,
+            None,
+        );
+        let moved = Member {
+            domains: vec![6],
+            ..member.clone()
+        };
         assert!(held.scope.covers(&member) && !held.scope.covers(&moved));
     }
 
@@ -751,9 +816,15 @@ mod tests {
         // LH-3: a range holds only what's inside it; outside, undelete's rules
         let ranged = Keeping::new(Some(30), &[hold(accounts(&[2]), Some(1_000), Some(2_000))]);
         assert!(ranged.covers(Some(1_500)) && !ranged.covers(Some(2_500)));
-        assert!(ranged.covers(None), "contacts, files and scripts are held whole");
+        assert!(
+            ranged.covers(None),
+            "contacts, files and scripts are held whole"
+        );
         assert_eq!(ranged.until(100, ranged.covers(Some(2_500))), Some(130));
-        assert!(ranged.covers_event(Some(2_000 + 3_600)), "a day of slack for an event");
+        assert!(
+            ranged.covers_event(Some(2_000 + 3_600)),
+            "a day of slack for an event"
+        );
 
         // Neither held nor undelete: nothing is kept
         let none = Keeping::new(None, &[]);
