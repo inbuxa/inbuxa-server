@@ -668,3 +668,35 @@ impl DisplayArchivedResponse for ArchivedResponse<Box<str>> {
     }
 }
 */
+
+// inbuxa: whether an address can go into MAIL FROM or RCPT TO as it is. Report
+// addresses come from DNS, where quoted-printable can put CR/LF in them, and a
+// line break there would start a command of the sender's choosing.
+pub fn is_smtp_path(address: &str) -> bool {
+    !address.is_empty()
+        && !address
+            .bytes()
+            .any(|byte| byte.is_ascii_control() || matches!(byte, b' ' | b'<' | b'>'))
+}
+
+#[cfg(test)]
+mod smtp_path_tests {
+    use super::is_smtp_path;
+
+    #[test]
+    fn only_plain_addresses_are_paths() {
+        assert!(is_smtp_path("reports@example.org"));
+        assert!(is_smtp_path("jörg@exämple.org"));
+        for address in [
+            "",
+            "x@example.org\r\nRSET",
+            "x@example.org\nRSET",
+            "x@example.org\0",
+            "x@example.org> NOTIFY=NEVER",
+            "x y@example.org",
+            "<x@example.org",
+        ] {
+            assert!(!is_smtp_path(address), "{address:?}");
+        }
+    }
+}

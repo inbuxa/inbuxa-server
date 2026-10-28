@@ -2,6 +2,8 @@
  * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
+ *
+ * Modified by Coffey Labs in 2026 for INBUXA.
  */
 
 use crate::{
@@ -75,6 +77,10 @@ impl MtaReportSend for Server {
         for rcpt_ in rcpts {
             message.add_expanded_recipient(rcpt_.as_ref(), self).await;
         }
+        // inbuxa: every address was refused
+        if message.message.recipients.is_empty() {
+            return;
+        }
 
         // Schedule delivery at a random time between now and the next 3 hours
         if !deliver_now {
@@ -121,6 +127,10 @@ impl MtaReportSend for Server {
         );
         for rcpt in rcpts {
             message.add_expanded_recipient(rcpt, self).await;
+        }
+        // inbuxa: every address was refused
+        if message.message.recipients.is_empty() {
+            return;
         }
 
         // Queue message

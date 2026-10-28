@@ -11,8 +11,8 @@ use super::{
     QueuedMessage, Recipient, Schedule, Status,
 };
 use crate::inbound::dkim::DkimSign;
-use crate::queue::MessageWrapper;
 use crate::queue::manager::{Queue, QueueStats};
+use crate::queue::{MessageWrapper, is_smtp_path};
 use ahash::{AHashMap, AHashSet};
 use common::config::smtp::auth::DkimSigners;
 use common::config::smtp::queue::{ArchivedQueueExpiry, QueueName};
@@ -40,7 +40,7 @@ use store::write::{
 use store::{
     Deserialize, IterateParams, Serialize, SerializeInfallible, U32_LEN, U64_LEN, ValueKey,
 };
-use trc::{AddContext, ServerEvent, SpamEvent};
+use trc::{AddContext, DeliveryEvent, ServerEvent, SpamEvent};
 use types::blob::BlobId;
 use types::blob_hash::BlobHash;
 use utils::DomainPart;
@@ -678,7 +678,17 @@ impl MessageWrapper {
     }
 
     pub async fn add_expanded_recipient(&mut self, rcpt: impl AsRef<str>, server: &Server) {
-        self.message.recipients.push(Recipient::new(rcpt.as_ref()));
+        let rcpt = rcpt.as_ref();
+        if !is_smtp_path(rcpt) {
+            trc::event!(
+                Delivery(DeliveryEvent::RcptToRejected),
+                SpanId = self.span_id,
+                To = rcpt.to_string(),
+                Details = "The address can't be written in an SMTP command.",
+            );
+            return;
+        }
+        self.message.recipients.push(Recipient::new(rcpt));
         let queue = server.get_queue_or_default(
             &server
                 .eval_if::<String, _>(

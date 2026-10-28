@@ -2,6 +2,8 @@
  * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
+ *
+ * Modified by Coffey Labs in 2026 for INBUXA.
  */
 
 use crate::{
@@ -12,7 +14,7 @@ use common::{config::smtp::report::AggregateFrequency, ipc::TlsEvent};
 use mail_auth::{
     common::parse::TxtRecordParser,
     flate2::read::GzDecoder,
-    mta_sts::TlsRpt,
+    mta_sts::{ReportUri, TlsRpt},
     report::tlsrpt::{FailureDetails, PolicyType, ResultType, TlsReport},
 };
 use registry::schema::structs::{Expression, ReportSettings, TlsInternalReport, TlsReportSettings};
@@ -252,5 +254,45 @@ async fn report_tls() {
         assert_eq!(report.contact_info.unwrap(), "https://foobar.org/contact");
         assert_eq!(report.policies.len(), 1);
     }
+
+    // inbuxa: rua addresses are quoted-printable, so a record can put CR/LF in
+    // one. That address must never reach a RCPT TO.
+    let tls_record = Arc::new(
+        TlsRpt::parse(b"v=TLSRPTv1;rua=mailto:x@foobar.org=0D=0ARSET,mailto:reports@foobar.org")
+            .unwrap(),
+    );
+    assert!(
+        matches!(&tls_record.rua[0], ReportUri::Mail(addr) if addr.contains("\r\n")),
+        "{:?}",
+        tls_record.rua
+    );
+    test.server
+        .schedule_tls(Box::new(TlsEvent {
+            domain: "foobar.org".to_string(),
+            policy: common::ipc::PolicyType::None,
+            failure: None,
+            tls_record,
+            interval: AggregateFrequency::Daily,
+            span_id: 0,
+        }))
+        .await;
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    let reports = test.read_report_events::<TlsInternalReport>().await;
+    assert_eq!(reports.len(), 1);
+    test.server
+        .send_tls_aggregate_report(reports.first().unwrap().0.id())
+        .await
+        .unwrap();
+    let message = test.expect_message().await;
+    assert_eq!(
+        message
+            .message
+            .recipients
+            .iter()
+            .map(|rcpt| rcpt.address().to_string())
+            .collect::<Vec<_>>(),
+        ["reports@foobar.org"]
+    );
+
     test.assert_report_is_empty::<TlsInternalReport>().await;
 }
