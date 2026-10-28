@@ -724,6 +724,21 @@ async fn antispam() {
         assert!(spam_ctx.result.tags.contains("RCPT_COUNT_GT_50"));
         assert!(!spam_ctx.result.tags.contains("SORTED_RECIPS"));
         assert!(elapsed < Duration::from_secs(2), "{elapsed:?}");
+
+        // inbuxa: and the Subject used to be searched end to end once or twice
+        // per recipient, so a long one took time proportional to both
+        let subject = format!("for first@example.org {}", "word ".repeat(400_000));
+        let message = format!("To: first@example.org, {to}\r\nSubject: {subject}\r\n\r\nTest\r\n");
+        let parsed_message = MessageParser::new().parse(&message).unwrap();
+        let spam_input = session.build_spam_input(&parsed_message, &[], None, None, None, None);
+        let mut spam_ctx = test.server.spam_filter_init(spam_input);
+        let started = Instant::now();
+        test.server
+            .spam_filter_analyze_recipient(&mut spam_ctx)
+            .await;
+        let elapsed = started.elapsed();
+        assert!(spam_ctx.result.tags.contains("RCPT_IN_SUBJECT"));
+        assert!(elapsed < Duration::from_secs(2), "{elapsed:?}");
     }
 }
 

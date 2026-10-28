@@ -17,6 +17,8 @@ use crate::SpamFilterContext;
 
 // inbuxa: how many To/Cc addresses the similar-recipients check compares
 const SIMILAR_RECIPS_SAMPLE: usize = 50;
+// inbuxa: how much of the Subject is searched for each recipient
+const SUBJECT_SCAN_LEN: usize = 1_000;
 
 pub trait SpamFilterAnalyzeRecipient: Sync + Send {
     fn spam_filter_analyze_recipient(
@@ -155,6 +157,11 @@ impl SpamFilterAnalyzeRecipient for Server {
         let mut to_dn_count = 0;
         let mut to_match_envrcpt = 0;
 
+        // inbuxa: only the start of the Subject; all of it, once per recipient,
+        // took time proportional to both the Subject and the recipient list
+        let subject_lc =
+            &ctx.output.subject_lc[..ctx.output.subject_lc.floor_char_boundary(SUBJECT_SCAN_LEN)];
+
         for rcpt in &unique_recipients {
             // Validate name
             if let Some(rcpt_name) = &rcpt.name {
@@ -172,13 +179,10 @@ impl SpamFilterAnalyzeRecipient for Server {
 
             // Check if the local part is present in the subject
             if !rcpt.email.local_part.is_empty() {
-                if ctx.output.subject_lc.contains(rcpt.email.address.as_str()) {
+                if subject_lc.contains(rcpt.email.address.as_str()) {
                     ctx.result.add_tag("RCPT_IN_SUBJECT");
                 } else if rcpt.email.local_part.len() > 3
-                    && ctx
-                        .output
-                        .subject_lc
-                        .contains(rcpt.email.local_part.as_str())
+                    && subject_lc.contains(rcpt.email.local_part.as_str())
                 {
                     ctx.result.add_tag("RCPT_LOCAL_IN_SUBJECT");
                 }
