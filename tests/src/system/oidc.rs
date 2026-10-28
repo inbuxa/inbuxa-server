@@ -153,6 +153,21 @@ pub async fn test(test: &mut TestServer) {
         get("https://127.0.0.1:8899/.well-known/openid-configuration").await;
     let jwk_set: JWKSet<()> = get(&oidc_metadata.jwks_uri).await;
 
+    // Autoconfig echoes the address it was given; it must come back as XML text
+    let xml = String::from_utf8(
+        get_bytes(
+            "https://127.0.0.1:8899/mail/config-v1.1.xml?emailaddress=\
+             %3Cb%20x%3D%22y%22%3Ez%3C%2Fb%3E%40example.org",
+        )
+        .await
+        .to_vec(),
+    )
+    .unwrap();
+    assert!(
+        !xml.contains("<b x=") && xml.contains("&lt;b x="),
+        "unescaped address in autoconfig: {xml}"
+    );
+
     // OAuth Public Clients profile: the authorization server metadata must advertise the
     // mandatory properties (RFC 8414 + draft-ietf-mailmaint-oauth-public).
     assert!(

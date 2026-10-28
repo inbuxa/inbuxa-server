@@ -7,6 +7,7 @@
  */
 
 use crate::{Server, manager::application::Resource};
+use quick_xml::escape::escape;
 use registry::schema::enums::ServiceProtocol;
 use std::fmt::Write;
 use utils::url_params::UrlParams;
@@ -32,6 +33,10 @@ impl Server {
 
         // inbuxa: legacy-protocols LP-7, LP-14a
         let legacy_off = self.legacy_off_for(domain).await?;
+
+        // Both come from the query string
+        let emailaddress = escape(emailaddress);
+        let domain = escape(domain);
 
         // Build XML response
         let mut config = String::with_capacity(1024);
