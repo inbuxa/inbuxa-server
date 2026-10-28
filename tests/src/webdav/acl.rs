@@ -6,10 +6,12 @@
  * Modified by Coffey Labs in 2026 for INBUXA.
  */
 
-use crate::utils::{server::TestServer, webdav::GenerateTestDavResource};
+use crate::utils::{jmap::JmapUtils, server::TestServer, webdav::GenerateTestDavResource};
 use dav_proto::schema::property::{DavProperty, WebDavProperty};
 use groupware::DavResourceName;
 use hyper::StatusCode;
+use jmap_proto::{object::calendar::CalendarProperty, request::method::MethodObject};
+use serde_json::json;
 
 pub async fn test(test: &TestServer) {
     let owner_client = test.account("bill@example.com").webdav_client();
@@ -442,6 +444,69 @@ pub async fn test(test: &TestServer) {
     member_client
         .delete_default_containers_by_account("support@example.com")
         .await;
+
+    // inbuxa: MOVE of a whole calendar takes it from its owner, but it needed
+    // only RemoveItems, which a JMAP mayWriteAll share grants without mayDelete
+    let bill = test.account("bill@example.com");
+    let john = test.account("john@example.com");
+    let owner_calendar = format!(
+        "{}/bill%40example.com/team-calendar/",
+        DavResourceName::Cal.base_path()
+    );
+    let sharee_calendar = format!(
+        "{}/john%40example.com/team-calendar/",
+        DavResourceName::Cal.base_path()
+    );
+    owner_client
+        .mkcol(
+            "MKCALENDAR",
+            &owner_calendar,
+            [],
+            [("D:displayname", "Team calendar")],
+        )
+        .await
+        .with_status(StatusCode::CREATED);
+    let calendar_id = bill
+        .jmap_get(
+            MethodObject::Calendar,
+            [CalendarProperty::Id, CalendarProperty::Name],
+            Vec::<&str>::new(),
+        )
+        .await
+        .list()
+        .iter()
+        .find(|calendar| calendar.text_field("name") == "Team calendar")
+        .expect("Team calendar")
+        .id()
+        .to_string();
+    bill.jmap_update(
+        MethodObject::Calendar,
+        [(
+            &calendar_id,
+            json!({
+                format!("shareWith/{}", john.id_string()): {
+                    "mayReadItems": true,
+                    "mayWriteAll": true
+                }
+            }),
+        )],
+        Vec::<(&str, &str)>::new(),
+    )
+    .await
+    .updated(&calendar_id);
+    sharee_client
+        .request_with_headers(
+            "MOVE",
+            &owner_calendar,
+            [("destination", sharee_calendar.as_str())],
+            "",
+        )
+        .await
+        .with_status(StatusCode::FORBIDDEN);
+    owner_client
+        .request("DELETE", &owner_calendar, "")
+        .await
+        .with_status(StatusCode::NO_CONTENT);
 
     sharee_client.delete_default_containers().await;
     owner_client.delete_default_containers().await;
