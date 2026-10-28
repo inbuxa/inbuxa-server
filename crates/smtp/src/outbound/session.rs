@@ -2,13 +2,15 @@
  * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
+ *
+ * Modified by Coffey Labs in 2026 for INBUXA.
  */
 
 use super::client::SmtpClient;
 use crate::outbound::DeliveryResult;
 use crate::outbound::client::{BoxResponse, from_error_status, from_mail_send_error};
 use crate::outbound::error::ClientError;
-use crate::queue::{Error, MessageWrapper, Recipient, Status};
+use crate::queue::{Error, MessageWrapper, Recipient, Status, is_smtp_path};
 use crate::queue::{ErrorDetails, HostResponse, UnexpectedResponse};
 use common::Server;
 use common::config::smtp::queue::ConnectionStrategy;
@@ -169,6 +171,27 @@ impl MessageWrapper {
                 &rcpt.status,
                 Status::Completed(_) | Status::PermanentFailure(_)
             ) {
+                continue;
+            }
+
+            // inbuxa: queued before the queue refused such addresses
+            if !is_smtp_path(rcpt.address()) {
+                trc::event!(
+                    Delivery(DeliveryEvent::RcptToRejected),
+                    SpanId = params.session_id,
+                    Hostname = params.hostname.to_string(),
+                    To = rcpt.address().to_string(),
+                    Details = "The address can't be written in an SMTP command.",
+                );
+                statuses.push(DeliveryResult::account(
+                    Status::PermanentFailure(ErrorDetails {
+                        entity: params.hostname.into(),
+                        details: Error::Io(
+                            "The address can't be written in an SMTP command.".into(),
+                        ),
+                    }),
+                    *rcpt_idx,
+                ));
                 continue;
             }
 

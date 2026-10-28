@@ -355,6 +355,98 @@ pub async fn test(test: &mut TestServer) {
         assert_eq!(objects, vec![john_ids[&object_type]]);
     }
 
+    // inbuxa: an administrator holding fewer permissions than an account used
+    // to be able to change it (its password too) or delete it; permissions
+    // were compared only when they were the thing being changed
+    let limited_role_id = admin
+        .registry_create_object(Role {
+            description: "Limited administrator".to_string(),
+            enabled_permissions: Map::new(vec![
+                Permission::Authenticate,
+                Permission::SysAccountGet,
+                Permission::SysAccountQuery,
+                Permission::SysAccountUpdate,
+                Permission::SysAccountDestroy,
+            ]),
+            ..Default::default()
+        })
+        .await;
+    let minion_role_id = admin
+        .registry_create_object(Role {
+            description: "Minion".to_string(),
+            enabled_permissions: Map::new(vec![Permission::Authenticate]),
+            ..Default::default()
+        })
+        .await;
+    let mut account_ids = Vec::new();
+    for (name, roles) in [
+        (
+            "limited",
+            UserRoles::Custom(CustomRoles {
+                role_ids: Map::new(vec![limited_role_id]),
+            }),
+        ),
+        (
+            "minion",
+            UserRoles::Custom(CustomRoles {
+                role_ids: Map::new(vec![minion_role_id]),
+            }),
+        ),
+        ("boss", UserRoles::Admin),
+    ] {
+        account_ids.push(
+            admin
+                .registry_create_object(structs::Account::User(UserAccount {
+                    name: name.to_string(),
+                    domain_id,
+                    credentials: List::from_iter([Credential::Password(PasswordCredential {
+                        secret: "this is a very strong password".to_string(),
+                        ..Default::default()
+                    })]),
+                    roles,
+                    ..Default::default()
+                }))
+                .await,
+        );
+    }
+    let (limited_id, minion_id, boss_id) = (account_ids[0], account_ids[1], account_ids[2]);
+    let limited = crate::utils::account::Account::new(
+        "limited@example.org",
+        "this is a very strong password",
+        &[],
+        "Limited",
+        limited_id,
+    );
+    // An account it outranks, it may change
+    limited
+        .registry_update_object(
+            ObjectType::Account,
+            minion_id,
+            json!({ Property::Description: "Changed by a limited admin" }),
+        )
+        .await;
+    // One that holds more, it may neither change nor delete
+    limited
+        .registry_update_object_expect_err(
+            ObjectType::Account,
+            boss_id,
+            json!({ Property::Description: "Changed by a limited admin" }),
+        )
+        .await
+        .assert_type(SetErrorType::Forbidden);
+    limited
+        .registry_destroy_object_expect_err(ObjectType::Account, boss_id)
+        .await
+        .assert_type(SetErrorType::Forbidden);
+    admin
+        .registry_destroy(ObjectType::Account, account_ids.clone())
+        .await
+        .assert_destroyed(&account_ids);
+    admin
+        .registry_destroy(ObjectType::Role, [limited_role_id, minion_role_id])
+        .await
+        .assert_destroyed(&[limited_role_id, minion_role_id]);
+
     // Destroy test data
     for (account, ids) in [(&john, &john_ids), (&jane, &jane_ids)] {
         for (object_type, id) in ids {

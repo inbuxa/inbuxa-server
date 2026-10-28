@@ -32,6 +32,7 @@ use store::{
     write::{AlignedBytes, Archive, BatchBuilder, now},
 };
 use trc::AddContext;
+use types::acl::grants_beyond;
 use types::{
     acl::{Acl, AclGrant},
     blob::BlobId,
@@ -74,6 +75,17 @@ impl FileNodeSet for Server {
             .with_state(cache.assert_state(false, &request.if_in_state)?);
         let mut will_destroy = response.collect_will_destroy(request.unwrap_destroy());
         let is_shared = access_token.is_shared(account_id);
+        // inbuxa: where a sharee may add and remove nodes (AL-7: a writing
+        // delegate may do both anywhere)
+        let (can_add_to, can_remove_from) =
+            if is_shared && !access_token.delegate_may_write(account_id) {
+                (
+                    Some(cache.shared_containers(access_token, [Acl::AddItems], true)),
+                    Some(cache.shared_containers(access_token, [Acl::RemoveItems], true)),
+                )
+            } else {
+                (None, None)
+            };
         let on_destroy_remove_children = request
             .arguments
             .on_destroy_remove_children
@@ -159,6 +171,19 @@ impl FileNodeSet for Server {
                 &created_folders,
             ) {
                 response.not_created.append(id, err);
+                continue 'create;
+            }
+            if file_node.parent_id > 0
+                && let Some(allowed) = &can_add_to
+                && !created_folders.contains_key(&(file_node.parent_id - 1))
+                && !allowed.contains(file_node.parent_id - 1)
+            {
+                response.not_created.append(
+                    id,
+                    SetError::forbidden().with_description(
+                        "You are not allowed to create file nodes in this folder.",
+                    ),
+                );
                 continue 'create;
             }
 
@@ -276,8 +301,11 @@ impl FileNodeSet for Server {
                         file_node.acls = parent_acls;
                     }
                 } else if is_shared
-                    && parent_acls
-                        .is_none_or(|acls| !acls.effective_acl(access_token).contains(Acl::Share))
+                    && parent_acls.is_none_or(|acls| {
+                        // inbuxa: and passes on only the rights it holds itself
+                        let held = acls.effective_acl(access_token);
+                        !held.contains(Acl::Share) || grants_beyond(&held, &file_node.acls, &acls)
+                    })
                 {
                     response.not_created.append(
                         id,
@@ -424,6 +452,22 @@ impl FileNodeSet for Server {
                 response.not_updated.append(id, err);
                 continue 'update;
             }
+            let old_parent_id = file_node.inner.parent_id.to_native();
+            if new_file_node.parent_id != old_parent_id
+                && let (Some(may_add), Some(may_remove)) = (&can_add_to, &can_remove_from)
+                && (old_parent_id == 0
+                    || !may_remove.contains(old_parent_id - 1)
+                    || new_file_node.parent_id == 0
+                    || (!created_folders.contains_key(&(new_file_node.parent_id - 1))
+                        && !may_add.contains(new_file_node.parent_id - 1)))
+            {
+                response.not_updated.append(
+                    id,
+                    SetError::forbidden()
+                        .with_description("You are not allowed to move this file node there."),
+                );
+                continue 'update;
+            }
 
             let renamed = match find_sibling_collision(
                 Some(document_id),
@@ -517,6 +561,26 @@ impl FileNodeSet for Server {
                         id,
                         SetError::forbidden()
                             .with_description("You are not allowed to modify this file node."),
+                    );
+                    continue 'update;
+                }
+                // inbuxa: a sharee passes on only the rights it holds itself.
+                if has_acl_changes
+                    && grants_beyond(
+                        &acl,
+                        &new_file_node.acls,
+                        &file_node
+                            .inner
+                            .acls
+                            .iter()
+                            .map(AclGrant::from)
+                            .collect::<Vec<_>>(),
+                    )
+                {
+                    response.not_updated.append(
+                        id,
+                        SetError::forbidden()
+                            .with_description("You can only share rights you hold yourself."),
                     );
                     continue 'update;
                 }

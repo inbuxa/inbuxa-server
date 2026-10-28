@@ -196,7 +196,7 @@ impl EmailSubmissionProperty {
         )
         .or_else(|| {
             if allow_patch && value.contains('/') {
-                EmailSubmissionProperty::Pointer(JsonPointer::parse(value)).into()
+                super::parse_nested_pointer(value).map(EmailSubmissionProperty::Pointer)
             } else {
                 None
             }

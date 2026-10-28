@@ -2,6 +2,8 @@
  * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
+ *
+ * Modified by Coffey Labs in 2026 for INBUXA.
  */
 
 use crate::utils::{jmap::JmapUtils, server::TestServer};
@@ -574,6 +576,54 @@ pub async fn test(test: &TestServer) {
         "name": "Test #1",
         "description": null
         }));
+
+    // inbuxa: a sharee holding Share passes on only the rights it holds itself.
+    // Jane may write and share, but not delete, so she can't grant Delete,
+    // not even to herself.
+    john.jmap_update(
+        MethodObject::Calendar,
+        [(
+            &john_calendar_id,
+            json!({
+                format!("shareWith/{jane_id}/mayShare"): true,
+                format!("shareWith/{jane_id}/mayDelete"): false,
+            }),
+        )],
+        Vec::<(&str, &str)>::new(),
+    )
+    .await
+    .updated(&john_calendar_id);
+    jane.jmap_update_account(
+        john,
+        MethodObject::Calendar,
+        [(
+            &john_calendar_id,
+            json!({
+                format!("shareWith/{jane_id}/mayDelete"): true,
+            }),
+        )],
+        Vec::<(&str, &str)>::new(),
+    )
+    .await
+    .not_updated(&john_calendar_id);
+    john.jmap_update(
+        MethodObject::Calendar,
+        [(
+            &john_calendar_id,
+            json!({
+                format!("shareWith/{jane_id}/mayShare"): false,
+                format!("shareWith/{jane_id}/mayDelete"): true,
+            }),
+        )],
+        Vec::<(&str, &str)>::new(),
+    )
+    .await
+    .updated(&john_calendar_id);
+    jane_share_change_id = jane
+        .jmap_changes(MethodObject::ShareNotification, &jane_share_change_id)
+        .await
+        .new_state()
+        .to_string();
 
     // Revoke Jane's access
     john.jmap_update(

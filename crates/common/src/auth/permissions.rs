@@ -126,6 +126,28 @@ impl Server {
         access_token: &AccessToken,
         account: &Account,
     ) -> trc::Result<Result<(), Vec<Permission>>> {
+        self.account_permissions(access_token, account)
+            .await
+            .map(|permissions| access_token.can_grant_permissions(permissions))
+    }
+
+    /// inbuxa: SCIM-13: only the permissions a change adds to an account
+    pub async fn can_change_permissions(
+        &self,
+        access_token: &AccessToken,
+        old_account: &Account,
+        account: &Account,
+    ) -> trc::Result<Result<(), Vec<Permission>>> {
+        let mut added = self.account_permissions(access_token, account).await?;
+        added.difference(&self.account_permissions(access_token, old_account).await?);
+        Ok(access_token.can_grant_permissions(added))
+    }
+
+    async fn account_permissions(
+        &self,
+        access_token: &AccessToken,
+        account: &Account,
+    ) -> trc::Result<Permissions> {
         let (permissions, role_ids, tenant_id) = match account {
             Account::User(account) => (
                 &account.permissions,
@@ -158,7 +180,7 @@ impl Server {
 
         self.effective_permissions(permissions, role_ids, tenant_id)
             .await
-            .map(|permissions| access_token.can_grant_permissions(permissions.finalize()))
+            .map(|permissions| permissions.finalize())
     }
 }
 

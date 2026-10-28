@@ -1,0 +1,70 @@
+# iTIP: only the organizer may update or cancel an event
+
+# Organizer invites two attendees (1)
+> put a@example.com sender-role@example.com
+BEGIN:VCALENDAR
+PRODID:-//Example/ExampleCalendarClient//EN
+VERSION:2.0
+BEGIN:VEVENT
+UID:sender-role@example.com
+SEQUENCE:0
+ORGANIZER:mailto:a@example.com
+ATTENDEE;ROLE=CHAIR;PARTSTAT=ACCEPTED:mailto:a@example.com
+ATTENDEE;RSVP=TRUE:mailto:b@example.com
+ATTENDEE;RSVP=TRUE:mailto:c@example.com
+SUMMARY:Planning
+DTSTART:20270104T180000Z
+DTEND:20270104T190000Z
+DTSTAMP:20261027T120000Z
+STATUS:CONFIRMED
+END:VEVENT
+END:VCALENDAR
+
+# Organizer invites two attendees (2)
+> send
+
+# An attendee cancels the event for another attendee, posing as the organizer
+> itip c@example.com b@example.com
+BEGIN:VCALENDAR
+PRODID:-//Example/ExampleCalendarClient//EN
+METHOD:CANCEL
+VERSION:2.0
+BEGIN:VEVENT
+UID:sender-role@example.com
+SEQUENCE:1
+ORGANIZER:mailto:a@example.com
+ATTENDEE;ROLE=CHAIR;PARTSTAT=ACCEPTED:mailto:a@example.com
+ATTENDEE:mailto:b@example.com
+ATTENDEE:mailto:c@example.com
+DTSTAMP:20261027T130000Z
+STATUS:CANCELLED
+END:VEVENT
+END:VCALENDAR
+
+> send
+SenderIsNotOrganizer("c@example.com")
+
+# An attendee reschedules the event for another attendee, posing as the organizer
+> itip c@example.com b@example.com
+BEGIN:VCALENDAR
+PRODID:-//Example/ExampleCalendarClient//EN
+METHOD:REQUEST
+VERSION:2.0
+BEGIN:VEVENT
+UID:sender-role@example.com
+SEQUENCE:2
+ORGANIZER:mailto:a@example.com
+ATTENDEE;ROLE=CHAIR;PARTSTAT=ACCEPTED:mailto:a@example.com
+ATTENDEE:mailto:b@example.com
+ATTENDEE:mailto:c@example.com
+SUMMARY:Planning (moved)
+DTSTART:20270105T030000Z
+DTEND:20270105T040000Z
+DTSTAMP:20261027T140000Z
+STATUS:CONFIRMED
+END:VEVENT
+END:VCALENDAR
+
+> send
+SenderIsNotOrganizer("c@example.com")
+

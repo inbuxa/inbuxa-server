@@ -16,7 +16,7 @@ use base64::{
     engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD},
 };
 use common::{
-    KV_OAUTH, Server,
+    KV_OAUTH, KV_OAUTH_DEVICE, Server,
     auth::{
         AccessToken,
         oauth::{GrantType, oidc::StandardClaims},
@@ -161,7 +161,7 @@ impl TokenHandler for Server {
                 if let Some(auth_code_) = self
                     .in_memory_store()
                     .key_get::<Archive<AlignedBytes>>(KeyValue::<()>::build_key(
-                        KV_OAUTH,
+                        KV_OAUTH_DEVICE,
                         device_code.as_bytes(),
                     ))
                     .await?
@@ -187,7 +187,7 @@ impl TokenHandler for Server {
                                     // Mark this token as issued
                                     self.in_memory_store()
                                         .key_delete(KeyValue::<()>::build_key(
-                                            KV_OAUTH,
+                                            KV_OAUTH_DEVICE,
                                             device_code.as_bytes(),
                                         ))
                                         .await?;

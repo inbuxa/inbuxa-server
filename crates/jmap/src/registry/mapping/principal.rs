@@ -6,7 +6,10 @@
  * Modified by Coffey Labs in 2026 for INBUXA.
  */
 
-use crate::registry::mapping::{ObjectResponse, ValidationResult};
+use crate::registry::{
+    mapping::{ObjectResponse, ValidationResult},
+    set::SetOrigin,
+};
 use common::{
     Server,
     auth::{AccessToken, Permissions, PermissionsGroup, permissions::BuildPermissions},
@@ -37,6 +40,7 @@ pub async fn validate_account(
     access_token: &AccessToken,
     mut account: &mut Account,
     old_account: AccountUpdate<'_>,
+    origin: SetOrigin,
 ) -> ValidationResult {
     let is_external_directory = if let Account::User(account) = account {
         server
@@ -236,10 +240,30 @@ pub async fn validate_account(
         }
     };
 
-    let mut result = if validate_permissions {
-        Ok(server
-            .can_set_permissions(access_token, account)
+    // inbuxa: whoever changes an account must hold every permission it has,
+    // not only when its permissions are what changes; otherwise a limited
+    // administrator could reset a fuller one's password (SCIM-13: SCIM excepted)
+    if origin == SetOrigin::Jmap
+        && let AccountUpdate::Update(old_account) = old_account
+        && let Err(missing) = server
+            .can_set_permissions(access_token, old_account)
             .await?
+    {
+        return Ok(Err(build_set_error(missing)));
+    }
+
+    let mut result = if validate_permissions {
+        let allowed = match old_account {
+            // inbuxa: SCIM-13: a change SCIM makes is checked for what it adds,
+            // so it can turn off an administrator's sign-in
+            AccountUpdate::Update(old_account) if origin == SetOrigin::Scim => {
+                server
+                    .can_change_permissions(access_token, old_account, account)
+                    .await?
+            }
+            _ => server.can_set_permissions(access_token, account).await?,
+        };
+        Ok(allowed
             .map(|_| ObjectResponse::default())
             .map_err(build_set_error))
     } else {

@@ -2,6 +2,8 @@
  * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
+ *
+ * Modified by Coffey Labs in 2026 for INBUXA.
  */
 
 use super::assert_is_unique_uid;
@@ -28,7 +30,9 @@ use dav_proto::{
 };
 use groupware::{
     cache::GroupwareCache,
-    calendar::{CalendarEvent, CalendarEventData, itip::ItipSendStatus},
+    calendar::{
+        CalendarEvent, CalendarEventData, dates::has_oversized_rrule, itip::ItipSendStatus,
+    },
     scheduling::{
         ItipMessages, event_create::itip_create, event_update::itip_update,
         itip::itip_set_unreachable_status,
@@ -500,6 +504,16 @@ impl CalendarUpdateRequestHandler for Server {
 }
 
 fn validate_ical(ical: &ICalendar) -> crate::Result<&str> {
+    if has_oversized_rrule(ical) {
+        return Err(DavError::Condition(
+            DavErrorCondition::new(
+                StatusCode::PRECONDITION_FAILED,
+                CalCondition::ValidCalendarObjectResource,
+            )
+            .with_details("Recurrence rule produces too many instances per period"),
+        ));
+    }
+
     // Validate UIDs
     let mut uids = HashSet::with_capacity(1);
 

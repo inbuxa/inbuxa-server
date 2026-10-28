@@ -26,7 +26,12 @@ use registry::schema::{
         SystemSettings, TaskManager,
     },
 };
-use std::{str::FromStr, time::Duration};
+use registry::types::ipmask::IpAddrOrMask;
+use std::{
+    net::{Ipv4Addr, Ipv6Addr},
+    str::FromStr,
+    time::Duration,
+};
 use utils::map::vec_map::VecMap;
 
 #[derive(Clone)]
@@ -71,6 +76,9 @@ pub struct Http {
     /// CORS is permissive (bootstrap, recovery, or `usePermissiveCors`).
     pub cors_origins: Vec<hyper::header::HeaderValue>,
     pub use_forwarded: bool,
+    /// inbuxa: peers whose X-Forwarded-For / Forwarded headers are believed.
+    /// Loopback and private networks, or `INBUXA_HTTP_TRUSTED_PROXIES`.
+    pub trusted_proxies: Vec<IpAddrOrMask>,
     pub redirect_root: Option<String>,
     /// inbuxa: HTTP Basic accepted on every endpoint, not only DAV (contract
     /// C-23). True in bootstrap and recovery mode, or with
@@ -489,6 +497,26 @@ impl Http {
                 Err(_) => false,
             };
 
+        // inbuxa: which peers may say who the client is. A list replaces the
+        // default; an entry that isn't an address or network is left out.
+        let trusted_proxies = match types::branding::env_var("HTTP_TRUSTED_PROXIES") {
+            Ok(value) if !value.trim().is_empty() => value
+                .split(|c: char| c == ',' || c.is_whitespace())
+                .filter(|entry| !entry.is_empty())
+                .filter_map(|entry| match entry.parse::<IpAddrOrMask>() {
+                    Ok(net) => Some(net),
+                    Err(err) => {
+                        bp.build_warning(
+                            ObjectType::Http.singleton(),
+                            format!("INBUXA_HTTP_TRUSTED_PROXIES: {err}, left out."),
+                        );
+                        None
+                    }
+                })
+                .collect(),
+            _ => default_trusted_proxies(),
+        };
+
         if use_permissive_cors {
             http_headers.push((
                 hyper::header::ACCESS_CONTROL_ALLOW_ORIGIN,
@@ -547,10 +575,34 @@ impl Http {
             response_headers: http_headers,
             cors_origins,
             use_forwarded: http.use_x_forwarded,
+            trusted_proxies,
             redirect_root: http.redirect_root,
             basic_auth_everywhere,
         }
     }
+}
+
+// inbuxa: loopback and the private ranges, where a reverse proxy on the same
+// host, container network or LAN connects from.
+fn default_trusted_proxies() -> Vec<IpAddrOrMask> {
+    let v4 = |a, b, bits: u32| IpAddrOrMask::V4 {
+        addr: Ipv4Addr::new(a, b, 0, 0),
+        mask: u32::MAX << (32 - bits),
+    };
+    let v6 = |addr: Ipv6Addr, bits: u32| IpAddrOrMask::V6 {
+        addr,
+        mask: u128::MAX << (128 - bits),
+    };
+    vec![
+        v4(127, 0, 8),
+        v4(10, 0, 8),
+        v4(172, 16, 12),
+        v4(192, 168, 16),
+        v4(100, 64, 10),
+        v6(Ipv6Addr::LOCALHOST, 128),
+        v6(Ipv6Addr::new(0xfc00, 0, 0, 0, 0, 0, 0, 0), 7),
+        v6(Ipv6Addr::new(0xfe80, 0, 0, 0, 0, 0, 0, 0), 10),
+    ]
 }
 
 impl AsnGeoLookupConfig {

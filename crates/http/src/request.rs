@@ -17,6 +17,7 @@ use crate::{
         },
         token_only::{is_refused_basic, is_token_only_path},
     },
+    client_ip,
     form::FormHandler,
 };
 use common::{
@@ -49,7 +50,7 @@ use jmap::{
 use jmap_proto::request::{Request, capability::Session};
 use percent_encoding::percent_decode_str;
 use registry::schema::enums::Permission;
-use std::{net::IpAddr, str::FromStr, sync::Arc};
+use std::{str::FromStr, sync::Arc};
 use store::dispatch::lookup::KeyValue;
 use trc::SecurityEvent;
 use types::{blob::BlobId, id::Id};
@@ -722,43 +723,11 @@ async fn handle_session<T: SessionStream>(inner: Arc<Inner>, session: SessionDat
                         );
 
                         session.remote_ip
-                    } else if let Some(forwarded_for) = req
-                        .headers()
-                        .get(header::FORWARDED)
-                        .and_then(|h| h.to_str().ok())
-                        .and_then(|h| {
-                            let h = h.to_ascii_lowercase();
-                            h.split_once("for=").and_then(|(_, rest)| {
-                                let mut start_ip = usize::MAX;
-                                let mut end_ip = usize::MAX;
-
-                                for (pos, ch) in rest.char_indices() {
-                                    match ch {
-                                        '0'..='9' | 'a'..='f' | ':' | '.' => {
-                                            if start_ip == usize::MAX {
-                                                start_ip = pos;
-                                            }
-                                            end_ip = pos;
-                                        }
-                                        '"' | '[' | ' ' if start_ip == usize::MAX => {}
-                                        _ => {
-                                            break;
-                                        }
-                                    }
-                                }
-
-                                rest.get(start_ip..=end_ip)
-                                    .and_then(|h| h.parse::<IpAddr>().ok())
-                            })
-                        })
-                        .or_else(|| {
-                            req.headers()
-                                .get("X-Forwarded-For")
-                                .and_then(|h| h.to_str().ok())
-                                .map(|h| h.split_once(',').map_or(h, |(ip, _)| ip).trim())
-                                .and_then(|h| h.parse::<IpAddr>().ok())
-                        })
-                    {
+                    } else if let Some(forwarded_for) = client_ip::forwarded_client(
+                        session.remote_ip,
+                        req.headers(),
+                        &server.core.network.http.trusted_proxies,
+                    ) {
                         trc::event!(
                             Http(trc::HttpEvent::RequestUrl),
                             SpanId = session.session_id,
@@ -901,7 +870,13 @@ async fn handle_session<T: SessionStream>(inner: Arc<Inner>, session: SessionDat
     {
         if http_err.is_parse() {
             let server = inner.build_server();
-            if !server.core.network.http.use_forwarded {
+            // inbuxa: a trusted proxy's address stands for many clients
+            if !(server.core.network.http.use_forwarded
+                && client_ip::is_trusted_proxy(
+                    &server.core.network.http.trusted_proxies,
+                    &session.remote_ip,
+                ))
+            {
                 match server.is_scanner_fail2banned(session.remote_ip).await {
                     Ok(true) => {
                         trc::event!(

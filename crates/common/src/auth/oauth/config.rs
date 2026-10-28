@@ -2,19 +2,25 @@
  * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
+ *
+ * Modified by Coffey Labs in 2026 for INBUXA.
  */
 
 use crate::{
     config::{EcKeyCurve, build_ecdsa_pem, build_rsa_keypair},
     manager::application::Resource,
 };
+use aws_lc_rs::{
+    rand::SystemRandom,
+    signature::{ECDSA_P256_SHA256_FIXED_SIGNING, EcdsaKeyPair},
+};
 use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
 use jsonwebtoken::{
     Algorithm, EncodingKey,
     jwk::{
         AlgorithmParameters, CommonParameters, EllipticCurve, EllipticCurveKeyParameters,
-        EllipticCurveKeyType, Jwk, JwkSet, KeyAlgorithm, OctetKeyParameters, OctetKeyType,
-        PublicKeyUse, RSAKeyParameters, RSAKeyType,
+        EllipticCurveKeyType, Jwk, JwkSet, KeyAlgorithm, PublicKeyUse, RSAKeyParameters,
+        RSAKeyType,
     },
 };
 use registry::schema::{enums::JwtSignatureAlgorithm, prelude::ObjectType, structs::OidcProvider};
@@ -61,35 +67,34 @@ impl OAuthConfig {
             JwtSignatureAlgorithm::Hs512 => Algorithm::HS512,
         };
 
-        let rand_key = rng()
-            .sample_iter(Alphanumeric)
-            .take(64)
-            .map(char::from)
-            .collect::<String>();
-
-        let signature_key = auth
-            .signature_key
-            .secret()
-            .await
-            .map_err(|err| {
-                bp.build_error(ObjectType::OidcProvider.singleton(), err);
-            })
-            .unwrap_or(Cow::Borrowed(rand_key.as_str()));
-
-        let fallback_key = || {
-            (
-                EncodingKey::from_secret(rand_key.as_bytes()),
-                AlgorithmParameters::OctetKey(OctetKeyParameters {
-                    key_type: OctetKeyType::Octet,
-                    value: URL_SAFE_NO_PAD.encode(&rand_key),
-                })
-                .into(),
-            )
+        // inbuxa: every fallback key is its own random value, and an empty
+        // secret counts as missing.
+        let random_key = || {
+            rng()
+                .sample_iter(Alphanumeric)
+                .take(64)
+                .map(char::from)
+                .collect::<String>()
         };
 
-        let (oidc_signing_secret, algorithm) = match oidc_signature_algorithm {
+        let signature_key = match auth.signature_key.secret().await {
+            Ok(key) if !key.is_empty() => key,
+            Ok(_) => {
+                bp.build_error(
+                    ObjectType::OidcProvider.singleton(),
+                    "The OIDC signature key is empty",
+                );
+                Cow::Owned(random_key())
+            }
+            Err(err) => {
+                bp.build_error(ObjectType::OidcProvider.singleton(), err);
+                Cow::Owned(random_key())
+            }
+        };
+
+        let configured = match oidc_signature_algorithm {
             Algorithm::HS256 | Algorithm::HS384 | Algorithm::HS512 => {
-                (EncodingKey::from_secret(signature_key.as_bytes()), None)
+                Ok((EncodingKey::from_secret(signature_key.as_bytes()), None))
             }
             Algorithm::RS256
             | Algorithm::RS384
@@ -98,24 +103,36 @@ impl OAuthConfig {
             | Algorithm::PS384
             | Algorithm::PS512 => parse_rsa_key(&auth)
                 .await
-                .map_err(|err| {
-                    bp.build_error(ObjectType::OidcProvider.singleton(), err);
-                })
-                .map(|(secret, alg)| (secret, Some(alg)))
-                .unwrap_or_else(|_| fallback_key()),
+                .map(|(secret, alg)| (secret, Some(alg))),
             Algorithm::ES256 | Algorithm::ES384 => parse_ecdsa_key(&auth, oidc_signature_algorithm)
                 .await
-                .map_err(|err| {
-                    bp.build_error(ObjectType::OidcProvider.singleton(), err);
-                })
-                .map(|(secret, alg)| (secret, Some(alg)))
-                .unwrap_or_else(|_| fallback_key()),
-            _ => {
-                bp.build_error(
-                    ObjectType::OidcProvider.singleton(),
-                    format!("Unsupported OIDC signature algorithm {oidc_signature_algorithm:?}"),
-                );
-                fallback_key()
+                .map(|(secret, alg)| (secret, Some(alg))),
+            _ => Err(format!(
+                "Unsupported OIDC signature algorithm {oidc_signature_algorithm:?}"
+            )),
+        };
+
+        // inbuxa: when the configured key can't be used, sign with a fresh
+        // ES256 key and publish only its public half. The old fallback was a
+        // random HMAC secret published as an "oct" key in the public JWKS,
+        // where anyone could take it and sign ID tokens.
+        let (oidc_signing_secret, algorithm, oidc_signature_algorithm) = match configured {
+            Ok((secret, algorithm)) => (secret, algorithm, oidc_signature_algorithm),
+            Err(err) => {
+                bp.build_error(ObjectType::OidcProvider.singleton(), err);
+                match ephemeral_es256_key() {
+                    Ok((secret, algorithm)) => (secret, Some(algorithm), Algorithm::ES256),
+                    Err(err) => {
+                        // Nothing is published, so no relying party accepts
+                        // what this key signs.
+                        bp.build_error(ObjectType::OidcProvider.singleton(), err);
+                        (
+                            EncodingKey::from_secret(random_key().as_bytes()),
+                            None,
+                            oidc_signature_algorithm,
+                        )
+                    }
+                }
             }
         };
 
@@ -140,12 +157,20 @@ impl OAuthConfig {
         };
 
         OAuthConfig {
-            oauth_key: auth
-                .encryption_key
-                .secret()
-                .await
-                .map_err(|err| bp.build_error(ObjectType::OidcProvider.singleton(), err))
-                .map_or_else(|_| rand_key.clone(), Cow::into_owned),
+            oauth_key: match auth.encryption_key.secret().await {
+                Ok(key) if !key.is_empty() => key.into_owned(),
+                Ok(_) => {
+                    bp.build_error(
+                        ObjectType::OidcProvider.singleton(),
+                        "The OAuth encryption key is empty",
+                    );
+                    random_key()
+                }
+                Err(err) => {
+                    bp.build_error(ObjectType::OidcProvider.singleton(), err);
+                    random_key()
+                }
+            },
             oauth_expiry_user_code: auth.user_code_expiry.as_secs(),
             oauth_expiry_auth_code: auth.auth_code_expiry.as_secs(),
             oauth_expiry_token: auth.access_token_expiry.as_secs(),
@@ -160,6 +185,24 @@ impl OAuthConfig {
             oidc_jwks,
         }
     }
+}
+
+fn ephemeral_es256_key() -> Result<(EncodingKey, AlgorithmParameters), String> {
+    let pkcs8 =
+        EcdsaKeyPair::generate_pkcs8(&ECDSA_P256_SHA256_FIXED_SIGNING, &SystemRandom::new())
+            .map_err(|err| format!("Failed to generate a fallback OIDC key: {err}"))?;
+    let pem = pem::encode(&pem::Pem::new("PRIVATE KEY", pkcs8.as_ref()));
+    let ecdsa_key = build_ecdsa_pem(EcKeyCurve::P256, &pem)?;
+
+    Ok((
+        EncodingKey::from_ec_der(&ecdsa_key.pkcs8_der),
+        AlgorithmParameters::EllipticCurve(EllipticCurveKeyParameters {
+            key_type: EllipticCurveKeyType::EC,
+            curve: EllipticCurve::P256,
+            x: URL_SAFE_NO_PAD.encode(&ecdsa_key.x),
+            y: URL_SAFE_NO_PAD.encode(&ecdsa_key.y),
+        }),
+    ))
 }
 
 async fn parse_rsa_key(auth: &OidcProvider) -> Result<(EncodingKey, AlgorithmParameters), String> {
@@ -200,4 +243,19 @@ async fn parse_ecdsa_key(
         EncodingKey::from_ec_der(&ecdsa_key.pkcs8_der),
         AlgorithmParameters::EllipticCurve(ecdsa_key_params),
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use jsonwebtoken::jwk::AlgorithmParameters;
+
+    #[test]
+    fn fallback_signing_key_is_asymmetric() {
+        // What the JWKS publishes for the fallback must be a public key only.
+        let (_, params) = super::ephemeral_es256_key().unwrap();
+        assert!(matches!(params, AlgorithmParameters::EllipticCurve(_)));
+        let json = serde_json::to_string(&params).unwrap();
+        assert!(!json.contains("\"oct\""), "{json}");
+        assert!(!json.contains("\"d\""), "{json}");
+    }
 }

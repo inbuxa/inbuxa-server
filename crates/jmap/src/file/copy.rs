@@ -39,6 +39,7 @@ use store::{
     write::{AlignedBytes, Archive, BatchBuilder, now},
 };
 use trc::AddContext;
+use types::acl::grants_beyond;
 use types::{
     acl::Acl,
     collection::{Collection, SyncCollection},
@@ -117,6 +118,9 @@ impl FileNodeCopy for Server {
         } else {
             None
         };
+        // inbuxa: onExists=replace deletes what it replaces, as FileNode/set does
+        let can_delete = (!access_token.is_member(account_id))
+            .then(|| cache.shared_containers(access_token, [Acl::Delete], false));
         let on_exists = request.arguments.on_exists;
         let case_insensitive = request
             .arguments
@@ -242,6 +246,23 @@ impl FileNodeCopy for Server {
                 file_node.modified = now() as i64;
             }
 
+            // inbuxa: whether the node may go in this folder comes before any
+            // name collision there, so a refused copy can't replace what's there
+            if file_node.parent_id > 0
+                && let Some(allowed) = &can_add_to
+                && !created_folders.contains_key(&(file_node.parent_id - 1))
+                && !allowed.contains(file_node.parent_id - 1)
+            {
+                response.not_created.append(
+                    id,
+                    SetError::forbidden().with_description(
+                        "You are not allowed to create file nodes in this folder.",
+                    ),
+                );
+                continue 'create;
+            }
+
+            let mut replaces = None;
             let renamed = match find_sibling_collision(
                 None,
                 &file_node,
@@ -297,8 +318,22 @@ impl FileNodeCopy for Server {
                                         .append(id, SetError::node_has_children());
                                     continue 'create;
                                 }
+                                if let Some(can_delete) = &can_delete
+                                    && !cache
+                                        .subtree(target.path())
+                                        .all(|node| can_delete.contains(node.document_id()))
+                                {
+                                    response.not_created.append(
+                                        id,
+                                        SetError::forbidden().with_description(
+                                            "You are not allowed to delete the file node this would replace.",
+                                        ),
+                                    );
+                                    continue 'create;
+                                }
                             }
-                            implicit_destroys.insert(existing);
+                            // inbuxa: deleted only once the copy is made
+                            replaces = Some(existing);
                             false
                         }
                         OnExists::Newest => unreachable!(),
@@ -332,20 +367,6 @@ impl FileNodeCopy for Server {
             if file_node.parent_id > 0 {
                 let parent_id = file_node.parent_id - 1;
 
-                // The user must be allowed to add children to the destination parent
-                if let Some(allowed) = &can_add_to
-                    && !created_folders.contains_key(&parent_id)
-                    && !allowed.contains(parent_id)
-                {
-                    response.not_created.append(
-                        id,
-                        SetError::forbidden().with_description(
-                            "You are not allowed to create file nodes in this folder.",
-                        ),
-                    );
-                    continue 'create;
-                }
-
                 let parent_acls = created_folders.get(&parent_id).cloned().or_else(|| {
                     cache
                         .container_resource_by_id(parent_id)
@@ -357,8 +378,11 @@ impl FileNodeCopy for Server {
                         file_node.acls = parent_acls;
                     }
                 } else if is_shared
-                    && parent_acls
-                        .is_none_or(|acls| !acls.effective_acl(access_token).contains(Acl::Share))
+                    && parent_acls.is_none_or(|acls| {
+                        // inbuxa: and passes on only the rights it holds itself
+                        let held = acls.effective_acl(access_token);
+                        !held.contains(Acl::Share) || grants_beyond(&held, &file_node.acls, &acls)
+                    })
                 {
                     response.not_created.append(
                         id,
@@ -386,6 +410,9 @@ impl FileNodeCopy for Server {
                     .caused_by(trc::location!())?;
             }
 
+            if let Some(existing) = replaces {
+                implicit_destroys.insert(existing);
+            }
             let document_id = self
                 .store()
                 .assign_document_ids(account_id, Collection::FileNode, 1)

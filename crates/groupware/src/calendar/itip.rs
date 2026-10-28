@@ -2,6 +2,8 @@
  * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
+ *
+ * Modified by Coffey Labs in 2026 for INBUXA.
  */
 
 use crate::{
@@ -155,6 +157,10 @@ impl ItipIngest for Server {
                 ItipError::SenderIsNotOrganizerNorAttendee,
             ));
         }
+        // inbuxa: also covers events the recipient doesn't have yet
+        itip_snapshots
+            .assert_organizer_sends(itip_method(&itip)?, sender)
+            .map_err(ItipIngestError::Message)?;
 
         // Obtain changedBy
         let changed_by = if let Some(id) = self.account_id_from_email(sender, true).await? {

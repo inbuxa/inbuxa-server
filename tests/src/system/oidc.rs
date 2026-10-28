@@ -153,6 +153,21 @@ pub async fn test(test: &mut TestServer) {
         get("https://127.0.0.1:8899/.well-known/openid-configuration").await;
     let jwk_set: JWKSet<()> = get(&oidc_metadata.jwks_uri).await;
 
+    // Autoconfig echoes the address it was given; it must come back as XML text
+    let xml = String::from_utf8(
+        get_bytes(
+            "https://127.0.0.1:8899/mail/config-v1.1.xml?emailaddress=\
+             %3Cb%20x%3D%22y%22%3Ez%3C%2Fb%3E%40example.org",
+        )
+        .await
+        .to_vec(),
+    )
+    .unwrap();
+    assert!(
+        !xml.contains("<b x=") && xml.contains("&lt;b x="),
+        "unescaped address in autoconfig: {xml}"
+    );
+
     // OAuth Public Clients profile: the authorization server metadata must advertise the
     // mandatory properties (RFC 8414 + draft-ietf-mailmaint-oauth-public).
     assert!(
@@ -442,6 +457,22 @@ pub async fn test(test: &mut TestServer) {
         TokenResponse::Error {
             error: ErrorType::InvalidGrant
         }
+    );
+
+    // inbuxa: an authorization code is not a device code. Redeemed through the
+    // device grant it would skip the PKCE, redirect_uri and client checks above.
+    let device_params = AHashMap::from_iter([
+        (
+            "grant_type".to_string(),
+            "urn:ietf:params:oauth:grant-type:device_code".to_string(),
+        ),
+        ("device_code".to_string(), token_params["code"].clone()),
+        ("client_id".to_string(), client_id.to_string()),
+    ]);
+    let device_grant = post::<TokenResponse>(&metadata.token_endpoint, &device_params).await;
+    assert!(
+        !matches!(device_grant, TokenResponse::Granted(_)),
+        "an authorization code was redeemed through the device grant: {device_grant:?}"
     );
 
     // Obtain token and verify the granted scope is echoed back

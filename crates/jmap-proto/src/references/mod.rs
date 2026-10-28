@@ -2,6 +2,8 @@
  * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
+ *
+ * Modified by Coffey Labs in 2026 for INBUXA.
  */
 
 use compact_str::format_compact;
@@ -44,6 +46,12 @@ fn topological_sort<T>(
 
     'main: loop {
         while let Some(from_id) = it.next() {
+            // Already placed: its references were placed before it, so
+            // walking them again only repeats work (exponentially so when
+            // creates share references).
+            if !create.contains_key(from_id) {
+                continue;
+            }
             if let Some(to_ids) = graph.get(from_id) {
                 it_stack.push((it, from_id));
                 if it_stack.len() > 1000 {
@@ -85,6 +93,36 @@ fn topological_sort<T>(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn topological_sort_visits_each_create_once() {
+        // b0 -> {b1, b2}, b1 -> {b2, b3}, ...: an acyclic graph that a walk
+        // without a visited set traverses about fib(n) times.
+        const N: usize = 60;
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let mut create = utils::map::vec_map::VecMap::new();
+            let mut graph = std::collections::HashMap::new();
+            for i in 0..N {
+                create.append(format!("b{i}"), i);
+                let refs = [i + 1, i + 2]
+                    .into_iter()
+                    .filter(|j| *j < N)
+                    .map(|j| format!("b{j}"))
+                    .collect::<Vec<_>>();
+                if !refs.is_empty() {
+                    graph.insert(format!("b{i}"), refs);
+                }
+            }
+            let sorted = super::topological_sort(&mut create, graph).unwrap();
+            let _ = tx.send(sorted.into_iter().map(|(_, v)| v).collect::<Vec<_>>());
+        });
+        let order = rx
+            .recv_timeout(std::time::Duration::from_secs(2))
+            .expect("topological sort did not finish within 2 seconds");
+        // Every create comes after the ones it references.
+        assert_eq!(order, (0..N).rev().collect::<Vec<_>>());
+    }
+
     use crate::references::Graph;
     use crate::references::eval::EvalObjectReferences;
     use crate::{

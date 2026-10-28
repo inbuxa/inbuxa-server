@@ -2,6 +2,8 @@
  * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
+ *
+ * Modified by Coffey Labs in 2026 for INBUXA.
  */
 
 use std::fmt::{self, Display};
@@ -144,5 +146,58 @@ impl From<&ArchivedAclGrant> for AclGrant {
             account_id: u32::from(value.account_id),
             grants: (&value.grants).into(),
         }
+    }
+}
+
+/// inbuxa: whether `new` gives anyone a right that `held` lacks. Only rights
+/// added since `old` count, so a sharee may keep or narrow what the owner
+/// granted, and passes on only the rights it holds itself.
+pub fn grants_beyond(held: &Bitmap<Acl>, new: &[AclGrant], old: &[AclGrant]) -> bool {
+    new.iter().any(|grant| {
+        let had = old
+            .iter()
+            .find(|old| old.account_id == grant.account_id)
+            .map_or(0, |old| old.grants.bitmap);
+        grant.grants.bitmap & !had & !held.bitmap != 0
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Acl, AclGrant, grants_beyond};
+    use utils::map::bitmap::Bitmap;
+
+    fn grant(account_id: u32, acls: &[Acl]) -> AclGrant {
+        let mut grants = Bitmap::new();
+        grants.insert_many(acls.iter().copied());
+        AclGrant { account_id, grants }
+    }
+
+    #[test]
+    fn sharee_passes_on_only_what_it_holds() {
+        let held = grant(1, &[Acl::Read, Acl::Modify, Acl::Share]).grants;
+        let old = [
+            grant(1, &[Acl::Read, Acl::Modify, Acl::Share]),
+            grant(3, &[Acl::Delete]),
+        ];
+
+        // Granting itself Delete
+        assert!(grants_beyond(
+            &held,
+            &[grant(1, &[Acl::Read, Acl::Modify, Acl::Share, Acl::Delete])],
+            &old
+        ));
+        // Granting someone else Delete
+        assert!(grants_beyond(&held, &[grant(2, &[Acl::Delete])], &old));
+        // Passing on what it holds, keeping what the owner gave someone, narrowing
+        assert!(!grants_beyond(
+            &held,
+            &[
+                grant(1, &[Acl::Read]),
+                grant(2, &[Acl::Read, Acl::Share]),
+                grant(3, &[Acl::Delete])
+            ],
+            &old
+        ));
     }
 }

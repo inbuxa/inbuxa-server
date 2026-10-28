@@ -130,6 +130,9 @@ pub const KV_LOCK_DAV: u8 = 25;
 pub const KV_SIEVE_ID: u8 = 26;
 // inbuxa: far above upstream's prefixes, so a new one of theirs never collides
 pub const KV_PORT_REACHABILITY: u8 = 200;
+// inbuxa: device-flow codes live apart from authorization codes, so neither
+// grant can redeem the other's code.
+pub const KV_OAUTH_DEVICE: u8 = 201;
 
 #[derive(Clone)]
 pub struct Server {

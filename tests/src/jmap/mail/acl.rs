@@ -469,6 +469,22 @@ pub async fn test(test: &TestServer) {
         .await
         .unwrap();
 
+    // AddItems on a mailbox doesn't let John file messages he can't read into it
+    let result = john_client
+        .set_default_account_id(jane.id_string())
+        .email_set_mailbox(&jane_trash_email, &mailbox_id, true)
+        .await;
+    assert!(
+        matches!(
+            result,
+            Err(jmap_client::Error::Set(SetError {
+                type_: SetErrorType::NotFound,
+                ..
+            }))
+        ),
+        "Expected not found, got {result:?}"
+    );
+
     // Try deleting a mailbox
     assert_forbidden(
         john_client

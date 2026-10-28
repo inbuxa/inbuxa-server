@@ -2,6 +2,8 @@
  * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
+ *
+ * Modified by Coffey Labs in 2026 for INBUXA.
  */
 
 use crate::calendar_event::{CalendarSyntheticId, assert_is_unique_uid};
@@ -27,6 +29,7 @@ use groupware::{
         ALERT_EMAIL, ALERT_RELATIVE_TO_END, ArchivedDefaultAlert, Calendar, CalendarEvent,
         CalendarEventData, EVENT_DRAFT, EVENT_HIDE_ATTENDEES, EVENT_INVITE_OTHERS,
         EVENT_INVITE_SELF, PREF_USE_DEFAULT_ALERTS,
+        dates::has_oversized_rrule,
         expand::{CalendarEventExpansion, ComponentRecurrenceId, RecurrenceKey, resolve_local},
         itip::ItipSendStatus,
     },
@@ -409,6 +412,17 @@ impl CalendarEventSet for Server {
                         "Event size {} exceeds the maximum allowed size of {} bytes.",
                         new_calendar_event.size, self.core.groupware.max_ical_size
                     )),
+                );
+                continue 'update;
+            }
+            if has_oversized_rrule(&new_calendar_event.data.event) {
+                update.fail(
+                    &mut response,
+                    SetError::invalid_properties()
+                        .with_property(JSCalendarProperty::RecurrenceRule)
+                        .with_description(
+                            "Recurrence rule produces too many instances per period.",
+                        ),
                 );
                 continue 'update;
             }
@@ -813,6 +827,13 @@ impl CalendarEventSet for Server {
                     size, self.core.groupware.max_ical_size
                 ),
             )));
+        }
+        if has_oversized_rrule(&ical) {
+            return Ok(Err(SetError::invalid_properties()
+                .with_property(JSCalendarProperty::RecurrenceRule)
+                .with_description(
+                    "Recurrence rule produces too many instances per period.",
+                )));
         }
 
         // Build event

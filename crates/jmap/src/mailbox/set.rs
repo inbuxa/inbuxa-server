@@ -39,6 +39,7 @@ use store::{
     write::{AlignedBytes, Archive, BatchBuilder, assert::AssertValue},
 };
 use trc::AddContext;
+use types::acl::grants_beyond;
 use types::{
     acl::Acl, collection::Collection, field::MailboxField, id::Id, special_use::SpecialUse,
 };
@@ -644,6 +645,20 @@ impl MailboxSet for Server {
                     .with_description(
                         "Your organization has turned off sharing mail folders. A shared mailbox or a group can be set up by an administrator instead.",
                     )));
+            }
+
+            // inbuxa: a sharee passes on only the rights it holds itself.
+            if ctx.is_shared
+                && let Some(current) = current.as_ref()
+                && grants_beyond(
+                    &current.inner.acls.effective_acl(ctx.access_token),
+                    &changes.acls,
+                    &current.inner.acls,
+                )
+            {
+                return Ok(Err(SetError::forbidden()
+                    .with_property(MailboxProperty::ShareWith)
+                    .with_description("You can only share rights you hold yourself.")));
             }
 
             if !changes.acls.is_empty()

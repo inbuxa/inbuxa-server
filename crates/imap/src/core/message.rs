@@ -2,6 +2,8 @@
  * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
+ *
+ * Modified by Coffey Labs in 2026 for INBUXA.
  */
 
 use super::{
@@ -11,7 +13,7 @@ use crate::core::ImapId;
 use ahash::AHashMap;
 use common::network::SessionStream;
 use email::cache::MessageCacheFetch;
-use imap_proto::protocol::{Sequence, expunge, select::Exists};
+use imap_proto::protocol::{Sequence, expunge, merge_ranges, select::Exists};
 use std::collections::BTreeMap;
 use store::{ValueKey, roaring::RoaringBitmap, write::ValueClass};
 use trc::AddContext;
@@ -280,33 +282,33 @@ impl SelectedMailbox {
         uids
     }
 
-    pub async fn sequence_expand_missing(&self, sequence: &Sequence, is_uid: bool) -> Vec<u32> {
-        let mut deleted_ids = Vec::new();
+    pub async fn sequence_missing_ranges(
+        &self,
+        sequence: &Sequence,
+        is_uid: bool,
+    ) -> Vec<(u32, u32)> {
         if !sequence.is_saved_search() {
             let state = self.state.lock();
             if is_uid {
-                for uid in sequence.expand(state.uid_max) {
-                    if !state.uid_to_id.contains_key(&uid) {
-                        deleted_ids.push(uid);
-                    }
-                }
+                sequence.missing_ranges(state.uid_max, |uid| state.uid_to_id.contains_key(&uid))
             } else {
-                for seqnum in sequence.expand(state.total_messages as u32) {
-                    if seqnum > state.total_messages as u32 {
-                        deleted_ids.push(seqnum);
-                    }
-                }
+                sequence.missing_ranges(state.total_messages as u32, |_| true)
             }
         } else if let Some(saved_ids) = self.get_saved_search().await {
             let state = self.state.lock();
-            for id in saved_ids.iter() {
-                if !state.uid_to_id.contains_key(&id.uid) {
-                    deleted_ids.push(if is_uid { id.uid } else { id.seqnum });
-                }
-            }
+            merge_ranges(
+                saved_ids
+                    .iter()
+                    .filter(|id| !state.uid_to_id.contains_key(&id.uid))
+                    .map(|id| {
+                        let value = if is_uid { id.uid } else { id.seqnum };
+                        (value, value)
+                    })
+                    .collect(),
+            )
+        } else {
+            Vec::new()
         }
-        deleted_ids.sort_unstable();
-        deleted_ids
     }
 
     pub fn append_messages(&self, ids: Vec<ImapUidToId>, modseq: Option<u64>) {

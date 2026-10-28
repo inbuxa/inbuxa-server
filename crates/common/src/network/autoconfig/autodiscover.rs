@@ -9,6 +9,7 @@
 use crate::{Server, manager::application::Resource};
 use quick_xml::Reader;
 use quick_xml::XmlVersion;
+use quick_xml::escape::escape;
 use quick_xml::events::Event;
 use registry::schema::{enums::ServiceProtocol, structs::Service};
 use std::{borrow::Cow, fmt::Write};
@@ -98,6 +99,8 @@ fn build_autodiscover_response(
     services: &VecMap<ServiceProtocol, Service>,
     switched_off: impl Fn(&ServiceProtocol) -> bool,
 ) -> String {
+    let emailaddress = escape(emailaddress);
+
     // Build XML response
     let mut config = String::with_capacity(1024);
     let _ = writeln!(&mut config, "<?xml version=\"1.0\" encoding=\"UTF-8\"?>");
@@ -382,6 +385,23 @@ mod tests {
                 "{request}"
             );
         }
+    }
+
+    #[test]
+    fn autodiscover_escapes_address() {
+        use utils::map::vec_map::VecMap;
+
+        let xml = super::build_autodiscover_response(
+            "<b x=\"y\">z</b>@example.org",
+            "mail.example.org",
+            &VecMap::new(),
+            |_| false,
+        );
+        assert!(!xml.contains("<b x="), "{xml}");
+        assert!(
+            xml.contains("&lt;b x=&quot;y&quot;&gt;z&lt;/b&gt;@example.org"),
+            "{xml}"
+        );
     }
 
     #[test]

@@ -2,14 +2,15 @@
  * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
+ *
+ * Modified by Coffey Labs in 2026 for INBUXA.
  */
 
 use crate::{Command, ResponseCode, ResponseType, StatusResponse};
-use ahash::AHashSet;
 use base64::{Engine, engine::general_purpose::STANDARD};
 use chrono::{DateTime, Utc};
 use compact_str::CompactString;
-use std::{cmp::Ordering, fmt::Display};
+use std::fmt::Display;
 use types::id::Id;
 use types::keyword::{ArchivedKeyword, Keyword};
 use utils::chained_bytes::SliceRange;
@@ -142,54 +143,52 @@ impl Sequence {
         }
     }
 
-    pub fn expand(&self, max_value: u32) -> AHashSet<u32> {
-        match self {
-            Sequence::Number { value } => AHashSet::from_iter([*value]),
-            Sequence::List { items } => {
-                let mut result = AHashSet::with_capacity(items.len());
-                for item in items {
-                    match item {
-                        Sequence::Number { value } => {
-                            result.insert(*value);
-                        }
-                        Sequence::Range { start, end } => {
-                            let start = start.unwrap_or(max_value);
-                            let end = end.unwrap_or(max_value);
-                            match start.cmp(&end) {
-                                Ordering::Equal => {
-                                    result.insert(start);
-                                }
-                                Ordering::Less => {
-                                    result.extend(start..=end);
-                                }
-                                Ordering::Greater => {
-                                    result.extend(end..=start);
-                                }
-                            }
-                        }
-                        _ => (),
+    /// The parts of this sequence that name no existing item, as sorted,
+    /// merged, inclusive ranges. `*` resolves to `max_value`; numbers up to
+    /// `max_value` are missing when `exists` says so, and every number above
+    /// it is missing. The part above `max_value` is never walked, so the cost
+    /// is bounded by `max_value` and the number of items in the command, not
+    /// by the numbers in it.
+    pub fn missing_ranges(&self, max_value: u32, exists: impl Fn(u32) -> bool) -> Vec<(u32, u32)> {
+        let mut missing = Vec::new();
+        for (low, high) in self.ranges(max_value) {
+            let walk_high = high.min(max_value);
+            if low <= walk_high {
+                for value in low..=walk_high {
+                    if !exists(value) {
+                        missing.push((value, value));
                     }
                 }
-                result
             }
+            if high > max_value {
+                missing.push((low.max(max_value + 1), high));
+            }
+        }
+        merge_ranges(missing)
+    }
+
+    /// The numbers this sequence covers, as sorted, merged, inclusive ranges.
+    /// `*` resolves to `max_value`; saved searches are not included.
+    pub fn ranges(&self, max_value: u32) -> Vec<(u32, u32)> {
+        let mut ranges = Vec::new();
+        self.collect_ranges(max_value, &mut ranges);
+        merge_ranges(ranges)
+    }
+
+    fn collect_ranges(&self, max_value: u32, ranges: &mut Vec<(u32, u32)>) {
+        match self {
+            Sequence::Number { value } => ranges.push((*value, *value)),
             Sequence::Range { start, end } => {
-                let mut result = AHashSet::new();
                 let start = start.unwrap_or(max_value);
                 let end = end.unwrap_or(max_value);
-                match start.cmp(&end) {
-                    Ordering::Equal => {
-                        result.insert(start);
-                    }
-                    Ordering::Less => {
-                        result.extend(start..=end);
-                    }
-                    Ordering::Greater => {
-                        result.extend(end..=start);
-                    }
-                }
-                result
+                ranges.push((start.min(end), start.max(end)));
             }
-            _ => AHashSet::new(),
+            Sequence::List { items } => {
+                for item in items {
+                    item.collect_ranges(max_value, ranges);
+                }
+            }
+            Sequence::SavedSearch => (),
         }
     }
 }
@@ -539,9 +538,9 @@ impl ResponseCode {
             ResponseCode::UidValidity => b"UIDVALIDITY",
             ResponseCode::Unavailable => b"UNAVAILABLE",
             ResponseCode::UnknownCte => b"UNKNOWN-CTE",
-            ResponseCode::Modified { ids } => {
+            ResponseCode::Modified { ranges } => {
                 buf.extend_from_slice(b"MODIFIED ");
-                serialize_sequence(buf, ids);
+                serialize_ranges(buf, ranges);
                 return;
             }
             ResponseCode::ObjectId(object_id) => {
@@ -733,6 +732,32 @@ impl ProtocolVersion {
     }
 }
 
+/// Sorts inclusive ranges and merges the ones that overlap or touch.
+pub fn merge_ranges(mut ranges: Vec<(u32, u32)>) -> Vec<(u32, u32)> {
+    ranges.sort_unstable();
+    let mut merged: Vec<(u32, u32)> = Vec::with_capacity(ranges.len());
+    for (low, high) in ranges {
+        match merged.last_mut() {
+            Some(last) if low <= last.1.saturating_add(1) => last.1 = last.1.max(high),
+            _ => merged.push((low, high)),
+        }
+    }
+    merged
+}
+
+pub fn serialize_ranges(buf: &mut Vec<u8>, ranges: &[(u32, u32)]) {
+    for (pos, (low, high)) in ranges.iter().enumerate() {
+        if pos > 0 {
+            buf.push(b',');
+        }
+        buf.extend_from_slice(low.to_string().as_bytes());
+        if high != low {
+            buf.push(b':');
+            buf.extend_from_slice(high.to_string().as_bytes());
+        }
+    }
+}
+
 pub fn serialize_sequence(buf: &mut Vec<u8>, list: &[u32]) {
     let mut ids = list.iter().peekable();
     while let Some(&id) = ids.next() {
@@ -821,6 +846,79 @@ mod tests {
     use crate::parser::parse_sequence_set;
     use crate::protocol::{ObjectId, SerializeResponse};
     use types::id::Id;
+
+    #[test]
+    fn sequence_work_is_bounded_by_max_value() {
+        // A client-sent range far above the mailbox's highest UID used to be
+        // expanded into a set holding every number in it.
+        let sequence = parse_sequence_set(b"1:4294967295").unwrap();
+        assert_eq!(
+            sequence.missing_ranges(10, |uid| uid % 2 == 0),
+            vec![(1, 1), (3, 3), (5, 5), (7, 7), (9, 9), (11, 4294967295)]
+        );
+        let sequence = parse_sequence_set(b"4294967295,5:*,4000000000:*").unwrap();
+        // `*` is 10, so `4000000000:*` covers 10 through 4000000000.
+        assert_eq!(
+            sequence.ranges(10),
+            vec![(5, 4000000000), (4294967295, 4294967295)]
+        );
+        assert_eq!(sequence.missing_ranges(u32::MAX, |_| true), vec![]);
+    }
+
+    #[test]
+    fn sequence_missing_ranges_match_expansion() {
+        // Reference: expand every number, then keep the missing ones.
+        fn reference(sequence: &super::Sequence, max: u32, exists: &[u32]) -> Vec<u32> {
+            let mut out = Vec::new();
+            for value in 0..=max + 20 {
+                if sequence.contains(value, max) && !exists.contains(&value) {
+                    out.push(value);
+                }
+            }
+            out
+        }
+        fn flatten(ranges: &[(u32, u32)]) -> Vec<u32> {
+            ranges.iter().flat_map(|(low, high)| *low..=*high).collect()
+        }
+        let exists = [1, 2, 3, 5, 8, 13];
+        for sequence in [
+            "1",
+            "*",
+            "1:*",
+            "*:1",
+            "4:2",
+            "2:4,6:9,3",
+            "1:3,5,7:*",
+            "20:15",
+            "9,9,9",
+            "13:*,1",
+            "0:3",
+        ] {
+            let parsed = match parse_sequence_set(sequence.as_bytes()) {
+                Ok(parsed) => parsed,
+                Err(_) => continue,
+            };
+            for max in [0, 1, 13, 15] {
+                let exists = exists
+                    .iter()
+                    .copied()
+                    .filter(|v| *v <= max)
+                    .collect::<Vec<_>>();
+                assert_eq!(
+                    flatten(&parsed.missing_ranges(max, |v| exists.contains(&v))),
+                    reference(&parsed, max, &exists),
+                    "sequence {sequence:?}, max {max}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn modified_ranges_serialize() {
+        let mut buf = Vec::new();
+        super::serialize_ranges(&mut buf, &[(1, 1), (3, 7), (9, 9)]);
+        assert_eq!(String::from_utf8(buf).unwrap(), "1,3:7,9");
+    }
 
     #[test]
     fn serialize_error_uses_command_tag() {

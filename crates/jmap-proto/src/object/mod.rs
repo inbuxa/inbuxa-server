@@ -7,9 +7,9 @@
  */
 
 use crate::request::deserialize::DeserializeArguments;
-use jmap_tools::{Element, Null, Property};
+use jmap_tools::{Element, JsonPointer, Null, Property};
 use serde::Serialize;
-use std::{fmt::Debug, str::FromStr};
+use std::{cell::Cell, fmt::Debug, str::FromStr};
 use types::{acl::Acl, blob::BlobId, id::Id};
 
 pub mod addressbook;
@@ -235,5 +235,69 @@ impl TryFrom<AnyId> for Null {
 
     fn try_from(_: AnyId) -> Result<Self, Self::Error> {
         unreachable!()
+    }
+}
+
+// inbuxa: how deep a key's escaped "/" is parsed as a pointer inside a pointer.
+// Each level can escape the one inside it, so without a limit a request could
+// nest them thousands deep. Past this, the text is kept as a plain key.
+const MAX_POINTER_NESTING: u32 = 8;
+
+thread_local! {
+    static POINTER_NESTING: Cell<u32> = const { Cell::new(0) };
+}
+
+struct PointerNesting;
+
+impl Drop for PointerNesting {
+    fn drop(&mut self) {
+        POINTER_NESTING.with(|depth| depth.set(depth.get() - 1));
+    }
+}
+
+pub(crate) fn parse_nested_pointer<P: Property>(value: &str) -> Option<JsonPointer<P>> {
+    let level = POINTER_NESTING.with(Cell::get);
+    if level >= MAX_POINTER_NESTING {
+        return None;
+    }
+    POINTER_NESTING.with(|depth| depth.set(level + 1));
+    let _nesting = PointerNesting;
+    Some(JsonPointer::parse(value))
+}
+
+// inbuxa: a key holding an escaped "/" is parsed again as a pointer, and each
+// level can escape the one inside it. On a 2 MiB stack, like a tokio worker's,
+// a key nested a few thousand deep used to overflow it and abort the process.
+#[cfg(test)]
+mod pointer_nesting_tests {
+    use super::email::EmailProperty;
+    use jmap_tools::{JsonPointer, JsonPointerItem, Key};
+
+    fn nesting(ptr: &JsonPointer<EmailProperty>) -> usize {
+        match ptr.first() {
+            Some(JsonPointerItem::Key(Key::Property(EmailProperty::Pointer(inner)))) => {
+                1 + nesting(inner)
+            }
+            _ => 0,
+        }
+    }
+
+    #[test]
+    fn nested_pointers_are_bounded() {
+        let mut key = "a/z".to_string();
+        for _ in 0..2_000 {
+            key = key.replace('~', "~0").replace('/', "~1") + "/z";
+        }
+        let depth = std::thread::Builder::new()
+            .stack_size(2 * 1024 * 1024)
+            .spawn(move || nesting(&JsonPointer::<EmailProperty>::parse(&key)))
+            .unwrap()
+            .join()
+            .unwrap();
+        assert!(depth <= 16, "{depth}");
+
+        // One escaped level still parses as before
+        let ptr = JsonPointer::<EmailProperty>::parse("a~1b/c");
+        assert_eq!(nesting(&ptr), 1);
     }
 }

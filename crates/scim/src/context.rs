@@ -13,7 +13,7 @@ use common::{
     auth::{AccessToken, DomainCache},
 };
 use http_proto::HttpSessionData;
-use jmap::registry::set::RegistrySet;
+use jmap::registry::set::{RegistrySet, SetOrigin};
 use jmap_proto::{method::set::SetRequest, object::registry::Registry};
 use registry::{
     schema::{
@@ -217,7 +217,13 @@ impl<'x> Ctx<'x> {
             .map_err(|err| server_error(trc::JmapEvent::InvalidArguments.into_err().reason(err)))?;
         let response = self
             .server
-            .registry_set(ObjectType::Account, request, self.token, self.session)
+            .registry_set_from(
+                ObjectType::Account,
+                request,
+                self.token,
+                self.session,
+                SetOrigin::Scim,
+            )
             .await
             .map_err(|err| {
                 if matches!(

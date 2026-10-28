@@ -2,6 +2,8 @@
  * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
+ *
+ * Modified by Coffey Labs in 2026 for INBUXA.
  */
 
 use super::assert_is_unique_uid;
@@ -186,15 +188,25 @@ impl CardCopyMoveRequestHandler for Server {
                     // Validate ACLs
                     if !access_token.is_member(to_account_id)
                         || (!access_token.is_member(from_account_id)
-                            && !from_resources.has_access_to_container(
-                                access_token,
-                                from_resource.document_id(),
-                                if is_move {
-                                    Acl::RemoveItems
-                                } else {
-                                    Acl::ReadItems
-                                },
-                            ))
+                            // inbuxa: moving a whole collection takes it from its owner, so it
+                            // needs the rights DELETE needs, not just RemoveItems.
+                            && !(if is_move {
+                                from_resources.has_access_to_container(
+                                    access_token,
+                                    from_resource.document_id(),
+                                    Acl::Delete,
+                                ) && from_resources.has_access_to_container(
+                                    access_token,
+                                    from_resource.document_id(),
+                                    Acl::RemoveItems,
+                                )
+                            } else {
+                                from_resources.has_access_to_container(
+                                    access_token,
+                                    from_resource.document_id(),
+                                    Acl::ReadItems,
+                                )
+                            }))
                     {
                         return Err(DavError::Code(StatusCode::FORBIDDEN));
                     }
@@ -360,15 +372,25 @@ impl CardCopyMoveRequestHandler for Server {
 
                 // Validate ACLs
                 if !access_token.is_member(from_account_id)
-                    && !from_resources.has_access_to_container(
-                        access_token,
-                        from_resource.document_id(),
-                        if is_move {
-                            Acl::RemoveItems
-                        } else {
-                            Acl::ReadItems
-                        },
-                    )
+                    // inbuxa: moving a whole collection takes it from its owner, so it
+                    // needs the rights DELETE needs, not just RemoveItems.
+                    && !(if is_move {
+                        from_resources.has_access_to_container(
+                            access_token,
+                            from_resource.document_id(),
+                            Acl::Delete,
+                        ) && from_resources.has_access_to_container(
+                            access_token,
+                            from_resource.document_id(),
+                            Acl::RemoveItems,
+                        )
+                    } else {
+                        from_resources.has_access_to_container(
+                            access_token,
+                            from_resource.document_id(),
+                            Acl::ReadItems,
+                        )
+                    })
                 {
                     return Err(DavError::Code(StatusCode::FORBIDDEN));
                 }

@@ -22,6 +22,7 @@ use imap_proto::{
     protocol::{
         Flag, ImapResponse,
         fetch::{DataItem, FetchItem},
+        merge_ranges,
         store::{Arguments, Operation, Response},
     },
     receiver::Request,
@@ -161,7 +162,7 @@ impl<T: SessionStream> SessionData<T> {
                 .imap_ctx(&arguments.tag, trc::location!())?;
 
             let mut modified = mailbox
-                .sequence_expand_missing(&arguments.sequence_set, is_uid)
+                .sequence_missing_ranges(&arguments.sequence_set, is_uid)
                 .await;
 
             // Add all IDs that changed in this mailbox
@@ -175,9 +176,9 @@ impl<T: SessionStream> SessionData<T> {
             }) {
                 if let Some(imap_id) = ids.remove(&id) {
                     if is_uid {
-                        modified.push(imap_id.uid);
+                        modified.push((imap_id.uid, imap_id.uid));
                     } else {
-                        modified.push(imap_id.seqnum);
+                        modified.push((imap_id.seqnum, imap_id.seqnum));
                         if is_delete {
                             unchanged_failed = true;
                         }
@@ -186,8 +187,10 @@ impl<T: SessionStream> SessionData<T> {
             }
 
             if !modified.is_empty() {
-                modified.sort_unstable();
-                response_code = ResponseCode::Modified { ids: modified }.into();
+                response_code = ResponseCode::Modified {
+                    ranges: merge_ranges(modified),
+                }
+                .into();
             }
         }
 
