@@ -1,6 +1,6 @@
 [package]
 name = "jmap"
-version = "0.16.27"
+version.workspace = true
 edition = "2024"
 
 [dependencies]

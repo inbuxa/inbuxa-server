@@ -8,7 +8,6 @@
 
 use base64::Engine;
 use base64::engine::general_purpose;
-use std::env;
 use std::io::{self, Write};
 use store::write::{AnyClass, AnyKey, BatchBuilder, ValueClass};
 use store::{Deserialize, IterateParams, SUBSPACE_INDEXES, SUBSPACE_REGISTRY_IDX, Store};
@@ -16,7 +15,7 @@ use store::{Deserialize, IterateParams, SUBSPACE_INDEXES, SUBSPACE_REGISTRY_IDX,
 const HELP: &str = concat!(
     types::brand_server!(),
     " ",
-    types::brand_version_full!(),
+    types::brand_version!(),
     r#" Data Store CLI
 
 Enter commands (type 'help' for available commands).

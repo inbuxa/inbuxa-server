@@ -1,10 +1,11 @@
 [package]
 name = "types"
-version = "0.16.27"
+version.workspace = true
 edition = "2024"
 
 [dependencies]
 utils = { path = "../utils" }
+proc_macros = { path = "../utils/proc-macros" }
 trc = { path = "../trc" }
 jmap-tools = { version = "0.1" }
 hashify = "0.2"
