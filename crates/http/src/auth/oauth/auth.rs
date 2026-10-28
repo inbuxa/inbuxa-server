@@ -11,7 +11,7 @@ use crate::auth::oauth::{
     OAuthStatus, openid::OpenIdHandler, registration::ClientRegistrationHandler,
 };
 use common::{
-    KV_OAUTH, Server,
+    KV_OAUTH, KV_OAUTH_DEVICE, Server,
     auth::{
         AuthRequest,
         authentication::UsernameParts,
@@ -379,7 +379,7 @@ impl OAuthApiHandler for Server {
                 if let Some(auth_code_) = self
                     .in_memory_store()
                     .key_get::<Archive<AlignedBytes>>(KeyValue::<()>::build_key(
-                        KV_OAUTH,
+                        KV_OAUTH_DEVICE,
                         code.as_bytes(),
                     ))
                     .await?
@@ -420,7 +420,7 @@ impl OAuthApiHandler for Server {
                                 // Delete issued user code
                                 self.in_memory_store()
                                     .key_delete(KeyValue::<()>::build_key(
-                                        KV_OAUTH,
+                                        KV_OAUTH_DEVICE,
                                         code.as_bytes(),
                                     ))
                                     .await?;
@@ -429,7 +429,7 @@ impl OAuthApiHandler for Server {
                                 self.in_memory_store()
                                     .key_set(
                                         KeyValue::with_prefix(
-                                            KV_OAUTH,
+                                            KV_OAUTH_DEVICE,
                                             oauth.params.as_bytes(),
                                             Archiver::new(new_oauth_code)
                                                 .untrusted()
@@ -529,7 +529,7 @@ impl OAuthApiHandler for Server {
         // Insert device code
         self.in_memory_store()
             .key_set(
-                KeyValue::with_prefix(KV_OAUTH, device_code.as_bytes(), oauth_code.clone())
+                KeyValue::with_prefix(KV_OAUTH_DEVICE, device_code.as_bytes(), oauth_code.clone())
                     .expires(self.core.oauth.oauth_expiry_user_code),
             )
             .await?;
@@ -537,7 +537,7 @@ impl OAuthApiHandler for Server {
         // Insert user code
         self.in_memory_store()
             .key_set(
-                KeyValue::with_prefix(KV_OAUTH, user_code.as_bytes(), oauth_code)
+                KeyValue::with_prefix(KV_OAUTH_DEVICE, user_code.as_bytes(), oauth_code)
                     .expires(self.core.oauth.oauth_expiry_user_code),
             )
             .await?;

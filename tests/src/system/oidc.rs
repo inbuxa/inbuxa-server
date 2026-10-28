@@ -459,6 +459,22 @@ pub async fn test(test: &mut TestServer) {
         }
     );
 
+    // inbuxa: an authorization code is not a device code. Redeemed through the
+    // device grant it would skip the PKCE, redirect_uri and client checks above.
+    let device_params = AHashMap::from_iter([
+        (
+            "grant_type".to_string(),
+            "urn:ietf:params:oauth:grant-type:device_code".to_string(),
+        ),
+        ("device_code".to_string(), token_params["code"].clone()),
+        ("client_id".to_string(), client_id.to_string()),
+    ]);
+    let device_grant = post::<TokenResponse>(&metadata.token_endpoint, &device_params).await;
+    assert!(
+        !matches!(device_grant, TokenResponse::Granted(_)),
+        "an authorization code was redeemed through the device grant: {device_grant:?}"
+    );
+
     // Obtain token and verify the granted scope is echoed back
     token_params.insert("code_verifier".to_string(), PKCE_VERIFIER.to_string());
     let granted = post::<TokenResponse>(&metadata.token_endpoint, &token_params).await;

@@ -14,10 +14,10 @@ use crate::task_manager::{
 };
 use common::{
     KV_ACME, KV_GREYLIST, KV_LOCK_DAV, KV_LOCK_QUEUE_MESSAGE, KV_LOCK_TASK, KV_OAUTH,
-    KV_QUOTA_BLOB, KV_RATE_LIMIT_AUTH, KV_RATE_LIMIT_CONTACT, KV_RATE_LIMIT_HTTP_ANONYMOUS,
-    KV_RATE_LIMIT_HTTP_AUTHENTICATED, KV_RATE_LIMIT_IMAP, KV_RATE_LIMIT_LOITER, KV_RATE_LIMIT_RCPT,
-    KV_RATE_LIMIT_SCAN, KV_RATE_LIMIT_SMTP, KV_SIEVE_ID, Server,
-    storage::index::ObjectIndexBuilder,
+    KV_OAUTH_DEVICE, KV_QUOTA_BLOB, KV_RATE_LIMIT_AUTH, KV_RATE_LIMIT_CONTACT,
+    KV_RATE_LIMIT_HTTP_ANONYMOUS, KV_RATE_LIMIT_HTTP_AUTHENTICATED, KV_RATE_LIMIT_IMAP,
+    KV_RATE_LIMIT_LOITER, KV_RATE_LIMIT_RCPT, KV_RATE_LIMIT_SCAN, KV_RATE_LIMIT_SMTP, KV_SIEVE_ID,
+    Server, storage::index::ObjectIndexBuilder,
 };
 use email::{
     cache::MessageCacheFetch,
@@ -392,7 +392,9 @@ async fn store_maintenance(
                     KV_RATE_LIMIT_IMAP,
                 ][..],
                 TaskStoreMaintenanceType::ResetBlobQuotas => &[KV_QUOTA_BLOB][..],
-                TaskStoreMaintenanceType::RemoveAuthTokens => &[KV_ACME, KV_OAUTH][..],
+                TaskStoreMaintenanceType::RemoveAuthTokens => {
+                    &[KV_ACME, KV_OAUTH, KV_OAUTH_DEVICE][..]
+                }
                 _ => unreachable!(),
             };
 
