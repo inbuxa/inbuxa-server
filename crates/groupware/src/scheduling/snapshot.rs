@@ -2,6 +2,8 @@
  * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
+ *
+ * Modified by Coffey Labs in 2026 for INBUXA.
  */
 
 use crate::scheduling::{
@@ -10,7 +12,7 @@ use crate::scheduling::{
 };
 use ahash::AHashMap;
 use calcard::icalendar::{
-    ICalendar, ICalendarParameterName, ICalendarParameterValue, ICalendarProperty,
+    ICalendar, ICalendarMethod, ICalendarParameterName, ICalendarParameterValue, ICalendarProperty,
     ICalendarScheduleAgentValue, ICalendarValue, Uri,
 };
 
@@ -362,6 +364,29 @@ pub fn itip_snapshot<'x, 'y>(
 }
 
 impl ItipSnapshots<'_> {
+    // inbuxa: REQUEST, ADD, CANCEL and DECLINECOUNTER are the organizer's
+    // messages (RFC 5546 section 1.4), so only the organizer may send them.
+    // An attendee holds the UID too, and could otherwise rewrite or cancel the
+    // event in every other attendee's calendar.
+    pub fn assert_organizer_sends(
+        &self,
+        method: &ICalendarMethod,
+        sender: &str,
+    ) -> Result<(), ItipError> {
+        if matches!(
+            method,
+            ICalendarMethod::Request
+                | ICalendarMethod::Add
+                | ICalendarMethod::Cancel
+                | ICalendarMethod::Declinecounter
+        ) && !self.organizer.email.email.eq_ignore_ascii_case(sender)
+        {
+            Err(ItipError::SenderIsNotOrganizer(sender.to_string()))
+        } else {
+            Ok(())
+        }
+    }
+
     pub fn sender_is_organizer_or_attendee(&self, email: &str) -> bool {
         self.organizer.email.email == email
             || self.components.values().any(|snapshot| {

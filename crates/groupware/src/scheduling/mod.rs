@@ -2,6 +2,8 @@
  * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
+ *
+ * Modified by Coffey Labs in 2026 for INBUXA.
  */
 
 use crate::{decode_mailto_address, extract_addr_spec};
@@ -141,6 +143,7 @@ pub enum ItipError {
     OrganizerIsLocalAddress,
     SenderIsNotOrganizerNorAttendee,
     SenderIsNotParticipant(String),
+    SenderIsNotOrganizer(String),
     UnknownParticipant(String),
     UnsupportedMethod(ICalendarMethod),
     ICalendarParseError,
@@ -368,6 +371,7 @@ impl ItipError {
             ItipError::MultipleOrganizer
                 | ItipError::OrganizerIsLocalAddress
                 | ItipError::SenderIsNotParticipant(_)
+                | ItipError::SenderIsNotOrganizer(_)
                 | ItipError::OrganizerMismatch
                 | ItipError::CannotModifyProperty(_)
                 | ItipError::CannotModifyInstance
@@ -423,6 +427,9 @@ impl Display for ItipError {
             }
             ItipError::SenderIsNotParticipant(participant) => {
                 write!(f, "Sender {participant:?} is not a participant")
+            }
+            ItipError::SenderIsNotOrganizer(sender) => {
+                write!(f, "Sender {sender:?} is not the organizer")
             }
             ItipError::SenderIsNotOrganizerNorAttendee => {
                 write!(f, "Sender is neither organizer nor attendee")
