@@ -97,6 +97,9 @@ impl EmailSet for Server {
             } else {
                 (None, None, None)
             };
+        let can_read_message_ids = access_token
+            .is_shared(account_id)
+            .then(|| cache.shared_messages(access_token, Acl::ReadItems));
 
         // Obtain import access token
         let import_access_token = if account_id != access_token.account_id() {
@@ -823,6 +826,13 @@ impl EmailSet for Server {
 
             // Obtain message data
             let document_id = id.document_id();
+            if can_read_message_ids
+                .as_ref()
+                .is_some_and(|ids| !ids.contains(document_id))
+            {
+                response.not_updated.append(id, SetError::not_found());
+                continue 'update;
+            }
             let data_ = match self
                 .store()
                 .get_value::<Archive<AlignedBytes>>(ValueKey::archive(
