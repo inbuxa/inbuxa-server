@@ -2,6 +2,8 @@
  * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
+ *
+ * Modified by Coffey Labs in 2026 for INBUXA.
  */
 
 use std::ops::Deref;
@@ -96,7 +98,8 @@ impl<T: BitmapItem> Bitmap<T> {
     #[inline(always)]
     pub fn remove(&mut self, item: T) {
         debug_assert!(item.is_valid());
-        self.bitmap ^= 1 << item.into();
+        // inbuxa: clear the bit; XOR would set it when it wasn't set.
+        self.bitmap &= !(1 << item.into());
     }
 
     #[inline(always)]
@@ -312,5 +315,49 @@ impl<T: BitmapItem> Default for Bitmap<T> {
             bitmap: 0,
             _state: std::marker::PhantomData,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Bitmap, BitmapItem};
+
+    #[derive(Clone, Copy)]
+    struct Bit(u64);
+
+    impl From<u64> for Bit {
+        fn from(value: u64) -> Self {
+            Bit(value)
+        }
+    }
+
+    impl From<Bit> for u64 {
+        fn from(bit: Bit) -> Self {
+            bit.0
+        }
+    }
+
+    impl BitmapItem for Bit {
+        fn max() -> u64 {
+            64
+        }
+
+        fn is_valid(&self) -> bool {
+            self.0 < 64
+        }
+    }
+
+    #[test]
+    fn remove_never_adds() {
+        // IMAP SETACL "-x" removes rights one by one: removing a right that
+        // isn't held must leave it unheld, not grant it.
+        let mut bitmap = Bitmap::<Bit>::new();
+        bitmap.insert(Bit(1));
+        bitmap.remove(Bit(5));
+        assert!(!bitmap.contains(Bit(5)));
+        assert!(bitmap.contains(Bit(1)));
+        bitmap.remove(Bit(1));
+        bitmap.remove(Bit(1));
+        assert!(bitmap.is_empty());
     }
 }
