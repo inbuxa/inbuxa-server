@@ -56,6 +56,10 @@ jobs:
         run: python3 tools/fork/expr-schema.py --check
       - if: always()
         run: python3 -m unittest discover -s tools/fork/tests
+      # The release workflows' version helper and its mapping, the same cases
+      # as the server's display_version macro.
+      - if: always()
+        run: python3 -m unittest discover -s tools/release/tests
 
   build:
     if: ${{ vars.BUILD_ON != 'github' }}

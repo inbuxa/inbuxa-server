@@ -99,6 +99,10 @@ jobs:
         run: python3 tools/fork/expr-schema.py --check
       - if: always()
         run: python3 -m unittest discover -s tools/fork/tests
+      # The release workflows' version helper and its mapping, the same cases
+      # as the server's display_version macro.
+      - if: always()
+        run: python3 -m unittest discover -s tools/release/tests
 
   # The build, and that every test target compiles. The suites are not run:
   # they need a store, fixed ports and containers (docs/spec/
@@ -164,10 +168,10 @@ jobs:
 
   # --------------------------------------------------------------- tags ------
   # Two guards before anything is pushed, the same as Gitea's publish.yml:
-  #   * the tag must be v<brand_version!>. The version is a string in
-  #     crates/types/src/branding.rs, not Cargo.toml, and the image is tagged
-  #     with it, so a tag beside an unbumped macro would publish an image that
-  #     reports a different version from its tag.
+  #   * the tag must be v<version>, the workspace version in Cargo.toml as
+  #     tags name it (tools/release/version.py: 27.1.0 is v27.1, 27.1.0-rc.1
+  #     is v27.1-rc.1). The server reports that same version, so a tag beside
+  #     an unbumped Cargo.toml would publish an image that says otherwise.
   #   * the tag must be on main or on a release/* branch, so an image never
   #     describes code that was never reviewed onto one of them. A release/*
   #     branch carries a hotfix cut from an earlier release tag.
@@ -176,6 +180,10 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       version: ${{ steps.v.outputs.version }}
+      # Space-separated: the version, then the series' moving tags. A release
+      # candidate gets 27.1-rc.N and 27.1-rc; a release 27.1.N, 27.1 and latest.
+      tags: ${{ steps.v.outputs.tags }}
+      prerelease: ${{ steps.v.outputs.prerelease }}
     steps:
       # Full history, and every branch as origin/*: the ancestry check cannot
       # be answered from a shallow clone.
@@ -187,16 +195,9 @@ jobs:
           TAG: ${{ github.ref_name }}
         run: |
           set -euo pipefail
-          # Scoped to the macro body: branding.rs holds other string literals,
-          # and tagging an image from one of those would be worse than failing.
-          V="$(awk '/macro_rules! brand_version /,/^}/' crates/types/src/branding.rs \
-               | grep -om1 '"[0-9][^"]*"' | tr -d '"')"
-          [ -n "$V" ] || { echo "could not read brand_version! from branding.rs" >&2; exit 1; }
-          if [ "$TAG" != "v$V" ]; then
-            echo "Tag $TAG names a commit whose brand_version! says $V." >&2
-            echo "Refusing to publish an image that would report the wrong version." >&2
-            exit 1
-          fi
+          V="$(python3 tools/release/version.py --tag "$TAG")"
+          tags="$(python3 tools/release/version.py --image-tags | tr '\n' ' ')"
+          if python3 tools/release/version.py --prerelease; then pre=true; else pre=false; fi
           commit="$(git rev-parse "${TAG}^{commit}")"
           on=""
           for ref in origin/main $(git for-each-ref --format='%(refname:short)' 'refs/remotes/origin/release/*'); do
@@ -205,6 +206,9 @@ jobs:
           [ -n "$on" ] || { echo "$TAG is not on main or a release/* branch" >&2; exit 1; }
           echo "$TAG is on $on"
           echo "version=$V" >> "$GITHUB_OUTPUT"
+          echo "tags=${tags% }" >> "$GITHUB_OUTPUT"
+          echo "prerelease=$pre" >> "$GITHUB_OUTPUT"
+          echo "image tags: ${tags% }; prerelease: $pre"
 
   # Each architecture on its own native runner, side by side. The Dockerfile
   # cross-compiles from the build platform, and on the self-hosted runners one
@@ -212,8 +216,8 @@ jobs:
   # each natively (the builder stage picks the matching target, and the
   # aarch64 toolchain it installs exists on arm64 too), and the small final
   # stage needs no QEMU. amd64 also moves :<version> as soon as it is done, so
-  # a production deploy can start from it; :latest waits for the index below,
-  # so it never names an image without arm64.
+  # a production deploy can start from it; the series tags and :latest wait
+  # for the index below, so they never name an image without arm64.
   publish:
     needs: [version]
     runs-on: ${{ matrix.runner }}
@@ -265,14 +269,16 @@ jobs:
             ${{ env.IMAGE }}:${{ env.VERSION }}-${{ matrix.arch }}
             ${{ matrix.arch == 'amd64' && format('{0}:{1}', env.IMAGE, env.VERSION) || '' }}
 
-  # Joins the two per-architecture tags into :<version> and :latest. Built
-  # from the per-architecture tags rather than :<version>, which by now is
-  # the amd64 image and would be read as such.
+  # Joins the two per-architecture tags into :<version> and the series'
+  # moving tags (never :latest for a release candidate). Built from the
+  # per-architecture tags rather than :<version>, which by now is the amd64
+  # image and would be read as such.
   index:
     needs: [version, publish]
     runs-on: ubuntu-latest
     env:
       VERSION: ${{ needs.version.outputs.version }}
+      TAGS: ${{ needs.version.outputs.tags }}
     steps:
       - run: echo "IMAGE=${{ vars.REGISTRY }}/${GITHUB_REPOSITORY,,}" >> "$GITHUB_ENV"
       - uses: docker/setup-buildx-action@594f3bf4285d9ea8dc53c9a0c9c4092420091003 # v4.4.0
@@ -282,9 +288,10 @@ jobs:
           username: jcoffey-dev
           password: ${{ secrets.GITEA_TOKEN }}
       - run: |
-          docker buildx imagetools create \
-            --tag "$IMAGE:$VERSION" \
-            --tag "$IMAGE:latest" \
+          set -euo pipefail
+          args=()
+          for t in $TAGS; do args+=(--tag "$IMAGE:$t"); done
+          docker buildx imagetools create "${args[@]}" \
             "$IMAGE:$VERSION-amd64" "$IMAGE:$VERSION-arm64"
           docker buildx imagetools inspect "$IMAGE:$VERSION"
       # Gitea keeps a container package on its owner; linking it shows it on
@@ -308,6 +315,8 @@ jobs:
       - env:
           TAG: ${{ github.ref_name }}
           VERSION: ${{ needs.version.outputs.version }}
+          TAGS: ${{ needs.version.outputs.tags }}
+          PRERELEASE: ${{ needs.version.outputs.prerelease }}
           GITEA_TOKEN: ${{ secrets.GITEA_TOKEN }}
           REGISTRY: ${{ vars.REGISTRY }}
         run: |
@@ -317,11 +326,18 @@ jobs:
           if [ "$code" = 200 ]; then echo "$TAG already has a release"; exit 0; fi
           [ "$code" = 404 ] || { echo "looking up the release for $TAG answered $code" >&2; exit 1; }
           image="$REGISTRY/${GITHUB_REPOSITORY,,}:$VERSION"
-          body="Container image: \`$image\` (linux/amd64, linux/arm64); also \`:latest\`.
+          also="$(for t in ${TAGS#"$VERSION"}; do printf ' `:%s`' "$t"; done)"
+          body="Container image: \`$image\` (linux/amd64, linux/arm64); also$also.
 
           Binaries for a host install are attached: \`inbuxa-linux-amd64.tar.gz\` and \`inbuxa-linux-arm64.tar.gz\`, with \`SHA256SUMS\`. Each is the binary out of this release's image for that architecture, so it is the same build. The image grants it \`cap_net_bind_service\`; a host install has to grant that itself (\`setcap\`, or \`AmbientCapabilities\` in the unit) to bind port 25."
+          if [ "$PRERELEASE" = true ]; then
+            body="Release candidate for the next series, to try before it ships. \`:latest\` stays on the current release.
+
+          $body"
+          fi
           jq -n --arg tag "$TAG" --arg name "INBUXA $VERSION" --arg body "$body" \
-                '{tag_name:$tag, name:$name, body:$body}' |
+                --argjson pre "$PRERELEASE" \
+                '{tag_name:$tag, name:$name, body:$body, prerelease:$pre}' |
           curl -fsS -X POST -H "Authorization: token $GITEA_TOKEN" -H 'Content-Type: application/json' \
                --data @- "$api/releases" | jq -r '"created release " + .tag_name'
 
@@ -382,7 +398,8 @@ jobs:
 
   # ------------------------------------------------------ ghcr replica ------
   # Copies the release image from the Gitea registry, which stays the
-  # authoritative one, to ghcr.io under the same version tag and :latest. It is
+  # authoritative one, to ghcr.io under the same tags (:latest only for a
+  # release, never a release candidate). It is
   # a copy, not a second build: the digest on GHCR is the digest on the
   # registry, so `docker pull ghcr.io/...` gets exactly the same image. Left
   # out of the report to Gitea, like the release copy, so a GHCR problem
@@ -398,13 +415,16 @@ jobs:
       - env:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ needs.version.outputs.version }}
+          TAGS: ${{ needs.version.outputs.tags }}
         run: |
           set -euo pipefail
           src="${{ vars.REGISTRY }}/${GITHUB_REPOSITORY,,}"
           dst="ghcr.io/${GITHUB_REPOSITORY,,}"
           tag="$TAG"
           echo "$GH_TOKEN" | docker login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
-          docker buildx imagetools create -t "$dst:$tag" -t "$dst:latest" "$src:$tag"
+          args=()
+          for t in $TAGS; do args+=(-t "$dst:$t"); done
+          docker buildx imagetools create "${args[@]}" "$src:$tag"
           want="$(docker buildx imagetools inspect "$src:$tag" --format '{{json .Manifest.Digest}}')"
           got="$(docker buildx imagetools inspect "$dst:$tag" --format '{{json .Manifest.Digest}}')"
           echo "registry $src:$tag = $want"
