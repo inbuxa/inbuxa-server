@@ -2,11 +2,31 @@
  * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
+ *
+ * Modified by Coffey Labs in 2026 for INBUXA.
  */
 
 use proc_macro::TokenStream;
 use quote::quote;
 use syn::{Data, DeriveInput, parse_macro_input};
+
+// inbuxa: the displayed version (see version.rs).
+mod version;
+
+/// The workspace version as tags and images name it, as a string literal, so
+/// it can go into `concat!`. Read from the crate being compiled, which
+/// inherits the one version in the workspace Cargo.toml.
+#[proc_macro]
+pub fn display_version(_input: TokenStream) -> TokenStream {
+    let cargo = std::env::var("CARGO_PKG_VERSION").unwrap_or_default();
+    match version::display(&cargo) {
+        Ok(shown) => quote!(#shown).into(),
+        Err(err) => {
+            let err = format!("workspace version: {err}");
+            quote!(compile_error!(#err)).into()
+        }
+    }
+}
 
 #[proc_macro_derive(EnumMethods)]
 pub fn enum_id(input: TokenStream) -> TokenStream {

@@ -2,7 +2,7 @@
 name = "inbuxa-features"
 description = "inbuxa's rebuilt features: behavior Stalwart ships only in its Enterprise Edition, rebuilt clean-room"
 license = "AGPL-3.0-only"
-version = "0.16.22"
+version.workspace = true
 edition = "2024"
 
 [dependencies]

@@ -1,0 +1,83 @@
+# Watch spam-filter, whose rules the server bundles (resources/spam-filter/),
+# and open an issue when it publishes a newer release than the one
+# BUNDLED_SPAM_RULES_VERSION names on main, so it waits in the tracker until
+# someone takes it in as resources/spam-filter/README.md describes.
+#
+# Reads metadata only: the releases list from GitHub's API and spam_rules.rs
+# from Gitea's. Drafts and pre-releases are ignored. An issue is opened once
+# per release: an existing one with the same title, open or closed, stops a
+# second.
+#
+# This was upstream-watch, which also opened an issue for each new release of
+# the server the fork was built on. 0.16.27 was the last import (2026-10-27),
+# so that half is gone.
+#
+# Daily 06:17 UTC; run it by hand with workflow_dispatch.
+name: spam-rules-watch
+
+on:
+  schedule:
+    - cron: '17 6 * * *'
+  workflow_dispatch:
+
+concurrency:
+  group: spam-rules-watch
+  cancel-in-progress: false
+
+jobs:
+  spam-rules-watch:
+    runs-on: light
+    container:
+      image: python:3.13-slim@sha256:8d9d0b8bcf6506481eae4907c18f5e3e7902e629f5f6d684f9e7c32e85e3ddf0 # 3.13-slim
+    env:
+      TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      REPO: ${{ github.repository }}
+    steps:
+      - shell: bash
+        run: |
+          python3 - <<'PY'
+          import base64, json, os, re, sys, urllib.request
+
+          api = f"{os.environ['CI_SERVER_INTERNAL']}/api/v1/repos/{os.environ['REPO']}"
+          def call(method, url, body=None, token=os.environ["TOKEN"]):
+              headers = {"Content-Type": "application/json", "User-Agent": "inbuxa-spam-rules-watch"}
+              if token:
+                  headers["Authorization"] = f"token {token}"
+              req = urllib.request.Request(url, method=method, headers=headers,
+                  data=json.dumps(body).encode() if body is not None else None)
+              with urllib.request.urlopen(req, timeout=30) as r:
+                  return json.load(r)
+          SEMVER = re.compile(r"^v(\d+)\.(\d+)\.(\d+)$")
+          def key(tag):
+              return tuple(int(x) for x in SEMVER.match(tag).groups())
+
+          # The spam filter rules bundled with the server (resources/spam-filter/):
+          # an issue when spam-filter publishes a newer release than the one
+          # BUNDLED_SPAM_RULES_VERSION names on main.
+          src = call("GET", f"{api}/contents/crates/common/src/manager/spam_rules.rs?ref=main")
+          text = base64.b64decode(src["content"]).decode()
+          m = re.search(r'BUNDLED_SPAM_RULES_VERSION: &str = "(\d+\.\d+\.\d+)"', text)
+          if not m:
+              print("Can't read BUNDLED_SPAM_RULES_VERSION from spam_rules.rs", file=sys.stderr); sys.exit(1)
+          bundled = "v" + m.group(1)
+          rels = call("GET", "https://api.github.com/repos/stalwartlabs/spam-filter/releases?per_page=30", token=None)
+          newer = sorted((r for r in rels
+                          if not r["draft"] and not r["prerelease"] and SEMVER.match(r["tag_name"])
+                          and key(r["tag_name"]) > key(bundled)),
+                         key=lambda r: key(r["tag_name"]))
+          if not newer:
+              print(f"Up to date: the bundled spam rules are {bundled}, the newest release."); sys.exit(0)
+          latest = newer[-1]
+          tag = latest["tag_name"]
+          title = f"Update the bundled spam rules to {tag}"
+          existing = {i["title"] for i in call("GET", f"{api}/issues?state=all&type=issues&q=bundled+spam+rules&limit=50")}
+          if title in existing:
+              print(f"spam rules {tag}: issue already exists."); sys.exit(0)
+          body = (f"spam-filter published {tag} on {latest['published_at'][:10]}. "
+                  f"The server bundles {bundled}.\n\n"
+                  "Update it as resources/spam-filter/README.md describes: take the rules file "
+                  f"from the {tag} release (by tag, not `latest`), set BUNDLED_SPAM_RULES_VERSION, "
+                  "and run the antispam test.")
+          issue = call("POST", f"{api}/issues", {"title": title, "body": body})
+          print(f"spam rules {tag}: opened #{issue['number']}.")
+          PY

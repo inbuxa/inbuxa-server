@@ -42,7 +42,7 @@ pub struct IpcReceivers {
 const HELP: &str = concat!(
     types::brand_server!(),
     " ",
-    types::brand_version_full!(),
+    types::brand_version!(),
     r#"
 
 Usage: inbuxa [OPTIONS]
@@ -97,7 +97,7 @@ impl BootManager {
                         std::process::exit(0);
                     }
                     ("version" | "V", _) => {
-                        println!("{}", types::brand_version_full!());
+                        println!("{}", types::brand_version!());
                         std::process::exit(0);
                     }
                     ("config" | "c", Some(value)) => {
@@ -173,20 +173,20 @@ impl BootManager {
                         Hostname = bootstrap.registry.local_hostname().to_string(),
                         Details =
                             "No configuration file was found. Port 8080 is open for initial setup.",
-                        Version = types::brand_version_full!(),
+                        Version = types::brand_version!(),
                     );
                 } else if bootstrap.registry.is_recovery_mode() {
                     trc::event!(
                         Server(trc::ServerEvent::RecoveryMode),
                         Details = "Port 8080 is open for troubleshooting and recovery.",
                         Hostname = bootstrap.registry.local_hostname().to_string(),
-                        Version = types::brand_version_full!(),
+                        Version = types::brand_version!(),
                     );
                 } else {
                     trc::event!(
                         Server(trc::ServerEvent::Startup),
                         Hostname = bootstrap.registry.local_hostname().to_string(),
-                        Version = types::brand_version_full!(),
+                        Version = types::brand_version!(),
                     );
                 }
 

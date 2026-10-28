@@ -56,7 +56,7 @@ pub async fn test(test: &TestServer) {
         "urn:ietf:params:jmap:submission": {},
         "urn:ietf:params:jmap:vacationresponse": {},
         "urn:ietf:params:jmap:sieve": {
-          "implementation": concat!(types::brand!(), " ", types::brand_version_full!())
+          "implementation": concat!(types::brand!(), " ", types::brand_version!())
         },
         "urn:ietf:params:jmap:blob": {},
         "urn:ietf:params:jmap:quota": {},

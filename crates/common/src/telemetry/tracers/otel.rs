@@ -30,11 +30,11 @@ pub(crate) fn spawn_otel_tracer(builder: SubscriberBuilder, mut otel: OtelTracer
     tokio::spawn(async move {
         let resource = Resource::builder()
             .with_service_name("inbuxa")
-            .with_attribute(KeyValue::new(SERVICE_VERSION, types::brand_version_full!()))
+            .with_attribute(KeyValue::new(SERVICE_VERSION, types::brand_version!()))
             .build();
 
         let instrumentation = InstrumentationScope::builder("inbuxa")
-            .with_version(types::brand_version_full!())
+            .with_version(types::brand_version!())
             .build();
 
         otel.log_exporter.set_resource(&resource);

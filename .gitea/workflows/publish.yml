@@ -13,8 +13,8 @@
 #   * publish-amd64 pushes :<version>-amd64 and :<version>, a plain amd64
 #     image, as soon as its build is done. A deploy can start from it.
 #   * publish-arm64 then builds arm64, pushes :<version>-arm64, and replaces
-#     :<version> with the two-platform index. :latest moves only here, so it
-#     never names an image without arm64.
+#     :<version> with the two-platform index. The series tags (and :latest, for a
+#     release) move only here, so they never name an image without arm64.
 #
 # Both jobs use one BuildKit builder, `gitea-builder`, whose container
 # (buildx_buildkit_gitea-builder0) and state volume stay on the runner's host
@@ -27,18 +27,20 @@
 # just did where it can.
 #
 # Two guards before anything is pushed:
-#   * the tag must be v<brand_version!>. The version is a string in
-#     crates/types/src/branding.rs, not Cargo.toml, and the image is tagged
-#     with it, so a tag beside an unbumped macro would publish an image that
-#     reports a different version from its tag.
+#   * the tag must be v<version>, the workspace version in Cargo.toml as tags
+#     name it (tools/release/version.py: 27.1.0 is v27.1, 27.1.0-rc.1 is
+#     v27.1-rc.1). The server reports that same version, so a tag beside an
+#     unbumped Cargo.toml would publish an image that says otherwise.
 #   * the tag must be on main or on a release/* branch, so an image never
 #     describes code that was never reviewed onto one of them. A release/*
 #     branch carries a hotfix: it starts at an earlier release tag, takes
 #     fixes through pull requests into it, and is tagged there, so production
 #     can get a fix without everything that has landed on main since.
 #
-# :latest moves with every published tag: tags are cut by the weekly release
-# (or by hand for a real release); there are no prerelease tags here.
+# Each version also moves its series' tags (tools/release/version.py
+# --image-tags): a release 27.1.N moves :27.1 and :latest; a release candidate
+# 27.1-rc.N moves :27.1-rc and never :latest, and its Release is a
+# pre-release.
 #
 # The push logs in with PACKAGE_TOKEN (jcoffey-dev, write:package): the job's
 # own token is refused by the container registry.
@@ -64,6 +66,8 @@ jobs:
       image: python:3.13-slim@sha256:8d9d0b8bcf6506481eae4907c18f5e3e7902e629f5f6d684f9e7c32e85e3ddf0 # 3.13-slim
     outputs:
       version: ${{ steps.v.outputs.version }}
+      tags: ${{ steps.v.outputs.tags }}
+      prerelease: ${{ steps.v.outputs.prerelease }}
     steps:
       # Full history: the ancestry check cannot be answered from a shallow
       # clone. The checkout also fetches every branch as origin/*.
@@ -76,16 +80,9 @@ jobs:
           TAG: ${{ github.ref_name }}
         run: |
           set -euo pipefail
-          # Scoped to the macro body: branding.rs holds other string literals,
-          # and tagging an image from one of those would be worse than failing.
-          V="$(awk '/macro_rules! brand_version /,/^}/' crates/types/src/branding.rs \
-               | grep -om1 '"[0-9][^"]*"' | tr -d '"')"
-          [ -n "$V" ] || { echo "could not read brand_version! from branding.rs" >&2; exit 1; }
-          if [ "$TAG" != "v$V" ]; then
-            echo "Tag $TAG names a commit whose brand_version! says $V." >&2
-            echo "Refusing to publish an image that would report the wrong version." >&2
-            exit 1
-          fi
+          V="$(python3 tools/release/version.py --tag "$TAG")"
+          tags="$(python3 tools/release/version.py --image-tags | tr '\n' ' ')"
+          if python3 tools/release/version.py --prerelease; then pre=true; else pre=false; fi
           commit="$(git rev-parse "${TAG}^{commit}")"
           on=""
           for ref in origin/main $(git for-each-ref --format='%(refname:short)' 'refs/remotes/origin/release/*'); do
@@ -94,7 +91,9 @@ jobs:
           [ -n "$on" ] || { echo "$TAG is not on main or a release/* branch" >&2; exit 1; }
           echo "$TAG is on $on"
           echo "version=$V" >> "$GITHUB_OUTPUT"
-          echo "version $V"
+          echo "tags=${tags% }" >> "$GITHUB_OUTPUT"
+          echo "prerelease=$pre" >> "$GITHUB_OUTPUT"
+          echo "version $V; image tags: ${tags% }; prerelease: $pre"
 
   publish-amd64:
     if: ${{ vars.BUILD_ON != 'github' }}
@@ -150,6 +149,7 @@ jobs:
       REGISTRY: ${{ vars.REGISTRY }}
       IMAGE: ${{ vars.REGISTRY }}/${{ github.repository }}
       VERSION: ${{ needs.version.outputs.version }}
+      TAGS: ${{ needs.version.outputs.tags }}
       PACKAGE_TOKEN: ${{ secrets.PACKAGE_TOKEN }}
     steps:
       - uses: coffey-labs/actions/checkout@fab0c4d45e0162963965f1555df27b7bed5e20ec
@@ -165,9 +165,9 @@ jobs:
             --provenance=false --sbom=false \
             --tag "$IMAGE:$VERSION-arm64" \
             --push .
-          docker buildx imagetools create \
-            --tag "$IMAGE:$VERSION" \
-            --tag "$IMAGE:latest" \
+          args=""
+          for t in $TAGS; do args="$args --tag $IMAGE:$t"; done
+          docker buildx imagetools create $args \
             "$IMAGE:$VERSION-amd64" "$IMAGE:$VERSION-arm64"
           docker buildx imagetools inspect "$IMAGE:$VERSION"
       - if: always()
@@ -222,6 +222,8 @@ jobs:
         env:
           TAG: ${{ github.ref_name }}
           VERSION: ${{ needs.version.outputs.version }}
+          TAGS: ${{ needs.version.outputs.tags }}
+          PRERELEASE: ${{ needs.version.outputs.prerelease }}
           TOKEN: ${{ secrets.GITHUB_TOKEN }}
           REPO: ${{ github.repository }}
           REGISTRY: ${{ vars.REGISTRY }}
@@ -237,15 +239,20 @@ jobs:
           except urllib.error.HTTPError as e:
               if e.code != 404: raise
           image = f"{os.environ['REGISTRY']}/{os.environ['REPO']}:{version}"
-          body = (f"Container image: `{image}` (linux/amd64, linux/arm64); also `:latest`. "
+          also = " ".join(f"`:{t}`" for t in os.environ["TAGS"].split()[1:])
+          pre = os.environ["PRERELEASE"] == "true"
+          body = (("Release candidate for the next series, to try before it ships. "
+                   "`:latest` stays on the current release.\n\n" if pre else "")
+                  + f"Container image: `{image}` (linux/amd64, linux/arm64); also {also}. "
                   "amd64 is published first; arm64 is added to the same tag when its build "
-                  "finishes, and `:latest` moves then.\n\n"
+                  "finishes, and the series tags move then.\n\n"
                   "Binaries for a host install are attached: `inbuxa-linux-amd64.tar.gz` and "
                   "`inbuxa-linux-arm64.tar.gz`, with `SHA256SUMS`. Each is the binary out of this "
                   "release's image for that architecture, so it is the same build. The image "
                   "grants it `cap_net_bind_service`; a host install has to grant that itself "
                   "(`setcap`, or `AmbientCapabilities` in the unit) to bind port 25.")
-          data = json.dumps({"tag_name": tag, "name": f"INBUXA {version}", "body": body}).encode()
+          data = json.dumps({"tag_name": tag, "name": f"INBUXA {version}", "body": body,
+                             "prerelease": pre}).encode()
           r = json.load(urllib.request.urlopen(urllib.request.Request(f"{api}/releases", data=data, headers=h)))
           print(f"created release {r['tag_name']}")
           PY

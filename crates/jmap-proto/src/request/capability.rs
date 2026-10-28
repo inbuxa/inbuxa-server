@@ -474,7 +474,7 @@ impl Session {
 impl Default for SieveSessionCapabilities {
     fn default() -> Self {
         Self {
-            implementation: concat!(types::brand!(), " ", types::brand_version_full!()),
+            implementation: concat!(types::brand!(), " ", types::brand_version!()),
         }
     }
 }

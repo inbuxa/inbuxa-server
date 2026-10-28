@@ -81,40 +81,40 @@ fn legacy_setting(name: &str, is_set: impl Fn(&str) -> bool) -> Option<String> {
     is_set(&legacy).then_some(legacy)
 }
 
-/// INBUXA's own version, dated like the rest of its family: `YYYY.M.D`, with
-/// a letter or `.N` suffix for a second release on one day. It's set here and
-/// not in Cargo.toml, so upstream's version bumps merge without conflicts.
+/// inbuxa's version as tags, images and `--version` name it: `27.1` for a
+/// series, `27.1.3` for its patches, `27.1-rc.1` for a release candidate. It
+/// comes from the one version in the workspace Cargo.toml (`27.1.0`, `27.1.3`,
+/// `27.1.0-rc.1`), so a release changes that and nothing else.
 #[macro_export]
 macro_rules! brand_version {
     () => {
-        "2026.10.28"
+        $crate::branding::__display_version!()
     };
 }
 
-/// The version with the Stalwart release it's built on, e.g.
-/// `2026.9.20 (Stalwart 0.16.22)`. The base comes from Cargo, which follows
-/// upstream, so it's always the base actually compiled in. It matters because
-/// Stalwart's data upgrades are one-way. Once INBUXA stops tracking upstream,
-/// this becomes just the version.
-#[macro_export]
-macro_rules! brand_version_full {
-    // The upstream crate version, without naming the upstream project: this
-    // string is user-visible (--version, the startup banner, the console,
-    // telemetry and the JMAP session's "implementation" field), and the name
-    // belongs only in copyright notices and the lineage line.
-    () => {
-        concat!(
-            $crate::brand_version!(),
-            " (upstream ",
-            env!("CARGO_PKG_VERSION"),
-            ")"
-        )
-    };
-}
+#[doc(hidden)]
+pub use proc_macros::display_version as __display_version;
 
 #[cfg(test)]
 mod tests {
     use super::{LEGACY_ENV_PREFIX, legacy_setting};
+
+    #[test]
+    fn the_version_is_cargos_without_the_series_zero() {
+        let cargo = env!("CARGO_PKG_VERSION");
+        let shown = crate::brand_version!();
+        assert_eq!(
+            cargo,
+            match shown.split_once('-') {
+                Some((series, pre)) => format!("{series}.0-{pre}"),
+                None if shown.matches('.').count() == 1 => format!("{shown}.0"),
+                None => shown.to_string(),
+            }
+        );
+        // Usable where a literal is needed.
+        let banner: &str = concat!("v", crate::brand_version!());
+        assert_eq!(banner, format!("v{shown}"));
+    }
 
     #[test]
     fn an_upstream_setting_is_named_for_renaming() {

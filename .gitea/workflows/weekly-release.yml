@@ -4,12 +4,14 @@
 # :latest to an identical build, spends a version number, and notifies
 # everybody about nothing.
 #
-# The version is the date, YYYY.M.D unpadded, with a .N suffix from 2 for a
-# second release on one day. It lives in crates/types/src/branding.rs
-# (brand_version!), deliberately not in Cargo.toml so upstream's version bumps
-# merge without conflicts. The bump is committed to main and the tag names that
-# commit, so the tree a tag points at reports the version the tag claims --
-# publish.yml refuses a tag that doesn't.
+# Since 27.1 the version is a series and its patches: the weekly release cuts
+# the next patch of the current series (27.1 -> 27.1.1 -> 27.1.2). A new series
+# and its release candidates (27.1-rc.N) are cut by hand, so while main is on a
+# release candidate this job says so and stops. The version is the workspace
+# version in Cargo.toml (tools/release/version.py reads and bumps it, with
+# Cargo.lock). The bump is committed to main and the tag names that commit, so
+# the tree a tag points at reports the version the tag claims -- publish.yml
+# refuses a tag that doesn't.
 #
 # Mondays 10:07 UTC, last of the three INBUXA releases: Admin and the webmail
 # release ahead of the server they talk to. Run it by hand with
@@ -20,11 +22,11 @@
 # RELEASE_TOKEN (jcoffey-dev, write:repository, allowed to push to main):
 #   * a tag Gitea creates for the job's own token raises no event, and the
 #     tag must start publish.yml;
-#   * the bump is committed through the contents API. Gitea has no "only if
-#     the branch is still at X" guard, so the job checks main's head right
-#     before writing and refuses if it moved since the commit it counted from;
-#     run it again. (The API does refuse if the file itself changed, via its
-#     blob sha.)
+#   * the bump (Cargo.toml and Cargo.lock, one commit) goes through the
+#     contents API. Gitea has no "only if the branch is still at X" guard, so
+#     the job checks main's head right before writing and refuses if it moved
+#     since the commit it counted from; run it again. (The API does refuse if
+#     a file itself changed, via its blob sha.)
 name: weekly-release
 
 on:
@@ -63,7 +65,9 @@ jobs:
       - shell: bash
         run: |
           python3 - <<'PY'
-          import base64, datetime, json, os, re, subprocess, sys, urllib.request
+          import base64, json, os, subprocess, sys, urllib.request
+          sys.path.insert(0, "tools/release")
+          import version as v
 
           api = f"{os.environ['CI_SERVER_INTERNAL']}/api/v1/repos/{os.environ['REPO']}"
           def call(method, path, token, body=None):
@@ -81,6 +85,12 @@ jobs:
               return subprocess.run(["git", "show-ref", "--verify", "--quiet", f"refs/tags/{t}"]).returncode == 0
 
           sha = git("rev-parse", "HEAD")
+          current = v.cargo_version()
+          version = v.next_patch(current)
+          if version is None:
+              print(f"main is on release candidate {v.display(current)}: release candidates "
+                    "are cut by hand, so there's no weekly release."); sys.exit(0)
+
           # The newest published release, or empty on a project that has never
           # had one -- in which case everything counts as new. A release can
           # outlive its tag; falling back to the whole history over-counts,
@@ -92,12 +102,10 @@ jobs:
           if count == 0:
               print(f"Nothing to release: no commits since {previous}."); sys.exit(0)
 
-          d = datetime.datetime.now(datetime.timezone.utc)
-          today = f"{d.year}.{d.month}.{d.day}"
-          version, n = today, 2
-          while has_tag(f"v{version}"):
-              version, n = f"{today}.{n}", n + 1
-          tag = f"v{version}"
+          shown = v.display(version)
+          tag = f"v{shown}"
+          if has_tag(tag):
+              print(f"{tag} exists but main still says {v.display(current)}; fix main first.", file=sys.stderr); sys.exit(1)
           print(f"Releasing {tag} -- {count} commit(s) since {previous or 'the beginning'}, from {sha}.")
           if os.environ["DRY_RUN"] == "1":
               print(f"Dry run (RELEASE_LIVE='{os.environ.get('RELEASE_LIVE', '')}'): stopping here."); sys.exit(0)
@@ -106,22 +114,17 @@ jobs:
           if not token:
               print("RELEASE_TOKEN secret is not set on this repository", file=sys.stderr); sys.exit(1)
 
-          # Scoped to the macro body rather than replacing the first quoted
-          # string in the file, and asserted to have matched exactly once:
-          # branding.rs holds other string literals.
-          path = "crates/types/src/branding.rs"
-          src = open(path, encoding="utf-8").read()
-          out, hits = re.subn(r'(macro_rules! brand_version \{\s*\(\) => \{\s*")[^"]+(")',
-                              lambda m: m.group(1) + version + m.group(2), src, count=1)
-          assert hits == 1, f"brand_version! not found in {path}"
+          files = {str(p.relative_to(v.ROOT)): text for p, text in v.set_version(version).items()}
 
           head = call("GET", "/branches/main", token)["commit"]["id"]
           if head != sha:
               print(f"main moved from {sha} to {head} since this run counted; run it again.", file=sys.stderr); sys.exit(1)
-          blob = call("GET", f"/contents/{path}?ref={sha}", token)["sha"]
-          bump = call("PUT", f"/contents/{path}", token, {
-              "branch": "main", "message": f"Version {version}", "sha": blob,
-              "content": base64.b64encode(out.encode()).decode()})["commit"]["sha"]
+          changes = [{"operation": "update", "path": path,
+                      "sha": call("GET", f"/contents/{path}?ref={sha}", token)["sha"],
+                      "content": base64.b64encode(text.encode()).decode()}
+                     for path, text in files.items()]
+          bump = call("POST", "/contents", token, {
+              "branch": "main", "message": f"Version {shown}", "files": changes})["commit"]["sha"]
           print(f"committed the bump as {bump}")
 
           # Notes bounded to what is new: one line per change on main's
@@ -129,7 +132,7 @@ jobs:
           # is an ordinary push, so publish.yml builds and pushes the image.
           notes = git("log", "--first-parent", "--format=- %s", rng)
           rel = call("POST", "/releases", token, {
-              "tag_name": tag, "target_commitish": bump, "name": f"INBUXA {version}",
+              "tag_name": tag, "target_commitish": bump, "name": f"INBUXA {shown}",
               "body": f"{count} commit(s) since {previous or 'the beginning'}.\n\n{notes}"})
           print(f"created release {rel['tag_name']}")
           PY

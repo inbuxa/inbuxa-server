@@ -16,7 +16,7 @@ high-confidence spam categories, −3.0 for legitimate), which match
 
 ## Updating
 
-The `upstream-watch` workflow opens an issue when spam-filter publishes a
+The `spam-rules-watch` workflow opens an issue when spam-filter publishes a
 newer release. To take it:
 
 1. Download `spam-filter-rules.json.gz` from that release, pinned by tag
