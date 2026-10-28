@@ -699,6 +699,32 @@ async fn antispam() {
             }
         }
     }
+
+    // inbuxa: the similar-recipients check used to compare every pair of To/Cc
+    // addresses, so a long To header took time quadratic in its length.
+    if filter_test
+        .as_ref()
+        .is_none_or(|s| s.eq_ignore_ascii_case("recipient"))
+    {
+        println!("===== recipient (many) =====");
+        let to = (0..5_000u32)
+            .map(|i| format!("u{}@d{}.org", i.wrapping_mul(7919) % 5_000, i % 97))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let message = format!("To: {to}\r\nSubject: Hi\r\n\r\nTest\r\n");
+        let parsed_message = MessageParser::new().parse(&message).unwrap();
+        let session = test.new_mta_session();
+        let spam_input = session.build_spam_input(&parsed_message, &[], None, None, None, None);
+        let mut spam_ctx = test.server.spam_filter_init(spam_input);
+        let started = Instant::now();
+        test.server
+            .spam_filter_analyze_recipient(&mut spam_ctx)
+            .await;
+        let elapsed = started.elapsed();
+        assert!(spam_ctx.result.tags.contains("RCPT_COUNT_GT_50"));
+        assert!(!spam_ctx.result.tags.contains("SORTED_RECIPS"));
+        assert!(elapsed < Duration::from_secs(2), "{elapsed:?}");
+    }
 }
 
 async fn classifier_features(server: &Server, contents: String) {

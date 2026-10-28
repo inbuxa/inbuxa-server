@@ -2,6 +2,8 @@
  * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
+ *
+ * Modified by Coffey Labs in 2026 for INBUXA.
  */
 
 use std::future::Future;
@@ -12,6 +14,9 @@ use smtp_proto::{MAIL_BODY_8BITMIME, MAIL_BODY_BINARYMIME, MAIL_SMTPUTF8};
 use store::ahash::HashSet;
 
 use crate::SpamFilterContext;
+
+// inbuxa: how many To/Cc addresses the similar-recipients check compares
+const SIMILAR_RECIPS_SAMPLE: usize = 50;
 
 pub trait SpamFilterAnalyzeRecipient: Sync + Send {
     fn spam_filter_analyze_recipient(
@@ -243,6 +248,9 @@ impl SpamFilterAnalyzeRecipient for Server {
 
         if !is_sorted && rcpt_count >= 5 {
             // Look for similar recipients
+            // inbuxa: on the first SIMILAR_RECIPS_SAMPLE only; every pair of a
+            // long header would take time quadratic in its length
+            let rcpts = &rcpts[..rcpts.len().min(SIMILAR_RECIPS_SAMPLE)];
             let mut hits = 0;
             let mut combinations = 0;
             for i in 0..rcpts.len() {
