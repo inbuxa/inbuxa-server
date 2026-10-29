@@ -2,6 +2,8 @@
  * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
+ *
+ * Modified by Coffey Labs in 2026 for INBUXA.
  */
 
 pub mod auth;
@@ -14,7 +16,9 @@ use self::{
     auth::MailAuthConfig, queue::QueueConfig, report::ReportConfig, resolver::Resolvers,
     session::SessionConfig,
 };
-use crate::{config::smtp::queue::RequireOptional, expr::if_block::IfBlock};
+use crate::{
+    config::smtp::queue::RequireOptional, expr::if_block::IfBlock, network::public_only::PublicOnly,
+};
 use registry::{
     schema::{properties::ObjectType, structs::Rate},
     types::id::ObjectId,
@@ -60,13 +64,20 @@ impl SmtpConfig {
             resolvers: Resolvers::parse(bp).await,
             mail_auth: MailAuthConfig::parse(bp).await,
             report: ReportConfig::parse(bp).await,
+            // Both fetch from hosts the remote domain names in DNS
             mta_sts_client: utils::http::http_client_builder(false)
                 .pool_max_idle_per_host(0)
                 .user_agent(crate::USER_AGENT)
                 .redirect(reqwest::redirect::Policy::none())
+                .public_only()
                 .build()
                 .unwrap_or_default(),
-            tls_report_client: utils::http::unpooled_http_client(false),
+            tls_report_client: utils::http::http_client_builder(false)
+                .pool_max_idle_per_host(0)
+                .redirect(reqwest::redirect::Policy::none())
+                .public_only()
+                .build()
+                .unwrap_or_default(),
         };
 
         if !config.resolvers.dnssec_available
