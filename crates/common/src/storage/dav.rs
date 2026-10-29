@@ -2,6 +2,8 @@
  * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
+ *
+ * Modified by Coffey Labs in 2026 for INBUXA.
  */
 
 use crate::{
@@ -306,6 +308,14 @@ impl DavResource {
                 start, duration, ..
             } => Some((*start, *start + *duration as i64)),
             _ => None,
+        }
+    }
+
+    // inbuxa: EVENT_VIEW_* flags of a calendar event
+    pub fn event_view(&self) -> u8 {
+        match &self.data {
+            DavResourceMetadata::CalendarEvent { view, .. } => *view,
+            _ => 0,
         }
     }
 

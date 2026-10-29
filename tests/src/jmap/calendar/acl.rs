@@ -837,6 +837,197 @@ pub async fn test(test: &TestServer) {
         "private event listed to a sharee: {response:?}"
     );
 
+    // inbuxa: a sharee sees only the time of a private event, nothing of a
+    // secret one, and no other attendees of an event that hides them.
+    let event = |uid: &str, title: &str, extra: serde_json::Value| {
+        let mut event = json!({
+            "uid": uid,
+            "title": title,
+            "description": "Room 4, bring the files",
+            "start": "2020-02-03T10:00:00",
+            "timeZone": "America/New_York",
+            "duration": "PT1H",
+            "calendarIds": {
+                &shared_calendar_id: true
+            },
+            "participants": {
+                "a": {
+                    "calendarAddress": "mailto:organizer@remote.org",
+                    "roles": { "owner": true, "attendee": true }
+                },
+                "b": {
+                    "calendarAddress": "mailto:jdoe@example.com",
+                    "roles": { "attendee": true }
+                },
+                "c": {
+                    "calendarAddress": "mailto:guest@remote.org",
+                    "roles": { "attendee": true }
+                }
+            },
+        });
+        for (key, value) in extra.as_object().unwrap() {
+            event[key] = value.clone();
+        }
+        event
+    };
+    let response = john
+        .jmap_create(
+            MethodObject::CalendarEvent,
+            [
+                event(
+                    "private-event@example.com",
+                    "Doctor appointment",
+                    json!({"privacy": "private"}),
+                ),
+                event(
+                    "secret-event@example.com",
+                    "Job interview",
+                    json!({"privacy": "secret"}),
+                ),
+                event(
+                    "hidden-attendees@example.com",
+                    "Board meeting",
+                    json!({"hideAttendees": true}),
+                ),
+            ],
+            Vec::<(&str, &str)>::new(),
+        )
+        .await;
+    let private_id = response.created(0).id().to_string();
+    let secret_id = response.created(1).id().to_string();
+    let hidden_id = response.created(2).id().to_string();
+
+    // The owner sees everything
+    let response = john
+        .jmap_get(
+            MethodObject::CalendarEvent,
+            Vec::<&str>::new(),
+            [private_id.as_str(), secret_id.as_str()],
+        )
+        .await;
+    assert_eq!(response.list().len(), 2, "{response:?}");
+    assert_eq!(
+        response.list()[0].get("title").and_then(|v| v.as_str()),
+        Some("Doctor appointment")
+    );
+
+    // A secret event doesn't exist for the sharee
+    let response = jane
+        .jmap_get_account(
+            john,
+            MethodObject::CalendarEvent,
+            Vec::<&str>::new(),
+            [secret_id.as_str()],
+        )
+        .await;
+    assert_eq!(
+        response.not_found().collect::<Vec<_>>(),
+        [secret_id.as_str()],
+        "{response:?}"
+    );
+    let response = jane
+        .jmap_method_call(
+            "CalendarEvent/query",
+            json!({
+                "accountId": &john_id,
+            }),
+        )
+        .await;
+    let ids = response.ids().collect::<Vec<_>>();
+    assert!(ids.contains(&private_id.as_str()), "{response:?}");
+    assert!(!ids.contains(&secret_id.as_str()), "{response:?}");
+
+    // A private event shows its time only
+    let response = jane
+        .jmap_get_account(
+            john,
+            MethodObject::CalendarEvent,
+            Vec::<&str>::new(),
+            [private_id.as_str()],
+        )
+        .await;
+    let private_event = &response.list()[0];
+    assert_eq!(
+        private_event.get("start").and_then(|v| v.as_str()),
+        Some("2020-02-03T10:00:00"),
+        "{response:?}"
+    );
+    for property in [
+        "title",
+        "description",
+        "participants",
+        "organizerCalendarAddress",
+    ] {
+        assert!(
+            private_event.get(property).is_none(),
+            "{property} of a private event shown to a sharee: {response:?}"
+        );
+    }
+    let response = jane
+        .jmap_method_call(
+            "CalendarEvent/query",
+            json!({
+                "accountId": &john_id,
+                "filter": {"title": "Doctor"},
+            }),
+        )
+        .await;
+    assert_eq!(response.ids().count(), 0, "{response:?}");
+    let response = jane
+        .jmap_method_call(
+            "CalendarEvent/copy",
+            json!({
+                "fromAccountId": &john_id,
+                "accountId": &jane_id,
+                "create": {
+                    &private_id: {
+                        "calendarIds": {
+                            &jane_calendar_id: true
+                        }
+                    }
+                }
+            }),
+        )
+        .await;
+    assert_eq!(
+        response
+            .pointer(&format!(
+                "/methodResponses/0/1/notCreated/{private_id}/type"
+            ))
+            .and_then(|v| v.as_str()),
+        Some("forbidden"),
+        "{response:?}"
+    );
+
+    // An event that hides its attendees shows the sharee its owners only
+    let response = jane
+        .jmap_get_account(
+            john,
+            MethodObject::CalendarEvent,
+            ["id", "title", "participants"],
+            [hidden_id.as_str()],
+        )
+        .await;
+    let participants = response.list()[0]
+        .get("participants")
+        .and_then(|v| v.as_object())
+        .unwrap_or_else(|| panic!("{response:?}"));
+    let addresses = participants
+        .values()
+        .filter_map(|p| p.get("calendarAddress").and_then(|v| v.as_str()))
+        .collect::<Vec<_>>();
+    assert_eq!(addresses, ["mailto:organizer@remote.org"], "{response:?}");
+    let response = jane
+        .jmap_method_call(
+            "CalendarEvent/query",
+            json!({
+                "accountId": &john_id,
+                "filter": {"attendee": "guest@remote.org"},
+            }),
+        )
+        .await;
+    assert!(!response.ids().any(|id| id == hidden_id), "{response:?}");
+
     // Destroy all mailboxes
     john.destroy_all_calendars().await;
     jane.destroy_all_calendars().await;

@@ -11,20 +11,21 @@ use calcard::{
     common::{PartialDateTime, timezone::Tz},
     icalendar::{
         ICalendar, ICalendarComponent, ICalendarComponentType, ICalendarEntry, ICalendarParameter,
-        ICalendarParameterName, ICalendarParameterValue, ICalendarParticipationRole,
-        ICalendarProperty, ICalendarValue,
+        ICalendarParameterName, ICalendarProperty, ICalendarValue,
     },
     jscalendar::{
         JSCalendarDateTime, JSCalendarProperty, JSCalendarValue, import::ConversionOptions,
     },
 };
 use chrono::DateTime;
-use common::{Server, auth::AccessToken};
+use common::{EVENT_VIEW_HIDE_ATTENDEES, EVENT_VIEW_PRIVATE, Server, auth::AccessToken};
 use groupware::{
     cache::GroupwareCache,
     calendar::{
         CalendarEvent, EVENT_DRAFT, EVENT_HIDE_ATTENDEES, EVENT_INVITE_OTHERS, EVENT_INVITE_SELF,
-        PREF_USE_DEFAULT_ALERTS, expand::CalendarEventExpansion,
+        PREF_USE_DEFAULT_ALERTS,
+        expand::CalendarEventExpansion,
+        privacy::{event_view, hide_attendees, redact_private_event},
     },
 };
 use jmap_proto::{
@@ -73,11 +74,13 @@ impl CalendarEventGet for Server {
                 SyncCollection::Calendar,
             )
             .await?;
-        let calendar_event_ids = if access_token.reads_as_owner(account_id) {
+        let is_owner = access_token.reads_as_owner(account_id);
+        let calendar_event_ids = if is_owner {
             cache.document_ids(false).collect::<RoaringBitmap>()
         } else {
-            cache.shared_items(access_token, [Acl::ReadItems], true)
+            cache.shared_events(access_token, [Acl::ReadItems], true, 0)
         };
+        let mut writable_ids = None;
         let (mut ids, has_synthetic_ids) = if let Some(rr) = request.ids.take() {
             let rr = rr.unwrap();
             if rr.len() > self.core.jmap.get_max_objects {
@@ -234,6 +237,26 @@ impl CalendarEventGet for Server {
                 .deserialize::<CalendarEvent>()
                 .caused_by(trc::location!())?;
 
+            // inbuxa: a sharee sees the time of a private event only, and only the
+            // owners and themselves among the attendees of an event that hides
+            // them, unless they may change every event in its calendar.
+            let mut reduce_participants = reduce_participants;
+            if !is_owner {
+                let view = event_view(&calendar_event);
+                if view & EVENT_VIEW_PRIVATE != 0 {
+                    redact_private_event(&mut calendar_event.data.event);
+                }
+                if view & EVENT_VIEW_HIDE_ATTENDEES != 0
+                    && !writable_ids
+                        .get_or_insert_with(|| {
+                            cache.shared_items(access_token, [Acl::ModifyItems], true)
+                        })
+                        .contains(document_id)
+                {
+                    reduce_participants = true;
+                }
+            }
+
             // Extract recurrence keys from synthetic ids
             let mut recurrence_keys = AHashSet::new();
             let mut include_base_event = false;
@@ -257,28 +280,10 @@ impl CalendarEventGet for Server {
 
             // Reduce participants
             if reduce_participants {
-                for component in &mut calendar_event.data.event.components {
-                    if component.component_type.is_scheduling_object() {
-                        component.entries.retain(|entry| match &entry.name {
-                            ICalendarProperty::Attendee => {
-                                entry.parameters(&ICalendarParameterName::Role).any(|role| {
-                                    matches!(
-                                        role,
-                                        ICalendarParameterValue::Role(
-                                            ICalendarParticipationRole::Owner,
-                                        ),
-                                    )
-                                }) || entry.calendar_address().is_some_and(|addr| {
-                                    current_account_info
-                                        .addresses()
-                                        .iter()
-                                        .any(|a| a.eq_ignore_ascii_case(addr))
-                                })
-                            }
-                            _ => true,
-                        });
-                    }
-                }
+                hide_attendees(
+                    &mut calendar_event.data.event,
+                    current_account_info.addresses(),
+                );
             }
 
             // Expand synthetic ids
