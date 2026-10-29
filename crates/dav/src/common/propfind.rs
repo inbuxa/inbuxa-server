@@ -296,10 +296,14 @@ impl PropFindRequestHandler for Server {
         let collection_children;
         let sync_collection;
         let mut query_filter = None;
-        let mut limit = std::cmp::min(
+        // inbuxa: a limit of zero still allows one result, so the countdown
+        // below can't wrap around and lift the cap
+        let max_results = std::cmp::min(
             query.limit.unwrap_or(u32::MAX) as usize,
             self.core.groupware.max_results,
-        );
+        )
+        .max(1);
+        let mut limit = max_results;
         let mut is_sync_limited = false;
         let mut is_propfind = false;
         let mut ical_instances_limit = self.core.groupware.max_ical_instances;
@@ -1117,12 +1121,7 @@ impl PropFindRequestHandler for Server {
                 Response::new_status([query.uri], StatusCode::INSUFFICIENT_STORAGE)
                     .with_error(BaseCondition::NumberOfMatchesWithinLimit)
                     .with_response_description(if ical_instances_limit > 0 {
-                        format!(
-                            "The number of matches exceeds the limit of {}",
-                            query
-                                .limit
-                                .unwrap_or(self.core.groupware.max_results as u32)
-                        )
+                        format!("The number of matches exceeds the limit of {max_results}")
                     } else {
                         format!(
                             "The number of recurrence instances exceeds the limit of {}",
