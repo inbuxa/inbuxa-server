@@ -380,6 +380,8 @@ pub enum DavResourceMetadata {
         names: TinyVec<[DavName; 2]>,
         start: i64,
         duration: u32,
+        // inbuxa: EVENT_VIEW_* flags
+        view: u8,
     },
     CalendarEventNotification {
         names: TinyVec<[DavName; 2]>,
@@ -392,6 +394,11 @@ pub enum DavResourceMetadata {
         names: TinyVec<[DavName; 2]>,
     },
 }
+
+// inbuxa: what a sharee may see of a calendar event
+pub const EVENT_VIEW_PRIVATE: u8 = 1;
+pub const EVENT_VIEW_SECRET: u8 = 1 << 1;
+pub const EVENT_VIEW_HIDE_ATTENDEES: u8 = 1 << 2;
 
 #[derive(Debug, Clone, Default)]
 pub struct TinyCalendarPreferences {

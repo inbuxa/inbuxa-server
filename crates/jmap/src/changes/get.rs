@@ -188,7 +188,7 @@ impl ChangesLookup for Server {
                         SyncCollection::Calendar,
                     )
                     .await?
-                    .shared_items(access_token, [Acl::ReadItems], true),
+                    .shared_events(access_token, [Acl::ReadItems], true, 0),
                 MethodObject::FileNode => self
                     .fetch_dav_resources(
                         access_token.account_id(),

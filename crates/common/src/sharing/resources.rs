@@ -6,7 +6,7 @@
  * Modified by Coffey Labs in 2026 for INBUXA.
  */
 
-use crate::{DavResources, auth::AccessToken};
+use crate::{DavResources, EVENT_VIEW_SECRET, auth::AccessToken};
 use store::roaring::RoaringBitmap;
 use types::acl::Acl;
 use utils::map::bitmap::Bitmap;
@@ -73,6 +73,32 @@ impl DavResources {
         } else {
             shared_containers
         }
+    }
+
+    /// inbuxa: the shared items a sharee may see, without the calendar events
+    /// whose view has any of `hidden` (EVENT_VIEW_*). Secret events are always
+    /// left out.
+    pub fn shared_events(
+        &self,
+        access_token: &AccessToken,
+        check_acls: impl IntoIterator<Item = Acl>,
+        match_any: bool,
+        hidden: u8,
+    ) -> RoaringBitmap {
+        let mut document_ids = self.shared_items(access_token, check_acls, match_any);
+        if !document_ids.is_empty() {
+            document_ids -= self.events_with_view(hidden | EVENT_VIEW_SECRET);
+        }
+        document_ids
+    }
+
+    /// inbuxa: the calendar events whose view has any of `view` (EVENT_VIEW_*)
+    pub fn events_with_view(&self, view: u8) -> RoaringBitmap {
+        self.resources
+            .iter()
+            .filter(|resource| resource.event_view() & view != 0)
+            .map(|resource| resource.document_id)
+            .collect()
     }
 
     pub fn shared_documents(

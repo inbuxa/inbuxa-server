@@ -2,6 +2,8 @@
  * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
+ *
+ * Modified by Coffey Labs in 2026 for INBUXA.
  */
 
 use super::GroupwareCache;
@@ -9,7 +11,7 @@ use crate::{
     DavResourceName, RFC_3986,
     calendar::{
         ArchivedCalendar, ArchivedCalendarEvent, Calendar, CalendarEvent, SCHEDULE_INBOX_ID,
-        SCHEDULE_OUTBOX_ID, storage::ItipAutoExpunge,
+        SCHEDULE_OUTBOX_ID, privacy::archived_event_view, storage::ItipAutoExpunge,
     },
     contact::{AddressBook, ArchivedAddressBook, ArchivedContactCard, ContactCard},
     encode_path_segment,
@@ -319,6 +321,7 @@ pub(super) fn resource_from_event(event: &ArchivedCalendarEvent, document_id: u3
                 .collect(),
             start,
             duration,
+            view: archived_event_view(event),
         },
     }
 }
