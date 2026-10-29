@@ -14,6 +14,7 @@ use crate::{
     DavResourceName, DestroyArchive, RFC_3986,
     calendar::{
         ArchivedCalendarEventNotification, CalendarEventNotification, alarm::CalendarAlarmType,
+        privacy::itip_messages_for,
     },
     scheduling::{ItipMessages, event_cancel::itip_cancel},
 };
@@ -495,7 +496,7 @@ impl DestroyArchive<Archive<&ArchivedCalendarEvent>> {
                 .caused_by(trc::location!())?;
 
             if let Ok(messages) = itip_cancel(&event.data.event, account_info.addresses(), true) {
-                ItipMessages::new(vec![messages])
+                ItipMessages::new(itip_messages_for(vec![messages], event.flags))
                     .queue(batch)
                     .caused_by(trc::location!())?;
             }

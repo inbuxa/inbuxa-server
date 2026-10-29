@@ -32,6 +32,7 @@ use groupware::{
     cache::GroupwareCache,
     calendar::{
         CalendarEvent, CalendarEventData, dates::has_oversized_rrule, itip::ItipSendStatus,
+        privacy::itip_messages_for,
     },
     scheduling::{
         ItipMessages, event_create::itip_create, event_update::itip_update,
@@ -266,7 +267,10 @@ impl CalendarUpdateRequestHandler for Server {
                                 }
                             }
 
-                            itip_messages = Some(ItipMessages::new(messages));
+                            itip_messages = Some(ItipMessages::new(itip_messages_for(
+                                messages,
+                                new_event.flags,
+                            )));
                         } else {
                             return Err(DavError::Condition(DavErrorCondition::new(
                                 StatusCode::PRECONDITION_FAILED,
@@ -423,7 +427,8 @@ impl CalendarUpdateRequestHandler for Server {
                             < self.core.groupware.itip_outbound_max_recipients
                         {
                             event.schedule_tag = Some(1);
-                            itip_messages = Some(ItipMessages::new(messages));
+                            itip_messages =
+                                Some(ItipMessages::new(itip_messages_for(messages, event.flags)));
                         } else {
                             return Err(DavError::Condition(DavErrorCondition::new(
                                 StatusCode::PRECONDITION_FAILED,

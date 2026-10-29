@@ -2,6 +2,8 @@
  * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
+ *
+ * Modified by Coffey Labs in 2026 for INBUXA.
  */
 
 use crate::utils::{
@@ -499,6 +501,62 @@ pub async fn test(test: &TestServer) {
             "id": &jane_event_id,
             "organizerCalendarAddress": "mailto:jdoe@example.com"
         }));
+
+    // inbuxa: an invitation to an event that hides its attendees names only
+    // the organizer and the attendee it goes to
+    let mut hidden_event = test_event();
+    hidden_event["uid"] = json!("hidden-attendees-imip");
+    hidden_event["hideAttendees"] = json!(true);
+    john.jmap_create(
+        MethodObject::CalendarEvent,
+        [hidden_event.with_property(
+            JSCalendarProperty::<Id>::CalendarIds,
+            [john_calendar_id.as_str()].into_jmap_set(),
+        )],
+        [("sendSchedulingMessages", true)],
+    )
+    .await
+    .created(0);
+    tokio::time::sleep(std::time::Duration::from_millis(600)).await;
+    test.wait_for_tasks().await;
+    for (client, other) in [
+        (jane, "mailto:bill@example.com"),
+        (bill, "mailto:jane.smith@example.com"),
+    ] {
+        let response = client
+            .jmap_method_calls(json!([
+                [
+                    "CalendarEvent/query",
+                    {
+                        "accountId": client.id_string(),
+                        "filter": {"uid": "hidden-attendees-imip"}
+                    },
+                    "Q"
+                ],
+                [
+                    "CalendarEvent/get",
+                    {
+                        "accountId": client.id_string(),
+                        "#ids": {"resultOf": "Q", "name": "CalendarEvent/query", "path": "/ids"},
+                        "properties": ["participants"]
+                    },
+                    "G"
+                ]
+            ]))
+            .await;
+        let participants = response
+            .pointer("/methodResponses/1/1/list/0/participants")
+            .and_then(|v| v.as_object())
+            .unwrap_or_else(|| panic!("invitation not received: {response:?}"));
+        let addresses = participants
+            .values()
+            .filter_map(|p| p.get("calendarAddress").and_then(|v| v.as_str()))
+            .collect::<Vec<_>>();
+        assert!(
+            addresses.contains(&"mailto:jdoe@example.com") && !addresses.contains(&other),
+            "{addresses:?}"
+        );
+    }
 
     // Cleanup
     test.wait_for_tasks().await;

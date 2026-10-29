@@ -9,6 +9,7 @@
 //! owners and themselves among the attendees of an event that hides them.
 
 use super::{ArchivedCalendarEvent, CalendarEvent, EVENT_HIDE_ATTENDEES};
+use crate::scheduling::{ItipField, ItipMessage, ItipSummary, ItipValue};
 use calcard::icalendar::{
     ArchivedICalendarClassification, ArchivedICalendarProperty, ArchivedICalendarValue, ICalendar,
     ICalendarClassification, ICalendarComponentType, ICalendarParameterName,
@@ -148,5 +149,90 @@ pub fn hide_attendees(ical: &mut ICalendar, addresses: &[String]) {
                 _ => true,
             });
         }
+    }
+}
+
+/// An organizer's scheduling messages for an event that hides its attendees
+/// go to each recipient on its own and name no attendee but the organizer,
+/// the owners and that recipient.
+pub fn itip_hide_attendees(messages: Vec<ItipMessage<ICalendar>>) -> Vec<ItipMessage<ICalendar>> {
+    let mut result = Vec::with_capacity(messages.len());
+    for message in messages {
+        if !message.from_organizer {
+            result.push(message);
+            continue;
+        }
+        for rcpt in &message.to {
+            let mut ical = message.message.clone();
+            for component in &mut ical.components {
+                if component.component_type.is_scheduling_object() {
+                    let organizer = component
+                        .property(&ICalendarProperty::Organizer)
+                        .and_then(|entry| entry.calendar_address())
+                        .map(|addr| addr.to_string());
+                    component.entries.retain(|entry| {
+                        entry.name != ICalendarProperty::Attendee
+                            || entry.parameters(&ICalendarParameterName::Role).any(|role| {
+                                matches!(
+                                    role,
+                                    ICalendarParameterValue::Role(
+                                        ICalendarParticipationRole::Owner
+                                    )
+                                )
+                            })
+                            || entry.calendar_address().is_some_and(|addr| {
+                                addr.eq_ignore_ascii_case(rcpt)
+                                    || organizer.as_deref().is_some_and(|organizer| {
+                                        addr.eq_ignore_ascii_case(organizer)
+                                    })
+                            })
+                    });
+                }
+            }
+            let mut summary = message.summary.clone();
+            match &mut summary {
+                ItipSummary::Invite(fields)
+                | ItipSummary::Cancel(fields)
+                | ItipSummary::Rsvp {
+                    current: fields, ..
+                } => hide_summary_attendees(fields, rcpt),
+                ItipSummary::Update {
+                    current, previous, ..
+                } => {
+                    hide_summary_attendees(current, rcpt);
+                    hide_summary_attendees(previous, rcpt);
+                }
+            }
+            result.push(ItipMessage {
+                from: message.from.clone(),
+                from_organizer: true,
+                to: vec![rcpt.clone()],
+                summary,
+                message: ical,
+            });
+        }
+    }
+    result
+}
+
+fn hide_summary_attendees(fields: &mut [ItipField], rcpt: &str) {
+    for field in fields {
+        if let ItipValue::Participants(participants) = &mut field.value {
+            participants.retain(|participant| {
+                participant.is_organizer || participant.email.eq_ignore_ascii_case(rcpt)
+            });
+        }
+    }
+}
+
+/// The scheduling messages of an event with these flags as they may be sent
+pub fn itip_messages_for(
+    messages: Vec<ItipMessage<ICalendar>>,
+    event_flags: u16,
+) -> Vec<ItipMessage<ICalendar>> {
+    if event_flags & EVENT_HIDE_ATTENDEES != 0 {
+        itip_hide_attendees(messages)
+    } else {
+        messages
     }
 }

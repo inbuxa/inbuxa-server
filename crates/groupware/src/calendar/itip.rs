@@ -11,7 +11,7 @@ use crate::{
     cache::GroupwareCache,
     calendar::{
         CalendarEvent, CalendarEventData, CalendarEventNotification, ChangedBy,
-        EVENT_HIDE_ATTENDEES, EVENT_NOTIFICATION_IS_CHANGE,
+        EVENT_HIDE_ATTENDEES, EVENT_NOTIFICATION_IS_CHANGE, privacy::itip_messages_for,
     },
     scheduling::{
         InstanceId, ItipError, ItipMessage, ItipSnapshots,
@@ -230,7 +230,11 @@ impl ItipIngest for Server {
 
                         Ok(None)
                     }
-                    MergeResult::Message(itip_message) => Ok(Some(itip_message)),
+                    MergeResult::Message(itip_message) => {
+                        Ok(itip_messages_for(vec![itip_message], event.flags)
+                            .into_iter()
+                            .next())
+                    }
                     MergeResult::None => Ok(None),
                 }
             } else {
