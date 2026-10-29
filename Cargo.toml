@@ -93,12 +93,17 @@ rpath = false
 # vendor/sieve-rs is the published 0.7.3 with those renamed; see its
 # VENDORED.md. Re-vendor when the version in Cargo.lock moves.
 #
+# inbuxa: vendor/calcard is the published 0.3.14, vendored so the server can
+# carry fixes to it; see its VENDORED.md. Re-vendor when the version in
+# Cargo.lock moves.
+#
 # inbuxa: hickory and opentelemetry are upstream's patched branches, vendored
 # at the commits upstream pins so builds never fetch from upstream's
 # repositories; see vendor/hickory-dns/VENDORED.md and
 # vendor/opentelemetry-rust/VENDORED.md.
 [patch.crates-io]
 sieve-rs = { path = "vendor/sieve-rs" }
+calcard = { path = "vendor/calcard" }
 hickory-proto = { path = "vendor/hickory-dns/hickory-proto" }
 hickory-net = { path = "vendor/hickory-dns/hickory-net" }
 hickory-resolver = { path = "vendor/hickory-dns/hickory-resolver" }

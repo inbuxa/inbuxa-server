@@ -1,0 +1,12 @@
+_ignore
+Cargo.lock
+target
+web/dist
+specs/
+.DS_Store
+*.md
+!CHANGELOG.md
+!README.md
+
+# inbuxa: the vendoring notes are tracked
+!VENDORED.md
