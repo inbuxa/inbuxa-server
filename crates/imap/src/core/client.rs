@@ -444,7 +444,24 @@ impl<T: SessionStream> Session<T> {
             | Command::Sort(_)
             | Command::Thread(_)
             | Command::UidBatches => match state {
-                State::Selected { mailbox, .. } => {
+                State::Selected { data, mailbox } => {
+                    // inbuxa: a shared mailbox whose share was revoked while
+                    // it was selected can only be closed
+                    if !matches!(
+                        request.command,
+                        Command::Close | Command::Unselect | Command::Check
+                    ) && !data
+                        .is_mailbox_readable(&mailbox.id)
+                        .await
+                        .map_err(|err| err.id(request.tag.clone()))?
+                    {
+                        return Err(trc::ImapEvent::Error
+                            .into_err()
+                            .details("You no longer have access to this mailbox.")
+                            .code(ResponseCode::NoPerm)
+                            .id(request.tag));
+                    }
+
                     // RFC 9586 forbids message numbers once UIDONLY is enabled
                     if self.is_uidonly && request.command.requires_uid() {
                         Err(trc::ImapEvent::Error
