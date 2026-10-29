@@ -19,6 +19,7 @@ pub mod form;
 pub mod live; // inbuxa: monitoring (MON-20 to MON-24)
 pub mod request;
 pub mod scim; // inbuxa: SCIM 2.0 provisioning
+pub mod source; // inbuxa: /.well-known/source
 
 use common::Inner;
 use std::sync::Arc;

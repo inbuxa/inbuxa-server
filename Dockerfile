@@ -28,6 +28,11 @@ COPY --from=planner /recipe.json /recipe.json
 COPY vendor/ vendor/
 RUN RUSTFLAGS="$(cat /flags.txt)" cargo chef cook --target "$(cat /target.txt)" --release --no-default-features --features "sqlite postgres mysql rocks s3 redis azure nats" --recipe-path /recipe.json
 COPY . .
+# inbuxa: the commit being built, for /.well-known/source. The context has no
+# .git, so the release workflow passes it; a build without it serves no
+# source document.
+ARG INBUXA_REVISION=""
+ENV INBUXA_REVISION=${INBUXA_REVISION}
 RUN RUSTFLAGS="$(cat /flags.txt)" cargo build --target "$(cat /target.txt)" --release -p inbuxa --no-default-features --features "sqlite postgres mysql rocks s3 redis azure nats"
 RUN mv "/build/target/$(cat /target.txt)/release" "/output"
 

@@ -122,6 +122,7 @@ jobs:
           docker buildx build \
             --platform linux/amd64 \
             --provenance=false --sbom=false \
+            --build-arg INBUXA_REVISION="${{ github.sha }}" \
             --tag "$IMAGE:$VERSION-amd64" \
             --tag "$IMAGE:$VERSION" \
             --push .
@@ -163,6 +164,7 @@ jobs:
           docker buildx build \
             --platform linux/arm64 \
             --provenance=false --sbom=false \
+            --build-arg INBUXA_REVISION="${{ github.sha }}" \
             --tag "$IMAGE:$VERSION-arm64" \
             --push .
           args=""

@@ -350,6 +350,22 @@ impl ParseHttp for Server {
                         };
                     }
                 }
+                // inbuxa: where this build's source is (/.well-known/source)
+                ("source", &Method::GET | &Method::HEAD) => {
+                    // Limit anonymous requests
+                    self.is_http_anonymous_request_allowed(session.remote_ip)
+                        .await?;
+
+                    return match crate::source::document() {
+                        Some(document) => {
+                            Ok(Resource::new("application/json", document.into_bytes())
+                                .into_http_response()
+                                .with_no_cache()
+                                .with_cors_unrestricted())
+                        }
+                        None => Err(trc::ResourceEvent::NotFound.into_err()),
+                    };
+                }
                 ("mta-sts.txt", &Method::GET) => {
                     // Limit anonymous requests
                     self.is_http_anonymous_request_allowed(session.remote_ip)
