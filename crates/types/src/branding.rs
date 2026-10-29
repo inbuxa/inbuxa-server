@@ -52,6 +52,19 @@ macro_rules! brand_url {
     };
 }
 
+/// The public repository the server's source is published in, named in
+/// `/.well-known/source`.
+#[macro_export]
+macro_rules! brand_repository {
+    () => {
+        "https://git.coffeylabs.org/inbuxa/inbuxa-server"
+    };
+}
+
+/// The commit this build was made from, as the release build passes it in
+/// `INBUXA_REVISION`. A build that wasn't told has none.
+pub const BUILD_REVISION: Option<&str> = option_env!("INBUXA_REVISION");
+
 /// Reads one of the server's environment variables by its unprefixed name,
 /// such as `RECOVERY_ADMIN`, from `INBUXA_<name>`.
 ///

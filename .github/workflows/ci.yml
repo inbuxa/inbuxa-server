@@ -264,6 +264,7 @@ jobs:
           platforms: linux/${{ matrix.arch }}
           provenance: false
           sbom: false
+          build-args: INBUXA_REVISION=${{ github.sha }}
           push: true
           tags: |
             ${{ env.IMAGE }}:${{ env.VERSION }}-${{ matrix.arch }}
