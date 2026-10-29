@@ -262,9 +262,9 @@ impl CalendarEventQuery for Server {
             vec![]
         };
 
-        // inbuxa: a sharee never finds a secret event, and can't match on what
-        // it may not see: the details of a private event, or the attendees of
-        // one that hides them unless it may change every event in its calendar.
+        // inbuxa: a sharee can't match on what it may not see: the details of a
+        // private or confidential event, or the attendees of one that hides
+        // them unless it may change every event in its calendar.
         let mask = if access_token.reads_through_share(account_id) {
             let mut mask = cache.shared_events(
                 access_token,

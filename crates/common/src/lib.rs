@@ -395,10 +395,10 @@ pub enum DavResourceMetadata {
     },
 }
 
-// inbuxa: what a sharee may see of a calendar event
+// inbuxa: what a sharee may see of a calendar event: the time only of a
+// private or confidential one, and not the attendees of one that hides them
 pub const EVENT_VIEW_PRIVATE: u8 = 1;
-pub const EVENT_VIEW_SECRET: u8 = 1 << 1;
-pub const EVENT_VIEW_HIDE_ATTENDEES: u8 = 1 << 2;
+pub const EVENT_VIEW_HIDE_ATTENDEES: u8 = 1 << 1;
 
 #[derive(Debug, Clone, Default)]
 pub struct TinyCalendarPreferences {

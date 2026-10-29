@@ -79,7 +79,7 @@ impl CalendarEventGet for Server {
         let calendar_event_ids = if is_owner {
             cache.document_ids(false).collect::<RoaringBitmap>()
         } else {
-            cache.shared_events(access_token, [Acl::ReadItems], true, 0)
+            cache.shared_items(access_token, [Acl::ReadItems], true)
         };
         let mut writable_ids = None;
         let (mut ids, has_synthetic_ids) = if let Some(rr) = request.ids.take() {
@@ -238,9 +238,10 @@ impl CalendarEventGet for Server {
                 .deserialize::<CalendarEvent>()
                 .caused_by(trc::location!())?;
 
-            // inbuxa: a sharee sees the time of a private event only, and only the
-            // owners and themselves among the attendees of an event that hides
-            // them, unless they may change every event in its calendar.
+            // inbuxa: a sharee sees the time of a private or confidential event
+            // only, and only the owners and themselves among the attendees of an
+            // event that hides them, unless they may change every event in its
+            // calendar.
             let mut reduce_participants = reduce_participants;
             if !is_owner {
                 let view = event_view(&calendar_event);

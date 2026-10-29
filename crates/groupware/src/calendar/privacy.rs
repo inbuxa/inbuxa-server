@@ -4,9 +4,9 @@
  * SPDX-License-Identifier: AGPL-3.0-only
  */
 
-//! What a sharee of a calendar may see of an event: nothing of a secret
-//! (CLASS:CONFIDENTIAL) event, the time only of a private one, and only the
-//! owners and themselves among the attendees of an event that hides them.
+//! What a sharee of a calendar may see of an event: the time only of a
+//! private or confidential one, and only the owners and themselves among the
+//! attendees of an event that hides them.
 
 use super::{ArchivedCalendarEvent, CalendarEvent, EVENT_HIDE_ATTENDEES};
 use crate::scheduling::{ItipField, ItipMessage, ItipSummary, ItipValue};
@@ -15,7 +15,7 @@ use calcard::icalendar::{
     ICalendarClassification, ICalendarComponentType, ICalendarParameterName,
     ICalendarParameterValue, ICalendarParticipationRole, ICalendarProperty, ICalendarValue,
 };
-use common::{EVENT_VIEW_HIDE_ATTENDEES, EVENT_VIEW_PRIVATE, EVENT_VIEW_SECRET};
+use common::{EVENT_VIEW_HIDE_ATTENDEES, EVENT_VIEW_PRIVATE};
 
 pub fn event_view(event: &CalendarEvent) -> u8 {
     let mut view = 0;
@@ -30,10 +30,8 @@ pub fn event_view(event: &CalendarEvent) -> u8 {
     {
         view |= match entry.values.first() {
             Some(ICalendarValue::Classification(ICalendarClassification::Public)) | None => 0,
-            Some(ICalendarValue::Classification(ICalendarClassification::Confidential)) => {
-                EVENT_VIEW_SECRET
-            }
-            // An unknown class counts as private
+            // Confidential (what CalDAV clients use for "time only") and an
+            // unknown class count as private
             _ => EVENT_VIEW_PRIVATE,
         };
     }
@@ -59,9 +57,6 @@ pub fn archived_event_view(event: &ArchivedCalendarEvent) -> u8 {
                 ArchivedICalendarClassification::Public,
             ))
             | None => 0,
-            Some(ArchivedICalendarValue::Classification(
-                ArchivedICalendarClassification::Confidential,
-            )) => EVENT_VIEW_SECRET,
             _ => EVENT_VIEW_PRIVATE,
         };
     }
@@ -71,8 +66,8 @@ pub fn archived_event_view(event: &ArchivedCalendarEvent) -> u8 {
     view
 }
 
-/// Keeps only the time and basic metadata of a private event (RFC 8984,
-/// section 4.4.3), with its recurrence so its occurrences stay right.
+/// Keeps only the time and basic metadata of a private or confidential event
+/// (RFC 8984, section 4.4.3), with its recurrence so its occurrences stay right.
 pub fn redact_private_event(ical: &mut ICalendar) {
     let mut remove_ids = Vec::new();
     for (comp_id, comp) in ical.components.iter_mut().enumerate() {
