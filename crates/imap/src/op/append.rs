@@ -2,11 +2,13 @@
  * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
+ *
+ * Modified by Coffey Labs in 2026 for INBUXA.
  */
 
 use super::{ImapContext, ToModSeq};
 use crate::{
-    core::{ImapUidToId, MailboxId, SelectedMailbox, Session, SessionData},
+    core::{ImapUidToId, MailboxId, SelectedMailbox, Session, SessionData, gate::OpKind},
     spawn_op,
 };
 use common::{auth::BuildAccessToken, ipc::PushNotification, network::SessionStream};
@@ -29,6 +31,7 @@ impl<T: SessionStream> Session<T> {
     pub async fn handle_append(&mut self, request: Request<Command>) -> trc::Result<()> {
         // Validate access
         self.assert_has_permission(Permission::ImapAppend)?;
+        let permit = self.op_gate.acquire(OpKind::Write).await;
 
         let op_start = Instant::now();
         let arguments = request.parse_append(self.is_utf8)?;
@@ -67,7 +70,7 @@ impl<T: SessionStream> Session<T> {
         };
         let is_qresync = self.is_qresync;
 
-        spawn_op!(data, {
+        spawn_op!(data, permit, {
             let response = data
                 .append_messages(arguments, selected_mailbox, mailbox, is_qresync, op_start)
                 .await?

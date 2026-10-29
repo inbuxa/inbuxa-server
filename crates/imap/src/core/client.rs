@@ -18,7 +18,7 @@ use imap_proto::{
 };
 use trc::SecurityEvent;
 
-use super::{SelectedMailbox, Session, SessionData, State};
+use super::{SelectedMailbox, Session, SessionData, State, gate::OpKind};
 
 impl<T: SessionStream> Session<T> {
     pub async fn ingest(&mut self, bytes: &[u8]) -> SessionResult {
@@ -112,6 +112,14 @@ impl<T: SessionStream> Session<T> {
                     .map(|account_id| (account_id, 0))
                     .collect::<Vec<_>>(),
                 _ => Vec::new(),
+            };
+            // inbuxa: a command handled here rather than in a spawned task
+            // waits for every operation in flight and holds the whole gate
+            // while it runs; the others take their permit in their handler
+            let inline_permit = if takes_own_permit(&request.command) {
+                None
+            } else {
+                Some(self.op_gate.acquire(OpKind::Write).await)
             };
             let dispatch = async {
                 match request.command {
@@ -285,6 +293,8 @@ impl<T: SessionStream> Session<T> {
                 store::backend::scaleout::replica::replica_read(replica_accounts, dispatch).await
             };
 
+            drop(inline_permit);
+
             match result {
                 Ok(SessionResult::Continue) => (),
                 Ok(result) => return result,
@@ -307,6 +317,36 @@ impl<T: SessionStream> Session<T> {
 
         SessionResult::Continue
     }
+}
+
+// inbuxa: commands whose handler takes a read or write permit itself and
+// runs the operation in a spawned task
+fn takes_own_permit(command: &Command) -> bool {
+    matches!(
+        command,
+        Command::List
+            | Command::Lsub
+            | Command::Create
+            | Command::Delete
+            | Command::Rename
+            | Command::Status
+            | Command::Append
+            | Command::Search(_)
+            | Command::Sort(_)
+            | Command::Fetch(_)
+            | Command::Store(_)
+            | Command::Copy(_)
+            | Command::Move(_)
+            | Command::Thread(_)
+            | Command::Subscribe
+            | Command::Unsubscribe
+            | Command::SetAcl
+            | Command::DeleteAcl
+            | Command::GetAcl
+            | Command::MyRights
+            | Command::GetQuota
+            | Command::GetQuotaRoot
+    )
 }
 
 pub fn group_requests(

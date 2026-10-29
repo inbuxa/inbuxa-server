@@ -2,11 +2,13 @@
  * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
+ *
+ * Modified by Coffey Labs in 2026 for INBUXA.
  */
 
 use super::ImapContext;
 use crate::{
-    core::{Session, SessionData},
+    core::{Session, SessionData, gate::OpKind},
     spawn_op,
 };
 use common::{network::SessionStream, storage::index::ObjectIndexBuilder};
@@ -27,12 +29,13 @@ impl<T: SessionStream> Session<T> {
     ) -> trc::Result<()> {
         // Validate access
         self.assert_has_permission(Permission::ImapSubscribe)?;
+        let permit = self.op_gate.acquire(OpKind::Write).await;
 
         let op_start = Instant::now();
         let arguments = request.parse_subscribe(self.is_utf8)?;
         let data = self.state.session_data();
 
-        spawn_op!(data, {
+        spawn_op!(data, permit, {
             let response = data
                 .subscribe_folder(
                     arguments.tag,

@@ -2,10 +2,12 @@
  * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
+ *
+ * Modified by Coffey Labs in 2026 for INBUXA.
  */
 
 use crate::{
-    core::{Session, SessionData},
+    core::{Session, SessionData, gate::OpKind},
     spawn_op,
 };
 use common::{network::SessionStream, sharing::EffectiveAcl, storage::index::ObjectIndexBuilder};
@@ -30,13 +32,14 @@ impl<T: SessionStream> Session<T> {
     pub async fn handle_rename(&mut self, request: Request<Command>) -> trc::Result<()> {
         // Validate access
         self.assert_has_permission(Permission::ImapRename)?;
+        let permit = self.op_gate.acquire(OpKind::Write).await;
 
         let op_start = Instant::now();
         let arguments = request.parse_rename(self.is_utf8)?;
         let data = self.state.session_data();
         let is_objectid = self.is_objectid;
 
-        spawn_op!(data, {
+        spawn_op!(data, permit, {
             let response = data.rename_folder(arguments, is_objectid, op_start).await?;
             data.write_bytes(response.into_bytes()).await
         })
