@@ -675,7 +675,8 @@ pub async fn test(test: &mut TestServer) {
         obtain_auth_code(&http, &confidential_id, confidential_redirect).await,
     );
     params.insert("client_secret".to_string(), confidential_secret.to_string());
-    let (token, _, _) = unwrap_token_response(post(&metadata.token_endpoint, &params).await);
+    let (token, confidential_refresh, _) =
+        unwrap_token_response(post(&metadata.token_endpoint, &params).await);
     let confidential_client = Client::new()
         .credentials(Credentials::bearer(&token))
         .accept_invalid_certs(true)
@@ -711,6 +712,42 @@ pub async fn test(test: &mut TestServer) {
         "the WebSocket must stop serving an expired token, got {after_expiry:?}"
     );
     drop(ws);
+
+    // inbuxa: a refresh token is redeemed only by the client it was issued
+    // to, and a confidential client has to authenticate to redeem it
+    let mut params = AHashMap::from_iter([
+        ("grant_type".to_string(), "refresh_token".to_string()),
+        (
+            "refresh_token".to_string(),
+            confidential_refresh.expect("a refresh token"),
+        ),
+    ]);
+    assert_eq!(
+        post::<TokenResponse>(&metadata.token_endpoint, &params).await,
+        TokenResponse::Error {
+            error: ErrorType::InvalidClient
+        },
+        "a confidential client's refresh token needs the client's secret"
+    );
+    params.insert("client_id".to_string(), confidential_id.to_string());
+    assert_eq!(
+        post::<TokenResponse>(&metadata.token_endpoint, &params).await,
+        TokenResponse::Error {
+            error: ErrorType::InvalidClient
+        },
+        "naming the client is not authenticating it"
+    );
+    params.insert("client_id".to_string(), client_id.to_string());
+    assert_eq!(
+        post::<TokenResponse>(&metadata.token_endpoint, &params).await,
+        TokenResponse::Error {
+            error: ErrorType::InvalidGrant
+        },
+        "another client can't redeem the refresh token"
+    );
+    params.insert("client_id".to_string(), confidential_id.to_string());
+    params.insert("client_secret".to_string(), confidential_secret.to_string());
+    unwrap_token_response(post(&metadata.token_endpoint, &params).await);
 
     // The correct secret in the Authorization header (client_secret_basic) also works
     let mut params = base_params();

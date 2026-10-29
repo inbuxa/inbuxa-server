@@ -224,17 +224,6 @@ impl TokenHandler for Server {
             }
         } else if grant_type.eq_ignore_ascii_case("refresh_token") {
             if let Some(refresh_token) = params.get("refresh_token") {
-                if let Some(client_id) = client_id_cred.as_deref()
-                    && let Some(error) = self
-                        .verify_client_secret(client_id, client_secret_cred.as_deref())
-                        .await?
-                {
-                    return Ok(JsonResponse::with_status(
-                        StatusCode::BAD_REQUEST,
-                        TokenResponse::error(error),
-                    )
-                    .into_http_response());
-                }
                 response = match self
                     .validate_access_token(GrantType::RefreshToken.into(), refresh_token)
                     .await
@@ -248,11 +237,43 @@ impl TokenHandler for Server {
                     {
                         TokenResponse::error(ErrorType::InvalidGrant)
                     }
-                    Ok(token_info) => self
-                        .issue_token(
+                    Ok(token_info) => {
+                        // inbuxa: the refresh token names the client it was
+                        // issued to (AU-5). Only that client redeems it, and a
+                        // confidential one authenticates to do so; naming no
+                        // client stands for the token's own. A token from
+                        // before tokens named their client goes to the client
+                        // that authenticates now.
+                        let issued_to = token_info
+                            .claims
+                            .as_deref()
+                            .filter(|client_id| !client_id.is_empty());
+                        let client_id = match (issued_to, client_id_cred.as_deref()) {
+                            (Some(issued_to), Some(client_id)) if issued_to != client_id => {
+                                return Ok(JsonResponse::with_status(
+                                    StatusCode::BAD_REQUEST,
+                                    TokenResponse::error(ErrorType::InvalidGrant),
+                                )
+                                .into_http_response());
+                            }
+                            (Some(client_id), _) | (None, Some(client_id)) => client_id,
+                            (None, None) => "",
+                        };
+                        if !client_id.is_empty()
+                            && let Some(error) = self
+                                .verify_client_secret(client_id, client_secret_cred.as_deref())
+                                .await?
+                        {
+                            return Ok(JsonResponse::with_status(
+                                StatusCode::BAD_REQUEST,
+                                TokenResponse::error(error),
+                            )
+                            .into_http_response());
+                        }
+
+                        self.issue_token(
                             token_info.account_id,
-                            // inbuxa: AU-5: the client travels in the refresh token
-                            token_info.claims.as_deref().unwrap_or_default(),
+                            client_id,
                             issuer,
                             None,
                             None,
@@ -267,7 +288,8 @@ impl TokenHandler for Server {
                                 .into_err()
                                 .details(err)
                                 .caused_by(trc::location!())
-                        })?,
+                        })?
+                    }
                     Err(err) => {
                         trc::error!(
                             err.caused_by(trc::location!())
