@@ -2,6 +2,8 @@
  * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
+ *
+ * Modified by Coffey Labs in 2026 for INBUXA.
  */
 
 use crate::{
@@ -75,10 +77,18 @@ impl From<&RawElement<'_>> for DeadElementTag {
             .unwrap_or("invalid-utf8")
             .trim_ascii()
             .to_string();
+        let name = if is_xml_name(&name) {
+            name
+        } else {
+            "invalid-name".to_string()
+        };
         let mut attrs = String::with_capacity(raw.element.attributes_raw().len());
         if let Some(namespace) = &raw.namespace {
             attrs.push_str("xmlns=\"");
-            attrs.push_str(std::str::from_utf8(namespace).unwrap_or("invalid-utf8"));
+            push_attribute_value(
+                &mut attrs,
+                std::str::from_utf8(namespace).unwrap_or("invalid-utf8"),
+            );
             attrs.push('"');
         }
 
@@ -90,14 +100,15 @@ impl From<&RawElement<'_>> for DeadElementTag {
             if let (Ok(key), Ok(value)) = (
                 std::str::from_utf8(attr.key.as_ref()),
                 std::str::from_utf8(attr.value.as_ref()),
-            ) {
+            ) && is_xml_name(key)
+            {
                 if !attrs.is_empty() {
                     attrs.push(' ');
                 }
                 attrs.push_str(key);
                 attrs.push('=');
                 attrs.push('"');
-                attrs.push_str(value);
+                push_attribute_value(&mut attrs, value);
                 attrs.push('"');
             }
         }
@@ -105,6 +116,31 @@ impl From<&RawElement<'_>> for DeadElementTag {
         DeadElementTag {
             name,
             attrs: (!attrs.is_empty()).then_some(attrs),
+        }
+    }
+}
+
+/// inbuxa: element and attribute names are echoed back as they came in, so
+/// nothing that could end the tag or start markup may be in them
+pub(crate) fn is_xml_name(name: &str) -> bool {
+    !name.is_empty()
+        && !name
+            .chars()
+            .any(|c| c.is_whitespace() || matches!(c, '"' | '\'' | '<' | '>' | '&' | '=' | '/'))
+}
+
+/// inbuxa: a stored attribute value is always written inside double quotes,
+/// so it's unescaped as received (it may have been quoted with ') and escaped
+/// again for that
+fn push_attribute_value(out: &mut String, raw: &str) {
+    let value = quick_xml::escape::unescape(raw).unwrap_or(std::borrow::Cow::Borrowed(raw));
+    for c in value.chars() {
+        match c {
+            '&' => out.push_str("&amp;"),
+            '<' => out.push_str("&lt;"),
+            '>' => out.push_str("&gt;"),
+            '"' => out.push_str("&quot;"),
+            _ => out.push(c),
         }
     }
 }
@@ -120,6 +156,68 @@ mod tests {
             request::{Acl, LockInfo, MkCol, PropFind, PropertyUpdate, Report},
         },
     };
+
+    // inbuxa: dead properties are stored from one user's PROPPATCH or LOCK
+    // and shown to everyone who can read the resource: what comes back out
+    // must be the same well-formed XML, whatever quoting came in
+    #[test]
+    fn dead_property_round_trip_is_well_formed() {
+        let xml = r#"<?xml version="1.0" encoding="utf-8" ?>
+            <D:propertyupdate xmlns:D="DAV:" xmlns:Z="urn:example:z">
+              <D:set>
+                <D:prop>
+                  <Z:note a='x" ><evil/>' b="&amp;&quot;" c='&lt;q&gt;'><Z:outer><Z:inner>text</Z:inner><Z:empty/></Z:outer></Z:note>
+                </D:prop>
+              </D:set>
+            </D:propertyupdate>"#;
+
+        let update = PropertyUpdate::parse(&mut Tokenizer::new(xml.as_bytes())).unwrap();
+        let output = update
+            .set
+            .iter()
+            .map(|property| property.to_string())
+            .collect::<String>();
+        let wrapped = format!("<root>{output}</root>");
+
+        let mut reader = quick_xml::Reader::from_str(&wrapped);
+        let mut elements = Vec::new();
+        let mut attributes = Vec::new();
+        loop {
+            match reader.read_event() {
+                Ok(quick_xml::events::Event::Start(element))
+                | Ok(quick_xml::events::Event::Empty(element)) => {
+                    elements
+                        .push(String::from_utf8(element.local_name().as_ref().to_vec()).unwrap());
+                    for attribute in element.attributes() {
+                        let attribute = attribute.unwrap();
+                        attributes.push((
+                            String::from_utf8(attribute.key.as_ref().to_vec()).unwrap(),
+                            quick_xml::escape::unescape(
+                                std::str::from_utf8(&attribute.value).unwrap(),
+                            )
+                            .unwrap()
+                            .into_owned(),
+                        ));
+                    }
+                }
+                Ok(quick_xml::events::Event::Eof) => break,
+                Ok(_) => {}
+                Err(err) => panic!("malformed output {output:?}: {err}"),
+            }
+        }
+
+        assert_eq!(
+            elements,
+            ["root", "note", "outer", "inner", "empty"],
+            "{output}"
+        );
+        for (name, value) in [("a", r#"x" ><evil/>"#), ("b", r#"&""#), ("c", "<q>")] {
+            assert!(
+                attributes.contains(&(name.to_string(), value.to_string())),
+                "{name}={value:?} not in {attributes:?}"
+            );
+        }
+    }
 
     #[test]
     fn parse_address_data_version() {

@@ -2,11 +2,13 @@
  * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
+ *
+ * Modified by Coffey Labs in 2026 for INBUXA.
  */
 
 use super::{XmlCdataEscape, XmlEscape};
 use crate::{
-    responses::DeadPropertyFormat,
+    responses::{DeadAttributes, DeadPropertyFormat, dead_element_name},
     schema::{
         Namespace, Namespaces,
         property::{
@@ -39,12 +41,9 @@ impl Display for PropResponse {
 impl Display for DavPropertyValue {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let (name, attrs) = self.property.tag_name();
+        let name = dead_element_name(name);
 
-        write!(f, "<{}", name)?;
-
-        if let Some(attrs) = attrs {
-            write!(f, " {attrs}")?;
-        }
+        write!(f, "<{name}{}", DeadAttributes(attrs))?;
 
         if !matches!(self.value, DavValue::Null) {
             write!(f, ">{}</{}>", self.value, name)
@@ -275,11 +274,7 @@ impl Display for ReportSet {
 impl Display for DavProperty {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let (name, attrs) = self.tag_name();
-        if let Some(attrs) = attrs {
-            write!(f, "<{name} {attrs}/>")
-        } else {
-            write!(f, "<{name}/>")
-        }
+        write!(f, "<{}{}/>", dead_element_name(name), DeadAttributes(attrs))
     }
 }
 
