@@ -140,8 +140,9 @@ impl BlobDownload for Server {
                                         .await
                                         .caused_by(trc::location!())?
                                         // inbuxa: a calendar event's blob holds all of
-                                        // it, so a sharee gets none of a private event
-                                        // or one that hides its attendees
+                                        // it, so a sharee gets none of a private or
+                                        // confidential event or one that hides its
+                                        // attendees
                                         .shared_events(
                                             access_token,
                                             [Acl::ReadItems],

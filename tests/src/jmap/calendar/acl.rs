@@ -837,8 +837,8 @@ pub async fn test(test: &TestServer) {
         "private event listed to a sharee: {response:?}"
     );
 
-    // inbuxa: a sharee sees only the time of a private event, nothing of a
-    // secret one, and no other attendees of an event that hides them.
+    // inbuxa: a sharee sees only the time of a private or confidential event,
+    // and no other attendees of an event that hides them.
     let event = |uid: &str, title: &str, extra: serde_json::Value| {
         let mut event = json!({
             "uid": uid,
@@ -880,7 +880,7 @@ pub async fn test(test: &TestServer) {
                     json!({"privacy": "private"}),
                 ),
                 event(
-                    "secret-event@example.com",
+                    "confidential-event@example.com",
                     "Job interview",
                     json!({"privacy": "secret"}),
                 ),
@@ -894,7 +894,7 @@ pub async fn test(test: &TestServer) {
         )
         .await;
     let private_id = response.created(0).id().to_string();
-    let secret_id = response.created(1).id().to_string();
+    let confidential_id = response.created(1).id().to_string();
     let hidden_id = response.created(2).id().to_string();
 
     // The owner sees everything
@@ -902,7 +902,7 @@ pub async fn test(test: &TestServer) {
         .jmap_get(
             MethodObject::CalendarEvent,
             Vec::<&str>::new(),
-            [private_id.as_str(), secret_id.as_str()],
+            [private_id.as_str(), confidential_id.as_str()],
         )
         .await;
     assert_eq!(response.list().len(), 2, "{response:?}");
@@ -911,20 +911,8 @@ pub async fn test(test: &TestServer) {
         Some("Doctor appointment")
     );
 
-    // A secret event doesn't exist for the sharee
-    let response = jane
-        .jmap_get_account(
-            john,
-            MethodObject::CalendarEvent,
-            Vec::<&str>::new(),
-            [secret_id.as_str()],
-        )
-        .await;
-    assert_eq!(
-        response.not_found().collect::<Vec<_>>(),
-        [secret_id.as_str()],
-        "{response:?}"
-    );
+    // A private event and a confidential one (JMAP "secret", stored as
+    // CLASS:CONFIDENTIAL) both show the sharee their time only
     let response = jane
         .jmap_method_call(
             "CalendarEvent/query",
@@ -935,69 +923,76 @@ pub async fn test(test: &TestServer) {
         .await;
     let ids = response.ids().collect::<Vec<_>>();
     assert!(ids.contains(&private_id.as_str()), "{response:?}");
-    assert!(!ids.contains(&secret_id.as_str()), "{response:?}");
-
-    // A private event shows its time only
-    let response = jane
-        .jmap_get_account(
-            john,
-            MethodObject::CalendarEvent,
-            Vec::<&str>::new(),
-            [private_id.as_str()],
-        )
-        .await;
-    let private_event = &response.list()[0];
-    assert_eq!(
-        private_event.get("start").and_then(|v| v.as_str()),
-        Some("2020-02-03T10:00:00"),
-        "{response:?}"
-    );
-    for property in [
-        "title",
-        "description",
-        "participants",
-        "organizerCalendarAddress",
+    assert!(ids.contains(&confidential_id.as_str()), "{response:?}");
+    for (event_id, title) in [
+        (private_id.as_str(), "Doctor"),
+        (confidential_id.as_str(), "Job"),
     ] {
-        assert!(
-            private_event.get(property).is_none(),
-            "{property} of a private event shown to a sharee: {response:?}"
+        let response = jane
+            .jmap_get_account(
+                john,
+                MethodObject::CalendarEvent,
+                Vec::<&str>::new(),
+                [event_id],
+            )
+            .await;
+        assert_eq!(response.not_found().count(), 0, "{response:?}");
+        let shared_event = &response.list()[0];
+        assert_eq!(
+            shared_event.get("start").and_then(|v| v.as_str()),
+            Some("2020-02-03T10:00:00"),
+            "{response:?}"
         );
-    }
-    let response = jane
-        .jmap_method_call(
-            "CalendarEvent/query",
-            json!({
-                "accountId": &john_id,
-                "filter": {"title": "Doctor"},
-            }),
-        )
-        .await;
-    assert_eq!(response.ids().count(), 0, "{response:?}");
-    let response = jane
-        .jmap_method_call(
-            "CalendarEvent/copy",
-            json!({
-                "fromAccountId": &john_id,
-                "accountId": &jane_id,
-                "create": {
-                    &private_id: {
-                        "calendarIds": {
-                            &jane_calendar_id: true
+        assert_eq!(
+            shared_event.get("duration").and_then(|v| v.as_str()),
+            Some("PT1H"),
+            "{response:?}"
+        );
+        for property in [
+            "title",
+            "description",
+            "participants",
+            "organizerCalendarAddress",
+        ] {
+            assert!(
+                shared_event.get(property).is_none(),
+                "{property} of event {event_id} shown to a sharee: {response:?}"
+            );
+        }
+        let response = jane
+            .jmap_method_call(
+                "CalendarEvent/query",
+                json!({
+                    "accountId": &john_id,
+                    "filter": {"title": title},
+                }),
+            )
+            .await;
+        assert_eq!(response.ids().count(), 0, "{response:?}");
+        let response = jane
+            .jmap_method_call(
+                "CalendarEvent/copy",
+                json!({
+                    "fromAccountId": &john_id,
+                    "accountId": &jane_id,
+                    "create": {
+                        event_id: {
+                            "calendarIds": {
+                                &jane_calendar_id: true
+                            }
                         }
                     }
-                }
-            }),
-        )
-        .await;
-    assert_eq!(
-        response
-            .pointer(&format!(
-                "/methodResponses/0/1/notCreated/{private_id}/type"
-            ))
-            .and_then(|v| v.as_str()),
-        Some("forbidden"),
-        "{response:?}"
-    );
+                }),
+            )
+            .await;
+        assert_eq!(
+            response
+                .pointer(&format!("/methodResponses/0/1/notCreated/{event_id}/type"))
+                .and_then(|v| v.as_str()),
+            Some("forbidden"),
+            "{response:?}"
+        );
+    }
 
     // An event that hides its attendees shows the sharee its owners only
     let response = jane

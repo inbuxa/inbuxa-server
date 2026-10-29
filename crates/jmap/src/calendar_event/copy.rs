@@ -105,7 +105,7 @@ impl JmapCalendarEventCopy for Server {
         let from_calendar_event_ids = if is_owner {
             from_cache.document_ids(false).collect::<RoaringBitmap>()
         } else {
-            from_cache.shared_events(access_token, [Acl::ReadItems], true, 0)
+            from_cache.shared_items(access_token, [Acl::ReadItems], true)
         };
         let mut writable_ids = None;
 
