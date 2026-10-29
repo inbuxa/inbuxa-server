@@ -62,10 +62,14 @@ impl ToModSeq for u64 {
 
 #[macro_export]
 macro_rules! spawn_op {
-    ($data:expr, $($code:tt)*) => {
+    ($data:expr, $permit:expr, $($code:tt)*) => {
         {
+        // inbuxa: the operation holds the permit the handler took from the
+        // session's gate until it finishes
+        let permit: $crate::core::gate::OpPermit = $permit;
         // inbuxa: ST-6: the operation keeps its read scope
         tokio::spawn(store::backend::scaleout::replica::carry(async move {
+            let _permit = permit;
             let data = &($data);
 
             if let Err(err) = (async {

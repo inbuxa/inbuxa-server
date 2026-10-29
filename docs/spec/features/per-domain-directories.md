@@ -148,13 +148,17 @@ Enterprise upstream. Feature 1 covers that field. `TenantStorageQuota` has
 |---|---|---|
 | `description` | string | Label |
 | `issuerUrl` | URI | The provider's issuer. Discovery is fetched from `<issuerUrl>/.well-known/openid-configuration` |
-| `requireAudience` | string, nullable | If set, a token's `aud` must include it |
+| `requireAudience` | string, nullable | A token's `aud` must include it. Required on a new directory; one saved without it keeps working, logs a warning each time it loads, and can't have an audience removed once set |
 | `requireScopes` | set of strings, default `openid`, `email` | Every listed scope must be in the token |
 | `claimUsername` | string, default `preferred_username` | Claim that names the account |
 | `usernameDomain` | string, nullable | Appended as `@domain` when the username claim has no `@`. Also appended to bare group names |
 | `claimName` | string, nullable, default `name` | Claim for the display name |
 | `claimGroups` | string, nullable | Claim for group memberships |
 | `memberTenantId` | `Id<x:Tenant>`, nullable | Tenant (Feature 1) |
+| `opaqueTokens` | `reject`, `userinfo` or `introspection`, nullable | What a token that isn't a JWT signs in by (DIR-27). Unset: `introspection` with an `introspectionUrl`, else `reject`. A directory saved before the field existed reads as `userinfo` |
+| `introspectionUrl` | URI, nullable | RFC 7662 endpoint. Unset: the discovery document's `introspection_endpoint` |
+| `introspectionClientId` | string, nullable | Client ID introspection authenticates with. Required for `introspection` |
+| `introspectionClientSecret` | `x:SecretKeyOptional` | Its secret. Required for `introspection` |
 
 The LDAP and SQL variants are unchanged, and this feature adds nothing to
 them.
@@ -353,16 +357,30 @@ check it and the fork keeps it.
   - `HS*` algorithms are refused, and HMAC keys in the JWKS are skipped. RSA
     (RS and PS), EC P-256 and P-384, and EdDSA are accepted.
   - The key is found by `kid`. An unknown `kid` refetches the JWKS, at most
-    once every 300 seconds. With no `kid`, every key is tried.
+    once every 300 seconds. With no `kid`, every key is tried, and if none
+    verifies the signature the JWKS is refetched once, under the same limit.
+  - Discovery, JWKS, userinfo and introspection responses are read up to
+    1 MiB; a larger one is a provider error.
   - `iss` must equal the discovery document's issuer.
   - `exp` is checked, with 60 seconds of leeway.
   - If `requireAudience` is set, `aud` must be present and include it.
   - Every `requireScopes` entry must appear in `scope`, which may be a
     space-separated string or an array.
-- **DIR-27. Opaque tokens.** A token that isn't a JWT is sent to the
-  provider's userinfo endpoint (OIDC Core §5.3). `401` or `403` means sign-in
-  fails. Token introspection (RFC 7662) isn't used (public docs), and no
-  audience or scope check is possible on this path (open question 2).
+- **DIR-27. Opaque tokens.** A token that isn't a JWT signs in by the
+  directory's `opaqueTokens`:
+  - `reject`: it doesn't.
+  - `introspection`: it is posted to the introspection endpoint (RFC 7662)
+    with HTTP Basic client authentication (RFC 6749 §2.3.1). Only
+    `"active": true` with `iss` equal to the discovery issuer, `aud`
+    including `requireAudience` when set, `exp` not past, no ID or refresh
+    marker (as for JWTs) and every `requireScopes` entry signs in. A non-2xx
+    answer is a provider error, not a failed sign-in. The claims are then
+    used as a JWT's are (DIR-28).
+  - `userinfo`: it is sent to the provider's userinfo endpoint (OIDC Core
+    §5.3), and `401` or `403` means sign-in fails. No audience or scope check
+    is possible, and any token the provider issued to any application
+    passes; only directories saved before `opaqueTokens` existed get this
+    without choosing it.
 - **DIR-28. Identity.**
   - The account address is the `claimUsername` claim if it contains `@`.
     Otherwise it is that claim plus `@usernameDomain`, or failing that the
@@ -512,6 +530,9 @@ data.
    introspection (which needs client credentials the schema has no field
    for)? The docs name `requireAudience`'s default as `stalwart`, and the
    schema has no default. Observe which one a new directory gets.
+   **Settled** (http-directory-services-13): a new directory must set
+   `requireAudience`, and `opaqueTokens` offers introspection; see the
+   table and DIR-27.
 3. **Local credentials outlive the directory.** App passwords and API keys
    keep working for a user disabled in the directory (DIR-3). Should
    synchronization, or a failed directory sign-in, suspend them?

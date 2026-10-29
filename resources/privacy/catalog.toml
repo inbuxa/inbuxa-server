@@ -1649,6 +1649,8 @@ secret = ["credential"]
 
 [object."x:OidcDirectory"]
 default = "none"
+[object."x:OidcDirectory".properties]
+introspectionClientSecret = ["credential"]
 
 [object."x:OidcProvider"]
 default = "none"

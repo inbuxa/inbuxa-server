@@ -20,8 +20,11 @@ pub mod list;
 
 impl<T: SessionStream> Session<T> {
     pub async fn handle_capa(&mut self) -> trc::Result<()> {
-        let mechanisms = if self.stream.is_tls() || self.server.core.imap.allow_plain_auth {
+        let mechanisms = if self.stream.is_tls() {
             vec![Mechanism::Plain, Mechanism::OAuthBearer, Mechanism::XOauth2]
+        } else if self.server.core.imap.allow_plain_auth {
+            // inbuxa: bearer tokens are only offered over TLS
+            vec![Mechanism::Plain]
         } else {
             // inbuxa: no mechanism is offered where none would be accepted
             vec![]

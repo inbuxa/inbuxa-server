@@ -213,7 +213,21 @@ impl<T: SessionStream> Session<T> {
             | Command::Apop { .. } => {
                 if let State::NotAuthenticated { username, .. } = &self.state {
                     if self.stream.is_tls() || self.server.core.imap.allow_plain_auth {
-                        if !matches!(command, Command::Pass { .. }) || username.is_some() {
+                        if !self.stream.is_tls()
+                            && matches!(
+                                command,
+                                Command::Auth {
+                                    mechanism: Mechanism::OAuthBearer | Mechanism::XOauth2,
+                                    ..
+                                }
+                            )
+                        {
+                            // inbuxa: a bearer token is never taken on clear
+                            // text, whatever the plain-text setting
+                            Err(trc::Pop3Event::Error
+                                .into_err()
+                                .details("Bearer tokens require TLS."))
+                        } else if !matches!(command, Command::Pass { .. }) || username.is_some() {
                             Ok(command)
                         } else {
                             Err(trc::Pop3Event::Error

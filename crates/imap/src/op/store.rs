@@ -8,7 +8,7 @@
 
 use super::{FromModSeq, ImapContext};
 use crate::{
-    core::{SelectedMailbox, Session, SessionData},
+    core::{SelectedMailbox, Session, SessionData, gate::OpKind},
     spawn_op,
 };
 use ahash::AHashSet;
@@ -51,6 +51,7 @@ impl<T: SessionStream> Session<T> {
     ) -> trc::Result<()> {
         // Validate access
         self.assert_has_permission(Permission::ImapStore)?;
+        let permit = self.op_gate.acquire(OpKind::Write).await;
 
         let op_start = Instant::now();
         let arguments = request.parse_store()?;
@@ -61,7 +62,7 @@ impl<T: SessionStream> Session<T> {
         let message_limit = self.server.core.imap.max_messages_per_command;
 
         if spawn {
-            spawn_op!(data, {
+            spawn_op!(data, permit, {
                 let response = data
                     .store(
                         arguments,

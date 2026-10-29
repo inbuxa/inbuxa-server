@@ -8,7 +8,7 @@
 
 use super::{FromModSeq, ToModSeq};
 use crate::{
-    core::{ImapId, SavedSearch, SelectedMailbox, Session, SessionData},
+    core::{ImapId, SavedSearch, SelectedMailbox, Session, SessionData, gate::OpKind},
     spawn_op,
 };
 use common::network::SessionStream;
@@ -58,6 +58,7 @@ impl<T: SessionStream> Session<T> {
             request.parse_sort()
         }?;
 
+        let permit = self.op_gate.acquire(OpKind::Read).await;
         // RFC 9586 forbids the sequence set criterion once UIDONLY is enabled
         if self.is_uidonly
             && arguments.filter.iter().any(|filter| {
@@ -86,7 +87,7 @@ impl<T: SessionStream> Session<T> {
                 (None, None)
             };
 
-        spawn_op!(data, {
+        spawn_op!(data, permit, {
             let tag = std::mem::take(&mut arguments.tag);
             let bytes = match data
                 .search(

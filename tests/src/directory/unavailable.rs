@@ -2,6 +2,8 @@
  * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
+ *
+ * Modified by Coffey Labs in 2026 for INBUXA.
  */
 
 use directory::{Credentials, Directory, UnavailableDirectory, backend::oidc::OpenIdDirectory};
@@ -27,6 +29,7 @@ pub async fn test() {
         require_audience: None,
         require_scopes: Map::new(vec![]),
         member_tenant_id: None,
+        ..Default::default()
     })
     .await
     .expect_err("Discovery against an unreachable issuer must fail");

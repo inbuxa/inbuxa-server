@@ -2,11 +2,13 @@
  * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
+ *
+ * Modified by Coffey Labs in 2026 for INBUXA.
  */
 
 use super::ToModSeq;
 use crate::{
-    core::{Mailbox, Session, SessionData},
+    core::{Mailbox, Session, SessionData, gate::OpKind},
     op::ImapContext,
     spawn_op,
 };
@@ -30,6 +32,7 @@ impl<T: SessionStream> Session<T> {
     pub async fn handle_status(&mut self, requests: Vec<Request<Command>>) -> trc::Result<()> {
         // Validate access
         self.assert_has_permission(Permission::ImapStatus)?;
+        let permit = self.op_gate.acquire(OpKind::Read).await;
 
         let is_utf8 = self.is_utf8;
 
@@ -53,7 +56,7 @@ impl<T: SessionStream> Session<T> {
 
         let data = self.state.session_data();
 
-        spawn_op!(data, {
+        spawn_op!(data, permit, {
             let mut did_sync = false;
 
             for request in parsed {

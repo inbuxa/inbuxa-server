@@ -6,7 +6,7 @@
  * Modified by Coffey Labs in 2026 for INBUXA.
  */
 
-use crate::core::{Command, Session, State, StatusResponse};
+use crate::core::{Command, ResponseCode, Session, State, StatusResponse};
 use common::{
     auth::AuthRequest,
     network::{SessionStream, legacy::LegacyProtocol, limiter::LimiterResult},
@@ -30,6 +30,16 @@ impl<T: SessionStream> Session<T> {
         let mut tokens = request.tokens.into_iter();
         let mechanism = Mechanism::parse(&tokens.next().unwrap().unwrap_bytes())
             .map_err(|err| trc::AuthEvent::Error.into_err().details(err))?;
+
+        // inbuxa: a bearer token is never asked for or taken on clear text,
+        // whatever the plain-text setting
+        if !self.stream.is_tls() && matches!(mechanism, Mechanism::OAuthBearer | Mechanism::XOauth2)
+        {
+            return Err(trc::AuthEvent::Error
+                .into_err()
+                .code(ResponseCode::EncryptNeeded)
+                .details("Bearer tokens require TLS."));
+        }
         let mut params: Vec<String> = tokens
             .filter_map(|token| token.unwrap_string().ok())
             .collect();

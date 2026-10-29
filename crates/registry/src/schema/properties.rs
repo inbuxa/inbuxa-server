@@ -2,6 +2,8 @@
  * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
+ *
+ * Modified by Coffey Labs in 2026 for INBUXA.
  */
 
 // This file is auto-generated. Do not edit directly.
@@ -982,6 +984,11 @@ pub enum Property {
     RequestTlsCertificate = 123,
     Require = 551,
     RequireAudience = 607,
+    // inbuxa: http-directory-services-13
+    OpaqueTokens = 935,
+    IntrospectionUrl = 936,
+    IntrospectionClientId = 937,
+    IntrospectionClientSecret = 938,
     RequireClientRegistration = 615,
     RequireScopes = 608,
     RequireTls = 525,

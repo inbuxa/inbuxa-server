@@ -29,6 +29,7 @@ use tokio::{
 use trc::AddContext;
 
 pub mod client;
+pub mod gate;
 pub mod mailbox;
 pub mod message;
 pub mod session;
@@ -61,6 +62,8 @@ pub struct Session<T: SessionStream> {
     pub in_flight: InFlight,
     pub remote_addr: IpAddr,
     pub session_id: u64,
+    // inbuxa: bounds and orders the operations this session runs
+    pub op_gate: gate::OpGate,
 }
 
 pub struct SessionData<T: SessionStream> {

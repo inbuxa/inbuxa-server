@@ -2,10 +2,12 @@
  * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
+ *
+ * Modified by Coffey Labs in 2026 for INBUXA.
  */
 
 use crate::{
-    core::{SelectedMailbox, Session, SessionData},
+    core::{SelectedMailbox, Session, SessionData, gate::OpKind},
     spawn_op,
 };
 use ahash::AHashMap;
@@ -31,13 +33,14 @@ impl<T: SessionStream> Session<T> {
     ) -> trc::Result<()> {
         // Validate access
         self.assert_has_permission(Permission::ImapThread)?;
+        let permit = self.op_gate.acquire(OpKind::Read).await;
 
         let op_start = Instant::now();
         let command = request.command;
         let mut arguments = request.parse_thread()?;
         let (data, mailbox) = self.state.mailbox_state();
 
-        spawn_op!(data, {
+        spawn_op!(data, permit, {
             let tag = std::mem::take(&mut arguments.tag);
 
             match data.thread(arguments, mailbox, is_uid, op_start).await {

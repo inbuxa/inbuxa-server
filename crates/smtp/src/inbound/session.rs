@@ -7,7 +7,7 @@
  */
 
 use common::{
-    config::{server::ServerProtocol, smtp::session::Mechanism},
+    config::server::ServerProtocol,
     expr::{self, functions::ResolveVariable, *},
     network::SessionStream,
 };
@@ -26,7 +26,7 @@ use trc::{NetworkEvent, SecurityEvent, SmtpEvent};
 
 use crate::core::{Session, State};
 
-use super::auth::SaslToken;
+use super::auth::{AUTH_BEARER, SaslToken};
 
 impl<T: SessionStream> Session<T> {
     pub async fn ingest(&mut self, bytes: &[u8]) -> Result<bool, ()> {
@@ -102,16 +102,8 @@ impl<T: SessionStream> Session<T> {
                                 mechanism,
                                 initial_response,
                             } => {
-                                let auth: u64 = self
-                                    .server
-                                    .eval_if::<Mechanism, _>(
-                                        &self.server.core.smtp.session.auth.mechanisms,
-                                        self,
-                                        self.data.session_id,
-                                    )
-                                    .await
-                                    .unwrap_or_default()
-                                    .into();
+                                // inbuxa: no bearer token mechanism on clear text
+                                let auth = self.sasl_mechanisms().await;
                                 if auth == 0 {
                                     trc::event!(
                                         Smtp(SmtpEvent::AuthNotAllowed),
@@ -127,6 +119,15 @@ impl<T: SessionStream> Session<T> {
                                     );
 
                                     self.write(b"503 5.5.1 Already authenticated.\r\n").await?;
+                                } else if mechanism & AUTH_BEARER != 0 && !self.stream.is_tls() {
+                                    trc::event!(
+                                        Smtp(SmtpEvent::AuthMechanismNotSupported),
+                                        SpanId = self.data.session_id,
+                                        Details = "Bearer tokens require TLS",
+                                    );
+
+                                    self.write(b"538 5.7.11 Bearer tokens require TLS.\r\n")
+                                        .await?;
                                 } else if let Some(mut token) =
                                     SaslToken::from_mechanism(mechanism & auth)
                                 {

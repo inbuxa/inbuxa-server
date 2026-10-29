@@ -2,6 +2,8 @@
  * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
+ *
+ * Modified by Coffey Labs in 2026 for INBUXA.
  */
 
 use ahash::AHashMap;
@@ -22,6 +24,26 @@ pub struct OidcConfig {
     pub claim_name: Option<String>,
     pub claim_groups: Option<String>,
     pub default_domain: Option<String>,
+    pub opaque_tokens: OpaqueTokens,
+}
+
+/// inbuxa: http-directory-services-13: what a bearer token that isn't a
+/// JWT signs in by.
+pub enum OpaqueTokens {
+    /// Nothing: refused.
+    Reject,
+    /// The provider's user info endpoint answering for it, which it does for
+    /// any token it issued, to any application.
+    Userinfo,
+    /// The provider's token introspection endpoint (RFC 7662).
+    Introspection(Introspection),
+}
+
+pub struct Introspection {
+    /// None until discovery: then the discovery document's, if not set.
+    pub url: Option<String>,
+    pub client_id: String,
+    pub client_secret: String,
 }
 
 pub struct OidcDiscovery {
@@ -38,6 +60,9 @@ pub struct DiscoveryDocument {
     pub authorization_endpoint: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub end_session_endpoint: Option<String>,
+    // inbuxa: read for opaque tokens, not passed on to clients
+    #[serde(default, skip_serializing)]
+    pub introspection_endpoint: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub scopes_supported: Option<Vec<String>>,
     #[serde(skip_serializing_if = "Option::is_none")]

@@ -2,6 +2,8 @@
  * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
+ *
+ * Modified by Coffey Labs in 2026 for INBUXA.
  */
 
 use crate::{
@@ -67,10 +69,17 @@ async fn auth() {
                 else_: "false".into(),
             },
             sasl_mechanisms: Expression {
-                match_: List::from_iter([ExpressionMatch {
-                    if_: "remote_ip = '10.0.0.1' && is_tls".into(),
-                    then: "[plain, login]".into(),
-                }]),
+                match_: List::from_iter([
+                    ExpressionMatch {
+                        if_: "remote_ip = '10.0.0.1' && is_tls".into(),
+                        then: "[plain, login]".into(),
+                    },
+                    // inbuxa: every mechanism allowed with or without TLS
+                    ExpressionMatch {
+                        if_: "remote_ip = '10.0.0.3'".into(),
+                        then: "[plain, login, oauthbearer, xoauth2]".into(),
+                    },
+                ]),
                 else_: "0".into(),
             },
             wait_on_fail: Expression {
@@ -175,4 +184,31 @@ async fn auth() {
     session
         .auth_plain("john@example.org", "12345 + extra safety", "503 5.5.1")
         .await;
+
+    // inbuxa: bearer tokens are neither offered nor accepted without TLS,
+    // even where the configuration allows every mechanism there
+    let mut session = test.new_mta_session();
+    session.data.remote_ip_str = "10.0.0.3".into();
+    session.eval_session_params().await;
+    session.stream.tls = false;
+    session
+        .ehlo("mx.foobar.org")
+        .await
+        .assert_contains(" PLAIN")
+        .assert_not_contains("OAUTHBEARER")
+        .assert_not_contains("XOAUTH2");
+    session
+        .ingest(b"AUTH OAUTHBEARER bixhPWpvaG5AZXhhbXBsZS5vcmcsAWF1dGg9QmVhcmVyIHgBAQ==\r\n")
+        .await
+        .unwrap();
+    session.response().assert_code("538 5.7.11");
+    session.ingest(b"AUTH XOAUTH2\r\n").await.unwrap();
+    session.response().assert_code("538 5.7.11");
+    session.stream.tls = true;
+    session
+        .ehlo("mx.foobar.org")
+        .await
+        .assert_contains(" PLAIN")
+        .assert_contains("OAUTHBEARER")
+        .assert_contains("XOAUTH2");
 }

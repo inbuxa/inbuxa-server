@@ -8,7 +8,7 @@
 
 use crate::utils::{
     http::HttpRequest,
-    imap::{ImapConnection, Type},
+    imap::{AssertResult, ImapConnection, Type},
     pop3::Pop3Connection,
     server::TestServer,
     smtp::SmtpConnection,
@@ -39,9 +39,15 @@ use registry::schema::{
     prelude::{ObjectType, Property},
     structs::{OAuthClient, OidcProvider, SecretText, SecretTextValue},
 };
+use rustls_pki_types::ServerName;
 use serde::{Serialize, de::DeserializeOwned};
 use std::time::{Duration, Instant};
 use store::ahash::AHashMap;
+use tokio::{
+    io::{AsyncBufReadExt, AsyncRead, AsyncWriteExt, BufReader},
+    net::TcpStream,
+};
+use utils::tls::build_tls_connector;
 
 #[derive(Debug, serde::Deserialize)]
 pub struct OAuthMetadata {
@@ -560,20 +566,31 @@ pub async fn test(test: &mut TestServer) {
         "n,a={},\u{1}auth=Bearer {}\u{1}\u{1}",
         "user@domain", token
     ));
+    // inbuxa: bearer tokens are refused on clear text, so the sign-ins that
+    // should work run over STARTTLS (SMTP) and implicit TLS (IMAP)
     let mut smtp = SmtpConnection::connect().await;
-    smtp.send(&format!("AUTH OAUTHBEARER {oauth_bearer_invalid_sasl}",))
-        .await;
-    smtp.read(1, 4).await;
     smtp.send(&format!("AUTH OAUTHBEARER {oauth_bearer_sasl}",))
         .await;
-    smtp.read(1, 2).await;
+    smtp.read(1, 5).await;
+    let replies = lmtp_starttls_auth(&[&oauth_bearer_invalid_sasl, &oauth_bearer_sasl]).await;
+    assert!(
+        replies[0].starts_with('4') && replies[1].starts_with("235"),
+        "SMTP OAUTHBEARER over TLS: {replies:?}"
+    );
 
     // Try IMAP OAUTHBEARER auth
     let mut imap = ImapConnection::connect(b"_x ").await;
     imap.assert_read(Type::Untagged, ResponseType::Ok).await;
     imap.send(&format!("AUTHENTICATE OAUTHBEARER {oauth_bearer_sasl}"))
         .await;
-    imap.assert_read(Type::Tagged, ResponseType::Ok).await;
+    imap.assert_read(Type::Tagged, ResponseType::No)
+        .await
+        .assert_contains("PRIVACYREQUIRED");
+    let reply = imap_tls_auth(&oauth_bearer_sasl).await;
+    assert!(
+        reply.starts_with("a OK"),
+        "IMAP OAUTHBEARER over TLS: {reply}"
+    );
 
     // Try POP3 OAUTHBEARER auth
     let mut pop3 = Pop3Connection::connect().await;
@@ -1260,3 +1277,81 @@ WiYrLO4z8/kmkqvA7wGElBok9IqhRANCAAQxZK68FnQtHC0eyh8CA05xRIvxhVHn
 0ymka6XBh9aFtW4wfeoKhTkSKjHc/zjh9Rr2dr3kvmYe80fMGhW4ycGA
 -----END PRIVATE KEY-----
 ";
+
+// inbuxa: AUTH OAUTHBEARER with each SASL response on the LMTP port after
+// STARTTLS, one attempt per response; returns the final reply lines.
+async fn lmtp_starttls_auth(sasl: &[&str]) -> Vec<String> {
+    let mut stream = BufReader::new(TcpStream::connect("127.0.0.1:11200").await.unwrap());
+    read_smtp_reply(&mut stream).await;
+    stream
+        .get_mut()
+        .write_all(b"LHLO localhost\r\n")
+        .await
+        .unwrap();
+    read_smtp_reply(&mut stream).await;
+    stream.get_mut().write_all(b"STARTTLS\r\n").await.unwrap();
+    assert!(read_smtp_reply(&mut stream).await.starts_with("220"));
+    let tls = build_tls_connector(true)
+        .unwrap()
+        .connect(
+            ServerName::try_from("localhost").unwrap().to_owned(),
+            stream.into_inner(),
+        )
+        .await
+        .unwrap();
+    let mut stream = BufReader::new(tls);
+    stream
+        .get_mut()
+        .write_all(b"LHLO localhost\r\n")
+        .await
+        .unwrap();
+    read_smtp_reply(&mut stream).await;
+    let mut replies = Vec::new();
+    for response in sasl {
+        stream
+            .get_mut()
+            .write_all(format!("AUTH OAUTHBEARER {response}\r\n").as_bytes())
+            .await
+            .unwrap();
+        replies.push(read_smtp_reply(&mut stream).await);
+    }
+    replies
+}
+
+async fn read_smtp_reply<S: AsyncRead + Unpin>(stream: &mut BufReader<S>) -> String {
+    loop {
+        let mut line = String::new();
+        stream.read_line(&mut line).await.unwrap();
+        if line.len() < 4 || line.as_bytes()[3] == b' ' {
+            return line;
+        }
+    }
+}
+
+// inbuxa: AUTHENTICATE OAUTHBEARER on the implicit TLS IMAP port; returns the
+// tagged reply.
+async fn imap_tls_auth(sasl: &str) -> String {
+    let tls = build_tls_connector(true)
+        .unwrap()
+        .connect(
+            ServerName::try_from("localhost").unwrap().to_owned(),
+            TcpStream::connect("127.0.0.1:9992").await.unwrap(),
+        )
+        .await
+        .unwrap();
+    let mut stream = BufReader::new(tls);
+    let mut line = String::new();
+    stream.read_line(&mut line).await.unwrap();
+    stream
+        .get_mut()
+        .write_all(format!("a AUTHENTICATE OAUTHBEARER {sasl}\r\n").as_bytes())
+        .await
+        .unwrap();
+    loop {
+        line.clear();
+        stream.read_line(&mut line).await.unwrap();
+        if line.starts_with("a ") || line.is_empty() {
+            return line;
+        }
+    }
+}

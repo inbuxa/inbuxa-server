@@ -7,7 +7,7 @@
  */
 
 use crate::{
-    core::{MailboxId, Session, SessionData, State},
+    core::{MailboxId, Session, SessionData, State, gate::OpKind},
     op::ImapContext,
     spawn_op,
 };
@@ -40,13 +40,14 @@ impl<T: SessionStream> Session<T> {
     pub async fn handle_get_acl(&mut self, request: Request<Command>) -> trc::Result<()> {
         // Validate access
         self.assert_has_permission(Permission::ImapAclGet)?;
+        let permit = self.op_gate.acquire(OpKind::Read).await;
 
         let op_start = Instant::now();
         let arguments = request.parse_acl(self.is_utf8)?;
         let is_utf8 = self.version.is_rev2() || self.is_utf8;
         let data = self.state.session_data();
 
-        spawn_op!(data, {
+        spawn_op!(data, permit, {
             let (mailbox_id, mailbox_, _) = data
                 .get_acl_mailbox(&arguments, true)
                 .await
@@ -169,13 +170,14 @@ impl<T: SessionStream> Session<T> {
     pub async fn handle_my_rights(&mut self, request: Request<Command>) -> trc::Result<()> {
         // Validate access
         self.assert_has_permission(Permission::ImapMyRights)?;
+        let permit = self.op_gate.acquire(OpKind::Read).await;
 
         let op_start = Instant::now();
         let arguments = request.parse_acl(self.is_utf8)?;
         let data = self.state.session_data();
         let is_utf8 = self.version.is_rev2() || self.is_utf8;
 
-        spawn_op!(data, {
+        spawn_op!(data, permit, {
             let (mailbox_id, mailbox_, access_token) = data
                 .get_acl_mailbox(&arguments, false)
                 .await
@@ -262,13 +264,14 @@ impl<T: SessionStream> Session<T> {
     pub async fn handle_set_acl(&mut self, request: Request<Command>) -> trc::Result<()> {
         // Validate access
         self.assert_has_permission(Permission::ImapAclSet)?;
+        let permit = self.op_gate.acquire(OpKind::Write).await;
 
         let op_start = Instant::now();
         let command = request.command;
         let arguments = request.parse_acl(self.is_utf8)?;
         let data = self.state.session_data();
 
-        spawn_op!(data, {
+        spawn_op!(data, permit, {
             // Validate mailbox
             let (mailbox_id, current_mailbox, access_token) = data
                 .get_acl_mailbox(&arguments, true)

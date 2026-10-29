@@ -138,6 +138,7 @@ pub struct Context<'x> {
     pub(crate) num_instructions: usize,
     pub(crate) num_out_messages: usize,
     pub(crate) regex_cache: runtime::tests::comparator::RegexCache,
+    pub(crate) scanned_bytes: std::cell::Cell<usize>,
 }
 
 #[derive(Debug, Clone, Eq, PartialEq, Hash)]
