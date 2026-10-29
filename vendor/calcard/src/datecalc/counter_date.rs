@@ -2,6 +2,8 @@
  * SPDX-FileCopyrightText: 2021 Fredrik Meringdal, Ralph Bisschops <https://github.com/fmeringdal/rust-rrule>
  *
  * SPDX-License-Identifier: Apache-2.0 OR MIT
+ *
+ * Modified by Coffey Labs in 2026 for INBUXA.
  */
 
 use super::{
@@ -37,7 +39,20 @@ impl DateTimeIter {
     /// is higher than daily (e.g. hourly) where this function might return a date with the
     /// same day, but the iterator already knows that the current day can't
     /// be part of the result.
+    #[cfg(test)]
     pub fn increment(&mut self, rrule: &RRule, increment_day: bool) -> Result<(), RRuleError> {
+        self.increment_counted(rrule, increment_day, &mut 0)
+    }
+
+    /// inbuxa: `increment`, adding to `steps` each pass of the search loops
+    /// that skip the times `BYHOUR`, `BYMINUTE` and `BYSECOND` exclude, so the
+    /// caller can charge them against its expansion budget.
+    pub fn increment_counted(
+        &mut self,
+        rrule: &RRule,
+        increment_day: bool,
+        steps: &mut u32,
+    ) -> Result<(), RRuleError> {
         let RRule {
             interval,
             week_start,
@@ -51,13 +66,20 @@ impl DateTimeIter {
             ICalendarFrequency::Monthly => self.increment_monthly(*interval),
             ICalendarFrequency::Weekly => self.increment_weekly(*interval, *week_start),
             ICalendarFrequency::Daily => self.increment_daily(*interval),
-            ICalendarFrequency::Hourly => self.increment_hourly(*interval, by_hour, increment_day),
+            ICalendarFrequency::Hourly => {
+                self.increment_hourly(*interval, by_hour, increment_day, steps)
+            }
             ICalendarFrequency::Minutely => {
-                self.increment_minutely(*interval, by_hour, by_minute, increment_day)
+                self.increment_minutely(*interval, by_hour, by_minute, increment_day, steps)
             }
-            ICalendarFrequency::Secondly => {
-                self.increment_secondly(*interval, by_hour, by_minute, by_second, increment_day)
-            }
+            ICalendarFrequency::Secondly => self.increment_secondly(
+                *interval,
+                by_hour,
+                by_minute,
+                by_second,
+                increment_day,
+                steps,
+            ),
         }
     }
 
@@ -166,6 +188,7 @@ impl DateTimeIter {
         interval: u16,
         by_hour: &[u8],
         increment_day: bool,
+        steps: &mut u32,
     ) -> Result<(), RRuleError> {
         if increment_day {
             // Jump to one iteration before the next day
@@ -179,6 +202,7 @@ impl DateTimeIter {
 
         let mut prev_hours = HashSet::new();
         loop {
+            *steps = steps.saturating_add(1);
             self.hour = checked_add_u32(
                 self.hour,
                 u32::from(interval),
@@ -213,6 +237,7 @@ impl DateTimeIter {
         by_hour: &[u8],
         by_minute: &[u8],
         increment_day: bool,
+        steps: &mut u32,
     ) -> Result<(), RRuleError> {
         if increment_day {
             // Jump to one iteration before the next day
@@ -227,13 +252,14 @@ impl DateTimeIter {
 
         let mut prev_values = HashSet::new();
         loop {
+            *steps = steps.saturating_add(1);
             self.minute += u32::from(interval);
             let hours_div = u16::try_from(self.minute / 60).map_err(|_| {
                 RRuleError::new_iter_err("unexpected high minute, please decrease interval")
             })?;
             if hours_div > 0 {
                 self.minute %= 60;
-                self.increment_hourly(hours_div, by_hour, increment_day)?;
+                self.increment_hourly(hours_div, by_hour, increment_day, steps)?;
             }
 
             let hours = (self.hour % 24) as u8;
@@ -263,6 +289,7 @@ impl DateTimeIter {
         by_minute: &[u8],
         by_second: &[u8],
         increment_day: bool,
+        steps: &mut u32,
     ) -> Result<(), RRuleError> {
         if increment_day {
             // Jump to one iteration before the next day
@@ -277,13 +304,14 @@ impl DateTimeIter {
 
         let mut prev_values = HashSet::new();
         loop {
+            *steps = steps.saturating_add(1);
             self.second += u32::from(interval);
             let minutes_div = u16::try_from(self.second / 60).map_err(|_| {
                 RRuleError::new_iter_err("unexpected high second, please decrease interval")
             })?;
             if minutes_div > 0 {
                 self.second %= 60;
-                self.increment_minutely(minutes_div, by_hour, by_minute, increment_day)?;
+                self.increment_minutely(minutes_div, by_hour, by_minute, increment_day, steps)?;
             }
 
             let hours = (self.hour % 24) as u8;

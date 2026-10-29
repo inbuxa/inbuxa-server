@@ -25,6 +25,25 @@ Every changed file carries a Coffey Labs notice in its header.
 
 - `.gitignore`: `VENDORED.md` is tracked (upstream ignores every `*.md`
   but the changelog and README).
+- `src/datecalc/mod.rs`, `src/datecalc/rrule_iter.rs`,
+  `src/datecalc/counter_date.rs`, `src/icalendar/dates.rs`: one
+  `expand_dates` call has a single work budget for all its recurrence rules
+  (`MAX_EXPANSION_WORK`, 1,000,000 units, about 50 ms in a release build).
+  Upstream only stops a rule after 100,000 passes that find nothing, counted
+  afresh for every instance and every rule, so a calendar of a few thousand
+  rules that never match (`FREQ=MONTHLY;BYMONTH=2;BYMONTHDAY=31`), or one
+  sparse rule, took seconds to minutes. A pass over a period costs one unit,
+  a pass that finds nothing one per 16 days it scanned, each candidate a
+  pass looks at without producing it one, and each time skipped while
+  looking for the next `BYHOUR`/`BYMINUTE`/`BYSECOND` match one
+  (`DateTimeIter::increment_counted` counts those). When the budget runs
+  out, expansion stops: the instances found so far are kept, as when the
+  instance limit is reached, later rules aren't expanded, and the result
+  carries a `CalendarErrorType::ExpansionBudgetExhausted` error for the
+  component it stopped at. Rules are no longer started once the instance
+  limit is reached (they couldn't add anything). The `budget_tests` in
+  `dates.rs` cover it, and `rule_expansion_shares_one_budget` in
+  `crates/groupware` fails to build if the server stops using this copy.
 
 ## Updating
 

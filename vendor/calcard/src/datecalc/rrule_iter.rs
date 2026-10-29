@@ -2,6 +2,8 @@
  * SPDX-FileCopyrightText: 2021 Fredrik Meringdal, Ralph Bisschops <https://github.com/fmeringdal/rust-rrule>
  *
  * SPDX-License-Identifier: Apache-2.0 OR MIT
+ *
+ * Modified by Coffey Labs in 2026 for INBUXA.
  */
 
 use super::counter_date::DateTimeIter;
@@ -14,6 +16,12 @@ use crate::icalendar::ICalendarFrequency;
 use chrono::NaiveTime;
 use std::collections::VecDeque;
 
+// inbuxa: passes plus skipped times, counted for the expansion budget tests
+#[cfg(test)]
+thread_local! {
+    pub(crate) static ITERATIONS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
 #[derive(Debug, Clone)]
 pub(crate) struct RRuleIter {
     pub(crate) counter_date: DateTimeIter,
@@ -25,6 +33,9 @@ pub(crate) struct RRuleIter {
     pub(crate) count: Option<u32>,
     pub(crate) limited: bool,
     pub(crate) was_limited: bool,
+    // inbuxa: work left from the expansion budget, see `MAX_EXPANSION_WORK`
+    pub(crate) budget: u32,
+    pub(crate) budget_exhausted: bool,
 }
 
 impl RRuleIter {
@@ -47,7 +58,16 @@ impl RRuleIter {
             count,
             limited,
             was_limited: false,
+            budget: u32::MAX,
+            budget_exhausted: false,
         }
+    }
+
+    /// inbuxa: limits the work this iterator may spend to `budget` units; once
+    /// it runs out, the iterator ends and `budget_exhausted` is set.
+    pub(crate) fn with_budget(mut self, budget: u32) -> Self {
+        self.budget = budget;
+        self
     }
 
     /// Attempts to add a date to the result. Returns `true` if we should
@@ -164,8 +184,42 @@ impl RRuleIter {
                 }
             }
 
+            // inbuxa: what this pass cost; the buffer was empty when it began
+            let produced = self.buffer.len();
+            let candidates = dayset.len().saturating_mul(self.timeset.len());
+            let mut work = if produced == 0 {
+                let days = match rrule.freq {
+                    ICalendarFrequency::Yearly => usize::from(self.ii.year_len()),
+                    ICalendarFrequency::Monthly => 31,
+                    ICalendarFrequency::Weekly => 7,
+                    _ => 1,
+                };
+                // one unit per 16 days scanned keeps a unit near the cost of a
+                // daily pass
+                days.div_ceil(16).saturating_add(candidates)
+            } else {
+                1 + candidates.saturating_sub(produced)
+            };
+
             let increment_day = dayset.is_empty();
-            if self.counter_date.increment(rrule, increment_day).is_err() {
+            let mut steps = 0;
+            let incremented = self
+                .counter_date
+                .increment_counted(rrule, increment_day, &mut steps);
+            work = work.saturating_add(steps as usize);
+            #[cfg(test)]
+            ITERATIONS.with(|count| count.set(count.get() + 1 + u64::from(steps)));
+            let Some(budget) = self
+                .budget
+                .checked_sub(u32::try_from(work).unwrap_or(u32::MAX))
+            else {
+                self.budget = 0;
+                self.budget_exhausted = true;
+                self.finished = true;
+                return true;
+            };
+            self.budget = budget;
+            if incremented.is_err() {
                 self.finished = true;
                 return true;
             }

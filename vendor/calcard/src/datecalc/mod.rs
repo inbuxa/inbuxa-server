@@ -2,6 +2,8 @@
  * SPDX-FileCopyrightText: 2021 Fredrik Meringdal, Ralph Bisschops <https://github.com/fmeringdal/rust-rrule>
  *
  * SPDX-License-Identifier: Apache-2.0 OR MIT
+ *
+ * Modified by Coffey Labs in 2026 for INBUXA.
  */
 
 mod checks;
@@ -29,6 +31,15 @@ pub(crate) use rrule_iter::RRuleIter;
 /// If after X number of iterations it still has not found an event,
 /// we can assume it will not find an event.
 static MAX_ITER_LOOP: u32 = 100_000;
+
+/// inbuxa: the work one `expand_dates` call may spend on all its recurrence
+/// rules together. Every pass over a period costs one unit, a pass that finds
+/// nothing costs one per 16 days it scanned, candidates a pass looks at
+/// without producing them cost one each, and so does every time the search
+/// for the next `BYHOUR`/`BYMINUTE`/`BYSECOND` match skips one. Rules that
+/// rarely or never match, spread over many components, can't add up past this
+/// (about 50 ms of work in a release build).
+pub(crate) const MAX_EXPANSION_WORK: u32 = 1_000_000;
 
 #[inline(always)]
 pub(crate) fn duration_from_midnight(time: NaiveTime) -> Duration {

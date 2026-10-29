@@ -355,3 +355,34 @@ impl ArchivedTimezone {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use calcard::{
+        common::timezone::Tz,
+        icalendar::{ICalendar, dates::CalendarErrorType},
+    };
+
+    // The shared expansion budget is carried by vendor/calcard, so this stops
+    // building if Cargo.lock moves calcard past the vendored copy
+    #[test]
+    fn rule_expansion_shares_one_budget() {
+        let mut ical = "BEGIN:VCALENDAR\r\nVERSION:2.0\r\n".to_string();
+        for _ in 0..40 {
+            ical.push_str(
+                "BEGIN:VEVENT\r\nUID:budget\r\nDTSTART:20000101T000000Z\r\n\
+                 RRULE:FREQ=DAILY;BYMONTH=2;BYMONTHDAY=31\r\nEND:VEVENT\r\n",
+            );
+        }
+        ical.push_str("END:VCALENDAR\r\n");
+
+        let expanded = ICalendar::parse(&ical).unwrap().expand_dates(Tz::UTC, 3000);
+        assert!(expanded.events.is_empty());
+        assert!(
+            expanded
+                .errors
+                .iter()
+                .any(|err| err.error == CalendarErrorType::ExpansionBudgetExhausted)
+        );
+    }
+}
