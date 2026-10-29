@@ -15,8 +15,27 @@ use registry::{
     schema::enums::{StorageQuota, TenantStorageQuota},
     types::EnumImpl,
 };
+use std::sync::Arc;
 use store::{ValueKey, write::ValueClass};
 use trc::AddContext;
+
+// inbuxa: the disk quota of the account a request writes into, with the bytes
+// the request has already added. A request commits all its items at once, so
+// each item is checked together with the ones before it, not against the
+// stored usage alone.
+pub struct QuotaBudget {
+    account: Arc<AccountCache>,
+    reserved: u64,
+}
+
+impl QuotaBudget {
+    pub fn new(account: Arc<AccountCache>) -> Self {
+        Self {
+            account,
+            reserved: 0,
+        }
+    }
+}
 
 impl Server {
     pub async fn get_used_quota_account(&self, account_id: u32) -> trc::Result<i64> {
@@ -70,6 +89,17 @@ impl Server {
             }
         }
 
+        Ok(())
+    }
+
+    // inbuxa: checks an item against the account's quota and, when it fits,
+    // counts it towards the rest of the request
+    pub async fn reserve_quota(&self, budget: &mut QuotaBudget, item_size: u64) -> trc::Result<()> {
+        if item_size > 0 {
+            self.has_available_quota(&budget.account, budget.reserved + item_size)
+                .await?;
+            budget.reserved += item_size;
+        }
         Ok(())
     }
 

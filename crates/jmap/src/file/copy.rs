@@ -15,7 +15,7 @@ use crate::{
         update_file_node, validate_file_node_hierarchy,
     },
 };
-use common::{Server, auth::AccessToken, sharing::EffectiveAcl};
+use common::{Server, auth::AccessToken, sharing::EffectiveAcl, storage::quota::QuotaBudget};
 use groupware::{cache::GroupwareCache, file::FileNode};
 use http_proto::HttpSessionData;
 use jmap_proto::{
@@ -137,6 +137,9 @@ impl FileNodeCopy for Server {
         let mut implicit_destroys: AHashSet<u32> = AHashSet::new();
         let mut created_folders = AHashMap::new();
         let mut destroy_ids = Vec::new();
+        // inbuxa: copies count towards the disk quota of the account they land in
+        let mut quota =
+            QuotaBudget::new(self.account(account_id).await.caused_by(trc::location!())?);
 
         'create: for (id, create) in request.create.into_valid() {
             let from_document_id = id.document_id();
@@ -398,6 +401,19 @@ impl FileNodeCopy for Server {
                         .with_description("Cannot create top-level folder in a shared account."),
                 );
                 continue 'create;
+            }
+
+            // inbuxa: Validate quota
+            match self
+                .reserve_quota(&mut quota, file_node.size() as u64)
+                .await
+            {
+                Ok(_) => {}
+                Err(err) if err.matches(trc::EventType::Limit(trc::LimitEvent::Quota)) => {
+                    response.not_created.append(id, SetError::over_quota());
+                    continue 'create;
+                }
+                Err(err) => return Err(err.caused_by(trc::location!())),
             }
 
             if !file_node.acls.is_empty() {
