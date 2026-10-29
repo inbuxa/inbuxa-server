@@ -30,8 +30,9 @@ use common::{
     scripts::ScriptModification,
 };
 use mail_auth::{
-    AuthenticatedMessage, AuthenticationResults, Dkim2Result, DkimResult, DmarcResult, ReceivedSpf,
-    SpfOutput, SpfResult,
+    AuthenticatedMessage, AuthenticationResults, Dkim2Result, DkimResult, DmarcOutput, DmarcResult,
+    ReceivedSpf, SpfOutput, SpfResult,
+    common::to_a_label,
     common::{
         crypto::Algorithm,
         headers::{Header, HeaderWriter},
@@ -373,15 +374,38 @@ impl<T: SessionStream> Session<T> {
                     }
                 };
                 let time = Instant::now();
-                let dmarc_output =
-                    self.server
+
+                // inbuxa: a From header naming several domains is checked
+                // against each of them and the strictest result applies
+                // (RFC 7489, Section 6.6.1)
+                let author_domains = dmarc_author_domains(&auth_message);
+                let author_messages = if author_domains.len() > 1 {
+                    author_domains
+                        .iter()
+                        .map(|domain| {
+                            let mut message = auth_message.clone();
+                            message.from.retain(|address| {
+                                address.rsplit_once('@').is_some_and(|(_, addr_domain)| {
+                                    to_a_label(addr_domain) == domain.as_str()
+                                })
+                            });
+                            Cow::Owned(message)
+                        })
+                        .collect::<Vec<_>>()
+                } else {
+                    vec![Cow::Borrowed(&auth_message)]
+                };
+                let mut dmarc_output: Option<DmarcOutput> = None;
+                for author_message in &author_messages {
+                    let output = self
+                        .server
                         .core
                         .smtp
                         .resolvers
                         .dns
                         .verify_dmarc(self.server.inner.cache.build_auth_parameters(
                             DmarcParameters {
-                                message: &auth_message,
+                                message: author_message.as_ref(),
                                 dkim_output: &dkim_output,
                                 dkim2_output: dkim2_output.as_ref(),
                                 rfc5321_mail_from_domain: if !mail_from.domain.is_empty() {
@@ -393,6 +417,14 @@ impl<T: SessionStream> Session<T> {
                             },
                         ))
                         .await;
+                    if dmarc_output
+                        .as_ref()
+                        .is_none_or(|current| dmarc_strictness(&output) > dmarc_strictness(current))
+                    {
+                        dmarc_output = Some(output);
+                    }
+                }
+                let dmarc_output = dmarc_output.unwrap_or_default();
 
                 let dmarc_result = dmarc_output.result();
                 let pass = dmarc_result == DmarcResult::Pass;
@@ -1218,5 +1250,35 @@ fn parse_dkim2_dsn<'x, 'r>(
         ))
     } else {
         None
+    }
+}
+
+// inbuxa: the distinct author domains of the From header, as DMARC compares them
+fn dmarc_author_domains(message: &AuthenticatedMessage<'_>) -> Vec<String> {
+    let mut domains: Vec<String> = Vec::new();
+    for address in &message.from {
+        if let Some((_, domain)) = address.rsplit_once('@') {
+            let domain = to_a_label(domain);
+            if !domains.iter().any(|d| d.as_str() == domain) {
+                domains.push(domain.into_owned());
+            }
+        }
+    }
+    domains
+}
+
+// inbuxa: orders DMARC results so that a failure under the strictest policy
+// wins, then a failure, then no result, then a pass
+fn dmarc_strictness(output: &DmarcOutput) -> (u8, u8, u8) {
+    let policy = match output.policy() {
+        dmarc::Policy::Reject => 2,
+        dmarc::Policy::Quarantine => 1,
+        dmarc::Policy::None | dmarc::Policy::Unspecified => 0,
+    };
+    match output.result() {
+        DmarcResult::Fail(_) => (2, policy, 1),
+        DmarcResult::TempError(_) => (2, policy, 0),
+        DmarcResult::PermError(_) | DmarcResult::None => (1, 0, 0),
+        DmarcResult::Pass => (0, 0, 0),
     }
 }
