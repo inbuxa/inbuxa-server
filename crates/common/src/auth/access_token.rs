@@ -1008,6 +1008,12 @@ impl AccessToken {
         self
     }
 
+    /// inbuxa: the version of the account's password this session's
+    /// credentials go with; it changes with the password.
+    pub fn credential_version(&self) -> u64 {
+        self.inner.credential_version
+    }
+
     pub fn new_admin() -> AccessToken {
         AccessToken {
             scope_idx: 0,
