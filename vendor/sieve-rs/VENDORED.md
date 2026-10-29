@@ -50,6 +50,16 @@ Every changed file carries the AGPL 5(a) notice in its header.
   Upstream 0.7.3 fails its own svtests "No reply to auto-submitted mail" and
   "Notifying on automated messages" for this reason. The
   `sieve_auto_submitted_mail_gets_no_reply` test in `crates/common` covers it.
+- `src/runtime/tests/test_string.rs`: `string` is true when any key matches
+  any source. Upstream's `break` on a match only left the loop over sources,
+  so the next key overwrote the result: `string :is "a" ["a", "b"]` was
+  false while `["b", "a"]` was true.
+- `src/runtime/tests/test_date.rs`: `date :regex` and `currentdate :regex`
+  compare with the regex comparator (through the same size limit and
+  cache); upstream compared them as `:matches` wildcard patterns, so
+  `"^20[0-9]{2}$"` never matched a year. The
+  `sieve_tests_match_any_key_and_regex_dates` test in `crates/common`
+  covers both.
 - `Cargo.toml`: the example target is dropped, with the top-level
   `examples/` and `tests/`, which the server never builds. (`src/` keeps its
   own `tests` modules: the crate declares them.)

@@ -61,7 +61,10 @@ impl TestString {
                 let mut captured_values = Vec::new();
                 let sources = ctx.eval_values(&self.source);
 
-                for pattern in &self.key_list {
+                // inbuxa: any key matching any source makes the test true
+                // (RFC 5229); a plain break only left the inner loop, and the
+                // next key overwrote the result
+                'keys: for pattern in &self.key_list {
                     let key = ctx.eval_value(pattern);
                     for source in &sources {
                         if !empty_is_null || !source.is_empty() {
@@ -95,7 +98,7 @@ impl TestString {
                             };
 
                             if result {
-                                break;
+                                break 'keys;
                             }
                         }
                     }
