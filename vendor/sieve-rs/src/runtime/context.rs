@@ -2,6 +2,8 @@
  * SPDX-FileCopyrightText: 2020 Stalwart Labs Ltd <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
+ *
+ * Modified by Coffey Labs in 2026 for INBUXA.
  */
 
 use std::{borrow::Cow, sync::Arc, time::SystemTime};
@@ -70,6 +72,7 @@ impl<'x> Context<'x> {
             num_redirects: 0,
             num_instructions: 0,
             num_out_messages: 0,
+            regex_cache: Default::default(),
             last_message_id: 0,
             main_message_id: 0,
             virus_status: VirusStatus::Unknown,
@@ -680,6 +683,7 @@ impl<'x> Context<'x> {
             num_redirects: 0,
             num_instructions: 0,
             num_out_messages: 0,
+            regex_cache: Default::default(),
             last_message_id: 0,
             main_message_id: 0,
             virus_status: VirusStatus::Unknown,

@@ -2,6 +2,8 @@
  * SPDX-FileCopyrightText: 2020 Stalwart Labs Ltd <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
+ *
+ * Modified by Coffey Labs in 2026 for INBUXA.
  */
 
 use crate::{
@@ -81,6 +83,7 @@ impl TestMetadata {
                         &mut captured_values,
                     ),
                     MatchType::Regex(capture_positions) => self.comparator.regex(
+                        &ctx.regex_cache,
                         pattern,
                         &key,
                         value,

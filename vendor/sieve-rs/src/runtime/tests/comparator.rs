@@ -2,9 +2,11 @@
  * SPDX-FileCopyrightText: 2020 Stalwart Labs Ltd <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
+ *
+ * Modified by Coffey Labs in 2026 for INBUXA.
  */
 
-use std::{borrow::Cow, sync::Arc};
+use std::{borrow::Cow, cell::RefCell, sync::Arc};
 
 use crate::{
     MatchAs,
@@ -16,6 +18,50 @@ use crate::{
 };
 
 use super::glob::GlobPattern;
+
+// inbuxa: the most a compiled pattern may take (each of the matcher and its
+// lazy DFA cache); the default of 10 MiB let every :regex key of a stored
+// script hold that much
+pub(crate) const REGEX_SIZE_LIMIT: usize = 1024 * 1024;
+
+pub(crate) fn build_regex(expr: &str) -> Result<fancy_regex::Regex, fancy_regex::Error> {
+    fancy_regex::RegexBuilder::new(expr)
+        .delegate_size_limit(REGEX_SIZE_LIMIT)
+        .delegate_dfa_size_limit(REGEX_SIZE_LIMIT)
+        .build()
+}
+
+// inbuxa: patterns built from variables ("${x}") are compiled once per run, not
+// once for every value they are tested against
+const REGEX_CACHE_SIZE: usize = 32;
+
+#[derive(Debug, Clone, Default)]
+pub(crate) struct RegexCache(RefCell<Vec<(String, Option<fancy_regex::Regex>)>>);
+
+impl RegexCache {
+    fn eval(
+        &self,
+        expr: &str,
+        value: &str,
+        capture_positions: u64,
+        captured_values: &mut Vec<(usize, String)>,
+    ) -> bool {
+        let mut cache = self.0.borrow_mut();
+        let idx = if let Some(idx) = cache.iter().position(|(cached, _)| cached == expr) {
+            idx
+        } else {
+            if cache.len() == REGEX_CACHE_SIZE {
+                cache.remove(0);
+            }
+            cache.push((expr.to_string(), build_regex(expr).ok()));
+            cache.len() - 1
+        };
+        cache[idx]
+            .1
+            .as_ref()
+            .is_some_and(|regex| eval_regex(regex, value, capture_positions, captured_values))
+    }
+}
 
 pub(crate) trait Comparable {
     fn to_str(&'_ self) -> Cow<'_, str>;
@@ -68,8 +114,10 @@ impl Comparator {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn regex(
         &self,
+        cache: &RegexCache,
         pattern: &Value,
         pattern_expr: &Variable,
         value: &str,
@@ -81,7 +129,7 @@ impl Comparator {
             if let Some(regex) = lazy_regex.as_ref() {
                 eval_regex(regex, value, capture_positions, captured_values)
             } else {
-                match fancy_regex::Regex::new(&regex.expr) {
+                match build_regex(&regex.expr) {
                     Ok(fancy_regex) => {
                         let result =
                             eval_regex(&fancy_regex, value, capture_positions, captured_values);
@@ -95,13 +143,12 @@ impl Comparator {
                 }
             }
         } else {
-            match fancy_regex::Regex::new(pattern_expr.to_string().as_ref()) {
-                Ok(regex) => eval_regex(&regex, value, capture_positions, captured_values),
-                Err(err) => {
-                    debug_assert!(false, "Failed to compile regex: {err:?}");
-                    false
-                }
-            }
+            cache.eval(
+                pattern_expr.to_string().as_ref(),
+                value,
+                capture_positions,
+                captured_values,
+            )
         }
     }
 
