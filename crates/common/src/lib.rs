@@ -303,6 +303,8 @@ pub struct HttpAuthCache {
     pub expires: Instant,
     // inbuxa: how the cached credentials signed in (AU-5)
     pub origin: Option<Arc<inbuxa_features::audit::Via>>,
+    // inbuxa: when the cached bearer token expires
+    pub expires_at: Option<u64>,
 }
 
 pub struct Ipc {

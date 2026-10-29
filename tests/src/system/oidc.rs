@@ -893,7 +893,17 @@ pub async fn test(test: &mut TestServer) {
     );
 
     // Wait 1 second and make sure the access token expired
-    tokio::time::sleep(Duration::from_secs(6)).await; // inbuxa: past the 5s token
+    // inbuxa: used once 3s in, the token must still stop working when it
+    // expires, not when its cached sign-in would
+    tokio::time::sleep(Duration::from_secs(3)).await;
+    Client::new()
+        .credentials(Credentials::bearer(&token))
+        .accept_invalid_certs(true)
+        .follow_redirects(["127.0.0.1"])
+        .connect("https://127.0.0.1:8899")
+        .await
+        .unwrap();
+    tokio::time::sleep(Duration::from_secs(3)).await; // inbuxa: past the 5s token
     assert_unauthorized("https://127.0.0.1:8899", &token).await;
 
     // Wait another second for the refresh token to be about to expire
