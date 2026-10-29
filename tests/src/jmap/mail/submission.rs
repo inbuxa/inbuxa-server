@@ -2,6 +2,8 @@
  * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
+ *
+ * Modified by Coffey Labs in 2026 for INBUXA.
  */
 
 use crate::{
@@ -234,6 +236,73 @@ pub async fn test(test: &TestServer) {
         ),
     )
     .await;
+
+    // Every Bcc header is removed, including repeated and very long ones
+    let long_bcc = (0..3500)
+        .map(|i| format!("hidden_{i}@remote.org"))
+        .collect::<Vec<_>>()
+        .join(",\r\n ");
+    let bcc_body = format!(
+        "From: jdoe@example.com\r\nTo: jane_smith@remote.org\r\nBcc: {long_bcc}\r\nSubject: long bcc\r\n\r\ntest"
+    );
+    assert!(long_bcc.len() > u16::MAX as usize);
+    let bcc_email_id = client
+        .email_import(
+            bcc_body.into_bytes(),
+            [&mailbox_id],
+            None::<Vec<&str>>,
+            None,
+        )
+        .await
+        .unwrap()
+        .take_id();
+    client
+        .email_submission_create_envelope(
+            &bcc_email_id,
+            &identity_id,
+            "jdoe@example.com",
+            ["jane_smith@remote.org"],
+        )
+        .await
+        .unwrap();
+    let delivered = expect_message_delivery(&mut smtp_rx).await;
+    if let Some(pos) = delivered.message.find("hidden_") {
+        panic!(
+            "Bcc leaked: [...{}...]",
+            &delivered.message[pos.saturating_sub(100)..(pos + 100).min(delivered.message.len())]
+        );
+    }
+    assert!(delivered.message.contains("Subject: long bcc"));
+
+    let bcc_body = concat!(
+        "From: jdoe@example.com\r\n",
+        "Bcc: hidden_one@remote.org\r\n",
+        "To: jane_smith@remote.org\r\n",
+        "Bcc: hidden_two@remote.org\r\n",
+        "Subject: two bccs\r\n\r\n",
+        "test"
+    );
+    let bcc_email_id = client
+        .email_import(
+            bcc_body.as_bytes().to_vec(),
+            [&mailbox_id],
+            None::<Vec<&str>>,
+            None,
+        )
+        .await
+        .unwrap()
+        .take_id();
+    client
+        .email_submission_create(&bcc_email_id, &identity_id)
+        .await
+        .unwrap();
+    let delivered = expect_message_delivery(&mut smtp_rx).await;
+    assert!(
+        !delivered.message.contains("hidden_"),
+        "Bcc leaked: [{}]",
+        delivered.message
+    );
+    assert!(delivered.message.contains("Subject: two bccs"));
 
     // Manually add recipients to the envelope and confirm submission
     let email_submission_id = client
