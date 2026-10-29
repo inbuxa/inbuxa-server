@@ -2,6 +2,8 @@
  * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
+ *
+ * Modified by Coffey Labs in 2026 for INBUXA.
  */
 
 use crate::utils::{
@@ -9,6 +11,11 @@ use crate::utils::{
     pop3::{Pop3Connection, ResponseType},
     server::TestServer,
     smtp::SmtpConnection,
+};
+use registry::schema::{prelude::Property, structs::Imap};
+use tokio::{
+    io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
+    net::TcpStream,
 };
 
 pub async fn test(test: &TestServer) {
@@ -197,4 +204,59 @@ pub async fn test(test: &TestServer) {
         .await
         .assert_contains("+OK 0 0");
     pop3.send("QUIT").await;
+
+    // inbuxa: with plain-text sign-in turned off, a clear-text connection is
+    // offered no mechanism and accepts none, bearer tokens included
+    let admin = test.account("admin@example.com");
+    admin
+        .registry_update_setting(
+            Imap {
+                allow_plain_text_auth: false,
+                ..Default::default()
+            },
+            &[Property::AllowPlainTextAuth],
+        )
+        .await;
+    admin.reload_settings().await;
+
+    let (rx, mut tx) = TcpStream::connect("127.0.0.1:4111")
+        .await
+        .unwrap()
+        .into_split();
+    let mut rx = BufReader::new(rx).lines();
+    assert!(rx.next_line().await.unwrap().unwrap().starts_with("+OK"));
+    tx.write_all(b"CAPA\r\n").await.unwrap();
+    let mut capa = Vec::new();
+    loop {
+        let line = rx.next_line().await.unwrap().unwrap();
+        if line == "." {
+            break;
+        }
+        capa.push(line);
+    }
+    assert!(
+        !capa.iter().any(|l| l.starts_with("SASL") || l == "USER"),
+        "clear-text CAPA offered sign-in: {capa:?}"
+    );
+    for mechanism in ["OAUTHBEARER", "XOAUTH2", "PLAIN"] {
+        tx.write_all(format!("AUTH {mechanism}\r\n").as_bytes())
+            .await
+            .unwrap();
+        let line = rx.next_line().await.unwrap().unwrap();
+        assert!(
+            line.starts_with("-ERR") && line.contains("plain-text"),
+            "clear-text AUTH {mechanism} was not refused: {line}"
+        );
+    }
+
+    admin
+        .registry_update_setting(
+            Imap {
+                allow_plain_text_auth: true,
+                ..Default::default()
+            },
+            &[Property::AllowPlainTextAuth],
+        )
+        .await;
+    admin.reload_settings().await;
 }
