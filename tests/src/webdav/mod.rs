@@ -2,6 +2,8 @@
  * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
+ *
+ * Modified by Coffey Labs in 2026 for INBUXA.
  */
 
 use crate::utils::server::TestServerBuilder;
@@ -32,6 +34,7 @@ pub mod cal_query;
 pub mod cal_scheduling;
 pub mod card_query;
 pub mod copy_move;
+pub mod file_tasks; // inbuxa: file deletes wake the task manager
 pub mod lock;
 pub mod mkcol;
 pub mod multiget;
@@ -183,6 +186,7 @@ pub async fn webdav_tests() {
     }
     basic::test(&test).await;
     put_get::test(&test).await;
+    file_tasks::test(&test).await;
     mkcol::test(&test).await;
     copy_move::test(&test, assisted_discovery).await;
     prop::test(&test, assisted_discovery).await;

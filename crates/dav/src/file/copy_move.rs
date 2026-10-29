@@ -653,6 +653,8 @@ async fn overwrite_and_delete_item(
         .commit_batch(batch)
         .await
         .caused_by(trc::location!())?;
+    // inbuxa: the deleted source queued its undelete task
+    server.notify_task_queue();
 
     Ok(HttpResponse::new(StatusCode::NO_CONTENT).with_etag_opt(etag))
 }
@@ -807,6 +809,9 @@ async fn move_item(
         .commit_batch(batch)
         .await
         .caused_by(trc::location!())?;
+    // inbuxa: a move to another account deletes the source, which queued
+    // its undelete task
+    server.notify_task_queue();
 
     Ok(HttpResponse::new(StatusCode::CREATED).with_etag_opt(etag))
 }
