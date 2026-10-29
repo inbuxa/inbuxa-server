@@ -2,6 +2,8 @@
  * SPDX-FileCopyrightText: 2020 Stalwart Labs Ltd <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
+ *
+ * Modified by Coffey Labs in 2026 for INBUXA.
  */
 
 use mail_parser::{MimeHeaders, PartType, decoders::html::html_to_text};
@@ -45,10 +47,14 @@ impl TestBody {
                         0,
                         &mut Vec::new(),
                     ),
-                    MatchType::Regex(_) => {
-                        self.comparator
-                            .regex(pattern, key, subject, 0, &mut Vec::new())
-                    }
+                    MatchType::Regex(_) => self.comparator.regex(
+                        &ctx.regex_cache,
+                        pattern,
+                        key,
+                        subject,
+                        0,
+                        &mut Vec::new(),
+                    ),
                     _ => break,
                 };
 
@@ -203,10 +209,14 @@ impl TestBody {
                             0,
                             &mut Vec::new(),
                         ),
-                        MatchType::Regex(_) => {
-                            self.comparator
-                                .regex(pattern, key, text.as_ref(), 0, &mut Vec::new())
-                        }
+                        MatchType::Regex(_) => self.comparator.regex(
+                            &ctx.regex_cache,
+                            pattern,
+                            key,
+                            text.as_ref(),
+                            0,
+                            &mut Vec::new(),
+                        ),
                         _ => false,
                     };
 
