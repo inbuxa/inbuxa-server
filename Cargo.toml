@@ -86,9 +86,9 @@ rpath = false
 # vendor/sieve-rs is the published 0.7.3 with those renamed; see its
 # VENDORED.md. Re-vendor when the version in Cargo.lock moves.
 #
-# inbuxa: vendor/calcard is the published 0.3.14, vendored so the server can
-# carry fixes to it; see its VENDORED.md. Re-vendor when the version in
-# Cargo.lock moves.
+# inbuxa: vendor/calcard is the published 0.3.14 with one work budget shared
+# by all the recurrence rules an expansion runs; see its VENDORED.md.
+# Re-vendor when the version in Cargo.lock moves.
 #
 # inbuxa: hickory and opentelemetry are upstream's patched branches, vendored
 # at the commits upstream pins so builds never fetch from upstream's

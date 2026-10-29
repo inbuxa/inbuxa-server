@@ -2,6 +2,8 @@
  * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: Apache-2.0 OR MIT
+ *
+ * Modified by Coffey Labs in 2026 for INBUXA.
  */
 
 use super::{
@@ -10,7 +12,7 @@ use super::{
 };
 use crate::{
     common::{DateTimeResult, timezone::Tz},
-    datecalc::{RRuleIter, error::RRuleError, rrule::RRule},
+    datecalc::{MAX_EXPANSION_WORK, RRuleIter, error::RRuleError, rrule::RRule},
     icalendar::ICalendarParameterName,
 };
 use ahash::{AHashMap, AHashSet};
@@ -59,6 +61,9 @@ pub enum CalendarErrorType {
     InvalidDtEnd,
     InvalidDuration,
     RRule(RRuleError),
+    // inbuxa: expansion stopped at this component's rule because all rules
+    // together used up `MAX_EXPANSION_WORK`; later rules weren't expanded
+    ExpansionBudgetExhausted,
 }
 
 impl ICalendar {
@@ -92,6 +97,7 @@ impl ICalendar {
         }
 
         // Expand recurrences
+        let mut budget = MAX_EXPANSION_WORK;
         for (mut comp_id, event) in rrules {
             let rrule = event.rrule.unwrap();
             let floating_start = if let Some(floating_start) = Tz::Floating
@@ -127,7 +133,14 @@ impl ICalendar {
                 .collect::<AHashSet<_>>();
             let mut override_offset = None;
 
-            for date in RRuleIter::new(&rrule, &floating_start, true) {
+            // inbuxa: no instance can be added once the limit is reached
+            if limit == 0 {
+                continue;
+            }
+            let rule_comp_id = comp_id;
+            let mut dates = RRuleIter::new(&rrule, &floating_start, true).with_budget(budget);
+
+            for date in dates.by_ref() {
                 if limit != 0 {
                     limit -= 1;
                 } else {
@@ -164,6 +177,15 @@ impl ICalendar {
                     }
                     _ => {}
                 }
+            }
+
+            budget = dates.budget;
+            if dates.budget_exhausted {
+                expand.errors.push(CalendarError {
+                    comp_id: rule_comp_id,
+                    error: CalendarErrorType::ExpansionBudgetExhausted,
+                });
+                break;
             }
         }
 
@@ -547,6 +569,9 @@ impl Display for CalendarErrorType {
             CalendarErrorType::InvalidDtEnd => write!(f, "Invalid DTEND property"),
             CalendarErrorType::InvalidDuration => write!(f, "Invalid DURATION property"),
             CalendarErrorType::RRule(err) => write!(f, "RRule error: {err}"),
+            CalendarErrorType::ExpansionBudgetExhausted => {
+                write!(f, "Recurrence expansion stopped: work limit reached")
+            }
         }
     }
 }
@@ -640,5 +665,109 @@ mod tests {
                 }
             }
         }
+    }
+}
+
+// inbuxa: one budget bounds the work of all the rules in a calendar
+#[cfg(test)]
+mod budget_tests {
+    use crate::{
+        datecalc::{MAX_EXPANSION_WORK, rrule_iter::ITERATIONS},
+        icalendar::{
+            ICalendar,
+            dates::{CalendarErrorType, CalendarExpand},
+        },
+    };
+
+    fn calendar(rule: &str, components: usize) -> ICalendar {
+        let mut ical = "BEGIN:VCALENDAR\r\nVERSION:2.0\r\n".to_string();
+        for _ in 0..components {
+            ical.push_str(&format!(
+                "BEGIN:VEVENT\r\nUID:budget\r\nDTSTART:20000101T000000Z\r\n\
+                 DTEND:20000101T010000Z\r\nRRULE:{rule}\r\nEND:VEVENT\r\n"
+            ));
+        }
+        ical.push_str("END:VCALENDAR\r\n");
+        ICalendar::parse(&ical).unwrap()
+    }
+
+    // Expands and returns the result with the passes and skipped times it took
+    fn expand(rule: &str, components: usize, limit: usize) -> (CalendarExpand, u64) {
+        let ical = calendar(rule, components);
+        ITERATIONS.with(|count| count.set(0));
+        let expanded = ical.expand_dates(chrono_tz::Tz::UTC, limit);
+        (expanded, ITERATIONS.with(|count| count.get()))
+    }
+
+    // The budget, and the pass that runs over it
+    fn within_budget() -> u64 {
+        u64::from(MAX_EXPANSION_WORK) + 10_000
+    }
+
+    fn stopped(expanded: &CalendarExpand) -> bool {
+        expanded
+            .errors
+            .iter()
+            .any(|err| err.error == CalendarErrorType::ExpansionBudgetExhausted)
+    }
+
+    #[test]
+    fn never_matching_rules_share_one_budget() {
+        // Each rule alone spends calcard's 100,000 passes looking for a 31 February
+        let (expanded, iterations) = expand("FREQ=DAILY;BYMONTH=2;BYMONTHDAY=31", 40, 3000);
+        println!("40 never-matching rules: {iterations} iterations");
+        assert!(iterations <= within_budget(), "{iterations}");
+        assert!(expanded.events.is_empty());
+        assert!(stopped(&expanded));
+    }
+
+    #[test]
+    fn sparse_rules_share_one_budget() {
+        // One instance every four years, each found after ~1,460 daily passes,
+        // and one a year found by skipping every other minute of the year
+        for rule in [
+            "FREQ=DAILY;BYMONTH=2;BYMONTHDAY=29",
+            "FREQ=MINUTELY;BYMONTH=1;BYMONTHDAY=1;BYHOUR=1;BYMINUTE=1",
+        ] {
+            let (expanded, iterations) = expand(rule, 1, 3000);
+            println!(
+                "{rule}: {} instances, {iterations} iterations",
+                expanded.events.len()
+            );
+            assert!(iterations <= within_budget(), "{rule}: {iterations}");
+            assert!(!expanded.events.is_empty(), "{rule}");
+            assert!(stopped(&expanded), "{rule}");
+        }
+
+        // A year scanned for nothing costs more than a day scanned for nothing
+        let (expanded, iterations) = expand("FREQ=YEARLY;BYMONTH=2;BYMONTHDAY=31", 20, 3000);
+        println!("20 never-matching yearly rules: {iterations} passes");
+        assert!(iterations < 100_000, "{iterations}");
+        assert!(stopped(&expanded));
+    }
+
+    #[test]
+    fn ordinary_rules_expand_in_full() {
+        for (rule, instances) in [
+            ("FREQ=DAILY", 3000),
+            ("FREQ=WEEKLY;BYDAY=MO,WE,FR", 3000),
+            ("FREQ=MONTHLY;BYDAY=-1FR", 3000),
+            ("FREQ=MONTHLY;BYDAY=MO,TU,WE,TH,FR;BYSETPOS=-1", 3000),
+            ("FREQ=YEARLY", 3000),
+            // every leap day to the year 10000
+            ("FREQ=YEARLY;BYMONTH=2;BYMONTHDAY=29", 1941),
+            ("FREQ=HOURLY;BYHOUR=9,17", 3000),
+            ("FREQ=MINUTELY;INTERVAL=15;BYHOUR=9,10,11", 3000),
+        ] {
+            let (expanded, _) = expand(rule, 1, 3000);
+            assert_eq!(expanded.events.len(), instances, "{rule}");
+            assert!(expanded.errors.is_empty(), "{rule}: {:?}", expanded.errors);
+        }
+
+        // Rules after the instance limit is reached cost nothing
+        let (expanded, iterations) = expand("FREQ=DAILY", 200, 3000);
+        assert_eq!(expanded.events.len(), 3000);
+        assert!(expanded.errors.is_empty());
+        assert!(iterations < 4000, "{iterations}");
     }
 }
