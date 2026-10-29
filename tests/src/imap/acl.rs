@@ -185,6 +185,26 @@ pub async fn test(
     imap_john.send("UID STORE 1 +FLAGS (\\Deleted)").await;
     imap_john.assert_read(Type::Tagged, ResponseType::No).await;
 
+    // inbuxa: the right to modify messages ("w") does not cover \Deleted,
+    // which needs the right to remove them ("t"); the other flags in the
+    // same STORE still apply
+    imap_jane.send("SETACL INBOX jdoe@example.com +w").await;
+    imap_jane.assert_read(Type::Tagged, ResponseType::Ok).await;
+    imap_john.send("UID STORE 1 +FLAGS (\\Deleted)").await;
+    imap_john.assert_read(Type::Tagged, ResponseType::No).await;
+    imap_john
+        .send("UID STORE 1 +FLAGS (\\Deleted \\Flagged)")
+        .await;
+    imap_john.assert_read(Type::Tagged, ResponseType::Ok).await;
+    imap_john.send("UID FETCH 1 (FLAGS)").await;
+    imap_john
+        .assert_read(Type::Tagged, ResponseType::Ok)
+        .await
+        .assert_contains("\\Flagged")
+        .assert_count("\\Deleted", 0);
+    imap_jane.send("SETACL INBOX jdoe@example.com -w").await;
+    imap_jane.assert_read(Type::Tagged, ResponseType::Ok).await;
+
     imap_bill.send("UID STORE 1 +FLAGS (\\Deleted)").await;
     imap_bill.assert_read(Type::Tagged, ResponseType::Ok).await;
 
