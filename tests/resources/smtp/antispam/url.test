@@ -46,6 +46,33 @@ Subject: redirect to omograph
 
 login to https://www.redirect.com/?https://xn--twiter-507b.com
 <!-- NEXT TEST -->
+expect REDIRECTOR_URL HOMOGRAPH_URL
+
+Subject: plain http redirect to omograph
+
+login to http://www.redirect.com/?https://xn--twiter-507b.com
+<!-- NEXT TEST -->
+expect REDIRECTOR_URL
+expect_urls 25
+
+Subject: many redirects
+
+https://redirect.com/?https://site1.org/
+https://redirect.com/?https://site2.org/
+https://redirect.com/?https://site3.org/
+https://redirect.com/?https://site4.org/
+https://redirect.com/?https://site5.org/
+https://redirect.com/?https://site6.org/
+https://redirect.com/?https://site7.org/
+https://redirect.com/?https://site8.org/
+https://redirect.com/?https://site9.org/
+https://redirect.com/?https://site10.org/
+https://redirect.com/?https://site11.org/
+https://redirect.com/?https://site12.org/
+https://redirect.com/?https://site13.org/
+https://redirect.com/?https://site14.org/
+https://redirect.com/?https://site15.org/
+<!-- NEXT TEST -->
 expect HAS_ONION_URI HAS_ANON_DOMAIN
 
 Subject: url in title darkweb.onion/login
