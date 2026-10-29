@@ -6675,6 +6675,59 @@ impl<'de> serde::Deserialize<'de> for NetworkListenerProtocol {
     }
 }
 
+impl EnumImpl for OidcOpaqueTokens {
+    fn parse(value: &str) -> Option<Self> {
+        hashify::tiny_map! {
+            value.as_bytes(),
+            b"reject" => OidcOpaqueTokens::Reject,
+            b"userinfo" => OidcOpaqueTokens::Userinfo,
+            b"introspection" => OidcOpaqueTokens::Introspection,
+        }
+    }
+
+    fn as_str(&self) -> &'static str {
+        match self {
+            OidcOpaqueTokens::Reject => "reject",
+            OidcOpaqueTokens::Userinfo => "userinfo",
+            OidcOpaqueTokens::Introspection => "introspection",
+        }
+    }
+
+    fn to_id(&self) -> u16 {
+        *self as u16
+    }
+
+    fn from_id(id: u16) -> Option<Self> {
+        match id {
+            0 => Some(OidcOpaqueTokens::Reject),
+            1 => Some(OidcOpaqueTokens::Userinfo),
+            2 => Some(OidcOpaqueTokens::Introspection),
+            _ => None,
+        }
+    }
+
+    const COUNT: usize = 3;
+}
+
+impl serde::Serialize for OidcOpaqueTokens {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        serializer.serialize_str(self.as_str())
+    }
+}
+
+impl<'de> serde::Deserialize<'de> for OidcOpaqueTokens {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let s = Cow::<str>::deserialize(deserializer)?;
+        Self::parse(&s).ok_or_else(|| serde::de::Error::unknown_variant(&s, &[]))
+    }
+}
+
 impl EnumImpl for OvhEndpoint {
     fn parse(value: &str) -> Option<Self> {
         hashify::tiny_map! {

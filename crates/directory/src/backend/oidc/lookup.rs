@@ -8,7 +8,7 @@
 
 use crate::{
     Account, Credentials,
-    backend::oidc::{CachedKey, OidcError, OpenIdDirectory},
+    backend::oidc::{CachedKey, Introspection, OidcError, OpaqueTokens, OpenIdDirectory},
 };
 use ahash::AHashMap;
 use jsonwebtoken::{
@@ -87,37 +87,7 @@ impl OpenIdDirectory {
                     check_token_type(&token_data.claims)?;
                     self.validate_scopes(&token_data.claims)?;
 
-                    let mut claims = token_data.claims;
-                    let missing_username =
-                        is_claim_missing(&claims, Some(&self.config.claim_email));
-                    let jwt_email = self.resolve_email(&claims).ok();
-                    let missing_profile =
-                        is_claim_missing(&claims, self.config.claim_name.as_ref())
-                            || is_claim_missing(&claims, self.config.claim_groups.as_ref());
-
-                    if jwt_email.is_none() || missing_username || missing_profile {
-                        match self.fetch_userinfo(token).await {
-                            Ok(userinfo) => {
-                                if let (Some(base), Value::Object(extra)) =
-                                    (claims.as_object_mut(), userinfo)
-                                {
-                                    for (key, value) in extra {
-                                        if base.get(&key).is_none_or(Value::is_null) {
-                                            base.insert(key, value);
-                                        }
-                                    }
-                                }
-                            }
-                            Err(err) if jwt_email.is_none() => return Err(err),
-                            Err(_) => {}
-                        }
-                    }
-
-                    let email = match jwt_email {
-                        Some(email) if !missing_username => email,
-                        _ => self.resolve_email(&claims)?,
-                    };
-                    return self.build_account(email, &claims);
+                    return self.account_from_claims(token, token_data.claims).await;
                 }
                 Err(e) => {
                     last_err = Some(e);
@@ -131,9 +101,146 @@ impl OpenIdDirectory {
         )))
     }
 
+    /// inbuxa: the account a validated token's claims name, with what they
+    /// lack taken from the user info endpoint (shared by JWTs and
+    /// introspected tokens).
+    async fn account_from_claims(
+        &self,
+        token: &str,
+        mut claims: serde_json::Value,
+    ) -> Result<Account, OidcError> {
+        let missing_username = is_claim_missing(&claims, Some(&self.config.claim_email));
+        let jwt_email = self.resolve_email(&claims).ok();
+        let missing_profile = is_claim_missing(&claims, self.config.claim_name.as_ref())
+            || is_claim_missing(&claims, self.config.claim_groups.as_ref());
+
+        if jwt_email.is_none() || missing_username || missing_profile {
+            match self.fetch_userinfo(token).await {
+                Ok(userinfo) => {
+                    if let (Some(base), Value::Object(extra)) = (claims.as_object_mut(), userinfo) {
+                        for (key, value) in extra {
+                            if base.get(&key).is_none_or(Value::is_null) {
+                                base.insert(key, value);
+                            }
+                        }
+                    }
+                }
+                Err(err) if jwt_email.is_none() => return Err(err),
+                Err(_) => {}
+            }
+        }
+
+        let email = match jwt_email {
+            Some(email) if !missing_username => email,
+            _ => self.resolve_email(&claims)?,
+        };
+        self.build_account(email, &claims)
+    }
+
     async fn authenticate_opaque(&self, token: &str) -> Result<Account, OidcError> {
-        let claims = self.fetch_userinfo(token).await?;
-        self.build_account(self.resolve_email(&claims)?, &claims)
+        // inbuxa: http-directory-services-13: by the directory's policy
+        match &self.config.opaque_tokens {
+            OpaqueTokens::Reject => Err(OidcError::TokenValidation(
+                "This directory accepts only JWT access tokens".to_string(),
+            )),
+            OpaqueTokens::Userinfo => {
+                let claims = self.fetch_userinfo(token).await?;
+                self.build_account(self.resolve_email(&claims)?, &claims)
+            }
+            OpaqueTokens::Introspection(introspection) => {
+                let claims = self.introspect(token, introspection).await?;
+                check_token_type(&claims)?;
+                self.validate_scopes(&claims)?;
+                self.account_from_claims(token, claims).await
+            }
+        }
+    }
+
+    /// inbuxa: http-directory-services-13: asks the provider about a token
+    /// (RFC 7662), and returns what it says only for an active token it
+    /// issued, for the required audience when one is set.
+    async fn introspect(
+        &self,
+        token: &str,
+        introspection: &Introspection,
+    ) -> Result<serde_json::Value, OidcError> {
+        let url = introspection
+            .url
+            .as_deref()
+            .ok_or_else(|| OidcError::Config("No introspection endpoint is known".to_string()))?;
+        let resp = self
+            .http
+            .post(url)
+            // RFC 6749, section 2.3.1: both form-encoded first
+            .basic_auth(
+                form_encode(&introspection.client_id),
+                Some(form_encode(&introspection.client_secret)),
+            )
+            .header(
+                reqwest::header::CONTENT_TYPE,
+                "application/x-www-form-urlencoded",
+            )
+            .body(format!(
+                "token={}&token_type_hint=access_token",
+                form_encode(token)
+            ))
+            .send()
+            .await
+            .map_err(|e| OidcError::Network(format!("Introspection request failed: {e}")))?;
+
+        // A refusal here is of this server's client credentials, not the token
+        let status = resp.status();
+        if !status.is_success() {
+            return Err(OidcError::Provider(format!(
+                "Introspection returned HTTP {status}"
+            )));
+        }
+        let bytes = resp
+            .bytes()
+            .await
+            .map_err(|e| OidcError::Provider(format!("Introspection HTTP error: {e}")))?;
+        let claims = serde_json::from_slice::<serde_json::Value>(&bytes)
+            .map_err(|e| OidcError::Provider(format!("Introspection JSON parse error: {e}")))?;
+
+        if claims.get("active") != Some(&Value::Bool(true)) {
+            return Err(OidcError::AuthorizationFailed(
+                "The provider says the token is not active".to_string(),
+            ));
+        }
+        let issuer = self.discovery.document.issuer.trim_end_matches('/');
+        if claims
+            .get("iss")
+            .and_then(|iss| iss.as_str())
+            .is_none_or(|iss| iss.trim_end_matches('/') != issuer)
+        {
+            return Err(OidcError::TokenValidation(
+                "The token was not issued by this directory's provider".to_string(),
+            ));
+        }
+        if let Some(audience) = &self.config.require_aud {
+            let found = match claims.get("aud") {
+                Some(Value::String(aud)) => aud == audience,
+                Some(Value::Array(auds)) => auds.iter().any(|aud| aud.as_str() == Some(audience)),
+                _ => false,
+            };
+            if !found {
+                return Err(OidcError::TokenValidation(
+                    "The token was not issued for the required audience".to_string(),
+                ));
+            }
+        }
+        if let Some(exp) = claims.get("exp").and_then(|exp| exp.as_u64())
+            && exp + 60
+                < std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map_or(0, |now| now.as_secs())
+        {
+            return Err(OidcError::TokenValidation(
+                "The token has expired".to_string(),
+            ));
+        }
+
+        Ok(claims)
     }
 
     async fn get_key(&self, kid: Option<&str>) -> Result<Vec<Arc<CachedKey>>, OidcError> {
@@ -409,6 +516,21 @@ pub(super) async fn fetch_jwks_keys(
     Ok(map)
 }
 
+/// inbuxa: application/x-www-form-urlencoded, for the introspection request.
+fn form_encode(value: &str) -> String {
+    let mut out = String::with_capacity(value.len());
+    for byte in value.bytes() {
+        match byte {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'*' | b'-' | b'.' | b'_' => {
+                out.push(byte as char)
+            }
+            b' ' => out.push('+'),
+            _ => out.push_str(&format!("%{byte:02X}")),
+        }
+    }
+    out
+}
+
 fn extract_scopes(claims: &serde_json::Value) -> Vec<String> {
     match claims.get("scope") {
         Some(serde_json::Value::String(s)) => s.split_whitespace().map(|s| s.to_string()).collect(),
@@ -482,6 +604,19 @@ MCowBQYDK2VwAyEAXNXjqSjw780GFXxFztdFBUMpxRoFqsYWN55FXnvncCE=
 -----END PUBLIC KEY-----";
 
     fn test_directory() -> OpenIdDirectory {
+        test_directory_at("https://idp.example.org")
+    }
+
+    /// The test directory, with its endpoints at `base`.
+    fn test_directory_at(base: &str) -> OpenIdDirectory {
+        test_directory_with(base, None, OpaqueTokens::Reject)
+    }
+
+    fn test_directory_with(
+        base: &str,
+        require_aud: Option<&str>,
+        opaque_tokens: OpaqueTokens,
+    ) -> OpenIdDirectory {
         let mut keys = AHashMap::new();
         keys.insert(
             "test".to_string(),
@@ -493,22 +628,24 @@ MCowBQYDK2VwAyEAXNXjqSjw780GFXxFztdFBUMpxRoFqsYWN55FXnvncCE=
         OpenIdDirectory {
             config: crate::backend::oidc::OidcConfig {
                 issue_url: "https://idp.example.org".to_string(),
-                require_aud: None,
+                require_aud: require_aud.map(str::to_string),
                 require_scopes: Vec::new(),
                 claim_email: "email".to_string(),
                 claim_name: None,
                 claim_groups: None,
                 default_domain: None,
+                opaque_tokens,
             },
             discovery: crate::backend::oidc::OidcDiscovery {
                 url: "https://idp.example.org".to_string(),
                 document: crate::backend::oidc::DiscoveryDocument {
                     issuer: "https://idp.example.org".to_string(),
-                    jwks_uri: "https://idp.example.org/jwks".to_string(),
-                    userinfo_endpoint: "https://idp.example.org/userinfo".to_string(),
-                    token_endpoint: "https://idp.example.org/token".to_string(),
-                    authorization_endpoint: "https://idp.example.org/auth".to_string(),
+                    jwks_uri: format!("{base}/jwks"),
+                    userinfo_endpoint: format!("{base}/userinfo"),
+                    token_endpoint: format!("{base}/token"),
+                    authorization_endpoint: format!("{base}/auth"),
                     end_session_endpoint: None,
+                    introspection_endpoint: None,
                     scopes_supported: None,
                     claims_supported: None,
                     code_challenge_methods_supported: None,
@@ -541,6 +678,52 @@ MCowBQYDK2VwAyEAXNXjqSjw780GFXxFztdFBUMpxRoFqsYWN55FXnvncCE=
             &jsonwebtoken::EncodingKey::from_ed_pem(TEST_KEY.as_bytes()).unwrap(),
         )
         .unwrap()
+    }
+
+    /// A provider on 127.0.0.1 that answers every request with what
+    /// `answer` returns for it (the request line, headers and body).
+    async fn provider(answer: impl Fn(&str) -> (u16, String) + Send + Sync + 'static) -> String {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        let answer = Arc::new(answer);
+        tokio::spawn(async move {
+            while let Ok((mut stream, _)) = listener.accept().await {
+                let answer = answer.clone();
+                tokio::spawn(async move {
+                    let mut request = Vec::new();
+                    let mut buf = [0u8; 4096];
+                    loop {
+                        let read = stream.read(&mut buf).await.unwrap_or(0);
+                        if read == 0 {
+                            break;
+                        }
+                        request.extend_from_slice(&buf[..read]);
+                        if let Some(end) = request.windows(4).position(|w| w == b"\r\n\r\n") {
+                            let head = String::from_utf8_lossy(&request[..end]).to_lowercase();
+                            let length = head
+                                .lines()
+                                .find_map(|line| line.strip_prefix("content-length:"))
+                                .and_then(|value| value.trim().parse::<usize>().ok())
+                                .unwrap_or(0);
+                            if request.len() >= end + 4 + length {
+                                break;
+                            }
+                        }
+                    }
+                    let (status, body) = answer(&String::from_utf8_lossy(&request));
+                    // No Content-Length: the body ends when the connection does
+                    let head = format!(
+                        "HTTP/1.1 {status} Status\r\nContent-Type: application/json\r\nConnection: close\r\n\r\n"
+                    );
+                    let _ = stream.write_all(head.as_bytes()).await;
+                    let _ = stream.write_all(body.as_bytes()).await;
+                    let _ = stream.shutdown().await;
+                });
+            }
+        });
+        base
     }
 
     async fn sign_in(directory: &OpenIdDirectory, token: String) -> trc::Result<Account> {
@@ -585,6 +768,129 @@ MCowBQYDK2VwAyEAXNXjqSjw780GFXxFztdFBUMpxRoFqsYWN55FXnvncCE=
                 "{claims} must not sign in"
             );
         }
+    }
+
+    // http-directory-services-13: any token the provider issued, to any
+    // application, passes its user info endpoint, so a new directory
+    // refuses tokens that aren't JWTs
+    #[tokio::test]
+    async fn new_directories_refuse_opaque_tokens() {
+        let base = provider(|_| (200, json!({"email": "john@example.org"}).to_string())).await;
+        let directory = test_directory_at(&base);
+        assert!(
+            sign_in(&directory, "an-opaque-token".to_string())
+                .await
+                .is_err(),
+            "an opaque token signed in through the user info endpoint"
+        );
+
+        // ... and a directory saved before the policy keeps doing so
+        let directory = test_directory_with(&base, None, OpaqueTokens::Userinfo);
+        assert_eq!(
+            sign_in(&directory, "an-opaque-token".to_string())
+                .await
+                .map(|account| account.email)
+                .ok()
+                .as_deref(),
+            Some("john@example.org")
+        );
+    }
+
+    // http-directory-services-13: introspection signs in only an active
+    // token this provider issued for the required audience
+    #[tokio::test]
+    async fn introspection_checks_what_the_provider_says() {
+        let base = provider(|request| {
+            let (head, body) = request.split_once("\r\n\r\n").unwrap_or_default();
+            // RFC 6749 2.3.1: id and secret form-encoded, then Basic
+            let authorized = head.lines().any(|line| {
+                line.eq_ignore_ascii_case(&format!(
+                    "authorization: Basic {}",
+                    base64::Engine::encode(
+                        &base64::engine::general_purpose::STANDARD,
+                        "inbuxa:se+cret%2F%2B"
+                    )
+                ))
+            });
+            if !head.starts_with("POST /introspect ") || !authorized {
+                return (401, json!({"error": "invalid_client"}).to_string());
+            }
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_secs();
+            let mut claims = json!({
+                "active": true,
+                "iss": "https://idp.example.org",
+                "aud": ["inbuxa", "account"],
+                "exp": now + 300,
+                "email": "john@example.org",
+            });
+            match body
+                .strip_prefix("token=")
+                .and_then(|body| body.split('&').next())
+                .unwrap_or_default()
+            {
+                "good%2Btoken" => {}
+                "inactive" => claims = json!({"active": false}),
+                "foreign" => claims["iss"] = json!("https://other.example.org"),
+                "anonymous" => {
+                    claims.as_object_mut().unwrap().remove("iss");
+                }
+                "elsewhere" => claims["aud"] = json!("another-app"),
+                "unaddressed" => {
+                    claims.as_object_mut().unwrap().remove("aud");
+                }
+                "refresh" => claims["typ"] = json!("Refresh"),
+                "expired" => claims["exp"] = json!(1),
+                _ => claims = json!({"active": "true"}),
+            }
+            (200, claims.to_string())
+        })
+        .await;
+        let introspection = |client_secret: &str| {
+            OpaqueTokens::Introspection(Introspection {
+                url: Some(format!("{base}/introspect")),
+                client_id: "inbuxa".to_string(),
+                client_secret: client_secret.to_string(),
+            })
+        };
+        let directory = test_directory_with(&base, Some("inbuxa"), introspection("se cret/+"));
+
+        assert_eq!(
+            sign_in(&directory, "good+token".to_string())
+                .await
+                .map(|account| account.email)
+                .ok()
+                .as_deref(),
+            Some("john@example.org")
+        );
+        for token in [
+            "inactive",
+            "foreign",
+            "anonymous",
+            "elsewhere",
+            "unaddressed",
+            "refresh",
+            "expired",
+            "not-a-boolean",
+        ] {
+            let err = sign_in(&directory, token.to_string()).await.unwrap_err();
+            assert!(
+                err.matches(trc::EventType::Auth(AuthEvent::Failed)),
+                "{token}: {err:?}"
+            );
+        }
+
+        // A refusal of the server's own credentials is not the person's fault
+        let directory = test_directory_with(&base, Some("inbuxa"), introspection("wrong"));
+        let err = sign_in(&directory, "good+token".to_string())
+            .await
+            .unwrap_err();
+        assert!(
+            err.matches(trc::EventType::Auth(AuthEvent::Error)),
+            "{err:?}"
+        );
     }
 
     #[test]

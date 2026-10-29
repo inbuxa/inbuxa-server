@@ -9,10 +9,11 @@
 use crate::Directory;
 use crate::backend::oidc::lookup::fetch_jwks_keys;
 use crate::backend::oidc::{
-    CachedKey, DiscoveryDocument, JwksCache, OidcConfig, OidcDiscovery, OidcError, OpenIdDirectory,
+    CachedKey, DiscoveryDocument, Introspection, JwksCache, OidcConfig, OidcDiscovery, OidcError,
+    OpaqueTokens, OpenIdDirectory,
 };
 use ahash::AHashMap;
-use registry::schema::structs;
+use registry::schema::{enums::OidcOpaqueTokens, structs};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::RwLock;
@@ -21,6 +22,20 @@ use utils::Client;
 
 const DISCOVERY_RETRY_FOR: Duration = Duration::from_secs(30);
 const DISCOVERY_RETRY_INTERVAL: Duration = Duration::from_secs(3);
+
+/// inbuxa: http-directory-services-13: what a bearer token that isn't a JWT
+/// signs in by. Unset, as on a new directory: introspection when an
+/// introspection endpoint is set, else nothing. A directory saved before the
+/// setting existed reads as userinfo, which it always used.
+pub fn opaque_token_policy(config: &structs::OidcDirectory) -> OidcOpaqueTokens {
+    config
+        .opaque_tokens
+        .unwrap_or(if config.introspection_url.is_some() {
+            OidcOpaqueTokens::Introspection
+        } else {
+            OidcOpaqueTokens::Reject
+        })
+}
 
 impl OpenIdDirectory {
     pub async fn open(config: structs::OidcDirectory) -> Result<Directory, String> {
@@ -38,6 +53,27 @@ impl OpenIdDirectory {
             );
         }
 
+        let opaque_tokens = match opaque_token_policy(&config) {
+            OidcOpaqueTokens::Reject => OpaqueTokens::Reject,
+            OidcOpaqueTokens::Userinfo => OpaqueTokens::Userinfo,
+            OidcOpaqueTokens::Introspection => OpaqueTokens::Introspection(Introspection {
+                url: config.introspection_url,
+                client_id: config.introspection_client_id.ok_or_else(|| {
+                    "Opaque tokens are checked by introspection, which needs a client ID"
+                        .to_string()
+                })?,
+                client_secret: config
+                    .introspection_client_secret
+                    .secret()
+                    .await?
+                    .map(|secret| secret.into_owned())
+                    .ok_or_else(|| {
+                        "Opaque tokens are checked by introspection, which needs a client secret"
+                            .to_string()
+                    })?,
+            }),
+        };
+
         Self::new(OidcConfig {
             issue_url: config.issuer_url,
             require_aud: config.require_audience,
@@ -46,13 +82,14 @@ impl OpenIdDirectory {
             claim_name: config.claim_name,
             claim_groups: config.claim_groups,
             default_domain: config.username_domain,
+            opaque_tokens,
         })
         .await
         .map(Directory::OpenId)
         .map_err(|err| err.to_string())
     }
 
-    pub async fn new(config: OidcConfig) -> Result<Self, OidcError> {
+    pub async fn new(mut config: OidcConfig) -> Result<Self, OidcError> {
         let http = utils::http::http_client_builder(false)
             .user_agent("inbuxa/1.0") // types::brand!(); this crate does not depend on types
             .timeout(Duration::from_secs(30))
@@ -77,6 +114,19 @@ impl OpenIdDirectory {
                 Err(err) => return Err(err),
             }
         };
+
+        // inbuxa: http-directory-services-13
+        if let OpaqueTokens::Introspection(introspection) = &mut config.opaque_tokens
+            && introspection.url.is_none()
+        {
+            introspection.url = Some(document.introspection_endpoint.clone().ok_or_else(|| {
+                OidcError::Config(
+                    "Opaque tokens are checked by introspection, but no introspection endpoint \
+                     is set and the provider's discovery document names none"
+                        .to_string(),
+                )
+            })?);
+        }
 
         Ok(Self {
             discovery: OidcDiscovery {
@@ -189,5 +239,37 @@ impl OpenIdDirectory {
         let keys = fetch_jwks_keys(http, &discovery.jwks_uri).await?;
 
         Ok((discovery, keys))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn new_directories_refuse_opaque_tokens_unless_they_name_an_endpoint() {
+        let new = structs::OidcDirectory::default();
+        assert_eq!(opaque_token_policy(&new), OidcOpaqueTokens::Reject);
+        assert_eq!(
+            opaque_token_policy(&structs::OidcDirectory {
+                introspection_url: Some("https://idp.example.org/introspect".to_string()),
+                ..new.clone()
+            }),
+            OidcOpaqueTokens::Introspection
+        );
+        for chosen in [
+            OidcOpaqueTokens::Reject,
+            OidcOpaqueTokens::Userinfo,
+            OidcOpaqueTokens::Introspection,
+        ] {
+            assert_eq!(
+                opaque_token_policy(&structs::OidcDirectory {
+                    opaque_tokens: Some(chosen),
+                    introspection_url: Some("https://idp.example.org/introspect".to_string()),
+                    ..new.clone()
+                }),
+                chosen
+            );
+        }
     }
 }

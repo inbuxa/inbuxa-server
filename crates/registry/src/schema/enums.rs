@@ -1472,6 +1472,17 @@ pub enum NetworkListenerProtocol {
     ManageSieve = 5,
 }
 
+// inbuxa: http-directory-services-13: what an OIDC directory does with a
+// bearer token that isn't a JWT
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
+#[repr(u16)]
+pub enum OidcOpaqueTokens {
+    #[default]
+    Reject = 0,
+    Userinfo = 1,
+    Introspection = 2,
+}
+
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
 #[repr(u16)]
 pub enum OvhEndpoint {
