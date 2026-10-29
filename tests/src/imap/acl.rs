@@ -406,6 +406,17 @@ pub async fn test(
         .await
         .assert_count("dedup test", 0);
 
+    // inbuxa: Bill has Jane's Inbox selected when she stops sharing it
+    imap_bill
+        .send("SELECT \"Shared Folders/jane.smith@example.com/INBOX\"")
+        .await;
+    imap_bill.assert_read(Type::Tagged, ResponseType::Ok).await;
+    imap_bill.send("UID FETCH 1:* (PREVIEW)").await;
+    imap_bill
+        .assert_read(Type::Tagged, ResponseType::Ok)
+        .await
+        .assert_contains("dedup test");
+
     // Jane stops sharing with Bill, and removes Insert access to John
     imap_jane.send("DELETEACL INBOX foobar@example.com").await;
     imap_jane.assert_read(Type::Tagged, ResponseType::Ok).await;
@@ -419,6 +430,18 @@ pub async fn test(
         .await
         .assert_contains("\"jdoe@example.com\" rl")
         .assert_count("foobar@example.com", 0);
+
+    // inbuxa: from then on Bill gets nothing more from the selected mailbox
+    for command in ["UID FETCH 1:* (PREVIEW)", "UID SEARCH ALL"] {
+        imap_bill.send(command).await;
+        imap_bill
+            .assert_read(Type::Tagged, ResponseType::No)
+            .await
+            .assert_contains("NOPERM")
+            .assert_count("dedup test", 0);
+    }
+    imap_bill.send("UNSELECT").await;
+    imap_bill.assert_read(Type::Tagged, ResponseType::Ok).await;
 
     // Bill should not have access to Jane's Inbox anymore
     imap_bill.send("LIST \"\" \"*\"").await;

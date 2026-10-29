@@ -2,6 +2,8 @@
  * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
+ *
+ * Modified by Coffey Labs in 2026 for INBUXA.
  */
 
 use super::{Account, MailboxId, MailboxSync, Session, SessionData};
@@ -434,5 +436,22 @@ impl<T: SessionStream> SessionData<T> {
                         .caused_by(trc::location!())
                         .details("Mailbox no longer exists.")
                 })?)
+    }
+
+    /// inbuxa: whether a selected mailbox can still be read. A mailbox in
+    /// another account stops being readable while selected when the share
+    /// is revoked (or the mailbox is deleted), and from then on none of its
+    /// messages, flags or counts are served.
+    pub async fn is_mailbox_readable(&self, mailbox: &MailboxId) -> trc::Result<bool> {
+        if mailbox.account_id == self.account_id {
+            return Ok(true);
+        }
+        match self
+            .check_mailbox_acl(mailbox.account_id, mailbox.mailbox_id, Acl::ReadItems)
+            .await
+        {
+            Err(err) if err.matches(trc::EventType::Imap(trc::ImapEvent::Error)) => Ok(false),
+            result => result,
+        }
     }
 }
