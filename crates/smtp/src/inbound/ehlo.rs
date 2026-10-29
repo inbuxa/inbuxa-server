@@ -2,13 +2,12 @@
  * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
+ *
+ * Modified by Coffey Labs in 2026 for INBUXA.
  */
 
 use crate::{core::Session, scripts::ScriptResult};
-use common::{
-    config::smtp::session::{Mechanism, Stage},
-    network::SessionStream,
-};
+use common::{config::smtp::session::Stage, network::SessionStream};
 use mail_auth::{
     SpfResult,
     spf::verify::{HasValidLabels, SpfParameters},
@@ -149,7 +148,6 @@ impl<T: SessionStream> Session<T> {
             response.capabilities |= EXT_START_TLS;
         }
         let ec = &self.server.core.smtp.session.extensions;
-        let ac = &self.server.core.smtp.session.auth;
         let dc = &self.server.core.smtp.session.data;
 
         // Pipelining
@@ -214,12 +212,8 @@ impl<T: SessionStream> Session<T> {
 
         // Authentication
         if !self.is_authenticated() {
-            response.auth_mechanisms = self
-                .server
-                .eval_if::<Mechanism, _>(&ac.mechanisms, self, self.data.session_id)
-                .await
-                .unwrap_or_default()
-                .into();
+            // inbuxa: no bearer token mechanism on clear text
+            response.auth_mechanisms = self.sasl_mechanisms().await;
             if response.auth_mechanisms != 0 {
                 response.capabilities |= EXT_AUTH;
             }
