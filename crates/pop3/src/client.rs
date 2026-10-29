@@ -205,10 +205,9 @@ impl<T: SessionStream> Session<T> {
     ) -> trc::Result<Command<String, Mechanism>> {
         match &command {
             Command::Capa | Command::Quit | Command::Noop => Ok(command),
-            Command::Auth {
-                mechanism: Mechanism::Plain,
-                ..
-            }
+            // inbuxa: every mechanism sends a credential (a bearer token is
+            // one too), so all of them follow the plain-text policy
+            Command::Auth { .. }
             | Command::User { .. }
             | Command::Pass { .. }
             | Command::Apop { .. } => {
@@ -226,15 +225,6 @@ impl<T: SessionStream> Session<T> {
                             .into_err()
                             .details("Cannot authenticate over plain-text."))
                     }
-                } else {
-                    Err(trc::Pop3Event::Error
-                        .into_err()
-                        .details("Already authenticated."))
-                }
-            }
-            Command::Auth { .. } => {
-                if let State::NotAuthenticated { .. } = &self.state {
-                    Ok(command)
                 } else {
                     Err(trc::Pop3Event::Error
                         .into_err()

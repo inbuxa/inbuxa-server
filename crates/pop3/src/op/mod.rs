@@ -2,6 +2,8 @@
  * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
+ *
+ * Modified by Coffey Labs in 2026 for INBUXA.
  */
 
 use common::network::SessionStream;
@@ -21,7 +23,8 @@ impl<T: SessionStream> Session<T> {
         let mechanisms = if self.stream.is_tls() || self.server.core.imap.allow_plain_auth {
             vec![Mechanism::Plain, Mechanism::OAuthBearer, Mechanism::XOauth2]
         } else {
-            vec![Mechanism::OAuthBearer, Mechanism::XOauth2]
+            // inbuxa: no mechanism is offered where none would be accepted
+            vec![]
         };
 
         trc::event!(
