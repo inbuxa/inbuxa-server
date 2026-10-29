@@ -13,6 +13,7 @@ use crate::{
 use ahash::AHashMap;
 use jsonwebtoken::{
     Algorithm, DecodingKey, Header, Validation, decode, decode_header,
+    errors::ErrorKind,
     jwk::{self, JwkSet},
 };
 use reqwest::Client;
@@ -20,6 +21,14 @@ use serde_json::Value;
 use std::time::Instant;
 use std::{sync::Arc, time::Duration};
 use trc::AuthEvent;
+
+/// How often the provider's keys may be fetched again for a token they don't
+/// verify.
+const KEY_REFRESH_INTERVAL: Duration = Duration::from_secs(300);
+
+/// inbuxa: http-directory-services-13: what a provider sends back is read up
+/// to this much.
+const MAX_RESPONSE_SIZE: usize = 1024 * 1024;
 
 impl OpenIdDirectory {
     pub async fn authenticate(&self, credentials: &Credentials) -> trc::Result<Account> {
@@ -59,46 +68,72 @@ impl OpenIdDirectory {
             ));
         }
 
-        let candidates = self.get_key(header.kid.as_deref()).await?;
-        let mut last_err = None;
-        for cached in &candidates {
-            let dk = &cached.decoding_key;
-            let alg = cached.algorithm;
-            let mut validation = Validation::new(alg);
+        let mut candidates = self.get_key(header.kid.as_deref()).await?;
+        let mut refreshed = false;
+        loop {
+            let mut last_err = None;
+            // inbuxa: whether every key failed only for being the wrong key
+            let mut wrong_keys = true;
+            for cached in &candidates {
+                let dk = &cached.decoding_key;
+                let alg = cached.algorithm;
+                let mut validation = Validation::new(alg);
 
-            if let Some(aud) = &self.config.require_aud {
-                validation.set_audience(&[aud]);
-            } else {
-                validation.validate_aud = false;
-            }
+                if let Some(aud) = &self.config.require_aud {
+                    validation.set_audience(&[aud]);
+                } else {
+                    validation.validate_aud = false;
+                }
 
-            validation.set_issuer(&[&self.discovery.document.issuer]);
-            validation.leeway = 60;
+                validation.set_issuer(&[&self.discovery.document.issuer]);
+                validation.leeway = 60;
 
-            match decode::<serde_json::Value>(token, dk, &validation) {
-                Ok(token_data) => {
-                    if self.config.require_aud.is_some() && token_data.claims.get("aud").is_none() {
-                        last_err = Some(jsonwebtoken::errors::Error::from(
-                            jsonwebtoken::errors::ErrorKind::InvalidAudience,
-                        ));
-                        continue;
+                match decode::<serde_json::Value>(token, dk, &validation) {
+                    Ok(token_data) => {
+                        if self.config.require_aud.is_some()
+                            && token_data.claims.get("aud").is_none()
+                        {
+                            last_err = Some(jsonwebtoken::errors::Error::from(
+                                jsonwebtoken::errors::ErrorKind::InvalidAudience,
+                            ));
+                            wrong_keys = false;
+                            continue;
+                        }
+
+                        check_token_type(&token_data.claims)?;
+                        self.validate_scopes(&token_data.claims)?;
+
+                        return self.account_from_claims(token, token_data.claims).await;
                     }
-
-                    check_token_type(&token_data.claims)?;
-                    self.validate_scopes(&token_data.claims)?;
-
-                    return self.account_from_claims(token, token_data.claims).await;
-                }
-                Err(e) => {
-                    last_err = Some(e);
+                    Err(e) => {
+                        wrong_keys &= matches!(
+                            e.kind(),
+                            ErrorKind::InvalidSignature | ErrorKind::InvalidAlgorithm
+                        );
+                        last_err = Some(e);
+                    }
                 }
             }
-        }
 
-        Err(OidcError::TokenValidation(format!(
-            "JWT validation failed: {}",
-            last_err.map(|e| e.to_string()).unwrap_or_default()
-        )))
+            // inbuxa: http-directory-services-13: a token without a kid that
+            // no cached key verifies may be signed with a key the provider
+            // rotated in, so the keys are fetched again, once, as for an
+            // unknown kid (and as rarely)
+            if header.kid.is_none()
+                && !refreshed
+                && wrong_keys
+                && let Some(keys) = self.refresh_keys().await
+            {
+                candidates = keys;
+                refreshed = true;
+                continue;
+            }
+
+            return Err(OidcError::TokenValidation(format!(
+                "JWT validation failed: {}",
+                last_err.map(|e| e.to_string()).unwrap_or_default()
+            )));
+        }
     }
 
     /// inbuxa: the account a validated token's claims name, with what they
@@ -195,10 +230,7 @@ impl OpenIdDirectory {
                 "Introspection returned HTTP {status}"
             )));
         }
-        let bytes = resp
-            .bytes()
-            .await
-            .map_err(|e| OidcError::Provider(format!("Introspection HTTP error: {e}")))?;
+        let bytes = read_body(resp, "Introspection").await?;
         let claims = serde_json::from_slice::<serde_json::Value>(&bytes)
             .map_err(|e| OidcError::Provider(format!("Introspection JSON parse error: {e}")))?;
 
@@ -252,7 +284,7 @@ impl OpenIdDirectory {
                     return Ok(vec![cached.clone()]);
                 }
 
-                if guard.last_updated.elapsed() < Duration::from_secs(300) {
+                if guard.last_updated.elapsed() < KEY_REFRESH_INTERVAL {
                     return Err(OidcError::TokenValidation("Unknown key id".to_string()));
                 }
             } else {
@@ -291,6 +323,35 @@ impl OpenIdDirectory {
         }
     }
 
+    /// inbuxa: every key, fetched again unless that was tried within
+    /// `KEY_REFRESH_INTERVAL`; None when it was, or the fetch failed (a
+    /// failed fetch also waits out the interval, so tokens can't make the
+    /// server hammer a struggling provider).
+    async fn refresh_keys(&self) -> Option<Vec<Arc<CachedKey>>> {
+        {
+            let mut guard = self.cache.write().await;
+            if guard.last_updated.elapsed() < KEY_REFRESH_INTERVAL {
+                return None;
+            }
+            guard.last_updated = Instant::now();
+        }
+        match fetch_jwks_keys(&self.http, &self.discovery.document.jwks_uri).await {
+            Ok(keys) => {
+                let all = keys.values().cloned().collect();
+                self.cache.write().await.keys = keys;
+                Some(all)
+            }
+            Err(err) => {
+                trc::event!(
+                    Auth(AuthEvent::Warning),
+                    Url = self.discovery.document.jwks_uri.clone(),
+                    Reason = format!("JWKS refresh failed: {err}")
+                );
+                None
+            }
+        }
+    }
+
     async fn fetch_userinfo(&self, token: &str) -> Result<serde_json::Value, OidcError> {
         let resp = self
             .http
@@ -302,7 +363,10 @@ impl OpenIdDirectory {
 
         let status = resp.status();
         if status == reqwest::StatusCode::UNAUTHORIZED || status == reqwest::StatusCode::FORBIDDEN {
-            let reason = resp.text().await.unwrap_or_default();
+            let reason = read_body(resp, "UserInfo")
+                .await
+                .map(|body| String::from_utf8_lossy(&body).into_owned())
+                .unwrap_or_default();
             return Err(OidcError::AuthorizationFailed(format!(
                 "Token rejected by UserInfo endpoint with status {status}: {reason}"
             )));
@@ -313,10 +377,7 @@ impl OpenIdDirectory {
             )));
         }
 
-        let bytes = resp
-            .bytes()
-            .await
-            .map_err(|e| OidcError::Provider(format!("UserInfo HTTP error: {e}")))?;
+        let bytes = read_body(resp, "UserInfo").await?;
 
         serde_json::from_slice::<serde_json::Value>(&bytes)
             .map_err(|e| OidcError::Provider(format!("UserInfo JSON parse error: {e}")))
@@ -403,16 +464,16 @@ pub(super) async fn fetch_jwks_keys(
     http: &Client,
     jwks_uri: &str,
 ) -> Result<AHashMap<String, Arc<CachedKey>>, OidcError> {
-    let jwks_bytes = http
-        .get(jwks_uri)
-        .send()
-        .await
-        .map_err(|e| OidcError::Network(format!("JWKS fetch failed: {e}")))?
-        .error_for_status()
-        .map_err(|e| OidcError::Provider(format!("JWKS HTTP error: {e}")))?
-        .bytes()
-        .await
-        .map_err(|e| OidcError::Provider(format!("JWKS HTTP error: {e}")))?;
+    let jwks_bytes = read_body(
+        http.get(jwks_uri)
+            .send()
+            .await
+            .map_err(|e| OidcError::Network(format!("JWKS fetch failed: {e}")))?
+            .error_for_status()
+            .map_err(|e| OidcError::Provider(format!("JWKS HTTP error: {e}")))?,
+        "JWKS",
+    )
+    .await?;
     let jwks: JwkSet = serde_json::from_slice(&jwks_bytes)
         .map_err(|e| OidcError::Provider(format!("JWKS JSON parse error: {e}")))?;
 
@@ -514,6 +575,37 @@ pub(super) async fn fetch_jwks_keys(
     }
 
     Ok(map)
+}
+
+/// inbuxa: http-directory-services-13: a response body, refused once it
+/// passes `MAX_RESPONSE_SIZE` instead of read whole.
+pub(super) async fn read_body(
+    mut resp: reqwest::Response,
+    what: &str,
+) -> Result<Vec<u8>, OidcError> {
+    let too_large = || {
+        OidcError::Provider(format!(
+            "{what} response is larger than {MAX_RESPONSE_SIZE} bytes"
+        ))
+    };
+    if resp
+        .content_length()
+        .is_some_and(|length| length > MAX_RESPONSE_SIZE as u64)
+    {
+        return Err(too_large());
+    }
+    let mut body = Vec::new();
+    while let Some(chunk) = resp
+        .chunk()
+        .await
+        .map_err(|e| OidcError::Provider(format!("{what} HTTP error: {e}")))?
+    {
+        if body.len() + chunk.len() > MAX_RESPONSE_SIZE {
+            return Err(too_large());
+        }
+        body.extend_from_slice(&chunk);
+    }
+    Ok(body)
 }
 
 /// inbuxa: application/x-www-form-urlencoded, for the introspection request.
@@ -891,6 +983,126 @@ MCowBQYDK2VwAyEAXNXjqSjw780GFXxFztdFBUMpxRoFqsYWN55FXnvncCE=
             err.matches(trc::EventType::Auth(AuthEvent::Error)),
             "{err:?}"
         );
+    }
+
+    /// A body over 1 MiB that is otherwise a good answer.
+    fn oversized(mut body: serde_json::Value) -> String {
+        body["padding"] = json!("x".repeat(1024 * 1024));
+        body.to_string()
+    }
+
+    // http-directory-services-13: what the provider sends back is read up to
+    // 1 MiB, never whole
+    #[tokio::test]
+    async fn provider_answers_are_capped() {
+        let base = provider(|request| {
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_secs();
+            let body = if request.starts_with("POST /introspect ") {
+                json!({
+                    "active": true,
+                    "iss": "https://idp.example.org",
+                    "exp": now + 300,
+                    "email": "john@example.org",
+                })
+            } else if request.starts_with("GET /jwks ") {
+                json!({"keys": []})
+            } else {
+                json!({"email": "john@example.org"})
+            };
+            (200, oversized(body))
+        })
+        .await;
+
+        let directory = test_directory_with(&base, None, OpaqueTokens::Userinfo);
+        assert!(
+            sign_in(&directory, "an-opaque-token".to_string())
+                .await
+                .is_err(),
+            "user info"
+        );
+        let directory = test_directory_with(
+            &base,
+            None,
+            OpaqueTokens::Introspection(Introspection {
+                url: Some(format!("{base}/introspect")),
+                client_id: "inbuxa".to_string(),
+                client_secret: "secret".to_string(),
+            }),
+        );
+        assert!(
+            sign_in(&directory, "an-opaque-token".to_string())
+                .await
+                .is_err(),
+            "introspection"
+        );
+        assert!(
+            fetch_jwks_keys(&Client::new(), &format!("{base}/jwks"))
+                .await
+                .is_err(),
+            "JWKS"
+        );
+    }
+
+    // http-directory-services-13: a token without a kid that no cached key
+    // verifies fetches the JWKS again, as an unknown kid does, so a provider
+    // that rotated its only key keeps working
+    #[tokio::test]
+    async fn tokens_without_a_kid_refresh_the_keys_once() {
+        const ROTATED_KEY: &str = "-----BEGIN PRIVATE KEY-----
+MC4CAQAwBQYDK2VwBCIEIGJCOx1xrTLtywhRlvhdTe5Sm7UNQlVFXzqomt76r12T
+-----END PRIVATE KEY-----";
+        let fetches = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let counter = fetches.clone();
+        let base = provider(move |_| {
+            counter.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            let key = json!({
+                "kty": "OKP",
+                "crv": "Ed25519",
+                "x": "b2naX3qFwv_RDOHZMPsYSii82JicgY3srqJSZfranzE",
+                "use": "sig",
+            });
+            (200, json!({"keys": [key]}).to_string())
+        })
+        .await;
+        let directory = test_directory_at(&base);
+        directory.cache.write().await.last_updated = Instant::now() - Duration::from_secs(600);
+
+        let rotated = |claims: serde_json::Value| {
+            let mut claims = claims;
+            claims["iss"] = json!("https://idp.example.org");
+            claims["exp"] = json!(
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_secs()
+                    + 300
+            );
+            claims["email"] = json!("john@example.org");
+            jsonwebtoken::encode(
+                &jsonwebtoken::Header::new(Algorithm::EdDSA),
+                &claims,
+                &jsonwebtoken::EncodingKey::from_ed_pem(ROTATED_KEY.as_bytes()).unwrap(),
+            )
+            .unwrap()
+        };
+        assert_eq!(
+            sign_in(&directory, rotated(json!({})))
+                .await
+                .map(|account| account.email)
+                .ok()
+                .as_deref(),
+            Some("john@example.org")
+        );
+        assert_eq!(fetches.load(std::sync::atomic::Ordering::Relaxed), 1);
+
+        // A forged one right after doesn't fetch again
+        let mut forged = rotated(json!({}));
+        forged.replace_range(forged.len() - 4.., "AAAA");
+        assert!(sign_in(&directory, forged).await.is_err());
+        assert_eq!(fetches.load(std::sync::atomic::Ordering::Relaxed), 1);
     }
 
     #[test]

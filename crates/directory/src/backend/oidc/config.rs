@@ -7,7 +7,7 @@
  */
 
 use crate::Directory;
-use crate::backend::oidc::lookup::fetch_jwks_keys;
+use crate::backend::oidc::lookup::{fetch_jwks_keys, read_body};
 use crate::backend::oidc::{
     CachedKey, DiscoveryDocument, Introspection, JwksCache, OidcConfig, OidcDiscovery, OidcError,
     OpaqueTokens, OpenIdDirectory,
@@ -150,16 +150,16 @@ impl OpenIdDirectory {
             "{}/.well-known/openid-configuration",
             config.issue_url.trim_end_matches('/')
         );
-        let discovery_bytes = http
-            .get(&discovery_url)
-            .send()
-            .await
-            .map_err(|e| OidcError::Network(format!("Discovery fetch failed: {e}")))?
-            .error_for_status()
-            .map_err(|e| OidcError::Provider(format!("Discovery HTTP error: {e}")))?
-            .bytes()
-            .await
-            .map_err(|e| OidcError::Provider(format!("Discovery HTTP error: {e}")))?;
+        let discovery_bytes = read_body(
+            http.get(&discovery_url)
+                .send()
+                .await
+                .map_err(|e| OidcError::Network(format!("Discovery fetch failed: {e}")))?
+                .error_for_status()
+                .map_err(|e| OidcError::Provider(format!("Discovery HTTP error: {e}")))?,
+            "Discovery",
+        )
+        .await?;
         let discovery: DiscoveryDocument = serde_json::from_slice(&discovery_bytes)
             .map_err(|e| OidcError::Provider(format!("Discovery JSON parse error: {e}")))?;
 
