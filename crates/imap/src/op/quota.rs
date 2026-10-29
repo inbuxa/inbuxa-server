@@ -2,6 +2,8 @@
  * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
+ *
+ * Modified by Coffey Labs in 2026 for INBUXA.
  */
 
 /*
@@ -11,7 +13,7 @@
  */
 
 use crate::{
-    core::{Session, SessionData},
+    core::{Session, SessionData, gate::OpKind},
     op::ImapContext,
     spawn_op,
 };
@@ -32,10 +34,11 @@ impl<T: SessionStream> Session<T> {
     pub async fn handle_get_quota(&mut self, request: Request<Command>) -> trc::Result<()> {
         // Validate access
         self.assert_has_permission(Permission::ImapStatus)?;
+        let permit = self.op_gate.acquire(OpKind::Read).await;
 
         let data = self.state.session_data();
 
-        spawn_op!(data, {
+        spawn_op!(data, permit, {
             match request.parse_get_quota() {
                 Ok(argument) => match data.get_quota(argument).await {
                     Ok(response) => {
@@ -55,11 +58,12 @@ impl<T: SessionStream> Session<T> {
     pub async fn handle_get_quota_root(&mut self, request: Request<Command>) -> trc::Result<()> {
         // Validate access
         self.assert_has_permission(Permission::ImapStatus)?;
+        let permit = self.op_gate.acquire(OpKind::Read).await;
 
         let data = self.state.session_data();
         let is_utf8 = self.is_utf8;
 
-        spawn_op!(data, {
+        spawn_op!(data, permit, {
             match request.parse_get_quota_root(is_utf8) {
                 Ok(argument) => match data.get_quota_root(argument).await {
                     Ok(response) => {

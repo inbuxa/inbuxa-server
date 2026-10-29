@@ -170,6 +170,7 @@ impl<T: SessionStream> Session<T> {
             session_id: session.session_id,
             in_flight: session.in_flight,
             remote_addr: session.remote_ip,
+            op_gate: super::gate::OpGate::new(),
             stream_rx,
             stream_tx: Arc::new(tokio::sync::Mutex::new(stream_tx)),
         })
@@ -237,6 +238,7 @@ impl<T: SessionStream> Session<T> {
             session_id: self.session_id,
             in_flight: self.in_flight,
             remote_addr: self.remote_addr,
+            op_gate: self.op_gate,
             stream_rx,
             stream_tx,
         })

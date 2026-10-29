@@ -2,11 +2,13 @@
  * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
+ *
+ * Modified by Coffey Labs in 2026 for INBUXA.
  */
 
 use super::ImapContext;
 use crate::{
-    core::{MailboxId, SelectedMailbox, Session, SessionData},
+    core::{MailboxId, SelectedMailbox, Session, SessionData, gate::OpKind},
     spawn_op,
 };
 use ahash::AHashMap;
@@ -58,6 +60,7 @@ impl<T: SessionStream> Session<T> {
         } else {
             Permission::ImapCopy
         })?;
+        let permit = self.op_gate.acquire(OpKind::Write).await;
 
         let op_start = Instant::now();
         let arguments = request.parse_copy_move(self.is_utf8)?;
@@ -70,7 +73,7 @@ impl<T: SessionStream> Session<T> {
             self.server.core.imap.max_messages_per_save
         };
 
-        spawn_op!(data, {
+        spawn_op!(data, permit, {
             // Refresh mailboxes
             data.synchronize_mailboxes(false)
                 .await

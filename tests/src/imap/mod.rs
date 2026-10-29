@@ -20,6 +20,7 @@ pub mod mailbox;
 pub mod managesieve;
 pub mod messagelimit;
 pub mod objectid;
+pub mod pipelining;
 pub mod pop;
 pub mod search;
 pub mod store;
@@ -274,6 +275,7 @@ pub async fn imap_tests() {
     acl::test(&mut imap, &mut imap_check, &test).await;
     uidbatches::test(&mut imap, &mut imap_check).await;
     messagelimit::test(&mut imap, &mut imap_check).await;
+    pipelining::test(&test).await;
 
     // UIDONLY cannot be disabled once enabled, so it uses its own connection
     uidonly::test(&test).await;
