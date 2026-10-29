@@ -1,7 +1,7 @@
 # Feature spec: inbuxa-relay, the edge appliance
 
 Status: draft, 2026-10-29. Not a rebuild: inbuxa's own design (SPEC.md §4).
-Open decisions are marked **Decision** and listed in "Open questions".
+Its open questions were settled on 2026-10-29: see "Decisions".
 
 ## Provenance
 
@@ -31,6 +31,9 @@ keeps that connection open.
 
 The relay stores no one's mail. It keeps a spool of mail waiting to move in
 either direction, and nothing else.
+
+In copy it is **inbuxa Relay**. The binary and the container image are
+`inbuxa-relay`.
 
 The settings-only edge in the docs works, but leaves the operator to get a
 lot right by hand. The relay removes each of those jobs:
@@ -78,7 +81,8 @@ These are invariants. No setting, on either side, turns any of them off.
 ```
 
 - One relay serves one downstream. One downstream may have several relays,
-  for example two relays as MX 10 and MX 20 (**Decision**: proposed yes).
+  for example two relays as MX 10 and MX 20. Each relay has its own
+  settings, and inbuxa-admin can copy one relay's settings to another.
 - A downstream cluster is one downstream. Every node that runs the link
   service holds its own link to each relay. The relay treats them as one
   client and hands each message to exactly one of them (RL-15).
@@ -89,11 +93,14 @@ These are invariants. No setting, on either side, turns any of them off.
 
 ### Transport
 
-- **RL-5.** The relay listens for the link on one TCP port (**Decision**:
-  proposed `443`, as the port most edge networks already allow out). TLS 1.3
-  only. JMAP method calls and push go over a WebSocket (RFC 8887) at the
-  session's `webSocketUrl`; blobs go over the HTTP `uploadUrl` and
-  `downloadUrl` on the same port.
+- **RL-5.** The relay listens for the link on one TCP port: `443` by
+  default, changed with `--link-listen`. The downstream is the side that
+  dials out, and outbound 443 is the one port a locked-down network almost
+  always allows. TLS 1.3 only. JMAP method calls and push go over a
+  WebSocket (RFC 8887) on HTTP/1.1, at the session's `webSocketUrl`. A
+  WebSocket takes over its HTTP/1.1 connection, so blobs go over separate
+  kept-alive HTTP/1.1 connections to `uploadUrl` and `downloadUrl` on the
+  same port, up to 4 per node.
 - **RL-6.** The relay requires a client certificate during the handshake, and
   completes the handshake only if the certificate chains to the pinned
   downstream link CA. A client without one gets a TLS alert and no HTTP
@@ -105,7 +112,9 @@ These are invariants. No setting, on either side, turns any of them off.
   firewalls between the two keep the connection open. After two missed pongs
   the downstream reconnects, with backoff from 1 s up to 60 s.
 
-The link is not WireGuard (inbuxa VPN), because a tun device needs
+The link doesn't use WebSockets over HTTP/2 (RFC 8441): few WebSocket
+libraries support them, and the relay would carry more code to save a few
+TLS connections. It is not WireGuard (inbuxa VPN), because a tun device needs
 privileges an unprivileged container doesn't have, and a control channel
 would still be needed on top. It is not ATRN (RFC 2645), because ATRN only
 reverses delivery: configuration, recipient sync, status and outbound
@@ -187,9 +196,9 @@ with the server's own `inbuxa:` objects. In particular, the relay's
 | `maxMessageSize` | downstream | SIZE limit. Default 50 MiB |
 | `maxRecipients` | downstream | Per message. Default 100 |
 | `rateLimits` | downstream | Connections and messages per minute per remote IP, and concurrent sessions per IP |
-| `dnsbl` | downstream | DNSBL zones checked at connect in held mode. Default empty (**Decision**) |
-| `liveVerdictTimeout` | downstream | Seconds to wait for a live verdict. Default 30 (**Decision**) |
-| `heldMaxAge` | downstream | How long held inbound mail waits for the downstream. Default 30 days (**Decision**) |
+| `dnsbl` | downstream | DNSBL zones checked at connect in held mode. Default empty (RL-14) |
+| `liveVerdictTimeout` | downstream | Seconds to wait for a live verdict. Default 30, maximum 120 (RL-13) |
+| `heldMaxAge` | downstream | How long held inbound mail waits for the downstream. Default 30 days, maximum 90 |
 | `spoolMaxBytes` | downstream | Spool size cap |
 | `outboundRetry`, `outboundExpiry` | downstream | Retry schedule and give-up time. Defaults match the server's (three days) |
 | `outboundTls` | downstream | Opportunistic TLS default; DANE and MTA-STS always enforced where published |
@@ -301,7 +310,11 @@ for `Inbound`.
 - **RL-13.** If no verdict arrives within `liveVerdictTimeout`, the relay
   replies `250` and the message becomes `held`. It is then handled as in
   held mode, and the downstream deduplicates it if it had already taken it
-  (RL-16).
+  (RL-16). `liveVerdictTimeout` must be at least the downstream's
+  `spamCallCeiling` (20 s by default, see the AI spam classification spec)
+  plus 5 s, so a slow model still answers in time. inbuxa-admin warns when
+  it isn't. Senders wait up to 10 minutes after DATA (RFC 5321
+  §4.5.3.2.6), so the wait costs nothing.
 - The verdict is for the whole message. If the downstream accepts it for
   some recipients and not others, it handles the rest as it does today for a
   failure after DATA, under RL-18's limit on DSNs.
@@ -317,7 +330,13 @@ When no link is up, or after RL-13:
 - The door checks above, plus any `dnsbl` zones at connect.
 - The relay seals the message to the spool with fsync, then replies `250`.
 - **RL-14.** Spam is never refused in held mode. The relay has no spam
-  filter, and it doesn't guess.
+  filter, and it doesn't guess. There is no greylisting and no reverse DNS
+  requirement either: both add state or turn away real mail, and the
+  downstream judges held mail later anyway.
+- `dnsbl` is empty by default. Most lists refuse queries that come through
+  public resolvers, which small servers often use, so a default list would
+  either do nothing or refuse everything. The add-a-relay wizard offers
+  zones, with that warning.
 
 ### Handing held mail down
 
@@ -333,14 +352,21 @@ When no link is up, or after RL-13:
   The downstream records every `Inbound` id it has ingested for at least
   `heldMaxAge` plus one day, and destroys a repeat without delivering it
   again.
-- **RL-17.** Held mail is never bounced for a spam verdict. The downstream
-  files it to Junk, or drops it, by its usual rules (**Decision**: whether
-  mail over the reject threshold is filed to Junk or dropped).
+- **RL-17.** Held mail is never bounced for a spam verdict. Under the
+  reject threshold, the downstream files it by its usual rules. Over it, the
+  message goes to Junk, never dropped, with the header
+  `X-Inbuxa-Relay: held, over reject threshold`. The sender was already told
+  `250`, so dropping it would lose mail without anyone knowing. Junk expires
+  on the downstream's own schedule. There is no setting for this.
 - **RL-18.** The downstream sends a DSN for held mail only when the sender
   passed SPF or DMARC in its own checks. A forged sender gets no bounce,
   so the relay can't become a backscatter source.
 - Held mail older than `heldMaxAge` is deleted, with an
   `inbound.expired` event and no DSN.
+- The downstream raises an alert when one of its nodes has had no link to
+  an enabled relay for an hour, so held mail doesn't sit unnoticed. It can't
+  alert while it is down itself. An outside monitor on the relay's port 25
+  covers that.
 
 ## Outbound
 
@@ -359,8 +385,8 @@ When no link is up, or after RL-13:
 - TLS results for each destination are sent as `RelayEvent`s. The downstream
   builds TLS-RPT reports from them, as it does from its own deliveries.
 - **RL-20.** If no relay can be reached, the downstream keeps the message in
-  its own queue and retries. With several relays, it uses any one that is
-  linked.
+  its own queue and retries. With several relays, it hands messages to the
+  linked ones in turn, skipping any marked `inboundOnly`.
 
 ## The spool
 
@@ -387,7 +413,7 @@ When no link is up, or after RL-13:
 
 | Object | What it holds |
 |---|---|
-| `inbuxa:Relay` | One per relay: `name`, `address`, `linkPort`, `enabled`, the settings pushed to the relay, `sendThrough` (route outbound mail through relays), and read-only status mirrored from the relay: link state per node, version, queue counts, `lastSeen`. Create returns `joinToken` once |
+| `inbuxa:Relay` | One per relay: `name`, `address`, `linkPort`, `enabled`, the settings pushed to the relay, `sendThrough` (route outbound mail through relays), `inboundOnly` (takes mail in but sends none, e.g. while its IP isn't warmed up or isn't in SPF yet), and read-only status mirrored from the relay: link state per node, version, queue counts, `lastSeen`. Create returns `joinToken` once |
 | `inbuxa:RelayMessage` | Read-only view of a relay's `Inbound` and `Outbound` queues, fetched over the link when asked. Never message content |
 
 Permissions: `sysRelayGet`, `sysRelayUpdate`, `sysRelayQueueGet`,
@@ -443,7 +469,8 @@ allowing the edge's IP and disabling SPF, DMARC and reverse IP for it.
 
 - **RL-25.** When a domain's DNS management is Automatic and relays are
   enabled, the published MX set is the relays, each with its own preference,
-  and SPF covers the relays' sending addresses. Publishing must keep every
+  and SPF covers the sending addresses of every relay not marked
+  `inboundOnly`. Publishing must keep every
   relay in the set: never replace a multi-host MX set with one host.
 - **RL-26.** A relay's public hostname needs an A or AAAA record and a
   reverse DNS name that matches it. The deliverability check runs against
@@ -483,15 +510,20 @@ A **Relays** page under Settings › Mail flow:
 
 ## Footprint
 
-- **RL-30.** A separate binary, `inbuxa-relay`, in this workspace, built
+- **RL-30.** A separate binary, `inbuxa-relay`, in this workspace, so the
+  link protocol and the server's ingest change land in the same PR and ship
+  in the same release. It is built
   without the `smtp`, `common`, `jmap`, `store`, `directory` or `spam-filter`
   crates. It uses smtp-proto, rustls, hickory (with DNSSEC, for DANE), tokio,
   hyper, a WebSocket library, serde_json, an HPKE implementation, and the
   outbound DANE and MTA-STS logic moved from `crates/smtp` into a small
   shared crate.
-- Whether it shares request parsing with `jmap-proto` (which depends on
-  `registry`) or has a small JMAP core of its own is settled by measuring
-  (**Decision**).
+- It has a small JMAP core of its own: the session, the request, response
+  and error envelope, `/get`, `/set`, `/changes`, `/query`, push, upload and
+  download. It doesn't use `jmap-proto`, which depends on `registry`: about
+  88,000 lines, most of it generated schema (measured 2026-10-29), for five
+  types. If the envelope is worth sharing later, it moves into a small crate
+  both use.
 - Budgets, checked in CI on the release build:
 
   | Measure | Budget |
@@ -578,36 +610,52 @@ A **Relays** page under Settings › Mail flow:
 - **RL-T18.** The footprint budgets in RL-30 hold.
 - **RL-T19.** The downstream's DNS publish with two relays keeps both MX
   records, at their preferences.
+- **RL-T20.** Held mail over the downstream's reject threshold lands in
+  Junk with the `X-Inbuxa-Relay` header, and no DSN is sent.
+- **RL-T21.** inbuxa-admin warns when `liveVerdictTimeout` is under the
+  downstream's `spamCallCeiling` plus 5 s.
+- **RL-T22.** With two relays, one marked `inboundOnly`, every outbound
+  message goes through the other, and SPF lists only the other's address.
+- **RL-T23.** A node with no link to an enabled relay for an hour raises an
+  alert.
 
-## Open questions
+## Decisions
 
-1. **Name.** `inbuxa-relay` for the repository and binary, "inbuxa Relay" in
-   copy, as the brand bible's descriptive component names?
-2. **Held-mode door checks.** Proposed: domain, recipients, size, rate
-   limits, and DNSBL only if the administrator lists zones. Or carry more on
-   the relay?
-3. **Several relays per downstream.** Proposed: yes, each still serving one
-   downstream.
-4. **Live mode in the first release**, or held mode first?
-5. **`liveVerdictTimeout`.** Proposed: 30 s.
-6. **Link port.** Proposed: 443.
-7. **`jmap-proto`, or a JMAP core of the relay's own.** Measure first. If
-   `registry` adds more than about 2 MB, write it standalone.
-8. **`heldMaxAge`.** Proposed: 30 days.
-9. **Held mail over the reject threshold** (RL-17): Junk, or drop?
-10. **WebSocket over HTTP/1.1 or HTTP/2** (RFC 8441). Proposed: HTTP/1.1,
-    the simpler of the two for the relay.
+Settled by John on 2026-10-29:
+
+1. **Name.** "inbuxa Relay" in copy; `inbuxa-relay` for the binary and
+   image. It lives in this workspace, not its own repository (RL-30).
+2. **Held-mode door checks.** Domain, recipients, size and rate limits;
+   DNSBL only when an administrator lists zones. No greylisting, no reverse
+   DNS requirement (RL-14).
+3. **Several relays per downstream.** Yes, each with its own settings, each
+   serving one downstream. Outbound takes turns among linked relays;
+   `inboundOnly` keeps one out of the rotation (RL-20).
+4. **Live mode is in the first release.** Held mode is built first, but
+   doesn't ship alone (see "Implementation status").
+5. **`liveVerdictTimeout`.** 30 s by default, at most 120 s, and at least
+   `spamCallCeiling` plus 5 s (RL-13).
+6. **Link port.** 443, changed with `--link-listen` (RL-5).
+7. **JMAP core.** The relay's own, not `jmap-proto` ("Footprint").
+8. **`heldMaxAge`.** 30 days by default, at most 90, with a link-down alert
+   after an hour.
+9. **Held mail over the reject threshold.** Junk, with a header; never
+   dropped, and no setting (RL-17).
+10. **WebSocket transport.** HTTP/1.1, with blobs on separate connections
+    (RL-5).
+
+No questions are open.
 
 ## Implementation status
 
-Not started. Proposed order:
+Not started. Order:
 
-1. This spec, settled.
+1. This spec (settled 2026-10-29).
 2. The relay: the link (join, pins, settings, recipients) and held-mode
    inbound with the sealed spool. On the downstream: the link service,
-   `inbuxa:Relay`, ingest with session context (RL-23). This alone does more
-   than the settings-only edge.
-3. Live mode (RL-12, RL-13).
+   `inbuxa:Relay`, ingest with session context (RL-23).
+3. Live mode (RL-12, RL-13). Steps 2 and 3 ship together: held mode alone
+   can't refuse spam at the door, which the settings-only edge already can.
 4. Outbound: `Outbound`, the `inbuxaRelay` route, status and DSNs, TLS-RPT
    events.
 5. inbuxa-admin's Relays page, certificates (RL-27), DNS (RL-25), and
