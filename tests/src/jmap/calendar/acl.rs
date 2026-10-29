@@ -754,6 +754,89 @@ pub async fn test(test: &TestServer) {
         [john_calendar_id.as_str()]
     );
 
+    // inbuxa: sharing a calendar shares its events only. An event in a private
+    // calendar whose id happens to equal the shared calendar's id stays private.
+    let private_calendar_id = john
+        .jmap_create(
+            MethodObject::Calendar,
+            [json!({
+                "name": "Private",
+            })],
+            Vec::<(&str, &str)>::new(),
+        )
+        .await
+        .created(0)
+        .id()
+        .to_string();
+    let shared_calendar_id = john
+        .jmap_create(
+            MethodObject::Calendar,
+            [json!({
+                "name": "Shared",
+                "shareWith": {
+                    &jane_id : {
+                        "mayReadItems": true,
+                    }
+                }
+            })],
+            Vec::<(&str, &str)>::new(),
+        )
+        .await
+        .created(0)
+        .id()
+        .to_string();
+    let mut private_event_id = None;
+    for num in 0..20 {
+        let event_id = john
+            .jmap_create(
+                MethodObject::CalendarEvent,
+                [json!({
+                    "uid": format!("private-event-{num}@example.com"),
+                    "title": "John's private event",
+                    "start": "2020-01-15T13:00:00",
+                    "timeZone": "America/New_York",
+                    "duration": "PT1H",
+                    "calendarIds": {
+                        &private_calendar_id: true
+                    },
+                })],
+                Vec::<(&str, &str)>::new(),
+            )
+            .await
+            .created(0)
+            .id()
+            .to_string();
+        if event_id == shared_calendar_id {
+            private_event_id = Some(event_id);
+            break;
+        }
+    }
+    let private_event_id = private_event_id.expect("no event got the shared calendar's id");
+    assert_eq!(
+        jane.jmap_get_account(
+            john,
+            MethodObject::CalendarEvent,
+            [JSCalendarProperty::<Id>::Id, JSCalendarProperty::Title],
+            [private_event_id.as_str()],
+        )
+        .await
+        .not_found()
+        .collect::<Vec<_>>(),
+        [private_event_id.as_str()]
+    );
+    let response = jane
+        .jmap_method_call(
+            "CalendarEvent/query",
+            json!({
+                "accountId": &john_id,
+            }),
+        )
+        .await;
+    assert!(
+        !response.ids().any(|id| id == private_event_id),
+        "private event listed to a sharee: {response:?}"
+    );
+
     // Destroy all mailboxes
     john.destroy_all_calendars().await;
     jane.destroy_all_calendars().await;

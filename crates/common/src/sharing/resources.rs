@@ -49,8 +49,14 @@ impl DavResources {
         if !shared_containers.is_empty() {
             let mut document_ids = RoaringBitmap::new();
 
+            // inbuxa: only files carry their own ACLs and share an id space with
+            // their folders. Calendar events and contacts are shared through
+            // their containers alone.
             for resource in &self.resources {
-                if !resource.is_container() && shared_containers.contains(resource.document_id) {
+                if !resource.is_container()
+                    && resource.acls().is_some()
+                    && shared_containers.contains(resource.document_id)
+                {
                     document_ids.insert(resource.document_id);
                 }
             }
