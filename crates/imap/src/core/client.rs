@@ -36,18 +36,10 @@ impl<T: SessionStream> Session<T> {
 
         loop {
             match self.receiver.parse(&mut bytes) {
-                Ok(request) => match self.is_allowed(request).await {
-                    Ok(request) => {
-                        has_expunge |=
-                            matches!(request.command, Command::Expunge(_) | Command::Close);
-                        requests.push(request);
-                    }
-                    Err(err) => {
-                        if !self.write_error(err).await {
-                            return SessionResult::Close;
-                        }
-                    }
-                },
+                Ok(request) => {
+                    has_expunge |= matches!(request.command, Command::Expunge(_) | Command::Close);
+                    requests.push(request);
+                }
                 Err(receiver::Error::NeedsMoreData) => {
                     break;
                 }
@@ -95,6 +87,18 @@ impl<T: SessionStream> Session<T> {
 
         let mut requests = requests.into_iter().peekable();
         while let Some(request) = requests.next() {
+            // inbuxa: each command is checked against the state it runs in,
+            // not the one the buffer was read in, so a SELECT pipelined with
+            // the FETCH or STORE after it lets them run (RFC 9051 5.5)
+            let request = match self.is_allowed(request).await {
+                Ok(request) => request,
+                Err(err) => {
+                    if !self.write_error(err).await {
+                        return SessionResult::Close;
+                    }
+                    continue;
+                }
+            };
             // inbuxa: ST-6: commands that only read may be served by a read
             // replica; any write they make still goes to the primary
             let replica_accounts = match (&request.command, &self.state) {
@@ -131,22 +135,31 @@ impl<T: SessionStream> Session<T> {
                         .handle_select(request)
                         .await
                         .map(|_| SessionResult::Continue),
-                    Command::Create => self
-                        .handle_create(group_requests(&mut requests, vec![request]))
-                        .await
-                        .map(|_| SessionResult::Continue),
-                    Command::Delete => self
-                        .handle_delete(group_requests(&mut requests, vec![request]))
-                        .await
-                        .map(|_| SessionResult::Continue),
+                    Command::Create => match self.group_allowed(&mut requests, request).await {
+                        Some(requests) => self
+                            .handle_create(requests)
+                            .await
+                            .map(|_| SessionResult::Continue),
+                        None => Ok(SessionResult::Close),
+                    },
+                    Command::Delete => match self.group_allowed(&mut requests, request).await {
+                        Some(requests) => self
+                            .handle_delete(requests)
+                            .await
+                            .map(|_| SessionResult::Continue),
+                        None => Ok(SessionResult::Close),
+                    },
                     Command::Rename => self
                         .handle_rename(request)
                         .await
                         .map(|_| SessionResult::Continue),
-                    Command::Status => self
-                        .handle_status(group_requests(&mut requests, vec![request]))
-                        .await
-                        .map(|_| SessionResult::Continue),
+                    Command::Status => match self.group_allowed(&mut requests, request).await {
+                        Some(requests) => self
+                            .handle_status(requests)
+                            .await
+                            .map(|_| SessionResult::Continue),
+                        None => Ok(SessionResult::Close),
+                    },
                     Command::Append => self
                         .handle_append(request)
                         .await
@@ -167,10 +180,13 @@ impl<T: SessionStream> Session<T> {
                         .handle_search(request, false, is_uid)
                         .await
                         .map(|_| SessionResult::Continue),
-                    Command::Fetch(_) => self
-                        .handle_fetch(group_requests(&mut requests, vec![request]))
-                        .await
-                        .map(|_| SessionResult::Continue),
+                    Command::Fetch(_) => match self.group_allowed(&mut requests, request).await {
+                        Some(requests) => self
+                            .handle_fetch(requests)
+                            .await
+                            .map(|_| SessionResult::Continue),
+                        None => Ok(SessionResult::Close),
+                    },
                     Command::Store(is_uid) => self
                         .handle_store(request, is_uid, !has_expunge)
                         .await
@@ -290,7 +306,11 @@ impl<T: SessionStream> Session<T> {
             let result = if replica_accounts.is_empty() {
                 dispatch.await
             } else {
-                store::backend::scaleout::replica::replica_read(replica_accounts, dispatch).await
+                Box::pin(store::backend::scaleout::replica::replica_read(
+                    replica_accounts,
+                    dispatch,
+                ))
+                .await
             };
 
             drop(inline_permit);
@@ -349,23 +369,31 @@ fn takes_own_permit(command: &Command) -> bool {
     )
 }
 
-pub fn group_requests(
-    requests: &mut Peekable<IntoIter<Request<Command>>>,
-    mut grouped_requests: Vec<Request<Command>>,
-) -> Vec<Request<Command>> {
-    let last_command = grouped_requests.last().unwrap().command;
-    loop {
-        match requests.peek() {
-            Some(request) if request.command == last_command => {
-                grouped_requests.push(requests.next().unwrap());
-            }
-            _ => break,
-        }
-    }
-    grouped_requests
-}
-
 impl<T: SessionStream> Session<T> {
+    // inbuxa: the commands of one kind that follow a command, run with it as
+    // one batch; each is checked (and counted against the rate limit) on its
+    // own, and one that isn't allowed is answered and left out. None when
+    // that answer ends the session.
+    async fn group_allowed(
+        &self,
+        requests: &mut Peekable<IntoIter<Request<Command>>>,
+        first: Request<Command>,
+    ) -> Option<Vec<Request<Command>>> {
+        let command = first.command;
+        let mut grouped = vec![first];
+        while let Some(request) = requests.next_if(|request| request.command == command) {
+            match self.is_allowed(request).await {
+                Ok(request) => grouped.push(request),
+                Err(err) => {
+                    if !self.write_error(err).await {
+                        return None;
+                    }
+                }
+            }
+        }
+        Some(grouped)
+    }
+
     async fn is_allowed(&self, request: Request<Command>) -> trc::Result<Request<Command>> {
         let state = &self.state;
         // Rate limit request
