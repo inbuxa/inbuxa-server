@@ -11,7 +11,10 @@ use crate::{
     changes::state::JmapCacheState,
 };
 use calcard::jscalendar::JSCalendarProperty;
-use common::{EVENT_VIEW_HIDE_ATTENDEES, EVENT_VIEW_PRIVATE, Server, auth::AccessToken};
+use common::{
+    EVENT_VIEW_HIDE_ATTENDEES, EVENT_VIEW_PRIVATE, Server, auth::AccessToken,
+    storage::quota::QuotaBudget,
+};
 use groupware::{
     cache::GroupwareCache,
     calendar::{
@@ -121,6 +124,9 @@ impl JmapCalendarEventCopy for Server {
             .account_info(access_token.account_id())
             .await
             .caused_by(trc::location!())?;
+        // inbuxa: the account copied into is the one whose quota applies
+        let mut quota =
+            QuotaBudget::new(self.account(account_id).await.caused_by(trc::location!())?);
 
         // Prepare batch
         let mut batch = BatchBuilder::new();
@@ -203,6 +209,7 @@ impl JmapCalendarEventCopy for Server {
                     access_token,
                     account_id,
                     &account_info,
+                    &mut quota,
                     false,
                     &can_add_calendars,
                     calendar_event.data.event.into_jscalendar(),

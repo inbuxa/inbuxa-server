@@ -11,7 +11,10 @@ use crate::{
     blob::download::BlobDownload,
     changes::state::JmapCacheState,
 };
-use common::{DavResourceMetadata, DavResources, Server, auth::AccessToken, sharing::EffectiveAcl};
+use common::{
+    DavResourceMetadata, DavResources, Server, auth::AccessToken, sharing::EffectiveAcl,
+    storage::quota::QuotaBudget,
+};
 use groupware::{DestroyArchive, cache::GroupwareCache, file::FileNode};
 use http_proto::HttpSessionData;
 use jmap_proto::{
@@ -97,6 +100,9 @@ impl FileNodeSet for Server {
             .unwrap_or(false);
         let mut pending_names: AHashMap<(u32, String), Option<u32>> = AHashMap::new();
         let mut implicit_destroys: AHashSet<u32> = AHashSet::new();
+        // inbuxa: files count towards the disk quota of the account they're in
+        let mut quota =
+            QuotaBudget::new(self.account(account_id).await.caused_by(trc::location!())?);
 
         // Process creates
         let mut batch = BatchBuilder::new();
@@ -314,6 +320,19 @@ impl FileNodeSet for Server {
                     );
                     continue 'create;
                 }
+            }
+
+            // inbuxa: Validate quota
+            match self
+                .reserve_quota(&mut quota, file_node.size() as u64)
+                .await
+            {
+                Ok(_) => {}
+                Err(err) if err.matches(trc::EventType::Limit(trc::LimitEvent::Quota)) => {
+                    response.not_created.append(id, SetError::over_quota());
+                    continue 'create;
+                }
+                Err(err) => return Err(err.caused_by(trc::location!())),
             }
 
             // Validate ACLs
@@ -595,6 +614,19 @@ impl FileNodeSet for Server {
                 );
                 continue 'update;
             }
+
+            // inbuxa: Validate quota
+            let extra_bytes =
+                (new_file_node.size() as u64).saturating_sub(file_node.inner.size() as u64);
+            match self.reserve_quota(&mut quota, extra_bytes).await {
+                Ok(_) => {}
+                Err(err) if err.matches(trc::EventType::Limit(trc::LimitEvent::Quota)) => {
+                    response.not_updated.append(id, SetError::over_quota());
+                    continue 'update;
+                }
+                Err(err) => return Err(err.caused_by(trc::location!())),
+            }
+
             if has_acl_changes {
                 if let Err(err) = self.acl_validate(account_id, &new_file_node.acls).await {
                     response.not_updated.append(id, err.into());

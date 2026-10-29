@@ -26,7 +26,7 @@ use registry::{
     },
     types::{EnumImpl, list::List, map::Map},
 };
-use serde_json::json;
+use serde_json::{Value, json};
 use types::id::Id;
 use utils::map::vec_map::VecMap;
 
@@ -440,6 +440,18 @@ pub async fn test(test: &mut TestServer) {
         0
     );
 
+    // inbuxa: calendar events, contacts and files count towards the quota of
+    // the account they are written into, all the items of a request together
+    groupware_quota(test, &account, &other_account).await;
+    test.wait_for_tasks().await;
+    assert_eq!(
+        test.server
+            .get_used_quota_account(account.id().document_id())
+            .await
+            .unwrap(),
+        0
+    );
+
     // Test delivery quota
     let mut lmtp = SmtpConnection::connect().await;
     for i in 0..2 {
@@ -504,6 +516,242 @@ pub async fn test(test: &mut TestServer) {
         .await;
     admin.reload_settings().await;
     test.cleanup().await;
+}
+
+async fn groupware_quota(test: &TestServer, account: &Account, other_account: &Account) {
+    let other_id = other_account.id_string().to_string();
+    let used = || async {
+        test.server
+            .get_used_quota_account(account.id().document_id())
+            .await
+            .unwrap() as usize
+    };
+    // The size of an item that fits the quota alone but not twice over
+    let half_size =
+        |used: usize, overhead: usize| ((1024 - used) / 2 + 50).saturating_sub(overhead);
+
+    // A sharee writing into the account is held to the account's quota
+    let calendar_id = account
+        .jmap_create(
+            "Calendar",
+            [json!({
+                "name": "Quota",
+                "shareWith": { &other_id: { "mayReadItems": true, "mayWriteAll": true } }
+            })],
+            Vec::<(&str, &str)>::new(),
+        )
+        .await
+        .created(0)
+        .id()
+        .to_string();
+    let event = |uid: &str, size: usize| {
+        json!({
+            "@type": "Event",
+            "uid": uid,
+            "title": "Quota",
+            "description": "x".repeat(size),
+            "start": "2026-01-15T13:00:00",
+            "duration": "PT1H",
+            "calendarIds": { &calendar_id: true },
+        })
+    };
+    assert_eq!(
+        other_account
+            .jmap_create_account(
+                account,
+                "CalendarEvent",
+                [event("quota-shared", 1200)],
+                Vec::<(&str, &str)>::new(),
+            )
+            .await
+            .not_created(0)
+            .typ(),
+        "overQuota"
+    );
+
+    // Items created together count together
+    let before = used().await;
+    let small_id = account
+        .jmap_create(
+            "CalendarEvent",
+            [event("quota-0", 0)],
+            Vec::<(&str, &str)>::new(),
+        )
+        .await
+        .created(0)
+        .id()
+        .to_string();
+    let overhead = used().await - before;
+    account
+        .jmap_destroy(
+            "CalendarEvent",
+            [small_id.as_str()],
+            Vec::<(&str, &str)>::new(),
+        )
+        .await
+        .destroyed()
+        .for_each(drop);
+    let size = half_size(used().await, overhead);
+    let response = account
+        .jmap_create(
+            "CalendarEvent",
+            [event("quota-1", size), event("quota-2", size)],
+            Vec::<(&str, &str)>::new(),
+        )
+        .await;
+    response.created(0);
+    assert_eq!(response.not_created(1).typ(), "overQuota");
+    account.destroy_all_calendars().await;
+
+    let book_id = account
+        .jmap_create(
+            "AddressBook",
+            [json!({ "name": "Quota" })],
+            Vec::<(&str, &str)>::new(),
+        )
+        .await
+        .created(0)
+        .id()
+        .to_string();
+    let contact = |uid: &str, size: usize| {
+        json!({
+            "uid": uid,
+            "name": { "full": "Quota" },
+            "notes": { "n1": { "note": "x".repeat(size) } },
+            "addressBookIds": { &book_id: true },
+        })
+    };
+    let before = used().await;
+    let small_id = account
+        .jmap_create(
+            "ContactCard",
+            [contact("quota-0", 1)],
+            Vec::<(&str, &str)>::new(),
+        )
+        .await
+        .created(0)
+        .id()
+        .to_string();
+    let overhead = used().await - before;
+    account
+        .jmap_destroy(
+            "ContactCard",
+            [small_id.as_str()],
+            Vec::<(&str, &str)>::new(),
+        )
+        .await
+        .destroyed()
+        .for_each(drop);
+    let size = half_size(used().await, overhead);
+    let response = account
+        .jmap_create(
+            "ContactCard",
+            [contact("quota-1", size), contact("quota-2", size)],
+            Vec::<(&str, &str)>::new(),
+        )
+        .await;
+    response.created(0);
+    assert_eq!(response.not_created(1).typ(), "overQuota");
+    account.destroy_all_addressbooks().await;
+
+    // Files count towards the quota, created or copied in
+    let file_with_blob = |owner: &Account, name: &str, size: usize, extra: Value| {
+        let mut file = json!({ "name": name, "parentId": null, "blobId": "#file" });
+        if let (Value::Object(file), Value::Object(extra)) = (&mut file, extra) {
+            file.extend(extra);
+        }
+        json!([
+            ["Blob/upload", {
+                "accountId": owner.id_string(),
+                "create": { "file": { "data": [{ "data:asText": "f".repeat(size) }] } }
+            }, "0"],
+            ["FileNode/set", {
+                "accountId": owner.id_string(),
+                "create": { "i0": file }
+            }, "1"]
+        ])
+    };
+    let response = account
+        .jmap_method_calls(file_with_blob(account, "small.txt", 100, json!({})))
+        .await
+        .into_inner();
+    assert!(
+        response
+            .pointer("/methodResponses/1/1/created/i0/id")
+            .is_some(),
+        "{response}"
+    );
+    let response = account
+        .jmap_method_calls(file_with_blob(account, "big.txt", 2000, json!({})))
+        .await
+        .into_inner();
+    assert_eq!(
+        response.pointer("/methodResponses/1/1/notCreated/i0/type"),
+        Some(&json!("overQuota")),
+        "{response}"
+    );
+
+    // (the upload limit is three files a second)
+    tokio::time::sleep(std::time::Duration::from_millis(1100)).await;
+    let account_id = account.id_string().to_string();
+    let folder_id = other_account
+        .jmap_create(
+            "FileNode",
+            [json!({
+                "name": "shared",
+                "parentId": null,
+                "shareWith": { &account_id: { "mayRead": true } }
+            })],
+            Vec::<(&str, &str)>::new(),
+        )
+        .await
+        .created(0)
+        .id()
+        .to_string();
+    let response = other_account
+        .jmap_method_calls(file_with_blob(
+            other_account,
+            "big.txt",
+            2000,
+            json!({ "parentId": &folder_id }),
+        ))
+        .await
+        .into_inner();
+    let file_id = response
+        .pointer("/methodResponses/1/1/created/i0/id")
+        .and_then(|id| id.as_str())
+        .unwrap_or_else(|| panic!("{response}"))
+        .to_string();
+    let response = account
+        .jmap_copy(
+            other_account,
+            account,
+            "FileNode",
+            [(&file_id, json!({ "parentId": null, "name": "copied.txt" }))],
+            false,
+        )
+        .await;
+    assert_eq!(
+        response.method_response()["notCreated"][&file_id].typ(),
+        "overQuota"
+    );
+
+    for owner in [account, other_account] {
+        owner
+            .jmap_method_calls(json!([
+                ["FileNode/get", {
+                    "accountId": owner.id_string(),
+                    "ids": null,
+                    "properties": ["id"]
+                }, "R1"],
+                ["FileNode/set", {
+                    "accountId": owner.id_string(),
+                    "#destroy": { "resultOf": "R1", "name": "FileNode/get", "path": "/list/*/id" },
+                    "onDestroyRemoveChildren": true
+                }, "R2"]
+            ]))
+            .await;
+    }
 }
 
 fn assert_over_quota<T: std::fmt::Debug>(result: Result<T, jmap_client::Error>) {

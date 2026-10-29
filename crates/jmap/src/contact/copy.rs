@@ -7,7 +7,7 @@
  */
 
 use crate::{changes::state::JmapCacheState, contact::set::ContactCardSet};
-use common::{Server, auth::AccessToken};
+use common::{Server, auth::AccessToken, storage::quota::QuotaBudget};
 use groupware::{cache::GroupwareCache, contact::ContactCard};
 use http_proto::HttpSessionData;
 use jmap_proto::{
@@ -56,7 +56,8 @@ impl JmapContactCardCopy for Server {
     ) -> trc::Result<CopyResponse<contact::ContactCard>> {
         let account_id = request.account_id.document_id();
         let from_account_id = request.from_account_id.document_id();
-        let account = self.account(account_id).await.caused_by(trc::location!())?;
+        let mut quota =
+            QuotaBudget::new(self.account(account_id).await.caused_by(trc::location!())?);
 
         if account_id == from_account_id {
             return Err(trc::JmapEvent::InvalidArguments
@@ -149,7 +150,7 @@ impl JmapContactCardCopy for Server {
                     &cache,
                     &mut batch,
                     access_token,
-                    &account,
+                    &mut quota,
                     account_id,
                     &can_add_address_books,
                     contact.card.into_jscontact(),
