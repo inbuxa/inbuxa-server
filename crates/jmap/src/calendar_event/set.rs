@@ -32,6 +32,7 @@ use groupware::{
         dates::has_oversized_rrule,
         expand::{CalendarEventExpansion, ComponentRecurrenceId, RecurrenceKey, resolve_local},
         itip::ItipSendStatus,
+        privacy::itip_messages_for,
     },
     scheduling::{
         ItipMessages,
@@ -498,7 +499,10 @@ impl CalendarEventSet for Server {
                                 }
                             }
 
-                            itip_messages = Some(ItipMessages::new(messages));
+                            itip_messages = Some(ItipMessages::new(itip_messages_for(
+                                messages,
+                                new_calendar_event.flags,
+                            )));
                         } else {
                             update.fail(
                                 &mut response,
@@ -873,7 +877,8 @@ impl CalendarEventSet for Server {
                         < self.core.groupware.itip_outbound_max_recipients
                     {
                         event.schedule_tag = Some(1);
-                        itip_messages = Some(ItipMessages::new(messages));
+                        itip_messages =
+                            Some(ItipMessages::new(itip_messages_for(messages, event.flags)));
                     } else {
                         return Ok(Err(SetError::invalid_properties()
                             .with_property(JSCalendarProperty::Participants)
