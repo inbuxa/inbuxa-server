@@ -125,6 +125,15 @@ pub(crate) async fn bootstrap_set(
             break;
         }
 
+        // inbuxa: http-directory-services-13: a directory made at setup is a
+        // new one, and names its audience
+        if let Some(directory) = map_directory(&bootstrap.directory)
+            && let Err(err) = crate::inbuxa::oidc_directory::validate(&directory, None)
+        {
+            set.response.not_updated.append(id, err);
+            break;
+        }
+
         // Validate domain name and hostname
         let server_hostname = bootstrap
             .server_hostname

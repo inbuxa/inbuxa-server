@@ -564,13 +564,30 @@ impl RegistrySet for Server {
                                 Ok(ObjectResponse::default())
                             }
                         }
-                        ObjectInner::Directory(_) if is_create => {
-                            validate_tenant_quota(
-                                self,
-                                access_token,
-                                TenantStorageQuota::MaxDirectories,
-                            )
-                            .await?
+                        ObjectInner::Directory(directory) => {
+                            // inbuxa: http-directory-services-13: a new OIDC
+                            // directory names its audience
+                            let stored = match &modification {
+                                Modification::Update { object, .. } => match &object.inner {
+                                    ObjectInner::Directory(stored) => Some(stored),
+                                    _ => None,
+                                },
+                                Modification::Create { .. } => None,
+                            };
+                            if let Err(err) =
+                                crate::inbuxa::oidc_directory::validate(directory, stored)
+                            {
+                                Err(err)
+                            } else if is_create {
+                                validate_tenant_quota(
+                                    self,
+                                    access_token,
+                                    TenantStorageQuota::MaxDirectories,
+                                )
+                                .await?
+                            } else {
+                                Ok(ObjectResponse::default())
+                            }
                         }
                         // inbuxa: legacy-protocols LP-4
                         ObjectInner::NetworkListener(listener) => {

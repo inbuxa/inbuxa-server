@@ -24,6 +24,20 @@ const DISCOVERY_RETRY_INTERVAL: Duration = Duration::from_secs(3);
 
 impl OpenIdDirectory {
     pub async fn open(config: structs::OidcDirectory) -> Result<Directory, String> {
+        // inbuxa: http-directory-services-13: only a directory saved before
+        // the audience was required has none; it keeps working, with a
+        // warning every time it loads
+        if config.require_audience.is_none() {
+            trc::event!(
+                Auth(AuthEvent::Warning),
+                Url = config.issuer_url.clone(),
+                Details = config.description.clone(),
+                Reason = "No required audience is set, so tokens this provider issued to any \
+                          other application sign in. Set requireAudience to the client ID \
+                          registered for this server; a later release will require it."
+            );
+        }
+
         Self::new(OidcConfig {
             issue_url: config.issuer_url,
             require_aud: config.require_audience,

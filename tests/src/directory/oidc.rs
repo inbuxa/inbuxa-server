@@ -10,7 +10,7 @@
 //! runs from `directory_tests`. Each check names its test number or
 //! requirement.
 
-use crate::utils::{server::TestServerBuilder, smtp::SmtpConnection};
+use crate::utils::{registry::UnwrapRegistryId, server::TestServerBuilder, smtp::SmtpConnection};
 use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
 use common::{BuildServer, auth::AuthRequest};
 use directory::Credentials;
@@ -27,6 +27,7 @@ use registry::{
 };
 use serde_json::json;
 use std::net::IpAddr;
+use store::registry::write::RegistryWrite;
 use trc::{Collector, MetricType};
 use types::id::Id;
 use utils::map::vec_map::VecMap;
@@ -169,6 +170,23 @@ pub async fn test() {
 
     // example.org signs in against Keycloak; there is no server default
     let keycloak = admin.registry_create_object(directory(None)).await;
+
+    // http-directory-services-13: a new directory names the audience its
+    // tokens must be issued for, or tokens minted for any other application
+    // at the provider would sign in
+    let mut no_audience = directory(None);
+    if let structs::Directory::Oidc(oidc) = &mut no_audience {
+        oidc.require_audience = None;
+    }
+    let refused = admin.registry_create_object_expect_err(no_audience).await;
+    assert!(
+        refused
+            .description
+            .as_deref()
+            .is_some_and(|reason| reason.contains("audience")),
+        "a new directory without an audience: {refused:?}"
+    );
+
     let domain = admin.find_or_create_domain("example.org").await;
     admin
         .registry_update_object(
@@ -220,6 +238,66 @@ pub async fn test() {
         bearer(&test, Some(JOHN), &john_token).await.unwrap(),
         john,
         "test 5: the named user"
+    );
+
+    // http-directory-services-13: a directory saved before the audience was
+    // required keeps signing people in, and can still be edited without
+    // one; an audience, once set, stays
+    let mut legacy = directory(None);
+    if let structs::Directory::Oidc(oidc) = &mut legacy {
+        oidc.description = "Keycloak, saved without an audience".to_string();
+        oidc.require_audience = None;
+    }
+    let legacy = test
+        .server
+        .registry()
+        .write(RegistryWrite::insert(&legacy.into()))
+        .await
+        .unwrap()
+        .unwrap_id(trc::location!());
+    admin.reload_settings().await;
+    admin
+        .registry_update_object(
+            ObjectType::Directory,
+            legacy,
+            json!({ Property::Description: "Keycloak, still without an audience" }),
+        )
+        .await;
+    admin
+        .registry_update_object(
+            ObjectType::Domain,
+            domain,
+            json!({ Property::DirectoryId: legacy.to_string() }),
+        )
+        .await;
+    let fresh = token("stalwart", "stalwart-secret", JOHN, "openid email profile")
+        .await
+        .unwrap();
+    assert_eq!(
+        bearer(&test, None, &fresh).await.unwrap(),
+        john,
+        "a directory saved without an audience"
+    );
+    admin
+        .registry_update_object(
+            ObjectType::Domain,
+            domain,
+            json!({ Property::DirectoryId: keycloak.to_string() }),
+        )
+        .await;
+    let refused = admin
+        .registry_update_object_expect_err(
+            ObjectType::Directory,
+            keycloak,
+            json!({ Property::RequireAudience: null }),
+        )
+        .await;
+    assert!(
+        refused
+            .description
+            .as_deref()
+            .is_some_and(|reason| reason.contains("audience")),
+        "removing the audience: {refused:?}"
     );
 
     // Test 17: no password sign-in on an OIDC domain (DIR-29)
