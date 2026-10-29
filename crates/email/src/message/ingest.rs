@@ -749,6 +749,7 @@ impl EmailIngest for Server {
         let key_len = IndexKeyPrefix::len() + result.thread_hash.len() + U32_LEN;
         let document_id_pos = key_len - U32_LEN;
         let mut thread_merge = ThreadMerge::new();
+        let mut candidates_left = THREAD_SCAN_LIMIT;
         self.store()
             .iterate(
                 IterateParams::new(
@@ -771,9 +772,16 @@ impl EmailIngest for Server {
                         }),
                     },
                 )
-                .ascending(),
+                .descending(),
                 |key, value| {
                     if key.len() == key_len {
+                        // inbuxa: only the newest messages with this thread name
+                        // are candidates
+                        if candidates_left == 0 {
+                            return Ok(false);
+                        }
+                        candidates_left -= 1;
+
                         // Find matching references
                         let references = value.get(U32_LEN..).unwrap_or_default();
 
@@ -962,6 +970,12 @@ impl EmailIngest for Server {
         }
     }
 }
+
+// inbuxa: how many of the newest messages sharing a thread name (or sharing
+// none) a new message is compared with. Every delivery used to read all of
+// them, so mail sent with one subject over and over made each delivery to that
+// account slower than the last.
+pub const THREAD_SCAN_LIMIT: usize = 512;
 
 pub fn has_message_id(a: &[CheekyHash], b: &[u8]) -> bool {
     let mut i = 0;

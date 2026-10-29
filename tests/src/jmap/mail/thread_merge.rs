@@ -31,6 +31,58 @@ use types::id::Id;
 pub async fn test(test: &TestServer) {
     test_single_thread(test).await;
     test_multi_thread(test).await;
+    test_scan_limit(test).await;
+}
+
+// inbuxa: a new message is compared with the newest THREAD_SCAN_LIMIT messages
+// sharing its thread name, not with every one of them
+async fn test_scan_limit(test: &TestServer) {
+    println!("Running Email thread scan limit tests...");
+    let account = test.account("jdoe@example.com");
+    let client = account.jmap_client().await;
+    let inbox_id = Id::from(INBOX_ID).to_string();
+    let import = |message: String| {
+        let client = &client;
+        let inbox_id = &inbox_id;
+        async move {
+            let id = client
+                .email_import(
+                    message.into_bytes(),
+                    [inbox_id.clone()],
+                    None::<Vec<String>>,
+                    None,
+                )
+                .await
+                .unwrap()
+                .take_id();
+            Id::from_str(&id).unwrap().prefix_id()
+        }
+    };
+
+    let oldest_thread = import("Message-ID: <scan-0@x>\nSubject: Same\n\nm\n".into()).await;
+    let mut newest_thread = 0;
+    for i in 1..=::email::message::ingest::THREAD_SCAN_LIMIT {
+        newest_thread = import(format!("Message-ID: <scan-{i}@x>\nSubject: Same\n\nm\n")).await;
+    }
+    let newest = ::email::message::ingest::THREAD_SCAN_LIMIT;
+    assert_eq!(
+        import(format!(
+            "Message-ID: <reply-new@x>\nReferences: <scan-{newest}@x>\nSubject: re: Same\n\nr\n"
+        ))
+        .await,
+        newest_thread
+    );
+    assert_ne!(
+        import(
+            "Message-ID: <reply-old@x>\nReferences: <scan-0@x>\nSubject: re: Same\n\nr\n".into()
+        )
+        .await,
+        oldest_thread
+    );
+
+    test.destroy_all_mailboxes(account).await;
+    test.wait_for_tasks().await;
+    test.assert_is_empty().await;
 }
 
 async fn test_single_thread(test_server: &TestServer) {
