@@ -14,10 +14,18 @@
 //! one and logs a warning each time it loads; it can still be edited, but an
 //! audience it has can't be removed. Requiring it of every directory is left
 //! to a later release.
+//!
+//! A directory that checks opaque tokens by introspection names the client
+//! ID and secret it calls the provider with.
 
+use directory::backend::oidc::config::opaque_token_policy;
 use jmap_proto::error::set::{SetError, SetErrorType};
 use registry::{
-    schema::{prelude::Property, structs::Directory},
+    schema::{
+        enums::OidcOpaqueTokens,
+        prelude::Property,
+        structs::{Directory, SecretKeyOptional},
+    },
     types::error::ValidationError,
 };
 
@@ -41,6 +49,29 @@ pub fn validate(
                  for this server at the provider. Without it, tokens the provider issued to any \
                  other application would sign in.",
             ));
+    }
+
+    if opaque_token_policy(directory) == OidcOpaqueTokens::Introspection {
+        let mut missing = Vec::new();
+        if directory.introspection_client_id.is_none() {
+            missing.push(ValidationError::required(Property::IntrospectionClientId));
+        }
+        if matches!(
+            directory.introspection_client_secret,
+            SecretKeyOptional::None
+        ) {
+            missing.push(ValidationError::required(
+                Property::IntrospectionClientSecret,
+            ));
+        }
+        if !missing.is_empty() {
+            return Err(SetError::new(SetErrorType::ValidationFailed)
+                .with_validation_errors(missing)
+                .with_description(
+                    "Opaque tokens are checked at the introspection endpoint, which needs the \
+                     client ID and secret this server signs in to the provider with.",
+                ));
+        }
     }
     Ok(())
 }
@@ -71,5 +102,45 @@ mod tests {
         assert!(validate(&oidc(None), Some(&oidc(None))).is_ok());
         // ... but an audience, once set, stays
         assert!(validate(&oidc(None), Some(&oidc(Some("inbuxa")))).is_err());
+    }
+
+    #[test]
+    fn introspection_names_its_client() {
+        let with = |policy: Option<OidcOpaqueTokens>, url: bool, client: bool| {
+            Directory::Oidc(OidcDirectory {
+                require_audience: Some("inbuxa".to_string()),
+                opaque_tokens: policy,
+                introspection_url: url.then(|| "https://idp.example.org/introspect".to_string()),
+                introspection_client_id: client.then(|| "inbuxa".to_string()),
+                introspection_client_secret: if client {
+                    SecretKeyOptional::Value(registry::schema::structs::SecretKeyValue {
+                        secret: "secret".to_string(),
+                    })
+                } else {
+                    SecretKeyOptional::None
+                },
+                ..Default::default()
+            })
+        };
+
+        assert!(validate(&with(None, false, false), None).is_ok());
+        assert!(validate(&with(None, true, false), None).is_err());
+        assert!(validate(&with(None, true, true), None).is_ok());
+        assert!(
+            validate(
+                &with(Some(OidcOpaqueTokens::Introspection), false, false),
+                None
+            )
+            .is_err()
+        );
+        assert!(
+            validate(
+                &with(Some(OidcOpaqueTokens::Introspection), false, true),
+                None
+            )
+            .is_ok()
+        );
+        assert!(validate(&with(Some(OidcOpaqueTokens::Reject), true, false), None).is_ok());
+        assert!(validate(&with(Some(OidcOpaqueTokens::Userinfo), false, false), None).is_ok());
     }
 }

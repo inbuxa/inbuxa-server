@@ -16,11 +16,11 @@ use common::{BuildServer, auth::AuthRequest};
 use directory::Credentials;
 use registry::{
     schema::{
-        enums::TenantStorageQuota,
+        enums::{OidcOpaqueTokens, TenantStorageQuota},
         prelude::{ObjectType, Property},
         structs::{
             self, CertificateManagement, DkimManagement, DnsManagement, Domain, Expression,
-            MtaStageRcpt, OidcDirectory, Tenant, UserAccount,
+            MtaStageRcpt, OidcDirectory, SecretKeyOptional, SecretKeyValue, Tenant, UserAccount,
         },
     },
     types::map::Map,
@@ -56,6 +56,14 @@ fn realm_directory(realm: &str, tenant: Option<Id>) -> structs::Directory {
             "openid".to_string(),
         ]),
         member_tenant_id: tenant,
+        // http-directory-services-13: opaque tokens go to Keycloak's
+        // introspection endpoint, found by discovery
+        opaque_tokens: Some(OidcOpaqueTokens::Introspection),
+        introspection_url: None,
+        introspection_client_id: Some("stalwart".to_string()),
+        introspection_client_secret: SecretKeyOptional::Value(SecretKeyValue {
+            secret: "stalwart-secret".to_string(),
+        }),
     })
 }
 
@@ -242,11 +250,15 @@ pub async fn test() {
 
     // http-directory-services-13: a directory saved before the audience was
     // required keeps signing people in, and can still be edited without
-    // one; an audience, once set, stays
+    // one; an audience, once set, stays. It also still takes opaque tokens
+    // its user info endpoint accepts, as it always did.
     let mut legacy = directory(None);
     if let structs::Directory::Oidc(oidc) = &mut legacy {
         oidc.description = "Keycloak, saved without an audience".to_string();
         oidc.require_audience = None;
+        oidc.opaque_tokens = Some(OidcOpaqueTokens::Userinfo);
+        oidc.introspection_client_id = None;
+        oidc.introspection_client_secret = SecretKeyOptional::None;
     }
     let legacy = test
         .server
@@ -263,28 +275,111 @@ pub async fn test() {
             json!({ Property::Description: "Keycloak, still without an audience" }),
         )
         .await;
-    admin
-        .registry_update_object(
-            ObjectType::Domain,
-            domain,
-            json!({ Property::DirectoryId: legacy.to_string() }),
-        )
-        .await;
+    let sign_in_through = async |directory: Id, token: &str| {
+        admin
+            .registry_update_object(
+                ObjectType::Domain,
+                domain,
+                json!({ Property::DirectoryId: directory.to_string() }),
+            )
+            .await;
+        // In test mode a leading "." makes any token opaque
+        let result = bearer(&test, Some(JOHN), token).await;
+        admin
+            .registry_update_object(
+                ObjectType::Domain,
+                domain,
+                json!({ Property::DirectoryId: keycloak.to_string() }),
+            )
+            .await;
+        result
+    };
     let fresh = token("stalwart", "stalwart-secret", JOHN, "openid email profile")
         .await
         .unwrap();
     assert_eq!(
-        bearer(&test, None, &fresh).await.unwrap(),
+        sign_in_through(legacy, &fresh).await.unwrap(),
         john,
         "a directory saved without an audience"
     );
-    admin
-        .registry_update_object(
-            ObjectType::Domain,
-            domain,
-            json!({ Property::DirectoryId: keycloak.to_string() }),
+    assert_eq!(
+        sign_in_through(legacy, &format!(".{fresh}")).await.unwrap(),
+        john,
+        "an opaque token, through a directory saved before the policy"
+    );
+
+    // ... a new directory that doesn't say refuses opaque tokens
+    let mut unset = directory(None);
+    if let structs::Directory::Oidc(oidc) = &mut unset {
+        oidc.description = "Keycloak, opaque tokens unset".to_string();
+        oidc.opaque_tokens = None;
+        oidc.introspection_client_id = None;
+        oidc.introspection_client_secret = SecretKeyOptional::None;
+    }
+    let unset = admin.registry_create_object(unset).await;
+    assert!(
+        sign_in_through(unset, &format!(".{fresh}")).await.is_err(),
+        "an opaque token, through a new directory"
+    );
+    assert_eq!(
+        sign_in_through(unset, &fresh).await.unwrap(),
+        john,
+        "a JWT, through a new directory"
+    );
+
+    // ... and introspection takes only an active access token
+    assert_eq!(
+        bearer(&test, Some(JOHN), &format!(".{fresh}"))
+            .await
+            .unwrap(),
+        john,
+        "an opaque token, by introspection"
+    );
+    let refresh = reqwest::Client::new()
+        .post("http://localhost:9080/realms/stalwart/protocol/openid-connect/token")
+        .form(&[
+            ("grant_type", "password"),
+            ("client_id", "stalwart"),
+            ("client_secret", "stalwart-secret"),
+            ("username", JOHN),
+            ("password", PASSWORD),
+            ("scope", "openid email profile"),
+        ])
+        .send()
+        .await
+        .unwrap()
+        .json::<serde_json::Value>()
+        .await
+        .unwrap()["refresh_token"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    for (what, token) in [
+        ("a refresh token", format!(".{refresh}")),
+        (
+            "a token the provider never issued",
+            ".never-issued".to_string(),
+        ),
+    ] {
+        assert!(
+            bearer(&test, Some(JOHN), &token).await.is_err(),
+            "by introspection: {what}"
+        );
+    }
+    let refused = admin
+        .registry_update_object_expect_err(
+            ObjectType::Directory,
+            keycloak,
+            json!({ Property::IntrospectionClientId: null }),
         )
         .await;
+    assert!(
+        refused
+            .description
+            .as_deref()
+            .is_some_and(|reason| reason.contains("client ID")),
+        "introspection without a client: {refused:?}"
+    );
     let refused = admin
         .registry_update_object_expect_err(
             ObjectType::Directory,
@@ -473,8 +568,8 @@ pub async fn test() {
         )
         .await;
     admin.reload_settings().await;
-    // An opaque token has to reach the provider's userinfo endpoint, so with
-    // the provider stopped this is an outage, not a bad token
+    // An opaque token has to reach the provider's introspection endpoint, so
+    // with the provider stopped this is an outage, not a bad token
     crate::utils::containers::docker("stop", "stalwart-test-keycloak");
     for attempt in 0..8 {
         let err = bearer(&test, Some(JOHN), "an-opaque-token")

@@ -2,6 +2,8 @@
  * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
+ *
+ * Modified by Coffey Labs in 2026 for INBUXA.
  */
 
 // This file is auto-generated. Do not edit directly.
@@ -4142,6 +4144,15 @@ pub struct OidcDirectory {
     pub claim_groups: Option<String>,
     #[serde(rename = "memberTenantId")]
     pub member_tenant_id: Option<Id>,
+    // inbuxa: http-directory-services-13
+    #[serde(rename = "opaqueTokens")]
+    pub opaque_tokens: Option<OidcOpaqueTokens>,
+    #[serde(rename = "introspectionUrl")]
+    pub introspection_url: Option<String>,
+    #[serde(rename = "introspectionClientId")]
+    pub introspection_client_id: Option<String>,
+    #[serde(rename = "introspectionClientSecret")]
+    pub introspection_client_secret: SecretKeyOptional,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

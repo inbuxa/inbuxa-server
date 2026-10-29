@@ -2,6 +2,8 @@
  * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
+ *
+ * Modified by Coffey Labs in 2026 for INBUXA.
  */
 
 // This file is auto-generated. Do not edit directly.
@@ -1135,6 +1137,10 @@ impl EnumImpl for Property {
             b"requestTlsCertificate" => Property::RequestTlsCertificate,
             b"require" => Property::Require,
             b"requireAudience" => Property::RequireAudience,
+            b"opaqueTokens" => Property::OpaqueTokens,
+            b"introspectionUrl" => Property::IntrospectionUrl,
+            b"introspectionClientId" => Property::IntrospectionClientId,
+            b"introspectionClientSecret" => Property::IntrospectionClientSecret,
             b"requireClientRegistration" => Property::RequireClientRegistration,
             b"requireScopes" => Property::RequireScopes,
             b"requireTls" => Property::RequireTls,
@@ -2075,6 +2081,10 @@ impl EnumImpl for Property {
             Property::RequestTlsCertificate => "requestTlsCertificate",
             Property::Require => "require",
             Property::RequireAudience => "requireAudience",
+            Property::OpaqueTokens => "opaqueTokens",
+            Property::IntrospectionUrl => "introspectionUrl",
+            Property::IntrospectionClientId => "introspectionClientId",
+            Property::IntrospectionClientSecret => "introspectionClientSecret",
             Property::RequireClientRegistration => "requireClientRegistration",
             Property::RequireScopes => "requireScopes",
             Property::RequireTls => "requireTls",
@@ -3019,6 +3029,10 @@ impl EnumImpl for Property {
             123 => Some(Property::RequestTlsCertificate),
             551 => Some(Property::Require),
             607 => Some(Property::RequireAudience),
+            935 => Some(Property::OpaqueTokens),
+            936 => Some(Property::IntrospectionUrl),
+            937 => Some(Property::IntrospectionClientId),
+            938 => Some(Property::IntrospectionClientSecret),
             615 => Some(Property::RequireClientRegistration),
             608 => Some(Property::RequireScopes),
             525 => Some(Property::RequireTls),
@@ -3230,7 +3244,7 @@ impl EnumImpl for Property {
         }
     }
 
-    const COUNT: usize = 935;
+    const COUNT: usize = 939;
 }
 
 impl serde::Serialize for Property {
