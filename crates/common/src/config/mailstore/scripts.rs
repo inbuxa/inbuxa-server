@@ -348,4 +348,51 @@ if header :regex "x-h" "${p}" { discard; }
         let many = run(1000);
         assert!(many < one * 10, "1 header: {one:?}, 1000 headers: {many:?}");
     }
+
+    // inbuxa: vacation and notify don't answer mail a program sent (RFC 3834),
+    // or two autoresponders answer each other
+    #[test]
+    fn sieve_auto_submitted_mail_gets_no_reply() {
+        let runtime = sieve::Runtime::new();
+        let sends = |script: &str, header: &str| {
+            let script =
+                std::sync::Arc::new(sieve::Compiler::new().compile(script.as_bytes()).unwrap());
+            let message = format!(
+                "From: sender@example.org\r\nTo: john@example.com\r\n{header}Subject: hi\r\n\r\nbody\r\n"
+            );
+            let mut ctx = runtime
+                .filter(message.as_bytes())
+                .with_envelope(sieve::Envelope::From, "sender@example.org")
+                .with_envelope(sieve::Envelope::To, "john@example.com")
+                .with_user_address("john@example.com");
+            let mut input = sieve::Input::script("test", script);
+            let mut sent = false;
+            while let Some(event) = ctx.run(input) {
+                input = match event.unwrap() {
+                    sieve::Event::SendMessage { .. } => {
+                        sent = true;
+                        sieve::Input::True
+                    }
+                    sieve::Event::DuplicateId { .. } => sieve::Input::False,
+                    _ => sieve::Input::True,
+                };
+            }
+            sent
+        };
+        for script in [
+            "require \"vacation\";\nvacation \"away\";\n",
+            "require \"enotify\";\nnotify \"mailto:john@example.net\";\n",
+        ] {
+            assert!(sends(script, ""), "{script}");
+            assert!(sends(script, "Auto-Submitted: no\r\n"), "{script}");
+            assert!(
+                !sends(script, "Auto-Submitted: auto-replied\r\n"),
+                "{script}"
+            );
+            assert!(
+                !sends(script, "auto-submitted: auto-generated\r\n"),
+                "{script}"
+            );
+        }
+    }
 }
