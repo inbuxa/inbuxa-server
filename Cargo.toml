@@ -40,7 +40,7 @@ members = [
 # 27.1.3 is "27.1.3", 27.1.0-rc.1 is "27.1-rc.1". tools/release/version.py
 # reads and bumps it.
 [workspace.package]
-version = "27.1.0-rc.1"
+version = "27.1.0-rc.2"
 
 [workspace.lints.clippy]
 result_unit_err = "allow"
