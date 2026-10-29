@@ -2,6 +2,8 @@
  * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
+ *
+ * Modified by Coffey Labs in 2026 for INBUXA.
  */
 
 use crate::{
@@ -228,6 +230,50 @@ async fn update(client: &Client, root_mailbox_id: &str) {
         .unwrap()
         .updated(mailbox.id(0))
         .unwrap();
+    assert_email_properties(
+        client,
+        mailbox.id(0),
+        &[&test_mailbox2_id],
+        &["test1", "test3"],
+    )
+    .await;
+
+    // inbuxa: a keyword must be a valid name (RFC 8621 section 4.1.1),
+    // whether the keywords are set whole or patched one at a time
+    for keywords in [&["test1", "x)\r\n* 1 EXPUNGE"][..], &["two words"]] {
+        let mut request = client.build();
+        request
+            .set_email()
+            .update(mailbox.id(0))
+            .keywords(keywords.iter().copied());
+        assert!(matches!(
+            request
+                .send_set_email()
+                .await
+                .unwrap()
+                .updated(mailbox.id(0)),
+            Err(Error::Set(SetError {
+                type_: SetErrorType::InvalidProperties,
+                ..
+            }))
+        ));
+    }
+    let mut request = client.build();
+    request
+        .set_email()
+        .update(mailbox.id(0))
+        .keyword("x)\r\n* 1 EXPUNGE", true);
+    assert!(matches!(
+        request
+            .send_set_email()
+            .await
+            .unwrap()
+            .updated(mailbox.id(0)),
+        Err(Error::Set(SetError {
+            type_: SetErrorType::InvalidProperties,
+            ..
+        }))
+    ));
     assert_email_properties(
         client,
         mailbox.id(0),

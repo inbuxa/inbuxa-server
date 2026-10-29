@@ -2,10 +2,14 @@
  * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
+ *
+ * Modified by Coffey Labs in 2026 for INBUXA.
  */
 
 use crate::{
-    blob::download::BlobDownload, changes::state::JmapCacheState, email::ingested_into_object,
+    blob::download::BlobDownload,
+    changes::state::JmapCacheState,
+    email::{ingested_into_object, invalid_keyword},
 };
 use common::{Server, auth::AccessToken, ipc::PushNotification};
 use email::{
@@ -126,6 +130,12 @@ impl EmailImport for Server {
                     );
                     continue 'outer;
                 }
+            }
+
+            // inbuxa: a keyword that is not a valid name is refused
+            if email.keywords.iter().any(|keyword| !keyword.is_valid()) {
+                response.not_created.append(id, invalid_keyword());
+                continue;
             }
 
             let MaybeIdReference::Id(blob_id) = email.blob_id else {
