@@ -2,6 +2,8 @@
  * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
+ *
+ * Modified by Coffey Labs in 2026 for INBUXA.
  */
 
 use super::AssertResult;
@@ -10,6 +12,18 @@ use imap_proto::ResponseType;
 
 pub async fn test(test: &TestServer) {
     println!("Running ManageSieve tests...");
+
+    // inbuxa: before sign-in a literal may only be as large as a sign-in needs
+    let mut sieve = SieveConnection::connect().await;
+    sieve.assert_read(ResponseType::Ok).await;
+    sieve
+        .send_literal("AUTHENTICATE \"PLAIN\" ", &"A".repeat(100000))
+        .await;
+    let line = sieve.read_line().await;
+    assert!(
+        line.contains("maximum request size"),
+        "oversized pre-auth literal was read: {line}"
+    );
 
     // Connect to ManageSieve
     let mut sieve = SieveConnection::connect().await;

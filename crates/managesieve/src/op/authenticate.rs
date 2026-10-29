@@ -14,7 +14,7 @@ use common::{
 use directory::Credentials;
 use imap_proto::{
     protocol::authenticate::Mechanism,
-    receiver::{self, Request},
+    receiver::{self, PRE_AUTH_MAX_REQUEST_SIZE, Request},
 };
 use mail_parser::decoders::base64::base64_decode;
 use registry::schema::enums::Permission;
@@ -121,12 +121,20 @@ impl<T: SessionStream> Session<T> {
             access_token,
             in_flight,
         };
+        // inbuxa: signed in, so the configured request size now applies
+        self.receiver.max_request_size = self.server.core.imap.max_request_size;
 
         Ok(StatusResponse::ok("Authentication successful").into_bytes())
     }
 
     pub async fn handle_unauthenticate(&mut self) -> trc::Result<Vec<u8>> {
         self.state = State::NotAuthenticated { auth_failures: 0 };
+        self.receiver.max_request_size = self
+            .server
+            .core
+            .imap
+            .max_request_size
+            .min(PRE_AUTH_MAX_REQUEST_SIZE);
 
         trc::event!(
             ManageSieve(trc::ManageSieveEvent::Unauthenticate),

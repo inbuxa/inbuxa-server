@@ -2,6 +2,8 @@
  * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
+ *
+ * Modified by Coffey Labs in 2026 for INBUXA.
  */
 
 use super::{ImapSessionManager, Session, State};
@@ -15,7 +17,7 @@ use common::{
 };
 use imap_proto::{
     protocol::{ProtocolVersion, SerializeResponse},
-    receiver::Receiver,
+    receiver::{PRE_AUTH_MAX_REQUEST_SIZE, Receiver},
 };
 use std::sync::Arc;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -146,7 +148,14 @@ impl<T: SessionStream> Session<T> {
         let (stream_rx, stream_tx) = tokio::io::split(session.stream);
 
         Ok(Session {
-            receiver: Receiver::with_max_request_size(server.core.imap.max_request_size),
+            // inbuxa: the full request size only applies after sign-in
+            receiver: Receiver::with_max_request_size(
+                server
+                    .core
+                    .imap
+                    .max_request_size
+                    .min(PRE_AUTH_MAX_REQUEST_SIZE),
+            ),
             version: ProtocolVersion::Rev1,
             state: State::NotAuthenticated { auth_failures: 0 },
             is_tls,
@@ -201,7 +210,16 @@ impl<T: SessionStream> Session<T> {
         let (stream_rx, stream_tx) =
             tokio::io::split(self.instance.tls_accept(stream, self.session_id).await?);
         let stream_tx = Arc::new(tokio::sync::Mutex::new(stream_tx));
-        let receiver = Receiver::with_max_request_size(self.server.core.imap.max_request_size);
+        let receiver =
+            Receiver::with_max_request_size(if matches!(state, State::NotAuthenticated { .. }) {
+                self.server
+                    .core
+                    .imap
+                    .max_request_size
+                    .min(PRE_AUTH_MAX_REQUEST_SIZE)
+            } else {
+                self.server.core.imap.max_request_size
+            });
 
         Ok(Session {
             server: self.server,
