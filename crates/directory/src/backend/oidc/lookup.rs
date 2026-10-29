@@ -84,6 +84,7 @@ impl OpenIdDirectory {
                         continue;
                     }
 
+                    check_token_type(&token_data.claims)?;
                     self.validate_scopes(&token_data.claims)?;
 
                     let mut claims = token_data.claims;
@@ -431,6 +432,37 @@ fn extract_string_list(value: &serde_json::Value) -> Option<Vec<String>> {
     }
 }
 
+/// inbuxa: only an access token signs in. A token the provider marks as an
+/// ID token was minted for whichever client the user signed in to, and a
+/// refresh token is never presented as a bearer token. Keycloak marks its
+/// tokens with `typ`, Amazon Cognito with `token_use`.
+fn check_token_type(claims: &serde_json::Value) -> Result<(), OidcError> {
+    let marker = |claim: &str| claims.get(claim).and_then(|v| v.as_str());
+    let refused = match (marker("typ"), marker("token_use")) {
+        (Some(typ), _)
+            if ["id", "refresh", "offline", "logout"]
+                .iter()
+                .any(|kind| typ.eq_ignore_ascii_case(kind)) =>
+        {
+            Some(typ)
+        }
+        (_, Some(token_use))
+            if ["id", "refresh"]
+                .iter()
+                .any(|kind| token_use.eq_ignore_ascii_case(kind)) =>
+        {
+            Some(token_use)
+        }
+        _ => None,
+    };
+    match refused {
+        Some(kind) => Err(OidcError::TokenValidation(format!(
+            "Not an access token (marked {kind:?})"
+        ))),
+        None => Ok(()),
+    }
+}
+
 #[inline(always)]
 fn is_claim_missing(claims: &serde_json::Value, claim: Option<&String>) -> bool {
     claim.is_some_and(|claim| claims.get(claim).is_none_or(serde_json::Value::is_null))
@@ -440,6 +472,120 @@ fn is_claim_missing(claims: &serde_json::Value, claim: Option<&String>) -> bool 
 mod tests {
     use super::*;
     use serde_json::json;
+
+    // A key for these tests only
+    const TEST_KEY: &str = "-----BEGIN PRIVATE KEY-----
+MC4CAQAwBQYDK2VwBCIEIGtahTxccpNyO2c/+k3fa0Opl10EO4gp0Iw8XAM2hUeL
+-----END PRIVATE KEY-----";
+    const TEST_PUBLIC_KEY: &str = "-----BEGIN PUBLIC KEY-----
+MCowBQYDK2VwAyEAXNXjqSjw780GFXxFztdFBUMpxRoFqsYWN55FXnvncCE=
+-----END PUBLIC KEY-----";
+
+    fn test_directory() -> OpenIdDirectory {
+        let mut keys = AHashMap::new();
+        keys.insert(
+            "test".to_string(),
+            Arc::new(CachedKey {
+                decoding_key: DecodingKey::from_ed_pem(TEST_PUBLIC_KEY.as_bytes()).unwrap(),
+                algorithm: Algorithm::EdDSA,
+            }),
+        );
+        OpenIdDirectory {
+            config: crate::backend::oidc::OidcConfig {
+                issue_url: "https://idp.example.org".to_string(),
+                require_aud: None,
+                require_scopes: Vec::new(),
+                claim_email: "email".to_string(),
+                claim_name: None,
+                claim_groups: None,
+                default_domain: None,
+            },
+            discovery: crate::backend::oidc::OidcDiscovery {
+                url: "https://idp.example.org".to_string(),
+                document: crate::backend::oidc::DiscoveryDocument {
+                    issuer: "https://idp.example.org".to_string(),
+                    jwks_uri: "https://idp.example.org/jwks".to_string(),
+                    userinfo_endpoint: "https://idp.example.org/userinfo".to_string(),
+                    token_endpoint: "https://idp.example.org/token".to_string(),
+                    authorization_endpoint: "https://idp.example.org/auth".to_string(),
+                    end_session_endpoint: None,
+                    scopes_supported: None,
+                    claims_supported: None,
+                    code_challenge_methods_supported: None,
+                },
+            },
+            http: Client::new(),
+            cache: tokio::sync::RwLock::new(crate::backend::oidc::JwksCache {
+                keys,
+                last_updated: Instant::now(),
+            }),
+        }
+    }
+
+    fn signed(claims: serde_json::Value) -> String {
+        let mut header = jsonwebtoken::Header::new(Algorithm::EdDSA);
+        header.kid = Some("test".to_string());
+        let mut claims = claims;
+        claims["iss"] = json!("https://idp.example.org");
+        claims["exp"] = json!(
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_secs()
+                + 300
+        );
+        claims["email"] = json!("john@example.org");
+        jsonwebtoken::encode(
+            &header,
+            &claims,
+            &jsonwebtoken::EncodingKey::from_ed_pem(TEST_KEY.as_bytes()).unwrap(),
+        )
+        .unwrap()
+    }
+
+    async fn sign_in(directory: &OpenIdDirectory, token: String) -> trc::Result<Account> {
+        directory
+            .authenticate(&Credentials::Bearer {
+                username: None,
+                token,
+            })
+            .await
+    }
+
+    // inbuxa: a token the provider marks as an ID or refresh token is not an
+    // access token: an ID token is minted for whichever client signed in
+    #[tokio::test]
+    async fn only_access_tokens_sign_in() {
+        let directory = test_directory();
+
+        for claims in [
+            json!({}),
+            json!({"typ": "Bearer"}),
+            json!({"token_use": "access"}),
+        ] {
+            assert_eq!(
+                sign_in(&directory, signed(claims.clone()))
+                    .await
+                    .map(|account| account.email)
+                    .ok()
+                    .as_deref(),
+                Some("john@example.org"),
+                "{claims}"
+            );
+        }
+        for claims in [
+            json!({"typ": "ID"}),
+            json!({"typ": "Refresh"}),
+            json!({"typ": "Offline"}),
+            json!({"token_use": "id"}),
+            json!({"token_use": "refresh"}),
+        ] {
+            assert!(
+                sign_in(&directory, signed(claims.clone())).await.is_err(),
+                "{claims} must not sign in"
+            );
+        }
+    }
 
     #[test]
     fn extract_string_list_distinguishes_absent_from_empty() {
