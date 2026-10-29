@@ -23,6 +23,7 @@ use common::auth::oauth::{
         ClientRegistrationRequest, ClientRegistrationResponse, TokenEndpointAuthMethod,
     },
 };
+use futures::StreamExt;
 use http::auth::oauth::{
     DeviceAuthResponse, ErrorType, TokenResponse,
     auth::{LoginRequest, LoginResponse},
@@ -30,6 +31,7 @@ use http::auth::oauth::{
 use imap_proto::ResponseType;
 use jmap_client::{
     client::{Client, Credentials},
+    client_ws::WebSocketMessage,
     mailbox::query::Filter,
 };
 use registry::schema::{
@@ -685,6 +687,30 @@ pub async fn test(test: &mut TestServer) {
         confidential_client.default_account_id(),
         user_id.to_string()
     );
+
+    // inbuxa: a WebSocket opened with the token serves it only while the
+    // token is valid
+    let mut ws = confidential_client.connect_ws().await.unwrap();
+    let mut request = confidential_client.build();
+    request.get_mailbox();
+    request.send_ws().await.unwrap();
+    assert!(
+        matches!(
+            tokio::time::timeout(Duration::from_secs(5), ws.next()).await,
+            Ok(Some(Ok(WebSocketMessage::Response(_))))
+        ),
+        "the WebSocket serves a valid token"
+    );
+    tokio::time::sleep(Duration::from_secs(6)).await; // past the 5s token
+    let mut request = confidential_client.build();
+    request.get_mailbox();
+    request.send_ws().await.unwrap();
+    let after_expiry = tokio::time::timeout(Duration::from_secs(5), ws.next()).await;
+    assert!(
+        !matches!(after_expiry, Ok(Some(Ok(WebSocketMessage::Response(_))))),
+        "the WebSocket must stop serving an expired token, got {after_expiry:?}"
+    );
+    drop(ws);
 
     // The correct secret in the Authorization header (client_secret_basic) also works
     let mut params = base_params();
