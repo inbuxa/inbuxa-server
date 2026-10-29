@@ -2,6 +2,8 @@
  * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
+ *
+ * Modified by Coffey Labs in 2026 for INBUXA.
  */
 
 use base64::{Engine, engine::general_purpose};
@@ -85,6 +87,14 @@ impl SieveConnection {
                 Err(_) => panic!("Timeout while waiting for server response: {:?}", lines),
             }
         }
+    }
+
+    pub async fn read_line(&mut self) -> String {
+        tokio::time::timeout(Duration::from_millis(1500), self.reader.next_line())
+            .await
+            .expect("Timeout while waiting for server response")
+            .unwrap()
+            .expect("Connection closed")
     }
 
     pub async fn send(&mut self, text: &str) {

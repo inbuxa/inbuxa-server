@@ -58,4 +58,10 @@ pub async fn test(imap: &mut ImapConnection, _imap_check: &mut ImapConnection) {
     imap.assert_read(Type::Continuation, ResponseType::Ok).await;
     imap.send_untagged("AGJvYXR5AG1jYm9hdGZhY2U=").await;
     imap.assert_read(Type::Tagged, ResponseType::No).await;
+
+    // inbuxa: before sign-in a literal may only be as large as a sign-in needs
+    imap.send("AUTHENTICATE PLAIN {100000}").await;
+    imap.assert_read(Type::Tagged, ResponseType::Bad)
+        .await
+        .assert_contains("maximum request size");
 }
