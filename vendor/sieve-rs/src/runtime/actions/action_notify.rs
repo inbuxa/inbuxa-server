@@ -2,6 +2,8 @@
  * SPDX-FileCopyrightText: 2020 Stalwart Labs Ltd <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
+ *
+ * Modified by Coffey Labs in 2026 for INBUXA.
  */
 
 use mail_builder::headers::{date::Date, message_id::generate_message_id_header};
@@ -15,18 +17,15 @@ use crate::{
     },
 };
 
-use super::action_vacation::MAX_SUBJECT_LEN;
+use super::action_vacation::{MAX_SUBJECT_LEN, is_auto_submitted};
 
 impl Notify {
     pub(crate) fn exec(&self, ctx: &mut Context) {
         // Do not notify on Auto-Submitted messages
         for header in &ctx.message.parts[0].headers {
-            if matches!(&header.name, HeaderName::Other(name) if name.eq_ignore_ascii_case("Auto-Submitted"))
-                && header
-                    .value
-                    .as_text()
-                    .is_none_or(|v| !v.eq_ignore_ascii_case("no"))
-            {
+            // inbuxa: mail-parser names Auto-Submitted itself; matching
+            // HeaderName::Other never found it
+            if header.name == HeaderName::AutoSubmitted && is_auto_submitted(&header.value) {
                 return;
             }
         }

@@ -42,6 +42,14 @@ Every changed file carries the AGPL 5(a) notice in its header.
   in `context.rs` cover it; they run from this directory with `cargo test
   --offline --target-dir ../../target/sieve-rs-tests scan_limit` (the crate's
   `test_suite` and `parse_rfc` need upstream's `tests/`, which isn't kept).
+- `src/runtime/actions/action_vacation.rs`, `action_notify.rs`: vacation
+  and notify stay silent for mail with `Auto-Submitted` other than `no`
+  (RFC 3834). Upstream looked for the header as `HeaderName::Other`, but
+  mail-parser 0.11 parses it as `HeaderName::AutoSubmitted`, so the check
+  never ran and both answered other programs' mail, autoresponders included.
+  Upstream 0.7.3 fails its own svtests "No reply to auto-submitted mail" and
+  "Notifying on automated messages" for this reason. The
+  `sieve_auto_submitted_mail_gets_no_reply` test in `crates/common` covers it.
 - `Cargo.toml`: the example target is dropped, with the top-level
   `examples/` and `tests/`, which the server never builds. (`src/` keeps its
   own `tests` modules: the crate declares them.)

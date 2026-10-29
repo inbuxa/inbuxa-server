@@ -2,6 +2,8 @@
  * SPDX-FileCopyrightText: 2020 Stalwart Labs Ltd <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
+ *
+ * Modified by Coffey Labs in 2026 for INBUXA.
  */
 
 use std::borrow::Cow;
@@ -22,6 +24,14 @@ use crate::{
 };
 
 pub(crate) const MAX_SUBJECT_LEN: usize = 256;
+
+// inbuxa: RFC 3834: anything but "no" means a program sent the message, and
+// a program's mail is not answered
+pub(crate) fn is_auto_submitted(value: &HeaderValue) -> bool {
+    value
+        .as_text()
+        .is_none_or(|v| !v.eq_ignore_ascii_case("no"))
+}
 
 impl TestVacation {
     pub(crate) fn exec(&self, ctx: &mut Context) -> TestResult {
@@ -101,16 +111,13 @@ impl TestVacation {
                 HeaderName::Received => {
                     received_count += 1;
                 }
+                // inbuxa: mail-parser names Auto-Submitted itself, so it never
+                // arrived as HeaderName::Other and the check never ran
+                HeaderName::AutoSubmitted if is_auto_submitted(&header.value) => {
+                    return TestResult::Bool(false);
+                }
                 HeaderName::Other(header_name) => {
-                    if header_name.eq_ignore_ascii_case("Auto-Submitted") {
-                        if header
-                            .value
-                            .as_text()
-                            .is_none_or(|v| !v.eq_ignore_ascii_case("no"))
-                        {
-                            return TestResult::Bool(false);
-                        }
-                    } else if header_name.eq_ignore_ascii_case("X-Auto-Response-Suppress") {
+                    if header_name.eq_ignore_ascii_case("X-Auto-Response-Suppress") {
                         if header.value.as_text().is_some_and(|v| {
                             v.to_ascii_lowercase()
                                 .split(',')
