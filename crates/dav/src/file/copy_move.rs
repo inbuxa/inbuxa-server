@@ -2,6 +2,8 @@
  * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
+ *
+ * Modified by Coffey Labs in 2026 for INBUXA.
  */
 
 use super::FromDavResource;
@@ -32,7 +34,7 @@ use store::{
 };
 use trc::AddContext;
 use types::{
-    acl::Acl,
+    acl::{Acl, AclGrant},
     collection::{Collection, SyncCollection, VanishedCollection},
 };
 
@@ -158,21 +160,23 @@ impl FileCopyMoveRequestHandler for Server {
 
         // Validate destination ACLs
         if let Some(document_id) = destination.document_id {
-            if let Some(delete_destination) = &delete_destination
-                && !access_token.is_member(to_account_id)
-                && !to_resources.has_access_to_container(
-                    access_token,
-                    delete_destination.document_id.unwrap(),
-                    Acl::Delete,
-                )
-            {
-                return Err(DavError::Code(StatusCode::FORBIDDEN));
-            }
-
-            if !access_token.is_member(to_account_id)
-                && !to_resources.has_access_to_container(access_token, document_id, Acl::Modify)
-            {
-                return Err(DavError::Code(StatusCode::FORBIDDEN));
+            if !access_token.is_member(to_account_id) {
+                // inbuxa: adding to a folder needs AddItems, as PUT and MKCOL
+                // do, and replacing what is there needs Delete on all of it,
+                // as DELETE does
+                if !to_resources.has_access_to_container(access_token, document_id, Acl::AddItems) {
+                    return Err(DavError::Code(StatusCode::FORBIDDEN));
+                }
+                if delete_destination.is_some() {
+                    let permissions =
+                        to_resources.shared_containers(access_token, [Acl::Delete], false);
+                    if !to_resources
+                        .subtree(destination_resource_name)
+                        .all(|resource| permissions.contains(resource.document_id()))
+                    {
+                        return Err(DavError::Code(StatusCode::FORBIDDEN));
+                    }
+                }
             }
         } else if !access_token.is_member(to_account_id) {
             return Err(DavError::Code(StatusCode::FORBIDDEN));
@@ -342,6 +346,10 @@ pub(crate) struct Destination {
     pub new_name: Option<String>,
     pub document_id: Option<u32>,
     pub is_container: bool,
+    // inbuxa: the ACL of this node. What a COPY, or a MOVE from another
+    // account, puts in a folder takes the folder's ACL, as an uploaded file
+    // does, never the source's.
+    pub acls: Vec<AclGrant>,
 }
 
 impl Default for Destination {
@@ -351,6 +359,7 @@ impl Default for Destination {
             document_id: Default::default(),
             new_name: Default::default(),
             is_container: true,
+            acls: Default::default(),
         }
     }
 }
@@ -501,6 +510,7 @@ async fn copy_container(
         };
         node.modified = now;
         node.created = now;
+        node.acls = destination.acls.clone();
         if let Some(new_name) = destination.new_name.take() {
             node.name = new_name;
         }
@@ -612,6 +622,11 @@ async fn overwrite_and_delete_item(
         dest_node.inner.name.to_string()
     };
     source_node.parent_id = dest_node.inner.parent_id.into();
+    // inbuxa: a file moved from another account over a file keeps that
+    // file's ACL
+    if from_account_id != to_account_id {
+        source_node.acls = dest_node.inner.acls.iter().map(AclGrant::from).collect();
+    }
 
     let mut batch = BatchBuilder::new();
     let etag = source_node
@@ -689,6 +704,8 @@ async fn overwrite_item(
         dest_node.inner.name.to_string()
     };
     source_node.parent_id = dest_node.inner.parent_id.into();
+    // inbuxa: a copy that replaces a file keeps that file's ACL
+    source_node.acls = dest_node.inner.acls.iter().map(AclGrant::from).collect();
     let mut batch = BatchBuilder::new();
     let etag = source_node
         .update(
@@ -758,6 +775,7 @@ async fn move_item(
             .etag()
     } else {
         // Destination is in a different account: insert a new node, then delete the old one
+        new_node.acls = destination.acls;
         let to_document_id = server
             .store()
             .assign_document_ids(to_account_id, Collection::FileNode, 1)
@@ -818,6 +836,7 @@ async fn copy_item(
         .deserialize::<FileNode>()
         .caused_by(trc::location!())?;
     node.parent_id = parent_id;
+    node.acls = destination.acls;
     if let Some(new_name) = destination.new_name {
         node.name = new_name;
     }
@@ -902,6 +921,11 @@ impl FromDavResource for Destination {
             document_id: Some(item.document_id()),
             is_container: item.is_container(),
             new_name: None,
+            acls: item
+                .resource
+                .acls()
+                .map(|acls| acls.to_vec())
+                .unwrap_or_default(),
         }
     }
 }
