@@ -2,6 +2,8 @@
  * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
+ *
+ * Modified by Coffey Labs in 2026 for INBUXA.
  */
 
 use argon2::Argon2;
@@ -18,7 +20,8 @@ use sha1::Digest;
 use sha1::Sha1;
 use sha2::Sha256;
 use sha2::Sha512;
-use tokio::sync::oneshot;
+use std::sync::{Arc, LazyLock};
+use tokio::sync::Semaphore;
 use totp_rs::Totp;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -72,17 +75,58 @@ pub async fn verify_mfa_secret_hash(
     }
 }
 
+/// inbuxa: slow password hashes run on the blocking pool, at most one per
+/// CPU at a time, and the rest wait their turn. A flood of sign-ins then
+/// neither stalls the async workers every connection is served on nor
+/// starts hundreds of threads each holding a memory-hard hash.
+static HASHERS: LazyLock<Arc<Semaphore>> = LazyLock::new(|| {
+    Arc::new(Semaphore::new(
+        std::thread::available_parallelism().map_or(4, |n| n.get()),
+    ))
+});
+
+async fn run_hasher<T: Send + 'static>(
+    hasher: impl FnOnce() -> T + Send + 'static,
+) -> trc::Result<T> {
+    let thread_error = |err: String| {
+        trc::EventType::Server(trc::ServerEvent::ThreadError)
+            .caused_by(trc::location!())
+            .reason(err)
+    };
+    let permit = HASHERS
+        .clone()
+        .acquire_owned()
+        .await
+        .map_err(|err| thread_error(err.to_string()))?;
+    tokio::task::spawn_blocking(move || {
+        let _permit = permit;
+        hasher()
+    })
+    .await
+    .map_err(|err| thread_error(err.to_string()))
+}
+
+/// inbuxa: checks a crypt(3)-style hash on the hashing pool.
+async fn verify_crypt(
+    verify: fn(&[u8], &str) -> bool,
+    hashed_secret: &str,
+    secret: &[u8],
+) -> trc::Result<bool> {
+    let secret = secret.to_vec();
+    let hashed_secret = hashed_secret.to_string();
+    run_hasher(move || verify(&secret, &hashed_secret)).await
+}
+
 async fn verify_hash_prefix(hashed_secret: &str, secret: &[u8]) -> trc::Result<bool> {
     let is_argon = hashed_secret.starts_with("$argon2");
     let is_pbkdf2 = !is_argon && hashed_secret.starts_with("$pbkdf2");
     let is_scrypt = !is_argon && !is_pbkdf2 && hashed_secret.starts_with("$scrypt");
 
     if is_argon || is_pbkdf2 || is_scrypt {
-        let (tx, rx) = oneshot::channel();
         let secret = secret.to_vec();
         let hashed_secret = hashed_secret.to_string();
 
-        tokio::task::spawn_blocking(move || match PasswordHash::new(&hashed_secret) {
+        run_hasher(move || match PasswordHash::new(&hashed_secret) {
             Ok(hash) => {
                 let result = if is_argon {
                     Argon2::default().verify_password(&secret, &hash)
@@ -92,37 +136,26 @@ async fn verify_hash_prefix(hashed_secret: &str, secret: &[u8]) -> trc::Result<b
                     Scrypt::default().verify_password(&secret, &hash)
                 };
 
-                tx.send(Ok(result.is_ok())).ok();
+                Ok(result.is_ok())
             }
-            Err(err) => {
-                tx.send(Err(trc::AuthEvent::Error
-                    .reason(err)
-                    .details(hashed_secret)))
-                    .ok();
-            }
-        });
-
-        match rx.await {
-            Ok(result) => result,
-            Err(err) => Err(trc::EventType::Server(trc::ServerEvent::ThreadError)
-                .caused_by(trc::location!())
-                .reason(err)),
-        }
+            Err(err) => Err(trc::AuthEvent::Error.reason(err).details(hashed_secret)),
+        })
+        .await?
     } else if hashed_secret.starts_with("$2") {
         // Blowfish crypt
-        Ok(bcrypt::verify(secret, hashed_secret))
+        verify_crypt(|s, h| bcrypt::verify(s, h), hashed_secret, secret).await
     } else if hashed_secret.starts_with("$6$") {
         // SHA-512 crypt
-        Ok(sha512_crypt::verify(secret, hashed_secret))
+        verify_crypt(|s, h| sha512_crypt::verify(s, h), hashed_secret, secret).await
     } else if hashed_secret.starts_with("$5$") {
         // SHA-256 crypt
-        Ok(sha256_crypt::verify(secret, hashed_secret))
+        verify_crypt(|s, h| sha256_crypt::verify(s, h), hashed_secret, secret).await
     } else if hashed_secret.starts_with("$sha1") {
         // SHA-1 crypt
-        Ok(sha1_crypt::verify(secret, hashed_secret))
+        verify_crypt(|s, h| sha1_crypt::verify(s, h), hashed_secret, secret).await
     } else if hashed_secret.starts_with("$1") {
         // MD5 based hash
-        Ok(md5_crypt::verify(secret, hashed_secret))
+        verify_crypt(|s, h| md5_crypt::verify(s, h), hashed_secret, secret).await
     } else {
         Err(trc::AuthEvent::Error
             .into_err()
@@ -135,7 +168,7 @@ pub async fn verify_secret_hash(hashed_secret: &str, secret: &[u8]) -> trc::Resu
         verify_hash_prefix(hashed_secret, secret).await
     } else if hashed_secret.starts_with('_') {
         // Enhanced DES-based hash
-        Ok(bsdi_crypt::verify(secret, hashed_secret))
+        verify_crypt(|s, h| bsdi_crypt::verify(s, h), hashed_secret, secret).await
     } else if let Some(hashed_secret) = hashed_secret.strip_prefix('{') {
         if let Some((algo, hashed_secret)) = hashed_secret.split_once('}') {
             match algo.to_ascii_uppercase().as_str() {
@@ -222,7 +255,7 @@ pub async fn verify_secret_hash(hashed_secret: &str, secret: &[u8]) -> trc::Resu
                         verify_hash_prefix(hashed_secret, secret).await
                     } else {
                         // Unix crypt
-                        Ok(unix_crypt::verify(secret, hashed_secret))
+                        verify_crypt(|s, h| unix_crypt::verify(s, h), hashed_secret, secret).await
                     }
                 }
                 "PLAIN" | "CLEAR" => Ok(hashed_secret.as_bytes() == secret),
@@ -243,9 +276,7 @@ pub async fn verify_secret_hash(hashed_secret: &str, secret: &[u8]) -> trc::Resu
 }
 
 pub async fn hash_secret(algorithm: PasswordHashAlgorithm, secret: Vec<u8>) -> trc::Result<String> {
-    let (tx, rx) = oneshot::channel();
-
-    tokio::task::spawn_blocking(move || {
+    run_hasher(move || {
         let result = match algorithm {
             PasswordHashAlgorithm::Argon2id => {
                 let hasher = Argon2::default();
@@ -254,14 +285,11 @@ pub async fn hash_secret(algorithm: PasswordHashAlgorithm, secret: Vec<u8>) -> t
                     .map(|h| h.to_string())
             }
             PasswordHashAlgorithm::Bcrypt => {
-                return tx
-                    .send(bcrypt::hash(secret.as_slice()).map_err(|err| {
-                        trc::AuthEvent::Error
-                            .reason(err)
-                            .details("Bcrypt hash failed")
-                    }))
-                    .ok()
-                    .unwrap_or(());
+                return bcrypt::hash(secret.as_slice()).map_err(|err| {
+                    trc::AuthEvent::Error
+                        .reason(err)
+                        .details("Bcrypt hash failed")
+                });
             }
             PasswordHashAlgorithm::Scrypt => Scrypt::default()
                 .hash_password(secret.as_slice())
@@ -271,20 +299,13 @@ pub async fn hash_secret(algorithm: PasswordHashAlgorithm, secret: Vec<u8>) -> t
                 .map(|h| h.to_string()),
         };
 
-        tx.send(result.map_err(|err| {
+        result.map_err(|err| {
             trc::AuthEvent::Error
                 .reason(err)
                 .details("Password hash failed")
-        }))
-        .ok();
-    });
-
-    match rx.await {
-        Ok(result) => result,
-        Err(err) => Err(trc::EventType::Server(trc::ServerEvent::ThreadError)
-            .caused_by(trc::location!())
-            .reason(err)),
-    }
+        })
+    })
+    .await?
 }
 
 pub fn is_password_hash(s: &str) -> bool {
@@ -445,6 +466,51 @@ mod tests {
 
     fn b64(bytes: &[u8]) -> String {
         String::from_utf8(Base64Encoder::new().encode(bytes).unwrap()).unwrap()
+    }
+
+    // inbuxa: a slow hash is checked off the async workers, so a flood of
+    // sign-ins can't stall every other connection served on them
+    #[tokio::test(flavor = "current_thread")]
+    #[allow(deprecated)] // old schemes, as imported accounts still have them
+    async fn slow_hashes_do_not_block_the_executor() {
+        use std::sync::{
+            Arc,
+            atomic::{AtomicUsize, Ordering},
+        };
+
+        let hashes = [
+            bcrypt::hash_with("$2b$04$abcdefghijklmnopqrstuu", "secret").unwrap(),
+            sha512_crypt::hash("secret").unwrap(),
+            sha256_crypt::hash("secret").unwrap(),
+            sha1_crypt::hash("secret").unwrap(),
+            md5_crypt::hash("secret").unwrap(),
+            bsdi_crypt::hash("secret").unwrap(),
+            format!("{{CRYPT}}{}", unix_crypt::hash("secret").unwrap()),
+            Argon2::default()
+                .hash_password(b"secret")
+                .unwrap()
+                .to_string(),
+        ];
+
+        let ticks = Arc::new(AtomicUsize::new(0));
+        let ticker = tokio::spawn({
+            let ticks = ticks.clone();
+            async move {
+                loop {
+                    ticks.fetch_add(1, Ordering::Relaxed);
+                    tokio::task::yield_now().await;
+                }
+            }
+        });
+        for hash in &hashes {
+            let before = ticks.load(Ordering::Relaxed);
+            assert!(verify_secret_hash(hash, b"secret").await.unwrap(), "{hash}");
+            assert!(
+                ticks.load(Ordering::Relaxed) > before,
+                "checking {hash} blocked the executor"
+            );
+        }
+        ticker.abort();
     }
 
     #[test]
