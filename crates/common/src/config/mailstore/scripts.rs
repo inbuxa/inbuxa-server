@@ -395,4 +395,52 @@ if header :regex "x-h" "${p}" { discard; }
             );
         }
     }
+
+    // inbuxa: a test is true when any key matches (RFC 5229, 5260), whatever
+    // the keys' order, and :regex on a date part is a regular expression,
+    // not a wildcard pattern
+    #[test]
+    fn sieve_tests_match_any_key_and_regex_dates() {
+        let runtime = sieve::Runtime::new();
+        let matched = |test: &str| {
+            let script = format!(
+                "require [\"fileinto\", \"variables\", \"date\", \"regex\"];\nif {test} {{ fileinto \"matched\"; }}\n"
+            );
+            let script = std::sync::Arc::new(
+                sieve::Compiler::new()
+                    .compile(script.as_bytes())
+                    .unwrap_or_else(|err| panic!("{test}: {err}")),
+            );
+            let message = "Date: Tue, 27 Oct 2026 09:30:00 +0000\r\nSubject: hi\r\n\r\nbody\r\n";
+            let mut ctx = runtime.filter(message.as_bytes());
+            let mut input = sieve::Input::script("test", script);
+            let mut filed = false;
+            while let Some(event) = ctx.run(input) {
+                if let sieve::Event::FileInto { folder, .. } = event.unwrap() {
+                    filed |= folder == "matched";
+                }
+                input = sieve::Input::True;
+            }
+            filed
+        };
+        for test in [
+            r#"string :is "a" ["a", "b"]"#,
+            r#"string :is "a" ["b", "a"]"#,
+            r#"string :is ["x", "a"] ["a", "b"]"#,
+            r#"date :regex "date" "year" "^20[0-9]{2}$""#,
+            r#"date :regex "date" "month" ["^1[12]$", "^10$"]"#,
+            r#"date :regex "date" "month" "1.""#,
+            r#"currentdate :regex "year" "^[0-9]{4}$""#,
+        ] {
+            assert!(matched(test), "{test} should match");
+        }
+        for test in [
+            r#"string :is "a" ["b", "c"]"#,
+            r#"date :regex "date" "year" "^19[0-9]{2}$""#,
+            r#"date :regex "date" "month" "^0[1-9]$""#,
+            r#"currentdate :regex "year" "^[0-9]{2}$""#,
+        ] {
+            assert!(!matched(test), "{test} should not match");
+        }
+    }
 }

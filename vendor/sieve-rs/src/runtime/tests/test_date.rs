@@ -2,6 +2,8 @@
  * SPDX-FileCopyrightText: 2020 Stalwart Labs Ltd <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
+ *
+ * Modified by Coffey Labs in 2026 for INBUXA.
  */
 
 use std::borrow::Cow;
@@ -94,7 +96,7 @@ impl TestDate {
                         if let Some(dt) = ctx.find_dates(header) {
                             let date_part =
                                 self.date_part.eval(self.zone.eval(dt.as_ref()).as_ref());
-                            for key in &key_list {
+                            for (key, pattern) in key_list.iter().zip(self.key_list.iter()) {
                                 if match &self.match_type {
                                     MatchType::Is => self.comparator.is(&date_part.as_str(), key),
                                     MatchType::Contains => self
@@ -113,9 +115,12 @@ impl TestDate {
                                             &mut captured_values,
                                         )
                                     }
-                                    MatchType::Regex(capture_positions) => self.comparator.matches(
+                                    // inbuxa: :regex compared as a wildcard pattern
+                                    MatchType::Regex(capture_positions) => self.comparator.regex(
+                                        &ctx.regex_cache,
+                                        pattern,
+                                        key,
                                         &date_part,
-                                        key.to_string().as_ref(),
                                         *capture_positions,
                                         &mut captured_values,
                                     ),
@@ -182,8 +187,8 @@ impl TestCurrentDate {
                     }),
                 );
 
-                for key in &self.key_list {
-                    let key = ctx.eval_value(key);
+                for pattern in &self.key_list {
+                    let key = ctx.eval_value(pattern);
 
                     if match &self.match_type {
                         MatchType::Is => self.comparator.is(&date_part.as_str(), &key),
@@ -200,9 +205,12 @@ impl TestCurrentDate {
                             *capture_positions,
                             &mut captured_values,
                         ),
-                        MatchType::Regex(capture_positions) => self.comparator.matches(
+                        // inbuxa: :regex compared as a wildcard pattern
+                        MatchType::Regex(capture_positions) => self.comparator.regex(
+                            &ctx.regex_cache,
+                            pattern,
+                            &key,
                             &date_part,
-                            key.to_string().as_ref(),
                             *capture_positions,
                             &mut captured_values,
                         ),
