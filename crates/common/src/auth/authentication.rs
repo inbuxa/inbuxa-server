@@ -415,6 +415,8 @@ impl Server {
                                 }
                                 _ => false,
                             };
+                            // inbuxa: the sign-in lasts no longer than the token
+                            let expires_at = JwtClaims::expires_at(token);
                             let token = self
                                 .build_directory_token(directory, result, req.remote_ip)
                                 .await?;
@@ -426,7 +428,9 @@ impl Server {
                                     .reason("Authenticated using an email alias but account does not have AuthenticateAlias permission"));
                             }
                             // inbuxa: AU-5
-                            return Ok(token.with_origin(Via::Directory));
+                            return Ok(token
+                                .with_origin(Via::Directory)
+                                .with_expires_at(expires_at));
                         }
                         Err(err) => {
                             external_error = Some(err);
@@ -445,16 +449,19 @@ impl Server {
                         .and_then(|token| AccessToken::new(token, req.remote_ip))
                         // inbuxa: AU-5
                         .map(|token| {
-                            token.with_origin(Via::OAuth {
-                                client: token_info
-                                    .claims
-                                    .as_deref()
-                                    .filter(|claims| !claims.is_empty())
-                                    .unwrap_or("unknown")
-                                    .chars()
-                                    .take(200)
-                                    .collect(),
-                            })
+                            token
+                                .with_origin(Via::OAuth {
+                                    client: token_info
+                                        .claims
+                                        .as_deref()
+                                        .filter(|claims| !claims.is_empty())
+                                        .unwrap_or("unknown")
+                                        .chars()
+                                        .take(200)
+                                        .collect(),
+                                })
+                                // inbuxa: the sign-in lasts no longer than the token
+                                .with_expires_at(Some(token_info.expiry))
                         }),
                     Err(err) => {
                         if let Some(external_error) = external_error {
@@ -745,6 +752,17 @@ impl<'x> JwtClaims<'x> {
 
     fn parse(payload: &'x [u8]) -> Option<Self> {
         serde_json::from_slice(payload).ok()
+    }
+
+    /// inbuxa: when a JWT expires, from its `exp` claim. Read only after the
+    /// directory has verified the token.
+    fn expires_at(token: &str) -> Option<u64> {
+        serde_json::from_slice::<serde_json::Value>(&Self::decode_payload(token)?)
+            .ok()?
+            .get("exp")?
+            .as_f64()
+            .filter(|exp| *exp > 0.0)
+            .map(|exp| exp as u64)
     }
 
     fn domain(&self) -> Option<&str> {

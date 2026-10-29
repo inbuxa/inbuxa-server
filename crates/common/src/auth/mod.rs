@@ -134,6 +134,8 @@ pub struct AccessToken {
     inner: Arc<AccessTokenInner>,
     // inbuxa: how this session signed in, for the audit log (AU-5)
     origin: Option<Arc<inbuxa_features::audit::Via>>,
+    // inbuxa: when the bearer token this session signed in with expires
+    expires_at: Option<u64>,
 }
 
 #[derive(Debug, Default, Clone)]
@@ -320,6 +322,7 @@ impl BuildAccessToken for Arc<AccessTokenInner> {
         AccessToken {
             scope_idx: 0,
             origin: None,
+            expires_at: None,
             inner: self,
         }
     }
