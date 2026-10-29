@@ -2,6 +2,8 @@
  * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
+ *
+ * Modified by Coffey Labs in 2026 for INBUXA.
  */
 
 use super::{
@@ -788,7 +790,7 @@ impl DataItem<'_> {
             }
             DataItem::Flags { flags } => {
                 buf.extend_from_slice(b"FLAGS (");
-                for (pos, flag) in flags.iter().enumerate() {
+                for (pos, flag) in flags.iter().filter(|f| f.is_serializable()).enumerate() {
                     if pos > 0 {
                         buf.push(b' ');
                     }

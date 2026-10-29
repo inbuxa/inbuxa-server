@@ -9,7 +9,7 @@
 use crate::{
     blob::download::BlobDownload,
     changes::state::JmapCacheState,
-    email::{PatchResult, handle_email_patch, ingested_into_object},
+    email::{PatchResult, handle_email_patch, ingested_into_object, invalid_keyword},
 };
 use common::{
     Server, auth::AccessToken, ipc::PushNotification, storage::index::ObjectIndexBuilder,
@@ -180,6 +180,13 @@ impl EmailSet for Server {
                             .collect();
                     }
                     (EmailProperty::Keywords, Value::Object(keywords_)) => {
+                        // inbuxa: a keyword that is not a valid name is refused
+                        if keywords_.iter().any(|(keyword, _)| {
+                            !matches!(keyword, Key::Property(EmailProperty::Keyword(_)))
+                        }) {
+                            response.not_created.append(id, invalid_keyword());
+                            continue 'create;
+                        }
                         keywords = keywords_
                             .into_expanded_boolean_set()
                             .filter_map(|id| id.try_into_property()?.try_into_keyword())
@@ -876,6 +883,13 @@ impl EmailSet for Server {
                         );
                     }
                     (Key::Property(EmailProperty::Keywords), Value::Object(keywords_)) => {
+                        // inbuxa: a keyword that is not a valid name is refused
+                        if keywords_.iter().any(|(keyword, _)| {
+                            !matches!(keyword, Key::Property(EmailProperty::Keyword(_)))
+                        }) {
+                            response.not_updated.append(id, invalid_keyword());
+                            continue 'update;
+                        }
                         new_data.set_keywords(
                             keywords_
                                 .into_expanded_boolean_set()

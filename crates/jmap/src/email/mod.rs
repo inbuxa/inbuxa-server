@@ -2,6 +2,8 @@
  * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
+ *
+ * Modified by Coffey Labs in 2026 for INBUXA.
  */
 
 use email::message::ingest::IngestedEmail;
@@ -37,6 +39,14 @@ pub(crate) enum PatchResult<'x> {
     AddMailbox(u32),
     RemoveMailbox(u32),
     Invalid(SetError<EmailProperty>),
+}
+
+/// inbuxa: the error for a keyword that is not a valid name (RFC 8621
+/// section 4.1.1), which would otherwise reach IMAP clients unescaped
+pub(crate) fn invalid_keyword() -> SetError<EmailProperty> {
+    SetError::invalid_properties()
+        .with_property(EmailProperty::Keywords)
+        .with_description("Keywords must be 1 to 255 printable ASCII characters without spaces or ( ) { ] % * \" \\.")
 }
 
 pub(crate) fn handle_email_patch<'x>(
