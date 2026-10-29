@@ -2,6 +2,8 @@
  * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
+ *
+ * Modified by Coffey Labs in 2026 for INBUXA.
  */
 
 use crate::blob::download::BlobDownload;
@@ -14,7 +16,7 @@ use email::message::{
 use jmap_proto::{
     method::parse::{ParseRequest, ParseResponse},
     object::email::{Email, EmailProperty},
-    request::{IntoValid, MaybeInvalid, reference::MaybeIdReference},
+    request::{MaybeInvalid, reference::MaybeIdReference, unique_valid},
 };
 use jmap_tools::{Key, Map, Value};
 use mail_parser::{
@@ -41,37 +43,34 @@ impl EmailParse for Server {
         if request.blob_ids.len() > self.core.jmap.mail_parse_max_items {
             return Err(trc::JmapEvent::RequestTooLarge.into_err());
         }
-        let properties = request
-            .properties
-            .map(|v| v.into_valid().collect())
-            .unwrap_or_else(|| {
-                vec![
-                    EmailProperty::BlobId,
-                    EmailProperty::Size,
-                    EmailProperty::ReceivedAt,
-                    EmailProperty::MessageId,
-                    EmailProperty::InReplyTo,
-                    EmailProperty::References,
-                    EmailProperty::Sender,
-                    EmailProperty::From,
-                    EmailProperty::To,
-                    EmailProperty::Cc,
-                    EmailProperty::Bcc,
-                    EmailProperty::ReplyTo,
-                    EmailProperty::Subject,
-                    EmailProperty::SentAt,
-                    EmailProperty::HasAttachment,
-                    EmailProperty::Preview,
-                    EmailProperty::BodyValues,
-                    EmailProperty::TextBody,
-                    EmailProperty::HtmlBody,
-                    EmailProperty::Attachments,
-                ]
-            });
+        let properties = request.properties.map(unique_valid).unwrap_or_else(|| {
+            vec![
+                EmailProperty::BlobId,
+                EmailProperty::Size,
+                EmailProperty::ReceivedAt,
+                EmailProperty::MessageId,
+                EmailProperty::InReplyTo,
+                EmailProperty::References,
+                EmailProperty::Sender,
+                EmailProperty::From,
+                EmailProperty::To,
+                EmailProperty::Cc,
+                EmailProperty::Bcc,
+                EmailProperty::ReplyTo,
+                EmailProperty::Subject,
+                EmailProperty::SentAt,
+                EmailProperty::HasAttachment,
+                EmailProperty::Preview,
+                EmailProperty::BodyValues,
+                EmailProperty::TextBody,
+                EmailProperty::HtmlBody,
+                EmailProperty::Attachments,
+            ]
+        });
         let body_properties = request
             .arguments
             .body_properties
-            .map(|v| v.into_valid().collect())
+            .map(unique_valid)
             .unwrap_or_else(|| {
                 vec![
                     EmailProperty::PartId,

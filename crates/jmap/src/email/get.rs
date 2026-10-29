@@ -22,7 +22,7 @@ use email::{
 use jmap_proto::{
     method::get::{GetRequest, GetResponse},
     object::email::{Email, EmailProperty, EmailValue, HeaderForm},
-    request::IntoValid,
+    request::unique_valid,
     types::date::UTCDate,
 };
 use jmap_tools::{Key, Map, Value};
@@ -87,7 +87,7 @@ impl EmailGet for Server {
         let body_properties = request
             .arguments
             .body_properties
-            .map(|v| v.into_valid().collect())
+            .map(unique_valid)
             .unwrap_or_else(|| {
                 vec![
                     EmailProperty::PartId,
