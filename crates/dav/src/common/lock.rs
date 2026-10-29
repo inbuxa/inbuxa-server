@@ -385,36 +385,70 @@ impl LockRequestHandler for Server {
         ) {
             let mut base_path = None;
 
-            'outer: for (pos, resource) in resources.iter().enumerate() {
+            // inbuxa: a lock token counts as submitted wherever it appears in
+            // the If header
+            let submitted_tokens = headers
+                .if_
+                .iter()
+                .flat_map(|if_| if_.list.iter())
+                .filter_map(|cond| match cond {
+                    Condition::StateToken { token, .. } => Some(*token),
+                    _ => None,
+                })
+                .collect::<Vec<_>>();
+
+            for (pos, resource) in resources.iter().enumerate() {
                 if pos == 0 && matches!(method, DavMethod::COPY) {
                     continue;
                 }
 
                 if let Some(idx) = locks.find_cache_pos(self, resource).await? {
-                    let mut failed_locks = Vec::new();
+                    let found_locks = locks.find_locks_by_pos(idx, resource, true)?;
+                    let mut failed_locks: Vec<String> = Vec::new();
 
-                    for (lock_path, lock_item) in locks.find_locks_by_pos(idx, resource, true)? {
-                        let lock_token = lock_item.urn().to_string();
-                        if headers.if_.iter().any(|if_| {
-                            if_.resource
-                                .is_none_or(|r| {
-                                    r.trim_end_matches('/').ends_with(lock_path)})
-                                && if_.list.iter().any(|cond| matches!(cond, Condition::StateToken { token, .. } if token == &lock_token))
+                    // inbuxa: the resource and every locked resource below it
+                    // each need the token of one of the locks covering them
+                    // (more than one only when the locks are shared)
+                    let mut locked_paths = vec![resource.path];
+                    for (lock_path, _) in &found_locks {
+                        if lock_path.len() > resource.path.len()
+                            && !locked_paths.contains(lock_path)
+                        {
+                            locked_paths.push(lock_path);
+                        }
+                    }
+                    for locked_path in locked_paths {
+                        let covering = found_locks
+                            .iter()
+                            .filter(|(lock_path, lock_item)| {
+                                *lock_path == locked_path
+                                    || (lock_item.depth_infinity
+                                        && locked_path
+                                            .strip_prefix(*lock_path)
+                                            .is_some_and(|rest| rest.starts_with('/')))
+                            })
+                            .collect::<Vec<_>>();
+                        if covering.iter().any(|(_, lock_item)| {
+                            submitted_tokens.contains(&lock_item.urn().to_string().as_str())
                         }) {
-                            break 'outer;
-                        } else {
-                            let base_path = base_path.get_or_insert_with(|| {
-                                headers.base_uri()
-                                    .unwrap_or_default()
-                            });
-                            failed_locks.push(format!("{base_path}/{lock_path}").into());
+                            continue;
+                        }
+                        for (lock_path, _) in covering {
+                            let base_path = base_path
+                                .get_or_insert_with(|| headers.base_uri().unwrap_or_default());
+                            let href = format!("{base_path}/{lock_path}");
+                            if !failed_locks.contains(&href) {
+                                failed_locks.push(href);
+                            }
                         }
                     }
 
                     if !failed_locks.is_empty() {
                         lock_response = Err(DavErrorCondition::new(
                             StatusCode::LOCKED,
-                            BaseCondition::LockTokenSubmitted(List(failed_locks)),
+                            BaseCondition::LockTokenSubmitted(List(
+                                failed_locks.into_iter().map(Into::into).collect(),
+                            )),
                         )
                         .into());
                         break;
