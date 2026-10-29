@@ -80,4 +80,10 @@ under MIT or BSD licenses, which stays under those licenses;
 Stalwart Labs' name. **inbuxa** isn't affiliated with or endorsed by Stalwart
 Labs.
 
+`LICENSES/LicenseRef-SEL.txt` (and its copy in `vendor/sieve-rs/`) is there
+only because the inherited headers name it as upstream's other option, and
+a license a header names has to be in `LICENSES/`. It isn't a license for
+**inbuxa** and grants nothing: **inbuxa** is distributed under the
+AGPL-3.0-only.
+
 The **inbuxa** mark reuses ihasmail's cat-and-envelope artwork.
