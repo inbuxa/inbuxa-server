@@ -2,6 +2,8 @@
  * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
+ *
+ * Modified by Coffey Labs in 2026 for INBUXA.
  */
 
 use crate::{
@@ -10,6 +12,7 @@ use crate::{
         MaybeInvalid,
         deserialize::{DeserializeArguments, deserialize_request},
         reference::{MaybeIdReference, MaybeResultReference, ResultReference},
+        unique_valid,
     },
     types::state::State,
 };
@@ -99,20 +102,10 @@ impl<T: JmapObject> Default for GetRequest<T> {
 impl<T: JmapObject> GetRequest<T> {
     pub fn unwrap_properties(&mut self, default: &[T::Property]) -> Vec<T::Property> {
         if let Some(properties_) = self.properties.take().map(|p| p.unwrap()) {
-            let mut properties = Vec::with_capacity(properties_.len());
+            let mut properties = unique_valid(properties_);
             let id_prop = T::ID_PROPERTY;
-            let mut has_id = false;
 
-            for prop in properties_ {
-                if let MaybeInvalid::Value(p) = prop {
-                    if p == id_prop {
-                        has_id = true;
-                    }
-                    properties.push(p);
-                }
-            }
-
-            if !has_id {
+            if !properties.contains(&id_prop) {
                 properties.push(id_prop);
             }
 
