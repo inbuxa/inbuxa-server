@@ -25,6 +25,16 @@ impl<T: SessionStream> Session<T> {
     pub async fn handle_authenticate(&mut self, request: Request<Command>) -> trc::Result<()> {
         let mut args = request.parse_authenticate()?;
 
+        // inbuxa: a bearer token is a credential on its own, so it is never
+        // asked for or taken on clear text, whatever the plain-text setting
+        if !self.is_tls && matches!(args.mechanism, Mechanism::OAuthBearer | Mechanism::XOauth2) {
+            return Err(trc::AuthEvent::Error
+                .into_err()
+                .details("Bearer tokens require TLS.")
+                .id(args.tag)
+                .code(ResponseCode::PrivacyRequired));
+        }
+
         match args.mechanism {
             Mechanism::Plain | Mechanism::OAuthBearer | Mechanism::XOauth2 => {
                 if !args.params.is_empty() {
@@ -138,6 +148,7 @@ impl<T: SessionStream> Session<T> {
                         true,
                         !self.is_tls && self.instance.acceptor.is_tls(),
                         true,
+                        self.is_tls,
                         self.server.core.imap.max_messages_per_command,
                         self.server.core.imap.max_messages_per_save,
                     ),

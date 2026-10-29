@@ -8,7 +8,7 @@
 
 use super::{ImapSessionManager, Session, State};
 use crate::{
-    GREETING_WITH_TLS, GREETING_WITH_TLS_LOGIN_DISABLED, GREETING_WITHOUT_TLS,
+    GREETING_CLEAR_TEXT, GREETING_WITH_TLS, GREETING_WITH_TLS_LOGIN_DISABLED, GREETING_WITHOUT_TLS,
     GREETING_WITHOUT_TLS_LOGIN_DISABLED,
 };
 use common::{
@@ -129,7 +129,8 @@ impl<T: SessionStream> Session<T> {
         let greeting = match (offer_tls, allow_auth) {
             (true, true) => &GREETING_WITH_TLS,
             (true, false) => &GREETING_WITH_TLS_LOGIN_DISABLED,
-            (false, true) => &GREETING_WITHOUT_TLS,
+            (false, true) if is_tls => &GREETING_WITHOUT_TLS,
+            (false, true) => &GREETING_CLEAR_TEXT,
             (false, false) => &GREETING_WITHOUT_TLS_LOGIN_DISABLED,
         };
 

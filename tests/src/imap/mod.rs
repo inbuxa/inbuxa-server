@@ -10,6 +10,7 @@ pub mod acl;
 pub mod antispam;
 pub mod append;
 pub mod basic;
+pub mod bearer_tls;
 pub mod body_structure;
 pub mod condstore;
 pub mod copy_move;
@@ -54,6 +55,13 @@ pub async fn imap_tests() {
         .with_default_listeners()
         .await
         .with_listener(NetworkListenerProtocol::Pop3, "pop3-plain", 4111, false)
+        .await
+        .with_listener(
+            NetworkListenerProtocol::ManageSieve,
+            "sieve-plain",
+            4191,
+            false,
+        )
         .await
         .build()
         .await;
@@ -287,6 +295,9 @@ pub async fn imap_tests() {
 
     // Run POP3 tests
     pop::test(&test).await;
+
+    // Bearer tokens on clear-text connections
+    bearer_tls::test().await;
 
     // Print elapsed time
     let elapsed = start_time.elapsed();

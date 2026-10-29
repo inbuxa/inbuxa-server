@@ -28,10 +28,14 @@ impl<T: SessionStream> Session<T> {
         if !self.stream.is_tls() {
             response.extend_from_slice(b"\"STARTTLS\"\r\n");
         }
-        if self.stream.is_tls() || self.server.core.imap.allow_plain_auth {
+        // inbuxa: bearer tokens are only offered over TLS, and nothing is
+        // offered on clear text with plain-text sign-in off (STARTTLS is)
+        if self.stream.is_tls() {
             response.extend_from_slice(b"\"SASL\" \"PLAIN OAUTHBEARER XOAUTH2\"\r\n");
+        } else if self.server.core.imap.allow_plain_auth {
+            response.extend_from_slice(b"\"SASL\" \"PLAIN\"\r\n");
         } else {
-            response.extend_from_slice(b"\"SASL\" \"OAUTHBEARER XOAUTH2\"\r\n");
+            response.extend_from_slice(b"\"SASL\" \"\"\r\n");
         };
         if let Some(sieve) =
             self.server
