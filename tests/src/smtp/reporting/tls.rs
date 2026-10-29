@@ -294,5 +294,41 @@ async fn report_tls() {
         ["reports@foobar.org"]
     );
 
+    // inbuxa: a rua host name that resolves to a local address is never
+    // contacted; the report goes to the mailto address instead.
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let tls_record = Arc::new(
+        TlsRpt::parse(
+            format!("v=TLSRPTv1;rua=https://localhost:{port}/tls,mailto:reports@foobar.org")
+                .as_bytes(),
+        )
+        .unwrap(),
+    );
+    test.server
+        .schedule_tls(Box::new(TlsEvent {
+            domain: "foobar.org".to_string(),
+            policy: common::ipc::PolicyType::None,
+            failure: None,
+            tls_record,
+            interval: AggregateFrequency::Daily,
+            span_id: 0,
+        }))
+        .await;
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    let reports = test.read_report_events::<TlsInternalReport>().await;
+    assert_eq!(reports.len(), 1);
+    test.server
+        .send_tls_aggregate_report(reports.first().unwrap().0.id())
+        .await
+        .unwrap();
+    assert!(
+        tokio::time::timeout(Duration::from_millis(200), listener.accept())
+            .await
+            .is_err(),
+        "the TLS report was sent to a local address"
+    );
+    test.expect_message().await;
+
     test.assert_report_is_empty::<TlsInternalReport>().await;
 }
