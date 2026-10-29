@@ -15,7 +15,8 @@ use calcard::{
     common::timezone::Tz,
     icalendar::{
         ICalendar, ICalendarComponentType, ICalendarFrequency, ICalendarRecurrenceRule,
-        ICalendarValue, dates::TimeOrDelta,
+        ICalendarValue,
+        dates::{CalendarError, CalendarErrorType, TimeOrDelta},
     },
 };
 use compact_str::ToCompactString;
@@ -26,6 +27,21 @@ use store::{
 };
 
 const MAX_TIME_SPAN: i64 = u32::MAX as i64;
+
+// inbuxa: the object to log with a rule expansion error. Not when the work
+// budget ran out: anyone who can get an object stored (a sharee, or a sender
+// whose invitation is processed) can cause that on purpose, and every time it
+// would copy up to the whole object into the log
+fn expansion_error_details(ical: &ICalendar, errors: &[CalendarError]) -> Option<String> {
+    if errors
+        .iter()
+        .any(|err| err.error == CalendarErrorType::ExpansionBudgetExhausted)
+    {
+        None
+    } else {
+        Some(ical.to_string())
+    }
+}
 
 // calcard builds every candidate of one period (days x BYHOUR x BYMINUTE x
 // BYSECOND) before the expansion limit applies, so a rule is refused when that
@@ -233,6 +249,7 @@ impl CalendarEventData {
         }
 
         if !expanded.errors.is_empty() {
+            let details = expansion_error_details(&ical, &expanded.errors);
             trc::event!(
                 Calendar(trc::CalendarEvent::RuleExpansionError),
                 Reason = expanded
@@ -240,7 +257,7 @@ impl CalendarEventData {
                     .into_iter()
                     .map(|e| e.error.to_compact_string())
                     .collect::<Vec<_>>(),
-                Details = ical.to_string(),
+                Details = details,
                 Limit = max_expansions,
             );
         }
@@ -376,13 +393,34 @@ mod tests {
         }
         ical.push_str("END:VCALENDAR\r\n");
 
-        let expanded = ICalendar::parse(&ical).unwrap().expand_dates(Tz::UTC, 3000);
+        let parsed = ICalendar::parse(&ical).unwrap();
+        let expanded = parsed.expand_dates(Tz::UTC, 3000);
         assert!(expanded.events.is_empty());
         assert!(
             expanded
                 .errors
                 .iter()
                 .any(|err| err.error == CalendarErrorType::ExpansionBudgetExhausted)
+        );
+
+        // Anyone who can get an object stored can use up the budget, so its
+        // log entry leaves the object out
+        assert_eq!(
+            super::expansion_error_details(&parsed, &expanded.errors),
+            None
+        );
+    }
+
+    #[test]
+    fn other_expansion_errors_keep_the_object() {
+        let ical = "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nBEGIN:VEVENT\r\nUID:x\r\n\
+                    RRULE:FREQ=DAILY\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n";
+        let parsed = ICalendar::parse(ical).unwrap();
+        let expanded = parsed.expand_dates(Tz::UTC, 3000);
+        assert!(!expanded.errors.is_empty());
+        assert!(
+            super::expansion_error_details(&parsed, &expanded.errors)
+                .is_some_and(|details| details.contains("UID:x"))
         );
     }
 }
