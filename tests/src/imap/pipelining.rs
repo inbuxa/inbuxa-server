@@ -82,15 +82,13 @@ pub async fn test(test: &TestServer) {
         ));
     }
 
-    // STORE, then FETCH of the same messages, then DELETE, in one write.
-    // SELECT goes first on its own: the commands after it are checked
-    // against the session state as they are read.
-    tx.write_all(b"q1 SELECT \"Pipelined\"\r\n").await.unwrap();
-    let result = read_tags(&mut rx, &["q1"]).await;
-    result.check_in_order(&mut problems, "SELECT", &["q1"]);
-    let tags = ["q2", "q3", "q4", "q5"];
+    // SELECT, then STORE and FETCH of the same messages, then UNSELECT and
+    // DELETE, in one write: each command is checked against the state it
+    // runs in, so the ones after SELECT find a mailbox selected
+    let tags = ["q1", "q2", "q3", "q4", "q5"];
     tx.write_all(
         concat!(
+            "q1 SELECT \"Pipelined\"\r\n",
             "q2 STORE 1:* +FLAGS.SILENT (\\Flagged)\r\n",
             "q3 FETCH 1:* (FLAGS)\r\n",
             "q4 UNSELECT\r\n",
@@ -101,11 +99,30 @@ pub async fn test(test: &TestServer) {
     .await
     .unwrap();
     let result = read_tags(&mut rx, &tags).await;
-    result.check_in_order(&mut problems, "STORE/FETCH/UNSELECT/DELETE", &tags);
+    result.check_in_order(&mut problems, "SELECT/STORE/FETCH/UNSELECT/DELETE", &tags);
     let fetched = result.untagged("FETCH (");
     if fetched.len() != MESSAGES || fetched.iter().any(|line| !line.contains("\\Flagged")) {
         problems.push(format!(
             "FETCH after the pipelined STORE did not see \\Flagged on all {MESSAGES} messages: {fetched:?}"
+        ));
+    }
+
+    // and the other way round: a FETCH after UNSELECT in the same write
+    // finds no mailbox selected
+    let tags = ["r1", "r2", "r3"];
+    tx.write_all(b"r1 SELECT \"INBOX\"\r\nr2 UNSELECT\r\nr3 FETCH 1:* (FLAGS)\r\n")
+        .await
+        .unwrap();
+    let result = read_tags(&mut rx, &tags).await;
+    let outcome = result
+        .tagged
+        .iter()
+        .map(|line| line.splitn(3, ' ').take(2).collect::<Vec<_>>().join(" "))
+        .collect::<Vec<_>>();
+    if outcome != ["r1 OK", "r2 OK", "r3 BAD"] {
+        problems.push(format!(
+            "SELECT/UNSELECT/FETCH: expected OK, OK, BAD in order: {:?}",
+            result.tagged
         ));
     }
 
