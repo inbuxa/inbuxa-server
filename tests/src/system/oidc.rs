@@ -23,6 +23,7 @@ use common::auth::oauth::{
         ClientRegistrationRequest, ClientRegistrationResponse, TokenEndpointAuthMethod,
     },
 };
+use futures::StreamExt;
 use http::auth::oauth::{
     DeviceAuthResponse, ErrorType, TokenResponse,
     auth::{LoginRequest, LoginResponse},
@@ -30,6 +31,7 @@ use http::auth::oauth::{
 use imap_proto::ResponseType;
 use jmap_client::{
     client::{Client, Credentials},
+    client_ws::WebSocketMessage,
     mailbox::query::Filter,
 };
 use registry::schema::{
@@ -673,7 +675,8 @@ pub async fn test(test: &mut TestServer) {
         obtain_auth_code(&http, &confidential_id, confidential_redirect).await,
     );
     params.insert("client_secret".to_string(), confidential_secret.to_string());
-    let (token, _, _) = unwrap_token_response(post(&metadata.token_endpoint, &params).await);
+    let (token, confidential_refresh, _) =
+        unwrap_token_response(post(&metadata.token_endpoint, &params).await);
     let confidential_client = Client::new()
         .credentials(Credentials::bearer(&token))
         .accept_invalid_certs(true)
@@ -685,6 +688,66 @@ pub async fn test(test: &mut TestServer) {
         confidential_client.default_account_id(),
         user_id.to_string()
     );
+
+    // inbuxa: a WebSocket opened with the token serves it only while the
+    // token is valid
+    let mut ws = confidential_client.connect_ws().await.unwrap();
+    let mut request = confidential_client.build();
+    request.get_mailbox();
+    request.send_ws().await.unwrap();
+    assert!(
+        matches!(
+            tokio::time::timeout(Duration::from_secs(5), ws.next()).await,
+            Ok(Some(Ok(WebSocketMessage::Response(_))))
+        ),
+        "the WebSocket serves a valid token"
+    );
+    tokio::time::sleep(Duration::from_secs(6)).await; // past the 5s token
+    let mut request = confidential_client.build();
+    request.get_mailbox();
+    request.send_ws().await.unwrap();
+    let after_expiry = tokio::time::timeout(Duration::from_secs(5), ws.next()).await;
+    assert!(
+        !matches!(after_expiry, Ok(Some(Ok(WebSocketMessage::Response(_))))),
+        "the WebSocket must stop serving an expired token, got {after_expiry:?}"
+    );
+    drop(ws);
+
+    // inbuxa: a refresh token is redeemed only by the client it was issued
+    // to, and a confidential client has to authenticate to redeem it
+    let mut params = AHashMap::from_iter([
+        ("grant_type".to_string(), "refresh_token".to_string()),
+        (
+            "refresh_token".to_string(),
+            confidential_refresh.expect("a refresh token"),
+        ),
+    ]);
+    assert_eq!(
+        post::<TokenResponse>(&metadata.token_endpoint, &params).await,
+        TokenResponse::Error {
+            error: ErrorType::InvalidClient
+        },
+        "a confidential client's refresh token needs the client's secret"
+    );
+    params.insert("client_id".to_string(), confidential_id.to_string());
+    assert_eq!(
+        post::<TokenResponse>(&metadata.token_endpoint, &params).await,
+        TokenResponse::Error {
+            error: ErrorType::InvalidClient
+        },
+        "naming the client is not authenticating it"
+    );
+    params.insert("client_id".to_string(), client_id.to_string());
+    assert_eq!(
+        post::<TokenResponse>(&metadata.token_endpoint, &params).await,
+        TokenResponse::Error {
+            error: ErrorType::InvalidGrant
+        },
+        "another client can't redeem the refresh token"
+    );
+    params.insert("client_id".to_string(), confidential_id.to_string());
+    params.insert("client_secret".to_string(), confidential_secret.to_string());
+    unwrap_token_response(post(&metadata.token_endpoint, &params).await);
 
     // The correct secret in the Authorization header (client_secret_basic) also works
     let mut params = base_params();
@@ -893,7 +956,17 @@ pub async fn test(test: &mut TestServer) {
     );
 
     // Wait 1 second and make sure the access token expired
-    tokio::time::sleep(Duration::from_secs(6)).await; // inbuxa: past the 5s token
+    // inbuxa: used once 3s in, the token must still stop working when it
+    // expires, not when its cached sign-in would
+    tokio::time::sleep(Duration::from_secs(3)).await;
+    Client::new()
+        .credentials(Credentials::bearer(&token))
+        .accept_invalid_certs(true)
+        .follow_redirects(["127.0.0.1"])
+        .connect("https://127.0.0.1:8899")
+        .await
+        .unwrap();
+    tokio::time::sleep(Duration::from_secs(3)).await; // inbuxa: past the 5s token
     assert_unauthorized("https://127.0.0.1:8899", &token).await;
 
     // Wait another second for the refresh token to be about to expire

@@ -2,6 +2,8 @@
  * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
+ *
+ * Modified by Coffey Labs in 2026 for INBUXA.
  */
 
 pub mod acl;
@@ -13,6 +15,7 @@ pub mod property;
 pub mod propstat;
 pub mod schedule;
 
+use crate::requests::is_xml_name;
 use crate::schema::{
     Namespaces,
     property::{Comp, ResourceType, SupportedCollation},
@@ -174,26 +177,66 @@ pub trait DeadPropertyFormat {
 
 impl DeadPropertyFormat for DeadProperty {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let mut last_tag = "";
+        // inbuxa: each end tag closes the element opened last
+        let mut open_tags = Vec::new();
 
         for item in &self.0 {
             match item {
                 DeadPropertyTag::ElementStart(tag) => {
-                    let name = &tag.name;
-                    if let Some(attrs) = &tag.attrs {
-                        write!(f, "<{name} {attrs}>")?;
-                    } else {
-                        write!(f, "<{name}>")?;
-                    }
-                    last_tag = name;
+                    let name = dead_element_name(&tag.name);
+                    write!(f, "<{name}{}>", DeadAttributes(tag.attrs.as_deref()))?;
+                    open_tags.push(name);
                 }
                 DeadPropertyTag::ElementEnd => {
-                    write!(f, "</{}>", last_tag)?;
+                    if let Some(name) = open_tags.pop() {
+                        write!(f, "</{name}>")?;
+                    }
                 }
                 DeadPropertyTag::Text(text) => {
                     text.write_escaped_to(f)?;
                 }
             }
+        }
+
+        while let Some(name) = open_tags.pop() {
+            write!(f, "</{name}>")?;
+        }
+
+        Ok(())
+    }
+}
+
+/// inbuxa: a stored element name that couldn't be written back as one
+pub(crate) fn dead_element_name(name: &str) -> &str {
+    if is_xml_name(name) {
+        name
+    } else {
+        "invalid-name"
+    }
+}
+
+/// inbuxa: writes a dead property's stored attributes as ` name="value"`
+/// pairs. Values stored before they were escaped on the way in may hold a
+/// quote or markup, so writing stops at the first part that isn't a plain
+/// pair.
+pub(crate) struct DeadAttributes<'x>(pub Option<&'x str>);
+
+impl Display for DeadAttributes<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let Some(mut attrs) = self.0 else {
+            return Ok(());
+        };
+
+        loop {
+            attrs = attrs.trim_start();
+            let Some((name, value, rest)) = attrs.split_once('=').and_then(|(name, rest)| {
+                let (value, rest) = rest.strip_prefix('"')?.split_once('"')?;
+                (is_xml_name(name) && !value.contains('<')).then_some((name, value, rest))
+            }) else {
+                break;
+            };
+            write!(f, " {name}=\"{value}\"")?;
+            attrs = rest;
         }
 
         Ok(())
@@ -245,6 +288,37 @@ mod tests {
         fn from(v: VCard) -> Self {
             DavValue::VCard(v)
         }
+    }
+
+    // inbuxa: attributes stored before they were escaped on the way in are
+    // written only up to the first part that isn't a plain name="value" pair
+    #[test]
+    fn stored_dead_property_attributes_stay_inside_the_tag() {
+        struct Format(DeadProperty);
+        impl Display for Format {
+            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                super::DeadPropertyFormat::fmt(&self.0, f)
+            }
+        }
+
+        let property = DeadProperty(vec![
+            DeadPropertyTag::ElementStart(DeadElementTag {
+                name: "note".to_string(),
+                attrs: Some(r#"xmlns="urn:example:z" a="x" ><evil/>" b="y""#.to_string()),
+            }),
+            DeadPropertyTag::ElementStart(DeadElementTag {
+                name: "inner".to_string(),
+                attrs: Some(r#"c="<evil/>""#.to_string()),
+            }),
+            DeadPropertyTag::Text("text".to_string()),
+            DeadPropertyTag::ElementEnd,
+            DeadPropertyTag::ElementEnd,
+        ]);
+
+        assert_eq!(
+            Format(property).to_string(),
+            r#"<note xmlns="urn:example:z" a="x"><inner>text</inner></note>"#
+        );
     }
 
     #[test]

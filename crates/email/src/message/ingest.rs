@@ -2,6 +2,8 @@
  * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
+ *
+ * Modified by Coffey Labs in 2026 for INBUXA.
  */
 
 use super::crypto::{EncryptMessage, EncryptMessageError};
@@ -10,6 +12,7 @@ use crate::{
     mailbox::{INBOX_ID, JUNK_ID, SENT_ID, TRASH_ID, UidMailbox},
     message::{
         crypto::EncryptionFlags,
+        delivery::VerifiedSender,
         index::{IndexMessage, extractors::VisitText},
         metadata::{MessageData, MessageMetadata},
     },
@@ -80,7 +83,8 @@ pub struct IngestEmail<'x> {
 pub enum IngestSource<'x> {
     Smtp {
         deliver_to: &'x str,
-        is_sender_authenticated: bool,
+        envelope_from: &'x str,
+        verified_sender: VerifiedSender,
         is_spam: bool,
     },
     Jmap {
@@ -244,9 +248,23 @@ impl EmailIngest for Server {
         let is_spam = match params.source {
             IngestSource::Smtp {
                 deliver_to,
-                is_sender_authenticated,
+                envelope_from,
+                verified_sender,
                 mut is_spam,
             } => {
+                // inbuxa: a signed-in sender is known by its envelope address,
+                // which submission checks against the account; the From header
+                // is trusted only when it passed DMARC
+                let sender = match verified_sender {
+                    VerifiedSender::Envelope => sanitize_email(envelope_from),
+                    VerifiedSender::FromHeader => message
+                        .from()
+                        .and_then(|s| s.first())
+                        .and_then(|s| s.address())
+                        .and_then(sanitize_email),
+                    VerifiedSender::None => None,
+                };
+
                 // Add delivered to header
                 if self.core.smtp.session.data.add_delivered_to {
                     extra_headers = format!("Delivered-To: {deliver_to}\r\n");
@@ -266,13 +284,8 @@ impl EmailIngest for Server {
                     // sender address is present in the user's address book.
                     if is_spam
                         && self.core.spam.card_is_ham
-                        && let Some(sender) = message
-                            .from()
-                            .and_then(|s| s.first())
-                            .and_then(|s| s.address())
-                            .and_then(sanitize_email)
+                        && let Some(sender) = &sender
                         && sender != deliver_to
-                        && is_sender_authenticated
                         && self
                             .document_exists(
                                 account_id,
@@ -363,7 +376,7 @@ impl EmailIngest for Server {
                 // iMIP processing
                 if self.core.groupware.itip_enabled
                     && !is_spam
-                    && is_sender_authenticated
+                    && let Some(sender) = &sender
                     && params
                         .access_token
                         .has_permission(Permission::CalendarSchedulingReceive)
@@ -372,7 +385,6 @@ impl EmailIngest for Server {
                         .build_account_info(account.clone())
                         .await
                         .caused_by(trc::location!())?;
-                    let mut sender = None;
                     for part in &message.parts {
                         if part.content_type().is_some_and(|ct| {
                             ct.ctype().eq_ignore_ascii_case("text")
@@ -383,64 +395,43 @@ impl EmailIngest for Server {
                         }) && let Some(itip_message) = part.text_contents()
                         {
                             if itip_message.len() < self.core.groupware.itip_inbound_max_ical_size {
-                                if let Some(sender) = sender.get_or_insert_with(|| {
-                                    message
-                                        .from()
-                                        .and_then(|s| s.first())
-                                        .and_then(|s| s.address())
-                                        .and_then(sanitize_email)
-                                }) {
-                                    match self
-                                        .itip_ingest(
-                                            &account_info,
-                                            sender,
-                                            deliver_to,
-                                            itip_message,
-                                        )
-                                        .await
-                                    {
-                                        Ok(message) => {
-                                            if let Some(message) = message {
-                                                itip_messages.push(message);
-                                            }
+                                match self
+                                    .itip_ingest(&account_info, sender, deliver_to, itip_message)
+                                    .await
+                                {
+                                    Ok(message) => {
+                                        if let Some(message) = message {
+                                            itip_messages.push(message);
+                                        }
+                                        trc::event!(
+                                            Calendar(trc::CalendarEvent::ItipMessageReceived),
+                                            SpanId = params.session_id,
+                                            From = sender.to_string(),
+                                            AccountId = account_id,
+                                        );
+                                    }
+                                    Err(ItipIngestError::Message(itip_error)) => match itip_error {
+                                        ItipError::NothingToSend
+                                        | ItipError::OtherSchedulingAgent => (),
+                                        err => {
                                             trc::event!(
-                                                Calendar(trc::CalendarEvent::ItipMessageReceived),
+                                                Calendar(trc::CalendarEvent::ItipMessageError),
                                                 SpanId = params.session_id,
                                                 From = sender.to_string(),
                                                 AccountId = account_id,
-                                            );
+                                                Details = err.to_string(),
+                                            )
                                         }
-                                        Err(ItipIngestError::Message(itip_error)) => {
-                                            match itip_error {
-                                                ItipError::NothingToSend
-                                                | ItipError::OtherSchedulingAgent => (),
-                                                err => {
-                                                    trc::event!(
-                                                        Calendar(
-                                                            trc::CalendarEvent::ItipMessageError
-                                                        ),
-                                                        SpanId = params.session_id,
-                                                        From = sender.to_string(),
-                                                        AccountId = account_id,
-                                                        Details = err.to_string(),
-                                                    )
-                                                }
-                                            }
-                                        }
-                                        Err(ItipIngestError::Internal(err)) => {
-                                            trc::error!(err.caused_by(trc::location!()));
-                                        }
+                                    },
+                                    Err(ItipIngestError::Internal(err)) => {
+                                        trc::error!(err.caused_by(trc::location!()));
                                     }
                                 }
                             } else {
                                 trc::event!(
                                     Calendar(trc::CalendarEvent::ItipMessageError),
                                     SpanId = params.session_id,
-                                    From = message
-                                        .from()
-                                        .and_then(|a| a.first())
-                                        .and_then(|a| a.address())
-                                        .map(|a| a.to_string()),
+                                    From = sender.to_string(),
                                     AccountId = account_id,
                                     Details = "iMIP message too large",
                                     Limit = self.core.groupware.itip_inbound_max_ical_size,
@@ -758,6 +749,7 @@ impl EmailIngest for Server {
         let key_len = IndexKeyPrefix::len() + result.thread_hash.len() + U32_LEN;
         let document_id_pos = key_len - U32_LEN;
         let mut thread_merge = ThreadMerge::new();
+        let mut candidates_left = THREAD_SCAN_LIMIT;
         self.store()
             .iterate(
                 IterateParams::new(
@@ -780,9 +772,16 @@ impl EmailIngest for Server {
                         }),
                     },
                 )
-                .ascending(),
+                .descending(),
                 |key, value| {
                     if key.len() == key_len {
+                        // inbuxa: only the newest messages with this thread name
+                        // are candidates
+                        if candidates_left == 0 {
+                            return Ok(false);
+                        }
+                        candidates_left -= 1;
+
                         // Find matching references
                         let references = value.get(U32_LEN..).unwrap_or_default();
 
@@ -971,6 +970,12 @@ impl EmailIngest for Server {
         }
     }
 }
+
+// inbuxa: how many of the newest messages sharing a thread name (or sharing
+// none) a new message is compared with. Every delivery used to read all of
+// them, so mail sent with one subject over and over made each delivery to that
+// account slower than the last.
+pub const THREAD_SCAN_LIMIT: usize = 512;
 
 pub fn has_message_id(a: &[CheekyHash], b: &[u8]) -> bool {
     let mut i = 0;

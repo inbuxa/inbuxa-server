@@ -2,6 +2,8 @@
  * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
+ *
+ * Modified by Coffey Labs in 2026 for INBUXA.
  */
 
 use super::{
@@ -294,10 +296,14 @@ impl PropFindRequestHandler for Server {
         let collection_children;
         let sync_collection;
         let mut query_filter = None;
-        let mut limit = std::cmp::min(
+        // inbuxa: a limit of zero still allows one result, so the countdown
+        // below can't wrap around and lift the cap
+        let max_results = std::cmp::min(
             query.limit.unwrap_or(u32::MAX) as usize,
             self.core.groupware.max_results,
-        );
+        )
+        .max(1);
+        let mut limit = max_results;
         let mut is_sync_limited = false;
         let mut is_propfind = false;
         let mut ical_instances_limit = self.core.groupware.max_ical_instances;
@@ -1115,12 +1121,7 @@ impl PropFindRequestHandler for Server {
                 Response::new_status([query.uri], StatusCode::INSUFFICIENT_STORAGE)
                     .with_error(BaseCondition::NumberOfMatchesWithinLimit)
                     .with_response_description(if ical_instances_limit > 0 {
-                        format!(
-                            "The number of matches exceeds the limit of {}",
-                            query
-                                .limit
-                                .unwrap_or(self.core.groupware.max_results as u32)
-                        )
+                        format!("The number of matches exceeds the limit of {max_results}")
                     } else {
                         format!(
                             "The number of recurrence instances exceeds the limit of {}",
@@ -1223,6 +1224,9 @@ async fn get(
             }))
         });
 
+    // inbuxa: the containers the caller can see, before narrowing to changes
+    let visible_containers = display_containers.clone();
+
     // Filter by changelog
     let is_sync = match query.sync_type {
         SyncType::From { id, seq } => {
@@ -1307,6 +1311,26 @@ async fn get(
                     .vanished(account_id, vanished_collection.into(), Query::Since(id))
                     .await
                     .caused_by(trc::location!())?;
+
+                // inbuxa: the log holds deletions from the whole account: keep
+                // those inside the synced collection, under a container the
+                // caller can see
+                let scope = resource
+                    .resource
+                    .filter(|path| !path.is_empty())
+                    .map_or_else(
+                        || resources.base_path.clone(),
+                        |path| resources.format_collection(path),
+                    );
+                vanished.retain(|href| {
+                    href.starts_with(scope.as_str())
+                        && visible_containers.as_ref().is_none_or(|containers| {
+                            href.strip_prefix(resources.base_path.as_str())
+                                .and_then(|path| path.trim_end_matches('/').rsplit_once('/'))
+                                .and_then(|(parent, _)| resources.by_path(parent))
+                                .is_some_and(|parent| containers.contains(parent.document_id()))
+                        })
+                });
                 total_changes += vanished.len();
             }
 

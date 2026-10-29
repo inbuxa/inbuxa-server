@@ -2,6 +2,8 @@
  * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
+ *
+ * Modified by Coffey Labs in 2026 for INBUXA.
  */
 
 use crate::api::{ToRequestError, notifications_into_push_objects, request::RequestHandler};
@@ -17,7 +19,9 @@ use jmap_proto::{
     },
 };
 use std::future::Future;
+use std::net::IpAddr;
 use std::time::Instant;
+use store::write::now;
 use tokio_tungstenite::WebSocketStream;
 use trc::JmapEvent;
 use tungstenite::Message;
@@ -94,15 +98,44 @@ impl WebSocketHandler for Server {
                                         self.core.jmap.request_max_size,
                                     ) {
                                         Ok(WebSocketMessage::Request(request)) => {
-                                            let response = self
-                                                .handle_jmap_request(
-                                                    request.request,
+                                            // inbuxa: each request is served as the
+                                            // session stands now, and counts toward
+                                            // the account's request limits
+                                            let access_token = match current_websocket_token(
+                                                self,
+                                                &access_token,
+                                                session.remote_ip,
+                                            )
+                                            .await
+                                            {
+                                                Ok(access_token) => access_token,
+                                                Err(err) => {
+                                                    end_websocket(&mut stream, err, session.session_id).await;
+                                                    break;
+                                                }
+                                            };
+                                            match self
+                                                .is_http_authenticated_request_allowed(
                                                     &access_token,
-                                                    &session,
+                                                    session.remote_ip,
                                                 )
-                                                .await;
-                                            WebSocketResponse::from_response(response, request.id)
-                                            .to_json()
+                                                .await
+                                            {
+                                                Ok(_in_flight) => {
+                                                    let response = self
+                                                        .handle_jmap_request(
+                                                            request.request,
+                                                            &access_token,
+                                                            &session,
+                                                        )
+                                                        .await;
+                                                    WebSocketResponse::from_response(response, request.id)
+                                                    .to_json()
+                                                }
+                                                Err(err) => {
+                                                    WebSocketRequestError::from(err.to_request_error()).to_json()
+                                                }
+                                            }
                                         }
                                         Ok(WebSocketMessage::PushEnable(push_enable)) => {
                                             change_types = if !push_enable.data_types.is_empty() {
@@ -229,6 +262,13 @@ impl WebSocketHandler for Server {
                 // Send any queued changes
                 let elapsed = last_changes_sent.elapsed();
                 if elapsed >= throttle {
+                    // inbuxa: only while the session is still valid
+                    if let Err(err) =
+                        current_websocket_token(self, &access_token, session.remote_ip).await
+                    {
+                        end_websocket(&mut stream, err, session.session_id).await;
+                        break;
+                    }
                     for push in notifications_into_push_objects(std::mem::take(&mut notifications))
                     {
                         let payload = WebSocketPushObject {
@@ -266,4 +306,64 @@ impl WebSocketHandler for Server {
             }
         }
     }
+}
+
+/// inbuxa: the WebSocket's access token as it stands now. The socket
+/// outlives the request that opened it, so it ends when the bearer token it
+/// signed in with expires, the account is locked or removed, the password
+/// changes, or the app password or API key it used goes; and each request
+/// sees the account's current permissions and shares.
+async fn current_websocket_token(
+    server: &Server,
+    signed_in: &AccessToken,
+    remote_ip: IpAddr,
+) -> trc::Result<AccessToken> {
+    if signed_in
+        .expires_at()
+        .is_some_and(|expires_at| expires_at <= now())
+    {
+        return Err(trc::AuthEvent::TokenExpired.into_err());
+    }
+    let inner = server.access_token(signed_in.account_id()).await?;
+    if inner.is_locked() {
+        return Err(trc::AuthEvent::Failed
+            .into_err()
+            .details("Account is locked"));
+    }
+    // A session that signed in with an app password or API key ends when
+    // that credential goes, which renewing it below checks
+    if signed_in.credential_id().is_none()
+        && inner.credential_version() != signed_in.credential_version()
+    {
+        return Err(trc::AuthEvent::TokenExpired
+            .into_err()
+            .details("Credentials changed"));
+    }
+    AccessToken::renew(inner, signed_in.credential_id(), remote_ip).map(|access_token| {
+        access_token
+            .with_origin_arc(signed_in.origin_arc())
+            .with_expires_at(signed_in.expires_at())
+    })
+}
+
+/// inbuxa: tells the client its session is over and closes the socket.
+async fn end_websocket(
+    stream: &mut WebSocketStream<TokioIo<Upgraded>>,
+    err: trc::Error,
+    session_id: u64,
+) {
+    trc::event!(
+        Jmap(JmapEvent::WebsocketStop),
+        SpanId = session_id,
+        Reason = "Session no longer authorized",
+        CausedBy = err,
+    );
+    let _ = stream
+        .send(Message::Text(
+            WebSocketRequestError::from(RequestError::unauthorized())
+                .to_json()
+                .into(),
+        ))
+        .await;
+    let _ = stream.close(None).await;
 }

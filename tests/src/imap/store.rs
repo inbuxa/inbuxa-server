@@ -2,6 +2,8 @@
  * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
+ *
+ * Modified by Coffey Labs in 2026 for INBUXA.
  */
 
 use super::{AssertResult, ImapConnection, Type};
@@ -72,4 +74,22 @@ pub async fn test(imap: &mut ImapConnection, _imap_check: &mut ImapConnection, t
         .await
         .assert_count("FLAGS", 3)
         .assert_count("Answered", 0);
+
+    // inbuxa: a keyword that is not an atom (here stored from a literal, as
+    // JMAP or Sieve could) is never written into FLAGS, so it cannot inject
+    // a response
+    for op in ["+", "-"] {
+        imap.send(&format!("UID STORE 1 {op}FLAGS (custom {{16}}"))
+            .await;
+        imap.assert_read(Type::Continuation, ResponseType::Ok).await;
+        imap.send_untagged("x)\r\n* 99 EXPUNGE)").await;
+        imap.assert_read(Type::Tagged, ResponseType::Ok)
+            .await
+            .assert_count("99 EXPUNGE", 0);
+        imap.send("UID FETCH 1 (FLAGS)").await;
+        imap.assert_read(Type::Tagged, ResponseType::Ok)
+            .await
+            .assert_count("99 EXPUNGE", 0)
+            .assert_count("custom", if op == "+" { 1 } else { 0 });
+    }
 }

@@ -114,7 +114,10 @@ impl Property for EmailProperty {
         let allow_patch = key.is_none();
         if let Some(Key::Property(key)) = key {
             match key.patch_or_prop() {
-                EmailProperty::Keywords => EmailProperty::Keyword(Keyword::parse(value)).into(),
+                // inbuxa: a keyword that is not a valid name is not taken
+                EmailProperty::Keywords => Some(Keyword::parse(value))
+                    .filter(Keyword::is_valid)
+                    .map(EmailProperty::Keyword),
                 EmailProperty::MailboxIds => match parse_ref(value) {
                     MaybeReference::Value(v) => Some(EmailProperty::IdValue(v)),
                     MaybeReference::Reference(v) => Some(EmailProperty::IdReference(v)),

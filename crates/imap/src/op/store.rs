@@ -14,6 +14,7 @@ use crate::{
 use ahash::AHashSet;
 use common::{network::SessionStream, storage::index::ObjectIndexBuilder};
 use email::{
+    cache::{MessageCacheFetch, mailbox::MailboxCacheAccess},
     mailbox::TRASH_ID,
     message::{ingest::EmailIngest, metadata::MessageData},
 };
@@ -126,14 +127,33 @@ impl<T: SessionStream> SessionData<T> {
         }
 
         // Verify that the user can modify messages in this mailbox.
-        if !self
-            .check_mailbox_acl(
-                mailbox.id.account_id,
-                mailbox.id.mailbox_id,
-                Acl::ModifyItems,
-            )
+        // inbuxa: \Deleted needs the right to remove messages and every other
+        // flag the right to modify them (RFC 4314 "t" and "w"). Keywords
+        // belong to the message, so on a shared account the right has to
+        // hold on every mailbox the message is in, not only the selected one.
+        let access_token = self
+            .refresh_access_token()
             .await
-            .imap_ctx(&arguments.tag, trc::location!())?
+            .imap_ctx(&arguments.tag, trc::location!())?;
+        let shared_rights = if !access_token.is_member(account_id) {
+            let cache = self
+                .server
+                .get_cached_messages(account_id)
+                .await
+                .imap_ctx(&arguments.tag, trc::location!())?;
+            Some((
+                cache.shared_mailboxes(&access_token, Acl::ModifyItems),
+                cache.shared_mailboxes(&access_token, Acl::RemoveItems),
+            ))
+        } else {
+            None
+        };
+        let is_replace = matches!(arguments.operation, Operation::Set);
+        let wants_modify = is_replace || arguments.keywords.iter().any(|f| *f != Flag::Deleted);
+        let wants_remove = is_replace || arguments.keywords.contains(&Flag::Deleted);
+        if let Some((modify_ids, remove_ids)) = &shared_rights
+            && !(wants_modify && modify_ids.contains(mailbox.id.mailbox_id)
+                || wants_remove && remove_ids.contains(mailbox.id.mailbox_id))
         {
             return Err(trc::ImapEvent::Error
                 .into_err()
@@ -283,29 +303,55 @@ impl<T: SessionStream> SessionData<T> {
                     .imap_ctx(response.tag.as_ref().unwrap(), trc::location!())?;
                 let mut new_data = data.inner.to_builder();
 
+                // inbuxa: the rights this message allows (see above); flags
+                // the user may not change are left as they are
+                let (may_modify, may_remove) = match &shared_rights {
+                    Some((modify_ids, remove_ids)) => (
+                        new_data
+                            .mailboxes
+                            .iter()
+                            .all(|m| modify_ids.contains(m.mailbox_id)),
+                        new_data
+                            .mailboxes
+                            .iter()
+                            .all(|m| remove_ids.contains(m.mailbox_id)),
+                    ),
+                    None => (true, true),
+                };
+                let may_change = |keyword: &Keyword| {
+                    if keyword == &Keyword::Deleted {
+                        may_remove
+                    } else {
+                        may_modify
+                    }
+                };
+
                 // Apply changes
-                let mut seen_changed = false;
                 match arguments.operation {
-                    Operation::Set => {
-                        seen_changed = set_keywords.contains(&Keyword::Seen)
-                            != new_data.has_keyword(&Keyword::Seen);
+                    Operation::Set if may_modify && may_remove => {
                         new_data.set_keywords(set_keywords.clone());
                     }
+                    Operation::Set => {
+                        new_data.keywords.retain(|keyword| {
+                            !may_change(keyword) || set_keywords.contains(keyword)
+                        });
+                        for keyword in set_keywords.iter().filter(|k| may_change(k)) {
+                            new_data.add_keyword(keyword.clone());
+                        }
+                    }
                     Operation::Add => {
-                        for keyword in &set_keywords {
-                            if new_data.add_keyword(keyword.clone()) && keyword == &Keyword::Seen {
-                                seen_changed = true;
-                            }
+                        for keyword in set_keywords.iter().filter(|k| may_change(k)) {
+                            new_data.add_keyword(keyword.clone());
                         }
                     }
                     Operation::Clear => {
-                        for keyword in &set_keywords {
-                            if new_data.remove_keyword(keyword) && keyword == &Keyword::Seen {
-                                seen_changed = true;
-                            }
+                        for keyword in set_keywords.iter().filter(|k| may_change(k)) {
+                            new_data.remove_keyword(keyword);
                         }
                     }
                 }
+                let seen_changed = new_data.has_keyword(&Keyword::Seen)
+                    != data.inner.keywords.iter().any(|k| k == &Keyword::Seen);
 
                 if !new_data.has_keyword_changes(data.inner) {
                     continue;

@@ -9,7 +9,7 @@
 use crate::{api::query::QueryResponseBuilder, changes::state::JmapCacheState};
 use calcard::{common::timezone::Tz, jscalendar::JSCalendarDateTime};
 use chrono::offset::TimeZone;
-use common::{Server, auth::AccessToken};
+use common::{EVENT_VIEW_HIDE_ATTENDEES, EVENT_VIEW_PRIVATE, Server, auth::AccessToken};
 use groupware::{
     cache::GroupwareCache,
     calendar::{CalendarEvent, expand::RecurrenceKey},
@@ -69,6 +69,8 @@ impl CalendarEventQuery for Server {
             .await?;
         let default_tz = request.arguments.time_zone.unwrap_or(Tz::UTC);
         let mut filter: Option<TimeRange> = None;
+        let mut matches_details = false;
+        let mut matches_participants = false;
 
         // Extract from/to arguments
         for cond in &request.filter {
@@ -84,6 +86,23 @@ impl CalendarEventQuery for Server {
         }
 
         for cond in std::mem::take(&mut request.filter) {
+            if let Filter::Property(cond) = &cond {
+                matches_details |= matches!(
+                    cond,
+                    CalendarEventFilter::Text(_)
+                        | CalendarEventFilter::Title(_)
+                        | CalendarEventFilter::Description(_)
+                        | CalendarEventFilter::Location(_)
+                        | CalendarEventFilter::Owner(_)
+                        | CalendarEventFilter::Attendee(_)
+                );
+                matches_participants |= matches!(
+                    cond,
+                    CalendarEventFilter::Text(_)
+                        | CalendarEventFilter::Owner(_)
+                        | CalendarEventFilter::Attendee(_)
+                );
+            }
             match cond {
                 Filter::Property(cond) => match cond {
                     CalendarEventFilter::InCalendar(MaybeInvalid::Value(id)) => {
@@ -243,6 +262,29 @@ impl CalendarEventQuery for Server {
             vec![]
         };
 
+        // inbuxa: a sharee can't match on what it may not see: the details of a
+        // private or confidential event, or the attendees of one that hides
+        // them unless it may change every event in its calendar.
+        let mask = if access_token.reads_through_share(account_id) {
+            let mut mask = cache.shared_events(
+                access_token,
+                [Acl::ReadItems],
+                true,
+                if matches_details {
+                    EVENT_VIEW_PRIVATE
+                } else {
+                    0
+                },
+            );
+            if matches_participants {
+                mask -= cache.events_with_view(EVENT_VIEW_HIDE_ATTENDEES)
+                    - cache.shared_items(access_token, [Acl::ModifyItems], true);
+            }
+            mask
+        } else {
+            cache.document_ids(false).collect()
+        };
+
         let results = self
             .search_store()
             .query_account(
@@ -250,11 +292,7 @@ impl CalendarEventQuery for Server {
                     .with_filters(filters)
                     .with_comparators(comparators)
                     .with_account_id(account_id)
-                    .with_mask(if access_token.reads_through_share(account_id) {
-                        cache.shared_items(access_token, [Acl::ReadItems], true)
-                    } else {
-                        cache.document_ids(false).collect()
-                    }),
+                    .with_mask(mask),
             )
             .await?;
 

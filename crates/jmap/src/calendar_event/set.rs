@@ -21,6 +21,7 @@ use chrono::DateTime;
 use common::{
     DavName, DavResources, Server,
     auth::{AccessToken, AccountInfo},
+    storage::quota::QuotaBudget,
 };
 use groupware::{
     DestroyArchive,
@@ -32,6 +33,8 @@ use groupware::{
         dates::has_oversized_rrule,
         expand::{CalendarEventExpansion, ComponentRecurrenceId, RecurrenceKey, resolve_local},
         itip::ItipSendStatus,
+        limit_component_depth,
+        privacy::itip_messages_for,
     },
     scheduling::{
         ItipMessages,
@@ -80,6 +83,7 @@ pub trait CalendarEventSet: Sync + Send {
         access_token: &AccessToken,
         account_id: u32,
         account_info: &AccountInfo,
+        quota: &mut QuotaBudget,
         send_scheduling_messages: bool,
         can_add_calendars: &Option<RoaringBitmap>,
         js_calendar_event: JSCalendar<'_, Id, BlobId>,
@@ -106,6 +110,9 @@ impl CalendarEventSet for Server {
             .scheduling_account_info(access_token.account_id(), account_id)
             .await
             .caused_by(trc::location!())?;
+        // inbuxa: the account written into is the one whose quota applies
+        let mut quota =
+            QuotaBudget::new(self.account(account_id).await.caused_by(trc::location!())?);
         let mut response = SetResponse::from_request(&request, self.core.jmap.set_max_objects)?
             .with_state(cache.assert_state(false, &request.if_in_state)?);
         let will_destroy = response.collect_will_destroy(request.unwrap_destroy());
@@ -139,6 +146,7 @@ impl CalendarEventSet for Server {
                     access_token,
                     account_id,
                     &account_info,
+                    &mut quota,
                     send_scheduling_messages,
                     &can_add_calendars,
                     JSCalendar::default(),
@@ -288,6 +296,7 @@ impl CalendarEventSet for Server {
                 }
             }
 
+            limit_component_depth(&mut new_calendar_event.data.event);
             let mut js_calendar_group =
                 std::mem::take(&mut new_calendar_event.data.event).into_jscalendar::<Id, BlobId>();
 
@@ -498,7 +507,10 @@ impl CalendarEventSet for Server {
                                 }
                             }
 
-                            itip_messages = Some(ItipMessages::new(messages));
+                            itip_messages = Some(ItipMessages::new(itip_messages_for(
+                                messages,
+                                new_calendar_event.flags,
+                            )));
                         } else {
                             update.fail(
                                 &mut response,
@@ -554,20 +566,16 @@ impl CalendarEventSet for Server {
             }
 
             // Validate quota
-            let extra_bytes = (new_calendar_event.size as u64)
-                .saturating_sub(u32::from(calendar_event.inner.size) as u64);
-            if extra_bytes > 0 {
-                match self
-                    .has_available_quota(account_info.account(), extra_bytes)
-                    .await
-                {
-                    Ok(_) => {}
-                    Err(err) if err.matches(trc::EventType::Limit(trc::LimitEvent::Quota)) => {
-                        update.fail(&mut response, SetError::over_quota());
-                        continue 'update;
-                    }
-                    Err(err) => return Err(err.caused_by(trc::location!())),
+            // inbuxa: counted as the stored record is, not the iCalendar alone
+            let extra_bytes = (new_calendar_event.size() as u64)
+                .saturating_sub(calendar_event.inner.size() as u64);
+            match self.reserve_quota(&mut quota, extra_bytes).await {
+                Ok(_) => {}
+                Err(err) if err.matches(trc::EventType::Limit(trc::LimitEvent::Quota)) => {
+                    update.fail(&mut response, SetError::over_quota());
+                    continue 'update;
                 }
+                Err(err) => return Err(err.caused_by(trc::location!())),
             }
 
             // Update record
@@ -717,6 +725,7 @@ impl CalendarEventSet for Server {
         access_token: &AccessToken,
         account_id: u32,
         account_info: &AccountInfo,
+        quota: &mut QuotaBudget,
         send_scheduling_messages: bool,
         can_add_calendars: &Option<RoaringBitmap>,
         mut js_calendar_group: JSCalendar<'_, Id, BlobId>,
@@ -873,7 +882,8 @@ impl CalendarEventSet for Server {
                         < self.core.groupware.itip_outbound_max_recipients
                     {
                         event.schedule_tag = Some(1);
-                        itip_messages = Some(ItipMessages::new(messages));
+                        itip_messages =
+                            Some(ItipMessages::new(itip_messages_for(messages, event.flags)));
                     } else {
                         return Ok(Err(SetError::invalid_properties()
                             .with_property(JSCalendarProperty::Participants)
@@ -910,10 +920,7 @@ impl CalendarEventSet for Server {
         }
 
         // Validate quota
-        match self
-            .has_available_quota(account_info.account(), size as u64)
-            .await
-        {
+        match self.reserve_quota(quota, event.size() as u64).await {
             Ok(_) => {}
             Err(err) if err.matches(trc::EventType::Limit(trc::LimitEvent::Quota)) => {
                 return Ok(Err(SetError::over_quota()));

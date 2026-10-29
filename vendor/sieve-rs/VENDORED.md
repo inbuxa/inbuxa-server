@@ -20,6 +20,15 @@ Every changed file carries the AGPL 5(a) notice in its header.
   (the server sets its own name on both of its runtimes anyway), and the
   test-only capability is `vnd.inbuxa.testsuite`.
 - `src/lib.rs`: the test-suite environment variables are `vnd.inbuxa.*`.
+- `src/runtime/tests/comparator.rs`, `src/compiler/grammar/mod.rs`: every
+  `:regex` pattern is built through `build_regex`, which holds the compiled
+  matcher and its lazy DFA to 1 MiB each (fancy-regex's default is 10 MiB),
+  and a pattern built from variables is compiled once per run (`RegexCache`,
+  32 patterns, a field of `Context` in `src/lib.rs` and
+  `src/runtime/context.rs`) instead of once for every value it is tested
+  against. Every caller of `Comparator::regex` passes the cache. The
+  `sieve_regexes_are_size_limited` and `sieve_variable_patterns_compile_once`
+  tests in `crates/common` cover both.
 - `Cargo.toml`: the example target is dropped, with the top-level
   `examples/` and `tests/`, which the server never builds. (`src/` keeps its
   own `tests` modules: the crate declares them.)

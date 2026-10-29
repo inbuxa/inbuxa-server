@@ -2,6 +2,8 @@
  * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
+ *
+ * Modified by Coffey Labs in 2026 for INBUXA.
  */
 
 use crate::utils::{server::TestServer, webdav::GenerateTestDavResource};
@@ -285,6 +287,85 @@ pub async fn test(test: &TestServer) {
                 "D:multistatus.D:response.D:status",
                 "HTTP/1.1 404 Not Found",
             );
+    }
+
+    // inbuxa: a sync reports only deletions inside the synced collection
+    // that the caller could see
+    let sharee_client = test.account("jane@example.com").webdav_client();
+    let sharee_principal = format!(
+        "{}/jane%40example.com/",
+        DavResourceName::Principal.base_path()
+    );
+    for resource_type in [
+        DavResourceName::File,
+        DavResourceName::Cal,
+        DavResourceName::Card,
+    ] {
+        println!(
+            "Running REPORT sync-collection deletion scope tests ({})...",
+            resource_type.base_path()
+        );
+        let user_base_path = format!("{}/john%40example.com/", resource_type.base_path());
+        let shared = format!("{user_base_path}sync-shared/");
+        let private = format!("{user_base_path}sync-private/");
+        let shared_item = format!("{shared}item");
+        let private_item = format!("{private}secret-plans");
+        for (folder, item) in [(&shared, &shared_item), (&private, &private_item)] {
+            client
+                .request("MKCOL", folder, "")
+                .await
+                .with_status(StatusCode::CREATED);
+            client
+                .request("PUT", item, resource_type.generate())
+                .await
+                .with_status(StatusCode::CREATED);
+        }
+        client
+            .acl(&shared, sharee_principal.as_str(), ["read"])
+            .await
+            .with_status(StatusCode::OK);
+        if resource_type == DavResourceName::File {
+            client
+                .acl(&shared_item, sharee_principal.as_str(), ["read"])
+                .await
+                .with_status(StatusCode::OK);
+        }
+        let sharee_token = sharee_client
+            .sync_collection(&shared, "", Depth::One, None, ["D:getetag"])
+            .await
+            .sync_token()
+            .to_string();
+        let owner_token = client
+            .sync_collection(&shared, "", Depth::One, None, ["D:getetag"])
+            .await
+            .sync_token()
+            .to_string();
+        client
+            .request("DELETE", &private_item, "")
+            .await
+            .with_status(StatusCode::NO_CONTENT);
+        for (client, token) in [(&sharee_client, &sharee_token), (&client, &owner_token)] {
+            let response = client
+                .sync_collection(&shared, token, Depth::One, None, ["D:getetag"])
+                .await;
+            assert_eq!(response.hrefs(), Vec::<&str>::new());
+        }
+        let mut shared_paths = vec![&shared];
+        if resource_type == DavResourceName::File {
+            shared_paths.push(&shared_item);
+        }
+        for path in shared_paths {
+            client
+                .acl(path, sharee_principal.as_str(), [])
+                .await
+                .with_status(StatusCode::OK);
+        }
+        for folder in [&shared, &private] {
+            client
+                .request("DELETE", folder, "")
+                .await
+                .with_status(StatusCode::NO_CONTENT);
+        }
     }
 
     client.delete_default_containers().await;

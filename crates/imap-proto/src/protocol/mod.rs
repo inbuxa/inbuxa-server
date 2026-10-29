@@ -330,6 +330,18 @@ pub enum Flag {
 }
 
 impl Flag {
+    /// inbuxa: a keyword is only written to a response when it is an atom
+    /// (or a backslash and an atom), so a keyword stored through JMAP, Sieve
+    /// or an IMAP literal cannot break out of a FLAGS list
+    pub fn is_serializable(&self) -> bool {
+        match self {
+            Flag::Keyword(keyword) => {
+                Keyword::is_valid_name(keyword.strip_prefix('\\').unwrap_or(keyword))
+            }
+            _ => true,
+        }
+    }
+
     pub fn serialize(&self, buf: &mut Vec<u8>) {
         buf.extend_from_slice(match self {
             Flag::Seen => b"\\Seen",

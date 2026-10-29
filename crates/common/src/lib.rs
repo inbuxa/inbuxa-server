@@ -303,6 +303,8 @@ pub struct HttpAuthCache {
     pub expires: Instant,
     // inbuxa: how the cached credentials signed in (AU-5)
     pub origin: Option<Arc<inbuxa_features::audit::Via>>,
+    // inbuxa: when the cached bearer token expires
+    pub expires_at: Option<u64>,
 }
 
 pub struct Ipc {
@@ -378,6 +380,8 @@ pub enum DavResourceMetadata {
         names: TinyVec<[DavName; 2]>,
         start: i64,
         duration: u32,
+        // inbuxa: EVENT_VIEW_* flags
+        view: u8,
     },
     CalendarEventNotification {
         names: TinyVec<[DavName; 2]>,
@@ -390,6 +394,11 @@ pub enum DavResourceMetadata {
         names: TinyVec<[DavName; 2]>,
     },
 }
+
+// inbuxa: what a sharee may see of a calendar event: the time only of a
+// private or confidential one, and not the attendees of one that hides them
+pub const EVENT_VIEW_PRIVATE: u8 = 1;
+pub const EVENT_VIEW_HIDE_ATTENDEES: u8 = 1 << 1;
 
 #[derive(Debug, Clone, Default)]
 pub struct TinyCalendarPreferences {

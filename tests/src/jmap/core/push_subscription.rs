@@ -2,6 +2,8 @@
  * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
+ *
+ * Modified by Coffey Labs in 2026 for INBUXA.
  */
 
 use crate::{
@@ -376,6 +378,29 @@ pub async fn test(test: &TestServer) {
             ]]),
         )
         .await;
+
+    // inbuxa: a host name that resolves to a local address is never
+    // contacted, not even for the verification request.
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let local_id = client
+        .push_subscription_create(
+            "local",
+            &format!(
+                "https://localhost:{}/push?skip_checks=true",
+                listener.local_addr().unwrap().port()
+            ),
+            None,
+        )
+        .await
+        .unwrap()
+        .take_id();
+    assert!(
+        tokio::time::timeout(Duration::from_secs(2), listener.accept())
+            .await
+            .is_err(),
+        "the push verification was sent to a local address"
+    );
+    client.push_subscription_destroy(&local_id).await.unwrap();
 
     // Test the EmailPush object builder (filters and size limits) directly
     test_email_push_object(test).await;

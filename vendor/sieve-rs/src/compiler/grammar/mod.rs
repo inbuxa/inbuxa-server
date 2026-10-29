@@ -487,7 +487,7 @@ impl CompilerState<'_> {
         if matches!(match_type, MatchType::Regex(_)) {
             for key in key_list {
                 if let Value::Text(expr) = key {
-                    match fancy_regex::Regex::new(expr) {
+                    match crate::runtime::tests::comparator::build_regex(expr) {
                         Ok(regex) => {
                             *key = Value::Regex(Regex::new(expr.to_string(), regex));
                         }

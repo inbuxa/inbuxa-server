@@ -42,7 +42,7 @@ use crate::{
     request::{capability::CapabilityIds, reference::MaybeIdReference},
 };
 use jmap_tools::{Null, Value};
-use std::{collections::HashMap, fmt::Debug, str::FromStr};
+use std::{collections::HashMap, fmt::Debug, hash::Hash, str::FromStr};
 use types::id::Id;
 use utils::map::vec_map::VecMap;
 
@@ -340,6 +340,15 @@ pub trait IntoValid {
     type Item;
 
     fn into_valid(self) -> impl Iterator<Item = Self::Item>;
+}
+
+// inbuxa: a property listed twice is returned once; a list repeating one
+// (bodyValues, say) used to render it again for every repeat in every object
+pub fn unique_valid<T: FromStr + Hash + Eq + Clone>(list: Vec<MaybeInvalid<T>>) -> Vec<T> {
+    let mut seen = ahash::AHashSet::with_capacity(list.len());
+    list.into_valid()
+        .filter(|item| seen.insert(item.clone()))
+        .collect()
 }
 
 impl<T: FromStr> IntoValid for Vec<MaybeInvalid<T>> {

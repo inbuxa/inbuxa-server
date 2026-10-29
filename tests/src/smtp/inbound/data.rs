@@ -2,6 +2,8 @@
  * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
+ *
+ * Modified by Coffey Labs in 2026 for INBUXA.
  */
 
 use crate::{
@@ -254,6 +256,21 @@ async fn data() {
         .send_message("bill@doe.org", &["mike@test.com"], "test:no_dkim", "250")
         .await;
     test.expect_message().await;
+
+    // A BDAT chunk size is not allocated before its bytes arrive
+    size_session.mail_from("bill@doe.org", "250").await;
+    size_session.rcpt_to("mike@test.com", "250").await;
+    size_session
+        .ingest(b"BDAT 268435456\r\n0123456789")
+        .await
+        .unwrap();
+    assert!(
+        size_session.data.message.capacity() < 1024 * 1024,
+        "BDAT reserved {} bytes before they arrived",
+        size_session.data.message.capacity()
+    );
+    size_session.reset();
+    size_session.state = Default::default();
 
     // Send broken message
     session

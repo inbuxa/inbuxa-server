@@ -31,6 +31,7 @@ use jmap_proto::{
     types::{date::UTCDate, state::State},
 };
 use jmap_tools::{Key, Map, Value};
+use mail_parser::{HeaderName, MessageParser};
 use smtp::{
     core::{Session, SessionData},
     queue::spool::SmtpSpool,
@@ -678,7 +679,6 @@ impl EmailSubmissionSet for Server {
         }
 
         // Add recipients to envelope if missing
-        let mut bcc_header = None;
         if rcpt_to.is_empty() {
             for header in metadata.contents[0].parts[0].headers.iter() {
                 if matches!(
@@ -687,9 +687,6 @@ impl EmailSubmissionSet for Server {
                         | ArchivedMetadataHeaderName::Cc
                         | ArchivedMetadataHeaderName::Bcc
                 ) {
-                    if matches!(header.name, ArchivedMetadataHeaderName::Bcc) {
-                        bcc_header = Some(header);
-                    }
                     match &header.value {
                         ArchivedMetadataHeaderValue::AddressList(addr) => {
                             for address in addr.iter() {
@@ -742,11 +739,6 @@ impl EmailSubmissionSet for Server {
                 return Ok(Err(SetError::new(SetErrorType::NoRecipients)
                     .with_description("No recipients found in email.")));
             }
-        } else {
-            bcc_header = metadata.contents[0].parts[0]
-                .headers
-                .iter()
-                .find(|header| matches!(header.name, ArchivedMetadataHeaderName::Bcc));
         }
 
         // Update sendAt
@@ -779,14 +771,8 @@ impl EmailSubmissionSet for Server {
                 .with_description("Blob for email not found.")));
         };
 
-        // Remove BCC header if present
-        if let Some(bcc_header) = bcc_header {
-            let mut new_message = Vec::with_capacity(message.len());
-            let range = bcc_header.name_value_range();
-            new_message.extend_from_slice(&message[..range.start]);
-            new_message.extend_from_slice(&message[range.end..]);
-            message = new_message;
-        }
+        // Remove BCC headers if present
+        message = strip_bcc_headers(message);
 
         // Begin local SMTP session
         let mut session = Session::<NullIo>::local(
@@ -1002,4 +988,35 @@ fn rcpt_into_static(rcpt: RcptTo<Cow<'_, str>>) -> RcptTo<Cow<'static, str>> {
         rrvs: rcpt.rrvs,
         flags: rcpt.flags,
     }
+}
+
+// inbuxa: removes every Bcc header of the message root, found on a fresh parse
+// so that the offsets are exact whatever the size of the header
+fn strip_bcc_headers(message: Vec<u8>) -> Vec<u8> {
+    let ranges = MessageParser::new()
+        .parse_headers(&message)
+        .and_then(|parsed| {
+            parsed.parts.first().map(|root| {
+                root.headers
+                    .iter()
+                    .filter(|header| header.name == HeaderName::Bcc)
+                    .map(|header| header.offset_field as usize..header.offset_end as usize)
+                    .collect::<Vec<_>>()
+            })
+        })
+        .unwrap_or_default();
+    if ranges.is_empty() {
+        return message;
+    }
+
+    let mut stripped = Vec::with_capacity(message.len());
+    let mut pos = 0;
+    for range in ranges {
+        if range.start >= pos && range.start <= range.end && range.end <= message.len() {
+            stripped.extend_from_slice(&message[pos..range.start]);
+            pos = range.end;
+        }
+    }
+    stripped.extend_from_slice(&message[pos..]);
+    stripped
 }

@@ -2,6 +2,8 @@
  * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
+ *
+ * Modified by Coffey Labs in 2026 for INBUXA.
  */
 
 use jmap_tools::{Element, Property, Value};
@@ -119,6 +121,25 @@ pub enum Keyword {
 
 impl Keyword {
     pub const MAX_LENGTH: usize = 128;
+
+    /// inbuxa: RFC 8621 section 4.1.1: 1 to 255 characters from %x21-%x7E
+    /// except ( ) { ] % * " \, which also makes the keyword an IMAP atom.
+    /// Anything else could break out of an IMAP FLAGS list.
+    pub fn is_valid_name(name: &str) -> bool {
+        (1..=255).contains(&name.len())
+            && name.bytes().all(|ch| {
+                matches!(ch, 0x21..=0x7e)
+                    && !matches!(ch, b'(' | b')' | b'{' | b']' | b'%' | b'*' | b'"' | b'\\')
+            })
+    }
+
+    /// inbuxa: whether the keyword may be stored from JMAP or written to IMAP
+    pub fn is_valid(&self) -> bool {
+        match self {
+            Keyword::Other(name) => Self::is_valid_name(name),
+            _ => true,
+        }
+    }
 
     pub fn parse(value: &str) -> Self {
         Self::try_parse(value)
@@ -528,6 +549,43 @@ impl<'de> serde::Deserialize<'de> for Keyword {
         Ok(Keyword::parse(
             <std::borrow::Cow<'de, str>>::deserialize(deserializer)?.as_ref(),
         ))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Keyword;
+
+    #[test]
+    fn keyword_names() {
+        for name in [
+            "$seen",
+            "$Junk",
+            "custom",
+            "x-y.z_1",
+            "a!#&'+-/:;<=>?@[^`|}~",
+        ] {
+            assert!(Keyword::is_valid_name(name), "{name:?} should be valid");
+        }
+        for name in [
+            "",
+            "two words",
+            "x)",
+            "x)\r\n* 1 EXPUNGE",
+            "tab\there",
+            "{5}",
+            "100%",
+            "a*",
+            "quo\"te",
+            "back\\slash",
+            "close]",
+            "caf\u{e9}",
+            &"a".repeat(256),
+        ] {
+            assert!(!Keyword::is_valid_name(name), "{name:?} should be invalid");
+        }
+        assert!(Keyword::Seen.is_valid());
+        assert!(!Keyword::parse("x y").is_valid());
     }
 }
 

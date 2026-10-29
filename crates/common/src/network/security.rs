@@ -333,27 +333,56 @@ impl Server {
             .data
             .blocked_ips
             .write()
-            .blocked_ip_addresses
-            .insert(IpWithTtl::new(ip, expires_at.unwrap_or(u64::MAX)));
+            .block(IpWithTtl::new(ip, expires_at.unwrap_or(u64::MAX)));
 
         // Write blocked IP to config
         // inbuxa: AU-1.10: recorded as the server's automatic ban
-        let RegistryWriteResult::Success(id) = inbuxa_features::audit::scope::system(
+        let blocked_ip = Object::from(BlockedIp {
+            address: IpAddrOrMask::from_ip(ip),
+            created_at: UTCDateTime::from_timestamp(now as i64),
+            expires_at: expires_at.map(|ts| UTCDateTime::from_timestamp(ts as i64)),
+            reason,
+        });
+        let id = match inbuxa_features::audit::scope::system(
             "auto-ban",
-            self.registry().write(RegistryWrite::insert(
-                &BlockedIp {
-                    address: IpAddrOrMask::from_ip(ip),
-                    created_at: UTCDateTime::from_timestamp(now as i64),
-                    expires_at: expires_at.map(|ts| UTCDateTime::from_timestamp(ts as i64)),
-                    reason,
-                }
-                .into(),
-            )),
+            self.registry().write(RegistryWrite::insert(&blocked_ip)),
         )
         .await
         .caused_by(trc::location!())?
-        else {
-            return Ok(());
+        {
+            RegistryWriteResult::Success(id) => id,
+            // inbuxa: the address's earlier ban is still on record (it is
+            // removed some time after it ends): the new ban replaces it
+            // unless that one lasts longer
+            RegistryWriteResult::PrimaryKeyConflict { existing_id, .. }
+                if existing_id.object() == ObjectType::BlockedIp =>
+            {
+                let Some(existing) = self.registry().get(existing_id).await? else {
+                    return Ok(());
+                };
+                let existing_expires_at = BlockedIp::from(existing.clone())
+                    .expires_at
+                    .map(|dt| dt.timestamp() as u64)
+                    .unwrap_or(u64::MAX);
+                if existing_expires_at >= expires_at.unwrap_or(u64::MAX) {
+                    return Ok(());
+                }
+                let RegistryWriteResult::Success(id) = inbuxa_features::audit::scope::system(
+                    "auto-ban",
+                    self.registry().write(RegistryWrite::update(
+                        existing_id.id(),
+                        &blocked_ip,
+                        &existing,
+                    )),
+                )
+                .await
+                .caused_by(trc::location!())?
+                else {
+                    return Ok(());
+                };
+                id
+            }
+            _ => return Ok(()),
         };
 
         // Increment version
@@ -527,6 +556,21 @@ impl BlockedIps {
 
         ips.has_blocked_networks = !ips.blocked_ip_networks.is_empty();
         ips
+    }
+}
+
+impl BlockedIps {
+    /// inbuxa: bans an address. A set keeps the entry it already has, so an
+    /// address whose earlier ban has ended would otherwise stay unbanned;
+    /// the later of the two bans is kept.
+    pub fn block(&mut self, ip: IpWithTtl<IpAddr>) {
+        if self
+            .blocked_ip_addresses
+            .get(&ip)
+            .is_none_or(|existing| existing.expires_at < ip.expires_at)
+        {
+            self.blocked_ip_addresses.replace(ip);
+        }
     }
 }
 

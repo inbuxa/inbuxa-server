@@ -2,6 +2,8 @@
  * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
+ *
+ * Modified by Coffey Labs in 2026 for INBUXA.
  */
 
 pub mod alarm;
@@ -9,6 +11,7 @@ pub mod dates;
 pub mod expand;
 pub mod index;
 pub mod itip;
+pub mod privacy;
 pub mod storage;
 
 use calcard::icalendar::{
@@ -435,5 +438,83 @@ impl From<SupportedComponent> for ICalendarComponentType {
             SupportedComponent::VStatus => ICalendarComponentType::VStatus,
             SupportedComponent::Other => ICalendarComponentType::Other(Default::default()),
         }
+    }
+}
+
+// inbuxa: how deep components may nest below the VCALENDAR when an event is
+// converted to JSCalendar. Components the converter doesn't know (X- ones, for
+// example) are carried along as nested jCal, and nesting tens of thousands
+// deep built a value that overflowed the stack when it was dropped or
+// serialized, which aborted the server.
+pub const MAX_COMPONENT_DEPTH: usize = 32;
+
+/// Drops whatever is nested below `MAX_COMPONENT_DEPTH`, returning whether
+/// anything was.
+pub fn limit_component_depth(ical: &mut ICalendar) -> bool {
+    let mut level = vec![0u32];
+    for _ in 0..MAX_COMPONENT_DEPTH {
+        level = level
+            .iter()
+            .filter_map(|id| ical.components.get(*id as usize))
+            .flat_map(|component| component.component_ids.iter().copied())
+            .collect();
+        if level.is_empty() {
+            return false;
+        }
+    }
+
+    let mut truncated = false;
+    for id in level {
+        if let Some(component) = ical.components.get_mut(id as usize)
+            && !component.component_ids.is_empty()
+        {
+            component.component_ids.clear();
+            truncated = true;
+        }
+    }
+    truncated
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{MAX_COMPONENT_DEPTH, limit_component_depth};
+    use calcard::{icalendar::ICalendar, jscalendar::import::ConversionOptions};
+
+    fn nested(depth: usize) -> String {
+        let mut ical = "BEGIN:VCALENDAR\r\nBEGIN:VEVENT\r\nUID:deep\r\n".to_string();
+        ical.push_str(&"BEGIN:X-DEEP\r\n".repeat(depth));
+        ical.push_str(&"END:X-DEEP\r\n".repeat(depth));
+        ical.push_str("END:VEVENT\r\nEND:VCALENDAR\r\n");
+        ical
+    }
+
+    #[test]
+    fn deep_components_are_cut_before_conversion() {
+        let shallow = nested(4);
+        let mut ical = ICalendar::parse(&shallow).unwrap();
+        assert!(!limit_component_depth(&mut ical));
+        assert_eq!(ical, ICalendar::parse(&shallow).unwrap());
+
+        // Converting and dropping the result runs on a small stack, as the
+        // server's workers do
+        let deep = nested(200_000);
+        let jcal = std::thread::Builder::new()
+            .stack_size(2 * 1024 * 1024)
+            .spawn(move || {
+                let mut ical = ICalendar::parse(&deep).unwrap();
+                assert!(limit_component_depth(&mut ical));
+                let jcal = serde_json::to_string(
+                    &ical.into_jscalendar_with_opt::<String, String>(ConversionOptions::default()),
+                )
+                .unwrap();
+                jcal.matches("x-deep").count()
+            })
+            .unwrap()
+            .join()
+            .unwrap();
+        assert!(
+            (1..=MAX_COMPONENT_DEPTH).contains(&jcal),
+            "{jcal} levels kept"
+        );
     }
 }

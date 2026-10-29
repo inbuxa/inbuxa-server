@@ -2,6 +2,8 @@
  * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
+ *
+ * Modified by Coffey Labs in 2026 for INBUXA.
  */
 
 use crate::{jmap::replace_blob_ids, utils::server::TestServer};
@@ -164,6 +166,73 @@ pub async fn test(test: &TestServer) {
             fs::write(&file_name, result.as_bytes()).unwrap();
             panic!("Test failed, output saved to {}", file_name.display());
         }
+    }
+
+    // inbuxa: a property listed twice is returned once, in Email/get and
+    // Email/parse alike, for the object and for each body part
+    let blob_id = client
+        .upload(
+            None,
+            b"From: a@example.com\r\nSubject: twice\r\n\r\nThe body.\r\n".to_vec(),
+            None,
+        )
+        .await
+        .unwrap()
+        .take_blob_id();
+    let email_id = client
+        .email_import(
+            b"From: a@example.com\r\nSubject: twice\r\n\r\nThe body.\r\n".to_vec(),
+            [mailbox_id.clone()],
+            None::<Vec<String>>,
+            None,
+        )
+        .await
+        .unwrap()
+        .take_id();
+    let repeated = [
+        "bodyValues",
+        "bodyValues",
+        "textBody",
+        "textBody",
+        "bodyValues",
+    ];
+    let response = account
+        .jmap_raw_post(
+            serde_json::json!({
+                "using": ["urn:ietf:params:jmap:core", "urn:ietf:params:jmap:mail"],
+                "methodCalls": [
+                    ["Email/get", {
+                        "accountId": account.id_string(),
+                        "ids": [&email_id],
+                        "properties": repeated,
+                        "bodyProperties": ["partId", "partId", "size", "partId"],
+                        "fetchAllBodyValues": true
+                    }, "0"],
+                    ["Email/parse", {
+                        "accountId": account.id_string(),
+                        "blobIds": [&blob_id],
+                        "properties": repeated,
+                        "bodyProperties": ["partId", "partId", "size", "partId"],
+                        "fetchAllBodyValues": true
+                    }, "1"]
+                ]
+            })
+            .to_string(),
+            "application/json",
+        )
+        .await
+        .text();
+    for (name, count) in [
+        ("\"bodyValues\"", 2),
+        ("\"textBody\"", 2),
+        ("\"partId\"", 2),
+        ("\"The body.", 2),
+    ] {
+        assert_eq!(
+            response.matches(name).count(),
+            count,
+            "{name} in {response}"
+        );
     }
 
     test.destroy_all_mailboxes(account).await;
