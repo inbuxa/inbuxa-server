@@ -533,6 +533,13 @@ A **Relays** page under Settings › Mail flow:
   | Resident memory, 50 concurrent SMTP sessions | ≤ 128 MB |
   | Container image | `FROM scratch`: the binary and CA roots only |
 
+- **RL-31.** It ships as its own artifacts, from the same release tag as
+  the server: a multi-arch image (linux/amd64, linux/arm64) named
+  `inbuxa-relay`, tagged like the server's, and static `inbuxa-relay`
+  binaries for x86_64 and aarch64 attached to the same Release. Running a
+  relay never needs the server image or binary. `publish.yml` builds both
+  products, so a relay and a server with the same version always speak the
+  same link protocol.
 - It runs as a non-root user, with `CAP_NET_BIND_SERVICE` only.
 - It logs to stderr only: start, stop, link up and down, and errors. It logs
   no address and no content. Everything else goes up the link as
@@ -608,6 +615,9 @@ A **Relays** page under Settings › Mail flow:
 - **RL-T17.** A held message from a sender that fails both SPF and DMARC, to
   a recipient removed since the last sync: no DSN is sent.
 - **RL-T18.** The footprint budgets in RL-30 hold.
+- **RL-T24.** A release tag publishes the `inbuxa-relay` image for both
+  architectures and both binaries, and the relay image contains no server
+  binary.
 - **RL-T19.** The downstream's DNS publish with two relays keeps both MX
   records, at their preferences.
 - **RL-T20.** Held mail over the downstream's reject threshold lands in
@@ -624,7 +634,8 @@ A **Relays** page under Settings › Mail flow:
 Settled by John on 2026-10-29:
 
 1. **Name.** "inbuxa Relay" in copy; `inbuxa-relay` for the binary and
-   image. It lives in this workspace, not its own repository (RL-30).
+   image. It lives in this workspace, not its own repository (RL-30), and
+   ships as its own image and binaries at release time (RL-31).
 2. **Held-mode door checks.** Domain, recipients, size and rate limits;
    DNSBL only when an administrator lists zones. No greylisting, no reverse
    DNS requirement (RL-14).
@@ -660,5 +671,5 @@ Not started. Order:
    events.
 5. inbuxa-admin's Relays page, certificates (RL-27), DNS (RL-25), and
    upgrades (RL-29).
-6. Packaging (image, installer path) and a docs page. The edge-server page
+6. Packaging (RL-31, and an installer path) and a docs page. The edge-server page
    points to it.
