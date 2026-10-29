@@ -129,6 +129,10 @@ impl DestroyArchive<Vec<u32>> {
                 .commit_batch(batch)
                 .await
                 .caused_by(trc::location!())?;
+            // inbuxa: deleted files queue the task that notes them for
+            // undelete; wake the task manager rather than leave the task to
+            // its next periodic look at the queue
+            server.notify_task_queue();
         }
 
         Ok(())

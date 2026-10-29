@@ -341,6 +341,39 @@ pub async fn wait_for_tasks(server: &Server, skip_not_due: bool, skip_permanent_
     }
 }
 
+/// inbuxa: waits for the task queue to empty, giving up after `within`, and
+/// returns the task still queued then. The task manager only looks at the
+/// queue again when woken or every few minutes, so a write that queues a
+/// task without waking it shows up here as a task that sits.
+pub async fn task_left_after(server: &Server, within: std::time::Duration) -> Option<Task> {
+    let give_up_at = std::time::Instant::now() + within;
+    loop {
+        let mut pending = None;
+        server
+            .core
+            .storage
+            .data
+            .iterate(
+                IterateParams::new(
+                    ValueKey::from(ValueClass::TaskQueue(TaskQueueClass::Task { id: 0 })),
+                    ValueKey::from(ValueClass::TaskQueue(TaskQueueClass::Task { id: u64::MAX })),
+                )
+                .ascending(),
+                |_, value| {
+                    pending = Some(Task::deserialize(value)?);
+                    Ok(false)
+                },
+            )
+            .await
+            .unwrap();
+
+        if pending.is_none() || std::time::Instant::now() > give_up_at {
+            return pending;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    }
+}
+
 pub async fn assert_is_empty(server: &Server, include_registry: bool) {
     // Wait for pending index tasks
     wait_for_tasks(server, false, false).await;

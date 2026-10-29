@@ -764,6 +764,8 @@ impl FileNodeSet for Server {
                 .await
                 .and_then(|ids| ids.last_change_id(account_id))
                 .caused_by(trc::location!())?;
+            // inbuxa: destroyed files queued their undelete tasks
+            self.notify_task_queue();
 
             response.new_state = State::Exact(change_id).into();
         }
