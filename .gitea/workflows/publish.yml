@@ -37,8 +37,10 @@
 #     fixes through pull requests into it, and is tagged there, so production
 #     can get a fix without everything that has landed on main since.
 #
-# :latest moves with every published tag: tags are cut by the weekly release
-# (or by hand for a real release); there are no prerelease tags here.
+# :latest moves with a published tag while 2026.x is the newest series. Once
+# a final release numbered by series exists (v27.1, v27.1.3), a 2026.x
+# security release from release/2026 leaves :latest where it is (the version
+# job's `latest` output).
 #
 # The push logs in with PACKAGE_TOKEN (jcoffey-dev, write:package): the job's
 # own token is refused by the container registry.
@@ -64,6 +66,7 @@ jobs:
       image: python:3.13-slim@sha256:8d9d0b8bcf6506481eae4907c18f5e3e7902e629f5f6d684f9e7c32e85e3ddf0 # 3.13-slim
     outputs:
       version: ${{ steps.v.outputs.version }}
+      latest: ${{ steps.latest.outputs.latest }}
     steps:
       # Full history: the ancestry check cannot be answered from a shallow
       # clone. The checkout also fetches every branch as origin/*.
@@ -95,6 +98,22 @@ jobs:
           echo "$TAG is on $on"
           echo "version=$V" >> "$GITHUB_OUTPUT"
           echo "version $V"
+      # inbuxa: :latest belongs to the newest series; see the top of this file
+      - id: latest
+        env:
+          TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          python3 - <<'EOF'
+          import json, os, re, urllib.request
+          url = (f"{os.environ['CI_SERVER_INTERNAL']}/api/v1/repos/{os.environ['GITHUB_REPOSITORY']}"
+                 "/releases?draft=false&pre-release=false&limit=50")
+          req = urllib.request.Request(url, headers={"Authorization": f"token {os.environ['TOKEN']}"})
+          newer = [r["tag_name"] for r in json.load(urllib.request.urlopen(req))
+                   if re.match(r"v[0-9]{1,3}\.", r["tag_name"])]
+          print(f"{newer[0]} is out: :latest stays on its series" if newer else "no series release yet: :latest moves")
+          with open(os.environ["GITHUB_OUTPUT"], "a") as out:
+              out.write(f"latest={'false' if newer else 'true'}\n")
+          EOF
 
   publish-amd64:
     if: ${{ vars.BUILD_ON != 'github' }}
@@ -150,6 +169,7 @@ jobs:
       REGISTRY: ${{ vars.REGISTRY }}
       IMAGE: ${{ vars.REGISTRY }}/${{ github.repository }}
       VERSION: ${{ needs.version.outputs.version }}
+      LATEST: ${{ needs.version.outputs.latest }}
       PACKAGE_TOKEN: ${{ secrets.PACKAGE_TOKEN }}
     steps:
       - uses: coffey-labs/actions/checkout@fab0c4d45e0162963965f1555df27b7bed5e20ec
@@ -165,9 +185,11 @@ jobs:
             --provenance=false --sbom=false \
             --tag "$IMAGE:$VERSION-arm64" \
             --push .
+          if [ "$LATEST" = true ]; then latest="--tag $IMAGE:latest"; else latest=""; fi
+          # $latest unquoted on purpose: empty, or two words
           docker buildx imagetools create \
             --tag "$IMAGE:$VERSION" \
-            --tag "$IMAGE:latest" \
+            $latest \
             "$IMAGE:$VERSION-amd64" "$IMAGE:$VERSION-arm64"
           docker buildx imagetools inspect "$IMAGE:$VERSION"
       - if: always()
@@ -222,6 +244,7 @@ jobs:
         env:
           TAG: ${{ github.ref_name }}
           VERSION: ${{ needs.version.outputs.version }}
+          LATEST: ${{ needs.version.outputs.latest }}
           TOKEN: ${{ secrets.GITHUB_TOKEN }}
           REPO: ${{ github.repository }}
           REGISTRY: ${{ vars.REGISTRY }}
@@ -237,9 +260,11 @@ jobs:
           except urllib.error.HTTPError as e:
               if e.code != 404: raise
           image = f"{os.environ['REGISTRY']}/{os.environ['REPO']}:{version}"
-          body = (f"Container image: `{image}` (linux/amd64, linux/arm64); also `:latest`. "
-                  "amd64 is published first; arm64 is added to the same tag when its build "
-                  "finishes, and `:latest` moves then.\n\n"
+          latest = os.environ["LATEST"] == "true"
+          body = (f"Container image: `{image}` (linux/amd64, linux/arm64)"
+                  + ("; also `:latest`. " if latest else ". `:latest` stays on the newer series. ")
+                  + "amd64 is published first; arm64 is added to the same tag when its build finishes"
+                  + (", and `:latest` moves then.\n\n" if latest else ".\n\n")
                   "Binaries for a host install are attached: `inbuxa-linux-amd64.tar.gz` and "
                   "`inbuxa-linux-arm64.tar.gz`, with `SHA256SUMS`. Each is the binary out of this "
                   "release's image for that architecture, so it is the same build. The image "

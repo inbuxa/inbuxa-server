@@ -176,6 +176,7 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       version: ${{ steps.v.outputs.version }}
+      latest: ${{ steps.latest.outputs.latest }}
     steps:
       # Full history, and every branch as origin/*: the ancestry check cannot
       # be answered from a shallow clone.
@@ -205,6 +206,26 @@ jobs:
           [ -n "$on" ] || { echo "$TAG is not on main or a release/* branch" >&2; exit 1; }
           echo "$TAG is on $on"
           echo "version=$V" >> "$GITHUB_OUTPUT"
+      # inbuxa: :latest belongs to the newest series. Until 27.1 ships it is
+      # 2026.x's; once a final release numbered by series exists (v27.1,
+      # v27.1.3), a 2026.x security release from this branch leaves :latest,
+      # GHCR's :latest and the GitHub "latest release" where they are. The
+      # check fails rather than guess: a wrong :latest is worse than a re-run.
+      - id: latest
+        env:
+          GITEA_TOKEN: ${{ secrets.GITEA_TOKEN }}
+        run: |
+          set -euo pipefail
+          newer="$(curl -fsS --retry 5 --retry-all-errors --retry-delay 10 -H "Authorization: token $GITEA_TOKEN" \
+                     "$GITEA_URL/api/v1/repos/$GITHUB_REPOSITORY/releases?draft=false&pre-release=false&limit=50" |
+                   jq -r '[.[].tag_name | select(test("^v[0-9]{1,3}\\."))] | first // ""')"
+          if [ -n "$newer" ]; then
+            echo "$newer is out: :latest stays on its series"
+            echo "latest=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "no series release yet: :latest moves"
+            echo "latest=true" >> "$GITHUB_OUTPUT"
+          fi
 
   # Each architecture on its own native runner, side by side. The Dockerfile
   # cross-compiles from the build platform, and on the self-hosted runners one
@@ -273,6 +294,7 @@ jobs:
     runs-on: ubuntu-latest
     env:
       VERSION: ${{ needs.version.outputs.version }}
+      LATEST: ${{ needs.version.outputs.latest }}
     steps:
       - run: echo "IMAGE=${{ vars.REGISTRY }}/${GITHUB_REPOSITORY,,}" >> "$GITHUB_ENV"
       - uses: docker/setup-buildx-action@594f3bf4285d9ea8dc53c9a0c9c4092420091003 # v4.4.0
@@ -282,9 +304,9 @@ jobs:
           username: jcoffey-dev
           password: ${{ secrets.GITEA_TOKEN }}
       - run: |
-          docker buildx imagetools create \
-            --tag "$IMAGE:$VERSION" \
-            --tag "$IMAGE:latest" \
+          tags=(--tag "$IMAGE:$VERSION")
+          [ "$LATEST" = true ] && tags+=(--tag "$IMAGE:latest")
+          docker buildx imagetools create "${tags[@]}" \
             "$IMAGE:$VERSION-amd64" "$IMAGE:$VERSION-arm64"
           docker buildx imagetools inspect "$IMAGE:$VERSION"
       # Gitea keeps a container package on its owner; linking it shows it on
@@ -308,6 +330,7 @@ jobs:
       - env:
           TAG: ${{ github.ref_name }}
           VERSION: ${{ needs.version.outputs.version }}
+          LATEST: ${{ needs.version.outputs.latest }}
           GITEA_TOKEN: ${{ secrets.GITEA_TOKEN }}
           REGISTRY: ${{ vars.REGISTRY }}
         run: |
@@ -317,7 +340,9 @@ jobs:
           if [ "$code" = 200 ]; then echo "$TAG already has a release"; exit 0; fi
           [ "$code" = 404 ] || { echo "looking up the release for $TAG answered $code" >&2; exit 1; }
           image="$REGISTRY/${GITHUB_REPOSITORY,,}:$VERSION"
-          body="Container image: \`$image\` (linux/amd64, linux/arm64); also \`:latest\`.
+          also="; also \`:latest\`."
+          [ "$LATEST" = true ] || also=". \`:latest\` stays on the newer series."
+          body="Container image: \`$image\` (linux/amd64, linux/arm64)$also
 
           Binaries for a host install are attached: \`inbuxa-linux-amd64.tar.gz\` and \`inbuxa-linux-arm64.tar.gz\`, with \`SHA256SUMS\`. Each is the binary out of this release's image for that architecture, so it is the same build. The image grants it \`cap_net_bind_service\`; a host install has to grant that itself (\`setcap\`, or \`AmbientCapabilities\` in the unit) to bind port 25."
           jq -n --arg tag "$TAG" --arg name "INBUXA $VERSION" --arg body "$body" \
@@ -398,13 +423,16 @@ jobs:
       - env:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ needs.version.outputs.version }}
+          LATEST: ${{ needs.version.outputs.latest }}
         run: |
           set -euo pipefail
           src="${{ vars.REGISTRY }}/${GITHUB_REPOSITORY,,}"
           dst="ghcr.io/${GITHUB_REPOSITORY,,}"
           tag="$TAG"
           echo "$GH_TOKEN" | docker login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
-          docker buildx imagetools create -t "$dst:$tag" -t "$dst:latest" "$src:$tag"
+          tags=(-t "$dst:$tag")
+          [ "$LATEST" = true ] && tags+=(-t "$dst:latest")
+          docker buildx imagetools create "${tags[@]}" "$src:$tag"
           want="$(docker buildx imagetools inspect "$src:$tag" --format '{{json .Manifest.Digest}}')"
           got="$(docker buildx imagetools inspect "$dst:$tag" --format '{{json .Manifest.Digest}}')"
           echo "registry $src:$tag = $want"
@@ -420,7 +448,7 @@ jobs:
   # rewritten to Gitea links: on GitHub a bare #16 is some other PR.
   github-release:
     if: ${{ vars.BUILD_ON == 'github' && github.ref_type == 'tag' }}
-    needs: [binaries]
+    needs: [version, binaries]
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -428,6 +456,7 @@ jobs:
       GITEA_URL: ${{ vars.GITEA_URL }}
       GH_TOKEN: ${{ github.token }}
       TAG: ${{ github.ref_name }}
+      LATEST: ${{ needs.version.outputs.latest }}
     steps:
       - run: |
           set -euo pipefail
@@ -454,7 +483,9 @@ jobs:
             curl -fsSL -o "files/$name" "$url"; files+=("files/$name")
           done < <(jq -r '.assets[]? | [.name, .browser_download_url] | @tsv' rel.json)
           title="$(jq -r '.name // ""' rel.json)"; [ -n "$title" ] || title="$TAG"
-          if [ "$(jq -r .prerelease rel.json)" = true ]; then kind=--prerelease; else kind=--latest; fi
+          if [ "$(jq -r .prerelease rel.json)" = true ]; then kind=--prerelease
+          elif [ "$LATEST" = true ]; then kind=--latest
+          else kind=--latest=false; fi
           gh release create "$TAG" --repo "$GITHUB_REPOSITORY" --verify-tag --title "$title" \
             --notes-file notes.md "$kind" "${files[@]}"
           echo "created the GitHub release for $TAG with ${#files[@]} file(s)"
