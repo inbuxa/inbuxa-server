@@ -8,7 +8,7 @@
 
 use super::{ImapSessionManager, Session, State};
 use crate::{
-    GREETING_WITH_TLS, GREETING_WITH_TLS_LOGIN_DISABLED, GREETING_WITHOUT_TLS,
+    GREETING_CLEAR_TEXT, GREETING_WITH_TLS, GREETING_WITH_TLS_LOGIN_DISABLED, GREETING_WITHOUT_TLS,
     GREETING_WITHOUT_TLS_LOGIN_DISABLED,
 };
 use common::{
@@ -129,7 +129,8 @@ impl<T: SessionStream> Session<T> {
         let greeting = match (offer_tls, allow_auth) {
             (true, true) => &GREETING_WITH_TLS,
             (true, false) => &GREETING_WITH_TLS_LOGIN_DISABLED,
-            (false, true) => &GREETING_WITHOUT_TLS,
+            (false, true) if is_tls => &GREETING_WITHOUT_TLS,
+            (false, true) => &GREETING_CLEAR_TEXT,
             (false, false) => &GREETING_WITHOUT_TLS_LOGIN_DISABLED,
         };
 
@@ -169,6 +170,7 @@ impl<T: SessionStream> Session<T> {
             session_id: session.session_id,
             in_flight: session.in_flight,
             remote_addr: session.remote_ip,
+            op_gate: super::gate::OpGate::new(),
             stream_rx,
             stream_tx: Arc::new(tokio::sync::Mutex::new(stream_tx)),
         })
@@ -236,6 +238,7 @@ impl<T: SessionStream> Session<T> {
             session_id: self.session_id,
             in_flight: self.in_flight,
             remote_addr: self.remote_addr,
+            op_gate: self.op_gate,
             stream_rx,
             stream_tx,
         })

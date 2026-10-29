@@ -9,13 +9,17 @@
 use crate::core::Session;
 use common::{
     auth::AuthRequest,
+    config::smtp::session::Mechanism,
     network::{SessionStream, legacy::LegacyProtocol},
 };
 use directory::Credentials;
 use mail_parser::{HeaderName, HeaderValue, decoders::base64::base64_decode};
 use registry::schema::enums::Permission;
-use smtp_proto::{AUTH_LOGIN, AUTH_OAUTHBEARER, AUTH_PLAIN, AUTH_XOAUTH2, IntoString};
+use smtp_proto::{AUTH_LOGIN, AUTH_OAUTHBEARER, AUTH_PLAIN, AUTH_XOAUTH, AUTH_XOAUTH2, IntoString};
 use trc::AuthEvent;
+
+// inbuxa: mechanisms that send a bearer token, a credential on its own
+pub const AUTH_BEARER: u64 = AUTH_OAUTHBEARER | AUTH_XOAUTH | AUTH_XOAUTH2;
 
 pub struct SaslToken {
     mechanism: u64,
@@ -48,6 +52,27 @@ impl SaslToken {
 }
 
 impl<T: SessionStream> Session<T> {
+    /// The mechanisms this session may use: the configured ones, less the
+    /// bearer token ones on clear text whatever the configuration says.
+    pub async fn sasl_mechanisms(&self) -> u64 {
+        let mechanisms: u64 = self
+            .server
+            .eval_if::<Mechanism, _>(
+                &self.server.core.smtp.session.auth.mechanisms,
+                self,
+                self.data.session_id,
+            )
+            .await
+            .unwrap_or_default()
+            .into();
+
+        if self.stream.is_tls() {
+            mechanisms
+        } else {
+            mechanisms & !AUTH_BEARER
+        }
+    }
+
     pub async fn handle_sasl_response(
         &mut self,
         token: &mut SaslToken,

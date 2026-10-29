@@ -9,7 +9,7 @@
 use std::time::Instant;
 
 use crate::{
-    core::{Session, SessionData},
+    core::{Session, SessionData, gate::OpKind},
     spawn_op,
 };
 use common::network::SessionStream;
@@ -48,6 +48,7 @@ impl<T: SessionStream> Session<T> {
             request.parse_lsub(self.is_utf8)
         }?;
 
+        let permit = self.op_gate.acquire(OpKind::Read).await;
         // Activate OBJECTID+ when the OBJECTID return option or STATUS attribute is requested
         if let Arguments::Extended { return_options, .. } = &arguments
             && return_options.iter().any(|option| match option {
@@ -67,6 +68,7 @@ impl<T: SessionStream> Session<T> {
 
             spawn_op!(
                 data,
+                permit,
                 data.list(arguments, is_lsub, version, is_utf8, op_start)
                     .await
             )

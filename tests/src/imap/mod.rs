@@ -10,6 +10,7 @@ pub mod acl;
 pub mod antispam;
 pub mod append;
 pub mod basic;
+pub mod bearer_tls;
 pub mod body_structure;
 pub mod condstore;
 pub mod copy_move;
@@ -19,6 +20,7 @@ pub mod mailbox;
 pub mod managesieve;
 pub mod messagelimit;
 pub mod objectid;
+pub mod pipelining;
 pub mod pop;
 pub mod search;
 pub mod store;
@@ -54,6 +56,13 @@ pub async fn imap_tests() {
         .with_default_listeners()
         .await
         .with_listener(NetworkListenerProtocol::Pop3, "pop3-plain", 4111, false)
+        .await
+        .with_listener(
+            NetworkListenerProtocol::ManageSieve,
+            "sieve-plain",
+            4191,
+            false,
+        )
         .await
         .build()
         .await;
@@ -266,6 +275,7 @@ pub async fn imap_tests() {
     acl::test(&mut imap, &mut imap_check, &test).await;
     uidbatches::test(&mut imap, &mut imap_check).await;
     messagelimit::test(&mut imap, &mut imap_check).await;
+    pipelining::test(&test).await;
 
     // UIDONLY cannot be disabled once enabled, so it uses its own connection
     uidonly::test(&test).await;
@@ -287,6 +297,9 @@ pub async fn imap_tests() {
 
     // Run POP3 tests
     pop::test(&test).await;
+
+    // Bearer tokens on clear-text connections
+    bearer_tls::test().await;
 
     // Print elapsed time
     let elapsed = start_time.elapsed();

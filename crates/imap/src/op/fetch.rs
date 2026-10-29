@@ -8,7 +8,7 @@
 
 use super::{FromModSeq, ImapContext};
 use crate::{
-    core::{SelectedMailbox, Session, SessionData},
+    core::{SelectedMailbox, Session, SessionData, gate::OpKind},
     spawn_op,
 };
 use ahash::AHashMap;
@@ -94,11 +94,23 @@ impl<T: SessionStream> Session<T> {
             }
         }
 
+        // inbuxa: a FETCH that marks messages \Seen changes the mailbox
+        let kind = if mailbox.is_select
+            && ops.iter().any(|op| {
+                op.as_ref()
+                    .is_ok_and(|(_, _, arguments)| may_set_seen(&arguments.attributes))
+            }) {
+            OpKind::Write
+        } else {
+            OpKind::Read
+        };
+        let permit = self.op_gate.acquire(kind).await;
+
         if activate_objectid && let Some(enabled) = self.activate_objectid() {
             self.write_bytes(enabled).await?;
         }
 
-        spawn_op!(data, {
+        spawn_op!(data, permit, {
             for op in ops {
                 match op {
                     Ok((is_uid, enabled_condstore, arguments)) => {
@@ -129,6 +141,19 @@ impl<T: SessionStream> Session<T> {
             Ok(())
         })
     }
+}
+
+// inbuxa: errs on the side of a write; a header-only section counts too
+fn may_set_seen(attributes: &[Attribute]) -> bool {
+    attributes.iter().any(|attribute| {
+        matches!(
+            attribute,
+            Attribute::BodySection { peek: false, .. }
+                | Attribute::Binary { peek: false, .. }
+                | Attribute::Rfc822
+                | Attribute::Rfc822Text
+        )
+    })
 }
 
 impl<T: SessionStream> SessionData<T> {

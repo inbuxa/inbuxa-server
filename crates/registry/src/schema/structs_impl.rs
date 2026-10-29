@@ -4069,7 +4069,9 @@ impl RegistryJsonPropertyPatch for BlockedIp {
 
 impl ObjectImpl for Bootstrap {
     const FLAGS: u64 = OBJ_SINGLETON;
-    const VERSION: u8 = 1;
+    // inbuxa: 2, as x:Directory: OidcDirectory gained fields at version 2
+    // of both
+    const VERSION: u8 = 2;
     const OBJECT: ObjectType = ObjectType::Bootstrap;
 
     fn validate(&self, errors: &mut Vec<ValidationError>) -> bool {
@@ -6990,7 +6992,9 @@ impl RegistryJsonPropertyPatch for DeliveryError {
 
 impl ObjectImpl for Directory {
     const FLAGS: u64 = OBJ_FILTER_TENANT;
-    const VERSION: u8 = 0;
+    // inbuxa: 2, as x:Bootstrap: OidcDirectory gained fields at version 2
+    // of both
+    const VERSION: u8 = 2;
     const OBJECT: ObjectType = ObjectType::Directory;
 
     fn validate(&self, errors: &mut Vec<ValidationError>) -> bool {
@@ -30639,6 +30643,18 @@ impl OidcDirectory {
                 errors.push(ValidationError::required(Property::MemberTenantId));
             }
         }
+        if let Some(value) = &self.introspection_url {
+            if value.is_empty() {
+                errors.push(ValidationError::required(Property::IntrospectionUrl));
+            }
+        }
+        if let Some(value) = &self.introspection_client_id {
+            if value.is_empty() {
+                errors.push(ValidationError::required(Property::IntrospectionClientId));
+            }
+        }
+        let value = &self.introspection_client_secret;
+        value.validate(errors);
         errors.len() == neb
     }
 
@@ -30661,6 +30677,10 @@ impl Pickle for OidcDirectory {
         self.claim_name.pickle(out);
         self.claim_groups.pickle(out);
         self.member_tenant_id.pickle(out);
+        self.opaque_tokens.pickle(out);
+        self.introspection_url.pickle(out);
+        self.introspection_client_id.pickle(out);
+        self.introspection_client_secret.pickle(out);
     }
 
     fn unpickle(stream: &mut crate::pickle::PickledStream<'_>) -> Option<Self> {
@@ -30674,6 +30694,18 @@ impl Pickle for OidcDirectory {
         this.claim_name = Pickle::unpickle(stream)?;
         this.claim_groups = Pickle::unpickle(stream)?;
         this.member_tenant_id = Pickle::unpickle(stream)?;
+        // inbuxa: http-directory-services-13: version 2 of both x:Directory
+        // and x:Bootstrap, the two objects this is stored in. A directory
+        // saved before keeps accepting opaque tokens its user info endpoint
+        // accepts, as it always did; a new one refuses them by default.
+        if stream.version() >= 2 {
+            this.opaque_tokens = Pickle::unpickle(stream)?;
+            this.introspection_url = Pickle::unpickle(stream)?;
+            this.introspection_client_id = Pickle::unpickle(stream)?;
+            this.introspection_client_secret = Pickle::unpickle(stream)?;
+        } else {
+            this.opaque_tokens = Some(OidcOpaqueTokens::Userinfo);
+        }
         Some(this)
     }
 }
@@ -30690,13 +30722,17 @@ impl Default for OidcDirectory {
             claim_name: Some("name".to_string()),
             claim_groups: Default::default(),
             member_tenant_id: Default::default(),
+            opaque_tokens: Default::default(),
+            introspection_url: Default::default(),
+            introspection_client_id: Default::default(),
+            introspection_client_secret: Default::default(),
         }
     }
 }
 
 impl IntoValue for OidcDirectory {
     fn into_value(self) -> JmapValue<'static> {
-        let mut map = jmap_tools::Map::with_capacity(11);
+        let mut map = jmap_tools::Map::with_capacity(15);
         map.insert_unchecked(Property::Description, self.description.into_value());
         map.insert_unchecked(Property::IssuerUrl, self.issuer_url.into_value());
         map.insert_unchecked(
@@ -30709,6 +30745,19 @@ impl IntoValue for OidcDirectory {
         map.insert_unchecked(Property::ClaimName, self.claim_name.into_value());
         map.insert_unchecked(Property::ClaimGroups, self.claim_groups.into_value());
         map.insert_unchecked(Property::MemberTenantId, self.member_tenant_id.into_value());
+        map.insert_unchecked(Property::OpaqueTokens, self.opaque_tokens.into_value());
+        map.insert_unchecked(
+            Property::IntrospectionUrl,
+            self.introspection_url.into_value(),
+        );
+        map.insert_unchecked(
+            Property::IntrospectionClientId,
+            self.introspection_client_id.into_value(),
+        );
+        map.insert_unchecked(
+            Property::IntrospectionClientSecret,
+            self.introspection_client_secret.into_value(),
+        );
         JmapValue::Object(map)
     }
 }
@@ -30745,6 +30794,16 @@ impl RegistryJsonPropertyPatch for OidcDirectory {
             Some(Property::MemberTenantId) => self
                 .member_tenant_id
                 .patch(pointer.assert_can_set_tenant()?, value),
+            Some(Property::OpaqueTokens) => self.opaque_tokens.patch(pointer, value),
+            Some(Property::IntrospectionUrl) => self
+                .introspection_url
+                .patch(pointer.with_validators(&[StringValidator::Trim]), value),
+            Some(Property::IntrospectionClientId) => self
+                .introspection_client_id
+                .patch(pointer.with_validators(&[StringValidator::Trim]), value),
+            Some(Property::IntrospectionClientSecret) => {
+                self.introspection_client_secret.patch(pointer, value)
+            }
             Some(Property::Type) => Ok(MaybeUnpatched::Unpatched {
                 property: Property::Type,
                 value,

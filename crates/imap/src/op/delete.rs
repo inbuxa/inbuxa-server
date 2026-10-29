@@ -2,11 +2,13 @@
  * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
+ *
+ * Modified by Coffey Labs in 2026 for INBUXA.
  */
 
 use super::ImapContext;
 use crate::{
-    core::{Session, SessionData},
+    core::{Session, SessionData, gate::OpKind},
     spawn_op,
 };
 use common::network::SessionStream;
@@ -21,11 +23,12 @@ impl<T: SessionStream> Session<T> {
     pub async fn handle_delete(&mut self, requests: Vec<Request<Command>>) -> trc::Result<()> {
         // Validate access
         self.assert_has_permission(Permission::ImapDelete)?;
+        let permit = self.op_gate.acquire(OpKind::Write).await;
 
         let data = self.state.session_data();
         let is_utf8 = self.is_utf8;
 
-        spawn_op!(data, {
+        spawn_op!(data, permit, {
             for request in requests {
                 match request.parse_delete(is_utf8) {
                     Ok(argument) => match data.delete_folder(argument).await {

@@ -2,6 +2,8 @@
  * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
+ *
+ * Modified by Coffey Labs in 2026 for INBUXA.
  */
 
 use super::{ImapResponse, authenticate::Mechanism};
@@ -144,6 +146,7 @@ impl Capability {
         is_authenticated: bool,
         offer_tls: bool,
         allow_auth: bool,
+        allow_bearer: bool,
         message_limit: u32,
         save_limit: u32,
     ) -> Vec<Capability> {
@@ -195,11 +198,14 @@ impl Capability {
                 Capability::SaveLimit(save_limit),
             ]);
         } else if allow_auth {
-            capabilities.extend([
-                Capability::Auth(Mechanism::Plain),
-                Capability::Auth(Mechanism::OAuthBearer),
-                Capability::Auth(Mechanism::XOauth2),
-            ]);
+            capabilities.push(Capability::Auth(Mechanism::Plain));
+            // inbuxa: bearer tokens are only offered over TLS
+            if allow_bearer {
+                capabilities.extend([
+                    Capability::Auth(Mechanism::OAuthBearer),
+                    Capability::Auth(Mechanism::XOauth2),
+                ]);
+            }
         } else {
             capabilities.push(Capability::LoginDisabled);
         }

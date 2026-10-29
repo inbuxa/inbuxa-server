@@ -41,6 +41,9 @@ impl TestAddress {
                     self.mime_anychild,
                     |header, _, _| {
                         ctx.find_addresses(header, &self.address_part, |value| {
+                            if ctx.charge_scan(value.len() * key_list.len()) {
+                                return true;
+                            }
                             for key in &key_list {
                                 if is_is {
                                     if self.comparator.is(&value, key) {
@@ -62,6 +65,9 @@ impl TestAddress {
                 self.mime_anychild,
                 |header, _, _| {
                     ctx.find_addresses(header, &self.address_part, |value| {
+                        if ctx.charge_scan(value.len() * key_list.len()) {
+                            return true;
+                        }
                         for key in &key_list {
                             if self.comparator.relational(rel_match, &value, key) {
                                 return true;
@@ -80,6 +86,9 @@ impl TestAddress {
                     self.mime_anychild,
                     |header, _, _| {
                         ctx.find_addresses(header, &self.address_part, |value| {
+                            if ctx.charge_scan(value.len() * key_list.len()) {
+                                return true;
+                            }
                             for (pattern_expr, pattern) in key_list.iter().zip(self.key_list.iter())
                             {
                                 if is_matches {
@@ -145,6 +154,10 @@ impl TestAddress {
                     self.mime_anychild,
                     |header, _, _| {
                         ctx.find_addresses(header, &self.address_part, |value| {
+                            // inbuxa: each value is compared with those kept so far
+                            if ctx.charge_scan(value.len().saturating_mul(values.len() + 1)) {
+                                return true;
+                            }
                             if !value.is_empty() && !values.iter().any(|v| v.eq(value)) {
                                 values.push(value.to_string());
                             }

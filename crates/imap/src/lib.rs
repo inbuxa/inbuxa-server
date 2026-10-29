@@ -21,21 +21,32 @@ pub mod op;
 static SERVER_GREETING: &str = concat!(types::brand!(), " IMAP4rev2 at your service.");
 
 pub(crate) static GREETING_WITH_TLS: LazyLock<Vec<u8>> =
-    LazyLock::new(|| build_greeting(true, true));
+    LazyLock::new(|| build_greeting(true, true, false));
 
 pub(crate) static GREETING_WITH_TLS_LOGIN_DISABLED: LazyLock<Vec<u8>> =
-    LazyLock::new(|| build_greeting(true, false));
+    LazyLock::new(|| build_greeting(true, false, false));
 
 pub(crate) static GREETING_WITHOUT_TLS: LazyLock<Vec<u8>> =
-    LazyLock::new(|| build_greeting(false, true));
+    LazyLock::new(|| build_greeting(false, true, true));
+
+// inbuxa: clear text with no STARTTLS to offer, so no bearer tokens either
+pub(crate) static GREETING_CLEAR_TEXT: LazyLock<Vec<u8>> =
+    LazyLock::new(|| build_greeting(false, true, false));
 
 pub(crate) static GREETING_WITHOUT_TLS_LOGIN_DISABLED: LazyLock<Vec<u8>> =
-    LazyLock::new(|| build_greeting(false, false));
+    LazyLock::new(|| build_greeting(false, false, false));
 
-fn build_greeting(offer_tls: bool, allow_auth: bool) -> Vec<u8> {
+fn build_greeting(offer_tls: bool, allow_auth: bool, allow_bearer: bool) -> Vec<u8> {
     StatusResponse::ok(SERVER_GREETING)
         .with_code(ResponseCode::Capability {
-            capabilities: Capability::all_capabilities(false, offer_tls, allow_auth, 0, 0),
+            capabilities: Capability::all_capabilities(
+                false,
+                offer_tls,
+                allow_auth,
+                allow_bearer,
+                0,
+                0,
+            ),
         })
         .into_bytes()
 }

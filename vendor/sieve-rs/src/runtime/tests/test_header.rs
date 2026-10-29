@@ -6,7 +6,7 @@
  * Modified by Coffey Labs in 2026 for INBUXA.
  */
 
-use mail_parser::{Header, HeaderName, HeaderValue, parsers::MessageStream};
+use mail_parser::{Header, HeaderName, HeaderValue, MessagePart, parsers::MessageStream};
 
 use crate::{
     Context, Event,
@@ -40,6 +40,9 @@ impl TestHeader {
                     self.mime_anychild,
                     |header, _, _| {
                         ctx.find_header_values(header, &mime_opts, |value| {
+                            if ctx.charge_scan(value.len() * key_list.len()) {
+                                return true;
+                            }
                             for key in &key_list {
                                 if is_is {
                                     if self.comparator.is(&value, key) {
@@ -61,6 +64,9 @@ impl TestHeader {
                 self.mime_anychild,
                 |header, _, _| {
                     ctx.find_header_values(header, &mime_opts, |value| {
+                        if ctx.charge_scan(value.len() * key_list.len()) {
+                            return true;
+                        }
                         for key in &key_list {
                             if self.comparator.relational(rel_match, &value, key) {
                                 return true;
@@ -79,6 +85,9 @@ impl TestHeader {
                     self.mime_anychild,
                     |header, _, _| {
                         ctx.find_header_values(header, &mime_opts, |value| {
+                            if ctx.charge_scan(value.len() * key_list.len()) {
+                                return true;
+                            }
                             for (pattern_expr, pattern) in key_list.iter().zip(self.key_list.iter())
                             {
                                 if is_matches {
@@ -163,6 +172,10 @@ impl TestHeader {
                     self.mime_anychild,
                     |header, _, _| {
                         ctx.find_header_values(header, &mime_opts, |value| {
+                            // inbuxa: each value is compared with those kept so far
+                            if ctx.charge_scan(value.len().saturating_mul(values.len() + 1)) {
+                                return true;
+                            }
                             if !value.is_empty() && !values.iter().any(|v| v.eq(value)) {
                                 values.push(value.to_string());
                             }
@@ -228,6 +241,10 @@ impl Context<'_> {
 
         while let Some((part_id, message_part)) = part_iter.next() {
             'outer: for header_name in header_names {
+                // inbuxa: looking for a header scans the part's headers
+                if self.charge_scan(header_bytes(message_part)) {
+                    return true;
+                }
                 match index {
                     None => {
                         for (pos, header) in message_part
@@ -364,4 +381,10 @@ impl Context<'_> {
             _ => visitor_fnc(""),
         }
     }
+}
+
+// inbuxa: the size of a part's header block, as it came in
+pub(crate) fn header_bytes(part: &MessagePart) -> usize {
+    part.raw_body_offset()
+        .saturating_sub(part.raw_header_offset()) as usize
 }

@@ -1,0 +1,519 @@
+/*
+ * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
+ *
+ * SPDX-License-Identifier: Apache-2.0 OR MIT
+ */
+
+use super::*;
+use crate::{
+    common::{
+        ArchivedPartialDateTime, CalendarScale,
+        writer::{FoldingWriter, LineWriter, write_bytes, write_param_value, write_text},
+    },
+    icalendar::{
+        ValueSeparator,
+        writer::{write_component_begin, write_component_end},
+    },
+};
+use std::{
+    fmt::{Display, Write},
+    slice::Iter,
+};
+
+impl ArchivedICalendar {
+    pub fn write_to(&self, out: &mut impl Write) -> std::fmt::Result {
+        let _v = [0.into()];
+        let mut component_iter: Iter<'_, rkyv::primitive::ArchivedU32> = _v.iter();
+        let mut component_stack = Vec::with_capacity(4);
+
+        loop {
+            if let Some(component_id) = component_iter.next() {
+                let component = self
+                    .components
+                    .get(component_id.to_native() as usize)
+                    .unwrap();
+                write_component_begin(out, component.component_type.as_str())?;
+
+                for entry in component.entries.iter() {
+                    if !matches!(
+                        entry.name,
+                        ArchivedICalendarProperty::Begin | ArchivedICalendarProperty::End
+                    ) {
+                        entry.write_to(out, true)?;
+                    }
+                }
+
+                if !component.component_ids.is_empty() {
+                    component_stack.push((component, component_iter));
+                    component_iter = component.component_ids.iter();
+                } else {
+                    write_component_end(out, component.component_type.as_str())?;
+                }
+            } else if let Some((component, iter)) = component_stack.pop() {
+                write_component_end(out, component.component_type.as_str())?;
+                component_iter = iter;
+            } else {
+                break;
+            }
+        }
+
+        Ok(())
+    }
+}
+
+impl ArchivedICalendarEntry {
+    pub fn write_to(&self, out: &mut impl Write, with_value: bool) -> std::fmt::Result {
+        let mut folded = FoldingWriter::new(out);
+        let out = &mut folded;
+
+        out.write_atomic(self.name.as_str())?;
+
+        if matches!(
+            self.values.first().as_ref(),
+            Some(ArchivedICalendarValue::Binary(_))
+        ) {
+            out.write_atomic(";ENCODING=BASE64")?;
+        }
+
+        let mut types = None;
+        let mut last_param: Option<&ArchivedICalendarParameterName> = None;
+
+        for param in self.params.iter() {
+            if last_param.is_some_and(|last_param| last_param == &param.name) {
+                out.write_atomic(",")?;
+            } else {
+                out.write_atomic(";")?;
+                out.write_atomic(param.name.as_str())?;
+                if !matches!(param.value, ArchivedICalendarParameterValue::Null) {
+                    out.write_atomic("=")?;
+                }
+                last_param = Some(&param.name);
+            }
+
+            match &param.value {
+                ArchivedICalendarParameterValue::Text(v) => {
+                    write_param_value(out, v)?;
+                }
+                ArchivedICalendarParameterValue::Integer(i) => {
+                    write!(out, "{i}")?;
+                }
+                ArchivedICalendarParameterValue::Bool(v) => {
+                    let v = if !matches!(param.name, ArchivedICalendarParameterName::Range) {
+                        if *v { "TRUE" } else { "FALSE" }
+                    } else {
+                        "THISANDFUTURE"
+                    };
+                    out.write_atomic(v)?;
+                }
+                ArchivedICalendarParameterValue::Uri(uri) => {
+                    out.write_atomic("\"")?;
+                    write_uri(out, uri, false)?;
+                    out.write_atomic("\"")?;
+                }
+                ArchivedICalendarParameterValue::Cutype(v) => {
+                    write_param_value(out, v.as_str())?;
+                }
+                ArchivedICalendarParameterValue::Fbtype(v) => {
+                    write_param_value(out, v.as_str())?;
+                }
+                ArchivedICalendarParameterValue::Partstat(v) => {
+                    write_param_value(out, v.as_str())?;
+                }
+                ArchivedICalendarParameterValue::Related(v) => {
+                    write_param_value(out, v.as_str())?;
+                }
+                ArchivedICalendarParameterValue::Reltype(v) => {
+                    write_param_value(out, v.as_str())?;
+                }
+                ArchivedICalendarParameterValue::Role(v) => {
+                    write_param_value(out, v.as_str())?;
+                }
+                ArchivedICalendarParameterValue::ScheduleAgent(v) => {
+                    write_param_value(out, v.as_str())?;
+                }
+                ArchivedICalendarParameterValue::ScheduleForceSend(v) => {
+                    write_param_value(out, v.as_str())?;
+                }
+                ArchivedICalendarParameterValue::Value(v) => {
+                    types = Some(v);
+                    write_param_value(out, v.as_str())?;
+                }
+                ArchivedICalendarParameterValue::Display(v) => {
+                    write_param_value(out, v.as_str())?;
+                }
+                ArchivedICalendarParameterValue::Feature(v) => {
+                    write_param_value(out, v.as_str())?;
+                }
+                ArchivedICalendarParameterValue::Duration(v) => {
+                    write!(out, "{v}")?;
+                }
+                ArchivedICalendarParameterValue::Linkrel(v) => {
+                    write_param_value(out, v.as_str())?;
+                }
+                ArchivedICalendarParameterValue::Null => {
+                    last_param = None;
+                }
+            }
+        }
+
+        out.write_atomic(":")?;
+
+        if with_value {
+            let (default_type, separator) = self.name.default_types();
+            let separator = if !matches!(separator, ValueSeparator::Comma) {
+                ";"
+            } else {
+                ","
+            };
+            let default_type = default_type.unwrap_ical();
+
+            for (pos, value) in self.values.iter().enumerate() {
+                if pos > 0 {
+                    out.write_atomic(separator)?;
+                }
+
+                let text = match value {
+                    ArchivedICalendarValue::Binary(v) => {
+                        write_bytes(out, v)?;
+                        continue;
+                    }
+                    ArchivedICalendarValue::Boolean(v) => {
+                        out.write_atomic(if *v { "TRUE" } else { "FALSE" })?;
+                        continue;
+                    }
+                    ArchivedICalendarValue::Uri(v) => {
+                        write_uri(out, v, true)?;
+                        continue;
+                    }
+                    ArchivedICalendarValue::PartialDateTime(v) => {
+                        v.format_as_ical(out, types.unwrap_or(&default_type))?;
+                        continue;
+                    }
+                    ArchivedICalendarValue::Duration(v) => {
+                        write!(out, "{}", v)?;
+                        continue;
+                    }
+                    ArchivedICalendarValue::RecurrenceRule(v) => {
+                        write!(out, "{}", v)?;
+                        continue;
+                    }
+                    ArchivedICalendarValue::Period(v) => {
+                        write!(out, "{}", v)?;
+                        continue;
+                    }
+                    ArchivedICalendarValue::Float(v) => {
+                        write!(out, "{v}")?;
+                        continue;
+                    }
+                    ArchivedICalendarValue::Integer(v) => {
+                        write!(out, "{v}")?;
+                        continue;
+                    }
+                    ArchivedICalendarValue::Text(v) => {
+                        let escape = !matches!(
+                            types.unwrap_or(&default_type),
+                            ArchivedICalendarValueType::Recur
+                        );
+                        write_text(out, v, escape, escape)?;
+                        continue;
+                    }
+                    ArchivedICalendarValue::CalendarScale(v) => v.as_str(),
+                    ArchivedICalendarValue::Method(v) => v.as_str(),
+                    ArchivedICalendarValue::Classification(v) => v.as_str(),
+                    ArchivedICalendarValue::Status(v) => v.as_str(),
+                    ArchivedICalendarValue::Transparency(v) => v.as_str(),
+                    ArchivedICalendarValue::Action(v) => v.as_str(),
+                    ArchivedICalendarValue::BusyType(v) => v.as_str(),
+                    ArchivedICalendarValue::ParticipantType(v) => v.as_str(),
+                    ArchivedICalendarValue::ResourceType(v) => v.as_str(),
+                    ArchivedICalendarValue::Proximity(v) => v.as_str(),
+                };
+
+                out.write_atomic(text)?;
+            }
+        }
+        out.end_line()
+    }
+}
+
+pub(crate) fn write_uri<W: Write>(
+    out: &mut FoldingWriter<'_, W>,
+    value: &ArchivedUri,
+    escape: bool,
+) -> std::fmt::Result {
+    match value {
+        ArchivedUri::Data(v) => {
+            let media_type = v.content_type.as_deref().unwrap_or_default();
+            out.write_str("data:")?;
+            out.write_str(media_type)?;
+            out.write_str(";")?;
+            if escape {
+                out.write_atomic("base64\\,")?;
+            } else {
+                out.write_atomic("base64,")?;
+            }
+            write_bytes(out, &v.data)
+        }
+        ArchivedUri::Location(v) => write_text(out, v, escape, escape),
+    }
+}
+
+impl Display for ArchivedICalendarRecurrenceRule {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "FREQ={}", self.freq.as_str())?;
+        if let Some(until) = self.until.as_ref() {
+            write!(f, ";UNTIL=")?;
+            until.format_as_ical(
+                f,
+                if until.has_date_and_time() {
+                    &ArchivedICalendarValueType::DateTime
+                } else {
+                    &ArchivedICalendarValueType::Date
+                },
+            )?;
+        }
+        if let Some(count) = self.count.as_ref().filter(|c| **c > 0) {
+            write!(f, ";COUNT={}", count)?;
+        }
+        if let Some(interval) = self.interval.as_ref() {
+            write!(f, ";INTERVAL={}", interval)?;
+        }
+        if !self.bysecond.is_empty() {
+            write!(f, ";BYSECOND=")?;
+            for (pos, item) in self.bysecond.iter().enumerate() {
+                if pos > 0 {
+                    write!(f, ",")?;
+                }
+                write!(f, "{}", item)?;
+            }
+        }
+        if !self.byminute.is_empty() {
+            write!(f, ";BYMINUTE=")?;
+            for (pos, item) in self.byminute.iter().enumerate() {
+                if pos > 0 {
+                    write!(f, ",")?;
+                }
+                write!(f, "{}", item)?;
+            }
+        }
+        if !self.byhour.is_empty() {
+            write!(f, ";BYHOUR=")?;
+            for (pos, item) in self.byhour.iter().enumerate() {
+                if pos > 0 {
+                    write!(f, ",")?;
+                }
+                write!(f, "{}", item)?;
+            }
+        }
+        if !self.byday.is_empty() {
+            write!(f, ";BYDAY=")?;
+            for (pos, item) in self.byday.iter().enumerate() {
+                if pos > 0 {
+                    write!(f, ",")?;
+                }
+                write!(f, "{}", item)?;
+            }
+        }
+        if !self.bymonthday.is_empty() {
+            write!(f, ";BYMONTHDAY=")?;
+            for (pos, item) in self.bymonthday.iter().enumerate() {
+                if pos > 0 {
+                    write!(f, ",")?;
+                }
+                write!(f, "{}", item)?;
+            }
+        }
+        if !self.byyearday.is_empty() {
+            write!(f, ";BYYEARDAY=")?;
+            for (pos, item) in self.byyearday.iter().enumerate() {
+                if pos > 0 {
+                    write!(f, ",")?;
+                }
+                write!(f, "{}", item)?;
+            }
+        }
+        if !self.byweekno.is_empty() {
+            write!(f, ";BYWEEKNO=")?;
+            for (pos, item) in self.byweekno.iter().enumerate() {
+                if pos > 0 {
+                    write!(f, ",")?;
+                }
+                write!(f, "{}", item)?;
+            }
+        }
+        if !self.bymonth.is_empty() {
+            write!(f, ";BYMONTH=")?;
+            for (pos, item) in self.bymonth.iter().enumerate() {
+                if pos > 0 {
+                    write!(f, ",")?;
+                }
+                write!(f, "{}", item)?;
+            }
+        }
+        if !self.bysetpos.is_empty() {
+            write!(f, ";BYSETPOS=")?;
+            for (pos, item) in self.bysetpos.iter().enumerate() {
+                if pos > 0 {
+                    write!(f, ",")?;
+                }
+                write!(f, "{}", item)?;
+            }
+        }
+        if let Some(wkst) = self.wkst.as_ref() {
+            write!(f, ";WKST={}", wkst.as_str())?;
+        }
+        if let Some(rscale) = self.rscale.as_ref() {
+            write!(f, ";RSCALE={}", rscale.as_str())?;
+        } else if self.skip.is_some() {
+            write!(f, ";RSCALE={}", CalendarScale::Gregorian.as_str())?;
+        }
+        if let Some(skip) = self.skip.as_ref() {
+            write!(f, ";SKIP={}", skip.as_str())?;
+        }
+
+        Ok(())
+    }
+}
+
+impl Display for ArchivedICalendarDay {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        if let Some(ordwk) = self.ordwk.as_ref() {
+            write!(f, "{}", ordwk)?;
+        }
+        write!(f, "{}", self.weekday.as_str())
+    }
+}
+
+impl Display for ArchivedICalendarMonth {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        if !self.is_leap() {
+            write!(f, "{}", self.month())
+        } else {
+            write!(f, "{}L", self.month())
+        }
+    }
+}
+
+impl Display for ArchivedICalendarPeriod {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ArchivedICalendarPeriod::Range { start, end } => {
+                start.format_as_ical(f, &ArchivedICalendarValueType::DateTime)?;
+                write!(f, "/")?;
+                end.format_as_ical(f, &ArchivedICalendarValueType::DateTime)
+            }
+            ArchivedICalendarPeriod::Duration { start, duration } => {
+                start.format_as_ical(f, &ArchivedICalendarValueType::DateTime)?;
+                write!(f, "/{}", duration)
+            }
+        }
+    }
+}
+
+impl Display for ArchivedICalendarDuration {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        if self.neg {
+            write!(f, "-")?;
+        }
+        write!(f, "P")?;
+        if self.weeks == 0
+            && self.days == 0
+            && self.hours == 0
+            && self.minutes == 0
+            && self.seconds == 0
+        {
+            return write!(f, "T0S");
+        }
+        if self.weeks != 0 {
+            write!(f, "{}W", self.weeks)?;
+        }
+        if self.days != 0 {
+            write!(f, "{}D", self.days)?;
+        }
+        if self.hours != 0 || self.minutes != 0 || self.seconds != 0 {
+            write!(f, "T")?;
+            if self.hours != 0 {
+                write!(f, "{}H", self.hours)?;
+            }
+            if self.minutes != 0 {
+                write!(f, "{}M", self.minutes)?;
+            }
+            if self.seconds != 0 {
+                write!(f, "{}S", self.seconds)?;
+            }
+        }
+
+        Ok(())
+    }
+}
+
+impl ArchivedPartialDateTime {
+    pub fn format_as_ical(
+        &self,
+        out: &mut impl Write,
+        fmt: &ArchivedICalendarValueType,
+    ) -> std::fmt::Result {
+        if matches!(
+            fmt,
+            ArchivedICalendarValueType::Date | ArchivedICalendarValueType::DateTime
+        ) {
+            write!(
+                out,
+                "{:04}{:02}{:02}",
+                self.year
+                    .as_ref()
+                    .map(|n| n.to_native())
+                    .unwrap_or_default(),
+                self.month.as_ref().copied().unwrap_or_default(),
+                self.day.as_ref().copied().unwrap_or_default(),
+            )?;
+        }
+
+        if matches!(fmt, ArchivedICalendarValueType::DateTime) {
+            write!(out, "T")?;
+        }
+
+        if matches!(
+            fmt,
+            ArchivedICalendarValueType::DateTime | ArchivedICalendarValueType::Time
+        ) {
+            write!(
+                out,
+                "{:02}{:02}{:02}",
+                self.hour.as_ref().copied().unwrap_or_default(),
+                self.minute.as_ref().copied().unwrap_or_default(),
+                self.second.as_ref().copied().unwrap_or_default(),
+            )?;
+
+            if matches!(
+                (self.tz_hour.as_ref(), self.tz_minute.as_ref()),
+                (Some(0), Some(0))
+            ) {
+                write!(out, "Z")?;
+            }
+        }
+
+        if matches!(fmt, ArchivedICalendarValueType::UtcOffset) {
+            if self.tz_minus {
+                write!(out, "-")?;
+            } else {
+                write!(out, "+")?;
+            }
+
+            write!(
+                out,
+                "{:02}{:02}",
+                self.tz_hour.as_ref().copied().unwrap_or_default(),
+                self.tz_minute.as_ref().copied().unwrap_or_default(),
+            )?;
+        }
+
+        Ok(())
+    }
+}
+
+impl Display for ArchivedICalendar {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.write_to(f)
+    }
+}

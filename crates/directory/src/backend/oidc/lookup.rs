@@ -8,11 +8,12 @@
 
 use crate::{
     Account, Credentials,
-    backend::oidc::{CachedKey, OidcError, OpenIdDirectory},
+    backend::oidc::{CachedKey, Introspection, OidcError, OpaqueTokens, OpenIdDirectory},
 };
 use ahash::AHashMap;
 use jsonwebtoken::{
     Algorithm, DecodingKey, Header, Validation, decode, decode_header,
+    errors::ErrorKind,
     jwk::{self, JwkSet},
 };
 use reqwest::Client;
@@ -20,6 +21,14 @@ use serde_json::Value;
 use std::time::Instant;
 use std::{sync::Arc, time::Duration};
 use trc::AuthEvent;
+
+/// How often the provider's keys may be fetched again for a token they don't
+/// verify.
+const KEY_REFRESH_INTERVAL: Duration = Duration::from_secs(300);
+
+/// inbuxa: http-directory-services-13: what a provider sends back is read up
+/// to this much.
+const MAX_RESPONSE_SIZE: usize = 1024 * 1024;
 
 impl OpenIdDirectory {
     pub async fn authenticate(&self, credentials: &Credentials) -> trc::Result<Account> {
@@ -59,81 +68,211 @@ impl OpenIdDirectory {
             ));
         }
 
-        let candidates = self.get_key(header.kid.as_deref()).await?;
-        let mut last_err = None;
-        for cached in &candidates {
-            let dk = &cached.decoding_key;
-            let alg = cached.algorithm;
-            let mut validation = Validation::new(alg);
+        let mut candidates = self.get_key(header.kid.as_deref()).await?;
+        let mut refreshed = false;
+        loop {
+            let mut last_err = None;
+            // inbuxa: whether every key failed only for being the wrong key
+            let mut wrong_keys = true;
+            for cached in &candidates {
+                let dk = &cached.decoding_key;
+                let alg = cached.algorithm;
+                let mut validation = Validation::new(alg);
 
-            if let Some(aud) = &self.config.require_aud {
-                validation.set_audience(&[aud]);
-            } else {
-                validation.validate_aud = false;
+                if let Some(aud) = &self.config.require_aud {
+                    validation.set_audience(&[aud]);
+                } else {
+                    validation.validate_aud = false;
+                }
+
+                validation.set_issuer(&[&self.discovery.document.issuer]);
+                validation.leeway = 60;
+
+                match decode::<serde_json::Value>(token, dk, &validation) {
+                    Ok(token_data) => {
+                        if self.config.require_aud.is_some()
+                            && token_data.claims.get("aud").is_none()
+                        {
+                            last_err = Some(jsonwebtoken::errors::Error::from(
+                                jsonwebtoken::errors::ErrorKind::InvalidAudience,
+                            ));
+                            wrong_keys = false;
+                            continue;
+                        }
+
+                        check_token_type(&token_data.claims)?;
+                        self.validate_scopes(&token_data.claims)?;
+
+                        return self.account_from_claims(token, token_data.claims).await;
+                    }
+                    Err(e) => {
+                        wrong_keys &= matches!(
+                            e.kind(),
+                            ErrorKind::InvalidSignature | ErrorKind::InvalidAlgorithm
+                        );
+                        last_err = Some(e);
+                    }
+                }
             }
 
-            validation.set_issuer(&[&self.discovery.document.issuer]);
-            validation.leeway = 60;
+            // inbuxa: http-directory-services-13: a token without a kid that
+            // no cached key verifies may be signed with a key the provider
+            // rotated in, so the keys are fetched again, once, as for an
+            // unknown kid (and as rarely)
+            if header.kid.is_none()
+                && !refreshed
+                && wrong_keys
+                && let Some(keys) = self.refresh_keys().await
+            {
+                candidates = keys;
+                refreshed = true;
+                continue;
+            }
 
-            match decode::<serde_json::Value>(token, dk, &validation) {
-                Ok(token_data) => {
-                    if self.config.require_aud.is_some() && token_data.claims.get("aud").is_none() {
-                        last_err = Some(jsonwebtoken::errors::Error::from(
-                            jsonwebtoken::errors::ErrorKind::InvalidAudience,
-                        ));
-                        continue;
-                    }
+            return Err(OidcError::TokenValidation(format!(
+                "JWT validation failed: {}",
+                last_err.map(|e| e.to_string()).unwrap_or_default()
+            )));
+        }
+    }
 
-                    check_token_type(&token_data.claims)?;
-                    self.validate_scopes(&token_data.claims)?;
+    /// inbuxa: the account a validated token's claims name, with what they
+    /// lack taken from the user info endpoint (shared by JWTs and
+    /// introspected tokens).
+    async fn account_from_claims(
+        &self,
+        token: &str,
+        mut claims: serde_json::Value,
+    ) -> Result<Account, OidcError> {
+        let missing_username = is_claim_missing(&claims, Some(&self.config.claim_email));
+        let jwt_email = self.resolve_email(&claims).ok();
+        let missing_profile = is_claim_missing(&claims, self.config.claim_name.as_ref())
+            || is_claim_missing(&claims, self.config.claim_groups.as_ref());
 
-                    let mut claims = token_data.claims;
-                    let missing_username =
-                        is_claim_missing(&claims, Some(&self.config.claim_email));
-                    let jwt_email = self.resolve_email(&claims).ok();
-                    let missing_profile =
-                        is_claim_missing(&claims, self.config.claim_name.as_ref())
-                            || is_claim_missing(&claims, self.config.claim_groups.as_ref());
-
-                    if jwt_email.is_none() || missing_username || missing_profile {
-                        match self.fetch_userinfo(token).await {
-                            Ok(userinfo) => {
-                                if let (Some(base), Value::Object(extra)) =
-                                    (claims.as_object_mut(), userinfo)
-                                {
-                                    for (key, value) in extra {
-                                        if base.get(&key).is_none_or(Value::is_null) {
-                                            base.insert(key, value);
-                                        }
-                                    }
-                                }
+        if jwt_email.is_none() || missing_username || missing_profile {
+            match self.fetch_userinfo(token).await {
+                Ok(userinfo) => {
+                    if let (Some(base), Value::Object(extra)) = (claims.as_object_mut(), userinfo) {
+                        for (key, value) in extra {
+                            if base.get(&key).is_none_or(Value::is_null) {
+                                base.insert(key, value);
                             }
-                            Err(err) if jwt_email.is_none() => return Err(err),
-                            Err(_) => {}
                         }
                     }
-
-                    let email = match jwt_email {
-                        Some(email) if !missing_username => email,
-                        _ => self.resolve_email(&claims)?,
-                    };
-                    return self.build_account(email, &claims);
                 }
-                Err(e) => {
-                    last_err = Some(e);
-                }
+                Err(err) if jwt_email.is_none() => return Err(err),
+                Err(_) => {}
             }
         }
 
-        Err(OidcError::TokenValidation(format!(
-            "JWT validation failed: {}",
-            last_err.map(|e| e.to_string()).unwrap_or_default()
-        )))
+        let email = match jwt_email {
+            Some(email) if !missing_username => email,
+            _ => self.resolve_email(&claims)?,
+        };
+        self.build_account(email, &claims)
     }
 
     async fn authenticate_opaque(&self, token: &str) -> Result<Account, OidcError> {
-        let claims = self.fetch_userinfo(token).await?;
-        self.build_account(self.resolve_email(&claims)?, &claims)
+        // inbuxa: http-directory-services-13: by the directory's policy
+        match &self.config.opaque_tokens {
+            OpaqueTokens::Reject => Err(OidcError::TokenValidation(
+                "This directory accepts only JWT access tokens".to_string(),
+            )),
+            OpaqueTokens::Userinfo => {
+                let claims = self.fetch_userinfo(token).await?;
+                self.build_account(self.resolve_email(&claims)?, &claims)
+            }
+            OpaqueTokens::Introspection(introspection) => {
+                let claims = self.introspect(token, introspection).await?;
+                check_token_type(&claims)?;
+                self.validate_scopes(&claims)?;
+                self.account_from_claims(token, claims).await
+            }
+        }
+    }
+
+    /// inbuxa: http-directory-services-13: asks the provider about a token
+    /// (RFC 7662), and returns what it says only for an active token it
+    /// issued, for the required audience when one is set.
+    async fn introspect(
+        &self,
+        token: &str,
+        introspection: &Introspection,
+    ) -> Result<serde_json::Value, OidcError> {
+        let url = introspection
+            .url
+            .as_deref()
+            .ok_or_else(|| OidcError::Config("No introspection endpoint is known".to_string()))?;
+        let resp = self
+            .http
+            .post(url)
+            // RFC 6749, section 2.3.1: both form-encoded first
+            .basic_auth(
+                form_encode(&introspection.client_id),
+                Some(form_encode(&introspection.client_secret)),
+            )
+            .header(
+                reqwest::header::CONTENT_TYPE,
+                "application/x-www-form-urlencoded",
+            )
+            .body(format!(
+                "token={}&token_type_hint=access_token",
+                form_encode(token)
+            ))
+            .send()
+            .await
+            .map_err(|e| OidcError::Network(format!("Introspection request failed: {e}")))?;
+
+        // A refusal here is of this server's client credentials, not the token
+        let status = resp.status();
+        if !status.is_success() {
+            return Err(OidcError::Provider(format!(
+                "Introspection returned HTTP {status}"
+            )));
+        }
+        let bytes = read_body(resp, "Introspection").await?;
+        let claims = serde_json::from_slice::<serde_json::Value>(&bytes)
+            .map_err(|e| OidcError::Provider(format!("Introspection JSON parse error: {e}")))?;
+
+        if claims.get("active") != Some(&Value::Bool(true)) {
+            return Err(OidcError::AuthorizationFailed(
+                "The provider says the token is not active".to_string(),
+            ));
+        }
+        let issuer = self.discovery.document.issuer.trim_end_matches('/');
+        if claims
+            .get("iss")
+            .and_then(|iss| iss.as_str())
+            .is_none_or(|iss| iss.trim_end_matches('/') != issuer)
+        {
+            return Err(OidcError::TokenValidation(
+                "The token was not issued by this directory's provider".to_string(),
+            ));
+        }
+        if let Some(audience) = &self.config.require_aud {
+            let found = match claims.get("aud") {
+                Some(Value::String(aud)) => aud == audience,
+                Some(Value::Array(auds)) => auds.iter().any(|aud| aud.as_str() == Some(audience)),
+                _ => false,
+            };
+            if !found {
+                return Err(OidcError::TokenValidation(
+                    "The token was not issued for the required audience".to_string(),
+                ));
+            }
+        }
+        if let Some(exp) = claims.get("exp").and_then(|exp| exp.as_u64())
+            && exp + 60
+                < std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map_or(0, |now| now.as_secs())
+        {
+            return Err(OidcError::TokenValidation(
+                "The token has expired".to_string(),
+            ));
+        }
+
+        Ok(claims)
     }
 
     async fn get_key(&self, kid: Option<&str>) -> Result<Vec<Arc<CachedKey>>, OidcError> {
@@ -145,7 +284,7 @@ impl OpenIdDirectory {
                     return Ok(vec![cached.clone()]);
                 }
 
-                if guard.last_updated.elapsed() < Duration::from_secs(300) {
+                if guard.last_updated.elapsed() < KEY_REFRESH_INTERVAL {
                     return Err(OidcError::TokenValidation("Unknown key id".to_string()));
                 }
             } else {
@@ -184,6 +323,35 @@ impl OpenIdDirectory {
         }
     }
 
+    /// inbuxa: every key, fetched again unless that was tried within
+    /// `KEY_REFRESH_INTERVAL`; None when it was, or the fetch failed (a
+    /// failed fetch also waits out the interval, so tokens can't make the
+    /// server hammer a struggling provider).
+    async fn refresh_keys(&self) -> Option<Vec<Arc<CachedKey>>> {
+        {
+            let mut guard = self.cache.write().await;
+            if guard.last_updated.elapsed() < KEY_REFRESH_INTERVAL {
+                return None;
+            }
+            guard.last_updated = Instant::now();
+        }
+        match fetch_jwks_keys(&self.http, &self.discovery.document.jwks_uri).await {
+            Ok(keys) => {
+                let all = keys.values().cloned().collect();
+                self.cache.write().await.keys = keys;
+                Some(all)
+            }
+            Err(err) => {
+                trc::event!(
+                    Auth(AuthEvent::Warning),
+                    Url = self.discovery.document.jwks_uri.clone(),
+                    Reason = format!("JWKS refresh failed: {err}")
+                );
+                None
+            }
+        }
+    }
+
     async fn fetch_userinfo(&self, token: &str) -> Result<serde_json::Value, OidcError> {
         let resp = self
             .http
@@ -195,7 +363,10 @@ impl OpenIdDirectory {
 
         let status = resp.status();
         if status == reqwest::StatusCode::UNAUTHORIZED || status == reqwest::StatusCode::FORBIDDEN {
-            let reason = resp.text().await.unwrap_or_default();
+            let reason = read_body(resp, "UserInfo")
+                .await
+                .map(|body| String::from_utf8_lossy(&body).into_owned())
+                .unwrap_or_default();
             return Err(OidcError::AuthorizationFailed(format!(
                 "Token rejected by UserInfo endpoint with status {status}: {reason}"
             )));
@@ -206,10 +377,7 @@ impl OpenIdDirectory {
             )));
         }
 
-        let bytes = resp
-            .bytes()
-            .await
-            .map_err(|e| OidcError::Provider(format!("UserInfo HTTP error: {e}")))?;
+        let bytes = read_body(resp, "UserInfo").await?;
 
         serde_json::from_slice::<serde_json::Value>(&bytes)
             .map_err(|e| OidcError::Provider(format!("UserInfo JSON parse error: {e}")))
@@ -296,16 +464,16 @@ pub(super) async fn fetch_jwks_keys(
     http: &Client,
     jwks_uri: &str,
 ) -> Result<AHashMap<String, Arc<CachedKey>>, OidcError> {
-    let jwks_bytes = http
-        .get(jwks_uri)
-        .send()
-        .await
-        .map_err(|e| OidcError::Network(format!("JWKS fetch failed: {e}")))?
-        .error_for_status()
-        .map_err(|e| OidcError::Provider(format!("JWKS HTTP error: {e}")))?
-        .bytes()
-        .await
-        .map_err(|e| OidcError::Provider(format!("JWKS HTTP error: {e}")))?;
+    let jwks_bytes = read_body(
+        http.get(jwks_uri)
+            .send()
+            .await
+            .map_err(|e| OidcError::Network(format!("JWKS fetch failed: {e}")))?
+            .error_for_status()
+            .map_err(|e| OidcError::Provider(format!("JWKS HTTP error: {e}")))?,
+        "JWKS",
+    )
+    .await?;
     let jwks: JwkSet = serde_json::from_slice(&jwks_bytes)
         .map_err(|e| OidcError::Provider(format!("JWKS JSON parse error: {e}")))?;
 
@@ -409,6 +577,52 @@ pub(super) async fn fetch_jwks_keys(
     Ok(map)
 }
 
+/// inbuxa: http-directory-services-13: a response body, refused once it
+/// passes `MAX_RESPONSE_SIZE` instead of read whole.
+pub(super) async fn read_body(
+    mut resp: reqwest::Response,
+    what: &str,
+) -> Result<Vec<u8>, OidcError> {
+    let too_large = || {
+        OidcError::Provider(format!(
+            "{what} response is larger than {MAX_RESPONSE_SIZE} bytes"
+        ))
+    };
+    if resp
+        .content_length()
+        .is_some_and(|length| length > MAX_RESPONSE_SIZE as u64)
+    {
+        return Err(too_large());
+    }
+    let mut body = Vec::new();
+    while let Some(chunk) = resp
+        .chunk()
+        .await
+        .map_err(|e| OidcError::Provider(format!("{what} HTTP error: {e}")))?
+    {
+        if body.len() + chunk.len() > MAX_RESPONSE_SIZE {
+            return Err(too_large());
+        }
+        body.extend_from_slice(&chunk);
+    }
+    Ok(body)
+}
+
+/// inbuxa: application/x-www-form-urlencoded, for the introspection request.
+fn form_encode(value: &str) -> String {
+    let mut out = String::with_capacity(value.len());
+    for byte in value.bytes() {
+        match byte {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'*' | b'-' | b'.' | b'_' => {
+                out.push(byte as char)
+            }
+            b' ' => out.push('+'),
+            _ => out.push_str(&format!("%{byte:02X}")),
+        }
+    }
+    out
+}
+
 fn extract_scopes(claims: &serde_json::Value) -> Vec<String> {
     match claims.get("scope") {
         Some(serde_json::Value::String(s)) => s.split_whitespace().map(|s| s.to_string()).collect(),
@@ -482,6 +696,19 @@ MCowBQYDK2VwAyEAXNXjqSjw780GFXxFztdFBUMpxRoFqsYWN55FXnvncCE=
 -----END PUBLIC KEY-----";
 
     fn test_directory() -> OpenIdDirectory {
+        test_directory_at("https://idp.example.org")
+    }
+
+    /// The test directory, with its endpoints at `base`.
+    fn test_directory_at(base: &str) -> OpenIdDirectory {
+        test_directory_with(base, None, OpaqueTokens::Reject)
+    }
+
+    fn test_directory_with(
+        base: &str,
+        require_aud: Option<&str>,
+        opaque_tokens: OpaqueTokens,
+    ) -> OpenIdDirectory {
         let mut keys = AHashMap::new();
         keys.insert(
             "test".to_string(),
@@ -493,22 +720,24 @@ MCowBQYDK2VwAyEAXNXjqSjw780GFXxFztdFBUMpxRoFqsYWN55FXnvncCE=
         OpenIdDirectory {
             config: crate::backend::oidc::OidcConfig {
                 issue_url: "https://idp.example.org".to_string(),
-                require_aud: None,
+                require_aud: require_aud.map(str::to_string),
                 require_scopes: Vec::new(),
                 claim_email: "email".to_string(),
                 claim_name: None,
                 claim_groups: None,
                 default_domain: None,
+                opaque_tokens,
             },
             discovery: crate::backend::oidc::OidcDiscovery {
                 url: "https://idp.example.org".to_string(),
                 document: crate::backend::oidc::DiscoveryDocument {
                     issuer: "https://idp.example.org".to_string(),
-                    jwks_uri: "https://idp.example.org/jwks".to_string(),
-                    userinfo_endpoint: "https://idp.example.org/userinfo".to_string(),
-                    token_endpoint: "https://idp.example.org/token".to_string(),
-                    authorization_endpoint: "https://idp.example.org/auth".to_string(),
+                    jwks_uri: format!("{base}/jwks"),
+                    userinfo_endpoint: format!("{base}/userinfo"),
+                    token_endpoint: format!("{base}/token"),
+                    authorization_endpoint: format!("{base}/auth"),
                     end_session_endpoint: None,
+                    introspection_endpoint: None,
                     scopes_supported: None,
                     claims_supported: None,
                     code_challenge_methods_supported: None,
@@ -541,6 +770,52 @@ MCowBQYDK2VwAyEAXNXjqSjw780GFXxFztdFBUMpxRoFqsYWN55FXnvncCE=
             &jsonwebtoken::EncodingKey::from_ed_pem(TEST_KEY.as_bytes()).unwrap(),
         )
         .unwrap()
+    }
+
+    /// A provider on 127.0.0.1 that answers every request with what
+    /// `answer` returns for it (the request line, headers and body).
+    async fn provider(answer: impl Fn(&str) -> (u16, String) + Send + Sync + 'static) -> String {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        let answer = Arc::new(answer);
+        tokio::spawn(async move {
+            while let Ok((mut stream, _)) = listener.accept().await {
+                let answer = answer.clone();
+                tokio::spawn(async move {
+                    let mut request = Vec::new();
+                    let mut buf = [0u8; 4096];
+                    loop {
+                        let read = stream.read(&mut buf).await.unwrap_or(0);
+                        if read == 0 {
+                            break;
+                        }
+                        request.extend_from_slice(&buf[..read]);
+                        if let Some(end) = request.windows(4).position(|w| w == b"\r\n\r\n") {
+                            let head = String::from_utf8_lossy(&request[..end]).to_lowercase();
+                            let length = head
+                                .lines()
+                                .find_map(|line| line.strip_prefix("content-length:"))
+                                .and_then(|value| value.trim().parse::<usize>().ok())
+                                .unwrap_or(0);
+                            if request.len() >= end + 4 + length {
+                                break;
+                            }
+                        }
+                    }
+                    let (status, body) = answer(&String::from_utf8_lossy(&request));
+                    // No Content-Length: the body ends when the connection does
+                    let head = format!(
+                        "HTTP/1.1 {status} Status\r\nContent-Type: application/json\r\nConnection: close\r\n\r\n"
+                    );
+                    let _ = stream.write_all(head.as_bytes()).await;
+                    let _ = stream.write_all(body.as_bytes()).await;
+                    let _ = stream.shutdown().await;
+                });
+            }
+        });
+        base
     }
 
     async fn sign_in(directory: &OpenIdDirectory, token: String) -> trc::Result<Account> {
@@ -585,6 +860,249 @@ MCowBQYDK2VwAyEAXNXjqSjw780GFXxFztdFBUMpxRoFqsYWN55FXnvncCE=
                 "{claims} must not sign in"
             );
         }
+    }
+
+    // http-directory-services-13: any token the provider issued, to any
+    // application, passes its user info endpoint, so a new directory
+    // refuses tokens that aren't JWTs
+    #[tokio::test]
+    async fn new_directories_refuse_opaque_tokens() {
+        let base = provider(|_| (200, json!({"email": "john@example.org"}).to_string())).await;
+        let directory = test_directory_at(&base);
+        assert!(
+            sign_in(&directory, "an-opaque-token".to_string())
+                .await
+                .is_err(),
+            "an opaque token signed in through the user info endpoint"
+        );
+
+        // ... and a directory saved before the policy keeps doing so
+        let directory = test_directory_with(&base, None, OpaqueTokens::Userinfo);
+        assert_eq!(
+            sign_in(&directory, "an-opaque-token".to_string())
+                .await
+                .map(|account| account.email)
+                .ok()
+                .as_deref(),
+            Some("john@example.org")
+        );
+    }
+
+    // http-directory-services-13: introspection signs in only an active
+    // token this provider issued for the required audience
+    #[tokio::test]
+    async fn introspection_checks_what_the_provider_says() {
+        let base = provider(|request| {
+            let (head, body) = request.split_once("\r\n\r\n").unwrap_or_default();
+            // RFC 6749 2.3.1: id and secret form-encoded, then Basic
+            let authorized = head.lines().any(|line| {
+                line.eq_ignore_ascii_case(&format!(
+                    "authorization: Basic {}",
+                    base64::Engine::encode(
+                        &base64::engine::general_purpose::STANDARD,
+                        "inbuxa:se+cret%2F%2B"
+                    )
+                ))
+            });
+            if !head.starts_with("POST /introspect ") || !authorized {
+                return (401, json!({"error": "invalid_client"}).to_string());
+            }
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_secs();
+            let mut claims = json!({
+                "active": true,
+                "iss": "https://idp.example.org",
+                "aud": ["inbuxa", "account"],
+                "exp": now + 300,
+                "email": "john@example.org",
+            });
+            match body
+                .strip_prefix("token=")
+                .and_then(|body| body.split('&').next())
+                .unwrap_or_default()
+            {
+                "good%2Btoken" => {}
+                "inactive" => claims = json!({"active": false}),
+                "foreign" => claims["iss"] = json!("https://other.example.org"),
+                "anonymous" => {
+                    claims.as_object_mut().unwrap().remove("iss");
+                }
+                "elsewhere" => claims["aud"] = json!("another-app"),
+                "unaddressed" => {
+                    claims.as_object_mut().unwrap().remove("aud");
+                }
+                "refresh" => claims["typ"] = json!("Refresh"),
+                "expired" => claims["exp"] = json!(1),
+                _ => claims = json!({"active": "true"}),
+            }
+            (200, claims.to_string())
+        })
+        .await;
+        let introspection = |client_secret: &str| {
+            OpaqueTokens::Introspection(Introspection {
+                url: Some(format!("{base}/introspect")),
+                client_id: "inbuxa".to_string(),
+                client_secret: client_secret.to_string(),
+            })
+        };
+        let directory = test_directory_with(&base, Some("inbuxa"), introspection("se cret/+"));
+
+        assert_eq!(
+            sign_in(&directory, "good+token".to_string())
+                .await
+                .map(|account| account.email)
+                .ok()
+                .as_deref(),
+            Some("john@example.org")
+        );
+        for token in [
+            "inactive",
+            "foreign",
+            "anonymous",
+            "elsewhere",
+            "unaddressed",
+            "refresh",
+            "expired",
+            "not-a-boolean",
+        ] {
+            let err = sign_in(&directory, token.to_string()).await.unwrap_err();
+            assert!(
+                err.matches(trc::EventType::Auth(AuthEvent::Failed)),
+                "{token}: {err:?}"
+            );
+        }
+
+        // A refusal of the server's own credentials is not the person's fault
+        let directory = test_directory_with(&base, Some("inbuxa"), introspection("wrong"));
+        let err = sign_in(&directory, "good+token".to_string())
+            .await
+            .unwrap_err();
+        assert!(
+            err.matches(trc::EventType::Auth(AuthEvent::Error)),
+            "{err:?}"
+        );
+    }
+
+    /// A body over 1 MiB that is otherwise a good answer.
+    fn oversized(mut body: serde_json::Value) -> String {
+        body["padding"] = json!("x".repeat(1024 * 1024));
+        body.to_string()
+    }
+
+    // http-directory-services-13: what the provider sends back is read up to
+    // 1 MiB, never whole
+    #[tokio::test]
+    async fn provider_answers_are_capped() {
+        let base = provider(|request| {
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_secs();
+            let body = if request.starts_with("POST /introspect ") {
+                json!({
+                    "active": true,
+                    "iss": "https://idp.example.org",
+                    "exp": now + 300,
+                    "email": "john@example.org",
+                })
+            } else if request.starts_with("GET /jwks ") {
+                json!({"keys": []})
+            } else {
+                json!({"email": "john@example.org"})
+            };
+            (200, oversized(body))
+        })
+        .await;
+
+        let directory = test_directory_with(&base, None, OpaqueTokens::Userinfo);
+        assert!(
+            sign_in(&directory, "an-opaque-token".to_string())
+                .await
+                .is_err(),
+            "user info"
+        );
+        let directory = test_directory_with(
+            &base,
+            None,
+            OpaqueTokens::Introspection(Introspection {
+                url: Some(format!("{base}/introspect")),
+                client_id: "inbuxa".to_string(),
+                client_secret: "secret".to_string(),
+            }),
+        );
+        assert!(
+            sign_in(&directory, "an-opaque-token".to_string())
+                .await
+                .is_err(),
+            "introspection"
+        );
+        assert!(
+            fetch_jwks_keys(&Client::new(), &format!("{base}/jwks"))
+                .await
+                .is_err(),
+            "JWKS"
+        );
+    }
+
+    // http-directory-services-13: a token without a kid that no cached key
+    // verifies fetches the JWKS again, as an unknown kid does, so a provider
+    // that rotated its only key keeps working
+    #[tokio::test]
+    async fn tokens_without_a_kid_refresh_the_keys_once() {
+        const ROTATED_KEY: &str = "-----BEGIN PRIVATE KEY-----
+MC4CAQAwBQYDK2VwBCIEIGJCOx1xrTLtywhRlvhdTe5Sm7UNQlVFXzqomt76r12T
+-----END PRIVATE KEY-----";
+        let fetches = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let counter = fetches.clone();
+        let base = provider(move |_| {
+            counter.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            let key = json!({
+                "kty": "OKP",
+                "crv": "Ed25519",
+                "x": "b2naX3qFwv_RDOHZMPsYSii82JicgY3srqJSZfranzE",
+                "use": "sig",
+            });
+            (200, json!({"keys": [key]}).to_string())
+        })
+        .await;
+        let directory = test_directory_at(&base);
+        directory.cache.write().await.last_updated = Instant::now() - Duration::from_secs(600);
+
+        let rotated = |claims: serde_json::Value| {
+            let mut claims = claims;
+            claims["iss"] = json!("https://idp.example.org");
+            claims["exp"] = json!(
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_secs()
+                    + 300
+            );
+            claims["email"] = json!("john@example.org");
+            jsonwebtoken::encode(
+                &jsonwebtoken::Header::new(Algorithm::EdDSA),
+                &claims,
+                &jsonwebtoken::EncodingKey::from_ed_pem(ROTATED_KEY.as_bytes()).unwrap(),
+            )
+            .unwrap()
+        };
+        assert_eq!(
+            sign_in(&directory, rotated(json!({})))
+                .await
+                .map(|account| account.email)
+                .ok()
+                .as_deref(),
+            Some("john@example.org")
+        );
+        assert_eq!(fetches.load(std::sync::atomic::Ordering::Relaxed), 1);
+
+        // A forged one right after doesn't fetch again
+        let mut forged = rotated(json!({}));
+        forged.replace_range(forged.len() - 4.., "AAAA");
+        assert!(sign_in(&directory, forged).await.is_err());
+        assert_eq!(fetches.load(std::sync::atomic::Ordering::Relaxed), 1);
     }
 
     #[test]
