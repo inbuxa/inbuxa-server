@@ -32,6 +32,10 @@ impl TestBody {
                 ctx.message.header_raw("Subject").unwrap_or_default()
             };
 
+            // inbuxa: charged like any other scan
+            if ctx.charge_scan(subject.len() * key_list.len()) {
+                return TestResult::Bool(false);
+            }
             for (key, pattern) in key_list.iter().zip(self.key_list.iter()) {
                 let result = match &self.match_type {
                     MatchType::Is => self.comparator.is(&subject, key),
@@ -192,6 +196,10 @@ impl TestBody {
                         return false;
                     }
                 };
+                // inbuxa: extracting the text scans it once, and each key again
+                if ctx.charge_scan(text.len() * key_list.len().max(1)) {
+                    return true;
+                }
                 let mut result = false;
 
                 for (key, pattern) in key_list.iter().zip(self.key_list.iter()) {

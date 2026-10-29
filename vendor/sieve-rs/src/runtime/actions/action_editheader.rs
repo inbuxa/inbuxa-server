@@ -73,8 +73,16 @@ impl DeleteHeader {
             self.index,
             self.mime_anychild,
             |header, part_id, header_pos| {
+                if ctx.is_over_cpu_limit() {
+                    return true;
+                }
                 if !value_patterns.is_empty() {
                     let did_match = ctx.find_header_values(header, &MimeOpts::None, |value| {
+                        // inbuxa: charged like the header test; past the limit,
+                        // nothing is deleted and the run stops
+                        if ctx.charge_scan(value.len() * value_patterns.len()) {
+                            return false;
+                        }
                         for (pattern_expr, pattern) in
                             value_patterns.iter().zip(self.value_patterns.iter())
                         {
@@ -124,6 +132,10 @@ impl DeleteHeader {
                 false
             },
         );
+
+        if ctx.is_over_cpu_limit() {
+            return;
+        }
 
         if !deleted_headers.is_empty() {
             ctx.has_changes = true;
