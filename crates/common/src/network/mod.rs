@@ -42,6 +42,7 @@ pub mod legacy;
 pub mod limiter;
 pub mod listen;
 pub mod mta;
+pub mod public_only;
 pub mod security;
 pub mod stream;
 pub mod tls;
