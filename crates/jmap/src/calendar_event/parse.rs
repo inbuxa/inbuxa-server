@@ -2,6 +2,8 @@
  * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
+ *
+ * Modified by Coffey Labs in 2026 for INBUXA.
  */
 
 use crate::blob::download::BlobDownload;
@@ -10,6 +12,7 @@ use calcard::{
     jscalendar::{JSCalendarProperty, import::ConversionOptions},
 };
 use common::{Server, auth::AccessToken};
+use groupware::calendar::limit_component_depth;
 use jmap_proto::{
     method::parse::{ParseRequest, ParseResponse},
     object::calendar_event::CalendarEvent,
@@ -58,11 +61,13 @@ impl CalendarEventParse for Server {
                     continue;
                 }
             };
-            let Ok(vcard) = ICalendar::parse(std::str::from_utf8(&raw_vcard).unwrap_or_default())
+            let Ok(mut vcard) =
+                ICalendar::parse(std::str::from_utf8(&raw_vcard).unwrap_or_default())
             else {
                 response.not_parsable.push(blob_id);
                 continue;
             };
+            limit_component_depth(&mut vcard);
             let mut js_calendar_entries = vcard
                 .into_jscalendar_with_opt::<Id, BlobId>(ConversionOptions::default())
                 .into_inner()

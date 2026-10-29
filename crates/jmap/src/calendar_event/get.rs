@@ -25,6 +25,7 @@ use groupware::{
         CalendarEvent, EVENT_DRAFT, EVENT_HIDE_ATTENDEES, EVENT_INVITE_OTHERS, EVENT_INVITE_SELF,
         PREF_USE_DEFAULT_ALERTS,
         expand::CalendarEventExpansion,
+        limit_component_depth,
         privacy::{event_view, hide_attendees, redact_private_event},
     },
 };
@@ -496,7 +497,7 @@ impl CalendarEventGet for Server {
                 results.push((Id::from(document_id), event, expansion));
             }
 
-            for (id, ical, expansion) in results {
+            for (id, mut ical, expansion) in results {
                 let is_origin = return_is_origin.as_ref().is_some_and(|account| {
                     ical.components
                         .iter()
@@ -511,6 +512,7 @@ impl CalendarEventGet for Server {
                         })
                 });
 
+                limit_component_depth(&mut ical);
                 let jscal = ical
                     .into_jscalendar_with_opt::<Id, BlobId>(
                         ConversionOptions::default()
