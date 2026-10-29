@@ -24,10 +24,22 @@ use types::blob_hash::BlobHash;
 
 pub const ORCPT_ADDR_TYPE: &str = "rfc822;";
 
+// inbuxa: which sender identity of a delivered message has been verified
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum VerifiedSender {
+    /// Neither the envelope sender nor the From header was verified
+    #[default]
+    None,
+    /// The From header domain passed DMARC
+    FromHeader,
+    /// The envelope sender signed in to submit the message
+    Envelope,
+}
+
 #[derive(Debug)]
 pub struct IngestMessage {
     pub sender_address: String,
-    pub sender_authenticated: bool,
+    pub verified_sender: VerifiedSender,
     pub recipients: Vec<IngestRecipient>,
     pub message_blob: BlobHash,
     pub message_size: u64,
@@ -266,7 +278,8 @@ impl MailDelivery for Server {
                                 received_at: None,
                                 source: IngestSource::Smtp {
                                     deliver_to: &rcpt.address,
-                                    is_sender_authenticated: message.sender_authenticated,
+                                    envelope_from: &message.sender_address,
+                                    verified_sender: message.verified_sender,
                                     is_spam: rcpt.is_spam(),
                                 },
                                 session_id: message.session_id,
@@ -279,7 +292,7 @@ impl MailDelivery for Server {
                                 message_blob,
                                 raw_message,
                                 &message.sender_address,
-                                message.sender_authenticated,
+                                message.verified_sender,
                                 &rcpt,
                                 message.session_id,
                                 active_script,

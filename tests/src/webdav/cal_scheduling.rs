@@ -2,9 +2,12 @@
  * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
+ *
+ * Modified by Coffey Labs in 2026 for INBUXA.
  */
 
 use crate::{
+    smtp::session::TestSession,
     utils::{server::TestServer, webdav::DummyWebDavClient},
     webdav::prop::ALL_DAV_PROPERTIES,
 };
@@ -929,6 +932,45 @@ pub async fn test(test: &TestServer) {
         Vec::<String>::new()
     );
 
+    // A signed-in user can't send an iMIP request in someone else's name
+    let jane_events = jane_client.fetch_icals().await.len();
+    let mut session = test.new_mta_session();
+    session.data.authenticated_as = Some(
+        test.server
+            .account_info(bill_client.account_id)
+            .await
+            .unwrap(),
+    );
+    session.eval_session_params().await;
+    session.ehlo("mx.example.com").await;
+    session
+        .send_message(
+            "bill@example.com",
+            &["jane.smith@example.com"],
+            &TEST_IMIP_SPOOFED
+                .replace(
+                    "$START",
+                    &DateTime::from_timestamp(now() as i64 + 60 * 60)
+                        .to_rfc3339()
+                        .replace(['-', ':'], ""),
+                )
+                .replace(
+                    "$END",
+                    &DateTime::from_timestamp(now() as i64 + 2 * 60 * 60)
+                        .to_rfc3339()
+                        .replace(['-', ':'], ""),
+                ),
+            "250",
+        )
+        .await;
+    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    test.wait_for_tasks().await;
+    let cals = jane_client.fetch_icals().await;
+    assert!(
+        cals.len() == jane_events && !cals.iter().any(|cal| cal.ical.contains("SPOOF9263504")),
+        "spoofed iMIP request was accepted: {cals:?}"
+    );
+
     for client in [bill_client, jane_client, john_client] {
         client.delete_default_containers().await;
     }
@@ -1315,6 +1357,29 @@ ATTENDEE;CUTYPE=INDIVIDUAL:mailto:bill@example.com
 END:VEVENT
 END:VCALENDAR
 "#;
+
+const TEST_IMIP_SPOOFED: &str = "From: jdoe@example.com\r
+To: jane.smith@example.com\r
+Subject: Invitation\r
+MIME-Version: 1.0\r
+Content-Type: text/calendar; method=REQUEST; charset=utf-8\r
+\r
+BEGIN:VCALENDAR\r
+VERSION:2.0\r
+PRODID:-//Example Corp.//CalDAV Client//EN\r
+METHOD:REQUEST\r
+BEGIN:VEVENT\r
+UID:SPOOF9263504\r
+SEQUENCE:0\r
+DTSTART:$START\r
+DTEND:$END\r
+DTSTAMP:20090602T170000Z\r
+SUMMARY:Spoofed\r
+ORGANIZER:mailto:jdoe@example.com\r
+ATTENDEE;CUTYPE=INDIVIDUAL;PARTSTAT=NEEDS-ACTION;RSVP=TRUE:mailto:jane.smith@example.com\r
+END:VEVENT\r
+END:VCALENDAR\r
+";
 
 const TEST_ITIP_EXTERNAL: &str = r#"BEGIN:VCALENDAR
 VERSION:2.0
