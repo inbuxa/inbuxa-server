@@ -379,6 +379,8 @@ Not a rebuild: the **deliverability check** is INBUXA's own design (inbuxa-draft
 
 Not a rebuild: **scheduled reports and the weekly digest** are INBUXA's own design (inbuxa-drafts `specs/scheduled-reports.md`). An administrator picks sections, a schedule in a time zone and recipients on this server; every node looks for due reports once a minute, one claims each run with the task lock, and the report is built from data the server already keeps and mailed DKIM-signed: `inbuxa:ScheduledReport`, `inbuxa:ScheduledReportSettings` and `inbuxa:ReportExport` (a download: a ZIP of a summary and CSVs) (`crates/jmap/src/inbuxa/scheduled_reports.rs`, `crates/features/src/scheduled_reports/`, `crates/services/src/inbuxa_scheduled_reports.rs`, `crates/smtp/src/reporting/inbuxa_send.rs`), and the `sysScheduledReportGet` and `sysScheduledReportUpdate` permissions. The weekly digest is a built-in report, on by default.
 
+Not a rebuild: **inbuxa-relay** is INBUXA's own design (`features/relay.md`, settled 2026-10-29, not started). It's a small edge appliance that takes mail in on port 25 for one downstream server or cluster, and sends that downstream's outgoing mail on. The downstream dials out to it over JMAP (`urn:inbuxa:jmap:relay`), so the protected network exposes no mail port, and it is administered only from the downstream's inbuxa-admin.
+
 ## 5. The web front ends
 
 **Which ihasmail.** Public ihasmail stays Stalwart-facing: its code, docs,
