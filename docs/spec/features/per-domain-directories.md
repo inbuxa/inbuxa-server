@@ -357,7 +357,10 @@ check it and the fork keeps it.
   - `HS*` algorithms are refused, and HMAC keys in the JWKS are skipped. RSA
     (RS and PS), EC P-256 and P-384, and EdDSA are accepted.
   - The key is found by `kid`. An unknown `kid` refetches the JWKS, at most
-    once every 300 seconds. With no `kid`, every key is tried.
+    once every 300 seconds. With no `kid`, every key is tried, and if none
+    verifies the signature the JWKS is refetched once, under the same limit.
+  - Discovery, JWKS, userinfo and introspection responses are read up to
+    1 MiB; a larger one is a provider error.
   - `iss` must equal the discovery document's issuer.
   - `exp` is checked, with 60 seconds of leeway.
   - If `requireAudience` is set, `aud` must be present and include it.
