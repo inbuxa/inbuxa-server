@@ -210,6 +210,7 @@ impl ItipIngest for Server {
                     &itip,
                     itip_snapshots,
                     sender.to_string(),
+                    self.core.groupware.max_ical_instances,
                 )? {
                     MergeResult::Actions(changes) => {
                         commit_itip_merge(
@@ -488,6 +489,7 @@ impl ItipIngest for Server {
                     &reply,
                     reply_snapshots,
                     rsvp.attendee.clone(),
+                    self.core.groupware.max_ical_instances,
                 )
             });
         let changes = match merge {

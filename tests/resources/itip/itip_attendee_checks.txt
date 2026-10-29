@@ -1,0 +1,167 @@
+# iTIP: REFRESH and REPLY are accepted only from the event's attendees
+
+# Organizer invites two attendees to a three-day series (1)
+> put a@example.com attendee-checks@example.com
+BEGIN:VCALENDAR
+PRODID:-//Example/ExampleCalendarClient//EN
+VERSION:2.0
+BEGIN:VEVENT
+UID:attendee-checks@example.com
+SEQUENCE:0
+ORGANIZER:mailto:a@example.com
+ATTENDEE;ROLE=CHAIR;PARTSTAT=ACCEPTED:mailto:a@example.com
+ATTENDEE;RSVP=TRUE:mailto:b@example.com
+ATTENDEE;RSVP=TRUE:mailto:c@example.com
+SUMMARY:Standup
+DTSTART:20270104T180000Z
+DTEND:20270104T183000Z
+RRULE:FREQ=DAILY;COUNT=3
+DTSTAMP:20261027T120000Z
+STATUS:CONFIRMED
+END:VEVENT
+END:VCALENDAR
+
+# Organizer invites two attendees to a three-day series (2)
+> send
+
+# Someone who was never invited asks for the event
+> itip x@example.com a@example.com
+BEGIN:VCALENDAR
+PRODID:-//Example/ExampleCalendarClient//EN
+METHOD:REFRESH
+VERSION:2.0
+BEGIN:VEVENT
+UID:attendee-checks@example.com
+ORGANIZER:mailto:a@example.com
+ATTENDEE:mailto:x@example.com
+DTSTAMP:20261027T130000Z
+END:VEVENT
+END:VCALENDAR
+
+> send
+SenderIsNotParticipant("x@example.com")
+
+# Organizer removes the second attendee (1)
+> put a@example.com attendee-checks@example.com
+BEGIN:VCALENDAR
+PRODID:-//Example/ExampleCalendarClient//EN
+VERSION:2.0
+BEGIN:VEVENT
+UID:attendee-checks@example.com
+SEQUENCE:1
+ORGANIZER:mailto:a@example.com
+ATTENDEE;ROLE=CHAIR;PARTSTAT=ACCEPTED:mailto:a@example.com
+ATTENDEE;RSVP=TRUE:mailto:b@example.com
+SUMMARY:Standup
+DTSTART:20270104T180000Z
+DTEND:20270104T183000Z
+RRULE:FREQ=DAILY;COUNT=3
+DTSTAMP:20261027T130000Z
+STATUS:CONFIRMED
+END:VEVENT
+END:VCALENDAR
+
+# Organizer removes the second attendee (2)
+> send
+
+# The removed attendee asks for the event again
+> itip c@example.com a@example.com
+BEGIN:VCALENDAR
+PRODID:-//Example/ExampleCalendarClient//EN
+METHOD:REFRESH
+VERSION:2.0
+BEGIN:VEVENT
+UID:attendee-checks@example.com
+ORGANIZER:mailto:a@example.com
+ATTENDEE:mailto:c@example.com
+DTSTAMP:20261027T140000Z
+END:VEVENT
+END:VCALENDAR
+
+> send
+SenderIsNotParticipant("c@example.com")
+
+# The removed attendee replies to an instance the organizer hasn't changed
+> itip c@example.com a@example.com
+BEGIN:VCALENDAR
+PRODID:-//Example/ExampleCalendarClient//EN
+METHOD:REPLY
+VERSION:2.0
+BEGIN:VEVENT
+UID:attendee-checks@example.com
+SEQUENCE:1
+RECURRENCE-ID:20270105T180000Z
+ORGANIZER:mailto:a@example.com
+ATTENDEE;PARTSTAT=ACCEPTED:mailto:c@example.com
+DTSTAMP:20261027T150000Z
+END:VEVENT
+END:VCALENDAR
+
+> send
+SenderIsNotParticipant("c@example.com")
+
+# An attendee replies to one instance and adds a stranger to it
+> itip b@example.com a@example.com
+BEGIN:VCALENDAR
+PRODID:-//Example/ExampleCalendarClient//EN
+METHOD:REPLY
+VERSION:2.0
+BEGIN:VEVENT
+UID:attendee-checks@example.com
+SEQUENCE:1
+RECURRENCE-ID:20270105T180000Z
+ORGANIZER;CN="Not A":mailto:a@example.com
+ATTENDEE;PARTSTAT=DECLINED:mailto:b@example.com
+ATTENDEE;PARTSTAT=ACCEPTED:mailto:mallory@example.org
+DTSTAMP:20261027T160000Z
+END:VEVENT
+END:VCALENDAR
+
+> send
+
+# An attendee replies to a date the series doesn't have
+> itip b@example.com a@example.com
+BEGIN:VCALENDAR
+PRODID:-//Example/ExampleCalendarClient//EN
+METHOD:REPLY
+VERSION:2.0
+BEGIN:VEVENT
+UID:attendee-checks@example.com
+SEQUENCE:1
+RECURRENCE-ID:20270110T180000Z
+ORGANIZER:mailto:a@example.com
+ATTENDEE;PARTSTAT=DECLINED:mailto:b@example.com
+DTSTAMP:20261027T170000Z
+END:VEVENT
+END:VCALENDAR
+
+> send
+
+# Only the attendee's own answer reaches the organizer's copy
+> get a@example.com attendee-checks@example.com
+BEGIN:VCALENDAR
+PRODID:-//Example/ExampleCalendarClient//EN
+VERSION:2.0
+BEGIN:VEVENT
+ATTENDEE;PARTSTAT=DECLINED;SCHEDULE-STATUS=2.0:mailto:b@example.com
+ORGANIZER:mailto:a@example.com
+RECURRENCE-ID:20270105T180000Z
+UID:attendee-checks@example.com
+DTSTAMP:1
+SEQUENCE:2
+END:VEVENT
+BEGIN:VEVENT
+STATUS:CONFIRMED
+SUMMARY:Standup
+DTEND:20270104T183000Z
+DTSTART:20270104T180000Z
+ATTENDEE;ROLE=CHAIR;PARTSTAT=ACCEPTED:mailto:a@example.com
+ATTENDEE;RSVP=TRUE:mailto:b@example.com
+ORGANIZER:mailto:a@example.com
+UID:attendee-checks@example.com
+RRULE:FREQ=DAILY;COUNT=3
+DTSTAMP:0
+SEQUENCE:2
+END:VEVENT
+END:VCALENDAR
+
