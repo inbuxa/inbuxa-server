@@ -2,6 +2,8 @@
  * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
+ *
+ * Modified by Coffey Labs in 2026 for INBUXA.
  */
 
 use super::{
@@ -11,7 +13,11 @@ use super::{
 };
 use crate::state_manager::{PushBatch, PushRegistration};
 use calcard::jscalendar::JSCalendarDateTime;
-use common::{Server, ipc::PushNotification, network::webpush::Vapid};
+use common::{
+    Server,
+    ipc::PushNotification,
+    network::{public_only::PublicOnly, webpush::Vapid},
+};
 use email::push::{PushSubscription, Urgency};
 use jmap_proto::{
     object::email::{EmailProperty, EmailValue},
@@ -265,6 +271,7 @@ pub(crate) fn build_push_client() -> Client {
             }
             _ => attempt.stop(),
         }))
+        .public_only()
         .build()
         .unwrap_or_default()
 }

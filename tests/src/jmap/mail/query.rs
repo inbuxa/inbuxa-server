@@ -2,6 +2,8 @@
  * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
+ *
+ * Modified by Coffey Labs in 2026 for INBUXA.
  */
 
 use crate::store::{deflate_test_resource, query::FIELDS};
@@ -335,7 +337,7 @@ pub async fn query(client: &Client, can_stem: bool) {
                 (email::query::Filter::has_keyword("T")),
             ]),
             vec![
-                email::query::Comparator::has_keyword("attributed to"),
+                email::query::Comparator::has_keyword("attributed_to"),
                 email::query::Comparator::from(),
                 email::query::Comparator::sent_at(),
             ],
@@ -355,7 +357,7 @@ pub async fn query(client: &Client, can_stem: bool) {
                 (email::query::Filter::has_keyword("T")),
             ]),
             vec![
-                email::query::Comparator::has_keyword("attributed to").descending(),
+                email::query::Comparator::has_keyword("attributed_to").descending(),
                 email::query::Comparator::from(),
                 email::query::Comparator::sent_at(),
             ],
@@ -813,7 +815,8 @@ pub async fn create(test: &TestServer, account: &Account) {
                 || keyword == "artist"
                 || keyword == "Bronze"
             {
-                keywords.push(keyword);
+                // inbuxa: a keyword can't hold a space (RFC 8621 section 4.1.1)
+                keywords.push(keyword.replace(' ', "_"));
             }
         }
 

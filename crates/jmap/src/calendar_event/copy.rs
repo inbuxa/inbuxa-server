@@ -11,8 +11,17 @@ use crate::{
     changes::state::JmapCacheState,
 };
 use calcard::jscalendar::JSCalendarProperty;
-use common::{Server, auth::AccessToken};
-use groupware::{cache::GroupwareCache, calendar::CalendarEvent};
+use common::{
+    EVENT_VIEW_HIDE_ATTENDEES, EVENT_VIEW_PRIVATE, Server, auth::AccessToken,
+    storage::quota::QuotaBudget,
+};
+use groupware::{
+    cache::GroupwareCache,
+    calendar::{
+        CalendarEvent, limit_component_depth,
+        privacy::{event_view, hide_attendees},
+    },
+};
 use http_proto::HttpSessionData;
 use jmap_proto::{
     error::set::SetError,
@@ -92,11 +101,13 @@ impl JmapCalendarEventCopy for Server {
             )
             .await
             .caused_by(trc::location!())?;
-        let from_calendar_event_ids = if access_token.reads_as_owner(from_account_id) {
+        let is_owner = access_token.reads_as_owner(from_account_id);
+        let from_calendar_event_ids = if is_owner {
             from_cache.document_ids(false).collect::<RoaringBitmap>()
         } else {
             from_cache.shared_items(access_token, [Acl::ReadItems], true)
         };
+        let mut writable_ids = None;
 
         let can_add_calendars = if access_token.is_shared(account_id) {
             cache
@@ -113,6 +124,9 @@ impl JmapCalendarEventCopy for Server {
             .account_info(access_token.account_id())
             .await
             .caused_by(trc::location!())?;
+        // inbuxa: the account copied into is the one whose quota applies
+        let mut quota =
+            QuotaBudget::new(self.account(account_id).await.caused_by(trc::location!())?);
 
         // Prepare batch
         let mut batch = BatchBuilder::new();
@@ -161,9 +175,33 @@ impl JmapCalendarEventCopy for Server {
                 continue;
             };
 
-            let calendar_event = _calendar_event
+            let mut calendar_event = _calendar_event
                 .deserialize::<CalendarEvent>()
                 .caused_by(trc::location!())?;
+            limit_component_depth(&mut calendar_event.data.event);
+
+            // inbuxa: a sharee can't copy out what it may not see
+            if !is_owner {
+                let view = event_view(&calendar_event);
+                if view & EVENT_VIEW_PRIVATE != 0 {
+                    response.not_created.append(
+                        id,
+                        SetError::forbidden().with_description(
+                            "Private events can't be copied from a shared calendar.",
+                        ),
+                    );
+                    continue;
+                }
+                if view & EVENT_VIEW_HIDE_ATTENDEES != 0
+                    && !writable_ids
+                        .get_or_insert_with(|| {
+                            from_cache.shared_items(access_token, [Acl::ModifyItems], true)
+                        })
+                        .contains(from_calendar_event_id)
+                {
+                    hide_attendees(&mut calendar_event.data.event, account_info.addresses());
+                }
+            }
 
             match self
                 .create_calendar_event(
@@ -172,6 +210,7 @@ impl JmapCalendarEventCopy for Server {
                     access_token,
                     account_id,
                     &account_info,
+                    &mut quota,
                     false,
                     &can_add_calendars,
                     calendar_event.data.event.into_jscalendar(),

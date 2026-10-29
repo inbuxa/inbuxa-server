@@ -2,6 +2,8 @@
  * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
+ *
+ * Modified by Coffey Labs in 2026 for INBUXA.
  */
 
 use crate::utils::server::TestServer;
@@ -140,6 +142,25 @@ END:VCARD
             "The number of matches exceeds the limit of 2",
         )
         .with_href_count(3);
+
+    // Test 5: A limit of zero still caps the results
+    client
+        .request(
+            "REPORT",
+            &default_path,
+            &QUERY4.replace("<C:nresults>2<", "<C:nresults>0<"),
+        )
+        .await
+        .with_status(StatusCode::MULTI_STATUS)
+        .with_value(
+            "D:multistatus.D:response.D:status",
+            "HTTP/1.1 507 Insufficient Storage",
+        )
+        .with_value(
+            "D:multistatus.D:response.D:responsedescription",
+            "The number of matches exceeds the limit of 1",
+        )
+        .with_href_count(2);
 
     client.delete_default_containers().await;
     test.assert_is_empty().await;

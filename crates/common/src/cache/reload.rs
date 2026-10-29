@@ -54,8 +54,8 @@ impl Server {
                         if expires_at > now() {
                             let mut ips = self.inner.data.blocked_ips.write();
                             if let Some(ip) = ip.address.try_to_ip() {
-                                ips.blocked_ip_addresses
-                                    .insert(IpWithTtl::new(ip, expires_at));
+                                // inbuxa: also when an earlier ban is remembered
+                                ips.block(IpWithTtl::new(ip, expires_at));
                             } else {
                                 ips.blocked_ip_networks
                                     .push(IpWithTtl::new(ip.address, expires_at));

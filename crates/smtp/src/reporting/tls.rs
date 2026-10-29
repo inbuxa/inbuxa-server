@@ -19,6 +19,7 @@ use common::{
         resolver::{Mode, MxPattern, TlsaMatching},
     },
     ipc::{TlsEvent, ToHash},
+    network::public_only::has_public_host,
 };
 use mail_auth::{
     flate2::{Compression, write::GzEncoder},
@@ -149,6 +150,17 @@ impl TlsReporting for Server {
                     TLS_HTTP_REPORT.lock().extend_from_slice(&json);
 
                     return Ok(());
+                }
+
+                // inbuxa: host names are checked when they resolve
+                if !has_public_host(uri) {
+                    trc::event!(
+                        OutgoingReport(OutgoingReportEvent::SubmissionError),
+                        SpanId = span_id,
+                        Url = uri.to_string(),
+                        Details = "Report URI is not a public address"
+                    );
+                    continue;
                 }
 
                 match self

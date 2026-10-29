@@ -2,6 +2,8 @@
  * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
+ *
+ * Modified by Coffey Labs in 2026 for INBUXA.
  */
 
 use crate::utils::{
@@ -706,6 +708,37 @@ END:VCALENDAR
     "duration": "P2DT7H30M"
   }
 ]));
+
+    // inbuxa: components nested far below an event are cut at a fixed depth
+    // instead of being converted level by level (which overflowed the stack)
+    let depth = 100_000;
+    let deep = format!(
+        "BEGIN:VCALENDAR\r\nBEGIN:VEVENT\r\nUID:deep\r\nDTSTART:20260101T100000Z\r\n{}{}END:VEVENT\r\nEND:VCALENDAR\r\n",
+        "BEGIN:X-DEEP\r\n".repeat(depth),
+        "END:X-DEEP\r\n".repeat(depth)
+    );
+    let response = account
+        .jmap_method_calls(json!([
+            ["Blob/upload", {
+                "accountId": account.id_string(),
+                "create": { "deep": { "data": [{ "data:asText": deep }] } }
+            }, "S1"],
+            ["CalendarEvent/parse", {
+                "accountId": account.id_string(),
+                "blobIds": ["#deep"]
+            }, "P1"]
+        ]))
+        .await
+        .into_inner();
+    let parsed = response
+        .pointer("/methodResponses/1/1/parsed")
+        .and_then(|parsed| parsed.as_object())
+        .and_then(|parsed| parsed.values().next())
+        .unwrap_or_else(|| panic!("{}", response.to_string().len()))
+        .to_string();
+    assert!(parsed.contains("\"uid\":\"deep\""), "{parsed}");
+    let levels = parsed.matches("x-deep").count();
+    assert!((1..=32).contains(&levels), "{levels} levels");
 
     // Deletion tests
     test.wait_for_tasks().await;

@@ -2,6 +2,8 @@
  * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
+ *
+ * Modified by Coffey Labs in 2026 for INBUXA.
  */
 
 use super::{ManageSieveSessionManager, Session, State};
@@ -10,7 +12,7 @@ use common::{
     BuildServer,
     network::{SessionData, SessionManager, SessionResult, SessionStream},
 };
-use imap_proto::receiver::{self, Receiver};
+use imap_proto::receiver::{self, PRE_AUTH_MAX_REQUEST_SIZE, Receiver};
 use tokio_rustls::server::TlsStream;
 
 impl SessionManager for ManageSieveSessionManager {
@@ -23,8 +25,15 @@ impl SessionManager for ManageSieveSessionManager {
             // Create session
             let server = self.inner.build_server();
             let mut session = Session {
-                receiver: Receiver::with_max_request_size(server.core.imap.max_request_size)
-                    .with_start_state(receiver::State::Command { is_uid: false }),
+                // inbuxa: the full request size only applies after sign-in
+                receiver: Receiver::with_max_request_size(
+                    server
+                        .core
+                        .imap
+                        .max_request_size
+                        .min(PRE_AUTH_MAX_REQUEST_SIZE),
+                )
+                .with_start_state(receiver::State::Command { is_uid: false }),
                 server,
                 instance: session.instance,
                 state: State::NotAuthenticated { auth_failures: 0 },
@@ -131,8 +140,18 @@ impl<T: SessionStream> Session<T> {
     }
 
     pub async fn into_tls(self) -> Result<Session<TlsStream<T>>, ()> {
-        let receiver = Receiver::with_max_request_size(self.server.core.imap.max_request_size)
-            .with_start_state(receiver::State::Command { is_uid: false });
+        let receiver = Receiver::with_max_request_size(
+            if matches!(self.state, State::NotAuthenticated { .. }) {
+                self.server
+                    .core
+                    .imap
+                    .max_request_size
+                    .min(PRE_AUTH_MAX_REQUEST_SIZE)
+            } else {
+                self.server.core.imap.max_request_size
+            },
+        )
+        .with_start_state(receiver::State::Command { is_uid: false });
 
         Ok(Session {
             stream: self

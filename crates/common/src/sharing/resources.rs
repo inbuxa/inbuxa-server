@@ -49,8 +49,14 @@ impl DavResources {
         if !shared_containers.is_empty() {
             let mut document_ids = RoaringBitmap::new();
 
+            // inbuxa: only files carry their own ACLs and share an id space with
+            // their folders. Calendar events and contacts are shared through
+            // their containers alone.
             for resource in &self.resources {
-                if !resource.is_container() && shared_containers.contains(resource.document_id) {
+                if !resource.is_container()
+                    && resource.acls().is_some()
+                    && shared_containers.contains(resource.document_id)
+                {
                     document_ids.insert(resource.document_id);
                 }
             }
@@ -67,6 +73,31 @@ impl DavResources {
         } else {
             shared_containers
         }
+    }
+
+    /// inbuxa: the shared items a sharee may see, without the calendar events
+    /// whose view has any of `hidden` (EVENT_VIEW_*).
+    pub fn shared_events(
+        &self,
+        access_token: &AccessToken,
+        check_acls: impl IntoIterator<Item = Acl>,
+        match_any: bool,
+        hidden: u8,
+    ) -> RoaringBitmap {
+        let mut document_ids = self.shared_items(access_token, check_acls, match_any);
+        if !document_ids.is_empty() {
+            document_ids -= self.events_with_view(hidden);
+        }
+        document_ids
+    }
+
+    /// inbuxa: the calendar events whose view has any of `view` (EVENT_VIEW_*)
+    pub fn events_with_view(&self, view: u8) -> RoaringBitmap {
+        self.resources
+            .iter()
+            .filter(|resource| resource.event_view() & view != 0)
+            .map(|resource| resource.document_id)
+            .collect()
     }
 
     pub fn shared_documents(

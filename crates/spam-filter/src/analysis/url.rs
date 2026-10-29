@@ -2,6 +2,8 @@
  * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
+ *
+ * Modified by Coffey Labs in 2026 for INBUXA.
  */
 
 use super::{ElementLocation, is_trusted_domain, is_url_redirector};
@@ -14,6 +16,7 @@ use crate::{
 };
 use common::Server;
 use common::config::mailstore::spamfilter::{Element, IpResolver, Location};
+use common::network::public_only::has_public_host;
 use common::scripts::IsMixedCharset;
 use common::scripts::functions::unicode::CharUtils;
 use hyper::{Uri, header::LOCATION};
@@ -23,6 +26,9 @@ use std::hash::{Hash, Hasher};
 use std::{borrow::Cow, future::Future, time::Duration};
 
 const HTTPS_SCHEME: &str = "https://";
+
+// inbuxa: the most redirector lookups one message can cause
+const MAX_REDIRECT_LOOKUPS: usize = 10;
 
 pub trait SpamFilterAnalyzeUrl: Sync + Send {
     fn spam_filter_analyze_url(
@@ -148,6 +154,7 @@ impl SpamFilterAnalyzeUrl for Server {
         if !ctx.input.is_train {
             let mut redirected_urls = HashSet::new();
             let mut trusted_domains: HashSet<String> = HashSet::new();
+            let mut redirect_lookups = 0;
 
             {
                 let mut checked_domains: HashSet<&str> = HashSet::new();
@@ -205,10 +212,11 @@ impl SpamFilterAnalyzeUrl for Server {
                         let mut redirect_count = 1;
                         let mut url_redirect = url.element.request_url();
 
-                        while redirect_count <= 3 {
+                        while redirect_count <= 3 && redirect_lookups < MAX_REDIRECT_LOOKUPS {
+                            redirect_lookups += 1;
                             match http_get_header(
                                 self,
-                                url_redirect.as_ref(),
+                                &https_url(&url_redirect),
                                 LOCATION,
                                 Duration::from_secs(5),
                             )
@@ -333,12 +341,24 @@ async fn http_get_header(
 ) -> trc::Result<Option<String>> {
     #[cfg(feature = "test_mode")]
     {
+        // Like the real client, which only speaks https
+        if !url.starts_with(HTTPS_SCHEME) {
+            return Err(trc::SieveEvent::RuntimeError
+                .into_err()
+                .details("Redirector lookups are https only"));
+        }
+
         return if url.contains("redirect.") {
             Ok(url.split_once("/?").unwrap().1.to_string().into())
         } else {
             Ok(None)
         };
     }
+    // inbuxa: host names are checked when they resolve
+    if !has_public_host(url) {
+        return Ok(None);
+    }
+
     server
         .core
         .spam
@@ -360,6 +380,17 @@ async fn http_get_header(
                 .and_then(|h| h.to_str().ok())
                 .map(|h| h.to_string())
         })
+}
+
+/// Redirectors are asked over https only, so a plain http link is looked up
+/// at its https address.
+fn https_url(url: &str) -> Cow<'_, str> {
+    match url.get(..7) {
+        Some(scheme) if scheme.eq_ignore_ascii_case("http://") => {
+            Cow::Owned([HTTPS_SCHEME, &url[7..]].concat())
+        }
+        _ => Cow::Borrowed(url),
+    }
 }
 
 fn collect_url(

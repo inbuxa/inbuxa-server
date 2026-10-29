@@ -2,15 +2,14 @@
  * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
+ *
+ * Modified by Coffey Labs in 2026 for INBUXA.
  */
 
 use crate::changes::state::JmapCacheState;
 use crate::contact::assert_is_unique_uid;
 use calcard::jscontact::{JSContact, JSContactProperty, JSContactValue};
-use common::{
-    DavName, DavResources, Server,
-    auth::{AccessToken, AccountCache},
-};
+use common::{DavName, DavResources, Server, auth::AccessToken, storage::quota::QuotaBudget};
 use groupware::{DestroyArchive, cache::GroupwareCache, contact::ContactCard};
 use http_proto::HttpSessionData;
 use jmap_proto::{
@@ -49,7 +48,7 @@ pub trait ContactCardSet: Sync + Send {
         cache: &DavResources,
         batch: &mut BatchBuilder,
         access_token: &AccessToken,
-        account: &AccountCache,
+        quota: &mut QuotaBudget,
         account_id: u32,
         can_add_address_books: &Option<RoaringBitmap>,
         js_contact: JSContact<'_, Id, BlobId>,
@@ -65,7 +64,8 @@ impl ContactCardSet for Server {
         _session: &HttpSessionData,
     ) -> trc::Result<SetResponse<contact::ContactCard>> {
         let account_id = request.account_id.document_id();
-        let account = self.account(account_id).await.caused_by(trc::location!())?;
+        let mut quota =
+            QuotaBudget::new(self.account(account_id).await.caused_by(trc::location!())?);
         let cache = self
             .fetch_dav_resources(
                 access_token.account_id(),
@@ -103,7 +103,7 @@ impl ContactCardSet for Server {
                     &cache,
                     &mut batch,
                     access_token,
-                    &account,
+                    &mut quota,
                     account_id,
                     &can_add_address_books,
                     JSContact::default(),
@@ -271,17 +271,16 @@ impl ContactCardSet for Server {
                 );
                 continue 'update;
             }
-            let extra_bytes = (new_contact_card.size as u64)
-                .saturating_sub(u32::from(contact_card.inner.size) as u64);
-            if extra_bytes > 0 {
-                match self.has_available_quota(&account, extra_bytes).await {
-                    Ok(_) => {}
-                    Err(err) if err.matches(trc::EventType::Limit(trc::LimitEvent::Quota)) => {
-                        response.not_updated.append(id, SetError::over_quota());
-                        continue 'update;
-                    }
-                    Err(err) => return Err(err.caused_by(trc::location!())),
+            // inbuxa: counted as the stored record is, not the vCard alone
+            let extra_bytes =
+                (new_contact_card.size() as u64).saturating_sub(contact_card.inner.size() as u64);
+            match self.reserve_quota(&mut quota, extra_bytes).await {
+                Ok(_) => {}
+                Err(err) if err.matches(trc::EventType::Limit(trc::LimitEvent::Quota)) => {
+                    response.not_updated.append(id, SetError::over_quota());
+                    continue 'update;
                 }
+                Err(err) => return Err(err.caused_by(trc::location!())),
             }
 
             // Update record
@@ -388,7 +387,7 @@ impl ContactCardSet for Server {
         cache: &DavResources,
         batch: &mut BatchBuilder,
         access_token: &AccessToken,
-        account: &AccountCache,
+        quota: &mut QuotaBudget,
         account_id: u32,
         can_add_address_books: &Option<RoaringBitmap>,
         mut js_contact: JSContact<'_, Id, BlobId>,
@@ -441,7 +440,13 @@ impl ContactCardSet for Server {
                 ),
             )));
         }
-        match self.has_available_quota(account, size as u64).await {
+        let contact = ContactCard {
+            names,
+            size: size as u32,
+            card,
+            ..Default::default()
+        };
+        match self.reserve_quota(quota, contact.size() as u64).await {
             Ok(_) => {}
             Err(err) if err.matches(trc::EventType::Limit(trc::LimitEvent::Quota)) => {
                 return Ok(Err(SetError::over_quota()));
@@ -455,20 +460,15 @@ impl ContactCardSet for Server {
             .assign_document_ids(account_id, Collection::ContactCard, 1)
             .await
             .caused_by(trc::location!())?;
-        ContactCard {
-            names,
-            size: size as u32,
-            card,
-            ..Default::default()
-        }
-        .insert(
-            access_token.account_tenant_ids(),
-            account_id,
-            document_id,
-            batch,
-        )
-        .caused_by(trc::location!())
-        .map(|_| Ok(document_id))
+        contact
+            .insert(
+                access_token.account_tenant_ids(),
+                account_id,
+                document_id,
+                batch,
+            )
+            .caused_by(trc::location!())
+            .map(|_| Ok(document_id))
     }
 }
 

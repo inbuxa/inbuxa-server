@@ -2,6 +2,8 @@
  * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
+ *
+ * Modified by Coffey Labs in 2026 for INBUXA.
  */
 
 use std::{fmt::Display, sync::Arc, time::Duration};
@@ -59,46 +61,62 @@ impl MtaStsLookup for Server {
         };
 
         // Check if the policy has been cached
-        if let Some(value) = self.inner.cache.dns_mta_sts.get(domain)
+        let cached = self.inner.cache.dns_mta_sts.get(domain);
+        if let Some(value) = &cached
             && value.id == record.id
         {
-            return Ok(value);
+            return Ok(value.clone());
         }
 
-        // Fetch policy
-        #[cfg(not(feature = "test_mode"))]
-        let bytes = self
-            .core
-            .smtp
-            .mta_sts_client
-            .get(format!("https://mta-sts.{domain}/.well-known/mta-sts.txt"))
-            .timeout(timeout)
-            .send()
-            .await?
-            .bytes_with_limit(MAX_POLICY_SIZE)
-            .await?
-            .ok_or_else(|| Error::InvalidPolicy("Policy too large".to_string()))?;
-        #[cfg(feature = "test_mode")]
-        let bytes = STS_TEST_POLICY.lock().clone();
-
-        // Parse policy
-        let policy = Arc::new(Policy::parse(
-            std::str::from_utf8(&bytes).map_err(|err| Error::InvalidPolicy(err.to_string()))?,
-            record.id.clone(),
-        )?);
-
-        self.inner.cache.dns_mta_sts.insert(
-            domain.into(),
-            policy.clone(),
-            Duration::from_secs(if (3600..31557600).contains(&policy.max_age) {
-                policy.max_age
-            } else {
-                86400
-            }),
-        );
-
-        Ok(policy)
+        // A new policy id whose policy can't be fetched keeps the cached
+        // policy in force until it expires (RFC 8461, Section 5.1)
+        match fetch_policy(self, domain, &record, timeout).await {
+            Ok(policy) => Ok(policy),
+            Err(err) => cached.ok_or(err),
+        }
     }
+}
+
+#[allow(unused_variables)]
+async fn fetch_policy(
+    server: &Server,
+    domain: &str,
+    record: &MtaSts,
+    timeout: Duration,
+) -> Result<Arc<Policy>, Error> {
+    // Fetch policy
+    #[cfg(not(feature = "test_mode"))]
+    let bytes = server
+        .core
+        .smtp
+        .mta_sts_client
+        .get(format!("https://mta-sts.{domain}/.well-known/mta-sts.txt"))
+        .timeout(timeout)
+        .send()
+        .await?
+        .bytes_with_limit(MAX_POLICY_SIZE)
+        .await?
+        .ok_or_else(|| Error::InvalidPolicy("Policy too large".to_string()))?;
+    #[cfg(feature = "test_mode")]
+    let bytes = STS_TEST_POLICY.lock().clone();
+
+    // Parse policy
+    let policy = Arc::new(Policy::parse(
+        std::str::from_utf8(&bytes).map_err(|err| Error::InvalidPolicy(err.to_string()))?,
+        record.id.clone(),
+    )?);
+
+    server.inner.cache.dns_mta_sts.insert(
+        domain.into(),
+        policy.clone(),
+        Duration::from_secs(if (3600..31557600).contains(&policy.max_age) {
+            policy.max_age
+        } else {
+            86400
+        }),
+    );
+
+    Ok(policy)
 }
 
 impl From<&Error> for ResultType {

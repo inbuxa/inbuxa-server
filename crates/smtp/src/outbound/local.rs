@@ -2,6 +2,8 @@
  * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
+ *
+ * Modified by Coffey Labs in 2026 for INBUXA.
  */
 
 use crate::{
@@ -16,7 +18,9 @@ use crate::{
     },
 };
 use common::Server;
-use email::message::delivery::{IngestMessage, IngestRecipient, LocalDeliveryStatus, MailDelivery};
+use email::message::delivery::{
+    IngestMessage, IngestRecipient, LocalDeliveryStatus, MailDelivery, VerifiedSender,
+};
 use smtp_proto::Response;
 use trc::SieveEvent;
 
@@ -45,9 +49,15 @@ impl MessageWrapper {
         let delivery_result = server
             .deliver_message(IngestMessage {
                 sender_address: self.message.return_path.to_string(),
-                sender_authenticated: self.message.flags
-                    & (FROM_UNAUTHENTICATED_DMARC | FROM_AUTHENTICATED)
-                    != 0,
+                // inbuxa: a signed-in sender is known by its envelope
+                // address, any other only by a From header that passed DMARC
+                verified_sender: if self.message.flags & FROM_AUTHENTICATED != 0 {
+                    VerifiedSender::Envelope
+                } else if self.message.flags & FROM_UNAUTHENTICATED_DMARC != 0 {
+                    VerifiedSender::FromHeader
+                } else {
+                    VerifiedSender::None
+                },
                 recipients,
                 message_blob: self.message.blob_hash.clone(),
                 message_size: self.message.size,

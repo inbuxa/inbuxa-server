@@ -2,6 +2,8 @@
  * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
+ *
+ * Modified by Coffey Labs in 2026 for INBUXA.
  */
 
 use crate::{
@@ -199,7 +201,14 @@ impl<T: SessionStream> SessionData<T> {
         // Fetch selected mailbox changes
         if check_emails {
             // Synchronize emails
-            if let Some(mailbox) = mailbox {
+            // inbuxa: nothing is reported for a shared mailbox that can no
+            // longer be read
+            if let Some(mailbox) = mailbox
+                && self
+                    .is_mailbox_readable(&mailbox.id)
+                    .await
+                    .caused_by(trc::location!())?
+            {
                 // Obtain changes since last sync
                 let modseq = mailbox.state.lock().modseq;
                 let new_state = self

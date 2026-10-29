@@ -496,6 +496,7 @@ impl AccessToken {
         AccessToken {
             scope_idx: 0,
             origin: None,
+            expires_at: None,
             inner,
         }
         .assert_is_valid(remote_ip)
@@ -505,6 +506,7 @@ impl AccessToken {
         AccessToken {
             scope_idx: 0,
             origin: None,
+            expires_at: None,
             inner,
         }
     }
@@ -529,6 +531,7 @@ impl AccessToken {
                 scope_idx,
                 inner,
                 origin: None,
+                expires_at: None,
             })
             .and_then(|token| token.assert_is_valid(remote_ip))
     }
@@ -544,6 +547,7 @@ impl AccessToken {
             AccessToken {
                 scope_idx: 0,
                 origin: None,
+                expires_at: None,
                 inner,
             }
             .assert_is_valid(remote_ip)
@@ -747,6 +751,7 @@ impl AccessToken {
                 access_token = AccessToken {
                     scope_idx: access_token.scope_idx,
                     origin: access_token.origin.clone(),
+                    expires_at: access_token.expires_at,
                     inner: Arc::new(inner),
                 };
             }
@@ -990,10 +995,30 @@ impl AccessToken {
         self
     }
 
+    /// inbuxa: when the bearer token this session signed in with expires,
+    /// in seconds since the Unix epoch. None when it signed in otherwise.
+    pub fn expires_at(&self) -> Option<u64> {
+        self.expires_at
+    }
+
+    /// inbuxa: records when the bearer token this session signed in with
+    /// expires.
+    pub fn with_expires_at(mut self, expires_at: Option<u64>) -> Self {
+        self.expires_at = expires_at;
+        self
+    }
+
+    /// inbuxa: the version of the account's password this session's
+    /// credentials go with; it changes with the password.
+    pub fn credential_version(&self) -> u64 {
+        self.inner.credential_version
+    }
+
     pub fn new_admin() -> AccessToken {
         AccessToken {
             scope_idx: 0,
             origin: None,
+            expires_at: None,
             inner: Arc::new(AccessTokenInner::new_admin()),
         }
     }
@@ -1009,6 +1034,7 @@ impl AccessToken {
         AccessToken {
             scope_idx: 0,
             origin: None,
+            expires_at: None,
             inner: Arc::new(AccessTokenInner {
                 account_id,
                 tenant_id: Default::default(),

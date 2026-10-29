@@ -221,6 +221,44 @@ pub async fn test(test: &mut TestServer) {
     )
     .await;
 
+    // inbuxa: an address that fails again after its ban ran out is banned
+    // again, although the expired ban is still remembered and its record
+    // not yet cleaned up
+    for _ in 0..105 {
+        validate_password_with_ip("unknown@example.org", "wrong password", "10.0.0.2", false).await;
+    }
+    validate_password_with_ip(
+        "user@example.org",
+        "this is a very strong password",
+        "10.0.0.2",
+        false,
+    )
+    .await;
+    let blocked_ids = admin
+        .registry_query_ids(
+            ObjectType::BlockedIp,
+            [(Property::Address, "10.0.0.2")],
+            Vec::<&str>::new(),
+        )
+        .await;
+    assert_eq!(blocked_ids.len(), 1);
+    assert!(
+        admin
+            .registry_get::<BlockedIp>(blocked_ids[0])
+            .await
+            .expires_at
+            .is_some_and(|at| at.timestamp() > store::write::now() as i64),
+        "the second ban's record runs from the second ban"
+    );
+    tokio::time::sleep(Duration::from_secs(6)).await;
+    validate_password_with_ip(
+        "user@example.org",
+        "this is a very strong password",
+        "10.0.0.2",
+        true,
+    )
+    .await;
+
     // inbuxa: personal-data catalog, D2: the daily clean-up removes the
     // expired ban's record, without waiting for settings to reload
     test.server.purge_expired_blocked_ips().await.unwrap();

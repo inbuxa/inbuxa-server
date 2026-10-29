@@ -2,6 +2,8 @@
  * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
+ *
+ * Modified by Coffey Labs in 2026 for INBUXA.
  */
 
 use crate::{
@@ -480,4 +482,28 @@ async fn dmarc() {
         )
         .await;
     test.assert_no_events();
+
+    // A From header naming several domains is checked against each of them
+    test.server.txt_add(
+        "test.net",
+        Spf::parse(b"v=spf1 -all").unwrap(),
+        Instant::now() + Duration::from_secs(5),
+    );
+    test.server.txt_add(
+        "_dmarc.example.com",
+        Dmarc::parse(b"v=DMARC1; p=reject; aspf=s; adkim=s;").unwrap(),
+        Instant::now() + Duration::from_secs(5),
+    );
+    session
+        .send_message(
+            "joe@test.net",
+            &["jdoe@localdomain.org"],
+            concat!(
+                "From: joe@test.net, bill@example.com\r\n",
+                "To: jdoe@localdomain.org\r\n",
+                "Subject: test\r\n\r\ntest"
+            ),
+            "550 5.7.1",
+        )
+        .await;
 }

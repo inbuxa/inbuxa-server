@@ -2,6 +2,8 @@
  * SPDX-FileCopyrightText: 2020 Stalwart Labs Ltd <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
+ *
+ * Modified by Coffey Labs in 2026 for INBUXA.
  */
 
 use mail_parser::DateTime;
@@ -63,6 +65,7 @@ impl TestEnvelope {
                                 return true;
                             }
                         } else if self.comparator.regex(
+                            &ctx.regex_cache,
                             pattern,
                             pattern_expr,
                             value,

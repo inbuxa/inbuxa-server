@@ -6,14 +6,21 @@
  * Modified by Coffey Labs in 2026 for INBUXA.
  */
 
-use crate::scheduling::{
-    InstanceId, ItipError, ItipMessage, ItipSnapshots, organizer::organizer_request_full,
+use crate::{
+    calendar::dates::has_oversized_rrule,
+    scheduling::{
+        Attendee, InstanceId, ItipError, ItipMessage, ItipSnapshot, ItipSnapshots,
+        organizer::organizer_request_full,
+    },
 };
 use ahash::AHashSet;
-use calcard::icalendar::{
-    ICalendar, ICalendarComponent, ICalendarComponentType, ICalendarEntry, ICalendarMethod,
-    ICalendarParameter, ICalendarParameterName, ICalendarProperty, ICalendarStatus, ICalendarValue,
-    Uri,
+use calcard::{
+    common::timezone::Tz,
+    icalendar::{
+        ICalendar, ICalendarComponent, ICalendarComponentType, ICalendarEntry, ICalendarMethod,
+        ICalendarParameter, ICalendarParameterName, ICalendarProperty, ICalendarStatus,
+        ICalendarValue, Uri,
+    },
 };
 
 #[derive(Debug)]
@@ -56,6 +63,7 @@ pub fn itip_process_message(
     itip: &ICalendar,
     itip_snapshots: ItipSnapshots<'_>,
     sender: String,
+    max_instances: usize,
 ) -> Result<MergeResult, ItipError> {
     if snapshots.organizer.email != itip_snapshots.organizer.email {
         return Err(ItipError::OrganizerMismatch);
@@ -71,9 +79,24 @@ pub fn itip_process_message(
         }
         match method {
             ICalendarMethod::Reply => {
-                handle_reply(&snapshots, &itip_snapshots, &sender, &mut merge_actions)?;
+                handle_reply(
+                    ical,
+                    &snapshots,
+                    &itip_snapshots,
+                    &sender,
+                    max_instances,
+                    &mut merge_actions,
+                )?;
             }
             ICalendarMethod::Refresh => {
+                // inbuxa: only a current attendee may ask for the event again
+                if !snapshots
+                    .components
+                    .values()
+                    .any(|snapshot| snapshot.attendee_by_email(&sender).is_some())
+                {
+                    return Err(ItipError::SenderIsNotParticipant(sender));
+                }
                 return organizer_request_full(ical, &snapshots, None, false).and_then(
                     |messages| {
                         messages
@@ -315,7 +338,14 @@ pub fn itip_process_message(
                     })
                 }) =>
             {
-                handle_reply(&snapshots, &itip_snapshots, &sender, &mut merge_actions)?;
+                handle_reply(
+                    ical,
+                    &snapshots,
+                    &itip_snapshots,
+                    &sender,
+                    max_instances,
+                    &mut merge_actions,
+                )?;
             }
             _ => return Err(ItipError::UnsupportedMethod(method.clone())),
         }
@@ -351,11 +381,15 @@ pub fn itip_import_message(ical: &mut ICalendar) -> Result<(), ItipError> {
 }
 
 fn handle_reply(
+    ical: &ICalendar,
     snapshots: &ItipSnapshots<'_>,
     itip_snapshots: &ItipSnapshots<'_>,
     sender: &str,
+    max_instances: usize,
     merge_actions: &mut Vec<MergeAction>,
 ) -> Result<(), ItipError> {
+    let mut occurrences = None;
+
     for (instance_id, itip_snapshot) in &itip_snapshots.components {
         if let Some(snapshot) = snapshots.components.get(instance_id) {
             if let (Some(attendee), Some(updated_attendee)) = (
@@ -370,44 +404,8 @@ fn handle_reply(
 
                 if changed_part_stat || changed_rsvp || changed_delegated_to || has_request_status {
                     // Update participant status
-                    let mut add_parameters = Vec::new();
-                    let mut remove_parameters = Vec::new();
-                    if changed_part_stat {
-                        remove_parameters.push(ICalendarParameterName::Partstat);
-                        if let Some(part_stat) = updated_attendee.part_stat {
-                            add_parameters.push(ICalendarParameter::partstat(part_stat.clone()));
-                        }
-                    }
-
-                    if changed_rsvp {
-                        remove_parameters.push(ICalendarParameterName::Rsvp);
-                        if let Some(rsvp) = updated_attendee.rsvp {
-                            add_parameters.push(ICalendarParameter::rsvp(rsvp));
-                        }
-                    }
-
-                    if changed_delegated_to {
-                        remove_parameters.push(ICalendarParameterName::DelegatedTo);
-                        if !updated_attendee.delegated_to.is_empty() {
-                            add_parameters.extend(updated_attendee.delegated_to.iter().map(
-                                |email| {
-                                    ICalendarParameter::delegated_to(Uri::Location(
-                                        email.to_string(),
-                                    ))
-                                },
-                            ));
-                        }
-                    }
-
-                    // RFC 6638 3.2.5: the status defaults to 2.0 when the reply carries none
-                    remove_parameters.push(ICalendarParameterName::ScheduleStatus);
-                    add_parameters.push(ICalendarParameter::schedule_status(
-                        if has_request_status {
-                            itip_snapshot.request_status.join(",")
-                        } else {
-                            "2.0".to_string()
-                        },
-                    ));
+                    let (remove_parameters, add_parameters) =
+                        reply_parameters(attendee, updated_attendee, itip_snapshot);
 
                     merge_actions.push(MergeAction::RemoveParameters {
                         component_id: snapshot.comp_id,
@@ -506,35 +504,81 @@ fn handle_reply(
             } else {
                 return Err(ItipError::SenderIsNotParticipant(sender.to_string()));
             }
-        } else if itip_snapshot.attendee_by_email(sender).is_some() {
-            // Add component
+        } else if let (InstanceId::Recurrence(recurrence_id), Some(updated_attendee)) =
+            (instance_id, itip_snapshot.attendee_by_email(sender))
+        {
+            // inbuxa: an answer for an instance the organizer hasn't changed must
+            // come from an attendee of the series and name one of its dates. The
+            // new instance keeps the organizer's own ORGANIZER, UID and SEQUENCE
+            // and takes only the sender's answer from the reply.
+            let Some(series) = snapshots.components.get(&InstanceId::Main) else {
+                continue;
+            };
+            let Some(attendee) = series.attendee_by_email(sender) else {
+                return Err(ItipError::SenderIsNotParticipant(sender.to_string()));
+            };
+            if !occurrences
+                .get_or_insert_with(|| series_occurrences(ical, series.comp_id, max_instances))
+                .contains(&recurrence_id.date)
+            {
+                continue;
+            }
+
             let itip_component = itip_snapshot.comp;
             let is_todo = itip_component.component_type == ICalendarComponentType::VTodo;
+            let (remove_parameters, add_parameters) =
+                reply_parameters(attendee, updated_attendee, itip_snapshot);
+            let mut attendee_entry = series.comp.entries[attendee.entry_id as usize].clone();
+            attendee_entry
+                .params
+                .retain(|param| !remove_parameters.contains(&param.name));
+            attendee_entry.params.extend(add_parameters);
+
+            let mut entries = series
+                .comp
+                .entries
+                .iter()
+                .filter(|entry| {
+                    matches!(
+                        entry.name,
+                        ICalendarProperty::Organizer
+                            | ICalendarProperty::Uid
+                            | ICalendarProperty::Sequence
+                    )
+                })
+                .cloned()
+                .chain([attendee_entry])
+                .collect::<Vec<_>>();
+            entries.extend(
+                itip_component
+                    .entries
+                    .iter()
+                    .filter(|entry| {
+                        matches!(
+                            entry.name,
+                            ICalendarProperty::Dtstamp | ICalendarProperty::RecurrenceId
+                        ) || (is_todo
+                            && matches!(
+                                entry.name,
+                                ICalendarProperty::PercentComplete
+                                    | ICalendarProperty::Status
+                                    | ICalendarProperty::Completed
+                            ))
+                    })
+                    .cloned(),
+            );
+
+            // Add the attendees the sender delegated to
+            for delegated_to in &updated_attendee.delegated_to {
+                if let Some(itip_delegated) = itip_snapshot.attendee_by_email(&delegated_to.email) {
+                    entries.push(itip_component.entries[itip_delegated.entry_id as usize].clone());
+                }
+            }
+
             merge_actions.push(MergeAction::AddComponent {
                 component: ICalendarComponent {
                     component_type: itip_component.component_type.clone(),
-                    entries: itip_component
-                        .entries
-                        .iter()
-                        .filter(|entry| {
-                            matches!(
-                                entry.name,
-                                ICalendarProperty::Organizer
-                                    | ICalendarProperty::Attendee
-                                    | ICalendarProperty::Uid
-                                    | ICalendarProperty::Dtstamp
-                                    | ICalendarProperty::Sequence
-                                    | ICalendarProperty::RecurrenceId
-                            ) || (is_todo
-                                && matches!(
-                                    entry.name,
-                                    ICalendarProperty::PercentComplete
-                                        | ICalendarProperty::Status
-                                        | ICalendarProperty::Completed
-                                ))
-                        })
-                        .cloned()
-                        .collect(),
+                    entries,
                     component_ids: vec![],
                 },
             });
@@ -544,6 +588,78 @@ fn handle_reply(
     }
 
     Ok(())
+}
+
+fn reply_parameters(
+    attendee: &Attendee<'_>,
+    updated_attendee: &Attendee<'_>,
+    itip_snapshot: &ItipSnapshot<'_>,
+) -> (Vec<ICalendarParameterName>, Vec<ICalendarParameter>) {
+    let mut add_parameters = Vec::new();
+    let mut remove_parameters = Vec::new();
+    if attendee.part_stat != updated_attendee.part_stat {
+        remove_parameters.push(ICalendarParameterName::Partstat);
+        if let Some(part_stat) = updated_attendee.part_stat {
+            add_parameters.push(ICalendarParameter::partstat(part_stat.clone()));
+        }
+    }
+
+    if attendee.rsvp != updated_attendee.rsvp {
+        remove_parameters.push(ICalendarParameterName::Rsvp);
+        if let Some(rsvp) = updated_attendee.rsvp {
+            add_parameters.push(ICalendarParameter::rsvp(rsvp));
+        }
+    }
+
+    if attendee.delegated_to != updated_attendee.delegated_to {
+        remove_parameters.push(ICalendarParameterName::DelegatedTo);
+        if !updated_attendee.delegated_to.is_empty() {
+            add_parameters.extend(
+                updated_attendee.delegated_to.iter().map(|email| {
+                    ICalendarParameter::delegated_to(Uri::Location(email.to_string()))
+                }),
+            );
+        }
+    }
+
+    // RFC 6638 3.2.5: the status defaults to 2.0 when the reply carries none
+    remove_parameters.push(ICalendarParameterName::ScheduleStatus);
+    add_parameters.push(ICalendarParameter::schedule_status(
+        if !itip_snapshot.request_status.is_empty() {
+            itip_snapshot.request_status.join(",")
+        } else {
+            "2.0".to_string()
+        },
+    ));
+
+    (remove_parameters, add_parameters)
+}
+
+// The start times of a series on its own, without the instances that override it
+fn series_occurrences(ical: &ICalendar, main_comp_id: u16, max_instances: usize) -> AHashSet<i64> {
+    let mut series = ical.clone();
+    let overrides = series
+        .components
+        .iter()
+        .enumerate()
+        .filter(|(comp_id, comp)| {
+            comp.component_type.is_scheduling_object() && *comp_id != main_comp_id as usize
+        })
+        .map(|(comp_id, _)| comp_id as u32)
+        .collect::<Vec<_>>();
+    if !overrides.is_empty() {
+        series.remove_component_ids(&overrides);
+    }
+    if has_oversized_rrule(&series) {
+        return AHashSet::new();
+    }
+
+    series
+        .expand_dates(Tz::Floating, max_instances)
+        .events
+        .into_iter()
+        .map(|event| event.start.timestamp())
+        .collect()
 }
 
 pub fn itip_merge_changes(ical: &mut ICalendar, itip: &ICalendar, changes: Vec<MergeAction>) {

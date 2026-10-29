@@ -376,6 +376,7 @@ async fn antispam() {
             let mut expect_headers = String::new();
             let mut body_params = 0;
             let mut is_tls = false;
+            let mut expect_urls = None;
 
             for line in lines.by_ref() {
                 if in_params {
@@ -488,6 +489,9 @@ async fn antispam() {
                         }
                         "tls.version" => {
                             is_tls = true;
+                        }
+                        "expect_urls" => {
+                            expect_urls = Some(value.parse::<usize>().unwrap());
                         }
                         _ => panic!("Invalid parameter {param:?}"),
                     }
@@ -677,6 +681,10 @@ async fn antispam() {
                     server.spam_filter_analyze_llm(&mut spam_ctx).await;
                 }
                 _ => panic!("Invalid test {test_name:?}"),
+            }
+
+            if let Some(expect_urls) = expect_urls {
+                assert_eq!(spam_ctx.output.urls.len(), expect_urls);
             }
 
             // Compare tags

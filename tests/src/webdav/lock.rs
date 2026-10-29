@@ -15,6 +15,109 @@ use hyper::StatusCode;
 pub async fn test(test: &TestServer) {
     let client = test.account("john@example.com").webdav_client();
 
+    // inbuxa: every locked resource a request touches needs one of its
+    // locks' tokens, not just the first one found
+    println!("Running LOCK tests (several resources)...");
+    let base_path = format!("{}/john%40example.com", DavResourceName::File.base_path());
+    let src_path = format!("{base_path}/lock-src");
+    let dst_path = format!("{base_path}/lock-dst");
+    let mut tokens = Vec::new();
+    for path in [&src_path, &dst_path] {
+        client
+            .request("MKCOL", path, "")
+            .await
+            .with_status(StatusCode::CREATED);
+        tokens.push(
+            client
+                .lock_create(path, "some-client", true, "infinity", "Second-123")
+                .await
+                .with_status(StatusCode::CREATED)
+                .lock_token()
+                .to_string(),
+        );
+    }
+    let src_only = format!("(<{}>)", tokens[0]);
+    let both = format!("(<{}>) (<{}>)", tokens[0], tokens[1]);
+    client
+        .request_with_headers(
+            "MOVE",
+            &src_path,
+            [
+                ("destination", dst_path.as_str()),
+                ("overwrite", "T"),
+                ("if", src_only.as_str()),
+            ],
+            "",
+        )
+        .await
+        .with_status(StatusCode::LOCKED)
+        .with_value("D:error.D:lock-token-submitted.D:href", &dst_path);
+    client
+        .request_with_headers(
+            "MOVE",
+            &src_path,
+            [
+                ("destination", dst_path.as_str()),
+                ("overwrite", "T"),
+                ("if", both.as_str()),
+            ],
+            "",
+        )
+        .await
+        .with_status(StatusCode::NO_CONTENT);
+    for (path, token) in [&src_path, &dst_path].into_iter().zip(&tokens) {
+        client
+            .unlock(path, token)
+            .await
+            .with_status(StatusCode::NO_CONTENT);
+    }
+
+    // A shared lock's holder writes with its own token alone
+    let shared_path = format!("{base_path}/lock-shared");
+    client
+        .request("MKCOL", &shared_path, "")
+        .await
+        .with_status(StatusCode::CREATED);
+    let mut tokens = Vec::new();
+    for owner in ["client-a", "client-b"] {
+        tokens.push(
+            client
+                .lock_create(&shared_path, owner, false, "infinity", "Second-123")
+                .await
+                .with_status(StatusCode::CREATED)
+                .lock_token()
+                .to_string(),
+        );
+    }
+    let file_path = format!("{shared_path}/file.txt");
+    client
+        .request("PUT", &file_path, "content")
+        .await
+        .with_status(StatusCode::LOCKED);
+    client
+        .request_with_headers(
+            "PUT",
+            &file_path,
+            [("if", format!("(<{}>)", tokens[1]).as_str())],
+            "content",
+        )
+        .await
+        .with_status(StatusCode::CREATED);
+    for token in &tokens {
+        client
+            .unlock(&shared_path, token)
+            .await
+            .with_status(StatusCode::NO_CONTENT);
+    }
+    client
+        .request("DELETE", &shared_path, "")
+        .await
+        .with_status(StatusCode::NO_CONTENT);
+    client
+        .request("DELETE", &dst_path, "")
+        .await
+        .with_status(StatusCode::NO_CONTENT);
+
     for resource_type in [
         DavResourceName::File,
         DavResourceName::Cal,

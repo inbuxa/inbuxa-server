@@ -11,6 +11,7 @@ use crate::expr::{
     functions::ResolveVariable,
     if_block::{BootstrapExprExt, IfBlock},
 };
+use crate::network::public_only::PublicOnly;
 use ahash::AHashSet;
 use mail_auth::common::resolver::ToReverseName;
 use nlp::classifier::model::{CcfhClassifier, FhClassifier};
@@ -248,9 +249,13 @@ impl SpamFilterConfig {
             grey_list_expiry: spam.greylist_for.map(|d| d.into_inner().as_secs()),
             // inbuxa: unset, empty or upstream's old default means the bundled rules
             spam_rules_url: crate::manager::spam_rules::rules_url(spam.spam_filter_rules_url),
-            url_client: utils::http::http_client_builder(true)
+            // inbuxa: redirectors are looked up over verified https, at
+            // public addresses only
+            url_client: utils::http::http_client_builder(false)
                 .pool_max_idle_per_host(0)
                 .redirect(reqwest::redirect::Policy::none())
+                .https_only(true)
+                .public_only()
                 .user_agent("Mozilla/5.0 (X11; Linux i686; rv:109.0) Gecko/20100101 Firefox/118.0")
                 .build()
                 .unwrap_or_default(),

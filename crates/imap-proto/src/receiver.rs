@@ -2,6 +2,8 @@
  * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
+ *
+ * Modified by Coffey Labs in 2026 for INBUXA.
  */
 
 use super::{ResponseCode, ResponseType};
@@ -73,6 +75,11 @@ pub struct Receiver<T: CommandParser> {
 }
 
 const ARG_MAX_LEN: usize = 8000;
+
+/// inbuxa: the largest request accepted before sign-in. Nothing sent before
+/// sign-in (a login, a SASL response, a bearer token) comes near it, so the
+/// configured request size only applies once the client is signed in.
+pub const PRE_AUTH_MAX_REQUEST_SIZE: usize = 64 * 1024;
 
 struct ArgumentBuffer {
     buf: Vec<u8>,
@@ -325,10 +332,10 @@ impl<T: CommandParser> Receiver<T> {
                                     )));
                                 }
                                 self.state = State::LiteralSeek { size, non_sync };
+                                self.buf.clear();
                                 if !oversize {
                                     self.buf.resize_buffer(size as usize);
                                 }
-                                self.buf.clear();
                             } else {
                                 return Err(self.error_reset("Invalid empty literal."));
                             }
@@ -422,8 +429,9 @@ impl ArgumentBuffer {
     }
 
     pub fn resize_buffer(&mut self, size: usize) {
+        // inbuxa: room for exactly the literal (the buffer is empty here)
         if self.buf.capacity() < size {
-            self.buf.reserve(size - self.buf.capacity());
+            self.buf.reserve_exact(size - self.buf.len());
         }
     }
 
@@ -443,9 +451,9 @@ impl ArgumentBuffer {
     }
 
     pub fn take(&mut self) -> Vec<u8> {
-        let buf = self.buf.clone();
-        self.buf.clear();
-        buf
+        // inbuxa: hand the argument over instead of copying it, so a large
+        // literal is neither held twice nor kept for the rest of the session
+        std::mem::replace(&mut self.buf, Vec::with_capacity(10))
     }
 
     #[inline(always)]
@@ -1125,6 +1133,24 @@ mod tests {
                 result => panic!("Expecter error, got: {:?}", result),
             }
         }
+    }
+
+    #[test]
+    fn receiver_does_not_keep_literal_buffer() {
+        let mut receiver = Receiver::<Command>::with_max_request_size(2 * 1024 * 1024);
+        let literal = "A".repeat(1024 * 1024);
+        let frame = format!("a1 APPEND inbox {{{}+}}\r\n{literal}\r\n", literal.len());
+        let request = receiver.parse(&mut frame.as_bytes().iter()).unwrap();
+        let Some(Token::Argument(argument)) = request.tokens.last() else {
+            panic!("literal missing from {request:?}");
+        };
+        assert_eq!(argument, literal.as_bytes());
+        assert!(argument.capacity() <= literal.len() + 16);
+        assert!(
+            receiver.buf.buf.capacity() < 1024,
+            "receiver kept a {} byte buffer after the literal",
+            receiver.buf.buf.capacity()
+        );
     }
 
     #[test]

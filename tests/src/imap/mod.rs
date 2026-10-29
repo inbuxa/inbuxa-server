@@ -2,6 +2,8 @@
  * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
+ *
+ * Modified by Coffey Labs in 2026 for INBUXA.
  */
 
 pub mod acl;
@@ -32,7 +34,7 @@ use ahash::AHashSet;
 use imap_proto::ResponseType;
 use registry::{
     schema::{
-        enums::{Permission, SpecialUse},
+        enums::{NetworkListenerProtocol, Permission, SpecialUse},
         prelude::ObjectType,
         structs::{
             Email, EmailFolder, Expression, Imap, MemoryLookupKey, MtaStageAuth, MtaStageData,
@@ -50,6 +52,8 @@ pub async fn imap_tests() {
     let mut test = TestServerBuilder::new("imap_tests")
         .await
         .with_default_listeners()
+        .await
+        .with_listener(NetworkListenerProtocol::Pop3, "pop3-plain", 4111, false)
         .await
         .build()
         .await;

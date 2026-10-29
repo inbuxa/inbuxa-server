@@ -79,11 +79,9 @@ impl<T: SessionStream> Session<T> {
                                 } else if chunk_size.saturating_add(self.data.message.len())
                                     < self.params.max_message_size
                                 {
-                                    if self.data.message.is_empty() {
-                                        self.data.message = Vec::with_capacity(chunk_size);
-                                    } else {
-                                        self.data.message.reserve(chunk_size);
-                                    }
+                                    // Reserve only what has already arrived, the buffer
+                                    // grows with the rest of the chunk as it is received
+                                    self.data.message.reserve(chunk_size.min(iter.len()));
                                     State::Bdat(BdatReceiver::new(chunk_size, is_last))
                                 } else {
                                     trc::event!(

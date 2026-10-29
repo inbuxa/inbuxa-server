@@ -6,7 +6,7 @@
  * Modified by Coffey Labs in 2026 for INBUXA.
  */
 
-use common::{Server, auth::AccessToken};
+use common::{EVENT_VIEW_HIDE_ATTENDEES, EVENT_VIEW_PRIVATE, Server, auth::AccessToken};
 use email::cache::MessageCacheFetch;
 use email::cache::email::MessageCacheAccess;
 use email::message::metadata::MessageMetadata;
@@ -139,7 +139,16 @@ impl BlobDownload for Server {
                                         )
                                         .await
                                         .caused_by(trc::location!())?
-                                        .shared_items(access_token, [Acl::ReadItems], true)
+                                        // inbuxa: a calendar event's blob holds all of
+                                        // it, so a sharee gets none of a private or
+                                        // confidential event or one that hides its
+                                        // attendees
+                                        .shared_events(
+                                            access_token,
+                                            [Acl::ReadItems],
+                                            true,
+                                            EVENT_VIEW_PRIVATE | EVENT_VIEW_HIDE_ATTENDEES,
+                                        )
                                         .contains(*document_id),
                                     _ => false,
                                 }

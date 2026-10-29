@@ -300,4 +300,52 @@ mod tests {
             assert_eq!(Capability::parse(name), capability);
         }
     }
+
+    // inbuxa: a :regex key compiles to at most 1 MiB; it could take ten
+    #[test]
+    fn sieve_regexes_are_size_limited() {
+        let compile = |pattern: &str| {
+            sieve::Compiler::new().compile(
+                format!(
+                    "require \"regex\";\nif header :regex \"subject\" \"{pattern}\" {{ keep; }}\n"
+                )
+                .as_bytes(),
+            )
+        };
+        assert!(compile(r"^\\w{20}$").is_ok());
+        let err = compile(r"^\\w{200}$").unwrap_err().to_string();
+        assert!(err.contains("Invalid regular expression"), "{err}");
+    }
+
+    // inbuxa: a pattern built from a variable is compiled once per run, not
+    // once for every header it's tested against
+    #[test]
+    fn sieve_variable_patterns_compile_once() {
+        let script = std::sync::Arc::new(
+            sieve::Compiler::new()
+                .compile(
+                    br#"require ["regex", "variables"];
+set "p" "^\\w{20}x$";
+if header :regex "x-h" "${p}" { discard; }
+"#,
+                )
+                .unwrap(),
+        );
+        let runtime = sieve::Runtime::new();
+        let run = |headers: usize| {
+            let mut message = "X-H: value\r\n".repeat(headers);
+            message.push_str("Subject: test\r\n\r\nbody\r\n");
+            let start = std::time::Instant::now();
+            let mut ctx = runtime.filter(message.as_bytes());
+            let mut input = sieve::Input::script("test", script.clone());
+            while let Some(result) = ctx.run(input) {
+                result.unwrap();
+                input = sieve::Input::True;
+            }
+            start.elapsed()
+        };
+        let one = run(1);
+        let many = run(1000);
+        assert!(many < one * 10, "1 header: {one:?}, 1000 headers: {many:?}");
+    }
 }

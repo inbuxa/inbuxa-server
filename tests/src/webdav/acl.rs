@@ -508,6 +508,133 @@ pub async fn test(test: &TestServer) {
         .await
         .with_status(StatusCode::NO_CONTENT);
 
+    // inbuxa: COPY and MOVE into a shared folder need the rights PUT and
+    // DELETE need there, and what lands there takes the folder's ACL
+    let file_base = DavResourceName::File.base_path();
+    let jane_principal = format!(
+        "{}/jane%40example.com/",
+        DavResourceName::Principal.base_path()
+    );
+    let owner_drop = format!("{file_base}/bill%40example.com/drop-box/");
+    let owner_team = format!("{file_base}/bill%40example.com/team-folder/");
+    let owner_keep = format!("{owner_team}keep/");
+    let owner_keep_file = format!("{owner_keep}notes.txt");
+    let sharee_src = format!("{file_base}/john%40example.com/outbox/");
+    let sharee_src_file = format!("{sharee_src}payload.txt");
+    for folder in [&owner_drop, &owner_team, &owner_keep] {
+        owner_client
+            .request("MKCOL", folder, "")
+            .await
+            .with_status(StatusCode::CREATED);
+    }
+    owner_client
+        .request("PUT", &owner_keep_file, "keep me")
+        .await
+        .with_status(StatusCode::CREATED);
+    for (path, grants) in [
+        (&owner_drop, ["read", "write-properties"].as_slice()),
+        (&owner_team, ["read", "write-content"].as_slice()),
+        (&owner_keep, ["read", "write"].as_slice()),
+        (&owner_keep_file, ["read"].as_slice()),
+    ] {
+        owner_client
+            .acl(path, john_principal.as_str(), grants.iter().copied())
+            .await
+            .with_status(StatusCode::OK);
+    }
+    sharee_client
+        .request("MKCOL", &sharee_src, "")
+        .await
+        .with_status(StatusCode::CREATED);
+    sharee_client
+        .acl(&sharee_src, jane_principal.as_str(), ["read", "write"])
+        .await
+        .with_status(StatusCode::OK);
+    sharee_client
+        .request("PUT", &sharee_src_file, "payload")
+        .await
+        .with_status(StatusCode::CREATED);
+
+    // Adding to a folder needs the right to add to it, as for PUT
+    sharee_client
+        .request("PUT", &format!("{owner_drop}direct.txt"), "payload")
+        .await
+        .with_status(StatusCode::FORBIDDEN);
+    let copy_dest = format!("{owner_drop}payload.txt");
+    sharee_client
+        .request_with_headers(
+            "COPY",
+            &sharee_src_file,
+            [("destination", copy_dest.as_str())],
+            "",
+        )
+        .await
+        .with_status(StatusCode::FORBIDDEN);
+
+    // Overwriting a folder needs the right to delete everything in it, as
+    // for DELETE
+    sharee_client
+        .request("DELETE", &owner_keep, "")
+        .await
+        .with_status(StatusCode::FORBIDDEN);
+    sharee_client
+        .request_with_headers(
+            "COPY",
+            &sharee_src,
+            [("destination", owner_keep.as_str()), ("overwrite", "T")],
+            "",
+        )
+        .await
+        .with_status(StatusCode::FORBIDDEN);
+    owner_client
+        .request("GET", &owner_keep_file, "")
+        .await
+        .with_status(StatusCode::OK)
+        .with_body("keep me");
+
+    // A copy or a move from another account takes the destination folder's
+    // ACL: John's grant to Jane stays behind
+    for (method, name) in [("COPY", "copied"), ("MOVE", "moved")] {
+        let dest = format!("{owner_team}{name}/");
+        sharee_client
+            .request_with_headers(method, &sharee_src, [("destination", dest.as_str())], "")
+            .await
+            .with_status(StatusCode::CREATED);
+        let dest_file = format!("{dest}payload.txt");
+        let response = owner_client
+            .propfind(&dest, [DavProperty::WebDav(WebDavProperty::Acl)])
+            .await;
+        for href in [dest.as_str(), dest_file.as_str()] {
+            response
+                .properties(href)
+                .get(DavProperty::WebDav(WebDavProperty::Acl))
+                .with_some_values([format!("D:ace.D:principal.D:href:{john_principal}").as_str()])
+                .without_values([format!("D:ace.D:principal.D:href:{jane_principal}").as_str()]);
+        }
+    }
+    for folder in [&owner_drop, &owner_team] {
+        owner_client
+            .request("DELETE", folder, "")
+            .await
+            .with_status(StatusCode::NO_CONTENT);
+    }
+    // Jane's grants left John's account with the move: a grant made and
+    // taken back refreshes her view of it
+    sharee_client
+        .request("MKCOL", &sharee_src, "")
+        .await
+        .with_status(StatusCode::CREATED);
+    for grants in [["read"].as_slice(), [].as_slice()] {
+        sharee_client
+            .acl(&sharee_src, jane_principal.as_str(), grants.iter().copied())
+            .await
+            .with_status(StatusCode::OK);
+    }
+    sharee_client
+        .request("DELETE", &sharee_src, "")
+        .await
+        .with_status(StatusCode::NO_CONTENT);
+
     sharee_client.delete_default_containers().await;
     owner_client.delete_default_containers().await;
     test.assert_is_empty().await;

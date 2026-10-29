@@ -13,7 +13,7 @@ use http_proto::{HttpRequest, HttpSessionData};
 use hyper::header;
 use mail_parser::decoders::base64::base64_decode;
 use std::future::Future;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 pub trait Authenticator: Sync + Send {
     fn authenticate_headers(
@@ -40,7 +40,8 @@ impl Authenticator for Server {
                         session.remote_ip,
                     )?
                     // inbuxa: AU-5
-                    .with_origin_arc(http_cache.origin.clone());
+                    .with_origin_arc(http_cache.origin.clone())
+                    .with_expires_at(http_cache.expires_at);
 
                     if access_token.revision() == http_cache.revision {
                         // Enforce authenticated rate limit
@@ -95,17 +96,29 @@ impl Authenticator for Server {
                 .await?;
 
             // Cache credentials
-            self.inner.cache.http_auth.insert(
-                token.into(),
-                HttpAuthCache {
-                    account_id: access_token.account_id(),
-                    revision: access_token.revision(),
-                    credential_id: access_token.credential_id(),
-                    expires: Instant::now()
-                        + Duration::from_secs(self.core.oauth.oauth_expiry_token),
-                    origin: access_token.origin_arc(),
-                },
-            );
+            // inbuxa: a bearer token's sign-in is remembered no longer than
+            // the token is valid
+            let lifetime = Duration::from_secs(self.core.oauth.oauth_expiry_token);
+            let lifetime = match access_token.expires_at() {
+                Some(expires_at) => (UNIX_EPOCH + Duration::from_secs(expires_at))
+                    .duration_since(SystemTime::now())
+                    .unwrap_or_default()
+                    .min(lifetime),
+                None => lifetime,
+            };
+            if !lifetime.is_zero() {
+                self.inner.cache.http_auth.insert(
+                    token.into(),
+                    HttpAuthCache {
+                        account_id: access_token.account_id(),
+                        revision: access_token.revision(),
+                        credential_id: access_token.credential_id(),
+                        expires: Instant::now() + lifetime,
+                        origin: access_token.origin_arc(),
+                        expires_at: access_token.expires_at(),
+                    },
+                );
+            }
 
             // Enforce authenticated rate limit
             self.is_http_authenticated_request_allowed(&access_token, session.remote_ip)
