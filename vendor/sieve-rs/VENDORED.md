@@ -29,6 +29,19 @@ Every changed file carries the AGPL 5(a) notice in its header.
   against. Every caller of `Comparator::regex` passes the cache. The
   `sieve_regexes_are_size_limited` and `sieve_variable_patterns_compile_once`
   tests in `crates/common` cover both.
+- `src/runtime/context.rs`, `src/lib.rs`, `src/runtime/tests/test_header.rs`,
+  `test_address.rs`, `test_body.rs`, `test_string.rs`, `test_exists.rs`,
+  `src/runtime/actions/action_editheader.rs`: the bytes that tests scan count
+  against the cpu limit, one instruction for every 64 KiB
+  (`SCAN_BYTES_PER_INSTRUCTION`). Header, address, body and string tests and
+  `deleteheader` charge each value they compare times the number of keys, and
+  every search for a header charges the part's header block; the total is
+  `Context::scanned_bytes`. A test stops scanning once the run is over the
+  limit, and the run fails with `CPULimitReached` as it does for too many
+  instructions (`deleteheader` then deletes nothing). The `scan_limit_tests`
+  in `context.rs` cover it; they run from this directory with `cargo test
+  --offline --target-dir ../../target/sieve-rs-tests scan_limit` (the crate's
+  `test_suite` and `parse_rfc` need upstream's `tests/`, which isn't kept).
 - `Cargo.toml`: the example target is dropped, with the top-level
   `examples/` and `tests/`, which the server never builds. (`src/` keeps its
   own `tests` modules: the crate declares them.)

@@ -23,6 +23,11 @@ use super::{
     tests::{TestResult, test_envelope::parse_envelope_address},
 };
 
+// inbuxa: tests are charged one instruction for every 64 KiB they scan (the
+// bytes compared, times the keys compared against), so the cpu limit also bounds
+// how much of a large message a script can read
+pub(crate) const SCAN_BYTES_PER_INSTRUCTION: usize = 64 * 1024;
+
 #[derive(Clone, Debug)]
 pub(crate) struct ScriptStack {
     pub(crate) script: Arc<Sieve>,
@@ -73,6 +78,7 @@ impl<'x> Context<'x> {
             num_instructions: 0,
             num_out_messages: 0,
             regex_cache: Default::default(),
+            scanned_bytes: Default::default(),
             last_message_id: 0,
             main_message_id: 0,
             virus_status: VirusStatus::Unknown,
@@ -127,7 +133,7 @@ impl<'x> Context<'x> {
         'outer: loop {
             while let Some(instruction) = iter.next() {
                 self.num_instructions += 1;
-                if self.num_instructions > self.runtime.cpu_limit {
+                if self.is_over_cpu_limit() {
                     self.finish_loop();
                     return Some(Err(RuntimeError::CPULimitReached));
                 }
@@ -157,6 +163,11 @@ impl<'x> Context<'x> {
                         continue;
                     }
                     Instruction::Test(test) => match test.exec(self) {
+                        // inbuxa: a test that scanned past the limit stops the run
+                        _ if self.is_over_cpu_limit() => {
+                            self.finish_loop();
+                            return Some(Err(RuntimeError::CPULimitReached));
+                        }
                         TestResult::Bool(result) => {
                             self.test_result = result;
                         }
@@ -304,7 +315,13 @@ impl<'x> Context<'x> {
                         }
                     }
                     Instruction::AddHeader(add_header) => add_header.exec(self),
-                    Instruction::DeleteHeader(delete_header) => delete_header.exec(self),
+                    Instruction::DeleteHeader(delete_header) => {
+                        delete_header.exec(self);
+                        if self.is_over_cpu_limit() {
+                            self.finish_loop();
+                            return Some(Err(RuntimeError::CPULimitReached));
+                        }
+                    }
                     Instruction::Set(set) => {
                         set.exec(self);
                         if let Some(event) = self.queued_events.next() {
@@ -441,6 +458,22 @@ impl<'x> Context<'x> {
             Some(event) => Some(Ok(event)),
             _ => None,
         }
+    }
+
+    // inbuxa: adds `bytes` to what this run's tests have scanned; true once the
+    // run is over its cpu limit, so the caller can stop scanning
+    #[inline]
+    pub(crate) fn charge_scan(&self, bytes: usize) -> bool {
+        self.scanned_bytes
+            .set(self.scanned_bytes.get().saturating_add(bytes));
+        self.is_over_cpu_limit()
+    }
+
+    #[inline]
+    pub(crate) fn is_over_cpu_limit(&self) -> bool {
+        self.num_instructions
+            .saturating_add(self.scanned_bytes.get() / SCAN_BYTES_PER_INSTRUCTION)
+            > self.runtime.cpu_limit
     }
 
     pub(crate) fn finish_loop(&mut self) {
@@ -684,10 +717,123 @@ impl<'x> Context<'x> {
             num_instructions: 0,
             num_out_messages: 0,
             regex_cache: Default::default(),
+            scanned_bytes: Default::default(),
             last_message_id: 0,
             main_message_id: 0,
             virus_status: VirusStatus::Unknown,
             spam_status: SpamStatus::Unknown,
         }
+    }
+}
+
+// inbuxa: the bytes that tests scan count against the cpu limit
+#[cfg(test)]
+mod scan_limit_tests {
+    use mail_parser::MessageParser;
+
+    use crate::{
+        Compiler, Context, Input, Runtime, compiler::grammar::Capability, runtime::RuntimeError,
+    };
+
+    fn run(script: &str, raw_message: &[u8], cpu_limit: usize) -> Result<usize, RuntimeError> {
+        let script = Compiler::new().compile(script.as_bytes()).unwrap();
+        let runtime = Runtime::new()
+            .with_capability(Capability::While)
+            .with_capability(Capability::Expressions)
+            .with_cpu_limit(cpu_limit);
+        let mut ctx = Context::new(&runtime, MessageParser::new().parse(raw_message).unwrap());
+        let mut input = Input::script("test", script);
+        while let Some(result) = ctx.run(input) {
+            result?;
+            input = Input::True;
+        }
+        Ok(ctx.num_instructions)
+    }
+
+    fn assert_limited(result: Result<usize, RuntimeError>) {
+        assert!(
+            matches!(result, Err(RuntimeError::CPULimitReached)),
+            "expected CPULimitReached, got {result:?}"
+        );
+    }
+
+    fn keys(n: usize) -> String {
+        (0..n)
+            .map(|i| format!("\"key-{i}\""))
+            .collect::<Vec<_>>()
+            .join(", ")
+    }
+
+    fn large_body(size: usize) -> Vec<u8> {
+        let mut raw = b"From: a@example.org\r\nTo: b@example.org\r\nSubject: hi\r\n\r\n".to_vec();
+        while raw.len() < size {
+            raw.extend_from_slice(b"lorem ipsum dolor sit amet consectetur adipiscing elit\r\n");
+        }
+        raw
+    }
+
+    #[test]
+    fn body_scans_count_against_cpu_limit() {
+        let raw = large_body(4 << 20);
+
+        // one test, many keys: 4 MiB x 100 keys is 6400 instructions' worth
+        let script = format!(
+            "require \"body\";\nif body :raw :contains [{}] {{ stop; }}\n",
+            keys(100)
+        );
+        assert_limited(run(&script, &raw, 5000));
+
+        // a loop over one key
+        let script = "require [\"body\", \"variables\", \"vnd.inbuxa.while\", \"vnd.inbuxa.expressions\"];\n\
+                      set \"i\" \"0\";\n\
+                      while \"i < 100\" {\n\
+                          if body :raw :contains \"not-there\" { stop; }\n\
+                          let \"i\" \"i + 1\";\n\
+                      }\n";
+        assert_limited(run(script, &raw, 2000));
+    }
+
+    #[test]
+    fn header_scans_count_against_cpu_limit() {
+        let mut raw = b"From: a@example.org\r\nTo: b@example.org\r\n".to_vec();
+        while raw.len() < 4 << 20 {
+            raw.extend_from_slice(
+                b"X-Filler: lorem ipsum dolor sit amet consectetur adipiscing elit\r\n",
+            );
+        }
+        raw.extend_from_slice(b"Subject: hi\r\n\r\nbody\r\n");
+
+        let script = format!(
+            "if header :contains \"X-Filler\" [{}] {{ stop; }}\n",
+            keys(100)
+        );
+        assert_limited(run(&script, &raw, 5000));
+
+        let script = format!(
+            "require \"variables\";\nif string :contains \"${{x}}\" [{}] {{ stop; }}\nif address :contains \"From\" [{}] {{ stop; }}\n",
+            keys(10),
+            keys(10)
+        );
+        assert!(run(&script, &raw, 5000).is_ok());
+    }
+
+    #[test]
+    fn small_messages_cost_nothing_extra() {
+        let raw = large_body(16 << 10);
+        let script = "require [\"body\", \"variables\", \"editheader\"];\n\
+                      if header :contains [\"Subject\", \"To\"] [\"a\", \"b\", \"c\"] { set \"x\" \"1\"; }\n\
+                      if address :domain \"From\" \"example.org\" { set \"y\" \"1\"; }\n\
+                      if exists \"X-Spam\" { stop; }\n\
+                      if body :text :contains [\"one\", \"two\"] { stop; }\n\
+                      if string :is \"${x}\" \"2\" { stop; }\n\
+                      deleteheader :contains \"Subject\" \"zzz\";\n";
+
+        // the instructions alone fill the limit; the scans add nothing
+        let num_instructions = run(script, &raw, 5000).unwrap();
+        assert_eq!(
+            run(script, &raw, num_instructions).ok(),
+            Some(num_instructions)
+        );
+        assert_limited(run(script, &raw, num_instructions - 1));
     }
 }

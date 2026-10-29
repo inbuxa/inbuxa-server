@@ -65,6 +65,9 @@ impl TestString {
                     let key = ctx.eval_value(pattern);
                     for source in &sources {
                         if !empty_is_null || !source.is_empty() {
+                            if ctx.charge_scan(source.len()) {
+                                return TestResult::Bool(false);
+                            }
                             result = match &self.match_type {
                                 MatchType::Is => self.comparator.is(source, &key),
                                 MatchType::Contains => self.comparator.contains(
