@@ -18,7 +18,7 @@ use common::{
 use groupware::{
     cache::GroupwareCache,
     calendar::{
-        CalendarEvent,
+        CalendarEvent, limit_component_depth,
         privacy::{event_view, hide_attendees},
     },
 };
@@ -178,6 +178,7 @@ impl JmapCalendarEventCopy for Server {
             let mut calendar_event = _calendar_event
                 .deserialize::<CalendarEvent>()
                 .caused_by(trc::location!())?;
+            limit_component_depth(&mut calendar_event.data.event);
 
             // inbuxa: a sharee can't copy out what it may not see
             if !is_owner {

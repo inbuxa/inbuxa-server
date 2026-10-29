@@ -33,6 +33,7 @@ use groupware::{
         dates::has_oversized_rrule,
         expand::{CalendarEventExpansion, ComponentRecurrenceId, RecurrenceKey, resolve_local},
         itip::ItipSendStatus,
+        limit_component_depth,
         privacy::itip_messages_for,
     },
     scheduling::{
@@ -295,6 +296,7 @@ impl CalendarEventSet for Server {
                 }
             }
 
+            limit_component_depth(&mut new_calendar_event.data.event);
             let mut js_calendar_group =
                 std::mem::take(&mut new_calendar_event.data.event).into_jscalendar::<Id, BlobId>();
 
