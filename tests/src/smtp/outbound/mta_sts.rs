@@ -2,6 +2,8 @@
  * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
+ *
+ * Modified by Coffey Labs in 2026 for INBUXA.
  */
 
 use crate::{
@@ -26,7 +28,10 @@ use registry::{
     },
     types::{map::Map, socketaddr::SocketAddr},
 };
-use smtp::outbound::mta_sts::{lookup::STS_TEST_POLICY, parse::ParsePolicy};
+use smtp::outbound::mta_sts::{
+    lookup::{MtaStsLookup, STS_TEST_POLICY},
+    parse::ParsePolicy,
+};
 use std::{
     str::FromStr,
     sync::Arc,
@@ -264,6 +269,20 @@ async fn mta_sts_verify() {
         )
     );
     assert!(report.failure.is_none());
+
+    // A new policy id whose policy can't be fetched keeps the cached policy
+    local.server.txt_add(
+        "_mta-sts.foobar.org",
+        MtaSts::parse(b"v=STSv1; id=policy_rotated;").unwrap(),
+        Instant::now() + Duration::from_secs(10),
+    );
+    STS_TEST_POLICY.lock().clear();
+    let cached = local
+        .server
+        .lookup_mta_sts_policy("foobar.org", Duration::from_secs(5))
+        .await
+        .expect("cached MTA-STS policy was dropped after a failed fetch");
+    assert_eq!(cached.id, "policy_will_work");
 }
 
 #[tokio::test]
