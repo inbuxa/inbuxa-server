@@ -2,6 +2,8 @@
  * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
+ *
+ * Modified by Coffey Labs in 2026 for INBUXA.
  */
 
 use crate::auth::oauth::FormData;
@@ -12,7 +14,9 @@ use common::{
     network::ip_to_bytes,
     psl,
 };
-use email::message::delivery::{IngestMessage, IngestRecipient, LocalDeliveryStatus, MailDelivery};
+use email::message::delivery::{
+    IngestMessage, IngestRecipient, LocalDeliveryStatus, MailDelivery, VerifiedSender,
+};
 use http_proto::*;
 use hyper::StatusCode;
 use mail_auth::common::cache::NoCache;
@@ -176,7 +180,7 @@ impl FormHandler for Server {
             for result in self
                 .deliver_message(IngestMessage {
                     sender_address: from_email,
-                    sender_authenticated: false,
+                    verified_sender: VerifiedSender::None,
                     recipients: form
                         .rcpt_to
                         .iter()
