@@ -105,6 +105,7 @@ fn call_one(app: &App, caller: &Caller, call: &Invocation) -> MethodResult {
         method::RELAY_JOIN => relay_join(app, args),
         method::RELAY_GET => relay_get(app, args),
         method::RELAY_SET => relay_set(app, args),
+        method::RELAY_UPGRADE => relay_upgrade(app, args),
         method::RECIPIENT_DOMAIN_GET => recipient_domain_get(app),
         method::RECIPIENT_DOMAIN_SET => recipient_domain_set(app, args),
         method::RECIPIENT_SET => recipient_set(app, args),
@@ -301,6 +302,81 @@ fn relay_set(app: &App, args: &Map<String, Value>) -> MethodResult {
         "newState": app.relay_state(),
         "updated": updated,
         "notUpdated": not_updated,
+    }))
+}
+
+/// `Relay/upgrade` (RL-29): `{blobId, signature}`, the release binary as
+/// an upload and its signature file's text. Answers once the new binary
+/// is in place; the relay then exits for its supervisor to restart it.
+fn relay_upgrade(app: &App, args: &Map<String, Value>) -> MethodResult {
+    use crate::upgrade::{self, Refused};
+    use std::sync::atomic::Ordering;
+    if !app.self_upgrade {
+        return Err(err(
+            MethodError::Forbidden,
+            "this relay runs in a container image: update the image instead",
+        ));
+    }
+    let blob_id = args
+        .get("blobId")
+        .and_then(Value::as_str)
+        .filter(|id| crate::link::is_blob_id(id))
+        .ok_or_else(|| err(MethodError::InvalidArguments, "blobId: an uploaded blob"))?;
+    let signature = args
+        .get("signature")
+        .and_then(Value::as_str)
+        .ok_or_else(|| {
+            err(
+                MethodError::InvalidArguments,
+                "signature: the release's signature file",
+            )
+        })?;
+    let exe = app
+        .exe
+        .clone()
+        .ok_or_else(|| err(MethodError::ServerFail, "the relay can't find its binary"))?;
+    if app.upgrading.swap(true, Ordering::SeqCst) {
+        return Err(err(
+            MethodError::Forbidden,
+            "an upgrade is already on its way",
+        ));
+    }
+    let path = app.paths.blobs().join(blob_id);
+    let result = std::fs::read(&path)
+        .map_err(|_| Refused::Invalid("no such blob".into()))
+        .and_then(|binary| {
+            let release =
+                upgrade::check(&binary, signature, &app.release_keys, crate::app::VERSION)?;
+            upgrade::install(&exe, &binary, &release.version)?;
+            Ok(release)
+        });
+    let _ = std::fs::remove_file(&path);
+    let release = match result {
+        Ok(release) => release,
+        Err(refused) => {
+            app.upgrading.store(false, Ordering::SeqCst);
+            let (kind, text) = match refused {
+                Refused::Invalid(text) => (MethodError::InvalidArguments, text),
+                Refused::Failed(text) => (MethodError::ServerFail, text),
+            };
+            app.record(
+                "relay.upgrade-refused",
+                crate::events::data([("reason", json!(text))]),
+            );
+            return Err(err(kind, text));
+        }
+    };
+    app.record(
+        "relay.upgraded",
+        crate::events::data([
+            ("from", json!(crate::app::VERSION)),
+            ("to", json!(release.version)),
+        ]),
+    );
+    app.restart.notify_one();
+    Ok(json!({
+        "accountId": ACCOUNT_ID,
+        "relayVersion": release.version,
     }))
 }
 

@@ -343,7 +343,13 @@ async fn relay_end_to_end() {
     assert!(crate::join(&paths, &token.encode()).is_err(), "joined once");
 
     let identity = Identity::load(&paths).unwrap().unwrap();
-    let app = Arc::new(App::open(Paths::new(&dir), identity).unwrap());
+    let mut app = App::open(Paths::new(&dir), identity).unwrap();
+    let (release_key, release_public) = crate::upgrade::tests::test_key();
+    app.release_keys = vec![release_public];
+    let exe = dir.join("inbuxa-relay");
+    std::fs::write(&exe, crate::upgrade::tests::script(crate::app::VERSION)).unwrap();
+    app.exe = Some(exe.clone());
+    let app = Arc::new(app);
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let link_addr = listener.local_addr().unwrap();
     tokio::spawn(link::serve(app.clone(), listener));
@@ -674,6 +680,62 @@ async fn relay_end_to_end() {
     assert_eq!(gone["destroyed"], json!([out_id]));
     assert!(!eml.exists());
 
+    // RL-T16 / RL-29: a signed release, newer, for this target, goes in;
+    // nothing else does.
+    let release = crate::upgrade::tests::script("99.0.0");
+    let target = inbuxa_relay_proto::release::target();
+    let sign = |version: &str, target: &str| {
+        crate::upgrade::tests::sign(&release_key, &release, version, target)
+    };
+    let mut upgrade = async |signature: String| {
+        let (status, blob) = down
+            .http("POST", "/jmap/upload/relay", release.clone())
+            .await;
+        assert_eq!(status, 201);
+        let blob: Value = serde_json::from_slice(&blob).unwrap();
+        ws.call(
+            "Relay/upgrade",
+            json!({ "blobId": blob["blobId"], "signature": signature }),
+        )
+        .await
+    };
+    let forged = crate::upgrade::tests::sign(
+        &aws_lc_rs::signature::Ed25519KeyPair::from_seed_unchecked(&[9u8; 32]).unwrap(),
+        &release,
+        "99.0.0",
+        &target,
+    );
+    for signature in [
+        forged,
+        sign("27.0.0", &target),
+        sign("99.0.0", "riscv64-none-other"),
+        "not a signature file".to_string(),
+    ] {
+        let (name, args) = upgrade(signature).await;
+        assert_eq!(
+            (name.as_str(), args["type"].as_str()),
+            ("error", Some("invalidArguments")),
+            "{args}"
+        );
+    }
+    assert_eq!(
+        std::fs::read(&exe).unwrap(),
+        crate::upgrade::tests::script(crate::app::VERSION)
+    );
+    let (name, args) = upgrade(sign("99.0.0", &target)).await;
+    assert_eq!(name, "Relay/upgrade", "{args}");
+    assert_eq!(args["relayVersion"], "99.0.0");
+    assert_eq!(std::fs::read(&exe).unwrap(), release);
+    tokio::time::timeout(Duration::from_secs(1), app.restart.notified())
+        .await
+        .expect("the run loop is told to exit");
+    let (name, args) = upgrade(sign("99.0.0", &target)).await;
+    assert_eq!(
+        (name.as_str(), args["type"].as_str()),
+        ("error", Some("forbidden")),
+        "one upgrade at a time"
+    );
+
     // Events went up the link.
     let events = ws.ok("RelayEvent/get", json!({})).await;
     let kinds: Vec<&str> = events["list"]
@@ -687,6 +749,8 @@ async fn relay_end_to_end() {
         "inbound.accepted",
         "inbound.refused",
         "smtp.session",
+        "relay.upgrade-refused",
+        "relay.upgraded",
     ] {
         assert!(kinds.contains(&kind), "{kind} in {kinds:?}");
     }
