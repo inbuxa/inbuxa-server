@@ -26,6 +26,7 @@ pub mod broadcast;
 pub mod inbuxa_deliverability; // inbuxa: the deliverability check
 pub mod inbuxa_lock_expiry;
 pub mod inbuxa_log_retention; // inbuxa: personal-data catalog, D1
+pub mod inbuxa_relay_certificates; // inbuxa: inbuxa Relays' certificates
 pub mod inbuxa_relay_link; // inbuxa: links to inbuxa Relays
 pub mod inbuxa_scheduled_reports; // inbuxa: scheduled reports and the weekly digest
 pub mod state_manager;

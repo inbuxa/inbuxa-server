@@ -28,7 +28,9 @@
 //! linked node with the lowest id takes them. A node with no link to a
 //! joined relay for an hour says so with `relay.link-down` (RL-T23).
 
-use crate::task_manager::dns::queue_relay_dns;
+use crate::{
+    inbuxa_relay_certificates::order_relay_certificates, task_manager::dns::queue_relay_dns,
+};
 use common::{
     BuildServer, Inner, Server,
     config::server::{DEFAULT_TLS_TIMEOUT, ServerProtocol},
@@ -193,6 +195,8 @@ async fn reconcile(
         queue_relay_dns(server).await?;
         relays::dns::record_dns(data, hash).await?;
     }
+    // Their certificates, ordered when missing or running out (RL-27)
+    order_relay_certificates(inner, &all).await;
     let wanted: HashMap<u32, (String, u16)> = all
         .into_iter()
         .filter(|relay| relay.enabled)

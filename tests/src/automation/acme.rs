@@ -27,6 +27,7 @@ use registry::{
     types::{datetime::UTCDateTime, id::ObjectId, map::Map},
 };
 use serde_json::json;
+use std::str::FromStr;
 use store::{registry::write::RegistryWrite, write::now};
 use x509_parser::parse_x509_certificate;
 use x509_parser::pem::Pem;
@@ -398,6 +399,7 @@ pub async fn test(test: &TestServer) {
     let mut sans = certificate.subject_alternative_names.into_inner();
     sans.sort();
     assert_eq!(sans, vec!["*.dns.org".to_string(), "dns.org".to_string()]);
+    relay_certificate(test).await;
     account.registry_destroy_all(ObjectType::Certificate).await;
     account.registry_destroy_all(ObjectType::Task).await;
 
@@ -895,4 +897,152 @@ fn top_issuer_common_name(chain: &str) -> Option<String> {
         .filter_map(|cn| cn.as_str().ok())
         .next()
         .map(str::to_string)
+}
+
+/// A relay's certificate (relay spec, RL-27): a joined relay named under
+/// dns.org, whose DNS and certificates are managed here, gets one for its
+/// public name alone, by DNS-01, without asking.
+async fn relay_certificate(test: &TestServer) {
+    println!("Running relay certificate tests...");
+    let account = test.account("admin@example.org");
+    let using = ["urn:ietf:params:jmap:core", "urn:inbuxa:jmap"];
+    let response = account
+        .jmap_request(
+            &using,
+            json!([["inbuxa:Relay/set", {
+                "accountId": account.id_string(),
+                "create": {"r": {
+                    "name": "Edge",
+                    "address": "127.0.0.1",
+                    "linkPort": 9,
+                    "settings": {"hostname": "mx1.dns.org"}
+                }}
+            }, "0"]]),
+        )
+        .await
+        .0;
+    let id = response
+        .pointer("/methodResponses/0/1/created/r/id")
+        .and_then(|id| id.as_str())
+        .unwrap_or_else(|| panic!("relay created: {response}"))
+        .to_string();
+    let relay_id = u32::try_from(types::id::Id::from_str(&id).unwrap().id()).unwrap();
+
+    // Joined: its link key pinned, as a node does when it joins
+    let data = test.server.store();
+    let (mut relay, version) = inbuxa_features::relay::get_versioned(data, relay_id)
+        .await
+        .unwrap()
+        .unwrap();
+    relay.join.secret = None;
+    relay.join.relay_pin = Some([7; 32]);
+    assert!(
+        inbuxa_features::relay::replace(data, &relay, version)
+            .await
+            .unwrap()
+    );
+    inbuxa_features::relay::changed();
+
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(120);
+    let relay = loop {
+        let relay = inbuxa_features::relay::get(data, relay_id)
+            .await
+            .unwrap()
+            .unwrap();
+        if relay.smtp_certificate.is_some() {
+            break relay;
+        }
+        let order = inbuxa_features::relay::certificate::last_order(data, relay_id)
+            .await
+            .unwrap();
+        assert!(
+            order.as_ref().and_then(|o| o.error()).is_none(),
+            "order failed: {order:?}"
+        );
+        assert!(
+            std::time::Instant::now() < deadline,
+            "no certificate for the relay"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    };
+    let pem = relay.smtp_certificate.as_deref().unwrap();
+    let block = Pem::iter_from_buffer(pem.as_bytes())
+        .next()
+        .unwrap()
+        .unwrap();
+    let (_, cert) = parse_x509_certificate(&block.contents).unwrap();
+    let names = cert
+        .subject_alternative_name()
+        .unwrap()
+        .unwrap()
+        .value
+        .general_names
+        .iter()
+        .map(|name| name.to_string())
+        .collect::<Vec<_>>();
+    assert_eq!(names, ["DNSName(mx1.dns.org)"], "its name alone");
+    assert!(
+        relay
+            .smtp_private_key
+            .as_deref()
+            .is_some_and(|key| key.contains("PRIVATE KEY"))
+    );
+    // Not one of this server's own certificates
+    assert!(
+        account
+            .registry_get_all::<Certificate>()
+            .await
+            .into_iter()
+            .all(|(_, c)| !c
+                .subject_alternative_names
+                .iter()
+                .any(|n| n == "mx1.dns.org"))
+    );
+
+    // Shown on the relay, and nothing is ordered again
+    let response = account
+        .jmap_request(
+            &using,
+            json!([["inbuxa:Relay/get", {
+                "accountId": account.id_string(),
+                "ids": [&id],
+                "properties": ["certificateNotAfter", "certificateError", "smtpPrivateKey"]
+            }, "0"]]),
+        )
+        .await
+        .0;
+    let got = response.pointer("/methodResponses/0/1/list/0").unwrap();
+    assert!(got["certificateNotAfter"].as_str().is_some(), "{got}");
+    assert_eq!(got["certificateError"], serde_json::Value::Null, "{got}");
+    assert_eq!(got["smtpPrivateKey"], "****", "{got}");
+    let order = inbuxa_features::relay::certificate::last_order(data, relay_id)
+        .await
+        .unwrap()
+        .unwrap();
+    inbuxa_features::relay::changed();
+    tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+    assert_eq!(
+        inbuxa_features::relay::certificate::last_order(data, relay_id)
+            .await
+            .unwrap(),
+        Some(order),
+        "a good certificate isn't ordered again"
+    );
+
+    account
+        .jmap_request(
+            &using,
+            json!([["inbuxa:Relay/set", {
+                "accountId": account.id_string(),
+                "destroy": [&id]
+            }, "0"]]),
+        )
+        .await;
+    assert_eq!(
+        inbuxa_features::relay::certificate::last_order(data, relay_id)
+            .await
+            .unwrap(),
+        None,
+        "forgotten with the relay"
+    );
 }

@@ -38,6 +38,10 @@ pub enum RelayProperty {
     SmtpCertificate,
     /// Reads back as `****`.
     SmtpPrivateKey,
+    /// When the stored certificate runs out, if it can be read.
+    CertificateNotAfter,
+    /// Why the last certificate order failed, if it did (RL-27).
+    CertificateError,
     /// `waiting`, `expired` or `joined`.
     JoinState,
     JoinExpiresAt,
@@ -83,6 +87,8 @@ impl Property for RelayProperty {
             RelayProperty::Settings => "settings",
             RelayProperty::SmtpCertificate => "smtpCertificate",
             RelayProperty::SmtpPrivateKey => "smtpPrivateKey",
+            RelayProperty::CertificateNotAfter => "certificateNotAfter",
+            RelayProperty::CertificateError => "certificateError",
             RelayProperty::JoinState => "joinState",
             RelayProperty::JoinExpiresAt => "joinExpiresAt",
             RelayProperty::JoinedAt => "joinedAt",
@@ -113,6 +119,8 @@ impl RelayProperty {
             b"settings" => RelayProperty::Settings,
             b"smtpCertificate" => RelayProperty::SmtpCertificate,
             b"smtpPrivateKey" => RelayProperty::SmtpPrivateKey,
+            b"certificateNotAfter" => RelayProperty::CertificateNotAfter,
+            b"certificateError" => RelayProperty::CertificateError,
             b"joinState" => RelayProperty::JoinState,
             b"joinExpiresAt" => RelayProperty::JoinExpiresAt,
             b"joinedAt" => RelayProperty::JoinedAt,

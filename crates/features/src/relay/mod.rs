@@ -20,11 +20,14 @@
 //! - `i` + relay id (u32) + `Inbound` id: a message taken from the relay.
 //! - `o` + relay id (u32) + `Outbound` id: a message handed to the relay
 //!   ([`outbound::Handed`]), as JSON.
+//! - `c` + relay id (u32): the last order for the relay's certificate
+//!   ([`certificate::CertificateOrder`]), as JSON.
 //! - `d`: what the relays last put in the domains' DNS records, hashed
 //!   ([`dns::dns_change`]).
 //!
 //! Numbers are big-endian. There are few relays, so they're read whole.
 
+pub mod certificate;
 pub mod dns;
 pub mod link;
 pub mod messages;
@@ -582,6 +585,7 @@ pub async fn delete(data: &Store, id: u32) -> trc::Result<()> {
     let nodes = link::statuses(data, id).await?;
     let mut batch = BatchBuilder::new();
     batch.clear(class(KIND_RELAY, Some(id)));
+    batch.clear(certificate::certificate_class(id));
     link::clear_statuses(&mut batch, id, &nodes);
     data.write(batch.build_all())
         .await

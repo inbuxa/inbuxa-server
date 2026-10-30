@@ -102,6 +102,8 @@ foundation = []
 
 [dev-dependencies]
 tokio = { version = "1.53", features = ["full"] }
+# inbuxa: relay certificate tests (relay spec, RL-27)
+time = "0.3"
 
 [lints]
 workspace = true
