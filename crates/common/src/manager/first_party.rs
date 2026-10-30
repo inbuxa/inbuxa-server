@@ -38,9 +38,13 @@ use registry::{
     },
     types::map::Map,
 };
-use store::registry::{
-    bootstrap::Bootstrap,
-    write::{RegistryWrite, RegistryWriteResult},
+use store::{
+    SUBSPACE_INBUXA,
+    registry::{
+        bootstrap::Bootstrap,
+        write::{RegistryWrite, RegistryWriteResult},
+    },
+    write::AnyKey,
 };
 
 /// The client id the upstream web interface uses when its application names none.
@@ -50,6 +54,9 @@ pub const WEBMAIL_CLIENT_ID: &str = "ihasmail-inbuxa";
 /// The web interface's client id before the fork renamed it (SPEC §2.4).
 /// Only ever read to retire it.
 const LEGACY_WEB_INTERFACE_CLIENT_ID: &str = "stalwart-webui";
+/// Where upstream's web interface is downloaded from, whatever the release.
+/// Only ever read to switch it off in a store brought over from Stalwart.
+const UPSTREAM_WEB_INTERFACE_URL: &str = "https://github.com/stalwartlabs/webui/";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FirstPartyClient {
@@ -272,6 +279,62 @@ pub async fn ensure_first_party_clients(bp: &mut Bootstrap) -> trc::Result<()> {
     Ok(())
 }
 
+/// A store brought over from Stalwart still lists upstream's web interface,
+/// which would be downloaded and served at `/admin` (docs/spec/import-0.16.md).
+/// The first time inbuxa opens a store, before it has inbuxa's store version,
+/// that application is switched off, and the record is kept so an operator can
+/// switch it back on. The version is written later in the same start, so an
+/// application switched back on stays on.
+pub async fn disable_imported_web_interface(bp: &mut Bootstrap) -> trc::Result<()> {
+    let marked = bp
+        .data_store
+        .get_value::<u32>(AnyKey {
+            subspace: SUBSPACE_INBUXA,
+            key: crate::INBUXA_STORE_VERSION_KEY.to_vec(),
+        })
+        .await?
+        .is_some();
+    if marked {
+        return Ok(());
+    }
+
+    for app in bp.list_infallible::<Application>().await {
+        if !app.object.enabled || !is_upstream_web_interface(&app.object.resource_url) {
+            continue;
+        }
+        let mut updated = app.object.clone();
+        updated.enabled = false;
+        // The old object carries its revision: the write asserts on it.
+        let current = Object::with_revision(ObjectInner::from(app.object), app.revision);
+        let result = bp
+            .registry
+            .write(RegistryWrite::update(
+                app.id.id(),
+                &updated.clone().into(),
+                &current,
+            ))
+            .await?;
+        if !matches!(result, RegistryWriteResult::Success(_)) {
+            return Err(trc::StoreEvent::UnexpectedError
+                .into_err()
+                .details("Failed to switch off the imported web interface.")
+                .reason(result.to_string())
+                .caused_by(trc::location!()));
+        }
+        trc::event!(
+            Server(trc::ServerEvent::Startup),
+            Details = "Switched off the upstream web interface an imported store listed; switch it back on in its Application if it's wanted.",
+            Url = updated.resource_url,
+        );
+    }
+
+    Ok(())
+}
+
+fn is_upstream_web_interface(resource_url: &str) -> bool {
+    resource_url.starts_with(UPSTREAM_WEB_INTERFACE_URL)
+}
+
 /// An install from before the rename, upstream's or this fork's, has the web
 /// interface registered as `stalwart-webui`, and may
 /// have an application naming it. The application is moved to the current id
@@ -421,6 +484,24 @@ async fn ensure_client(bp: &mut Bootstrap, client: FirstPartyClient) -> trc::Res
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn upstream_web_interface_is_recognised_by_its_download() {
+        for url in [
+            "https://github.com/stalwartlabs/webui/releases/download/v1.0.11/webui.zip",
+            "https://github.com/stalwartlabs/webui/releases/latest/download/webui.zip",
+        ] {
+            assert!(is_upstream_web_interface(url), "{url}");
+        }
+        for url in [
+            "https://127.0.0.1/webui.zip",
+            "https://github.com/stalwartlabs/webui-fork/releases/download/v1/webui.zip",
+            "https://example.org/github.com/stalwartlabs/webui/webui.zip",
+            "",
+        ] {
+            assert!(!is_upstream_web_interface(url), "{url}");
+        }
+    }
 
     fn web_interface() -> Application {
         Application {

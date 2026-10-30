@@ -2,8 +2,8 @@
 # SPDX-FileCopyrightText: 2026 Coffey Labs LLC
 # SPDX-License-Identifier: AGPL-3.0-only
 """What happens on the imported store after the move: delivery through the
-imported Sieve filter, search over imported mail, and re-saving a filter that
-uses a pre-rename extension name."""
+imported Sieve filter, search over imported mail, re-saving a filter that uses
+a pre-rename extension name, and the 0.16 web interface switched off."""
 import json, smtplib, sys, time, os
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from jmap import Jmap
@@ -58,9 +58,11 @@ blob = alice.upload(b'require ["fileinto", "vnd.stalwart.expressions"];\r\nlet "
 r = alice.call(("SieveScript/set", {"accountId": acct, "update": {script["id"]: {"blobId": blob}}}))[0]
 ok("re-saving a pre-rename filter", not r.get("notUpdated"), r.get("notUpdated"))
 
-# 4. The 0.16 web interface left in the registry.
+# 4. The 0.16 web interface: switched off on first open, record kept.
 A = json.load(open(os.path.join(os.environ["FIXTURE"], "admin.json")))
 adm = Jmap(BASE, A["username"], A["secret"], ["urn:inbuxa:jmap:registry"])
 apps = adm.call(("x:Application/get", {"ids": None}))[0]["list"]
-print("INFO applications:", [(a.get("description"), a.get("enabled"), a.get("resourceUrl")) for a in apps])
+webui = [a for a in apps if (a.get("resourceUrl") or "").startswith("https://github.com/stalwartlabs/webui/")]
+ok("0.16 web interface switched off, record kept", webui and not any(a.get("enabled") for a in webui),
+   [(a.get("enabled"), a.get("resourceUrl")) for a in apps])
 sys.exit(1 if failed else 0)

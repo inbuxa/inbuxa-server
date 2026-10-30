@@ -88,6 +88,10 @@ async fn insert_safe_defaults(bp: &mut Bootstrap) -> trc::Result<()> {
         return Ok(());
     }
 
+    // inbuxa: a store brought over from Stalwart doesn't serve upstream's web
+    // interface (docs/spec/import-0.16.md), before the applications load
+    super::first_party::disable_imported_web_interface(bp).await?;
+
     // inbuxa: registration is required (contract C-5), so the first-party
     // front ends are registered on every start (C-6)
     super::first_party::ensure_first_party_clients(bp).await?;

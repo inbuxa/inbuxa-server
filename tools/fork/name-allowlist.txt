@@ -39,3 +39,10 @@ crates/common/src/manager/spam_rules.rs	"https://github.com/stalwartlabs/spam-fi
 # bundles this server line can serve.
 crates/common/src/manager/defaults.rs	"https://github.com/stalwartlabs/webui/releases/download/v1.0.11/webui.zip"
 crates/common/src/manager/defaults.rs	"https://github.com/stalwartlabs/webui/releases/latest/download/webui.zip"
+# Recognising that web application in a store brought over from Stalwart, to
+# switch it off on first open (docs/spec/import-0.16.md).
+crates/common/src/manager/first_party.rs	"https://github.com/stalwartlabs/webui/"
+crates/common/src/manager/first_party.rs	"https://github.com/stalwartlabs/webui/releases/download/v1.0.11/webui.zip"
+crates/common/src/manager/first_party.rs	"https://github.com/stalwartlabs/webui/releases/latest/download/webui.zip"
+crates/common/src/manager/first_party.rs	"https://github.com/stalwartlabs/webui-fork/releases/download/v1/webui.zip"
+crates/common/src/manager/first_party.rs	"https://example.org/github.com/stalwartlabs/webui/webui.zip"
