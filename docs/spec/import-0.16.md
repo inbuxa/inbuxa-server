@@ -54,6 +54,7 @@ Each of these is done in place on first start, and each is listed in
 `tests/resources/import-0.16.27/known-differences.txt` or tested on its own:
 
 - **Store version:** written as 1 (`crates/migration`).
+- **Upstream's web interface** is switched off, record kept (see below).
 - **Roles:** inbuxa adds its Compliance Officer role. The built-in System
   Administrator and Tenant Administrator roles gain inbuxa's own permissions
   (account locks, audit, legal holds, journaling, DLP, mail rules,
@@ -79,10 +80,12 @@ Each of these is done in place on first start, and each is listed in
   restores passwords on JMAP for an operator who needs it while clients move
   to OAuth.
 - **The 0.16 web interface.** Its application record carries over and points
-  at upstream's `webui` release on GitHub. inbuxa keeps an imported
-  application and fetches it (SPEC.md §5.3), so it serves that interface at
-  `/admin` unless the operator removes it. Open: whether an import should
-  disable it (see below).
+  at upstream's `webui` release on GitHub. inbuxa switches it off the first
+  time it opens the store (`first_party.rs`,
+  `disable_imported_web_interface`, test `imported_web_interface`), keeps the
+  record, and logs that it did. An operator who still wants that interface at
+  `/admin` switches the application back on, and it stays on. Applications of
+  the operator's own aren't touched.
 
 ## Not covered
 
@@ -99,7 +102,8 @@ Each of these is done in place on first start, and each is listed in
 needs docker and about seven minutes, most of it waiting for the reindex.
 It fails on any difference that isn't in `known-differences.txt`, and on
 any of the after-import checks: delivery through the imported Sieve filter,
-search over imported mail, and re-saving a pre-rename filter. A known
+search over imported mail, re-saving a pre-rename filter, and the 0.16 web
+interface switched off with its record kept. A known
 difference that stops happening is reported as `GONE`, so the list can't go
 stale without anyone noticing.
 
@@ -112,9 +116,3 @@ it. The server it builds has no internet access, so upstream's web
 interface bundle and the data files it downloads at first start never reach
 the fixture. The fixture holds only what `populate.py` creates, plus what
 0.16.27 creates at setup.
-
-## Open
-
-- Whether importing a 0.16 store should disable the leftover web interface
-  application (keeping the record, so the operator can switch it back on),
-  rather than serving upstream's interface at `/admin`.

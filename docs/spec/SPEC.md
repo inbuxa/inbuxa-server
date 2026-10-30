@@ -492,8 +492,10 @@ that downloads a release of `stalwartlabs/webui` from GitHub. The fork:
 Done 2026-09-18. A first boot of the debug build answered 404 on `/admin` and
 `/account` in bootstrap mode and after setup, held no web application and no
 OAuth client, and logged no download. Setup worked over JMAP. An install
-upgraded from Stalwart keeps any web application it has, and contract C-6
-still registers its OAuth client.
+upgraded from Stalwart keeps its web application records, and contract C-6
+still registers its OAuth client. Upstream's own web interface is switched
+off the first time inbuxa opens the store, with its record kept, so the
+operator can switch it back on (`docs/spec/import-0.16.md`).
 
 Where each of the web interface's jobs goes:
 

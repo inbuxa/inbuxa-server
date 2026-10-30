@@ -11,7 +11,8 @@
 # what 0.16.27 served (expected.json, less known-differences.txt). Then it
 # checks what happens after the move: mail delivered through the imported
 # Sieve filter, search over imported mail once the reindex has run (up to
-# five minutes), and re-saving a filter that uses a pre-rename extension name.
+# five minutes), re-saving a filter that uses a pre-rename extension name, and
+# the 0.16 web interface switched off with its record kept.
 # Run it on every release candidate; see docs/spec/import-0.16.md.
 #
 # Needs docker, python3, loopback ports 18091 and 18025, and DNS (delivery
@@ -30,8 +31,8 @@ echo '{"@type":"RocksDb","path":"/var/lib/inbuxa/"}' > "$WORK/etc/config.json" &
 docker run --rm -v "$WORK/etc:/etc/inbuxa" -v "$WORK/data:/var/lib/inbuxa" -v "$FIXTURE/export:/import:ro" \
   $IMAGE --config /etc/inbuxa/config.json --import /import | tail -1
 # Basic auth on JMAP is refused by default (contract C-23); the check signs in
-# with the fixture's passwords. GitHub stays unreachable, so the 0.16 web
-# interface the store still lists is never fetched.
+# with the fixture's passwords. GitHub stays unreachable, so an image from
+# before the 0.16 web interface was switched off on import never fetches it.
 docker run -d --name $NAME -e INBUXA_HTTP_BASIC_AUTH=all --add-host github.com:127.0.0.1 \
   -p 127.0.0.1:18091:8080 -p 127.0.0.1:18025:25 \
   -v "$WORK/etc:/etc/inbuxa" -v "$WORK/data:/var/lib/inbuxa" $IMAGE >/dev/null
