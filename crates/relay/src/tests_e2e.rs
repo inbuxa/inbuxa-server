@@ -589,6 +589,10 @@ async fn relay_end_to_end() {
     let got = ws.ok("Inbound/get", json!({ "ids": [live_id] })).await;
     assert_eq!(got["list"][0]["state"], "pending");
     ws.ok("Inbound/claim", json!({})).await;
+    // Claimed, it still waits for its verdict
+    let got = ws.ok("Inbound/get", json!({ "ids": [live_id] })).await;
+    assert_eq!(got["list"][0]["state"], "pending");
+    assert!(got["list"][0]["claimedUntil"].is_string());
     let verdict = ws
         .ok(
             "Inbound/set",

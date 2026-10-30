@@ -61,11 +61,13 @@ struct Entry {
 }
 
 impl Entry {
+    /// A message waiting for a verdict is pending even while leased: the
+    /// downstream has to know to answer it.
     fn state(&self, now: u64) -> InboundState {
-        if self.lease.as_ref().is_some_and(|l| l.until > now) {
-            InboundState::Claimed
-        } else if self.waiter.is_some() {
+        if self.waiter.is_some() {
             InboundState::Pending
+        } else if self.lease.as_ref().is_some_and(|l| l.until > now) {
+            InboundState::Claimed
         } else {
             InboundState::Held
         }
@@ -267,13 +269,15 @@ impl Spool {
     /// The JMAP object for one message.
     pub fn get(&self, id: &str, now: u64) -> Option<Inbound> {
         let e = self.entries.get(id)?;
-        let state = e.state(now);
         Some(Inbound {
             id: e.meta.id.clone(),
             received_at: time::utc_date(e.meta.received_at),
-            state,
-            claimed_until: (state == InboundState::Claimed)
-                .then(|| time::utc_date(e.lease.as_ref().map_or(0, |l| l.until))),
+            state: e.state(now),
+            claimed_until: e
+                .lease
+                .as_ref()
+                .filter(|l| l.until > now)
+                .map(|l| time::utc_date(l.until)),
             envelope: e.meta.envelope.clone(),
             session: e.meta.session.clone(),
             size: e.meta.size,

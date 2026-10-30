@@ -9,7 +9,9 @@
 //! the settings and recipient set a relay is sent, and each node's view of
 //! each relay's link, under `E` `s` + relay id + node id.
 
-use super::{DownstreamKeys, FEATURE, Json, KIND_STATUS, Relay, get_versioned, replace};
+use super::{
+    DownstreamKeys, FEATURE, Json, KIND_INGESTED, KIND_STATUS, Relay, get_versioned, replace,
+};
 use inbuxa_relay_proto::{
     pin::{Pin, pins_match},
     recipient::{self, RecipientDomain, RecipientHash},
@@ -317,6 +319,101 @@ pub(super) fn clear_statuses(batch: &mut BatchBuilder, relay_id: u32, nodes: &[N
     for link in nodes {
         batch.clear(status_class(relay_id, link.node_id));
     }
+}
+
+// ---- Messages taken ---------------------------------------------------------
+
+/// The longest `Inbound` id kept: the relay's are 25 characters.
+pub const INBOUND_ID_MAX: usize = 64;
+
+/// Whether `id` can be an `Inbound` id: never anything but letters and
+/// digits.
+pub fn is_inbound_id(id: &str) -> bool {
+    !id.is_empty() && id.len() <= INBOUND_ID_MAX && id.bytes().all(|b| b.is_ascii_alphanumeric())
+}
+
+/// A relay's message, taken at `at`.
+#[derive(Debug, Clone, SerdeSerialize, SerdeDeserialize)]
+struct Taken {
+    id: String,
+    at: u64,
+}
+
+fn ingested_class(relay_id: u32, inbound_id: &[u8]) -> ValueClass {
+    let mut key = Vec::with_capacity(6 + inbound_id.len());
+    key.push(FEATURE);
+    key.push(KIND_INGESTED);
+    key.extend_from_slice(&relay_id.to_be_bytes());
+    key.extend_from_slice(inbound_id);
+    ValueClass::Any(AnyClass {
+        subspace: SUBSPACE_INBUXA,
+        key,
+    })
+}
+
+/// RL-16: whether a relay's message was taken already.
+pub async fn was_ingested(data: &Store, relay_id: u32, inbound_id: &str) -> trc::Result<bool> {
+    data.get_value::<Json<Taken>>(ValueKey::from(ingested_class(
+        relay_id,
+        inbound_id.as_bytes(),
+    )))
+    .await
+    .caused_by(trc::location!())
+    .map(|value| value.is_some())
+}
+
+/// RL-16: records a relay's message as taken, before the relay is told so.
+pub async fn record_ingested(
+    data: &Store,
+    relay_id: u32,
+    inbound_id: &str,
+    now: u64,
+) -> trc::Result<()> {
+    let taken = Taken {
+        id: inbound_id.to_string(),
+        at: now,
+    };
+    let mut batch = BatchBuilder::new();
+    batch.set(
+        ingested_class(relay_id, inbound_id.as_bytes()),
+        Json(&taken).serialize()?,
+    );
+    data.write(batch.build_all())
+        .await
+        .caused_by(trc::location!())?;
+    Ok(())
+}
+
+/// Forgets the messages from a relay taken before `before`: RL-16 keeps
+/// them for `heldMaxAge` and a day. How many went.
+pub async fn forget_ingested(data: &Store, relay_id: u32, before: u64) -> trc::Result<usize> {
+    let mut old = Vec::new();
+    data.iterate(
+        IterateParams::new(
+            ValueKey::from(ingested_class(relay_id, &[])),
+            ValueKey::from(ingested_class(relay_id, &[u8::MAX; INBOUND_ID_MAX + 1])),
+        ),
+        |_, value| {
+            if let Ok(Json(taken)) = Json::<Taken>::deserialize(value)
+                && taken.at < before
+            {
+                old.push(taken.id);
+            }
+            Ok(true)
+        },
+    )
+    .await
+    .caused_by(trc::location!())?;
+    for chunk in old.chunks(500) {
+        let mut batch = BatchBuilder::new();
+        for id in chunk {
+            batch.clear(ingested_class(relay_id, id.as_bytes()));
+        }
+        data.write(batch.build_all())
+            .await
+            .caused_by(trc::location!())?;
+    }
+    Ok(old.len())
 }
 
 #[cfg(test)]

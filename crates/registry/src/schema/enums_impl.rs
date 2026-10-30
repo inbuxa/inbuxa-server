@@ -3775,6 +3775,7 @@ impl EnumImpl for ExpressionVariable {
             b"url_original" => ExpressionVariable::UrlOriginal,
             b"value" => ExpressionVariable::Value,
             b"value_lower" => ExpressionVariable::ValueLower,
+            b"relay" => ExpressionVariable::Relay,
         }
         .copied()
     }
@@ -3873,6 +3874,7 @@ impl EnumImpl for ExpressionVariable {
             ExpressionVariable::UrlOriginal => "url_original",
             ExpressionVariable::Value => "value",
             ExpressionVariable::ValueLower => "value_lower",
+            ExpressionVariable::Relay => "relay",
         }
     }
 
@@ -3974,11 +3976,12 @@ impl EnumImpl for ExpressionVariable {
             89 => Some(ExpressionVariable::UrlOriginal),
             90 => Some(ExpressionVariable::Value),
             91 => Some(ExpressionVariable::ValueLower),
+            92 => Some(ExpressionVariable::Relay),
             _ => None,
         }
     }
 
-    const COUNT: usize = 92;
+    const COUNT: usize = 93;
 }
 
 impl serde::Serialize for ExpressionVariable {

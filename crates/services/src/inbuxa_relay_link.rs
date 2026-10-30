@@ -14,10 +14,19 @@
 //! relay's settings and recipient set the same as this server's: in full
 //! when the link comes up, then as changes, every few seconds.
 //!
-//! Push is asked for `Relay` only. Asking for `Inbound` would put the relay
-//! in live mode, which waits for verdicts this node doesn't give yet.
+//! Push is asked for `Relay` and `Inbound`, which puts the relay in live
+//! mode (RL-12). Every message the relay takes is claimed, unsealed, and
+//! judged by this server's own inbound pipeline with the relay's session
+//! (RL-23): a live one gets this server's verdict before the sender is
+//! answered, a held one is delivered, or reported to a sender who passed
+//! SPF or DMARC (RL-17, RL-18). A message taken is recorded before the
+//! relay is told, so one offered again isn't delivered twice (RL-16).
 
-use common::{BuildServer, Inner, Server};
+use common::{
+    BuildServer, Inner, Server,
+    config::server::{DEFAULT_TLS_TIMEOUT, ServerProtocol},
+    network::{ServerInstance, TcpAcceptor, limiter::ConcurrencyLimiter},
+};
 use futures::{SinkExt, StreamExt};
 use http_body_util::{BodyExt, Full};
 use hyper::body::Bytes;
@@ -28,7 +37,8 @@ use inbuxa_features::{
         self as relays, DownstreamKeys, JoinState, Relay,
         link::{
             JoinRecorded, LinkState, LocalDomain, NODE_CERT_RENEW_AFTER, NodeCertificate, NodeLink,
-            RecipientPlan, issue_node_certificate, pushed_settings, record_join, set_status,
+            RecipientPlan, forget_ingested, is_inbound_id, issue_node_certificate, pushed_settings,
+            record_ingested, record_join, set_status, was_ingested,
         },
     },
 };
@@ -37,8 +47,11 @@ use inbuxa_relay_proto::{
     jmap::{ClientFrame, Invocation, Request, ServerFrame, Session, method},
     pin::{Pin, pins_match, spki_pin},
     recipient::{RecipientDomain, RecipientHash},
-    token,
-    types::{Capability, RELAY_SINGLETON, RelaySettings, RelayStatus},
+    seal, token,
+    types::{
+        Address, Capability, Inbound, InboundState, RELAY_SINGLETON, RelaySettings, RelayStatus,
+        Reply, Verdict,
+    },
 };
 use registry::schema::{
     prelude::ObjectType,
@@ -50,16 +63,25 @@ use rustls::{
 };
 use rustls_pki_types::{CertificateDer, PrivateKeyDer, ServerName, UnixTime};
 use serde_json::{Value, json};
+use smtp::{
+    core::Relayed,
+    inbound::relayed::{RelayedMessage, RelayedOutcome, ingest_relayed},
+};
 use std::{
-    collections::{BTreeMap, BTreeSet, HashMap},
+    collections::{BTreeMap, BTreeSet, HashMap, HashSet},
     sync::{Arc, Mutex},
     time::Duration,
 };
 use store::{registry::RegistryQuery, write::now};
-use tokio::{net::TcpStream, sync::watch, task::JoinHandle};
+use tokio::{
+    net::TcpStream,
+    sync::{mpsc, watch},
+    task::JoinHandle,
+};
 use tokio_rustls::{TlsConnector, client::TlsStream};
 use tokio_tungstenite::{WebSocketStream, tungstenite::Message};
 use types::id::Id;
+use utils::snowflake::SnowflakeIdGenerator;
 
 /// How often the list of relays is read again.
 const SCAN: Duration = Duration::from_secs(10);
@@ -79,15 +101,39 @@ const MAX_DELTA: usize = 2_000;
 const ACCOUNT_ID: &str = "relay";
 /// Any name: the relay is known by its key, never its name (RL-6).
 const SERVER_NAME: &str = "relay.invalid";
+/// Messages one link takes at once.
+const TAKE_MAX: usize = 8;
+/// How long a claimed message is this node's (RL-15).
+const LEASE_SECONDS: u64 = 300;
+/// How often messages taken long ago are forgotten (RL-16).
+const FORGET_EVERY: u64 = 3_600;
 
 pub fn spawn_relay_links(inner: Arc<Inner>) {
     tokio::spawn(async move {
         let certs = Arc::new(NodeCertificates::default());
+        // Relayed mail's sessions: port 25's, but no listener's
+        let instance = Arc::new(ServerInstance {
+            id: "relay".to_string(),
+            protocol: ServerProtocol::Smtp,
+            acceptor: TcpAcceptor::Plain,
+            limiter: ConcurrencyLimiter::new(100),
+            tls_timeout: DEFAULT_TLS_TIMEOUT,
+            shutdown_rx: watch::channel(false).1,
+            proxy_networks: vec![],
+            span_id_gen: Arc::new(SnowflakeIdGenerator::new()),
+        });
         let mut links: HashMap<u32, Running> = HashMap::new();
+        let mut forgot_at = 0;
         loop {
             let server = inner.build_server();
-            if let Err(err) = reconcile(&inner, &server, &certs, &mut links).await {
+            if let Err(err) = reconcile(&inner, &server, &certs, &instance, &mut links).await {
                 trc::error!(err.details("Failed to start relay links"));
+            }
+            if now() >= forgot_at + FORGET_EVERY {
+                forgot_at = now();
+                if let Err(err) = forget_taken(&server).await {
+                    trc::error!(err.details("Failed to forget relayed messages taken"));
+                }
             }
             let woken = tokio::select! {
                 _ = tokio::time::sleep(SCAN) => false,
@@ -115,6 +161,7 @@ async fn reconcile(
     inner: &Arc<Inner>,
     server: &Server,
     certs: &Arc<NodeCertificates>,
+    instance: &Arc<ServerInstance>,
     links: &mut HashMap<u32, Running>,
 ) -> trc::Result<()> {
     let data = server.store();
@@ -145,7 +192,13 @@ async fn reconcile(
             continue;
         }
         let (wake, woken) = watch::channel(0);
-        let handle = tokio::spawn(run_link(inner.clone(), id, certs.clone(), woken));
+        let handle = tokio::spawn(run_link(
+            inner.clone(),
+            id,
+            certs.clone(),
+            instance.clone(),
+            woken,
+        ));
         links.insert(
             id,
             Running {
@@ -154,6 +207,16 @@ async fn reconcile(
                 wake,
             },
         );
+    }
+    Ok(())
+}
+
+/// RL-16: a relay's messages are remembered for its `heldMaxAge` and a day.
+async fn forget_taken(server: &Server) -> trc::Result<()> {
+    let data = server.store();
+    for relay in relays::all(data).await? {
+        let keep = (u64::from(relay.settings.held_max_age) + 1) * 86_400;
+        forget_ingested(data, relay.id, now().saturating_sub(keep)).await?;
     }
     Ok(())
 }
@@ -210,6 +273,7 @@ async fn run_link(
     inner: Arc<Inner>,
     relay_id: u32,
     certs: Arc<NodeCertificates>,
+    instance: Arc<ServerInstance>,
     mut woken: watch::Receiver<u64>,
 ) {
     let mut backoff = BACKOFF_MIN;
@@ -247,7 +311,16 @@ async fn run_link(
                     "The join token ran out before the relay joined. Start a new join.",
                 )),
                 JoinState::Joined => {
-                    session(&server, &relay, &keys, &cert, &mut woken, &mut status).await
+                    session(
+                        &server,
+                        &instance,
+                        &relay,
+                        &keys,
+                        &cert,
+                        &mut woken,
+                        &mut status,
+                    )
+                    .await
                 }
             },
             Err(err) => Err(err),
@@ -651,11 +724,12 @@ async fn join(data: &store::Store, relay: &Relay, cert: &NodeCertificate) -> Res
 
 // ---- The linked session ---------------------------------------------------
 
-/// A WebSocket to the relay, with the `Relay` changes it pushed meanwhile.
+/// A WebSocket to the relay, with the changes it pushed meanwhile.
 struct Ws {
     stream: WebSocketStream<TlsStream<TcpStream>>,
     next_id: u64,
     relay_changed: bool,
+    inbound_changed: bool,
 }
 
 impl Ws {
@@ -685,6 +759,7 @@ impl Ws {
             stream,
             next_id: 0,
             relay_changed: false,
+            inbound_changed: false,
         })
     }
 
@@ -716,10 +791,11 @@ impl Ws {
     }
 
     fn note(&mut self, frame: &ServerFrame) {
-        if let ServerFrame::StateChange { changed, .. } = frame
-            && changed.values().any(|types| types.contains_key("Relay"))
-        {
-            self.relay_changed = true;
+        if let ServerFrame::StateChange { changed, .. } = frame {
+            for types in changed.values() {
+                self.relay_changed |= types.contains_key("Relay");
+                self.inbound_changed |= types.contains_key("Inbound");
+            }
         }
     }
 
@@ -801,6 +877,7 @@ struct Sent {
 /// turned off, moved or joined again, or this node stops.
 async fn session(
     server: &Server,
+    instance: &Arc<ServerInstance>,
     relay: &Relay,
     keys: &DownstreamKeys,
     cert: &NodeCertificate,
@@ -809,11 +886,12 @@ async fn session(
 ) -> Result<(), LinkError> {
     let data = server.store();
     let pin = relay.join.relay_pin;
-    let dialer = Dialer::new(relay, cert, pin)?;
+    let dialer = Arc::new(Dialer::new(relay, cert, pin)?);
     dialer.check_session().await?;
     let mut ws = Ws::open(&dialer).await?;
+    // Inbound too: live mode (RL-12)
     ws.send(&ClientFrame::WebSocketPushEnable {
-        data_types: Some(vec!["Relay".into()]),
+        data_types: Some(vec!["Relay".into(), "Inbound".into()]),
         push_state: None,
     })
     .await?;
@@ -822,6 +900,19 @@ async fn session(
     sync(server, &relay, keys, &dialer, &mut ws, &mut sent).await?;
     status.set(data, relay.id, LinkState::Linked, None).await;
     refresh_status(&mut ws, data, &relay, &sent, status).await?;
+
+    let (answers_tx, mut answers) = mpsc::unbounded_channel();
+    let mut taker = Taker {
+        server: server.clone(),
+        instance: instance.clone(),
+        dialer: dialer.clone(),
+        relay_id: relay.id,
+        relay_name: relay.name.clone(),
+        secret: keys.sealing_secret,
+        taking: HashSet::new(),
+        answers: answers_tx,
+    };
+    taker.take(&mut ws).await?;
 
     let mut tick = tokio::time::interval(SYNC);
     tick.reset();
@@ -833,6 +924,14 @@ async fn session(
                 if ws.relay_changed {
                     refresh_status(&mut ws, data, &relay, &sent, status).await?;
                 }
+                if ws.inbound_changed {
+                    taker.take(&mut ws).await?;
+                }
+                continue;
+            }
+            Some(answer) = answers.recv() => {
+                taker.answer(&mut ws, answer).await?;
+                taker.take(&mut ws).await?;
                 continue;
             }
             _ = tick.tick() => {}
@@ -856,6 +955,300 @@ async fn session(
         }
         sync(server, &relay, keys, &dialer, &mut ws, &mut sent).await?;
         refresh_status(&mut ws, data, &relay, &sent, status).await?;
+        taker.relay_name = relay.name.clone();
+        taker.take(&mut ws).await?;
+    }
+}
+
+// ---- Inbound mail -----------------------------------------------------------
+
+/// Takes the relay's messages for this node: a few at a time, each judged in
+/// its own task, each answered on the link when judged.
+struct Taker {
+    server: Server,
+    instance: Arc<ServerInstance>,
+    dialer: Arc<Dialer>,
+    relay_id: u32,
+    relay_name: String,
+    secret: [u8; 32],
+    /// Claimed and still being judged.
+    taking: HashSet<String>,
+    answers: mpsc::UnboundedSender<Answer>,
+}
+
+/// What a judged message's answer to the relay is.
+struct Answer {
+    id: String,
+    action: Action,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum Action {
+    /// Taken: the relay deletes it, and a live sender hears 250.
+    Destroy,
+    /// A live message refused: the relay gives the sender this reply.
+    Verdict(Verdict),
+    /// Not now: the lease runs out and it is offered again (RL-16).
+    Leave,
+}
+
+impl Taker {
+    /// Claims what the relay holds, up to [`TAKE_MAX`] at once.
+    async fn take(&mut self, ws: &mut Ws) -> Result<(), LinkError> {
+        ws.inbound_changed = false;
+        let room = TAKE_MAX.saturating_sub(self.taking.len());
+        if room == 0 {
+            return Ok(());
+        }
+        let claimed = ws
+            .ok(
+                method::INBOUND_CLAIM,
+                json!({"limit": room, "leaseSeconds": LEASE_SECONDS}),
+            )
+            .await?;
+        let ids: Vec<&str> = claimed["ids"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(Value::as_str)
+            .collect();
+        if ids.is_empty() {
+            return Ok(());
+        }
+        let got = ws.ok(method::INBOUND_GET, json!({"ids": ids})).await?;
+        for inbound in got["list"].as_array().into_iter().flatten() {
+            let Ok(inbound) = serde_json::from_value::<Inbound>(inbound.clone()) else {
+                continue;
+            };
+            if !is_inbound_id(&inbound.id)
+                || !is_inbound_id(&inbound.blob_id)
+                || !self.taking.insert(inbound.id.clone())
+            {
+                continue;
+            }
+            let job = Job {
+                server: self.server.clone(),
+                instance: self.instance.clone(),
+                dialer: self.dialer.clone(),
+                relay_id: self.relay_id,
+                relay_name: self.relay_name.clone(),
+                secret: self.secret,
+            };
+            let answers = self.answers.clone();
+            tokio::spawn(async move {
+                let id = inbound.id.clone();
+                let action = job.judge(inbound).await;
+                let _ = answers.send(Answer { id, action });
+            });
+        }
+        Ok(())
+    }
+
+    /// Tells the relay what became of one message.
+    async fn answer(&mut self, ws: &mut Ws, answer: Answer) -> Result<(), LinkError> {
+        self.taking.remove(&answer.id);
+        match answer.action {
+            Action::Destroy => {
+                ws.ok(method::INBOUND_SET, json!({"destroy": [answer.id]}))
+                    .await?;
+            }
+            Action::Verdict(verdict) => {
+                // Refused as `notUpdated` if it stopped waiting meanwhile:
+                // then it is held, comes back when the lease runs out, and
+                // is judged as held
+                ws.ok(
+                    method::INBOUND_SET,
+                    json!({"update": {answer.id: {"verdict": verdict}}}),
+                )
+                .await?;
+            }
+            Action::Leave => {}
+        }
+        Ok(())
+    }
+}
+
+/// Everything one message's judging needs, apart from the link.
+struct Job {
+    server: Server,
+    instance: Arc<ServerInstance>,
+    dialer: Arc<Dialer>,
+    relay_id: u32,
+    relay_name: String,
+    secret: [u8; 32],
+}
+
+impl Job {
+    async fn judge(self, inbound: Inbound) -> Action {
+        let data = self.server.store().clone();
+        // RL-16: offered again after this server took it
+        match was_ingested(&data, self.relay_id, &inbound.id).await {
+            Ok(true) => return Action::Destroy,
+            Ok(false) => {}
+            Err(err) => {
+                trc::error!(err.details("Failed to read the relayed messages taken"));
+                return Action::Leave;
+            }
+        }
+        let live = inbound.state == InboundState::Pending;
+
+        let message = match self.fetch(&inbound).await {
+            Ok(message) => message,
+            Err(reason) => {
+                trc::error!(
+                    trc::EventType::Server(trc::ServerEvent::ThreadError)
+                        .reason(reason)
+                        .details("Failed to take a relayed message")
+                        .id(inbound.id.clone())
+                );
+                return Action::Leave;
+            }
+        };
+
+        let input = relayed_message(&self.relay_name, &inbound, !live, message);
+        let outcome = ingest_relayed(self.server.clone(), self.instance.clone(), input).await;
+        let action = action_for(&outcome, live);
+        if action == Action::Destroy
+            && let Err(err) = record_ingested(&data, self.relay_id, &inbound.id, now()).await
+        {
+            trc::error!(err.details("Failed to record a relayed message as taken"));
+        }
+        action
+    }
+
+    /// The message, downloaded and unsealed (RL-21).
+    async fn fetch(&self, inbound: &Inbound) -> Result<Vec<u8>, String> {
+        let (status, sealed) = self
+            .dialer
+            .http(
+                "GET",
+                &format!("/jmap/download/relay/{}/msg", inbound.blob_id),
+                "application/octet-stream",
+                Vec::new(),
+            )
+            .await
+            .map_err(|err| err.message)?;
+        if status != 200 {
+            return Err(format!(
+                "The relay answered {status} for a held message's download."
+            ));
+        }
+        seal::open(&self.secret, inbound.id.as_bytes(), &sealed)
+            .map_err(|err| format!("A relayed message didn't unseal: {err}"))
+    }
+}
+
+/// The relay's session, as this server's pipeline takes it (RL-23).
+fn relayed_message(relay: &str, inbound: &Inbound, held: bool, message: Vec<u8>) -> RelayedMessage {
+    let address = |address: &Address| {
+        (
+            address.email.clone(),
+            address
+                .parameters
+                .iter()
+                .flatten()
+                .map(|(key, value)| (key.clone(), value.clone()))
+                .collect(),
+        )
+    };
+    let session = &inbound.session;
+    RelayedMessage {
+        relayed: Relayed {
+            relay: relay.to_string(),
+            held,
+            tls: session
+                .tls
+                .as_ref()
+                .map(|tls| (tls.version.clone(), tls.cipher.clone())),
+            dmarc_pass: false,
+        },
+        local_ip: session.local_ip,
+        remote_ip: session.remote_ip,
+        remote_port: session.remote_port,
+        helo: session.helo.clone(),
+        mail_from: address(&inbound.envelope.mail_from),
+        rcpt_to: inbound.envelope.rcpt_to.iter().map(address).collect(),
+        message,
+    }
+}
+
+/// What the relay is told, from what this server answered.
+fn action_for(outcome: &RelayedOutcome, live: bool) -> Action {
+    match outcome {
+        RelayedOutcome::Accepted { .. } => Action::Destroy,
+        RelayedOutcome::Refused { reply, .. } if live => Action::Verdict(verdict_for(reply)),
+        // Held and refused for good: reported to the sender if it may be
+        // (RL-18), and gone
+        RelayedOutcome::Refused { reply, .. } if reply.starts_with('5') => Action::Destroy,
+        // Held and refused for now: tried again after the lease
+        RelayedOutcome::Refused { .. } => Action::Leave,
+    }
+}
+
+/// A live message's verdict: this server's reply, as the relay gives it.
+fn verdict_for(reply: &str) -> Verdict {
+    let mut parts = reply.splitn(3, ' ');
+    let code = parts.next().and_then(|code| code.parse::<u16>().ok());
+    let class = code.map_or(4, |code| code / 100);
+    let (enhanced, text) = match parts.next() {
+        Some(esc)
+            if esc.split('.').count() == 3
+                && esc.split('.').all(|p| p.parse::<u16>().is_ok())
+                && esc.starts_with(char::from(b'0' + class as u8)) =>
+        {
+            (
+                esc.to_string(),
+                parts.next().unwrap_or_default().to_string(),
+            )
+        }
+        Some(word) => (
+            format!("{class}.0.0"),
+            [word, parts.next().unwrap_or_default()].join(" "),
+        ),
+        None => (format!("{class}.0.0"), String::new()),
+    };
+    // Not a reply at all: its words, as a temporary failure
+    let text = if code.is_none() {
+        reply.to_string()
+    } else {
+        text
+    };
+    let text: String = text
+        .trim()
+        .chars()
+        .filter(|c| !c.is_control())
+        .take(400)
+        .collect();
+    let text = if text.is_empty() {
+        "Refused".to_string()
+    } else {
+        text
+    };
+    let verdict = match (code, class) {
+        (Some(code), 5) => Verdict::Reject(Reply {
+            code,
+            enhanced,
+            text,
+        }),
+        (Some(code), 4) => Verdict::Tempfail(Reply {
+            code,
+            enhanced,
+            text,
+        }),
+        _ => Verdict::Tempfail(Reply {
+            code: 451,
+            enhanced: "4.3.0".into(),
+            text,
+        }),
+    };
+    if verdict.is_valid() {
+        verdict
+    } else {
+        Verdict::Tempfail(Reply {
+            code: 451,
+            enhanced: "4.3.0".into(),
+            text: "Try again later".into(),
+        })
     }
 }
 
@@ -1059,4 +1452,71 @@ async fn local_recipients(server: &Server) -> trc::Result<(Vec<LocalDomain>, Vec
         }
     }
     Ok((local, addresses))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn reply(code: u16, enhanced: &str, text: &str) -> Reply {
+        Reply {
+            code,
+            enhanced: enhanced.into(),
+            text: text.into(),
+        }
+    }
+
+    #[test]
+    fn verdicts() {
+        assert_eq!(
+            verdict_for("550 5.7.1 Message rejected due to excessive spam score."),
+            Verdict::Reject(reply(
+                550,
+                "5.7.1",
+                "Message rejected due to excessive spam score."
+            ))
+        );
+        assert_eq!(
+            verdict_for("450 4.4.6 Too many Received headers."),
+            Verdict::Tempfail(reply(450, "4.4.6", "Too many Received headers."))
+        );
+        // No enhanced code, or one of the wrong class: the class's own
+        assert_eq!(
+            verdict_for("554 no thanks"),
+            Verdict::Reject(reply(554, "5.0.0", "no thanks"))
+        );
+        assert_eq!(
+            verdict_for("451 5.7.1 odd"),
+            Verdict::Tempfail(reply(451, "4.0.0", "5.7.1 odd"))
+        );
+        // Anything else is a temporary failure, never a 250
+        assert_eq!(
+            verdict_for("garbage"),
+            Verdict::Tempfail(reply(451, "4.3.0", "garbage"))
+        );
+        assert!(verdict_for("550 5.1.1").is_valid());
+    }
+
+    #[test]
+    fn actions() {
+        let accepted = RelayedOutcome::Accepted {
+            refused: vec![("joe@example.com".into(), "550 5.1.1 No".into())],
+        };
+        let refused = |reply: &str| RelayedOutcome::Refused {
+            reply: reply.into(),
+            refused: vec![],
+        };
+        assert_eq!(action_for(&accepted, true), Action::Destroy);
+        assert_eq!(action_for(&accepted, false), Action::Destroy);
+        assert!(matches!(
+            action_for(&refused("550 5.7.1 Spam"), true),
+            Action::Verdict(Verdict::Reject(_))
+        ));
+        // Held: refused for good is reported and gone, for now is retried
+        assert_eq!(action_for(&refused("550 5.1.1 No"), false), Action::Destroy);
+        assert_eq!(
+            action_for(&refused("451 4.3.0 Later"), false),
+            Action::Leave
+        );
+    }
 }

@@ -2,6 +2,8 @@
  * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
+ *
+ * Modified by Coffey Labs in 2026 for INBUXA.
  */
 
 use crate::core::Session;
@@ -70,7 +72,7 @@ impl<T: SessionStream> Session<T> {
             authenticated_as: self.data.authenticated_as.as_ref().map(|a| a.name()),
             asn: self.data.asn_geo_data.asn.as_ref().map(|a| a.id),
             country: self.data.asn_geo_data.country.as_ref().map(|c| c.as_str()),
-            is_tls: self.stream.is_tls(),
+            is_tls: self.is_tls(),
             env_from: self
                 .data
                 .mail_from

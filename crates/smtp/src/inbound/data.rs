@@ -428,6 +428,10 @@ impl<T: SessionStream> Session<T> {
 
                 let dmarc_result = dmarc_output.result();
                 let pass = dmarc_result == DmarcResult::Pass;
+                // inbuxa: RL-18, a held message's failures bounce only then
+                if let Some(relayed) = self.data.relayed.as_mut() {
+                    relayed.dmarc_pass = pass;
+                }
                 let strict = dmarc.is_strict();
                 let is_temp_fail = matches!(dmarc_result, DmarcResult::TempError(_));
                 let rejected = strict
@@ -603,6 +607,25 @@ impl<T: SessionStream> Session<T> {
                         recipient.flags = (recipient.flags & !RCPT_SPAM_MASK)
                             | rcpt_spam_flag(scores.spam_percentage(user_score));
                     }
+                }
+                // inbuxa: RL-17: held mail was already accepted, so it is
+                // never dropped or refused for spam: it goes to Junk
+                SpamFilterAction::Discard | SpamFilterAction::Reject
+                    if self.data.relayed.as_ref().is_some_and(|r| r.held) =>
+                {
+                    trc::event!(
+                        Spam(SpamEvent::Classify),
+                        SpanId = self.data.session_id,
+                        QueueId = message_id,
+                        Result = "junk",
+                        Reason = "Held by a relay, over the reject threshold: filed as Junk.",
+                    );
+                    headers.extend_from_slice(b"X-Inbuxa-Relay: held, over reject threshold\r\n");
+                    for recipient in self.data.rcpt_to.iter_mut() {
+                        recipient.flags = (recipient.flags & !RCPT_SPAM_MASK) | rcpt_spam_flag(100);
+                    }
+                    let scores = &self.server.core.spam.scores;
+                    spam_result = Some((scores.reject_threshold.max(scores.spam_threshold), 100));
                 }
                 SpamFilterAction::Discard => {
                     trc::event!(
@@ -1184,8 +1207,13 @@ impl<T: SessionStream> Session<T> {
             headers.extend_from_slice(b")");
         }
         headers.extend_from_slice(b")\r\n\t");
-        if self.stream.is_tls() {
-            let (version, cipher) = self.stream.tls_version_and_cipher();
+        // inbuxa: RL-23: a relayed message's TLS is the relay's with the sender
+        let tls = match self.data.relayed.as_ref().and_then(|r| r.tls.as_ref()) {
+            Some((version, cipher)) => Some((version.clone().into(), cipher.clone().into())),
+            None if self.stream.is_tls() => Some(self.stream.tls_version_and_cipher()),
+            None => None,
+        };
+        if let Some((version, cipher)) = tls {
             headers.extend_from_slice(b"(using ");
             headers.extend_from_slice(version.as_bytes());
             headers.extend_from_slice(b" with cipher ");
@@ -1195,7 +1223,7 @@ impl<T: SessionStream> Session<T> {
         headers.extend_from_slice(b"by ");
         headers.extend_from_slice(self.hostname.as_bytes());
         headers.extend_from_slice(concat!(" (", types::brand!(), " SMTP) with ").as_bytes());
-        headers.extend_from_slice(match (self.stream.is_tls(), !self.is_authenticated()) {
+        headers.extend_from_slice(match (self.is_tls(), !self.is_authenticated()) {
             (true, true) => b"ESMTPS",
             (true, false) => b"ESMTPSA",
             (false, true) => b"ESMTP",

@@ -18,6 +18,7 @@ pub mod mail;
 pub mod mailflow; // inbuxa: DLP and mail flow rules
 pub mod milter;
 pub mod rcpt;
+pub mod relayed; // inbuxa: RL-23, mail an inbuxa Relay took
 pub mod session;
 pub mod spam;
 pub mod spawn;

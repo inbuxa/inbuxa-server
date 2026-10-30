@@ -109,6 +109,23 @@ pub struct SessionData {
     // to, and recipients rules added, by rule name
     pub journal_marks: Vec<u32>,
     pub journal_added: Vec<(String, String)>,
+    // inbuxa: RL-23: a message a relay took on port 25, judged here as if
+    // this server had taken the session
+    pub relayed: Option<Relayed>,
+}
+
+/// inbuxa: RL-23: what a relay saw of the session it took a message in.
+/// Only the relay link service sets it, for a pinned relay.
+#[derive(Debug, Clone, Default)]
+pub struct Relayed {
+    /// The relay's name, for `relay` in expressions.
+    pub relay: String,
+    /// The relay already said 250 (RL-17).
+    pub held: bool,
+    /// TLS version and cipher between the sender and the relay.
+    pub tls: Option<(String, String)>,
+    /// DMARC passed, once DATA checked it (RL-18).
+    pub dmarc_pass: bool,
 }
 
 /// inbuxa: a DATA refusal by DLP rules: blocked, or a warning the sender
@@ -199,6 +216,7 @@ impl SessionData {
             journal_marks: Vec::new(),
             journal_added: Vec::new(),
             access_token: None,
+            relayed: None,
         }
     }
 }
@@ -328,6 +346,7 @@ impl SessionData {
             journal_marks: Vec::new(),
             journal_added: Vec::new(),
             access_token: None,
+            relayed: None,
         }
     }
 }

@@ -29,6 +29,12 @@ use crate::core::{Session, State};
 use super::auth::{AUTH_BEARER, SaslToken};
 
 impl<T: SessionStream> Session<T> {
+    /// inbuxa: TLS on this session, or between the sender and the relay
+    /// that took it (RL-23).
+    pub fn is_tls(&self) -> bool {
+        self.stream.is_tls() || self.data.relayed.as_ref().is_some_and(|r| r.tls.is_some())
+    }
+
     pub async fn ingest(&mut self, bytes: &[u8]) -> Result<bool, ()> {
         let mut iter = bytes.iter();
         let mut state = std::mem::replace(&mut self.state, State::None);
@@ -623,7 +629,7 @@ impl<T: SessionStream> ResolveVariable for Session<T> {
             ExpressionVariable::RemotePort => self.data.remote_port.into(),
             ExpressionVariable::LocalIp => self.data.local_ip_str.as_str().into(),
             ExpressionVariable::LocalPort => self.data.local_port.into(),
-            ExpressionVariable::IsTls => self.stream.is_tls().into(),
+            ExpressionVariable::IsTls => self.is_tls().into(),
             ExpressionVariable::Priority => self.data.priority.to_compact_string().into(),
             ExpressionVariable::Protocol => self.instance.protocol.as_str().into(),
             ExpressionVariable::Asn => self
@@ -640,6 +646,13 @@ impl<T: SessionStream> ResolveVariable for Session<T> {
                 .country
                 .as_ref()
                 .map(|c| c.as_str())
+                .unwrap_or_default()
+                .into(),
+            ExpressionVariable::Relay => self
+                .data
+                .relayed
+                .as_ref()
+                .map(|r| r.relay.as_str())
                 .unwrap_or_default()
                 .into(),
             _ => expr::Variable::default(),
