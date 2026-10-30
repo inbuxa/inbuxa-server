@@ -239,8 +239,9 @@ impl QueuedMessage {
             }
         }
         // inbuxa: with a relay's sendThrough on, every non-local recipient
-        // goes through a relay (relay spec, RL-24)
-        static THROUGH_RELAY: RoutingStrategy = RoutingStrategy::InbuxaRelay;
+        // goes through a relay, any of them unless its route names some
+        // (relay spec, RL-24)
+        static THROUGH_RELAY: RoutingStrategy = RoutingStrategy::InbuxaRelay(Vec::new());
         let senders = &server.inner.data.relay_senders;
         if let Err(err) = senders.load(server.store()).await {
             trc::error!(err.details("Failed to read the relays").span_id(span_id));
@@ -267,7 +268,11 @@ impl QueuedMessage {
                         .unwrap_or_else(|| "default".to_string()),
                     message.span_id,
                 );
-                let route = if through_relay && !matches!(route, RoutingStrategy::Local) {
+                let route = if through_relay
+                    && !matches!(
+                        route,
+                        RoutingStrategy::Local | RoutingStrategy::InbuxaRelay(_)
+                    ) {
                     &THROUGH_RELAY
                 } else {
                     route
@@ -334,9 +339,15 @@ impl QueuedMessage {
                     continue 'next_route;
                 }
                 // inbuxa: handed to an inbuxa Relay (relay spec, RL-24)
-                RoutingStrategy::InbuxaRelay => {
+                RoutingStrategy::InbuxaRelay(named) => {
                     message
-                        .hand_to_relay(&rcpt_idxs, rcpt_headers, &mut delivery_results, &server)
+                        .hand_to_relay(
+                            named,
+                            &rcpt_idxs,
+                            rcpt_headers,
+                            &mut delivery_results,
+                            &server,
+                        )
                         .await;
                     continue 'next_route;
                 }

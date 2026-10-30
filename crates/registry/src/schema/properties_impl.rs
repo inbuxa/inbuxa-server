@@ -1141,6 +1141,7 @@ impl EnumImpl for Property {
             b"introspectionUrl" => Property::IntrospectionUrl,
             b"introspectionClientId" => Property::IntrospectionClientId,
             b"introspectionClientSecret" => Property::IntrospectionClientSecret,
+            b"relays" => Property::Relays,
             b"requireClientRegistration" => Property::RequireClientRegistration,
             b"requireScopes" => Property::RequireScopes,
             b"requireTls" => Property::RequireTls,
@@ -2085,6 +2086,7 @@ impl EnumImpl for Property {
             Property::IntrospectionUrl => "introspectionUrl",
             Property::IntrospectionClientId => "introspectionClientId",
             Property::IntrospectionClientSecret => "introspectionClientSecret",
+            Property::Relays => "relays",
             Property::RequireClientRegistration => "requireClientRegistration",
             Property::RequireScopes => "requireScopes",
             Property::RequireTls => "requireTls",
@@ -3033,6 +3035,7 @@ impl EnumImpl for Property {
             936 => Some(Property::IntrospectionUrl),
             937 => Some(Property::IntrospectionClientId),
             938 => Some(Property::IntrospectionClientSecret),
+            939 => Some(Property::Relays),
             615 => Some(Property::RequireClientRegistration),
             608 => Some(Property::RequireScopes),
             525 => Some(Property::RequireTls),
@@ -3244,7 +3247,7 @@ impl EnumImpl for Property {
         }
     }
 
-    const COUNT: usize = 939;
+    const COUNT: usize = 940;
 }
 
 impl serde::Serialize for Property {

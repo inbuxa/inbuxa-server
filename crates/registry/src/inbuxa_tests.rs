@@ -9,10 +9,14 @@
 use crate::{
     pickle::{Pickle, PickledStream},
     schema::{
-        enums::OidcOpaqueTokens,
+        enums::{MtaRouteType, OidcOpaqueTokens},
         prelude::{ObjectImpl, ObjectInner, ObjectType},
-        structs::{Bootstrap, Directory, DirectoryBootstrap, OidcDirectory},
+        structs::{
+            Bootstrap, Directory, DirectoryBootstrap, MtaRoute, MtaRouteCommon,
+            MtaRouteInbuxaRelay, OidcDirectory,
+        },
     },
+    types::{EnumImpl, map::Map},
 };
 
 /// An OIDC directory as it was stored before the opaque-token fields.
@@ -107,4 +111,40 @@ fn oidc_directories_saved_before_the_opaque_token_policy_keep_userinfo() {
             ObjectInner::Bootstrap(bootstrap)
         );
     }
+}
+
+// Relay spec, RL-24: the inbuxaRelay route is a fourth route type, stored
+// after the three there were, which read as before
+#[test]
+fn inbuxa_relay_routes_are_stored_after_the_others() {
+    let route = MtaRoute::InbuxaRelay(MtaRouteInbuxaRelay {
+        relays: Map::new(vec!["east".to_string(), "west".to_string()]),
+        name: "relays".to_string(),
+        description: Some("Through the east and west relays".to_string()),
+    });
+    let bytes = route.to_pickled_vec();
+    assert_eq!(
+        read(ObjectType::MtaRoute, &bytes),
+        ObjectInner::MtaRoute(route)
+    );
+
+    let local = MtaRoute::Local(MtaRouteCommon {
+        name: "local".to_string(),
+        description: None,
+    });
+    let mut bytes = vec![0u8];
+    2u16.pickle(&mut bytes);
+    "local".to_string().pickle(&mut bytes);
+    None::<String>.pickle(&mut bytes);
+    assert_eq!(local.to_pickled_vec(), bytes);
+    assert_eq!(
+        read(ObjectType::MtaRoute, &bytes),
+        ObjectInner::MtaRoute(local)
+    );
+
+    assert_eq!(
+        MtaRouteType::parse("InbuxaRelay"),
+        Some(MtaRouteType::InbuxaRelay)
+    );
+    assert_eq!(MtaRouteType::from_id(3), Some(MtaRouteType::InbuxaRelay));
 }

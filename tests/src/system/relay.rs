@@ -26,12 +26,16 @@ use crate::utils::{
 };
 use inbuxa_relay_proto::{time, token::JoinToken};
 use mail_auth::{common::parse::TxtRecordParser, mta_sts::TlsRpt};
-use registry::schema::{
-    prelude::{ObjectType, Property},
-    structs::{
-        CertificateManagement, DkimManagement, DnsManagement, Domain, Tenant, TlsInternalReport,
-        UserRoles,
+use registry::{
+    schema::{
+        prelude::{ObjectType, Property},
+        structs::{
+            CertificateManagement, DkimManagement, DnsManagement, Domain, Expression,
+            ExpressionMatch, MtaOutboundStrategy, MtaRoute, MtaRouteInbuxaRelay, Tenant,
+            TlsInternalReport, UserRoles,
+        },
     },
+    types::map::Map,
 };
 use serde_json::{Value, json};
 use std::str::FromStr;
@@ -1021,6 +1025,108 @@ pub async fn link(test: &mut TestServer) {
         );
         tokio::time::sleep(std::time::Duration::from_millis(500)).await;
     }
+
+    // A route naming relays (RL-24): with sendThrough off, only the
+    // domains routed to it go through a relay, and only the relays named.
+    // One named relay that isn't there: the mail waits, saying so
+    call(
+        admin,
+        "inbuxa:Relay/set",
+        json!({"update": {&id: {"sendThrough": false}}}),
+    )
+    .await;
+    for (name, relay) in [("through-edge", "Edge"), ("through-nowhere", "Nowhere")] {
+        admin
+            .registry_create_object(MtaRoute::InbuxaRelay(MtaRouteInbuxaRelay {
+                relays: Map::new(vec![relay.to_string()]),
+                name: name.to_string(),
+                description: None,
+            }))
+            .await;
+    }
+    admin
+        .registry_update_setting(
+            MtaOutboundStrategy {
+                route: Expression {
+                    match_: [
+                        ExpressionMatch {
+                            if_: "is_local_domain(rcpt_domain)".into(),
+                            then: "'local'".into(),
+                        },
+                        ExpressionMatch {
+                            if_: "rcpt_domain == 'named.test'".into(),
+                            then: "'through-edge'".into(),
+                        },
+                        ExpressionMatch {
+                            if_: "rcpt_domain == 'elsewhere.test'".into(),
+                            then: "'through-nowhere'".into(),
+                        },
+                    ]
+                    .into_iter()
+                    .collect(),
+                    else_: "'mx'".into(),
+                },
+                ..Default::default()
+            },
+            &[Property::Route],
+        )
+        .await;
+    admin.reload_settings().await;
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    while test.server.inner.data.relay_senders.sending() {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "sendThrough off reached the queue"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    }
+    submit(
+        &jane,
+        &identity,
+        &drafts,
+        &["bob@named.test"],
+        "Through the named relay",
+    )
+    .await;
+    submit(
+        &jane,
+        &identity,
+        &drafts,
+        &["bob@elsewhere.test"],
+        "Through no relay",
+    )
+    .await;
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    loop {
+        let (_, queued) = call(admin, "x:QueuedMessage/get", json!({"ids": null})).await;
+        let text = queued.to_string();
+        let sent = mx_seen
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|m| m.contains("Subject: Through the named relay"));
+        if sent
+            && !text.contains("bob@named.test")
+            && text.contains("bob@elsewhere.test")
+            && text.contains("No relay named Nowhere")
+        {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "sent through Edge: {sent}; queued: {queued}"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    }
+    assert!(
+        !mx_seen
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|m| m.contains("Subject: Through no relay")),
+        "sent through a relay the route doesn't name"
+    );
+
     tokio::time::sleep(std::time::Duration::from_secs(2)).await;
     assert_eq!(
         subjects(&jane)

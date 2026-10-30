@@ -1448,6 +1448,8 @@ pub enum MtaRouteType {
     Mx = 0,
     Relay = 1,
     Local = 2,
+    // inbuxa: relay spec, RL-24
+    InbuxaRelay = 3,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]

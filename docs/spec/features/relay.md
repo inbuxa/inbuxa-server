@@ -552,9 +552,15 @@ allowing the edge's IP and disabling SPF, DMARC and reverse IP for it.
 
 ### Outbound routing
 
-- **RL-24.** A new route type, `inbuxaRelay`, alongside the existing route
-  types, names one or more `inbuxa:Relay`s. With `sendThrough` on, it is the
-  route for every non-local recipient.
+- **RL-24.** A new route type, `InbuxaRelay`, alongside the existing route
+  types, names one or more `inbuxa:Relay`s in `relays`, by name (every
+  relay with that name), or none, for any relay. The queue's `route`
+  expression picks it per recipient like any other route, so some domains
+  can go through relays while the rest go direct. Its recipients go through
+  the relays named, chosen as below; a relay renamed stops matching. With
+  `sendThrough` on, every non-local recipient is routed through relays, to
+  the relays its route names if it is an `InbuxaRelay` route, to any
+  otherwise.
 - `sendThrough` on any enabled relay sends every non-local recipient
   through relays: the enabled ones not marked `inboundOnly`, that the node
   delivering is linked to, each message starting with the next in turn.
@@ -841,7 +847,11 @@ In progress. Done so far:
   `outbound.tls` into a session in this server's TLS-RPT reports, with the
   policy, result, MX host, address and reason (tested with a relay's
   STARTTLS failure for REQUIRETLS mail).
-- Still to come in step 4: the named `inbuxaRelay` route.
+- The `InbuxaRelay` route type (`x:MtaRoute`, stored as its fourth
+  variant, so routes saved before read as they were), in the served schema
+  for the console's route form. Tested end to end with `sendThrough` off:
+  a domain routed to a route naming the relay goes through it, and one
+  routed to a route naming no linked relay waits, saying so.
 - `crates/outbound-tls` (RL-30): the TLSA and MTA-STS types, the DANE
   certificate check, MTA-STS policy parsing and matching, and the DNSSEC
   lookups (with the bogus-answer recheck), moved out of `crates/smtp` and
@@ -859,7 +869,7 @@ Order:
    `inbuxa:Relay`, ingest with session context (RL-23).
 3. Live mode (RL-12, RL-13). Steps 2 and 3 ship together: held mode alone
    can't refuse spam at the door, which the settings-only edge already can.
-4. Outbound: `Outbound`, the `inbuxaRelay` route, status and DSNs, TLS-RPT
+4. Outbound: `Outbound`, the `InbuxaRelay` route, status and DSNs, TLS-RPT
    events.
 5. inbuxa-admin's Relays page, certificates (RL-27), DNS (RL-25), and
    upgrades (RL-29).
