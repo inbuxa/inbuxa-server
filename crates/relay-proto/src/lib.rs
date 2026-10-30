@@ -14,6 +14,7 @@
 pub mod jmap;
 pub mod pin;
 pub mod recipient;
+pub mod release;
 pub mod seal;
 pub mod time;
 pub mod token;

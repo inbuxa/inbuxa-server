@@ -8,14 +8,21 @@
 //! inbuxa Relays this server or cluster links to. A relay serves the whole
 //! downstream, so nobody in a tenant reaches them. A create returns the
 //! join token, once; so does an update with `rejoin: true`, which starts
-//! over with a relay that was reset. The request layer records every
-//! change in the audit log, with the private key and the token left out.
+//! over with a relay that was reset. An update with `upgrade` hands the
+//! relay a signed release over this node's link (RL-29). The request layer
+//! records every change in the audit log, with the private key and the
+//! token left out.
 
+use crate::blob::download::BlobDownload;
 use common::{Server, auth::AccessToken, network::acme::relay::relay_certificate_not_after};
 use inbuxa_features::relay::{
     self as relays, JoinState, Relay as StoredRelay, certificate::CertificateOrder, link::NodeLink,
 };
-use inbuxa_relay_proto::{b64, types::RelaySettings};
+use inbuxa_relay_proto::{
+    b64,
+    release::{self, Version},
+    types::RelaySettings,
+};
 use jmap_proto::{
     error::set::SetError,
     method::{
@@ -28,9 +35,9 @@ use jmap_proto::{
 };
 use jmap_tools::{Key, Map, Property, Value};
 use registry::schema::prelude::MASKED_PASSWORD;
-use std::borrow::Cow;
+use std::{borrow::Cow, str::FromStr};
 use store::write::now;
-use types::id::Id;
+use types::{blob::BlobId, id::Id};
 
 type RValue = Value<'static, P, RelayValue>;
 type JsonMap = serde_json::Map<String, serde_json::Value>;
@@ -58,10 +65,14 @@ const ALL: &[P] = &[
     P::JoinedAt,
     P::LinkKeyPin,
     P::Links,
+    P::OlderThanServer,
     P::CreatedBy,
     P::CreatedAt,
     P::UpdatedAt,
 ];
+
+/// This server's release, which its relays are compared with (RL-28).
+const SERVER_VERSION: &str = env!("CARGO_PKG_VERSION");
 
 /// Properties the server sets; a client that sends them is refused.
 const SERVER_SET: &[P] = &[
@@ -74,6 +85,7 @@ const SERVER_SET: &[P] = &[
     P::LinkKeyPin,
     P::JoinToken,
     P::Links,
+    P::OlderThanServer,
     P::CreatedBy,
     P::CreatedAt,
     P::UpdatedAt,
@@ -146,6 +158,16 @@ fn links_value(links: &[NodeLink]) -> RValue {
     json_to_value(serde_json::Value::Array(list))
 }
 
+/// Whether any link last heard an older release than this server's.
+fn older_than_server(links: &[NodeLink]) -> Option<bool> {
+    let server = Version::parse(SERVER_VERSION)?;
+    let versions: Vec<Version> = links
+        .iter()
+        .filter_map(|link| Version::parse(&link.relay.as_ref()?.relay_version))
+        .collect();
+    (!versions.is_empty()).then(|| versions.iter().any(|version| *version < server))
+}
+
 fn to_value(
     relay: &StoredRelay,
     links: &[NodeLink],
@@ -184,6 +206,7 @@ fn to_value(
             P::JoinedAt => relay.join.joined_at.map_or(Value::Null, date),
             P::LinkKeyPin => text(relay.join.relay_pin.map(|pin| b64::encode(&pin)).as_deref()),
             P::Links => links_value(links),
+            P::OlderThanServer => older_than_server(links).map_or(Value::Null, Value::Bool),
             P::CreatedBy => text(Some(&relay.created_by)),
             P::CreatedAt => date(relay.created_at),
             P::UpdatedAt => date(relay.updated_at),
@@ -201,6 +224,13 @@ struct Sent {
     properties: JsonMap,
     settings: JsonMap,
     rejoin: bool,
+    upgrade: Option<Upgrade>,
+}
+
+/// A release to hand the relay: an upload, and its signature file's text.
+struct Upgrade {
+    blob_id: String,
+    signature: String,
 }
 
 fn client_json(value: Value<'_, P, RelayValue>) -> Result<Sent, SetError<P>> {
@@ -220,6 +250,25 @@ fn client_json(value: Value<'_, P, RelayValue>) -> Result<Sent, SetError<P>> {
                         .with_description("true, to start a new join."));
                 }
             },
+            Key::Property(P::Upgrade) => {
+                let json: serde_json::Value = value.into();
+                match (json["blobId"].as_str(), json["signature"].as_str()) {
+                    (Some(blob_id), Some(signature)) => {
+                        sent.upgrade = Some(Upgrade {
+                            blob_id: blob_id.to_string(),
+                            signature: signature.to_string(),
+                        })
+                    }
+                    _ => {
+                        return Err(SetError::invalid_properties()
+                            .with_property(P::Upgrade)
+                            .with_description(
+                                "{blobId, signature}: the release binary, uploaded, \
+                                 and its signature file's text.",
+                            ));
+                    }
+                }
+            }
             Key::Property(p) => {
                 sent.properties
                     .insert(p.to_cow().into_owned(), value.into());
@@ -344,6 +393,56 @@ fn apply(current: &StoredRelay, sent: &Sent) -> Result<StoredRelay, SetError<P>>
     })
 }
 
+/// Hands a relay a signed release over this node's link (RL-29), once the
+/// release checks out here. The relay checks it again, with its own target
+/// and version, installs it and restarts.
+async fn upgrade_relay(
+    server: &Server,
+    access_token: &AccessToken,
+    id: Id,
+    upgrade: &Upgrade,
+) -> trc::Result<Result<(), SetError<P>>> {
+    let refused = |text: String| {
+        SetError::invalid_properties()
+            .with_property(P::Upgrade)
+            .with_description(text)
+    };
+    let Some(relay) = (match relay_id(id) {
+        Some(relay_id) => relays::get(server.store(), relay_id).await?,
+        None => None,
+    }) else {
+        return Ok(Err(SetError::not_found()));
+    };
+    let binary = match BlobId::from_str(&upgrade.blob_id) {
+        Ok(blob_id) => server.blob_download(&blob_id, access_token).await?,
+        Err(_) => None,
+    };
+    let Some(binary) = binary else {
+        return Ok(Err(refused(format!(
+            "No blob {} that you can read.",
+            upgrade.blob_id
+        ))));
+    };
+    if let Err(err) = release::verify(&binary, &upgrade.signature, release::RELEASE_KEYS) {
+        return Ok(Err(refused(format!("{err}."))));
+    }
+    let Some(linked) = server.inner.data.relay_senders.linked(relay.id) else {
+        return Ok(Err(SetError::forbidden().with_description(format!(
+            "This node has no link to {} now; try again once it is linked.",
+            relay.name
+        ))));
+    };
+    match linked
+        .sender
+        .upgrade(binary, upgrade.signature.clone())
+        .await
+    {
+        // The relay's own relay.upgraded event follows over the link
+        Ok(_) => Ok(Ok(())),
+        Err(why) => Ok(Err(refused(why))),
+    }
+}
+
 /// `inbuxa:Relay/get`: every relay, oldest first.
 pub async fn get(
     server: &Server,
@@ -376,7 +475,7 @@ pub async fn get(
         }
     };
     for relay in wanted {
-        let links = if properties.contains(&P::Links) {
+        let links = if properties.contains(&P::Links) || properties.contains(&P::OlderThanServer) {
             relays::link::statuses(data, relay.id).await?
         } else {
             Vec::new()
@@ -411,6 +510,11 @@ pub async fn set(
                 return Err(SetError::invalid_properties()
                     .with_property(P::Rejoin)
                     .with_description("A new relay gets its join token anyway."));
+            }
+            if sent.upgrade.is_some() {
+                return Err(SetError::invalid_properties()
+                    .with_property(P::Upgrade)
+                    .with_description("A relay is upgraded once it has joined."));
             }
             if sent
                 .properties
@@ -460,6 +564,21 @@ pub async fn set(
                 continue;
             }
         };
+        if let Some(upgrade) = &sent.upgrade {
+            let outcome = if sent.rejoin || !sent.properties.is_empty() || !sent.settings.is_empty()
+            {
+                Err(SetError::invalid_properties()
+                    .with_property(P::Upgrade)
+                    .with_description("Send an upgrade on its own."))
+            } else {
+                upgrade_relay(server, access_token, id, upgrade).await?
+            };
+            match outcome {
+                Ok(()) => response.updated.append(id, None),
+                Err(error) => response.not_updated.append(id, error),
+            }
+            continue;
+        }
         let mut outcome = None;
         // A node may record the join while this runs: start over from the
         // relay as it is then, a few times

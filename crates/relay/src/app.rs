@@ -22,7 +22,7 @@ use std::{
     net::IpAddr,
     sync::{
         Arc, Mutex, RwLock,
-        atomic::{AtomicU32, AtomicU64, Ordering},
+        atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering},
     },
 };
 use tokio::sync::{Notify, broadcast, watch};
@@ -57,6 +57,14 @@ pub struct App {
     pub last_error: Mutex<Option<String>>,
     pub limiter: Mutex<Limiter>,
     pub self_upgrade: bool,
+    /// The keys a release must be signed by (RL-29).
+    pub release_keys: Vec<[u8; 32]>,
+    /// The binary an upgrade replaces.
+    pub exe: Option<std::path::PathBuf>,
+    /// An upgrade is installing, or installed and waiting to restart.
+    pub upgrading: AtomicBool,
+    /// Wakes the run loop to exit for the supervisor's restart.
+    pub restart: Notify,
 }
 
 impl App {
@@ -91,6 +99,10 @@ impl App {
             last_error: Mutex::new(None),
             limiter: Mutex::new(Limiter::default()),
             self_upgrade: std::env::var_os("INBUXA_RELAY_CONTAINER").is_none(),
+            release_keys: inbuxa_relay_proto::release::RELEASE_KEYS.to_vec(),
+            exe: crate::upgrade::current_exe(),
+            upgrading: AtomicBool::new(false),
+            restart: Notify::new(),
         })
     }
 

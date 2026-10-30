@@ -255,7 +255,7 @@ with the server's own `inbuxa:` objects. In particular, the relay's
 | `sealingKey` | downstream | The downstream's public sealing key |
 | `linkAllowFrom` | downstream | Addresses and CIDR ranges that may dial the link port. Default empty: anyone (RL-33) |
 | `nextLinkCaPin` | downstream | A second link CA to trust during a replacement (RL-34). Default null |
-| `status` | relay | `{startedAt, linkClients, mode, spool: {inbound, outbound, bytes}, recipientState, certificateNotAfter, linkCaPins, lastError}`; `linkCaPins` lists the CAs it trusts (RL-34) |
+| `status` | relay | `{startedAt, linkClients, mode, spool: {inbound, outbound, bytes}, recipientState, certificateNotAfter, linkCaPins, lastError, selfUpgrade}`; `linkCaPins` lists the CAs it trusts (RL-34); `selfUpgrade` is false in a container image (RL-29) |
 
 Settings are cached in the state directory as the downstream last set them,
 so a reboot without the link comes back with the same settings (RL-22).
@@ -329,7 +329,7 @@ Standard RFC 8620 methods, plus five of its own:
 |---|---|
 | `Relay/get`, `Relay/set` | Read status; push settings |
 | `Relay/join` | Join proof (see "Joining and reset"). Answers only on an unjoined relay |
-| `Relay/upgrade` | `{blobId, signature}`: install a signed release (RL-29) |
+| `Relay/upgrade` | `{blobId, signature}`: install a signed release, the binary as an upload and its signature file's text (RL-29) |
 | `RecipientDomain/get`, `/set`; `Recipient/set`, `/changes` | Recipient sync |
 | `Recipient/replace` | Full recipient refresh from a blob |
 | `Inbound/changes`, `/get`, `/query` | See what is waiting |
@@ -507,7 +507,7 @@ When no link is up, or after RL-13:
 
 | Object | What it holds |
 |---|---|
-| `inbuxa:Relay` | One per relay: `name`, `address`, `linkPort`, `enabled`, the settings pushed to the relay, `sendThrough` (route outbound mail through relays), `inboundOnly` (takes mail in but sends none, e.g. while its IP isn't warmed up or isn't in SPF yet), `mxPreference` (its MX preference, 10 by default, RL-25), `certificateNotAfter` and `certificateError` (when its certificate runs out, and why the last order failed, RL-27), and read-only status mirrored from the relay: link state per node, version, queue counts, `lastSeen`. Create, or an update with `rejoin: true`, returns `joinToken` once |
+| `inbuxa:Relay` | One per relay: `name`, `address`, `linkPort`, `enabled`, the settings pushed to the relay, `sendThrough` (route outbound mail through relays), `inboundOnly` (takes mail in but sends none, e.g. while its IP isn't warmed up or isn't in SPF yet), `mxPreference` (its MX preference, 10 by default, RL-25), `certificateNotAfter` and `certificateError` (when its certificate runs out, and why the last order failed, RL-27), `olderThanServer` (a link last heard an older release than this server's, RL-28), and read-only status mirrored from the relay: link state per node, version, queue counts, `lastSeen`. Create, or an update with `rejoin: true`, returns `joinToken` once. An update with `upgrade: {blobId, signature}`, sent on its own, hands the relay a release over the node's link (RL-29) |
 | `inbuxa:RelayMessage` | Read-only view of a relay's `Inbound` and `Outbound` queues, fetched over the link when asked. Never message content. `/get`, `/query` (filter `relayId`, `direction`; newest first) and `/set` destroy only: discards held mail, or cancels an outbound message, whose recipients fail here with no DSN as a delivery cancelled in the queue does. Each id is the relay's id and a hash of the relay's own message id, so nothing is stored |
 
 Permissions: `sysRelayGet`, `sysRelayUpdate`, `sysRelayQueueGet`,
@@ -920,7 +920,40 @@ In progress. Done so far:
   a certificate for its name alone, isn't among this server's own
   certificates, shows `certificateNotAfter`, isn't ordered again, and
   its order record goes with it when it's removed.
-- Still to come in step 5: upgrades (RL-29).
+- Upgrades (RL-29). A release binary comes with a signature file,
+  `inbuxa-relay-<target>.sig`: four lines, `inbuxa-relay release 1`,
+  `version <Cargo version>`, `target <arch>-<os>-<libc>` (like
+  `x86_64-linux-musl`) and `sha256 <hex>`, then `signature <base64url>`,
+  an Ed25519 signature over those four lines.
+  `tools/release/sign-relay.sh` makes it with openssl. The release keys'
+  public halves are compiled into `crates/relay-proto/src/release.rs`;
+  a build without one refuses every upgrade.
+- An administrator uploads the binary and sends `upgrade` with its blob
+  and the signature file's text. This server checks the signature first,
+  then uploads the binary over its link and calls `Relay/upgrade`; with
+  no link from this node to the relay, the update is refused. The relay
+  refuses it in a container image (`selfUpgrade: false`), while another
+  upgrade is on its way, when the signature fails, when the target isn't
+  its own, and when the version isn't newer than its own. Otherwise it
+  writes the new binary beside its own, runs it with `--version`, which
+  must name the signed version within 10 seconds, keeps the old one as
+  `inbuxa-relay.previous`, and moves the new one into place. It answers,
+  records `relay.upgraded` (or `relay.upgrade-refused`, with the reason),
+  and exits with status 75 (EX_TEMPFAIL) for its supervisor to start the
+  new binary: one set to restart on failure restarts it too.
+- `olderThanServer` compares each link's last `relayVersion` with this
+  server's version, by SemVer precedence, so a release candidate comes
+  before its release.
+- Tested: over the relay's real link, a forged signature, an older
+  version, another target and an unreadable file are refused and leave
+  the binary alone (RL-T16); a good release goes in, the old one is kept,
+  the run loop is told to exit, and a second upgrade waits. A binary
+  that says another version is never put in place. The signing script's
+  output checks out against the Rust code. On this server, an upgrade
+  with anything else, an unknown blob, or a signature by no release key
+  is refused before any relay sees it.
+- Not yet: the release key itself, and signing in the release workflow,
+  come with packaging (step 6). Until then no build accepts an upgrade.
 
 Order:
 

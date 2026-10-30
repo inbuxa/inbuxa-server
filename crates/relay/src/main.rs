@@ -23,6 +23,7 @@ mod spool;
 mod state;
 #[cfg(test)]
 mod tests_e2e;
+mod upgrade;
 
 use app::App;
 use inbuxa_relay_proto::{time, token::JoinToken};
@@ -112,7 +113,11 @@ fn main() -> ExitCode {
             Some(token) => join(&paths, token),
             None => Err("join needs the token from inbuxa-admin".into()),
         },
-        "run" => run(&paths, args.link_listen),
+        "run" => match run(&paths, args.link_listen) {
+            Ok(Stopped::Upgraded) => return ExitCode::from(upgrade::RESTART_EXIT),
+            Ok(Stopped::Asked) => Ok(()),
+            Err(e) => Err(e),
+        },
         "status" => status(&paths),
         "reset" => reset(&paths, args.discard_held),
         other => Err(format!("unknown command {other}")),
@@ -154,7 +159,15 @@ fn join(paths: &Paths, token_text: &str) -> Result<(), String> {
     Ok(())
 }
 
-fn run(paths: &Paths, link_listen: SocketAddr) -> Result<(), String> {
+/// Why `run` ended, when it ended well.
+enum Stopped {
+    /// A signal asked it to.
+    Asked,
+    /// A new binary is in place, for the supervisor to start (RL-29).
+    Upgraded,
+}
+
+fn run(paths: &Paths, link_listen: SocketAddr) -> Result<Stopped, String> {
     paths.create_dirs().map_err(|e| e.to_string())?;
     let _lock = RunLock::acquire(paths).map_err(|e| e.to_string())?;
     let identity = match Identity::load(paths).map_err(|e| e.to_string())? {
@@ -211,7 +224,14 @@ fn run(paths: &Paths, link_listen: SocketAddr) -> Result<(), String> {
             _ = shutdown() => {
                 app.write_status();
                 eprintln!("inbuxa-relay: stopping");
-                Ok(())
+                Ok(Stopped::Asked)
+            }
+            _ = app.restart.notified() => {
+                // Time for the answer to reach the downstream
+                tokio::time::sleep(Duration::from_secs(1)).await;
+                app.write_status();
+                eprintln!("inbuxa-relay: upgraded; exiting for the new binary to start");
+                Ok(Stopped::Upgraded)
             }
         }
     })

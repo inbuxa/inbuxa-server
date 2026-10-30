@@ -1250,6 +1250,21 @@ impl Sender for LinkSender {
             Ok(Value::Object(answer.1))
         })
     }
+
+    fn upgrade(&self, binary: Vec<u8>, signature: String) -> Call<'_> {
+        Box::pin(async move {
+            let blob_id = self
+                .dialer
+                .upload(binary)
+                .await
+                .map_err(|err| err.message)?;
+            self.call(
+                method::RELAY_UPGRADE,
+                json!({"blobId": blob_id, "signature": signature}),
+            )
+            .await
+        })
+    }
 }
 
 /// A relay's `notCreated` for a message, as this server's refusal.

@@ -57,6 +57,10 @@ pub trait Sender: Send + Sync {
     /// One method on the relay's API, on its account: the answer's
     /// arguments, or why there are none (the relay's error included).
     fn call(&self, method: &'static str, args: serde_json::Value) -> Call<'_>;
+
+    /// Uploads a release binary and calls `Relay/upgrade` with it and its
+    /// signature file (RL-29): the answer's arguments.
+    fn upgrade(&self, binary: Vec<u8>, signature: String) -> Call<'_>;
 }
 
 /// A relay this node is linked to.
@@ -264,6 +268,10 @@ mod tests {
         }
 
         fn call(&self, _: &'static str, _: serde_json::Value) -> Call<'_> {
+            Box::pin(async { Err("no".into()) })
+        }
+
+        fn upgrade(&self, _: Vec<u8>, _: String) -> Call<'_> {
             Box::pin(async { Err("no".into()) })
         }
     }

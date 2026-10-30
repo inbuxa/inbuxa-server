@@ -50,6 +50,12 @@ pub enum RelayProperty {
     LinkKeyPin,
     /// Update only: `true` starts a new join, with a new token.
     Rejoin,
+    /// Update only: `{blobId, signature}`, a signed release the relay
+    /// installs (RL-29).
+    Upgrade,
+    /// Whether a linked relay runs an older release than this server
+    /// (RL-28); null before any link has said.
+    OlderThanServer,
     /// In a create or rejoin response only.
     JoinToken,
     /// Each node's link to the relay, and what the relay last said.
@@ -94,6 +100,8 @@ impl Property for RelayProperty {
             RelayProperty::JoinedAt => "joinedAt",
             RelayProperty::LinkKeyPin => "linkKeyPin",
             RelayProperty::Rejoin => "rejoin",
+            RelayProperty::Upgrade => "upgrade",
+            RelayProperty::OlderThanServer => "olderThanServer",
             RelayProperty::JoinToken => "joinToken",
             RelayProperty::Links => "links",
             RelayProperty::CreatedBy => "createdBy",
@@ -126,6 +134,8 @@ impl RelayProperty {
             b"joinedAt" => RelayProperty::JoinedAt,
             b"linkKeyPin" => RelayProperty::LinkKeyPin,
             b"rejoin" => RelayProperty::Rejoin,
+            b"upgrade" => RelayProperty::Upgrade,
+            b"olderThanServer" => RelayProperty::OlderThanServer,
             b"joinToken" => RelayProperty::JoinToken,
             b"links" => RelayProperty::Links,
             b"createdBy" => RelayProperty::CreatedBy,

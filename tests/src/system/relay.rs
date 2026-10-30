@@ -283,6 +283,70 @@ pub async fn test(test: &mut TestServer) {
     assert_eq!(again.ca_spki, first.ca_spki);
     assert_ne!(again.secret, first.secret);
     assert_eq!(get(admin, &id).await["joinState"], "waiting");
+    assert_eq!(
+        get(admin, &id).await["olderThanServer"],
+        Value::Null,
+        "no link has said"
+    );
+
+    // RL-29: a release is checked here before it goes to a relay. This
+    // build has no release key, or one that didn't sign this
+    let release_blob = admin
+        .jmap_client()
+        .await
+        .upload(
+            None,
+            b"#!/bin/sh\necho 'inbuxa-relay 99.0.0'\n".to_vec(),
+            None,
+        )
+        .await
+        .unwrap()
+        .take_blob_id();
+    let signature = format!(
+        "inbuxa-relay release 1\nversion 99.0.0\ntarget x86_64-linux-musl\n\
+         sha256 {}\nsignature {}\n",
+        "0".repeat(64),
+        "A".repeat(86)
+    );
+    let upgrade = json!({"blobId": release_blob, "signature": signature});
+    let mut created_upgraded = relay("x");
+    created_upgraded["upgrade"] = upgrade.clone();
+    let (_, response) = call(
+        admin,
+        "inbuxa:Relay/set",
+        json!({"create": {"u": created_upgraded}}),
+    )
+    .await;
+    assert_eq!(
+        response["notCreated"]["u"]["properties"][0], "upgrade",
+        "{response}"
+    );
+    for (patch, says) in [
+        (json!({"upgrade": "latest"}), "{blobId, signature}"),
+        (
+            json!({"upgrade": upgrade.clone(), "name": "Edge"}),
+            "on its own",
+        ),
+        (
+            json!({"upgrade": {"blobId": "nope", "signature": signature}}),
+            "No blob",
+        ),
+        (
+            json!({"upgrade": {"blobId": release_blob, "signature": "garbage"}}),
+            "unreadable",
+        ),
+        (json!({"upgrade": upgrade}), "release key"),
+    ] {
+        let (_, response) = call(admin, "inbuxa:Relay/set", json!({"update": {&id: patch}})).await;
+        let refused = &response["notUpdated"][&id];
+        assert_eq!(refused["properties"][0], "upgrade", "{response}");
+        assert!(
+            refused["description"]
+                .as_str()
+                .is_some_and(|d| d.contains(says)),
+            "{says}: {response}"
+        );
+    }
 
     // Nobody in a tenant reaches relays
     let tenant = admin
@@ -810,6 +874,8 @@ pub async fn link(test: &mut TestServer) {
     let recipients = link["recipients"].as_u64().unwrap_or_default();
     assert!(recipients >= 3, "{relay}");
     assert_eq!(link["lastError"], Value::Null, "{relay}");
+    // The relay is this build's: not older (RL-28)
+    assert_eq!(relay["olderThanServer"], false, "{relay}");
 
     // Real recipients only (RL-1)
     let replies = rcpt_replies(
