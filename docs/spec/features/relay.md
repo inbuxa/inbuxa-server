@@ -507,7 +507,7 @@ When no link is up, or after RL-13:
 
 | Object | What it holds |
 |---|---|
-| `inbuxa:Relay` | One per relay: `name`, `address`, `linkPort`, `enabled`, the settings pushed to the relay, `sendThrough` (route outbound mail through relays), `inboundOnly` (takes mail in but sends none, e.g. while its IP isn't warmed up or isn't in SPF yet), `mxPreference` (its MX preference, 10 by default, RL-25), and read-only status mirrored from the relay: link state per node, version, queue counts, `lastSeen`. Create, or an update with `rejoin: true`, returns `joinToken` once |
+| `inbuxa:Relay` | One per relay: `name`, `address`, `linkPort`, `enabled`, the settings pushed to the relay, `sendThrough` (route outbound mail through relays), `inboundOnly` (takes mail in but sends none, e.g. while its IP isn't warmed up or isn't in SPF yet), `mxPreference` (its MX preference, 10 by default, RL-25), `certificateNotAfter` and `certificateError` (when its certificate runs out, and why the last order failed, RL-27), and read-only status mirrored from the relay: link state per node, version, queue counts, `lastSeen`. Create, or an update with `rejoin: true`, returns `joinToken` once |
 | `inbuxa:RelayMessage` | Read-only view of a relay's `Inbound` and `Outbound` queues, fetched over the link when asked. Never message content. `/get`, `/query` (filter `relayId`, `direction`; newest first) and `/set` destroy only: discards held mail, or cancels an outbound message, whose recipients fail here with no DSN as a delivery cancelled in the queue does. Each id is the relay's id and a hash of the relay's own message id, so nothing is stored |
 
 Permissions: `sysRelayGet`, `sysRelayUpdate`, `sysRelayQueueGet`,
@@ -896,7 +896,31 @@ In progress. Done so far:
 - Tested: the joined test relay is example.com's only MX host, at
   preference 10 and then 20 after a change. SPF names it and this
   server, and the relay's host gets its own `a` policy.
-- Still to come in step 5: certificates (RL-27) and upgrades (RL-29).
+- Certificates (RL-27). A joined, enabled relay needs one when it has
+  none, when its certificate doesn't name its public name (a wildcard
+  names one level down), or when it runs out within 30 days. Its public
+  name must be under a domain whose DNS and certificates are both
+  Automatic here; the closest such domain is used, with its ACME
+  provider and its DNS server. The order is always DNS-01, whatever
+  challenge the provider uses for the domain itself, and is for the
+  public name alone, with a key of its own: never the domain's wildcard
+  key, which mustn't leave this server. A renewal keeps the relay's key;
+  a new name gets a new one.
+- The link service checks at each scan, and one node orders: it claims
+  the order first under `c` + relay id, and a running claim lasts an
+  hour. A failed order waits six hours before the next, for the ACME
+  provider's rate limits, and its error is the relay's
+  `certificateError`. The certificate goes on the relay unless its
+  public name changed meanwhile, and every link pushes it with the
+  settings. Without such a domain nothing is ordered, and an
+  administrator uploads `smtpCertificate` and `smtpPrivateKey`. One
+  uploaded that still does is left alone; one that stops doing is
+  replaced, when a domain allows it.
+- Tested against pebble: a joined relay named under a DNS-01 domain gets
+  a certificate for its name alone, isn't among this server's own
+  certificates, shows `certificateNotAfter`, isn't ordered again, and
+  its order record goes with it when it's removed.
+- Still to come in step 5: upgrades (RL-29).
 
 Order:
 

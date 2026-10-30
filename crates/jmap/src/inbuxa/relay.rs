@@ -11,8 +11,10 @@
 //! over with a relay that was reset. The request layer records every
 //! change in the audit log, with the private key and the token left out.
 
-use common::{Server, auth::AccessToken};
-use inbuxa_features::relay::{self as relays, JoinState, Relay as StoredRelay, link::NodeLink};
+use common::{Server, auth::AccessToken, network::acme::relay::relay_certificate_not_after};
+use inbuxa_features::relay::{
+    self as relays, JoinState, Relay as StoredRelay, certificate::CertificateOrder, link::NodeLink,
+};
 use inbuxa_relay_proto::{b64, types::RelaySettings};
 use jmap_proto::{
     error::set::SetError,
@@ -49,6 +51,8 @@ const ALL: &[P] = &[
     P::Settings,
     P::SmtpCertificate,
     P::SmtpPrivateKey,
+    P::CertificateNotAfter,
+    P::CertificateError,
     P::JoinState,
     P::JoinExpiresAt,
     P::JoinedAt,
@@ -62,6 +66,8 @@ const ALL: &[P] = &[
 /// Properties the server sets; a client that sends them is refused.
 const SERVER_SET: &[P] = &[
     P::Id,
+    P::CertificateNotAfter,
+    P::CertificateError,
     P::JoinState,
     P::JoinExpiresAt,
     P::JoinedAt,
@@ -140,7 +146,13 @@ fn links_value(links: &[NodeLink]) -> RValue {
     json_to_value(serde_json::Value::Array(list))
 }
 
-fn to_value(relay: &StoredRelay, links: &[NodeLink], properties: &[P], now: u64) -> RValue {
+fn to_value(
+    relay: &StoredRelay,
+    links: &[NodeLink],
+    order: Option<&CertificateOrder>,
+    properties: &[P],
+    now: u64,
+) -> RValue {
     let state = relay.join.state(now);
     let mut out = Map::with_capacity(properties.len());
     for property in properties {
@@ -157,6 +169,12 @@ fn to_value(relay: &StoredRelay, links: &[NodeLink], properties: &[P], now: u64)
             P::Settings => json_to_value(serde_json::to_value(&relay.settings).unwrap_or_default()),
             P::SmtpCertificate => text(relay.smtp_certificate.as_deref()),
             P::SmtpPrivateKey => text(relay.smtp_private_key.as_ref().map(|_| MASKED_PASSWORD)),
+            P::CertificateNotAfter => relay
+                .smtp_certificate
+                .as_deref()
+                .and_then(relay_certificate_not_after)
+                .map_or(Value::Null, |at| date(at.max(0) as u64)),
+            P::CertificateError => text(order.and_then(|order| order.error())),
             P::JoinState => text(Some(match state {
                 JoinState::Waiting => "waiting",
                 JoinState::Expired => "expired",
@@ -363,9 +381,14 @@ pub async fn get(
         } else {
             Vec::new()
         };
+        let order = if properties.contains(&P::CertificateError) {
+            relays::certificate::last_order(data, relay.id).await?
+        } else {
+            None
+        };
         response
             .list
-            .push(to_value(relay, &links, &properties, now));
+            .push(to_value(relay, &links, order.as_ref(), &properties, now));
     }
     Ok(response)
 }
