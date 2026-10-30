@@ -307,7 +307,7 @@ so a reboot without the link comes back with the same settings (RL-22).
 | `blobId` | The message as the downstream signed it |
 | `envelope` | RFC 8621 `Envelope` |
 | `size` | Bytes |
-| `deliveryStatus` | RFC 8621 `DeliveryStatus` per recipient: `smtpReply` (empty before the first try), `delivered` (`queued`, `yes`, `no`, `unknown`) |
+| `deliveryStatus` | RFC 8621 `DeliveryStatus` per recipient: `smtpReply` (empty before the first try), `delivered` (`queued`, `yes`, `no`, `unknown`), and `mx`, the host the reply came from when one answered (not in RFC 8621) |
 | `nextAttemptAt`, `attempts`, `expiresAt` | Retry state. `nextAttemptAt` only while a recipient is queued |
 
 A create takes `blobId` and `envelope` only; the relay sets the rest, and no
@@ -552,9 +552,25 @@ allowing the edge's IP and disabling SPF, DMARC and reverse IP for it.
 - **RL-24.** A new route type, `inbuxaRelay`, alongside the existing route
   types, names one or more `inbuxa:Relay`s. With `sendThrough` on, it is the
   route for every non-local recipient.
+- `sendThrough` on any enabled relay sends every non-local recipient
+  through relays: the enabled ones not marked `inboundOnly`, that the node
+  delivering is linked to, each message starting with the next in turn.
+  A relay that refuses a message for now (its spool full, its link
+  failing) passes it to the next; one that refuses it for good
+  (`tooLarge`, `forbiddenFrom`) fails those recipients. With no relay
+  linked, the recipients wait in the queue and are retried as usual.
 - The downstream's queue keeps the message until a relay reports a final
   status. The item shows "handed to relay ‹name›", and then the remote
-  server's reply.
+  server's reply. A handed-over recipient isn't handed over again while it
+  waits, except when the relay no longer has the message (a reset). A
+  message cancelled from the downstream's queue is destroyed on the relay
+  too, unless an attempt is under way, and then at the next status.
+- The relay's statuses are followed by one node, the lowest linked to that
+  relay, for every message handed to it from any node. A final status is
+  recorded in the downstream's queue, which sends any DSN as for its own
+  deliveries, and the message is then destroyed on the relay.
+- Mail sent with REQUIRETLS (RFC 8689) isn't handed to a relay yet: it
+  takes the route it would without relays.
 
 ### DNS and certificates
 
@@ -801,8 +817,18 @@ In progress. Done so far:
   recipient status from the remote server's replies, retries, expiry, and
   `outbound.*` events (RL-T12 tested against a scripted MX with fixed DNS
   answers). The release binary went from 5.4 MB to 8.1 MB with it
-  (glibc, measured 2026-10-30). The downstream doesn't hand anything over
-  yet: that is the rest of step 4.
+  (glibc, measured 2026-10-30).
+- Outbound through relays on the downstream: `sendThrough` and
+  `inboundOnly` decide the route (RL-20, RL-24); each message is uploaded
+  and created with `Outbound/set` over the delivering node's link, its
+  recipients are marked in the queue as handed to the relay, and the link
+  service follows `Outbound` with push, records each reply, and destroys
+  the relay's copy once every recipient is final. Tested end to end with
+  the relay sending to a scripted MX (RL-T11): a test build of the relay,
+  with the `test-mx` feature, sends every domain to one local port.
+  `outboundTls` is set like any other setting, `settings/outboundTls`.
+- Still to come in step 4: the named `inbuxaRelay` route, TLS-RPT reports
+  from the relay's `outbound.tls` events, and REQUIRETLS through relays.
 - `crates/outbound-tls` (RL-30): the TLSA and MTA-STS types, the DANE
   certificate check, MTA-STS policy parsing and matching, and the DNSSEC
   lookups (with the bogus-answer recheck), moved out of `crates/smtp` and

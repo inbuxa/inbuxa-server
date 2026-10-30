@@ -17,10 +17,14 @@
 //! - `r` + relay id (u32): a relay ([`Relay`]), as JSON.
 //! - `s` + relay id (u32) + node id (u64): that node's link to the relay
 //!   ([`link::NodeLink`]), as JSON.
+//! - `i` + relay id (u32) + `Inbound` id: a message taken from the relay.
+//! - `o` + relay id (u32) + `Outbound` id: a message handed to the relay
+//!   ([`outbound::Handed`]), as JSON.
 //!
 //! Numbers are big-endian. There are few relays, so they're read whole.
 
 pub mod link;
+pub mod outbound;
 
 use inbuxa_relay_proto::{
     b64,
@@ -52,6 +56,7 @@ const KIND_KEYS: u8 = b'k';
 const KIND_RELAY: u8 = b'r';
 const KIND_STATUS: u8 = b's';
 const KIND_INGESTED: u8 = b'i';
+const KIND_HANDED: u8 = b'o';
 const CREATE_ATTEMPTS: usize = 5;
 
 const MAX_NAME: usize = 100;

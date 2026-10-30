@@ -191,6 +191,15 @@ fn run(paths: &Paths, link_listen: SocketAddr) -> Result<(), String> {
         tokio::spawn(sweeper(app.clone()));
         let outbound = app.clone();
         tokio::spawn(async move {
+            #[cfg(feature = "test-mx")]
+            if let Some(port) = std::env::var("INBUXA_RELAY_TEST_MX")
+                .ok()
+                .and_then(|port| port.parse().ok())
+            {
+                eprintln!("inbuxa-relay: a test build: all mail goes to 127.0.0.1:{port}");
+                let test = Arc::new(deliver::route::TestMx { port });
+                return deliver::run(outbound, test).await;
+            }
             let dns = Arc::new(deliver::route::Dns::new().await);
             deliver::run(outbound, dns).await
         });

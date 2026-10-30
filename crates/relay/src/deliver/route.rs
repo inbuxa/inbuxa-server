@@ -301,3 +301,36 @@ impl Resolve for Dns {
         }
     }
 }
+
+/// The server's system tests: every domain is its own MX, at 127.0.0.1,
+/// unsigned and without MTA-STS.
+#[cfg(feature = "test-mx")]
+pub struct TestMx {
+    pub port: u16,
+}
+
+#[cfg(feature = "test-mx")]
+impl Resolve for TestMx {
+    async fn mx(&self, domain: &str) -> Result<Mx, LookupError> {
+        Ok(Mx::Hosts {
+            hosts: vec![domain.to_string()],
+            secure: false,
+        })
+    }
+
+    async fn addresses(&self, _: &str, _: bool) -> Result<(Vec<IpAddr>, bool), LookupError> {
+        Ok((vec![IpAddr::V4(std::net::Ipv4Addr::LOCALHOST)], false))
+    }
+
+    async fn tlsa(&self, _: &str) -> Result<TlsaResult, LookupError> {
+        Ok(TlsaResult::Missing)
+    }
+
+    async fn mta_sts(&self, _: &str) -> Option<Arc<Policy>> {
+        None
+    }
+
+    fn port(&self) -> u16 {
+        self.port
+    }
+}

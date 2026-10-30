@@ -45,6 +45,7 @@ use inbuxa_features::{
             RecipientPlan, forget_ingested, is_inbound_id, issue_node_certificate, pushed_settings,
             record_ingested, record_join, set_status, was_ingested,
         },
+        outbound::{self, HandOver, Handed, Linked, Refused, Sender},
     },
 };
 use inbuxa_relay_proto::{
@@ -54,8 +55,9 @@ use inbuxa_relay_proto::{
     recipient::{RecipientDomain, RecipientHash},
     seal, token,
     types::{
-        Address, Capability, Inbound, InboundState, RELAY_SINGLETON, RelayEvent as ProtoRelayEvent,
-        RelaySettings, RelayStatus, Reply, Verdict,
+        Address, Capability, Delivered, DeliveryStatus, Envelope, Inbound, InboundState,
+        Outbound as ProtoOutbound, RELAY_SINGLETON, RelayEvent as ProtoRelayEvent, RelaySettings,
+        RelayStatus, Reply, Verdict,
     },
 };
 use registry::schema::{
@@ -71,6 +73,7 @@ use serde_json::{Value, json};
 use smtp::{
     core::Relayed,
     inbound::relayed::{RelayedMessage, RelayedOutcome, ingest_relayed},
+    outbound::relay::{Applied, RelayedStatus, apply_relayed},
 };
 use std::{
     collections::{BTreeMap, BTreeSet, HashMap, HashSet},
@@ -177,15 +180,17 @@ async fn reconcile(
     links: &mut HashMap<u32, Running>,
 ) -> trc::Result<()> {
     let data = server.store();
-    let wanted: HashMap<u32, (String, u16)> = match relays::keys(data).await? {
-        Some(_) => relays::all(data)
-            .await?
-            .into_iter()
-            .filter(|relay| relay.enabled)
-            .map(|relay| (relay.id, (relay.address.clone(), relay.link_port)))
-            .collect(),
-        None => HashMap::new(),
+    let all = match relays::keys(data).await? {
+        Some(_) => relays::all(data).await?,
+        None => Vec::new(),
     };
+    // Which relays outbound mail goes through (RL-20, RL-24)
+    server.inner.data.relay_senders.set_relays(&all);
+    let wanted: HashMap<u32, (String, u16)> = all
+        .into_iter()
+        .filter(|relay| relay.enabled)
+        .map(|relay| (relay.id, (relay.address.clone(), relay.link_port)))
+        .collect();
     links.retain(|id, link| match wanted.get(id) {
         Some(target) if *target == link.target && !link.handle.is_finished() => true,
         // Moved: start over at the new address
@@ -780,6 +785,7 @@ struct Ws {
     relay_changed: bool,
     inbound_changed: bool,
     events_changed: bool,
+    outbound_changed: bool,
 }
 
 impl Ws {
@@ -812,6 +818,7 @@ impl Ws {
             relay_changed: false,
             inbound_changed: false,
             events_changed: false,
+            outbound_changed: false,
         })
     }
 
@@ -861,6 +868,7 @@ impl Ws {
                 self.relay_changed |= types.contains_key("Relay");
                 self.inbound_changed |= types.contains_key("Inbound");
                 self.events_changed |= types.contains_key("RelayEvent");
+                self.outbound_changed |= types.contains_key("Outbound");
             }
         }
     }
@@ -957,7 +965,12 @@ async fn session(
     let mut ws = Ws::open(&dialer).await?;
     // Inbound too: live mode (RL-12)
     ws.send(&ClientFrame::WebSocketPushEnable {
-        data_types: Some(vec!["Relay".into(), "Inbound".into(), "RelayEvent".into()]),
+        data_types: Some(vec![
+            "Relay".into(),
+            "Inbound".into(),
+            "RelayEvent".into(),
+            "Outbound".into(),
+        ]),
         push_state: None,
     })
     .await?;
@@ -981,6 +994,13 @@ async fn session(
     taker.take(&mut ws).await?;
     take_events(&mut ws, data, &relay, status.current.node_id).await?;
 
+    // Outbound mail can go through this link now (RL-24), until it drops
+    let _sending = Sending::up(server, &relay, dialer.clone());
+    let mut follower = Follower::default();
+    follower
+        .follow(&mut ws, server, &relay, status.current.node_id)
+        .await?;
+
     let mut tick = tokio::time::interval(SYNC);
     tick.reset();
     let mut ping = tokio::time::interval(PING_EVERY);
@@ -1000,6 +1020,9 @@ async fn session(
                 }
                 if ws.events_changed {
                     take_events(&mut ws, data, &relay, status.current.node_id).await?;
+                }
+                if ws.outbound_changed {
+                    follower.follow(&mut ws, server, &relay, status.current.node_id).await?;
                 }
                 continue;
             }
@@ -1036,6 +1059,9 @@ async fn session(
         taker.relay_name = relay.name.clone();
         taker.take(&mut ws).await?;
         take_events(&mut ws, data, &relay, status.current.node_id).await?;
+        follower
+            .follow(&mut ws, server, &relay, status.current.node_id)
+            .await?;
     }
 }
 
@@ -1050,16 +1076,7 @@ async fn take_events(
     node_id: u64,
 ) -> Result<(), LinkError> {
     ws.events_changed = false;
-    let first = relays::link::statuses(data, relay.id)
-        .await?
-        .iter()
-        .filter(|link| {
-            link.state == LinkState::Linked && link.updated_at + 3 * STATUS_EVERY >= now()
-        })
-        .map(|link| link.node_id)
-        .min()
-        .is_none_or(|first| first >= node_id);
-    if !first {
+    if !first_linked(data, relay.id, node_id).await? {
         return Ok(());
     }
     let answer = ws.ok(method::RELAY_EVENT_GET, json!({})).await?;
@@ -1075,6 +1092,20 @@ async fn take_events(
             .await?;
     }
     Ok(())
+}
+
+/// Whether this node is the lowest linked to the relay, which takes what
+/// only one node should: events, and outbound statuses.
+async fn first_linked(data: &store::Store, relay_id: u32, node_id: u64) -> trc::Result<bool> {
+    Ok(relays::link::statuses(data, relay_id)
+        .await?
+        .iter()
+        .filter(|link| {
+            link.state == LinkState::Linked && link.updated_at + 3 * STATUS_EVERY >= now()
+        })
+        .map(|link| link.node_id)
+        .min()
+        .is_none_or(|first| first >= node_id))
 }
 
 /// One relay event, as a `relay.*` trace event naming the relay.
@@ -1138,6 +1169,230 @@ fn trace_event(relay: &Relay, event: &ProtoRelayEvent) {
             Details = Value::Object(data.clone()).to_string(),
         ),
     }
+}
+
+// ---- Outbound mail ----------------------------------------------------------
+
+/// Hands messages to the relay over this node's link (RL-24): the message
+/// as an upload, then `Outbound/set` create.
+struct LinkSender {
+    dialer: Arc<Dialer>,
+}
+
+impl Sender for LinkSender {
+    fn hand_over(&self, message: Vec<u8>, envelope: Envelope) -> HandOver<'_> {
+        Box::pin(async move {
+            let blob_id = self
+                .dialer
+                .upload(message)
+                .await
+                .map_err(|err| Refused::Temporary(err.message))?;
+            let answer = self
+                .dialer
+                .api(vec![Invocation::new(
+                    method::OUTBOUND_SET,
+                    json!({
+                        "accountId": ACCOUNT_ID,
+                        "create": {"m": {"blobId": blob_id, "envelope": envelope}},
+                    }),
+                    "c",
+                )])
+                .await
+                .map_err(|err| Refused::Temporary(err.message))?
+                .into_iter()
+                .next()
+                .ok_or_else(|| Refused::Temporary("The relay didn't answer.".into()))?;
+            let args = answer.args();
+            if let Some(id) = args["created"]["m"]["id"].as_str() {
+                return Ok(id.to_string());
+            }
+            Err(refusal(&args["notCreated"]["m"]))
+        })
+    }
+}
+
+/// A relay's `notCreated` for a message, as this server's refusal.
+fn refusal(error: &Value) -> Refused {
+    let description = error["description"].as_str().unwrap_or("no reason given");
+    match error["type"].as_str().unwrap_or_default() {
+        "tooLarge" => Refused::Permanent(format!("552 5.3.4 {description}")),
+        "forbiddenFrom" => Refused::Permanent(format!("550 5.7.1 {description}")),
+        "invalidProperties" => Refused::Permanent(format!("550 5.5.2 {description}")),
+        kind => Refused::Temporary(format!("{kind}: {description}")),
+    }
+}
+
+/// This node's link, offered for outbound mail while it is up.
+struct Sending {
+    inner: Arc<Inner>,
+    linked: Arc<Linked>,
+}
+
+impl Sending {
+    fn up(server: &Server, relay: &Relay, dialer: Arc<Dialer>) -> Self {
+        let linked = Arc::new(Linked {
+            relay_id: relay.id,
+            name: relay.name.clone(),
+            sender: Box::new(LinkSender { dialer }),
+        });
+        server.inner.data.relay_senders.link_up(linked.clone());
+        Sending {
+            inner: server.inner.clone(),
+            linked,
+        }
+    }
+}
+
+impl Drop for Sending {
+    fn drop(&mut self) {
+        self.inner.data.relay_senders.link_down(&self.linked);
+    }
+}
+
+/// How many messages one `Outbound/get` asks for.
+const FOLLOW_BATCH: usize = 200;
+
+/// Follows the messages handed to the relay, from any node, until each
+/// has a final status (RL-24): the lowest linked node does, and records
+/// the relay's replies in this server's queue, which sends the DSNs.
+#[derive(Default)]
+struct Follower {
+    /// Each message's statuses as last recorded, to skip ones unchanged.
+    recorded: HashMap<String, BTreeMap<String, DeliveryStatus>>,
+}
+
+impl Follower {
+    async fn follow(
+        &mut self,
+        ws: &mut Ws,
+        server: &Server,
+        relay: &Relay,
+        node_id: u64,
+    ) -> Result<(), LinkError> {
+        ws.outbound_changed = false;
+        let data = server.store();
+        if !first_linked(data, relay.id, node_id).await? {
+            self.recorded.clear();
+            return Ok(());
+        }
+        let handed: HashMap<String, Handed> = outbound::handed(data, relay.id)
+            .await?
+            .into_iter()
+            .map(|h| (h.id.clone(), h))
+            .collect();
+        self.recorded.retain(|id, _| handed.contains_key(id));
+        let ids: Vec<&String> = handed.keys().collect();
+        for batch in ids.chunks(FOLLOW_BATCH) {
+            let answer = ws.ok(method::OUTBOUND_GET, json!({"ids": batch})).await?;
+            let mut done = Vec::new();
+            for found in answer["list"].as_array().into_iter().flatten() {
+                let Ok(found) = serde_json::from_value::<ProtoOutbound>(found.clone()) else {
+                    continue;
+                };
+                let Some(handed) = handed.get(&found.id) else {
+                    continue;
+                };
+                if self.recorded.get(&found.id) == Some(&found.delivery_status) {
+                    continue;
+                }
+                let statuses = relayed_statuses(handed, &found);
+                let finished = statuses.iter().all(|(_, s)| {
+                    matches!(
+                        s,
+                        RelayedStatus::Delivered { .. } | RelayedStatus::Refused { .. }
+                    )
+                });
+                match apply_relayed(
+                    server,
+                    handed.queue_id,
+                    &handed.queue_name,
+                    &relay.name,
+                    &statuses,
+                )
+                .await
+                {
+                    Applied::Done if finished => done.push(found.id.clone()),
+                    Applied::Done => {
+                        self.recorded
+                            .insert(found.id.clone(), found.delivery_status.clone());
+                    }
+                    // Cancelled here: the relay stops too
+                    Applied::Gone => done.push(found.id.clone()),
+                    Applied::Locked => {}
+                }
+            }
+            // Gone from the relay (a reset, or kept past seven days): the
+            // queue hands the recipients over again
+            for id in answer["notFound"].as_array().into_iter().flatten() {
+                let Some(handed) = id.as_str().and_then(|id| handed.get(id)) else {
+                    continue;
+                };
+                let lost: Vec<(String, RelayedStatus)> = handed
+                    .recipients
+                    .iter()
+                    .map(|r| (r.clone(), RelayedStatus::Lost))
+                    .collect();
+                match apply_relayed(
+                    server,
+                    handed.queue_id,
+                    &handed.queue_name,
+                    &relay.name,
+                    &lost,
+                )
+                .await
+                {
+                    Applied::Done | Applied::Gone => {
+                        outbound::forget_handed(data, relay.id, std::slice::from_ref(&handed.id))
+                            .await?;
+                    }
+                    Applied::Locked => {}
+                }
+            }
+            if !done.is_empty() {
+                let answer = ws
+                    .ok(method::OUTBOUND_SET, json!({"destroy": done}))
+                    .await?;
+                // One being tried right now is cleared next time
+                let busy: HashSet<&str> = answer["notDestroyed"]
+                    .as_object()
+                    .into_iter()
+                    .flatten()
+                    .filter(|(_, e)| e["type"] == "forbidden")
+                    .map(|(id, _)| id.as_str())
+                    .collect();
+                let forget: Vec<String> = done
+                    .into_iter()
+                    .filter(|id| !busy.contains(id.as_str()))
+                    .collect();
+                for id in &forget {
+                    self.recorded.remove(id);
+                }
+                outbound::forget_handed(data, relay.id, &forget).await?;
+            }
+        }
+        Ok(())
+    }
+}
+
+/// What the relay says of each recipient a message was handed over for.
+fn relayed_statuses(handed: &Handed, found: &ProtoOutbound) -> Vec<(String, RelayedStatus)> {
+    handed
+        .recipients
+        .iter()
+        .filter_map(|address| {
+            let status = found.delivery_status.get(address)?;
+            let reply = status.smtp_reply.clone();
+            let mx = status.mx.clone();
+            Some((
+                address.clone(),
+                match status.delivered {
+                    Delivered::Yes | Delivered::Unknown => RelayedStatus::Delivered { reply, mx },
+                    Delivered::No => RelayedStatus::Refused { reply, mx },
+                    Delivered::Queued => RelayedStatus::Queued { reply, mx },
+                },
+            ))
+        })
+        .collect()
 }
 
 // ---- Inbound mail -----------------------------------------------------------
