@@ -38,6 +38,8 @@ pub mod smtp;
 #[cfg(test)]
 pub mod store;
 #[cfg(test)]
+pub mod store_version; // inbuxa: INBUXA_STORE_VERSION
+#[cfg(test)]
 pub mod system;
 #[cfg(test)]
 pub mod telemetry;
