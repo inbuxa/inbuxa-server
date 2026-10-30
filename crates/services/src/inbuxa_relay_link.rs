@@ -21,6 +21,11 @@
 //! answered, a held one is delivered, or reported to a sender who passed
 //! SPF or DMARC (RL-17, RL-18). A message taken is recorded before the
 //! relay is told, so one offered again isn't delivered twice (RL-16).
+//!
+//! The relay's own events become this server's `relay.*` trace events, so
+//! they reach the log, webhooks and OpenTelemetry. On a cluster only the
+//! linked node with the lowest id takes them. A node with no link to a
+//! joined relay for an hour says so with `relay.link-down` (RL-T23).
 
 use common::{
     BuildServer, Inner, Server,
@@ -49,8 +54,8 @@ use inbuxa_relay_proto::{
     recipient::{RecipientDomain, RecipientHash},
     seal, token,
     types::{
-        Address, Capability, Inbound, InboundState, RELAY_SINGLETON, RelaySettings, RelayStatus,
-        Reply, Verdict,
+        Address, Capability, Inbound, InboundState, RELAY_SINGLETON, RelayEvent as ProtoRelayEvent,
+        RelaySettings, RelayStatus, Reply, Verdict,
     },
 };
 use registry::schema::{
@@ -107,6 +112,8 @@ const TAKE_MAX: usize = 8;
 const LEASE_SECONDS: u64 = 300;
 /// How often messages taken long ago are forgotten (RL-16).
 const FORGET_EVERY: u64 = 3_600;
+/// No link this long to a joined relay raises `relay.link-down`.
+const LINK_DOWN_ALERT: u64 = 3_600;
 
 pub fn spawn_relay_links(inner: Arc<Inner>) {
     tokio::spawn(async move {
@@ -343,6 +350,9 @@ async fn run_link(
                 wait
             }
         };
+        if relay.join.state(now()) == JoinState::Joined {
+            status.alert_if_down(relay.relay_id(), &relay.settings.hostname);
+        }
         if !wait.is_zero() {
             tokio::select! {
                 _ = tokio::time::sleep(wait) => {}
@@ -368,6 +378,10 @@ async fn link_keys(
 struct StatusWriter {
     current: NodeLink,
     written_at: u64,
+    /// Since when this node has had no link, if it hasn't.
+    unlinked_since: Option<u64>,
+    /// `relay.link-down` was raised for this outage, for this relay.
+    alerted: Option<(String, String)>,
 }
 
 impl StatusWriter {
@@ -378,6 +392,26 @@ impl StatusWriter {
                 ..Default::default()
             },
             written_at: 0,
+            unlinked_since: None,
+            alerted: None,
+        }
+    }
+
+    /// RL-T23: an hour with no link to a joined relay is said once, and
+    /// so is its end.
+    fn alert_if_down(&mut self, relay_id: String, hostname: &str) {
+        let Some(since) = self.unlinked_since else {
+            return;
+        };
+        if self.alerted.is_none() && now() >= since + LINK_DOWN_ALERT {
+            trc::event!(
+                Relay(trc::RelayEvent::LinkDown),
+                Id = relay_id.clone(),
+                Hostname = hostname.to_string(),
+                Reason = self.current.last_error.clone().unwrap_or_default(),
+                Elapsed = trc::Value::Duration(now().saturating_sub(since) * 1000),
+            );
+            self.alerted = Some((relay_id, hostname.to_string()));
         }
     }
 
@@ -391,6 +425,14 @@ impl StatusWriter {
         let now = now();
         if state != self.current.state {
             self.current.since = now;
+        }
+        if state == LinkState::Linked {
+            self.unlinked_since = None;
+            if let Some((id, hostname)) = self.alerted.take() {
+                trc::event!(Relay(trc::RelayEvent::LinkUp), Id = id, Hostname = hostname);
+            }
+        } else if self.unlinked_since.is_none() {
+            self.unlinked_since = Some(now);
         }
         let changed = state != self.current.state || error != self.current.last_error;
         self.current.state = state;
@@ -730,6 +772,7 @@ struct Ws {
     next_id: u64,
     relay_changed: bool,
     inbound_changed: bool,
+    events_changed: bool,
 }
 
 impl Ws {
@@ -760,6 +803,7 @@ impl Ws {
             next_id: 0,
             relay_changed: false,
             inbound_changed: false,
+            events_changed: false,
         })
     }
 
@@ -795,6 +839,7 @@ impl Ws {
             for types in changed.values() {
                 self.relay_changed |= types.contains_key("Relay");
                 self.inbound_changed |= types.contains_key("Inbound");
+                self.events_changed |= types.contains_key("RelayEvent");
             }
         }
     }
@@ -891,7 +936,7 @@ async fn session(
     let mut ws = Ws::open(&dialer).await?;
     // Inbound too: live mode (RL-12)
     ws.send(&ClientFrame::WebSocketPushEnable {
-        data_types: Some(vec!["Relay".into(), "Inbound".into()]),
+        data_types: Some(vec!["Relay".into(), "Inbound".into(), "RelayEvent".into()]),
         push_state: None,
     })
     .await?;
@@ -913,6 +958,7 @@ async fn session(
         answers: answers_tx,
     };
     taker.take(&mut ws).await?;
+    take_events(&mut ws, data, &relay, status.current.node_id).await?;
 
     let mut tick = tokio::time::interval(SYNC);
     tick.reset();
@@ -926,6 +972,9 @@ async fn session(
                 }
                 if ws.inbound_changed {
                     taker.take(&mut ws).await?;
+                }
+                if ws.events_changed {
+                    take_events(&mut ws, data, &relay, status.current.node_id).await?;
                 }
                 continue;
             }
@@ -957,6 +1006,108 @@ async fn session(
         refresh_status(&mut ws, data, &relay, &sent, status).await?;
         taker.relay_name = relay.name.clone();
         taker.take(&mut ws).await?;
+        take_events(&mut ws, data, &relay, status.current.node_id).await?;
+    }
+}
+
+// ---- Relay events -----------------------------------------------------------
+
+/// The relay's events, as this server's trace events, then acknowledged so
+/// the relay can forget them. One node takes them: the lowest linked one.
+async fn take_events(
+    ws: &mut Ws,
+    data: &store::Store,
+    relay: &Relay,
+    node_id: u64,
+) -> Result<(), LinkError> {
+    ws.events_changed = false;
+    let first = relays::link::statuses(data, relay.id)
+        .await?
+        .iter()
+        .filter(|link| {
+            link.state == LinkState::Linked && link.updated_at + 3 * STATUS_EVERY >= now()
+        })
+        .map(|link| link.node_id)
+        .min()
+        .is_none_or(|first| first >= node_id);
+    if !first {
+        return Ok(());
+    }
+    let answer = ws.ok(method::RELAY_EVENT_GET, json!({})).await?;
+    let mut ids = Vec::new();
+    for event in answer["list"].as_array().into_iter().flatten() {
+        if let Ok(event) = serde_json::from_value::<ProtoRelayEvent>(event.clone()) {
+            trace_event(relay, &event);
+            ids.push(event.id);
+        }
+    }
+    if !ids.is_empty() {
+        ws.ok(method::RELAY_EVENT_SET, json!({"destroy": ids}))
+            .await?;
+    }
+    Ok(())
+}
+
+/// One relay event, as a `relay.*` trace event naming the relay.
+fn trace_event(relay: &Relay, event: &ProtoRelayEvent) {
+    let id = relay.relay_id();
+    let hostname = relay.settings.hostname.clone();
+    let data = &event.data;
+    let text = |key: &str| {
+        data.get(key)
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string()
+    };
+    let number = |key: &str| data.get(key).and_then(Value::as_u64).unwrap_or_default();
+    match event.kind.as_str() {
+        "smtp.session" => trc::event!(
+            Relay(trc::RelayEvent::Session),
+            Id = id,
+            Hostname = hostname,
+            RemoteIp = text("remoteIp"),
+            Tls = data.get("tls").and_then(Value::as_bool).unwrap_or_default(),
+            Total = number("accepted"),
+            TotalFailures = number("refusedRecipients"),
+        ),
+        "inbound.accepted" => trc::event!(
+            Relay(trc::RelayEvent::MessageAccepted),
+            Id = id,
+            Hostname = hostname,
+            Details = text("id"),
+            Type = text("mode"),
+            Size = number("size"),
+        ),
+        "inbound.refused" => trc::event!(
+            Relay(trc::RelayEvent::MessageRefused),
+            Id = id,
+            Hostname = hostname,
+            Details = text("id"),
+            Code = number("code"),
+        ),
+        "inbound.expired" => trc::event!(
+            Relay(trc::RelayEvent::MessageExpired),
+            Id = id,
+            Hostname = hostname,
+            Details = text("id"),
+            Value = text("receivedAt"),
+        ),
+        "relay.joined" => {
+            trc::event!(Relay(trc::RelayEvent::Joined), Id = id, Hostname = hostname,)
+        }
+        "recipients.replaced" => trc::event!(
+            Relay(trc::RelayEvent::RecipientsReplaced),
+            Id = id,
+            Hostname = hostname,
+            Total = number("count"),
+        ),
+        kind => trc::event!(
+            Relay(trc::RelayEvent::Event),
+            Id = id,
+            Hostname = hostname,
+            Type = kind.to_string(),
+            Details = Value::Object(data.clone()).to_string(),
+        ),
     }
 }
 
@@ -1037,7 +1188,7 @@ impl Taker {
             let answers = self.answers.clone();
             tokio::spawn(async move {
                 let id = inbound.id.clone();
-                let action = job.judge(inbound).await;
+                let action = Box::pin(job.judge(inbound)).await;
                 let _ = answers.send(Answer { id, action });
             });
         }
@@ -1106,7 +1257,12 @@ impl Job {
         };
 
         let input = relayed_message(&self.relay_name, &inbound, !live, message);
-        let outcome = ingest_relayed(self.server.clone(), self.instance.clone(), input).await;
+        let outcome = Box::pin(ingest_relayed(
+            self.server.clone(),
+            self.instance.clone(),
+            input,
+        ))
+        .await;
         let action = action_for(&outcome, live);
         if action == Action::Destroy
             && let Err(err) = record_ingested(&data, self.relay_id, &inbound.id, now()).await
@@ -1495,6 +1651,25 @@ mod tests {
             Verdict::Tempfail(reply(451, "4.3.0", "garbage"))
         );
         assert!(verdict_for("550 5.1.1").is_valid());
+    }
+
+    #[test]
+    fn link_down_alert() {
+        let alert = |status: &mut StatusWriter| status.alert_if_down("a".into(), "mx1.example.com");
+        let mut status = StatusWriter::new(7);
+        // Never unlinked, or not for an hour yet: nothing
+        alert(&mut status);
+        assert!(status.alerted.is_none());
+        status.unlinked_since = Some(now() - LINK_DOWN_ALERT + 60);
+        alert(&mut status);
+        assert!(status.alerted.is_none());
+        // An hour: once
+        status.unlinked_since = Some(now() - LINK_DOWN_ALERT);
+        alert(&mut status);
+        let first = status.alerted.clone();
+        assert!(first.is_some());
+        alert(&mut status);
+        assert_eq!(status.alerted, first);
     }
 
     #[test]

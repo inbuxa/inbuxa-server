@@ -12,10 +12,11 @@
 // auth.legacy-protocol-refused (legacy-protocols LP-6); 643 is
 // security.legacy-protocols-changed (LP-8); 644 to 646 are the cluster
 // coordinator's connection events; 647 and 648 are the audit log's
-// (audit-hold-lock spec, AU-3, AU-8); 649 is cluster.node-id-reassigned.
+// (audit-hold-lock spec, AU-3, AU-8); 649 is cluster.node-id-reassigned;
+// 650 to 658 are inbuxa Relay's (relay spec, RL-23, RL-T23).
 // TOTAL_EVENT_COUNT sizes the collector's per-event tables, so it is one
 // more than the highest id; the test below holds it to the variant list
-pub const TOTAL_EVENT_COUNT: usize = 650;
+pub const TOTAL_EVENT_COUNT: usize = 659;
 pub const TOTAL_METRIC_COUNT: usize = 369;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -50,6 +51,8 @@ pub enum EventType {
     PushSubscription(PushSubscriptionEvent),
     Queue(QueueEvent),
     Registry(RegistryEvent),
+    // inbuxa: relay spec
+    Relay(RelayEvent),
     Resource(ResourceEvent),
     // inbuxa: SCIM-54
     Scim(ScimEvent),
@@ -640,6 +643,22 @@ pub enum ResourceEvent {
     DownloadExternal = 387,
     ApplicationUpdated = 601,
     ApplicationUnpacked = 602,
+}
+
+// inbuxa: relay spec: what an inbuxa Relay reports, mapped by the link
+// service, and the link-down alert (RL-T23)
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[repr(u16)]
+pub enum RelayEvent {
+    Session = 650,
+    MessageAccepted = 651,
+    MessageRefused = 652,
+    MessageExpired = 653,
+    Joined = 654,
+    RecipientsReplaced = 655,
+    Event = 656,
+    LinkDown = 657,
+    LinkUp = 658,
 }
 
 // inbuxa: SCIM-54: every write an identity provider makes

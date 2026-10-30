@@ -690,8 +690,16 @@ In progress. Done so far:
   is retried after the lease, and spam over the reject threshold goes to
   Junk (RL-17). Every message taken is recorded until `heldMaxAge` and a
   day have passed (RL-16). A pending message stays `pending` when claimed.
-- Not done yet: `inbuxa:RelayMessage`, relay events in the trace, and the
-  link-down alert.
+- Relay events: the link service asks for `RelayEvent` push too, and the
+  linked node with the lowest id turns each event into a `relay.*` trace
+  event (`relay.session`, `relay.message-accepted`, `-refused`,
+  `-expired`, `relay.joined`, `relay.recipients-replaced`, and
+  `relay.event` for any other type), then acknowledges it. A node with no
+  link to a joined relay for an hour raises `relay.link-down` (a warning),
+  once, and `relay.link-up` when it is back (RL-T23). Both reach the log,
+  webhooks and OpenTelemetry.
+- Not done yet: `inbuxa:RelayMessage`, which comes with inbuxa-admin's
+  Relays page (step 5), once `Outbound` exists to show beside `Inbound`.
 
 Order:
 
