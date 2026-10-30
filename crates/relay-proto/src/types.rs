@@ -349,6 +349,70 @@ impl Verdict {
     }
 }
 
+/// A message the downstream handed to the relay to send (RL-19).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Outbound {
+    pub id: String,
+    pub created_at: String,
+    /// The upload the message was made from, as the downstream signed it.
+    pub blob_id: String,
+    pub envelope: Envelope,
+    pub size: u64,
+    /// Per recipient, by address.
+    pub delivery_status: BTreeMap<String, DeliveryStatus>,
+    /// The next try, while any recipient is still queued.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub next_attempt_at: Option<String>,
+    pub attempts: u32,
+    pub expires_at: String,
+}
+
+/// What `Outbound/set` create takes.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct NewOutbound {
+    pub blob_id: String,
+    pub envelope: Envelope,
+}
+
+/// RFC 8621 `DeliveryStatus`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DeliveryStatus {
+    /// The remote server's last reply, empty before the first try.
+    pub smtp_reply: String,
+    pub delivered: Delivered,
+    /// The relay never learns this.
+    pub displayed: Displayed,
+}
+
+impl DeliveryStatus {
+    pub fn queued() -> Self {
+        DeliveryStatus {
+            smtp_reply: String::new(),
+            delivered: Delivered::Queued,
+            displayed: Displayed::Unknown,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum Delivered {
+    Queued,
+    Yes,
+    No,
+    Unknown,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum Displayed {
+    Unknown,
+    Yes,
+}
+
 /// A relay event, for the downstream's history and tracer.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -405,6 +469,30 @@ mod tests {
         s.held_max_age = 91;
         assert_eq!(s.problems().len(), 2);
         assert!(s.serves("EXAMPLE.com"));
+    }
+
+    #[test]
+    fn outbound_wire_form() {
+        let status = serde_json::to_value(DeliveryStatus::queued()).unwrap();
+        assert_eq!(
+            status,
+            json!({"smtpReply": "", "delivered": "queued", "displayed": "unknown"})
+        );
+        let new: NewOutbound = serde_json::from_value(json!({
+            "blobId": "b1",
+            "envelope": {"mailFrom": {"email": "a@example.com"}, "rcptTo": [{"email": "b@example.org"}]},
+        }))
+        .unwrap();
+        assert_eq!(new.envelope.rcpt_to.len(), 1);
+        assert!(
+            serde_json::from_value::<NewOutbound>(json!({
+                "blobId": "b1",
+                "envelope": {"mailFrom": {"email": ""}, "rcptTo": []},
+                "deliveryStatus": {},
+            }))
+            .is_err(),
+            "the relay sets the status"
+        );
     }
 
     #[test]

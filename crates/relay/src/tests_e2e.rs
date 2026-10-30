@@ -622,6 +622,58 @@ async fn relay_end_to_end() {
     let got = ws.ok("Inbound/get", json!({ "ids": [held_id] })).await;
     assert_eq!(got["list"][0]["state"], "held");
 
+    // Outbound: handed over as an upload (RL-19), never from a sender
+    // outside the relay's domains (RL-T10), and cancelled while queued.
+    let (status, body) = down
+        .http(
+            "POST",
+            "/jmap/upload/relay",
+            b"Subject: out\r\n\r\nhello\r\n".to_vec(),
+        )
+        .await;
+    assert_eq!(status, 201);
+    let blob: Value = serde_json::from_slice(&body).unwrap();
+    let envelope = |from: &str| json!({ "mailFrom": { "email": from }, "rcptTo": [{ "email": "bob@example.org" }] });
+    let set = ws
+        .ok(
+            "Outbound/set",
+            json!({ "create": {
+                "a": { "blobId": blob["blobId"], "envelope": envelope("jane@example.com") },
+                "b": { "blobId": blob["blobId"], "envelope": envelope("jane@example.org") },
+            }}),
+        )
+        .await;
+    assert_eq!(set["notCreated"]["b"]["type"], "forbiddenFrom", "{set}");
+    let out_id = set["created"]["a"]["id"].as_str().unwrap().to_string();
+    assert_eq!(
+        set["created"]["a"]["deliveryStatus"]["bob@example.org"]["delivered"],
+        "queued"
+    );
+    ws.wait_change("Outbound").await;
+    let got = ws.ok("Outbound/get", json!({ "ids": [out_id] })).await;
+    assert_eq!(got["list"][0]["size"], 23);
+    let eml = app.paths.spool_out().join(format!("{out_id}.eml"));
+    assert!(eml.exists());
+    let relay = ws.ok("Relay/get", json!({})).await;
+    assert_eq!(relay["list"][0]["status"]["spool"]["outbound"], 1);
+    let again = ws
+        .ok(
+            "Outbound/set",
+            json!({
+                "create": { "c": { "blobId": blob["blobId"], "envelope": envelope("jane@example.com") }},
+                "update": { out_id.clone(): { "attempts": 9 }},
+            }),
+        )
+        .await;
+    assert_eq!(
+        again["notCreated"]["c"]["type"], "invalidProperties",
+        "an upload is used once"
+    );
+    assert_eq!(again["notUpdated"][&out_id]["type"], "forbidden");
+    let gone = ws.ok("Outbound/set", json!({ "destroy": [out_id] })).await;
+    assert_eq!(gone["destroyed"], json!([out_id]));
+    assert!(!eml.exists());
+
     // Events went up the link.
     let events = ws.ok("RelayEvent/get", json!({})).await;
     let kinds: Vec<&str> = events["list"]

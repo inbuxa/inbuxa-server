@@ -12,8 +12,10 @@
 //! command line can join, run, show status, and reset; nothing else.
 
 mod app;
+mod changelog;
 mod events;
 mod link;
+mod outbound;
 mod recipients;
 mod smtp;
 mod spool;
@@ -286,10 +288,9 @@ fn status(paths: &Paths) -> Result<(), String> {
             println!("Running:    yes, since {}", s.started_at);
             println!("Mode:       {:?}", s.mode);
             println!("Linked:     {} connection(s)", s.link_clients);
-            println!(
-                "Held mail:  {} message(s), {} bytes",
-                s.spool.inbound, s.spool.bytes
-            );
+            println!("Held mail:  {} message(s)", s.spool.inbound);
+            println!("Outbound:   {} message(s)", s.spool.outbound);
+            println!("Spool:      {} bytes", s.spool.bytes);
             if let Some(e) = s.last_error {
                 println!("Last error: {e}");
             }

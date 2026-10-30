@@ -16,7 +16,7 @@ use inbuxa_relay_proto::{
     jmap::{Invocation, MethodError, Request, Response, method},
     recipient::{RecipientDomain, RecipientHash},
     time, token,
-    types::{RELAY_SINGLETON, RelaySettings, Verdict, type_name},
+    types::{NewOutbound, RELAY_SINGLETON, RelaySettings, Verdict, type_name},
 };
 use rustls_pki_types::{CertificateDer, pem::PemObject};
 use serde_json::{Map, Value, json};
@@ -115,6 +115,9 @@ fn call_one(app: &App, caller: &Caller, call: &Invocation) -> MethodResult {
         method::INBOUND_CHANGES => inbound_changes(app, args),
         method::INBOUND_CLAIM => inbound_claim(app, caller, args),
         method::INBOUND_SET => inbound_set(app, args),
+        method::OUTBOUND_GET => outbound_get(app, args),
+        method::OUTBOUND_CHANGES => outbound_changes(app, args),
+        method::OUTBOUND_SET => outbound_set(app, args),
         method::RELAY_EVENT_GET => event_get(app, args),
         method::RELAY_EVENT_CHANGES => event_changes(app, args),
         method::RELAY_EVENT_SET => event_set(app, args),
@@ -747,6 +750,148 @@ fn inbound_set(app: &App, args: &Map<String, Value>) -> MethodResult {
     }))
 }
 
+// ---- Outbound -------------------------------------------------------------
+
+fn outbound_get(app: &App, args: &Map<String, Value>) -> MethodResult {
+    let ids = string_list(args, "ids")?;
+    let outbox = app.outbox.lock().expect("outbox");
+    let ids = ids.unwrap_or_else(|| outbox.ids());
+    let mut list = Vec::new();
+    let mut not_found = Vec::new();
+    for id in ids {
+        match outbox.get(&id) {
+            Some(outbound) => {
+                list.push(serde_json::to_value(outbound).expect("outbound serializes"))
+            }
+            None => not_found.push(id),
+        }
+    }
+    Ok(json!({
+        "accountId": ACCOUNT_ID,
+        "state": outbox.state(),
+        "list": list,
+        "notFound": not_found,
+    }))
+}
+
+fn outbound_changes(app: &App, args: &Map<String, Value>) -> MethodResult {
+    let since = args
+        .get("sinceState")
+        .and_then(Value::as_str)
+        .ok_or_else(|| err(MethodError::InvalidArguments, "sinceState is required"))?;
+    let max = args
+        .get("maxChanges")
+        .and_then(Value::as_u64)
+        .map_or(MAX_CHANGES, |m| (m as usize).clamp(1, MAX_CHANGES));
+    let outbox = app.outbox.lock().expect("outbox");
+    let changes = outbox
+        .changes(since, max)
+        .ok_or((MethodError::CannotCalculateChanges, None))?;
+    Ok(json!({
+        "accountId": ACCOUNT_ID,
+        "oldState": changes.old_state,
+        "newState": changes.new_state,
+        "hasMoreChanges": changes.has_more,
+        "created": changes.created,
+        "updated": changes.updated,
+        "destroyed": changes.destroyed,
+    }))
+}
+
+/// RL-19: the only way mail leaves through the relay.
+fn outbound_set(app: &App, args: &Map<String, Value>) -> MethodResult {
+    let mut created = Map::new();
+    let mut not_created = Map::new();
+    let mut not_updated = Map::new();
+    let mut destroyed = Vec::new();
+    let mut not_destroyed = Map::new();
+    let settings = app.settings();
+    let create = object(args, "create")?;
+    let full = match (&settings, create) {
+        (Some(settings), Some(create)) if !create.is_empty() => app.spool_full(settings),
+        _ => false,
+    };
+    let mut outbox = app.outbox.lock().expect("outbox");
+    let old_state = outbox.state();
+    for (key, value) in create.into_iter().flatten() {
+        let new = match serde_json::from_value::<NewOutbound>(value.clone()) {
+            Ok(new) if crate::link::is_blob_id(&new.blob_id) => new,
+            Ok(_) => {
+                not_created.insert(
+                    key.clone(),
+                    set_error("invalidProperties", "blobId: an uploaded blob"),
+                );
+                continue;
+            }
+            Err(e) => {
+                not_created.insert(key.clone(), set_error("invalidProperties", e.to_string()));
+                continue;
+            }
+        };
+        let Some(settings) = &settings else {
+            not_created.insert(
+                key.clone(),
+                set_error("forbidden", "the relay has no settings yet"),
+            );
+            continue;
+        };
+        let blob = app.paths.blobs().join(&new.blob_id);
+        match outbox.create(
+            &blob,
+            &new.blob_id,
+            new.envelope,
+            settings,
+            full,
+            time::now(),
+        ) {
+            Ok(id) => {
+                let object = outbox.get(&id).expect("just created");
+                created.insert(
+                    key.clone(),
+                    serde_json::to_value(object).expect("outbound serializes"),
+                );
+            }
+            Err(refusal) => {
+                not_created.insert(key.clone(), set_error(refusal.kind, refusal.description));
+            }
+        }
+    }
+    for id in object(args, "update")?
+        .into_iter()
+        .flatten()
+        .map(|(id, _)| id)
+    {
+        not_updated.insert(
+            id.clone(),
+            set_error("forbidden", "only the relay changes an Outbound"),
+        );
+    }
+    for id in string_list(args, "destroy")?.unwrap_or_default() {
+        if outbox.destroy(&id) {
+            destroyed.push(id);
+        } else {
+            not_destroyed.insert(id, set_error("notFound", "no such message"));
+        }
+    }
+    let new_state = outbox.state();
+    drop(outbox);
+    if new_state != old_state {
+        app.notify(type_name::OUTBOUND, new_state.clone());
+        app.relay_changed();
+    }
+    Ok(json!({
+        "accountId": ACCOUNT_ID,
+        "oldState": old_state,
+        "newState": new_state,
+        "created": created,
+        "notCreated": not_created,
+        "updated": {},
+        "notUpdated": not_updated,
+        "destroyed": destroyed,
+        "notDestroyed": not_destroyed,
+    }))
+}
+
 // ---- RelayEvent -----------------------------------------------------------
 
 fn event_get(app: &App, args: &Map<String, Value>) -> MethodResult {
@@ -823,6 +968,10 @@ pub fn states(app: &App) -> Vec<(&'static str, String)> {
         (type_name::RECIPIENT, recipient.clone()),
         (type_name::RECIPIENT_DOMAIN, recipient),
         (type_name::INBOUND, app.spool.lock().expect("spool").state()),
+        (
+            type_name::OUTBOUND,
+            app.outbox.lock().expect("outbox").state(),
+        ),
         (
             type_name::RELAY_EVENT,
             app.events.lock().expect("events").state(),
