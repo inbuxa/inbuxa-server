@@ -55,12 +55,21 @@ impl Paths {
         self.root.join("spool").join("in")
     }
 
+    pub fn spool_out(&self) -> PathBuf {
+        self.root.join("spool").join("out")
+    }
+
     pub fn blobs(&self) -> PathBuf {
         self.root.join("blobs")
     }
 
     pub fn create_dirs(&self) -> io::Result<()> {
-        for dir in [self.root.clone(), self.spool_in(), self.blobs()] {
+        for dir in [
+            self.root.clone(),
+            self.spool_in(),
+            self.spool_out(),
+            self.blobs(),
+        ] {
             fs::create_dir_all(&dir)?;
             set_private(&dir, true)?;
         }

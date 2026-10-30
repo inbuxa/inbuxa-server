@@ -306,8 +306,17 @@ so a reboot without the link comes back with the same settings (RL-22).
 | `id`, `createdAt` | |
 | `blobId` | The message as the downstream signed it |
 | `envelope` | RFC 8621 `Envelope` |
-| `deliveryStatus` | RFC 8621 `DeliveryStatus` per recipient: `smtpReply`, `delivered` (`queued`, `yes`, `no`, `unknown`) |
-| `nextAttemptAt`, `attempts`, `expiresAt` | Retry state |
+| `size` | Bytes |
+| `deliveryStatus` | RFC 8621 `DeliveryStatus` per recipient: `smtpReply` (empty before the first try), `delivered` (`queued`, `yes`, `no`, `unknown`) |
+| `nextAttemptAt`, `attempts`, `expiresAt` | Retry state. `nextAttemptAt` only while a recipient is queued |
+
+A create takes `blobId` and `envelope` only; the relay sets the rest, and no
+update is allowed. The upload moves into the spool, so it can't be used
+twice. Besides `forbiddenFrom` (RL-19), a create is refused as `tooLarge`
+over `maxMessageSize` or `maxRecipients`, `overQuota` when the spool is
+full, and `invalidProperties` for an empty `rcptTo`, a recipient listed
+twice, or an address or SMTP parameter that couldn't go on a command line
+as it is.
 
 **`RelayEvent`**: read-only, `{id, at, type, data}`. The relay's sessions,
 deliveries, rejections and errors, for the downstream's history and tracer.
@@ -761,6 +770,10 @@ In progress. Done so far:
   link to a joined relay for an hour raises `relay.link-down` (a warning),
   once, and `relay.link-up` when it is back (RL-T23). Both reach the log,
   webhooks and OpenTelemetry.
+- `Outbound` on the relay: `Outbound/set` create and destroy, `/get` and
+  `/changes`, with push, in `spool/out/` (RL-19, RL-T10). The relay doesn't
+  deliver it yet, and the downstream doesn't hand anything over yet; both
+  are the rest of step 4.
 - `crates/outbound-tls` (RL-30): the TLSA and MTA-STS types, the DANE
   certificate check, MTA-STS policy parsing and matching, and the DNSSEC
   lookups (with the bogus-answer recheck), moved out of `crates/smtp` and

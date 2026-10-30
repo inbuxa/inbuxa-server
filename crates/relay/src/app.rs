@@ -8,6 +8,7 @@
 
 use crate::{
     events::Events,
+    outbound::Outbox,
     recipients::Recipients,
     spool::Spool,
     state::{self, Identity, Paths},
@@ -43,6 +44,7 @@ pub struct App {
     settings_state: AtomicU64,
     pub recipients: RwLock<Recipients>,
     pub spool: Mutex<Spool>,
+    pub outbox: Mutex<Outbox>,
     pub events: Mutex<Events>,
     pub push: broadcast::Sender<Changed>,
     /// Link connections, and those with push on for `Inbound`.
@@ -60,6 +62,7 @@ impl App {
         let settings = state::load_settings(&paths)?.map(Arc::new);
         let recipients = Recipients::load(&paths)?;
         let spool = Spool::open(&paths.spool_in())?;
+        let outbox = Outbox::open(&paths.spool_out())?;
         let events = Events::open(paths.events())?;
         // Uploads don't survive a restart.
         if let Ok(dir) = std::fs::read_dir(paths.blobs()) {
@@ -75,6 +78,7 @@ impl App {
             settings_state: AtomicU64::new(1),
             recipients: RwLock::new(recipients),
             spool: Mutex::new(spool),
+            outbox: Mutex::new(outbox),
             events: Mutex::new(events),
             push,
             link_clients: AtomicU32::new(0),
@@ -145,9 +149,13 @@ impl App {
     }
 
     pub fn status(&self) -> RelayStatus {
-        let (inbound, bytes) = {
+        let (inbound, inbound_bytes) = {
             let spool = self.spool.lock().expect("spool");
             (spool.count(), spool.bytes())
+        };
+        let (outbound, outbound_bytes) = {
+            let outbox = self.outbox.lock().expect("outbox");
+            (outbox.count(), outbox.bytes())
         };
         RelayStatus {
             started_at: time::utc_date(self.started_at),
@@ -156,8 +164,8 @@ impl App {
             mode: self.mode(),
             spool: SpoolStatus {
                 inbound,
-                outbound: 0,
-                bytes,
+                outbound,
+                bytes: inbound_bytes + outbound_bytes,
             },
             recipient_state: self.recipients.read().expect("recipients").state(),
             certificate_not_after: None,
@@ -166,9 +174,11 @@ impl App {
         }
     }
 
-    /// Whether the spool is too full for new mail: past 90% of the cap.
+    /// Whether the spool is too full for new mail, either way: past 90% of
+    /// the cap.
     pub fn spool_full(&self, settings: &RelaySettings) -> bool {
-        let bytes = self.spool.lock().expect("spool").bytes();
+        let bytes =
+            self.spool.lock().expect("spool").bytes() + self.outbox.lock().expect("outbox").bytes();
         bytes.saturating_mul(10) >= settings.spool_max_bytes.saturating_mul(9)
             || disk_nearly_full(&self.paths.spool_in())
     }

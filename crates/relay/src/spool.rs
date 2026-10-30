@@ -15,7 +15,10 @@
 //! Leases and live verdict waiters are runtime only. After a restart every
 //! message is held and unleased; the downstream deduplicates by id (RL-16).
 
-use crate::state::{set_private, sync_dir, write_atomic};
+use crate::{
+    changelog::Changelog,
+    state::{set_private, sync_dir, write_atomic},
+};
 use inbuxa_relay_proto::{
     seal::Sealer,
     time,
@@ -23,14 +26,13 @@ use inbuxa_relay_proto::{
 };
 use serde::{Deserialize, Serialize};
 use std::{
-    collections::{BTreeMap, VecDeque},
+    collections::BTreeMap,
     fs, io,
     path::{Path, PathBuf},
 };
 use tokio::{io::AsyncWriteExt, sync::oneshot};
 
-/// How many destroyed ids `/changes` can still report.
-const TOMBSTONES: usize = 10_000;
+pub use crate::changelog::Changes;
 
 /// A message's stored properties.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -74,16 +76,6 @@ impl Entry {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Changes {
-    pub old_state: String,
-    pub new_state: String,
-    pub created: Vec<String>,
-    pub updated: Vec<String>,
-    pub destroyed: Vec<String>,
-    pub has_more: bool,
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum VerdictError {
     NotFound,
@@ -96,10 +88,7 @@ pub enum VerdictError {
 pub struct Spool {
     dir: PathBuf,
     entries: BTreeMap<String, Entry>,
-    modseq: u64,
-    tombstones: VecDeque<(u64, String)>,
-    /// `/changes` can't go back past this.
-    floor: u64,
+    log: Changelog,
     bytes: u64,
 }
 
@@ -129,9 +118,7 @@ impl Spool {
         let mut spool = Spool {
             dir: dir.to_path_buf(),
             entries: BTreeMap::new(),
-            modseq: 1,
-            tombstones: VecDeque::new(),
-            floor: 1,
+            log: Changelog::default(),
             bytes: 0,
         };
         let mut msgs = Vec::new();
@@ -191,7 +178,7 @@ impl Spool {
     }
 
     pub fn state(&self) -> String {
-        self.modseq.to_string()
+        self.log.state()
     }
 
     pub fn count(&self) -> u64 {
@@ -207,8 +194,7 @@ impl Spool {
     }
 
     fn bump(&mut self) -> u64 {
-        self.modseq += 1;
-        self.modseq
+        self.log.bump()
     }
 
     /// Starts writing a new message in the spool directory `dir`, sealed
@@ -298,38 +284,11 @@ impl Spool {
     }
 
     pub fn changes(&self, since: &str, max: usize) -> Option<Changes> {
-        let since: u64 = since.parse().ok()?;
-        if since < self.floor || since > self.modseq {
-            return None;
-        }
-        let mut created = Vec::new();
-        let mut updated = Vec::new();
-        for (id, e) in &self.entries {
-            if e.created > since {
-                created.push(id.clone());
-            } else if e.modseq > since {
-                updated.push(id.clone());
-            }
-        }
-        let destroyed: Vec<String> = self
-            .tombstones
-            .iter()
-            .filter(|(seq, _)| *seq > since)
-            .map(|(_, id)| id.clone())
-            .collect();
-        let total = created.len() + updated.len() + destroyed.len();
-        if total > max {
-            // Too much at once: the client starts over with /query.
-            return None;
-        }
-        Some(Changes {
-            old_state: since.to_string(),
-            new_state: self.state(),
-            created,
-            updated,
-            destroyed,
-            has_more: false,
-        })
+        self.log.changes(
+            since,
+            max,
+            self.entries.iter().map(|(id, e)| (id, e.created, e.modseq)),
+        )
     }
 
     /// RL-15: leases up to `limit` unleased messages to `conn`.
@@ -438,13 +397,7 @@ impl Spool {
         let _ = fs::remove_file(self.meta_path(id));
         let _ = fs::remove_file(self.msg_path(id));
         let _ = sync_dir(&self.dir);
-        let modseq = self.bump();
-        self.tombstones.push_back((modseq, id.to_string()));
-        while self.tombstones.len() > TOMBSTONES {
-            if let Some((seq, _)) = self.tombstones.pop_front() {
-                self.floor = seq;
-            }
-        }
+        self.log.destroyed(id);
         true
     }
 
