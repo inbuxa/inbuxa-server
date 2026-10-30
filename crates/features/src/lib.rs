@@ -28,6 +28,7 @@ pub mod lock;
 pub mod mailflow;
 pub mod masked_email;
 pub mod privacy;
+pub mod relay; // inbuxa: the downstream side of inbuxa Relay (not a rebuild)
 pub mod scheduled_reports; // inbuxa: scheduled reports and the weekly digest (not a rebuild)
 pub mod security;
 pub mod tenancy;

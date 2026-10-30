@@ -127,6 +127,7 @@ pub enum GetRequestMethod {
     AccountLock(Box<GetRequest<crate::object::inbuxa_account_lock::AccountLock>>),
     LegalHold(Box<GetRequest<crate::object::inbuxa_legal_hold::LegalHold>>),
     MailRule(Box<GetRequest<crate::object::inbuxa_mail_rule::MailRule>>),
+    Relay(Box<GetRequest<crate::object::inbuxa_relay::Relay>>),
     SecurityAcceptance(
         Box<GetRequest<crate::object::inbuxa_security_acceptance::SecurityAcceptance>>,
     ),
@@ -183,6 +184,7 @@ pub enum SetRequestMethod<'x> {
     AccountLock(Box<SetRequest<'x, crate::object::inbuxa_account_lock::AccountLock>>),
     LegalHold(Box<SetRequest<'x, crate::object::inbuxa_legal_hold::LegalHold>>),
     MailRule(Box<SetRequest<'x, crate::object::inbuxa_mail_rule::MailRule>>),
+    Relay(Box<SetRequest<'x, crate::object::inbuxa_relay::Relay>>),
     SecurityAcceptance(
         Box<SetRequest<'x, crate::object::inbuxa_security_acceptance::SecurityAcceptance>>,
     ),

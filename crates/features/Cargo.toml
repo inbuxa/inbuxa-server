@@ -31,6 +31,10 @@ mail-builder = { version = "1.0" }
 # inbuxa: scheduled reports run at a local time (scheduled-reports spec, RP-15)
 chrono = { version = "0.4", default-features = false, features = ["std"] }
 chrono-tz = "0.10"
+# inbuxa: the downstream side of inbuxa Relay (relay spec)
+inbuxa-relay-proto = { path = "../relay-proto" }
+aws-lc-rs = { version = "1" }
+rcgen = { version = "0.14", default-features = false, features = ["crypto", "pem", "aws_lc_rs"] }
 
 [dev-dependencies]
 tokio = { version = "1.53", features = ["macros", "rt"] }
