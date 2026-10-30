@@ -121,6 +121,20 @@ reverses delivery: configuration, recipient sync, status and outbound
 results would still need another channel. JMAP carries all of them, and is
 the protocol the rest of the suite already speaks.
 
+- **RL-32. WireGuard underneath, optional.** The link can run over a
+  WireGuard network the operator already has, with nothing changed in the
+  link itself: the relay and every node are peers on it, the relay runs
+  with `--link-listen <its WireGuard address>:443`, and its `address` in
+  inbuxa-admin is that WireGuard address. The link port is then not on the
+  internet at all, and WireGuard answers nothing to a packet from a key it
+  doesn't know. The pins and the join proof stay: WireGuard says which key
+  sent a packet, not that it came from this downstream's current node. The
+  docs page shows the setup (step 6). Built-in WireGuard, with the keys
+  exchanged at join and a userspace implementation in the relay, is a
+  later option if hand setup proves a burden. It would cost the relay a
+  tun device or a userspace network stack, and on a cluster one peer per
+  node on every relay.
+
 ### Identities
 
 | Key | Lives on | Pinned by | Purpose |
@@ -129,6 +143,37 @@ the protocol the rest of the suite already speaks.
 | Relay link key | Relay state directory | Downstream, at join | The relay's link server certificate (self-signed) |
 | Downstream sealing key (X25519) | Downstream registry (secret); public half pushed to the relay | — | The relay seals held inbound mail to it (RL-21) |
 | Relay SMTP certificate | Relay state directory | — | STARTTLS on port 25, under the relay's public hostname. Issued by the downstream (RL-27) |
+
+### Hardening
+
+- **RL-33. Who may dial the link.** The setting `linkAllowFrom` (a list of
+  addresses and CIDR ranges, pushed with the others) limits the link port
+  to those sources. Others are dropped before TLS, with no reply. Empty
+  means anyone, the default, since a cluster's outbound addresses aren't
+  always known in advance. Until its first settings, a relay takes the
+  link from anyone, so it can join. A list that leaves the downstream out
+  would lock it out for good, so: inbuxa-admin warns when no node's
+  address it knows is in the list, and `inbuxa-relay run --link-allow-any`
+  ignores the list until the downstream pushes a new one.
+- **RL-34. A new link CA without rejoining.** inbuxa-admin can replace the
+  link CA, for instance when a node's certificate may have leaked, since a
+  node certificate can't be revoked one by one. The downstream makes the
+  new CA and pushes its pin as `nextLinkCaPin`. A relay then trusts both,
+  and says so in its status. Once every enabled relay does, nodes take
+  certificates from the new CA, and the downstream pushes it as the only
+  CA. From then on a certificate from the old one fails the handshake.
+  A relay that missed the change, because it was down meanwhile, still
+  has the old pin and needs a new join; inbuxa-admin lists it.
+- **RL-35. The downstream's relay keys, wrapped.** The link CA key, the
+  sealing key and each relay's recipient key are stored encrypted under a
+  wrapping key the store doesn't hold: a file every node reads, named by
+  `INBUXA_RELAY_KEY_FILE`. A copy of the store or a backup alone then
+  can't issue node certificates or open held mail. Without the file, relay
+  links don't start, and the node says why. The file must be backed up on
+  its own: losing it loses held mail, which is sealed to the sealing key,
+  and means a new join for every relay. inbuxa-admin says so when it is
+  turned on. Without the setting, keys are stored as today, as registry
+  secrets.
 
 ### Joining and reset
 
@@ -208,7 +253,9 @@ with the server's own `inbuxa:` objects. In particular, the relay's
 | `outboundTls` | downstream | Opportunistic TLS default; DANE and MTA-STS always enforced where published |
 | `smtpCertificate` | downstream | PEM chain and private key. `/get` never returns the key |
 | `sealingKey` | downstream | The downstream's public sealing key |
-| `status` | relay | `{startedAt, linkClients, mode, spool: {inbound, outbound, bytes}, recipientState, certificateNotAfter, lastError}` |
+| `linkAllowFrom` | downstream | Addresses and CIDR ranges that may dial the link port. Default empty: anyone (RL-33) |
+| `nextLinkCaPin` | downstream | A second link CA to trust during a replacement (RL-34). Default null |
+| `status` | relay | `{startedAt, linkClients, mode, spool: {inbound, outbound, bytes}, recipientState, certificateNotAfter, linkCaPins, lastError}`; `linkCaPins` lists the CAs it trusts (RL-34) |
 
 Settings are cached in the state directory as the downstream last set them,
 so a reboot without the link comes back with the same settings (RL-22).
@@ -572,7 +619,10 @@ A **Relays** page under Settings › Mail flow:
 - **No path in.** The protected network accepts no connection from the
   relay. The link is dialed out, and speaks only the methods above.
 - **The link port.** Pinned mTLS before any HTTP. TLS handshakes are rate
-  limited per IP.
+  limited per IP. `linkAllowFrom` (RL-33) limits who reaches it, and over
+  WireGuard (RL-32) it isn't on the internet at all.
+- **A leaked node certificate** is good until it expires, up to 30 days,
+  unless the link CA is replaced (RL-34).
 - **Port 25 can't relay.** There is no AUTH and no outbound path from port
   25 (RL-4, RL-19).
 - **A compromised relay** gives an attacker mail in flight, the outbound
@@ -583,7 +633,12 @@ A **Relays** page under Settings › Mail flow:
   holds, and a relay can be disabled from inbuxa-admin at once, which drops
   its link.
 - **Secrets on the downstream:** the link CA key, the sealing key and the
-  recipient key, as registry secrets. inbuxa-admin never shows them.
+  recipient key, as registry secrets, or wrapped under a key outside the
+  store (RL-35). inbuxa-admin never shows them.
+- **The join window.** Anyone holding the token who can also take over the
+  relay's address before the real relay joins could join a relay of their
+  own. Tokens last 24 hours and work once; an IP address in `address`, or
+  a WireGuard address (RL-32), narrows it further.
 
 ## Acceptance tests
 
@@ -638,6 +693,14 @@ A **Relays** page under Settings › Mail flow:
   message goes through the other, and SPF lists only the other's address.
 - **RL-T23.** A node with no link to an enabled relay for an hour raises an
   alert.
+- **RL-T25.** With `linkAllowFrom` set, a link connection from another
+  address is closed before TLS. `--link-allow-any` lets it in again.
+- **RL-T26.** After a link CA replacement (RL-34), every relay stays linked
+  without a new join, and a node certificate from the old CA fails the
+  handshake.
+- **RL-T27.** With `INBUXA_RELAY_KEY_FILE` set, a copy of the store holds
+  none of the relay keys in the clear, and a node started without the file
+  starts no relay link and says why.
 
 ## Decisions
 
@@ -714,4 +777,6 @@ Order:
 5. inbuxa-admin's Relays page, certificates (RL-27), DNS (RL-25), and
    upgrades (RL-29).
 6. Packaging (RL-31, and an installer path) and a docs page. The edge-server page
-   points to it.
+   points to it. The docs page shows the WireGuard setup (RL-32).
+7. Hardening: who may dial the link (RL-33), a new link CA without
+   rejoining (RL-34), and the relay keys wrapped (RL-35).
