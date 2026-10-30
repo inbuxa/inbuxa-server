@@ -16,7 +16,8 @@
 //! port 25 takes mail only for this server's real recipients. Live, a
 //! message is delivered before the sender hears 250, and this server's
 //! refusal is the sender's reply; held while the link is off, it is
-//! delivered once the link is back, exactly once.
+//! delivered once the link is back, exactly once. The relay's events are
+//! taken and acknowledged.
 
 use crate::utils::{
     account::Account,
@@ -730,6 +731,11 @@ pub async fn link(test: &mut TestServer) {
     // message is delivered once the link is back, once
     let reply = send_mail(smtp_port, "jane@example.com", &message("Held one", "")).await;
     assert!(reply.starts_with("250"), "{reply}");
+    let pending_events = std::fs::read_to_string(state.join("events.jsonl")).unwrap_or_default();
+    assert!(
+        pending_events.contains("inbound.accepted"),
+        "the relay recorded the held message: {pending_events}"
+    );
     call(
         admin,
         "inbuxa:Relay/set",
@@ -750,6 +756,26 @@ pub async fn link(test: &mut TestServer) {
             .count(),
         2
     );
+
+    // The relay's events were taken as this server's relay.* trace events,
+    // and acknowledged, so the relay forgot them
+    let events = state.join("events.jsonl");
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    loop {
+        let left = std::fs::read_to_string(&events)
+            .unwrap_or_default()
+            .lines()
+            .filter(|line| !line.trim().is_empty())
+            .count();
+        if left == 0 {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "{left} relay events left unacknowledged"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    }
 
     call(admin, "inbuxa:Relay/set", json!({"destroy": [&id]})).await;
 }
