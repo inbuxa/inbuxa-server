@@ -19,14 +19,25 @@ use crate::queue::{
     Error, ErrorDetails, HostResponse, MessageWrapper, RCPT_RELAYED, Status, UnexpectedResponse,
     spool::SmtpSpool,
 };
+use crate::{queue::RecipientDomain, reporting::send::MtaReportSend};
 use common::{Server, config::smtp::queue::QueueName, ipc::QueueEvent};
+use common::{
+    config::smtp::report::AggregateFrequency,
+    ipc::{PolicyType, TlsEvent},
+};
 use inbuxa_features::relay::outbound::{Handed, Refused, record_handed};
+use inbuxa_outbound_tls::{Policy, Tlsa};
 use inbuxa_relay_proto::types::{Address, Envelope};
+use mail_auth::{
+    mta_sts::TlsRpt,
+    report::tlsrpt::{FailureDetails, ResultType},
+};
+use serde_json::Value;
 use smtp_proto::{
     MAIL_BODY_8BITMIME, MAIL_REQUIRETLS, MAIL_RET_FULL, MAIL_RET_HDRS, RCPT_NOTIFY_DELAY,
     RCPT_NOTIFY_FAILURE, RCPT_NOTIFY_NEVER, RCPT_NOTIFY_SUCCESS, Response,
 };
-use std::collections::BTreeMap;
+use std::{collections::BTreeMap, sync::Arc};
 use store::write::now;
 use trc::RelayEvent;
 use types::id::Id;
@@ -355,9 +366,171 @@ pub async fn apply_relayed(
     Applied::Done
 }
 
+/// One of a relay's `outbound.tls` events in this server's TLS-RPT reports
+/// (RFC 8460), as if this server had made the session: the same policy,
+/// result and frequency, for a domain that publishes a TLS-RPT record.
+pub async fn report_relayed_tls(server: &Server, data: &serde_json::Map<String, Value>) {
+    let Some(tls) = relayed_tls(data) else {
+        return;
+    };
+    let span_id = server.inner.data.span_id_gen.generate();
+    let interval = match server
+        .eval_if(
+            &server.core.smtp.report.tls.send,
+            &RecipientDomain::new(&tls.domain),
+            span_id,
+        )
+        .await
+        .unwrap_or(AggregateFrequency::Never)
+    {
+        interval @ (AggregateFrequency::Hourly
+        | AggregateFrequency::Daily
+        | AggregateFrequency::Weekly) => interval,
+        AggregateFrequency::Never => return,
+    };
+    let record = match server
+        .core
+        .smtp
+        .resolvers
+        .dns
+        .txt_lookup::<TlsRpt>(
+            format!("_smtp._tls.{}.", tls.domain),
+            Some(&server.inner.cache.dns_txt),
+        )
+        .await
+    {
+        Ok(record) => record,
+        // No record: nobody to report to
+        Err(_) => return,
+    };
+    server
+        .schedule_report(TlsEvent {
+            domain: tls.domain,
+            policy: tls.policy,
+            failure: tls.failure,
+            tls_record: record,
+            interval,
+            span_id,
+        })
+        .await;
+}
+
+/// What an `outbound.tls` event says, as this server's report takes it.
+#[derive(Debug, PartialEq)]
+struct RelayedTls {
+    domain: String,
+    policy: PolicyType,
+    failure: Option<FailureDetails>,
+}
+
+fn relayed_tls(data: &serde_json::Map<String, Value>) -> Option<RelayedTls> {
+    let text = |key: &str| data.get(key).and_then(Value::as_str);
+    let domain = text("domain")?.trim_end_matches('.').to_lowercase();
+    if domain.is_empty() {
+        return None;
+    }
+    let policy = match text("policyType")? {
+        "tlsa" => PolicyType::Tlsa(
+            data.get("tlsa")
+                .and_then(|t| serde_json::from_value::<Tlsa>(t.clone()).ok())
+                .map(Arc::new),
+        ),
+        "sts" => PolicyType::Sts(
+            data.get("sts")
+                .and_then(|p| serde_json::from_value::<Policy>(p.clone()).ok())
+                .map(Arc::new),
+        ),
+        _ => PolicyType::None,
+    };
+    let failure = match text("result")? {
+        "success" => None,
+        result => {
+            let result_type =
+                serde_json::from_value::<ResultType>(Value::String(result.to_string()))
+                    .unwrap_or(ResultType::Other);
+            let mut failure = FailureDetails::new(result_type);
+            if let Some(mx) = text("mx") {
+                failure = failure.with_receiving_mx_hostname(mx);
+            }
+            if let Some(ip) = text("ip").and_then(|ip| ip.parse().ok()) {
+                failure = failure.with_receiving_ip(ip);
+            }
+            if let Some(reason) = text("reason") {
+                failure = failure.with_failure_reason_code(reason);
+            }
+            Some(failure)
+        }
+    };
+    Some(RelayedTls {
+        domain,
+        policy,
+        failure,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn relayed_tls_events() {
+        let event = |data: Value| relayed_tls(data.as_object().unwrap());
+        let ok = event(serde_json::json!({
+            "domain": "Example.ORG", "mx": "mx.example.org", "ip": "192.0.2.1",
+            "policyType": "no-policy-found", "policyStrings": [], "result": "success"
+        }))
+        .unwrap();
+        assert_eq!(ok.domain, "example.org");
+        assert_eq!((ok.policy, ok.failure), (PolicyType::None, None));
+
+        let tlsa = Tlsa {
+            entries: vec![inbuxa_outbound_tls::TlsaEntry {
+                is_end_entity: true,
+                is_spki: true,
+                matching: inbuxa_outbound_tls::TlsaMatching::Sha256,
+                data: vec![1, 2, 3],
+            }],
+            has_end_entities: true,
+            has_intermediates: false,
+        };
+        let dane = event(serde_json::json!({
+            "domain": "example.org", "mx": "mx.example.org", "ip": "192.0.2.1",
+            "policyType": "tlsa", "result": "validation-failure",
+            "reason": "no certificate matched", "tlsa": tlsa
+        }))
+        .unwrap();
+        assert_eq!(dane.policy, PolicyType::Tlsa(Some(Arc::new(tlsa))));
+        let failure = dane.failure.unwrap();
+        assert_eq!(failure.result_type, ResultType::ValidationFailure);
+        assert_eq!(
+            failure.receiving_mx_hostname.as_deref(),
+            Some("mx.example.org")
+        );
+        assert_eq!(failure.receiving_ip, Some("192.0.2.1".parse().unwrap()));
+        assert_eq!(
+            failure.failure_reason_code.as_deref(),
+            Some("no certificate matched")
+        );
+
+        let policy = Policy {
+            id: "20260101".into(),
+            mode: inbuxa_outbound_tls::Mode::Enforce,
+            mx: vec![inbuxa_outbound_tls::MxPattern::Equals(
+                "mx.example.org".into(),
+            )]
+            .into_boxed_slice(),
+            max_age: 86_400,
+        };
+        let sts = event(serde_json::json!({
+            "domain": "example.org", "mx": "other.example.org",
+            "policyType": "sts", "result": "something-new", "sts": policy
+        }))
+        .unwrap();
+        assert_eq!(sts.policy, PolicyType::Sts(Some(Arc::new(policy))));
+        assert_eq!(sts.failure.unwrap().result_type, ResultType::Other);
+
+        assert!(event(serde_json::json!({"policyType": "tlsa", "result": "success"})).is_none());
+    }
 
     #[test]
     fn replies() {
