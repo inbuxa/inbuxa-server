@@ -47,10 +47,16 @@ pub enum Refused {
 
 pub type HandOver<'a> = Pin<Box<dyn Future<Output = Result<String, Refused>> + Send + 'a>>;
 
+pub type Call<'a> = Pin<Box<dyn Future<Output = Result<serde_json::Value, String>> + Send + 'a>>;
+
 /// One relay link on this node, able to take a message: uploads it and
 /// creates an `Outbound`, whose id it returns.
 pub trait Sender: Send + Sync {
     fn hand_over(&self, message: Vec<u8>, envelope: Envelope) -> HandOver<'_>;
+
+    /// One method on the relay's API, on its account: the answer's
+    /// arguments, or why there are none (the relay's error included).
+    fn call(&self, method: &'static str, args: serde_json::Value) -> Call<'_>;
 }
 
 /// A relay this node is linked to.
@@ -119,6 +125,17 @@ impl Senders {
             .expect("senders")
             .linked
             .insert(linked.relay_id, linked);
+    }
+
+    /// This node's link to a relay, while it is up, whether the relay
+    /// sends mail or not.
+    pub fn linked(&self, relay_id: u32) -> Option<Arc<Linked>> {
+        self.state
+            .lock()
+            .expect("senders")
+            .linked
+            .get(&relay_id)
+            .cloned()
     }
 
     /// Forgets a link, unless a newer one to the same relay replaced it.
@@ -244,6 +261,10 @@ mod tests {
     impl Sender for Nothing {
         fn hand_over(&self, _: Vec<u8>, _: Envelope) -> HandOver<'_> {
             Box::pin(async { Err(Refused::Temporary("no".into())) })
+        }
+
+        fn call(&self, _: &'static str, _: serde_json::Value) -> Call<'_> {
+            Box::pin(async { Err("no".into()) })
         }
     }
 

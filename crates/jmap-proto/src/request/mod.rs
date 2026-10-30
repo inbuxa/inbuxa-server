@@ -128,6 +128,7 @@ pub enum GetRequestMethod {
     LegalHold(Box<GetRequest<crate::object::inbuxa_legal_hold::LegalHold>>),
     MailRule(Box<GetRequest<crate::object::inbuxa_mail_rule::MailRule>>),
     Relay(Box<GetRequest<crate::object::inbuxa_relay::Relay>>),
+    RelayMessage(Box<GetRequest<crate::object::inbuxa_relay_message::RelayMessage>>),
     SecurityAcceptance(
         Box<GetRequest<crate::object::inbuxa_security_acceptance::SecurityAcceptance>>,
     ),
@@ -185,6 +186,7 @@ pub enum SetRequestMethod<'x> {
     LegalHold(Box<SetRequest<'x, crate::object::inbuxa_legal_hold::LegalHold>>),
     MailRule(Box<SetRequest<'x, crate::object::inbuxa_mail_rule::MailRule>>),
     Relay(Box<SetRequest<'x, crate::object::inbuxa_relay::Relay>>),
+    RelayMessage(Box<SetRequest<'x, crate::object::inbuxa_relay_message::RelayMessage>>),
     SecurityAcceptance(
         Box<SetRequest<'x, crate::object::inbuxa_security_acceptance::SecurityAcceptance>>,
     ),
@@ -246,6 +248,7 @@ pub enum QueryRequestMethod {
     Registry(Box<QueryRequest<Registry>>),
     AuditEvent(Box<QueryRequest<crate::object::inbuxa_audit::AuditEvent>>),
     JournalEntry(Box<QueryRequest<crate::object::inbuxa_journal_entry::JournalEntry>>),
+    RelayMessage(Box<QueryRequest<crate::object::inbuxa_relay_message::RelayMessage>>),
 }
 
 #[derive(Debug)]

@@ -704,6 +704,27 @@ impl<'de> Visitor<'de> for CallVisitor {
                     return Err(de::Error::invalid_length(1, &self));
                 }
             },
+            (MethodFunction::Get, MethodObject::RelayMessage) => match seq.next_element() {
+                Ok(Some(value)) => RequestMethod::Get(GetRequestMethod::RelayMessage(value)),
+                Err(err) => RequestMethod::invalid(err),
+                Ok(None) => {
+                    return Err(de::Error::invalid_length(1, &self));
+                }
+            },
+            (MethodFunction::Query, MethodObject::RelayMessage) => match seq.next_element() {
+                Ok(Some(value)) => RequestMethod::Query(QueryRequestMethod::RelayMessage(value)),
+                Err(err) => RequestMethod::invalid(err),
+                Ok(None) => {
+                    return Err(de::Error::invalid_length(1, &self));
+                }
+            },
+            (MethodFunction::Set, MethodObject::RelayMessage) => match seq.next_element() {
+                Ok(Some(value)) => RequestMethod::Set(SetRequestMethod::RelayMessage(value)),
+                Err(err) => RequestMethod::invalid(err),
+                Ok(None) => {
+                    return Err(de::Error::invalid_length(1, &self));
+                }
+            },
             // inbuxa: accepted security to-do items
             (MethodFunction::Get, MethodObject::SecurityAcceptance) => match seq.next_element() {
                 Ok(Some(value)) => RequestMethod::Get(GetRequestMethod::SecurityAcceptance(value)),

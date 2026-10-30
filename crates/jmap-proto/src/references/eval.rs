@@ -91,6 +91,9 @@ impl Response<'_> {
                         GetResponseMethod::Relay(response) => {
                             response.eval_jptr(path, &mut results)
                         }
+                        GetResponseMethod::RelayMessage(response) => {
+                            response.eval_jptr(path, &mut results)
+                        }
                         GetResponseMethod::SecurityAcceptance(response) => {
                             response.eval_jptr(path, &mut results)
                         }

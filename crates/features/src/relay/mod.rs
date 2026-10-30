@@ -24,6 +24,7 @@
 //! Numbers are big-endian. There are few relays, so they're read whole.
 
 pub mod link;
+pub mod messages;
 pub mod outbound;
 
 use inbuxa_relay_proto::{

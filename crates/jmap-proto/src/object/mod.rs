@@ -43,6 +43,7 @@ pub mod inbuxa_log_settings; // inbuxa: personal-data catalog, D1
 pub mod inbuxa_mail_rule; // inbuxa: DLP and mail flow rules
 pub mod inbuxa_protocol_policy; // inbuxa: legacy protocols off
 pub mod inbuxa_relay; // inbuxa: inbuxa Relay
+pub mod inbuxa_relay_message; // inbuxa: a relay's queues
 pub mod inbuxa_report_export; // inbuxa: scheduled reports, RP-19
 pub mod inbuxa_scheduled_report; // inbuxa: scheduled reports
 pub mod inbuxa_scheduled_report_settings; // inbuxa: scheduled reports

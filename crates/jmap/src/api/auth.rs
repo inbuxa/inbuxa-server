@@ -118,6 +118,7 @@ impl JmapAuthorization for AccessToken {
                 }
                 // inbuxa: inbuxa Relay
                 GetRequestMethod::Relay(_) => Permission::SysRelayGet,
+                GetRequestMethod::RelayMessage(_) => Permission::SysRelayQueueGet,
                 // inbuxa: journaling (JR-18)
                 GetRequestMethod::Journal(_) => Permission::SysJournalGet,
                 GetRequestMethod::JournalEntry(_) => Permission::SysJournalSearch,
@@ -319,6 +320,14 @@ impl JmapAuthorization for AccessToken {
                         Permission::SysRelayUpdate,
                         Permission::SysRelayUpdate,
                         Permission::SysRelayUpdate,
+                    ),
+                    // inbuxa: a relay's queues; set only destroys
+                    SetRequestMethod::RelayMessage(s) => validate_set(
+                        s,
+                        self,
+                        Permission::SysRelayQueueUpdate,
+                        Permission::SysRelayQueueUpdate,
+                        Permission::SysRelayQueueUpdate,
                     ),
                     // inbuxa: journaling (JR-18)
                     SetRequestMethod::Journal(s) => validate_set(
@@ -577,6 +586,7 @@ impl JmapAuthorization for AccessToken {
                 | MethodObject::HoldExport
                 | MethodObject::MailRule
                 | MethodObject::Relay
+                | MethodObject::RelayMessage
                 | MethodObject::SecurityAcceptance
                 | MethodObject::DeliverabilityReport
                 | MethodObject::DeliverabilitySettings
@@ -650,6 +660,8 @@ impl JmapAuthorization for AccessToken {
                 QueryRequestMethod::AuditEvent(_) => Permission::SysAuditGet,
                 // inbuxa: journaling (JR-15)
                 QueryRequestMethod::JournalEntry(_) => Permission::SysJournalSearch,
+                // inbuxa: a relay's queues
+                QueryRequestMethod::RelayMessage(_) => Permission::SysRelayQueueGet,
                 QueryRequestMethod::Registry(_) => {
                     let MethodObject::Registry(object_type) = object else {
                         unreachable!()

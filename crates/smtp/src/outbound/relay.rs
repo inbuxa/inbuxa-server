@@ -17,8 +17,8 @@
 
 use super::DeliveryResult;
 use crate::queue::{
-    Error, ErrorDetails, HostResponse, MessageWrapper, RCPT_RELAYED, Status, UnexpectedResponse,
-    spool::SmtpSpool,
+    Error, ErrorDetails, HostResponse, MessageWrapper, RCPT_DSN_SENT, RCPT_RELAYED, Status,
+    UnexpectedResponse, spool::SmtpSpool,
 };
 use crate::{queue::RecipientDomain, reporting::send::MtaReportSend};
 use common::{Server, config::smtp::queue::QueueName, ipc::QueueEvent};
@@ -274,6 +274,10 @@ pub enum RelayedStatus {
     },
     /// The relay no longer has the message: hand it over again.
     Lost,
+    /// An administrator cancelled it (`inbuxa:RelayMessage/set` destroy):
+    /// failed, like a delivery cancelled in this server's queue, and with
+    /// no DSN.
+    Cancelled,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -281,7 +285,9 @@ pub enum Applied {
     Done,
     /// The queue is working on the message: try again later.
     Locked,
-    /// The message is no longer queued here.
+    /// The message is no longer queued here, or none of these recipients
+    /// waits on the relay any more (cancelled, or expired here): the relay
+    /// can stop.
     Gone,
 }
 
@@ -308,6 +314,7 @@ pub async fn apply_relayed(
     let now = now();
     let mut changed = false;
     let mut wake = false;
+    let mut waiting = false;
     for rcpt in message.message.recipients.iter_mut() {
         // Expired here meanwhile: this server's word stands
         if rcpt.flags & RCPT_RELAYED == 0
@@ -324,6 +331,7 @@ pub async fn apply_relayed(
         else {
             continue;
         };
+        waiting = true;
         let entity = |mx: &Option<String>| -> Box<str> { mx.as_deref().unwrap_or(relay).into() };
         let new = match status {
             RelayedStatus::Delivered { reply, mx } => Status::Completed(HostResponse {
@@ -351,10 +359,20 @@ pub async fn apply_relayed(
                 entity: relay.into(),
                 details: Error::Io("The relay no longer has the message.".into()),
             }),
+            RelayedStatus::Cancelled => {
+                rcpt.flags |= RCPT_DSN_SENT;
+                Status::PermanentFailure(ErrorDetails {
+                    entity: relay.into(),
+                    details: Error::Io("Delivery canceled.".into()),
+                })
+            }
         };
         if matches!(
             status,
-            RelayedStatus::Delivered { .. } | RelayedStatus::Refused { .. } | RelayedStatus::Lost
+            RelayedStatus::Delivered { .. }
+                | RelayedStatus::Refused { .. }
+                | RelayedStatus::Lost
+                | RelayedStatus::Cancelled
         ) {
             rcpt.flags &= !RCPT_RELAYED;
             rcpt.retry.due = now;
@@ -364,6 +382,10 @@ pub async fn apply_relayed(
             rcpt.status = new;
             changed = true;
         }
+    }
+    if !waiting {
+        server.unlock_event(queue_id, queue_name).await;
+        return Applied::Gone;
     }
     if changed || wake {
         message

@@ -72,7 +72,7 @@ const SERVER_SET: &[P] = &[
     P::UpdatedAt,
 ];
 
-fn server_level(access_token: &AccessToken) -> trc::Result<()> {
+pub(super) fn server_level(access_token: &AccessToken) -> trc::Result<()> {
     if access_token.tenant_id().is_some() {
         Err(trc::JmapEvent::Forbidden
             .into_err()
@@ -82,7 +82,12 @@ fn server_level(access_token: &AccessToken) -> trc::Result<()> {
     }
 }
 
-fn json_to_value(json: serde_json::Value) -> RValue {
+/// A JSON value as a JMAP one, its object keys kept as plain keys.
+pub(super) fn json_to_value<P, E>(json: serde_json::Value) -> Value<'static, P, E>
+where
+    P: Property,
+    E: jmap_tools::Element<Property = P>,
+{
     match json {
         serde_json::Value::Null => Value::Null,
         serde_json::Value::Bool(b) => Value::Bool(b),

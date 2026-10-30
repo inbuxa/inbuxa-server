@@ -46,7 +46,7 @@ use inbuxa_features::{
             RecipientPlan, forget_ingested, is_inbound_id, issue_node_certificate, pushed_settings,
             record_ingested, record_join, set_status, was_ingested,
         },
-        outbound::{self, HandOver, Handed, Linked, Refused, Sender},
+        outbound::{self, Call, HandOver, Handed, Linked, Refused, Sender},
     },
 };
 use inbuxa_relay_proto::{
@@ -1212,6 +1212,32 @@ impl Sender for LinkSender {
                 return Ok(id.to_string());
             }
             Err(refusal(&args["notCreated"]["m"]))
+        })
+    }
+
+    fn call(&self, method: &'static str, mut args: Value) -> Call<'_> {
+        Box::pin(async move {
+            if args.get("accountId").is_none() {
+                args["accountId"] = ACCOUNT_ID.into();
+            }
+            let answer = self
+                .dialer
+                .api(vec![Invocation::new(method, args, "c")])
+                .await
+                .map_err(|err| err.message)?
+                .into_iter()
+                .next()
+                .ok_or_else(|| format!("The relay didn't answer {method}."))?;
+            if answer.name() == "error" {
+                return Err(format!(
+                    "The relay refused {method}: {}",
+                    answer.args()["description"]
+                        .as_str()
+                        .or(answer.args()["type"].as_str())
+                        .unwrap_or("no reason")
+                ));
+            }
+            Ok(Value::Object(answer.1))
         })
     }
 }

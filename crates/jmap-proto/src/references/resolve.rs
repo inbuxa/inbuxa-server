@@ -56,6 +56,7 @@ impl Response<'_> {
                 GetRequestMethod::LegalHold(request) => request.resolve_references(self)?,
                 GetRequestMethod::MailRule(request) => request.resolve_references(self)?,
                 GetRequestMethod::Relay(request) => request.resolve_references(self)?,
+                GetRequestMethod::RelayMessage(request) => request.resolve_references(self)?,
                 GetRequestMethod::SecurityAcceptance(request) => {
                     request.resolve_references(self)?
                 }
@@ -151,6 +152,9 @@ impl Response<'_> {
                     request.resolve_references(self, 1, false)?
                 }
                 SetRequestMethod::Relay(request) => request.resolve_references(self, 1, false)?,
+                SetRequestMethod::RelayMessage(request) => {
+                    request.resolve_references(self, 1, false)?
+                }
                 SetRequestMethod::SecurityAcceptance(request) => {
                     request.resolve_references(self, 1, false)?
                 }
