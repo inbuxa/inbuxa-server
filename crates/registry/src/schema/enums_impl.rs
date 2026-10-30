@@ -6508,6 +6508,7 @@ impl EnumImpl for MtaRouteType {
             b"Mx" => MtaRouteType::Mx,
             b"Relay" => MtaRouteType::Relay,
             b"Local" => MtaRouteType::Local,
+            b"InbuxaRelay" => MtaRouteType::InbuxaRelay,
         }
     }
 
@@ -6516,6 +6517,7 @@ impl EnumImpl for MtaRouteType {
             MtaRouteType::Mx => "Mx",
             MtaRouteType::Relay => "Relay",
             MtaRouteType::Local => "Local",
+            MtaRouteType::InbuxaRelay => "InbuxaRelay",
         }
     }
 
@@ -6528,11 +6530,12 @@ impl EnumImpl for MtaRouteType {
             0 => Some(MtaRouteType::Mx),
             1 => Some(MtaRouteType::Relay),
             2 => Some(MtaRouteType::Local),
+            3 => Some(MtaRouteType::InbuxaRelay),
             _ => None,
         }
     }
 
-    const COUNT: usize = 3;
+    const COUNT: usize = 4;
 }
 
 impl serde::Serialize for MtaRouteType {

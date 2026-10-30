@@ -989,6 +989,8 @@ pub enum Property {
     IntrospectionUrl = 936,
     IntrospectionClientId = 937,
     IntrospectionClientSecret = 938,
+    // inbuxa: relay spec, RL-24
+    Relays = 939,
     RequireClientRegistration = 615,
     RequireScopes = 608,
     RequireTls = 525,

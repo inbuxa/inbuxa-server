@@ -80,8 +80,9 @@ pub enum RoutingStrategy {
     Local,
     Mx(MxConfig),
     Relay(RelayConfig),
-    // inbuxa: handed to an inbuxa Relay over its link (relay spec, RL-24)
-    InbuxaRelay,
+    // inbuxa: handed to an inbuxa Relay over its link (relay spec, RL-24):
+    // one of the relays named, or any relay when none are
+    InbuxaRelay(Vec<String>),
 }
 
 #[derive(Clone, Debug)]
@@ -413,6 +414,13 @@ impl QueueConfig {
                     queue
                         .routing_strategy
                         .insert(route.name, RoutingStrategy::Local);
+                }
+                // inbuxa: relay spec, RL-24
+                MtaRoute::InbuxaRelay(route) => {
+                    queue.routing_strategy.insert(
+                        route.name,
+                        RoutingStrategy::InbuxaRelay(route.relays.into_iter().collect()),
+                    );
                 }
             }
         }

@@ -8,7 +8,8 @@
 //! RL-20, RL-24).
 //!
 //! With a relay's `sendThrough` on, every non-local recipient is handed to
-//! one of the relays this node is linked to, in turn. The recipients stay
+//! one of the relays this node is linked to, in turn; a recipient whose
+//! route is an `InbuxaRelay` route goes to one of the relays it names. The recipients stay
 //! in this server's queue, marked [`RCPT_RELAYED`] and shown as handed to
 //! the relay, until the link service reports the relay's final status for
 //! them through [`apply_relayed`]. The usual DSNs follow from there. With
@@ -47,19 +48,29 @@ use types::id::Id;
 pub const RELAYED_RECHECK: u64 = 3_600;
 
 impl MessageWrapper {
-    /// Hands one domain's recipients to the first relay that takes them.
+    /// Hands one domain's recipients to the first relay that takes them,
+    /// of those `named`, or of all when none are.
     pub(super) async fn hand_to_relay(
         &self,
+        named: &[String],
         rcpt_idxs: &[usize],
         rcpt_headers: Option<&[u8]>,
         results: &mut Vec<DeliveryResult>,
         server: &Server,
     ) {
-        let candidates = server.inner.data.relay_senders.candidates();
+        let candidates = server.inner.data.relay_senders.candidates(named);
         if candidates.is_empty() {
+            let reason = if named.is_empty() {
+                "No relay is linked from this node.".to_string()
+            } else {
+                format!(
+                    "No relay named {} is linked from this node and sending.",
+                    named.join(" or ")
+                )
+            };
             let status = Status::TemporaryFailure(ErrorDetails {
                 entity: "relay".into(),
-                details: Error::ConnectionError("No relay is linked from this node.".into()),
+                details: Error::ConnectionError(reason.into()),
             });
             results.push(DeliveryResult::domain(status, rcpt_idxs.to_vec()));
             return;

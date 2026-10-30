@@ -27860,6 +27860,7 @@ impl ObjectImpl for MtaRoute {
             MtaRoute::Mx(inner) => inner.validate(errors),
             MtaRoute::Relay(inner) => inner.validate(errors),
             MtaRoute::Local(inner) => inner.validate(errors),
+            MtaRoute::InbuxaRelay(inner) => inner.validate(errors),
         }
     }
 
@@ -27872,6 +27873,9 @@ impl ObjectImpl for MtaRoute {
                 object.index(i);
             }
             MtaRoute::Local(object) => {
+                object.index(i);
+            }
+            MtaRoute::InbuxaRelay(object) => {
                 object.index(i);
             }
         }
@@ -27899,6 +27903,10 @@ impl Pickle for MtaRoute {
                 2u16.pickle(out);
                 inner.pickle(out);
             }
+            MtaRoute::InbuxaRelay(inner) => {
+                3u16.pickle(out);
+                inner.pickle(out);
+            }
         }
     }
 
@@ -27907,6 +27915,7 @@ impl Pickle for MtaRoute {
             0 => Pickle::unpickle(stream).map(MtaRoute::Mx),
             1 => Pickle::unpickle(stream).map(MtaRoute::Relay),
             2 => Pickle::unpickle(stream).map(MtaRoute::Local),
+            3 => Pickle::unpickle(stream).map(MtaRoute::InbuxaRelay),
             _ => None,
         }
     }
@@ -27936,6 +27945,13 @@ impl IntoValue for MtaRoute {
                     .insert_unchecked(Property::Type, JmapValue::Str("Local".into()));
                 obj
             }
+            MtaRoute::InbuxaRelay(obj) => {
+                let mut obj = obj.into_value();
+                obj.as_object_mut()
+                    .unwrap()
+                    .insert_unchecked(Property::Type, JmapValue::Str("InbuxaRelay".into()));
+                obj
+            }
         }
     }
 }
@@ -27951,12 +27967,14 @@ impl RegistryJsonPatch for MtaRoute {
                 MtaRouteType::Mx => *self = MtaRoute::Mx(Default::default()),
                 MtaRouteType::Relay => *self = MtaRoute::Relay(Default::default()),
                 MtaRouteType::Local => *self = MtaRoute::Local(Default::default()),
+                MtaRouteType::InbuxaRelay => *self = MtaRoute::InbuxaRelay(Default::default()),
             }
         }
         match self {
             MtaRoute::Mx(inner) => inner.patch(pointer, value),
             MtaRoute::Relay(inner) => inner.patch(pointer, value),
             MtaRoute::Local(inner) => inner.patch(pointer, value),
+            MtaRoute::InbuxaRelay(inner) => inner.patch(pointer, value),
         }
     }
 }
@@ -27967,6 +27985,7 @@ impl MtaRoute {
             MtaRoute::Mx(_) => MtaRouteType::Mx,
             MtaRoute::Relay(_) => MtaRouteType::Relay,
             MtaRoute::Local(_) => MtaRouteType::Local,
+            MtaRoute::InbuxaRelay(_) => MtaRouteType::InbuxaRelay,
         }
     }
 }
@@ -28030,6 +28049,90 @@ impl RegistryJsonPropertyPatch for MtaRouteCommon {
         value: JmapValue<'x>,
     ) -> PatchResult<'x> {
         match pointer.next_property() {
+            Some(Property::Name) => self.name.patch(pointer.assert_read_only()?, value),
+            Some(Property::Description) => self.description.patch(pointer, value),
+            Some(Property::Type) => Ok(MaybeUnpatched::Unpatched {
+                property: Property::Type,
+                value,
+            }),
+            _ => Err(PatchError::new(pointer, "Invalid property")),
+        }
+    }
+}
+
+// inbuxa: relay spec, RL-24
+impl MtaRouteInbuxaRelay {
+    fn validate(&self, errors: &mut Vec<ValidationError>) -> bool {
+        let neb = errors.len();
+        let value = &self.relays;
+        for value in value.iter() {
+            if value.is_empty() {
+                errors.push(ValidationError::required(Property::Relays));
+            }
+        }
+        let value = &self.name;
+        if value.is_empty() {
+            errors.push(ValidationError::required(Property::Name));
+        }
+        if let Some(value) = &self.description {
+            if value.is_empty() {
+                errors.push(ValidationError::required(Property::Description));
+            }
+        }
+        errors.len() == neb
+    }
+
+    fn index<'x>(&'x self, i: &mut IndexBuilder<'x>) {
+        i.unique(Property::Name, &self.name);
+    }
+}
+
+impl Pickle for MtaRouteInbuxaRelay {
+    fn pickle(&self, out: &mut Vec<u8>) {
+        self.relays.pickle(out);
+        self.name.pickle(out);
+        self.description.pickle(out);
+    }
+
+    fn unpickle(stream: &mut crate::pickle::PickledStream<'_>) -> Option<Self> {
+        let mut this = Self::default();
+        this.relays = Pickle::unpickle(stream)?;
+        this.name = Pickle::unpickle(stream)?;
+        this.description = Pickle::unpickle(stream)?;
+        Some(this)
+    }
+}
+
+impl Default for MtaRouteInbuxaRelay {
+    fn default() -> Self {
+        Self {
+            relays: Default::default(),
+            name: Default::default(),
+            description: Default::default(),
+        }
+    }
+}
+
+impl IntoValue for MtaRouteInbuxaRelay {
+    fn into_value(self) -> JmapValue<'static> {
+        let mut map = jmap_tools::Map::with_capacity(4);
+        map.insert_unchecked(Property::Relays, self.relays.into_value());
+        map.insert_unchecked(Property::Name, self.name.into_value());
+        map.insert_unchecked(Property::Description, self.description.into_value());
+        JmapValue::Object(map)
+    }
+}
+
+impl RegistryJsonPropertyPatch for MtaRouteInbuxaRelay {
+    fn patch_property<'x>(
+        &mut self,
+        mut pointer: JsonPointerPatch<'_>,
+        value: JmapValue<'x>,
+    ) -> PatchResult<'x> {
+        match pointer.next_property() {
+            Some(Property::Relays) => self
+                .relays
+                .patch(pointer.with_validators(&[StringValidator::Trim]), value),
             Some(Property::Name) => self.name.patch(pointer.assert_read_only()?, value),
             Some(Property::Description) => self.description.patch(pointer, value),
             Some(Property::Type) => Ok(MaybeUnpatched::Unpatched {

@@ -3796,11 +3796,25 @@ pub enum MtaRoute {
     Mx(MtaRouteMx),
     Relay(MtaRouteRelay),
     Local(MtaRouteCommon),
+    // inbuxa: relay spec, RL-24
+    InbuxaRelay(MtaRouteInbuxaRelay),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct MtaRouteCommon {
+    #[serde(rename = "name")]
+    pub name: String,
+    #[serde(rename = "description")]
+    pub description: Option<String>,
+}
+
+// inbuxa: through inbuxa Relays (relay spec, RL-24)
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct MtaRouteInbuxaRelay {
+    #[serde(rename = "relays")]
+    pub relays: Map<String>,
     #[serde(rename = "name")]
     pub name: String,
     #[serde(rename = "description")]

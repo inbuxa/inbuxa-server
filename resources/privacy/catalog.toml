@@ -1595,6 +1595,9 @@ default = "none"
 [object."x:MtaRouteCommon"]
 default = "none"
 
+[object."x:MtaRouteInbuxaRelay"]
+default = "none"
+
 [object."x:MtaRouteMx"]
 default = "none"
 

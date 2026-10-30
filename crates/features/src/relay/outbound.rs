@@ -21,7 +21,7 @@ use super::{
 use inbuxa_relay_proto::types::Envelope;
 use serde::{Deserialize as SerdeDeserialize, Serialize as SerdeSerialize};
 use std::{
-    collections::{BTreeMap, HashSet},
+    collections::{BTreeMap, HashMap},
     future::Future,
     pin::Pin,
     sync::{
@@ -74,8 +74,9 @@ struct State {
     known: bool,
     /// An enabled relay has `sendThrough` on (RL-24).
     send_through: bool,
-    /// Enabled relays not marked `inboundOnly` (RL-20).
-    may_send: HashSet<u32>,
+    /// Enabled relays not marked `inboundOnly` (RL-20), by id, with their
+    /// names as they are now: a rename doesn't restart the link.
+    may_send: HashMap<u32, String>,
     linked: BTreeMap<u32, Arc<Linked>>,
 }
 
@@ -88,7 +89,7 @@ impl Senders {
         state.may_send = relays
             .iter()
             .filter(|r| r.enabled && !r.inbound_only)
-            .map(|r| r.id)
+            .map(|r| (r.id, r.name.trim().to_string()))
             .collect();
     }
 
@@ -133,14 +134,19 @@ impl Senders {
     }
 
     /// The relays to try for one message, in order: those this node is
-    /// linked to and that may send, each message starting with the next
-    /// one in turn (RL-20).
-    pub fn candidates(&self) -> Vec<Arc<Linked>> {
+    /// linked to and that may send, of those `named` when a route names
+    /// some, each message starting with the next one in turn (RL-20, RL-24).
+    pub fn candidates(&self, named: &[String]) -> Vec<Arc<Linked>> {
         let state = self.state.lock().expect("senders");
         let mut linked: Vec<Arc<Linked>> = state
             .linked
             .values()
-            .filter(|l| state.may_send.contains(&l.relay_id))
+            .filter(|l| {
+                state
+                    .may_send
+                    .get(&l.relay_id)
+                    .is_some_and(|name| named.is_empty() || named.iter().any(|n| n.trim() == name))
+            })
             .cloned()
             .collect();
         if !linked.is_empty() {
@@ -275,13 +281,13 @@ mod tests {
         ]);
         assert!(senders.sending());
         // Nothing linked: nothing to try, and the mail waits
-        assert!(senders.candidates().is_empty());
+        assert!(senders.candidates(&[]).is_empty());
         for id in [1, 2, 3] {
             senders.link_up(linked(id));
         }
         let mut firsts = Vec::new();
         for _ in 0..4 {
-            let ids: Vec<u32> = senders.candidates().iter().map(|l| l.relay_id).collect();
+            let ids: Vec<u32> = senders.candidates(&[]).iter().map(|l| l.relay_id).collect();
             assert_eq!(ids.len(), 2, "{ids:?}");
             assert!(!ids.contains(&2), "inboundOnly: {ids:?}");
             firsts.push(ids[0]);
@@ -298,8 +304,37 @@ mod tests {
         senders.link_up(old.clone());
         senders.link_up(new.clone());
         senders.link_down(&old);
-        assert_eq!(senders.candidates().len(), 1);
+        assert_eq!(senders.candidates(&[]).len(), 1);
         senders.link_down(&new);
-        assert!(senders.candidates().is_empty());
+        assert!(senders.candidates(&[]).is_empty());
+    }
+
+    #[test]
+    fn a_route_names_its_relays() {
+        let senders = Senders::default();
+        let mut renamed = relay(3, false, false);
+        renamed.name = "east".into();
+        senders.set_relays(&[relay(1, false, false), relay(2, false, true), renamed]);
+        for id in [1, 2, 3] {
+            senders.link_up(linked(id));
+        }
+        let ids = |named: &[&str]| -> Vec<u32> {
+            let named: Vec<String> = named.iter().map(|n| n.to_string()).collect();
+            let mut ids: Vec<u32> = senders
+                .candidates(&named)
+                .iter()
+                .map(|l| l.relay_id)
+                .collect();
+            ids.sort();
+            ids
+        };
+        assert_eq!(ids(&[]), [1, 3]);
+        assert_eq!(ids(&["r1"]), [1]);
+        // By the name it has now, not the one it was linked under
+        assert_eq!(ids(&["east"]), [3]);
+        assert!(ids(&["r3"]).is_empty());
+        // inboundOnly sends nothing, named or not
+        assert!(ids(&["r2"]).is_empty());
+        assert_eq!(ids(&["r1", "east", "nowhere"]), [1, 3]);
     }
 }
