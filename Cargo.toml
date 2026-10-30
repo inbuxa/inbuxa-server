@@ -33,6 +33,7 @@ members = [
     "crates/migration",
     "crates/features",
     "crates/relay-proto",
+    "crates/outbound-tls",
     "crates/relay",
     "tests",
 ]

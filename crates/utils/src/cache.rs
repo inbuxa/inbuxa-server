@@ -2,6 +2,8 @@
  * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
+ *
+ * Modified by Coffey Labs in 2026 for INBUXA.
  */
 
 use arcstr::ArcStr;
@@ -256,6 +258,34 @@ impl<T: Clone + CacheItemWeight> CacheItemWeight for Option<T> {
 impl<T: CacheItemWeight> CacheItemWeight for Arc<T> {
     fn weight(&self) -> u64 {
         self.as_ref().weight()
+    }
+}
+
+// inbuxa: the outbound TLS types moved to their own crate (RL-30), so
+// their weights live here, with the trait.
+impl CacheItemWeight for inbuxa_outbound_tls::Tlsa {
+    fn weight(&self) -> u64 {
+        self.entries
+            .iter()
+            .map(|entry| {
+                (entry.data.len() + std::mem::size_of::<inbuxa_outbound_tls::TlsaEntry>()) as u64
+            })
+            .sum::<u64>()
+            + std::mem::size_of::<inbuxa_outbound_tls::Tlsa>() as u64
+    }
+}
+
+impl CacheItemWeight for inbuxa_outbound_tls::Policy {
+    fn weight(&self) -> u64 {
+        (std::mem::size_of::<inbuxa_outbound_tls::Policy>()
+            + self
+                .mx
+                .iter()
+                .map(|mx| match mx {
+                    inbuxa_outbound_tls::MxPattern::Equals(t) => t.len(),
+                    inbuxa_outbound_tls::MxPattern::StartsWith(t) => t.len(),
+                })
+                .sum::<usize>()) as u64
     }
 }
 

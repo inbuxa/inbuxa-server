@@ -29,7 +29,7 @@ use mail_auth::{
     spf::verify::SpfParameters,
 };
 use registry::schema::{prelude::ObjectType, structs::Domain};
-use smtp::outbound::mta_sts::{lookup::MtaStsLookup, verify::VerifyPolicy};
+use smtp::outbound::mta_sts::lookup::MtaStsLookup;
 use std::{
     collections::BTreeSet,
     future::Future,

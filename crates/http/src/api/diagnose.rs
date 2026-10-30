@@ -2,6 +2,8 @@
  * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
+ *
+ * Modified by Coffey Labs in 2026 for INBUXA.
  */
 
 use common::{
@@ -22,7 +24,7 @@ use smtp::outbound::{
     },
     error::ClientError,
     lookup::{DnsLookup, SourceIp, ToNextHop},
-    mta_sts::{lookup::MtaStsLookup, verify::VerifyPolicy},
+    mta_sts::lookup::MtaStsLookup,
 };
 use std::{
     net::{IpAddr, SocketAddr},

@@ -14,7 +14,7 @@ pub static STS_TEST_POLICY: parking_lot::Mutex<Vec<u8>> = parking_lot::Mutex::ne
 use common::{Server, config::smtp::resolver::Policy};
 use mail_auth::{mta_sts::MtaSts, report::tlsrpt::ResultType};
 
-use super::{Error, parse::ParsePolicy};
+use super::Error;
 
 #[cfg(not(feature = "test_mode"))]
 use utils::HttpLimitResponse;

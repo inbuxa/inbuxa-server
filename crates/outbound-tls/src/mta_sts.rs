@@ -2,26 +2,30 @@
  * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
+ *
+ * Modified by Coffey Labs in 2026 for INBUXA.
  */
 
-use common::config::smtp::resolver::{Mode, MxPattern, Policy};
-use utils::DomainPart;
+//! MTA-STS (RFC 8461) policies: parsing the fetched file, and matching MX
+//! hosts against it. Fetching and caching stay with each caller.
 
+use crate::{Mode, MxPattern, Policy};
+
+/// A domain as an A-label, lowercased, for matching MX hosts.
 fn to_a_label(domain: &str) -> String {
-    domain
-        .to_ascii_domain()
-        .map(|domain| domain.to_lowercase())
-        .unwrap_or_else(|| domain.to_lowercase())
+    if domain.is_ascii() {
+        domain.to_ascii_lowercase()
+    } else {
+        idna::domain_to_ascii(domain)
+            .map(|domain| domain.to_lowercase())
+            .unwrap_or_else(|_| domain.to_lowercase())
+    }
 }
 
-pub trait ParsePolicy {
-    fn parse(data: &str, id: String) -> Result<Self, String>
-    where
-        Self: Sized;
-}
-
-impl ParsePolicy for Policy {
-    fn parse(mut data: &str, id: String) -> Result<Policy, String> {
+impl Policy {
+    /// Parses a policy file (RFC 8461 §3.2), as fetched; `id` is the
+    /// policy id from the TXT record.
+    pub fn parse(mut data: &str, id: String) -> Result<Policy, String> {
         let mut mode = Mode::None;
         let mut max_age: u64 = 86400;
         let mut mx = Vec::new();
@@ -35,8 +39,8 @@ impl ParsePolicy for Policy {
                     data = "";
                     next_data.trim()
                 };
-                hashify::fnc_map!(key.trim().as_bytes(),
-                    b"mx" => {
+                match key.trim() {
+                    "mx" => {
                         if let Some(suffix) = value.strip_prefix("*.") {
                             if !suffix.is_empty() {
                                 mx.push(MxPattern::StartsWith(to_a_label(suffix)));
@@ -44,27 +48,25 @@ impl ParsePolicy for Policy {
                         } else if !value.is_empty() {
                             mx.push(MxPattern::Equals(to_a_label(value)));
                         }
-                    },
-                    b"max_age" => {
+                    }
+                    "max_age" => {
                         if let Ok(value) = value.parse() {
                             max_age = value;
                         }
-                    },
-                    b"mode" => {
+                    }
+                    "mode" => {
                         mode = match value {
                             "enforce" => Mode::Enforce,
                             "testing" => Mode::Testing,
                             "none" => Mode::None,
                             _ => return Err(format!("Unsupported mode {value:?}.")),
                         };
-                    },
-                    b"version" => {
-                        if !value.eq_ignore_ascii_case("STSv1") {
-                            return Err(format!("Unsupported version {value:?}."));
-                        }
-                    },
+                    }
+                    "version" if !value.eq_ignore_ascii_case("STSv1") => {
+                        return Err(format!("Unsupported version {value:?}."));
+                    }
                     _ => {}
-                );
+                }
             } else {
                 break;
             }
@@ -83,11 +85,41 @@ impl ParsePolicy for Policy {
     }
 }
 
+impl Policy {
+    /// Whether `mx_host` may be delivered to under this policy.
+    pub fn verify(&self, mx_host: &str) -> bool {
+        if self.mode != Mode::None {
+            for mx_pattern in &self.mx {
+                match mx_pattern {
+                    MxPattern::Equals(host) => {
+                        if host == mx_host {
+                            return true;
+                        }
+                    }
+                    MxPattern::StartsWith(domain) => {
+                        if let Some((_, suffix)) = mx_host.split_once('.')
+                            && suffix == domain
+                        {
+                            return true;
+                        }
+                    }
+                }
+            }
+
+            false
+        } else {
+            true
+        }
+    }
+
+    pub fn enforce(&self) -> bool {
+        self.mode == Mode::Enforce
+    }
+}
+
 #[cfg(test)]
 mod test {
-    use super::ParsePolicy;
-    use crate::outbound::mta_sts::verify::VerifyPolicy;
-    use common::config::smtp::resolver::Policy;
+    use crate::Policy;
 
     #[test]
     fn mx_patterns_are_a_labels() {
@@ -106,5 +138,6 @@ mod test {
         assert!(policy.verify("mx.xn--eebajf.xn--9dbq2a"));
         assert!(policy.verify("mail.xn--eebajf.xn--9dbq2a"));
         assert!(!policy.verify("mx.example.org"));
+        assert!(policy.enforce());
     }
 }

@@ -774,6 +774,12 @@ In progress. Done so far:
   `/changes`, with push, in `spool/out/` (RL-19, RL-T10). The relay doesn't
   deliver it yet, and the downstream doesn't hand anything over yet; both
   are the rest of step 4.
+- `crates/outbound-tls` (RL-30): the TLSA and MTA-STS types, the DANE
+  certificate check, MTA-STS policy parsing and matching, and the DNSSEC
+  lookups (with the bogus-answer recheck), moved out of `crates/smtp` and
+  `crates/common`. The server keeps its caches, trace events, policy fetch
+  and test mocks around them, so its behavior is unchanged. The relay will
+  use the same code to deliver.
 - Not done yet: `inbuxa:RelayMessage`, which comes with inbuxa-admin's
   Relays page (step 5), once `Outbound` exists to show beside `Inbound`.
 
