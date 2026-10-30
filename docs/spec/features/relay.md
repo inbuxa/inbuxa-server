@@ -508,7 +508,7 @@ When no link is up, or after RL-13:
 | Object | What it holds |
 |---|---|
 | `inbuxa:Relay` | One per relay: `name`, `address`, `linkPort`, `enabled`, the settings pushed to the relay, `sendThrough` (route outbound mail through relays), `inboundOnly` (takes mail in but sends none, e.g. while its IP isn't warmed up or isn't in SPF yet), and read-only status mirrored from the relay: link state per node, version, queue counts, `lastSeen`. Create, or an update with `rejoin: true`, returns `joinToken` once |
-| `inbuxa:RelayMessage` | Read-only view of a relay's `Inbound` and `Outbound` queues, fetched over the link when asked. Never message content |
+| `inbuxa:RelayMessage` | Read-only view of a relay's `Inbound` and `Outbound` queues, fetched over the link when asked. Never message content. `/get`, `/query` (filter `relayId`, `direction`; newest first) and `/set` destroy only: discards held mail, or cancels an outbound message, whose recipients fail here with no DSN as a delivery cancelled in the queue does. Each id is the relay's id and a hash of the relay's own message id, so nothing is stored |
 
 Permissions: `sysRelayGet`, `sysRelayUpdate`, `sysRelayQueueGet`,
 `sysRelayQueueUpdate` (cancel an outbound message, discard held mail). The
@@ -858,8 +858,17 @@ In progress. Done so far:
   `crates/common`. The server keeps its caches, trace events, policy fetch
   and test mocks around them, so its behavior is unchanged. The relay will
   use the same code to deliver.
-- Not done yet: `inbuxa:RelayMessage`, which comes with inbuxa-admin's
-  Relays page (step 5), once `Outbound` exists to show beside `Inbound`.
+- `inbuxa:RelayMessage` (step 5, for inbuxa-admin's Relays page): get,
+  query and destroy, over the asking node's link, with `sysRelayQueueGet`
+  and `sysRelayQueueUpdate`, and every destroy audited. A relay this node
+  can't reach is left out of a query of all relays; asked for by name, it
+  is an error (`serverUnavailable`). An outbound message cancelled while
+  the relay is sending it is dropped at the relay's next status. Tested
+  end to end: the deferred message read back with the remote server's
+  reply and its queue id, then cancelled, gone from both queues, with no
+  DSN.
+- Still to come in step 5: inbuxa-admin's Relays page, certificates
+  (RL-27), DNS (RL-25) and upgrades (RL-29).
 
 Order:
 

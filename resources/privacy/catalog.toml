@@ -131,6 +131,20 @@ joinToken = ["credential"]
 links = ["network"]
 createdBy = ["identifier"]
 
+# Kept at the relay, read over the link when asked; nothing stored here
+[object."inbuxa:RelayMessage"]
+file = "inbuxa_relay_message.rs"
+default = "none"
+whose = ["holder", "correspondent"]
+where = ["external"]
+scope = "server"
+retention = "object-life"
+[object."inbuxa:RelayMessage".properties]
+envelope = ["identifier", "contact"]
+session = ["network", "identifier"]
+deliveryStatus = ["identifier", "network"]
+doorChecks = ["network"]
+
 [object."inbuxa:Journal"]
 file = "inbuxa_journal.rs"
 default = "none"

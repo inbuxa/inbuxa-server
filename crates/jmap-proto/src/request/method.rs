@@ -69,6 +69,7 @@ pub enum MethodObject {
     // inbuxa: DLP and mail flow rules
     MailRule,
     Relay,
+    RelayMessage,
     // inbuxa: accepted security to-do items
     SecurityAcceptance,
     // inbuxa: the deliverability check
@@ -126,6 +127,7 @@ impl MethodObject {
             | MethodObject::HoldExport
             | MethodObject::MailRule
             | MethodObject::Relay
+            | MethodObject::RelayMessage
             | MethodObject::SecurityAcceptance
             | MethodObject::HeldMessage
             | MethodObject::DeliverabilityReport
@@ -340,6 +342,9 @@ impl MethodName {
             (MethodFunction::Set, MethodObject::MailRule) => "inbuxa:MailRule/set",
             (MethodFunction::Get, MethodObject::Relay) => "inbuxa:Relay/get",
             (MethodFunction::Set, MethodObject::Relay) => "inbuxa:Relay/set",
+            (MethodFunction::Get, MethodObject::RelayMessage) => "inbuxa:RelayMessage/get",
+            (MethodFunction::Query, MethodObject::RelayMessage) => "inbuxa:RelayMessage/query",
+            (MethodFunction::Set, MethodObject::RelayMessage) => "inbuxa:RelayMessage/set",
             (MethodFunction::Get, MethodObject::SecurityAcceptance) => {
                 "inbuxa:SecurityAcceptance/get"
             }
@@ -540,6 +545,9 @@ impl MethodName {
             "inbuxa:MailRule/set" => (MethodObject::MailRule, MethodFunction::Set),
             "inbuxa:Relay/get" => (MethodObject::Relay, MethodFunction::Get),
             "inbuxa:Relay/set" => (MethodObject::Relay, MethodFunction::Set),
+            "inbuxa:RelayMessage/get" => (MethodObject::RelayMessage, MethodFunction::Get),
+            "inbuxa:RelayMessage/query" => (MethodObject::RelayMessage, MethodFunction::Query),
+            "inbuxa:RelayMessage/set" => (MethodObject::RelayMessage, MethodFunction::Set),
             "inbuxa:SecurityAcceptance/get" => (MethodObject::SecurityAcceptance, MethodFunction::Get),
             "inbuxa:SecurityAcceptance/set" => (MethodObject::SecurityAcceptance, MethodFunction::Set),
             "inbuxa:DeliverabilityReport/get" => (MethodObject::DeliverabilityReport, MethodFunction::Get),
@@ -637,6 +645,7 @@ impl Display for MethodObject {
             MethodObject::LegalHold => "inbuxa:LegalHold",
             MethodObject::MailRule => "inbuxa:MailRule",
             MethodObject::Relay => "inbuxa:Relay",
+            MethodObject::RelayMessage => "inbuxa:RelayMessage",
             MethodObject::SecurityAcceptance => "inbuxa:SecurityAcceptance",
             MethodObject::DeliverabilityReport => "inbuxa:DeliverabilityReport",
             MethodObject::DeliverabilitySettings => "inbuxa:DeliverabilitySettings",

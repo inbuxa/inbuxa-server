@@ -1026,6 +1026,92 @@ pub async fn link(test: &mut TestServer) {
         tokio::time::sleep(std::time::Duration::from_millis(500)).await;
     }
 
+    // The relay's queues, read over the link (inbuxa:RelayMessage): the
+    // deferred message, with the remote server's reply and its place in
+    // this server's queue, and never the message itself
+    let (name, response) = call(
+        admin,
+        "inbuxa:RelayMessage/query",
+        json!({"filter": {"relayId": &id, "direction": "outbound"}, "calculateTotal": true}),
+    )
+    .await;
+    assert_eq!(name, "inbuxa:RelayMessage/query", "{response}");
+    let ids = response["ids"].as_array().cloned().unwrap_or_default();
+    assert!(ids.len() >= 2, "{response}");
+    let (_, response) = call(admin, "inbuxa:RelayMessage/get", json!({"ids": ids})).await;
+    assert!(!response.to_string().contains("blobId"), "{response}");
+    let later = response["list"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .find(|m| m["envelope"]["rcptTo"][0]["email"] == "later@remote.test")
+        .cloned()
+        .unwrap_or_else(|| panic!("the deferred message: {response}"));
+    assert_eq!(later["relayId"], json!(&id), "{later}");
+    assert_eq!(later["direction"], "outbound", "{later}");
+    assert!(
+        later["deliveryStatus"]["later@remote.test"]["smtpReply"]
+            .as_str()
+            .is_some_and(|r| r.contains("Try again later")),
+        "{later}"
+    );
+    assert!(later["queueId"].is_string(), "{later}");
+    assert!(
+        later["state"].is_null() && later["session"].is_null(),
+        "{later}"
+    );
+    // Cancelled: gone from the relay and from this server's queue, with no
+    // DSN (the count below)
+    let (_, response) = call(
+        admin,
+        "inbuxa:RelayMessage/set",
+        json!({"destroy": [&later["id"]], "reason": "Sent by mistake"}),
+    )
+    .await;
+    assert_eq!(response["destroyed"], json!([&later["id"]]), "{response}");
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    loop {
+        let (_, queued) = call(admin, "x:QueuedMessage/get", json!({"ids": null})).await;
+        let (_, at_relay) = call(
+            admin,
+            "inbuxa:RelayMessage/get",
+            json!({"ids": [&later["id"]]}),
+        )
+        .await;
+        let here = queued.to_string().contains("later@remote.test");
+        let there = at_relay["notFound"] != json!([&later["id"]]);
+        if !here && !there {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "queued here: {here}, at the relay: {there}"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    }
+    // A relay message that isn't there, and one that can't be changed
+    let other = ids
+        .iter()
+        .filter_map(|i| i.as_str())
+        .find(|i| *i != later["id"])
+        .unwrap()
+        .to_string();
+    let (_, response) = call(
+        admin,
+        "inbuxa:RelayMessage/set",
+        json!({"destroy": [&later["id"]], "update": {&other: {"size": 1}}}),
+    )
+    .await;
+    assert_eq!(
+        response["notDestroyed"][later["id"].as_str().unwrap()]["type"],
+        "notFound",
+        "{response}"
+    );
+    assert_eq!(
+        response["notUpdated"][&other]["type"], "forbidden",
+        "{response}"
+    );
+
     // A route naming relays (RL-24): with sendThrough off, only the
     // domains routed to it go through a relay, and only the relays named.
     // One named relay that isn't there: the mail waits, saying so

@@ -33,6 +33,7 @@ pub mod masked_secrets; // inbuxa: "****" is never saved as a secret
 pub mod oidc_directory; // inbuxa: http-directory-services-13
 pub mod protocol_policy;
 pub mod relay; // inbuxa: inbuxa Relay
+pub mod relay_message; // inbuxa: a relay's queues
 pub mod scheduled_reports; // inbuxa: scheduled reports and the weekly digest
 pub mod security_acceptance;
 pub mod sharing_policy;

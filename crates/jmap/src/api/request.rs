@@ -293,6 +293,9 @@ impl RequestHandler for Server {
                                     SetResponseMethod::Relay(set_response) => {
                                         set_response.update_created_ids(&mut response);
                                     }
+                                    SetResponseMethod::RelayMessage(set_response) => {
+                                        set_response.update_created_ids(&mut response);
+                                    }
                                     SetResponseMethod::SecurityAcceptance(set_response) => {
                                         set_response.update_created_ids(&mut response);
                                     }
@@ -566,6 +569,13 @@ impl RequestHandler for Server {
                         .await?
                         .into()
                 }
+                // inbuxa: a relay's queues, fetched over the link
+                GetRequestMethod::RelayMessage(mut req) => {
+                    resolve_account_id(&mut req.account_id, method_name.obj, access_token)?;
+                    crate::inbuxa::relay_message::get(self, access_token, *req)
+                        .await?
+                        .into()
+                }
                 // inbuxa: accepted security to-do items
                 GetRequestMethod::SecurityAcceptance(mut req) => {
                     resolve_account_id(&mut req.account_id, method_name.obj, access_token)?;
@@ -832,6 +842,13 @@ impl RequestHandler for Server {
                 QueryRequestMethod::JournalEntry(mut req) => {
                     resolve_account_id(&mut req.account_id, method_name.obj, access_token)?;
                     crate::inbuxa::journal_entry::query(self, access_token, session, *req)
+                        .await?
+                        .into()
+                }
+                // inbuxa: a relay's queues
+                QueryRequestMethod::RelayMessage(mut req) => {
+                    resolve_account_id(&mut req.account_id, method_name.obj, access_token)?;
+                    crate::inbuxa::relay_message::query(self, access_token, *req)
                         .await?
                         .into()
                 }
@@ -1134,6 +1151,22 @@ impl RequestHandler for Server {
                         reason,
                         *req,
                         |req| Box::pin(crate::inbuxa::relay::set(self, access_token, req)),
+                    )
+                    .await?
+                    .into()
+                }
+                SetRequestMethod::RelayMessage(mut req) => {
+                    resolve_account_id(&mut req.account_id, method_name.obj, access_token)?;
+                    let reason = req.arguments.reason.clone();
+                    crate::inbuxa::audit::recorded(
+                        self,
+                        access_token,
+                        session,
+                        &method_name.obj.to_string(),
+                        None,
+                        reason,
+                        *req,
+                        |req| Box::pin(crate::inbuxa::relay_message::set(self, access_token, req)),
                     )
                     .await?
                     .into()
