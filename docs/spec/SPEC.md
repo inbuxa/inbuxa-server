@@ -21,15 +21,20 @@ setup and recovery.
   together.
 - No web interface on the mail host. Both front ends talk to the server over
   JMAP and OAuth, and can run beside it or on another machine.
-- Stay close enough to upstream that its releases can be taken quickly.
+- ~~Stay close enough to upstream that its releases can be taken quickly.~~
+  Ended with the last import, 0.16.27 (2026-10-27): inbuxa diverges fully
+  from 27.1.
 
 **Non-goals**
 
 - Carrying, adapting or reading Stalwart Enterprise code (see §3).
 - Using Stalwart's name or logo anywhere in the product (see §2.4).
-- Changing Stalwart's storage formats beyond what upstream changes. Existing
-  Stalwart 0.16 data, including data written by Enterprise features, must
-  open unchanged (see §7).
+- ~~Changing Stalwart's storage formats beyond what upstream changes.~~
+  Reversed 2026-10-29 (John): from 27.1 the store layout is inbuxa's own,
+  marked with its own store version, and Stalwart is a migration source. A
+  Stalwart 0.16.27 store stays readable as a frozen import format
+  (`import-0.16.md`). INBUXA's own Enterprise-era data was carried over at
+  its cutover (§7).
 
 ## 2. The fork itself
 

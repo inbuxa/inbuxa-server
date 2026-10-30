@@ -86,9 +86,11 @@ change a password, re-authorize a client, or re-point a DNS record. That is
 the promise the tool makes, and the verification below is what checks it
 rather than assuming it.
 
-The store format is upstream's and unchanged (SPEC.md §2.6), which is what
-makes this a copy rather than a conversion. A migration that also crosses an
-upstream version is that upgrade first, then this.
+~~The store format is upstream's and unchanged (SPEC.md §2.6), which is what
+makes this a copy rather than a conversion.~~ Since 2026-10-29 the store
+layout is inbuxa's own. A Stalwart 0.16.27 store is read as a frozen import
+format, by export and import (`import-0.16.md`). A source on an older 0.16
+is upgraded to 0.16.27 first, then imported.
 
 ## Shape
 
