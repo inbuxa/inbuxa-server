@@ -2,6 +2,8 @@
  * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
+ *
+ * Modified by Coffey Labs in 2026 for INBUXA.
  */
 
 use crate::{
@@ -24,6 +26,8 @@ pub mod error;
 pub mod local;
 pub mod lookup;
 pub mod mta_sts;
+// inbuxa: outbound through inbuxa Relay (relay spec, RL-24)
+pub mod relay;
 pub mod session;
 
 pub(super) enum DeliveryResult {
@@ -38,6 +42,11 @@ pub(super) enum DeliveryResult {
     RateLimited {
         rcpt_idxs: Vec<usize>,
         retry_at: u64,
+    },
+    // inbuxa: handed to the relay named, which reports what became of it
+    Relayed {
+        relay: Box<str>,
+        rcpt_idx: usize,
     },
 }
 

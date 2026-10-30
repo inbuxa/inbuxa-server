@@ -8162,6 +8162,7 @@ dependencies = [
  "hashify",
  "inbuxa-features",
  "inbuxa-outbound-tls",
+ "inbuxa-relay-proto",
  "mail-auth",
  "mail-builder 1.0.0",
  "mail-parser",

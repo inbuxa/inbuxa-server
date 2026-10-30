@@ -146,11 +146,12 @@ struct Target<'a, R> {
     rcpts: &'a [&'a Address],
 }
 
-fn status(delivered: Delivered, smtp_reply: String) -> DeliveryStatus {
+fn status(delivered: Delivered, smtp_reply: String, mx: Option<&str>) -> DeliveryStatus {
     DeliveryStatus {
         smtp_reply,
         delivered,
         displayed: Displayed::Unknown,
+        mx: mx.map(str::to_string),
     }
 }
 
@@ -158,7 +159,7 @@ impl<R: Resolve> Target<'_, R> {
     fn every(&self, delivered: Delivered, reply: String) -> Vec<(String, DeliveryStatus)> {
         self.rcpts
             .iter()
-            .map(|r| (r.email.clone(), status(delivered, reply.clone())))
+            .map(|r| (r.email.clone(), status(delivered, reply.clone(), None)))
             .collect()
     }
 
@@ -288,7 +289,7 @@ impl<R: Resolve> Target<'_, R> {
                                     RcptOutcome::Deferred(r) => (Delivered::Queued, r, 2),
                                 };
                                 counts[n] += 1;
-                                (rcpt.email.clone(), status(delivered, reply))
+                                (rcpt.email.clone(), status(delivered, reply, Some(host)))
                             })
                             .collect();
                         self.app.record(

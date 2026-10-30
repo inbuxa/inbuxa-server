@@ -32,6 +32,11 @@ futures-util = "0.3.34"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 
+[features]
+# For the server's system tests only: `INBUXA_RELAY_TEST_MX=<port>` sends
+# every domain's mail to 127.0.0.1 on that port. Never in a release.
+test-mx = []
+
 [lints]
 workspace = true
 

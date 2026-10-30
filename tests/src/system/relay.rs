@@ -33,6 +33,8 @@ use std::str::FromStr;
 
 const USING: &[&str] = &[
     "urn:ietf:params:jmap:core",
+    "urn:ietf:params:jmap:mail",
+    "urn:ietf:params:jmap:submission",
     "urn:inbuxa:jmap",
     "urn:inbuxa:jmap:registry",
 ];
@@ -542,6 +544,99 @@ async fn wait_for_mail(account: &Account, subject: &str, count: usize) {
     }
 }
 
+/// Sends a message from `sender` to `to` by JMAP submission.
+async fn submit(sender: &Account, identity: &str, mailbox: &str, to: &[&str], subject: &str) {
+    let (_, response) = call(
+        sender,
+        "Email/set",
+        json!({"create": {"e": {
+            "mailboxIds": {mailbox: true},
+            "from": [{"email": sender.name()}],
+            "to": to.iter().map(|a| json!({"email": a})).collect::<Vec<_>>(),
+            "subject": subject,
+            "bodyValues": {"b": {"value": "Hello from the far side."}},
+            "textBody": [{"partId": "b", "type": "text/plain"}]
+        }}}),
+    )
+    .await;
+    let email = response["created"]["e"]["id"]
+        .as_str()
+        .unwrap_or_else(|| panic!("draft: {response}"))
+        .to_string();
+    let (_, response) = call(
+        sender,
+        "EmailSubmission/set",
+        json!({"create": {"s": {"emailId": email, "identityId": identity}}}),
+    )
+    .await;
+    assert!(response["created"].get("s").is_some(), "{response}");
+}
+
+/// The destination the relay sends to (`INBUXA_RELAY_TEST_MX`): takes
+/// `bob`, refuses `nobody`, defers `later`. The messages it took.
+async fn scripted_mx() -> (u16, std::sync::Arc<std::sync::Mutex<Vec<String>>>) {
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let taken = seen.clone();
+    tokio::spawn(async move {
+        while let Ok((stream, _)) = listener.accept().await {
+            let taken = taken.clone();
+            tokio::spawn(async move {
+                let (read, mut write) = stream.into_split();
+                let mut read = BufReader::new(read);
+                let _ = write.write_all(b"220 remote.test ready\r\n").await;
+                let mut accepted = 0;
+                loop {
+                    let mut line = String::new();
+                    if read.read_line(&mut line).await.unwrap_or(0) == 0 {
+                        return;
+                    }
+                    let upper = line.to_ascii_uppercase();
+                    let answer = if upper.starts_with("EHLO") {
+                        "250-remote.test\r\n250 8BITMIME\r\n"
+                    } else if upper.starts_with("MAIL") {
+                        accepted = 0;
+                        "250 2.1.0 Ok\r\n"
+                    } else if upper.starts_with("RCPT") && upper.contains("<BOB@") {
+                        accepted += 1;
+                        "250 2.1.5 Ok\r\n"
+                    } else if upper.starts_with("RCPT") && upper.contains("<LATER@") {
+                        "451 4.7.1 Try again later\r\n"
+                    } else if upper.starts_with("RCPT") {
+                        "550 5.1.1 No such user here\r\n"
+                    } else if upper.starts_with("DATA") && accepted > 0 {
+                        let _ = write.write_all(b"354 Go ahead\r\n").await;
+                        let mut message = String::new();
+                        loop {
+                            let mut line = String::new();
+                            if read.read_line(&mut line).await.unwrap_or(0) == 0 {
+                                return;
+                            }
+                            if line == ".\r\n" {
+                                break;
+                            }
+                            message.push_str(&line);
+                        }
+                        taken.lock().unwrap().push(message);
+                        "250 2.0.0 Queued as 1\r\n"
+                    } else if upper.starts_with("DATA") {
+                        "554 5.5.1 No valid recipients\r\n"
+                    } else if upper.starts_with("QUIT") {
+                        let _ = write.write_all(b"221 Bye\r\n").await;
+                        return;
+                    } else {
+                        "250 Ok\r\n"
+                    };
+                    let _ = write.write_all(answer.as_bytes()).await;
+                }
+            });
+        }
+    });
+    (port, seen)
+}
+
 fn message(subject: &str, extra_headers: &str) -> String {
     format!(
         "{extra_headers}From: Someone <someone@sender.example>\nTo: jane@example.com\n\
@@ -556,7 +651,7 @@ pub async fn link(test: &mut TestServer) {
     let binary = relay_binary();
     assert!(
         binary.exists(),
-        "{} is missing: run cargo build -p inbuxa-relay",
+        "{} is missing: run cargo build -p inbuxa-relay --features test-mx",
         binary.display()
     );
     let jane = admin
@@ -570,6 +665,7 @@ pub async fn link(test: &mut TestServer) {
         .await;
     let link_port = free_port();
     let smtp_port = free_port();
+    let (mx_port, mx_seen) = scripted_mx().await;
 
     let (_, response) = call(
         admin,
@@ -612,6 +708,7 @@ pub async fn link(test: &mut TestServer) {
                 "--state",
             ])
             .arg(&state)
+            .env("INBUXA_RELAY_TEST_MX", mx_port.to_string())
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null())
             .spawn()
@@ -755,6 +852,109 @@ pub async fn link(test: &mut TestServer) {
             .filter(|s| *s == "Held one" || *s == "Live one")
             .count(),
         2
+    );
+
+    // Outbound through the relay (RL-24): handed over, sent by the relay,
+    // and each recipient's reply recorded here, with one DSN (RL-T11)
+    call(
+        admin,
+        "inbuxa:Relay/set",
+        json!({"update": {&id: {"sendThrough": true, "settings/maxRecipients": 10}}}),
+    )
+    .await;
+    let (_, response) = call(
+        &jane,
+        "Identity/set",
+        json!({"create": {"i": {"name": "Jane", "email": "jane@example.com"}}}),
+    )
+    .await;
+    let identity = response["created"]["i"]["id"]
+        .as_str()
+        .unwrap_or_else(|| panic!("{response}"))
+        .to_string();
+    let (_, response) = call(
+        &jane,
+        "Mailbox/set",
+        json!({"create": {"m": {"name": "Outbound drafts"}}}),
+    )
+    .await;
+    let drafts = response["created"]["m"]["id"].as_str().unwrap().to_string();
+    // The relay has the new maxRecipients before anything is handed to it
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    loop {
+        let replies = rcpt_replies(smtp_port, &["jane@example.com", "joe@example.com"]).await;
+        if replies[1].starts_with("250") {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "maxRecipients reached the relay: {replies:?}"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    }
+    submit(
+        &jane,
+        &identity,
+        &drafts,
+        &["bob@remote.test", "nobody@remote.test"],
+        "Through the relay",
+    )
+    .await;
+    wait_for_mail(&jane, "Failed to deliver message", 1).await;
+    let seen = mx_seen.lock().unwrap().clone();
+    assert!(
+        seen.iter()
+            .any(|m| m.contains("Subject: Through the relay")),
+        "the relay sent it on: {seen:?}"
+    );
+    // Gone from this server's queue, and from the relay's
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    loop {
+        let (_, queued) = call(admin, "x:QueuedMessage/get", json!({"ids": null})).await;
+        let in_queue = queued.to_string().contains("nobody@remote.test");
+        let at_relay = std::fs::read_dir(state.join("spool").join("out"))
+            .map(|dir| dir.count())
+            .unwrap_or_default();
+        if !in_queue && at_relay == 0 {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "queued here: {in_queue}, files at the relay: {at_relay}"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    }
+    // A deferral stays queued here, with the remote server's reply
+    submit(
+        &jane,
+        &identity,
+        &drafts,
+        &["later@remote.test"],
+        "Deferred by the remote",
+    )
+    .await;
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    loop {
+        let (_, queued) = call(admin, "x:QueuedMessage/get", json!({"ids": null})).await;
+        let text = queued.to_string();
+        if text.contains("later@remote.test") && text.contains("Try again later") {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the deferral is shown: {queued}"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    }
+    tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+    assert_eq!(
+        subjects(&jane)
+            .await
+            .iter()
+            .filter(|s| s.starts_with("Failed") || s.starts_with("Warning"))
+            .count(),
+        1,
+        "one DSN, for the refusal"
     );
 
     // The relay's events were taken as this server's relay.* trace events,

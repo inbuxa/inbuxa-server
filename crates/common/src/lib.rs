@@ -194,6 +194,10 @@ pub struct Data {
 
     // inbuxa: the audit log's chain heads and recent-access marks (AU)
     pub audit: inbuxa_features::audit::AuditLog,
+
+    // inbuxa: the relays outbound mail goes through, and this node's links
+    // to them (relay spec, RL-20, RL-24)
+    pub relay_senders: inbuxa_features::relay::outbound::Senders,
 }
 
 #[derive(Clone)]

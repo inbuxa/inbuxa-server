@@ -401,6 +401,9 @@ pub struct DeliveryStatus {
     pub delivered: Delivered,
     /// The relay never learns this.
     pub displayed: Displayed,
+    /// The MX host the reply came from, when one answered. Not in RFC 8621.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mx: Option<String>,
 }
 
 impl DeliveryStatus {
@@ -409,6 +412,7 @@ impl DeliveryStatus {
             smtp_reply: String::new(),
             delivered: Delivered::Queued,
             displayed: Displayed::Unknown,
+            mx: None,
         }
     }
 }

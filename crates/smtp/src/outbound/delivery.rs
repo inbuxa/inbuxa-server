@@ -15,13 +15,14 @@ use crate::outbound::dane::dnssec::{DnssecStatus, TlsaLookup, TlsaResult};
 use crate::outbound::error::ClientError;
 use crate::outbound::lookup::{DnsLookup, SourceIp};
 use crate::outbound::mta_sts::lookup::MtaStsLookup;
+use crate::outbound::relay::RELAYED_RECHECK;
 use crate::outbound::{client::StartTlsResult, dane::verify::TlsaVerify};
 use crate::queue::dsn::{DsnStatus, SendDsn};
 use crate::queue::spool::{DSN_RETRY, SmtpSpool};
 use crate::queue::throttle::IsAllowed;
 use crate::queue::{
     Error, FROM_REPORT, HostResponse, MessageWrapper, Metadata, QueueEnvelope, QueuedMessage,
-    Status,
+    RCPT_RELAYED, Status,
 };
 use crate::reporting::send::MtaReportSend;
 use crate::{queue::ErrorDetails, reporting::tls::TlsRptOptions};
@@ -237,6 +238,16 @@ impl QueuedMessage {
                 }
             }
         }
+        // inbuxa: with a relay's sendThrough on, every non-local recipient
+        // goes through a relay (relay spec, RL-24). REQUIRETLS mail doesn't
+        // yet: the relay can't keep that promise for it.
+        static THROUGH_RELAY: RoutingStrategy = RoutingStrategy::InbuxaRelay;
+        let senders = &server.inner.data.relay_senders;
+        if let Err(err) = senders.load(server.store()).await {
+            trc::error!(err.details("Failed to read the relays").span_id(span_id));
+        }
+        let through_relay = senders.sending() && message.message.flags & MAIL_REQUIRETLS == 0;
+        let mut relayed_waiting = Vec::new();
         for (rcpt_idx, rcpt) in message.message.recipients.iter().enumerate() {
             if matches!(
                 &rcpt.status,
@@ -244,6 +255,11 @@ impl QueuedMessage {
             ) && rcpt.retry.due <= now_
                 && rcpt.queue == message.queue_name
             {
+                // inbuxa: waiting on a relay's status, not handed over again
+                if rcpt.flags & RCPT_RELAYED != 0 {
+                    relayed_waiting.push(rcpt_idx);
+                    continue;
+                }
                 let envelope = QueueEnvelope::new(&message.message, rcpt);
                 let route = server.get_route_or_default(
                     &server
@@ -252,6 +268,11 @@ impl QueuedMessage {
                         .unwrap_or_else(|| "default".to_string()),
                     message.span_id,
                 );
+                let route = if through_relay && !matches!(route, RoutingStrategy::Local) {
+                    &THROUGH_RELAY
+                } else {
+                    route
+                };
 
                 // Map RCPT headers
                 let mut rcpt_headers = default_rcpt_header;
@@ -310,6 +331,13 @@ impl QueuedMessage {
                     // Deliver message locally
                     message
                         .deliver_local(&rcpt_idxs, &mut delivery_results, &server)
+                        .await;
+                    continue 'next_route;
+                }
+                // inbuxa: handed to an inbuxa Relay (relay spec, RL-24)
+                RoutingStrategy::InbuxaRelay => {
+                    message
+                        .hand_to_relay(&rcpt_idxs, rcpt_headers, &mut delivery_results, &server)
                         .await;
                     continue 'next_route;
                 }
@@ -1520,7 +1548,21 @@ impl QueuedMessage {
                         message.set_rcpt_rate_limit(rcpt_idx, retry_at);
                     }
                 }
+                // inbuxa: kept here until the relay reports a final status
+                DeliveryResult::Relayed { relay, rcpt_idx } => {
+                    let rcpt = &mut message.message.recipients[rcpt_idx];
+                    rcpt.flags |= RCPT_RELAYED;
+                    rcpt.retry.due = now() + RELAYED_RECHECK;
+                    rcpt.status = Status::TemporaryFailure(ErrorDetails {
+                        entity: relay.clone(),
+                        details: Error::Io(format!("Handed to relay {relay}").into()),
+                    });
+                }
             }
+        }
+        // inbuxa: still waiting on a relay: looked at again later
+        for rcpt_idx in relayed_waiting {
+            message.message.recipients[rcpt_idx].retry.due = now() + RELAYED_RECHECK;
         }
 
         // Send Delivery Status Notifications

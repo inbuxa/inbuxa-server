@@ -19,6 +19,8 @@ inbuxa-outbound-tls = { path = "../outbound-tls" }
 email = { path =  "../email" }
 registry = { path =  "../registry" }
 inbuxa-features = { path = "../features" }
+# inbuxa: outbound through inbuxa Relay (relay spec, RL-24)
+inbuxa-relay-proto = { path = "../relay-proto" }
 spam-filter = { path =  "../spam-filter" }
 trc = { path = "../trc" }
 mail-auth = { version = "0.13", features = ["rkyv"] }
