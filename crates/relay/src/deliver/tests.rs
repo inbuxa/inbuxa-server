@@ -395,6 +395,9 @@ async fn dane_is_enforced() {
     let tls = events(&app, "outbound.tls");
     assert_eq!(tls[0]["policyType"], "tlsa");
     assert_eq!(tls[0]["result"], "success");
+    // The records themselves, as the downstream's reports take them
+    let sent: Tlsa = serde_json::from_value(tls[0]["tlsa"].clone()).unwrap();
+    assert_eq!(sent.entries.len(), 1);
     assert!(
         tls[0]["policyStrings"][0]
             .as_str()
@@ -466,6 +469,12 @@ async fn mta_sts_enforce_is_enforced() {
         let tls = events(&app, "outbound.tls");
         assert_eq!(tls[0]["policyType"], "sts", "{name}");
         assert_ne!(tls[0]["result"], "success", "{name}");
+        let sent: Policy = serde_json::from_value(tls[0]["sts"].clone()).unwrap();
+        assert_eq!(
+            (sent.id.as_str(), sent.mode),
+            ("1", Mode::Enforce),
+            "{name}"
+        );
         assert!(
             tls[0]["policyStrings"]
                 .as_array()

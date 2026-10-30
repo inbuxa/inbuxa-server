@@ -23,7 +23,8 @@
 //! relay is told, so one offered again isn't delivered twice (RL-16).
 //!
 //! The relay's own events become this server's `relay.*` trace events, so
-//! they reach the log, webhooks and OpenTelemetry. On a cluster only the
+//! they reach the log, webhooks and OpenTelemetry, and its TLS results go
+//! into this server's TLS-RPT reports. On a cluster only the
 //! linked node with the lowest id takes them. A node with no link to a
 //! joined relay for an hour says so with `relay.link-down` (RL-T23).
 
@@ -73,7 +74,7 @@ use serde_json::{Value, json};
 use smtp::{
     core::Relayed,
     inbound::relayed::{RelayedMessage, RelayedOutcome, ingest_relayed},
-    outbound::relay::{Applied, RelayedStatus, apply_relayed},
+    outbound::relay::{Applied, RelayedStatus, apply_relayed, report_relayed_tls},
 };
 use std::{
     collections::{BTreeMap, BTreeSet, HashMap, HashSet},
@@ -992,7 +993,7 @@ async fn session(
         answers: answers_tx,
     };
     taker.take(&mut ws).await?;
-    take_events(&mut ws, data, &relay, status.current.node_id).await?;
+    take_events(&mut ws, server, &relay, status.current.node_id).await?;
 
     // Outbound mail can go through this link now (RL-24), until it drops
     let _sending = Sending::up(server, &relay, dialer.clone());
@@ -1019,7 +1020,7 @@ async fn session(
                     taker.take(&mut ws).await?;
                 }
                 if ws.events_changed {
-                    take_events(&mut ws, data, &relay, status.current.node_id).await?;
+                    take_events(&mut ws, server, &relay, status.current.node_id).await?;
                 }
                 if ws.outbound_changed {
                     follower.follow(&mut ws, server, &relay, status.current.node_id).await?;
@@ -1058,7 +1059,7 @@ async fn session(
         refresh_status(&mut ws, data, &relay, &sent, status).await?;
         taker.relay_name = relay.name.clone();
         taker.take(&mut ws).await?;
-        take_events(&mut ws, data, &relay, status.current.node_id).await?;
+        take_events(&mut ws, server, &relay, status.current.node_id).await?;
         follower
             .follow(&mut ws, server, &relay, status.current.node_id)
             .await?;
@@ -1071,12 +1072,12 @@ async fn session(
 /// the relay can forget them. One node takes them: the lowest linked one.
 async fn take_events(
     ws: &mut Ws,
-    data: &store::Store,
+    server: &Server,
     relay: &Relay,
     node_id: u64,
 ) -> Result<(), LinkError> {
     ws.events_changed = false;
-    if !first_linked(data, relay.id, node_id).await? {
+    if !first_linked(server.store(), relay.id, node_id).await? {
         return Ok(());
     }
     let answer = ws.ok(method::RELAY_EVENT_GET, json!({})).await?;
@@ -1084,6 +1085,10 @@ async fn take_events(
     for event in answer["list"].as_array().into_iter().flatten() {
         if let Ok(event) = serde_json::from_value::<ProtoRelayEvent>(event.clone()) {
             trace_event(relay, &event);
+            // The relay's sessions count in this server's TLS-RPT reports
+            if event.kind == "outbound.tls" {
+                report_relayed_tls(server, &event.data).await;
+            }
             ids.push(event.id);
         }
     }

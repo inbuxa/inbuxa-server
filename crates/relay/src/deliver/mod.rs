@@ -368,6 +368,16 @@ impl<R: Resolve> Target<'_, R> {
         if let Some(failure) = failure {
             data.insert("reason".into(), json!(failure.reason));
         }
+        // The policy itself, for the downstream's TLS-RPT reports
+        match (mode, sts) {
+            (TlsMode::Dane(tlsa), _) => {
+                data.insert("tlsa".into(), json!(tlsa.as_ref()));
+            }
+            (TlsMode::Verified, Some(policy)) => {
+                data.insert("sts".into(), json!(policy));
+            }
+            _ => {}
+        }
         self.app.record("outbound.tls", data);
     }
 }

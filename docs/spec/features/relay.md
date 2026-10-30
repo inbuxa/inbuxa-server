@@ -449,7 +449,10 @@ When no link is up, or after RL-13:
   downstream writes any DSN itself, and its history shows the remote
   server's real reply. The relay never writes a message of its own.
 - TLS results for each destination are sent as `RelayEvent`s. The downstream
-  builds TLS-RPT reports from them, as it does from its own deliveries.
+  builds TLS-RPT reports from them, as it does from its own deliveries: the
+  same report frequency, sent only for a domain that publishes a TLS-RPT
+  record. Each event carries the policy itself (`tlsa`, the TLSA records,
+  or `sts`, the MTA-STS policy) beside its `policyStrings`.
 - How a domain is tried: its MX hosts best first (no MX means the domain
   itself; a null MX, RFC 7505, refuses every recipient with `556 5.1.10`),
   at most five hosts and two addresses each. With the MX answer and the
@@ -834,8 +837,11 @@ In progress. Done so far:
 - REQUIRETLS through relays: handed over with the parameter, delivered by
   the relay only over TLS with a verified certificate (tested against a
   scripted MX with a self-signed one).
-- Still to come in step 4: the named `inbuxaRelay` route, and TLS-RPT
-  reports from the relay's `outbound.tls` events.
+- TLS-RPT from relays: the node that takes a relay's events turns each
+  `outbound.tls` into a session in this server's TLS-RPT reports, with the
+  policy, result, MX host, address and reason (tested with a relay's
+  STARTTLS failure for REQUIRETLS mail).
+- Still to come in step 4: the named `inbuxaRelay` route.
 - `crates/outbound-tls` (RL-30): the TLSA and MTA-STS types, the DANE
   certificate check, MTA-STS policy parsing and matching, and the DNSSEC
   lookups (with the bogus-answer recheck), moved out of `crates/smtp` and

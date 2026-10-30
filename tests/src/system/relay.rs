@@ -21,12 +21,17 @@
 
 use crate::utils::{
     account::Account,
+    dns::DnsCache,
     server::{TestServer, TestServerBuilder},
 };
 use inbuxa_relay_proto::{time, token::JoinToken};
+use mail_auth::{common::parse::TxtRecordParser, mta_sts::TlsRpt};
 use registry::schema::{
     prelude::{ObjectType, Property},
-    structs::{CertificateManagement, DkimManagement, DnsManagement, Domain, Tenant, UserRoles},
+    structs::{
+        CertificateManagement, DkimManagement, DnsManagement, Domain, Tenant, TlsInternalReport,
+        UserRoles,
+    },
 };
 use serde_json::{Value, json};
 use std::str::FromStr;
@@ -963,7 +968,13 @@ pub async fn link(test: &mut TestServer) {
         tokio::time::sleep(std::time::Duration::from_millis(500)).await;
     }
     // REQUIRETLS (RFC 8689): never sent in the clear, and this MX has no
-    // STARTTLS, so it waits, saying why
+    // STARTTLS, so it waits, saying why. The domain publishes TLS-RPT, so
+    // the relay's failed session lands in this server's report (RFC 8460)
+    test.server.txt_add(
+        "_smtp._tls.remote.test",
+        TlsRpt::parse(b"v=TLSRPTv1; rua=mailto:tls@remote.test").unwrap(),
+        std::time::Instant::now() + std::time::Duration::from_secs(3600),
+    );
     submit_with(
         &jane,
         &identity,
@@ -997,6 +1008,19 @@ pub async fn link(test: &mut TestServer) {
             .any(|m| m.contains("Subject: Strict one")),
         "sent in the clear"
     );
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    loop {
+        let reports = admin.registry_get_all::<TlsInternalReport>().await;
+        let text = format!("{reports:?}");
+        if text.contains("remote.test") && text.contains("StartTlsNotSupported") {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the relay's TLS failure is in a TLS-RPT report: {text}"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    }
     tokio::time::sleep(std::time::Duration::from_secs(2)).await;
     assert_eq!(
         subjects(&jane)
