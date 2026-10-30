@@ -1,0 +1,42 @@
+# What inbuxa adds when it first starts on a 0.16.27 store: its own
+# Compliance Officer role, and its own permissions on the built-in
+# administrator roles. Read by tools/import-check/compare.py; one
+# difference per line, as it prints them.
++ /admin/roles/Compliance Officer
++ /admin/roles/System Administrator/enabled sysAccountLockCreate
++ /admin/roles/System Administrator/enabled sysAccountLockDestroy
++ /admin/roles/System Administrator/enabled sysAccountLockGet
++ /admin/roles/System Administrator/enabled sysAccountLockUpdate
++ /admin/roles/System Administrator/enabled sysAiExplain
++ /admin/roles/System Administrator/enabled sysAuditExport
++ /admin/roles/System Administrator/enabled sysAuditGet
++ /admin/roles/System Administrator/enabled sysAuditSettingsUpdate
++ /admin/roles/System Administrator/enabled sysComplianceGet
++ /admin/roles/System Administrator/enabled sysDeliverabilityCheck
++ /admin/roles/System Administrator/enabled sysDeliverabilityGet
++ /admin/roles/System Administrator/enabled sysDeliverabilityUpdate
++ /admin/roles/System Administrator/enabled sysDlpPolicyGet
++ /admin/roles/System Administrator/enabled sysDlpPolicyUpdate
++ /admin/roles/System Administrator/enabled sysDlpReviewGet
++ /admin/roles/System Administrator/enabled sysDlpReviewUpdate
++ /admin/roles/System Administrator/enabled sysJournalGet
++ /admin/roles/System Administrator/enabled sysJournalUpdate
++ /admin/roles/System Administrator/enabled sysLegalHoldCreate
++ /admin/roles/System Administrator/enabled sysLegalHoldExport
++ /admin/roles/System Administrator/enabled sysLegalHoldGet
++ /admin/roles/System Administrator/enabled sysLegalHoldUpdate
++ /admin/roles/System Administrator/enabled sysMailRuleGet
++ /admin/roles/System Administrator/enabled sysMailRuleUpdate
++ /admin/roles/System Administrator/enabled sysScheduledReportGet
++ /admin/roles/System Administrator/enabled sysScheduledReportUpdate
++ /admin/roles/System Administrator/enabled sysSecurityAccept
++ /admin/roles/Tenant Administrator/enabled sysAccountLockCreate
++ /admin/roles/Tenant Administrator/enabled sysAccountLockDestroy
++ /admin/roles/Tenant Administrator/enabled sysAccountLockGet
++ /admin/roles/Tenant Administrator/enabled sysAccountLockUpdate
++ /admin/roles/Tenant Administrator/enabled sysAuditExport
++ /admin/roles/Tenant Administrator/enabled sysAuditGet
++ /admin/roles/Tenant Administrator/enabled sysComplianceGet
++ /admin/roles/Tenant Administrator/enabled sysDeliverabilityGet
++ /admin/roles/Tenant Administrator/enabled sysScheduledReportGet
++ /admin/roles/Tenant Administrator/enabled sysScheduledReportUpdate
