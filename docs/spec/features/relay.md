@@ -867,6 +867,8 @@ In progress. Done so far:
   end to end: the deferred message read back with the remote server's
   reply and its queue id, then cancelled, gone from both queues, with no
   DSN.
+- The served schema lists the Relays page (`CustomComponent/Relays`) in
+  Settings, beside Routes, so inbuxa-admin can show it.
 - Still to come in step 5: inbuxa-admin's Relays page, certificates
   (RL-27), DNS (RL-25) and upgrades (RL-29).
 
