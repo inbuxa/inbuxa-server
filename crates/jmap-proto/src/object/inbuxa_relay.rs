@@ -31,6 +31,8 @@ pub enum RelayProperty {
     Enabled,
     SendThrough,
     InboundOnly,
+    /// Its MX preference, where DNS is published (RL-25).
+    MxPreference,
     /// What is pushed to the relay.
     Settings,
     SmtpCertificate,
@@ -77,6 +79,7 @@ impl Property for RelayProperty {
             RelayProperty::Enabled => "enabled",
             RelayProperty::SendThrough => "sendThrough",
             RelayProperty::InboundOnly => "inboundOnly",
+            RelayProperty::MxPreference => "mxPreference",
             RelayProperty::Settings => "settings",
             RelayProperty::SmtpCertificate => "smtpCertificate",
             RelayProperty::SmtpPrivateKey => "smtpPrivateKey",
@@ -106,6 +109,7 @@ impl RelayProperty {
             b"enabled" => RelayProperty::Enabled,
             b"sendThrough" => RelayProperty::SendThrough,
             b"inboundOnly" => RelayProperty::InboundOnly,
+            b"mxPreference" => RelayProperty::MxPreference,
             b"settings" => RelayProperty::Settings,
             b"smtpCertificate" => RelayProperty::SmtpCertificate,
             b"smtpPrivateKey" => RelayProperty::SmtpPrivateKey,

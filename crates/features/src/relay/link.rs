@@ -432,6 +432,7 @@ mod tests {
             enabled: true,
             send_through: false,
             inbound_only: false,
+            mx_preference: 10,
             settings: RelaySettings {
                 hostname: "mx1.example.com".into(),
                 domains: domains.iter().map(|d| d.to_string()).collect(),

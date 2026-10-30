@@ -28,6 +28,7 @@
 //! linked node with the lowest id takes them. A node with no link to a
 //! joined relay for an hour says so with `relay.link-down` (RL-T23).
 
+use crate::task_manager::dns::queue_relay_dns;
 use common::{
     BuildServer, Inner, Server,
     config::server::{DEFAULT_TLS_TIMEOUT, ServerProtocol},
@@ -187,6 +188,11 @@ async fn reconcile(
     };
     // Which relays outbound mail goes through (RL-20, RL-24)
     server.inner.data.relay_senders.set_relays(&all);
+    // The domains' MX and SPF records, when the relays in them changed (RL-25)
+    if let Some(hash) = relays::dns::dns_change(data, &all).await? {
+        queue_relay_dns(server).await?;
+        relays::dns::record_dns(data, hash).await?;
+    }
     let wanted: HashMap<u32, (String, u16)> = all
         .into_iter()
         .filter(|relay| relay.enabled)

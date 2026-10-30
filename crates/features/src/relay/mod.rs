@@ -20,9 +20,12 @@
 //! - `i` + relay id (u32) + `Inbound` id: a message taken from the relay.
 //! - `o` + relay id (u32) + `Outbound` id: a message handed to the relay
 //!   ([`outbound::Handed`]), as JSON.
+//! - `d`: what the relays last put in the domains' DNS records, hashed
+//!   ([`dns::dns_change`]).
 //!
 //! Numbers are big-endian. There are few relays, so they're read whole.
 
+pub mod dns;
 pub mod link;
 pub mod messages;
 pub mod outbound;
@@ -150,6 +153,9 @@ pub struct Relay {
     /// Takes mail in but sends none (RL-20).
     #[serde(default)]
     pub inbound_only: bool,
+    /// Its MX preference, where DNS is published for a domain (RL-25).
+    #[serde(default = "default_mx_preference")]
+    pub mx_preference: u16,
     /// What the downstream pushes to the relay, but for the certificate and
     /// the keys, which it adds itself. Empty `domains` means every domain
     /// this server has.
@@ -187,6 +193,10 @@ impl std::fmt::Debug for Relay {
 
 fn default_link_port() -> u16 {
     443
+}
+
+fn default_mx_preference() -> u16 {
+    10
 }
 
 fn yes() -> bool {
@@ -595,6 +605,7 @@ mod tests {
             enabled: true,
             send_through: false,
             inbound_only: false,
+            mx_preference: 10,
             settings: RelaySettings {
                 hostname: "mx1.example.com".into(),
                 ..Default::default()

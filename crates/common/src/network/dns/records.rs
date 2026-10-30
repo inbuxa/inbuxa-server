@@ -13,6 +13,7 @@ use dns_update::{
     CAARecord, DnsRecord, KeyValue, MXRecord, NamedDnsRecord, SRVRecord, TLSARecord, TlsaCertUsage,
     TlsaMatching, TlsaSelector, bind::BindSerializer,
 };
+use inbuxa_features::relay::dns as relay_dns;
 use registry::schema::{
     enums::{DnsRecordType, ServiceProtocol},
     prelude::{ObjectType, Property},
@@ -39,6 +40,19 @@ impl Server {
         // inbuxa: legacy-protocols LP-7, LP-14a
         let legacy_off = self.legacy_off_for(domain_name).await?;
         let domain_name_suffix = format!(".{domain_name}");
+        // inbuxa: relays that take the domain's mail are its MX set, and
+        // the ones that send are in its SPF (relay spec, RL-25)
+        let relay_dns = if record_types
+            .iter()
+            .any(|t| matches!(t, DnsRecordType::Mx | DnsRecordType::Spf))
+        {
+            relay_dns::for_domain(
+                &inbuxa_features::relay::all(self.store()).await?,
+                domain_name,
+            )
+        } else {
+            None
+        };
 
         for record_type in record_types {
             match record_type {
@@ -62,6 +76,18 @@ impl Server {
                     }
                 }
                 DnsRecordType::Mx => {
+                    if let Some(relays) = &relay_dns {
+                        for (host, preference) in &relays.mx {
+                            records.push(NamedDnsRecord {
+                                name: format!("{domain_name}."),
+                                record: DnsRecord::MX(MXRecord {
+                                    exchange: format!("{host}."),
+                                    priority: *preference,
+                                }),
+                            });
+                        }
+                        continue;
+                    }
                     for mx in &network.info.mxs {
                         records.push(NamedDnsRecord {
                             name: format!("{domain_name}."),
@@ -76,6 +102,44 @@ impl Server {
                     }
                 }
                 DnsRecordType::Spf => {
+                    if let Some(relays) = &relay_dns {
+                        let mut hosts = relays.senders.clone();
+                        if relays.server_sends {
+                            let own = network
+                                .info
+                                .mxs
+                                .iter()
+                                .map(|mx| mx.hostname.as_deref().unwrap_or(default_host))
+                                .chain(network.info.mxs.is_empty().then_some(default_host));
+                            for host in own {
+                                let host = host.trim_end_matches('.').to_ascii_lowercase();
+                                if !hosts.contains(&host) {
+                                    hosts.push(host);
+                                }
+                            }
+                        }
+                        for host in &hosts {
+                            if host.ends_with(&domain_name_suffix) {
+                                records.push(NamedDnsRecord {
+                                    name: format!("{host}."),
+                                    record: DnsRecord::TXT("v=spf1 a -all".to_string()),
+                                });
+                            }
+                        }
+                        match relay_dns::spf_policy(&hosts) {
+                            Some(policy) => records.push(NamedDnsRecord {
+                                name: format!("{domain_name}."),
+                                record: DnsRecord::TXT(policy),
+                            }),
+                            None => trc::event!(
+                                Dns(trc::DnsEvent::BuildError),
+                                Domain = domain_name.to_string(),
+                                Total = hosts.len(),
+                                Details = "More hosts send mail than one SPF record can name; the domain's SPF record was left as it is",
+                            ),
+                        }
+                        continue;
+                    }
                     let mxs = network
                         .info
                         .mxs

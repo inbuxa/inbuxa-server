@@ -2,17 +2,85 @@
  * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
+ *
+ * Modified by Coffey Labs in 2026 for INBUXA.
  */
 
 use crate::task_manager::TaskResult;
 use common::Server;
 use dns_update::{CAARecord, DnsRecord, DnsRecordType, Error as DnsUpdateError, KeyValue};
-use registry::schema::structs::{
-    DnsManagement, Domain, Task, TaskDnsManagement, TaskDomainManagement, TaskStatus,
+use registry::{
+    schema::{
+        enums::DnsRecordType as RecordType,
+        prelude::ObjectType,
+        structs::{
+            DnsManagement, Domain, Task, TaskDnsManagement, TaskDomainManagement, TaskStatus,
+        },
+    },
+    types::{EnumImpl, map::Map},
 };
 use std::fmt::Write;
-use store::ahash::AHashMap;
-use trc::DnsEvent;
+use store::{ahash::AHashMap, registry::RegistryQuery, write::BatchBuilder};
+use trc::{AddContext, DnsEvent, TaskManagerEvent};
+use types::id::Id;
+
+/// Queues the MX and SPF records again for every domain whose DNS is
+/// published and names them, when what the relays put in them changed
+/// (relay spec, RL-25). Returns how many domains.
+pub(crate) async fn queue_relay_dns(server: &Server) -> trc::Result<usize> {
+    let domain_ids = server
+        .registry()
+        .query::<Vec<Id>>(RegistryQuery::new(ObjectType::Domain))
+        .await
+        .caused_by(trc::location!())?;
+    let mut batch = BatchBuilder::new();
+    let mut total = 0;
+    for domain_id in domain_ids {
+        let Some(domain) = server
+            .registry()
+            .object::<Domain>(domain_id)
+            .await
+            .caused_by(trc::location!())?
+        else {
+            continue;
+        };
+        let DnsManagement::Automatic(props) = &domain.dns_management else {
+            continue;
+        };
+        let records: Vec<RecordType> = props
+            .publish_records
+            .iter()
+            .filter(|r| matches!(r, RecordType::Mx | RecordType::Spf))
+            .copied()
+            .collect();
+        if records.is_empty() {
+            continue;
+        }
+        let task = Task::DnsManagement(TaskDnsManagement {
+            domain_id,
+            update_records: Map::new(records),
+            on_success_renew_certificate: false,
+            status: TaskStatus::now(),
+        });
+        trc::event!(
+            TaskManager(TaskManagerEvent::TaskQueued),
+            Type = task.object_type().as_str(),
+            Domain = domain.name.clone(),
+            Details = "The relays in its MX or SPF records changed",
+        );
+        batch.schedule_task(task);
+        total += 1;
+    }
+    if !batch.is_empty() {
+        server
+            .store()
+            .write(batch.build_all())
+            .await
+            .caused_by(trc::location!())?;
+        server.notify_task_queue();
+    }
+    Ok(total)
+}
 
 pub(crate) trait DnsManagementTask: Sync + Send {
     fn dns_management(&self, task: &TaskDnsManagement) -> impl Future<Output = TaskResult> + Send;
@@ -110,6 +178,22 @@ async fn dns_management(server: &Server, task: &TaskDnsManagement) -> trc::Resul
             }
         }
 
+        // inbuxa: a publish never cuts a domain's MX set down to one host
+        // (relay spec, RL-25)
+        if record_type == DnsRecordType::MX
+            && let Ok(existing) = dns_updater.list_rrset(origin, &name, record_type).await
+            && let Some(hosts) = shrinks_mx_set(&existing, &recs)
+        {
+            if !errors.is_empty() {
+                errors.push_str("; ");
+            }
+            let _ = write!(
+                &mut errors,
+                "Left the MX records for {name} as they are: publishing would replace their {hosts} hosts with one"
+            );
+            continue;
+        }
+
         if let Err(err) = dns_updater
             .set_rrset(origin, &name, record_type, recs)
             .await
@@ -141,6 +225,25 @@ async fn dns_management(server: &Server, task: &TaskDnsManagement) -> trc::Resul
     } else {
         Ok(TaskResult::permanent(errors))
     }
+}
+
+/// How many hosts a published MX set has, when `new` would replace them
+/// with one.
+fn shrinks_mx_set(existing: &[DnsRecord], new: &[DnsRecord]) -> Option<usize> {
+    let hosts = |records: &[DnsRecord]| {
+        let mut hosts: Vec<String> = records
+            .iter()
+            .filter_map(|r| match r {
+                DnsRecord::MX(mx) => Some(mx.exchange.trim_end_matches('.').to_ascii_lowercase()),
+                _ => None,
+            })
+            .collect();
+        hosts.sort();
+        hosts.dedup();
+        hosts.len()
+    };
+    let (before, after) = (hosts(existing), hosts(new));
+    (before > 1 && after == 1).then_some(before)
 }
 
 fn same_rrset_family(a: &DnsRecord, b: &DnsRecord) -> bool {
@@ -202,4 +305,36 @@ fn is_owned_txt_name(name: &str) -> bool {
         || name.contains("_ua-auto-config.")
         || name.contains("_validation-persist.")
         || name.contains("._domainkey.")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use dns_update::MXRecord;
+
+    fn mx(hosts: &[&str]) -> Vec<DnsRecord> {
+        hosts
+            .iter()
+            .map(|host| {
+                DnsRecord::MX(MXRecord {
+                    exchange: host.to_string(),
+                    priority: 10,
+                })
+            })
+            .collect()
+    }
+
+    #[test]
+    fn an_mx_set_isnt_cut_to_one() {
+        let three = mx(&["mail.example.com.", "mx2.example.com.", "mx3.example.com."]);
+        assert_eq!(shrinks_mx_set(&three, &mx(&["mail.example.com."])), Some(3));
+        // The same host twice is one host
+        assert_eq!(
+            shrinks_mx_set(&mx(&["a.test.", "A.test"]), &mx(&["b.test."])),
+            None
+        );
+        assert_eq!(shrinks_mx_set(&three, &mx(&["a.test.", "b.test."])), None);
+        assert_eq!(shrinks_mx_set(&mx(&["a.test."]), &mx(&["b.test."])), None);
+        assert_eq!(shrinks_mx_set(&[], &mx(&["a.test."])), None);
+    }
 }
