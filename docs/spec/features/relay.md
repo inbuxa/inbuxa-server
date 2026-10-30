@@ -569,8 +569,12 @@ allowing the edge's IP and disabling SPF, DMARC and reverse IP for it.
   relay, for every message handed to it from any node. A final status is
   recorded in the downstream's queue, which sends any DSN as for its own
   deliveries, and the message is then destroyed on the relay.
-- Mail sent with REQUIRETLS (RFC 8689) isn't handed to a relay yet: it
-  takes the route it would without relays.
+- Mail sent with REQUIRETLS (RFC 8689) is handed over with the parameter,
+  and the relay treats it as the server's own delivery does: TLS is
+  required, with a WebPKI certificate valid for the MX host unless DANE
+  applies, never in the clear, and `REQUIRETLS` is passed on where the
+  next server offers it. Its TLS failures are reported as
+  `no-policy-found` unless an MTA-STS policy applied.
 
 ### DNS and certificates
 
@@ -827,8 +831,11 @@ In progress. Done so far:
   the relay sending to a scripted MX (RL-T11): a test build of the relay,
   with the `test-mx` feature, sends every domain to one local port.
   `outboundTls` is set like any other setting, `settings/outboundTls`.
-- Still to come in step 4: the named `inbuxaRelay` route, TLS-RPT reports
-  from the relay's `outbound.tls` events, and REQUIRETLS through relays.
+- REQUIRETLS through relays: handed over with the parameter, delivered by
+  the relay only over TLS with a verified certificate (tested against a
+  scripted MX with a self-signed one).
+- Still to come in step 4: the named `inbuxaRelay` route, and TLS-RPT
+  reports from the relay's `outbound.tls` events.
 - `crates/outbound-tls` (RL-30): the TLSA and MTA-STS types, the DANE
   certificate check, MTA-STS policy parsing and matching, and the DNSSEC
   lookups (with the bogus-answer recheck), moved out of `crates/smtp` and

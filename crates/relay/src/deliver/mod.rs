@@ -189,6 +189,7 @@ impl<R: Resolve> Target<'_, R> {
             .await
             .filter(|p| p.mode != Mode::None);
         let enforce = sts.as_ref().is_some_and(|p| p.enforce());
+        let requiretls = client::requires_tls(&self.meta.envelope.mail_from);
         let mut last = format!("451 4.4.0 No MX host of {domain} could be reached");
 
         for host in hosts.iter().take(MX_MAX) {
@@ -218,7 +219,9 @@ impl<R: Resolve> Target<'_, R> {
                     continue;
                 }
             };
-            let fallback = if enforce {
+            // REQUIRETLS asks what the server's own delivery gives it: TLS
+            // with a WebPKI certificate, unless DANE applies (RFC 8689 §4.2.1)
+            let fallback = if enforce || requiretls {
                 TlsMode::Verified
             } else if self.settings.outbound_tls == OutboundTls::Required {
                 TlsMode::Required
@@ -345,7 +348,14 @@ impl<R: Resolve> Target<'_, R> {
         let mut data = crate::events::data([
             ("domain", json!(self.domain)),
             ("mx", json!(mx)),
-            ("policyType", json!(mode.policy_type())),
+            (
+                "policyType",
+                // Verified for REQUIRETLS alone isn't an MTA-STS policy
+                json!(match (mode, sts) {
+                    (TlsMode::Verified, None) => "no-policy-found",
+                    _ => mode.policy_type(),
+                }),
+            ),
             ("policyStrings", json!(policy_strings)),
             (
                 "result",
