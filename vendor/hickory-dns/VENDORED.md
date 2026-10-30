@@ -18,7 +18,12 @@ UDP answer.
 
 ## Changes
 
-None. Each directory is `cargo package --no-verify` of that commit (the
+One: in `hickory-resolver/src/name_server.rs`, `let h3` is gated on
+`__h3` instead of `__tls`, so a build with TLS but without HTTP/3 (ours)
+no longer warns about an unused variable. hickory's `main` has the same
+line; `release/0.26` doesn't yet. Drop it when re-vendoring past it.
+
+Otherwise each directory is `cargo package --no-verify` of that commit (the
 manifest normalized, so it builds outside hickory's workspace), without
 `Cargo.lock`, `Cargo.toml.orig` and `.cargo_vcs_info.json` (the
 repository ignores dotfiles; the commit is recorded above).
