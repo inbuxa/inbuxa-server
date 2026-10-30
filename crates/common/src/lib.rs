@@ -106,6 +106,16 @@ Schema history:
 
 pub const DATABASE_SCHEMA_VERSION: u32 = 6;
 
+// inbuxa: the layout of the store as our own line keeps it, beside the
+// schema version above (which stays at 0.16's, so a Stalwart 0.16 store
+// still opens). Kept in the fork's subspace under `Vs`; a store without it
+// was last opened by a release from before the mark, or by Stalwart, and
+// gets it on start. A release refuses a store marked newer than its own.
+//
+// 1 - the 0.16 layout plus the fork's own subspace (2026.10.x, 27.1)
+pub const INBUXA_STORE_VERSION: u32 = 1;
+pub const INBUXA_STORE_VERSION_KEY: &[u8] = b"Vs";
+
 pub const LONG_1D_SLUMBER: Duration = Duration::from_secs(60 * 60 * 24);
 pub const LONG_1Y_SLUMBER: Duration = Duration::from_secs(60 * 60 * 24 * 365);
 
