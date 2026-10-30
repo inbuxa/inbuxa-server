@@ -12,7 +12,7 @@
 //! change in the audit log, with the private key and the token left out.
 
 use common::{Server, auth::AccessToken};
-use inbuxa_features::relay::{self as relays, JoinState, Relay as StoredRelay};
+use inbuxa_features::relay::{self as relays, JoinState, Relay as StoredRelay, link::NodeLink};
 use inbuxa_relay_proto::{b64, types::RelaySettings};
 use jmap_proto::{
     error::set::SetError,
@@ -52,6 +52,7 @@ const ALL: &[P] = &[
     P::JoinExpiresAt,
     P::JoinedAt,
     P::LinkKeyPin,
+    P::Links,
     P::CreatedBy,
     P::CreatedAt,
     P::UpdatedAt,
@@ -65,6 +66,7 @@ const SERVER_SET: &[P] = &[
     P::JoinedAt,
     P::LinkKeyPin,
     P::JoinToken,
+    P::Links,
     P::CreatedBy,
     P::CreatedAt,
     P::UpdatedAt,
@@ -115,7 +117,24 @@ fn text(value: Option<&str>) -> RValue {
     value.map_or(Value::Null, |value| Value::Str(value.to_string().into()))
 }
 
-fn to_value(relay: &StoredRelay, properties: &[P], now: u64) -> RValue {
+/// Each node's link, with its times as dates.
+fn links_value(links: &[NodeLink]) -> RValue {
+    let date = |at: u64| UTCDate::from_timestamp(at as i64).to_string();
+    let list = links
+        .iter()
+        .map(|link| {
+            let mut json = serde_json::to_value(link).unwrap_or_default();
+            json["nodeId"] = link.node_id.to_string().into();
+            json["since"] = date(link.since).into();
+            json["updatedAt"] = date(link.updated_at).into();
+            json["lastSeen"] = link.last_seen.map(date).into();
+            json
+        })
+        .collect::<Vec<_>>();
+    json_to_value(serde_json::Value::Array(list))
+}
+
+fn to_value(relay: &StoredRelay, links: &[NodeLink], properties: &[P], now: u64) -> RValue {
     let state = relay.join.state(now);
     let mut out = Map::with_capacity(properties.len());
     for property in properties {
@@ -139,6 +158,7 @@ fn to_value(relay: &StoredRelay, properties: &[P], now: u64) -> RValue {
             P::JoinExpiresAt if state != JoinState::Joined => date(relay.join.expires_at),
             P::JoinedAt => relay.join.joined_at.map_or(Value::Null, date),
             P::LinkKeyPin => text(relay.join.relay_pin.map(|pin| b64::encode(&pin)).as_deref()),
+            P::Links => links_value(links),
             P::CreatedBy => text(Some(&relay.created_by)),
             P::CreatedAt => date(relay.created_at),
             P::UpdatedAt => date(relay.updated_at),
@@ -314,23 +334,31 @@ pub async fn get(
         list: Vec::new(),
         not_found,
     };
-    let all = relays::all(server.store()).await?;
+    let data = server.store();
+    let all = relays::all(data).await?;
     let now = now();
-    match ids {
-        None => {
-            response.list = all
-                .iter()
-                .map(|relay| to_value(relay, &properties, now))
-                .collect()
-        }
+    let wanted: Vec<&StoredRelay> = match ids {
+        None => all.iter().collect(),
         Some(ids) => {
+            let mut wanted = Vec::with_capacity(ids.len());
             for id in ids {
                 match relay_id(id).and_then(|id| all.iter().find(|r| r.id == id)) {
-                    Some(relay) => response.list.push(to_value(relay, &properties, now)),
+                    Some(relay) => wanted.push(relay),
                     None => response.push_not_found(id),
                 }
             }
+            wanted
         }
+    };
+    for relay in wanted {
+        let links = if properties.contains(&P::Links) {
+            relays::link::statuses(data, relay.id).await?
+        } else {
+            Vec::new()
+        };
+        response
+            .list
+            .push(to_value(relay, &links, &properties, now));
     }
     Ok(response)
 }
@@ -460,5 +488,11 @@ pub async fn set(
         response.destroyed.push(id);
     }
 
+    if !response.created.is_empty()
+        || !response.updated.is_empty()
+        || !response.destroyed.is_empty()
+    {
+        relays::changed();
+    }
     Ok(response)
 }

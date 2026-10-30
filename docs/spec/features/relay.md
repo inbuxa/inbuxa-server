@@ -669,8 +669,14 @@ In progress. Done so far:
   hashing and sealing (PR #244).
 - `crates/relay`: the relay binary, inbound in held and live mode (PR #245).
 - On the downstream: `inbuxa:Relay` and its permissions, the link CA and
-  sealing key, and join tokens. Status, `inbuxa:RelayMessage` and the link
-  service are not done yet.
+  sealing key, and join tokens (PR #249).
+- The downstream's link service: every node dials each enabled relay,
+  completes the join and pins its key, pushes settings, domains and the
+  recipient set (whole, then deltas), and reports each node's link in the
+  relay's `links` (this PR). Node link certificates last 30 days and are
+  renewed after 20.
+- Not done yet: ingest, live verdicts, `inbuxa:RelayMessage`, relay events
+  in the trace, and the link-down alert.
 
 Order:
 
