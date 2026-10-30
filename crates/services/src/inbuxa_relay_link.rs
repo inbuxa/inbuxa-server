@@ -82,6 +82,7 @@ use tokio::{
     net::TcpStream,
     sync::{mpsc, watch},
     task::JoinHandle,
+    time::MissedTickBehavior,
 };
 use tokio_rustls::{TlsConnector, client::TlsStream};
 use tokio_tungstenite::{WebSocketStream, tungstenite::Message};
@@ -94,8 +95,12 @@ const SCAN: Duration = Duration::from_secs(10);
 const SYNC: Duration = Duration::from_secs(15);
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
 const CALL_TIMEOUT: Duration = Duration::from_secs(60);
-const BACKOFF_MIN: Duration = Duration::from_secs(5);
-const BACKOFF_MAX: Duration = Duration::from_secs(120);
+const BACKOFF_MIN: Duration = Duration::from_secs(1);
+const BACKOFF_MAX: Duration = Duration::from_secs(60);
+/// How often the link is pinged, so NAT and firewalls keep it open (RL-5).
+const PING_EVERY: Duration = Duration::from_secs(30);
+/// Pongs that may go missing before the link is taken as dead.
+const PONGS_MISSED_MAX: u32 = 2;
 /// After a join that can't go on, wait this long, or for a change.
 const JOIN_FAILED_WAIT: Duration = Duration::from_secs(300);
 /// Status is written when it changes, and at least this often.
@@ -770,6 +775,8 @@ async fn join(data: &store::Store, relay: &Relay, cert: &NodeCertificate) -> Res
 struct Ws {
     stream: WebSocketStream<TlsStream<TcpStream>>,
     next_id: u64,
+    /// Pings sent since the last pong.
+    pongs_missed: u32,
     relay_changed: bool,
     inbound_changed: bool,
     events_changed: bool,
@@ -801,6 +808,7 @@ impl Ws {
         Ok(Ws {
             stream,
             next_id: 0,
+            pongs_missed: 0,
             relay_changed: false,
             inbound_changed: false,
             events_changed: false,
@@ -824,7 +832,8 @@ impl Ws {
                         return Ok(frame);
                     }
                 }
-                Some(Ok(Message::Ping(_) | Message::Pong(_) | Message::Frame(_))) => {}
+                Some(Ok(Message::Pong(_))) => self.pongs_missed = 0,
+                Some(Ok(Message::Ping(_) | Message::Frame(_))) => {}
                 Some(Ok(Message::Binary(_))) => {}
                 Some(Ok(Message::Close(_))) | None => {
                     return Err(LinkError::down("The relay closed the link."));
@@ -832,6 +841,18 @@ impl Ws {
                 Some(Err(err)) => return Err(LinkError::down(format!("The link dropped: {err}"))),
             }
         }
+    }
+
+    /// Pings the relay, or fails once too many pongs have gone missing.
+    async fn ping(&mut self) -> Result<(), LinkError> {
+        if self.pongs_missed >= PONGS_MISSED_MAX {
+            return Err(LinkError::down("The relay stopped answering pings."));
+        }
+        self.pongs_missed += 1;
+        self.stream
+            .send(Message::Ping(Bytes::new()))
+            .await
+            .map_err(|err| LinkError::down(format!("The link dropped: {err}")))
     }
 
     fn note(&mut self, frame: &ServerFrame) {
@@ -962,6 +983,10 @@ async fn session(
 
     let mut tick = tokio::time::interval(SYNC);
     tick.reset();
+    let mut ping = tokio::time::interval(PING_EVERY);
+    // A long call must not let pings pile up and count as missed
+    ping.set_missed_tick_behavior(MissedTickBehavior::Delay);
+    ping.reset();
     loop {
         tokio::select! {
             frame = ws.frame() => {
@@ -981,6 +1006,10 @@ async fn session(
             Some(answer) = answers.recv() => {
                 taker.answer(&mut ws, answer).await?;
                 taker.take(&mut ws).await?;
+                continue;
+            }
+            _ = ping.tick() => {
+                ws.ping().await?;
                 continue;
             }
             _ = tick.tick() => {}
