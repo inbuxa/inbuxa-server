@@ -10,7 +10,7 @@
 //! them. Before the join completes, only `Relay/join`, then `Relay/get` and
 //! `Relay/set`, answer; everything else is `forbidden`.
 
-use crate::{app::App, link::tls::cert_pin, state::JoinStage};
+use crate::{app::App, link::tls::cert_pin, outbound::Destroyed, state::JoinStage};
 use inbuxa_relay_proto::{
     CAPABILITY, CORE_CAPABILITY, b64,
     jmap::{Invocation, MethodError, Request, Response, method},
@@ -867,10 +867,17 @@ fn outbound_set(app: &App, args: &Map<String, Value>) -> MethodResult {
         );
     }
     for id in string_list(args, "destroy")?.unwrap_or_default() {
-        if outbox.destroy(&id) {
-            destroyed.push(id);
-        } else {
-            not_destroyed.insert(id, set_error("notFound", "no such message"));
+        match outbox.destroy(&id) {
+            Destroyed::Yes => destroyed.push(id),
+            Destroyed::NotFound => {
+                not_destroyed.insert(id, set_error("notFound", "no such message"));
+            }
+            Destroyed::InFlight => {
+                not_destroyed.insert(
+                    id,
+                    set_error("forbidden", "a delivery attempt is under way; try again"),
+                );
+            }
         }
     }
     let new_state = outbox.state();
@@ -878,6 +885,9 @@ fn outbound_set(app: &App, args: &Map<String, Value>) -> MethodResult {
     if new_state != old_state {
         app.notify(type_name::OUTBOUND, new_state.clone());
         app.relay_changed();
+    }
+    if !created.is_empty() {
+        app.outbound_wake.notify_one();
     }
     Ok(json!({
         "accountId": ACCOUNT_ID,

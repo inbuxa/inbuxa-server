@@ -25,7 +25,7 @@ use std::{
         atomic::{AtomicU32, AtomicU64, Ordering},
     },
 };
-use tokio::sync::{broadcast, watch};
+use tokio::sync::{Notify, broadcast, watch};
 
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
@@ -45,6 +45,8 @@ pub struct App {
     pub recipients: RwLock<Recipients>,
     pub spool: Mutex<Spool>,
     pub outbox: Mutex<Outbox>,
+    /// Wakes the delivery engine when mail is handed over.
+    pub outbound_wake: Notify,
     pub events: Mutex<Events>,
     pub push: broadcast::Sender<Changed>,
     /// Link connections, and those with push on for `Inbound`.
@@ -79,6 +81,7 @@ impl App {
             recipients: RwLock::new(recipients),
             spool: Mutex::new(spool),
             outbox: Mutex::new(outbox),
+            outbound_wake: Notify::new(),
             events: Mutex::new(events),
             push,
             link_clients: AtomicU32::new(0),
@@ -111,6 +114,11 @@ impl App {
 
     pub fn notify(&self, type_name: &'static str, state: String) {
         let _ = self.push.send(Changed { type_name, state });
+    }
+
+    pub fn outbound_changed(&self) {
+        let state = self.outbox.lock().expect("outbox").state();
+        self.notify(type_name::OUTBOUND, state);
     }
 
     pub fn inbound_changed(&self) {

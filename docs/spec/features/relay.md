@@ -250,7 +250,7 @@ with the server's own `inbuxa:` objects. In particular, the relay's
 | `heldMaxAge` | downstream | How long held inbound mail waits for the downstream. Default 30 days, maximum 90 |
 | `spoolMaxBytes` | downstream | Spool size cap |
 | `outboundRetry`, `outboundExpiry` | downstream | Retry schedule and give-up time. Defaults match the server's (three days) |
-| `outboundTls` | downstream | Opportunistic TLS default; DANE and MTA-STS always enforced where published |
+| `outboundTls` | downstream | Where neither DANE nor MTA-STS applies: `opportunistic` (the default; STARTTLS when offered) or `required` (no delivery without STARTTLS). The certificate isn't checked either way. DANE and MTA-STS are always enforced where published |
 | `smtpCertificate` | downstream | PEM chain and private key. `/get` never returns the key |
 | `sealingKey` | downstream | The downstream's public sealing key |
 | `linkAllowFrom` | downstream | Addresses and CIDR ranges that may dial the link port. Default empty: anyone (RL-33) |
@@ -450,6 +450,31 @@ When no link is up, or after RL-13:
   server's real reply. The relay never writes a message of its own.
 - TLS results for each destination are sent as `RelayEvent`s. The downstream
   builds TLS-RPT reports from them, as it does from its own deliveries.
+- How a domain is tried: its MX hosts best first (no MX means the domain
+  itself; a null MX, RFC 7505, refuses every recipient with `556 5.1.10`),
+  at most five hosts and two addresses each. With the MX answer and the
+  host's addresses both DNSSEC-signed, signed TLSA records make it a DANE
+  delivery, which takes precedence over MTA-STS. A signed zone whose TLSA
+  records are unusable still requires encryption (RFC 7672 §2.2). Bogus
+  TLSA records skip the host. Otherwise an MTA-STS `enforce` policy skips
+  hosts it doesn't list and requires a WebPKI certificate valid for the
+  host; `testing` only reports. Opportunistic TLS that fails to set up is
+  tried once more in the clear. A host that can't be reached, or fails its
+  TLS policy, passes the attempt to the next.
+- Each recipient's reply is the remote server's own: RCPT's for a refusal
+  or a deferral, the final reply after DATA for the rest. When no host
+  could take the attempt, the recipients stay queued with the reason, as a
+  `4.4.x` reply. The next try follows `outboundRetry`, the last interval
+  repeating. At `expiresAt` what is still queued becomes `delivered: no`,
+  keeping the last reply seen. A finished message the downstream never
+  clears is deleted after seven days. `destroy` is refused (`forbidden`)
+  while an attempt is under way.
+- Events: `outbound.attempt` per session that reached MAIL FROM (`id`,
+  `domain`, `mx`, `ip`, `tls`, and counts delivered, refused and
+  deferred); `outbound.tls` per session where TLS applied or failed
+  (`domain`, `mx`, `ip`, `policyType` as TLS-RPT names it, `policyStrings`,
+  `result` as a TLS-RPT result type or `success`, and `reason`);
+  `outbound.expired` (`id`, `recipients`).
 - **RL-20.** If no relay can be reached, the downstream keeps the message in
   its own queue and retries. With several relays, it hands messages to the
   linked ones in turn, skipping any marked `inboundOnly`.
@@ -771,9 +796,13 @@ In progress. Done so far:
   once, and `relay.link-up` when it is back (RL-T23). Both reach the log,
   webhooks and OpenTelemetry.
 - `Outbound` on the relay: `Outbound/set` create and destroy, `/get` and
-  `/changes`, with push, in `spool/out/` (RL-19, RL-T10). The relay doesn't
-  deliver it yet, and the downstream doesn't hand anything over yet; both
-  are the rest of step 4.
+  `/changes`, with push, in `spool/out/` (RL-19, RL-T10).
+- Outbound delivery on the relay: MX, DANE, MTA-STS and `outboundTls`, per
+  recipient status from the remote server's replies, retries, expiry, and
+  `outbound.*` events (RL-T12 tested against a scripted MX with fixed DNS
+  answers). The release binary went from 5.4 MB to 8.1 MB with it
+  (glibc, measured 2026-10-30). The downstream doesn't hand anything over
+  yet: that is the rest of step 4.
 - `crates/outbound-tls` (RL-30): the TLSA and MTA-STS types, the DANE
   certificate check, MTA-STS policy parsing and matching, and the DNSSEC
   lookups (with the bogus-answer recheck), moved out of `crates/smtp` and

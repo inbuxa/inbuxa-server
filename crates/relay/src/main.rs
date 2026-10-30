@@ -13,6 +13,7 @@
 
 mod app;
 mod changelog;
+mod deliver;
 mod events;
 mod link;
 mod outbound;
@@ -188,6 +189,11 @@ fn run(paths: &Paths, link_listen: SocketAddr) -> Result<(), String> {
         let link = tokio::spawn(link::serve(app.clone(), listener));
         tokio::spawn(smtp::serve(app.clone()));
         tokio::spawn(sweeper(app.clone()));
+        let outbound = app.clone();
+        tokio::spawn(async move {
+            let dns = Arc::new(deliver::route::Dns::new().await);
+            deliver::run(outbound, dns).await
+        });
         tokio::select! {
             result = link => match result {
                 Ok(Err(e)) => Err(format!("the link stopped: {e}")),

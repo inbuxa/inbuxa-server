@@ -65,6 +65,8 @@ pub struct RelaySettings {
     pub outbound_retry: Vec<u32>,
     /// Seconds before outbound mail is given up.
     pub outbound_expiry: u32,
+    /// TLS where neither DANE nor MTA-STS asks for it.
+    pub outbound_tls: OutboundTls,
     /// The STARTTLS certificate for port 25.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub smtp_certificate: Option<SmtpCertificate>,
@@ -91,6 +93,7 @@ impl Default for RelaySettings {
             spool_max_bytes: 2 * 1024 * 1024 * 1024,
             outbound_retry: vec![120, 300, 600, 1800, 3600, 7200, 14_400],
             outbound_expiry: 3 * 86_400,
+            outbound_tls: OutboundTls::default(),
             smtp_certificate: None,
             sealing_key: None,
             recipient_key: None,
@@ -147,6 +150,19 @@ impl RelaySettings {
     pub fn serves(&self, domain: &str) -> bool {
         self.domains.iter().any(|d| d.eq_ignore_ascii_case(domain))
     }
+}
+
+/// TLS for outbound mail where the destination publishes no DANE or
+/// MTA-STS policy; those are always enforced (spec "Outbound").
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum OutboundTls {
+    /// STARTTLS when offered, without checking the certificate: it could
+    /// be stripped anyway.
+    #[default]
+    Opportunistic,
+    /// No delivery without STARTTLS; the certificate still isn't checked.
+    Required,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
