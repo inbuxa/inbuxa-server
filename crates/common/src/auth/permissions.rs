@@ -366,6 +366,14 @@ impl Default for DefaultPermissions {
                     default.superuser.push(permission);
                 }
                 Permission::SysJournalSearch | Permission::SysJournalExport => {}
+                // inbuxa: a relay serves the whole downstream, never a
+                // tenant (relay spec, "Registry objects")
+                Permission::SysRelayGet
+                | Permission::SysRelayUpdate
+                | Permission::SysRelayQueueGet
+                | Permission::SysRelayQueueUpdate => {
+                    default.superuser.push(permission);
+                }
                 // inbuxa: AL-12: tenant administrators lock and delegate
                 // within their tenant
                 Permission::SysAccountLockGet

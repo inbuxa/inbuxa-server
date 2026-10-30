@@ -112,6 +112,7 @@ pub enum GetResponseMethod {
     AccountLock(GetResponse<crate::object::inbuxa_account_lock::AccountLock>),
     LegalHold(GetResponse<crate::object::inbuxa_legal_hold::LegalHold>),
     MailRule(GetResponse<crate::object::inbuxa_mail_rule::MailRule>),
+    Relay(GetResponse<crate::object::inbuxa_relay::Relay>),
     SecurityAcceptance(GetResponse<crate::object::inbuxa_security_acceptance::SecurityAcceptance>),
     DeliverabilityReport(
         GetResponse<crate::object::inbuxa_deliverability_report::DeliverabilityReport>,
@@ -166,6 +167,7 @@ pub enum SetResponseMethod {
     AccountLock(Box<SetResponse<crate::object::inbuxa_account_lock::AccountLock>>),
     LegalHold(Box<SetResponse<crate::object::inbuxa_legal_hold::LegalHold>>),
     MailRule(Box<SetResponse<crate::object::inbuxa_mail_rule::MailRule>>),
+    Relay(Box<SetResponse<crate::object::inbuxa_relay::Relay>>),
     SecurityAcceptance(
         Box<SetResponse<crate::object::inbuxa_security_acceptance::SecurityAcceptance>>,
     ),
@@ -1030,6 +1032,18 @@ impl<'x> From<GetResponse<crate::object::inbuxa_mail_rule::MailRule>> for Respon
 impl<'x> From<SetResponse<crate::object::inbuxa_mail_rule::MailRule>> for ResponseMethod<'x> {
     fn from(value: SetResponse<crate::object::inbuxa_mail_rule::MailRule>) -> Self {
         ResponseMethod::Set(SetResponseMethod::MailRule(Box::new(value)))
+    }
+}
+
+impl<'x> From<GetResponse<crate::object::inbuxa_relay::Relay>> for ResponseMethod<'x> {
+    fn from(value: GetResponse<crate::object::inbuxa_relay::Relay>) -> Self {
+        ResponseMethod::Get(GetResponseMethod::Relay(value))
+    }
+}
+
+impl<'x> From<SetResponse<crate::object::inbuxa_relay::Relay>> for ResponseMethod<'x> {
+    fn from(value: SetResponse<crate::object::inbuxa_relay::Relay>) -> Self {
+        ResponseMethod::Set(SetResponseMethod::Relay(Box::new(value)))
     }
 }
 

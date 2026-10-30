@@ -116,6 +116,8 @@ impl JmapAuthorization for AccessToken {
                         Permission::SysDlpPolicyGet
                     }
                 }
+                // inbuxa: inbuxa Relay
+                GetRequestMethod::Relay(_) => Permission::SysRelayGet,
                 // inbuxa: journaling (JR-18)
                 GetRequestMethod::Journal(_) => Permission::SysJournalGet,
                 GetRequestMethod::JournalEntry(_) => Permission::SysJournalSearch,
@@ -310,6 +312,14 @@ impl JmapAuthorization for AccessToken {
                                 .details("You are not authorized to change mail rules"))
                         }
                     }
+                    // inbuxa: inbuxa Relay; a new join token is an update
+                    SetRequestMethod::Relay(s) => validate_set(
+                        s,
+                        self,
+                        Permission::SysRelayUpdate,
+                        Permission::SysRelayUpdate,
+                        Permission::SysRelayUpdate,
+                    ),
                     // inbuxa: journaling (JR-18)
                     SetRequestMethod::Journal(s) => validate_set(
                         s,
@@ -566,6 +576,7 @@ impl JmapAuthorization for AccessToken {
                 | MethodObject::LegalHold
                 | MethodObject::HoldExport
                 | MethodObject::MailRule
+                | MethodObject::Relay
                 | MethodObject::SecurityAcceptance
                 | MethodObject::DeliverabilityReport
                 | MethodObject::DeliverabilitySettings

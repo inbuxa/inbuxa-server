@@ -34,6 +34,7 @@ pub fn is_secret(object: &str, property: &str) -> bool {
         .any(|name| lower == name.to_ascii_lowercase())
         || lower.ends_with("secret")
         || lower.ends_with("password")
+        || lower.ends_with("privatekey")
         || schema::embedded()
             .and_then(|schema| schema.property(object, property))
             .is_some_and(|info| info.secret)
@@ -166,6 +167,8 @@ mod tests {
         assert!(!text.contains("old-key"));
         // Unchanged secrets aren't mentioned at all
         assert!(diff("x:AiModel", Some(&before), Some(&before)).is_empty());
+        // A private key by any name, like a relay's STARTTLS key
+        assert!(is_secret("inbuxa:Relay", "smtpPrivateKey"));
     }
 
     #[test]

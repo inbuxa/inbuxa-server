@@ -31,6 +31,7 @@ pub mod monitoring;
 pub mod oidc;
 pub mod purge;
 pub mod quota;
+pub mod relay; // inbuxa: inbuxa Relay
 pub mod reload; // inbuxa: reloads and build errors
 pub mod scheduled_reports; // inbuxa: scheduled reports and the weekly digest
 pub mod security;

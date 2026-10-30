@@ -290,6 +290,9 @@ impl RequestHandler for Server {
                                     SetResponseMethod::MailRule(set_response) => {
                                         set_response.update_created_ids(&mut response);
                                     }
+                                    SetResponseMethod::Relay(set_response) => {
+                                        set_response.update_created_ids(&mut response);
+                                    }
                                     SetResponseMethod::SecurityAcceptance(set_response) => {
                                         set_response.update_created_ids(&mut response);
                                     }
@@ -553,6 +556,13 @@ impl RequestHandler for Server {
                 GetRequestMethod::MailRule(mut req) => {
                     resolve_account_id(&mut req.account_id, method_name.obj, access_token)?;
                     crate::inbuxa::mail_rule::get(self, access_token, *req)
+                        .await?
+                        .into()
+                }
+                // inbuxa: inbuxa Relay
+                GetRequestMethod::Relay(mut req) => {
+                    resolve_account_id(&mut req.account_id, method_name.obj, access_token)?;
+                    crate::inbuxa::relay::get(self, access_token, *req)
                         .await?
                         .into()
                 }
@@ -1108,6 +1118,22 @@ impl RequestHandler for Server {
                         reason,
                         *req,
                         |req| Box::pin(crate::inbuxa::mail_rule::set(self, access_token, req)),
+                    )
+                    .await?
+                    .into()
+                }
+                SetRequestMethod::Relay(mut req) => {
+                    resolve_account_id(&mut req.account_id, method_name.obj, access_token)?;
+                    let reason = req.arguments.reason.clone();
+                    crate::inbuxa::audit::recorded(
+                        self,
+                        access_token,
+                        session,
+                        &method_name.obj.to_string(),
+                        None,
+                        reason,
+                        *req,
+                        |req| Box::pin(crate::inbuxa::relay::set(self, access_token, req)),
                     )
                     .await?
                     .into()

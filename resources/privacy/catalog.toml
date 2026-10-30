@@ -113,6 +113,23 @@ exceptions = ["contact", "content"]
 actions = ["contact", "content"]
 createdBy = ["identifier"]
 
+[object."inbuxa:Relay"]
+file = "inbuxa_relay.rs"
+default = "none"
+whose = ["administrator"]
+where = ["data-store"]
+scope = "server"
+retention = "unbounded"
+[object."inbuxa:Relay".properties]
+name = ["content"]
+description = ["content"]
+address = ["network"]
+settings = ["network"]
+smtpCertificate = ["network"]
+smtpPrivateKey = ["credential"]
+joinToken = ["credential"]
+createdBy = ["identifier"]
+
 [object."inbuxa:Journal"]
 file = "inbuxa_journal.rs"
 default = "none"

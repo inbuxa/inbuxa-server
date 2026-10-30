@@ -1780,6 +1780,11 @@ pub enum Permission {
     // inbuxa: scheduled reports and the weekly digest
     SysScheduledReportGet = 688,
     SysScheduledReportUpdate = 689,
+    // inbuxa: inbuxa Relay
+    SysRelayGet = 690,
+    SysRelayUpdate = 691,
+    SysRelayQueueGet = 692,
+    SysRelayQueueUpdate = 693,
     SysAccountGet = 219,
     SysAccountCreate = 220,
     SysAccountUpdate = 221,

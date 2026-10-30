@@ -7160,6 +7160,10 @@ impl EnumImpl for Permission {
             b"sysDeliverabilityCheck" => Permission::SysDeliverabilityCheck,
             b"sysScheduledReportGet" => Permission::SysScheduledReportGet,
             b"sysScheduledReportUpdate" => Permission::SysScheduledReportUpdate,
+            b"sysRelayGet" => Permission::SysRelayGet,
+            b"sysRelayUpdate" => Permission::SysRelayUpdate,
+            b"sysRelayQueueGet" => Permission::SysRelayQueueGet,
+            b"sysRelayQueueUpdate" => Permission::SysRelayQueueUpdate,
             b"sysAccountGet" => Permission::SysAccountGet,
             b"sysAccountCreate" => Permission::SysAccountCreate,
             b"sysAccountUpdate" => Permission::SysAccountUpdate,
@@ -7866,6 +7870,10 @@ impl EnumImpl for Permission {
             Permission::SysDeliverabilityCheck => "sysDeliverabilityCheck",
             Permission::SysScheduledReportGet => "sysScheduledReportGet",
             Permission::SysScheduledReportUpdate => "sysScheduledReportUpdate",
+            Permission::SysRelayGet => "sysRelayGet",
+            Permission::SysRelayUpdate => "sysRelayUpdate",
+            Permission::SysRelayQueueGet => "sysRelayQueueGet",
+            Permission::SysRelayQueueUpdate => "sysRelayQueueUpdate",
             Permission::SysAccountGet => "sysAccountGet",
             Permission::SysAccountCreate => "sysAccountCreate",
             Permission::SysAccountUpdate => "sysAccountUpdate",
@@ -8565,6 +8573,10 @@ impl EnumImpl for Permission {
             687 => Some(Permission::SysDeliverabilityCheck),
             688 => Some(Permission::SysScheduledReportGet),
             689 => Some(Permission::SysScheduledReportUpdate),
+            690 => Some(Permission::SysRelayGet),
+            691 => Some(Permission::SysRelayUpdate),
+            692 => Some(Permission::SysRelayQueueGet),
+            693 => Some(Permission::SysRelayQueueUpdate),
             219 => Some(Permission::SysAccountGet),
             220 => Some(Permission::SysAccountCreate),
             221 => Some(Permission::SysAccountUpdate),
@@ -9009,7 +9021,7 @@ impl EnumImpl for Permission {
         }
     }
 
-    const COUNT: usize = 690;
+    const COUNT: usize = 694;
 }
 
 impl serde::Serialize for Permission {

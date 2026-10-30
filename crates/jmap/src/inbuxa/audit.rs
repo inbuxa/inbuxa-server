@@ -488,6 +488,16 @@ async fn fork_current(server: &Server, object: &str, id: &MaybeInvalid<Id>) -> O
             }
             MaybeInvalid::Invalid(_) => None,
         },
+        // A relay as an administrator sets it: never its keys or token
+        "inbuxa:Relay" => match id {
+            MaybeInvalid::Value(id) => {
+                inbuxa_features::relay::get(data, u32::try_from(id.id()).ok()?)
+                    .await
+                    .ok()?
+                    .map(|relay| relay.audit_view())
+            }
+            MaybeInvalid::Invalid(_) => None,
+        },
         _ => None,
     }
 }

@@ -149,6 +149,10 @@ the protocol the rest of the suite already speaks.
    relay deletes the secret, and the downstream pushes the first settings
    and recipient set. The relay opens port 25 only once it has both.
 
+A relay that was reset joins again with a new token. In inbuxa-admin, an
+update with `rejoin: true` returns one, once, and forgets the relay's
+pinned link key and its recipient key.
+
 - **RL-8.** A join token works once. A wrong proof, an expired token, or a
   second join attempt fails, and the relay stays unjoined.
 - **RL-9.** `inbuxa-relay status` prints the link state, the number of
@@ -413,7 +417,7 @@ When no link is up, or after RL-13:
 
 | Object | What it holds |
 |---|---|
-| `inbuxa:Relay` | One per relay: `name`, `address`, `linkPort`, `enabled`, the settings pushed to the relay, `sendThrough` (route outbound mail through relays), `inboundOnly` (takes mail in but sends none, e.g. while its IP isn't warmed up or isn't in SPF yet), and read-only status mirrored from the relay: link state per node, version, queue counts, `lastSeen`. Create returns `joinToken` once |
+| `inbuxa:Relay` | One per relay: `name`, `address`, `linkPort`, `enabled`, the settings pushed to the relay, `sendThrough` (route outbound mail through relays), `inboundOnly` (takes mail in but sends none, e.g. while its IP isn't warmed up or isn't in SPF yet), and read-only status mirrored from the relay: link state per node, version, queue counts, `lastSeen`. Create, or an update with `rejoin: true`, returns `joinToken` once |
 | `inbuxa:RelayMessage` | Read-only view of a relay's `Inbound` and `Outbound` queues, fetched over the link when asked. Never message content |
 
 Permissions: `sysRelayGet`, `sysRelayUpdate`, `sysRelayQueueGet`,
@@ -659,7 +663,16 @@ No questions are open.
 
 ## Implementation status
 
-Not started. Order:
+In progress. Done so far:
+
+- `crates/relay-proto`: the link's shared types, joining, recipient
+  hashing and sealing (PR #244).
+- `crates/relay`: the relay binary, inbound in held and live mode (PR #245).
+- On the downstream: `inbuxa:Relay` and its permissions, the link CA and
+  sealing key, and join tokens. Status, `inbuxa:RelayMessage` and the link
+  service are not done yet.
+
+Order:
 
 1. This spec (settled 2026-10-29).
 2. The relay: the link (join, pins, settings, recipients) and held-mode
