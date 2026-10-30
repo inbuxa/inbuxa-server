@@ -32,6 +32,7 @@ members = [
     "crates/trc",
     "crates/migration",
     "crates/features",
+    "crates/relay-proto",
     "tests",
 ]
 

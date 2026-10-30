@@ -1,0 +1,17 @@
+[package]
+name = "inbuxa-relay-proto"
+description = "The link between inbuxa-relay and its downstream: JMAP types, joining, recipient hashing and spool sealing (docs/spec/features/relay.md)"
+license = "AGPL-3.0-only"
+version.workspace = true
+edition = "2024"
+
+# Shared by the relay and the server, so it stays small: no inbuxa crate,
+# and nothing the relay's footprint budget (RL-30) would notice.
+[dependencies]
+aws-lc-rs = { version = "1" }
+base64 = "0.23"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+
+[lints]
+workspace = true

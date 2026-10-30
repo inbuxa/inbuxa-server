@@ -3972,6 +3972,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "inbuxa-relay-proto"
+version = "27.1.0-rc.4"
+dependencies = [
+ "aws-lc-rs",
+ "base64 0.23.1",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "include-flate"
 version = "0.3.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
