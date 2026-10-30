@@ -46,6 +46,8 @@ pub enum RelayProperty {
     Rejoin,
     /// In a create or rejoin response only.
     JoinToken,
+    /// Each node's link to the relay, and what the relay last said.
+    Links,
     CreatedBy,
     CreatedAt,
     UpdatedAt,
@@ -84,6 +86,7 @@ impl Property for RelayProperty {
             RelayProperty::LinkKeyPin => "linkKeyPin",
             RelayProperty::Rejoin => "rejoin",
             RelayProperty::JoinToken => "joinToken",
+            RelayProperty::Links => "links",
             RelayProperty::CreatedBy => "createdBy",
             RelayProperty::CreatedAt => "createdAt",
             RelayProperty::UpdatedAt => "updatedAt",
@@ -112,6 +115,7 @@ impl RelayProperty {
             b"linkKeyPin" => RelayProperty::LinkKeyPin,
             b"rejoin" => RelayProperty::Rejoin,
             b"joinToken" => RelayProperty::JoinToken,
+            b"links" => RelayProperty::Links,
             b"createdBy" => RelayProperty::CreatedBy,
             b"createdAt" => RelayProperty::CreatedAt,
             b"updatedAt" => RelayProperty::UpdatedAt,

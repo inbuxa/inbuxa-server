@@ -34,7 +34,9 @@ chrono-tz = "0.10"
 # inbuxa: the downstream side of inbuxa Relay (relay spec)
 inbuxa-relay-proto = { path = "../relay-proto" }
 aws-lc-rs = { version = "1" }
-rcgen = { version = "0.14", default-features = false, features = ["crypto", "pem", "aws_lc_rs"] }
+rcgen = { version = "0.14", default-features = false, features = ["crypto", "pem", "aws_lc_rs", "x509-parser"] }
+time = "0.3"
 
 [dev-dependencies]
+x509-parser = "0.18"
 tokio = { version = "1.53", features = ["macros", "rt"] }

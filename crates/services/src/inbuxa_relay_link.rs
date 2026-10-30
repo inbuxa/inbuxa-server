@@ -1,0 +1,1062 @@
+/*
+ * SPDX-FileCopyrightText: 2026 Coffey Labs LLC
+ *
+ * SPDX-License-Identifier: AGPL-3.0-only
+ */
+
+//! The relay link service (docs/spec/features/relay.md, "The link
+//! service"): on every node, a link to every enabled inbuxa Relay.
+//!
+//! The node dials the relay; the relay never dials in. A relay waiting to
+//! join gets `Relay/join` on a connection that can't check its key yet, and
+//! its proof decides whether its key is pinned (RL-7, RL-8). After that the
+//! node only talks to that key, over a WebSocket (RFC 8887), and keeps the
+//! relay's settings and recipient set the same as this server's: in full
+//! when the link comes up, then as changes, every few seconds.
+//!
+//! Push is asked for `Relay` only. Asking for `Inbound` would put the relay
+//! in live mode, which waits for verdicts this node doesn't give yet.
+
+use common::{BuildServer, Inner, Server};
+use futures::{SinkExt, StreamExt};
+use http_body_util::{BodyExt, Full};
+use hyper::body::Bytes;
+use hyper_util::rt::TokioIo;
+use inbuxa_features::{
+    masked_email,
+    relay::{
+        self as relays, DownstreamKeys, JoinState, Relay,
+        link::{
+            JoinRecorded, LinkState, LocalDomain, NODE_CERT_RENEW_AFTER, NodeCertificate, NodeLink,
+            RecipientPlan, issue_node_certificate, pushed_settings, record_join, set_status,
+        },
+    },
+};
+use inbuxa_relay_proto::{
+    CAPABILITY, CORE_CAPABILITY, PROTOCOL_VERSION, b64,
+    jmap::{ClientFrame, Invocation, Request, ServerFrame, Session, method},
+    pin::{Pin, pins_match, spki_pin},
+    recipient::{RecipientDomain, RecipientHash},
+    token,
+    types::{Capability, RELAY_SINGLETON, RelaySettings, RelayStatus},
+};
+use registry::schema::{
+    prelude::ObjectType,
+    structs::{Domain, SubAddressing},
+};
+use rustls::{
+    DigitallySignedStruct, SignatureScheme,
+    client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier},
+};
+use rustls_pki_types::{CertificateDer, PrivateKeyDer, ServerName, UnixTime};
+use serde_json::{Value, json};
+use std::{
+    collections::{BTreeMap, BTreeSet, HashMap},
+    sync::{Arc, Mutex},
+    time::Duration,
+};
+use store::{registry::RegistryQuery, write::now};
+use tokio::{net::TcpStream, sync::watch, task::JoinHandle};
+use tokio_rustls::{TlsConnector, client::TlsStream};
+use tokio_tungstenite::{WebSocketStream, tungstenite::Message};
+use types::id::Id;
+
+/// How often the list of relays is read again.
+const SCAN: Duration = Duration::from_secs(10);
+/// How often a linked relay is brought up to date, and asked how it is.
+const SYNC: Duration = Duration::from_secs(15);
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
+const CALL_TIMEOUT: Duration = Duration::from_secs(60);
+const BACKOFF_MIN: Duration = Duration::from_secs(5);
+const BACKOFF_MAX: Duration = Duration::from_secs(120);
+/// After a join that can't go on, wait this long, or for a change.
+const JOIN_FAILED_WAIT: Duration = Duration::from_secs(300);
+/// Status is written when it changes, and at least this often.
+const STATUS_EVERY: u64 = 60;
+/// More recipient changes than this go as a full `Recipient/replace`.
+const MAX_DELTA: usize = 2_000;
+/// The relay's only account.
+const ACCOUNT_ID: &str = "relay";
+/// Any name: the relay is known by its key, never its name (RL-6).
+const SERVER_NAME: &str = "relay.invalid";
+
+pub fn spawn_relay_links(inner: Arc<Inner>) {
+    tokio::spawn(async move {
+        let certs = Arc::new(NodeCertificates::default());
+        let mut links: HashMap<u32, Running> = HashMap::new();
+        loop {
+            let server = inner.build_server();
+            if let Err(err) = reconcile(&inner, &server, &certs, &mut links).await {
+                trc::error!(err.details("Failed to start relay links"));
+            }
+            let woken = tokio::select! {
+                _ = tokio::time::sleep(SCAN) => false,
+                _ = relays::CHANGED.notified() => true,
+            };
+            if woken {
+                for link in links.values() {
+                    link.wake.send_modify(|n| *n = n.wrapping_add(1));
+                }
+            }
+        }
+    });
+}
+
+struct Running {
+    handle: JoinHandle<()>,
+    /// Where the link goes: a change starts it again.
+    target: (String, u16),
+    wake: watch::Sender<u64>,
+}
+
+/// Starts a link for every enabled relay, and stops those for relays gone,
+/// turned off, or moved.
+async fn reconcile(
+    inner: &Arc<Inner>,
+    server: &Server,
+    certs: &Arc<NodeCertificates>,
+    links: &mut HashMap<u32, Running>,
+) -> trc::Result<()> {
+    let data = server.store();
+    let wanted: HashMap<u32, (String, u16)> = match relays::keys(data).await? {
+        Some(_) => relays::all(data)
+            .await?
+            .into_iter()
+            .filter(|relay| relay.enabled)
+            .map(|relay| (relay.id, (relay.address.clone(), relay.link_port)))
+            .collect(),
+        None => HashMap::new(),
+    };
+    links.retain(|id, link| match wanted.get(id) {
+        Some(target) if *target == link.target && !link.handle.is_finished() => true,
+        // Moved: start over at the new address
+        Some(_) => {
+            link.handle.abort();
+            false
+        }
+        // Gone or turned off: the link sees it, says so, and ends
+        None => {
+            link.wake.send_modify(|n| *n = n.wrapping_add(1));
+            false
+        }
+    });
+    for (id, target) in wanted {
+        if links.contains_key(&id) {
+            continue;
+        }
+        let (wake, woken) = watch::channel(0);
+        let handle = tokio::spawn(run_link(inner.clone(), id, certs.clone(), woken));
+        links.insert(
+            id,
+            Running {
+                handle,
+                target,
+                wake,
+            },
+        );
+    }
+    Ok(())
+}
+
+/// This node's link certificate, made again once it is old.
+#[derive(Default)]
+struct NodeCertificates(Mutex<Option<Arc<NodeCertificate>>>);
+
+impl NodeCertificates {
+    fn get(&self, keys: &DownstreamKeys, node_id: u64) -> trc::Result<Arc<NodeCertificate>> {
+        let now = now();
+        let mut current = self.0.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(cert) = current.as_ref()
+            && cert.issued_at + NODE_CERT_RENEW_AFTER > now
+        {
+            return Ok(cert.clone());
+        }
+        let cert = Arc::new(issue_node_certificate(keys, node_id, now)?);
+        *current = Some(cert.clone());
+        Ok(cert)
+    }
+}
+
+/// Why a link went down, and how the node shows it.
+struct LinkError {
+    state: LinkState,
+    message: String,
+}
+
+impl LinkError {
+    fn down(message: impl Into<String>) -> Self {
+        LinkError {
+            state: LinkState::Down,
+            message: message.into(),
+        }
+    }
+
+    fn join_failed(message: impl Into<String>) -> Self {
+        LinkError {
+            state: LinkState::JoinFailed,
+            message: message.into(),
+        }
+    }
+}
+
+impl From<trc::Error> for LinkError {
+    fn from(err: trc::Error) -> Self {
+        LinkError::down(format!("This server failed: {err}"))
+    }
+}
+
+/// One relay's link, for as long as the relay is enabled.
+async fn run_link(
+    inner: Arc<Inner>,
+    relay_id: u32,
+    certs: Arc<NodeCertificates>,
+    mut woken: watch::Receiver<u64>,
+) {
+    let mut backoff = BACKOFF_MIN;
+    let mut status = StatusWriter::new(inner.build_server().core.network.node_id);
+    loop {
+        let server = inner.build_server();
+        let data = server.store().clone();
+        let relay = match relays::get(&data, relay_id).await {
+            Ok(Some(relay)) if relay.enabled => relay,
+            Ok(Some(_)) => {
+                status
+                    .set(
+                        &data,
+                        relay_id,
+                        LinkState::Down,
+                        Some("The relay is turned off.".into()),
+                    )
+                    .await;
+                return;
+            }
+            Ok(None) => return,
+            Err(err) => {
+                trc::error!(err.details("Failed to read a relay"));
+                tokio::time::sleep(backoff).await;
+                continue;
+            }
+        };
+        let outcome = match link_keys(&server, &certs).await {
+            Ok((keys, cert)) => match relay.join.state(now()) {
+                JoinState::Waiting => {
+                    status.set(&data, relay_id, LinkState::Joining, None).await;
+                    join(&data, &relay, &cert).await
+                }
+                JoinState::Expired => Err(LinkError::join_failed(
+                    "The join token ran out before the relay joined. Start a new join.",
+                )),
+                JoinState::Joined => {
+                    session(&server, &relay, &keys, &cert, &mut woken, &mut status).await
+                }
+            },
+            Err(err) => Err(err),
+        };
+        let wait = match outcome {
+            Ok(()) => {
+                backoff = BACKOFF_MIN;
+                Duration::ZERO
+            }
+            Err(err) => {
+                let wait = if err.state == LinkState::JoinFailed {
+                    JOIN_FAILED_WAIT
+                } else {
+                    backoff
+                };
+                status
+                    .set(&data, relay_id, err.state, Some(err.message))
+                    .await;
+                backoff = (backoff * 2).min(BACKOFF_MAX);
+                wait
+            }
+        };
+        if !wait.is_zero() {
+            tokio::select! {
+                _ = tokio::time::sleep(wait) => {}
+                _ = woken.changed() => {}
+            }
+        }
+    }
+}
+
+async fn link_keys(
+    server: &Server,
+    certs: &NodeCertificates,
+) -> Result<(DownstreamKeys, Arc<NodeCertificate>), LinkError> {
+    let keys = relays::keys(server.store())
+        .await?
+        .ok_or_else(|| LinkError::down("This server has no relay keys yet."))?;
+    let cert = certs.get(&keys, server.core.network.node_id)?;
+    Ok((keys, cert))
+}
+
+/// Writes this node's view of a link when it changes, and at least every
+/// [`STATUS_EVERY`] seconds while it holds.
+struct StatusWriter {
+    current: NodeLink,
+    written_at: u64,
+}
+
+impl StatusWriter {
+    fn new(node_id: u64) -> Self {
+        StatusWriter {
+            current: NodeLink {
+                node_id,
+                ..Default::default()
+            },
+            written_at: 0,
+        }
+    }
+
+    async fn set(
+        &mut self,
+        data: &store::Store,
+        relay_id: u32,
+        state: LinkState,
+        error: Option<String>,
+    ) {
+        let now = now();
+        if state != self.current.state {
+            self.current.since = now;
+        }
+        let changed = state != self.current.state || error != self.current.last_error;
+        self.current.state = state;
+        if error.is_some() || state == LinkState::Linked {
+            self.current.last_error = error;
+        }
+        self.write(data, relay_id, changed, now).await;
+    }
+
+    async fn seen(
+        &mut self,
+        data: &store::Store,
+        relay_id: u32,
+        relay: Option<RelayStatus>,
+        recipients: u64,
+    ) {
+        let now = now();
+        let changed = relay != self.current.relay || Some(recipients) != self.current.recipients;
+        self.current.last_seen = Some(now);
+        if relay.is_some() {
+            self.current.relay = relay;
+        }
+        self.current.recipients = Some(recipients);
+        self.write(data, relay_id, changed, now).await;
+    }
+
+    async fn write(&mut self, data: &store::Store, relay_id: u32, changed: bool, now: u64) {
+        if !changed && now < self.written_at + STATUS_EVERY {
+            return;
+        }
+        self.current.updated_at = now;
+        match set_status(data, relay_id, &self.current).await {
+            Ok(()) => self.written_at = now,
+            Err(err) => {
+                trc::error!(err.details("Failed to record a relay link"));
+            }
+        }
+    }
+}
+
+// ---- TLS ------------------------------------------------------------------
+
+/// Checks the relay's certificate against its pinned key, or, while it
+/// joins, takes any key and keeps it for the proof (RL-7).
+#[derive(Debug)]
+struct RelayKey {
+    pin: Option<Pin>,
+    seen: Mutex<Option<Pin>>,
+    algorithms: rustls::crypto::WebPkiSupportedAlgorithms,
+}
+
+impl ServerCertVerifier for RelayKey {
+    fn verify_server_cert(
+        &self,
+        end_entity: &CertificateDer<'_>,
+        _: &[CertificateDer<'_>],
+        _: &ServerName<'_>,
+        _: &[u8],
+        _: UnixTime,
+    ) -> Result<ServerCertVerified, rustls::Error> {
+        let pin = x509_parser::parse_x509_certificate(end_entity)
+            .map(|(_, cert)| spki_pin(cert.tbs_certificate.subject_pki.raw))
+            .map_err(|_| {
+                rustls::Error::InvalidCertificate(rustls::CertificateError::BadEncoding)
+            })?;
+        if let Some(pinned) = &self.pin
+            && !pins_match(pinned, &pin)
+        {
+            return Err(rustls::Error::InvalidCertificate(
+                rustls::CertificateError::ApplicationVerificationFailure,
+            ));
+        }
+        *self.seen.lock().unwrap_or_else(|e| e.into_inner()) = Some(pin);
+        Ok(ServerCertVerified::assertion())
+    }
+
+    fn verify_tls12_signature(
+        &self,
+        _: &[u8],
+        _: &CertificateDer<'_>,
+        _: &DigitallySignedStruct,
+    ) -> Result<HandshakeSignatureValid, rustls::Error> {
+        // The link is TLS 1.3 only
+        Err(rustls::Error::PeerIncompatible(
+            rustls::PeerIncompatible::Tls12NotOffered,
+        ))
+    }
+
+    fn verify_tls13_signature(
+        &self,
+        message: &[u8],
+        cert: &CertificateDer<'_>,
+        dss: &DigitallySignedStruct,
+    ) -> Result<HandshakeSignatureValid, rustls::Error> {
+        rustls::crypto::verify_tls13_signature(message, cert, dss, &self.algorithms)
+    }
+
+    fn supported_verify_schemes(&self) -> Vec<SignatureScheme> {
+        self.algorithms.supported_schemes()
+    }
+}
+
+/// Dials one relay: TLS 1.3, this node's link certificate, and the relay's
+/// key checked against `pin` when there is one.
+struct Dialer {
+    address: String,
+    port: u16,
+    connector: TlsConnector,
+    key: Arc<RelayKey>,
+}
+
+impl Dialer {
+    fn new(relay: &Relay, cert: &NodeCertificate, pin: Option<Pin>) -> Result<Self, LinkError> {
+        let provider = Arc::new(rustls::crypto::aws_lc_rs::default_provider());
+        let key = Arc::new(RelayKey {
+            pin,
+            seen: Mutex::new(None),
+            algorithms: provider.signature_verification_algorithms,
+        });
+        let private_key = PrivateKeyDer::try_from(cert.key_der.clone())
+            .map_err(|err| LinkError::down(format!("The node's link key is unreadable: {err}")))?;
+        let mut config = rustls::ClientConfig::builder_with_provider(provider)
+            .with_protocol_versions(&[&rustls::version::TLS13])
+            .map_err(|err| LinkError::down(err.to_string()))?
+            .dangerous()
+            .with_custom_certificate_verifier(key.clone())
+            .with_client_auth_cert(
+                vec![
+                    CertificateDer::from(cert.cert_der.clone()),
+                    CertificateDer::from(cert.ca_der.clone()),
+                ],
+                private_key,
+            )
+            .map_err(|err| LinkError::down(err.to_string()))?;
+        config.alpn_protocols = vec![b"http/1.1".to_vec()];
+        Ok(Dialer {
+            address: relay.address.trim().to_string(),
+            port: relay.link_port,
+            connector: TlsConnector::from(Arc::new(config)),
+            key,
+        })
+    }
+
+    async fn connect(&self) -> Result<TlsStream<TcpStream>, LinkError> {
+        let host = self.address.trim_start_matches('[').trim_end_matches(']');
+        let connect = async {
+            let tcp = TcpStream::connect((host, self.port)).await?;
+            self.connector
+                .connect(
+                    ServerName::try_from(SERVER_NAME).expect("a valid name"),
+                    tcp,
+                )
+                .await
+        };
+        match tokio::time::timeout(CONNECT_TIMEOUT, connect).await {
+            Ok(Ok(tls)) => Ok(tls),
+            Ok(Err(err)) => Err(LinkError::down(match self.key.pin {
+                Some(_) if err.to_string().contains("ApplicationVerificationFailure") => {
+                    "The relay answered with another key than the one pinned at join. \
+                     If it was reset, start a new join."
+                        .to_string()
+                }
+                _ => format!("Could not reach the relay: {err}"),
+            })),
+            Err(_) => Err(LinkError::down("Could not reach the relay in time.")),
+        }
+    }
+
+    fn seen_pin(&self) -> Option<Pin> {
+        *self.key.seen.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// One HTTP/1.1 request on its own connection.
+    async fn http(
+        &self,
+        method: &str,
+        path: &str,
+        content_type: &str,
+        body: Vec<u8>,
+    ) -> Result<(u16, Vec<u8>), LinkError> {
+        let tls = self.connect().await?;
+        let failed =
+            |err: &dyn std::fmt::Display| LinkError::down(format!("The relay failed: {err}"));
+        let (mut sender, conn) = hyper::client::conn::http1::handshake(TokioIo::new(tls))
+            .await
+            .map_err(|e| failed(&e))?;
+        tokio::spawn(conn);
+        let request = hyper::Request::builder()
+            .method(method)
+            .uri(path)
+            .header("Host", SERVER_NAME)
+            .header("Content-Type", content_type)
+            .body(Full::new(Bytes::from(body)))
+            .map_err(|e| failed(&e))?;
+        let exchange = async {
+            let response = sender.send_request(request).await.map_err(|e| failed(&e))?;
+            let status = response.status().as_u16();
+            let body = response
+                .into_body()
+                .collect()
+                .await
+                .map_err(|e| failed(&e))?
+                .to_bytes()
+                .to_vec();
+            Ok((status, body))
+        };
+        tokio::time::timeout(CALL_TIMEOUT, exchange)
+            .await
+            .map_err(|_| LinkError::down("The relay didn't answer in time."))?
+    }
+
+    /// The relay's JMAP session, refused if its link protocol is one this
+    /// server doesn't speak (RL-28).
+    async fn check_session(&self) -> Result<Capability, LinkError> {
+        let (status, body) = self
+            .http("GET", "/jmap/session", "application/json", Vec::new())
+            .await?;
+        if status != 200 {
+            return Err(LinkError::down(format!(
+                "The relay answered {status} for its session."
+            )));
+        }
+        let capability = serde_json::from_slice::<Session>(&body)
+            .ok()
+            .and_then(|session| session.capabilities.get(CAPABILITY).cloned())
+            .and_then(|value| serde_json::from_value::<Capability>(value).ok())
+            .ok_or_else(|| LinkError::down("The relay's session is unreadable."))?;
+        if capability.protocol_version != PROTOCOL_VERSION {
+            return Err(LinkError::down(format!(
+                "The relay speaks link protocol {} and this server speaks {}: \
+                 update whichever is older.",
+                capability.protocol_version, PROTOCOL_VERSION
+            )));
+        }
+        Ok(capability)
+    }
+
+    async fn api(&self, calls: Vec<Invocation>) -> Result<Vec<Invocation>, LinkError> {
+        let request = Request {
+            using: vec![CORE_CAPABILITY.into(), CAPABILITY.into()],
+            method_calls: calls,
+            created_ids: None,
+        };
+        let body = serde_json::to_vec(&request).unwrap_or_default();
+        let (status, body) = self
+            .http("POST", "/jmap/api", "application/json", body)
+            .await?;
+        if status != 200 {
+            return Err(LinkError::down(format!(
+                "The relay answered {status}: {}",
+                String::from_utf8_lossy(&body)
+            )));
+        }
+        serde_json::from_slice::<inbuxa_relay_proto::jmap::Response>(&body)
+            .map(|response| response.method_responses)
+            .map_err(|_| LinkError::down("The relay's answer is unreadable."))
+    }
+
+    /// Uploads `body`; the blob's id.
+    async fn upload(&self, body: Vec<u8>) -> Result<String, LinkError> {
+        let (status, body) = self
+            .http(
+                "POST",
+                "/jmap/upload/relay",
+                "application/octet-stream",
+                body,
+            )
+            .await?;
+        if status != 200 && status != 201 {
+            return Err(LinkError::down(format!(
+                "The relay refused an upload ({status})."
+            )));
+        }
+        serde_json::from_slice::<Value>(&body)
+            .ok()
+            .and_then(|v| v["blobId"].as_str().map(str::to_string))
+            .ok_or_else(|| LinkError::down("The relay's upload answer is unreadable."))
+    }
+}
+
+// ---- Joining --------------------------------------------------------------
+
+/// Joins a relay waiting with its token (relay spec, "Joining and reset",
+/// step 4): one call, `Relay/join`, on a connection whose key is checked by
+/// the answer instead.
+async fn join(data: &store::Store, relay: &Relay, cert: &NodeCertificate) -> Result<(), LinkError> {
+    let Some(secret) = relay.join.secret else {
+        return Ok(());
+    };
+    let dialer = Dialer::new(relay, cert, None)?;
+    let nonce = relays::random_key();
+    let responses = dialer
+        .api(vec![Invocation::new(
+            method::RELAY_JOIN,
+            json!({"accountId": ACCOUNT_ID, "nonce": b64::encode(&nonce)}),
+            "j",
+        )])
+        .await?;
+    let seen = dialer
+        .seen_pin()
+        .ok_or_else(|| LinkError::down("The relay showed no key."))?;
+    let answer = responses
+        .into_iter()
+        .next()
+        .ok_or_else(|| LinkError::down("The relay didn't answer the join."))?;
+    if answer.name() == "error" {
+        // Another node may have joined it a moment ago: read the relay again
+        return Err(LinkError::down(format!(
+            "The relay refused the join: {}",
+            answer.args()["description"].as_str().unwrap_or("no reason")
+        )));
+    }
+    let proof = answer.args()["proof"]
+        .as_str()
+        .and_then(b64::decode)
+        .unwrap_or_default();
+    let claimed = answer.args()["relayPin"].as_str().and_then(b64::decode);
+    if claimed.as_deref() != Some(&seen[..])
+        || !token::verify_join_proof(&secret, &nonce, &seen, &proof)
+    {
+        return Err(LinkError::join_failed(
+            "The relay's answer didn't prove it holds this relay's token. \
+             Reset the relay and start a new join.",
+        ));
+    }
+    // Whichever way it went, the relay is read again: joined by this node
+    // or another, or given a new token meanwhile
+    let _: JoinRecorded = record_join(data, relay.id, &secret, seen, now()).await?;
+    Ok(())
+}
+
+// ---- The linked session ---------------------------------------------------
+
+/// A WebSocket to the relay, with the `Relay` changes it pushed meanwhile.
+struct Ws {
+    stream: WebSocketStream<TlsStream<TcpStream>>,
+    next_id: u64,
+    relay_changed: bool,
+}
+
+impl Ws {
+    async fn open(dialer: &Dialer) -> Result<Ws, LinkError> {
+        let tls = dialer.connect().await?;
+        let request = tokio_tungstenite::tungstenite::http::Request::builder()
+            .uri(format!("wss://{SERVER_NAME}/jmap/ws"))
+            .header("Host", SERVER_NAME)
+            .header("Connection", "Upgrade")
+            .header("Upgrade", "websocket")
+            .header("Sec-WebSocket-Version", "13")
+            .header(
+                "Sec-WebSocket-Key",
+                tokio_tungstenite::tungstenite::handshake::client::generate_key(),
+            )
+            .header("Sec-WebSocket-Protocol", "jmap")
+            .body(())
+            .map_err(|err| LinkError::down(err.to_string()))?;
+        let (stream, _) = tokio::time::timeout(
+            CONNECT_TIMEOUT,
+            tokio_tungstenite::client_async(request, tls),
+        )
+        .await
+        .map_err(|_| LinkError::down("The relay's WebSocket didn't open in time."))?
+        .map_err(|err| LinkError::down(format!("The relay's WebSocket didn't open: {err}")))?;
+        Ok(Ws {
+            stream,
+            next_id: 0,
+            relay_changed: false,
+        })
+    }
+
+    async fn send(&mut self, frame: &ClientFrame) -> Result<(), LinkError> {
+        let text = serde_json::to_string(frame).unwrap_or_default();
+        self.stream
+            .send(Message::Text(text.into()))
+            .await
+            .map_err(|err| LinkError::down(format!("The link dropped: {err}")))
+    }
+
+    /// The next frame from the relay, `None` once it has gone.
+    async fn frame(&mut self) -> Result<ServerFrame, LinkError> {
+        loop {
+            match self.stream.next().await {
+                Some(Ok(Message::Text(text))) => {
+                    if let Ok(frame) = serde_json::from_str::<ServerFrame>(&text) {
+                        return Ok(frame);
+                    }
+                }
+                Some(Ok(Message::Ping(_) | Message::Pong(_) | Message::Frame(_))) => {}
+                Some(Ok(Message::Binary(_))) => {}
+                Some(Ok(Message::Close(_))) | None => {
+                    return Err(LinkError::down("The relay closed the link."));
+                }
+                Some(Err(err)) => return Err(LinkError::down(format!("The link dropped: {err}"))),
+            }
+        }
+    }
+
+    fn note(&mut self, frame: &ServerFrame) {
+        if let ServerFrame::StateChange { changed, .. } = frame
+            && changed.values().any(|types| types.contains_key("Relay"))
+        {
+            self.relay_changed = true;
+        }
+    }
+
+    /// Sends `calls` and waits for their answers.
+    async fn call(&mut self, calls: Vec<Invocation>) -> Result<Vec<Invocation>, LinkError> {
+        self.next_id += 1;
+        let id = format!("r{}", self.next_id);
+        self.send(&ClientFrame::Request {
+            id: Some(id.clone()),
+            request: Request {
+                using: vec![CORE_CAPABILITY.into(), CAPABILITY.into()],
+                method_calls: calls,
+                created_ids: None,
+            },
+        })
+        .await?;
+        let wait = async {
+            loop {
+                let frame = self.frame().await?;
+                match frame {
+                    ServerFrame::Response {
+                        request_id,
+                        response,
+                    } if request_id.as_deref() == Some(id.as_str()) => {
+                        return Ok(response.method_responses);
+                    }
+                    ServerFrame::RequestError {
+                        request_id, detail, ..
+                    } if request_id.as_deref() == Some(id.as_str()) => {
+                        return Err(LinkError::down(format!(
+                            "The relay refused a request: {}",
+                            detail.unwrap_or_default()
+                        )));
+                    }
+                    other => self.note(&other),
+                }
+            }
+        };
+        tokio::time::timeout(CALL_TIMEOUT, wait)
+            .await
+            .map_err(|_| LinkError::down("The relay didn't answer in time."))?
+    }
+
+    /// One call on the relay's account, whose answer must not be an error.
+    async fn ok(&mut self, name: &str, mut args: Value) -> Result<Value, LinkError> {
+        if args.get("accountId").is_none() {
+            args["accountId"] = ACCOUNT_ID.into();
+        }
+        let answer = self
+            .call(vec![Invocation::new(name, args, "c")])
+            .await?
+            .into_iter()
+            .next()
+            .ok_or_else(|| LinkError::down(format!("The relay didn't answer {name}.")))?;
+        if answer.name() == "error" {
+            return Err(LinkError::down(format!(
+                "The relay refused {name}: {}",
+                answer.args()["description"]
+                    .as_str()
+                    .or(answer.args()["type"].as_str())
+                    .unwrap_or("no reason")
+            )));
+        }
+        Ok(Value::Object(answer.1))
+    }
+}
+
+/// What this node last sent the relay on this link.
+#[derive(Default)]
+struct Sent {
+    /// The relay's domains were read, and its recipients sent in full.
+    started: bool,
+    settings: Option<RelaySettings>,
+    domains: BTreeMap<String, RecipientDomain>,
+    hashes: BTreeSet<RecipientHash>,
+}
+
+/// The relay linked: kept up to date until the link drops, the relay is
+/// turned off, moved or joined again, or this node stops.
+async fn session(
+    server: &Server,
+    relay: &Relay,
+    keys: &DownstreamKeys,
+    cert: &NodeCertificate,
+    woken: &mut watch::Receiver<u64>,
+    status: &mut StatusWriter,
+) -> Result<(), LinkError> {
+    let data = server.store();
+    let pin = relay.join.relay_pin;
+    let dialer = Dialer::new(relay, cert, pin)?;
+    dialer.check_session().await?;
+    let mut ws = Ws::open(&dialer).await?;
+    ws.send(&ClientFrame::WebSocketPushEnable {
+        data_types: Some(vec!["Relay".into()]),
+        push_state: None,
+    })
+    .await?;
+    let mut sent = Sent::default();
+    let mut relay = relay.clone();
+    sync(server, &relay, keys, &dialer, &mut ws, &mut sent).await?;
+    status.set(data, relay.id, LinkState::Linked, None).await;
+    refresh_status(&mut ws, data, &relay, &sent, status).await?;
+
+    let mut tick = tokio::time::interval(SYNC);
+    tick.reset();
+    loop {
+        tokio::select! {
+            frame = ws.frame() => {
+                let frame = frame?;
+                ws.note(&frame);
+                if ws.relay_changed {
+                    refresh_status(&mut ws, data, &relay, &sent, status).await?;
+                }
+                continue;
+            }
+            _ = tick.tick() => {}
+            changed = woken.changed() => {
+                if changed.is_err() {
+                    return Ok(());
+                }
+            }
+        }
+        // The relay as it is now: a new join, a move or off ends this link
+        match relays::get(data, relay.id).await? {
+            Some(now_relay)
+                if now_relay.enabled
+                    && now_relay.join.relay_pin == pin
+                    && now_relay.address == relay.address
+                    && now_relay.link_port == relay.link_port =>
+            {
+                relay = now_relay;
+            }
+            _ => return Ok(()),
+        }
+        sync(server, &relay, keys, &dialer, &mut ws, &mut sent).await?;
+        refresh_status(&mut ws, data, &relay, &sent, status).await?;
+    }
+}
+
+/// Asks the relay how it is, and records it.
+async fn refresh_status(
+    ws: &mut Ws,
+    data: &store::Store,
+    relay: &Relay,
+    sent: &Sent,
+    status: &mut StatusWriter,
+) -> Result<(), LinkError> {
+    ws.relay_changed = false;
+    let answer = ws
+        .ok(method::RELAY_GET, json!({"ids": [RELAY_SINGLETON]}))
+        .await?;
+    let relay_status = answer["list"][0]
+        .get("status")
+        .cloned()
+        .and_then(|value| serde_json::from_value::<RelayStatus>(value).ok());
+    status
+        .seen(data, relay.id, relay_status, sent.hashes.len() as u64)
+        .await;
+    Ok(())
+}
+
+/// Brings the relay's settings, domains and recipients level with this
+/// server's, sending only what changed since the last time.
+async fn sync(
+    server: &Server,
+    relay: &Relay,
+    keys: &DownstreamKeys,
+    dialer: &Dialer,
+    ws: &mut Ws,
+    sent: &mut Sent,
+) -> Result<(), LinkError> {
+    let (local, addresses) = local_recipients(server).await?;
+    let plan = RecipientPlan::new(relay, &local, &addresses);
+    if plan.domains.is_empty() {
+        return Err(LinkError::down(
+            "The relay has no domain to serve: none of its domains is on this server.",
+        ));
+    }
+
+    // Settings, whole, when they changed
+    let settings = pushed_settings(relay, keys, &plan);
+    if sent.settings.as_ref() != Some(&settings) {
+        let patch = serde_json::to_value(&settings).unwrap_or_default();
+        let answer = ws
+            .ok(
+                method::RELAY_SET,
+                json!({"update": {RELAY_SINGLETON: patch}}),
+            )
+            .await?;
+        if let Some(error) = answer["notUpdated"][RELAY_SINGLETON].as_object() {
+            return Err(LinkError::down(format!(
+                "The relay refused its settings: {}",
+                error
+                    .get("description")
+                    .and_then(Value::as_str)
+                    .unwrap_or("no reason")
+            )));
+        }
+        sent.settings = Some(settings);
+    }
+
+    // Domains: on a new link, whatever the relay holds that isn't served
+    // goes; after that, only changes
+    if !sent.started {
+        let answer = ws.ok(method::RECIPIENT_DOMAIN_GET, json!({})).await?;
+        for domain in answer["list"].as_array().into_iter().flatten() {
+            if let Ok(domain) = serde_json::from_value::<RecipientDomain>(domain.clone()) {
+                sent.domains.insert(domain.domain.clone(), domain);
+            }
+        }
+    }
+    let create: serde_json::Map<String, Value> = plan
+        .domains
+        .iter()
+        .filter(|(name, domain)| sent.domains.get(*name) != Some(*domain))
+        .map(|(name, domain)| {
+            (
+                name.clone(),
+                serde_json::to_value(domain).unwrap_or_default(),
+            )
+        })
+        .collect();
+    let destroy: Vec<&String> = sent
+        .domains
+        .keys()
+        .filter(|name| !plan.domains.contains_key(*name))
+        .collect();
+    if !create.is_empty() || !destroy.is_empty() {
+        ws.ok(
+            method::RECIPIENT_DOMAIN_SET,
+            json!({"create": create, "destroy": destroy}),
+        )
+        .await?;
+        sent.domains = plan.domains.clone();
+    }
+
+    // Recipients: in full on a new link or after many changes, else as
+    // changes
+    let hashes: BTreeSet<RecipientHash> = plan.hashes(&relay.recipient_key).into_iter().collect();
+    let added: Vec<&RecipientHash> = hashes.difference(&sent.hashes).collect();
+    let removed: Vec<&RecipientHash> = sent.hashes.difference(&hashes).collect();
+    if !sent.started || added.len() + removed.len() > MAX_DELTA {
+        let mut file = Vec::with_capacity(hashes.len() * 32);
+        for hash in &hashes {
+            file.extend_from_slice(hash);
+        }
+        let blob_id = dialer.upload(file).await?;
+        ws.ok(method::RECIPIENT_REPLACE, json!({"blobId": blob_id}))
+            .await?;
+    } else if !added.is_empty() || !removed.is_empty() {
+        let create: serde_json::Map<String, Value> = added
+            .iter()
+            .enumerate()
+            .map(|(i, hash)| (format!("h{i}"), json!({"hash": b64::encode(*hash)})))
+            .collect();
+        let destroy: Vec<String> = removed.iter().map(|hash| b64::encode(*hash)).collect();
+        ws.ok(
+            method::RECIPIENT_SET,
+            json!({"create": create, "destroy": destroy}),
+        )
+        .await?;
+    }
+    sent.hashes = hashes;
+    sent.started = true;
+    Ok(())
+}
+
+// ---- This server's recipients ---------------------------------------------
+
+/// This server's domains, and every address it takes mail for: accounts and
+/// groups with their aliases, mailing lists, and live masked addresses.
+/// Each address counts at every name of its domain.
+///
+/// A domain whose recipients an external directory answers for has only
+/// the addresses this server has seen from it.
+async fn local_recipients(server: &Server) -> trc::Result<(Vec<LocalDomain>, Vec<String>)> {
+    let registry = server.registry();
+    let mut names: HashMap<u32, Vec<String>> = HashMap::new();
+    let mut local = Vec::new();
+    for id in registry
+        .query::<Vec<Id>>(RegistryQuery::new(ObjectType::Domain))
+        .await?
+    {
+        let Some(domain) = registry.object::<Domain>(id).await? else {
+            continue;
+        };
+        if !domain.is_enabled {
+            continue;
+        }
+        let mut domain_names = vec![domain.name.trim_end_matches('.').to_ascii_lowercase()];
+        domain_names.extend(
+            domain
+                .aliases
+                .iter()
+                .map(|alias| alias.trim_end_matches('.').to_ascii_lowercase()),
+        );
+        local.push(LocalDomain {
+            names: domain_names.clone(),
+            catch_all: domain.catch_all_address.is_some() || domain.allow_relaying,
+            subaddress_separator: match domain.sub_addressing {
+                SubAddressing::Disabled => None,
+                SubAddressing::Enabled | SubAddressing::Custom(_) => Some("+".into()),
+            },
+        });
+        names.insert(id.document_id(), domain_names);
+    }
+
+    let mut addresses = Vec::new();
+    let mut add = |local_part: &str, domain_id: u32| {
+        for name in names.get(&domain_id).into_iter().flatten() {
+            addresses.push(format!("{}@{name}", local_part.to_lowercase()));
+        }
+    };
+    for id in registry
+        .query::<Vec<Id>>(RegistryQuery::new(ObjectType::Account))
+        .await?
+    {
+        if let Some(account) = server.try_account(id.document_id()).await? {
+            for address in account.addresses.iter() {
+                add(&address.local_part, address.domain_id);
+            }
+        }
+    }
+    for id in registry
+        .query::<Vec<Id>>(RegistryQuery::new(ObjectType::MailingList))
+        .await?
+    {
+        if let Some(list) = server.try_list(id.document_id()).await? {
+            for address in list.addresses.iter() {
+                add(&address.local_part, address.domain_id);
+            }
+        }
+    }
+    for mask in masked_email::ops::all(server.store(), registry).await? {
+        if mask.accepts_mail() {
+            addresses.push(mask.object.email.to_lowercase());
+        }
+    }
+    Ok((local, addresses))
+}

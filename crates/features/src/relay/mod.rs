@@ -15,8 +15,12 @@
 //! - `k`: the downstream's keys ([`DownstreamKeys`]), as JSON. One per
 //!   server or cluster, made with the first relay.
 //! - `r` + relay id (u32): a relay ([`Relay`]), as JSON.
+//! - `s` + relay id (u32) + node id (u64): that node's link to the relay
+//!   ([`link::NodeLink`]), as JSON.
 //!
 //! Numbers are big-endian. There are few relays, so they're read whole.
+
+pub mod link;
 
 use inbuxa_relay_proto::{
     b64,
@@ -33,9 +37,20 @@ use store::{
 use trc::AddContext;
 use types::id::Id;
 
+/// Wakes the link service on this node when a relay is added, changed or
+/// removed here. Other nodes see it at their next scan.
+pub static CHANGED: std::sync::LazyLock<tokio::sync::Notify> =
+    std::sync::LazyLock::new(tokio::sync::Notify::new);
+
+/// Tells this node's link service that the relays changed.
+pub fn changed() {
+    CHANGED.notify_one();
+}
+
 const FEATURE: u8 = b'E';
 const KIND_KEYS: u8 = b'k';
 const KIND_RELAY: u8 = b'r';
+const KIND_STATUS: u8 = b's';
 const CREATE_ATTEMPTS: usize = 5;
 
 const MAX_NAME: usize = 100;
@@ -545,9 +560,12 @@ pub async fn replace(data: &Store, relay: &Relay, version: u64) -> trc::Result<b
     }
 }
 
+/// Removes a relay, and every node's record of its link.
 pub async fn delete(data: &Store, id: u32) -> trc::Result<()> {
+    let nodes = link::statuses(data, id).await?;
     let mut batch = BatchBuilder::new();
     batch.clear(class(KIND_RELAY, Some(id)));
+    link::clear_statuses(&mut batch, id, &nodes);
     data.write(batch.build_all())
         .await
         .caused_by(trc::location!())?;

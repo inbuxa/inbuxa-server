@@ -10,6 +10,10 @@
 //! and is kept when written back that way, a rejoin issues a new token,
 //! nobody in a tenant reaches relays, and the audit log never holds the
 //! key or a token.
+//!
+//! `relay_link_tests` runs a real `inbuxa-relay` (build it first with
+//! `cargo build -p inbuxa-relay`): the server joins it, sets it up, and its
+//! port 25 takes mail only for this server's real recipients.
 
 use crate::utils::{
     account::Account,
@@ -348,6 +352,275 @@ pub async fn relay_tests() {
     let admin = test.create_admin_account("admin@example.com").await;
     test.insert_account(admin);
     self::test(&mut test).await;
+    if test.is_reset() {
+        test.temp_dir.delete();
+    }
+}
+
+/// The `inbuxa-relay` binary: `INBUXA_RELAY_BIN`, or the workspace's debug
+/// build.
+fn relay_binary() -> std::path::PathBuf {
+    std::env::var_os("INBUXA_RELAY_BIN")
+        .map(Into::into)
+        .unwrap_or_else(|| {
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../target/debug/inbuxa-relay")
+        })
+}
+
+fn free_port() -> u16 {
+    std::net::TcpListener::bind("127.0.0.1:0")
+        .unwrap()
+        .local_addr()
+        .unwrap()
+        .port()
+}
+
+/// The relay process, stopped when the test ends.
+struct RelayProcess(std::process::Child);
+
+impl Drop for RelayProcess {
+    fn drop(&mut self) {
+        let _ = self.0.kill();
+        let _ = self.0.wait();
+    }
+}
+
+/// Polls `check` against the relay object until it's true, or panics.
+async fn wait_for(
+    account: &Account,
+    id: &str,
+    what: &str,
+    seconds: u64,
+    check: impl Fn(&Value) -> bool,
+) -> Value {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(seconds);
+    loop {
+        let relay = get(account, id).await;
+        if check(&relay) {
+            return relay;
+        }
+        if std::time::Instant::now() > deadline {
+            panic!("{what}: {relay}");
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    }
+}
+
+/// The relay's replies to one SMTP transaction's recipients, after EHLO and
+/// MAIL FROM. Port 25 opens a few seconds after the relay is set up.
+async fn rcpt_replies(port: u16, recipients: &[&str]) -> Vec<String> {
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    let stream = loop {
+        match tokio::net::TcpStream::connect(("127.0.0.1", port)).await {
+            Ok(stream) => break stream,
+            Err(e) if std::time::Instant::now() > deadline => panic!("port {port}: {e}"),
+            Err(_) => tokio::time::sleep(std::time::Duration::from_millis(250)).await,
+        }
+    };
+    let (read, mut write) = stream.into_split();
+    let mut read = BufReader::new(read);
+    async fn reply(read: &mut BufReader<tokio::net::tcp::OwnedReadHalf>) -> String {
+        let mut all = String::new();
+        loop {
+            let mut line = String::new();
+            read.read_line(&mut line).await.unwrap();
+            all.push_str(&line);
+            if line.len() < 4 || line.as_bytes()[3] != b'-' {
+                return all;
+            }
+        }
+    }
+    assert!(reply(&mut read).await.starts_with("220"));
+    let mut replies = Vec::new();
+    for line in [
+        "EHLO client.example.org".to_string(),
+        "MAIL FROM:<sender@example.org>".into(),
+    ]
+    .into_iter()
+    .chain(recipients.iter().map(|r| format!("RCPT TO:<{r}>")))
+    {
+        write
+            .write_all(format!("{line}\r\n").as_bytes())
+            .await
+            .unwrap();
+        replies.push(reply(&mut read).await);
+    }
+    let _ = write.write_all(b"QUIT\r\n").await;
+    replies.split_off(2)
+}
+
+pub async fn link(test: &mut TestServer) {
+    println!("Running inbuxa Relay link tests...");
+    let admin = test.account("admin@example.com");
+    let binary = relay_binary();
+    assert!(
+        binary.exists(),
+        "{} is missing: run cargo build -p inbuxa-relay",
+        binary.display()
+    );
+    admin
+        .create_user_account(
+            "jane@example.com",
+            "jane-secret-4417",
+            "Jane",
+            &["jane.doe@example.com"],
+            vec![],
+        )
+        .await;
+    let link_port = free_port();
+    let smtp_port = free_port();
+
+    let (_, response) = call(
+        admin,
+        "inbuxa:Relay/set",
+        json!({"create": {"r": {
+            "name": "Edge",
+            "address": "127.0.0.1",
+            "linkPort": link_port,
+            "settings": {
+                "hostname": "mx1.example.com",
+                "smtpListen": [format!("127.0.0.1:{smtp_port}")],
+                "domains": ["example.com"]
+            }
+        }}}),
+    )
+    .await;
+    let id = response["created"]["r"]["id"]
+        .as_str()
+        .unwrap_or_else(|| panic!("relay created: {response}"))
+        .to_string();
+    let token = response["created"]["r"]["joinToken"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    // The relay host: join with the token, then run
+    let state = test.temp_dir.path.join("relay-state");
+    let joined = std::process::Command::new(&binary)
+        .args(["join", &token, "--state"])
+        .arg(&state)
+        .output()
+        .unwrap();
+    assert!(joined.status.success(), "{joined:?}");
+    let _relay = RelayProcess(
+        std::process::Command::new(&binary)
+            .args([
+                "run",
+                "--link-listen",
+                &format!("127.0.0.1:{link_port}"),
+                "--state",
+            ])
+            .arg(&state)
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .unwrap(),
+    );
+
+    // The server joins it, pins its key, and sets it up: port 25 opens
+    let relay = wait_for(admin, &id, "the relay joined and took mail", 60, |relay| {
+        relay["joinState"] == "joined"
+            && relay["links"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .any(|link| link["state"] == "linked" && link["relay"]["mode"] == "held")
+    })
+    .await;
+    assert!(relay["linkKeyPin"].as_str().is_some(), "{relay}");
+    let link = &relay["links"][0];
+    // The administrator, jane and her alias, at least
+    let recipients = link["recipients"].as_u64().unwrap_or_default();
+    assert!(recipients >= 3, "{relay}");
+    assert_eq!(link["lastError"], Value::Null, "{relay}");
+
+    // Real recipients only (RL-1)
+    let replies = rcpt_replies(
+        smtp_port,
+        &[
+            "jane@example.com",
+            "Jane.Doe@example.com",
+            "jane+news@example.com",
+            "nobody@example.com",
+            "jane@elsewhere.org",
+        ],
+    )
+    .await;
+    assert!(replies[0].starts_with("250"), "{replies:?}");
+    assert!(replies[1].starts_with("250"), "alias: {replies:?}");
+    assert!(replies[2].starts_with("250"), "sub-address: {replies:?}");
+    assert!(replies[3].starts_with("550 5.1.1"), "unknown: {replies:?}");
+    assert!(
+        replies[4].starts_with("550 5.7.1"),
+        "not served: {replies:?}"
+    );
+
+    // A new account reaches the relay as a change
+    admin
+        .create_user_account("joe@example.com", "joe-secret-5529", "Joe", &[], vec![])
+        .await;
+    wait_for(
+        admin,
+        &id,
+        "the new recipient reached the relay",
+        45,
+        |relay| relay["links"][0]["recipients"].as_u64() == Some(recipients + 1),
+    )
+    .await;
+    let replies = rcpt_replies(smtp_port, &["joe@example.com"]).await;
+    assert!(replies[0].starts_with("250"), "{replies:?}");
+
+    // A setting reaches it too
+    call(
+        admin,
+        "inbuxa:Relay/set",
+        json!({"update": {&id: {"settings/maxRecipients": 1}}}),
+    )
+    .await;
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    loop {
+        let replies = rcpt_replies(smtp_port, &["jane@example.com", "joe@example.com"]).await;
+        if replies[1].starts_with("452") {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "maxRecipients reached the relay: {replies:?}"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    }
+
+    // Turned off, the link ends and says why
+    call(
+        admin,
+        "inbuxa:Relay/set",
+        json!({"update": {&id: {"enabled": false}}}),
+    )
+    .await;
+    wait_for(admin, &id, "the link ended", 30, |relay| {
+        relay["links"][0]["state"] == "down"
+            && relay["links"][0]["lastError"]
+                .as_str()
+                .is_some_and(|e| e.contains("turned off"))
+    })
+    .await;
+
+    call(admin, "inbuxa:Relay/set", json!({"destroy": [&id]})).await;
+}
+
+#[ignore]
+#[tokio::test(flavor = "multi_thread")]
+pub async fn relay_link_tests() {
+    let mut test = TestServerBuilder::new("relay_link_tests")
+        .await
+        .with_default_listeners()
+        .await
+        .build()
+        .await;
+    let admin = test.create_admin_account("admin@example.com").await;
+    test.insert_account(admin);
+    self::link(&mut test).await;
     if test.is_reset() {
         test.temp_dir.delete();
     }
