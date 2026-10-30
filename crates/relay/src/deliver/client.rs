@@ -284,6 +284,7 @@ pub struct Ehlo {
     pub eight_bit: bool,
     pub smtputf8: bool,
     pub dsn: bool,
+    pub requiretls: bool,
 }
 
 impl Ehlo {
@@ -301,11 +302,17 @@ impl Ehlo {
                 "8BITMIME" => ehlo.eight_bit = true,
                 "SMTPUTF8" => ehlo.smtputf8 = true,
                 "DSN" => ehlo.dsn = true,
+                "REQUIRETLS" => ehlo.requiretls = true,
                 _ => {}
             }
         }
         ehlo
     }
+}
+
+/// Whether the downstream sent the message with REQUIRETLS (RFC 8689).
+pub fn requires_tls(from: &Address) -> bool {
+    parameter(from, "REQUIRETLS").is_some()
 }
 
 /// The value of an SMTP parameter, if the downstream gave it.
@@ -319,7 +326,7 @@ fn parameter<'a>(address: &'a Address, name: &str) -> Option<Option<&'a str>> {
 }
 
 /// MAIL FROM, with only the parameters this server takes (RFC 1870, 6152,
-/// 6531, 3461). The size is the relay's own count.
+/// 6531, 3461, 8689). The size is the relay's own count.
 fn mail_from(from: &Address, ehlo: &Ehlo, size: u64, utf8: bool) -> String {
     let mut line = format!("MAIL FROM:<{}>", from.email);
     if ehlo.size.is_some() {
@@ -330,6 +337,10 @@ fn mail_from(from: &Address, ehlo: &Ehlo, size: u64, utf8: bool) -> String {
         && body.eq_ignore_ascii_case("8BITMIME")
     {
         line.push_str(" BODY=8BITMIME");
+    }
+    // Only ever on a session where TLS was required
+    if ehlo.requiretls && requires_tls(from) {
+        line.push_str(" REQUIRETLS");
     }
     if utf8 {
         line.push_str(" SMTPUTF8");
@@ -575,11 +586,26 @@ mod tests {
             size: Some(0),
             eight_bit: true,
             dsn: true,
+            requiretls: true,
             ..Default::default()
         };
         assert_eq!(
             mail_from(&from, &full, 10, true),
             "MAIL FROM:<a@example.com> SIZE=10 BODY=8BITMIME SMTPUTF8 RET=HDRS\r\n"
+        );
+        let mut strict = from.clone();
+        strict
+            .parameters
+            .as_mut()
+            .unwrap()
+            .insert("REQUIRETLS".to_string(), None);
+        assert_eq!(
+            mail_from(&strict, &bare, 10, false),
+            "MAIL FROM:<a@example.com>\r\n"
+        );
+        assert_eq!(
+            mail_from(&strict, &full, 10, false),
+            "MAIL FROM:<a@example.com> SIZE=10 BODY=8BITMIME REQUIRETLS RET=HDRS\r\n"
         );
         let mut rcpt = Address::new("b@example.org");
         rcpt.parameters = Some([("NOTIFY".to_string(), Some("NEVER".to_string()))].into());

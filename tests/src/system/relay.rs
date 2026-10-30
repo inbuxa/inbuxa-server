@@ -546,6 +546,18 @@ async fn wait_for_mail(account: &Account, subject: &str, count: usize) {
 
 /// Sends a message from `sender` to `to` by JMAP submission.
 async fn submit(sender: &Account, identity: &str, mailbox: &str, to: &[&str], subject: &str) {
+    submit_with(sender, identity, mailbox, to, subject, None).await
+}
+
+/// The same, with the submission's `envelope`, if given.
+async fn submit_with(
+    sender: &Account,
+    identity: &str,
+    mailbox: &str,
+    to: &[&str],
+    subject: &str,
+    envelope: Option<Value>,
+) {
     let (_, response) = call(
         sender,
         "Email/set",
@@ -563,10 +575,14 @@ async fn submit(sender: &Account, identity: &str, mailbox: &str, to: &[&str], su
         .as_str()
         .unwrap_or_else(|| panic!("draft: {response}"))
         .to_string();
+    let mut create = json!({"emailId": email, "identityId": identity});
+    if let Some(envelope) = envelope {
+        create["envelope"] = envelope;
+    }
     let (_, response) = call(
         sender,
         "EmailSubmission/set",
-        json!({"create": {"s": {"emailId": email, "identityId": identity}}}),
+        json!({"create": {"s": create}}),
     )
     .await;
     assert!(response["created"].get("s").is_some(), "{response}");
@@ -946,6 +962,41 @@ pub async fn link(test: &mut TestServer) {
         );
         tokio::time::sleep(std::time::Duration::from_millis(500)).await;
     }
+    // REQUIRETLS (RFC 8689): never sent in the clear, and this MX has no
+    // STARTTLS, so it waits, saying why
+    submit_with(
+        &jane,
+        &identity,
+        &drafts,
+        &["strict@remote.test"],
+        "Strict one",
+        Some(json!({
+            "mailFrom": {"email": "jane@example.com", "parameters": {"REQUIRETLS": null}},
+            "rcptTo": [{"email": "strict@remote.test"}]
+        })),
+    )
+    .await;
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    loop {
+        let (_, queued) = call(admin, "x:QueuedMessage/get", json!({"ids": null})).await;
+        let text = queued.to_string();
+        if text.contains("strict@remote.test") && text.contains("doesn't offer STARTTLS") {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "REQUIRETLS held back: {queued}"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    }
+    assert!(
+        !mx_seen
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|m| m.contains("Subject: Strict one")),
+        "sent in the clear"
+    );
     tokio::time::sleep(std::time::Duration::from_secs(2)).await;
     assert_eq!(
         subjects(&jane)

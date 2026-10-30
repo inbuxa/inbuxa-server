@@ -216,6 +216,10 @@ async fn relay(name: &str) -> (Arc<App>, std::path::PathBuf) {
 }
 
 fn hand_over(app: &App, to: &[&str], body: &[u8]) -> String {
+    hand_over_from(app, Address::new("jane@example.com"), to, body)
+}
+
+fn hand_over_from(app: &App, from: Address, to: &[&str], body: &[u8]) -> String {
     let blob = app.paths.blobs().join(crate::spool::new_id());
     std::fs::write(&blob, body).unwrap();
     let settings = app.settings().unwrap();
@@ -226,7 +230,7 @@ fn hand_over(app: &App, to: &[&str], body: &[u8]) -> String {
             &blob,
             "b",
             Envelope {
-                mail_from: Address::new("jane@example.com"),
+                mail_from: from,
                 rcpt_to: to.iter().map(|t| Address::new(*t)).collect(),
             },
             &settings,
@@ -473,6 +477,34 @@ async fn mta_sts_enforce_is_enforced() {
         std::fs::remove_dir_all(dir).unwrap();
     }
     assert!(seen.lock().unwrap().messages.is_empty());
+}
+
+#[tokio::test]
+async fn requiretls_needs_a_verified_certificate() {
+    // The scripted MX's certificate is self-signed: fine for opportunistic
+    // TLS, not for REQUIRETLS (RFC 8689)
+    let (port, seen, _) = scripted_mx().await;
+    let (app, dir) = relay("requiretls").await;
+    let mut from = Address::new("jane@example.com");
+    from.parameters = Some([("REQUIRETLS".to_string(), None)].into());
+    let id = hand_over_from(
+        &app,
+        from,
+        &["bob@example.org"],
+        b"Subject: r\r\n\r\nhi\r\n",
+    );
+    tokio::spawn(run(app.clone(), Arc::new(hosts(port))));
+    app.outbound_wake.notify_one();
+    let out = tried(&app, &id).await;
+    let status = &out.delivery_status["bob@example.org"];
+    assert_eq!(status.delivered, Delivered::Queued);
+    assert!(status.smtp_reply.starts_with("451 4."), "{status:?}");
+    let tls = events(&app, "outbound.tls");
+    assert_eq!(tls[0]["policyType"], "no-policy-found");
+    assert_ne!(tls[0]["result"], "success");
+    // Not tried again in the clear either
+    assert!(seen.lock().unwrap().messages.is_empty());
+    std::fs::remove_dir_all(dir).unwrap();
 }
 
 #[tokio::test]

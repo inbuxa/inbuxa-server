@@ -239,14 +239,13 @@ impl QueuedMessage {
             }
         }
         // inbuxa: with a relay's sendThrough on, every non-local recipient
-        // goes through a relay (relay spec, RL-24). REQUIRETLS mail doesn't
-        // yet: the relay can't keep that promise for it.
+        // goes through a relay (relay spec, RL-24)
         static THROUGH_RELAY: RoutingStrategy = RoutingStrategy::InbuxaRelay;
         let senders = &server.inner.data.relay_senders;
         if let Err(err) = senders.load(server.store()).await {
             trc::error!(err.details("Failed to read the relays").span_id(span_id));
         }
-        let through_relay = senders.sending() && message.message.flags & MAIL_REQUIRETLS == 0;
+        let through_relay = senders.sending();
         let mut relayed_waiting = Vec::new();
         for (rcpt_idx, rcpt) in message.message.recipients.iter().enumerate() {
             if matches!(

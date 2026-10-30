@@ -23,8 +23,8 @@ use common::{Server, config::smtp::queue::QueueName, ipc::QueueEvent};
 use inbuxa_features::relay::outbound::{Handed, Refused, record_handed};
 use inbuxa_relay_proto::types::{Address, Envelope};
 use smtp_proto::{
-    MAIL_BODY_8BITMIME, MAIL_RET_FULL, MAIL_RET_HDRS, RCPT_NOTIFY_DELAY, RCPT_NOTIFY_FAILURE,
-    RCPT_NOTIFY_NEVER, RCPT_NOTIFY_SUCCESS, Response,
+    MAIL_BODY_8BITMIME, MAIL_REQUIRETLS, MAIL_RET_FULL, MAIL_RET_HDRS, RCPT_NOTIFY_DELAY,
+    RCPT_NOTIFY_FAILURE, RCPT_NOTIFY_NEVER, RCPT_NOTIFY_SUCCESS, Response,
 };
 use std::collections::BTreeMap;
 use store::write::now;
@@ -153,7 +153,8 @@ impl MessageWrapper {
     }
 
     /// The envelope as the relay takes it: the DSN parameters this server
-    /// would send itself, and 8BITMIME (RFC 8621 `Address` parameters).
+    /// would send itself, 8BITMIME, and REQUIRETLS, which the relay keeps
+    /// as this server would (RFC 8621 `Address` parameters).
     fn relay_envelope(&self, rcpt_idxs: &[usize]) -> Envelope {
         let flags = self.message.flags;
         let mut from = BTreeMap::new();
@@ -164,6 +165,9 @@ impl MessageWrapper {
             from.insert("RET".to_string(), Some("FULL".to_string()));
         } else if flags & MAIL_RET_HDRS != 0 {
             from.insert("RET".to_string(), Some("HDRS".to_string()));
+        }
+        if flags & MAIL_REQUIRETLS != 0 {
+            from.insert("REQUIRETLS".to_string(), None);
         }
         if let Some(env_id) = &self.message.env_id {
             from.insert("ENVID".to_string(), Some(env_id.to_string()));
