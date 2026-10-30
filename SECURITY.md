@@ -2,13 +2,18 @@
 
 ## Supported versions
 
-INBUXA is developed on `main`, and security fixes are applied there and in
-the latest release. Older tags are not backported.
+Security fixes go into the newest release and into every older line still
+inside its security window. When a new series ships, the one before it gets
+three more months of security fixes. The full policy is on
+[Versions and upgrades](https://docs.inbuxa.org/versions/).
 
 | Version | Supported |
 | --- | --- |
-| `main` and the latest release | :white_check_mark: |
-| Older releases | :x: |
+| `main` and the newest release | :white_check_mark: |
+| The previous series, for three months after a new one ships | Security fixes only |
+| 2026.x, until three months after 27.1 ships | Security fixes only |
+| Release candidates | Replaced by the next candidate |
+| Anything older | :x: |
 
 ## Reporting a vulnerability
 
