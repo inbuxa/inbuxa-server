@@ -507,7 +507,7 @@ When no link is up, or after RL-13:
 
 | Object | What it holds |
 |---|---|
-| `inbuxa:Relay` | One per relay: `name`, `address`, `linkPort`, `enabled`, the settings pushed to the relay, `sendThrough` (route outbound mail through relays), `inboundOnly` (takes mail in but sends none, e.g. while its IP isn't warmed up or isn't in SPF yet), and read-only status mirrored from the relay: link state per node, version, queue counts, `lastSeen`. Create, or an update with `rejoin: true`, returns `joinToken` once |
+| `inbuxa:Relay` | One per relay: `name`, `address`, `linkPort`, `enabled`, the settings pushed to the relay, `sendThrough` (route outbound mail through relays), `inboundOnly` (takes mail in but sends none, e.g. while its IP isn't warmed up or isn't in SPF yet), `mxPreference` (its MX preference, 10 by default, RL-25), and read-only status mirrored from the relay: link state per node, version, queue counts, `lastSeen`. Create, or an update with `rejoin: true`, returns `joinToken` once |
 | `inbuxa:RelayMessage` | Read-only view of a relay's `Inbound` and `Outbound` queues, fetched over the link when asked. Never message content. `/get`, `/query` (filter `relayId`, `direction`; newest first) and `/set` destroy only: discards held mail, or cancels an outbound message, whose recipients fail here with no DSN as a delivery cancelled in the queue does. Each id is the relay's id and a hash of the relay's own message id, so nothing is stored |
 
 Permissions: `sysRelayGet`, `sysRelayUpdate`, `sysRelayQueueGet`,
@@ -869,8 +869,34 @@ In progress. Done so far:
   DSN.
 - The served schema lists the Relays page (`CustomComponent/Relays`) in
   Settings, beside Routes, so inbuxa-admin can show it.
-- Still to come in step 5: inbuxa-admin's Relays page, certificates
-  (RL-27), DNS (RL-25) and upgrades (RL-29).
+- inbuxa-admin's Relays page: the list with what needs attention, adding
+  a relay with its join token, each relay's settings with their help, its
+  queues, a new join, and removing it. Still to come there: the guided
+  add, the security checks, and the link to the relay's events.
+- DNS (RL-25). A relay is in a domain's records when it is enabled,
+  joined, and has a public name, and its `domains` name the domain or
+  name none. With any such relay, the domain's MX set is those relays,
+  each at its `mxPreference`, and the server's own MX hosts are left out.
+  The SPF record names each sending host by its address records
+  (`v=spf1 a:<host> ... -all`): the relays not marked `inboundOnly`, and
+  this server's own MX hosts unless an enabled relay has `sendThrough`
+  on. Each host under the domain gets `v=spf1 a -all` for its HELO name.
+  More than ten hosts would break SPF's lookup limit: the domain's SPF
+  record is then left as it is, with a `dns.build-error` event. With no
+  such relay, a domain's records are made as before.
+- What the relays put in any domain's records is kept as a hash. When it
+  changes (a relay joins or is removed, is turned on or off, gets another
+  public name, domains or preference, or `inboundOnly` or `sendThrough`
+  changes), the link service queues the MX and SPF records again for
+  every domain whose DNS is Automatic and publishes them. The same
+  records are in the zone file a domain with Manual DNS exports.
+- A publish never cuts a published MX set of two or more hosts down to
+  one. That MX record set is left as it is, and the task fails with a
+  reason that says so. This holds with or without relays.
+- Tested: the joined test relay is example.com's only MX host, at
+  preference 10 and then 20 after a change. SPF names it and this
+  server, and the relay's host gets its own `a` policy.
+- Still to come in step 5: certificates (RL-27) and upgrades (RL-29).
 
 Order:
 

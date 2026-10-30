@@ -28,6 +28,7 @@ use inbuxa_relay_proto::{time, token::JoinToken};
 use mail_auth::{common::parse::TxtRecordParser, mta_sts::TlsRpt};
 use registry::{
     schema::{
+        enums::DnsRecordType,
         prelude::{ObjectType, Property},
         structs::{
             CertificateManagement, DkimManagement, DnsManagement, Domain, Expression,
@@ -401,6 +402,59 @@ impl Drop for RelayProcess {
 }
 
 /// Polls `check` against the relay object until it's true, or panics.
+/// Waits for the link service to see the relays' DNS change (RL-25).
+async fn relay_dns_recorded(test: &TestServer) {
+    let data = test.server.store();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    loop {
+        let relays = inbuxa_features::relay::all(data).await.unwrap();
+        if inbuxa_features::relay::dns::dns_change(data, &relays)
+            .await
+            .unwrap()
+            .is_none()
+        {
+            return;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the relays' DNS change wasn't seen"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    }
+}
+
+/// example.com's MX and SPF records, as `name TYPE value`.
+async fn example_com_records(test: &TestServer) -> Vec<String> {
+    let server = &test.server;
+    for id in server
+        .registry()
+        .query::<Vec<types::id::Id>>(store::registry::RegistryQuery::new(ObjectType::Domain))
+        .await
+        .unwrap()
+    {
+        let Some(domain) = server.registry().object::<Domain>(id).await.unwrap() else {
+            continue;
+        };
+        if domain.name != "example.com" {
+            continue;
+        }
+        return server
+            .build_dns_records(id, &domain, &[DnsRecordType::Mx, DnsRecordType::Spf])
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|r| match r.record {
+                dns_update::DnsRecord::MX(mx) => {
+                    format!("{} MX {} {}", r.name, mx.priority, mx.exchange)
+                }
+                dns_update::DnsRecord::TXT(txt) => format!("{} TXT {txt}", r.name),
+                other => format!("{} {other:?}", r.name),
+            })
+            .collect();
+    }
+    panic!("no example.com domain");
+}
+
 async fn wait_for(
     account: &Account,
     id: &str,
@@ -776,6 +830,44 @@ pub async fn link(test: &mut TestServer) {
     assert!(
         replies[4].starts_with("550 5.7.1"),
         "not served: {replies:?}"
+    );
+
+    // Joined, it is example.com's MX set, and in its SPF with this server,
+    // which still sends its own mail (RL-25)
+    relay_dns_recorded(test).await;
+    let records = example_com_records(test).await;
+    assert!(
+        records.contains(&"example.com. MX 10 mx1.example.com.".to_string()),
+        "{records:?}"
+    );
+    assert_eq!(
+        records.iter().filter(|r| r.contains(" MX ")).count(),
+        1,
+        "only the relay: {records:?}"
+    );
+    let own = &test.server.core.network.server_name;
+    assert!(
+        records.contains(&format!(
+            "example.com. TXT v=spf1 a:mx1.example.com a:{own} -all"
+        )),
+        "{records:?}"
+    );
+    assert!(
+        records.contains(&"mx1.example.com. TXT v=spf1 a -all".to_string()),
+        "{records:?}"
+    );
+    // Its preference is the relay's, and changing it changes the records
+    call(
+        admin,
+        "inbuxa:Relay/set",
+        json!({"update": {&id: {"mxPreference": 20}}}),
+    )
+    .await;
+    relay_dns_recorded(test).await;
+    let records = example_com_records(test).await;
+    assert!(
+        records.contains(&"example.com. MX 20 mx1.example.com.".to_string()),
+        "{records:?}"
     );
 
     // Live (RL-12): delivered here before the sender hears 250
