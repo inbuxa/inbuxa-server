@@ -49,6 +49,16 @@ pub enum TlsaResult {
 /// An answer, and until when it may be cached: `None` when it mustn't be.
 pub type Cacheable<T> = (T, Option<Instant>);
 
+/// Whether `resolver` validates DNSSEC: the root's DNSKEY comes back
+/// proved secure. Through a resolver that strips signatures, DANE can't
+/// work, and every lookup would look insecure.
+pub async fn validates(resolver: &TokioResolver) -> bool {
+    resolver
+        .lookup(Name::root(), RecordType::DNSKEY)
+        .await
+        .is_ok_and(|lookup| lookup.answers().iter().any(|r| r.proof.is_secure()))
+}
+
 /// MX records for `name`, a fully qualified name.
 pub async fn mx(
     resolvers: &Resolvers<'_>,

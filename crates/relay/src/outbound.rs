@@ -18,7 +18,7 @@ use crate::{
 };
 use inbuxa_relay_proto::{
     time,
-    types::{Address, DeliveryStatus, Envelope, Outbound, RelaySettings},
+    types::{Address, Delivered, DeliveryStatus, Envelope, Outbound, RelaySettings},
 };
 use serde::{Deserialize, Serialize};
 use std::{
@@ -45,6 +45,28 @@ pub struct Meta {
     pub next_attempt_at: u64,
     pub attempts: u32,
     pub expires_at: u64,
+    /// When the last recipient got a final status.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub finished_at: Option<u64>,
+}
+
+impl Meta {
+    pub fn queued(&self) -> impl Iterator<Item = &Address> {
+        self.envelope.rcpt_to.iter().filter(|r| {
+            self.delivery_status
+                .get(&r.email)
+                .is_some_and(|s| s.delivered == Delivered::Queued)
+        })
+    }
+}
+
+/// What `destroy` did.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Destroyed {
+    Yes,
+    NotFound,
+    /// A delivery attempt is under way; it can't be pulled back mid-send.
+    InFlight,
 }
 
 struct Entry {
@@ -72,6 +94,8 @@ pub struct Outbox {
     entries: BTreeMap<String, Entry>,
     log: Changelog,
     bytes: u64,
+    /// Messages with a delivery attempt under way.
+    attempting: HashSet<String>,
 }
 
 pub fn new_id() -> String {
@@ -94,6 +118,7 @@ impl Outbox {
             entries: BTreeMap::new(),
             log: Changelog::default(),
             bytes: 0,
+            attempting: HashSet::new(),
         };
         let mut messages = Vec::new();
         for entry in fs::read_dir(dir)? {
@@ -202,6 +227,7 @@ impl Outbox {
             next_attempt_at: now,
             attempts: 0,
             expires_at: now + u64::from(settings.outbound_expiry),
+            finished_at: None,
         };
         self.commit(blob, &meta)
             .map_err(|e| refuse("serverFail", format!("could not spool the message: {e}")))?;
@@ -235,10 +261,7 @@ impl Outbox {
     /// The JMAP object for one message.
     pub fn get(&self, id: &str) -> Option<Outbound> {
         let m = &self.entries.get(id)?.meta;
-        let queued = m
-            .delivery_status
-            .values()
-            .any(|s| s.delivered == inbuxa_relay_proto::types::Delivered::Queued);
+        let queued = m.queued().next().is_some();
         Some(Outbound {
             id: m.id.clone(),
             created_at: time::utc_date(m.created_at),
@@ -268,16 +291,138 @@ impl Outbox {
     }
 
     /// Cancels a queued message, or clears a finished one.
-    pub fn destroy(&mut self, id: &str) -> bool {
+    pub fn destroy(&mut self, id: &str) -> Destroyed {
+        if self.attempting.contains(id) {
+            return Destroyed::InFlight;
+        }
         let Some(e) = self.entries.remove(id) else {
-            return false;
+            return Destroyed::NotFound;
         };
         self.bytes = self.bytes.saturating_sub(e.meta.size);
         let _ = fs::remove_file(self.meta_path(id));
         let _ = fs::remove_file(self.eml_path(id));
         let _ = sync_dir(&self.dir);
         self.log.destroyed(id);
-        true
+        Destroyed::Yes
+    }
+
+    /// Up to `limit` messages due for an attempt, oldest first, now marked
+    /// as being attempted.
+    pub fn take_due(&mut self, now: u64, limit: usize) -> Vec<Meta> {
+        let mut due: Vec<&Meta> = self
+            .entries
+            .values()
+            .map(|e| &e.meta)
+            .filter(|m| {
+                m.next_attempt_at <= now
+                    && m.expires_at > now
+                    && !self.attempting.contains(&m.id)
+                    && m.queued().next().is_some()
+            })
+            .collect();
+        due.sort_by_key(|m| (m.next_attempt_at, m.created_at));
+        let due: Vec<Meta> = due.into_iter().take(limit).cloned().collect();
+        for m in &due {
+            self.attempting.insert(m.id.clone());
+        }
+        due
+    }
+
+    /// An attempt ended without trying: it can be taken again.
+    pub fn release(&mut self, id: &str) {
+        self.attempting.remove(id);
+    }
+
+    /// Records an attempt: each recipient's new status, then the next try
+    /// from `outbound_retry`, the last interval repeating. False if the
+    /// message is gone.
+    pub fn record(
+        &mut self,
+        id: &str,
+        statuses: Vec<(String, DeliveryStatus)>,
+        retry: &[u32],
+        now: u64,
+    ) -> io::Result<bool> {
+        self.attempting.remove(id);
+        let Some(e) = self.entries.get_mut(id) else {
+            return Ok(false);
+        };
+        let mut meta = e.meta.clone();
+        for (rcpt, status) in statuses {
+            if let Some(current) = meta.delivery_status.get_mut(&rcpt)
+                && current.delivered == Delivered::Queued
+            {
+                *current = status;
+            }
+        }
+        meta.attempts += 1;
+        let step = (meta.attempts as usize - 1).min(retry.len().saturating_sub(1));
+        meta.next_attempt_at = now + u64::from(retry.get(step).copied().unwrap_or(3600));
+        if meta.queued().next().is_none() {
+            meta.finished_at = Some(now);
+        }
+        self.save(meta)?;
+        Ok(true)
+    }
+
+    /// Gives up on recipients still queued past `expiresAt`: they are
+    /// refused, with the last reply seen. Returns the messages and how
+    /// many recipients each gave up.
+    pub fn expire(&mut self, now: u64) -> io::Result<Vec<(String, usize)>> {
+        let old: Vec<Meta> = self
+            .entries
+            .values()
+            .map(|e| &e.meta)
+            .filter(|m| {
+                m.expires_at <= now
+                    && !self.attempting.contains(&m.id)
+                    && m.queued().next().is_some()
+            })
+            .cloned()
+            .collect();
+        let mut out = Vec::new();
+        for mut meta in old {
+            let mut count = 0;
+            for status in meta.delivery_status.values_mut() {
+                if status.delivered == Delivered::Queued {
+                    status.delivered = Delivered::No;
+                    if status.smtp_reply.is_empty() {
+                        status.smtp_reply = "421 4.4.7 Delivery time expired".into();
+                    }
+                    count += 1;
+                }
+            }
+            meta.finished_at = Some(now);
+            out.push((meta.id.clone(), count));
+            self.save(meta)?;
+        }
+        Ok(out)
+    }
+
+    /// Deletes finished messages the downstream never cleared, `keep`
+    /// seconds after they finished. Returns how many.
+    pub fn sweep_finished(&mut self, now: u64, keep: u64) -> usize {
+        let old: Vec<String> = self
+            .entries
+            .values()
+            .filter(|e| e.meta.finished_at.is_some_and(|at| at + keep <= now))
+            .map(|e| e.meta.id.clone())
+            .collect();
+        old.iter()
+            .filter(|id| self.destroy(id) == Destroyed::Yes)
+            .count()
+    }
+
+    /// Writes changed properties, the commit point for a status.
+    fn save(&mut self, meta: Meta) -> io::Result<()> {
+        let json = serde_json::to_vec(&meta).map_err(io::Error::other)?;
+        write_atomic(&self.meta_path(&meta.id), &json)?;
+        let modseq = self.log.bump();
+        if let Some(e) = self.entries.get_mut(&meta.id) {
+            e.meta = meta;
+            e.modseq = modseq;
+        }
+        Ok(())
     }
 }
 
@@ -364,7 +509,6 @@ fn check_parameters(address: &Address, field: &str) -> Result<(), Refusal> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use inbuxa_relay_proto::types::Delivered;
 
     fn settings() -> RelaySettings {
         RelaySettings {
@@ -503,8 +647,8 @@ mod tests {
         assert_eq!(fs::read_dir(&out).unwrap().count(), 2);
 
         let s1 = outbox.state();
-        assert!(outbox.destroy(&id));
-        assert!(!outbox.destroy(&id));
+        assert_eq!(outbox.destroy(&id), Destroyed::Yes);
+        assert_eq!(outbox.destroy(&id), Destroyed::NotFound);
         assert_eq!(outbox.changes(&s1, 10).unwrap().destroyed, vec![id]);
         assert_eq!(fs::read_dir(&out).unwrap().count(), 0);
         fs::remove_dir_all(d).unwrap();

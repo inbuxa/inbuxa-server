@@ -13,6 +13,8 @@ path = "src/main.rs"
 # small, and most of it the server already uses.
 [dependencies]
 inbuxa-relay-proto = { path = "../relay-proto" }
+inbuxa-outbound-tls = { path = "../outbound-tls" }
+rustls-native-certs = "0.8"
 aws-lc-rs = { version = "1" }
 smtp-proto = { version = "0.2.3" }
 tokio = { version = "1.53", features = ["rt-multi-thread", "net", "io-util", "time", "sync", "macros", "signal", "fs"] }
@@ -22,7 +24,7 @@ rustls-pki-types = { version = "1", features = ["std"] }
 rustls-webpki = { version = "0.103", default-features = false, features = ["std", "aws-lc-rs"] }
 rcgen = { version = "0.14", default-features = false, features = ["crypto", "pem", "aws_lc_rs"] }
 x509-parser = { version = "0.18" }
-hyper = { version = "1.11.1", features = ["server", "http1"] }
+hyper = { version = "1.11.1", features = ["server", "client", "http1"] }
 hyper-util = { version = "0.1.20", features = ["tokio"] }
 http-body-util = "0.1.5"
 tokio-tungstenite = "0.30"
