@@ -28,6 +28,9 @@ pub mod method {
     pub const INBOUND_QUERY: &str = "Inbound/query";
     pub const INBOUND_CLAIM: &str = "Inbound/claim";
     pub const INBOUND_SET: &str = "Inbound/set";
+    pub const OUTBOUND_GET: &str = "Outbound/get";
+    pub const OUTBOUND_CHANGES: &str = "Outbound/changes";
+    pub const OUTBOUND_SET: &str = "Outbound/set";
     pub const RELAY_EVENT_GET: &str = "RelayEvent/get";
     pub const RELAY_EVENT_CHANGES: &str = "RelayEvent/changes";
     pub const RELAY_EVENT_SET: &str = "RelayEvent/set";
