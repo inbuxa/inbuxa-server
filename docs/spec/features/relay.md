@@ -673,7 +673,7 @@ In progress. Done so far:
 - The downstream's link service: every node dials each enabled relay,
   completes the join and pins its key, pushes settings, domains and the
   recipient set (whole, then deltas), and reports each node's link in the
-  relay's `links` (this PR). Node link certificates last 30 days and are
+  relay's `links` (PR #253). Node link certificates last 30 days and are
   renewed after 20.
 - Not done yet: ingest, live verdicts, `inbuxa:RelayMessage`, relay events
   in the trace, and the link-down alert.
