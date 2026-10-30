@@ -3972,6 +3972,29 @@ dependencies = [
 ]
 
 [[package]]
+name = "inbuxa-relay"
+version = "27.1.0-rc.4"
+dependencies = [
+ "aws-lc-rs",
+ "futures-util",
+ "http-body-util",
+ "hyper",
+ "hyper-util",
+ "inbuxa-relay-proto",
+ "rcgen",
+ "rustls",
+ "rustls-pki-types",
+ "rustls-webpki",
+ "serde",
+ "serde_json",
+ "smtp-proto",
+ "tokio",
+ "tokio-rustls",
+ "tokio-tungstenite 0.30.0",
+ "x509-parser",
+]
+
+[[package]]
 name = "inbuxa-relay-proto"
 version = "27.1.0-rc.4"
 dependencies = [

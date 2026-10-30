@@ -1,0 +1,37 @@
+[package]
+name = "inbuxa-relay"
+description = "inbuxa Relay: a small edge appliance that takes mail in for one downstream inbuxa server and sends its mail on (docs/spec/features/relay.md)"
+license = "AGPL-3.0-only"
+version.workspace = true
+edition = "2024"
+
+[[bin]]
+name = "inbuxa-relay"
+path = "src/main.rs"
+
+# The footprint rule (RL-30): no inbuxa server crate. Everything here is
+# small, and most of it the server already uses.
+[dependencies]
+inbuxa-relay-proto = { path = "../relay-proto" }
+aws-lc-rs = { version = "1" }
+smtp-proto = { version = "0.2.3" }
+tokio = { version = "1.53", features = ["rt-multi-thread", "net", "io-util", "time", "sync", "macros", "signal", "fs"] }
+rustls = { version = "0.23.43", default-features = false, features = ["std", "aws_lc_rs", "tls12"] }
+tokio-rustls = { version = "0.26", default-features = false, features = ["aws_lc_rs", "tls12"] }
+rustls-pki-types = { version = "1", features = ["std"] }
+rustls-webpki = { version = "0.103", default-features = false, features = ["std", "aws-lc-rs"] }
+rcgen = { version = "0.14", default-features = false, features = ["crypto", "pem", "aws_lc_rs"] }
+x509-parser = { version = "0.18" }
+hyper = { version = "1.11.1", features = ["server", "http1"] }
+hyper-util = { version = "0.1.20", features = ["tokio"] }
+http-body-util = "0.1.5"
+tokio-tungstenite = "0.30"
+futures-util = "0.3.34"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+
+[lints]
+workspace = true
+
+[dev-dependencies]
+hyper = { version = "1.11.1", features = ["client", "http1"] }

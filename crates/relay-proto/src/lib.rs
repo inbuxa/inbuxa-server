@@ -30,7 +30,7 @@ pub const PROTOCOL_VERSION: u32 = 1;
 pub const CORE_CAPABILITY: &str = "urn:ietf:params:jmap:core";
 
 /// Base64url without padding, for every byte field on the wire.
-pub(crate) mod b64 {
+pub mod b64 {
     use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
     use serde::{Deserialize, Deserializer, Serializer, de::Error};
 
