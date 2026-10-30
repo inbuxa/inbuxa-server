@@ -15,6 +15,7 @@ types = { path =  "../types" }
 utils = { path =  "../utils" }
 directory = { path =  "../directory" }
 common = { path =  "../common" }
+inbuxa-outbound-tls = { path = "../outbound-tls" }
 email = { path =  "../email" }
 registry = { path =  "../registry" }
 inbuxa-features = { path = "../features" }

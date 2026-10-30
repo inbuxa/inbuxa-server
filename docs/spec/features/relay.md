@@ -761,6 +761,12 @@ In progress. Done so far:
   link to a joined relay for an hour raises `relay.link-down` (a warning),
   once, and `relay.link-up` when it is back (RL-T23). Both reach the log,
   webhooks and OpenTelemetry.
+- `crates/outbound-tls` (RL-30): the TLSA and MTA-STS types, the DANE
+  certificate check, MTA-STS policy parsing and matching, and the DNSSEC
+  lookups (with the bogus-answer recheck), moved out of `crates/smtp` and
+  `crates/common`. The server keeps its caches, trace events, policy fetch
+  and test mocks around them, so its behavior is unchanged. The relay will
+  use the same code to deliver.
 - Not done yet: `inbuxa:RelayMessage`, which comes with inbuxa-admin's
   Relays page (step 5), once `Outbound` exists to show beside `Inbound`.
 

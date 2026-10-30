@@ -28,10 +28,7 @@ use registry::{
     },
     types::{map::Map, socketaddr::SocketAddr},
 };
-use smtp::outbound::mta_sts::{
-    lookup::{MtaStsLookup, STS_TEST_POLICY},
-    parse::ParsePolicy,
-};
+use smtp::outbound::mta_sts::lookup::{MtaStsLookup, STS_TEST_POLICY};
 use std::{
     str::FromStr,
     sync::Arc,

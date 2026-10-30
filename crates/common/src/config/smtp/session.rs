@@ -374,7 +374,7 @@ impl SessionConfig {
                     &ext.ctx_mt_priority(),
                 ),
             },
-            mta_sts_policy: Policy::try_parse(bp).await,
+            mta_sts_policy: super::resolver::mta_sts_policy(bp).await,
             milters: bp
                 .list_infallible::<MtaMilter>()
                 .await

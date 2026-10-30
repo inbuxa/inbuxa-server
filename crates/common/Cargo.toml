@@ -6,6 +6,7 @@ build = "build.rs"
 
 [dependencies]
 utils = { path = "../utils" }
+inbuxa-outbound-tls = { path = "../outbound-tls" }
 nlp = { path = "../nlp" }
 store = { path = "../store" }
 trc = { path = "../trc" }

@@ -2,6 +2,8 @@
  * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
+ *
+ * Modified by Coffey Labs in 2026 for INBUXA.
  */
 
 use super::{NextHop, lookup::ToNextHop, mta_sts, session::SessionParams};
@@ -13,7 +15,6 @@ use crate::outbound::dane::dnssec::{DnssecStatus, TlsaLookup, TlsaResult};
 use crate::outbound::error::ClientError;
 use crate::outbound::lookup::{DnsLookup, SourceIp};
 use crate::outbound::mta_sts::lookup::MtaStsLookup;
-use crate::outbound::mta_sts::verify::VerifyPolicy;
 use crate::outbound::{client::StartTlsResult, dane::verify::TlsaVerify};
 use crate::queue::dsn::{DsnStatus, SendDsn};
 use crate::queue::spool::{DSN_RETRY, SmtpSpool};

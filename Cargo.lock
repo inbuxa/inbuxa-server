@@ -1319,6 +1319,7 @@ dependencies = [
  "idna",
  "imagesize",
  "inbuxa-features",
+ "inbuxa-outbound-tls",
  "infer 0.22.0",
  "jmap_proto",
  "jsonwebtoken",
@@ -3974,6 +3975,20 @@ dependencies = [
  "x509-parser",
  "xxhash-rust",
  "zip",
+]
+
+[[package]]
+name = "inbuxa-outbound-tls"
+version = "27.1.0-rc.4"
+dependencies = [
+ "idna",
+ "mail-auth",
+ "rustls-pki-types",
+ "rustls-webpki",
+ "serde",
+ "sha2 0.11.1",
+ "tokio",
+ "x509-parser",
 ]
 
 [[package]]
@@ -8144,6 +8159,7 @@ dependencies = [
  "email",
  "hashify",
  "inbuxa-features",
+ "inbuxa-outbound-tls",
  "mail-auth",
  "mail-builder 1.0.0",
  "mail-parser",
@@ -9525,6 +9541,7 @@ dependencies = [
  "form_urlencoded",
  "futures",
  "idna",
+ "inbuxa-outbound-tls",
  "mail-auth",
  "nohash-hasher",
  "privdrop",
