@@ -840,6 +840,8 @@ pub enum ExpressionVariable {
     UrlOriginal = 89,
     Value = 90,
     ValueLower = 91,
+    // inbuxa: RL-23, the relay a message came through
+    Relay = 92,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
@@ -3616,6 +3618,7 @@ pub static MTA_CONNECTION_VARIABLE: &[ExpressionVariable] = &[
     ExpressionVariable::IsTls,
     ExpressionVariable::Asn,
     ExpressionVariable::Country,
+    ExpressionVariable::Relay,
 ];
 
 pub static MTA_EHLO_VARIABLE: &[ExpressionVariable] = &[
@@ -3629,6 +3632,7 @@ pub static MTA_EHLO_VARIABLE: &[ExpressionVariable] = &[
     ExpressionVariable::HeloDomain,
     ExpressionVariable::Asn,
     ExpressionVariable::Country,
+    ExpressionVariable::Relay,
 ];
 
 pub static MTA_MAIL_FROM_VARIABLE: &[ExpressionVariable] = &[
@@ -3644,6 +3648,7 @@ pub static MTA_MAIL_FROM_VARIABLE: &[ExpressionVariable] = &[
     ExpressionVariable::AuthenticatedAs,
     ExpressionVariable::Asn,
     ExpressionVariable::Country,
+    ExpressionVariable::Relay,
 ];
 
 pub static MTA_QUEUE_HOST_VARIABLE: &[ExpressionVariable] = &[
@@ -3720,6 +3725,7 @@ pub static MTA_RCPT_TO_VARIABLE: &[ExpressionVariable] = &[
     ExpressionVariable::HeloDomain,
     ExpressionVariable::Asn,
     ExpressionVariable::Country,
+    ExpressionVariable::Relay,
 ];
 
 pub static MTA_RCPT_VARIABLE: &[ExpressionVariable] = &[ExpressionVariable::Rcpt];

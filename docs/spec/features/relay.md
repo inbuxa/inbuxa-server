@@ -227,6 +227,12 @@ so a reboot without the link comes back with the same settings (RL-22).
   stop someone holding the relay's key from testing guessed addresses
   offline; nothing on the relay could, since the relay has to check real
   ones.
+- A domain whose recipients an external directory (LDAP, SQL, OIDC)
+  answers for can't be listed. Its recipient set holds the accounts the
+  downstream has already seen from that directory, and nothing more: no
+  catch-all, which would break RL-1. Anyone else there is refused at the
+  relay until they first sign in (decided 2026-10-29). A live lookup over
+  the link may come later.
 - Deltas use `Recipient/set` (create and destroy by hash). A full refresh
   uses the custom `Recipient/replace {blobId}`: a sorted file of 32-byte
   hashes, swapped in atomically. The relay's `Recipient` state string lets
@@ -238,8 +244,8 @@ so a reboot without the link comes back with the same settings (RL-22).
 |---|---|
 | `id` | Stable for the message's whole life. The downstream deduplicates on it (RL-16) |
 | `receivedAt` | When the relay accepted it (or got the final dot, if pending) |
-| `state` | `pending` (live, awaiting a verdict), `held`, or `claimed` |
-| `claimedUntil` | End of the current lease, when claimed |
+| `state` | `pending` (live, awaiting a verdict, claimed or not), `held`, or `claimed` (held and leased) |
+| `claimedUntil` | End of the current lease, when leased |
 | `envelope` | RFC 8621 `Envelope`: `mailFrom` and `rcptTo`, with parameters |
 | `session` | `{remoteIp, remotePort, localIp, helo, tls: {version, cipher} or null, ptr}` |
 | `size` | Bytes |
@@ -675,8 +681,17 @@ In progress. Done so far:
   recipient set (whole, then deltas), and reports each node's link in the
   relay's `links` (PR #253). Node link certificates last 30 days and are
   renewed after 20.
-- Not done yet: ingest, live verdicts, `inbuxa:RelayMessage`, relay events
-  in the trace, and the link-down alert.
+- Ingest and live verdicts: the link service asks for `Inbound` push, so
+  the relay is live while a node is linked. Each message is claimed,
+  unsealed, and played through the downstream's own SMTP handlers with
+  the relay's session on port 25 (RL-23), with `relay` in expressions.
+  Live, the downstream's reply is the verdict; held, a refusal for good is
+  reported only to a sender who passed SPF or DMARC (RL-18), one for now
+  is retried after the lease, and spam over the reject threshold goes to
+  Junk (RL-17). Every message taken is recorded until `heldMaxAge` and a
+  day have passed (RL-16). A pending message stays `pending` when claimed.
+- Not done yet: `inbuxa:RelayMessage`, relay events in the trace, and the
+  link-down alert.
 
 Order:
 

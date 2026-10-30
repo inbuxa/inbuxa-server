@@ -51,6 +51,7 @@ const FEATURE: u8 = b'E';
 const KIND_KEYS: u8 = b'k';
 const KIND_RELAY: u8 = b'r';
 const KIND_STATUS: u8 = b's';
+const KIND_INGESTED: u8 = b'i';
 const CREATE_ATTEMPTS: usize = 5;
 
 const MAX_NAME: usize = 100;
@@ -569,6 +570,7 @@ pub async fn delete(data: &Store, id: u32) -> trc::Result<()> {
     data.write(batch.build_all())
         .await
         .caused_by(trc::location!())?;
+    link::forget_ingested(data, id, u64::MAX).await?;
     Ok(())
 }
 

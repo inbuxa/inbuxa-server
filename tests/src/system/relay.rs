@@ -13,7 +13,10 @@
 //!
 //! `relay_link_tests` runs a real `inbuxa-relay` (build it first with
 //! `cargo build -p inbuxa-relay`): the server joins it, sets it up, and its
-//! port 25 takes mail only for this server's real recipients.
+//! port 25 takes mail only for this server's real recipients. Live, a
+//! message is delivered before the sender hears 250, and this server's
+//! refusal is the sender's reply; held while the link is off, it is
+//! delivered once the link is back, exactly once.
 
 use crate::utils::{
     account::Account,
@@ -450,6 +453,102 @@ async fn rcpt_replies(port: u16, recipients: &[&str]) -> Vec<String> {
     replies.split_off(2)
 }
 
+/// Sends one message through the relay; the reply to its final dot.
+async fn send_mail(port: u16, rcpt: &str, message: &str) -> String {
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+    let stream = tokio::net::TcpStream::connect(("127.0.0.1", port))
+        .await
+        .unwrap();
+    let (read, mut write) = stream.into_split();
+    let mut read = BufReader::new(read);
+    async fn reply(read: &mut BufReader<tokio::net::tcp::OwnedReadHalf>) -> String {
+        let mut all = String::new();
+        loop {
+            let mut line = String::new();
+            read.read_line(&mut line).await.unwrap();
+            all.push_str(&line);
+            if line.len() < 4 || line.as_bytes()[3] != b'-' {
+                return all;
+            }
+        }
+    }
+    assert!(reply(&mut read).await.starts_with("220"));
+    for line in [
+        "EHLO sender.example".to_string(),
+        "MAIL FROM:<someone@sender.example>".to_string(),
+        format!("RCPT TO:<{rcpt}>"),
+        "DATA".to_string(),
+    ] {
+        write
+            .write_all(format!("{line}\r\n").as_bytes())
+            .await
+            .unwrap();
+        let answer = reply(&mut read).await;
+        assert!(
+            answer.starts_with('2') || answer.starts_with('3'),
+            "{line}: {answer}"
+        );
+    }
+    let body = message.replace('\n', "\r\n");
+    write
+        .write_all(format!("{body}\r\n.\r\n").as_bytes())
+        .await
+        .unwrap();
+    let answer = reply(&mut read).await;
+    let _ = write.write_all(b"QUIT\r\n").await;
+    answer
+}
+
+/// The subjects of every message in `account`'s mailboxes.
+async fn subjects(account: &Account) -> Vec<String> {
+    let response = account
+        .jmap_request(
+            &["urn:ietf:params:jmap:core", "urn:ietf:params:jmap:mail"],
+            json!([
+                ["Email/query", {"accountId": account.id_string()}, "q"],
+                ["Email/get", {
+                    "accountId": account.id_string(),
+                    "#ids": {"resultOf": "q", "name": "Email/query", "path": "/ids"},
+                    "properties": ["subject"]
+                }, "g"]
+            ]),
+        )
+        .await;
+    response
+        .0
+        .pointer("/methodResponses/1/1/list")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|email| email["subject"].as_str().map(str::to_string))
+        .collect()
+}
+
+/// Waits until `account` has `count` messages titled `subject`.
+async fn wait_for_mail(account: &Account, subject: &str, count: usize) {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    loop {
+        let found = subjects(account).await;
+        let n = found.iter().filter(|s| *s == subject).count();
+        if n == count {
+            return;
+        }
+        assert!(
+            n < count && std::time::Instant::now() < deadline,
+            "{count} of {subject:?}: {found:?}"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    }
+}
+
+fn message(subject: &str, extra_headers: &str) -> String {
+    format!(
+        "{extra_headers}From: Someone <someone@sender.example>\nTo: jane@example.com\n\
+         Subject: {subject}\nMessage-ID: <{}@sender.example>\n\nHello from outside.",
+        subject.replace(' ', "-")
+    )
+}
+
 pub async fn link(test: &mut TestServer) {
     println!("Running inbuxa Relay link tests...");
     let admin = test.account("admin@example.com");
@@ -459,7 +558,7 @@ pub async fn link(test: &mut TestServer) {
         "{} is missing: run cargo build -p inbuxa-relay",
         binary.display()
     );
-    admin
+    let jane = admin
         .create_user_account(
             "jane@example.com",
             "jane-secret-4417",
@@ -525,7 +624,7 @@ pub async fn link(test: &mut TestServer) {
                 .as_array()
                 .into_iter()
                 .flatten()
-                .any(|link| link["state"] == "linked" && link["relay"]["mode"] == "held")
+                .any(|link| link["state"] == "linked" && link["relay"]["mode"] == "live")
     })
     .await;
     assert!(relay["linkKeyPin"].as_str().is_some(), "{relay}");
@@ -555,6 +654,27 @@ pub async fn link(test: &mut TestServer) {
         replies[4].starts_with("550 5.7.1"),
         "not served: {replies:?}"
     );
+
+    // Live (RL-12): delivered here before the sender hears 250
+    let reply = send_mail(smtp_port, "jane@example.com", &message("Live one", "")).await;
+    assert!(reply.starts_with("250"), "{reply}");
+    wait_for_mail(&jane, "Live one", 1).await;
+
+    // Live: this server's refusal is the sender's reply, and the relay
+    // keeps nothing
+    let loop_headers =
+        "Received: from a.example by b.example; Thu, 29 Oct 2026 10:00:00 +0000\n".repeat(60);
+    let reply = send_mail(
+        smtp_port,
+        "jane@example.com",
+        &message("Looped one", &loop_headers),
+    )
+    .await;
+    assert!(reply.starts_with("450 4.4.6"), "{reply}");
+    wait_for(admin, &id, "the relay kept nothing", 30, |relay| {
+        relay["links"][0]["relay"]["spool"]["inbound"] == 0
+    })
+    .await;
 
     // A new account reaches the relay as a change
     admin
@@ -605,6 +725,31 @@ pub async fn link(test: &mut TestServer) {
                 .is_some_and(|e| e.contains("turned off"))
     })
     .await;
+
+    // Held while the link is off: the relay says 250 itself, and the
+    // message is delivered once the link is back, once
+    let reply = send_mail(smtp_port, "jane@example.com", &message("Held one", "")).await;
+    assert!(reply.starts_with("250"), "{reply}");
+    call(
+        admin,
+        "inbuxa:Relay/set",
+        json!({"update": {&id: {"enabled": true}}}),
+    )
+    .await;
+    wait_for_mail(&jane, "Held one", 1).await;
+    wait_for(admin, &id, "the held message was taken", 30, |relay| {
+        relay["links"][0]["state"] == "linked"
+            && relay["links"][0]["relay"]["spool"]["inbound"] == 0
+    })
+    .await;
+    assert_eq!(
+        subjects(&jane)
+            .await
+            .iter()
+            .filter(|s| *s == "Held one" || *s == "Live one")
+            .count(),
+        2
+    );
 
     call(admin, "inbuxa:Relay/set", json!({"destroy": [&id]})).await;
 }
