@@ -11,9 +11,10 @@
 //! A migration is created and checked; a run needs the secret once, and
 //! the child gets it and a run token through its environment and nothing
 //! else of the server's. The token signs in as the administrator, from
-//! loopback, and ends with the run. Preview, move, the passwords once, the
-//! final pass, stop, close; destroy is refused, a tenant is refused, and
-//! the audit log never holds the secret.
+//! loopback, and ends with the run. Preview, move, the passwords once (to
+//! whichever administrator takes them), the final pass, stop, close;
+//! destroy is refused, a tenant is refused, and the audit log never holds
+//! the secret.
 //!
 //! `migration_real_engine_tests` runs the real inbuxa-migrate against a
 //! Dovecot (`tests/resources/migrations/dovecot-source`), on demand.
@@ -261,8 +262,9 @@ pub async fn test(test: &mut TestServer, dir: PathBuf) {
     let response = update(admin, &id, json!({"description": "Dovecot, done"})).await;
     assert!(response["updated"].get(&id).is_some(), "{response}");
 
-    // The new passwords, once
-    let response = update(admin, &id, json!({"action": "passwords"})).await;
+    // The new passwords, once, to whichever administrator takes them
+    let other = test.account("admin2@example.com");
+    let response = update(other, &id, json!({"action": "passwords"})).await;
     let blob = response["updated"][&id]["passwordsBlobId"]
         .as_str()
         .unwrap_or_else(|| panic!("{response}"))
@@ -271,9 +273,9 @@ pub async fn test(test: &mut TestServer, dir: PathBuf) {
         .get(format!(
             "{}/jmap/download/{}/{blob}/passwords.csv",
             run["url"].as_str().unwrap(),
-            admin.id_string()
+            other.id_string()
         ))
-        .basic_auth(admin.name(), Some(admin.secret()))
+        .basic_auth(other.name(), Some(other.secret()))
         .send()
         .await
         .unwrap()
@@ -423,6 +425,8 @@ pub async fn migration_tests() {
     }
     let admin = test.create_admin_account("admin@example.com").await;
     test.insert_account(admin);
+    let other = test.create_admin_account("admin2@example.com").await;
+    test.insert_account(other);
     self::test(&mut test, dir).await;
     if test.is_reset() {
         test.temp_dir.delete();

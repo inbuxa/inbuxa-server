@@ -89,7 +89,7 @@ process of the node the administrator reached.
   redacts it.
 - **MG-13.** New accounts' passwords are in the work directory, readable by
   the server only. The `passwords` action hands them over once, as a blob
-  of whoever started the migration, and deletes the file.
+  of the administrator who takes them, and deletes the file.
 - **MG-14.** Closing a migration deletes its work directory, archives
   included, and forgets its secret. A closed migration stays listed;
   destroy is refused.
