@@ -16,7 +16,8 @@
 use crate::blob::download::BlobDownload;
 use common::{Server, auth::AccessToken, network::acme::relay::relay_certificate_not_after};
 use inbuxa_features::relay::{
-    self as relays, JoinState, Relay as StoredRelay, certificate::CertificateOrder, link::NodeLink,
+    self as relays, DownstreamKeys, JoinState, Relay as StoredRelay, certificate::CertificateOrder,
+    link::NodeLink,
 };
 use inbuxa_relay_proto::{
     b64,
@@ -66,6 +67,8 @@ const ALL: &[P] = &[
     P::LinkKeyPin,
     P::Links,
     P::OlderThanServer,
+    P::LinkCa,
+    P::LinkCaReplacing,
     P::CreatedBy,
     P::CreatedAt,
     P::UpdatedAt,
@@ -86,6 +89,8 @@ const SERVER_SET: &[P] = &[
     P::JoinToken,
     P::Links,
     P::OlderThanServer,
+    P::LinkCa,
+    P::LinkCaReplacing,
     P::CreatedBy,
     P::CreatedAt,
     P::UpdatedAt,
@@ -172,6 +177,7 @@ fn to_value(
     relay: &StoredRelay,
     links: &[NodeLink],
     order: Option<&CertificateOrder>,
+    keys: Option<&DownstreamKeys>,
     properties: &[P],
     now: u64,
 ) -> RValue {
@@ -207,6 +213,13 @@ fn to_value(
             P::LinkKeyPin => text(relay.join.relay_pin.map(|pin| b64::encode(&pin)).as_deref()),
             P::Links => links_value(links),
             P::OlderThanServer => older_than_server(links).map_or(Value::Null, Value::Bool),
+            P::LinkCa => text(
+                keys.and_then(|keys| relays::link::link_ca(relay, keys, links))
+                    .map(|ca| ca.as_str()),
+            ),
+            P::LinkCaReplacing => keys
+                .and_then(|keys| keys.next_link_ca.as_ref())
+                .map_or(Value::Null, |next| date(next.started_at)),
             P::CreatedBy => text(Some(&relay.created_by)),
             P::CreatedAt => date(relay.created_at),
             P::UpdatedAt => date(relay.updated_at),
@@ -225,6 +238,7 @@ struct Sent {
     settings: JsonMap,
     rejoin: bool,
     upgrade: Option<Upgrade>,
+    replace_link_ca: Option<relays::LinkCaChange>,
 }
 
 /// A release to hand the relay: an upload, and its signature file's text.
@@ -250,6 +264,21 @@ fn client_json(value: Value<'_, P, RelayValue>) -> Result<Sent, SetError<P>> {
                         .with_description("true, to start a new join."));
                 }
             },
+            Key::Property(P::ReplaceLinkCa) => {
+                match value
+                    .as_str()
+                    .and_then(|text| relays::LinkCaChange::parse(&text))
+                {
+                    Some(change) => sent.replace_link_ca = Some(change),
+                    None => {
+                        return Err(SetError::invalid_properties()
+                            .with_property(P::ReplaceLinkCa)
+                            .with_description(
+                                "start, finish or cancel a replacement of the link CA.",
+                            ));
+                    }
+                }
+            }
             Key::Property(P::Upgrade) => {
                 let json: serde_json::Value = value.into();
                 match (json["blobId"].as_str(), json["signature"].as_str()) {
@@ -460,6 +489,7 @@ pub async fn get(
     };
     let data = server.store();
     let all = relays::all(data).await?;
+    let keys = relays::keys(data).await?;
     let now = now();
     let wanted: Vec<&StoredRelay> = match ids {
         None => all.iter().collect(),
@@ -475,7 +505,10 @@ pub async fn get(
         }
     };
     for relay in wanted {
-        let links = if properties.contains(&P::Links) || properties.contains(&P::OlderThanServer) {
+        let links = if properties.contains(&P::Links)
+            || properties.contains(&P::OlderThanServer)
+            || properties.contains(&P::LinkCa)
+        {
             relays::link::statuses(data, relay.id).await?
         } else {
             Vec::new()
@@ -485,9 +518,14 @@ pub async fn get(
         } else {
             None
         };
-        response
-            .list
-            .push(to_value(relay, &links, order.as_ref(), &properties, now));
+        response.list.push(to_value(
+            relay,
+            &links,
+            order.as_ref(),
+            keys.as_ref(),
+            &properties,
+            now,
+        ));
     }
     Ok(response)
 }
@@ -515,6 +553,11 @@ pub async fn set(
                 return Err(SetError::invalid_properties()
                     .with_property(P::Upgrade)
                     .with_description("A relay is upgraded once it has joined."));
+            }
+            if sent.replace_link_ca.is_some() {
+                return Err(SetError::invalid_properties()
+                    .with_property(P::ReplaceLinkCa)
+                    .with_description("The link CA is replaced on an existing relay."));
             }
             if sent
                 .properties
@@ -564,6 +607,38 @@ pub async fn set(
                 continue;
             }
         };
+        // The link CA every relay shares (RL-34): asked of any one of them
+        if let Some(change) = sent.replace_link_ca {
+            let outcome = if sent.rejoin
+                || sent.upgrade.is_some()
+                || !sent.properties.is_empty()
+                || !sent.settings.is_empty()
+            {
+                Err(SetError::invalid_properties()
+                    .with_property(P::ReplaceLinkCa)
+                    .with_description("Send replaceLinkCa on its own."))
+            } else if relay_id(id).is_none()
+                || relays::get(data, relay_id(id).unwrap_or_default())
+                    .await?
+                    .is_none()
+            {
+                Err(SetError::not_found())
+            } else if relays::change_link_ca(data, change, now()).await? {
+                Ok(())
+            } else {
+                Err(SetError::invalid_properties()
+                    .with_property(P::ReplaceLinkCa)
+                    .with_description(match change {
+                        relays::LinkCaChange::Start => "A replacement is already under way.",
+                        _ => "No replacement is under way.",
+                    }))
+            };
+            match outcome {
+                Ok(()) => response.updated.append(id, None),
+                Err(error) => response.not_updated.append(id, error),
+            }
+            continue;
+        }
         if let Some(upgrade) = &sent.upgrade {
             let outcome = if sent.rejoin || !sent.properties.is_empty() || !sent.settings.is_empty()
             {

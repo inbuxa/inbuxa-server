@@ -15,6 +15,8 @@ use crate::{
 };
 use inbuxa_relay_proto::{
     allow::AllowList,
+    b64,
+    pin::Pin,
     time,
     types::{Mode, RelaySettings, RelayStatus, SpoolStatus, type_name},
 };
@@ -29,6 +31,12 @@ use std::{
 use tokio::sync::{Notify, broadcast, watch};
 
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
+
+fn trusted_cas(ca: Pin, next: Option<Pin>) -> Vec<Pin> {
+    std::iter::once(ca)
+        .chain(next.filter(|next| *next != ca))
+        .collect()
+}
 
 /// A data type's new state, for push.
 #[derive(Debug, Clone)]
@@ -69,6 +77,9 @@ pub struct App {
     /// `run --link-allow-any`: the `linkAllowFrom` to ignore, until the
     /// downstream sets another (RL-33).
     pub link_allow_any: Mutex<Option<Vec<String>>>,
+    /// The link CAs trusted: the relay's own, then the downstream's next
+    /// while it replaces it (RL-34). A link on a CA dropped from it ends.
+    pub link_ca: watch::Sender<Vec<Pin>>,
 }
 
 impl App {
@@ -85,6 +96,10 @@ impl App {
             }
         }
         let (push, _) = broadcast::channel(256);
+        let link_ca = trusted_cas(
+            identity.ca_pin,
+            settings.as_ref().and_then(|s| s.next_link_ca_pin),
+        );
         Ok(App {
             paths,
             identity: Mutex::new(identity),
@@ -108,6 +123,7 @@ impl App {
             upgrading: AtomicBool::new(false),
             restart: Notify::new(),
             link_allow_any: Mutex::new(None),
+            link_ca: watch::Sender::new(link_ca),
         })
     }
 
@@ -142,6 +158,17 @@ impl App {
                 "inbuxa-relay: the downstream set linkAllowFrom; --link-allow-any no longer applies"
             );
         }
+    }
+
+    /// Trusts `ca` and `next` for the link from now on, ending every link
+    /// on a CA no longer among them.
+    pub fn set_link_ca(&self, ca: Pin, next: Option<Pin>) {
+        let trusted = trusted_cas(ca, next);
+        self.link_ca.send_if_modified(|current| {
+            let changed = *current != trusted;
+            *current = trusted;
+            changed
+        });
     }
 
     pub fn conn_id(&self) -> u64 {
@@ -230,6 +257,12 @@ impl App {
             last_error: self.last_error.lock().expect("last_error").clone(),
             self_upgrade: self.self_upgrade,
             link_from: None,
+            link_ca_pins: self
+                .link_ca
+                .borrow()
+                .iter()
+                .map(|pin| b64::encode(pin))
+                .collect(),
         }
     }
 

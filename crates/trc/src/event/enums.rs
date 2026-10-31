@@ -13,10 +13,10 @@
 // security.legacy-protocols-changed (LP-8); 644 to 646 are the cluster
 // coordinator's connection events; 647 and 648 are the audit log's
 // (audit-hold-lock spec, AU-3, AU-8); 649 is cluster.node-id-reassigned;
-// 650 to 658 are inbuxa Relay's (relay spec, RL-23, RL-T23).
+// 650 to 659 are inbuxa Relay's (relay spec, RL-23, RL-T23).
 // TOTAL_EVENT_COUNT sizes the collector's per-event tables, so it is one
 // more than the highest id; the test below holds it to the variant list
-pub const TOTAL_EVENT_COUNT: usize = 659;
+pub const TOTAL_EVENT_COUNT: usize = 660;
 pub const TOTAL_METRIC_COUNT: usize = 369;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -659,6 +659,8 @@ pub enum RelayEvent {
     Event = 656,
     LinkDown = 657,
     LinkUp = 658,
+    /// Every joined relay trusts the new link CA: it is the only one now (RL-34).
+    LinkCaReplaced = 659,
 }
 
 // inbuxa: SCIM-54: every write an identity provider makes

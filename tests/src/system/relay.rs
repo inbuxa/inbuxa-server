@@ -266,6 +266,19 @@ pub async fn test(test: &mut TestServer) {
             .is_some_and(|d| d.contains("relay.example is not an address or CIDR range")),
         "{response}"
     );
+    // The next link CA is the server's to push (RL-34)
+    let (_, response) = call(
+        admin,
+        "inbuxa:Relay/set",
+        json!({"update": {&id: {"settings/nextLinkCaPin": "K28RckuyO0ozszKIofsQT6Ka3nR2k76IuCMLtio1hEU"}}}),
+    )
+    .await;
+    assert_eq!(
+        response["notUpdated"][&id]["properties"][0], "settings",
+        "{response}"
+    );
+    // A relay still joining has said nothing of its CA
+    assert_eq!(get(admin, &id).await["linkCa"], Value::Null);
     let (_, response) = call(
         admin,
         "inbuxa:Relay/set",
@@ -1395,6 +1408,50 @@ pub async fn link(test: &mut TestServer) {
         1,
         "one DSN, for the refusal"
     );
+
+    // RL-T26: a new link CA, without a new join. Sent alone, and only
+    // when it changes something.
+    let replace = async |change: Value, extra: Value| {
+        let mut update = json!({"replaceLinkCa": change});
+        if let Value::Object(extra) = extra {
+            update.as_object_mut().unwrap().extend(extra);
+        }
+        let (_, response) = call(admin, "inbuxa:Relay/set", json!({"update": {&id: update}})).await;
+        response["updated"].get(&id).is_some()
+    };
+    assert!(!replace(json!("start"), json!({"description": "and this"})).await);
+    assert!(!replace(json!("now"), Value::Null).await);
+    assert!(
+        !replace(json!("cancel"), Value::Null).await,
+        "none to cancel"
+    );
+    let relay = get(admin, &id).await;
+    assert_eq!(relay["linkCa"], "current", "{relay}");
+    assert_eq!(relay["linkCaReplacing"], Value::Null, "{relay}");
+    let old_pin = relay["links"][0]["relay"]["linkCaPins"][0].clone();
+    assert!(old_pin.is_string(), "{relay}");
+    assert!(replace(json!("start"), Value::Null).await);
+    assert!(!replace(json!("start"), Value::Null).await, "one at a time");
+    assert!(get(admin, &id).await["linkCaReplacing"].is_string());
+    // The relay trusts both, so the server finishes it: every node takes a
+    // certificate from the new CA, and the relay makes it its only one
+    let relay = wait_for(admin, &id, "the relay took the new link CA", 90, |relay| {
+        relay["linkCaReplacing"].is_null()
+            && relay["linkCa"] == "current"
+            && relay["links"].as_array().into_iter().flatten().any(|link| {
+                link["state"] == "linked"
+                    && link["relay"]["linkCaPins"]
+                        .as_array()
+                        .is_some_and(|pins| pins.len() == 1 && pins[0] != old_pin)
+            })
+    })
+    .await;
+    let new_pin = relay["links"][0]["relay"]["linkCaPins"][0].clone();
+    let identity: Value =
+        serde_json::from_str(&std::fs::read_to_string(state.join("identity.json")).unwrap())
+            .unwrap();
+    assert_eq!(identity["caPin"], new_pin, "the relay keeps the new CA");
+    assert_eq!(relay["joinState"], "joined", "without a new join");
 
     // The relay's events were taken as this server's relay.* trace events,
     // and acknowledged, so the relay forgot them

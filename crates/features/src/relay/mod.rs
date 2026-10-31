@@ -87,6 +87,55 @@ pub struct DownstreamKeys {
     #[serde(with = "b64")]
     pub sealing_public: [u8; 32],
     pub created_at: u64,
+    /// The CA replacing the link CA, while a replacement is under way
+    /// (RL-34).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub next_link_ca: Option<NextLinkCa>,
+}
+
+/// A link CA on its way in: pushed to the relays as `nextLinkCaPin` until
+/// every joined relay trusts it, then the link CA.
+#[derive(Clone, PartialEq, Eq, SerdeSerialize, SerdeDeserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct NextLinkCa {
+    pub key_pem: String,
+    pub cert_pem: String,
+    #[serde(with = "b64")]
+    pub pin: Pin,
+    pub started_at: u64,
+}
+
+/// What an administrator asks of a link CA replacement (RL-34).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LinkCaChange {
+    Start,
+    Finish,
+    Cancel,
+}
+
+impl LinkCaChange {
+    pub fn parse(text: &str) -> Option<Self> {
+        match text {
+            "start" => Some(LinkCaChange::Start),
+            "finish" => Some(LinkCaChange::Finish),
+            "cancel" => Some(LinkCaChange::Cancel),
+            _ => None,
+        }
+    }
+}
+
+impl DownstreamKeys {
+    /// The keys with the next link CA as the link CA, if there is one.
+    pub fn finished(&self) -> Option<DownstreamKeys> {
+        let next = self.next_link_ca.as_ref()?;
+        Some(DownstreamKeys {
+            link_ca_key_pem: next.key_pem.clone(),
+            link_ca_cert_pem: next.cert_pem.clone(),
+            link_ca_pin: next.pin,
+            next_link_ca: None,
+            ..self.clone()
+        })
+    }
 }
 
 impl std::fmt::Debug for DownstreamKeys {
@@ -111,6 +160,10 @@ pub struct Join {
     pub relay_pin: Option<Pin>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub joined_at: Option<u64>,
+    /// The link CA the token named. A join started before a replacement
+    /// finished can't complete after it (RL-34).
+    #[serde(with = "b64::option", skip_serializing_if = "Option::is_none")]
+    pub ca_pin: Option<Pin>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, SerdeSerialize)]
@@ -270,6 +323,7 @@ impl Relay {
         if settings.smtp_certificate.is_some()
             || settings.sealing_key.is_some()
             || settings.recipient_key.is_some()
+            || settings.next_link_ca_pin.is_some()
         {
             return invalid(
                 "settings",
@@ -353,6 +407,7 @@ impl Relay {
             expires_at: token.expires_at,
             relay_pin: None,
             joined_at: None,
+            ca_pin: Some(keys.link_ca_pin),
         };
         token.encode()
     }
@@ -370,6 +425,21 @@ pub fn random_key() -> [u8; 32] {
 
 /// New downstream keys: a P-256 link CA, and an X25519 sealing key pair.
 pub fn new_downstream_keys(now: u64) -> trc::Result<DownstreamKeys> {
+    let (key_pem, cert_pem, pin) = new_link_ca()?;
+    let (sealing_secret, sealing_public) = seal::generate_keypair();
+    Ok(DownstreamKeys {
+        link_ca_pin: pin,
+        link_ca_key_pem: key_pem,
+        link_ca_cert_pem: cert_pem,
+        sealing_secret: *sealing_secret,
+        sealing_public,
+        created_at: now,
+        next_link_ca: None,
+    })
+}
+
+/// A new P-256 link CA: its key, its certificate, and its key's pin.
+fn new_link_ca() -> trc::Result<(String, String, Pin)> {
     let failed = |err: rcgen::Error| {
         trc::EventType::Server(trc::ServerEvent::ThreadError)
             .into_err()
@@ -391,15 +461,11 @@ pub fn new_downstream_keys(now: u64) -> trc::Result<DownstreamKeys> {
     params.not_before = rcgen::date_time_ymd(2026, 1, 1);
     params.not_after = rcgen::date_time_ymd(2126, 1, 1);
     let cert = params.self_signed(&key).map_err(failed)?;
-    let (sealing_secret, sealing_public) = seal::generate_keypair();
-    Ok(DownstreamKeys {
-        link_ca_pin: spki_pin(&rcgen::PublicKeyData::subject_public_key_info(&key)),
-        link_ca_key_pem: key.serialize_pem(),
-        link_ca_cert_pem: cert.pem(),
-        sealing_secret: *sealing_secret,
-        sealing_public,
-        created_at: now,
-    })
+    Ok((
+        key.serialize_pem(),
+        cert.pem(),
+        spki_pin(&rcgen::PublicKeyData::subject_public_key_info(&key)),
+    ))
 }
 
 struct Json<T>(T);
@@ -539,6 +605,71 @@ pub async fn create(data: &Store, relay: &Relay, now: u64) -> trc::Result<(Relay
 /// A relay as stored, with the version [`replace`] checks: a hash of the
 /// stored bytes.
 struct Versioned(Relay, u64);
+
+struct VersionedKeys(DownstreamKeys, u64);
+
+impl Deserialize for VersionedKeys {
+    fn deserialize(bytes: &[u8]) -> trc::Result<Self> {
+        let Json(keys) = Json::<DownstreamKeys>::deserialize(bytes)?;
+        Ok(VersionedKeys(keys, xxhash_rust::xxh3::xxh3_64(bytes)))
+    }
+}
+
+/// Starts, finishes or cancels a replacement of the link CA (RL-34), and
+/// says whether anything changed: starting one already under way, or
+/// finishing or cancelling none, changes nothing. Finishing makes the next
+/// CA the link CA; each node then takes a certificate from it, and the
+/// relays that trust it make it their only one.
+pub async fn change_link_ca(data: &Store, change: LinkCaChange, now: u64) -> trc::Result<bool> {
+    keys_or_new(data, now).await?;
+    loop {
+        let Some(VersionedKeys(keys, version)) = data
+            .get_value::<VersionedKeys>(ValueKey::from(class(KIND_KEYS, None)))
+            .await
+            .caused_by(trc::location!())?
+        else {
+            return Ok(false);
+        };
+        let next = match change {
+            LinkCaChange::Start if keys.next_link_ca.is_none() => {
+                let (key_pem, cert_pem, pin) = new_link_ca()?;
+                DownstreamKeys {
+                    next_link_ca: Some(NextLinkCa {
+                        key_pem,
+                        cert_pem,
+                        pin,
+                        started_at: now,
+                    }),
+                    ..keys
+                }
+            }
+            LinkCaChange::Finish => match keys.finished() {
+                Some(next) => next,
+                None => return Ok(false),
+            },
+            LinkCaChange::Cancel if keys.next_link_ca.is_some() => DownstreamKeys {
+                next_link_ca: None,
+                ..keys
+            },
+            _ => return Ok(false),
+        };
+        let mut batch = BatchBuilder::new();
+        batch.assert_value(class(KIND_KEYS, None), AssertValue::Hash(version));
+        batch.set(class(KIND_KEYS, None), Json(&next).serialize()?);
+        match data.write(batch.build_all()).await {
+            Ok(_) => {
+                changed();
+                return Ok(true);
+            }
+            Err(err)
+                if matches!(
+                    err.as_ref(),
+                    trc::EventType::Store(trc::StoreEvent::AssertValueFailed)
+                ) => {}
+            Err(err) => return Err(err.caused_by(trc::location!())),
+        }
+    }
+}
 
 impl Deserialize for Versioned {
     fn deserialize(bytes: &[u8]) -> trc::Result<Self> {

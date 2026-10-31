@@ -38,6 +38,8 @@ pub struct NodeCertificate {
     pub key_der: Vec<u8>,
     pub ca_der: Vec<u8>,
     pub issued_at: u64,
+    /// The link CA that issued it: a new one means a new certificate.
+    pub ca_pin: Pin,
 }
 
 fn cert_error(err: rcgen::Error) -> trc::Error {
@@ -83,6 +85,7 @@ pub fn issue_node_certificate(
         key_der: key.serialize_der(),
         ca_der,
         issued_at: now,
+        ca_pin: keys.link_ca_pin,
     })
 }
 
@@ -228,6 +231,8 @@ pub fn pushed_settings(
     settings.domains = plan.domains.keys().cloned().collect();
     settings.sealing_key = Some(keys.sealing_public);
     settings.recipient_key = Some(relay.recipient_key);
+    // While the link CA is replaced, the relay trusts the next one too (RL-34)
+    settings.next_link_ca_pin = keys.next_link_ca.as_ref().map(|next| next.pin);
     settings.smtp_certificate = match (&relay.smtp_certificate, &relay.smtp_private_key) {
         (Some(chain_pem), Some(key_pem)) => Some(SmtpCertificate {
             chain_pem: chain_pem.clone(),
@@ -312,6 +317,84 @@ pub async fn statuses(data: &Store, relay_id: u32) -> trc::Result<Vec<NodeLink>>
     .caused_by(trc::location!())?;
     links.sort_by_key(|link| link.node_id);
     Ok(links)
+}
+
+/// Which link CA a relay trusts, as it last said (RL-34).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LinkCa {
+    /// This server's.
+    Current,
+    /// This server's, and the one replacing it.
+    Both,
+    /// Only one this server replaced: it needs a new join.
+    Old,
+}
+
+impl LinkCa {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            LinkCa::Current => "current",
+            LinkCa::Both => "both",
+            LinkCa::Old => "old",
+        }
+    }
+}
+
+/// What a relay's links last said of the CAs it trusts, the newest report
+/// first; `None` before any has. A relay still joining has said nothing,
+/// but a token that named a CA since replaced can't complete.
+pub fn link_ca(relay: &Relay, keys: &DownstreamKeys, links: &[NodeLink]) -> Option<LinkCa> {
+    if relay.join.relay_pin.is_none() {
+        return relay
+            .join
+            .ca_pin
+            .filter(|pin| !pins_match(pin, &keys.link_ca_pin))
+            .map(|_| LinkCa::Old);
+    }
+    let pins = links
+        .iter()
+        .filter_map(|link| Some((link.updated_at, &link.relay.as_ref()?.link_ca_pins)))
+        .filter(|(_, pins)| !pins.is_empty())
+        .max_by_key(|(at, _)| *at)?
+        .1;
+    let trusts = |pin: &Pin| {
+        pins.iter()
+            .any(|p| *p == inbuxa_relay_proto::b64::encode(pin))
+    };
+    Some(if !trusts(&keys.link_ca_pin) {
+        LinkCa::Old
+    } else if keys
+        .next_link_ca
+        .as_ref()
+        .is_some_and(|next| trusts(&next.pin))
+    {
+        LinkCa::Both
+    } else {
+        LinkCa::Current
+    })
+}
+
+/// Whether a link CA replacement can finish: every enabled relay that has
+/// joined says it trusts the next CA too. A relay that never says so holds
+/// it until an administrator finishes it anyway (RL-34).
+pub async fn link_ca_ready(
+    data: &Store,
+    keys: &DownstreamKeys,
+    relays: &[Relay],
+) -> trc::Result<bool> {
+    if keys.next_link_ca.is_none() {
+        return Ok(false);
+    }
+    for relay in relays
+        .iter()
+        .filter(|r| r.enabled && r.join.relay_pin.is_some())
+    {
+        let links = statuses(data, relay.id).await?;
+        if link_ca(relay, keys, &links) != Some(LinkCa::Both) {
+            return Ok(false);
+        }
+    }
+    Ok(true)
 }
 
 /// Forgets every node's link to a relay that is gone.
@@ -518,5 +601,58 @@ mod tests {
             validity.not_after.timestamp() as u64,
             now + NODE_CERT_LIFETIME
         );
+    }
+
+    /// RL-34: which CA a relay trusts, from what its links last said.
+    #[test]
+    fn link_ca_states() {
+        let keys = new_downstream_keys(time::now()).unwrap();
+        let mut replacing = keys.clone();
+        replacing.next_link_ca = Some(super::super::NextLinkCa {
+            key_pem: String::new(),
+            cert_pem: String::new(),
+            pin: [7; 32],
+            started_at: 1,
+        });
+        let pin = |pin: &Pin| inbuxa_relay_proto::b64::encode(pin);
+        let said = |pins: Vec<String>, at: u64| NodeLink {
+            relay: Some(RelayStatus {
+                link_ca_pins: pins,
+                ..Default::default()
+            }),
+            updated_at: at,
+            ..Default::default()
+        };
+        let mut joined = relay(&[]);
+        joined.join.relay_pin = Some([1; 32]);
+        // Nothing said yet, or by a relay from before RL-34
+        assert_eq!(link_ca(&joined, &keys, &[]), None);
+        assert_eq!(link_ca(&joined, &keys, &[said(vec![], 5)]), None);
+        let current = said(vec![pin(&keys.link_ca_pin)], 5);
+        assert_eq!(
+            link_ca(&joined, &keys, std::slice::from_ref(&current)),
+            Some(LinkCa::Current)
+        );
+        assert_eq!(
+            link_ca(&joined, &replacing, std::slice::from_ref(&current)),
+            Some(LinkCa::Current)
+        );
+        let both = said(vec![pin(&keys.link_ca_pin), pin(&[7; 32])], 9);
+        // The newest report wins
+        assert_eq!(
+            link_ca(&joined, &replacing, &[current.clone(), both.clone()]),
+            Some(LinkCa::Both)
+        );
+        // Once finished, a relay that never took the new CA is left on the old
+        let finished = replacing.finished().unwrap();
+        assert_eq!(finished.link_ca_pin, [7; 32]);
+        assert!(finished.next_link_ca.is_none());
+        assert_eq!(link_ca(&joined, &finished, &[current]), Some(LinkCa::Old));
+        assert_eq!(link_ca(&joined, &finished, &[both]), Some(LinkCa::Current));
+        // A join whose token named the old CA can't complete
+        let mut joining = relay(&[]);
+        joining.start_join(&keys, time::now());
+        assert_eq!(link_ca(&joining, &keys, &[]), None);
+        assert_eq!(link_ca(&joining, &finished, &[]), Some(LinkCa::Old));
     }
 }

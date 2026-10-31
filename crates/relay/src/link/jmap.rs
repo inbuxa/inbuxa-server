@@ -14,6 +14,7 @@ use crate::{app::App, link::tls::cert_pin, outbound::Destroyed, state::JoinStage
 use inbuxa_relay_proto::{
     CAPABILITY, CORE_CAPABILITY, b64,
     jmap::{Invocation, MethodError, Request, Response, method},
+    pin::pins_match,
     recipient::{RecipientDomain, RecipientHash},
     time, token,
     types::{NewOutbound, RELAY_SINGLETON, RelaySettings, RelayStatus, Verdict, type_name},
@@ -42,6 +43,8 @@ pub struct RequestError {
 pub struct Caller {
     pub conn: u64,
     pub peer: std::net::IpAddr,
+    /// The link CA its certificate is from (RL-34).
+    pub ca: inbuxa_relay_proto::pin::Pin,
 }
 
 type Failure = (MethodError, Option<String>);
@@ -106,7 +109,7 @@ fn call_one(app: &App, caller: &Caller, call: &Invocation) -> MethodResult {
     match call.name() {
         method::RELAY_JOIN => relay_join(app, args),
         method::RELAY_GET => relay_get(app, caller, args),
-        method::RELAY_SET => relay_set(app, args),
+        method::RELAY_SET => relay_set(app, caller, args),
         method::RELAY_UPGRADE => relay_upgrade(app, args),
         method::RECIPIENT_DOMAIN_GET => recipient_domain_get(app),
         method::RECIPIENT_DOMAIN_SET => recipient_domain_set(app, args),
@@ -266,7 +269,7 @@ fn relay_get(app: &App, caller: &Caller, args: &Map<String, Value>) -> MethodRes
 /// Read-only on `Relay`: what only the relay sets.
 const RELAY_READ_ONLY: &[&str] = &["id", "status", "relayVersion"];
 
-fn relay_set(app: &App, args: &Map<String, Value>) -> MethodResult {
+fn relay_set(app: &App, caller: &Caller, args: &Map<String, Value>) -> MethodResult {
     let old_state = app.relay_state();
     if let Some(if_in) = args.get("ifInState").and_then(Value::as_str)
         && if_in != old_state
@@ -292,7 +295,7 @@ fn relay_set(app: &App, args: &Map<String, Value>) -> MethodResult {
                 );
                 continue;
             }
-            match apply_settings(app, patch) {
+            match apply_settings(app, caller, patch) {
                 Ok(()) => {
                     updated.insert(id.clone(), Value::Null);
                 }
@@ -386,7 +389,7 @@ fn relay_upgrade(app: &App, args: &Map<String, Value>) -> MethodResult {
     }))
 }
 
-fn apply_settings(app: &App, patch: &Value) -> Result<(), Value> {
+fn apply_settings(app: &App, caller: &Caller, patch: &Value) -> Result<(), Value> {
     let Value::Object(patch) = patch else {
         return Err(set_error("invalidPatch", "a patch is an object"));
     };
@@ -435,10 +438,52 @@ fn apply_settings(app: &App, patch: &Value) -> Result<(), Value> {
             format!("smtpCertificate: {e}"),
         ));
     }
+    // The link CA (RL-34). A link on the downstream's next CA that pushes
+    // it as null makes it the relay's only one; nothing else may take it
+    // from under that link.
+    let ca = app.identity.lock().expect("identity").ca_pin;
+    if settings
+        .next_link_ca_pin
+        .is_some_and(|next| pins_match(&next, &ca))
+    {
+        return Err(set_error(
+            "invalidProperties",
+            "nextLinkCaPin: the relay trusts that CA already",
+        ));
+    }
+    let on_next = !pins_match(&caller.ca, &ca)
+        && current
+            .next_link_ca_pin
+            .is_some_and(|next| pins_match(&next, &caller.ca));
+    let promote = match settings.next_link_ca_pin {
+        None => on_next,
+        Some(next) if on_next && !pins_match(&next, &caller.ca) => {
+            return Err(set_error(
+                "invalidProperties",
+                "nextLinkCaPin: a link on the next CA can only make it the only one",
+            ));
+        }
+        Some(_) => false,
+    };
+    if promote {
+        // Saved first: if the relay stops before the settings are, it
+        // trusts the new CA twice, not the old one alone
+        let mut identity = app.identity.lock().expect("identity");
+        identity.ca_pin = caller.ca;
+        identity
+            .save(&app.paths)
+            .map_err(|e| set_error("serverFail", e.to_string()))?;
+    }
     crate::state::save_settings(&app.paths, &settings)
         .map_err(|e| set_error("serverFail", e.to_string()))?;
     app.link_allow_from_changed(&settings.link_allow_from);
+    let next = settings.next_link_ca_pin;
     app.settings.send_replace(Some(Arc::new(settings)));
+    // Links on a CA dropped here end now
+    app.set_link_ca(if promote { caller.ca } else { ca }, next);
+    if promote {
+        app.record("relay.link-ca-replaced", Map::new());
+    }
 
     // The first Relay/set after the proof completes the join.
     let mut identity = app.identity.lock().expect("identity");
