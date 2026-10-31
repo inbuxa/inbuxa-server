@@ -444,17 +444,19 @@ pub async fn set(
                 .await
                 .map(|_| None)
                 .map_err(refused),
-            Some("passwords") => runs::take_passwords(server, migration_id)
-                .await
-                .map(|blob| {
-                    let mut out = Map::with_capacity(1);
-                    out.insert_unchecked(
-                        Key::Property(P::PasswordsBlobId),
-                        Value::Str(blob.into()),
-                    );
-                    Some(Value::Object(out))
-                })
-                .map_err(refused),
+            Some("passwords") => {
+                runs::take_passwords(server, migration_id, access_token.account_id())
+                    .await
+                    .map(|blob| {
+                        let mut out = Map::with_capacity(1);
+                        out.insert_unchecked(
+                            Key::Property(P::PasswordsBlobId),
+                            Value::Str(blob.into()),
+                        );
+                        Some(Value::Object(out))
+                    })
+                    .map_err(refused)
+            }
             Some(_) => Err(invalid(
                 P::Action,
                 "preview, move, finalPass, stop, passwords or close.",

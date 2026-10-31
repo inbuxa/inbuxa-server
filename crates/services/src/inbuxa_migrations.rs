@@ -361,8 +361,8 @@ pub async fn close(server: &Server, id: u32) -> Result<(), Refusal> {
 }
 
 /// MG-13: the new accounts' passwords, once: the file is deleted as it's
-/// read. The CSV goes into a blob of whoever started the migration.
-pub async fn take_passwords(server: &Server, id: u32) -> Result<String, Refusal> {
+/// read. The CSV goes into a blob of the administrator who takes them.
+pub async fn take_passwords(server: &Server, id: u32, account_id: u32) -> Result<String, Refusal> {
     let migration = model::get(server.store(), id)
         .await
         .map_err(|err| Refusal::Failed(err.to_string()))?
@@ -394,7 +394,7 @@ pub async fn take_passwords(server: &Server, id: u32) -> Result<String, Refusal>
         return Err(Refusal::NoPasswords);
     }
     let blob = server
-        .put_jmap_blob(migration.created_by_id, &csv)
+        .put_jmap_blob(account_id, &csv)
         .await
         .map_err(|err| Refusal::Failed(err.to_string()))?;
     for path in files.drain(..) {
