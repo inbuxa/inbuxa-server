@@ -50,6 +50,7 @@ use inbuxa_features::{
             record_ingested, record_join, set_status, was_ingested,
         },
         outbound::{self, Call, HandOver, Handed, Linked, Refused, Sender},
+        wrap::KeyError,
     },
 };
 use inbuxa_relay_proto::{
@@ -184,6 +185,8 @@ async fn reconcile(
     links: &mut HashMap<u32, Running>,
 ) -> trc::Result<()> {
     let data = server.store();
+    // Keys stored in the clear, wrapped once a key file is named (RL-35)
+    relays::wrap_stored(data).await?;
     let (keys, all) = match relays::keys(data).await? {
         Some(keys) => (Some(keys), relays::all(data).await?),
         None => (None, Vec::new()),
@@ -301,6 +304,13 @@ impl LinkError {
     }
 }
 
+/// A relay key that can't be opened (RL-35): the node says why, in words.
+impl From<KeyError> for LinkError {
+    fn from(err: KeyError) -> Self {
+        LinkError::down(err.0)
+    }
+}
+
 impl From<trc::Error> for LinkError {
     fn from(err: trc::Error) -> Self {
         LinkError::down(format!("This server failed: {err}"))
@@ -401,6 +411,9 @@ async fn link_keys(
     let keys = relays::keys(server.store())
         .await?
         .ok_or_else(|| LinkError::down("This server has no relay keys yet."))?;
+    // Wrapped, and no key file to open them with (RL-35): no link starts
+    keys.sealing_secret.open()?;
+    keys.link_ca_key_pem.open()?;
     let cert = certs.get(&keys, server.core.network.node_id)?;
     Ok((keys, cert))
 }
@@ -1010,7 +1023,7 @@ async fn session(
         dialer: dialer.clone(),
         relay_id: relay.id,
         relay_name: relay.name.clone(),
-        secret: keys.sealing_secret,
+        secret: keys.sealing_secret.open()?,
         taking: HashSet::new(),
         answers: answers_tx,
     };
@@ -1807,7 +1820,7 @@ async fn sync(
     }
 
     // Settings, whole, when they changed
-    let settings = pushed_settings(relay, keys, &plan);
+    let settings = pushed_settings(relay, keys, &plan)?;
     if sent.settings.as_ref() != Some(&settings) {
         let mut patch = serde_json::to_value(&settings).unwrap_or_default();
         // The relay merges what it is sent: a setting left out stays as it
@@ -1872,7 +1885,10 @@ async fn sync(
 
     // Recipients: in full on a new link or after many changes, else as
     // changes
-    let hashes: BTreeSet<RecipientHash> = plan.hashes(&relay.recipient_key).into_iter().collect();
+    let hashes: BTreeSet<RecipientHash> = plan
+        .hashes(&relay.recipient_key.open()?)
+        .into_iter()
+        .collect();
     let added: Vec<&RecipientHash> = hashes.difference(&sent.hashes).collect();
     let removed: Vec<&RecipientHash> = sent.hashes.difference(&hashes).collect();
     if !sent.started || added.len() + removed.len() > MAX_DELTA {

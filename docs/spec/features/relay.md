@@ -205,6 +205,19 @@ the protocol the rest of the suite already speaks.
   turned on. Without the setting, keys are stored as today, as registry
   secrets.
 
+  How it goes:
+  - The file holds 32 random bytes in base64, as `openssl rand -base64 32`
+    writes them. Each key is wrapped with AES-256-GCM and a random nonce,
+    stored as `{"wrapped": …}` where it was a string.
+  - Once the setting names a file, the link service wraps every key still
+    stored in the clear, within a scan. Keys stay wrapped: taking the
+    setting away later doesn't unwrap them.
+  - A node that can't open them, because the setting is missing, the file
+    can't be read, or it holds another key, starts no link. Each of its
+    links shows why in `lastError`. While the setting names a file that
+    can't be read, no key is written in the clear.
+  - `inbuxa:Relay` shows `keysWrapped`.
+
 ### Joining and reset
 
 1. In inbuxa-admin, an administrator adds a relay: a name and the address the
@@ -537,7 +550,7 @@ When no link is up, or after RL-13:
 
 | Object | What it holds |
 |---|---|
-| `inbuxa:Relay` | One per relay: `name`, `address`, `linkPort`, `enabled`, the settings pushed to the relay, `sendThrough` (route outbound mail through relays), `inboundOnly` (takes mail in but sends none, e.g. while its IP isn't warmed up or isn't in SPF yet), `mxPreference` (its MX preference, 10 by default, RL-25), `certificateNotAfter` and `certificateError` (when its certificate runs out, and why the last order failed, RL-27), `olderThanServer` (a link last heard an older release than this server's, RL-28), `linkCa` and `linkCaReplacing` (RL-34), and read-only status mirrored from the relay: link state per node, version, queue counts, `lastSeen`. Create, or an update with `rejoin: true`, returns `joinToken` once. An update with `upgrade: {blobId, signature}`, sent on its own, hands the relay a release over the node's link (RL-29). An update with `replaceLinkCa`, sent on its own, starts, finishes or cancels a replacement of the shared link CA (RL-34) |
+| `inbuxa:Relay` | One per relay: `name`, `address`, `linkPort`, `enabled`, the settings pushed to the relay, `sendThrough` (route outbound mail through relays), `inboundOnly` (takes mail in but sends none, e.g. while its IP isn't warmed up or isn't in SPF yet), `mxPreference` (its MX preference, 10 by default, RL-25), `certificateNotAfter` and `certificateError` (when its certificate runs out, and why the last order failed, RL-27), `olderThanServer` (a link last heard an older release than this server's, RL-28), `linkCa` and `linkCaReplacing` (RL-34), `keysWrapped` (RL-35), and read-only status mirrored from the relay: link state per node, version, queue counts, `lastSeen`. Create, or an update with `rejoin: true`, returns `joinToken` once. An update with `upgrade: {blobId, signature}`, sent on its own, hands the relay a release over the node's link (RL-29). An update with `replaceLinkCa`, sent on its own, starts, finishes or cancels a replacement of the shared link CA (RL-34) |
 | `inbuxa:RelayMessage` | Read-only view of a relay's `Inbound` and `Outbound` queues, fetched over the link when asked. Never message content. `/get`, `/query` (filter `relayId`, `direction`; newest first) and `/set` destroy only: discards held mail, or cancels an outbound message, whose recipients fail here with no DSN as a delivery cancelled in the queue does. Each id is the relay's id and a hash of the relay's own message id, so nothing is stored |
 
 Permissions: `sysRelayGet`, `sysRelayUpdate`, `sysRelayQueueGet`,

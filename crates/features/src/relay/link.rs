@@ -11,6 +11,7 @@
 
 use super::{
     DownstreamKeys, FEATURE, Json, KIND_INGESTED, KIND_STATUS, Relay, get_versioned, replace,
+    wrap::KeyError,
 };
 use inbuxa_relay_proto::{
     pin::{Pin, pins_match},
@@ -57,7 +58,7 @@ pub fn issue_node_certificate(
     node_id: u64,
     now: u64,
 ) -> trc::Result<NodeCertificate> {
-    let ca_key = rcgen::KeyPair::from_pem(&keys.link_ca_key_pem).map_err(cert_error)?;
+    let ca_key = rcgen::KeyPair::from_pem(&keys.link_ca_key_pem.open()?).map_err(cert_error)?;
     let issuer =
         rcgen::Issuer::from_ca_cert_pem(&keys.link_ca_cert_pem, ca_key).map_err(cert_error)?;
     let key = rcgen::KeyPair::generate_for(&rcgen::PKCS_ECDSA_P256_SHA256).map_err(cert_error)?;
@@ -221,16 +222,17 @@ impl RecipientPlan {
 
 /// What the relay is sent with `Relay/set`: its settings as an
 /// administrator made them, with the served domains, the keys and the
-/// STARTTLS certificate added.
+/// STARTTLS certificate added. Fails only when the recipient key is
+/// wrapped and can't be opened (RL-35).
 pub fn pushed_settings(
     relay: &Relay,
     keys: &DownstreamKeys,
     plan: &RecipientPlan,
-) -> RelaySettings {
+) -> Result<RelaySettings, KeyError> {
     let mut settings = relay.settings.clone();
     settings.domains = plan.domains.keys().cloned().collect();
     settings.sealing_key = Some(keys.sealing_public);
-    settings.recipient_key = Some(relay.recipient_key);
+    settings.recipient_key = Some(relay.recipient_key.open()?);
     // While the link CA is replaced, the relay trusts the next one too (RL-34)
     settings.next_link_ca_pin = keys.next_link_ca.as_ref().map(|next| next.pin);
     settings.smtp_certificate = match (&relay.smtp_certificate, &relay.smtp_private_key) {
@@ -240,7 +242,7 @@ pub fn pushed_settings(
         }),
         _ => None,
     };
-    settings
+    Ok(settings)
 }
 
 /// A node's link to a relay, as that node sees it.
@@ -502,7 +504,7 @@ pub async fn forget_ingested(data: &Store, relay_id: u32, before: u64) -> trc::R
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::relay::{Join, new_downstream_keys};
+    use crate::relay::{Join, new_downstream_keys, wrap::Secret};
     use inbuxa_relay_proto::time;
 
     fn relay(domains: &[&str]) -> Relay {
@@ -523,7 +525,7 @@ mod tests {
             },
             smtp_certificate: None,
             smtp_private_key: None,
-            recipient_key: [9; 32],
+            recipient_key: Secret::new([9; 32]),
             join: Join::default(),
             created_by: String::new(),
             created_at: 0,
@@ -575,7 +577,7 @@ mod tests {
         let hashes = one.hashes(&[9; 32]);
         assert_eq!(hashes, vec![recipient::hash(&[9; 32], "jane@example.com")]);
         let keys = new_downstream_keys(time::now()).unwrap();
-        let settings = pushed_settings(&relay(&["example.com"]), &keys, &one);
+        let settings = pushed_settings(&relay(&["example.com"]), &keys, &one).unwrap();
         assert_eq!(settings.domains, ["example.com"]);
         assert_eq!(settings.sealing_key, Some(keys.sealing_public));
         assert_eq!(settings.recipient_key, Some([9; 32]));
@@ -609,7 +611,7 @@ mod tests {
         let keys = new_downstream_keys(time::now()).unwrap();
         let mut replacing = keys.clone();
         replacing.next_link_ca = Some(super::super::NextLinkCa {
-            key_pem: String::new(),
+            key_pem: Secret::new(String::new()),
             cert_pem: String::new(),
             pin: [7; 32],
             started_at: 1,
