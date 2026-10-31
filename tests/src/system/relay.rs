@@ -24,7 +24,7 @@ use crate::utils::{
     dns::DnsCache,
     server::{TestServer, TestServerBuilder},
 };
-use inbuxa_relay_proto::{time, token::JoinToken};
+use inbuxa_relay_proto::{b64, time, token::JoinToken};
 use mail_auth::{common::parse::TxtRecordParser, mta_sts::TlsRpt};
 use registry::{
     schema::{
@@ -279,6 +279,8 @@ pub async fn test(test: &mut TestServer) {
     );
     // A relay still joining has said nothing of its CA
     assert_eq!(get(admin, &id).await["linkCa"], Value::Null);
+    // No key file: the keys are stored as before RL-35
+    assert_eq!(get(admin, &id).await["keysWrapped"], false);
     let (_, response) = call(
         admin,
         "inbuxa:Relay/set",
@@ -1452,6 +1454,92 @@ pub async fn link(test: &mut TestServer) {
             .unwrap();
     assert_eq!(identity["caPin"], new_pin, "the relay keeps the new CA");
     assert_eq!(relay["joinState"], "joined", "without a new join");
+
+    // RL-T27: with a key file, a copy of the store holds none of the relay
+    // keys in the clear...
+    use inbuxa_features::relay as relays;
+    let data = test.server.store().clone();
+    let keys = relays::keys(&data).await.unwrap().unwrap();
+    let mut clear = vec![
+        keys.link_ca_key_pem
+            .open()
+            .unwrap()
+            .lines()
+            .nth(1)
+            .unwrap()
+            .to_string(),
+        b64::encode(&keys.sealing_secret.open().unwrap()),
+    ];
+    for relay in relays::all(&data).await.unwrap() {
+        clear.push(b64::encode(&relay.recipient_key.open().unwrap()));
+    }
+    let in_the_clear = async || {
+        relays::stored_bytes(&data)
+            .await
+            .unwrap()
+            .iter()
+            .any(|bytes| {
+                clear
+                    .iter()
+                    .any(|secret| bytes.windows(secret.len()).any(|w| w == secret.as_bytes()))
+            })
+    };
+    assert!(in_the_clear().await, "in the clear without one, as before");
+    let key_file = test.temp_dir.path.join("relay.key");
+    std::fs::write(&key_file, b64::encode(&relays::random_key())).unwrap();
+    relays::wrap::set_key_file(Some(&key_file));
+    relays::changed();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    while in_the_clear().await {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the relay keys were never wrapped"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    }
+    wait_for(
+        admin,
+        &id,
+        "the keys wrapped, and still linked",
+        30,
+        |relay| relay["keysWrapped"] == true && relay["links"][0]["state"] == "linked",
+    )
+    .await;
+    // ...and a node without the file starts no relay link, and says why
+    call(
+        admin,
+        "inbuxa:Relay/set",
+        json!({"update": {&id: {"enabled": false}}}),
+    )
+    .await;
+    wait_for(admin, &id, "the link ended", 30, |relay| {
+        relay["links"][0]["state"] == "down"
+    })
+    .await;
+    relays::wrap::set_key_file(None);
+    let reply = send_mail(smtp_port, "jane@example.com", &message("Wrapped one", "")).await;
+    assert!(reply.starts_with("250"), "held: {reply}");
+    call(
+        admin,
+        "inbuxa:Relay/set",
+        json!({"update": {&id: {"enabled": true}}}),
+    )
+    .await;
+    wait_for(admin, &id, "no link without the key file", 30, |relay| {
+        relay["links"][0]["state"] == "down"
+            && relay["links"][0]["lastError"]
+                .as_str()
+                .is_some_and(|e| e.contains("INBUXA_RELAY_KEY_FILE"))
+    })
+    .await;
+    // With it again, the link is back, and the mail held meanwhile opens
+    relays::wrap::set_key_file(Some(&key_file));
+    relays::changed();
+    wait_for_mail(&jane, "Wrapped one", 1).await;
+    wait_for(admin, &id, "linked again", 30, |relay| {
+        relay["links"][0]["state"] == "linked"
+    })
+    .await;
 
     // The relay's events were taken as this server's relay.* trace events,
     // and acknowledged, so the relay forgot them

@@ -69,6 +69,7 @@ const ALL: &[P] = &[
     P::OlderThanServer,
     P::LinkCa,
     P::LinkCaReplacing,
+    P::KeysWrapped,
     P::CreatedBy,
     P::CreatedAt,
     P::UpdatedAt,
@@ -91,6 +92,7 @@ const SERVER_SET: &[P] = &[
     P::OlderThanServer,
     P::LinkCa,
     P::LinkCaReplacing,
+    P::KeysWrapped,
     P::CreatedBy,
     P::CreatedAt,
     P::UpdatedAt,
@@ -220,6 +222,9 @@ fn to_value(
             P::LinkCaReplacing => keys
                 .and_then(|keys| keys.next_link_ca.as_ref())
                 .map_or(Value::Null, |next| date(next.started_at)),
+            P::KeysWrapped => {
+                Value::Bool(keys.is_some_and(|keys| keys.link_ca_key_pem.is_wrapped()))
+            }
             P::CreatedBy => text(Some(&relay.created_by)),
             P::CreatedAt => date(relay.created_at),
             P::UpdatedAt => date(relay.updated_at),
@@ -413,7 +418,7 @@ fn apply(current: &StoredRelay, sent: &Sent) -> Result<StoredRelay, SetError<P>>
     let next = parse(json)?;
     Ok(StoredRelay {
         id: current.id,
-        recipient_key: current.recipient_key,
+        recipient_key: current.recipient_key.clone(),
         join: current.join.clone(),
         created_by: current.created_by.clone(),
         created_at: current.created_at,

@@ -26,12 +26,15 @@
 //!   ([`dns::dns_change`]).
 //!
 //! Numbers are big-endian. There are few relays, so they're read whole.
+//! The secrets in `k` and `r` are wrapped under the key file
+//! `INBUXA_RELAY_KEY_FILE` names, when it names one ([`wrap`], RL-35).
 
 pub mod certificate;
 pub mod dns;
 pub mod link;
 pub mod messages;
 pub mod outbound;
+pub mod wrap;
 
 use inbuxa_relay_proto::{
     b64,
@@ -47,6 +50,7 @@ use store::{
 };
 use trc::AddContext;
 use types::id::Id;
+use wrap::Secret;
 
 /// Wakes the link service on this node when a relay is added, changed or
 /// removed here. Other nodes see it at their next scan.
@@ -77,13 +81,12 @@ const MAX_DOMAINS: usize = 5_000;
 #[derive(Clone, PartialEq, Eq, SerdeSerialize, SerdeDeserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DownstreamKeys {
-    pub link_ca_key_pem: String,
+    pub link_ca_key_pem: Secret<String>,
     pub link_ca_cert_pem: String,
     /// The pin of the link CA's key, which every relay keeps.
     #[serde(with = "b64")]
     pub link_ca_pin: Pin,
-    #[serde(with = "b64")]
-    pub sealing_secret: [u8; 32],
+    pub sealing_secret: Secret<[u8; 32]>,
     #[serde(with = "b64")]
     pub sealing_public: [u8; 32],
     pub created_at: u64,
@@ -98,7 +101,7 @@ pub struct DownstreamKeys {
 #[derive(Clone, PartialEq, Eq, SerdeSerialize, SerdeDeserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct NextLinkCa {
-    pub key_pem: String,
+    pub key_pem: Secret<String>,
     pub cert_pem: String,
     #[serde(with = "b64")]
     pub pin: Pin,
@@ -125,6 +128,16 @@ impl LinkCaChange {
 }
 
 impl DownstreamKeys {
+    /// Some secret is in the clear while a key file is named (RL-35).
+    pub fn needs_wrapping(&self) -> bool {
+        self.link_ca_key_pem.needs_wrapping()
+            || self.sealing_secret.needs_wrapping()
+            || self
+                .next_link_ca
+                .as_ref()
+                .is_some_and(|next| next.key_pem.needs_wrapping())
+    }
+
     /// The keys with the next link CA as the link CA, if there is one.
     pub fn finished(&self) -> Option<DownstreamKeys> {
         let next = self.next_link_ca.as_ref()?;
@@ -223,8 +236,8 @@ pub struct Relay {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub smtp_private_key: Option<String>,
     /// The key this relay's recipient hashes are made with (RL-11).
-    #[serde(with = "b64", default)]
-    pub recipient_key: [u8; 32],
+    #[serde(default)]
+    pub recipient_key: Secret<[u8; 32]>,
     #[serde(default)]
     pub join: Join,
     #[serde(default)]
@@ -401,7 +414,7 @@ impl Relay {
     /// to show the administrator once.
     pub fn start_join(&mut self, keys: &DownstreamKeys, now: u64) -> String {
         let token = JoinToken::issue(self.relay_id(), keys.link_ca_pin, now);
-        self.recipient_key = random_key();
+        self.recipient_key = Secret::new(random_key());
         self.join = Join {
             secret: Some(token.secret),
             expires_at: token.expires_at,
@@ -429,9 +442,9 @@ pub fn new_downstream_keys(now: u64) -> trc::Result<DownstreamKeys> {
     let (sealing_secret, sealing_public) = seal::generate_keypair();
     Ok(DownstreamKeys {
         link_ca_pin: pin,
-        link_ca_key_pem: key_pem,
+        link_ca_key_pem: Secret::new(key_pem),
         link_ca_cert_pem: cert_pem,
-        sealing_secret: *sealing_secret,
+        sealing_secret: Secret::new(*sealing_secret),
         sealing_public,
         created_at: now,
         next_link_ca: None,
@@ -635,7 +648,7 @@ pub async fn change_link_ca(data: &Store, change: LinkCaChange, now: u64) -> trc
                 let (key_pem, cert_pem, pin) = new_link_ca()?;
                 DownstreamKeys {
                     next_link_ca: Some(NextLinkCa {
-                        key_pem,
+                        key_pem: Secret::new(key_pem),
                         cert_pem,
                         pin,
                         started_at: now,
@@ -711,6 +724,79 @@ pub async fn replace(data: &Store, relay: &Relay, version: u64) -> trc::Result<b
     }
 }
 
+/// Wraps every relay secret stored in the clear, once a key file is named
+/// (RL-35), and says whether there were any. Each is written again, which
+/// wraps it, unless something changed it first.
+pub async fn wrap_stored(data: &Store) -> trc::Result<bool> {
+    if !wrap::turned_on() {
+        return Ok(false);
+    }
+    let mut wrapped = false;
+    while let Some(VersionedKeys(keys, version)) = data
+        .get_value::<VersionedKeys>(ValueKey::from(class(KIND_KEYS, None)))
+        .await
+        .caused_by(trc::location!())?
+        .filter(|VersionedKeys(keys, _)| keys.needs_wrapping())
+    {
+        let mut batch = BatchBuilder::new();
+        batch.assert_value(class(KIND_KEYS, None), AssertValue::Hash(version));
+        batch.set(class(KIND_KEYS, None), Json(&keys).serialize()?);
+        match data.write(batch.build_all()).await {
+            Ok(_) => {
+                wrapped = true;
+                break;
+            }
+            Err(err)
+                if matches!(
+                    err.as_ref(),
+                    trc::EventType::Store(trc::StoreEvent::AssertValueFailed)
+                ) => {}
+            Err(err) => return Err(err.caused_by(trc::location!())),
+        }
+    }
+    for relay in all(data).await? {
+        while let Some((relay, version)) = get_versioned(data, relay.id)
+            .await?
+            .filter(|(relay, _)| relay.recipient_key.needs_wrapping())
+        {
+            if replace(data, &relay, version).await? {
+                wrapped = true;
+                break;
+            }
+        }
+    }
+    Ok(wrapped)
+}
+
+/// The downstream keys and every relay as the store holds them: what a copy
+/// of the store gives away (RL-T27).
+pub async fn stored_bytes(data: &Store) -> trc::Result<Vec<Vec<u8>>> {
+    struct Raw(Vec<u8>);
+    impl Deserialize for Raw {
+        fn deserialize(bytes: &[u8]) -> trc::Result<Self> {
+            Ok(Raw(bytes.to_vec()))
+        }
+    }
+    let mut out = Vec::new();
+    if let Some(Raw(bytes)) = data
+        .get_value::<Raw>(ValueKey::from(class(KIND_KEYS, None)))
+        .await
+        .caused_by(trc::location!())?
+    {
+        out.push(bytes);
+    }
+    for relay in all(data).await? {
+        if let Some(Raw(bytes)) = data
+            .get_value::<Raw>(relay_key(relay.id))
+            .await
+            .caused_by(trc::location!())?
+        {
+            out.push(bytes);
+        }
+    }
+    Ok(out)
+}
+
 /// Removes a relay, and every node's record of its link.
 pub async fn delete(data: &Store, id: u32) -> trc::Result<()> {
     let nodes = link::statuses(data, id).await?;
@@ -747,7 +833,7 @@ mod tests {
             },
             smtp_certificate: None,
             smtp_private_key: None,
-            recipient_key: [0; 32],
+            recipient_key: Secret::new([0; 32]),
             join: Join::default(),
             created_by: String::new(),
             created_at: 0,
@@ -809,16 +895,16 @@ mod tests {
         assert_eq!(Some(decoded.secret), r.join.secret);
         assert_eq!(r.join.state(now), JoinState::Waiting);
         assert_eq!(r.join.state(decoded.expires_at), JoinState::Expired);
-        assert_ne!(r.recipient_key, [0; 32]);
+        assert!(r.recipient_key != Secret::new([0; 32]));
 
         // A new join forgets the pinned key and the old recipient key
         r.join.relay_pin = Some([7; 32]);
         assert_eq!(r.join.state(decoded.expires_at), JoinState::Joined);
-        let old_key = r.recipient_key;
+        let old_key = r.recipient_key.clone();
         let second = r.start_join(&keys, now);
         assert_ne!(second, token);
         assert_eq!(r.join.relay_pin, None);
-        assert_ne!(r.recipient_key, old_key);
+        assert!(r.recipient_key != old_key);
 
         // The pin is of the key inside the CA certificate the relay sees
         use base64::Engine;
@@ -830,7 +916,7 @@ mod tests {
                     .collect::<String>(),
             )
             .unwrap();
-        let ca_key = rcgen::KeyPair::from_pem(&keys.link_ca_key_pem).unwrap();
+        let ca_key = rcgen::KeyPair::from_pem(&keys.link_ca_key_pem.open().unwrap()).unwrap();
         let spki = rcgen::PublicKeyData::subject_public_key_info(&ca_key);
         assert!(der.windows(spki.len()).any(|w| w == spki));
         assert_eq!(spki_pin(&spki), keys.link_ca_pin);
@@ -838,7 +924,7 @@ mod tests {
         // The sealing key opens what's sealed to its public half
         let sealed = seal::seal(&keys.sealing_public, b"aad", b"hello").unwrap();
         assert_eq!(
-            seal::open(&keys.sealing_secret, b"aad", &sealed).unwrap(),
+            seal::open(&keys.sealing_secret.open().unwrap(), b"aad", &sealed).unwrap(),
             b"hello"
         );
     }

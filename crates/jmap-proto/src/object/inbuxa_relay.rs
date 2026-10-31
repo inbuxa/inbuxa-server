@@ -65,6 +65,9 @@ pub enum RelayProperty {
     LinkCa,
     /// When a replacement of the link CA began, while one is under way.
     LinkCaReplacing,
+    /// Whether the relay keys are wrapped under the key file
+    /// `INBUXA_RELAY_KEY_FILE` names (RL-35).
+    KeysWrapped,
     /// In a create or rejoin response only.
     JoinToken,
     /// Each node's link to the relay, and what the relay last said.
@@ -114,6 +117,7 @@ impl Property for RelayProperty {
             RelayProperty::ReplaceLinkCa => "replaceLinkCa",
             RelayProperty::LinkCa => "linkCa",
             RelayProperty::LinkCaReplacing => "linkCaReplacing",
+            RelayProperty::KeysWrapped => "keysWrapped",
             RelayProperty::JoinToken => "joinToken",
             RelayProperty::Links => "links",
             RelayProperty::CreatedBy => "createdBy",
@@ -151,6 +155,7 @@ impl RelayProperty {
             b"replaceLinkCa" => RelayProperty::ReplaceLinkCa,
             b"linkCa" => RelayProperty::LinkCa,
             b"linkCaReplacing" => RelayProperty::LinkCaReplacing,
+            b"keysWrapped" => RelayProperty::KeysWrapped,
             b"joinToken" => RelayProperty::JoinToken,
             b"links" => RelayProperty::Links,
             b"createdBy" => RelayProperty::CreatedBy,
