@@ -136,6 +136,10 @@ pub async fn serve(app: Arc<App>, listener: TcpListener) -> std::io::Result<()> 
                 continue;
             }
         };
+        // Dropped before TLS, with no reply (RL-33)
+        if !app.link_allows(peer.ip()) {
+            continue;
+        }
         let now = inbuxa_relay_proto::time::now();
         if !handshakes.lock().expect("handshakes").allow(peer.ip(), now) {
             continue;
@@ -151,11 +155,15 @@ pub async fn serve(app: Arc<App>, listener: TcpListener) -> std::io::Result<()> 
                     _ => return,
                 };
             let conn = app.conn_id();
+            let caller = jmap::Caller {
+                conn,
+                peer: peer.ip().to_canonical(),
+            };
             let service = {
                 let app = app.clone();
                 service_fn(move |req| {
                     let app = app.clone();
-                    async move { Ok::<_, std::convert::Infallible>(route(app, conn, req).await) }
+                    async move { Ok::<_, std::convert::Infallible>(route(app, caller, req).await) }
                 })
             };
             let _ = hyper::server::conn::http1::Builder::new()
@@ -172,12 +180,12 @@ pub async fn serve(app: Arc<App>, listener: TcpListener) -> std::io::Result<()> 
     }
 }
 
-async fn route(app: Arc<App>, conn: u64, req: Request<Incoming>) -> Response<Body> {
+async fn route(app: Arc<App>, caller: jmap::Caller, req: Request<Incoming>) -> Response<Body> {
     let path = req.uri().path().to_string();
     match (req.method(), path.as_str()) {
         (&Method::GET, "/jmap/session" | "/.well-known/jmap") => session(&app, &req),
-        (&Method::POST, "/jmap/api") => api(app, conn, req).await,
-        (&Method::GET, "/jmap/ws") => websocket(app, conn, req),
+        (&Method::POST, "/jmap/api") => api(app, caller, req).await,
+        (&Method::GET, "/jmap/ws") => websocket(app, caller, req),
         (&Method::POST, "/jmap/upload/relay") => upload(app, req).await,
         (&Method::GET, p) if p.starts_with("/jmap/download/relay/") => {
             download(app, &p["/jmap/download/relay/".len()..]).await
@@ -245,7 +253,7 @@ fn session(app: &App, req: &Request<Incoming>) -> Response<Body> {
     json_response(StatusCode::OK, &session)
 }
 
-async fn api(app: Arc<App>, conn: u64, req: Request<Incoming>) -> Response<Body> {
+async fn api(app: Arc<App>, caller: jmap::Caller, req: Request<Incoming>) -> Response<Body> {
     let body = match Limited::new(req.into_body(), MAX_REQUEST_SIZE)
         .collect()
         .await
@@ -278,7 +286,7 @@ async fn api(app: Arc<App>, conn: u64, req: Request<Incoming>) -> Response<Body>
             }
         },
     };
-    match jmap::handle(&app, &jmap::Caller { conn }, request) {
+    match jmap::handle(&app, &caller, request) {
         Ok(response) => json_response(StatusCode::OK, &response),
         Err(e) => problem(
             StatusCode::from_u16(e.status).unwrap_or(StatusCode::BAD_REQUEST),
@@ -355,7 +363,7 @@ async fn download(app: Arc<App>, rest: &str) -> Response<Body> {
         .expect("response")
 }
 
-fn websocket(app: Arc<App>, conn: u64, mut req: Request<Incoming>) -> Response<Body> {
+fn websocket(app: Arc<App>, caller: jmap::Caller, mut req: Request<Incoming>) -> Response<Body> {
     let headers = req.headers();
     let is_upgrade = headers
         .get(header::UPGRADE)
@@ -388,7 +396,7 @@ fn websocket(app: Arc<App>, conn: u64, mut req: Request<Incoming>) -> Response<B
             return;
         };
         let ws = WebSocketStream::from_raw_socket(TokioIo::new(upgraded), Role::Server, None).await;
-        run_websocket(app, conn, ws).await;
+        run_websocket(app, caller, ws).await;
     });
     Response::builder()
         .status(StatusCode::SWITCHING_PROTOCOLS)
@@ -417,7 +425,7 @@ impl PushState {
     }
 }
 
-async fn run_websocket<S>(app: Arc<App>, conn: u64, ws: WebSocketStream<S>)
+async fn run_websocket<S>(app: Arc<App>, caller: jmap::Caller, ws: WebSocketStream<S>)
 where
     S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
 {
@@ -468,7 +476,7 @@ where
                         detail: Some(e.to_string()),
                     }),
                     Ok(ClientFrame::Request { id, request }) => {
-                        Some(match jmap::handle(&app, &jmap::Caller { conn }, request) {
+                        Some(match jmap::handle(&app, &caller, request) {
                             Ok(response) => ServerFrame::Response { request_id: id, response },
                             Err(e) => ServerFrame::RequestError {
                                 request_id: id,
@@ -523,7 +531,7 @@ where
     push.types = None;
     set_live(&app, &mut push);
     app.link_clients.fetch_sub(1, Ordering::Relaxed);
-    if app.spool.lock().expect("spool").release_conn(conn) {
+    if app.spool.lock().expect("spool").release_conn(caller.conn) {
         app.inbound_changed();
     }
     app.relay_changed();

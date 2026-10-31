@@ -154,7 +154,13 @@ the protocol the rest of the suite already speaks.
   link from anyone, so it can join. A list that leaves the downstream out
   would lock it out for good, so: inbuxa-admin warns when no node's
   address it knows is in the list, and `inbuxa-relay run --link-allow-any`
-  ignores the list until the downstream pushes a new one.
+  ignores the list until the downstream pushes a new one. The addresses it
+  knows are the relay's: `Relay/get` answers each link with `linkFrom`,
+  the address that connection comes from, which each node keeps with its
+  link status. A connection already open stays open when the list
+  changes. Entries are addresses or ranges (`192.0.2.0/24`,
+  `2001:db8::/48`), at most 64; an IPv4 client of a `[::]` listener is
+  matched as IPv4.
 - **RL-34. A new link CA without rejoining.** inbuxa-admin can replace the
   link CA, for instance when a node's certificate may have leaked, since a
   node certificate can't be revoked one by one. The downstream makes the
@@ -255,7 +261,7 @@ with the server's own `inbuxa:` objects. In particular, the relay's
 | `sealingKey` | downstream | The downstream's public sealing key |
 | `linkAllowFrom` | downstream | Addresses and CIDR ranges that may dial the link port. Default empty: anyone (RL-33) |
 | `nextLinkCaPin` | downstream | A second link CA to trust during a replacement (RL-34). Default null |
-| `status` | relay | `{startedAt, linkClients, mode, spool: {inbound, outbound, bytes}, recipientState, certificateNotAfter, linkCaPins, lastError, selfUpgrade}`; `linkCaPins` lists the CAs it trusts (RL-34); `selfUpgrade` is false in a container image (RL-29) |
+| `status` | relay | `{startedAt, linkClients, mode, spool: {inbound, outbound, bytes}, recipientState, certificateNotAfter, linkCaPins, lastError, selfUpgrade, linkFrom}`; `linkCaPins` lists the CAs it trusts (RL-34); `selfUpgrade` is false in a container image (RL-29); `linkFrom` is the address the asking link connection comes from (RL-33) |
 
 Settings are cached in the state directory as the downstream last set them,
 so a reboot without the link comes back with the same settings (RL-22).
@@ -983,8 +989,12 @@ Packaging (step 6, RL-31):
   can replace the binary, with `Restart=always`, the one capability, and
   the filesystem read-only but for that directory and the state
   directory.
-- Still to come in step 6: the installer path and the docs page (with
-  the WireGuard setup, RL-32).
+- The installer installs a relay on a machine of its own with
+  `inbuxa relay install --token -` (inbuxa-installer #45): the release
+  binary, checked against a pinned checksum and its signature, the user,
+  the unit, the join. The docs page, "inbuxa Relay" under Running it,
+  covers the installer, a host by hand, the container image and the
+  WireGuard setup (RL-32). Step 6 is done.
 
 Order:
 

@@ -736,6 +736,48 @@ async fn relay_end_to_end() {
         "one upgrade at a time"
     );
 
+    // RL-T25: who may dial the link. Relay/get says where this link comes
+    // from, which is what a list has to let in.
+    let relay = ws.ok("Relay/get", json!({})).await;
+    assert_eq!(
+        relay["list"][0]["status"]["linkFrom"], "127.0.0.1",
+        "{relay}"
+    );
+    let mut allow = async |list: Value| {
+        let set = ws
+            .ok(
+                "Relay/set",
+                json!({ "update": { "singleton": { "linkAllowFrom": list }}}),
+            )
+            .await;
+        set["updated"] == json!({ "singleton": null })
+    };
+    assert!(!allow(json!(["not an address"])).await, "refused");
+    assert!(allow(json!(["192.0.2.0/24"])).await);
+    // A connection from elsewhere is closed before TLS, with no reply
+    let mut tcp = TcpStream::connect(link_addr).await.unwrap();
+    let mut buf = [0u8; 16];
+    let read = tokio::time::timeout(
+        Duration::from_secs(2),
+        tokio::io::AsyncReadExt::read(&mut tcp, &mut buf),
+    )
+    .await
+    .expect("closed, not left open");
+    assert!(matches!(read, Ok(0) | Err(_)), "{read:?}");
+    assert!(down.tls().await.is_err());
+    // --link-allow-any ignores the list it started with...
+    *app.link_allow_any.lock().unwrap() = Some(vec!["192.0.2.0/24".into()]);
+    assert!(down.tls().await.is_ok());
+    // ...until the downstream sets another, which then applies
+    assert!(allow(json!(["192.0.2.0/24", "127.0.0.0/8"])).await);
+    assert!(app.link_allow_any.lock().unwrap().is_none());
+    assert!(down.tls().await.is_ok());
+    assert!(allow(json!(["::ffff:192.0.2.1"])).await);
+    assert!(down.tls().await.is_err());
+    // The link already open was never cut
+    assert!(allow(json!(null)).await, "back to anyone");
+    assert!(down.tls().await.is_ok());
+
     // Events went up the link.
     let events = ws.ok("RelayEvent/get", json!({})).await;
     let kinds: Vec<&str> = events["list"]

@@ -67,6 +67,9 @@ pub struct RelaySettings {
     pub outbound_expiry: u32,
     /// TLS where neither DANE nor MTA-STS asks for it.
     pub outbound_tls: OutboundTls,
+    /// Addresses and CIDR ranges that may dial the link port; empty for
+    /// anyone (RL-33).
+    pub link_allow_from: Vec<String>,
     /// The STARTTLS certificate for port 25.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub smtp_certificate: Option<SmtpCertificate>,
@@ -94,6 +97,7 @@ impl Default for RelaySettings {
             outbound_retry: vec![120, 300, 600, 1800, 3600, 7200, 14_400],
             outbound_expiry: 3 * 86_400,
             outbound_tls: OutboundTls::default(),
+            link_allow_from: Vec::new(),
             smtp_certificate: None,
             sealing_key: None,
             recipient_key: None,
@@ -136,6 +140,17 @@ impl RelaySettings {
         }
         if self.outbound_retry.is_empty() || self.outbound_retry.contains(&0) {
             out.push("outboundRetry needs intervals above zero".into());
+        }
+        if self.link_allow_from.len() > crate::allow::MAX_ENTRIES {
+            out.push(format!(
+                "linkAllowFrom takes at most {} entries",
+                crate::allow::MAX_ENTRIES
+            ));
+        }
+        if let Err(entry) = crate::allow::AllowList::parse(&self.link_allow_from) {
+            out.push(format!(
+                "linkAllowFrom: {entry} is not an address or CIDR range"
+            ));
         }
         if self.sealing_key.is_none() {
             out.push("sealingKey is required".into());
@@ -220,6 +235,10 @@ pub struct RelayStatus {
     pub last_error: Option<String>,
     /// False in a container image: update the image instead (RL-29).
     pub self_upgrade: bool,
+    /// The address the asking link connection comes from, as the relay sees
+    /// it: what `linkAllowFrom` has to let in (RL-33).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub link_from: Option<String>,
 }
 
 /// Live while a link client has push on for `Inbound` (spec "Live mode").
