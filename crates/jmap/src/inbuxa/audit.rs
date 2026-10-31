@@ -488,6 +488,29 @@ async fn fork_current(server: &Server, object: &str, id: &MaybeInvalid<Id>) -> O
             }
             MaybeInvalid::Invalid(_) => None,
         },
+        // A migration's answers and where it is; it holds no secret
+        "inbuxa:Migration" => match id {
+            MaybeInvalid::Value(id) => {
+                inbuxa_features::migration::get(data, u32::try_from(id.id()).ok()?)
+                    .await
+                    .ok()?
+                    .map(|m| {
+                        serde_json::json!({
+                            "name": if m.description.is_empty() {
+                                format!("Migration {}", m.id)
+                            } else {
+                                m.description.clone()
+                            },
+                            "sourceKind": m.source_kind.as_str(),
+                            "source": m.source,
+                            "accounts": m.accounts.len(),
+                            "createAccounts": m.create_accounts,
+                            "status": m.status.as_str(),
+                        })
+                    })
+            }
+            MaybeInvalid::Invalid(_) => None,
+        },
         // A relay as an administrator sets it: never its keys or token
         "inbuxa:Relay" => match id {
             MaybeInvalid::Value(id) => {

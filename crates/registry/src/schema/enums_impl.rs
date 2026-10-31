@@ -7170,6 +7170,7 @@ impl EnumImpl for Permission {
             b"sysRelayUpdate" => Permission::SysRelayUpdate,
             b"sysRelayQueueGet" => Permission::SysRelayQueueGet,
             b"sysRelayQueueUpdate" => Permission::SysRelayQueueUpdate,
+            b"sysMigrationRun" => Permission::SysMigrationRun,
             b"sysAccountGet" => Permission::SysAccountGet,
             b"sysAccountCreate" => Permission::SysAccountCreate,
             b"sysAccountUpdate" => Permission::SysAccountUpdate,
@@ -7880,6 +7881,7 @@ impl EnumImpl for Permission {
             Permission::SysRelayUpdate => "sysRelayUpdate",
             Permission::SysRelayQueueGet => "sysRelayQueueGet",
             Permission::SysRelayQueueUpdate => "sysRelayQueueUpdate",
+            Permission::SysMigrationRun => "sysMigrationRun",
             Permission::SysAccountGet => "sysAccountGet",
             Permission::SysAccountCreate => "sysAccountCreate",
             Permission::SysAccountUpdate => "sysAccountUpdate",
@@ -8583,6 +8585,7 @@ impl EnumImpl for Permission {
             691 => Some(Permission::SysRelayUpdate),
             692 => Some(Permission::SysRelayQueueGet),
             693 => Some(Permission::SysRelayQueueUpdate),
+            694 => Some(Permission::SysMigrationRun),
             219 => Some(Permission::SysAccountGet),
             220 => Some(Permission::SysAccountCreate),
             221 => Some(Permission::SysAccountUpdate),
@@ -9027,7 +9030,7 @@ impl EnumImpl for Permission {
         }
     }
 
-    const COUNT: usize = 694;
+    const COUNT: usize = 695;
 }
 
 impl serde::Serialize for Permission {

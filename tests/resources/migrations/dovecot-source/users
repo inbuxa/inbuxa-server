@@ -1,0 +1,2 @@
+a@example.org:{plain}pass-a:5000:5000::/var/vmail/a@example.org::
+b@example.org:{plain}pass-b:5000:5000::/var/vmail/b@example.org::

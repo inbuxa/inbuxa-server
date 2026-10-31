@@ -351,6 +351,25 @@ impl Server {
                 }
             }
             Credentials::Bearer { username, token } => {
+                // inbuxa: migrations spec, MG-10: a migration's run token,
+                // from this node's loopback only
+                if token.starts_with(crate::migration_token::PREFIX) {
+                    let Some(holder) = crate::migration_token::holder(token, req.remote_ip) else {
+                        return Err(trc::AuthEvent::Failed
+                            .into_err()
+                            .reason("Not a live migration run token, or not from loopback"));
+                    };
+                    return self
+                        .access_token(holder.account_id)
+                        .await
+                        .and_then(|token| AccessToken::new(token, req.remote_ip))
+                        .map(|token| {
+                            token.with_origin(Via::Migration {
+                                id: holder.migration_id,
+                            })
+                        });
+                }
+
                 // Handle API key authentication
                 if let Some(key) = ApiKey::parse(token) {
                     return self

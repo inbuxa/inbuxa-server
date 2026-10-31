@@ -1,0 +1,96 @@
+#!/usr/bin/env python3
+# SPDX-FileCopyrightText: 2026 Coffey Labs LLC
+# SPDX-License-Identifier: AGPL-3.0-only
+#
+# A stand-in for inbuxa-migrate in tests/src/system/migration.rs: it answers
+# `plan` and `migrate` the way the real one does, says what it was given in
+# seen-*.json, and signs in to the server with its run token. An account
+# named slow@ makes a run wait, so it can be stopped.
+
+import json
+import os
+import ssl
+import sys
+import time
+import urllib.error
+import urllib.request
+
+args = sys.argv[1:]
+
+if args[0] == "plan":
+    answers = json.load(open(args[2]))
+    json.dump({"args": args, "env": sorted(os.environ)}, open("seen-plan.json", "w"))
+    print(json.dumps({
+        "plan": "plan.json",
+        "preview": "preview-plan.json",
+        "passwords": "passwords-1.csv" if answers["create"] else None,
+        "accounts": len(answers["accounts"]),
+        "secrets": {"source": "MIGRATE_SOURCE_SECRET", "target": "MIGRATE_INBUXA_TOKEN"},
+    }))
+    sys.exit(0)
+
+assert args[0] == "migrate", args
+answers = json.load(open("answers.json"))
+token = os.environ.get("MIGRATE_INBUXA_TOKEN", "")
+url = answers["target"]["url"]
+insecure = ssl.create_default_context()
+insecure.check_hostname = False
+insecure.verify_mode = ssl.CERT_NONE
+signed_in = None
+try:
+    request = urllib.request.Request(
+        url + "/jmap/session", headers={"Authorization": "Bearer " + token}
+    )
+    session = json.load(urllib.request.urlopen(request, context=insecure, timeout=10))
+    signed_in = session.get("username")
+except (urllib.error.URLError, OSError, ValueError) as err:
+    signed_in = "failed: " + str(err)
+
+json.dump({
+    "args": args,
+    "url": url,
+    "secret": os.environ.get("MIGRATE_SOURCE_SECRET"),
+    "token": token,
+    "signedIn": signed_in,
+    "env": sorted(os.environ),
+}, open("seen-run.json", "w"))
+
+
+def emit(event, **fields):
+    fields["event"] = event
+    print(json.dumps(fields), flush=True)
+
+
+accounts = answers["accounts"]
+dry_run = "--dry-run" in args
+emit("start", accounts=len(accounts), parallel=1, dryRun=dry_run)
+if "slow@example.org" in accounts:
+    time.sleep(60)
+rows = ["account,step,result,fetched,created,updated,deleted,skipped,failed,detail"]
+unfinished = 0
+for n, email in enumerate(accounts, 1):
+    emit("step", email=email, step="import")
+    counts = {"fetched": 3, "created": 3, "updated": 0, "deleted": 0, "skipped": 0, "failed": 0}
+    emit("step", email=email, step="import", result="done", counts=counts, detail="")
+    rows.append(f"{email},import,done,3,3,0,0,0,0,")
+    result = "done"
+    if not dry_run:
+        partial = email.startswith("b@")
+        counts = dict(counts, created=2 if partial else 3, failed=1 if partial else 0)
+        result = "partial" if partial else "done"
+        detail = "1 message over the size limit" if partial else ""
+        emit("step", email=email, step="export", result=result, counts=counts, detail=detail)
+        rows.append(f"{email},export,{result},3,{counts['created']},0,0,0,{counts['failed']},{detail}")
+    if result != "done":
+        unfinished += 1
+    emit("account", email=email, n=n, total=len(accounts), result=result)
+
+os.makedirs("work", exist_ok=True)
+report = "work/dry-run-report.csv" if dry_run else "work/report.csv"
+open(report, "w").write("\n".join(rows) + "\n")
+if answers["create"] and not dry_run and "--again" not in args:
+    open("passwords-1.csv", "w").write(
+        "email,password\n" + "".join(f"{a},generated-{n}\n" for n, a in enumerate(accounts))
+    )
+emit("end", done=len(accounts) - unfinished, unfinished=unfinished, report=report)
+sys.exit(5 if unfinished else 0)

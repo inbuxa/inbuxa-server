@@ -431,6 +431,7 @@ impl IntermediateChangesResponse {
             | MethodObject::LegalHold
             | MethodObject::HoldExport
             | MethodObject::MailRule
+            | MethodObject::Migration
             | MethodObject::Relay
             | MethodObject::RelayMessage
             | MethodObject::SecurityAcceptance

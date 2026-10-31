@@ -116,6 +116,8 @@ impl JmapAuthorization for AccessToken {
                         Permission::SysDlpPolicyGet
                     }
                 }
+                // inbuxa: migrations into this server (MG-10)
+                GetRequestMethod::Migration(_) => Permission::SysMigrationRun,
                 // inbuxa: inbuxa Relay
                 GetRequestMethod::Relay(_) => Permission::SysRelayGet,
                 GetRequestMethod::RelayMessage(_) => Permission::SysRelayQueueGet,
@@ -313,6 +315,14 @@ impl JmapAuthorization for AccessToken {
                                 .details("You are not authorized to change mail rules"))
                         }
                     }
+                    // inbuxa: migrations into this server (MG-10)
+                    SetRequestMethod::Migration(s) => validate_set(
+                        s,
+                        self,
+                        Permission::SysMigrationRun,
+                        Permission::SysMigrationRun,
+                        Permission::SysMigrationRun,
+                    ),
                     // inbuxa: inbuxa Relay; a new join token is an update
                     SetRequestMethod::Relay(s) => validate_set(
                         s,
@@ -585,6 +595,7 @@ impl JmapAuthorization for AccessToken {
                 | MethodObject::LegalHold
                 | MethodObject::HoldExport
                 | MethodObject::MailRule
+                | MethodObject::Migration
                 | MethodObject::Relay
                 | MethodObject::RelayMessage
                 | MethodObject::SecurityAcceptance

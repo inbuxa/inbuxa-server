@@ -41,6 +41,7 @@ pub mod inbuxa_journal_entry; // inbuxa: journaling, search and export
 pub mod inbuxa_legal_hold; // inbuxa: legal hold
 pub mod inbuxa_log_settings; // inbuxa: personal-data catalog, D1
 pub mod inbuxa_mail_rule; // inbuxa: DLP and mail flow rules
+pub mod inbuxa_migration; // inbuxa: migrations into this server
 pub mod inbuxa_protocol_policy; // inbuxa: legacy protocols off
 pub mod inbuxa_relay; // inbuxa: inbuxa Relay
 pub mod inbuxa_relay_message; // inbuxa: a relay's queues

@@ -33,8 +33,9 @@ use types::id::Id;
 /// locks and legal holds (audit-hold-lock spec, AU-9, AL-12, LH-13), and
 /// the data inventory (personal-data catalog spec), accepting security
 /// to-do items (security to-do list spec), the deliverability check
-/// (deliverability spec), scheduled reports (scheduled-reports spec), and
-/// inbuxa Relays (relay spec).
+/// (deliverability spec), scheduled reports (scheduled-reports spec),
+/// inbuxa Relays (relay spec), and running migrations (migrations spec,
+/// MG-10).
 const ADMIN_GRANTS: &[Permission] = &[
     Permission::SysAiExplain,
     Permission::SysAuditGet,
@@ -67,6 +68,7 @@ const ADMIN_GRANTS: &[Permission] = &[
     Permission::SysRelayUpdate,
     Permission::SysRelayQueueGet,
     Permission::SysRelayQueueUpdate,
+    Permission::SysMigrationRun,
 ];
 
 /// Granted to the server-level Compliance Officer role once it exists:

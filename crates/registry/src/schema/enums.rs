@@ -1789,6 +1789,8 @@ pub enum Permission {
     SysRelayUpdate = 691,
     SysRelayQueueGet = 692,
     SysRelayQueueUpdate = 693,
+    // inbuxa: migrations into this server
+    SysMigrationRun = 694,
     SysAccountGet = 219,
     SysAccountCreate = 220,
     SysAccountUpdate = 221,

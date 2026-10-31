@@ -374,6 +374,11 @@ impl Default for DefaultPermissions {
                 | Permission::SysRelayQueueUpdate => {
                     default.superuser.push(permission);
                 }
+                // inbuxa: migrations spec, MG-10: a migration writes into
+                // the whole server, so only its administrators run one
+                Permission::SysMigrationRun => {
+                    default.superuser.push(permission);
+                }
                 // inbuxa: AL-12: tenant administrators lock and delegate
                 // within their tenant
                 Permission::SysAccountLockGet

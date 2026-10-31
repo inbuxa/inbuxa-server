@@ -74,6 +74,7 @@ pub mod hold; // inbuxa: legal holds (audit-hold-lock spec, LH)
 pub mod i18n;
 pub mod ipc;
 pub mod manager;
+pub mod migration_token; // inbuxa: migrations' run tokens (migrations spec, MG-10)
 pub mod network;
 pub mod privacy; // inbuxa: the personal-data catalog, evaluated
 pub mod reachability; // inbuxa: whether the outside world reaches each node's ports
