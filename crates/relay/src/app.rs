@@ -14,6 +14,7 @@ use crate::{
     state::{self, Identity, Paths},
 };
 use inbuxa_relay_proto::{
+    allow::AllowList,
     time,
     types::{Mode, RelaySettings, RelayStatus, SpoolStatus, type_name},
 };
@@ -65,6 +66,9 @@ pub struct App {
     pub upgrading: AtomicBool,
     /// Wakes the run loop to exit for the supervisor's restart.
     pub restart: Notify,
+    /// `run --link-allow-any`: the `linkAllowFrom` to ignore, until the
+    /// downstream sets another (RL-33).
+    pub link_allow_any: Mutex<Option<Vec<String>>>,
 }
 
 impl App {
@@ -103,7 +107,41 @@ impl App {
             exe: crate::upgrade::current_exe(),
             upgrading: AtomicBool::new(false),
             restart: Notify::new(),
+            link_allow_any: Mutex::new(None),
         })
+    }
+
+    /// Whether `ip` may dial the link (RL-33): anyone until the first
+    /// settings, so a relay can join, and while `--link-allow-any` ignores
+    /// the list it was started with.
+    pub fn link_allows(&self, ip: IpAddr) -> bool {
+        let Some(settings) = self.settings() else {
+            return true;
+        };
+        if settings.link_allow_from.is_empty()
+            || self
+                .link_allow_any
+                .lock()
+                .expect("link_allow_any")
+                .as_ref()
+                .is_some_and(|ignored| *ignored == settings.link_allow_from)
+        {
+            return true;
+        }
+        // Settings are checked before they are kept, so this parses
+        AllowList::parse(&settings.link_allow_from).map_or(true, |list| list.allows(ip))
+    }
+
+    /// The downstream set `linkAllowFrom`: a list other than the one
+    /// `--link-allow-any` ignores ends it.
+    pub fn link_allow_from_changed(&self, list: &[String]) {
+        let mut ignored = self.link_allow_any.lock().expect("link_allow_any");
+        if ignored.as_deref().is_some_and(|ignored| ignored != list) {
+            *ignored = None;
+            eprintln!(
+                "inbuxa-relay: the downstream set linkAllowFrom; --link-allow-any no longer applies"
+            );
+        }
     }
 
     pub fn conn_id(&self) -> u64 {
@@ -191,6 +229,7 @@ impl App {
             certificate_not_after: None,
             last_error: self.last_error.lock().expect("last_error").clone(),
             self_upgrade: self.self_upgrade,
+            link_from: None,
         }
     }
 

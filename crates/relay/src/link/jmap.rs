@@ -16,7 +16,7 @@ use inbuxa_relay_proto::{
     jmap::{Invocation, MethodError, Request, Response, method},
     recipient::{RecipientDomain, RecipientHash},
     time, token,
-    types::{NewOutbound, RELAY_SINGLETON, RelaySettings, Verdict, type_name},
+    types::{NewOutbound, RELAY_SINGLETON, RelaySettings, RelayStatus, Verdict, type_name},
 };
 use rustls_pki_types::{CertificateDer, pem::PemObject};
 use serde_json::{Map, Value, json};
@@ -37,9 +37,11 @@ pub struct RequestError {
     pub detail: String,
 }
 
-/// Who is calling: the connection, for leases.
+/// Who is calling: the connection, for leases, and where it comes from.
+#[derive(Clone, Copy)]
 pub struct Caller {
     pub conn: u64,
+    pub peer: std::net::IpAddr,
 }
 
 type Failure = (MethodError, Option<String>);
@@ -103,7 +105,7 @@ fn call_one(app: &App, caller: &Caller, call: &Invocation) -> MethodResult {
     }
     match call.name() {
         method::RELAY_JOIN => relay_join(app, args),
-        method::RELAY_GET => relay_get(app, args),
+        method::RELAY_GET => relay_get(app, caller, args),
         method::RELAY_SET => relay_set(app, args),
         method::RELAY_UPGRADE => relay_upgrade(app, args),
         method::RECIPIENT_DOMAIN_GET => recipient_domain_get(app),
@@ -218,7 +220,7 @@ fn relay_join(app: &App, args: &Map<String, Value>) -> MethodResult {
     }))
 }
 
-fn relay_object(app: &App) -> Value {
+fn relay_object(app: &App, caller: &Caller) -> Value {
     let settings = app.settings().map(|s| (*s).clone()).unwrap_or_default();
     let mut value = serde_json::to_value(&settings).expect("settings serialize");
     let obj = value.as_object_mut().expect("object");
@@ -230,7 +232,11 @@ fn relay_object(app: &App) -> Value {
     obj.insert("id".into(), Value::String(RELAY_SINGLETON.into()));
     obj.insert(
         "status".into(),
-        serde_json::to_value(app.status()).expect("status serializes"),
+        serde_json::to_value(RelayStatus {
+            link_from: Some(caller.peer.to_string()),
+            ..app.status()
+        })
+        .expect("status serializes"),
     );
     obj.insert(
         "relayVersion".into(),
@@ -239,7 +245,7 @@ fn relay_object(app: &App) -> Value {
     value
 }
 
-fn relay_get(app: &App, args: &Map<String, Value>) -> MethodResult {
+fn relay_get(app: &App, caller: &Caller, args: &Map<String, Value>) -> MethodResult {
     let ids = string_list(args, "ids")?;
     let wanted = ids
         .as_ref()
@@ -252,7 +258,7 @@ fn relay_get(app: &App, args: &Map<String, Value>) -> MethodResult {
     Ok(json!({
         "accountId": ACCOUNT_ID,
         "state": app.relay_state(),
-        "list": if wanted { vec![relay_object(app)] } else { vec![] },
+        "list": if wanted { vec![relay_object(app, caller)] } else { vec![] },
         "notFound": not_found,
     }))
 }
@@ -431,6 +437,7 @@ fn apply_settings(app: &App, patch: &Value) -> Result<(), Value> {
     }
     crate::state::save_settings(&app.paths, &settings)
         .map_err(|e| set_error("serverFail", e.to_string()))?;
+    app.link_allow_from_changed(&settings.link_allow_from);
     app.settings.send_replace(Some(Arc::new(settings)));
 
     // The first Relay/set after the proof completes the join.

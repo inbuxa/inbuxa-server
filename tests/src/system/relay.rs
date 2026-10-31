@@ -257,6 +257,18 @@ pub async fn test(test: &mut TestServer) {
     let (_, response) = call(
         admin,
         "inbuxa:Relay/set",
+        json!({"update": {&id: {"settings/linkAllowFrom": ["192.0.2.0/24", "relay.example"]}}}),
+    )
+    .await;
+    assert!(
+        response["notUpdated"][&id]["description"]
+            .as_str()
+            .is_some_and(|d| d.contains("relay.example is not an address or CIDR range")),
+        "{response}"
+    );
+    let (_, response) = call(
+        admin,
+        "inbuxa:Relay/set",
         json!({"update": {&id: {"linkKeyPin": "AAAA"}}}),
     )
     .await;
@@ -874,6 +886,8 @@ pub async fn link(test: &mut TestServer) {
     let recipients = link["recipients"].as_u64().unwrap_or_default();
     assert!(recipients >= 3, "{relay}");
     assert_eq!(link["lastError"], Value::Null, "{relay}");
+    // Where the relay sees this node's link from, for linkAllowFrom (RL-33)
+    assert_eq!(link["relay"]["linkFrom"], "127.0.0.1", "{relay}");
     // The relay is this build's: not older (RL-28)
     assert_eq!(relay["olderThanServer"], false, "{relay}");
 

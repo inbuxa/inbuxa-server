@@ -43,6 +43,9 @@ Usage:
 Options:
   --state <dir>          state directory (default /var/lib/inbuxa-relay)
   --link-listen <addr>   link address and port (default [::]:443)
+  --link-allow-any       take the link from anywhere, ignoring the
+                         linkAllowFrom it has until the downstream sets
+                         another: for a list that locked the downstream out
 
 Everything else is set from the downstream's inbuxa-admin.
 
@@ -55,6 +58,7 @@ struct Args {
     token: Option<String>,
     state: String,
     link_listen: SocketAddr,
+    link_allow_any: bool,
     discard_held: bool,
 }
 
@@ -65,6 +69,7 @@ fn parse_args() -> Result<Args, String> {
     let mut state = state::DEFAULT_DIR.to_string();
     let mut link_listen: SocketAddr = "[::]:443".parse().expect("address");
     let mut discard_held = false;
+    let mut link_allow_any = false;
     while let Some(arg) = args.next() {
         match arg.as_str() {
             "--state" => state = args.next().ok_or("--state needs a directory")?,
@@ -76,6 +81,7 @@ fn parse_args() -> Result<Args, String> {
                     .map_err(|_| "--link-listen: an address and port, like [::]:443")?;
             }
             "--discard-held" => discard_held = true,
+            "--link-allow-any" => link_allow_any = true,
             "-h" | "--help" | "help" => return Err(String::new()),
             "-V" | "--version" => {
                 println!("inbuxa-relay {}", app::VERSION);
@@ -92,6 +98,7 @@ fn parse_args() -> Result<Args, String> {
         token,
         state,
         link_listen,
+        link_allow_any,
         discard_held,
     })
 }
@@ -113,7 +120,7 @@ fn main() -> ExitCode {
             Some(token) => join(&paths, token),
             None => Err("join needs the token from inbuxa-admin".into()),
         },
-        "run" => match run(&paths, args.link_listen) {
+        "run" => match run(&paths, args.link_listen, args.link_allow_any) {
             Ok(Stopped::Upgraded) => return ExitCode::from(upgrade::RESTART_EXIT),
             Ok(Stopped::Asked) => Ok(()),
             Err(e) => Err(e),
@@ -167,7 +174,7 @@ enum Stopped {
     Upgraded,
 }
 
-fn run(paths: &Paths, link_listen: SocketAddr) -> Result<Stopped, String> {
+fn run(paths: &Paths, link_listen: SocketAddr, link_allow_any: bool) -> Result<Stopped, String> {
     paths.create_dirs().map_err(|e| e.to_string())?;
     let _lock = RunLock::acquire(paths).map_err(|e| e.to_string())?;
     let identity = match Identity::load(paths).map_err(|e| e.to_string())? {
@@ -187,6 +194,19 @@ fn run(paths: &Paths, link_listen: SocketAddr) -> Result<Stopped, String> {
         },
     };
     let app = Arc::new(App::open(Paths::new(&paths.root), identity).map_err(|e| e.to_string())?);
+    if link_allow_any {
+        let list = app
+            .settings()
+            .map(|s| s.link_allow_from.clone())
+            .unwrap_or_default();
+        if !list.is_empty() {
+            eprintln!(
+                "inbuxa-relay: --link-allow-any: taking the link from anywhere until the \
+                 downstream sets linkAllowFrom again"
+            );
+        }
+        *app.link_allow_any.lock().expect("link_allow_any") = Some(list);
+    }
     // A relay is small: a few threads carry it, whatever the host has.
     let threads = std::thread::available_parallelism().map_or(2, |n| n.get().clamp(2, 4));
     let runtime = tokio::runtime::Builder::new_multi_thread()

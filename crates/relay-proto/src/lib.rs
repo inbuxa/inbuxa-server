@@ -11,6 +11,7 @@
 //! dials out to it. Both sides use this crate, so the wire types, the join
 //! proof, recipient hashing and the sealed spool format are defined once.
 
+pub mod allow;
 pub mod jmap;
 pub mod pin;
 pub mod recipient;
