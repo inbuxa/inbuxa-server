@@ -94,6 +94,17 @@ process of the node the administrator reached.
   included, and forgets its secret. A closed migration stays listed;
   destroy is refused.
 
+## Tests
+
+- `system::migration::migration_tests`: every requirement above, with a
+  stand-in engine (`tests/resources/migrations/fake-inbuxa-migrate`).
+- `system::migration::migration_real_engine_tests`, on demand: the real
+  inbuxa-migrate against a Dovecot (`tests/resources/migrations/dovecot-source`).
+- `tests/resources/migrations/live-image-test.py IMAGE`, on demand: a server
+  image's own inbuxa-migrate, from a Dovecot, with a restart in the middle
+  of the move (MG-11), the move carried on with the secret given again
+  (MG-12), then the final pass and close.
+
 ## Not yet
 
 - Actions sealed over to the node a migration runs on (MG-11).
