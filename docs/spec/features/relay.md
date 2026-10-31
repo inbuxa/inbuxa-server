@@ -955,7 +955,8 @@ In progress. Done so far:
 - The release keys are made with `tools/release/new-relay-keys.sh`: a CI
   key, kept as the Gitea Actions secret `RELAY_RELEASE_KEY`, and an
   offline key, kept off any server, for signing by hand when the CI key
-  has to be replaced. Both public halves are in `RELEASE_KEYS`.
+  has to be replaced. Both public halves are in `RELEASE_KEYS` (made
+  2026-10-30), so every build from then on takes signed upgrades.
 
 Packaging (step 6, RL-31):
 

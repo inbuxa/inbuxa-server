@@ -26,9 +26,26 @@ use aws_lc_rs::{
 };
 use std::{cmp::Ordering, fmt};
 
-/// The inbuxa release keys' public halves (raw Ed25519). A build without
-/// one refuses every upgrade.
-pub const RELEASE_KEYS: &[[u8; 32]] = &[];
+/// The inbuxa release keys' public halves (raw Ed25519), as
+/// `tools/release/new-relay-keys.sh` printed them on 2026-10-30. A build
+/// without one refuses every upgrade.
+pub const RELEASE_KEYS: &[[u8; 32]] = &[
+    // ci: the RELAY_RELEASE_KEY secret, which signs every release
+    // J0kY_vzXTC8T8gxErBMYI6cVk4Bwki65HlJGoDp15uw
+    [
+        0x27, 0x49, 0x18, 0xfe, 0xfc, 0xd7, 0x4c, 0x2f, 0x13, 0xf2, 0x0c, 0x44, 0xac, 0x13, 0x18,
+        0x23, 0xa7, 0x15, 0x93, 0x80, 0x70, 0x92, 0x2e, 0xb9, 0x1e, 0x52, 0x46, 0xa0, 0x3a, 0x75,
+        0xe6, 0xec,
+    ],
+    // offline: kept off any server, to sign by hand when the CI key has to
+    // be replaced
+    // vGsTE95CJ3vbGKVtfQctFEp0fOZ4wQ9QWTOFe0KF7_8
+    [
+        0xbc, 0x6b, 0x13, 0x13, 0xde, 0x42, 0x27, 0x7b, 0xdb, 0x18, 0xa5, 0x6d, 0x7d, 0x07, 0x2d,
+        0x14, 0x4a, 0x74, 0x7c, 0xe6, 0x78, 0xc1, 0x0f, 0x50, 0x59, 0x33, 0x85, 0x7b, 0x42, 0x85,
+        0xef, 0xff,
+    ],
+];
 
 const HEADER: &str = "inbuxa-relay release 1";
 
@@ -325,6 +342,33 @@ mod tests {
 
     const OPENSSL_SIGNATURE: &str =
         "zRj90ByVN18fmW-GOZ9cvGBK1ZsYYoNvowGsbSBYcslJhgIgmKrYHgRgq1CSIy4G-EzR5uexCzAUoa3FEcluAA";
+
+    /// The keys compiled in are the ones the comments name.
+    #[test]
+    fn release_keys_as_printed() {
+        let printed: Vec<String> = RELEASE_KEYS.iter().map(|key| b64::encode(key)).collect();
+        assert_eq!(
+            printed,
+            [
+                "J0kY_vzXTC8T8gxErBMYI6cVk4Bwki65HlJGoDp15uw",
+                "vGsTE95CJ3vbGKVtfQctFEp0fOZ4wQ9QWTOFe0KF7_8"
+            ]
+        );
+        for key in RELEASE_KEYS {
+            // Each is a key a signature can be checked against
+            assert_eq!(
+                verify_signature(
+                    &format!(
+                        "{HEADER}\nversion 1.0.0\ntarget t\nsha256 {}\nsignature {}\n",
+                        "0".repeat(64),
+                        "A".repeat(86)
+                    ),
+                    &[*key]
+                ),
+                Err(ReleaseError::BadSignature)
+            );
+        }
+    }
 
     #[test]
     fn versions_in_order() {
