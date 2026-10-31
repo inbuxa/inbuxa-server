@@ -32,9 +32,9 @@ Include as much as you can of:
 - anything about the deployment that matters — backend, front ends, whether
   it needs an authenticated account.
 
-You'll get an acknowledgement within a few days. If a report turns out to
-affect upstream Stalwart rather than this fork's own code, it will be passed
-to Stalwart Labs with credit to you, and you'll be told that has happened.
+You'll get an acknowledgement within a few days. If the problem is also in
+upstream Stalwart, it still gets fixed here, and you'll be told so you can
+report it to Stalwart Labs yourself. We don't forward reports to them.
 
 ## Scope
 
