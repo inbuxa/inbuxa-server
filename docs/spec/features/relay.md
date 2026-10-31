@@ -651,7 +651,7 @@ A **Relays** page under Settings › Mail flow:
   | Static musl binary, stripped, x86_64 and aarch64 | ≤ 15 MB |
   | Resident memory, joined and idle | ≤ 32 MB |
   | Resident memory, 50 concurrent SMTP sessions | ≤ 128 MB |
-  | Container image | `FROM scratch`: the binary and CA roots only |
+  | Container image | `FROM scratch`: the binary and CA roots only (12.4 MB on amd64, 2026-10-30) |
 
 - **RL-31.** It ships as its own artifacts, from the same release tag as
   the server: a multi-arch image (linux/amd64, linux/arm64) named
@@ -952,8 +952,39 @@ In progress. Done so far:
   output checks out against the Rust code. On this server, an upgrade
   with anything else, an unknown blob, or a signature by no release key
   is refused before any relay sees it.
-- Not yet: the release key itself, and signing in the release workflow,
-  come with packaging (step 6). Until then no build accepts an upgrade.
+- The release keys are made with `tools/release/new-relay-keys.sh`: a CI
+  key, kept as the Gitea Actions secret `RELAY_RELEASE_KEY`, and an
+  offline key, kept off any server, for signing by hand when the CI key
+  has to be replaced. Both public halves are in `RELEASE_KEYS` (made
+  2026-10-30), so every build from then on takes signed upgrades.
+
+Packaging (step 6, RL-31):
+
+- `Dockerfile.relay` builds the relay alone on Alpine, as a static musl
+  binary, natively on each architecture's runner. The image is `FROM
+  scratch`: the binary, the CA roots and the state directory, owned by
+  uid 2001; about 12 MB. It runs as 2001, with `cap_net_bind_service` on
+  the binary and nothing else, sets `INBUXA_RELAY_CONTAINER` (so
+  `selfUpgrade: false`), and joins from `INBUXA_RELAY_JOIN_TOKEN` on its
+  first run.
+- A release tag builds it beside the server, on whichever forge builds:
+  `<registry>/inbuxa/inbuxa-relay` under the server's tags. Before a tag
+  moves, the amd64 image must print `inbuxa-relay <Cargo version>` and
+  hold no `inbuxa` binary (RL-T24). The Release gets the binaries taken
+  out of the image, `inbuxa-relay-x86_64-linux-musl` and
+  `inbuxa-relay-aarch64-linux-musl`, in `SHA256SUMS` with the server's.
+- Gitea's `relay-sign` job then signs both with `RELAY_RELEASE_KEY`, and
+  attaches the `.sig` files, whichever forge built them. Without the
+  secret it warns and signs nothing. With GitHub building, a binary is
+  only as trustworthy as that build: GitHub uploads it, Gitea signs what
+  it finds.
+- `resources/systemd/inbuxa-relay.service` runs a host install from
+  `/opt/inbuxa-relay/bin`, owned by the `inbuxa-relay` user so an upgrade
+  can replace the binary, with `Restart=always`, the one capability, and
+  the filesystem read-only but for that directory and the state
+  directory.
+- Still to come in step 6: the installer path and the docs page (with
+  the WireGuard setup, RL-32).
 
 Order:
 

@@ -1,0 +1,40 @@
+# inbuxa Relay's image (relay spec, RL-31): the inbuxa-relay binary and
+# nothing of the server. It is a static musl build, built natively for the
+# platform asked for (each architecture has its own runner), so the binary
+# taken out of this image for a Release runs on any Linux of that
+# architecture.
+#
+#   docker buildx build -f Dockerfile.relay --platform linux/amd64 .
+#
+# The image runs as an unprivileged user (2001), may bind ports 25 and 443 and
+# nothing more, and keeps its state in /var/lib/inbuxa-relay. It sets
+# INBUXA_RELAY_CONTAINER, so the relay reports selfUpgrade: false and an
+# upgrade is a new image (RL-29). On its first run it joins with
+# INBUXA_RELAY_JOIN_TOKEN.
+#
+# Docker Hub images, pulled through Google's mirror, as in Dockerfile.
+FROM mirror.gcr.io/library/rust:1-alpine3.22 AS builder
+RUN apk add --no-cache musl-dev build-base cmake perl libcap ca-certificates
+WORKDIR /build
+COPY . .
+RUN cargo build --release --locked -p inbuxa-relay && \
+    install -m 0755 target/release/inbuxa-relay /inbuxa-relay && \
+    # Static, or it won't run on a host without musl
+    ! ldd /inbuxa-relay 2>/dev/null | grep -q '=>' && \
+    # Set here: the copy below keeps it
+    setcap 'cap_net_bind_service=+ep' /inbuxa-relay && \
+    mkdir -m 0700 /state
+
+# The binary and the CA roots, nothing else (RL-30): no shell, no package
+# manager. The user is a number, as there is no /etc/passwd.
+FROM scratch
+COPY --from=builder /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/ca-certificates.crt
+COPY --from=builder /inbuxa-relay /usr/local/bin/inbuxa-relay
+COPY --from=builder --chown=2001:2001 /state /var/lib/inbuxa-relay
+USER 2001:2001
+WORKDIR /var/lib/inbuxa-relay
+VOLUME ["/var/lib/inbuxa-relay"]
+ENV INBUXA_RELAY_CONTAINER=1
+EXPOSE 25 443
+ENTRYPOINT ["/usr/local/bin/inbuxa-relay"]
+CMD ["run", "--state", "/var/lib/inbuxa-relay"]
