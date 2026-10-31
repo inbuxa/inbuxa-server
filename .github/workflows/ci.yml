@@ -184,6 +184,8 @@ jobs:
       # candidate gets 27.1-rc.N and 27.1-rc; a release 27.1.N, 27.1 and latest.
       tags: ${{ steps.v.outputs.tags }}
       prerelease: ${{ steps.v.outputs.prerelease }}
+      # The Cargo form (27.1.0-rc.N), which `inbuxa-relay --version` prints.
+      cargo: ${{ steps.v.outputs.cargo }}
     steps:
       # Full history, and every branch as origin/*: the ancestry check cannot
       # be answered from a shallow clone.
@@ -208,6 +210,7 @@ jobs:
           echo "version=$V" >> "$GITHUB_OUTPUT"
           echo "tags=${tags% }" >> "$GITHUB_OUTPUT"
           echo "prerelease=$pre" >> "$GITHUB_OUTPUT"
+          echo "cargo=$(python3 tools/release/version.py --cargo)" >> "$GITHUB_OUTPUT"
           echo "image tags: ${tags% }; prerelease: $pre"
 
   # Each architecture on its own native runner, side by side. The Dockerfile
@@ -305,6 +308,83 @@ jobs:
             "$GITEA_URL/api/v1/packages/${owner,,}/container/$name/-/link/$name" \
             || echo "package already linked (or link refused); not fatal"
 
+  # inbuxa Relay's image (relay spec, RL-31), from the same tag: its own
+  # Dockerfile, a static musl build on each architecture's own runner, under
+  # the server's version tags. It is small, so it needs none of the room the
+  # server's build does.
+  relay-publish:
+    needs: [version]
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            runner: ubuntu-latest
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+    env:
+      VERSION: ${{ needs.version.outputs.version }}
+    steps:
+      - run: echo "RELAY_IMAGE=${{ vars.REGISTRY }}/${GITHUB_REPOSITORY_OWNER,,}/inbuxa-relay" >> "$GITHUB_ENV"
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: docker/setup-buildx-action@594f3bf4285d9ea8dc53c9a0c9c4092420091003 # v4.4.0
+      - uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        with:
+          registry: ${{ vars.REGISTRY }}
+          username: jcoffey-dev
+          password: ${{ secrets.GITEA_TOKEN }}
+      - uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: .
+          file: Dockerfile.relay
+          platforms: linux/${{ matrix.arch }}
+          provenance: false
+          sbom: false
+          push: true
+          tags: ${{ env.RELAY_IMAGE }}:${{ env.VERSION }}-${{ matrix.arch }}
+
+  # The relay's index, under the server's tags. Before it moves any tag, the
+  # amd64 image must say it is this version, and must hold no server binary
+  # (RL-T24).
+  relay-index:
+    needs: [version, relay-publish]
+    runs-on: ubuntu-latest
+    env:
+      VERSION: ${{ needs.version.outputs.version }}
+      CARGO_VERSION: ${{ needs.version.outputs.cargo }}
+      TAGS: ${{ needs.version.outputs.tags }}
+    steps:
+      - run: echo "RELAY_IMAGE=${{ vars.REGISTRY }}/${GITHUB_REPOSITORY_OWNER,,}/inbuxa-relay" >> "$GITHUB_ENV"
+      - uses: docker/setup-buildx-action@594f3bf4285d9ea8dc53c9a0c9c4092420091003 # v4.4.0
+      - uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        with:
+          registry: ${{ vars.REGISTRY }}
+          username: jcoffey-dev
+          password: ${{ secrets.GITEA_TOKEN }}
+      - run: |
+          set -euo pipefail
+          said="$(docker run --rm "$RELAY_IMAGE:$VERSION-amd64" --version)"
+          [ "$said" = "inbuxa-relay $CARGO_VERSION" ] || { echo "the relay image says '$said'" >&2; exit 1; }
+          id="$(docker create "$RELAY_IMAGE:$VERSION-amd64")"
+          files="$(docker export "$id" | tar -t)"
+          docker rm -f "$id" >/dev/null
+          if grep -qE '(^|/)inbuxa$' <<<"$files"; then
+            echo "the relay image holds a server binary" >&2; exit 1
+          fi
+          args=()
+          for t in $TAGS; do args+=(--tag "$RELAY_IMAGE:$t"); done
+          docker buildx imagetools create "${args[@]}" \
+            "$RELAY_IMAGE:$VERSION-amd64" "$RELAY_IMAGE:$VERSION-arm64"
+          docker buildx imagetools inspect "$RELAY_IMAGE:$VERSION"
+      - env:
+          GITEA_TOKEN: ${{ secrets.GITEA_TOKEN }}
+        run: |
+          owner="${GITHUB_REPOSITORY%%/*}"; name="${GITHUB_REPOSITORY#*/}"
+          curl -fsS -o /dev/null -X POST -H "Authorization: token $GITEA_TOKEN" \
+            "$GITEA_URL/api/v1/packages/${owner,,}/container/inbuxa-relay/-/link/$name" \
+            || echo "package already linked (or link refused); not fatal"
+
   # The weekly release creates its Release (and so the tag) on Gitea first; a
   # tag pushed by hand has none. Either way the tag ends up with exactly one
   # Release there, created once the image exists so its pull instructions
@@ -327,10 +407,13 @@ jobs:
           if [ "$code" = 200 ]; then echo "$TAG already has a release"; exit 0; fi
           [ "$code" = 404 ] || { echo "looking up the release for $TAG answered $code" >&2; exit 1; }
           image="$REGISTRY/${GITHUB_REPOSITORY,,}:$VERSION"
+          relay="$REGISTRY/${GITHUB_REPOSITORY_OWNER,,}/inbuxa-relay:$VERSION"
           also="$(for t in ${TAGS#"$VERSION"}; do printf ' `:%s`' "$t"; done)"
           body="Container image: \`$image\` (linux/amd64, linux/arm64); also$also.
 
-          Binaries for a host install are attached: \`inbuxa-linux-amd64.tar.gz\` and \`inbuxa-linux-arm64.tar.gz\`, with \`SHA256SUMS\`. Each is the binary out of this release's image for that architecture, so it is the same build. The image grants it \`cap_net_bind_service\`; a host install has to grant that itself (\`setcap\`, or \`AmbientCapabilities\` in the unit) to bind port 25."
+          Binaries for a host install are attached: \`inbuxa-linux-amd64.tar.gz\` and \`inbuxa-linux-arm64.tar.gz\`, with \`SHA256SUMS\`. Each is the binary out of this release's image for that architecture, so it is the same build. The image grants it \`cap_net_bind_service\`; a host install has to grant that itself (\`setcap\`, or \`AmbientCapabilities\` in the unit) to bind port 25.
+
+          inbuxa Relay, the edge relay, ships from the same tag: image \`$relay\` (linux/amd64, linux/arm64), and static binaries \`inbuxa-relay-x86_64-linux-musl\` and \`inbuxa-relay-aarch64-linux-musl\`, each with a \`.sig\` file by the inbuxa release key. inbuxa-admin's Relays page takes a binary and its \`.sig\` to upgrade a relay."
           if [ "$PRERELEASE" = true ]; then
             body="Release candidate for the next series, to try before it ships. \`:latest\` stays on the current release.
 
@@ -347,7 +430,7 @@ jobs:
   # the image runs. `docker create` starts nothing, so copying a file out of
   # the arm64 image on an amd64 runner needs no emulation.
   binaries:
-    needs: [version, index, release]
+    needs: [version, index, relay-index, release]
     runs-on: ubuntu-latest
     env:
       VERSION: ${{ needs.version.outputs.version }}
@@ -373,8 +456,21 @@ jobs:
             tar -czf "inbuxa-linux-$arch.tar.gz" inbuxa
             rm inbuxa
           done
-          sha256sum inbuxa-linux-*.tar.gz > SHA256SUMS
+          # The relay's, as bare binaries: an upgrade (RL-29) takes the file itself
+          relay="${{ vars.REGISTRY }}/${GITHUB_REPOSITORY_OWNER,,}/inbuxa-relay:$VERSION"
+          for pair in amd64:x86_64 arm64:aarch64; do
+            arch="${pair%%:*}"; name="inbuxa-relay-${pair#*:}-linux-musl"
+            docker pull -q --platform "linux/$arch" "$relay"
+            id="$(docker create --platform "linux/$arch" "$relay")"
+            docker cp "$id:/usr/local/bin/inbuxa-relay" "$name"
+            docker rm -f "$id" >/dev/null
+            chmod 0755 "$name"
+          done
+          sha256sum inbuxa-linux-*.tar.gz inbuxa-relay-* > SHA256SUMS
           cat SHA256SUMS
+      # The relay binaries' .sig files are made on Gitea, which holds the
+      # release key (publish.yml, relay-sign), once these are attached.
+      #
       # A re-run of a tag replaces its assets rather than leaving two files
       # with the same name and different contents.
       #
@@ -389,7 +485,8 @@ jobs:
           retry=(--retry 5 --retry-all-errors --retry-delay 15)
           rel="$(curl -fsS "${retry[@]}" -H "$auth" "$api/releases/tags/$TAG" | jq -r .id)"
           assets="$(curl -fsS "${retry[@]}" -H "$auth" "$api/releases/$rel/assets")"
-          for f in out/inbuxa-linux-amd64.tar.gz out/inbuxa-linux-arm64.tar.gz out/SHA256SUMS; do
+          for f in out/inbuxa-linux-amd64.tar.gz out/inbuxa-linux-arm64.tar.gz \
+                   out/inbuxa-relay-x86_64-linux-musl out/inbuxa-relay-aarch64-linux-musl out/SHA256SUMS; do
             name="$(basename "$f")"
             old="$(jq -r --arg n "$name" '.[] | select(.name == $n) | .id' <<<"$assets")"
             for id in $old; do curl -fsS "${retry[@]}" -o /dev/null -X DELETE -H "$auth" "$api/releases/$rel/assets/$id"; done
@@ -486,7 +583,7 @@ jobs:
   # way round) count as passing; a failed or cancelled one does not.
   report:
     if: ${{ always() && vars.BUILD_ON == 'github' }}
-    needs: [start, fork-checks, build, version, publish, index, release, binaries]
+    needs: [start, fork-checks, build, version, publish, index, relay-publish, relay-index, release, binaries]
     runs-on: ubuntu-latest
     steps:
       - env:
