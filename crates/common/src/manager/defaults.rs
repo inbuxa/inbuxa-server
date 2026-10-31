@@ -21,12 +21,15 @@ use registry::{
 };
 use std::str::FromStr;
 use store::{
+    SUBSPACE_INBUXA, ValueKey,
     rand::{RngExt, distr::Alphanumeric, rng},
     registry::{
         bootstrap::Bootstrap,
         write::{RegistryWrite, RegistryWriteResult},
     },
+    write::{AnyClass, BatchBuilder, ValueClass},
 };
+use trc::AddContext;
 
 pub const WEBUI_LATEST_URL: &str =
     "https://github.com/stalwartlabs/webui/releases/latest/download/webui.zip";
@@ -85,8 +88,16 @@ async fn insert_safe_defaults(bp: &mut Bootstrap) -> trc::Result<()> {
     }
 
     if is_recovery_mode {
+        // inbuxa: a server that has never started normally is still a new
+        // install after recovery mode, even once a role is made there (#265)
+        if bp.registry.count_object(ObjectType::Role).await? == 0 {
+            set_first_boot_pending(bp, true).await?;
+        }
         return Ok(());
     }
+
+    let is_new_install =
+        bp.registry.count_object(ObjectType::Role).await? == 0 || first_boot_pending(bp).await?;
 
     // inbuxa: a store brought over from Stalwart doesn't serve upstream's web
     // interface (docs/spec/import-0.16.md), before the applications load
@@ -400,11 +411,11 @@ async fn insert_safe_defaults(bp: &mut Bootstrap) -> trc::Result<()> {
 
     // inbuxa: personal-data catalog, defaults D2, D3, D4 and D6 (settled
     // 2026-09-28): privacy-leaning values, for new installs only. A server
-    // with roles is not new, and keeps its settings whether saved or left at
-    // the default. Each singleton is read, changed and written back whole, so
-    // anything already in it stays.
+    // that has started normally before is not new, and keeps its settings
+    // whether saved or left at the default. Each singleton is read, changed
+    // and written back whole, so anything already in it stays.
     #[cfg(not(feature = "test_mode"))]
-    if bp.registry.count_object(ObjectType::Role).await? == 0 {
+    if is_new_install {
         let mut security = bp.setting_infallible::<Security>().await;
         let mut classifier = bp.setting_infallible::<SpamClassifier>().await;
         let mut pyzor = bp.setting_infallible::<SpamPyzor>().await;
@@ -437,7 +448,7 @@ async fn insert_safe_defaults(bp: &mut Bootstrap) -> trc::Result<()> {
         }
     }
 
-    if bp.registry.count_object(ObjectType::Role).await? == 0 {
+    if is_new_install {
         let permissions = DefaultPermissions::default();
         let mut role_ids = Vec::with_capacity(4);
 
@@ -492,6 +503,8 @@ async fn insert_safe_defaults(bp: &mut Bootstrap) -> trc::Result<()> {
                 ))
                 .await?;
         }
+
+        set_first_boot_pending(bp, false).await?;
     }
 
     // inbuxa: administrator roles stored before a permission existed get it once
@@ -581,7 +594,6 @@ async fn insert_safe_defaults(bp: &mut Bootstrap) -> trc::Result<()> {
 
     #[cfg(not(feature = "test_mode"))]
     {
-        use store::write::BatchBuilder;
         use types::id::Id;
 
         // inbuxa: rules are always to hand, since a copy ships with the server
@@ -610,6 +622,40 @@ async fn insert_safe_defaults(bp: &mut Bootstrap) -> trc::Result<()> {
     }
 
     Ok(())
+}
+
+/// inbuxa: noted by recovery mode on a server with no roles yet, so the
+/// first normal start still seeds the built-in roles and the new-install
+/// defaults when a role was made in recovery mode (#265). Cleared once they
+/// are seeded. A server from before this note has roles and no note, and
+/// keeps its settings as they are.
+fn first_boot_key() -> ValueClass {
+    ValueClass::Any(AnyClass {
+        subspace: SUBSPACE_INBUXA,
+        key: b"Bd".to_vec(),
+    })
+}
+
+async fn first_boot_pending(bp: &Bootstrap) -> trc::Result<bool> {
+    bp.data_store
+        .get_value::<String>(ValueKey::from(first_boot_key()))
+        .await
+        .caused_by(trc::location!())
+        .map(|note| note.is_some())
+}
+
+async fn set_first_boot_pending(bp: &Bootstrap, pending: bool) -> trc::Result<()> {
+    let mut batch = BatchBuilder::new();
+    if pending {
+        batch.set(first_boot_key(), b"1".to_vec());
+    } else {
+        batch.clear(first_boot_key());
+    }
+    bp.data_store
+        .write(batch.build_all())
+        .await
+        .caused_by(trc::location!())
+        .map(|_| ())
 }
 
 /// inbuxa: the new-install values of defaults D2, D3, D4 and D6 from the
