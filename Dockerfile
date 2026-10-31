@@ -36,6 +36,25 @@ ENV INBUXA_REVISION=${INBUXA_REVISION}
 RUN RUSTFLAGS="$(cat /flags.txt)" cargo build --target "$(cat /target.txt)" --release -p inbuxa --no-default-features --features "sqlite postgres mysql rocks s3 redis azure nats"
 RUN mv "/build/target/$(cat /target.txt)/release" "/output"
 
+# inbuxa: migrations spec, MG-4: the inbuxa-migrate the server runs, a
+# release pinned by its checksums
+FROM --platform=$BUILDPLATFORM mirror.gcr.io/library/debian:trixie-slim AS migrate
+ARG TARGETPLATFORM
+ARG MIGRATE_VERSION=27.1-rc.8
+ARG MIGRATE_SHA256_AMD64=a8a880111c583fd190f70852ed64fc2794cbc085ef3623f90193e168d7cbc75d
+ARG MIGRATE_SHA256_ARM64=05b7402a61e0203b3bb4a5e967cf3da4d1ace64c8fafe78eaa64157d2abea2c8
+RUN export DEBIAN_FRONTEND=noninteractive && \
+    apt-get update && \
+    apt-get install -yq --no-install-recommends ca-certificates curl && \
+    case "${TARGETPLATFORM}" in \
+    "linux/arm64") arch=arm64 sum="${MIGRATE_SHA256_ARM64}" ;; \
+    "linux/amd64") arch=amd64 sum="${MIGRATE_SHA256_AMD64}" ;; \
+    *) exit 1 ;; \
+    esac && \
+    curl -fsSL -o /migrate.tar.gz "https://github.com/inbuxa/inbuxa-migrate/releases/download/v${MIGRATE_VERSION}/inbuxa-migrate-linux-${arch}.tar.gz" && \
+    echo "${sum}  /migrate.tar.gz" | sha256sum -c - && \
+    mkdir /migrate && tar -xzf /migrate.tar.gz -C /migrate
+
 FROM mirror.gcr.io/library/debian:trixie-slim
 RUN export DEBIAN_FRONTEND=noninteractive && \
     apt-get update && \
@@ -46,6 +65,9 @@ RUN export DEBIAN_FRONTEND=noninteractive && \
     mkdir -p /etc/inbuxa /var/lib/inbuxa && \
     chown inbuxa:inbuxa /etc/inbuxa /var/lib/inbuxa
 COPY --from=builder --chmod=0755 /output/inbuxa /usr/local/bin/inbuxa
+COPY --from=migrate --chmod=0755 /migrate/inbuxa-migrate /usr/local/bin/inbuxa-migrate
+COPY --from=migrate /migrate/LICENSES /usr/share/doc/inbuxa-migrate/LICENSES
+COPY --from=migrate /migrate/README.md /usr/share/doc/inbuxa-migrate/README.md
 RUN setcap 'cap_net_bind_service=+ep' /usr/local/bin/inbuxa
 USER inbuxa
 WORKDIR /var/lib/inbuxa

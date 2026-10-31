@@ -18,7 +18,7 @@ VOCAB = """
 [vocabulary]
 categories = ["identifier", "contact", "network", "content", "metadata", "credential"]
 whose = ["holder", "correspondent", "administrator"]
-where = ["data-store", "blob-store", "search-store", "in-memory-store", "memory", "log-file", "external"]
+where = ["data-store", "blob-store", "search-store", "in-memory-store", "memory", "log-file", "data-directory", "external"]
 scope = ["tenant", "server"]
 retention = ["unbounded", "object-life", "receiver"]
 """

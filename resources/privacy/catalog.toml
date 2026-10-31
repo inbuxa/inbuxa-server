@@ -20,7 +20,7 @@
 [vocabulary]
 categories = ["identifier", "contact", "network", "content", "metadata", "credential"]
 whose = ["holder", "correspondent", "administrator"]
-where = ["data-store", "blob-store", "search-store", "in-memory-store", "memory", "log-file", "external"]
+where = ["data-store", "blob-store", "search-store", "in-memory-store", "memory", "log-file", "data-directory", "external"]
 scope = ["tenant", "server"]
 retention = ["unbounded", "object-life", "receiver"]
 
@@ -270,6 +270,23 @@ reason = ["content"]
 createdBy = ["identifier"]
 blobId = ["content", "identifier", "contact", "metadata"]
 
+[object."inbuxa:Migration"]
+file = "inbuxa_migration.rs"
+default = "none"
+whose = ["holder", "administrator"]
+where = ["data-store", "blob-store", "memory"]
+scope = "server"
+retention = "object-life"
+[object."inbuxa:Migration".properties]
+description = ["content"]
+source = ["network", "identifier"]
+accounts = ["identifier"]
+failures = ["identifier", "content"]
+createdBy = ["identifier"]
+reportBlobId = ["identifier", "metadata"]
+passwordsBlobId = ["credential"]
+secret = ["credential"]
+
 [object."inbuxa:DeletedAccount"]
 file = "inbuxa_deleted_account.rs"
 default = "none"
@@ -382,6 +399,18 @@ scope = "tenant"
 retention = "receiver"
 leaves_host = false
 written_by = ["crates/services/src/inbuxa_scheduled_reports.rs"]
+
+# A migration's work directory on the node that runs it: an archive per
+# account, which is a full copy of the mailbox, logs and the report. Gone
+# when the migration is closed (migrations spec, MG-14).
+[source."migration-work-directory"]
+categories = ["content", "identifier", "contact", "metadata", "credential"]
+whose = ["holder", "correspondent", "administrator"]
+where = ["data-directory"]
+scope = "server"
+retention = "object-life"
+leaves_host = false
+written_by = ["crates/services/src/inbuxa_migrations.rs"]
 
 [source."full-text-index"]
 categories = ["content", "identifier", "contact", "metadata"]

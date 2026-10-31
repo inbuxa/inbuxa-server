@@ -30,6 +30,7 @@ pub mod log_settings;
 pub mod mail_rule;
 pub mod masked_email;
 pub mod masked_secrets; // inbuxa: "****" is never saved as a secret
+pub mod migration; // inbuxa: migrations into this server
 pub mod oidc_directory; // inbuxa: http-directory-services-13
 pub mod protocol_policy;
 pub mod relay; // inbuxa: inbuxa Relay

@@ -99,6 +99,11 @@ pub enum Via {
     },
     /// The recovery administrator from the server's own configuration.
     Recovery,
+    /// A migration's run, acting for the administrator who started it
+    /// (migrations spec, MG-10).
+    Migration {
+        id: u32,
+    },
 }
 
 /// What kind of thing happened.

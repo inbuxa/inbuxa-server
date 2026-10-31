@@ -27,6 +27,7 @@ pub mod legal_hold; // inbuxa: legal hold
 pub mod mail_rules; // inbuxa: DLP and mail flow rules
 pub mod masked_email;
 pub mod masked_secrets; // inbuxa: "****" is never saved as a secret
+pub mod migration; // inbuxa: migrations into this server
 pub mod monitoring;
 pub mod oidc;
 pub mod purge;

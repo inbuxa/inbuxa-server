@@ -106,7 +106,10 @@ impl Authenticator for Server {
                     .min(lifetime),
                 None => lifetime,
             };
-            if !lifetime.is_zero() {
+            // inbuxa: migrations spec, MG-10: a run token is checked on every
+            // request, so it ends with its run and stays loopback-only
+            let is_run_token = token.starts_with(common::migration_token::PREFIX);
+            if !lifetime.is_zero() && !is_run_token {
                 self.inner.cache.http_auth.insert(
                     token.into(),
                     HttpAuthCache {

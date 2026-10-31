@@ -88,6 +88,9 @@ impl Response<'_> {
                         GetResponseMethod::MailRule(response) => {
                             response.eval_jptr(path, &mut results)
                         }
+                        GetResponseMethod::Migration(response) => {
+                            response.eval_jptr(path, &mut results)
+                        }
                         GetResponseMethod::Relay(response) => {
                             response.eval_jptr(path, &mut results)
                         }

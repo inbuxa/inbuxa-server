@@ -689,6 +689,21 @@ impl<'de> Visitor<'de> for CallVisitor {
                     return Err(de::Error::invalid_length(1, &self));
                 }
             },
+            // inbuxa: migrations into this server
+            (MethodFunction::Get, MethodObject::Migration) => match seq.next_element() {
+                Ok(Some(value)) => RequestMethod::Get(GetRequestMethod::Migration(value)),
+                Err(err) => RequestMethod::invalid(err),
+                Ok(None) => {
+                    return Err(de::Error::invalid_length(1, &self));
+                }
+            },
+            (MethodFunction::Set, MethodObject::Migration) => match seq.next_element() {
+                Ok(Some(value)) => RequestMethod::Set(SetRequestMethod::Migration(value)),
+                Err(err) => RequestMethod::invalid(err),
+                Ok(None) => {
+                    return Err(de::Error::invalid_length(1, &self));
+                }
+            },
             // inbuxa: inbuxa Relay
             (MethodFunction::Get, MethodObject::Relay) => match seq.next_element() {
                 Ok(Some(value)) => RequestMethod::Get(GetRequestMethod::Relay(value)),

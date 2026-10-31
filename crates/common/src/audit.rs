@@ -180,7 +180,9 @@ impl Server {
     pub async fn audit_sign_in(&self, req: &AuthRequest, token: &AccessToken) {
         let via = token.origin();
         let (actor, target) = match via {
-            None | Some(Via::OAuth { .. }) | Some(Via::Directory) => return,
+            None | Some(Via::OAuth { .. }) | Some(Via::Directory) | Some(Via::Migration { .. }) => {
+                return;
+            }
             Some(Via::Master { account_id, name }) => {
                 let target_id = token.account_id();
                 (
