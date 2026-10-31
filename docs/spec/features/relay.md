@@ -170,6 +170,30 @@ the protocol the rest of the suite already speaks.
   CA. From then on a certificate from the old one fails the handshake.
   A relay that missed the change, because it was down meanwhile, still
   has the old pin and needs a new join; inbuxa-admin lists it.
+
+  How it goes:
+  - An update of any `inbuxa:Relay` with `replaceLinkCa`, sent on its
+    own, acts on the CA they all share: `start` makes the next CA,
+    `finish` makes it the link CA without waiting, and `cancel` drops it.
+    One that changes nothing (a second `start`, a `finish` with none
+    under way) is refused. Every relay shows `linkCaReplacing`, when the
+    replacement began, and its own `linkCa`: `current`, `both`, or `old`
+    (only a CA this server replaced, from what its links last said, or a
+    join whose token named one: it needs a new join), null before it has
+    said.
+  - The link service finishes it by itself once every enabled relay that
+    has joined says `both`, and records `relay.link-ca-replaced`. A
+    relay that never does holds it until an administrator finishes it.
+  - Each node then takes a certificate from the new CA and links again
+    with it. Its settings push carries `nextLinkCaPin: null`; from a link
+    on the next CA, that makes the next CA the relay's only one: the
+    relay saves it, ends every link on the old CA, and records
+    `relay.link-ca-replaced` too. From a link on the current CA, null
+    just drops the next one (a cancel). A link on the next CA can't name
+    another. Settings a server has cleared go to the relay as null, as a
+    setting left out of a push stays as it was.
+  - A join started before the replacement finished names the old CA in
+    its token and can't complete: start it again.
 - **RL-35. The downstream's relay keys, wrapped.** The link CA key, the
   sealing key and each relay's recipient key are stored encrypted under a
   wrapping key the store doesn't hold: a file every node reads, named by
@@ -261,7 +285,7 @@ with the server's own `inbuxa:` objects. In particular, the relay's
 | `sealingKey` | downstream | The downstream's public sealing key |
 | `linkAllowFrom` | downstream | Addresses and CIDR ranges that may dial the link port. Default empty: anyone (RL-33) |
 | `nextLinkCaPin` | downstream | A second link CA to trust during a replacement (RL-34). Default null |
-| `status` | relay | `{startedAt, linkClients, mode, spool: {inbound, outbound, bytes}, recipientState, certificateNotAfter, linkCaPins, lastError, selfUpgrade, linkFrom}`; `linkCaPins` lists the CAs it trusts (RL-34); `selfUpgrade` is false in a container image (RL-29); `linkFrom` is the address the asking link connection comes from (RL-33) |
+| `status` | relay | `{startedAt, linkClients, mode, spool: {inbound, outbound, bytes}, recipientState, certificateNotAfter, linkCaPins, lastError, selfUpgrade, linkFrom}`; `linkCaPins` lists the CAs it trusts, its own first (RL-34); `selfUpgrade` is false in a container image (RL-29); `linkFrom` is the address the asking link connection comes from (RL-33) |
 
 Settings are cached in the state directory as the downstream last set them,
 so a reboot without the link comes back with the same settings (RL-22).
@@ -513,7 +537,7 @@ When no link is up, or after RL-13:
 
 | Object | What it holds |
 |---|---|
-| `inbuxa:Relay` | One per relay: `name`, `address`, `linkPort`, `enabled`, the settings pushed to the relay, `sendThrough` (route outbound mail through relays), `inboundOnly` (takes mail in but sends none, e.g. while its IP isn't warmed up or isn't in SPF yet), `mxPreference` (its MX preference, 10 by default, RL-25), `certificateNotAfter` and `certificateError` (when its certificate runs out, and why the last order failed, RL-27), `olderThanServer` (a link last heard an older release than this server's, RL-28), and read-only status mirrored from the relay: link state per node, version, queue counts, `lastSeen`. Create, or an update with `rejoin: true`, returns `joinToken` once. An update with `upgrade: {blobId, signature}`, sent on its own, hands the relay a release over the node's link (RL-29) |
+| `inbuxa:Relay` | One per relay: `name`, `address`, `linkPort`, `enabled`, the settings pushed to the relay, `sendThrough` (route outbound mail through relays), `inboundOnly` (takes mail in but sends none, e.g. while its IP isn't warmed up or isn't in SPF yet), `mxPreference` (its MX preference, 10 by default, RL-25), `certificateNotAfter` and `certificateError` (when its certificate runs out, and why the last order failed, RL-27), `olderThanServer` (a link last heard an older release than this server's, RL-28), `linkCa` and `linkCaReplacing` (RL-34), and read-only status mirrored from the relay: link state per node, version, queue counts, `lastSeen`. Create, or an update with `rejoin: true`, returns `joinToken` once. An update with `upgrade: {blobId, signature}`, sent on its own, hands the relay a release over the node's link (RL-29). An update with `replaceLinkCa`, sent on its own, starts, finishes or cancels a replacement of the shared link CA (RL-34) |
 | `inbuxa:RelayMessage` | Read-only view of a relay's `Inbound` and `Outbound` queues, fetched over the link when asked. Never message content. `/get`, `/query` (filter `relayId`, `direction`; newest first) and `/set` destroy only: discards held mail, or cancels an outbound message, whose recipients fail here with no DSN as a delivery cancelled in the queue does. Each id is the relay's id and a hash of the relay's own message id, so nothing is stored |
 
 Permissions: `sysRelayGet`, `sysRelayUpdate`, `sysRelayQueueGet`,
@@ -829,7 +853,8 @@ In progress. Done so far:
   `relay.event` for any other type), then acknowledges it. A node with no
   link to a joined relay for an hour raises `relay.link-down` (a warning),
   once, and `relay.link-up` when it is back (RL-T23). Both reach the log,
-  webhooks and OpenTelemetry.
+  webhooks and OpenTelemetry. `relay.link-ca-replaced` (659) records a
+  finished link CA replacement (RL-34).
 - `Outbound` on the relay: `Outbound/set` create and destroy, `/get` and
   `/changes`, with push, in `spool/out/` (RL-19, RL-T10).
 - Outbound delivery on the relay: MX, DANE, MTA-STS and `outboundTls`, per

@@ -797,6 +797,69 @@ async fn relay_end_to_end() {
         assert!(kinds.contains(&kind), "{kind} in {kinds:?}");
     }
 
+    // RL-T26: a new link CA without a new join. The downstream pushes the
+    // next CA's pin, and the relay trusts both...
+    let next_ca = test_ca(true);
+    let next_pin = cert_pin(&next_ca.ca_der).unwrap();
+    let pins = |relay: &Value| relay["list"][0]["status"]["linkCaPins"].clone();
+    let set_next = async |ws: &mut Ws, pin: Value| {
+        let set = ws
+            .ok(
+                "Relay/set",
+                json!({ "update": { "singleton": { "nextLinkCaPin": pin }}}),
+            )
+            .await;
+        set["updated"] == json!({ "singleton": null })
+    };
+    assert!(
+        !set_next(&mut ws, json!(b64::encode(&ca_pin))).await,
+        "its own CA"
+    );
+    assert!(set_next(&mut ws, json!(b64::encode(&next_pin))).await);
+    let relay = ws.ok("Relay/get", json!({})).await;
+    assert_eq!(
+        pins(&relay),
+        json!([b64::encode(&ca_pin), b64::encode(&next_pin)])
+    );
+    let next_down = Downstream::new(&next_ca, link_addr);
+    let mut next_ws = next_down.ws().await.unwrap();
+    // ...a link on the next CA can't point it elsewhere...
+    assert!(!set_next(&mut next_ws, json!(b64::encode(&[5u8; 32]))).await);
+    // ...and pushing it as null from there makes it the only one
+    assert!(set_next(&mut next_ws, Value::Null).await);
+    let relay = next_ws.ok("Relay/get", json!({})).await;
+    assert_eq!(pins(&relay), json!([b64::encode(&next_pin)]));
+    assert_eq!(Identity::load(&paths).unwrap().unwrap().ca_pin, next_pin);
+    // A link on the old CA ends at once, and can't come back
+    let ended = tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            match ws.ws.next().await {
+                None | Some(Err(_)) | Some(Ok(Message::Close(_))) => return,
+                Some(Ok(_)) => {}
+            }
+        }
+    })
+    .await;
+    assert!(ended.is_ok(), "the old CA's link was cut");
+    // TLS 1.3 tells the client of a refused certificate on its first read
+    assert!(down.ws().await.is_err());
+    assert!(next_down.ws().await.is_ok());
+    let events = next_ws.ok("RelayEvent/get", json!({})).await;
+    assert!(
+        events["list"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|e| e["type"] == "relay.link-ca-replaced"),
+        "{events}"
+    );
+    // A link on the current CA can start and stop a replacement
+    assert!(set_next(&mut next_ws, json!(b64::encode(&[6u8; 32]))).await);
+    assert!(set_next(&mut next_ws, Value::Null).await);
+    let relay = next_ws.ok("Relay/get", json!({})).await;
+    assert_eq!(pins(&relay), json!([b64::encode(&next_pin)]));
+
     drop(ws);
+    drop(next_ws);
     std::fs::remove_dir_all(dir).unwrap();
 }

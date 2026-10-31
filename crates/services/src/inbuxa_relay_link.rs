@@ -184,10 +184,20 @@ async fn reconcile(
     links: &mut HashMap<u32, Running>,
 ) -> trc::Result<()> {
     let data = server.store();
-    let all = match relays::keys(data).await? {
-        Some(_) => relays::all(data).await?,
-        None => Vec::new(),
+    let (keys, all) = match relays::keys(data).await? {
+        Some(keys) => (Some(keys), relays::all(data).await?),
+        None => (None, Vec::new()),
     };
+    // A link CA replacement every joined relay is ready for (RL-34)
+    if let Some(keys) = &keys
+        && relays::link::link_ca_ready(data, keys, &all).await?
+        && relays::change_link_ca(data, relays::LinkCaChange::Finish, now()).await?
+    {
+        trc::event!(
+            Relay(trc::RelayEvent::LinkCaReplaced),
+            Details = "Every relay trusts the new link CA: it is the only one now."
+        );
+    }
     // Which relays outbound mail goes through (RL-20, RL-24)
     server.inner.data.relay_senders.set_relays(&all);
     // The domains' MX and SPF records, when the relays in them changed (RL-25)
@@ -259,6 +269,7 @@ impl NodeCertificates {
         let mut current = self.0.lock().unwrap_or_else(|e| e.into_inner());
         if let Some(cert) = current.as_ref()
             && cert.issued_at + NODE_CERT_RENEW_AFTER > now
+            && cert.ca_pin == keys.link_ca_pin
         {
             return Ok(cert.clone());
         }
@@ -987,7 +998,8 @@ async fn session(
     .await?;
     let mut sent = Sent::default();
     let mut relay = relay.clone();
-    sync(server, &relay, keys, &dialer, &mut ws, &mut sent).await?;
+    let mut keys = keys.clone();
+    sync(server, &relay, &keys, &dialer, &mut ws, &mut sent).await?;
     status.set(data, relay.id, LinkState::Linked, None).await;
     refresh_status(&mut ws, data, &relay, &sent, status).await?;
 
@@ -1065,7 +1077,13 @@ async fn session(
             }
             _ => return Ok(()),
         }
-        sync(server, &relay, keys, &dialer, &mut ws, &mut sent).await?;
+        // A new link CA: a link on a certificate from the old one starts
+        // again with one from the new (RL-34). A next CA, or none, is pushed.
+        match relays::keys(data).await? {
+            Some(now_keys) if now_keys.link_ca_pin == cert.ca_pin => keys = now_keys,
+            _ => return Ok(()),
+        }
+        sync(server, &relay, &keys, &dialer, &mut ws, &mut sent).await?;
         refresh_status(&mut ws, data, &relay, &sent, status).await?;
         taker.relay_name = relay.name.clone();
         taker.take(&mut ws).await?;
@@ -1791,7 +1809,14 @@ async fn sync(
     // Settings, whole, when they changed
     let settings = pushed_settings(relay, keys, &plan);
     if sent.settings.as_ref() != Some(&settings) {
-        let patch = serde_json::to_value(&settings).unwrap_or_default();
+        let mut patch = serde_json::to_value(&settings).unwrap_or_default();
+        // The relay merges what it is sent: a setting left out stays as it
+        // was, so one this server has cleared goes as null
+        if let Some(patch) = patch.as_object_mut() {
+            for cleared in ["smtpCertificate", "nextLinkCaPin"] {
+                patch.entry(cleared).or_insert(Value::Null);
+            }
+        }
         let answer = ws
             .ok(
                 method::RELAY_SET,

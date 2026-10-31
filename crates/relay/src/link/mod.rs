@@ -29,6 +29,7 @@ use inbuxa_relay_proto::{
         self as proto, Account, ClientFrame, ServerFrame, Session, WEBSOCKET_CAPABILITY,
         websocket_capability,
     },
+    pin::{Pin, pins_match},
     types::{Capability, type_name},
 };
 use std::{
@@ -111,6 +112,24 @@ impl Handshakes {
     }
 }
 
+/// Resolves once `ca` is no longer trusted for the link (RL-34): a link on
+/// it then ends.
+async fn untrusted(app: &App, ca: Pin) {
+    let mut trusted = app.link_ca.subscribe();
+    loop {
+        if !trusted
+            .borrow_and_update()
+            .iter()
+            .any(|pin| pins_match(pin, &ca))
+        {
+            return;
+        }
+        if trusted.changed().await.is_err() {
+            return std::future::pending().await;
+        }
+    }
+}
+
 /// Runs the link listener until the process ends.
 pub async fn serve(app: Arc<App>, listener: TcpListener) -> std::io::Result<()> {
     let config = {
@@ -118,7 +137,7 @@ pub async fn serve(app: Arc<App>, listener: TcpListener) -> std::io::Result<()> 
         tls::server_config(
             &identity.link_key_pem,
             &identity.link_cert_pem,
-            identity.ca_pin,
+            app.link_ca.subscribe(),
         )
         .map_err(std::io::Error::other)?
     };
@@ -154,10 +173,18 @@ pub async fn serve(app: Arc<App>, listener: TcpListener) -> std::io::Result<()> 
                     // peer gets a TLS alert and nothing more.
                     _ => return,
                 };
+            // Which of the trusted CAs it came in on (RL-34)
+            let Some(ca) = tls.get_ref().1.peer_certificates().and_then(|chain| {
+                tls::client_ca(chain.get(1..).unwrap_or_default(), &app.link_ca.borrow())
+                    .map(|(_, pin)| pin)
+            }) else {
+                return;
+            };
             let conn = app.conn_id();
             let caller = jmap::Caller {
                 conn,
                 peer: peer.ip().to_canonical(),
+                ca,
             };
             let service = {
                 let app = app.clone();
@@ -166,12 +193,15 @@ pub async fn serve(app: Arc<App>, listener: TcpListener) -> std::io::Result<()> 
                     async move { Ok::<_, std::convert::Infallible>(route(app, caller, req).await) }
                 })
             };
-            let _ = hyper::server::conn::http1::Builder::new()
+            let connection = hyper::server::conn::http1::Builder::new()
                 .timer(hyper_util::rt::TokioTimer::new())
                 .header_read_timeout(Duration::from_secs(30))
                 .serve_connection(TokioIo::new(tls), service)
-                .with_upgrades()
-                .await;
+                .with_upgrades();
+            tokio::select! {
+                _ = connection => {}
+                _ = untrusted(&app, ca) => {}
+            }
             let released = app.spool.lock().expect("spool").release_conn(conn);
             if released {
                 app.inbound_changed();
@@ -438,8 +468,11 @@ where
         live: false,
     };
     let idle = Duration::from_secs(120);
+    let cut = untrusted(&app, caller.ca);
+    tokio::pin!(cut);
     loop {
         tokio::select! {
+            _ = &mut cut => break,
             frame = tokio::time::timeout(idle, stream.next()) => {
                 let message = match frame {
                     Ok(Some(Ok(message))) => message,

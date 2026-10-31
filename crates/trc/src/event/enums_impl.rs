@@ -48,6 +48,7 @@ impl EventType {
             b"relay.event" => EventType::Relay(RelayEvent::Event),
             b"relay.link-down" => EventType::Relay(RelayEvent::LinkDown),
             b"relay.link-up" => EventType::Relay(RelayEvent::LinkUp),
+            b"relay.link-ca-replaced" => EventType::Relay(RelayEvent::LinkCaReplaced),
             // inbuxa: SCIM-54
             b"scim.resource-created" => EventType::Scim(ScimEvent::ResourceCreated),
             b"scim.resource-updated" => EventType::Scim(ScimEvent::ResourceUpdated),
@@ -719,6 +720,7 @@ impl EventType {
             EventType::Relay(RelayEvent::Event) => "relay.event",
             EventType::Relay(RelayEvent::LinkDown) => "relay.link-down",
             EventType::Relay(RelayEvent::LinkUp) => "relay.link-up",
+            EventType::Relay(RelayEvent::LinkCaReplaced) => "relay.link-ca-replaced",
             // inbuxa: SCIM-54
             EventType::Scim(ScimEvent::ResourceCreated) => "scim.resource-created",
             EventType::Scim(ScimEvent::ResourceUpdated) => "scim.resource-updated",
@@ -1531,6 +1533,7 @@ impl EventType {
             EventType::Relay(RelayEvent::Event) => 656,
             EventType::Relay(RelayEvent::LinkDown) => 657,
             EventType::Relay(RelayEvent::LinkUp) => 658,
+            EventType::Relay(RelayEvent::LinkCaReplaced) => 659,
             // inbuxa: SCIM-54
             EventType::Scim(ScimEvent::ResourceCreated) => 637,
             EventType::Scim(ScimEvent::ResourceUpdated) => 638,
@@ -2201,6 +2204,7 @@ impl EventType {
             656 => Some(EventType::Relay(RelayEvent::Event)),
             657 => Some(EventType::Relay(RelayEvent::LinkDown)),
             658 => Some(EventType::Relay(RelayEvent::LinkUp)),
+            659 => Some(EventType::Relay(RelayEvent::LinkCaReplaced)),
             // inbuxa: SCIM-54
             637 => Some(EventType::Scim(ScimEvent::ResourceCreated)),
             638 => Some(EventType::Scim(ScimEvent::ResourceUpdated)),
@@ -3193,6 +3197,7 @@ impl EventType {
             EventType::Relay(RelayEvent::Event) => Level::Info,
             EventType::Relay(RelayEvent::LinkDown) => Level::Warn,
             EventType::Relay(RelayEvent::LinkUp) => Level::Info,
+            EventType::Relay(RelayEvent::LinkCaReplaced) => Level::Info,
             // inbuxa: SCIM-54
             EventType::Scim(ScimEvent::ResourceCreated) => Level::Info,
             EventType::Scim(ScimEvent::ResourceUpdated) => Level::Info,
@@ -3294,6 +3299,7 @@ impl EventType {
             EventType::Relay(RelayEvent::Event) => "Relay event",
             EventType::Relay(RelayEvent::LinkDown) => "Relay link down for an hour",
             EventType::Relay(RelayEvent::LinkUp) => "Relay link back",
+            EventType::Relay(RelayEvent::LinkCaReplaced) => "Relay link CA replaced",
             // inbuxa: SCIM-54
             EventType::Scim(ScimEvent::ResourceCreated) => "SCIM resource created",
             EventType::Scim(ScimEvent::ResourceUpdated) => "SCIM resource updated",
@@ -4409,6 +4415,7 @@ impl EventType {
             EventType::Relay(RelayEvent::Event),
             EventType::Relay(RelayEvent::LinkDown),
             EventType::Relay(RelayEvent::LinkUp),
+            EventType::Relay(RelayEvent::LinkCaReplaced),
             // inbuxa: SCIM-54
             EventType::Scim(ScimEvent::ResourceCreated),
             EventType::Scim(ScimEvent::ResourceUpdated),

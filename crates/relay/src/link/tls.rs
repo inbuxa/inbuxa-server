@@ -17,6 +17,7 @@ use rustls::{
 };
 use rustls_pki_types::{CertificateDer, PrivateKeyDer, UnixTime, pem::PemObject};
 use std::sync::Arc;
+use tokio::sync::watch;
 
 pub fn provider() -> Arc<CryptoProvider> {
     Arc::new(rustls::crypto::aws_lc_rs::default_provider())
@@ -47,7 +48,7 @@ pub fn new_link_identity(relay_id: &str) -> Result<(String, String), rcgen::Erro
 pub fn server_config(
     key_pem: &str,
     cert_pem: &str,
-    ca_pin: Pin,
+    ca_pins: watch::Receiver<Vec<Pin>>,
 ) -> Result<rustls::ServerConfig, String> {
     let provider = provider();
     let cert = CertificateDer::from_pem_slice(cert_pem.as_bytes())
@@ -55,7 +56,7 @@ pub fn server_config(
     let key =
         PrivateKeyDer::from_pem_slice(key_pem.as_bytes()).map_err(|e| format!("link key: {e}"))?;
     let verifier = Arc::new(PinnedCaVerifier {
-        ca_pin,
+        ca_pins,
         algorithms: provider.signature_verification_algorithms,
     });
     let mut config = rustls::ServerConfig::builder_with_provider(provider)
@@ -68,12 +69,27 @@ pub fn server_config(
     Ok(config)
 }
 
+/// The pinned CA among the certificates a client sent with its own, if one
+/// is there.
+pub fn client_ca<'a>(
+    intermediates: &'a [CertificateDer<'a>],
+    pins: &[Pin],
+) -> Option<(&'a CertificateDer<'a>, Pin)> {
+    intermediates.iter().find_map(|c| {
+        let pin = cert_pin(c)?;
+        pins.iter()
+            .any(|trusted| pins_match(&pin, trusted))
+            .then_some((c, pin))
+    })
+}
+
 /// Accepts a client certificate only if one of the certificates the client
-/// sent has the pinned CA key and signed the client's own certificate,
-/// which must be valid now and for client authentication.
+/// sent has a pinned CA key and signed the client's own certificate,
+/// which must be valid now and for client authentication. The pins are the
+/// relay's CA and, while the downstream replaces it, the next one (RL-34).
 #[derive(Debug)]
 pub struct PinnedCaVerifier {
-    ca_pin: Pin,
+    ca_pins: watch::Receiver<Vec<Pin>>,
     algorithms: WebPkiSupportedAlgorithms,
 }
 
@@ -96,12 +112,10 @@ impl ClientCertVerifier for PinnedCaVerifier {
         intermediates: &[CertificateDer<'_>],
         now: UnixTime,
     ) -> Result<ClientCertVerified, Error> {
-        let ca = intermediates
-            .iter()
-            .find(|c| cert_pin(c).is_some_and(|pin| pins_match(&pin, &self.ca_pin)))
-            .ok_or(Error::InvalidCertificate(
-                rustls::CertificateError::UnknownIssuer,
-            ))?;
+        let pins = self.ca_pins.borrow().clone();
+        let (ca, _) = client_ca(intermediates, &pins).ok_or(Error::InvalidCertificate(
+            rustls::CertificateError::UnknownIssuer,
+        ))?;
         let anchor = webpki::anchor_from_trusted_cert(ca)
             .map_err(|_| Error::InvalidCertificate(rustls::CertificateError::BadEncoding))?;
         let ee = webpki::EndEntityCert::try_from(end_entity)
@@ -187,7 +201,7 @@ pub mod tests {
 
     fn verifier(pin: Pin) -> PinnedCaVerifier {
         PinnedCaVerifier {
-            ca_pin: pin,
+            ca_pins: watch::channel(vec![pin]).1,
             algorithms: provider().signature_verification_algorithms,
         }
     }
@@ -222,6 +236,6 @@ pub mod tests {
         let (key, cert) = new_link_identity("r1").unwrap();
         let der = CertificateDer::from_pem_slice(cert.as_bytes()).unwrap();
         assert!(cert_pin(&der).is_some());
-        assert!(server_config(&key, &cert, [1; 32]).is_ok());
+        assert!(server_config(&key, &cert, watch::channel(vec![[1; 32]]).1).is_ok());
     }
 }

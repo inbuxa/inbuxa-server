@@ -56,6 +56,15 @@ pub enum RelayProperty {
     /// Whether a linked relay runs an older release than this server
     /// (RL-28); null before any link has said.
     OlderThanServer,
+    /// Update only, sent on its own: `start`, `finish` or `cancel` a
+    /// replacement of the link CA every relay shares (RL-34).
+    ReplaceLinkCa,
+    /// Which link CA the relay last said it trusts: `current`, `both`
+    /// (the current and the next, during a replacement) or `old` (one this
+    /// server replaced: it needs a new join); null before it has said.
+    LinkCa,
+    /// When a replacement of the link CA began, while one is under way.
+    LinkCaReplacing,
     /// In a create or rejoin response only.
     JoinToken,
     /// Each node's link to the relay, and what the relay last said.
@@ -102,6 +111,9 @@ impl Property for RelayProperty {
             RelayProperty::Rejoin => "rejoin",
             RelayProperty::Upgrade => "upgrade",
             RelayProperty::OlderThanServer => "olderThanServer",
+            RelayProperty::ReplaceLinkCa => "replaceLinkCa",
+            RelayProperty::LinkCa => "linkCa",
+            RelayProperty::LinkCaReplacing => "linkCaReplacing",
             RelayProperty::JoinToken => "joinToken",
             RelayProperty::Links => "links",
             RelayProperty::CreatedBy => "createdBy",
@@ -136,6 +148,9 @@ impl RelayProperty {
             b"rejoin" => RelayProperty::Rejoin,
             b"upgrade" => RelayProperty::Upgrade,
             b"olderThanServer" => RelayProperty::OlderThanServer,
+            b"replaceLinkCa" => RelayProperty::ReplaceLinkCa,
+            b"linkCa" => RelayProperty::LinkCa,
+            b"linkCaReplacing" => RelayProperty::LinkCaReplacing,
             b"joinToken" => RelayProperty::JoinToken,
             b"links" => RelayProperty::Links,
             b"createdBy" => RelayProperty::CreatedBy,

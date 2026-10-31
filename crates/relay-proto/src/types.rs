@@ -70,6 +70,10 @@ pub struct RelaySettings {
     /// Addresses and CIDR ranges that may dial the link port; empty for
     /// anyone (RL-33).
     pub link_allow_from: Vec<String>,
+    /// A second link CA to trust while the downstream replaces its own
+    /// (RL-34). Pushed as null by a link on that CA, it becomes the only one.
+    #[serde(with = "b64::option", skip_serializing_if = "Option::is_none")]
+    pub next_link_ca_pin: Option<crate::pin::Pin>,
     /// The STARTTLS certificate for port 25.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub smtp_certificate: Option<SmtpCertificate>,
@@ -98,6 +102,7 @@ impl Default for RelaySettings {
             outbound_expiry: 3 * 86_400,
             outbound_tls: OutboundTls::default(),
             link_allow_from: Vec::new(),
+            next_link_ca_pin: None,
             smtp_certificate: None,
             sealing_key: None,
             recipient_key: None,
@@ -239,6 +244,10 @@ pub struct RelayStatus {
     /// it: what `linkAllowFrom` has to let in (RL-33).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub link_from: Option<String>,
+    /// The link CAs it trusts, base64url pins: its own first, then the one
+    /// the downstream is moving to, if any (RL-34).
+    #[serde(default)]
+    pub link_ca_pins: Vec<String>,
 }
 
 /// Live while a link client has push on for `Inbound` (spec "Live mode").
