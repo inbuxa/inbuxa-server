@@ -2,13 +2,16 @@
  * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
+ *
+ * Modified by Coffey Labs in 2026 for INBUXA.
  */
 
-use crate::utils::server::TestServer;
+use crate::utils::{server::TestServer, webdav::DummyWebDavClient};
 use crate::webdav::prop::ALL_DAV_PROPERTIES;
 use dav_proto::schema::property::{DavProperty, PrincipalProperty, WebDavProperty};
 use groupware::DavResourceName;
 use hyper::StatusCode;
+use registry::schema::{prelude::Property, structs::Sharing};
 
 pub async fn test(test: &TestServer, assisted_discovery: bool) {
     println!("Running principals tests...");
@@ -482,6 +485,70 @@ pub async fn test(test: &TestServer, assisted_discovery: bool) {
             DavResourceName::Principal.base_path()
         )
         .as_str()]);
+
+    // inbuxa: Test 7: with directory queries off, searching is refused and the
+    // principal collection lists only the caller's own, while principal-match
+    // still works, since clients use it to find their own account.
+    let admin = test.account("admin");
+    let set_directory_queries = async |allow| {
+        admin
+            .registry_update_setting(
+                Sharing {
+                    allow_directory_queries: allow,
+                    ..Default::default()
+                },
+                &[Property::AllowDirectoryQueries],
+            )
+            .await;
+        admin.reload_settings().await;
+    };
+    let principal_href = |name: &str| {
+        format!(
+            "{}/{}%40example.com/",
+            DavResourceName::Principal.base_path(),
+            name
+        )
+    };
+    set_directory_queries(false).await;
+    client
+        .request(
+            "REPORT",
+            DavResourceName::Principal.collection_path(),
+            PRINCIPAL_PROPERTY_SEARCH_QUERY.replace("$NAME", "doe"),
+        )
+        .await
+        .with_status(StatusCode::FORBIDDEN);
+    client
+        .request(
+            "REPORT",
+            DavResourceName::Principal.collection_path(),
+            PRINCIPAL_MATCH_QUERY,
+        )
+        .await
+        .with_status(StatusCode::MULTI_STATUS)
+        .into_propfind_response(None)
+        .with_hrefs([
+            principal_href("jane").as_str(),
+            principal_href("support").as_str(),
+        ]);
+    // Whoever can list accounts anyway isn't held back
+    // (not webdav_client(): the administrator has no address)
+    DummyWebDavClient::new(
+        admin.id().document_id(),
+        admin.name(),
+        admin.secret(),
+        "admin@example.com",
+    )
+    .request(
+        "REPORT",
+        DavResourceName::Principal.collection_path(),
+        PRINCIPAL_PROPERTY_SEARCH_QUERY.replace("$NAME", "support"),
+    )
+    .await
+    .with_status(StatusCode::MULTI_STATUS)
+    .into_propfind_response(None)
+    .with_hrefs([principal_href("support").as_str()]);
+    set_directory_queries(true).await;
 
     client.delete_default_containers().await;
     client

@@ -2,6 +2,8 @@
  * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
+ *
+ * Modified by Coffey Labs in 2026 for INBUXA.
  */
 
 use crate::api::query::QueryResponseBuilder;
@@ -14,7 +16,7 @@ use jmap_proto::{
 use registry::{
     schema::{
         enums::AccountType,
-        prelude::{ObjectType, Permission, Property},
+        prelude::{ObjectType, Property},
     },
     types::EnumImpl,
 };
@@ -41,9 +43,7 @@ impl PrincipalQuery for Server {
         mut request: QueryRequest<Principal>,
         access_token: &AccessToken,
     ) -> trc::Result<QueryResponse> {
-        if !self.core.groupware.allow_directory_query
-            && !access_token.has_permission(Permission::JmapPrincipalQuery)
-        {
+        if !self.can_read_directory(access_token) {
             return Err(trc::JmapEvent::Forbidden
                 .into_err()
                 .details("The administrator has disabled directory queries.".to_string()));

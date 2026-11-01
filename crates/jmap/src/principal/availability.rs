@@ -34,7 +34,6 @@ use jmap_proto::{
     types::date::UTCDate,
 };
 use jmap_tools::{Key, Map, Value};
-use registry::schema::enums::Permission;
 use std::{collections::hash_map::Entry, future::Future};
 use store::{
     ValueKey,
@@ -64,20 +63,25 @@ impl PrincipalGetAvailability for Server {
         request: GetAvailabilityRequest,
         access_token: &AccessToken,
     ) -> trc::Result<GetAvailabilityResponse> {
-        if !self.core.groupware.allow_directory_query
-            && !access_token.has_permission(Permission::JmapPrincipalGetAvailability)
-        {
-            return Err(trc::JmapEvent::Forbidden
-                .into_err()
-                .details("The administrator has disabled directory queries.".to_string()));
-        }
-
         // Process parameters
         if !request.id.is_valid() {
             return Err(trc::JmapEvent::InvalidArguments
                 .into_err()
                 .details("Missing principal id"));
         }
+
+        // inbuxa: with directory queries off, only the accounts this one already
+        // has to do with. Same answer whether the id exists or not.
+        if !self.can_read_directory(access_token)
+            && !access_token
+                .all_ids()
+                .any(|id| id == request.id.document_id())
+        {
+            return Err(trc::JmapEvent::Forbidden
+                .into_err()
+                .details("The administrator has disabled directory queries.".to_string()));
+        }
+
         let properties = request
             .event_properties
             .map(|props| props.into_valid().collect::<Vec<_>>())
