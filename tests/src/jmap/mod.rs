@@ -186,6 +186,8 @@ pub async fn jmap_tests() {
 
     test.insert_account(admin);
 
+    principal::directory_off::test(&test).await;
+
     mail::get::test(&test).await;
     mail::set::test(&test).await;
     mail::parse::test(&test).await;

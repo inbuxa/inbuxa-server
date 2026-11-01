@@ -2,6 +2,8 @@
  * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
+ *
+ * Modified by Coffey Labs in 2026 for INBUXA.
  */
 
 use common::{Server, auth::AccessToken};
@@ -12,7 +14,7 @@ use jmap_proto::{
     types::state::State,
 };
 use jmap_tools::{Key, Map, Value};
-use registry::schema::prelude::{ObjectType, Permission};
+use registry::schema::prelude::ObjectType;
 use std::future::Future;
 use store::{registry::RegistryQuery, roaring::RoaringBitmap};
 use trc::AddContext;
@@ -31,14 +33,6 @@ impl PrincipalGet for Server {
         mut request: GetRequest<Principal>,
         access_token: &AccessToken,
     ) -> trc::Result<GetResponse<Principal>> {
-        if !self.core.groupware.allow_directory_query
-            && !access_token.has_permission(Permission::JmapPrincipalGet)
-        {
-            return Err(trc::JmapEvent::Forbidden
-                .into_err()
-                .details("The administrator has disabled directory queries.".to_string()));
-        }
-
         let (ids, not_found_ids) = request.unwrap_ids(self.core.jmap.get_max_objects)?;
         let properties = request.unwrap_properties(&[
             PrincipalProperty::Id,
@@ -49,13 +43,19 @@ impl PrincipalGet for Server {
         ]);
 
         // Return all principals
-        let principal_ids = self
+        let mut principal_ids = self
             .registry()
             .query::<RoaringBitmap>(
                 RegistryQuery::new(ObjectType::Account).with_tenant(access_token.tenant_id()),
             )
             .await
             .caused_by(trc::location!())?;
+
+        // inbuxa: with directory queries off, only the accounts this one already
+        // has to do with: its own, its groups, and whoever shared with it.
+        if !self.can_read_directory(access_token) {
+            principal_ids &= RoaringBitmap::from_iter(access_token.all_ids());
+        }
 
         let ids = if let Some(ids) = ids {
             ids

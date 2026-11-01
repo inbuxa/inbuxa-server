@@ -216,18 +216,9 @@ impl DavRequestDispatcher for Server {
                     }
                 }
                 Report::AclPrincipalPropSet(report) => {
-                    // Validate permissions
-                    if !self.core.groupware.allow_directory_query
-                        && !access_token.has_permission(Permission::DavPrincipalAcl)
-                    {
-                        return Err(DavError::Condition(
-                            DavErrorCondition::new(
-                                StatusCode::FORBIDDEN,
-                                BaseCondition::NeedPrivileges(List(Default::default())),
-                            )
-                            .with_details("The administrator has disabled directory queries."),
-                        ));
-                    }
+                    // inbuxa: not a directory read, so allowDirectoryQueries
+                    // doesn't apply: the item's owner or a sharer, and only
+                    // the accounts already on its ACL.
                     let access_token =
                         access_token.assert_has_permission(Permission::DavPrincipalAcl)?;
 
@@ -235,18 +226,9 @@ impl DavRequestDispatcher for Server {
                         .await
                 }
                 Report::PrincipalMatch(report) => {
-                    // Validate permissions
-                    if !self.core.groupware.allow_directory_query
-                        && !access_token.has_permission(Permission::DavPrincipalMatch)
-                    {
-                        return Err(DavError::Condition(
-                            DavErrorCondition::new(
-                                StatusCode::FORBIDDEN,
-                                BaseCondition::NeedPrivileges(List(Default::default())),
-                            )
-                            .with_details("The administrator has disabled directory queries."),
-                        ));
-                    }
+                    // inbuxa: not a directory read, so allowDirectoryQueries
+                    // doesn't apply: it answers with the caller's own accounts,
+                    // and clients use it for discovery.
                     let access_token =
                         access_token.assert_has_permission(Permission::DavPrincipalMatch)?;
 
@@ -256,9 +238,7 @@ impl DavRequestDispatcher for Server {
                 Report::PrincipalPropertySearch(report) => {
                     if resource == DavResourceName::Principal {
                         // Validate permissions
-                        if !self.core.groupware.allow_directory_query
-                            && !access_token.has_permission(Permission::DavPrincipalSearch)
-                        {
+                        if !self.can_read_directory(&access_token) {
                             return Err(DavError::Condition(
                                 DavErrorCondition::new(
                                     StatusCode::FORBIDDEN,

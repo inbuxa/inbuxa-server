@@ -23,6 +23,15 @@ use types::id::Id;
 use utils::map::vec_map::VecMap;
 
 impl Server {
+    /// inbuxa: whether this account may look through the server's accounts.
+    /// `allowDirectoryQueries` decides, except for those who can list accounts
+    /// anyway. The `jmapPrincipal*` and `davPrincipal*` permissions don't count
+    /// here: every default user role holds them.
+    pub fn can_read_directory(&self, access_token: &AccessToken) -> bool {
+        self.core.groupware.allow_directory_query
+            || access_token.has_permission(Permission::SysAccountQuery)
+    }
+
     pub async fn add_role_permissions(
         &self,
         mut base_permissions: PermissionsGroup,

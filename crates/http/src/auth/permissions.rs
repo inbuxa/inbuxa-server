@@ -77,7 +77,7 @@ impl AccountApiHandler for Server {
                 permissions.clear(p.to_id() as usize);
             }
 
-            if !self.core.groupware.allow_directory_query {
+            if !self.can_read_directory(access_token) {
                 for p in [
                     Permission::JmapPrincipalQuery,
                     Permission::JmapPrincipalQueryChanges,
