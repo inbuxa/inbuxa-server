@@ -7,6 +7,7 @@
  */
 
 use common::{Server, auth::AccessToken, sharing::EffectiveAcl};
+use email::known_accounts::KnownAccounts;
 use jmap_proto::{
     error::set::{SetError, SetErrorType},
     object::{JmapRight, JmapSharedObject},
@@ -244,10 +245,14 @@ impl JmapRights {
 }
 
 pub trait JmapAcl {
+    /// `previous` holds the accounts already granted access before this change:
+    /// the item's current ACL, or the parent's when the ACL is inherited.
     fn acl_validate(
         &self,
+        access_token: &AccessToken,
         account_id: u32,
         grants: &[AclGrant],
+        previous: impl Iterator<Item = u32> + Send,
     ) -> impl Future<Output = Result<(), ShareValidationError>> + Send;
 }
 
@@ -259,9 +264,13 @@ pub enum ShareValidationError {
 impl JmapAcl for Server {
     async fn acl_validate(
         &self,
+        access_token: &AccessToken,
         account_id: u32,
         grants: &[AclGrant],
+        previous: impl Iterator<Item = u32> + Send,
     ) -> Result<(), ShareValidationError> {
+        let previous = previous.collect::<RoaringBitmap>();
+
         if grants.len() > self.core.groupware.max_shares_per_item {
             return Err(ShareValidationError::MaxSharesExceeded(
                 self.core.groupware.max_shares_per_item,
@@ -281,6 +290,23 @@ impl JmapAcl for Server {
             .ok()
             .flatten()
             .and_then(|owner| owner.id_tenant);
+
+        // inbuxa: with directory queries off, nobody new can be added, or a
+        // grant followed by reading the ACL would name any account. Same error
+        // as an account that doesn't exist, so it doesn't confirm one either.
+        if !self.can_read_directory(access_token)
+            && grants.iter().any(|g| !previous.contains(g.account_id))
+        {
+            let known = self.known_accounts(access_token).await.unwrap_or_default();
+            if let Some(grant) = grants
+                .iter()
+                .find(|g| !previous.contains(g.account_id) && !known.contains(g.account_id))
+            {
+                return Err(ShareValidationError::InvalidAccountId(Id::from(
+                    grant.account_id,
+                )));
+            }
+        }
 
         for grant in grants {
             if !principal_ids.contains(grant.account_id)

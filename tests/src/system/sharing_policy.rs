@@ -99,6 +99,12 @@ pub async fn sharing_policy_tests() {
         .await
         .with_default_listeners()
         .await
+        // inbuxa: these share with accounts they have nothing else to do with
+        .with_object(registry::schema::structs::Sharing {
+            allow_directory_queries: true,
+            ..Default::default()
+        })
+        .await
         .build()
         .await;
     let admin = test.create_admin_account("admin@example.org").await;

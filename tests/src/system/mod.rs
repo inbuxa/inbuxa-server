@@ -65,6 +65,12 @@ pub async fn system_tests() {
             ..Default::default()
         })
         .await
+        // inbuxa: these share with accounts they have nothing else to do with
+        .with_object(registry::schema::structs::Sharing {
+            allow_directory_queries: true,
+            ..Default::default()
+        })
+        .await
         .build()
         .await;
 

@@ -14,6 +14,7 @@
 pub mod cache;
 pub mod identity;
 pub mod inbuxa_lock; // inbuxa: account lock grants
+pub mod known_accounts; // inbuxa: directory queries off
 pub mod mailbox;
 pub mod message;
 pub mod push;

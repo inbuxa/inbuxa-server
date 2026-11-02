@@ -118,7 +118,10 @@ impl CalendarSet for Server {
             }
             // Validate ACLs
             if !calendar.acls.is_empty() {
-                if let Err(err) = self.acl_validate(account_id, &calendar.acls).await {
+                if let Err(err) = self
+                    .acl_validate(access_token, account_id, &calendar.acls, std::iter::empty())
+                    .await
+                {
                     response.not_created.append(id, err.into());
                     continue 'create;
                 }
@@ -249,7 +252,19 @@ impl CalendarSet for Server {
                 continue 'update;
             }
             if has_acl_changes {
-                if let Err(err) = self.acl_validate(account_id, &new_calendar.acls).await {
+                if let Err(err) = self
+                    .acl_validate(
+                        access_token,
+                        account_id,
+                        &new_calendar.acls,
+                        calendar
+                            .inner
+                            .acls
+                            .iter()
+                            .map(|grant| u32::from(grant.account_id)),
+                    )
+                    .await
+                {
                     response.not_updated.append(id, err.into());
                     continue 'update;
                 }

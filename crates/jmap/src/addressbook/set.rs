@@ -114,7 +114,15 @@ impl AddressBookSet for Server {
             }
             // Validate ACLs
             if !address_book.acls.is_empty() {
-                if let Err(err) = self.acl_validate(account_id, &address_book.acls).await {
+                if let Err(err) = self
+                    .acl_validate(
+                        access_token,
+                        account_id,
+                        &address_book.acls,
+                        std::iter::empty(),
+                    )
+                    .await
+                {
                     response.not_created.append(id, err.into());
                     continue 'create;
                 }
@@ -245,7 +253,19 @@ impl AddressBookSet for Server {
                 continue 'update;
             }
             if has_acl_changes {
-                if let Err(err) = self.acl_validate(account_id, &new_address_book.acls).await {
+                if let Err(err) = self
+                    .acl_validate(
+                        access_token,
+                        account_id,
+                        &new_address_book.acls,
+                        address_book
+                            .inner
+                            .acls
+                            .iter()
+                            .map(|grant| u32::from(grant.account_id)),
+                    )
+                    .await
+                {
                     response.not_updated.append(id, err.into());
                     continue 'update;
                 }

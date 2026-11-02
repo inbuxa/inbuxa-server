@@ -417,7 +417,20 @@ impl FileNodeCopy for Server {
             }
 
             if !file_node.acls.is_empty() {
-                if let Err(err) = self.acl_validate(account_id, &file_node.acls).await {
+                if let Err(err) = self
+                    .acl_validate(
+                        access_token,
+                        account_id,
+                        &file_node.acls,
+                        // inbuxa: inherited from the parent, so not newly granted
+                        file_node
+                            .acls
+                            .iter()
+                            .filter(|_| !has_acl_changes)
+                            .map(|grant| grant.account_id),
+                    )
+                    .await
+                {
                     response.not_created.append(id, err.into());
                     continue 'create;
                 }
