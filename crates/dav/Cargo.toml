@@ -6,6 +6,7 @@ edition = "2024"
 [dependencies]
 dav-proto = { path =  "../dav-proto" }
 common = { path = "../common" }
+email = { path = "../email" }
 store = { path = "../store" }
 utils = { path = "../utils" }
 groupware = { path = "../groupware" }

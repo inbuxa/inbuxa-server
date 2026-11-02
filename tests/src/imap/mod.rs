@@ -223,6 +223,13 @@ pub async fn imap_tests() {
             namespace: "spam-traps".into(),
         })
         .await;
+    // inbuxa: the ACL tests share with accounts they have nothing else to do with
+    admin
+        .registry_create_object(registry::schema::structs::Sharing {
+            allow_directory_queries: true,
+            ..Default::default()
+        })
+        .await;
     admin.reload_settings().await;
     admin.reload_lookup_stores().await;
 

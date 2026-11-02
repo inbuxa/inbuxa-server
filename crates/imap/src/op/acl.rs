@@ -16,6 +16,7 @@ use common::{
     storage::index::ObjectIndexBuilder,
 };
 use compact_str::ToCompactString;
+use email::known_accounts::KnownAccounts;
 use imap_proto::{
     Command, ResponseCode, StatusResponse,
     protocol::acl::{
@@ -319,6 +320,29 @@ impl<T: SessionStream> Session<T> {
                 .await
                 .imap_ctx(&arguments.tag, trc::location!())?
                 .is_none_or(|grantee| grantee.id_tenant != owner_tenant)
+            {
+                return Err(trc::ImapEvent::Error
+                    .into_err()
+                    .details("Account does not exist")
+                    .id(arguments.tag.to_string())
+                    .caused_by(trc::location!()));
+            }
+
+            // inbuxa: with directory queries off, nobody new can be added, or
+            // SETACL followed by GETACL would name any account. Refused as if
+            // the account didn't exist.
+            if !data.server.can_read_directory(&access_token)
+                && !current_mailbox
+                    .inner
+                    .acls
+                    .iter()
+                    .any(|grant| grant.account_id == acl_account_id)
+                && !data
+                    .server
+                    .known_accounts(&access_token)
+                    .await
+                    .imap_ctx(&arguments.tag, trc::location!())?
+                    .contains(acl_account_id)
             {
                 return Err(trc::ImapEvent::Error
                     .into_err()

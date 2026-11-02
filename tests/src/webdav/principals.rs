@@ -531,6 +531,20 @@ pub async fn test(test: &TestServer, assisted_discovery: bool) {
             principal_href("jane").as_str(),
             principal_href("support").as_str(),
         ]);
+    // ACL can't reach anyone new either, whether the account exists or not
+    for grantee in ["john", "nobody"] {
+        client
+            .acl(
+                &format!(
+                    "{}/jane%40example.com/default/",
+                    DavResourceName::Cal.base_path()
+                ),
+                &principal_href(grantee),
+                ["read"],
+            )
+            .await
+            .with_status(StatusCode::FORBIDDEN);
+    }
     // Whoever can list accounts anyway isn't held back
     // (not webdav_client(): the administrator has no address)
     DummyWebDavClient::new(
@@ -553,6 +567,11 @@ pub async fn test(test: &TestServer, assisted_discovery: bool) {
     client.delete_default_containers().await;
     client
         .delete_default_containers_by_account("support@example.com")
+        .await;
+    // Working out who jane knows reads her mail folders and support's
+    let jane = test.account("jane@example.com");
+    test.destroy_all_mailboxes(jane).await;
+    jane.destroy_all_mailboxes_for_account(test.account("support@example.com").id().document_id())
         .await;
     test.assert_is_empty().await;
 }

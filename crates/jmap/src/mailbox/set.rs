@@ -662,7 +662,14 @@ impl MailboxSet for Server {
             }
 
             if !changes.acls.is_empty()
-                && let Err(err) = self.acl_validate(ctx.account_id, &changes.acls).await
+                && let Err(err) = self
+                    .acl_validate(
+                        ctx.access_token,
+                        ctx.account_id,
+                        &changes.acls,
+                        before.iter().map(|grant| grant.account_id),
+                    )
+                    .await
             {
                 return Ok(Err(err.into()));
             }

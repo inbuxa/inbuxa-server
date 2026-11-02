@@ -7,6 +7,7 @@
  */
 
 use common::{Server, auth::AccessToken};
+use email::known_accounts::KnownAccounts;
 use jmap_proto::{
     method::get::{GetRequest, GetResponse},
     object::principal::{Principal, PrincipalProperty, PrincipalType, PrincipalValue},
@@ -52,9 +53,9 @@ impl PrincipalGet for Server {
             .caused_by(trc::location!())?;
 
         // inbuxa: with directory queries off, only the accounts this one already
-        // has to do with: its own, its groups, and whoever shared with it.
+        // has to do with, so it can still put a name to who it shares with.
         if !self.can_read_directory(access_token) {
-            principal_ids &= RoaringBitmap::from_iter(access_token.all_ids());
+            principal_ids &= self.known_accounts(access_token).await?;
         }
 
         let ids = if let Some(ids) = ids {

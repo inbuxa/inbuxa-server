@@ -20,6 +20,7 @@ use dav_proto::{
         response::{Ace, BaseCondition, GrantDeny, Href, MultiStatus, Principal},
     },
 };
+use email::known_accounts::KnownAccounts;
 use groupware::RFC_3986;
 use groupware::{cache::GroupwareCache, calendar::Calendar, contact::AddressBook, file::FileNode};
 use http_proto::HttpResponse;
@@ -168,6 +169,28 @@ impl DavAclHandler for Server {
                 .caused_by(trc::location!())?
                 .is_none_or(|grantee| grantee.id_tenant != tenant_id)
             {
+                return Err(DavError::Condition(DavErrorCondition::new(
+                    StatusCode::FORBIDDEN,
+                    BaseCondition::AllowedPrincipal,
+                )));
+            }
+        }
+
+        // inbuxa: with directory queries off, nobody new can be added, or a
+        // grant followed by reading the ACL would name any account.
+        if !self.can_read_directory(access_token)
+            && grants
+                .iter()
+                .any(|g| !acls.iter().any(|a| u32::from(a.account_id) == g.account_id))
+        {
+            let known = self
+                .known_accounts(access_token)
+                .await
+                .caused_by(trc::location!())?;
+            if grants.iter().any(|g| {
+                !known.contains(g.account_id)
+                    && !acls.iter().any(|a| u32::from(a.account_id) == g.account_id)
+            }) {
                 return Err(DavError::Condition(DavErrorCondition::new(
                     StatusCode::FORBIDDEN,
                     BaseCondition::AllowedPrincipal,

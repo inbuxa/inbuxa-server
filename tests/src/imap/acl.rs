@@ -7,7 +7,10 @@
  */
 
 use super::{AssertResult, ImapConnection, Type, append::assert_append_message};
-use crate::utils::{server::TestServer, smtp::SmtpConnection};
+use crate::{
+    jmap::principal::directory_off::set_directory_queries,
+    utils::{server::TestServer, smtp::SmtpConnection},
+};
 use imap_proto::ResponseType;
 
 pub async fn test(
@@ -456,4 +459,54 @@ pub async fn test(
         .assert_read(Type::Tagged, ResponseType::Ok)
         .await
         .assert_count("Shared Folders", 3);
+
+    // inbuxa: with directory queries off, SETACL can't reach anyone new, and an
+    // account that exists is refused the same way as one that doesn't
+    let admin = test.account("admin");
+    let stranger = admin
+        .create_user_account(
+            "stranger@example.com",
+            "stranger-secret-1234",
+            "Stranger",
+            &[],
+            vec![],
+        )
+        .await;
+    // (a session keeps the settings it started with, so each change reconnects)
+    set_directory_queries(test, false).await;
+    let mut imap_off = test.account("jdoe@example.com").imap_client().await;
+    for account in ["stranger@example.com", "nobody@example.com"] {
+        imap_off
+            .send(&format!("SETACL \"INBOX\" {account} lr"))
+            .await;
+        imap_off
+            .assert_read(Type::Tagged, ResponseType::No)
+            .await
+            .assert_contains("Account does not exist");
+        imap_off.send("GETACL \"INBOX\"").await;
+        imap_off
+            .assert_read(Type::Tagged, ResponseType::Ok)
+            .await
+            .assert_count(account, 0);
+    }
+
+    // Someone already on the mailbox stays usable
+    set_directory_queries(test, true).await;
+    let mut imap_on = test.account("jdoe@example.com").imap_client().await;
+    imap_on
+        .send("SETACL \"INBOX\" stranger@example.com lr")
+        .await;
+    imap_on.assert_read(Type::Tagged, ResponseType::Ok).await;
+    set_directory_queries(test, false).await;
+    let mut imap_off = test.account("jdoe@example.com").imap_client().await;
+    imap_off
+        .send("SETACL \"INBOX\" stranger@example.com lrs")
+        .await;
+    imap_off.assert_read(Type::Tagged, ResponseType::Ok).await;
+    imap_off
+        .send("DELETEACL \"INBOX\" stranger@example.com")
+        .await;
+    imap_off.assert_read(Type::Tagged, ResponseType::Ok).await;
+    set_directory_queries(test, true).await;
+    admin.destroy_account(stranger).await;
 }

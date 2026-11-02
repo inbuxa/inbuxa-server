@@ -218,7 +218,8 @@ impl DavRequestDispatcher for Server {
                 Report::AclPrincipalPropSet(report) => {
                     // inbuxa: not a directory read, so allowDirectoryQueries
                     // doesn't apply: the item's owner or a sharer, and only
-                    // the accounts already on its ACL.
+                    // the accounts on its ACL, which that setting also limits
+                    // when they're added (see handle_acl_request and acl_validate).
                     let access_token =
                         access_token.assert_has_permission(Permission::DavPrincipalAcl)?;
 
