@@ -3,7 +3,7 @@
 </p>
 
 <h3 align="center">
-  A complete mail and collaboration server, every feature included, under the AGPL
+  Self-hosted mail, calendars, contacts and files, enterprise features included
 </h3>
 
 <p align="center">
@@ -20,35 +20,59 @@
 > Development happens on [git.coffeylabs.org/inbuxa/inbuxa-server](https://git.coffeylabs.org/inbuxa/inbuxa-server); the copy on GitHub is a read-only mirror.
 > Report issues at **[git.coffeylabs.org/inbuxa/inbuxa-server/issues](https://git.coffeylabs.org/inbuxa/inbuxa-server/issues)**, join discussions at **[community.coffeylabs.org](https://community.coffeylabs.org)**, or chat on **[Discord](https://discord.gg/nqcY4TKfAn)**.
 
-**inbuxa** is a mail and collaboration server: JMAP, IMAP, POP3, SMTP,
-CalDAV, CardDAV and WebDAV, in one Rust binary, with ihasmail as its web front
-end. It is a fork of [Stalwart](https://github.com/stalwartlabs/stalwart).
-Project site: [inbuxa.org](https://inbuxa.org). Documentation: [docs.inbuxa.org](https://docs.inbuxa.org).
+**inbuxa** is a self-hosted mail and collaboration server from Coffey Labs. It
+speaks JMAP, IMAP, POP3, SMTP, CalDAV, CardDAV and WebDAV from one Rust binary.
+Project site: [inbuxa.org](https://inbuxa.org). Documentation:
+[docs.inbuxa.org](https://docs.inbuxa.org).
 
-Stalwart ships some features only in a paid Enterprise Edition: multi-tenancy,
-masked email, undelete and others. **inbuxa** ships everything to everybody under
-the AGPL-3.0, rebuilding those features independently and without using any
-of Stalwart's Enterprise code.
+The server is one part of a suite. [inbuxa Admin](https://git.coffeylabs.org/inbuxa/inbuxa-admin)
+is the console that runs it, and [inbuxa Webmail](https://git.coffeylabs.org/inbuxa/inbuxa-webmail)
+is where people read their mail. Each is its own program, so the mail host
+doesn't have to serve a web front end at all.
 
-## What's different from Stalwart
+## What's included
 
-- **Every feature, one edition.** No license key, no edition checks, no
-  upsell. See `docs/spec/SPEC.md` §4 for the features being rebuilt, and
-  `docs/spec/features/` for each one's specification.
-- **Webmail and administration by ihasmail,** as a separate service that can
-  run beside the server or elsewhere. Stalwart's own web interface is removed,
-  so there's no web front end on the mail host.
-- **Clean-room rebuilds.** Enterprise-only code is stripped from every
-  upstream release before it's imported. The rebuilt features are written
-  from specifications that use only public sources (`docs/spec/SPEC.md` §3).
+There is one edition and no paid tier. Nothing checks a license key.
 
-## How the fork is kept
+- **For organizations:** tenants, SCIM provisioning, single sign-on, per-domain
+  directories and branding.
+- **For compliance:** audit log, [legal holds](https://docs.inbuxa.org/run/legal-holds/),
+  data loss prevention, mail flow rules and journaling.
+- **For people:** masked addresses, undelete, shared mailboxes, calendars,
+  contacts and files.
+- **For operators:** monitoring and alerts, [clustering](https://docs.inbuxa.org/run/clustering/)
+  and scale-out storage, plus [inbuxa Relay](https://docs.inbuxa.org/run/relay/)
+  for a server that can't take mail from the internet directly.
+- **Local AI, if you want it:** a model you run yourself. It stays off until you
+  turn it on.
 
-Upstream releases arrive as stripped snapshots, never with upstream's git
-history, which contains Enterprise code. `tools/fork/strip.py` builds each
-snapshot on top of upstream's own `ossify.py`, then verifies it independently.
-The report for every import is in `docs/fork/strip-reports/`. See
-`docs/spec/SPEC.md` §2.
+## Where it's going
+
+**inbuxa** is its own project now, and it's built to stay that way.
+
+- **Its own release line.** Two series a year, in January and July, with one
+  version number across the suite. 27.1 ships in January 2027, and its release
+  candidates are out now. See [Versions and upgrades](https://docs.inbuxa.org/versions/).
+- **Its own data layout.** From 27.1 the store's format belongs to **inbuxa** and
+  changes when **inbuxa** needs it to.
+- **Its own security work.** Fixes are written and released here, under a
+  published support window. See [SECURITY.md](./SECURITY.md).
+- **Your way out stays open.** inbuxa-migrate brings accounts in from other mail
+  servers. It also writes them back out as plain files, in a
+  [published layout](https://coffeylabs.org/specs/account-export/) that any
+  software can read. See [Leaving inbuxa](https://docs.inbuxa.org/install/accounts/#leaving).
+- **Open standards.** We work on JMAP at the IETF. Our undelete work is now part
+  of [JMAP Object History](https://datatracker.ietf.org/doc/draft-ietf-jmap-object-history/),
+  a working group draft we co-author.
+- **Source you can check.** A running server names the exact source of its build
+  at `/.well-known/source`.
+
+## Where it came from
+
+**inbuxa** started as a fork of Stalwart.
+[Where the code comes from](https://docs.inbuxa.org/provenance/) has the full
+record. Moving from a Stalwart 0.16 server is an export and an import, covered
+in [Coming from Stalwart](https://docs.inbuxa.org/install/migrating/).
 
 ## Building
 
@@ -57,33 +81,28 @@ cargo build --release -p inbuxa          # the binary is target/release/inbuxa
 docker build -t inbuxa .                 # or the container image
 ```
 
-Settings are read from `INBUXA_*` environment variables. An existing Stalwart
-install's `STALWART_*` variables aren't read: the server stops at startup and
-names each one to rename.
-New installs keep their data in `/var/lib/inbuxa` and logs in
-`/var/log/inbuxa`. Existing installs keep the paths their configuration
-already names, so none of their data moves.
+Settings are read from `INBUXA_*` environment variables. New installs keep
+their data in `/var/lib/inbuxa` and logs in `/var/log/inbuxa`. Existing installs
+keep the paths their configuration already names, so none of their data moves.
 
 ## License and credits
 
 **inbuxa** is free software under the [GNU Affero General Public License,
-version 3](./LICENSES/AGPL-3.0-only.txt).
+version 3](./LICENSES/AGPL-3.0-only.txt). It is a Coffey Labs project.
 
-It is a fork of Stalwart, copyright © Stalwart Labs LLC, **modified by
+It started as a fork of Stalwart, copyright © Stalwart Labs LLC, **modified by
 Coffey Labs in 2026**. Upstream's copyright notices are kept on every file
-they cover, and every upstream file this fork changed says so in its header,
+they cover, and every upstream file changed for **inbuxa** says so in its header,
 under the notice it came with. Stalwart's files are dual-licensed
 AGPL-3.0-only or Stalwart's Enterprise License, and **inbuxa** takes them under
 the AGPL-3.0 only. A few of those files also carry code from other projects
 under MIT or BSD licenses, which stays under those licenses;
-[THIRD-PARTY.md](./THIRD-PARTY.md) lists it with its notices. "Stalwart" is
-Stalwart Labs' name. **inbuxa** isn't affiliated with or endorsed by Stalwart
-Labs.
+[THIRD-PARTY.md](./THIRD-PARTY.md) lists it with its notices. Stalwart is a
+trademark of Stalwart Labs LLC. **inbuxa** is not affiliated with or endorsed by
+Stalwart Labs.
 
 `LICENSES/LicenseRef-SEL.txt` (and its copy in `vendor/sieve-rs/`) is there
 only because the inherited headers name it as upstream's other option, and
 a license a header names has to be in `LICENSES/`. It isn't a license for
 **inbuxa** and grants nothing: **inbuxa** is distributed under the
 AGPL-3.0-only.
-
-The **inbuxa** mark reuses ihasmail's cat-and-envelope artwork.
