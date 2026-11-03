@@ -127,3 +127,9 @@ tools/fork/expr-schema.py --check  # exit 1 if it's out of date (CI)
 
 Re-run it after anything that regenerates the registry, an upstream import
 included.
+
+## docs-only.py
+
+Says whether a branch changes only top-level `*.md` files and `docs/`. GitHub's
+`ci.yml` uses the answer to skip the build for those branches, and still reports
+success to Gitea. `main` always builds. `fork-checks` runs either way.

@@ -104,11 +104,29 @@ jobs:
       - if: always()
         run: python3 -m unittest discover -s tools/release/tests
 
+  # Whether this branch touches anything the build reads. tools/fork/docs-only.py
+  # says what counts, and main always builds. A skipped build still reports
+  # success below: Gitea's `github` job waits for that status, so this can't be
+  # a paths-ignore on the trigger, which would leave it waiting until it times
+  # out. If this job fails, the build is skipped and the report says failure.
+  changes:
+    if: ${{ vars.BUILD_ON == 'github' && github.ref_type == 'branch' }}
+    runs-on: ubuntu-latest
+    outputs:
+      docs_only: ${{ steps.check.outputs.docs_only }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+      - id: check
+        run: python3 tools/fork/docs-only.py
+
   # The build, and that every test target compiles. The suites are not run:
   # they need a store, fixed ports and containers (docs/spec/
   # container-tests.md), and are run by hand.
   build:
-    if: ${{ vars.BUILD_ON == 'github' && github.ref_type == 'branch' }}
+    needs: [changes]
+    if: ${{ vars.BUILD_ON == 'github' && github.ref_type == 'branch' && needs.changes.outputs.docs_only == 'false' }}
     runs-on: ubuntu-latest
     env:
       CARGO_INCREMENTAL: "0"
@@ -583,7 +601,7 @@ jobs:
   # way round) count as passing; a failed or cancelled one does not.
   report:
     if: ${{ always() && vars.BUILD_ON == 'github' }}
-    needs: [start, fork-checks, build, version, publish, index, relay-publish, relay-index, release, binaries]
+    needs: [start, fork-checks, changes, build, version, publish, index, relay-publish, relay-index, release, binaries]
     runs-on: ubuntu-latest
     steps:
       - env:
