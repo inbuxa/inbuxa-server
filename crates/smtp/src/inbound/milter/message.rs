@@ -93,6 +93,14 @@ impl<T: SessionStream> Session<T> {
                         QueueId = queue_id,
                         Id = milter.id.to_string(),
                         Elapsed = time.elapsed(),
+                        Code = match &action {
+                            Action::ReplyCode { code, .. } => Some(code.to_vec().into_string()),
+                            _ => None,
+                        },
+                        Details = match &action {
+                            Action::ReplyCode { text, .. } => Some(text.clone()),
+                            _ => None,
+                        },
                     );
 
                     return Err(match action {

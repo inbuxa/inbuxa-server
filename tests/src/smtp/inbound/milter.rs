@@ -52,6 +52,7 @@ use tokio::{
     net::{TcpListener, TcpStream},
     sync::watch,
 };
+use trc::{Collector, EventType, Key, MilterEvent, ipc::subscriber::SubscriberBuilder};
 
 #[derive(Debug, Deserialize)]
 struct HeaderTest {
@@ -145,16 +146,50 @@ async fn milter_session() {
         .await;
     test.assert_no_events();
 
-    // Test reply code
+    // Capture the actual event emitted by the SMTP session, not a reconstructed event.
+    let subscriber_id = "smtp-milter-reply-code".to_string();
+    let subscriber = SubscriberBuilder::new(subscriber_id.clone())
+        .set_interests([EventType::Milter(MilterEvent::ActionReplyCode)])
+        .with_lossy(false);
+    Collector::union_interests(subscriber.interests.clone());
+    let (_, mut events) = subscriber.register();
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while !Collector::get_subscribers().contains(&subscriber_id) {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("Milter trace subscriber was not registered");
+
+    // Test reply code: the SMTP response and its trace retain the Milter's code/text.
     session
         .send_message(
             "reply_code@doe.org",
             &["bill@foobar.org"],
             "test:no_dkim",
-            "321",
+            "321 test",
         )
         .await;
     test.assert_no_events();
+
+    let event = tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            for event in events.recv().await.expect("Milter trace subscriber closed") {
+                if event.span_id() == Some(session.data.session_id) {
+                    return event;
+                }
+            }
+        }
+    })
+    .await
+    .expect("Milter reply-code event was not emitted");
+    Collector::remove_subscriber(subscriber_id);
+    assert_eq!(
+        event.inner.typ,
+        EventType::Milter(MilterEvent::ActionReplyCode)
+    );
+    assert_eq!(event.value_as_str(Key::Code), Some("321"));
+    assert_eq!(event.value_as_str(Key::Details), Some("test"));
 
     // Test accept with header addition
     session
