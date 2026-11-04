@@ -265,7 +265,20 @@ pub async fn test(test: &mut TestServer) {
         "{text}"
     );
     assert!(
-        text.contains("Bcc: journal-other@example.com\r\n"),
+        text.contains("Not in To or Cc: journal-other@example.com\r\n"),
+        "{text}"
+    );
+    assert!(
+        text.contains(
+            "Content-Type: multipart/report; report-type=\"vnd.coffeylabs.journal-report\""
+        ),
+        "{text}"
+    );
+    assert!(text.contains("Version: 1\r\n"), "{text}");
+    assert!(
+        text.contains(
+            "Original-Rcpt-To: <journal-other@example.com>; addressed=not-in-headers\r\n"
+        ),
         "{text}"
     );
     let original = report::original(&bytes).expect("original part");
@@ -567,7 +580,13 @@ pub async fn archive(test: &mut TestServer) {
         text.contains("Added by rule: Copy and journal -> journal-vault@example.com\r\n"),
         "{text}"
     );
-    assert!(!text.contains("Bcc:"), "{text}");
+    assert!(
+        text.contains(
+            "Original-Rcpt-To: <journal-vault@example.com>; addressed=rule; rule=\"Copy and journal\"\r\n"
+        ),
+        "{text}"
+    );
+    assert!(!text.contains("Not in To or Cc"), "{text}");
 
     // The same message went to the outside archive, which can't be reached
     // from here: once it leaves the queue (given up on, or deleted), it's
