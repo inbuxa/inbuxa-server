@@ -15,6 +15,7 @@ Written for the record SPEC.md §3 rule 3 asks for. Sources, and nothing else:
 | `inbuxa-drafts/queue/journaling.md` | Own | What John asked for, and the gaps to settle |
 | The DLP and mail flow rules spec, the audit-hold-lock spec, the personal-data catalog spec | Own | Conditions, the audit log, legal holds, roles, the catalog check |
 | RFC 5321, RFC 3461 (DSN, ORCPT), RFC 2046 (`message/rfc822`), RFC 5322 | Public | The envelope, the original recipient of an expanded list, the report's shape |
+| RFC 6522 (`multipart/report`), RFC 5965 (field names), RFC 8460 (the report-type registry), RFC 6152 and RFC 3030 (8BITMIME, BINARYMIME) | Public | The report's layout since the public specification |
 
 No Enterprise-only file or snippet was used, and no third-party journaling
 product or report format was consulted: the journal report below is our own
@@ -77,30 +78,37 @@ when it's queued, which is when it's held, with the hold noted in the entry.
 
 ### 2.2 The journal report (JR-3, JR-4)
 
-**JR-3.** Each copy is a **journal report**: a new message whose first part
-is `text/plain`, one field a line:
+**JR-3.** Each copy is a **journal report**, as the public specification at
+<https://coffeylabs.org/specs/journal-report/> defines it: a
+`multipart/report` with `report-type="vnd.coffeylabs.journal-report"` and
+three parts. The first is
+a `text/plain` summary for people, not to be parsed. The second, of type
+`application/vnd.coffeylabs.journal-report`, is the envelope for programs:
 
 ```
-Sender: alice@example.com
-Signed in as: alice@example.com
-Subject: Q3 figures
-Message-ID: <…>
-Queue ID: 1a2b3c…
-Received: 2026-09-28T14:03:11Z
+Version: 1
+Reporting-MTA: dns; mx.example.com
+Queue-ID: 1a2b3c
+Arrival-Date: Mon, 28 Sep 2026 14:03:11 +0000
 Direction: outgoing
-To: bank@elsewhere.example
-Cc: bob@example.com
-Bcc: carol@example.com
-Expanded: finance@example.com -> dan@example.com, erin@example.com
-Held for review: yes
+Authenticated: yes
+Held: no
+Original-Mail-From: <alice@example.com>
+Original-Rcpt-To: <bank@elsewhere.example>; addressed=to
+Original-Rcpt-To: <carol@example.com>; addressed=not-in-headers
+Original-Rcpt-To: <dan@example.com>; addressed=list; via=<finance@example.com>
+Original-Rcpt-To: <archive@example.com>; addressed=rule; rule="Copy finance"
 ```
 
-and whose second part is the message as queued, **byte for byte**, as
-`message/rfc822`. `Bcc:` lists envelope recipients that aren't in the
-message's To or Cc headers. `Expanded:` groups the members of a list under
-the list address, from their ORCPT. Recipients a transport rule added say so
-(`Added by rule: <name>`). The field names are fixed English (they're a
-record, not interface text), so a script can read them.
+The third is the message as queued, **byte for byte**, as `message/rfc822`.
+`addressed` says what the message and the envelope show: `not-in-headers`
+means in neither To nor Cc, which a blind copy is, and so is a list's post
+arriving for a subscriber, so the report doesn't call it Bcc. Field names are
+fixed English (they're a record, not interface text).
+
+Reports written before this layout are a `multipart/mixed` of a summary and
+the message, and stay as they are: they're hashed into the chain. See
+[As built](#as-built).
 
 **JR-4.** One report per queued message, with the whole envelope, whatever
 the scope matched on (§2.4). A message to 40 recipients is one report, not
@@ -278,7 +286,7 @@ fills in what it left open:
 - **If the copy can't be taken**, the message isn't queued: the sender gets
   a temporary failure and tries again. Nothing leaves unjournaled.
 - **The report** says `Authenticated: yes|no` instead of the signed-in
-  account (the queue doesn't keep which account it was). `Added by rule`
+  account (the queue doesn't keep which account it was). `addressed=rule`
   comes with **Journal it** in phase 3. A recipient given with an ORCPT
   that names another address counts as expanded from that address.
 - **Journal reports** the server queues carry message flag bit 48
@@ -346,6 +354,20 @@ Phase 5 (inbuxa-admin #62, server #119 for the menu, docs inbuxa.org #32):
   journal, and there's no blob-store warning yet.
 - The rule editor's **Journal it**, on mail flow rules and as an optional
   second action on DLP rules.
+
+Public specification (`feat/journal-report-format`):
+
+- **The layout** moved from a `multipart/mixed` to the `multipart/report`
+  JR-3 describes. The summary is now for people only, with one recipient a
+  line, and says "Not in To or Cc" where it said "Bcc". Reading the original
+  out of a report works for both layouts.
+- **An ORCPT that isn't plainly an address is dropped.** A sender writes that
+  parameter, and it goes into a field programs read.
+- **To an outside archive,** a report declares its body: `BODY=8BITMIME`, or
+  `BODY=BINARYMIME` for an original with a NUL or a line past 998 bytes. A
+  server that doesn't offer what's needed doesn't get the report, which counts
+  as refused and is kept under JR-7. Before, it was sent undeclared. Only
+  journal reports do this; other mail goes out as it did.
 
 ## Known gaps
 

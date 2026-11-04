@@ -10,13 +10,15 @@ use super::client::SmtpClient;
 use crate::outbound::DeliveryResult;
 use crate::outbound::client::{BoxResponse, from_error_status, from_mail_send_error};
 use crate::outbound::error::ClientError;
+use crate::queue::journal::FROM_JOURNAL;
 use crate::queue::{Error, MessageWrapper, Recipient, Status, is_smtp_path};
 use crate::queue::{ErrorDetails, HostResponse, UnexpectedResponse};
 use common::Server;
 use common::config::smtp::queue::ConnectionStrategy;
 use directory::Credentials;
 use smtp_proto::{
-    EXT_CHUNKING, EXT_DSN, EXT_REQUIRE_TLS, EXT_SIZE, EXT_SMTP_UTF8, EhloResponse, MAIL_REQUIRETLS,
+    EXT_8BIT_MIME, EXT_BINARY_MIME, EXT_CHUNKING, EXT_DSN, EXT_REQUIRE_TLS, EXT_SIZE,
+    EXT_SMTP_UTF8, EhloResponse, MAIL_BODY_8BITMIME, MAIL_BODY_BINARYMIME, MAIL_REQUIRETLS,
     MAIL_RET_FULL, MAIL_RET_HDRS, MAIL_SMTPUTF8, RCPT_NOTIFY_DELAY, RCPT_NOTIFY_FAILURE,
     RCPT_NOTIFY_NEVER, RCPT_NOTIFY_SUCCESS, Severity,
 };
@@ -119,6 +121,24 @@ impl MessageWrapper {
                     return status;
                 }
             };*/
+        }
+
+        // inbuxa: a journal report's original can't be re-encoded, so a server
+        // that can't take its body whole doesn't get it. Refusing here keeps
+        // the report in the built-in journal (JR-7) rather than risk a changed
+        // copy in the archive.
+        if !self.journal_body_fits(&capabilities) {
+            smtp_client.quit().await;
+            statuses.push(DeliveryResult::domain(
+                Status::PermanentFailure(ErrorDetails {
+                    entity: params.hostname.into(),
+                    details: Error::Io(
+                        "The server can't take this journal report's body unchanged".into(),
+                    ),
+                }),
+                rcpt_idxs,
+            ));
+            return;
         }
 
         // MAIL FROM
@@ -429,11 +449,36 @@ impl MessageWrapper {
         smtp_client.quit().await;
     }
 
+    /// inbuxa: whether the server can take a journal report's body as it is.
+    /// Every other message is sent as before.
+    fn journal_body_fits(&self, capabilities: &EhloResponse<String>) -> bool {
+        if !self.has_flag(FROM_JOURNAL) {
+            true
+        } else if self.has_flag(MAIL_BODY_BINARYMIME) {
+            // RFC 3030: BINARYMIME is only sent with BDAT
+            capabilities.has_capability(EXT_BINARY_MIME)
+                && capabilities.has_capability(EXT_CHUNKING)
+        } else if self.has_flag(MAIL_BODY_8BITMIME) {
+            capabilities.has_capability(EXT_8BIT_MIME)
+        } else {
+            true
+        }
+    }
+
     fn build_mail_from(&self, capabilities: &EhloResponse<String>) -> String {
         let mut mail_from = String::with_capacity(self.message.return_path.len() + 60);
         let _ = write!(mail_from, "MAIL FROM:<{}>", self.message.return_path);
         if capabilities.has_capability(EXT_SIZE) {
             let _ = write!(mail_from, " SIZE={}", self.message.size);
+        }
+        // inbuxa: journal reports declare their body (journal_body_fits has
+        // checked the server takes it)
+        if self.has_flag(FROM_JOURNAL) {
+            if self.has_flag(MAIL_BODY_BINARYMIME) {
+                mail_from.push_str(" BODY=BINARYMIME");
+            } else if self.has_flag(MAIL_BODY_8BITMIME) {
+                mail_from.push_str(" BODY=8BITMIME");
+            }
         }
         if self.has_flag(MAIL_REQUIRETLS) & capabilities.has_capability(EXT_REQUIRE_TLS) {
             mail_from.push_str(" REQUIRETLS");
@@ -500,5 +545,80 @@ impl Recipient {
     #[inline(always)]
     pub fn has_flag(&self, flag: u64) -> bool {
         (self.flags & flag) != 0
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::queue::Message;
+    use common::config::smtp::queue::QueueName;
+
+    fn wrapper(flags: u64) -> MessageWrapper {
+        MessageWrapper {
+            queue_id: 0,
+            queue_name: QueueName::new("default").unwrap(),
+            is_multi_queue: false,
+            span_id: 0,
+            message: Message {
+                created: 0,
+                blob_hash: Default::default(),
+                return_path: "".into(),
+                recipients: vec![],
+                received_from_ip: "127.0.0.1".parse().unwrap(),
+                received_via_port: 0,
+                flags,
+                env_id: None,
+                priority: 0,
+                size: 0,
+                metadata: Box::new([]),
+            },
+        }
+    }
+
+    fn server(capabilities: u32) -> EhloResponse<String> {
+        let mut ehlo = EhloResponse::new("mx.example.org".to_string());
+        ehlo.capabilities = capabilities;
+        ehlo
+    }
+
+    #[test]
+    fn journal_reports_declare_their_body_where_it_fits() {
+        let eight = wrapper(FROM_JOURNAL | MAIL_BODY_8BITMIME);
+        let takes_8bit = server(EXT_8BIT_MIME);
+        assert!(eight.journal_body_fits(&takes_8bit));
+        assert!(
+            eight
+                .build_mail_from(&takes_8bit)
+                .contains(" BODY=8BITMIME")
+        );
+        assert!(!eight.journal_body_fits(&server(0)));
+
+        let binary = wrapper(FROM_JOURNAL | MAIL_BODY_BINARYMIME);
+        let takes_binary = server(EXT_8BIT_MIME | EXT_BINARY_MIME | EXT_CHUNKING);
+        assert!(binary.journal_body_fits(&takes_binary));
+        assert!(
+            binary
+                .build_mail_from(&takes_binary)
+                .contains(" BODY=BINARYMIME")
+        );
+        assert!(!binary.journal_body_fits(&takes_8bit));
+        // RFC 3030: no BDAT, no BINARYMIME
+        assert!(!binary.journal_body_fits(&server(EXT_8BIT_MIME | EXT_BINARY_MIME)));
+
+        let plain = wrapper(FROM_JOURNAL);
+        assert!(plain.journal_body_fits(&server(0)));
+        assert!(!plain.build_mail_from(&server(0)).contains("BODY="));
+    }
+
+    #[test]
+    fn other_mail_goes_out_as_it_did() {
+        let other = wrapper(MAIL_BODY_8BITMIME);
+        assert!(other.journal_body_fits(&server(0)));
+        assert!(
+            !other
+                .build_mail_from(&server(EXT_8BIT_MIME))
+                .contains("BODY=")
+        );
     }
 }
