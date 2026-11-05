@@ -10041,7 +10041,6 @@ impl Default for DnsManagementProperties {
                 DnsRecordType::Srv,
                 DnsRecordType::MtaSts,
                 DnsRecordType::TlsRpt,
-                DnsRecordType::Caa,
                 DnsRecordType::AutoConfig,
                 DnsRecordType::AutoConfigLegacy,
                 DnsRecordType::AutoDiscover,

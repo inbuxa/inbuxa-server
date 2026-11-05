@@ -424,7 +424,7 @@ pub async fn test(test: &TestServer) {
             dkim_management: DkimManagement::Manual,
             dns_management: DnsManagement::Automatic(DnsManagementProperties {
                 dns_server_id: pebble_dns_id,
-                publish_records: Map::new(vec![DnsRecordType::Caa]),
+                publish_records: Map::new(vec![DnsRecordType::TlsRpt]),
                 ..Default::default()
             }),
             ..Default::default()

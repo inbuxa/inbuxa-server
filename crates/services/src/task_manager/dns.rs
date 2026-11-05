@@ -312,6 +312,15 @@ mod tests {
     use super::*;
     use dns_update::MXRecord;
 
+    // #292: a CAA record binds every name under the domain to this server's
+    // ACME account, so it has to be asked for.
+    #[test]
+    fn caa_is_off_by_default() {
+        let defaults = registry::schema::structs::DnsManagementProperties::default();
+        assert!(!defaults.publish_records.contains(&RecordType::Caa));
+        assert!(defaults.publish_records.contains(&RecordType::Dkim));
+    }
+
     fn mx(hosts: &[&str]) -> Vec<DnsRecord> {
         hosts
             .iter()
