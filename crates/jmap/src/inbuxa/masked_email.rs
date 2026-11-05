@@ -291,7 +291,7 @@ pub(crate) async fn query(mut req: RegistryQueryResponse<'_>) -> trc::Result<Que
             _ => false,
         })?;
     req.request
-        .extract_parameters(req.server.core.jmap.query_max_results, Some(Property::Id))?;
+        .extract_parameters(req.server.core.jmap.query_max_results, None)?;
 
     // ME-19: one account's masks, or every mask for a server-level
     // administrator who asks for no account in particular

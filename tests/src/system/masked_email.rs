@@ -492,6 +492,58 @@ pub async fn masked_email_compat() {
     }
 }
 
+/// `cargo test -p tests masked_email_query_pagination -- --ignored`.
+#[ignore]
+#[tokio::test(flavor = "multi_thread")]
+pub async fn masked_email_query_pagination() {
+    let test = TestServerBuilder::new("masked_email_query_pagination")
+        .await
+        .with_default_listeners()
+        .await
+        .build()
+        .await;
+    let admin = test.create_admin_account("admin@example.org").await;
+    admin.find_or_create_domain("example.org").await;
+    let alice = admin
+        .create_user_account("alice@example.org", SECRET_ALICE, "Alice", &[], vec![])
+        .await;
+    let mut ids = Vec::new();
+    for prefix in ["first", "second", "third"] {
+        ids.push(alice.x_create(json!({"emailPrefix": prefix})).await);
+    }
+    ids.sort_unstable();
+
+    let mut seen = Vec::new();
+    for (position, id) in ids.iter().enumerate() {
+        // calculateTotal must be false to exercise parameter extraction's
+        // storage-level pagination path.
+        let page = alice
+            .registry_query_paginated(
+                ObjectType::MaskedEmail,
+                "id",
+                true,
+                Some(position as i32),
+                Some(1),
+                None,
+                None,
+                false,
+            )
+            .await;
+        let page_ids = page.object_ids().collect::<Vec<_>>();
+        assert!(
+            page_ids.iter().all(|id| !seen.contains(id)),
+            "a previous page's result was repeated"
+        );
+        assert_eq!(page_ids, vec![*id], "page at position {position}");
+        assert_eq!(page.method_response()["position"], json!(position));
+        seen.extend(page_ids);
+    }
+
+    if test.is_reset() {
+        test.temp_dir.delete();
+    }
+}
+
 /// Runs the masked email tests alone:
 /// `cargo test -p tests masked_email_tests -- --ignored`.
 #[ignore]
