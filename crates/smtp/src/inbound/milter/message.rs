@@ -2,6 +2,8 @@
  * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
+ *
+ * Modified by Coffey Labs in 2026 for INBUXA.
  */
 
 use super::{Action, Error, Macros, Modification};
@@ -77,31 +79,36 @@ impl<T: SessionStream> Session<T> {
                     }
                 }
                 Err(Rejection::Action(action)) => {
-                    trc::event!(
-                        Milter(match &action {
-                            Action::Discard => MilterEvent::ActionDiscard,
-                            Action::Reject => MilterEvent::ActionReject,
-                            Action::TempFail => MilterEvent::ActionTempFail,
-                            Action::ReplyCode { .. } => {
-                                MilterEvent::ActionReplyCode
-                            }
-                            Action::Shutdown => MilterEvent::ActionShutdown,
-                            Action::ConnectionFailure => MilterEvent::ActionConnectionFailure,
-                            Action::Accept | Action::Continue => unreachable!(),
-                        }),
-                        SpanId = self.data.session_id,
-                        QueueId = queue_id,
-                        Id = milter.id.to_string(),
-                        Elapsed = time.elapsed(),
-                        Code = match &action {
-                            Action::ReplyCode { code, .. } => Some(code.to_vec().into_string()),
-                            _ => None,
-                        },
-                        Details = match &action {
-                            Action::ReplyCode { text, .. } => Some(text.clone()),
-                            _ => None,
-                        },
-                    );
+                    if let Action::ReplyCode { code, text } = &action {
+                        trc::event!(
+                            Milter(MilterEvent::ActionReplyCode),
+                            SpanId = self.data.session_id,
+                            QueueId = queue_id,
+                            Id = milter.id.to_string(),
+                            Code = std::str::from_utf8(code)
+                                .ok()
+                                .and_then(|code| code.parse::<u16>().ok()),
+                            Details = text.trim_end().to_string(),
+                            Elapsed = time.elapsed(),
+                        );
+                    } else {
+                        trc::event!(
+                            Milter(match &action {
+                                Action::Discard => MilterEvent::ActionDiscard,
+                                Action::Reject => MilterEvent::ActionReject,
+                                Action::TempFail => MilterEvent::ActionTempFail,
+                                Action::Shutdown => MilterEvent::ActionShutdown,
+                                Action::ConnectionFailure => MilterEvent::ActionConnectionFailure,
+                                Action::ReplyCode { .. } | Action::Accept | Action::Continue => {
+                                    unreachable!()
+                                }
+                            }),
+                            SpanId = self.data.session_id,
+                            QueueId = queue_id,
+                            Id = milter.id.to_string(),
+                            Elapsed = time.elapsed(),
+                        );
+                    }
 
                     return Err(match action {
                         Action::Discard => FilterResponse::accept(),

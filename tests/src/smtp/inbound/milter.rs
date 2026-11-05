@@ -188,7 +188,7 @@ async fn milter_session() {
         event.inner.typ,
         EventType::Milter(MilterEvent::ActionReplyCode)
     );
-    assert_eq!(event.value_as_str(Key::Code), Some("321"));
+    assert_eq!(event.value_as_uint(Key::Code), Some(321));
     assert_eq!(event.value_as_str(Key::Details), Some("test"));
 
     // Test accept with header addition
