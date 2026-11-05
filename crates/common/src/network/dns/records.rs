@@ -15,7 +15,7 @@ use dns_update::{
 };
 use inbuxa_features::relay::dns as relay_dns;
 use registry::schema::{
-    enums::{DnsRecordType, ServiceProtocol},
+    enums::{AcmeChallengeType, DnsRecordType, ServiceProtocol},
     prelude::{ObjectType, Property},
     structs::{AcmeProvider, CertificateManagement, DkimSignature, DnsManagement, Domain},
 };
@@ -334,18 +334,12 @@ impl Server {
                         }
 
                         // ACME DNS-PERSIST-01 validation record
-                        records.push(NamedDnsRecord {
-                            name: format!("_validation-persist.{domain_name}."),
-                            record: DnsRecord::TXT(format!(
-                                "{provider_name}; accounturi={}{}",
-                                provider.account_uri,
-                                if props.subject_alternative_names.is_empty() {
-                                    "; policy=wildcard"
-                                } else {
-                                    ""
-                                }
-                            )),
-                        });
+                        records.push(persist_validation_record(
+                            domain_name,
+                            provider_name,
+                            &provider.account_uri,
+                            props.subject_alternative_names.is_empty(),
+                        ));
                     }
                 }
                 DnsRecordType::Tlsa => {
@@ -446,6 +440,26 @@ impl Server {
             }
         }
 
+        // inbuxa: DNS-PERSIST-01 can't validate without this record, and CAA
+        // is optional. A domain that doesn't publish CAA still gets it (#292).
+        if !record_types.contains(&DnsRecordType::Caa)
+            && let CertificateManagement::Automatic(props) = &domain.certificate_management
+            && let Some(provider) = self
+                .registry()
+                .object::<AcmeProvider>(props.acme_provider_id)
+                .await?
+            && matches!(provider.challenge_type, AcmeChallengeType::DnsPersist01)
+            && let Ok(provider_url) = Url::parse(&provider.directory)
+            && let Some(provider_name) = provider_domain(&provider_url)
+        {
+            records.push(persist_validation_record(
+                domain_name,
+                provider_name,
+                &provider.account_uri,
+                props.subject_alternative_names.is_empty(),
+            ));
+        }
+
         Ok(records)
     }
 
@@ -508,6 +522,21 @@ impl Pacc {
 
 #[inline(always)]
 #[allow(unused)]
+fn persist_validation_record(
+    domain_name: &str,
+    provider_name: &str,
+    account_uri: &str,
+    wildcard: bool,
+) -> NamedDnsRecord {
+    NamedDnsRecord {
+        name: format!("_validation-persist.{domain_name}."),
+        record: DnsRecord::TXT(format!(
+            "{provider_name}; accounturi={account_uri}{}",
+            if wildcard { "; policy=wildcard" } else { "" }
+        )),
+    }
+}
+
 fn provider_domain(url: &Url) -> Option<&str> {
     #[cfg(feature = "test_mode")]
     {
