@@ -445,6 +445,149 @@ pub async fn test(test: &TestServer) {
         vec!["*.persist.org".to_string(), "persist.org".to_string()]
     );
 
+    account.registry_destroy_all(ObjectType::Certificate).await;
+    account.registry_destroy_all(ObjectType::Task).await;
+
+    // Changing a domain's names orders a certificate for them straight away,
+    // and leaves one renewal queued (#290)
+    let names_acme_id = account
+        .registry_create_object(AcmeProvider {
+            directory: "https://localhost:14000/dir".to_string(),
+            contact: Map::new(vec!["mailto:hello@names.org".to_string()]),
+            challenge_type: AcmeChallengeType::TlsAlpn01,
+            ..Default::default()
+        })
+        .await;
+    let names_domain = |names: &[&str]| {
+        CertificateManagement::Automatic(CertificateManagementProperties {
+            acme_provider_id: names_acme_id,
+            subject_alternative_names: Map::new(names.iter().map(|n| n.to_string()).collect()),
+        })
+    };
+    let names_domain_id = account
+        .registry_create_object(Domain {
+            name: "names.org".to_string(),
+            certificate_management: names_domain(&["a", "b"]),
+            dkim_management: DkimManagement::Manual,
+            dns_management: DnsManagement::Manual,
+            ..Default::default()
+        })
+        .await;
+    test.wait_for_tasks_skip_not_due().await;
+    assert_certificates(account, &[&["a.names.org", "b.names.org"]]).await;
+    assert_one_renewal(account, names_domain_id).await;
+
+    // Same names in a different order: nothing to do
+    account
+        .registry_update_object(
+            ObjectType::Domain,
+            names_domain_id,
+            json!({ Property::CertificateManagement: names_domain(&["b", "a"]) }),
+        )
+        .await;
+    test.wait_for_tasks_skip_not_due().await;
+    assert_certificates(account, &[&["a.names.org", "b.names.org"]]).await;
+    assert_one_renewal(account, names_domain_id).await;
+
+    // A new name
+    account
+        .registry_update_object(
+            ObjectType::Domain,
+            names_domain_id,
+            json!({ Property::CertificateManagement: names_domain(&["a", "b", "c"]) }),
+        )
+        .await;
+    test.wait_for_tasks_skip_not_due().await;
+    assert_certificates(
+        account,
+        &[
+            &["a.names.org", "b.names.org"],
+            &["a.names.org", "b.names.org", "c.names.org"],
+        ],
+    )
+    .await;
+    assert_one_renewal(account, names_domain_id).await;
+
+    // Off and on again, the way around this before it was fixed
+    account
+        .registry_update_object(
+            ObjectType::Domain,
+            names_domain_id,
+            json!({ Property::CertificateManagement: CertificateManagement::Manual }),
+        )
+        .await;
+    account
+        .registry_update_object(
+            ObjectType::Domain,
+            names_domain_id,
+            json!({ Property::CertificateManagement: names_domain(&["a", "b", "c"]) }),
+        )
+        .await;
+    test.wait_for_tasks_skip_not_due().await;
+    assert_one_renewal(account, names_domain_id).await;
+
+    // DNS-PERSIST-01 only allows a wildcard if its record says so. Going from
+    // named hosts to the wildcard needs that record republished first.
+    let names_persist_id = account
+        .registry_create_object(Domain {
+            name: "names-persist.org".to_string(),
+            certificate_management: CertificateManagement::Automatic(
+                CertificateManagementProperties {
+                    acme_provider_id: dns_acme_id,
+                    subject_alternative_names: Map::new(vec!["www".to_string()]),
+                },
+            ),
+            dkim_management: DkimManagement::Manual,
+            dns_management: DnsManagement::Automatic(DnsManagementProperties {
+                dns_server_id: pebble_dns_id,
+                publish_records: Map::new(vec![DnsRecordType::TlsRpt]),
+                ..Default::default()
+            }),
+            ..Default::default()
+        })
+        .await;
+    test.wait_for_tasks_skip_not_due().await;
+    account
+        .registry_update_object(
+            ObjectType::Domain,
+            names_persist_id,
+            json!({
+                Property::CertificateManagement: CertificateManagement::Automatic(
+                    CertificateManagementProperties {
+                        acme_provider_id: dns_acme_id,
+                        subject_alternative_names: Default::default(),
+                    },
+                ),
+            }),
+        )
+        .await;
+    test.wait_for_tasks_skip_not_due().await;
+    let persist_sans = account
+        .registry_get_all::<Certificate>()
+        .await
+        .into_iter()
+        .map(|(_, certificate)| {
+            let mut sans = certificate.subject_alternative_names.into_inner();
+            sans.sort();
+            sans
+        })
+        .collect::<Vec<_>>();
+    assert!(
+        persist_sans.contains(&vec![
+            "*.names-persist.org".to_string(),
+            "names-persist.org".to_string()
+        ]),
+        "no wildcard certificate: {persist_sans:?}"
+    );
+    assert_one_renewal(account, names_persist_id).await;
+
+    account
+        .registry_destroy(ObjectType::Domain, [names_domain_id, names_persist_id])
+        .await
+        .assert_destroyed(&[names_domain_id, names_persist_id]);
+    account.registry_destroy_all(ObjectType::Certificate).await;
+    account.registry_destroy_all(ObjectType::Task).await;
+
     // Test preferred chain selection against the alternate chains Pebble offers (RFC 8555 7.4.2)
     let pebble_roots = pebble_root_common_names().await;
     assert!(
@@ -686,6 +829,39 @@ pub async fn test(test: &TestServer) {
     account.registry_destroy_all(ObjectType::AcmeProvider).await;
     account.registry_destroy_all(ObjectType::Certificate).await;
     account.registry_destroy_all(ObjectType::Task).await;
+}
+
+/// The stored certificates are exactly these sets of names.
+async fn assert_certificates(account: &crate::utils::account::Account, expected: &[&[&str]]) {
+    let mut found = account
+        .registry_get_all::<Certificate>()
+        .await
+        .into_iter()
+        .map(|(_, certificate)| {
+            let mut sans = certificate.subject_alternative_names.into_inner();
+            sans.sort();
+            sans
+        })
+        .collect::<Vec<_>>();
+    found.sort();
+    let mut expected = expected
+        .iter()
+        .map(|names| names.iter().map(|n| n.to_string()).collect::<Vec<_>>())
+        .collect::<Vec<_>>();
+    expected.sort();
+    assert_eq!(found, expected);
+}
+
+async fn assert_one_renewal(account: &crate::utils::account::Account, domain: types::id::Id) {
+    let renewals = account
+        .registry_get_all::<Task>()
+        .await
+        .into_iter()
+        .filter(|(_, task)| {
+            matches!(task, Task::AcmeRenewal(TaskDomainManagement { domain_id, .. }) if *domain_id == domain)
+        })
+        .count();
+    assert_eq!(renewals, 1, "expected one queued renewal for the domain");
 }
 
 const ISSUER_ABC_CERT: &str = r#"-----BEGIN CERTIFICATE-----

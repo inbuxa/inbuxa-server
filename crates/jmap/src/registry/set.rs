@@ -55,11 +55,12 @@ use registry::{
         },
         structs::{
             Certificate, DkimSignature, DnsServer, Domain, PublicKey, Role, SieveSystemScript,
-            SieveUserScript, Task,
+            SieveUserScript, Task, TaskDnsManagement,
         },
     },
     types::id::ObjectId,
 };
+use services::task_manager::{domain_check::clear_queued_renewals, lock::TaskLockManager};
 use std::borrow::Cow;
 use store::{
     registry::{
@@ -866,6 +867,24 @@ impl RegistrySet for Server {
                         && let Some(object_id) = object_id
                     {
                         let mut batch = BatchBuilder::new();
+
+                        // inbuxa: a new renewal replaces the domain's queued
+                        // one, or both would keep renewing from here on (#290)
+                        let replaced = if tasks.iter().any(|task| {
+                            matches!(
+                                task,
+                                Task::AcmeRenewal(_)
+                                    | Task::DnsManagement(TaskDnsManagement {
+                                        on_success_renew_certificate: true,
+                                        ..
+                                    })
+                            )
+                        }) {
+                            clear_queued_renewals(set.server, object_id, &mut batch).await?
+                        } else {
+                            Vec::new()
+                        };
+
                         for mut task in tasks.drain(..) {
                             match &mut task {
                                 Task::AcmeRenewal(task) => task.domain_id = object_id,
@@ -876,6 +895,9 @@ impl RegistrySet for Server {
                             batch.schedule_task(task);
                         }
                         set.server.store().write(batch.build_all()).await?;
+                        for id in replaced {
+                            set.server.remove_index_lock(id).await;
+                        }
                         set.server.notify_task_queue();
                     }
                 }
