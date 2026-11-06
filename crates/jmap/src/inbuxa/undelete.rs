@@ -180,8 +180,10 @@ pub(crate) async fn query(mut req: RegistryQueryResponse<'_>) -> trc::Result<Que
             (Property::AccountId, _, _) => true,
             _ => false,
         })?;
+    // `None`: the items are filtered and sorted here, so position, anchor
+    // and limit stay on the request for the response builder
     req.request
-        .extract_parameters(req.server.core.jmap.query_max_results, Some(Property::Id))?;
+        .extract_parameters(req.server.core.jmap.query_max_results, None)?;
 
     let mut items = undelete::records::of_account(
         &req.server.core.storage.data,
