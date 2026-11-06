@@ -10000,10 +10000,8 @@ impl DnsManagementProperties {
                 errors.push(ValidationError::required(Property::Origin));
             }
         }
-        let value = &self.publish_records;
-        if value.len() < 1 {
-            errors.push(ValidationError::min_items(Property::PublishRecords, 1));
-        }
+        // inbuxa: an empty list is allowed, for a domain whose DNS is only
+        // there for DNS-01 certificate orders (#304)
         errors.len() == neb
     }
 

@@ -116,19 +116,22 @@ pub(crate) async fn validate_domain(
                 domain.certificate_management,
                 CertificateManagement::Automatic(_)
             );
-        tasks.push(Task::DnsManagement(TaskDnsManagement {
-            domain_id: Id::default(),
-            update_records: Map::new(
-                details
-                    .publish_records
-                    .iter()
-                    .filter(|&&r| r != DnsRecordType::Dkim || !will_trigger_dkim)
-                    .copied()
-                    .collect(),
-            ),
-            on_success_renew_certificate,
-            status: TaskStatus::now(),
-        }));
+        let update_records: Vec<DnsRecordType> = details
+            .publish_records
+            .iter()
+            .filter(|&&r| r != DnsRecordType::Dkim || !will_trigger_dkim)
+            .copied()
+            .collect();
+        // inbuxa: with nothing to publish and no certificate to order after,
+        // the task would only end as a failure (#304)
+        if !update_records.is_empty() || on_success_renew_certificate {
+            tasks.push(Task::DnsManagement(TaskDnsManagement {
+                domain_id: Id::default(),
+                update_records: Map::new(update_records),
+                on_success_renew_certificate,
+                status: TaskStatus::now(),
+            }));
+        }
         on_success_renew_certificate
     } else {
         if will_schedule_dkim {
