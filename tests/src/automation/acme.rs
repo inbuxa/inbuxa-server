@@ -403,6 +403,55 @@ pub async fn test(test: &TestServer) {
     account.registry_destroy_all(ObjectType::Certificate).await;
     account.registry_destroy_all(ObjectType::Task).await;
 
+    // A domain whose DNS is only there for DNS-01 publishes no records (#304)
+    let cert_only_domain_id = account
+        .registry_create_object(Domain {
+            name: "cert-only.org".to_string(),
+            certificate_management: CertificateManagement::Automatic(
+                CertificateManagementProperties {
+                    acme_provider_id: dns_acme_id,
+                    subject_alternative_names: Default::default(),
+                },
+            ),
+            dkim_management: DkimManagement::Manual,
+            dns_management: DnsManagement::Automatic(DnsManagementProperties {
+                dns_server_id: pebble_dns_id,
+                publish_records: Map::new(vec![]),
+                ..Default::default()
+            }),
+            ..Default::default()
+        })
+        .await;
+    test.wait_for_tasks_skip_not_due().await;
+    assert_certificates(account, &[&["*.cert-only.org", "cert-only.org"]]).await;
+    account.registry_destroy_all(ObjectType::Certificate).await;
+    account.registry_destroy_all(ObjectType::Task).await;
+
+    // With nothing to publish and no certificate to order, no DNS task is
+    // queued just to fail
+    let no_records_domain_id = account
+        .registry_create_object(Domain {
+            name: "no-records.org".to_string(),
+            certificate_management: CertificateManagement::Manual,
+            dkim_management: DkimManagement::Manual,
+            dns_management: DnsManagement::Automatic(DnsManagementProperties {
+                dns_server_id: pebble_dns_id,
+                publish_records: Map::new(vec![]),
+                ..Default::default()
+            }),
+            ..Default::default()
+        })
+        .await;
+    test.wait_for_tasks_skip_not_due().await;
+    assert!(
+        !account
+            .registry_get_all::<Task>()
+            .await
+            .into_iter()
+            .any(|(_, task)| matches!(task, Task::DnsManagement(_))),
+        "no DNS task for a domain with nothing to publish"
+    );
+
     // Test ACME using DNS-01 challenge
     let dns_acme_id = account
         .registry_create_object(AcmeProvider {
@@ -821,10 +870,22 @@ pub async fn test(test: &TestServer) {
     account
         .registry_destroy(
             ObjectType::Domain,
-            [tls_domain_id, dns_domain_id, persist_domain_id],
+            [
+                tls_domain_id,
+                dns_domain_id,
+                persist_domain_id,
+                cert_only_domain_id,
+                no_records_domain_id,
+            ],
         )
         .await
-        .assert_destroyed(&[tls_domain_id, dns_domain_id, persist_domain_id]);
+        .assert_destroyed(&[
+            tls_domain_id,
+            dns_domain_id,
+            persist_domain_id,
+            cert_only_domain_id,
+            no_records_domain_id,
+        ]);
     account.registry_destroy_all(ObjectType::DnsServer).await;
     account.registry_destroy_all(ObjectType::AcmeProvider).await;
     account.registry_destroy_all(ObjectType::Certificate).await;
