@@ -273,6 +273,44 @@ pub async fn test(test: &mut TestServer) {
         .await;
     assert_eq!(found.len(), 1, "query text");
 
+    // /query pages: each position gives the next item, never the first page
+    // again (calculateTotal off, the path that dropped them)
+    let all = user
+        .registry_query_paginated(
+            ObjectType::ArchivedItem,
+            "id",
+            false,
+            None,
+            None,
+            None,
+            None,
+            false,
+        )
+        .await
+        .object_ids()
+        .collect::<Vec<_>>();
+    assert!(all.len() >= 3, "query pages: {all:?}");
+    for (position, id) in all.iter().enumerate() {
+        let page = user
+            .registry_query_paginated(
+                ObjectType::ArchivedItem,
+                "id",
+                false,
+                Some(position as i32),
+                Some(1),
+                None,
+                None,
+                false,
+            )
+            .await;
+        assert_eq!(
+            page.object_ids().collect::<Vec<_>>(),
+            vec![*id],
+            "query page at position {position}"
+        );
+        assert_eq!(page.method_response()["position"], json!(position));
+    }
+
     // Acceptance test 15: nobody else sees the archive (UD-7)
     let other = admin
         .create_user_account("other@example.org", SECRET, "Other", &[], vec![])
@@ -627,6 +665,13 @@ pub async fn undelete_tests() {
                 else_: "false".to_string(),
                 ..Default::default()
             },
+            ..Default::default()
+        })
+        .await
+        // test 14 shares with an account it has nothing else to do with, as
+        // system_tests allows
+        .with_object(registry::schema::structs::Sharing {
+            allow_directory_queries: true,
             ..Default::default()
         })
         .await
