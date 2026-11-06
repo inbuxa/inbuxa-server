@@ -24,6 +24,10 @@ Report it privately by email to:
 
 **securityATcoffeylabsDOTorg**
 
+Or use **Report a vulnerability** on the
+[GitHub copy's Security tab](https://github.com/inbuxa/inbuxa-server/security/advisories/new),
+which reaches the same people privately.
+
 Include as much as you can of:
 
 - what the vulnerability is, and what it lets someone do;
