@@ -2,10 +2,13 @@
  * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
+ *
+ * Modified by Coffey Labs in 2026 for INBUXA.
  */
 
 use super::{
-    Alarm, AlarmDelta, ArchivedAlarmDelta, ArchivedCalendarEventData, expand::resolve_local,
+    Alarm, AlarmDelta, ArchivedAlarmDelta, ArchivedCalendarEventData,
+    expand::{range_zones, resolve_local},
 };
 use calcard::{
     common::timezone::Tz,
@@ -58,15 +61,12 @@ impl ArchivedCalendarEventData {
             let (offset_or_count, bytes_read) = instances.read_leb128::<u32>()?;
 
             let duration = range.duration.to_native() as i64;
-            let mut start_tz = Tz::from_id(range.start_tz.to_native())?;
-            let mut end_tz = Tz::from_id(range.end_tz.to_native())?;
-
-            if start_tz.is_floating() && !default_tz.is_floating() {
-                start_tz = default_tz;
-            }
-            if end_tz.is_floating() && !default_tz.is_floating() {
-                end_tz = default_tz;
-            }
+            let (start_tz, end_tz) = range_zones(
+                Tz::from_id(range.start_tz.to_native())?,
+                Tz::from_id(range.end_tz.to_native())?,
+                self.event.components.get(comp_id as usize),
+                default_tz,
+            );
 
             if instances.len() > bytes_read {
                 // Recurring event
