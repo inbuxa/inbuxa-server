@@ -44,6 +44,13 @@ Every changed file carries a Coffey Labs notice in its header.
   limit is reached (they couldn't add anything). The `budget_tests` in
   `dates.rs` cover it, and `rule_expansion_shares_one_budget` in
   `crates/groupware` fails to build if the server stops using this copy.
+- `src/icalendar/dates.rs`: a component whose DTSTART carries an offset
+  (`DTSTART:20261102T180000Z`) has that zone as its start zone. Upstream
+  took the default zone, which the server passes as floating, so every
+  instance of a UTC rule came out floating (one-off events were already
+  right), and the server then read the series in the zone each request asked
+  for. The `start_zone_tests` in `dates.rs` cover it. calcard 0.4 makes the
+  same change.
 
 ## Updating
 

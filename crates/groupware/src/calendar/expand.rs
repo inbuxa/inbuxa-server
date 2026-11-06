@@ -102,6 +102,70 @@ fn resolve_recurrence_id(
     })
 }
 
+// inbuxa: the zone of a DTSTART written with an offset ("...Z") and no TZID.
+// Series stored before calcard kept that zone have floating time ranges, and
+// read as floating they land in whatever zone the request asks for.
+pub trait ComponentStartOffset {
+    fn start_offset_tz(&self) -> Option<Tz>;
+}
+
+impl ComponentStartOffset for ArchivedICalendarComponent {
+    fn start_offset_tz(&self) -> Option<Tz> {
+        let entry = self.property(&ICalendarProperty::Dtstart)?;
+        if entry.tz_id().is_some() {
+            return None;
+        }
+        entry
+            .values
+            .first()?
+            .as_partial_date_time()?
+            .to_date_time()?
+            .tz()
+    }
+}
+
+impl ComponentStartOffset for ICalendarComponent {
+    fn start_offset_tz(&self) -> Option<Tz> {
+        let entry = self.property(&ICalendarProperty::Dtstart)?;
+        if entry.tz_id().is_some() {
+            return None;
+        }
+        entry
+            .values
+            .first()?
+            .as_partial_date_time()?
+            .to_date_time()?
+            .tz()
+    }
+}
+
+// inbuxa: the zones to read a time range in. A floating range is in the
+// component's DTSTART offset if it has one (see `ComponentStartOffset`), and
+// otherwise in `default_tz`, the request's zone.
+pub fn range_zones(
+    start_tz: Tz,
+    end_tz: Tz,
+    component: Option<&impl ComponentStartOffset>,
+    default_tz: Tz,
+) -> (Tz, Tz) {
+    let (mut start, mut end) = (start_tz, end_tz);
+    if start.is_floating()
+        && let Some(offset_tz) = component.and_then(|c| c.start_offset_tz())
+    {
+        start = offset_tz;
+        if end.is_floating() {
+            end = offset_tz;
+        }
+    }
+    if start.is_floating() && !default_tz.is_floating() {
+        start = default_tz;
+    }
+    if end.is_floating() && !default_tz.is_floating() {
+        end = default_tz;
+    }
+    (start, end)
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CalendarEventExpansion {
     pub comp_id: u32,
@@ -144,16 +208,13 @@ impl ArchivedCalendarEventData {
                 .all(|prior| prior.id != range.id)
                 .then(|| component.recurrence_id(component_tz))
                 .flatten();
-            let mut start_tz = component_tz;
-            let mut end_tz = Tz::from_id(range.end_tz.to_native())?;
+            let (start_tz, end_tz) = range_zones(
+                component_tz,
+                Tz::from_id(range.end_tz.to_native())?,
+                Some(component),
+                default_tz,
+            );
             let is_todo = component.component_type.is_todo();
-
-            if start_tz.is_floating() && !default_tz.is_floating() {
-                start_tz = default_tz;
-            }
-            if end_tz.is_floating() && !default_tz.is_floating() {
-                end_tz = default_tz;
-            }
 
             if instances.len() > bytes_read {
                 let unpacker =
@@ -234,15 +295,12 @@ impl CalendarEventData {
                 .all(|prior| prior.id != range.id)
                 .then(|| component.recurrence_id(component_tz))
                 .flatten();
-            let mut start_tz = component_tz;
-            let mut end_tz = Tz::from_id(range.end_tz)?;
-
-            if start_tz.is_floating() && !default_tz.is_floating() {
-                start_tz = default_tz;
-            }
-            if end_tz.is_floating() && !default_tz.is_floating() {
-                end_tz = default_tz;
-            }
+            let (start_tz, end_tz) = range_zones(
+                component_tz,
+                Tz::from_id(range.end_tz)?,
+                Some(component),
+                default_tz,
+            );
 
             let mut push_instance = |own_recurrence_id: Option<RecurrenceId>, start_offset: u32| {
                 let start_date_naive = start_offset as i64 + base_offset;
@@ -294,20 +352,15 @@ impl CalendarEventData {
         let instances = range.instances.as_ref();
         let (offset_or_count, bytes_read) = instances.read_leb128::<u32>()?;
         let component_tz = Tz::from_id(range.start_tz)?;
-        let own_recurrence_id = self
-            .event
-            .components
-            .get(comp_id as usize)
-            .and_then(|component| component.recurrence_id(component_tz));
-        let mut start_tz = component_tz;
-        let mut end_tz = Tz::from_id(range.end_tz)?;
-
-        if start_tz.is_floating() && !default_tz.is_floating() {
-            start_tz = default_tz;
-        }
-        if end_tz.is_floating() && !default_tz.is_floating() {
-            end_tz = default_tz;
-        }
+        let component = self.event.components.get(comp_id as usize);
+        let own_recurrence_id =
+            component.and_then(|component| component.recurrence_id(component_tz));
+        let (start_tz, end_tz) = range_zones(
+            component_tz,
+            Tz::from_id(range.end_tz)?,
+            component,
+            default_tz,
+        );
         let start_offset = if instances.len() > bytes_read {
             let mut unpacker =
                 BitpackIterator::from_bytes_and_offset(instances, bytes_read, offset_or_count);
@@ -507,5 +560,76 @@ mod tests {
             .recv_timeout(std::time::Duration::from_secs(2))
             .expect("expansion of an oversized RRULE must be refused, not attempted");
         assert_eq!(ranges, 1, "the base instance is still indexed");
+    }
+
+    // inbuxa: a series starting in UTC is read in UTC whatever zone the
+    // request asks for, including one stored before calcard kept the zone
+    #[test]
+    fn utc_series_ignores_the_request_zone() {
+        let phoenix = Tz::from_str("America/Phoenix").unwrap();
+        let ical = |dtstart: &str| {
+            let Entry::ICalendar(ical) = Parser::new(&format!(
+                "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nPRODID:-//Test//EN\r\n\
+                 BEGIN:VEVENT\r\nUID:utc@example.com\r\nDTSTAMP:20270101T000000Z\r\n\
+                 DTSTART{dtstart}\r\nDURATION:PT1H\r\nRRULE:FREQ=WEEKLY;COUNT=3\r\n\
+                 END:VEVENT\r\nEND:VCALENDAR\r\n"
+            ))
+            .entry() else {
+                panic!("failed to parse iCalendar");
+            };
+            CalendarEventData::new(ical, Tz::Floating, 1000, &mut None)
+        };
+        let starts = |data: &CalendarEventData, tz: Tz| {
+            let first = data.expand_single(1, tz).expect("first instance").start;
+            let mut keys = AHashSet::from_iter([key(2027, 3, 8, 9, 0)]);
+            let second = data.expand_from_ids(&mut keys, tz).expect("expansion");
+            assert_eq!(second.len(), 1);
+            let bytes = rkyv::to_bytes::<rkyv::rancor::Error>(data).unwrap();
+            let archived =
+                rkyv::access::<ArchivedCalendarEventData, rkyv::rancor::Error>(&bytes).unwrap();
+            let all = archived
+                .expand(tz, TimeRange::new(i64::MIN, i64::MAX))
+                .expect("expansion")
+                .into_iter()
+                .map(|e| (e.start, e.end))
+                .collect::<Vec<_>>();
+            (first, second[0].start, all)
+        };
+        let utc = |day| naive(2027, 3, day, 9, 0, 0);
+        let expected = (
+            utc(1),
+            utc(8),
+            [1, 8, 15].map(|day| (utc(day), utc(day) + 3600)).to_vec(),
+        );
+
+        let mut data = ical(":20270301T090000Z");
+        assert!(
+            data.time_ranges
+                .iter()
+                .all(|range| range.start_tz == Tz::UTC.as_id())
+        );
+        assert_eq!(starts(&data, phoenix), expected);
+        assert_eq!(starts(&data, Tz::UTC), expected);
+
+        // As stored before the fix: floating ranges
+        for range in &mut data.time_ranges {
+            range.start_tz = Tz::Floating.as_id();
+            range.end_tz = Tz::Floating.as_id();
+        }
+        assert_eq!(starts(&data, phoenix), expected);
+
+        // A floating series still follows the request's zone
+        let floating = ical(":20270301T090000");
+        let seven = 7 * 3600;
+        assert_eq!(
+            starts(&floating, phoenix),
+            (
+                utc(1) + seven,
+                utc(8) + seven,
+                [1, 8, 15]
+                    .map(|day| (utc(day) + seven, utc(day) + seven + 3600))
+                    .to_vec()
+            )
+        );
     }
 }

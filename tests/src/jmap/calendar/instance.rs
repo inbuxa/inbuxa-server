@@ -2,6 +2,8 @@
  * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
+ *
+ * Modified by Coffey Labs in 2026 for INBUXA.
  */
 
 use crate::{
@@ -884,6 +886,8 @@ pub async fn test(test: &TestServer) {
         ]
     );
 
+    utc_series(&account).await;
+
     // Clean up
     for calendar_id in [&calendar_id, &series_calendar_id] {
         account
@@ -894,6 +898,109 @@ pub async fn test(test: &TestServer) {
             )
             .await;
     }
+}
+
+// inbuxa: a series starting in UTC keeps its times and zone whatever zone
+// the request asks for (inbuxa-server #303)
+async fn utc_series(account: &Account) {
+    let calendar_id = account
+        .jmap_create(
+            MethodObject::Calendar,
+            [json!({ "name": "UTC series" })],
+            Vec::<(&str, &str)>::new(),
+        )
+        .await
+        .created(0)
+        .id()
+        .to_string();
+    let event_id = account
+        .jmap_create(
+            MethodObject::CalendarEvent,
+            [json!({
+              "@type": "Event",
+              "uid": "utc-series@example.com",
+              "calendarIds": { &calendar_id: true },
+              "title": "UTC series",
+              "start": "2026-11-02T18:00:00",
+              "duration": "PT1H",
+              "timeZone": "Etc/UTC",
+              "recurrenceRule": { "frequency": "weekly", "count": 3 }
+            })],
+            Vec::<(&str, &str)>::new(),
+        )
+        .await
+        .created(0)
+        .id()
+        .to_string();
+    let account_id = account.id_string();
+    let properties = ["id", "baseEventId", "start", "timeZone", "utcStart"];
+
+    for time_zone in ["America/Phoenix", "Etc/UTC"] {
+        let response = account
+            .jmap_method_calls(json!([
+                ["CalendarEvent/get", {
+                    "accountId": account_id,
+                    "ids": [&event_id],
+                    "properties": properties,
+                    "timeZone": time_zone,
+                }, "0"],
+                ["CalendarEvent/query", {
+                    "accountId": account_id,
+                    "filter": {
+                        "inCalendar": &calendar_id,
+                        "after": "2026-11-01T00:00:00",
+                        "before": "2026-12-01T00:00:00",
+                    },
+                    "sort": [{ "property": "start" }],
+                    "expandRecurrences": true,
+                    "timeZone": time_zone,
+                }, "1"],
+                ["CalendarEvent/get", {
+                    "accountId": account_id,
+                    "#ids": { "resultOf": "1", "name": "CalendarEvent/query", "path": "/ids" },
+                    "properties": properties,
+                    "timeZone": time_zone,
+                }, "2"],
+            ]))
+            .await;
+        let base = &response.list()[0];
+        assert_eq!(base.text_field("timeZone"), "Etc/UTC", "{time_zone}");
+        assert_eq!(
+            base.text_field("utcStart"),
+            "2026-11-02T18:00:00Z",
+            "{time_zone}"
+        );
+
+        let instances = response.response_at(2)["list"].as_array().unwrap();
+        let found = instances
+            .iter()
+            .map(|instance| {
+                assert_eq!(instance.text_field("baseEventId"), event_id);
+                (
+                    instance.text_field("start"),
+                    instance.text_field("timeZone"),
+                    instance.text_field("utcStart"),
+                )
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            found,
+            [
+                ("2026-11-02T18:00:00", "Etc/UTC", "2026-11-02T18:00:00Z"),
+                ("2026-11-09T18:00:00", "Etc/UTC", "2026-11-09T18:00:00Z"),
+                ("2026-11-16T18:00:00", "Etc/UTC", "2026-11-16T18:00:00Z"),
+            ],
+            "{time_zone}"
+        );
+    }
+
+    account
+        .jmap_destroy(
+            MethodObject::Calendar,
+            [&calendar_id],
+            [("onDestroyRemoveEvents", true)],
+        )
+        .await;
 }
 
 async fn expand_instances(account: &Account, calendar_id: &str) -> Vec<Value> {

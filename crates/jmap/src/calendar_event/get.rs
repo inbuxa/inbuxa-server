@@ -24,7 +24,7 @@ use groupware::{
     calendar::{
         CalendarEvent, EVENT_DRAFT, EVENT_HIDE_ATTENDEES, EVENT_INVITE_OTHERS, EVENT_INVITE_SELF,
         PREF_USE_DEFAULT_ALERTS,
-        expand::CalendarEventExpansion,
+        expand::{CalendarEventExpansion, ComponentStartOffset},
         limit_component_depth,
         privacy::{event_view, hide_attendees, redact_private_event},
     },
@@ -344,7 +344,12 @@ impl CalendarEventGet for Server {
                                 .collect::<Vec<_>>(),
                         };
 
-                        let tz = tz.unwrap_or(default_tz);
+                        // inbuxa: a series that starts in UTC ("...Z") keeps
+                        // that zone, as the base event does, rather than
+                        // taking the request's
+                        let tz = tz
+                            .or_else(|| source_component.start_offset_tz())
+                            .unwrap_or(default_tz);
                         let tz_name = tz.name().unwrap_or_default().to_string();
 
                         let start_timestamp = DateTime::from_timestamp(expansion.start, 0)
@@ -443,11 +448,13 @@ impl CalendarEventGet for Server {
             }
 
             if include_base_event {
-                let mut event = std::mem::take(&mut calendar_event.data.event);
-
                 // Obtain UTC start/end if requested
+                // inbuxa: before the event is taken, as the expansion reads
+                // its DTSTART to place a series stored floating
                 let expansion = if return_utc_dates
-                    && let Some(expansion) = event
+                    && let Some(expansion) = calendar_event
+                        .data
+                        .event
                         .components
                         .iter()
                         .position(|c| {
@@ -462,6 +469,7 @@ impl CalendarEventGet for Server {
                 } else {
                     CalendarEventExpansion::default()
                 };
+                let mut event = std::mem::take(&mut calendar_event.data.event);
 
                 // Remove recurrence ids
                 if let Some(range) = &override_range {

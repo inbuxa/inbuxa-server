@@ -393,7 +393,13 @@ impl ICalendarComponent {
             },
         };
         let mut event = None;
-        let start_tz = tz_resolver.resolve_or_default(dt_start_tzid);
+        // inbuxa: a DTSTART written with an offset ("...Z") is in that zone.
+        // Taking the default (floating, as the server stores events) made
+        // every instance of a UTC rule floating, so readers then placed it in
+        // whatever zone the client asked for.
+        let start_tz = dt_start
+            .tz()
+            .unwrap_or_else(|| tz_resolver.resolve_or_default(dt_start_tzid));
         let dt_start_tz = dt_start
             .to_date_time_with_tz(start_tz)
             .ok_or(CalendarErrorType::InvalidDtStart)?;
@@ -769,5 +775,69 @@ mod budget_tests {
         assert_eq!(expanded.events.len(), 3000);
         assert!(expanded.errors.is_empty());
         assert!(iterations < 4000, "{iterations}");
+    }
+}
+
+#[cfg(test)]
+mod start_zone_tests {
+    use crate::{
+        common::timezone::Tz,
+        icalendar::{ICalendar, dates::TimeOrDelta},
+    };
+
+    fn instances(dtstart: &str, rrule: Option<&str>, default_tz: Tz) -> Vec<(Tz, i64)> {
+        let rrule = rrule.map_or(String::new(), |rule| format!("RRULE:{rule}\r\n"));
+        let ical = ICalendar::parse(format!(
+            "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nBEGIN:VEVENT\r\nUID:zone\r\n\
+             DTSTART{dtstart}\r\nDURATION:PT1H\r\n{rrule}END:VEVENT\r\nEND:VCALENDAR\r\n"
+        ))
+        .unwrap();
+        ical.expand_dates(default_tz, 10)
+            .events
+            .into_iter()
+            .map(|event| {
+                if let TimeOrDelta::Time(end) = event.end {
+                    assert_eq!(end.timezone(), event.start.timezone());
+                }
+                (event.start.timezone(), event.start.timestamp())
+            })
+            .collect()
+    }
+
+    // 2026-11-02 18:00 UTC and a week later
+    const FIRST: i64 = 1793642400;
+    const SECOND: i64 = FIRST + 7 * 86400;
+
+    #[test]
+    fn utc_rule_instances_stay_utc() {
+        for default_tz in [Tz::Floating, Tz::Tz(chrono_tz::America::Phoenix)] {
+            assert_eq!(
+                instances(":20261102T180000Z", Some("FREQ=WEEKLY;COUNT=2"), default_tz),
+                vec![(Tz::UTC, FIRST), (Tz::UTC, SECOND)],
+                "{default_tz:?}"
+            );
+            // as a one-off already was
+            assert_eq!(
+                instances(":20261102T180000Z", None, default_tz),
+                vec![(Tz::UTC, FIRST)]
+            );
+        }
+    }
+
+    #[test]
+    fn floating_and_zoned_rules_unchanged() {
+        assert_eq!(
+            instances(":20261102T180000", Some("FREQ=WEEKLY;COUNT=2"), Tz::Floating),
+            vec![(Tz::Floating, FIRST), (Tz::Floating, SECOND)]
+        );
+        let new_york = Tz::Tz(chrono_tz::America::New_York);
+        assert_eq!(
+            instances(
+                ";TZID=America/New_York:20261102T130000",
+                Some("FREQ=WEEKLY;COUNT=2"),
+                Tz::Floating
+            ),
+            vec![(new_york, FIRST), (new_york, SECOND)]
+        );
     }
 }
