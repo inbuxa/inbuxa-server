@@ -103,7 +103,9 @@ impl DnsManagementTask for Server {
 }
 
 async fn dns_management(server: &Server, task: &TaskDnsManagement) -> trc::Result<TaskResult> {
-    if task.update_records.is_empty() {
+    // inbuxa: a task that renews afterwards can have an empty list: the
+    // DNS-PERSIST-01 record is published whichever types are asked for (#290)
+    if task.update_records.is_empty() && !task.on_success_renew_certificate {
         return Ok(TaskResult::permanent(
             "No DNS records to update".to_string(),
         ));

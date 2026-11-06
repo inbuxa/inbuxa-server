@@ -2,6 +2,8 @@
  * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
+ *
+ * Modified by Coffey Labs in 2026 for INBUXA.
  */
 
 use crate::registry::mapping::{
@@ -151,12 +153,7 @@ pub(crate) async fn validate_domain(
     // Schedule ACME renewal task if needed
     if !will_trigger_acme
         && let CertificateManagement::Automatic(details) = &domain.certificate_management
-        && old_domain.is_none_or(|old| {
-            !matches!(
-                old.certificate_management,
-                CertificateManagement::Automatic(_)
-            )
-        })
+        && needs_certificate_order(domain, old_domain)
     {
         let Some(provider) = set
             .server
@@ -179,13 +176,80 @@ pub(crate) async fn validate_domain(
                 )));
         }
 
-        tasks.push(Task::AcmeRenewal(TaskDomainManagement {
-            domain_id: Id::default(),
-            status: TaskStatus::now(),
-        }));
+        // inbuxa: CAA and the DNS-PERSIST-01 record name the provider, and the
+        // persist record says whether wildcards are allowed. Publish them
+        // before ordering, or the CA refuses the order (#290).
+        let publishes_caa = matches!(
+            &domain.dns_management,
+            DnsManagement::Automatic(dns) if dns.publish_records.contains(&DnsRecordType::Caa)
+        );
+        if matches!(domain.dns_management, DnsManagement::Automatic(_))
+            && (publishes_caa || matches!(provider.challenge_type, AcmeChallengeType::DnsPersist01))
+            && acme_records_outdated(domain, old_domain)
+        {
+            tasks.push(Task::DnsManagement(TaskDnsManagement {
+                domain_id: Id::default(),
+                update_records: Map::new(if publishes_caa {
+                    vec![DnsRecordType::Caa]
+                } else {
+                    vec![]
+                }),
+                on_success_renew_certificate: true,
+                status: TaskStatus::now(),
+            }));
+        } else {
+            tasks.push(Task::AcmeRenewal(TaskDomainManagement {
+                domain_id: Id::default(),
+                status: TaskStatus::now(),
+            }));
+        }
     }
 
     Ok(Ok(response))
+}
+
+/// inbuxa: whether a save changed what the domain's certificate is ordered
+/// for. The renewal task decides what to do about it: a certificate that
+/// already has these names just waits for its renewal date (#290).
+fn needs_certificate_order(domain: &Domain, old_domain: Option<&Domain>) -> bool {
+    let CertificateManagement::Automatic(new) = &domain.certificate_management else {
+        return false;
+    };
+    let Some(old_domain) = old_domain else {
+        return true;
+    };
+    let CertificateManagement::Automatic(old) = &old_domain.certificate_management else {
+        return true;
+    };
+    let names = |list: &'_ Map<String>| {
+        let mut names = list.as_slice().to_vec();
+        names.sort();
+        names.dedup();
+        names
+    };
+
+    old_domain.name != domain.name
+        || old.acme_provider_id != new.acme_provider_id
+        || names(&old.subject_alternative_names) != names(&new.subject_alternative_names)
+}
+
+/// inbuxa: whether a save left the published CAA and DNS-PERSIST-01 records
+/// out of date. Only an empty name list asks for a wildcard, so changing one
+/// list of names for another doesn't touch them.
+fn acme_records_outdated(domain: &Domain, old_domain: Option<&Domain>) -> bool {
+    let CertificateManagement::Automatic(new) = &domain.certificate_management else {
+        return false;
+    };
+    let Some(old_domain) = old_domain else {
+        return true;
+    };
+    let CertificateManagement::Automatic(old) = &old_domain.certificate_management else {
+        return true;
+    };
+
+    old_domain.name != domain.name
+        || old.acme_provider_id != new.acme_provider_id
+        || old.subject_alternative_names.is_empty() != new.subject_alternative_names.is_empty()
 }
 
 fn publishes_dkim(domain: &Domain) -> bool {
@@ -225,4 +289,89 @@ pub(crate) async fn validate_dns_server(
     }
 
     Ok(Ok(response))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use registry::schema::structs::CertificateManagementProperties;
+
+    fn domain(name: &str, provider: u64, names: &[&str]) -> Domain {
+        Domain {
+            name: name.to_string(),
+            certificate_management: CertificateManagement::Automatic(
+                CertificateManagementProperties {
+                    acme_provider_id: Id::from(provider),
+                    subject_alternative_names: Map::new(
+                        names.iter().map(|name| name.to_string()).collect(),
+                    ),
+                },
+            ),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn saving_the_same_names_orders_nothing() {
+        let old = domain("example.org", 1, &["mail", "imap"]);
+        assert!(!needs_certificate_order(
+            &domain("example.org", 1, &["imap", "mail"]),
+            Some(&old)
+        ));
+        assert!(!acme_records_outdated(
+            &domain("example.org", 1, &["imap", "mail"]),
+            Some(&old)
+        ));
+    }
+
+    #[test]
+    fn changing_the_names_orders_a_certificate() {
+        let old = domain("example.org", 1, &["mail"]);
+        for new in [
+            domain("example.org", 1, &["mail", "imap"]),
+            domain("example.org", 1, &["imap"]),
+            domain("example.org", 1, &[]),
+            domain("example.org", 2, &["mail"]),
+            domain("example.net", 1, &["mail"]),
+        ] {
+            assert!(needs_certificate_order(&new, Some(&old)));
+        }
+    }
+
+    #[test]
+    fn switching_to_automatic_orders_a_certificate_and_manual_doesnt() {
+        let manual = Domain {
+            certificate_management: CertificateManagement::Manual,
+            ..domain("example.org", 1, &[])
+        };
+        let automatic = domain("example.org", 1, &[]);
+        assert!(needs_certificate_order(&automatic, Some(&manual)));
+        assert!(needs_certificate_order(&automatic, None));
+        assert!(!needs_certificate_order(&manual, Some(&automatic)));
+        assert!(!needs_certificate_order(&manual, Some(&manual)));
+    }
+
+    #[test]
+    fn records_only_go_stale_when_what_they_say_changes() {
+        let old = domain("example.org", 1, &["mail"]);
+        // Still no wildcard, same provider
+        assert!(!acme_records_outdated(
+            &domain("example.org", 1, &["imap"]),
+            Some(&old)
+        ));
+        // Wildcard allowed from here on
+        assert!(acme_records_outdated(
+            &domain("example.org", 1, &[]),
+            Some(&old)
+        ));
+        // A different provider or owner name
+        assert!(acme_records_outdated(
+            &domain("example.org", 2, &["mail"]),
+            Some(&old)
+        ));
+        assert!(acme_records_outdated(
+            &domain("example.net", 1, &["mail"]),
+            Some(&old)
+        ));
+    }
 }

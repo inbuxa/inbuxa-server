@@ -10,6 +10,7 @@
 //! whose chain was broken) never got another, so its keys stopped rotating.
 //! This check runs on the task scheduler and queues the missing task.
 
+use crate::task_manager::lock::TaskLockManager;
 use common::Server;
 use registry::{
     schema::{
@@ -154,10 +155,45 @@ async fn has_dkim_keys(server: &Server, domain_id: Id) -> trc::Result<bool> {
         .caused_by(trc::location!())
 }
 
-async fn queued_domain_tasks(server: &Server) -> trc::Result<QueuedDomainTasks> {
-    // The due index carries each task's type, so only the few domain tasks
-    // are read in full. Failed tasks sit at the end of it (due u64::MAX).
-    let mut ids = Vec::new();
+/// Adds to `batch` the removal of a domain's queued renewal tasks, whatever
+/// their state, because a new one is about to replace them: each run queues
+/// the next, so every extra task would be another chain of renewals, for good
+/// (#290). Should the new one never run, the scheduled check queues another.
+///
+/// Returns the tasks it locked, to unlock once the batch is written. A task
+/// that's running right now can't be removed, and it stays.
+pub async fn clear_queued_renewals(
+    server: &Server,
+    domain_id: Id,
+    batch: &mut BatchBuilder,
+) -> trc::Result<Vec<u64>> {
+    let mut locked = Vec::new();
+    for (due, id) in queued_tasks(server, &[TaskType::AcmeRenewal]).await? {
+        let task = server
+            .store()
+            .get_value::<Task>(ValueKey::from(ValueClass::TaskQueue(
+                TaskQueueClass::Task { id },
+            )))
+            .await
+            .caused_by(trc::location!())?;
+        if matches!(task, Some(Task::AcmeRenewal(task)) if task.domain_id == domain_id)
+            && server.try_lock_task(id).await
+        {
+            batch
+                .clear(ValueClass::TaskQueue(TaskQueueClass::Task { id }))
+                .clear(ValueClass::TaskQueue(TaskQueueClass::Due { id, due }));
+            locked.push(id);
+        }
+    }
+
+    Ok(locked)
+}
+
+/// The due time and id of every queued task of the wanted types. The due
+/// index carries each task's type, so nothing is read in full. Failed tasks
+/// sit at the end of it (due u64::MAX).
+async fn queued_tasks(server: &Server, wanted: &[TaskType]) -> trc::Result<Vec<(u64, u64)>> {
+    let mut tasks = Vec::new();
     server
         .store()
         .iterate(
@@ -171,11 +207,8 @@ async fn queued_domain_tasks(server: &Server) -> trc::Result<QueuedDomainTasks> 
             .ascending(),
             |key, value| {
                 let task_type = value.deserialize_be_u16(0).ok().and_then(TaskType::from_id);
-                if matches!(
-                    task_type,
-                    Some(TaskType::DkimManagement | TaskType::AcmeRenewal)
-                ) {
-                    ids.push(key.deserialize_be_u64(U64_LEN)?);
+                if task_type.is_some_and(|typ| wanted.contains(&typ)) {
+                    tasks.push((key.deserialize_be_u64(0)?, key.deserialize_be_u64(U64_LEN)?));
                 }
                 Ok(true)
             },
@@ -183,8 +216,14 @@ async fn queued_domain_tasks(server: &Server) -> trc::Result<QueuedDomainTasks> 
         .await
         .caused_by(trc::location!())?;
 
+    Ok(tasks)
+}
+
+async fn queued_domain_tasks(server: &Server) -> trc::Result<QueuedDomainTasks> {
+    let tasks = queued_tasks(server, &[TaskType::DkimManagement, TaskType::AcmeRenewal]).await?;
+
     let mut queued = QueuedDomainTasks::default();
-    for id in ids {
+    for (_, id) in tasks {
         match server
             .store()
             .get_value::<Task>(ValueKey::from(ValueClass::TaskQueue(
