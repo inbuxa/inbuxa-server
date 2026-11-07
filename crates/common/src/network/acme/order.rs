@@ -13,6 +13,7 @@ use crate::network::acme::{
     AcmeDnsParameters, AcmeError, AcmeResult, AuthStatus, ChallengeType, Identifier, OrderStatus,
     ParsedCert, PemCert,
 };
+use crate::network::dns::update::name_in_zone;
 use crate::{KV_ACME, Server};
 use chrono::{TimeZone, Utc};
 use dns_update::DnsRecord;
@@ -330,14 +331,15 @@ impl AcmeRequestBuilder {
                         };
                         let domain = domain.strip_prefix("*.").unwrap_or(&domain);
 
-                        let zone = dns_parameters
-                            .origin
-                            .as_deref()
-                            .or_else(|| psl::domain_str(domain))
-                            .unwrap_or(domain);
-
                         let proof = self.dns_proof(challenge)?;
-                        let challenge_name = format!("_acme-challenge.{}", domain);
+                        let challenge_name = dns_parameters
+                            .updater
+                            .challenge_record_name(&format!("_acme-challenge.{}", domain))
+                            .await;
+                        // inbuxa: the zone is chosen for where the record is
+                        // written, which a followed CNAME can move elsewhere
+                        let zone =
+                            challenge_zone(dns_parameters.origin.as_deref(), &challenge_name);
                         dns_parameters
                             .updater
                             .set_rrset(
@@ -564,9 +566,64 @@ impl ParsedCert {
     }
 }
 
+/// inbuxa: the zone that gets the DNS-01 record named `name`: the domain's DNS
+/// origin when the name is inside it, otherwise the name's registered domain.
+/// A domain that only orders certificates can list hostnames from other
+/// zones, and one origin can't cover them all; sending a name outside the
+/// origin used to panic the renewal (#310).
+fn challenge_zone<'x>(origin: Option<&'x str>, name: &'x str) -> &'x str {
+    origin
+        .filter(|origin| name_in_zone(name, origin))
+        .or_else(|| psl::domain_str(name))
+        .unwrap_or(name)
+}
+
 #[cfg(test)]
 mod tests {
-    use super::chain_matches;
+    use super::{chain_matches, challenge_zone};
+
+    #[test]
+    fn challenge_zone_uses_origin_that_contains_the_name() {
+        assert_eq!(
+            challenge_zone(Some("mail.example.com"), "imap.mail.example.com"),
+            "mail.example.com"
+        );
+        assert_eq!(
+            challenge_zone(Some("example.com."), "Example.COM"),
+            "example.com."
+        );
+    }
+
+    #[test]
+    fn challenge_zone_skips_origin_outside_the_name() {
+        assert_eq!(
+            challenge_zone(Some("certs.example.net"), "mail.example.com"),
+            "example.com"
+        );
+        assert_eq!(
+            challenge_zone(Some("example.com"), "badexample.com"),
+            "badexample.com"
+        );
+    }
+
+    #[test]
+    fn challenge_zone_for_a_cname_target() {
+        // _acme-challenge.mail.example.com CNAME acme.example.com, with only
+        // the acme zone open to updates
+        assert_eq!(
+            challenge_zone(Some("acme.example.com"), "acme.example.com"),
+            "acme.example.com"
+        );
+        assert_eq!(
+            challenge_zone(Some("acme.example.com"), "_acme-challenge.mail.example.com"),
+            "example.com"
+        );
+    }
+
+    #[test]
+    fn challenge_zone_without_origin() {
+        assert_eq!(challenge_zone(None, "mail.example.co.uk"), "example.co.uk");
+    }
     use rcgen::{CertificateParams, DistinguishedName, DnType, KeyPair, PKCS_ECDSA_P256_SHA256};
 
     fn self_signed_pem(common_name: &str) -> String {
