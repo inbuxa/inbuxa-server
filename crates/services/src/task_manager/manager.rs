@@ -200,7 +200,12 @@ pub fn spawn_task_manager(inner: Arc<Inner>) {
 
                     if let Some(TaskDetails { task, info }) = fetch_enabled_task(&server, job).await
                     {
-                        // inbuxa: on a task of its own, as above
+                        // inbuxa: on a task of its own, as above. A panic counts
+                        // as a failed attempt, so the task backs off like any
+                        // other failure and shows why; releasing it to run
+                        // again at once let a task that always panics loop,
+                        // ordering a new certificate each time (#310)
+                        let attempted = task.clone();
                         let run = {
                             let server = server.clone();
                             let server_instance = server_instance.clone();
@@ -221,7 +226,20 @@ pub fn spawn_task_manager(inner: Arc<Inner>) {
                                 .await;
                             }
                             Err(err) => {
-                                worker_failed(&server, &[info.id], err).await;
+                                log_worker_panic(&err);
+                                update_tasks(
+                                    &server,
+                                    &mut [TaskDetails {
+                                        task: attempted,
+                                        info,
+                                    }],
+                                    vec![TaskResult::Failure {
+                                        typ: TaskFailureType::Temporary,
+                                        message: format!("Task failed unexpectedly: {err}"),
+                                        max_attempts: None,
+                                    }],
+                                )
+                                .await;
                                 refresh_queue = true;
                             }
                         }
@@ -617,15 +635,20 @@ async fn fetch_task(server: &Server, job: TaskJob) -> Option<TaskDetails> {
     }
 }
 
-/// inbuxa: a task panicked: its locks are released so it runs again, here or
-/// on another node, and the worker carries on.
-async fn worker_failed(server: &Server, ids: &[u64], err: tokio::task::JoinError) {
+fn log_worker_panic(err: &tokio::task::JoinError) {
     trc::event!(
         Server(trc::ServerEvent::ThreadError),
         Details = "Task worker failed",
         Reason = err.to_string(),
         CausedBy = trc::location!()
     );
+}
+
+/// inbuxa: an index batch panicked: its locks are released so it runs again,
+/// here or on another node, and the worker carries on. Other tasks are
+/// recorded as a failed attempt instead (#310).
+async fn worker_failed(server: &Server, ids: &[u64], err: tokio::task::JoinError) {
+    log_worker_panic(&err);
     for id in ids {
         server.remove_index_lock(*id).await;
     }

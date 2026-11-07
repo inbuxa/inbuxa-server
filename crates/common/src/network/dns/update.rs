@@ -2,6 +2,8 @@
  * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
+ *
+ * Modified by Coffey Labs in 2026 for INBUXA.
  */
 
 use crate::{Core, Server};
@@ -9,6 +11,10 @@ use base64::{Engine, engine::general_purpose};
 use dns_update::{
     DnsRecord, DnsRecordType, TsigAlgorithm,
     providers::{ovh::OvhEndpoint, rfc2136::DnsAddress},
+};
+use mail_auth::hickory_resolver::{
+    TokioResolver,
+    proto::rr::{Name, RData, Record, RecordType},
 };
 use registry::schema::{
     enums,
@@ -21,6 +27,66 @@ use std::{
 };
 use trc::DnsEvent;
 use types::id::Id;
+
+/// inbuxa: whether `name` is `zone` itself or a name under it, ignoring case
+/// and trailing dots. RFC 2136 updates assert this in hickory, so a name
+/// outside the zone panicked the task instead of failing it (#310).
+pub fn name_in_zone(name: &str, zone: &str) -> bool {
+    let name = name.trim_end_matches('.').as_bytes();
+    let zone = zone.trim_end_matches('.').as_bytes();
+    if zone.is_empty() || name.eq_ignore_ascii_case(zone) {
+        return true;
+    }
+    name.len() > zone.len()
+        && name[name.len() - zone.len() - 1] == b'.'
+        && name[name.len() - zone.len()..].eq_ignore_ascii_case(zone)
+}
+
+/// inbuxa: the name that gets the DNS-01 TXT record for `challenge_name`. A
+/// CNAME on the challenge name hands validation to another name, often in a
+/// zone set aside for ACME updates, so the chain is followed (eight hops at
+/// most) and the record is written at its end (#310).
+pub async fn follow_challenge_cname(resolver: &TokioResolver, challenge_name: &str) -> String {
+    let mut current = challenge_name.trim_end_matches('.').to_ascii_lowercase();
+    for _ in 0..8 {
+        let Ok(query) = Name::from_ascii(format!("{current}.")) else {
+            break;
+        };
+        let Ok(lookup) = resolver.lookup(query.clone(), RecordType::CNAME).await else {
+            break;
+        };
+        let Some(target) = cname_target(&query, lookup.answers()) else {
+            break;
+        };
+        current = target;
+    }
+    current
+}
+
+fn cname_target(query: &Name, answers: &[Record]) -> Option<String> {
+    answers.iter().find_map(|record| match &record.data {
+        RData::CNAME(target) if &record.name == query => Some(
+            target
+                .0
+                .to_ascii()
+                .trim_end_matches('.')
+                .to_ascii_lowercase(),
+        ),
+        _ => None,
+    })
+}
+
+fn check_zone(origin: &str, name: &str) -> Result<(), String> {
+    if name_in_zone(name, origin) {
+        Ok(())
+    } else {
+        Err(format!(
+            "{} is not in the DNS zone {}",
+            name.trim_end_matches('.'),
+            origin.trim_end_matches('.')
+        ))
+    }
+}
 
 pub struct DnsUpdater {
     pub updater: dns_update::DnsUpdater,
@@ -1135,6 +1201,7 @@ impl DnsUpdater {
         record_type: DnsRecordType,
         records: Vec<DnsRecord>,
     ) -> Result<(), String> {
+        check_zone(origin, name)?;
         let record_values = records
             .iter()
             .map(|r| trc::Value::String(r.to_string().into()))
@@ -1170,6 +1237,7 @@ impl DnsUpdater {
         name: &str,
         record_type: DnsRecordType,
     ) -> Result<(), String> {
+        check_zone(origin, name)?;
         if let Err(err) = self
             .updater
             .set_rrset(
@@ -1201,6 +1269,7 @@ impl DnsUpdater {
         record_type: DnsRecordType,
         records: Vec<DnsRecord>,
     ) -> Result<(), String> {
+        check_zone(origin, name)?;
         let record_values = records
             .iter()
             .map(|r| trc::Value::String(r.to_string().into()))
@@ -1236,6 +1305,7 @@ impl DnsUpdater {
         name: &str,
         record_type: DnsRecordType,
     ) -> dns_update::Result<Vec<DnsRecord>> {
+        check_zone(origin, name).map_err(dns_update::Error::Client)?;
         self.updater.list_rrset(name, record_type, origin).await
     }
 
@@ -1246,6 +1316,7 @@ impl DnsUpdater {
         record_type: DnsRecordType,
         records: Vec<DnsRecord>,
     ) -> Result<(), String> {
+        check_zone(origin, name)?;
         let record_values = records
             .iter()
             .map(|r| trc::Value::String(r.to_string().into()))
@@ -1269,6 +1340,20 @@ impl DnsUpdater {
                 Err(err.to_string())
             }
         }
+    }
+
+    /// inbuxa: where the DNS-01 record for `challenge_name` is written, after
+    /// following any CNAME on it (#310).
+    pub async fn challenge_record_name(&self, challenge_name: &str) -> String {
+        #[cfg(feature = "test_mode")]
+        if matches!(
+            self.updater,
+            dns_update::DnsUpdater::Pebble(_) | dns_update::DnsUpdater::InMemory(_)
+        ) {
+            return challenge_name.to_string();
+        }
+
+        follow_challenge_cname(self.core.smtp.resolvers.dns.resolver(), challenge_name).await
     }
 
     pub async fn wait_for_txt_propagation(&self, name: &str, origin: &str, expected: &str) -> bool {
@@ -1371,5 +1456,29 @@ impl Server {
                 dns_server_id
             )))
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::name_in_zone;
+
+    #[test]
+    fn names_inside_the_zone() {
+        assert!(name_in_zone("example.com", "example.com"));
+        assert!(name_in_zone(
+            "_acme-challenge.mail.example.com.",
+            "example.com"
+        ));
+        assert!(name_in_zone("MAIL.Example.com", "example.COM."));
+        assert!(name_in_zone("anything.test", ""));
+    }
+
+    #[test]
+    fn names_outside_the_zone() {
+        assert!(!name_in_zone("mail.example.net", "example.com"));
+        assert!(!name_in_zone("badexample.com", "example.com"));
+        assert!(!name_in_zone("example.com", "mail.example.com"));
+        assert!(!name_in_zone("ex\u{e4}mple.com", "mple.com"));
     }
 }

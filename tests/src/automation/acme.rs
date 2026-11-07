@@ -427,6 +427,35 @@ pub async fn test(test: &TestServer) {
     account.registry_destroy_all(ObjectType::Certificate).await;
     account.registry_destroy_all(ObjectType::Task).await;
 
+    // Hostnames outside the domain's DNS origin get their DNS-01 record in
+    // their own zone instead of failing the order (#310: this used to panic)
+    let outside_origin_domain_id = account
+        .registry_create_object(Domain {
+            name: "cert-origin.org".to_string(),
+            certificate_management: CertificateManagement::Automatic(
+                CertificateManagementProperties {
+                    acme_provider_id: dns_acme_id,
+                    subject_alternative_names: Map::new(vec![
+                        "mail.zone-310.org".to_string(),
+                        "imap.zone-310.org".to_string(),
+                    ]),
+                },
+            ),
+            dkim_management: DkimManagement::Manual,
+            dns_management: DnsManagement::Automatic(DnsManagementProperties {
+                dns_server_id: pebble_dns_id,
+                origin: Some("cert-origin.org".to_string()),
+                publish_records: Map::new(vec![]),
+                ..Default::default()
+            }),
+            ..Default::default()
+        })
+        .await;
+    test.wait_for_tasks_skip_not_due().await;
+    assert_certificates(account, &[&["imap.zone-310.org", "mail.zone-310.org"]]).await;
+    account.registry_destroy_all(ObjectType::Certificate).await;
+    account.registry_destroy_all(ObjectType::Task).await;
+
     // With nothing to publish and no certificate to order, no DNS task is
     // queued just to fail
     let no_records_domain_id = account
@@ -936,6 +965,7 @@ pub async fn test(test: &TestServer) {
                 dns_domain_id,
                 persist_domain_id,
                 cert_only_domain_id,
+                outside_origin_domain_id,
                 no_records_domain_id,
             ],
         )
@@ -945,6 +975,7 @@ pub async fn test(test: &TestServer) {
             dns_domain_id,
             persist_domain_id,
             cert_only_domain_id,
+            outside_origin_domain_id,
             no_records_domain_id,
         ]);
     account.registry_destroy_all(ObjectType::DnsServer).await;
