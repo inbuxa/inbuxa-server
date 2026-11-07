@@ -25,7 +25,7 @@ use registry::{
     schema::{
         enums::{TaskStatusType, TaskType},
         prelude::Property,
-        structs::Task,
+        structs::{Task, TaskDnsManagement},
     },
     types::{
         EnumImpl, ObjectImpl,
@@ -33,8 +33,8 @@ use registry::{
         index::{IndexBuilder, IndexKey},
     },
 };
-use services::task_manager::lock::TaskLockManager;
-use std::str::FromStr;
+use services::task_manager::{domain_check::clear_queued_renewals, lock::TaskLockManager};
+use std::{collections::HashSet, str::FromStr};
 use store::{
     IterateParams, SerializeInfallible, U64_LEN, ValueKey,
     registry::RegistryFilterOp,
@@ -48,6 +48,7 @@ pub(crate) async fn task_set(
 ) -> trc::Result<RegistrySetResponse<'_>> {
     let mut batch = BatchBuilder::new();
     let mut locked_tasks = Vec::new();
+    let mut renewing_domains = HashSet::new();
 
     // Process creations
     'outer: for (id, value) in set.create.drain() {
@@ -123,6 +124,34 @@ pub(crate) async fn task_set(
                         );
                         continue 'outer;
                     }
+                }
+
+                // inbuxa: a renewal created here replaces the domain's queued
+                // one, the way saving the domain does, or both would keep
+                // renewing from here on (#290)
+                let renews = match &task {
+                    Task::AcmeRenewal(task) => Some(task.domain_id),
+                    Task::DnsManagement(TaskDnsManagement {
+                        domain_id,
+                        on_success_renew_certificate: true,
+                        ..
+                    }) => Some(*domain_id),
+                    _ => None,
+                };
+                if let Some(domain_id) = renews {
+                    if !renewing_domains.insert(domain_id) {
+                        set.response.not_created.append(
+                            id,
+                            SetError::invalid_properties()
+                                .with_property(Property::DomainId)
+                                .with_description(
+                                    "Only one certificate renewal per domain can be created at a time",
+                                ),
+                        );
+                        continue 'outer;
+                    }
+                    locked_tasks
+                        .extend(clear_queued_renewals(set.server, domain_id, &mut batch).await?);
                 }
 
                 let task_id = set.server.registry().assign_id();

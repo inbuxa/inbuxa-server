@@ -7,7 +7,7 @@
  * Modified by Coffey Labs in 2026 for INBUXA.
  */
 
-use crate::utils::server::TestServer;
+use crate::utils::{jmap::JmapUtils, server::TestServer};
 use ahash::AHashSet;
 use common::network::dns::update::DNS_RECORDS;
 use dns_update::DnsRecord;
@@ -21,7 +21,7 @@ use registry::{
             CertificateManagementProperties, DkimManagement, DnsManagement,
             DnsManagementProperties, DnsServer, DnsServerCloudflare, Domain, PublicText,
             PublicTextValue, SecretKey, SecretKeyValue, SecretText, SecretTextValue, Task,
-            TaskDomainManagement,
+            TaskDomainManagement, TaskStatus,
         },
     },
     types::{datetime::UTCDateTime, id::ObjectId, map::Map},
@@ -574,6 +574,67 @@ pub async fn test(test: &TestServer) {
         .await;
     test.wait_for_tasks_skip_not_due().await;
     assert_one_renewal(account, names_domain_id).await;
+
+    // inbuxa: a renewal created over the API replaces the queued one as well,
+    // and only one can be created per domain in a request
+    let renewal = || {
+        Task::AcmeRenewal(TaskDomainManagement {
+            domain_id: names_domain_id,
+            status: TaskStatus::now(),
+        })
+    };
+    account.registry_create_object(renewal()).await;
+    assert_one_renewal(account, names_domain_id).await;
+    test.wait_for_tasks_skip_not_due().await;
+    assert_one_renewal(account, names_domain_id).await;
+    let response = account.registry_create([renewal(), renewal()]).await;
+    response.created_id(0);
+    response
+        .not_created(1)
+        .to_set_error()
+        .assert_type(SetErrorType::InvalidProperties)
+        .assert_description_contains("Only one certificate renewal per domain");
+    test.wait_for_tasks_skip_not_due().await;
+    assert_one_renewal(account, names_domain_id).await;
+
+    // A queued renewal can be told to run now, as the console's Order again
+    // does. The certificate is still valid, so it only reschedules itself.
+    let (renewal_id, queued) = account
+        .registry_get_all::<Task>()
+        .await
+        .into_iter()
+        .find(|(_, task)| {
+            matches!(task, Task::AcmeRenewal(TaskDomainManagement { domain_id, .. }) if *domain_id == names_domain_id)
+        })
+        .unwrap();
+    let due_before = queued.due_timestamp();
+    let now_text = UTCDateTime::now().to_string();
+    account
+        .registry_update_object(
+            ObjectType::Task,
+            renewal_id,
+            json!({ "status": { "@type": "Pending", "due": now_text } }),
+        )
+        .await;
+    test.wait_for_tasks_skip_not_due().await;
+    assert_one_renewal(account, names_domain_id).await;
+    let due_after = account
+        .registry_get_all::<Task>()
+        .await
+        .into_iter()
+        .find_map(|(_, task)| match task {
+            Task::AcmeRenewal(TaskDomainManagement { domain_id, .. })
+                if domain_id == names_domain_id =>
+            {
+                Some(task.due_timestamp())
+            }
+            _ => None,
+        })
+        .unwrap();
+    assert_eq!(
+        due_after, due_before,
+        "the run now should reschedule for when the certificate falls due"
+    );
 
     // DNS-PERSIST-01 only allows a wildcard if its record says so. Going from
     // named hosts to the wildcard needs that record republished first.
