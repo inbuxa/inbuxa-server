@@ -297,8 +297,13 @@ pub(crate) async fn task_set(
         if let Task::DestroyAccount(_) = task {
             set.response.not_destroyed.append(
                 id,
+                // inbuxa: #313: a kept account is restored or destroyed
+                // through its own object, which keeps this task in step
                 SetError::forbidden().with_description(
-                    "Account recovery is not supported in this deployment".to_string(),
+                    "An account's destroy task can't be cancelled. If the account \
+                     is still being kept, restore it or destroy it now with \
+                     inbuxa:DeletedAccount/set."
+                        .to_string(),
                 ),
             );
             continue;

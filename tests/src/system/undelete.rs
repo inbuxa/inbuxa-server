@@ -23,6 +23,7 @@ use email::{
 use hyper::StatusCode;
 use imap_proto::ResponseType;
 use jmap_client::client::{Client, Credentials};
+use jmap_proto::error::set::SetErrorType;
 use registry::{
     schema::{
         prelude::{ObjectType, Property},
@@ -541,6 +542,25 @@ pub async fn test(test: &mut TestServer) {
         pending_destroy(test, gone_id).await,
         "test 14: destruction due"
     );
+    // #313: its task can't be cancelled, and the refusal says where to go
+    let tasks = admin
+        .jmap_method_call("x:Task/get", json!({"ids": null}))
+        .await;
+    let task_id = tasks
+        .list()
+        .iter()
+        .find(|task| task["@type"] == "DestroyAccount" && task["accountId"] == gone_id.to_string())
+        .unwrap_or_else(|| panic!("#313: no DestroyAccount task in {tasks:?}"))["id"]
+        .as_str()
+        .unwrap()
+        .parse::<Id>()
+        .unwrap();
+    admin
+        .registry_destroy_object_expect_err(ObjectType::Task, task_id)
+        .await
+        .assert_type(SetErrorType::Forbidden)
+        .assert_description_contains("inbuxa:DeletedAccount/set");
+    assert!(pending_destroy(test, gone_id).await, "#313: still due");
 
     // Its name is held (UD-16)
     let domain_id = admin
