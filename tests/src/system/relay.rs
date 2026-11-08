@@ -12,7 +12,10 @@
 //! key or a token.
 //!
 //! `relay_link_tests` runs a real `inbuxa-relay` (build it first with
-//! `cargo build -p inbuxa-relay`): the server joins it, sets it up, and its
+//! `cargo build -p inbuxa-relay --features test-mx`, which sends all of its
+//! outbound mail to the test's own MX; a build without the feature looks
+//! that MX up in DNS, gets nowhere, and the test waits for a bounce that
+//! never comes): the server joins it, sets it up, and its
 //! port 25 takes mail only for this server's real recipients. Live, a
 //! message is delivered before the sender hears 250, and this server's
 //! refusal is the sender's reply; held while the link is off, it is
