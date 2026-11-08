@@ -525,6 +525,7 @@ mod tests {
             },
             smtp_certificate: None,
             smtp_private_key: None,
+            certificate_id: None,
             recipient_key: Secret::new([9; 32]),
             join: Join::default(),
             created_by: String::new(),

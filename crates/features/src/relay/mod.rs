@@ -44,6 +44,7 @@ use inbuxa_relay_proto::{
     types::RelaySettings,
 };
 use serde::{Deserialize as SerdeDeserialize, Serialize as SerdeSerialize, de::DeserializeOwned};
+use std::str::FromStr;
 use store::{
     Deserialize, IterateParams, SUBSPACE_INBUXA, Serialize, Store, ValueKey,
     write::{AnyClass, BatchBuilder, ValueClass, assert::AssertValue},
@@ -235,6 +236,12 @@ pub struct Relay {
     pub smtp_certificate: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub smtp_private_key: Option<String>,
+    /// One of this server's certificates (`x:Certificate`, by JMAP id) the
+    /// relay uses instead of one ordered for it (RL-36). The server copies
+    /// it into `smtp_certificate` and `smtp_private_key`, and moves on to
+    /// each renewal, the newest certificate for the same names.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub certificate_id: Option<String>,
     /// The key this relay's recipient hashes are made with (RL-11).
     #[serde(default)]
     pub recipient_key: Secret<[u8; 32]>,
@@ -368,6 +375,14 @@ impl Relay {
         if let Some(problem) = check.problems().into_iter().next() {
             return invalid("settings", problem);
         }
+        if let Some(id) = &self.certificate_id
+            && Id::from_str(id).is_err()
+        {
+            return invalid(
+                "certificateId",
+                "One of this server's certificates, by its id.",
+            );
+        }
         match (&self.smtp_certificate, &self.smtp_private_key) {
             (None, None) => {}
             (Some(chain), Some(key)) => {
@@ -401,6 +416,7 @@ impl Relay {
             "inboundOnly": self.inbound_only,
             "settings": self.settings,
             "smtpCertificate": self.smtp_certificate,
+            "certificateId": self.certificate_id,
         })
     }
 
@@ -833,6 +849,7 @@ mod tests {
             },
             smtp_certificate: None,
             smtp_private_key: None,
+            certificate_id: None,
             recipient_key: Secret::new([0; 32]),
             join: Join::default(),
             created_by: String::new(),

@@ -10,10 +10,14 @@
 //! and certificates this server manages covers that name. One node orders
 //! it; the relay gets it with its settings over every link. Without such a
 //! domain, nothing is ordered, and an administrator uploads one.
+//!
+//! A relay set to use one of this server's own certificates (RL-36) is
+//! never ordered one: it gets a copy of that certificate, and of each
+//! renewal, the newest certificate for the same names.
 
 use common::{
-    BuildServer, Inner,
-    network::acme::relay::{RelayCertificateNeed, relay_certificate_need},
+    BuildServer, Inner, Server,
+    network::acme::relay::{RelayCertificateNeed, RelayServerCertificate, relay_certificate_need},
 };
 use inbuxa_features::relay::{self as relays, Relay, certificate};
 use std::sync::Arc;
@@ -30,6 +34,10 @@ pub(crate) async fn order_relay_certificates(inner: &Arc<Inner>, all: &[Relay]) 
     {
         let hostname = relay.settings.hostname.trim().to_string();
         if hostname.is_empty() {
+            continue;
+        }
+        if let Some(id) = &relay.certificate_id {
+            follow_server_certificate(&server, relay, id, &hostname, now).await;
             continue;
         }
         let Some(need) = relay_certificate_need(relay.smtp_certificate.as_deref(), &hostname, now)
@@ -137,6 +145,98 @@ async fn install(
         relay.updated_at = now();
         if relays::replace(data, &relay, version).await? {
             return Ok(());
+        }
+    }
+    Err(trc::StoreEvent::UnexpectedError
+        .into_err()
+        .details("The relay kept changing"))
+}
+
+/// Keeps a relay set to use one of this server's certificates (RL-36) on
+/// the newest one for its names, and records why when there is none, as
+/// its `certificateError`. A relay already on it writes nothing.
+async fn follow_server_certificate(
+    server: &Server,
+    relay: &Relay,
+    id: &str,
+    hostname: &str,
+    now: u64,
+) {
+    let data = server.store();
+    let found = match server
+        .relay_server_certificate(id, relay.smtp_certificate.as_deref(), hostname)
+        .await
+    {
+        Ok(found) => found,
+        Err(err) => {
+            trc::error!(err.details("Failed to read a relay's server certificate"));
+            return;
+        }
+    };
+    let result = match found {
+        Ok(cert)
+            if relay.smtp_certificate.as_deref() == Some(cert.chain.as_str())
+                && relay.smtp_private_key.as_deref() == Some(cert.key.as_str())
+                && relay.certificate_id.as_deref() == Some(cert.id.to_string().as_str()) =>
+        {
+            Ok(())
+        }
+        Ok(cert) => match install_server_certificate(data, relay.id, id, hostname, cert).await {
+            Ok(true) => {
+                relays::changed();
+                Ok(())
+            }
+            // The choice changed meanwhile: the next scan follows the new one
+            Ok(false) => return,
+            Err(err) => {
+                trc::error!(err.details("Failed to copy a server certificate to a relay"));
+                return;
+            }
+        },
+        Err(reason) => Err(reason),
+    };
+    let last = match certificate::last_order(data, relay.id).await {
+        Ok(last) => last,
+        Err(err) => {
+            trc::error!(err.details("Failed to read a relay's certificate record"));
+            return;
+        }
+    };
+    if last.as_ref().and_then(|order| order.error()) != result.as_ref().err().map(String::as_str)
+        && let Err(err) = certificate::finish_order(data, relay.id, now, result).await
+    {
+        trc::error!(err.details("Failed to record a relay's server certificate"));
+    }
+}
+
+/// Puts a copy of `cert` on the relay, while it still uses certificate
+/// `chosen` under the same public name. False if that changed.
+async fn install_server_certificate(
+    data: &store::Store,
+    relay_id: u32,
+    chosen: &str,
+    hostname: &str,
+    cert: RelayServerCertificate,
+) -> trc::Result<bool> {
+    for _ in 0..5 {
+        let Some((mut relay, version)) = relays::get_versioned(data, relay_id).await? else {
+            return Ok(false);
+        };
+        if relay.certificate_id.as_deref() != Some(chosen)
+            || !relay
+                .settings
+                .hostname
+                .trim()
+                .eq_ignore_ascii_case(hostname)
+        {
+            return Ok(false);
+        }
+        relay.certificate_id = Some(cert.id.to_string());
+        relay.smtp_certificate = Some(cert.chain.clone());
+        relay.smtp_private_key = Some(cert.key.clone());
+        relay.updated_at = now();
+        if relays::replace(data, &relay, version).await? {
+            return Ok(true);
         }
     }
     Err(trc::StoreEvent::UnexpectedError

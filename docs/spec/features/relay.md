@@ -294,7 +294,7 @@ with the server's own `inbuxa:` objects. In particular, the relay's
 | `spoolMaxBytes` | downstream | Spool size cap |
 | `outboundRetry`, `outboundExpiry` | downstream | Retry schedule and give-up time. Defaults match the server's (three days) |
 | `outboundTls` | downstream | Where neither DANE nor MTA-STS applies: `opportunistic` (the default; STARTTLS when offered) or `required` (no delivery without STARTTLS). The certificate isn't checked either way. DANE and MTA-STS are always enforced where published |
-| `smtpCertificate` | downstream | PEM chain and private key. `/get` never returns the key |
+| `smtpCertificate` | downstream | PEM chain and private key. `/get` never returns the key. Ordered (RL-27), uploaded, or copied from the downstream's own certificate `certificateId` (RL-36) |
 | `sealingKey` | downstream | The downstream's public sealing key |
 | `linkAllowFrom` | downstream | Addresses and CIDR ranges that may dial the link port. Default empty: anyone (RL-33) |
 | `nextLinkCaPin` | downstream | A second link CA to trust during a replacement (RL-34). Default null |
@@ -550,7 +550,7 @@ When no link is up, or after RL-13:
 
 | Object | What it holds |
 |---|---|
-| `inbuxa:Relay` | One per relay: `name`, `address`, `linkPort`, `enabled`, the settings pushed to the relay, `sendThrough` (route outbound mail through relays), `inboundOnly` (takes mail in but sends none, e.g. while its IP isn't warmed up or isn't in SPF yet), `mxPreference` (its MX preference, 10 by default, RL-25), `certificateNotAfter` and `certificateError` (when its certificate runs out, and why the last order failed, RL-27), `olderThanServer` (a link last heard an older release than this server's, RL-28), `linkCa` and `linkCaReplacing` (RL-34), `keysWrapped` (RL-35), and read-only status mirrored from the relay: link state per node, version, queue counts, `lastSeen`. Create, or an update with `rejoin: true`, returns `joinToken` once. An update with `upgrade: {blobId, signature}`, sent on its own, hands the relay a release over the node's link (RL-29). An update with `replaceLinkCa`, sent on its own, starts, finishes or cancels a replacement of the shared link CA (RL-34) |
+| `inbuxa:Relay` | One per relay: `name`, `address`, `linkPort`, `enabled`, the settings pushed to the relay, `sendThrough` (route outbound mail through relays), `inboundOnly` (takes mail in but sends none, e.g. while its IP isn't warmed up or isn't in SPF yet), `mxPreference` (its MX preference, 10 by default, RL-25), `certificateNotAfter` and `certificateError` (when its certificate runs out, and why the last order failed, RL-27), `certificateId` (one of the downstream's certificates it uses, followed to each renewal, RL-36), `olderThanServer` (a link last heard an older release than this server's, RL-28), `linkCa` and `linkCaReplacing` (RL-34), `keysWrapped` (RL-35), and read-only status mirrored from the relay: link state per node, version, queue counts, `lastSeen`. Create, or an update with `rejoin: true`, returns `joinToken` once. An update with `upgrade: {blobId, signature}`, sent on its own, hands the relay a release over the node's link (RL-29). An update with `replaceLinkCa`, sent on its own, starts, finishes or cancels a replacement of the shared link CA (RL-34) |
 | `inbuxa:RelayMessage` | Read-only view of a relay's `Inbound` and `Outbound` queues, fetched over the link when asked. Never message content. `/get`, `/query` (filter `relayId`, `direction`; newest first) and `/set` destroy only: discards held mail, or cancels an outbound message, whose recipients fail here with no DSN as a delivery cancelled in the queue does. Each id is the relay's id and a hash of the relay's own message id, so nothing is stored |
 
 Permissions: `sysRelayGet`, `sysRelayUpdate`, `sysRelayQueueGet`,
@@ -642,6 +642,17 @@ allowing the edge's IP and disabling SPF, DMARC and reverse IP for it.
   through its DNS server settings, pushes it with `Relay/set`, and renews it
   30 days before it expires. Without DNS automation, an administrator
   uploads one. The relay never runs ACME, and opens no port 80.
+- **RL-36.** Instead, an administrator may point a relay at one of the
+  downstream's own certificates (`certificateId`), a wildcard, say. The
+  downstream refuses one that doesn't name the relay's public name, copies
+  it into the relay's certificate and key, and pushes it. It never orders
+  a certificate for that relay. Since an ACME renewal is stored as a new
+  certificate, the relay follows the newest one for the same names, and
+  `certificateId` moves to it; when the chosen one is gone, the names of
+  the relay's copy say which to follow. When none will do, the relay keeps
+  its copy and `certificateError` says why. Pasting a certificate and
+  `certificateId` together is refused; setting `certificateId` to null
+  goes back to RL-27, keeping the copy until it needs replacing.
 
 ### Updates
 
@@ -807,6 +818,9 @@ A **Relays** page under Settings › Mail flow:
 - **RL-T27.** With `INBUXA_RELAY_KEY_FILE` set, a copy of the store holds
   none of the relay keys in the clear, and a node started without the file
   starts no relay link and says why.
+- **RL-T28.** A relay set to use a downstream wildcard certificate gets it
+  without an order; a renewal of that wildcard reaches the relay and
+  `certificateId` moves to it; one for another name is refused.
 
 ## Decisions
 
