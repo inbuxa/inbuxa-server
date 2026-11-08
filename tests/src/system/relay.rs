@@ -31,15 +31,16 @@ use registry::{
         enums::DnsRecordType,
         prelude::{ObjectType, Property},
         structs::{
-            CertificateManagement, DkimManagement, DnsManagement, Domain, Expression,
-            ExpressionMatch, MtaOutboundStrategy, MtaRoute, MtaRouteInbuxaRelay, Tenant,
-            TlsInternalReport, UserRoles,
+            Certificate, CertificateManagement, DkimManagement, DnsManagement, Domain, Expression,
+            ExpressionMatch, MtaOutboundStrategy, MtaRoute, MtaRouteInbuxaRelay, PublicText,
+            PublicTextValue, SecretText, SecretTextValue, Tenant, TlsInternalReport, UserRoles,
         },
     },
-    types::map::Map,
+    types::{datetime::UTCDateTime, map::Map},
 };
 use serde_json::{Value, json};
 use std::str::FromStr;
+use store::registry::write::{RegistryWrite, RegistryWriteResult};
 
 const USING: &[&str] = &[
     "urn:ietf:params:jmap:core",
@@ -420,6 +421,8 @@ pub async fn test(test: &mut TestServer) {
         assert_eq!(name, "error", "{method} by a tenant: {response}");
     }
 
+    server_certificate(test, &other).await;
+
     // Destroyed
     let (_, response) = call(admin, "inbuxa:Relay/set", json!({"destroy": [&other]})).await;
     assert_eq!(response["destroyed"][0], other.as_str(), "{response}");
@@ -445,6 +448,100 @@ pub async fn test(test: &mut TestServer) {
     assert!(!text.contains(&again.encode()), "a join token was audited");
 
     call(admin, "inbuxa:Relay/set", json!({"destroy": [&id]})).await;
+}
+
+/// A server certificate with `names`, running out in `days`, stored as
+/// ACME stores one: its id and its chain.
+async fn server_certificate_with(test: &TestServer, names: &[&str], days: i64) -> (String, String) {
+    let key = rcgen::KeyPair::generate().unwrap();
+    let mut params =
+        rcgen::CertificateParams::new(names.iter().map(|n| n.to_string()).collect::<Vec<_>>())
+            .unwrap();
+    let now = ::time::OffsetDateTime::now_utc();
+    params.not_before = now - ::time::Duration::days(1);
+    params.not_after = now + ::time::Duration::days(days);
+    let chain = params.self_signed(&key).unwrap().pem();
+    let result = test
+        .server
+        .registry()
+        .write(RegistryWrite::insert(
+            &Certificate {
+                certificate: PublicText::Text(PublicTextValue {
+                    value: chain.clone(),
+                }),
+                private_key: SecretText::Text(SecretTextValue {
+                    secret: key.serialize_pem(),
+                }),
+                issuer: "Test".into(),
+                not_valid_after: UTCDateTime::from_timestamp(params.not_after.unix_timestamp()),
+                not_valid_before: UTCDateTime::from_timestamp(params.not_before.unix_timestamp()),
+                subject_alternative_names: Map::new(names.iter().map(|n| n.to_string()).collect()),
+            }
+            .into(),
+        ))
+        .await
+        .unwrap();
+    let RegistryWriteResult::Success(id) = result else {
+        panic!("certificate stored: {result:?}");
+    };
+    (id.to_string(), chain)
+}
+
+/// RL-36, RL-T28: a relay set to use one of the server's certificates gets
+/// a copy, and moves on to its renewal; one for another name is refused,
+/// and so is pasting a certificate along with it.
+async fn server_certificate(test: &TestServer, id: &str) {
+    let admin = test.account("admin@example.com");
+    let (wildcard, wildcard_pem) =
+        server_certificate_with(test, &["*.example.com", "example.com"], 60).await;
+    let (elsewhere, _) = server_certificate_with(test, &["mail.example.org"], 60).await;
+    let update = async |patch: Value| {
+        call(admin, "inbuxa:Relay/set", json!({"update": {id: patch}}))
+            .await
+            .1
+    };
+
+    let response = update(json!({"certificateId": &elsewhere})).await;
+    assert_eq!(
+        response["notUpdated"][id]["properties"][0], "certificateId",
+        "another name's certificate: {response}"
+    );
+    let response = update(json!({"certificateId": &wildcard, "smtpCertificate": CERT_PEM})).await;
+    assert_eq!(
+        response["notUpdated"][id]["properties"][0], "certificateId",
+        "pasted along with it: {response}"
+    );
+
+    let response = update(json!({"certificateId": &wildcard})).await;
+    assert!(response["updated"].get(id).is_some(), "{response}");
+    let relay = get(admin, id).await;
+    assert_eq!(relay["certificateId"], wildcard.as_str(), "{relay}");
+    assert_eq!(relay["smtpCertificate"], wildcard_pem.as_str());
+    assert_eq!(relay["smtpPrivateKey"], "****");
+    // Pasting one while it uses the server's is refused too
+    let response = update(json!({"smtpCertificate": CERT_PEM, "smtpPrivateKey": KEY_PEM})).await;
+    assert_eq!(
+        response["notUpdated"][id]["properties"][0], "certificateId",
+        "{response}"
+    );
+
+    // A renewal is a new certificate for the same names: the relay follows it
+    let (renewal, renewal_pem) =
+        server_certificate_with(test, &["example.com", "*.example.com"], 90).await;
+    let response = update(json!({"settings/hostname": "mx1.example.com"})).await;
+    assert!(response["updated"].get(id).is_some(), "{response}");
+    let relay = get(admin, id).await;
+    assert_eq!(relay["certificateId"], renewal.as_str(), "{relay}");
+    assert_eq!(relay["smtpCertificate"], renewal_pem.as_str());
+
+    // Back to ordering, or a pasted one: the copy stays until it's replaced
+    let response = update(json!({"certificateId": null})).await;
+    assert!(response["updated"].get(id).is_some(), "{response}");
+    let relay = get(admin, id).await;
+    assert_eq!(relay["certificateId"], Value::Null, "{relay}");
+    assert_eq!(relay["smtpCertificate"], renewal_pem.as_str());
+
+    admin.registry_destroy_all(ObjectType::Certificate).await;
 }
 
 #[ignore]

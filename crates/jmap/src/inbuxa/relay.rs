@@ -59,6 +59,7 @@ const ALL: &[P] = &[
     P::Settings,
     P::SmtpCertificate,
     P::SmtpPrivateKey,
+    P::CertificateId,
     P::CertificateNotAfter,
     P::CertificateError,
     P::JoinState,
@@ -199,6 +200,7 @@ fn to_value(
             P::Settings => json_to_value(serde_json::to_value(&relay.settings).unwrap_or_default()),
             P::SmtpCertificate => text(relay.smtp_certificate.as_deref()),
             P::SmtpPrivateKey => text(relay.smtp_private_key.as_ref().map(|_| MASKED_PASSWORD)),
+            P::CertificateId => text(relay.certificate_id.as_deref()),
             P::CertificateNotAfter => relay
                 .smtp_certificate
                 .as_deref()
@@ -368,6 +370,74 @@ fn parse(mut json: JsonMap) -> Result<StoredRelay, SetError<P>> {
             .with_description(invalid.reason)
     })?;
     Ok(relay)
+}
+
+impl Sent {
+    /// Whether it pastes in a certificate or a key, not `****` kept.
+    fn pastes_certificate(&self) -> bool {
+        self.properties.contains_key("smtpCertificate")
+            || self
+                .properties
+                .get("smtpPrivateKey")
+                .is_some_and(|key| key.as_str() != Some(MASKED_PASSWORD))
+    }
+
+    /// Refuses a pasted certificate for a relay that is to use one of this
+    /// server's (RL-36): the one sent, or else `current`, the one it uses.
+    fn paste_conflict(&self, current: Option<&str>) -> Result<(), SetError<P>> {
+        let chosen = match self.properties.get("certificateId") {
+            Some(sent) => sent.as_str().is_some(),
+            None => current.is_some(),
+        };
+        if chosen && self.pastes_certificate() {
+            return Err(SetError::invalid_properties()
+                .with_property(P::CertificateId)
+                .with_description("Paste a certificate or pick one of this server's, not both."));
+        }
+        Ok(())
+    }
+
+    /// Whether it changes which certificate the relay uses, or its name.
+    fn touches_certificate(&self) -> bool {
+        self.properties.contains_key("certificateId")
+            || self.properties.contains_key("settings")
+            || self.settings.contains_key("hostname")
+    }
+}
+
+/// A relay set to use one of this server's certificates (RL-36) gets a
+/// copy of it, the newest for its names, when that choice or the relay's
+/// name changes; the relay scan keeps it current after. Refuses one that
+/// doesn't name the relay.
+async fn copy_server_certificate(
+    server: &Server,
+    sent: &Sent,
+    relay: &mut StoredRelay,
+) -> trc::Result<Result<(), SetError<P>>> {
+    let Some(id) = relay.certificate_id.clone() else {
+        return Ok(Ok(()));
+    };
+    if !sent.touches_certificate() {
+        return Ok(Ok(()));
+    }
+    match server
+        .relay_server_certificate(
+            &id,
+            relay.smtp_certificate.as_deref(),
+            &relay.settings.hostname,
+        )
+        .await?
+    {
+        Ok(cert) => {
+            relay.certificate_id = Some(cert.id.to_string());
+            relay.smtp_certificate = Some(cert.chain);
+            relay.smtp_private_key = Some(cert.key);
+            Ok(Ok(()))
+        }
+        Err(reason) => Ok(Err(SetError::invalid_properties()
+            .with_property(P::CertificateId)
+            .with_description(reason))),
+    }
 }
 
 fn relay_id(id: Id) -> Option<u32> {
@@ -548,7 +618,14 @@ pub async fn set(
     let actor = server.audit_actor(access_token).await;
 
     for (client_id, value) in request.unwrap_create() {
-        let relay = match client_json(value).and_then(|sent| {
+        let sent = match client_json(value) {
+            Ok(sent) => sent,
+            Err(error) => {
+                response.not_created.append(client_id, error);
+                continue;
+            }
+        };
+        let relay = match (|| {
             if sent.rejoin {
                 return Err(SetError::invalid_properties()
                     .with_property(P::Rejoin)
@@ -574,23 +651,29 @@ pub async fn set(
                     .with_property(P::SmtpPrivateKey)
                     .with_description("There is no stored key for **** to keep."));
             }
-            let mut json = sent.properties;
+            sent.paste_conflict(None)?;
+            let mut json = sent.properties.clone();
             if !sent.settings.is_empty() {
                 let mut settings = match json.remove("settings") {
                     Some(serde_json::Value::Object(settings)) => settings,
                     _ => JsonMap::new(),
                 };
-                merge_settings(&mut settings, sent.settings)?;
+                merge_settings(&mut settings, sent.settings.clone())?;
                 json.insert("settings".into(), settings.into());
             }
             parse(json)
-        }) {
+        })() {
             Ok(relay) => relay,
             Err(error) => {
                 response.not_created.append(client_id, error);
                 continue;
             }
         };
+        let mut relay = relay;
+        if let Err(error) = copy_server_certificate(server, &sent, &mut relay).await? {
+            response.not_created.append(client_id, error);
+            continue;
+        }
         let at = now();
         let relay = StoredRelay {
             created_by: actor.name.clone(),
@@ -670,6 +753,10 @@ pub async fn set(
                 outcome = Some(Err(SetError::not_found()));
                 break;
             };
+            if let Err(error) = sent.paste_conflict(current.certificate_id.as_deref()) {
+                outcome = Some(Err(error));
+                break;
+            }
             let mut next = match apply(&current, &sent) {
                 Ok(next) => next,
                 Err(error) => {
@@ -677,6 +764,10 @@ pub async fn set(
                     break;
                 }
             };
+            if let Err(error) = copy_server_certificate(server, &sent, &mut next).await? {
+                outcome = Some(Err(error));
+                break;
+            }
             let at = now();
             let token = if sent.rejoin {
                 let keys = relays::keys_or_new(data, at).await?;
