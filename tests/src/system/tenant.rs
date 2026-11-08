@@ -469,10 +469,29 @@ pub async fn test(test: &mut TestServer) {
             "MT-9"
         );
     }
-    admin
-        .registry_destroy(ObjectType::DkimSignature, keys)
+    // #313: while someone else uses the domain it stays, keys and all, and
+    // the refusal says what's in the way
+    let k_user = admin
+        .create_user_account("kuser@k.example.org", SECRET_T_USER, "K user", &[], vec![])
         .await;
-    admin.registry_destroy(ObjectType::Domain, [k_domain]).await;
+    admin
+        .registry_destroy_object_expect_err(ObjectType::Domain, k_domain)
+        .await
+        .assert_type(SetErrorType::ObjectIsLinked)
+        .assert_description_contains("1 x:Account");
+    assert_eq!(
+        sorted(admin.dkim_keys_of(k_domain).await),
+        sorted(keys),
+        "#313"
+    );
+    admin.destroy_account(k_user).await;
+    test.wait_for_tasks().await;
+    // ... and once only its own DKIM keys refer to it, they go with it
+    admin
+        .registry_destroy(ObjectType::Domain, [k_domain])
+        .await
+        .assert_destroyed(&[k_domain]);
+    assert!(admin.dkim_keys_of(k_domain).await.is_empty(), "#313");
 
     // Acceptance test 8: a tenant that's still referenced can't be deleted
     admin

@@ -930,6 +930,12 @@ impl RegistrySet for Server {
                                 .append(id, build_set_error(missing));
                             continue;
                         }
+                        // inbuxa: #313: a domain's own DKIM keys go with it,
+                        // but only when nothing else holds the domain, so a
+                        // delete that would be refused anyway loses nothing
+                        if matches!(object.inner, ObjectInner::Domain(_)) {
+                            release_domain_keys(self, object_id, &mut cache_invalidator).await?;
+                        }
                         // inbuxa: personal-data catalog: a tenant's compliance
                         // role, while nobody holds it, goes first
                         let role_released = matches!(object.inner, ObjectInner::Tenant(_))
@@ -1259,14 +1265,77 @@ impl Modification {
     }
 }
 
+/// inbuxa: #313: deletes a domain's DKIM keys when they're the only objects
+/// that still refer to it. Keys sign for that one domain, so they're no use
+/// once it's gone; anything else that's linked leaves them in place and the
+/// domain's own delete is refused as before.
+async fn release_domain_keys(
+    server: &Server,
+    domain_id: ObjectId,
+    cache_invalidator: &mut CacheInvalidationBuilder,
+) -> trc::Result<()> {
+    let linked = server
+        .registry()
+        .linked_objects(domain_id)
+        .await
+        .caused_by(trc::location!())?;
+    if linked.is_empty()
+        || linked
+            .iter()
+            .any(|linked| linked.object() != ObjectType::DkimSignature)
+    {
+        return Ok(());
+    }
+
+    for key_id in linked {
+        let Some(key) = server
+            .registry()
+            .get(key_id)
+            .await
+            .caused_by(trc::location!())?
+        else {
+            continue;
+        };
+        if let RegistryWriteResult::Success(_) = server
+            .registry()
+            .write(RegistryWrite::delete_object(key_id, &key))
+            .await?
+        {
+            cache_invalidator.process_delete(key_id.id(), &key);
+        }
+    }
+    Ok(())
+}
+
 pub(crate) fn map_write_error(err: RegistryWriteResult) -> SetError<Property> {
     match err {
         RegistryWriteResult::CannotDeleteLinked {
             object_id,
             linked_objects,
-        } => SetError::new(SetErrorType::ObjectIsLinked)
-            .with_object_id(object_id)
-            .with_linked_objects(linked_objects),
+        } => {
+            // inbuxa: #313: say what's in the way, for clients that only
+            // show the description
+            let mut counts: Vec<(ObjectType, usize)> = Vec::new();
+            for linked in &linked_objects {
+                match counts.iter_mut().find(|(kind, _)| *kind == linked.object()) {
+                    Some((_, count)) => *count += 1,
+                    None => counts.push((linked.object(), 1)),
+                }
+            }
+            let in_use = counts
+                .iter()
+                .map(|(kind, count)| {
+                    format!("{count} x:{}", registry::types::EnumImpl::as_str(kind))
+                })
+                .collect::<Vec<_>>()
+                .join(", ");
+            SetError::new(SetErrorType::ObjectIsLinked)
+                .with_description(format!(
+                    "It's still used by {in_use}. Remove or change those first."
+                ))
+                .with_object_id(object_id)
+                .with_linked_objects(linked_objects)
+        }
         RegistryWriteResult::InvalidSingletonId => SetError::invalid_properties()
             .with_property(Property::Id)
             .with_description("Invalid singleton id"),
