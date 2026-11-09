@@ -34,6 +34,7 @@ pub mod cal_privacy; // inbuxa: sharees read events as JMAP shows them
 pub mod cal_query;
 pub mod cal_scheduling;
 pub mod card_query;
+pub mod copy_cross_account; // inbuxa: collection COPY/MOVE across accounts
 pub mod copy_move;
 pub mod file_tasks; // inbuxa: file deletes wake the task manager
 pub mod lock;
@@ -197,6 +198,7 @@ pub async fn webdav_tests() {
     principals::test(&test, assisted_discovery).await;
     acl::test(&test).await;
     cal_privacy::test(&test).await;
+    copy_cross_account::test(&test).await;
     card_query::test(&test).await;
     cal_query::test(&test).await;
     cal_alarm::test(&test).await;
