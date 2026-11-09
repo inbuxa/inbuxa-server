@@ -35,7 +35,8 @@ use types::id::Id;
 /// to-do items (security to-do list spec), the deliverability check
 /// (deliverability spec), scheduled reports (scheduled-reports spec),
 /// inbuxa Relays (relay spec), running migrations (migrations spec,
-/// MG-10), and checking the store's blobs (store-check spec, SV-9).
+/// MG-10), checking the store's blobs (store-check spec, SV-9), and taking
+/// snapshots of the store (store-snapshot spec, SN-8).
 const ADMIN_GRANTS: &[Permission] = &[
     Permission::SysAiExplain,
     Permission::SysAuditGet,
@@ -70,6 +71,7 @@ const ADMIN_GRANTS: &[Permission] = &[
     Permission::SysRelayQueueUpdate,
     Permission::SysMigrationRun,
     Permission::SysStoreCheck,
+    Permission::SysStoreSnapshot,
 ];
 
 /// Granted to the server-level Compliance Officer role once it exists:

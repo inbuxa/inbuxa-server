@@ -1793,6 +1793,8 @@ pub enum Permission {
     SysMigrationRun = 694,
     // inbuxa: checking the store's blobs
     SysStoreCheck = 695,
+    // inbuxa: a snapshot of the store, without stopping the server
+    SysStoreSnapshot = 696,
     SysAccountGet = 219,
     SysAccountCreate = 220,
     SysAccountUpdate = 221,

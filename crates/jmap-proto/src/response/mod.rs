@@ -114,6 +114,7 @@ pub enum GetResponseMethod {
     MailRule(GetResponse<crate::object::inbuxa_mail_rule::MailRule>),
     Migration(GetResponse<crate::object::inbuxa_migration::Migration>),
     StoreCheck(GetResponse<crate::object::inbuxa_store_check::StoreCheck>),
+    StoreSnapshot(GetResponse<crate::object::inbuxa_store_snapshot::StoreSnapshot>),
     Relay(GetResponse<crate::object::inbuxa_relay::Relay>),
     RelayMessage(GetResponse<crate::object::inbuxa_relay_message::RelayMessage>),
     SecurityAcceptance(GetResponse<crate::object::inbuxa_security_acceptance::SecurityAcceptance>),
@@ -172,6 +173,7 @@ pub enum SetResponseMethod {
     MailRule(Box<SetResponse<crate::object::inbuxa_mail_rule::MailRule>>),
     Migration(Box<SetResponse<crate::object::inbuxa_migration::Migration>>),
     StoreCheck(Box<SetResponse<crate::object::inbuxa_store_check::StoreCheck>>),
+    StoreSnapshot(Box<SetResponse<crate::object::inbuxa_store_snapshot::StoreSnapshot>>),
     Relay(Box<SetResponse<crate::object::inbuxa_relay::Relay>>),
     RelayMessage(Box<SetResponse<crate::object::inbuxa_relay_message::RelayMessage>>),
     SecurityAcceptance(
@@ -1064,6 +1066,23 @@ impl<'x> From<GetResponse<crate::object::inbuxa_store_check::StoreCheck>> for Re
 impl<'x> From<SetResponse<crate::object::inbuxa_store_check::StoreCheck>> for ResponseMethod<'x> {
     fn from(value: SetResponse<crate::object::inbuxa_store_check::StoreCheck>) -> Self {
         ResponseMethod::Set(SetResponseMethod::StoreCheck(Box::new(value)))
+    }
+}
+
+// inbuxa: a snapshot of the store
+impl<'x> From<GetResponse<crate::object::inbuxa_store_snapshot::StoreSnapshot>>
+    for ResponseMethod<'x>
+{
+    fn from(value: GetResponse<crate::object::inbuxa_store_snapshot::StoreSnapshot>) -> Self {
+        ResponseMethod::Get(GetResponseMethod::StoreSnapshot(value))
+    }
+}
+
+impl<'x> From<SetResponse<crate::object::inbuxa_store_snapshot::StoreSnapshot>>
+    for ResponseMethod<'x>
+{
+    fn from(value: SetResponse<crate::object::inbuxa_store_snapshot::StoreSnapshot>) -> Self {
+        ResponseMethod::Set(SetResponseMethod::StoreSnapshot(Box::new(value)))
     }
 }
 

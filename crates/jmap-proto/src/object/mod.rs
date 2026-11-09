@@ -51,6 +51,7 @@ pub mod inbuxa_scheduled_report_settings; // inbuxa: scheduled reports
 pub mod inbuxa_security_acceptance; // inbuxa: accepted security to-do items
 pub mod inbuxa_sharing_policy; // inbuxa: MA-C, who may share mail
 pub mod inbuxa_store_check; // inbuxa: checking the store's blobs
+pub mod inbuxa_store_snapshot; // inbuxa: a snapshot of the store
 pub mod inbuxa_tenant_protocol_policy; // inbuxa: legacy protocols off, per tenant
 pub mod mailbox;
 pub mod participant_identity;

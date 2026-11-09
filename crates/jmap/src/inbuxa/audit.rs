@@ -526,6 +526,19 @@ async fn fork_current(server: &Server, object: &str, id: &MaybeInvalid<Id>) -> O
             }
             MaybeInvalid::Invalid(_) => None,
         },
+        // A snapshot: its directory and how it stands (store-snapshot spec,
+        // SN-8)
+        "inbuxa:StoreSnapshot" => match id {
+            MaybeInvalid::Value(id) => services::inbuxa_store_snapshot::find(server, id.id())
+                .await
+                .map(|s| {
+                    serde_json::json!({
+                        "name": s.name,
+                        "status": s.status.as_str(),
+                    })
+                }),
+            MaybeInvalid::Invalid(_) => None,
+        },
         // A relay as an administrator sets it: never its keys or token
         "inbuxa:Relay" => match id {
             MaybeInvalid::Value(id) => {
