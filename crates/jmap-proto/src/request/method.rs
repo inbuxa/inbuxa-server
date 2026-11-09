@@ -70,6 +70,8 @@ pub enum MethodObject {
     MailRule,
     // inbuxa: migrations into this server
     Migration,
+    // inbuxa: checking the store's blobs
+    StoreCheck,
     Relay,
     RelayMessage,
     // inbuxa: accepted security to-do items
@@ -129,6 +131,7 @@ impl MethodObject {
             | MethodObject::HoldExport
             | MethodObject::MailRule
             | MethodObject::Migration
+            | MethodObject::StoreCheck
             | MethodObject::Relay
             | MethodObject::RelayMessage
             | MethodObject::SecurityAcceptance
@@ -345,6 +348,8 @@ impl MethodName {
             (MethodFunction::Set, MethodObject::MailRule) => "inbuxa:MailRule/set",
             (MethodFunction::Get, MethodObject::Migration) => "inbuxa:Migration/get",
             (MethodFunction::Set, MethodObject::Migration) => "inbuxa:Migration/set",
+            (MethodFunction::Get, MethodObject::StoreCheck) => "inbuxa:StoreCheck/get",
+            (MethodFunction::Set, MethodObject::StoreCheck) => "inbuxa:StoreCheck/set",
             (MethodFunction::Get, MethodObject::Relay) => "inbuxa:Relay/get",
             (MethodFunction::Set, MethodObject::Relay) => "inbuxa:Relay/set",
             (MethodFunction::Get, MethodObject::RelayMessage) => "inbuxa:RelayMessage/get",
@@ -550,6 +555,8 @@ impl MethodName {
             "inbuxa:MailRule/set" => (MethodObject::MailRule, MethodFunction::Set),
             "inbuxa:Migration/get" => (MethodObject::Migration, MethodFunction::Get),
             "inbuxa:Migration/set" => (MethodObject::Migration, MethodFunction::Set),
+            "inbuxa:StoreCheck/get" => (MethodObject::StoreCheck, MethodFunction::Get),
+            "inbuxa:StoreCheck/set" => (MethodObject::StoreCheck, MethodFunction::Set),
             "inbuxa:Relay/get" => (MethodObject::Relay, MethodFunction::Get),
             "inbuxa:Relay/set" => (MethodObject::Relay, MethodFunction::Set),
             "inbuxa:RelayMessage/get" => (MethodObject::RelayMessage, MethodFunction::Get),
@@ -652,6 +659,7 @@ impl Display for MethodObject {
             MethodObject::LegalHold => "inbuxa:LegalHold",
             MethodObject::MailRule => "inbuxa:MailRule",
             MethodObject::Migration => "inbuxa:Migration",
+            MethodObject::StoreCheck => "inbuxa:StoreCheck",
             MethodObject::Relay => "inbuxa:Relay",
             MethodObject::RelayMessage => "inbuxa:RelayMessage",
             MethodObject::SecurityAcceptance => "inbuxa:SecurityAcceptance",

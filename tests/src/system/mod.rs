@@ -38,6 +38,7 @@ pub mod scheduled_reports; // inbuxa: scheduled reports and the weekly digest
 pub mod security;
 pub mod security_acceptances; // inbuxa: accepted security to-do items
 pub mod sharing_policy; // inbuxa: MA-C, who may share mail
+pub mod store_check; // inbuxa: checking the store's blobs
 pub mod task;
 pub mod tenant;
 pub mod tracer_reload; // inbuxa: tracers start over when their settings change

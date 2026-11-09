@@ -118,6 +118,8 @@ impl JmapAuthorization for AccessToken {
                 }
                 // inbuxa: migrations into this server (MG-10)
                 GetRequestMethod::Migration(_) => Permission::SysMigrationRun,
+                // inbuxa: store-check spec, SV-9
+                GetRequestMethod::StoreCheck(_) => Permission::SysStoreCheck,
                 // inbuxa: inbuxa Relay
                 GetRequestMethod::Relay(_) => Permission::SysRelayGet,
                 GetRequestMethod::RelayMessage(_) => Permission::SysRelayQueueGet,
@@ -322,6 +324,14 @@ impl JmapAuthorization for AccessToken {
                         Permission::SysMigrationRun,
                         Permission::SysMigrationRun,
                         Permission::SysMigrationRun,
+                    ),
+                    // inbuxa: store-check spec, SV-9
+                    SetRequestMethod::StoreCheck(s) => validate_set(
+                        s,
+                        self,
+                        Permission::SysStoreCheck,
+                        Permission::SysStoreCheck,
+                        Permission::SysStoreCheck,
                     ),
                     // inbuxa: inbuxa Relay; a new join token is an update
                     SetRequestMethod::Relay(s) => validate_set(
@@ -596,6 +606,7 @@ impl JmapAuthorization for AccessToken {
                 | MethodObject::HoldExport
                 | MethodObject::MailRule
                 | MethodObject::Migration
+                | MethodObject::StoreCheck
                 | MethodObject::Relay
                 | MethodObject::RelayMessage
                 | MethodObject::SecurityAcceptance

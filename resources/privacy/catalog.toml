@@ -270,6 +270,17 @@ reason = ["content"]
 createdBy = ["identifier"]
 blobId = ["content", "identifier", "contact", "metadata"]
 
+[object."inbuxa:StoreCheck"]
+file = "inbuxa_store_check.rs"
+default = "none"
+whose = ["holder", "administrator"]
+where = ["data-store"]
+scope = "server"
+retention = "object-life"
+[object."inbuxa:StoreCheck".properties]
+createdBy = ["identifier"]
+problems = ["identifier", "metadata"]
+
 [object."inbuxa:Migration"]
 file = "inbuxa_migration.rs"
 default = "none"

@@ -704,6 +704,21 @@ impl<'de> Visitor<'de> for CallVisitor {
                     return Err(de::Error::invalid_length(1, &self));
                 }
             },
+            // inbuxa: checking the store's blobs
+            (MethodFunction::Get, MethodObject::StoreCheck) => match seq.next_element() {
+                Ok(Some(value)) => RequestMethod::Get(GetRequestMethod::StoreCheck(value)),
+                Err(err) => RequestMethod::invalid(err),
+                Ok(None) => {
+                    return Err(de::Error::invalid_length(1, &self));
+                }
+            },
+            (MethodFunction::Set, MethodObject::StoreCheck) => match seq.next_element() {
+                Ok(Some(value)) => RequestMethod::Set(SetRequestMethod::StoreCheck(value)),
+                Err(err) => RequestMethod::invalid(err),
+                Ok(None) => {
+                    return Err(de::Error::invalid_length(1, &self));
+                }
+            },
             // inbuxa: inbuxa Relay
             (MethodFunction::Get, MethodObject::Relay) => match seq.next_element() {
                 Ok(Some(value)) => RequestMethod::Get(GetRequestMethod::Relay(value)),

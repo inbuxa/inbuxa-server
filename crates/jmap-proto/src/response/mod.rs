@@ -113,6 +113,7 @@ pub enum GetResponseMethod {
     LegalHold(GetResponse<crate::object::inbuxa_legal_hold::LegalHold>),
     MailRule(GetResponse<crate::object::inbuxa_mail_rule::MailRule>),
     Migration(GetResponse<crate::object::inbuxa_migration::Migration>),
+    StoreCheck(GetResponse<crate::object::inbuxa_store_check::StoreCheck>),
     Relay(GetResponse<crate::object::inbuxa_relay::Relay>),
     RelayMessage(GetResponse<crate::object::inbuxa_relay_message::RelayMessage>),
     SecurityAcceptance(GetResponse<crate::object::inbuxa_security_acceptance::SecurityAcceptance>),
@@ -170,6 +171,7 @@ pub enum SetResponseMethod {
     LegalHold(Box<SetResponse<crate::object::inbuxa_legal_hold::LegalHold>>),
     MailRule(Box<SetResponse<crate::object::inbuxa_mail_rule::MailRule>>),
     Migration(Box<SetResponse<crate::object::inbuxa_migration::Migration>>),
+    StoreCheck(Box<SetResponse<crate::object::inbuxa_store_check::StoreCheck>>),
     Relay(Box<SetResponse<crate::object::inbuxa_relay::Relay>>),
     RelayMessage(Box<SetResponse<crate::object::inbuxa_relay_message::RelayMessage>>),
     SecurityAcceptance(
@@ -1049,6 +1051,19 @@ impl<'x> From<GetResponse<crate::object::inbuxa_migration::Migration>> for Respo
 impl<'x> From<SetResponse<crate::object::inbuxa_migration::Migration>> for ResponseMethod<'x> {
     fn from(value: SetResponse<crate::object::inbuxa_migration::Migration>) -> Self {
         ResponseMethod::Set(SetResponseMethod::Migration(Box::new(value)))
+    }
+}
+
+// inbuxa: checking the store's blobs
+impl<'x> From<GetResponse<crate::object::inbuxa_store_check::StoreCheck>> for ResponseMethod<'x> {
+    fn from(value: GetResponse<crate::object::inbuxa_store_check::StoreCheck>) -> Self {
+        ResponseMethod::Get(GetResponseMethod::StoreCheck(value))
+    }
+}
+
+impl<'x> From<SetResponse<crate::object::inbuxa_store_check::StoreCheck>> for ResponseMethod<'x> {
+    fn from(value: SetResponse<crate::object::inbuxa_store_check::StoreCheck>) -> Self {
+        ResponseMethod::Set(SetResponseMethod::StoreCheck(Box::new(value)))
     }
 }
 

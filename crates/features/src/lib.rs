@@ -32,5 +32,6 @@ pub mod privacy;
 pub mod relay; // inbuxa: the downstream side of inbuxa Relay (not a rebuild)
 pub mod scheduled_reports; // inbuxa: scheduled reports and the weekly digest (not a rebuild)
 pub mod security;
+pub mod store_check; // inbuxa: checking the store's blobs (not a rebuild)
 pub mod tenancy;
 pub mod undelete;
