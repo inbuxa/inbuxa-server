@@ -185,6 +185,9 @@ pub enum BlobStore {
     Azure(Arc<backend::azure::AzureStore>),
     // inbuxa: ST-16 to ST-22
     Sharded(Arc<backend::scaleout::ShardedBlobStore>),
+    // inbuxa: blob-store-change spec, BM-3: the current store, read through
+    // to the old ones while a change is unresolved
+    Moving(Arc<write::blob_move::MovingBlobStore>),
 }
 
 #[derive(Clone)]

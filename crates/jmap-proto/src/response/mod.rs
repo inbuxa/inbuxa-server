@@ -112,6 +112,9 @@ pub enum GetResponseMethod {
     AccountLock(GetResponse<crate::object::inbuxa_account_lock::AccountLock>),
     LegalHold(GetResponse<crate::object::inbuxa_legal_hold::LegalHold>),
     MailRule(GetResponse<crate::object::inbuxa_mail_rule::MailRule>),
+    StoreCheck(GetResponse<crate::object::inbuxa_store_check::StoreCheck>),
+    StoreSnapshot(GetResponse<crate::object::inbuxa_store_snapshot::StoreSnapshot>),
+    BlobStoreChange(GetResponse<crate::object::inbuxa_blob_store_change::BlobStoreChange>),
     SecurityAcceptance(GetResponse<crate::object::inbuxa_security_acceptance::SecurityAcceptance>),
     DeliverabilityReport(
         GetResponse<crate::object::inbuxa_deliverability_report::DeliverabilityReport>,
@@ -166,6 +169,9 @@ pub enum SetResponseMethod {
     AccountLock(Box<SetResponse<crate::object::inbuxa_account_lock::AccountLock>>),
     LegalHold(Box<SetResponse<crate::object::inbuxa_legal_hold::LegalHold>>),
     MailRule(Box<SetResponse<crate::object::inbuxa_mail_rule::MailRule>>),
+    StoreCheck(Box<SetResponse<crate::object::inbuxa_store_check::StoreCheck>>),
+    StoreSnapshot(Box<SetResponse<crate::object::inbuxa_store_snapshot::StoreSnapshot>>),
+    BlobStoreChange(Box<SetResponse<crate::object::inbuxa_blob_store_change::BlobStoreChange>>),
     SecurityAcceptance(
         Box<SetResponse<crate::object::inbuxa_security_acceptance::SecurityAcceptance>>,
     ),
@@ -1030,6 +1036,53 @@ impl<'x> From<GetResponse<crate::object::inbuxa_mail_rule::MailRule>> for Respon
 impl<'x> From<SetResponse<crate::object::inbuxa_mail_rule::MailRule>> for ResponseMethod<'x> {
     fn from(value: SetResponse<crate::object::inbuxa_mail_rule::MailRule>) -> Self {
         ResponseMethod::Set(SetResponseMethod::MailRule(Box::new(value)))
+    }
+}
+
+// inbuxa: checking the store's blobs
+impl<'x> From<GetResponse<crate::object::inbuxa_store_check::StoreCheck>> for ResponseMethod<'x> {
+    fn from(value: GetResponse<crate::object::inbuxa_store_check::StoreCheck>) -> Self {
+        ResponseMethod::Get(GetResponseMethod::StoreCheck(value))
+    }
+}
+
+impl<'x> From<SetResponse<crate::object::inbuxa_store_check::StoreCheck>> for ResponseMethod<'x> {
+    fn from(value: SetResponse<crate::object::inbuxa_store_check::StoreCheck>) -> Self {
+        ResponseMethod::Set(SetResponseMethod::StoreCheck(Box::new(value)))
+    }
+}
+
+// inbuxa: a snapshot of the store
+impl<'x> From<GetResponse<crate::object::inbuxa_store_snapshot::StoreSnapshot>>
+    for ResponseMethod<'x>
+{
+    fn from(value: GetResponse<crate::object::inbuxa_store_snapshot::StoreSnapshot>) -> Self {
+        ResponseMethod::Get(GetResponseMethod::StoreSnapshot(value))
+    }
+}
+
+impl<'x> From<SetResponse<crate::object::inbuxa_store_snapshot::StoreSnapshot>>
+    for ResponseMethod<'x>
+{
+    fn from(value: SetResponse<crate::object::inbuxa_store_snapshot::StoreSnapshot>) -> Self {
+        ResponseMethod::Set(SetResponseMethod::StoreSnapshot(Box::new(value)))
+    }
+}
+
+// inbuxa: a change of blob store
+impl<'x> From<GetResponse<crate::object::inbuxa_blob_store_change::BlobStoreChange>>
+    for ResponseMethod<'x>
+{
+    fn from(value: GetResponse<crate::object::inbuxa_blob_store_change::BlobStoreChange>) -> Self {
+        ResponseMethod::Get(GetResponseMethod::BlobStoreChange(value))
+    }
+}
+
+impl<'x> From<SetResponse<crate::object::inbuxa_blob_store_change::BlobStoreChange>>
+    for ResponseMethod<'x>
+{
+    fn from(value: SetResponse<crate::object::inbuxa_blob_store_change::BlobStoreChange>) -> Self {
+        ResponseMethod::Set(SetResponseMethod::BlobStoreChange(Box::new(value)))
     }
 }
 

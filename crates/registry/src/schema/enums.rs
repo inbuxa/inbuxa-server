@@ -1780,6 +1780,12 @@ pub enum Permission {
     // inbuxa: scheduled reports and the weekly digest
     SysScheduledReportGet = 688,
     SysScheduledReportUpdate = 689,
+    // inbuxa: checking the store's blobs
+    SysStoreCheck = 695,
+    // inbuxa: a snapshot of the store, without stopping the server
+    SysStoreSnapshot = 696,
+    // inbuxa: a change of blob store, copied and dismissed
+    SysBlobStoreChange = 697,
     SysAccountGet = 219,
     SysAccountCreate = 220,
     SysAccountUpdate = 221,

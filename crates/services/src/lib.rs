@@ -23,10 +23,13 @@ use crate::task_manager::{manager::spawn_task_manager, scheduler::spawn_task_sch
 
 pub mod broadcast;
 // inbuxa: AL-5, delegations end at their date
+pub mod inbuxa_blob_move; // inbuxa: changing the blob store
 pub mod inbuxa_deliverability; // inbuxa: the deliverability check
 pub mod inbuxa_lock_expiry;
 pub mod inbuxa_log_retention; // inbuxa: personal-data catalog, D1
 pub mod inbuxa_scheduled_reports; // inbuxa: scheduled reports and the weekly digest
+pub mod inbuxa_store_check; // inbuxa: checking the store's blobs
+pub mod inbuxa_store_snapshot; // inbuxa: a snapshot of the store
 pub mod state_manager;
 pub mod task_manager;
 
@@ -78,6 +81,16 @@ impl SpawnServices for IpcReceivers {
             // inbuxa: deliverability spec, DL-14: each node checks itself daily
             inbuxa_deliverability::spawn_deliverability(inner.clone());
 
+            // inbuxa: store-check spec, SV-8: a check this node ran stopped with it
+            inbuxa_store_check::spawn_store_checks(inner.clone());
+
+            // inbuxa: blob-store-change spec, BM-6, BM-10: a copy this node
+            // ran stopped with it; resolved changes stop being read through
+            inbuxa_blob_move::spawn_blob_moves(inner.clone());
+
+            // inbuxa: store-snapshot spec, SN-7: a snapshot cut short by a
+            // stop leaves a partial directory
+            inbuxa_store_snapshot::spawn_store_snapshots(inner.clone());
             // inbuxa: scheduled-reports spec, RP-16: every node looks for due reports
             inbuxa_scheduled_reports::spawn_scheduled_reports(inner.clone());
 

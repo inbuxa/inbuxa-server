@@ -20,6 +20,7 @@
 
 pub mod ai;
 pub mod audit;
+pub mod blob_move; // inbuxa: changing the blob store (not a rebuild)
 pub mod branding;
 pub mod deliverability; // inbuxa: the deliverability check (not a rebuild)
 pub mod hold;
@@ -30,5 +31,6 @@ pub mod masked_email;
 pub mod privacy;
 pub mod scheduled_reports; // inbuxa: scheduled reports and the weekly digest (not a rebuild)
 pub mod security;
+pub mod store_check; // inbuxa: checking the store's blobs (not a rebuild)
 pub mod tenancy;
 pub mod undelete;

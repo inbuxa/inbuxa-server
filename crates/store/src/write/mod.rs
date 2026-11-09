@@ -2,6 +2,8 @@
  * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
+ *
+ * Modified by Coffey Labs in 2026 for INBUXA.
  */
 
 use self::assert::AssertValue;
@@ -27,9 +29,12 @@ pub mod assert;
 pub mod batch;
 pub mod bitpack;
 pub mod blob;
+pub mod blob_check; // inbuxa: store-check spec
+pub mod blob_move; // inbuxa: blob-store-change spec
 pub mod key;
 pub mod log;
 pub mod serialize;
+pub mod snapshot; // inbuxa: store-snapshot spec
 
 pub(crate) const ARCHIVE_ALIGNMENT: usize = 16;
 

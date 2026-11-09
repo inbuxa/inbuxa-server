@@ -20,7 +20,7 @@
 [vocabulary]
 categories = ["identifier", "contact", "network", "content", "metadata", "credential"]
 whose = ["holder", "correspondent", "administrator"]
-where = ["data-store", "blob-store", "search-store", "in-memory-store", "memory", "log-file", "external"]
+where = ["data-store", "blob-store", "search-store", "in-memory-store", "memory", "log-file", "data-directory", "external"]
 scope = ["tenant", "server"]
 retention = ["unbounded", "object-life", "receiver"]
 
@@ -238,6 +238,38 @@ reason = ["content"]
 createdBy = ["identifier"]
 blobId = ["content", "identifier", "contact", "metadata"]
 
+[object."inbuxa:StoreCheck"]
+file = "inbuxa_store_check.rs"
+default = "none"
+whose = ["holder", "administrator"]
+where = ["data-store"]
+scope = "server"
+retention = "object-life"
+[object."inbuxa:StoreCheck".properties]
+createdBy = ["identifier"]
+problems = ["identifier", "metadata"]
+
+[object."inbuxa:BlobStoreChange"]
+file = "inbuxa_blob_store_change.rs"
+default = "none"
+whose = ["holder", "administrator"]
+where = ["data-store"]
+scope = "server"
+retention = "object-life"
+[object."inbuxa:BlobStoreChange".properties]
+copyStartedBy = ["identifier"]
+problems = ["identifier", "metadata"]
+
+[object."inbuxa:StoreSnapshot"]
+file = "inbuxa_store_snapshot.rs"
+default = "none"
+whose = ["administrator"]
+where = ["data-directory"]
+scope = "server"
+retention = "object-life"
+[object."inbuxa:StoreSnapshot".properties]
+createdBy = ["identifier"]
+
 [object."inbuxa:DeletedAccount"]
 file = "inbuxa_deleted_account.rs"
 default = "none"
@@ -350,6 +382,32 @@ scope = "tenant"
 retention = "receiver"
 leaves_host = false
 written_by = ["crates/services/src/inbuxa_scheduled_reports.rs"]
+
+# A store snapshot: a copy of the whole data store, and of a filesystem
+# blob store's files, under snapshots/ in the RocksDB directory. The latest
+# two are kept; a backup tool takes them off the host if the administrator
+# has one do so (store-snapshot spec, SN-3, SN-6).
+[source."store-snapshots"]
+categories = ["content", "identifier", "contact", "network", "metadata", "credential"]
+whose = ["holder", "correspondent", "administrator"]
+where = ["data-directory"]
+scope = "server"
+retention = "object-life"
+leaves_host = false
+written_by = ["crates/services/src/inbuxa_store_snapshot.rs"]
+
+# A change of blob store keeps the old store's settings, credentials
+# included, until it's resolved or dismissed, so the old store can be read
+# and copied from. Never returned by get (blob-store-change spec, BM-2,
+# BM-7, BM-9).
+[source."blob-store-change-settings"]
+categories = ["credential", "network"]
+whose = ["administrator"]
+where = ["data-store"]
+scope = "server"
+retention = "object-life"
+leaves_host = false
+written_by = ["crates/features/src/blob_move/mod.rs"]
 
 [source."full-text-index"]
 categories = ["content", "identifier", "contact", "metadata"]

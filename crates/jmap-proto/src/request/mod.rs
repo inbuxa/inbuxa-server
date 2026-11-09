@@ -127,6 +127,9 @@ pub enum GetRequestMethod {
     AccountLock(Box<GetRequest<crate::object::inbuxa_account_lock::AccountLock>>),
     LegalHold(Box<GetRequest<crate::object::inbuxa_legal_hold::LegalHold>>),
     MailRule(Box<GetRequest<crate::object::inbuxa_mail_rule::MailRule>>),
+    StoreCheck(Box<GetRequest<crate::object::inbuxa_store_check::StoreCheck>>),
+    StoreSnapshot(Box<GetRequest<crate::object::inbuxa_store_snapshot::StoreSnapshot>>),
+    BlobStoreChange(Box<GetRequest<crate::object::inbuxa_blob_store_change::BlobStoreChange>>),
     SecurityAcceptance(
         Box<GetRequest<crate::object::inbuxa_security_acceptance::SecurityAcceptance>>,
     ),
@@ -183,6 +186,9 @@ pub enum SetRequestMethod<'x> {
     AccountLock(Box<SetRequest<'x, crate::object::inbuxa_account_lock::AccountLock>>),
     LegalHold(Box<SetRequest<'x, crate::object::inbuxa_legal_hold::LegalHold>>),
     MailRule(Box<SetRequest<'x, crate::object::inbuxa_mail_rule::MailRule>>),
+    StoreCheck(Box<SetRequest<'x, crate::object::inbuxa_store_check::StoreCheck>>),
+    StoreSnapshot(Box<SetRequest<'x, crate::object::inbuxa_store_snapshot::StoreSnapshot>>),
+    BlobStoreChange(Box<SetRequest<'x, crate::object::inbuxa_blob_store_change::BlobStoreChange>>),
     SecurityAcceptance(
         Box<SetRequest<'x, crate::object::inbuxa_security_acceptance::SecurityAcceptance>>,
     ),
