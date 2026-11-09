@@ -43,6 +43,7 @@ pub async fn test(test: &TestServer) {
     .await;
     automatic_to_manual_dns_test(test).await;
     orphaned_keys_test(test).await;
+    domain_tasks_follow_settings_test(test).await;
 
     println!("Running DKIM Management tests...");
     let account = test.account("admin@example.org");
@@ -714,6 +715,87 @@ async fn automatic_to_manual_dns_test(test: &TestServer) {
         .registry_destroy(ObjectType::Domain, [domain_id])
         .await
         .assert_destroyed(&[domain_id]);
+    account.registry_destroy_all(ObjectType::DnsServer).await;
+}
+
+/// #327: a domain's DKIM task goes when DKIM is set to manual, isn't doubled
+/// when it's set back to automatic, and goes with the domain.
+async fn domain_tasks_follow_settings_test(test: &TestServer) {
+    println!("Running DKIM task lifecycle tests...");
+    let account = test.account("admin@example.org");
+    DNS_RECORDS.lock().unwrap().clear();
+    account.dkim_signatures().await.assert_total(0, 0);
+    let dns_server_id = account.create_memory_dns_server().await;
+
+    let domain_id = account
+        .registry_create_object(Domain {
+            name: "dkim-tasks.org".to_string(),
+            certificate_management: CertificateManagement::Manual,
+            dkim_management: dkim_management(LONG_ROTATION_MS),
+            dns_management: dns_management(dns_server_id),
+            ..Default::default()
+        })
+        .await;
+    account
+        .wait_for_dkim_stages(&[(DkimRotationStage::Active, 2)])
+        .await;
+    account.wait_for_dkim_task_count(domain_id, 1).await;
+
+    // Manual: the queued rotation goes now, not when it's due
+    account
+        .registry_update_object(
+            ObjectType::Domain,
+            domain_id,
+            json!({ Property::DkimManagement: DkimManagement::Manual }),
+        )
+        .await;
+    account.wait_for_dkim_task_count(domain_id, 0).await;
+
+    // Automatic again: one task, not a second beside a leftover
+    account
+        .registry_update_object(
+            ObjectType::Domain,
+            domain_id,
+            json!({ Property::DkimManagement: dkim_management(LONG_ROTATION_MS) }),
+        )
+        .await;
+    account.wait_for_dkim_task_count(domain_id, 1).await;
+    tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+    account.wait_for_dkim_task_count(domain_id, 1).await;
+
+    // Saving it again, changed, still leaves one
+    account
+        .registry_update_object(
+            ObjectType::Domain,
+            domain_id,
+            json!({ Property::DkimManagement: dkim_management(LONG_ROTATION_MS + 1000) }),
+        )
+        .await;
+    tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+    account.wait_for_dkim_task_count(domain_id, 1).await;
+
+    // Deleted: its tasks go with it
+    account
+        .registry_destroy(ObjectType::Domain, [domain_id])
+        .await
+        .assert_destroyed(&[domain_id]);
+    account.wait_for_dkim_task_count(domain_id, 0).await;
+    assert!(
+        account
+            .tasks()
+            .await
+            .is_none_or(|tasks| !tasks.iter().any(|task| matches!(
+                &task.task,
+                Task::DnsManagement(task) if task.domain_id == domain_id
+            ))),
+        "a deleted domain's DNS tasks stay queued"
+    );
+
+    // Cleanup
+    account.registry_destroy_all(ObjectType::Task).await;
+    account
+        .registry_destroy_all(ObjectType::DkimSignature)
+        .await;
     account.registry_destroy_all(ObjectType::DnsServer).await;
 }
 

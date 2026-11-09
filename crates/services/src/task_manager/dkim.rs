@@ -60,13 +60,13 @@ impl DkimManagementTask for Server {
 }
 
 async fn dkim_management(server: &Server, task: &TaskDomainManagement) -> trc::Result<TaskResult> {
+    // inbuxa: a domain that's gone, or no longer rotates its own keys, has
+    // nothing for this task to do: it goes quietly instead of failing (#327)
     let Some(domain) = server.registry().object::<Domain>(task.domain_id).await? else {
-        return Ok(TaskResult::permanent("Domain not found".to_string()));
+        return Ok(TaskResult::Ignored);
     };
     let DkimManagement::Automatic(dkim) = domain.dkim_management else {
-        return Ok(TaskResult::permanent(
-            "Domain is not set to automatic DKIM management".to_string(),
-        ));
+        return Ok(TaskResult::Ignored);
     };
     let configured = dkim.algorithms.into_inner();
     if configured.is_empty() {

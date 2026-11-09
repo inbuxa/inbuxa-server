@@ -13,7 +13,9 @@ use common::network::{dkim::generate_dkim_selector, dns::update::DnsUpdater};
 use jmap_proto::error::set::{SetError, SetErrorType};
 use registry::{
     schema::{
-        enums::{AcmeChallengeType, DkimSignatureType, DnsRecordType, TenantStorageQuota},
+        enums::{
+            AcmeChallengeType, DkimSignatureType, DnsRecordType, TaskType, TenantStorageQuota,
+        },
         prelude::{ObjectType, Property},
         structs::{
             AcmeProvider, CertificateManagement, DkimManagement, DkimManagementProperties,
@@ -209,6 +211,46 @@ pub(crate) async fn validate_domain(
     }
 
     Ok(Ok(response))
+}
+
+/// inbuxa: the queued tasks a saved domain should lose (#327): those for
+/// something it stopped managing itself, and its DKIM task when the save
+/// queues a new one, which would otherwise run alongside it for good.
+pub(crate) fn domain_tasks_to_clear(
+    domain: &Domain,
+    old_domain: &Domain,
+    tasks: &[Task],
+) -> Vec<TaskType> {
+    let mut types = Vec::new();
+    let stopped = |was: bool, is: bool| was && !is;
+    if stopped(
+        matches!(old_domain.dkim_management, DkimManagement::Automatic(_)),
+        matches!(domain.dkim_management, DkimManagement::Automatic(_)),
+    ) || tasks
+        .iter()
+        .any(|task| matches!(task, Task::DkimManagement(_)))
+    {
+        types.push(TaskType::DkimManagement);
+    }
+    if stopped(
+        matches!(old_domain.dns_management, DnsManagement::Automatic(_)),
+        matches!(domain.dns_management, DnsManagement::Automatic(_)),
+    ) {
+        types.push(TaskType::DnsManagement);
+    }
+    if stopped(
+        matches!(
+            old_domain.certificate_management,
+            CertificateManagement::Automatic(_)
+        ),
+        matches!(
+            domain.certificate_management,
+            CertificateManagement::Automatic(_)
+        ),
+    ) {
+        types.push(TaskType::AcmeRenewal);
+    }
+    types
 }
 
 /// inbuxa: whether a save changed what the domain's certificate is ordered

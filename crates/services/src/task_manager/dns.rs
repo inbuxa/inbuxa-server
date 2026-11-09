@@ -110,13 +110,13 @@ async fn dns_management(server: &Server, task: &TaskDnsManagement) -> trc::Resul
             "No DNS records to update".to_string(),
         ));
     }
+    // inbuxa: a domain that's gone, or no longer publishes its own records,
+    // has nothing for this task to do: it goes quietly instead of failing (#327)
     let Some(domain) = server.registry().object::<Domain>(task.domain_id).await? else {
-        return Ok(TaskResult::permanent("Domain not found".to_string()));
+        return Ok(TaskResult::Ignored);
     };
     let DnsManagement::Automatic(props) = &domain.dns_management else {
-        return Ok(TaskResult::permanent(
-            "Domain is not set to automatic DNS management".to_string(),
-        ));
+        return Ok(TaskResult::Ignored);
     };
     let dns_updater = match server.build_dns_updater(props.dns_server_id).await? {
         Ok(updater) => updater,
