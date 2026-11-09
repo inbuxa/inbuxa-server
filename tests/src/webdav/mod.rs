@@ -30,6 +30,7 @@ pub mod acl;
 pub mod basic;
 pub mod cal_alarm;
 pub mod cal_itip;
+pub mod cal_privacy; // inbuxa: sharees read events as JMAP shows them
 pub mod cal_query;
 pub mod cal_scheduling;
 pub mod card_query;
@@ -195,6 +196,7 @@ pub async fn webdav_tests() {
     lock::test(&test).await;
     principals::test(&test, assisted_discovery).await;
     acl::test(&test).await;
+    cal_privacy::test(&test).await;
     card_query::test(&test).await;
     cal_query::test(&test).await;
     cal_alarm::test(&test).await;

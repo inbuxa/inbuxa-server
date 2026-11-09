@@ -543,18 +543,73 @@ pub async fn test(test: &mut TestServer) {
     assert_eq!(access_introspect.token_type.unwrap(), "bearer");
     assert!(access_introspect.client_id.is_none());
     assert!(access_introspect.active);
+    // inbuxa: only an access token is active (RFC 7662); a refresh token
+    // can't be presented as a bearer token
     let refresh_introspect = post_with_auth::<OAuthIntrospect>(
         &metadata.introspection_endpoint,
         token.as_str().into(),
         &AHashMap::from_iter([("token".to_string(), refresh_token.unwrap())]),
     )
     .await;
-    assert_eq!(refresh_introspect.username.unwrap(), "user@example.org");
-    assert!(refresh_introspect.client_id.is_none());
-    assert!(refresh_introspect.active);
+    assert_eq!(refresh_introspect, OAuthIntrospect::default());
+
+    // inbuxa: introspection names the token's owner, not whoever asks
+    let other = test
+        .create_user_account(
+            "admin@example.org",
+            "other@example.org",
+            "another very strong password",
+            &[],
+            "other@example.org",
+        )
+        .await;
+    let other_code = http
+        .post::<LoginResponse>(
+            "/api/auth",
+            &LoginRequest::AuthCode {
+                account_name: "other@example.org".to_string(),
+                account_secret: "another very strong password".to_string(),
+                mfa_token: None,
+                client_id: client_id.to_string(),
+                redirect_uri: "com.example.app:/cb".to_string().into(),
+                nonce: None,
+                scope: Some(PROFILE_SCOPE.to_string()),
+                code_challenge: Some(PKCE_CHALLENGE.to_string()),
+                code_challenge_method: Some("S256".to_string()),
+                state: None,
+                resource: vec![],
+            },
+        )
+        .await
+        .unwrap()
+        .unwrap_code();
+    let (other_token, _, _) = unwrap_token_response(
+        post(
+            &metadata.token_endpoint,
+            &AHashMap::from_iter([
+                ("client_id".to_string(), client_id.to_string()),
+                (
+                    "redirect_uri".to_string(),
+                    "com.example.app:/cb".to_string(),
+                ),
+                ("grant_type".to_string(), "authorization_code".to_string()),
+                ("code".to_string(), other_code),
+                ("code_verifier".to_string(), PKCE_VERIFIER.to_string()),
+            ]),
+        )
+        .await,
+    );
+    let owner_introspect = post_with_auth::<OAuthIntrospect>(
+        &metadata.introspection_endpoint,
+        other_token.as_str().into(),
+        &AHashMap::from_iter([("token".to_string(), token.to_string())]),
+    )
+    .await;
+    assert!(owner_introspect.active);
     assert_eq!(
-        refresh_introspect.iat.unwrap(),
-        access_introspect.iat.unwrap()
+        owner_introspect.username.as_deref(),
+        Some("user@example.org"),
+        "introspection named the caller instead of the token's owner"
     );
 
     // Try SMTP OAUTHBEARER auth
@@ -1006,6 +1061,7 @@ pub async fn test(test: &mut TestServer) {
     // Clean up
     admin.registry_destroy_all(ObjectType::OAuthClient).await;
     admin.destroy_account(user).await;
+    admin.destroy_account(other).await;
     test.cleanup().await;
 }
 

@@ -97,6 +97,10 @@ impl<T: SessionStream> Session<T> {
                                         Limit = self.params.max_message_size,
                                     );
 
+                                    // inbuxa: a refused chunk ends the transaction, so
+                                    // chunks pipelined after it can't queue the message
+                                    // with this part missing
+                                    self.reset();
                                     State::SkipData(
                                         DummyDataReceiver::new_bdat(chunk_size),
                                         b"552 5.3.4 Message too big for system.\r\n",

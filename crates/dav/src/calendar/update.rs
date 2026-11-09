@@ -9,7 +9,7 @@
 use super::assert_is_unique_uid;
 use crate::{
     DavError, DavErrorCondition, DavMethod,
-    calendar::ItipPrecondition,
+    calendar::{ItipPrecondition, privacy::ShareeView},
     common::{
         ETag, ExtractETag,
         lock::{LockRequestHandler, ResourceState},
@@ -31,8 +31,10 @@ use dav_proto::{
 use groupware::{
     cache::GroupwareCache,
     calendar::{
-        CalendarEvent, CalendarEventData, dates::has_oversized_rrule, itip::ItipSendStatus,
-        privacy::itip_messages_for,
+        CalendarEvent, CalendarEventData,
+        dates::has_oversized_rrule,
+        itip::ItipSendStatus,
+        privacy::{archived_event_view, itip_messages_for},
     },
     scheduling::{
         ItipMessages, event_create::itip_create, event_update::itip_update,
@@ -153,6 +155,20 @@ impl CalendarUpdateRequestHandler for Server {
             let event = event_
                 .to_unarchived::<CalendarEvent>()
                 .caused_by(trc::location!())?;
+
+            // inbuxa: a reader who isn't the calendar's owner and doesn't see all
+            // of the event (see `ShareeView`) can't replace it, as what it
+            // sends back would wipe the rest
+            if !access_token.reads_as_owner(account_id)
+                && ShareeView::new(archived_event_view(event.inner), || {
+                    resources
+                        .shared_items(access_token, [Acl::ModifyItems], true)
+                        .contains(document_id)
+                })
+                .is_some()
+            {
+                return Err(DavError::Code(StatusCode::FORBIDDEN));
+            }
 
             // Validate headers
             match self

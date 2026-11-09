@@ -368,6 +368,32 @@ mod tests {
     }
 
     #[test]
+    fn serialize_list_item_with_line_breaks() {
+        // A stored name with CR/LF is sent as a literal, never as raw lines
+        let item = ListItem {
+            mailbox_name: "x\r\n* 1 EXPUNGE".into(),
+            attributes: vec![],
+            tags: vec![],
+        };
+        for (is_rev2, is_utf8, expected) in [
+            (
+                true,
+                true,
+                concat!(
+                    "* LIST () \"/\" {14}\r\nx\r\n* 1 EXPUNGE ",
+                    "(\"OLDNAME\" (\"x&AA0ACg-* 1 EXPUNGE\"))\r\n"
+                ),
+            ),
+            (false, true, "* LIST () \"/\" {14}\r\nx\r\n* 1 EXPUNGE\r\n"),
+            (false, false, "* LIST () \"/\" \"x&AA0ACg-* 1 EXPUNGE\"\r\n"),
+        ] {
+            let mut buf = Vec::new();
+            item.serialize(&mut buf, is_rev2, is_utf8, false);
+            assert_eq!(String::from_utf8(buf).unwrap(), expected);
+        }
+    }
+
+    #[test]
     fn serialize_list_objectid() {
         let mut buf = Vec::new();
         ListItem {

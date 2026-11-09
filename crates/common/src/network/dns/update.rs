@@ -1202,13 +1202,27 @@ impl DnsUpdater {
         records: Vec<DnsRecord>,
     ) -> Result<(), String> {
         check_zone(origin, name)?;
+        self.replace_rrset(origin, name, record_type, records)
+            .await
+            .map_err(|err| format!("Failed to set DNS RRSet: {}", err))
+    }
+
+    /// inbuxa: `set_rrset` with the provider's error as it came, so a caller
+    /// can tell a failure that may pass from one that won't.
+    pub async fn replace_rrset(
+        &self,
+        origin: &str,
+        name: &str,
+        record_type: DnsRecordType,
+        records: Vec<DnsRecord>,
+    ) -> dns_update::Result<()> {
+        check_zone(origin, name).map_err(dns_update::Error::Client)?;
         let record_values = records
             .iter()
             .map(|r| trc::Value::String(r.to_string().into()))
             .collect::<Vec<_>>();
 
-        if let Err(err) = self
-            .updater
+        self.updater
             .set_rrset(
                 name,
                 record_type,
@@ -1216,10 +1230,7 @@ impl DnsUpdater {
                 records,
                 origin,
             )
-            .await
-        {
-            return Err(format!("Failed to set DNS RRSet: {}", err));
-        }
+            .await?;
 
         trc::event!(
             Dns(DnsEvent::RecordCreated),

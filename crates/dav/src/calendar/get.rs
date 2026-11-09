@@ -2,10 +2,13 @@
  * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
+ *
+ * Modified by Coffey Labs in 2026 for INBUXA.
  */
 
 use crate::{
     DavError, DavMethod,
+    calendar::privacy::ShareeView,
     common::{
         ETag,
         lock::{LockRequestHandler, ResourceState},
@@ -14,7 +17,10 @@ use crate::{
 };
 use common::{Server, auth::AccessToken};
 use dav_proto::{RequestHeaders, schema::property::Rfc1123DateTime};
-use groupware::{cache::GroupwareCache, calendar::CalendarEvent};
+use groupware::{
+    cache::GroupwareCache,
+    calendar::{CalendarEvent, privacy::archived_event_view},
+};
 use http_proto::HttpResponse;
 use hyper::StatusCode;
 use store::{
@@ -119,7 +125,39 @@ impl CalendarGetRequestHandler for Server {
             .with_schedule_tag_opt(schedule_tag)
             .with_last_modified(Rfc1123DateTime::new(i64::from(event.modified)).to_string());
 
-        let ical = event.data.event.to_string();
+        // inbuxa: a reader who isn't the calendar's owner gets the event as
+        // JMAP shows it
+        let view = if !access_token.reads_as_owner(account_id) {
+            ShareeView::new(archived_event_view(event), || {
+                resources
+                    .shared_items(access_token, [Acl::ModifyItems], true)
+                    .contains(resource.document_id())
+            })
+        } else {
+            None
+        };
+        let ical = if let Some(view) = view {
+            let mut event = event_
+                .deserialize::<CalendarEvent>()
+                .caused_by(trc::location!())?;
+            let reader = if view.hide_attendees {
+                Some(
+                    self.account_info(access_token.account_id())
+                        .await
+                        .caused_by(trc::location!())?,
+                )
+            } else {
+                None
+            };
+            view.apply(
+                &mut event,
+                reader.as_ref().map(|r| r.addresses()).unwrap_or_default(),
+                self.core.groupware.max_ical_instances,
+            );
+            event.data.event.to_string()
+        } else {
+            event.data.event.to_string()
+        };
 
         if !is_head {
             Ok(response.with_binary_body(ical))

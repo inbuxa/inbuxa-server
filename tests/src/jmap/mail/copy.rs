@@ -2,6 +2,8 @@
  * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
+ *
+ * Modified by Coffey Labs in 2026 for INBUXA.
  */
 
 use crate::utils::server::TestServer;
@@ -93,6 +95,60 @@ pub async fn test(test: &TestServer) {
             .await
             .unwrap()
             .is_none()
+    );
+
+    // inbuxa: a copy that fails leaves its original in place, even with
+    // onSuccessDestroyOriginal
+    let duplicate = concat!(
+        "From: bill@example.com\r\n",
+        "To: jdoe@example.com\r\n",
+        "Message-ID: <copy-dupe@example.com>\r\n",
+        "Subject: Already there\r\n",
+        "\r\n",
+        "This one is in both accounts."
+    )
+    .as_bytes()
+    .to_vec();
+    client
+        .set_default_account_id(Id::new(2).to_string())
+        .email_import(
+            duplicate.clone(),
+            [&ac2_mailbox_id],
+            None::<Vec<&str>>,
+            None,
+        )
+        .await
+        .unwrap();
+    let ac1_dupe_id = client
+        .set_default_account_id(Id::new(1).to_string())
+        .email_import(duplicate, [&ac1_mailbox_id], None::<Vec<&str>>, None)
+        .await
+        .unwrap()
+        .take_id();
+    let mut request = client.build();
+    request
+        .copy_email(Id::new(1).to_string())
+        .account_id(Id::new(2).to_string())
+        .on_success_destroy_original(true)
+        .create(&ac1_dupe_id)
+        .mailbox_id(&ac2_mailbox_id, true);
+    let mut response = request.send().await.unwrap();
+    let mut copy = response
+        .method_response_by_pos(0)
+        .unwrap_copy_email()
+        .unwrap();
+    assert!(
+        copy.created(&ac1_dupe_id).is_err(),
+        "the duplicate should not have been copied"
+    );
+    assert!(
+        client
+            .set_default_account_id(Id::new(1).to_string())
+            .email_get(&ac1_dupe_id, None::<Vec<_>>)
+            .await
+            .unwrap()
+            .is_some(),
+        "a failed copy destroyed its original"
     );
 
     // Empty store

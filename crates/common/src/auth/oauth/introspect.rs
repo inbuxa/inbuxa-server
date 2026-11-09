@@ -2,11 +2,13 @@
  * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
+ *
+ * Modified by Coffey Labs in 2026 for INBUXA.
  */
 
-use crate::{Server, auth::AccessToken};
+use crate::{Server, auth::oauth::GrantType};
 use serde::{Deserialize, Serialize};
-use trc::{AddContext, AuthEvent, EventType};
+use trc::{AuthEvent, EventType};
 
 #[derive(Debug, Default, Clone, Eq, PartialEq, Deserialize, Serialize)]
 pub struct OAuthIntrospect {
@@ -47,26 +49,29 @@ pub struct OAuthIntrospect {
 }
 
 impl Server {
-    pub async fn introspect_access_token(
-        &self,
-        token: &str,
-        access_token: &AccessToken,
-    ) -> trc::Result<OAuthIntrospect> {
-        match self.validate_access_token(None, token).await {
-            Ok(token_info) => Ok(OAuthIntrospect {
-                active: true,
-                username: self
-                    .account(access_token.account_id())
-                    .await
-                    .caused_by(trc::location!())?
-                    .name()
-                    .to_string()
-                    .into(),
-                token_type: Some("bearer".into()),
-                exp: Some(token_info.expiry as i64),
-                iat: Some(token_info.issued_at as i64),
-                ..Default::default()
-            }),
+    pub async fn introspect_access_token(&self, token: &str) -> trc::Result<OAuthIntrospect> {
+        // inbuxa: only an access token is active; refresh, RSVP and live
+        // tokens can't be presented as a bearer token
+        match self
+            .validate_access_token(Some(GrantType::AccessToken), token)
+            .await
+        {
+            // inbuxa: the token is described by its owner, not by whoever
+            // asks; a token whose account is gone is inactive
+            Ok(token_info) => match self.account(token_info.account_id).await {
+                Ok(owner) => Ok(OAuthIntrospect {
+                    active: true,
+                    username: owner.name().to_string().into(),
+                    token_type: Some("bearer".into()),
+                    exp: Some(token_info.expiry as i64),
+                    iat: Some(token_info.issued_at as i64),
+                    ..Default::default()
+                }),
+                Err(err) if err.matches(EventType::Auth(AuthEvent::Error)) => {
+                    Ok(OAuthIntrospect::default())
+                }
+                Err(err) => Err(err.caused_by(trc::location!())),
+            },
             Err(err)
                 if matches!(
                     err.event_type(),

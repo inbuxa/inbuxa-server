@@ -244,6 +244,12 @@ impl JmapEmailCopy for Server {
             {
                 Ok(email) => {
                     last_change_id = Some(email.change_id);
+
+                    // inbuxa: only an original that was copied is destroyed
+                    if on_success_delete {
+                        destroy_ids.push(MaybeInvalid::Value(from_message_id));
+                    }
+
                     if train_spam {
                         self.add_account_spam_sample(
                             &mut train_batch,
@@ -274,11 +280,6 @@ impl JmapEmailCopy for Server {
                         },
                     );
                 }
-            }
-
-            // Add to destroy list
-            if on_success_delete {
-                destroy_ids.push(MaybeInvalid::Value(from_message_id));
             }
         }
 

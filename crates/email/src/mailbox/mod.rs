@@ -2,6 +2,8 @@
  * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
+ *
+ * Modified by Coffey Labs in 2026 for INBUXA.
  */
 
 use types::{acl::AclGrant, special_use::SpecialUse};
@@ -16,6 +18,12 @@ pub const JUNK_ID: u32 = 2;
 pub const DRAFTS_ID: u32 = 3;
 pub const SENT_ID: u32 = 4;
 pub const ARCHIVE_ID: u32 = 5;
+
+/// Mailbox names never hold control characters: IMAP sends names as
+/// quoted strings, where CR or LF would end the response line.
+pub fn mailbox_name_has_control_chars(name: &str) -> bool {
+    name.chars().any(char::is_control)
+}
 
 #[derive(rkyv::Archive, rkyv::Deserialize, rkyv::Serialize, Debug, Clone, PartialEq, Eq)]
 #[rkyv(derive(Debug))]
