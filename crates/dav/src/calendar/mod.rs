@@ -11,6 +11,7 @@ pub mod delete;
 pub mod freebusy;
 pub mod get;
 pub mod mkcol;
+pub mod privacy; // inbuxa: what sharees see of events
 pub mod proppatch;
 pub mod query;
 pub mod scheduling;

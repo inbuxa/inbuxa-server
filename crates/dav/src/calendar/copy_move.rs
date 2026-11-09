@@ -6,7 +6,7 @@
  * Modified by Coffey Labs in 2026 for INBUXA.
  */
 
-use super::assert_is_unique_uid;
+use super::{assert_is_unique_uid, privacy::check_copy_out};
 use crate::{
     DavError, DavMethod,
     common::{
@@ -545,6 +545,15 @@ async fn copy_event(
         let mut new_event = event
             .deserialize::<CalendarEvent>()
             .caused_by(trc::location!())?;
+        // inbuxa: a sharee takes out only what it may
+        check_copy_out(
+            server,
+            access_token,
+            from_account_id,
+            from_document_id,
+            &mut new_event,
+        )
+        .await?;
         new_event.names = vec![DavName {
             name: new_name.to_string(),
             parent_id: to_calendar_id,
@@ -714,6 +723,15 @@ async fn move_event(
         let mut new_event = event
             .deserialize::<CalendarEvent>()
             .caused_by(trc::location!())?;
+        // inbuxa: a sharee takes out only what it may
+        check_copy_out(
+            server,
+            access_token,
+            from_account_id,
+            from_document_id,
+            &mut new_event,
+        )
+        .await?;
         new_event.names = vec![DavName {
             name: new_name.to_string(),
             parent_id: to_calendar_id,
@@ -1036,6 +1054,15 @@ async fn copy_container(
                     )
                     .caused_by(trc::location!())?;
             } else {
+                // inbuxa: a sharee takes out only what it may
+                check_copy_out(
+                    server,
+                    access_token,
+                    from_account_id,
+                    from_child_document_id,
+                    &mut new_event,
+                )
+                .await?;
                 let next_email_alarm = event.inner.data.next_alarm(now() as i64, Tz::Floating);
                 if remove_source {
                     DestroyArchive(event)
