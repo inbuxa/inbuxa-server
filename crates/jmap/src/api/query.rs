@@ -2,6 +2,8 @@
  * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
+ *
+ * Modified by Coffey Labs in 2026 for INBUXA.
  */
 
 use jmap_proto::{
@@ -20,6 +22,8 @@ pub struct QueryResponseBuilder {
     pub has_anchor: bool,
     pub anchor_found: bool,
     index: i32,
+    // inbuxa: the request asked for no ids (`limit: 0`)
+    zero_limit: bool,
 
     pub response: QueryResponse,
 }
@@ -51,6 +55,7 @@ impl QueryResponseBuilder {
             anchor_offset: request.anchor_offset.unwrap_or(0),
             anchor_found: false,
             index: 0,
+            zero_limit: request.limit == Some(0),
             response: QueryResponse {
                 account_id: request.account_id,
                 query_state,
@@ -78,6 +83,19 @@ impl QueryResponseBuilder {
 
     pub fn add_id(&mut self, id: Id) -> bool {
         let id_u64 = id.id();
+
+        // inbuxa: a limit of 0 returns no ids. Internally a limit of 0 means
+        // "no limit", so it is handled here: only the anchor is still looked
+        // for, to report its position or that it wasn't found.
+        if self.zero_limit {
+            if self.has_anchor && id_u64 == self.anchor {
+                self.anchor_found = true;
+                self.position = (self.index + self.anchor_offset).max(0);
+                return false;
+            }
+            self.index += 1;
+            return self.has_anchor;
+        }
 
         // Pagination
         if !self.has_anchor {
@@ -148,6 +166,11 @@ impl QueryResponseBuilder {
             return Ok(self.response);
         }
 
+        if self.zero_limit {
+            self.response.position = self.requested_position.max(0);
+            return Ok(self.response);
+        }
+
         if self.requested_position >= 0 {
             self.response.position = if self.position == 0 {
                 self.requested_position
@@ -172,5 +195,64 @@ impl QueryResponseBuilder {
         }
 
         Ok(self.response)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use jmap_proto::object::sieve::Sieve;
+
+    fn request(
+        limit: Option<usize>,
+        position: Option<i32>,
+        anchor: Option<u64>,
+    ) -> QueryRequest<Sieve> {
+        QueryRequest {
+            account_id: Id::new(1),
+            filter: vec![],
+            sort: None,
+            position,
+            anchor: anchor.map(Id::new),
+            anchor_offset: None,
+            limit,
+            calculate_total: Some(true),
+            arguments: (),
+        }
+    }
+
+    fn run(request: &QueryRequest<Sieve>) -> trc::Result<QueryResponse> {
+        let mut builder = QueryResponseBuilder::new(10, 100, State::Initial, request);
+        for id in 0..10 {
+            if !builder.add_id(Id::new(id)) {
+                break;
+            }
+        }
+        builder.build()
+    }
+
+    #[test]
+    fn limit_zero_returns_no_ids() {
+        for (position, anchor) in [
+            (None, None),
+            (Some(3), None),
+            (Some(-3), None),
+            (None, Some(4)),
+        ] {
+            let response = run(&request(Some(0), position, anchor)).unwrap();
+            assert_eq!(
+                response.ids,
+                Vec::<Id>::new(),
+                "limit 0 with position {position:?}, anchor {anchor:?}"
+            );
+            assert_eq!(response.total, Some(10));
+        }
+
+        // An anchor that isn't there is still an error
+        assert!(run(&request(Some(0), None, Some(42))).is_err());
+
+        // Without a limit, and with one, ids still come back
+        assert_eq!(run(&request(None, None, None)).unwrap().ids.len(), 10);
+        assert_eq!(run(&request(Some(4), None, None)).unwrap().ids.len(), 4);
     }
 }
