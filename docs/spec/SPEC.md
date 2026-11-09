@@ -390,6 +390,8 @@ Not a rebuild: the **store check** is INBUXA's own design (`features/store-check
 
 Not a rebuild: the **store snapshot** is INBUXA's own design (`features/store-snapshot.md`, inbuxa-server #323, building). An administrator has the server take a consistent copy of its RocksDB store, and of a filesystem blob store's files, into `snapshots/` in the store's directory while mail flows, for a backup tool to copy; the latest two are kept: `inbuxa:StoreSnapshot` (`crates/jmap/src/inbuxa/store_snapshot.rs`, `crates/services/src/inbuxa_store_snapshot.rs`, `crates/store/src/write/snapshot.rs`, `crates/store/src/backend/rocksdb/checkpoint.rs`), and the `sysStoreSnapshot` permission.
 
+Not a rebuild: **the store layout, changed in steps** is INBUXA's own design (`features/store-layout.md`, approved 2026-11-08). A store carries its layout version (`Vs` in `_`); at boot one node, holding a lease, runs each step from the stored version up and marks the store after each. Step 1 → 2 gives SQL rate-limit counters their own expiry column; step 2 → 3 moves the audit log, journal, holds and undelete notes into subspaces of their own. A step stops rollback, so it ships at a series.
+
 Not a rebuild: **inbuxa-relay** is INBUXA's own design (`features/relay.md`, settled 2026-10-29, in progress). It's a small edge appliance that takes mail in on port 25 for one downstream server or cluster, and sends that downstream's outgoing mail on. The downstream dials out to it over JMAP (`urn:inbuxa:jmap:relay`), so the protected network exposes no mail port, and it is administered only from the downstream's inbuxa-admin.
 
 ## 5. The web front ends
