@@ -2,6 +2,8 @@
  * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
+ *
+ * Modified by Coffey Labs in 2026 for INBUXA.
  */
 
 use crate::{
@@ -111,7 +113,12 @@ where
         let len = u32::unpickle(stream)? as usize;
         let mut vec = Vec::with_capacity(len);
         for _ in 0..len {
-            vec.push(T::unpickle(stream)?);
+            // inbuxa: a value this build doesn't know (a permission or event
+            // added by a newer version) is left out instead of failing the
+            // whole object, so a rollback still loads its roles
+            if let Some(item) = T::unpickle_item(stream)? {
+                vec.push(item);
+            }
         }
         Some(Self(vec))
     }
@@ -430,6 +437,46 @@ mod tests {
         let pointer = JsonPointerPatch::new(&ptr);
         map.patch(pointer, Value::Bool(true)).expect("patch failed");
         map
+    }
+
+    /// A permission list stored by a newer version: the unknown id is left
+    /// out and the fields after it still read (rollback to an older build).
+    #[test]
+    fn unpickle_skips_unknown_enum_ids() {
+        use crate::{pickle::PickledStream, schema::enums::Permission};
+        use utils::map::vec_map::VecMap;
+
+        let unknown = u16::MAX - 1;
+        assert!(Permission::from_id(unknown).is_none());
+        let mut out = vec![0u8];
+        3u32.pickle(&mut out);
+        Permission::Authenticate.pickle(&mut out);
+        unknown.pickle(&mut out);
+        Permission::SysScheduledReportUpdate.pickle(&mut out);
+        2u32.pickle(&mut out);
+        unknown.pickle(&mut out);
+        7u64.pickle(&mut out);
+        Permission::AuthenticateWithAlias.pickle(&mut out);
+        9u64.pickle(&mut out);
+        "after".to_string().pickle(&mut out);
+
+        let mut stream = PickledStream::new(&out).unwrap();
+        let map = Map::<Permission>::unpickle(&mut stream).unwrap();
+        assert_eq!(
+            map.0,
+            vec![
+                Permission::Authenticate,
+                Permission::SysScheduledReportUpdate
+            ]
+        );
+        let vec_map = VecMap::<Permission, u64>::unpickle(&mut stream).unwrap();
+        assert_eq!(vec_map.len(), 1);
+        assert_eq!(vec_map.get(&Permission::AuthenticateWithAlias), Some(&9));
+        assert_eq!(String::unpickle(&mut stream).as_deref(), Some("after"));
+
+        // A list cut short is still refused
+        let mut stream = PickledStream::new(&out[..4]).unwrap();
+        assert!(Map::<Permission>::unpickle(&mut stream).is_none());
     }
 
     #[test]

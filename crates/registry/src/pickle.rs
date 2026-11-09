@@ -2,6 +2,8 @@
  * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
+ *
+ * Modified by Coffey Labs in 2026 for INBUXA.
  */
 
 use crate::types::EnumImpl;
@@ -17,6 +19,13 @@ const COMPRESS_WATERMARK: usize = 8192;
 pub trait Pickle: Sized {
     fn pickle(&self, out: &mut Vec<u8>);
     fn unpickle(stream: &mut PickledStream<'_>) -> Option<Self>;
+
+    /// inbuxa: reads one item of a list or map. `Some(None)` is an item this
+    /// build doesn't know, a newer version's enum value, read past so the
+    /// rest of the object still loads; `None` is a damaged stream.
+    fn unpickle_item(stream: &mut PickledStream<'_>) -> Option<Option<Self>> {
+        Self::unpickle(stream).map(Some)
+    }
 }
 
 pub struct PickledStream<'x> {
@@ -186,6 +195,10 @@ impl<T: EnumImpl> Pickle for T {
     fn unpickle(stream: &mut PickledStream<'_>) -> Option<Self> {
         u16::unpickle(stream).and_then(Self::from_id)
     }
+
+    fn unpickle_item(stream: &mut PickledStream<'_>) -> Option<Option<Self>> {
+        u16::unpickle(stream).map(Self::from_id)
+    }
 }
 
 impl<T> Pickle for Option<T>
@@ -256,9 +269,13 @@ where
         let len = u32::unpickle(stream)? as usize;
         let mut map = VecMap::with_capacity(len);
         for _ in 0..len {
-            let key = K::unpickle(stream)?;
+            let key = K::unpickle_item(stream)?;
             let value = V::unpickle(stream)?;
-            map.append(key, value);
+            // inbuxa: an entry keyed by a value this build doesn't know is
+            // dropped, its value read past
+            if let Some(key) = key {
+                map.append(key, value);
+            }
         }
         Some(map)
     }
@@ -271,5 +288,9 @@ impl Pickle for trc::Key {
 
     fn unpickle(stream: &mut PickledStream<'_>) -> Option<Self> {
         u16::unpickle(stream).and_then(Self::from_id)
+    }
+
+    fn unpickle_item(stream: &mut PickledStream<'_>) -> Option<Option<Self>> {
+        u16::unpickle(stream).map(Self::from_id)
     }
 }
