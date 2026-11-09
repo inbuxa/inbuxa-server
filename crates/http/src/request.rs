@@ -440,11 +440,10 @@ impl ParseHttp for Server {
                 }
                 ("introspect", &Method::POST) => {
                     // Authenticate request
-                    let (_in_flight, access_token) =
-                        self.authenticate_headers(&req, &session).await?;
+                    let (_in_flight, _) = self.authenticate_headers(&req, &session).await?;
 
                     return self
-                        .handle_token_introspect(&mut req, &access_token, session.session_id)
+                        .handle_token_introspect(&mut req, session.session_id)
                         .await;
                 }
                 ("userinfo", &Method::GET) => {
