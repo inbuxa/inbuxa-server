@@ -16,6 +16,7 @@ use crate::{
     DavError, DavErrorCondition,
     calendar::{
         CALENDAR_CONTAINER_PROPS, CALENDAR_ITEM_PROPS,
+        privacy::ShareeView,
         query::{CalendarQueryHandler, try_parse_tz},
     },
     card::{
@@ -52,7 +53,9 @@ use dav_proto::{
         },
     },
 };
-use groupware::calendar::{SCHEDULE_INBOX_ID, SupportedComponent};
+use groupware::calendar::{
+    CalendarEvent, SCHEDULE_INBOX_ID, SupportedComponent, privacy::archived_event_view,
+};
 use groupware::{
     DavCalendarResource, DavResourceName, cache::GroupwareCache, calendar::ArchivedTimezone,
 };
@@ -428,6 +431,8 @@ impl PropFindRequestHandler for Server {
         }
 
         let is_scheduling = collection_container == Collection::CalendarEventNotification;
+        let mut writable_ids: AHashMap<u32, RoaringBitmap> = AHashMap::new();
+        let mut reader_info = None;
         let account_info = self
             .account(access_token.account_id())
             .await
@@ -459,7 +464,53 @@ impl PropFindRequestHandler for Server {
                 .await
                 .caused_by(trc::location!())?
             {
-                archive_ = archive;
+                // inbuxa: a reader who isn't the calendar's owner gets an event
+                // as JMAP shows it, in its data and in what a query matches
+                let view = if collection == Collection::CalendarEvent
+                    && !access_token.reads_as_owner(account_id)
+                {
+                    let resources = data
+                        .resources(self, access_token, account_id, SyncCollection::Calendar)
+                        .await
+                        .caused_by(trc::location!())?;
+                    ShareeView::new(
+                        archived_event_view(
+                            archive
+                                .unarchive::<CalendarEvent>()
+                                .caused_by(trc::location!())?,
+                        ),
+                        || {
+                            writable_ids
+                                .entry(account_id)
+                                .or_insert_with(|| {
+                                    resources.shared_items(access_token, [Acl::ModifyItems], true)
+                                })
+                                .contains(document_id)
+                        },
+                    )
+                } else {
+                    None
+                };
+                archive_ = if let Some(view) = view {
+                    if view.hide_attendees && reader_info.is_none() {
+                        reader_info = Some(
+                            self.account_info(access_token.account_id())
+                                .await
+                                .caused_by(trc::location!())?,
+                        );
+                    }
+                    view.apply_archive(
+                        &archive,
+                        reader_info
+                            .as_ref()
+                            .map(|info| info.addresses())
+                            .unwrap_or_default(),
+                        self.core.groupware.max_ical_instances,
+                    )
+                    .caused_by(trc::location!())?
+                } else {
+                    archive
+                };
                 ArchivedResource::from_archive(&archive_, collection).caused_by(trc::location!())?
             } else {
                 response.add_response(Response::new_status([item.name], StatusCode::NOT_FOUND));
