@@ -31,6 +31,139 @@ pub struct KeyValue<T> {
     pub expires: Option<u64>,
 }
 
+/// inbuxa: SL-14. A counter with an expiry keeps it in a marker row next to
+/// it, which the purge reads to find expired counters. Upstream rewrote the
+/// marker on every increment, although the counters that expire (rate limits,
+/// upload quotas) are time buckets whose expiry is the end of the bucket and
+/// never changes. This remembers, per process, the markers already written,
+/// so an increment writes only the counter once its bucket's marker is in the
+/// store with an expiry at least as late as the one asked for.
+///
+/// What this remembers can go stale: another node's maintenance task can
+/// delete the bucket, or a node whose clock runs ahead can purge it. That is
+/// caught from the increment's result: a counter that comes back equal to
+/// the amount added was just created, so if its marker wasn't in the same
+/// write it is written right after. A counter is never left without a
+/// marker, which would keep it in the store for good.
+static COUNTER_MARKERS: std::sync::LazyLock<CounterMarkers> =
+    std::sync::LazyLock::new(CounterMarkers::default);
+
+#[derive(Default)]
+pub(crate) struct CounterMarkers(parking_lot::Mutex<ahash::AHashMap<Vec<u8>, CounterMarker>>);
+
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub(crate) struct CounterMarker {
+    expires_at: u64,
+    written: bool,
+}
+
+impl CounterMarkers {
+    const MAX_ENTRIES: usize = 100_000;
+
+    /// Whether this increment can leave the marker out. When it can't, the
+    /// marker is noted as being written.
+    pub(crate) fn can_skip(&self, key: &[u8], expires_at: u64, now: u64) -> bool {
+        let mut markers = self.0.lock();
+        if let Some(marker) = markers.get(key)
+            && marker.written
+            && marker.expires_at >= expires_at
+            && marker.expires_at > now
+        {
+            return true;
+        }
+        if markers.len() >= Self::MAX_ENTRIES {
+            markers.retain(|_, marker| marker.expires_at > now);
+            if markers.len() >= Self::MAX_ENTRIES {
+                markers.clear();
+            }
+        }
+        // A marker being written by another increment isn't counted on
+        // until its write is in, so this one writes it too
+        markers.insert(
+            key.to_vec(),
+            CounterMarker {
+                expires_at,
+                written: false,
+            },
+        );
+        false
+    }
+
+    pub(crate) fn written(&self, key: &[u8], expires_at: u64) {
+        let mut markers = self.0.lock();
+        if let Some(marker) = markers.get_mut(key)
+            && marker.expires_at <= expires_at
+        {
+            *marker = CounterMarker {
+                expires_at,
+                written: true,
+            };
+        }
+    }
+
+    pub(crate) fn forget(&self, key: &[u8]) {
+        self.0.lock().remove(key);
+    }
+}
+
+fn counter_marker_op(key: Vec<u8>, expires_at: u64) -> Operation {
+    Operation::Value {
+        class: ValueClass::InMemory(InMemoryClass::Key(key)),
+        op: ValueOp::Set(
+            KeySerializer::new(U64_LEN * 2)
+                .write(0u64)
+                .write(expires_at)
+                .finalize(),
+        ),
+    }
+}
+
+/// inbuxa: SL-14: `counter_incr` for a counter with an expiry whose new value
+/// is wanted, writing the marker only when the store may not have it.
+async fn counter_incr_marked(store: &Store, kv: KeyValue<i64>) -> trc::Result<i64> {
+    let now = now();
+    let expires_at = now + kv.expires.unwrap_or_default();
+    let skip_marker = COUNTER_MARKERS.can_skip(&kv.key, expires_at, now);
+
+    let mut batch = BatchBuilder::new();
+    if !skip_marker {
+        batch.any_op(counter_marker_op(kv.key.clone(), expires_at));
+    }
+    batch.any_op(Operation::Value {
+        class: ValueClass::InMemory(InMemoryClass::Counter(kv.key.clone())),
+        op: ValueOp::AddAndGet(kv.value),
+    });
+
+    let value = match store
+        .write(batch.build_all())
+        .await
+        .and_then(|r| r.last_counter_id())
+    {
+        Ok(value) => value,
+        Err(err) => {
+            if !skip_marker {
+                COUNTER_MARKERS.forget(&kv.key);
+            }
+            return Err(err);
+        }
+    };
+
+    if !skip_marker {
+        COUNTER_MARKERS.written(&kv.key, expires_at);
+    } else if value == kv.value {
+        // The counter was just created without its marker: the bucket was
+        // deleted or purged since the marker was written
+        let mut batch = BatchBuilder::new();
+        batch.any_op(counter_marker_op(kv.key.clone(), expires_at));
+        if let Err(err) = store.write(batch.build_all()).await {
+            COUNTER_MARKERS.forget(&kv.key);
+            return Err(err);
+        }
+    }
+
+    Ok(value)
+}
+
 impl InMemoryStore {
     pub async fn key_set(&self, kv: KeyValue<Vec<u8>>) -> trc::Result<()> {
         match self {
@@ -63,6 +196,10 @@ impl InMemoryStore {
 
     pub async fn counter_incr(&self, kv: KeyValue<i64>, return_value: bool) -> trc::Result<i64> {
         match self {
+            // inbuxa: SL-14: a bucketed counter writes its expiry marker once
+            InMemoryStore::Store(store) if return_value && kv.value > 0 && kv.expires.is_some() => {
+                counter_incr_marked(store, kv).await
+            }
             InMemoryStore::Store(store) => {
                 let mut batch = BatchBuilder::new();
 
@@ -737,5 +874,52 @@ impl From<Value<'static>> for String {
             Value::Integer(num) => num.to_string(),
             Value::Float(num) => num.to_string(),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::CounterMarkers;
+
+    #[test]
+    fn a_bucket_writes_its_marker_once() {
+        let markers = CounterMarkers::default();
+        // The first increment writes the marker, and so does any increment
+        // made before that write is in
+        assert!(!markers.can_skip(b"rate", 160, 100));
+        assert!(!markers.can_skip(b"rate", 160, 100));
+        markers.written(b"rate", 160);
+        // Then the bucket's later increments leave it out
+        assert!(markers.can_skip(b"rate", 160, 101));
+        assert!(markers.can_skip(b"rate", 159, 130));
+        // A later expiry is written
+        assert!(!markers.can_skip(b"rate", 161, 130));
+        markers.written(b"rate", 161);
+        assert!(markers.can_skip(b"rate", 161, 130));
+        // An expired marker is written again
+        assert!(!markers.can_skip(b"rate", 200, 161));
+        // Other keys are their own
+        assert!(!markers.can_skip(b"other", 160, 100));
+    }
+
+    #[test]
+    fn a_failed_write_is_forgotten() {
+        let markers = CounterMarkers::default();
+        assert!(!markers.can_skip(b"rate", 160, 100));
+        markers.forget(b"rate");
+        markers.written(b"rate", 160);
+        assert!(!markers.can_skip(b"rate", 160, 100));
+    }
+
+    #[test]
+    fn an_earlier_write_does_not_confirm_a_later_marker() {
+        let markers = CounterMarkers::default();
+        assert!(!markers.can_skip(b"rate", 160, 100));
+        assert!(!markers.can_skip(b"rate", 170, 100));
+        // The write for 160 lands first: 170 isn't in the store yet
+        markers.written(b"rate", 160);
+        assert!(!markers.can_skip(b"rate", 170, 100));
+        markers.written(b"rate", 170);
+        assert!(markers.can_skip(b"rate", 170, 100));
     }
 }

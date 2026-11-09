@@ -2,6 +2,8 @@
  * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
+ *
+ * Modified by Coffey Labs in 2026 for INBUXA.
  */
 
 use crate::utils::{
@@ -120,6 +122,36 @@ pub async fn lookup_tests() {
     store.purge_in_memory_store().await.unwrap();
     if let InMemoryStore::Store(store) = &store {
         store_assert_is_empty(store, store.clone().into(), false).await;
+    }
+
+    // inbuxa: SL-14: a bucket's marker is written once, and a bucket deleted
+    // behind this process's back (a reset on another node) gets it again, so
+    // the purge still finds the counter
+    if let InMemoryStore::Store(_) = &store {
+        let key = KeyValue::<()>::build_key(2, b"bucket");
+        for expected in 1..=3 {
+            assert_eq!(
+                expected,
+                store
+                    .counter_incr(KeyValue::new(key.clone(), 1).expires(5), true)
+                    .await
+                    .unwrap()
+            );
+        }
+        store.key_delete_prefix(&[2u8]).await.unwrap();
+        assert_eq!(
+            1,
+            store
+                .counter_incr(KeyValue::new(key.clone(), 1).expires(4), true)
+                .await
+                .unwrap()
+        );
+        tokio::time::sleep(tokio::time::Duration::from_secs(6)).await;
+        store.purge_in_memory_store().await.unwrap();
+        assert_eq!(0, store.counter_get(key.clone()).await.unwrap());
+        if let InMemoryStore::Store(store) = &store {
+            store_assert_is_empty(store, store.clone().into(), false).await;
+        }
     }
 
     // Test locking
