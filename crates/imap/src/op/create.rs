@@ -194,6 +194,10 @@ impl<T: SessionStream> SessionData<T> {
             return Err(trc::ImapEvent::Error
                 .into_err()
                 .details(format!("Invalid folder name '{mailbox_name}'.",)));
+        } else if email::mailbox::mailbox_name_has_control_chars(name) {
+            return Err(trc::ImapEvent::Error
+                .into_err()
+                .details("Mailbox name cannot contain control characters."));
         }
 
         // Build path
