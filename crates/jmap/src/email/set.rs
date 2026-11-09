@@ -948,12 +948,29 @@ impl EmailSet for Server {
             let mut train_spam = None;
             if has_keyword_changes {
                 // Verify permissions on shared accounts
-                if can_modify_mailbox_ids.as_ref().is_some_and(|ids| {
-                    !new_data
-                        .mailboxes
-                        .iter()
-                        .any(|mb| ids.contains(mb.mailbox_id))
-                }) {
+                // inbuxa: keywords belong to the message, so the right to
+                // modify them has to hold on every mailbox the message is in
+                // before and after this update (RFC 8621), not only on one.
+                // Changing $deleted also needs the right to remove messages.
+                let mut mailbox_ids = data
+                    .inner
+                    .mailboxes
+                    .iter()
+                    .map(|mb| u32::from(mb.mailbox_id))
+                    .chain(new_data.mailboxes.iter().map(|mb| mb.mailbox_id));
+                let changes_deleted = new_data
+                    .added_keywords(data.inner)
+                    .any(|k| matches!(k, Keyword::Deleted))
+                    || new_data
+                        .removed_keywords(data.inner)
+                        .any(|k| matches!(k, ArchivedKeyword::Deleted));
+                if let (Some(modify_ids), Some(remove_ids)) =
+                    (&can_modify_mailbox_ids, &can_delete_mailbox_ids)
+                    && !mailbox_ids.all(|mailbox_id| {
+                        modify_ids.contains(mailbox_id)
+                            && (!changes_deleted || remove_ids.contains(mailbox_id))
+                    })
+                {
                     response.not_updated.append(
                         id,
                         SetError::forbidden()
