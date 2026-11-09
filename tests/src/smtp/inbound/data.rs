@@ -52,6 +52,7 @@ async fn data() {
             "Mike Foobar",
             &[],
         ),
+        ("sam@quota.net", "p4ssw0rd + extra safety", "Sam Quota", &[]),
     ] {
         admin
             .create_user_account(name, secret, description, aliases, vec![])
@@ -182,6 +183,19 @@ async fn data() {
             },
             messages: None,
             size: Some(450),
+        })
+        .await;
+    admin
+        .registry_create_object(MtaQueueQuota {
+            description: None,
+            enable: true,
+            key: Map::new(vec![MtaQueueQuotaKey::RcptDomain]),
+            match_: Expression {
+                else_: "rcpt_domain = 'quota.net'".into(),
+                ..Default::default()
+            },
+            messages: Some(1),
+            size: None,
         })
         .await;
     admin
@@ -410,6 +424,20 @@ async fn data() {
         .send_message(
             "jane@foobar.org",
             &["jane@domain.net"],
+            "test:no_dkim",
+            "452 4.3.1",
+        )
+        .await;
+
+    // Every recipient domain quota applies, not only the first one:
+    // one message is allowed in the queue to domain quota.net
+    session
+        .send_message("jane@foobar.org", &["sam@quota.net"], "test:no_dkim", "250")
+        .await;
+    session
+        .send_message(
+            "jane@foobar.org",
+            &["sam@quota.net"],
             "test:no_dkim",
             "452 4.3.1",
         )
