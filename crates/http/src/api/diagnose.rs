@@ -194,15 +194,42 @@ impl ElapsedMs for Instant {
         self.elapsed().as_millis() as u64
     }
 }
+/// Splits a delivery test target into its domain and, for an address, the
+/// address itself. The address is sent in RCPT TO and the domain is looked
+/// up and fetched over HTTPS, so anything that is not a plain address or
+/// domain (control characters, spaces, angle brackets) is refused.
+pub(crate) fn parse_delivery_target(target: &str) -> Option<(String, Option<String>)> {
+    if target
+        .chars()
+        .any(|ch| ch.is_control() || ch.is_whitespace() || matches!(ch, '<' | '>'))
+    {
+        return None;
+    }
+
+    let (domain, email) = if target.contains('@') {
+        let email = utils::sanitize_email(target)?;
+        let (_, domain) = email.rsplit_once('@')?;
+        (domain.to_string(), Some(email))
+    } else {
+        (utils::sanitize_domain(target)?, None)
+    };
+
+    domain
+        .chars()
+        .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | '.'))
+        .then_some((domain, email))
+}
+
 pub(crate) fn spawn_delivery_diagnose(
     server: Server,
-    domain_or_email: String,
+    domain: String,
+    email: Option<String>,
     timeout: Duration,
 ) -> mpsc::Receiver<DeliveryStage> {
     let (tx, rx) = mpsc::channel(10);
 
     tokio::spawn(async move {
-        let _ = delivery_diagnose(tx, server, domain_or_email, timeout).await;
+        let _ = delivery_diagnose(tx, server, domain, email, timeout).await;
     });
 
     rx
@@ -211,15 +238,10 @@ pub(crate) fn spawn_delivery_diagnose(
 async fn delivery_diagnose(
     tx: mpsc::Sender<DeliveryStage>,
     server: Server,
-    domain_or_email: String,
+    domain: String,
+    email: Option<String>,
     timeout: Duration,
 ) -> Result<(), mpsc::error::SendError<DeliveryStage>> {
-    let (domain, email) = if let Some((_, domain)) = domain_or_email.rsplit_once('@') {
-        (domain.to_string(), Some(domain_or_email))
-    } else {
-        (domain_or_email, None)
-    };
-
     let local_host = &server.core.network.server_name;
     let conn_strategy = server.get_connection_or_default("default", 0);
 
@@ -782,4 +804,41 @@ async fn delivery_diagnose(
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_delivery_target;
+
+    #[test]
+    fn delivery_target_is_an_address_or_a_domain() {
+        assert_eq!(
+            parse_delivery_target("user@example.com"),
+            Some(("example.com".into(), Some("user@example.com".into())))
+        );
+        assert_eq!(
+            parse_delivery_target("example.com"),
+            Some(("example.com".into(), None))
+        );
+
+        // Anything that could end or extend an SMTP command is refused
+        for target in [
+            "user@example.com>\r\nRSET\r\nMAIL FROM:<x@example.org",
+            "user@example.com\nRSET",
+            "user@example.com\rRSET",
+            "user@example.com\0",
+            "user name@example.com",
+            "<user@example.com>",
+            "user@example.com> NOTIFY=NEVER",
+            "example.com\r\nRSET",
+            "example.com/.well-known",
+            "example.com:8443",
+            "example.com/x",
+            "",
+            "@",
+            "user@",
+        ] {
+            assert_eq!(parse_delivery_target(target), None, "accepted {target:?}");
+        }
+    }
 }

@@ -9,7 +9,7 @@
 pub mod diagnose;
 
 use crate::{
-    api::diagnose::{DeliveryStage, spawn_delivery_diagnose},
+    api::diagnose::{DeliveryStage, parse_delivery_target, spawn_delivery_diagnose},
     auth::{
         authenticate::Authenticator, oauth::auth::OAuthApiHandler, permissions::AccountApiHandler,
     },
@@ -271,11 +271,14 @@ impl ManagementApi for Server {
                                 .unwrap_or(30),
                         );
 
-                        let mut rx = spawn_delivery_diagnose(
-                            self.clone(),
-                            decode_path_element(target).to_lowercase(),
-                            timeout,
-                        );
+                        let (domain, email) =
+                            parse_delivery_target(&decode_path_element(target).to_lowercase())
+                                .ok_or_else(|| {
+                                    trc::ResourceEvent::BadParameters
+                                        .into_err()
+                                        .details("Expected an email address or a domain name.")
+                                })?;
+                        let mut rx = spawn_delivery_diagnose(self.clone(), domain, email, timeout);
 
                         Ok(HttpResponse::new(StatusCode::OK)
                             .with_content_type("text/event-stream")
