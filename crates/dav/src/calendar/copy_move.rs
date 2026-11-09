@@ -179,7 +179,8 @@ impl CalendarCopyMoveRequestHandler for Server {
 
         // Map destination
         if let Some(to_resource) = to_resource {
-            if from_resource.path() == to_resource.path() {
+            // inbuxa: paths are compared within one account only
+            if from_account_id == to_account_id && from_resource.path() == to_resource.path() {
                 // Same resource
                 return Err(DavError::Code(StatusCode::BAD_GATEWAY));
             }
@@ -1015,7 +1016,9 @@ async fn copy_container(
             let mut new_name = None;
 
             for name in event.inner.names.iter() {
-                if name.parent_id == to_document_id {
+                // inbuxa: ids are compared within one account only; across
+                // accounts the same id is another collection
+                if from_account_id == to_account_id && name.parent_id == to_document_id {
                     continue;
                 } else if name.parent_id == from_document_id {
                     new_name = Some(name.name.to_string());
