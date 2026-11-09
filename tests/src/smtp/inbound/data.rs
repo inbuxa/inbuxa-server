@@ -243,6 +243,24 @@ async fn data() {
     size_session.response().assert_code("552 5.3.4");
     size_session.rset().await;
 
+    // A chunk refused as too big ends the transaction: a pipelined last
+    // chunk after it is refused too, and nothing is queued
+    size_session.mail_from("bill@doe.org", "250").await;
+    size_session.rcpt_to("mike@test.com", "250").await;
+    let mut chunk = b"BDAT 10\r\n0123456789BDAT 200\r\n".to_vec();
+    chunk.extend_from_slice(&[b'A'; 200]);
+    let last = b"Subject: rest\r\n\r\nrest\r\n";
+    chunk.extend_from_slice(format!("BDAT {} LAST\r\n", last.len()).as_bytes());
+    chunk.extend_from_slice(last);
+    size_session.ingest(&chunk).await.unwrap();
+    size_session
+        .response()
+        .assert_count("250 2.6.0", 1)
+        .assert_count("552 5.3.4", 1)
+        .assert_code("503 5.5.1");
+    test.assert_no_events();
+    size_session.rset().await;
+
     // A maximum message size of zero disables the limit
     size_session.data.remote_ip_str = "10.0.0.5".into();
     size_session.eval_session_params().await;
