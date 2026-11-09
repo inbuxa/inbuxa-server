@@ -2,6 +2,8 @@
  * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
+ *
+ * Modified by Coffey Labs in 2026 for INBUXA.
  */
 
 use super::{Metadata, QueueEnvelope, Status};
@@ -62,8 +64,10 @@ impl HasQueueQuota for Server {
         }
 
         if !self.core.smtp.queue.quota.rcpt_domain.is_empty() {
-            let mut seen_domains = AHashSet::new();
             for quota in &self.core.smtp.queue.quota.rcpt_domain {
+                // inbuxa: each quota counts every domain once; a set shared
+                // by all of them left every quota after the first unchecked
+                let mut seen_domains = AHashSet::new();
                 for (rcpt_idx, rcpt) in message.message.recipients.iter().enumerate() {
                     if seen_domains.insert(rcpt.address.domain_part())
                         && !self

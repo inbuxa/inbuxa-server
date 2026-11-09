@@ -2,10 +2,13 @@
  * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
+ *
+ * Modified by Coffey Labs in 2026 for INBUXA.
  */
 
 use imap::op::list::matches_pattern;
 use imap_proto::ResponseType;
+use serde_json::json;
 
 use crate::utils::server::TestServer;
 
@@ -89,6 +92,38 @@ pub async fn test(
     // Enable IMAP4rev2
     imap.send("ENABLE IMAP4rev2").await;
     imap.assert_read(Type::Tagged, ResponseType::Ok).await;
+
+    // A mailbox name with CR/LF never ends a LIST line early
+    let injected_name = "x\r\n* 1 EXPUNGE";
+    let response = test
+        .account("jdoe@example.com")
+        .jmap_create(
+            "Mailbox",
+            [json!({ "name": injected_name })],
+            Vec::<(&str, &str)>::new(),
+        )
+        .await;
+    imap.send("LIST \"\" \"*\"").await;
+    let lines = imap.assert_read(Type::Tagged, ResponseType::Ok).await;
+    assert!(
+        !lines.iter().any(|line| line.starts_with("* 1 EXPUNGE")),
+        "A mailbox name injected an IMAP response: {lines:?}"
+    );
+    response.not_created(0);
+
+    // Control characters are refused by CREATE and RENAME too
+    imap.send(&format!(
+        "CREATE {{{}+}}\r\n{injected_name}",
+        injected_name.len()
+    ))
+    .await;
+    imap.assert_read(Type::Tagged, ResponseType::No).await;
+    imap.send(&format!(
+        "RENAME \"Tofu\" {{{}+}}\r\n{injected_name}",
+        injected_name.len()
+    ))
+    .await;
+    imap.assert_read(Type::Tagged, ResponseType::No).await;
 
     // Create and delete using IMAP4rev2
     imap.send("CREATE \"L&APg-bende opgaver\"").await;

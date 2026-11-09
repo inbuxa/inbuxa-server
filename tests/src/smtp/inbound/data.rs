@@ -52,6 +52,7 @@ async fn data() {
             "Mike Foobar",
             &[],
         ),
+        ("sam@quota.net", "p4ssw0rd + extra safety", "Sam Quota", &[]),
     ] {
         admin
             .create_user_account(name, secret, description, aliases, vec![])
@@ -188,6 +189,19 @@ async fn data() {
         .registry_create_object(MtaQueueQuota {
             description: None,
             enable: true,
+            key: Map::new(vec![MtaQueueQuotaKey::RcptDomain]),
+            match_: Expression {
+                else_: "rcpt_domain = 'quota.net'".into(),
+                ..Default::default()
+            },
+            messages: Some(1),
+            size: None,
+        })
+        .await;
+    admin
+        .registry_create_object(MtaQueueQuota {
+            description: None,
+            enable: true,
             key: Map::new(vec![MtaQueueQuotaKey::Rcpt]),
             match_: Expression {
                 else_: "rcpt = 'jane@domain.net'".into(),
@@ -241,6 +255,24 @@ async fn data() {
     chunk.extend_from_slice(&[b'A'; 200]);
     size_session.ingest(&chunk).await.unwrap();
     size_session.response().assert_code("552 5.3.4");
+    size_session.rset().await;
+
+    // A chunk refused as too big ends the transaction: a pipelined last
+    // chunk after it is refused too, and nothing is queued
+    size_session.mail_from("bill@doe.org", "250").await;
+    size_session.rcpt_to("mike@test.com", "250").await;
+    let mut chunk = b"BDAT 10\r\n0123456789BDAT 200\r\n".to_vec();
+    chunk.extend_from_slice(&[b'A'; 200]);
+    let last = b"Subject: rest\r\n\r\nrest\r\n";
+    chunk.extend_from_slice(format!("BDAT {} LAST\r\n", last.len()).as_bytes());
+    chunk.extend_from_slice(last);
+    size_session.ingest(&chunk).await.unwrap();
+    size_session
+        .response()
+        .assert_count("250 2.6.0", 1)
+        .assert_count("552 5.3.4", 1)
+        .assert_code("503 5.5.1");
+    test.assert_no_events();
     size_session.rset().await;
 
     // A maximum message size of zero disables the limit
@@ -392,6 +424,20 @@ async fn data() {
         .send_message(
             "jane@foobar.org",
             &["jane@domain.net"],
+            "test:no_dkim",
+            "452 4.3.1",
+        )
+        .await;
+
+    // Every recipient domain quota applies, not only the first one:
+    // one message is allowed in the queue to domain quota.net
+    session
+        .send_message("jane@foobar.org", &["sam@quota.net"], "test:no_dkim", "250")
+        .await;
+    session
+        .send_message(
+            "jane@foobar.org",
+            &["sam@quota.net"],
             "test:no_dkim",
             "452 4.3.1",
         )

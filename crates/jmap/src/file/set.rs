@@ -197,6 +197,9 @@ impl FileNodeSet for Server {
                 file_node.modified = now() as i64;
             }
 
+            // inbuxa: the node a replace destroys, queued only once the
+            // create is accepted
+            let mut replaces = None;
             let renamed = match find_sibling_collision(
                 None,
                 &file_node,
@@ -251,7 +254,7 @@ impl FileNodeSet for Server {
                                     continue 'create;
                                 }
                             }
-                            implicit_destroys.insert(existing);
+                            replaces = Some(existing);
                             false
                         }
                         OnExists::Newest => unreachable!(),
@@ -370,6 +373,9 @@ impl FileNodeSet for Server {
                     &mut batch,
                 )
                 .caused_by(trc::location!())?;
+            if let Some(existing) = replaces {
+                implicit_destroys.insert(existing);
+            }
             let create_id = id.clone();
             response.created(id, document_id);
             if renamed && let Some(Value::Object(map)) = response.created.get_mut(&create_id) {
@@ -488,6 +494,9 @@ impl FileNodeSet for Server {
                 continue 'update;
             }
 
+            // inbuxa: the node a replace destroys, queued only once the
+            // update is accepted
+            let mut replaces = None;
             let renamed = match find_sibling_collision(
                 Some(document_id),
                 &new_file_node,
@@ -542,7 +551,7 @@ impl FileNodeSet for Server {
                                     continue 'update;
                                 }
                             }
-                            implicit_destroys.insert(existing);
+                            replaces = Some(existing);
                             false
                         }
                         OnExists::Newest => unreachable!(),
@@ -664,6 +673,9 @@ impl FileNodeSet for Server {
                     &mut batch,
                 )
                 .caused_by(trc::location!())?;
+            if let Some(existing) = replaces {
+                implicit_destroys.insert(existing);
+            }
             let updated_value = if renamed {
                 let mut map = jmap_tools::Map::with_capacity(1);
                 map.insert_unchecked(

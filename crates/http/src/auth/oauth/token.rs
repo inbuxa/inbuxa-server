@@ -17,10 +17,7 @@ use base64::{
 };
 use common::{
     KV_OAUTH, KV_OAUTH_DEVICE, Server,
-    auth::{
-        AccessToken,
-        oauth::{GrantType, oidc::StandardClaims},
-    },
+    auth::oauth::{GrantType, oidc::StandardClaims},
 };
 use http_proto::*;
 use hyper::StatusCode;
@@ -42,7 +39,6 @@ pub trait TokenHandler: Sync + Send {
     fn handle_token_introspect(
         &self,
         req: &mut HttpRequest,
-        access_token: &AccessToken,
         session_id: u64,
     ) -> impl Future<Output = trc::Result<HttpResponse>> + Send;
 
@@ -318,7 +314,6 @@ impl TokenHandler for Server {
     async fn handle_token_introspect(
         &self,
         req: &mut HttpRequest,
-        access_token: &AccessToken,
         session_id: u64,
     ) -> trc::Result<HttpResponse> {
         // Parse token
@@ -331,7 +326,7 @@ impl TokenHandler for Server {
                     .details("Client ID is missing.")
             })?;
 
-        self.introspect_access_token(&token, access_token)
+        self.introspect_access_token(&token)
             .await
             .map(|response| JsonResponse::new(response).no_cache().into_http_response())
     }

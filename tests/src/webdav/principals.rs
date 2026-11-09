@@ -2,6 +2,8 @@
  * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
+ *
+ * Modified by Coffey Labs in 2026 for INBUXA.
  */
 
 use crate::utils::server::TestServer;
@@ -9,6 +11,11 @@ use crate::webdav::prop::ALL_DAV_PROPERTIES;
 use dav_proto::schema::property::{DavProperty, PrincipalProperty, WebDavProperty};
 use groupware::DavResourceName;
 use hyper::StatusCode;
+use registry::schema::{
+    enums::Permission,
+    prelude::ObjectType,
+    structs::{CertificateManagement, DkimManagement, DnsManagement, Domain, Tenant},
+};
 
 pub async fn test(test: &TestServer, assisted_discovery: bool) {
     println!("Running principals tests...");
@@ -483,9 +490,116 @@ pub async fn test(test: &TestServer, assisted_discovery: bool) {
         )
         .as_str()]);
 
+    // inbuxa: Test 7: with directory queries on, a tenant's user reads the
+    // principals of its own tenant but not those of another tenant
+    let admin = test.account("admin");
+    let mut tenant_ids = Vec::new();
+    let mut domain_ids = Vec::new();
+    for (tenant, domain) in [("Tenant T", "t.example.org"), ("Tenant U", "u.example.org")] {
+        let tenant_id = admin
+            .registry_create_object(Tenant {
+                name: tenant.to_string(),
+                ..Default::default()
+            })
+            .await;
+        domain_ids.push(
+            admin
+                .registry_create_object(Domain {
+                    name: domain.to_string(),
+                    is_enabled: true,
+                    member_tenant_id: Some(tenant_id),
+                    certificate_management: CertificateManagement::Manual,
+                    dns_management: DnsManagement::Manual,
+                    dkim_management: DkimManagement::Manual,
+                    ..Default::default()
+                })
+                .await,
+        );
+        tenant_ids.push(tenant_id);
+    }
+    let mut tenant_users = Vec::new();
+    for (name, secret, addresses) in [
+        (
+            "tuser@t.example.org",
+            "tenant t user passphrase",
+            &["tuser@t.example.org"],
+        ),
+        (
+            "tpeer@t.example.org",
+            "tenant t peer passphrase",
+            &["tpeer@t.example.org"],
+        ),
+        (
+            "uuser@u.example.org",
+            "tenant u user passphrase",
+            &["uuser@u.example.org"],
+        ),
+    ] {
+        tenant_users.push(
+            admin
+                .create_user_account(
+                    name,
+                    secret,
+                    name,
+                    addresses,
+                    vec![Permission::DavPrincipalList],
+                )
+                .await,
+        );
+    }
+    let tenant_principal = |name: &str| {
+        format!(
+            "{}/{}/",
+            DavResourceName::Principal.base_path(),
+            name.replace('@', "%40")
+        )
+    };
+    let t_client = tenant_users[0].webdav_client();
+    t_client
+        .request(
+            "PROPFIND",
+            &tenant_principal("tpeer@t.example.org"),
+            PRINCIPAL_DISPLAYNAME_QUERY,
+        )
+        .await
+        .with_status(StatusCode::MULTI_STATUS)
+        .into_propfind_response(None)
+        .properties(&tenant_principal("tpeer@t.example.org"))
+        .get(DavProperty::WebDav(WebDavProperty::DisplayName))
+        .with_values(["tpeer@t.example.org"])
+        .with_status(StatusCode::OK);
+    t_client
+        .request(
+            "PROPFIND",
+            &tenant_principal("uuser@u.example.org"),
+            PRINCIPAL_DISPLAYNAME_QUERY,
+        )
+        .await
+        .with_status(StatusCode::MULTI_STATUS)
+        .with_value(
+            "D:multistatus.D:response.D:status",
+            "HTTP/1.1 403 Forbidden",
+        );
+    for account in tenant_users {
+        admin.destroy_account(account).await;
+    }
+    admin
+        .registry_destroy(ObjectType::Domain, domain_ids.iter().copied())
+        .await
+        .assert_destroyed(&domain_ids);
+    admin
+        .registry_destroy(ObjectType::Tenant, tenant_ids.iter().copied())
+        .await
+        .assert_destroyed(&tenant_ids);
+
     client.delete_default_containers().await;
     client
         .delete_default_containers_by_account("support@example.com")
+        .await;
+    // Working out who jane knows reads her mail folders and support's
+    let jane = test.account("jane@example.com");
+    test.destroy_all_mailboxes(jane).await;
+    jane.destroy_all_mailboxes_for_account(test.account("support@example.com").id().document_id())
         .await;
     test.assert_is_empty().await;
 }
@@ -497,6 +611,9 @@ const PRINCIPAL_MATCH_QUERY: &str = r#"<?xml version="1.0" encoding="utf-8" ?>
 <D:displayname/>
 </D:principal-property>
 </D:principal-match>"#;
+
+const PRINCIPAL_DISPLAYNAME_QUERY: &str = r#"<?xml version="1.0" encoding="utf-8" ?>
+<D:propfind xmlns:D="DAV:"><D:prop><D:displayname/></D:prop></D:propfind>"#;
 
 const PRINCIPAL_SEARCH_PROPERTY_SET_QUERY: &str =
     r#"<?xml version="1.0" encoding="utf-8" ?><D:principal-search-property-set xmlns:D="DAV:"/>"#;
