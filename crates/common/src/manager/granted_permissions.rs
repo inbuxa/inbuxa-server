@@ -33,7 +33,10 @@ use types::id::Id;
 /// locks and legal holds (audit-hold-lock spec, AU-9, AL-12, LH-13), and
 /// the data inventory (personal-data catalog spec), accepting security
 /// to-do items (security to-do list spec), the deliverability check
-/// (deliverability spec), and scheduled reports (scheduled-reports spec).
+/// (deliverability spec), scheduled reports (scheduled-reports spec),
+/// checking the store's blobs (store-check spec, SV-9), taking snapshots of
+/// the store (store-snapshot spec, SN-8), and copying and dismissing changes
+/// of blob store (blob-store-change spec, BM-9).
 const ADMIN_GRANTS: &[Permission] = &[
     Permission::SysAiExplain,
     Permission::SysAuditGet,
@@ -62,6 +65,9 @@ const ADMIN_GRANTS: &[Permission] = &[
     Permission::SysDeliverabilityCheck,
     Permission::SysScheduledReportGet,
     Permission::SysScheduledReportUpdate,
+    Permission::SysStoreCheck,
+    Permission::SysStoreSnapshot,
+    Permission::SysBlobStoreChange,
 ];
 
 /// Granted to the server-level Compliance Officer role once it exists:

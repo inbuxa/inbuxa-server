@@ -2,6 +2,8 @@
  * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
+ *
+ * Modified by Coffey Labs in 2026 for INBUXA.
  */
 
 use crate::BlobStore;
@@ -77,9 +79,22 @@ impl FsStore {
             fs::create_dir_all(blob_path.parent().unwrap())
                 .await
                 .map_err(into_error)?;
-            let mut blob_file = File::create(&blob_path).await.map_err(into_error)?;
-            blob_file.write_all(data).await.map_err(into_error)?;
-            blob_file.flush().await.map_err(into_error)?;
+            // inbuxa: store-snapshot spec, SN-10: written beside it and
+            // renamed into place, never rewritten in place. A snapshot holds
+            // blobs by hard link, and a rewrite would change its copy too; a
+            // stop mid-write would leave half a blob under its id.
+            let temp_path = temp_path_for(&blob_path);
+            let written = async {
+                let mut blob_file = File::create(&temp_path).await?;
+                blob_file.write_all(data).await?;
+                blob_file.flush().await?;
+                fs::rename(&temp_path, &blob_path).await
+            }
+            .await;
+            if let Err(err) = written {
+                let _ = fs::remove_file(&temp_path).await;
+                return Err(into_error(err));
+            }
         }
 
         Ok(())
@@ -95,6 +110,11 @@ impl FsStore {
         }
     }
 
+    /// inbuxa: the directory the blobs are under (store-snapshot spec).
+    pub fn root(&self) -> &std::path::Path {
+        &self.path
+    }
+
     fn build_path(&self, key: &[u8]) -> PathBuf {
         let mut path = self.path.clone();
 
@@ -106,6 +126,66 @@ impl FsStore {
     }
 }
 
+/// inbuxa: SN-10. A blob's name is base32, so a name starting with a dot
+/// is never a blob: the snapshot's copy and anything listing blobs skip it.
+fn temp_path_for(blob_path: &std::path::Path) -> PathBuf {
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let n = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let name = blob_path
+        .file_name()
+        .map(|name| name.to_string_lossy())
+        .unwrap_or_default();
+    blob_path.with_file_name(format!(".{name}.{}-{n}.tmp", std::process::id()))
+}
+
 fn into_error(err: std::io::Error) -> trc::Error {
     trc::StoreEvent::FilesystemError.reason(err)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn writes_go_through_a_temporary_file() {
+        let dir = std::env::temp_dir().join(format!("inbuxa-fs-sn10-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let BlobStore::Fs(store) = FsStore::open(structs::FileSystemStore {
+            path: dir.to_string_lossy().to_string(),
+            depth: 2,
+        })
+        .await
+        .unwrap() else {
+            unreachable!()
+        };
+        let key = [7u8; 32];
+        store.put_blob(&key, b"first").await.unwrap();
+        let path = store.build_path(&key);
+
+        // A file held by a hard link, as a snapshot holds it, keeps what it
+        // had when the blob under its id is written again
+        let held = dir.join("held");
+        std::fs::hard_link(&path, &held).unwrap();
+        store.put_blob(&key, b"second, longer").await.unwrap();
+        assert_eq!(std::fs::read(&held).unwrap(), b"first");
+        assert_eq!(
+            store.get_blob(&key, 0..usize::MAX).await.unwrap().unwrap(),
+            b"second, longer"
+        );
+
+        // Nothing is left beside it
+        let names: Vec<_> = std::fs::read_dir(path.parent().unwrap())
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name())
+            .collect();
+        assert_eq!(names.len(), 1, "{names:?}");
+        assert!(
+            temp_path_for(&path)
+                .file_name()
+                .unwrap()
+                .to_string_lossy()
+                .starts_with('.')
+        );
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
 }

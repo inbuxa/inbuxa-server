@@ -287,7 +287,11 @@ impl Default for DefaultPermissions {
         };
 
         for permission_id in 0..Permission::COUNT {
-            let permission = Permission::from_id(permission_id as u16).unwrap();
+            // inbuxa: ids are shared with the 27.1 series, so this series
+            // has gaps where 27.1 has permissions it doesn't (690-694)
+            let Some(permission) = Permission::from_id(permission_id as u16) else {
+                continue;
+            };
             match permission {
                 Permission::Authenticate
                 | Permission::AuthenticateWithAlias
@@ -366,6 +370,21 @@ impl Default for DefaultPermissions {
                     default.superuser.push(permission);
                 }
                 Permission::SysJournalSearch | Permission::SysJournalExport => {}
+                // inbuxa: store-check spec, SV-9: a check reads every
+                // account's data, so only the server's administrators run one
+                Permission::SysStoreCheck => {
+                    default.superuser.push(permission);
+                }
+                // inbuxa: store-snapshot spec, SN-8: a snapshot holds every
+                // account's data, so only the server's administrators take one
+                Permission::SysStoreSnapshot => {
+                    default.superuser.push(permission);
+                }
+                // inbuxa: blob-store-change spec, BM-9: a copy reads and
+                // writes every account's blobs
+                Permission::SysBlobStoreChange => {
+                    default.superuser.push(permission);
+                }
                 // inbuxa: AL-12: tenant administrators lock and delegate
                 // within their tenant
                 Permission::SysAccountLockGet

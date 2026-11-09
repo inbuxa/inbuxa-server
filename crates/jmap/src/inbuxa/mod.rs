@@ -12,6 +12,7 @@ pub mod account_lock;
 pub mod ai_limits;
 pub mod audit;
 pub mod audit_log;
+pub mod blob_store_change; // inbuxa: a change of blob store
 pub mod data_inventory;
 pub mod deleted_account;
 pub mod deliverability; // inbuxa: the deliverability check
@@ -25,6 +26,7 @@ pub mod hold_export;
 pub mod hold_export_api;
 pub mod journal;
 pub mod journal_entry;
+pub mod json; // inbuxa: JSON values as JMAP ones
 pub mod legal_hold;
 pub mod log_settings;
 pub mod mail_rule;
@@ -35,6 +37,8 @@ pub mod protocol_policy;
 pub mod scheduled_reports; // inbuxa: scheduled reports and the weekly digest
 pub mod security_acceptance;
 pub mod sharing_policy;
+pub mod store_check; // inbuxa: checking the store's blobs
+pub mod store_snapshot; // inbuxa: a snapshot of the store
 pub mod telemetry;
 pub mod tenant_protocol_policy;
 pub mod undelete;

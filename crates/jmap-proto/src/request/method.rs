@@ -68,6 +68,12 @@ pub enum MethodObject {
     ProtocolPolicy,
     // inbuxa: DLP and mail flow rules
     MailRule,
+    // inbuxa: checking the store's blobs
+    StoreCheck,
+    // inbuxa: a snapshot of the store
+    StoreSnapshot,
+    // inbuxa: a change of blob store
+    BlobStoreChange,
     // inbuxa: accepted security to-do items
     SecurityAcceptance,
     // inbuxa: the deliverability check
@@ -124,6 +130,9 @@ impl MethodObject {
             | MethodObject::LegalHold
             | MethodObject::HoldExport
             | MethodObject::MailRule
+            | MethodObject::StoreCheck
+            | MethodObject::StoreSnapshot
+            | MethodObject::BlobStoreChange
             | MethodObject::SecurityAcceptance
             | MethodObject::HeldMessage
             | MethodObject::DeliverabilityReport
@@ -336,6 +345,12 @@ impl MethodName {
             (MethodFunction::Set, MethodObject::LegalHold) => "inbuxa:LegalHold/set",
             (MethodFunction::Get, MethodObject::MailRule) => "inbuxa:MailRule/get",
             (MethodFunction::Set, MethodObject::MailRule) => "inbuxa:MailRule/set",
+            (MethodFunction::Get, MethodObject::StoreCheck) => "inbuxa:StoreCheck/get",
+            (MethodFunction::Set, MethodObject::StoreCheck) => "inbuxa:StoreCheck/set",
+            (MethodFunction::Get, MethodObject::StoreSnapshot) => "inbuxa:StoreSnapshot/get",
+            (MethodFunction::Set, MethodObject::StoreSnapshot) => "inbuxa:StoreSnapshot/set",
+            (MethodFunction::Get, MethodObject::BlobStoreChange) => "inbuxa:BlobStoreChange/get",
+            (MethodFunction::Set, MethodObject::BlobStoreChange) => "inbuxa:BlobStoreChange/set",
             (MethodFunction::Get, MethodObject::SecurityAcceptance) => {
                 "inbuxa:SecurityAcceptance/get"
             }
@@ -534,6 +549,12 @@ impl MethodName {
             "inbuxa:LegalHold/set" => (MethodObject::LegalHold, MethodFunction::Set),
             "inbuxa:MailRule/get" => (MethodObject::MailRule, MethodFunction::Get),
             "inbuxa:MailRule/set" => (MethodObject::MailRule, MethodFunction::Set),
+            "inbuxa:StoreCheck/get" => (MethodObject::StoreCheck, MethodFunction::Get),
+            "inbuxa:StoreCheck/set" => (MethodObject::StoreCheck, MethodFunction::Set),
+            "inbuxa:StoreSnapshot/get" => (MethodObject::StoreSnapshot, MethodFunction::Get),
+            "inbuxa:StoreSnapshot/set" => (MethodObject::StoreSnapshot, MethodFunction::Set),
+            "inbuxa:BlobStoreChange/get" => (MethodObject::BlobStoreChange, MethodFunction::Get),
+            "inbuxa:BlobStoreChange/set" => (MethodObject::BlobStoreChange, MethodFunction::Set),
             "inbuxa:SecurityAcceptance/get" => (MethodObject::SecurityAcceptance, MethodFunction::Get),
             "inbuxa:SecurityAcceptance/set" => (MethodObject::SecurityAcceptance, MethodFunction::Set),
             "inbuxa:DeliverabilityReport/get" => (MethodObject::DeliverabilityReport, MethodFunction::Get),
@@ -630,6 +651,9 @@ impl Display for MethodObject {
             MethodObject::AccountLock => "inbuxa:AccountLock",
             MethodObject::LegalHold => "inbuxa:LegalHold",
             MethodObject::MailRule => "inbuxa:MailRule",
+            MethodObject::StoreCheck => "inbuxa:StoreCheck",
+            MethodObject::StoreSnapshot => "inbuxa:StoreSnapshot",
+            MethodObject::BlobStoreChange => "inbuxa:BlobStoreChange",
             MethodObject::SecurityAcceptance => "inbuxa:SecurityAcceptance",
             MethodObject::DeliverabilityReport => "inbuxa:DeliverabilityReport",
             MethodObject::DeliverabilitySettings => "inbuxa:DeliverabilitySettings",

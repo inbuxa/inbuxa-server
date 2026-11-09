@@ -310,6 +310,17 @@ async fn store_maintenance(
         }
         TaskStoreMaintenanceType::PurgeBlob => {
             if let Some(shard_index) = task.shard_index {
+                // inbuxa: store-snapshot spec, SN-4: while a snapshot takes
+                // the blobs, the purge is put off by five minutes
+                let Some(_purging) = store::write::snapshot::blob_purge_may_run() else {
+                    return Ok(TaskResult::Success(vec![Task::StoreMaintenance(
+                        TaskStoreMaintenance {
+                            maintenance_type: TaskStoreMaintenanceType::PurgeBlob,
+                            shard_index: Some(shard_index),
+                            status: TaskStatus::at(now() as i64 + 300),
+                        },
+                    )]));
+                };
                 server
                     .store()
                     .purge_blobs(server.blob_store().clone(), shard_index as u8)

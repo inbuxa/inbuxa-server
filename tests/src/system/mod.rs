@@ -15,6 +15,7 @@ pub mod audit; // inbuxa: the audit log
 pub mod authentication;
 pub mod authorization;
 pub mod auto_reload; // inbuxa: registry writes apply at once
+pub mod blob_store_change; // inbuxa: a change of blob store
 pub mod branding;
 pub mod compliance; // inbuxa: the compliance roles
 pub mod crypto;
@@ -36,6 +37,8 @@ pub mod scheduled_reports; // inbuxa: scheduled reports and the weekly digest
 pub mod security;
 pub mod security_acceptances; // inbuxa: accepted security to-do items
 pub mod sharing_policy; // inbuxa: MA-C, who may share mail
+pub mod store_check; // inbuxa: checking the store's blobs
+pub mod store_snapshot; // inbuxa: a snapshot of the store
 pub mod task;
 pub mod tenant;
 pub mod tracer_reload; // inbuxa: tracers start over when their settings change

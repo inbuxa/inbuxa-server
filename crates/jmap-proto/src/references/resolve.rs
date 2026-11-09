@@ -55,6 +55,9 @@ impl Response<'_> {
                 GetRequestMethod::AccountLock(request) => request.resolve_references(self)?,
                 GetRequestMethod::LegalHold(request) => request.resolve_references(self)?,
                 GetRequestMethod::MailRule(request) => request.resolve_references(self)?,
+                GetRequestMethod::StoreCheck(request) => request.resolve_references(self)?,
+                GetRequestMethod::StoreSnapshot(request) => request.resolve_references(self)?,
+                GetRequestMethod::BlobStoreChange(request) => request.resolve_references(self)?,
                 GetRequestMethod::SecurityAcceptance(request) => {
                     request.resolve_references(self)?
                 }
@@ -147,6 +150,15 @@ impl Response<'_> {
                     request.resolve_references(self, 1, false)?
                 }
                 SetRequestMethod::MailRule(request) => {
+                    request.resolve_references(self, 1, false)?
+                }
+                SetRequestMethod::StoreCheck(request) => {
+                    request.resolve_references(self, 1, false)?
+                }
+                SetRequestMethod::StoreSnapshot(request) => {
+                    request.resolve_references(self, 1, false)?
+                }
+                SetRequestMethod::BlobStoreChange(request) => {
                     request.resolve_references(self, 1, false)?
                 }
                 SetRequestMethod::SecurityAcceptance(request) => {

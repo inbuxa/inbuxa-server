@@ -116,6 +116,12 @@ impl JmapAuthorization for AccessToken {
                         Permission::SysDlpPolicyGet
                     }
                 }
+                // inbuxa: store-check spec, SV-9
+                GetRequestMethod::StoreCheck(_) => Permission::SysStoreCheck,
+                // inbuxa: store-snapshot spec, SN-8
+                GetRequestMethod::StoreSnapshot(_) => Permission::SysStoreSnapshot,
+                // inbuxa: blob-store-change spec, BM-9
+                GetRequestMethod::BlobStoreChange(_) => Permission::SysBlobStoreChange,
                 // inbuxa: journaling (JR-18)
                 GetRequestMethod::Journal(_) => Permission::SysJournalGet,
                 GetRequestMethod::JournalEntry(_) => Permission::SysJournalSearch,
@@ -310,6 +316,30 @@ impl JmapAuthorization for AccessToken {
                                 .details("You are not authorized to change mail rules"))
                         }
                     }
+                    // inbuxa: store-check spec, SV-9
+                    SetRequestMethod::StoreCheck(s) => validate_set(
+                        s,
+                        self,
+                        Permission::SysStoreCheck,
+                        Permission::SysStoreCheck,
+                        Permission::SysStoreCheck,
+                    ),
+                    // inbuxa: store-snapshot spec, SN-8
+                    SetRequestMethod::StoreSnapshot(s) => validate_set(
+                        s,
+                        self,
+                        Permission::SysStoreSnapshot,
+                        Permission::SysStoreSnapshot,
+                        Permission::SysStoreSnapshot,
+                    ),
+                    // inbuxa: blob-store-change spec, BM-9
+                    SetRequestMethod::BlobStoreChange(s) => validate_set(
+                        s,
+                        self,
+                        Permission::SysBlobStoreChange,
+                        Permission::SysBlobStoreChange,
+                        Permission::SysBlobStoreChange,
+                    ),
                     // inbuxa: journaling (JR-18)
                     SetRequestMethod::Journal(s) => validate_set(
                         s,
@@ -566,6 +596,9 @@ impl JmapAuthorization for AccessToken {
                 | MethodObject::LegalHold
                 | MethodObject::HoldExport
                 | MethodObject::MailRule
+                | MethodObject::StoreCheck
+                | MethodObject::StoreSnapshot
+                | MethodObject::BlobStoreChange
                 | MethodObject::SecurityAcceptance
                 | MethodObject::DeliverabilityReport
                 | MethodObject::DeliverabilitySettings

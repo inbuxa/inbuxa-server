@@ -488,6 +488,51 @@ async fn fork_current(server: &Server, object: &str, id: &MaybeInvalid<Id>) -> O
             }
             MaybeInvalid::Invalid(_) => None,
         },
+        // A store check: what kind, and how it stands (store-check spec, SV-9)
+        // A change of blob store: where from and to, and how it stands;
+        // never the old store's settings (blob-store-change spec, BM-9)
+        "inbuxa:BlobStoreChange" => match id {
+            MaybeInvalid::Value(id) => {
+                inbuxa_features::blob_move::get(data, u32::try_from(id.id()).ok()?)
+                    .await
+                    .ok()?
+                    .map(|c| {
+                        serde_json::json!({
+                            "from": c.from,
+                            "to": c.to,
+                            "status": c.status.as_str(),
+                        })
+                    })
+            }
+            MaybeInvalid::Invalid(_) => None,
+        },
+        "inbuxa:StoreCheck" => match id {
+            MaybeInvalid::Value(id) => {
+                inbuxa_features::store_check::get(data, u32::try_from(id.id()).ok()?)
+                    .await
+                    .ok()?
+                    .map(|c| {
+                        serde_json::json!({
+                            "mode": c.mode.as_str(),
+                            "status": c.status.as_str(),
+                        })
+                    })
+            }
+            MaybeInvalid::Invalid(_) => None,
+        },
+        // A snapshot: its directory and how it stands (store-snapshot spec,
+        // SN-8)
+        "inbuxa:StoreSnapshot" => match id {
+            MaybeInvalid::Value(id) => services::inbuxa_store_snapshot::find(server, id.id())
+                .await
+                .map(|s| {
+                    serde_json::json!({
+                        "name": s.name,
+                        "status": s.status.as_str(),
+                    })
+                }),
+            MaybeInvalid::Invalid(_) => None,
+        },
         _ => None,
     }
 }

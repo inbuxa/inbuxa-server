@@ -431,6 +431,9 @@ impl IntermediateChangesResponse {
             | MethodObject::LegalHold
             | MethodObject::HoldExport
             | MethodObject::MailRule
+            | MethodObject::StoreCheck
+            | MethodObject::StoreSnapshot
+            | MethodObject::BlobStoreChange
             | MethodObject::SecurityAcceptance
             | MethodObject::DeliverabilityReport
             | MethodObject::DeliverabilitySettings

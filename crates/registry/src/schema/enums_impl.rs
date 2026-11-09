@@ -7160,6 +7160,9 @@ impl EnumImpl for Permission {
             b"sysDeliverabilityCheck" => Permission::SysDeliverabilityCheck,
             b"sysScheduledReportGet" => Permission::SysScheduledReportGet,
             b"sysScheduledReportUpdate" => Permission::SysScheduledReportUpdate,
+            b"sysStoreCheck" => Permission::SysStoreCheck,
+            b"sysStoreSnapshot" => Permission::SysStoreSnapshot,
+            b"sysBlobStoreChange" => Permission::SysBlobStoreChange,
             b"sysAccountGet" => Permission::SysAccountGet,
             b"sysAccountCreate" => Permission::SysAccountCreate,
             b"sysAccountUpdate" => Permission::SysAccountUpdate,
@@ -7866,6 +7869,9 @@ impl EnumImpl for Permission {
             Permission::SysDeliverabilityCheck => "sysDeliverabilityCheck",
             Permission::SysScheduledReportGet => "sysScheduledReportGet",
             Permission::SysScheduledReportUpdate => "sysScheduledReportUpdate",
+            Permission::SysStoreCheck => "sysStoreCheck",
+            Permission::SysStoreSnapshot => "sysStoreSnapshot",
+            Permission::SysBlobStoreChange => "sysBlobStoreChange",
             Permission::SysAccountGet => "sysAccountGet",
             Permission::SysAccountCreate => "sysAccountCreate",
             Permission::SysAccountUpdate => "sysAccountUpdate",
@@ -8565,6 +8571,9 @@ impl EnumImpl for Permission {
             687 => Some(Permission::SysDeliverabilityCheck),
             688 => Some(Permission::SysScheduledReportGet),
             689 => Some(Permission::SysScheduledReportUpdate),
+            695 => Some(Permission::SysStoreCheck),
+            696 => Some(Permission::SysStoreSnapshot),
+            697 => Some(Permission::SysBlobStoreChange),
             219 => Some(Permission::SysAccountGet),
             220 => Some(Permission::SysAccountCreate),
             221 => Some(Permission::SysAccountUpdate),
@@ -9009,7 +9018,7 @@ impl EnumImpl for Permission {
         }
     }
 
-    const COUNT: usize = 690;
+    const COUNT: usize = 698;
 }
 
 impl serde::Serialize for Permission {

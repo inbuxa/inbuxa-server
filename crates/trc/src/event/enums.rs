@@ -12,10 +12,14 @@
 // auth.legacy-protocol-refused (legacy-protocols LP-6); 643 is
 // security.legacy-protocols-changed (LP-8); 644 to 646 are the cluster
 // coordinator's connection events; 647 and 648 are the audit log's
-// (audit-hold-lock spec, AU-3, AU-8); 649 is cluster.node-id-reassigned.
+// (audit-hold-lock spec, AU-3, AU-8); 649 is cluster.node-id-reassigned;
+// 650 to 659 are inbuxa Relay's in the 27.1 series and unused here; 660 is
+// store.blob-read-through (blob-store-change spec, BM-3). Ids are shared
+// with 27.1 because stored settings name events by id.
 // TOTAL_EVENT_COUNT sizes the collector's per-event tables, so it is one
 // more than the highest id; the test below holds it to the variant list
-pub const TOTAL_EVENT_COUNT: usize = 650;
+// less those 10 unused ids
+pub const TOTAL_EVENT_COUNT: usize = 661;
 pub const TOTAL_METRIC_COUNT: usize = 369;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -853,6 +857,9 @@ pub enum StoreEvent {
     CacheUpdate = 577,
     CacheEntryTooLarge = 633,
     BlobMissingMarker = 507,
+    /// inbuxa: blob-store-change spec, BM-3: a blob the blob store lacked
+    /// was found in the one it replaced, and kept.
+    BlobReadThrough = 660,
     DataWrite = 513,
     DataIterate = 512,
     BlobRead = 508,
@@ -1397,7 +1404,8 @@ mod tests {
     #[test]
     fn event_ids_fit_the_collector_tables() {
         let variants = EventType::variants();
-        assert_eq!(variants.len(), TOTAL_EVENT_COUNT);
+        // inbuxa: 650 to 659 are the 27.1 series' Relay events
+        assert_eq!(variants.len() + 10, TOTAL_EVENT_COUNT);
         let mut ids = variants
             .iter()
             .map(|event| event.to_id())

@@ -88,6 +88,15 @@ impl Response<'_> {
                         GetResponseMethod::MailRule(response) => {
                             response.eval_jptr(path, &mut results)
                         }
+                        GetResponseMethod::StoreCheck(response) => {
+                            response.eval_jptr(path, &mut results)
+                        }
+                        GetResponseMethod::StoreSnapshot(response) => {
+                            response.eval_jptr(path, &mut results)
+                        }
+                        GetResponseMethod::BlobStoreChange(response) => {
+                            response.eval_jptr(path, &mut results)
+                        }
                         GetResponseMethod::SecurityAcceptance(response) => {
                             response.eval_jptr(path, &mut results)
                         }
