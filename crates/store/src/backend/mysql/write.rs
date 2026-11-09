@@ -316,6 +316,34 @@ impl MysqlStore {
                                 })?,
                             );
                         }
+                        // inbuxa: SL-10: the counter keeps its expiry in its row
+                        ValueOp::AddAndGetExpiring(by, expires_at) => {
+                            let s = trx
+                                .prep(format!(
+                                    concat!(
+                                        "INSERT INTO {} (k, v, e) VALUES (:k, LAST_INSERT_ID(:v), :e) ",
+                                        "ON DUPLICATE KEY UPDATE v = LAST_INSERT_ID(v + :v), ",
+                                        "e = GREATEST(COALESCE(e, 0), :e)"
+                                    ),
+                                    table
+                                ))
+                                .await?;
+                            trx.exec_drop(
+                                &s,
+                                params! {"k" => key, "v" => &*by, "e" => *expires_at as i64},
+                            )
+                            .await?;
+                            let s = trx.prep("SELECT LAST_INSERT_ID()").await?;
+                            result.push_counter_id(
+                                trx.exec_first::<i64, _, _>(&s, ()).await?.ok_or_else(|| {
+                                    mysql_async::Error::Io(mysql_async::IoError::Io(
+                                        std::io::Error::other(
+                                            "LAST_INSERT_ID() did not return a value",
+                                        ),
+                                    ))
+                                })?,
+                            );
+                        }
                         ValueOp::Clear => {
                             // Update asserted value
                             if let Some(exists) = asserted_values.get_mut(&key) {
@@ -399,6 +427,26 @@ impl MysqlStore {
             }
 
             Ok(())
+        })
+        .await;
+        bounded(conn, result, limit)
+    }
+
+    /// inbuxa: SL-12
+    pub(crate) async fn purge_expired_counters(&self, now: u64) -> trc::Result<u64> {
+        let mut conn = self.conn().await?;
+        let limit = self.timeouts.maintenance;
+        let result = tokio::time::timeout(limit, async {
+            conn.exec_drop(
+                format!(
+                    "DELETE FROM {} WHERE e <= ?",
+                    char::from(SUBSPACE_IN_MEMORY_COUNTER)
+                ),
+                (now as i64,),
+            )
+            .await
+            .map_err(into_error)?;
+            Ok(conn.affected_rows())
         })
         .await;
         bounded(conn, result, limit)

@@ -113,8 +113,10 @@ pub const DATABASE_SCHEMA_VERSION: u32 = 6;
 // was last opened by a release from before the mark, or by Stalwart, and
 // gets it on start. A release refuses a store marked newer than its own.
 //
-// 1 - the 0.16 layout plus the fork's own subspace (2026.10.x, 27.1)
-pub const INBUXA_STORE_VERSION: u32 = 1;
+// 1 - the 0.16 layout plus the fork's own subspace (2026.10.x, 27.1-rc.16)
+// 2 - in-memory counters on SQL keep their own expiry (store-layout spec
+//     SL-10); the steps are in crates/migration/src/layout.rs
+pub const INBUXA_STORE_VERSION: u32 = 2;
 pub const INBUXA_STORE_VERSION_KEY: &[u8] = b"Vs";
 
 pub const LONG_1D_SLUMBER: Duration = Duration::from_secs(60 * 60 * 24);

@@ -2,6 +2,8 @@
  * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
+ *
+ * Modified by Coffey Labs in 2026 for INBUXA.
  */
 
 use super::{SqliteStore, into_error};
@@ -193,6 +195,26 @@ impl SqliteStore {
                                     .caused_by(trc::location!())?,
                                 );
                             }
+                            // inbuxa: SL-10: the counter keeps its expiry in its row
+                            ValueOp::AddAndGetExpiring(by, expires_at) => {
+                                result.push_counter_id(
+                                    trx.prepare_cached(&format!(
+                                        concat!(
+                                            "INSERT INTO {t} (k, v, e) VALUES (?, ?, ?) ",
+                                            "ON CONFLICT(k) DO UPDATE SET v = v + excluded.v, ",
+                                            "e = MAX(COALESCE(e, 0), excluded.e) RETURNING v"
+                                        ),
+                                        t = table
+                                    ))
+                                    .map_err(into_error)
+                                    .caused_by(trc::location!())?
+                                    .query_row(params![&key, &*by, *expires_at as i64], |row| {
+                                        row.get::<_, i64>(0)
+                                    })
+                                    .map_err(into_error)
+                                    .caused_by(trc::location!())?,
+                                );
+                            }
                             ValueOp::Clear => {
                                 trx.prepare_cached(&format!("DELETE FROM {} WHERE k = ?", table))
                                     .map_err(into_error)
@@ -293,6 +315,25 @@ impl SqliteStore {
             }
 
             Ok(())
+        })
+        .await
+    }
+
+    /// inbuxa: SL-12
+    pub(crate) async fn purge_expired_counters(&self, now: u64) -> trc::Result<u64> {
+        let manager = self.conn_pool.clone();
+        self.spawn_worker(move || {
+            let conn = manager.get().map_err(into_error)?;
+            conn.prepare_cached(&format!(
+                "DELETE FROM {} WHERE e <= ?",
+                char::from(SUBSPACE_IN_MEMORY_COUNTER)
+            ))
+            .map_err(into_error)
+            .caused_by(trc::location!())?
+            .execute([now as i64])
+            .map(|rows| rows as u64)
+            .map_err(into_error)
+            .caused_by(trc::location!())
         })
         .await
     }

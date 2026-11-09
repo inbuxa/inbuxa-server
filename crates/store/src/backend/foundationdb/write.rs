@@ -2,6 +2,8 @@
  * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
+ *
+ * Modified by Coffey Labs in 2026 for INBUXA.
  */
 
 use super::{
@@ -167,6 +169,10 @@ impl FdbStore {
                                 };
                                 trx.set(&key, &num.to_le_bytes()[..]);
                                 result.push_counter_id(num);
+                            }
+                            // inbuxa: SL-10 is SQL only
+                            ValueOp::AddAndGetExpiring(..) => {
+                                return Err(trc::StoreEvent::NotSupported.into_err().details("In-memory counters keep their expiry in a marker on this backend"));
                             }
                             ValueOp::Clear => {
                                 if is_chunked_value(key[0], class) {

@@ -2,6 +2,8 @@
  * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
+ *
+ * Modified by Coffey Labs in 2026 for INBUXA.
  */
 
 use super::{CF_INDEXES, CF_LOGS, CfHandle, RocksDbStore, into_error};
@@ -260,6 +262,12 @@ impl RocksDBTransaction<'_, '_> {
                                 })?;
                             txn.put_cf(&cf, &key, &num.to_le_bytes()[..])?;
                             result.push_counter_id(num);
+                        }
+                        // inbuxa: SL-10 is SQL only
+                        ValueOp::AddAndGetExpiring(..) => {
+                            return Err(CommitError::from(
+                                trc::StoreEvent::NotSupported.into_err().details("In-memory counters keep their expiry in a marker on this backend"),
+                            ));
                         }
                         ValueOp::Clear => {
                             txn.delete_cf(&cf, &key)?;

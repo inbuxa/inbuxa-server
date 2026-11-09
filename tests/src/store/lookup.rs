@@ -12,7 +12,11 @@ use crate::utils::{
 };
 use registry::schema::structs::Rate;
 use registry::types::duration::Duration;
-use store::{InMemoryStore, dispatch::lookup::KeyValue};
+use store::{
+    InMemoryStore, ValueKey,
+    dispatch::lookup::KeyValue,
+    write::{InMemoryClass, ValueClass},
+};
 
 #[tokio::test]
 pub async fn lookup_tests() {
@@ -152,6 +156,32 @@ pub async fn lookup_tests() {
         if let InMemoryStore::Store(store) = &store {
             store_assert_is_empty(store, store.clone().into(), false).await;
         }
+    }
+
+    // inbuxa: SL-10: on SQL a counter with an expiry is one row, with no
+    // marker, and the purge removes it by that expiry
+    if let InMemoryStore::Store(data) = &store
+        && data.counters_keep_expiry()
+    {
+        let key = KeyValue::<()>::build_key(3, b"bucket");
+        assert_eq!(
+            1,
+            store
+                .counter_incr(KeyValue::new(key.clone(), 1).expires(1), true)
+                .await
+                .unwrap()
+        );
+        let marker = data
+            .get_value::<u64>(ValueKey::from(ValueClass::InMemory(InMemoryClass::Key(
+                key.clone(),
+            ))))
+            .await
+            .unwrap();
+        assert_eq!(marker, None, "a counter marker was written");
+        tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
+        store.purge_in_memory_store().await.unwrap();
+        assert_eq!(0, store.counter_get(key.clone()).await.unwrap());
+        store_assert_is_empty(data, data.clone().into(), false).await;
     }
 
     // Test locking

@@ -74,6 +74,9 @@ async fn main() -> std::io::Result<()> {
     init.start_services().await;
     init.start_queue_manager();
 
+    // inbuxa: store-layout spec SL-5: stop if a newer release changes the store
+    migration::layout::spawn_mark_watch(init.inner.clone());
+
     // Log configuration errors
     init.bootstrap.log_errors();
     init.bootstrap.log_warnings();

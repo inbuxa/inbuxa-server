@@ -175,6 +175,33 @@ impl MysqlStore {
                 .map_err(into_error)?;
             }
 
+            // inbuxa: SL-10: in-memory counters keep their expiry in their
+            // row. MySQL has no ADD COLUMN IF NOT EXISTS, so look first, and
+            // take "duplicate column" from a node starting at the same time
+            // as done.
+            let table = char::from(SUBSPACE_IN_MEMORY_COUNTER).to_string();
+            let has_expiry = conn
+                .exec_first::<u8, _, _>(
+                    concat!(
+                        "SELECT 1 FROM information_schema.columns WHERE ",
+                        "table_schema = DATABASE() AND table_name = ? AND column_name = 'e'"
+                    ),
+                    (table.as_str(),),
+                )
+                .await
+                .map_err(into_error)?
+                .is_some();
+            if !has_expiry {
+                match conn
+                    .query_drop(format!("ALTER TABLE {table} ADD COLUMN e BIGINT NULL"))
+                    .await
+                {
+                    Ok(()) => {}
+                    Err(mysql_async::Error::Server(err)) if err.code == 1060 => {}
+                    Err(err) => return Err(into_error(err)),
+                }
+            }
+
             Ok(())
         })
         .await;

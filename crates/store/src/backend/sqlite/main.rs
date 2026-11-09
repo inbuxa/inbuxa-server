@@ -125,6 +125,22 @@ impl SqliteStore {
             .map_err(into_error)?;
         }
 
+        // inbuxa: SL-10: in-memory counters keep their expiry in their row
+        let table = char::from(SUBSPACE_IN_MEMORY_COUNTER);
+        let has_expiry = conn
+            .prepare(&format!(
+                "SELECT 1 FROM pragma_table_info('{table}') WHERE name = 'e'"
+            ))
+            .and_then(|mut s| s.exists([]))
+            .map_err(into_error)?;
+        if !has_expiry {
+            match conn.execute(&format!("ALTER TABLE {table} ADD COLUMN e INTEGER"), []) {
+                Ok(_) => {}
+                Err(err) if err.to_string().contains("duplicate column") => {}
+                Err(err) => return Err(into_error(err)),
+            }
+        }
+
         Ok(())
     }
 

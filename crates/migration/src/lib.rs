@@ -9,21 +9,22 @@
 #![warn(clippy::large_futures)]
 
 use crate::v016::migrate_v0_16;
-use common::{DATABASE_SCHEMA_VERSION, INBUXA_STORE_VERSION, INBUXA_STORE_VERSION_KEY, Server};
+use common::{DATABASE_SCHEMA_VERSION, INBUXA_STORE_VERSION, Server};
 use store::{
-    IterateParams, SUBSPACE_INBUXA, SUBSPACE_PROPERTY, SUBSPACE_QUEUE_MESSAGE, SUBSPACE_REPORT_IN,
+    IterateParams, SUBSPACE_PROPERTY, SUBSPACE_QUEUE_MESSAGE, SUBSPACE_REPORT_IN,
     SUBSPACE_REPORT_OUT, SerializeInfallible,
     write::{AnyClass, AnyKey, BatchBuilder, ValueClass},
 };
 use trc::AddContext;
 
 pub mod destroy;
+pub mod layout;
 pub mod v016;
 
 pub async fn try_migrate(server: &Server) -> trc::Result<()> {
     // inbuxa: a store a newer release has changed is refused before anything
     // below writes to it.
-    let store_version = store_version(server).await?;
+    let store_version = layout::store_version(server.store()).await?;
     if let Some(version) = store_version.filter(|version| *version > INBUXA_STORE_VERSION) {
         abort(&format!(
             "The data store was upgraded by a newer release (store version {version}, this release reads up to {INBUXA_STORE_VERSION}). Run that release again, or restore the backup taken before the upgrade, see https://docs.inbuxa.org/install/migrating/"
@@ -45,7 +46,7 @@ pub async fn try_migrate(server: &Server) -> trc::Result<()> {
     {
         Some(DATABASE_SCHEMA_VERSION) => {
             if !std::env::var("DANGER_FORCE_MIGRATE").is_ok_and(|v| v == "1") {
-                return mark_store(server, store_version).await;
+                return layout::upgrade_layout(server, store_version, false).await;
             }
         }
         Some(0..=4) => {
@@ -72,7 +73,7 @@ pub async fn try_migrate(server: &Server) -> trc::Result<()> {
         _ => {
             if is_new_install(server).await.caused_by(trc::location!())? {
                 write_schema_version(server).await?;
-                return mark_store(server, store_version).await;
+                return layout::upgrade_layout(server, store_version, true).await;
             } else {
                 abort(concat!(
                     "You must first upgrade to version 0.15, please read ",
@@ -84,42 +85,7 @@ pub async fn try_migrate(server: &Server) -> trc::Result<()> {
 
     migrate_v0_16(server).await?;
     write_schema_version(server).await?;
-    mark_store(server, store_version).await
-}
-
-async fn store_version(server: &Server) -> trc::Result<Option<u32>> {
-    server
-        .store()
-        .get_value::<u32>(AnyKey {
-            subspace: SUBSPACE_INBUXA,
-            key: INBUXA_STORE_VERSION_KEY.to_vec(),
-        })
-        .await
-        .caused_by(trc::location!())
-}
-
-// inbuxa: written once, when a store has no mark yet
-async fn mark_store(server: &Server, store_version: Option<u32>) -> trc::Result<()> {
-    if store_version.is_some() {
-        return Ok(());
-    }
-
-    let mut batch = BatchBuilder::new();
-    batch.set(
-        ValueClass::Any(AnyClass {
-            subspace: SUBSPACE_INBUXA,
-            key: INBUXA_STORE_VERSION_KEY.to_vec(),
-        }),
-        INBUXA_STORE_VERSION.serialize(),
-    );
-
-    server
-        .store()
-        .write(batch.build_all())
-        .await
-        .caused_by(trc::location!())?;
-
-    Ok(())
+    layout::upgrade_layout(server, store_version, false).await
 }
 
 async fn write_schema_version(server: &Server) -> trc::Result<()> {
@@ -141,7 +107,7 @@ async fn write_schema_version(server: &Server) -> trc::Result<()> {
     Ok(())
 }
 
-fn abort(message: &str) -> ! {
+pub(crate) fn abort(message: &str) -> ! {
     eprintln!("Migration aborted: {message}");
     panic!("Migration aborted: {message}");
 }

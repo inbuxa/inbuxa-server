@@ -219,6 +219,29 @@ impl PostgresStore {
                 .map_err(into_error)?;
             }
 
+            // inbuxa: SL-10: in-memory counters keep their expiry in their
+            // row. Added only when missing, so a start doesn't lock the table.
+            let table = char::from(SUBSPACE_IN_MEMORY_COUNTER).to_string();
+            let has_expiry = conn
+                .query_opt(
+                    concat!(
+                        "SELECT 1 FROM information_schema.columns WHERE ",
+                        "table_schema = current_schema() AND table_name = $1 AND column_name = 'e'"
+                    ),
+                    &[&table],
+                )
+                .await
+                .map_err(into_error)?
+                .is_some();
+            if !has_expiry {
+                conn.execute(
+                    &format!("ALTER TABLE {table} ADD COLUMN IF NOT EXISTS e BIGINT"),
+                    &[],
+                )
+                .await
+                .map_err(into_error)?;
+            }
+
             Ok(())
         })
         .await;

@@ -2,6 +2,8 @@
  * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
+ *
+ * Modified by Coffey Labs in 2026 for INBUXA.
  */
 
 use super::EphemeralStore;
@@ -102,6 +104,12 @@ impl EphemeralStore {
                             let next = current + *by;
                             map.insert(key, next.to_le_bytes().to_vec());
                             result.push_counter_id(next);
+                        }
+                        // inbuxa: SL-10 is SQL only
+                        ValueOp::AddAndGetExpiring(..) => {
+                            return Err(trc::StoreEvent::NotSupported.into_err().details(
+                                "In-memory counters keep their expiry in a marker on this backend",
+                            ));
                         }
                         ValueOp::Clear => {
                             map.remove(&key);
