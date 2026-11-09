@@ -198,6 +198,12 @@ pub trait ImapResponse {
 }
 
 pub fn quoted_string(buf: &mut Vec<u8>, text: &str) {
+    // A quoted string cannot hold CR or LF; send those as a literal so a
+    // stored value never ends the response line early
+    if text.as_bytes().iter().any(|ch| matches!(ch, b'\r' | b'\n')) {
+        literal_string(buf, text.as_bytes());
+        return;
+    }
     buf.push(b'"');
     for &c in text.as_bytes() {
         if c == b'\\' || c == b'"' {
