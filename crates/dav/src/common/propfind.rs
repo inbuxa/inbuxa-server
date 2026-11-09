@@ -200,9 +200,10 @@ impl PropFindRequestHandler for Server {
                             StatusCode::NOT_FOUND,
                         ));
                     } else if access_token.has_account_access(account_id)
-                        || (self.core.groupware.allow_directory_query
+                        || ((self.core.groupware.allow_directory_query
                             && access_token.has_permission(Permission::DavPrincipalList))
-                        || access_token.has_permission(Permission::SysAccountQuery)
+                            || access_token.has_permission(Permission::SysAccountQuery))
+                            && is_in_tenant(self, access_token, account_id).await?
                     {
                         self.prepare_principal_propfind_response(
                             access_token,
@@ -1723,6 +1724,24 @@ impl SyncTokenUrn for DavResources {
             seq: 0,
         }
         .to_string()
+    }
+}
+
+// inbuxa: reading the directory stays inside the caller's tenant, the same
+// rule as the principal listing and JMAP Principal/get; a caller outside
+// any tenant isn't limited.
+async fn is_in_tenant(
+    server: &Server,
+    access_token: &AccessToken,
+    account_id: u32,
+) -> trc::Result<bool> {
+    match access_token.tenant_id() {
+        Some(tenant_id) => Ok(server
+            .try_account(account_id)
+            .await
+            .caused_by(trc::location!())?
+            .is_some_and(|account| account.id_tenant == Some(tenant_id))),
+        None => Ok(true),
     }
 }
 
