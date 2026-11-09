@@ -35,8 +35,10 @@ before January, else 27.7. Release candidates may carry it before then.
 - **SL-1.** `crates/migration` holds one function per step, keyed by the
   version it starts from. At boot the runner reads the mark, treats a
   missing mark on an existing store as 1, and runs every step from there up
-  to `INBUXA_STORE_VERSION`. It writes the mark after each step, in the same
-  batch as the step's last write where the backend allows.
+  to `INBUXA_STORE_VERSION`. It writes the mark right after each step's last
+  write; SL-2 makes a step that stopped before the mark safe to run again. A
+  new install is marked at `INBUXA_STORE_VERSION` straight away. The steps
+  are in `crates/migration/src/layout.rs`.
 - **SL-2.** Every step can run twice safely. A step interrupted half-way
   runs again from the start on the next boot and comes to the same result.
 - **SL-3.** One node runs the steps. Before the first step a node takes a
@@ -45,19 +47,25 @@ before January, else 27.7. Release candidates may carry it before then.
   run. A node that can't take the lease waits, re-reads the mark every 10
   seconds, and goes on booting once the mark reaches its own version. A
   lease left by a node that died expires and the next node takes it over.
+  A node also takes over a lease held under its own node id, which a run of
+  its own that stopped left behind. A node whose renewal finds the lease
+  taken stops before writing the mark.
 - **SL-4.** A newer mark than the build's own is refused before anything is
   written, as now.
 - **SL-5.** A running node re-reads the mark every 60 seconds. When it finds
   a version above its own, it logs why, stops taking connections and exits
   non-zero. Then a node left on the old build during an upgrade can't keep
   writing the old layout. This ships in the release before the first step
-  that isn't rolling-safe (SL-6).
+  that isn't rolling-safe (SL-6). It ships with the runner.
 - **SL-6.** Each step says whether it is rolling-safe: whether nodes on the
   build before it can keep running, unharmed, against the new layout. A
   step that isn't refuses to start while another node shows as active
-  (`cluster_node_list`, status Active; how quickly a stopped node stops
-  showing as active is to be checked when this is built). It logs that the
-  other nodes must be stopped first. A single-node install never waits.
+  (`cluster_node_list`, status Active). A stopped node stops showing as
+  active three minutes after its last heartbeat (`UNRESPONSIVE_NODE_TIMEOUT`).
+  The step waits, re-checking every 10 seconds, and logs every minute that
+  the other nodes must be stopped first. Only other node ids on other hosts
+  count, so a single-node install never waits, even on an id of its own
+  from before a restart.
 - **SL-7.** Each step logs when it starts and when it ends, with counts of
   what it changed. The startup log states the store's layout version.
 - **SL-8.** Before a step runs, the server logs that the upgrade can't be
@@ -80,9 +88,12 @@ before January, else 27.7. Release candidates may carry it before then.
   row, `(k, v, e)`, instead of a counter row in `y` plus an expiry marker
   row in `m`. RocksDB and FoundationDB keep today's form, and the step does
   nothing there except write the mark.
-- **SL-11.** The step adds the column, fills `e` from each counter's marker,
-  then deletes those markers. Locks, greylist entries, Sieve duplicate ids
-  and other keys in `m` stay where they are.
+- **SL-11.** The column is added at boot by every build that has it, before
+  any step runs, so a node is never without it. The step fills `e` from each
+  counter's marker (an upsert adding 0 and keeping the later expiry), then
+  deletes those markers. A counter whose marker has already run out is
+  deleted with it. Locks, greylist entries, Sieve duplicate ids and other keys
+  in `m` stay where they are.
 - **SL-12.** The purge deletes expired counters with one statement per table
   (`DELETE FROM y WHERE e <= now`). Rows with a NULL `e`, written by a node on
   the old build during a roll, are purged the old way.
