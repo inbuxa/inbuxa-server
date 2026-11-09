@@ -296,6 +296,9 @@ impl RequestHandler for Server {
                                     SetResponseMethod::StoreCheck(set_response) => {
                                         set_response.update_created_ids(&mut response);
                                     }
+                                    SetResponseMethod::StoreSnapshot(set_response) => {
+                                        set_response.update_created_ids(&mut response);
+                                    }
                                     SetResponseMethod::Relay(set_response) => {
                                         set_response.update_created_ids(&mut response);
                                     }
@@ -579,6 +582,13 @@ impl RequestHandler for Server {
                 GetRequestMethod::StoreCheck(mut req) => {
                     resolve_account_id(&mut req.account_id, method_name.obj, access_token)?;
                     crate::inbuxa::store_check::get(self, access_token, *req)
+                        .await?
+                        .into()
+                }
+                // inbuxa: a snapshot of the store
+                GetRequestMethod::StoreSnapshot(mut req) => {
+                    resolve_account_id(&mut req.account_id, method_name.obj, access_token)?;
+                    crate::inbuxa::store_snapshot::get(self, access_token, *req)
                         .await?
                         .into()
                 }
@@ -1187,6 +1197,22 @@ impl RequestHandler for Server {
                         None,
                         *req,
                         |req| Box::pin(crate::inbuxa::store_check::set(self, access_token, req)),
+                    )
+                    .await?
+                    .into()
+                }
+                // inbuxa: store-snapshot spec, SN-8: taking and destroying are audited
+                SetRequestMethod::StoreSnapshot(mut req) => {
+                    resolve_account_id(&mut req.account_id, method_name.obj, access_token)?;
+                    crate::inbuxa::audit::recorded(
+                        self,
+                        access_token,
+                        session,
+                        &method_name.obj.to_string(),
+                        None,
+                        None,
+                        *req,
+                        |req| Box::pin(crate::inbuxa::store_snapshot::set(self, access_token, req)),
                     )
                     .await?
                     .into()

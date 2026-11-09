@@ -393,6 +393,11 @@ impl Default for DefaultPermissions {
                 Permission::SysStoreCheck => {
                     default.superuser.push(permission);
                 }
+                // inbuxa: store-snapshot spec, SN-8: a snapshot holds every
+                // account's data, so only the server's administrators take one
+                Permission::SysStoreSnapshot => {
+                    default.superuser.push(permission);
+                }
                 // inbuxa: AL-12: tenant administrators lock and delegate
                 // within their tenant
                 Permission::SysAccountLockGet

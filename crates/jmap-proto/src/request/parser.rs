@@ -719,6 +719,21 @@ impl<'de> Visitor<'de> for CallVisitor {
                     return Err(de::Error::invalid_length(1, &self));
                 }
             },
+            // inbuxa: a snapshot of the store
+            (MethodFunction::Get, MethodObject::StoreSnapshot) => match seq.next_element() {
+                Ok(Some(value)) => RequestMethod::Get(GetRequestMethod::StoreSnapshot(value)),
+                Err(err) => RequestMethod::invalid(err),
+                Ok(None) => {
+                    return Err(de::Error::invalid_length(1, &self));
+                }
+            },
+            (MethodFunction::Set, MethodObject::StoreSnapshot) => match seq.next_element() {
+                Ok(Some(value)) => RequestMethod::Set(SetRequestMethod::StoreSnapshot(value)),
+                Err(err) => RequestMethod::invalid(err),
+                Ok(None) => {
+                    return Err(de::Error::invalid_length(1, &self));
+                }
+            },
             // inbuxa: inbuxa Relay
             (MethodFunction::Get, MethodObject::Relay) => match seq.next_element() {
                 Ok(Some(value)) => RequestMethod::Get(GetRequestMethod::Relay(value)),

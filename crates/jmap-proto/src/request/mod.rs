@@ -129,6 +129,7 @@ pub enum GetRequestMethod {
     MailRule(Box<GetRequest<crate::object::inbuxa_mail_rule::MailRule>>),
     Migration(Box<GetRequest<crate::object::inbuxa_migration::Migration>>),
     StoreCheck(Box<GetRequest<crate::object::inbuxa_store_check::StoreCheck>>),
+    StoreSnapshot(Box<GetRequest<crate::object::inbuxa_store_snapshot::StoreSnapshot>>),
     Relay(Box<GetRequest<crate::object::inbuxa_relay::Relay>>),
     RelayMessage(Box<GetRequest<crate::object::inbuxa_relay_message::RelayMessage>>),
     SecurityAcceptance(
@@ -189,6 +190,7 @@ pub enum SetRequestMethod<'x> {
     MailRule(Box<SetRequest<'x, crate::object::inbuxa_mail_rule::MailRule>>),
     Migration(Box<SetRequest<'x, crate::object::inbuxa_migration::Migration>>),
     StoreCheck(Box<SetRequest<'x, crate::object::inbuxa_store_check::StoreCheck>>),
+    StoreSnapshot(Box<SetRequest<'x, crate::object::inbuxa_store_snapshot::StoreSnapshot>>),
     Relay(Box<SetRequest<'x, crate::object::inbuxa_relay::Relay>>),
     RelayMessage(Box<SetRequest<'x, crate::object::inbuxa_relay_message::RelayMessage>>),
     SecurityAcceptance(

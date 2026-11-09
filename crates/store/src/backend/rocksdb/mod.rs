@@ -2,6 +2,8 @@
  * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
+ *
+ * Modified by Coffey Labs in 2026 for INBUXA.
  */
 
 use std::sync::Arc;
@@ -11,6 +13,7 @@ use rocksdb::{BoundColumnFamily, MultiThreaded, OptimisticTransactionDB};
 use crate::{SUBSPACE_BLOBS, SUBSPACE_INDEXES, SUBSPACE_LOGS};
 
 pub mod blob;
+pub mod checkpoint; // inbuxa: store-snapshot spec
 pub mod main;
 pub mod read;
 pub mod write;

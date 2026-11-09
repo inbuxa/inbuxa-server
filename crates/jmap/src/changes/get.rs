@@ -433,6 +433,7 @@ impl IntermediateChangesResponse {
             | MethodObject::MailRule
             | MethodObject::Migration
             | MethodObject::StoreCheck
+            | MethodObject::StoreSnapshot
             | MethodObject::Relay
             | MethodObject::RelayMessage
             | MethodObject::SecurityAcceptance

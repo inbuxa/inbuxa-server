@@ -33,6 +33,7 @@ pub mod blob_check; // inbuxa: store-check spec
 pub mod key;
 pub mod log;
 pub mod serialize;
+pub mod snapshot; // inbuxa: store-snapshot spec
 
 pub(crate) const ARCHIVE_ALIGNMENT: usize = 16;
 

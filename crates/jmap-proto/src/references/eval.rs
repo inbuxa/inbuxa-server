@@ -94,6 +94,9 @@ impl Response<'_> {
                         GetResponseMethod::StoreCheck(response) => {
                             response.eval_jptr(path, &mut results)
                         }
+                        GetResponseMethod::StoreSnapshot(response) => {
+                            response.eval_jptr(path, &mut results)
+                        }
                         GetResponseMethod::Relay(response) => {
                             response.eval_jptr(path, &mut results)
                         }

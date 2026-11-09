@@ -281,6 +281,16 @@ retention = "object-life"
 createdBy = ["identifier"]
 problems = ["identifier", "metadata"]
 
+[object."inbuxa:StoreSnapshot"]
+file = "inbuxa_store_snapshot.rs"
+default = "none"
+whose = ["administrator"]
+where = ["data-directory"]
+scope = "server"
+retention = "object-life"
+[object."inbuxa:StoreSnapshot".properties]
+createdBy = ["identifier"]
+
 [object."inbuxa:Migration"]
 file = "inbuxa_migration.rs"
 default = "none"
@@ -422,6 +432,19 @@ scope = "server"
 retention = "object-life"
 leaves_host = false
 written_by = ["crates/services/src/inbuxa_migrations.rs"]
+
+# A store snapshot: a copy of the whole data store, and of a filesystem
+# blob store's files, under snapshots/ in the RocksDB directory. The latest
+# two are kept; a backup tool takes them off the host if the administrator
+# has one do so (store-snapshot spec, SN-3, SN-6).
+[source."store-snapshots"]
+categories = ["content", "identifier", "contact", "network", "metadata", "credential"]
+whose = ["holder", "correspondent", "administrator"]
+where = ["data-directory"]
+scope = "server"
+retention = "object-life"
+leaves_host = false
+written_by = ["crates/services/src/inbuxa_store_snapshot.rs"]
 
 [source."full-text-index"]
 categories = ["content", "identifier", "contact", "metadata"]

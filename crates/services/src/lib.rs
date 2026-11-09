@@ -31,6 +31,7 @@ pub mod inbuxa_relay_certificates; // inbuxa: inbuxa Relays' certificates
 pub mod inbuxa_relay_link; // inbuxa: links to inbuxa Relays
 pub mod inbuxa_scheduled_reports; // inbuxa: scheduled reports and the weekly digest
 pub mod inbuxa_store_check; // inbuxa: checking the store's blobs
+pub mod inbuxa_store_snapshot; // inbuxa: a snapshot of the store
 pub mod state_manager;
 pub mod task_manager;
 
@@ -87,6 +88,10 @@ impl SpawnServices for IpcReceivers {
 
             // inbuxa: store-check spec, SV-8: a check this node ran stopped with it
             inbuxa_store_check::spawn_store_checks(inner.clone());
+
+            // inbuxa: store-snapshot spec, SN-7: a snapshot cut short by a
+            // stop leaves a partial directory
+            inbuxa_store_snapshot::spawn_store_snapshots(inner.clone());
 
             // inbuxa: relay spec, "The link service": every node links to every relay
             inbuxa_relay_link::spawn_relay_links(inner.clone());

@@ -57,6 +57,7 @@ impl Response<'_> {
                 GetRequestMethod::MailRule(request) => request.resolve_references(self)?,
                 GetRequestMethod::Migration(request) => request.resolve_references(self)?,
                 GetRequestMethod::StoreCheck(request) => request.resolve_references(self)?,
+                GetRequestMethod::StoreSnapshot(request) => request.resolve_references(self)?,
                 GetRequestMethod::Relay(request) => request.resolve_references(self)?,
                 GetRequestMethod::RelayMessage(request) => request.resolve_references(self)?,
                 GetRequestMethod::SecurityAcceptance(request) => {
@@ -157,6 +158,9 @@ impl Response<'_> {
                     request.resolve_references(self, 1, false)?
                 }
                 SetRequestMethod::StoreCheck(request) => {
+                    request.resolve_references(self, 1, false)?
+                }
+                SetRequestMethod::StoreSnapshot(request) => {
                     request.resolve_references(self, 1, false)?
                 }
                 SetRequestMethod::Relay(request) => request.resolve_references(self, 1, false)?,
