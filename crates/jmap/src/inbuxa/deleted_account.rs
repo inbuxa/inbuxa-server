@@ -35,7 +35,7 @@ use registry::{
     schema::{
         enums::{AccountType, Permission},
         prelude::{Object, ObjectInner, ObjectType, Property},
-        structs::{Account, Credential, Task, TaskDestroyAccount, TaskStatus},
+        structs::{Account, Task, TaskDestroyAccount, TaskStatus},
     },
     types::{EnumImpl, datetime::UTCDateTime, id::ObjectId},
 };
@@ -424,21 +424,11 @@ async fn restore_account(
             .security
             .password_default_expiration
             .map(|expires| UTCDateTime::from_timestamp((now() + expires) as i64));
-        match user
-            .credentials
-            .values_mut()
-            .find_map(|credential| match credential {
-                Credential::Password(credential) => Some(credential),
-                _ => None,
-            }) {
-            Some(credential) => {
-                credential.secret = secret;
-                credential.expires_at = expires_at;
-            }
-            None => {
-                return Ok(Err(SetError::forbidden()
-                    .with_description("The kept account has no password credential.")));
-            }
+        // A user that never had a password gets one, the way setting a
+        // password on a live account does (#326)
+        user.set_password(secret);
+        if let Some(credential) = user.password_credential_mut() {
+            credential.expires_at = expires_at;
         }
     }
 

@@ -27,7 +27,10 @@ use jmap_proto::error::set::SetErrorType;
 use registry::{
     schema::{
         prelude::{ObjectType, Property},
-        structs::{DataRetention, Expression, Imap, Jmap, MtaStageAuth, MtaStageRcpt, Task},
+        structs::{
+            self, DataRetention, Expression, Imap, Jmap, MtaStageAuth, MtaStageRcpt, Task,
+            UserAccount,
+        },
     },
     types::duration::Duration,
 };
@@ -644,6 +647,40 @@ pub async fn test(test: &mut TestServer) {
     test.wait_for_tasks().await;
     assert!(admin.deleted_accounts().await.is_empty(), "test 14: gone");
     assert!(!pending_destroy(test, gone_id).await);
+
+    // A user created with no password comes back with the new one (#326)
+    let domain_id = admin.find_or_create_domain("example.org").await;
+    let no_password_id = admin
+        .registry_create_object(structs::Account::User(UserAccount {
+            name: "nopass".into(),
+            domain_id,
+            ..Default::default()
+        }))
+        .await;
+    admin
+        .registry_destroy(ObjectType::Account, [no_password_id])
+        .await
+        .assert_destroyed(&[no_password_id]);
+    admin
+        .deleted_account_set(json!({"update": {no_password_id.to_string(): {
+            "restore": true, "password": SECRET
+        }}}))
+        .await
+        .updated_id(no_password_id);
+    let mut no_password = Account::new("nopass@example.org", SECRET, &[], "", no_password_id);
+    no_password.http_listener_port = admin.http_listener_port;
+    assert_eq!(
+        no_password.count_with_subject("Anything").await,
+        0,
+        "test 14: signs in with the new password"
+    );
+    admin.destroy_account(no_password).await;
+    admin
+        .deleted_account_set(json!({"destroy": [no_password_id.to_string()]}))
+        .await
+        .assert_destroyed(&[no_password_id]);
+    test.wait_for_tasks().await;
+    assert!(admin.deleted_accounts().await.is_empty());
     admin.set_account_retention(None).await;
     let again = admin
         .create_user_account("gone@example.org", SECRET, "Gone", &[], vec![])
