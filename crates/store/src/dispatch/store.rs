@@ -531,6 +531,41 @@ impl Store {
         Ok(())
     }
 
+    /// inbuxa: SL-10: whether in-memory counters keep their expiry in their
+    /// own row (`ValueOp::AddAndGetExpiring`) instead of in a marker.
+    pub fn counters_keep_expiry(&self) -> bool {
+        match self {
+            #[cfg(feature = "sqlite")]
+            Self::SQLite(_) => true,
+            #[cfg(feature = "postgres")]
+            Self::PostgreSQL(_) => true,
+            #[cfg(feature = "mysql")]
+            Self::MySQL(_) => true,
+            Self::Replicated(store) => store.primary.counters_keep_expiry(),
+            _ => false,
+        }
+    }
+
+    /// inbuxa: SL-12: deletes the in-memory counters whose own expiry has
+    /// passed, with one statement. Counters without one (written by an
+    /// older build) are purged through their markers.
+    #[allow(unused_variables)]
+    pub async fn purge_expired_counters(&self, now: u64) -> trc::Result<u64> {
+        match self {
+            #[cfg(feature = "sqlite")]
+            Self::SQLite(store) => store.purge_expired_counters(now).await,
+            #[cfg(feature = "postgres")]
+            Self::PostgreSQL(store) => store.purge_expired_counters(now).await,
+            #[cfg(feature = "mysql")]
+            Self::MySQL(store) => store.purge_expired_counters(now).await,
+            Self::Replicated(store) => {
+                crate::sql_backend!(&store.primary, db => db.purge_expired_counters(now).await)
+            }
+            _ => Ok(0),
+        }
+        .caused_by(trc::location!())
+    }
+
     pub async fn create_tables(&self) -> trc::Result<()> {
         match self {
             #[cfg(feature = "sqlite")]

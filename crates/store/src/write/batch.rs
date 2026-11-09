@@ -534,7 +534,7 @@ impl Batch<'_> {
                 op,
                 Operation::AssertValue { .. }
                     | Operation::Value {
-                        op: ValueOp::AddAndGet(_),
+                        op: ValueOp::AddAndGet(_) | ValueOp::AddAndGetExpiring(..),
                         ..
                     }
             )

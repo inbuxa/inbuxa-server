@@ -412,6 +412,26 @@ impl PostgresStore {
                                     .and_then(|row| row.try_get::<_, i64>(0))?,
                             );
                         }
+                        // inbuxa: SL-10: the counter keeps its expiry in its row
+                        ValueOp::AddAndGetExpiring(by, expires_at) => {
+                            pipeline.flush().await?;
+                            let s = trx
+                                .prepare_cached(&format!(
+                                    concat!(
+                                        "INSERT INTO {t} (k, v, e) VALUES ($1, $2, $3) ",
+                                        "ON CONFLICT(k) DO UPDATE SET v = {t}.v + EXCLUDED.v, ",
+                                        "e = GREATEST(COALESCE({t}.e, 0), EXCLUDED.e) RETURNING v"
+                                    ),
+                                    t = table
+                                ))
+                                .await?;
+                            let expires_at = *expires_at as i64;
+                            result.push_counter_id(
+                                trx.query_one(&s, &[&key, by, &expires_at])
+                                    .await
+                                    .and_then(|row| row.try_get::<_, i64>(0))?,
+                            );
+                        }
                         ValueOp::Clear => {
                             let s = trx
                                 .prepare_cached(&format!("DELETE FROM {} WHERE k = $1", table))
@@ -510,6 +530,24 @@ impl PostgresStore {
             }
 
             Ok(())
+        })
+        .await;
+        bounded(conn, result, limit)
+    }
+
+    /// inbuxa: SL-12
+    pub(crate) async fn purge_expired_counters(&self, now: u64) -> trc::Result<u64> {
+        let conn = self.conn_pool.get().await.map_err(into_pool_error)?;
+        let limit = self.timeouts.maintenance;
+        let result = tokio::time::timeout(limit, async {
+            let s = conn
+                .prepare_cached(&format!(
+                    "DELETE FROM {} WHERE e <= $1",
+                    char::from(SUBSPACE_IN_MEMORY_COUNTER)
+                ))
+                .await
+                .map_err(into_error)?;
+            conn.execute(&s, &[&(now as i64)]).await.map_err(into_error)
         })
         .await;
         bounded(conn, result, limit)

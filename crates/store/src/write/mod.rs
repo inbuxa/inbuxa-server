@@ -327,6 +327,10 @@ pub enum ValueOp {
     MergeFnc(MergeOperation),
     AtomicAdd(i64),
     AddAndGet(i64),
+    /// inbuxa: SL-10: `AddAndGet` for an in-memory counter that expires at
+    /// the given time, kept in the counter's own row. Only the SQL backends
+    /// take it (`Store::counters_keep_expiry`); the others refuse it.
+    AddAndGetExpiring(i64, u64),
     #[default]
     Clear,
 }

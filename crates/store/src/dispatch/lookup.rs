@@ -196,6 +196,20 @@ impl InMemoryStore {
 
     pub async fn counter_incr(&self, kv: KeyValue<i64>, return_value: bool) -> trc::Result<i64> {
         match self {
+            // inbuxa: SL-10: on SQL a counter keeps its expiry in its own row
+            InMemoryStore::Store(store) if kv.expires.is_some() && store.counters_keep_expiry() => {
+                let expires_at = now() + kv.expires.unwrap_or_default();
+                let mut batch = BatchBuilder::new();
+                batch.any_op(Operation::Value {
+                    class: ValueClass::InMemory(InMemoryClass::Counter(kv.key)),
+                    op: ValueOp::AddAndGetExpiring(kv.value, expires_at),
+                });
+                store
+                    .write(batch.build_all())
+                    .await
+                    .and_then(|r| r.last_counter_id())
+                    .map(|value| if return_value { value } else { 0 })
+            }
             // inbuxa: SL-14: a bucketed counter writes its expiry marker once
             InMemoryStore::Store(store) if return_value && kv.value > 0 && kv.expires.is_some() => {
                 counter_incr_marked(store, kv).await
@@ -646,6 +660,12 @@ impl InMemoryStore {
                             .caused_by(trc::location!())?;
                     }
                 }
+
+                // inbuxa: SL-12: counters that keep their own expiry
+                store
+                    .purge_expired_counters(current_time)
+                    .await
+                    .caused_by(trc::location!())?;
 
                 if !expired_counters.is_empty() {
                     let mut batch = BatchBuilder::new();
