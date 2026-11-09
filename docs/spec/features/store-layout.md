@@ -90,7 +90,12 @@ before January, else 27.7. Release candidates may carry it before then.
   column there.
 - **SL-14.** Also, on every backend: write the expiry marker only when the
   counter's bucket is new, not on every increment. That half of the gain
-  needs no step and may land first.
+  needs no step and may land first. Each process remembers the markers it
+  has written; an increment leaves the marker out only once that write is
+  in and its expiry is at least the one asked for. A counter that comes back
+  equal to the amount added was just created, so if its marker was left out
+  (another node reset or purged the bucket) it is written straight after:
+  a counter is never left without a marker, which would keep it for good.
 
 ### Step 2 → 3: the fork's data gets its own subspaces
 
