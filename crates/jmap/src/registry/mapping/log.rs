@@ -164,6 +164,11 @@ fn read_log_offsets(
     anchor: u64,
     limit: usize,
 ) -> io::Result<Vec<Id>> {
+    // inbuxa: a limit of 0 asks for no entries, not all of them
+    if limit == 0 {
+        return Ok(Vec::new());
+    }
+
     let mut logs = fs::read_dir(path)?.collect::<Result<Vec<_>, _>>()?;
     logs.sort_by_key(|b| std::cmp::Reverse(b.file_name()));
 
@@ -517,5 +522,28 @@ impl<R: Read + Seek> Iterator for RevLines<R> {
             String::from_utf8(line)
                 .map_err(|_| std::io::Error::new(std::io::ErrorKind::InvalidData, "Invalid UTF-8")),
         )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::read_log_offsets;
+
+    #[test]
+    fn limit_zero_reads_no_entries() {
+        let dir = std::env::temp_dir().join(format!("inbuxa-log-limit-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("server.log"),
+            "2026-11-08T10:00:00Z INFO First (first)\n2026-11-08T10:00:01Z INFO Second (second)\n",
+        )
+        .unwrap();
+
+        let none = read_log_offsets(&dir, None, 0, 0).unwrap();
+        let all = read_log_offsets(&dir, None, 0, 10).unwrap();
+        std::fs::remove_dir_all(&dir).unwrap();
+
+        assert!(none.is_empty(), "limit 0 returned {none:?}");
+        assert_eq!(all.len(), 2);
     }
 }
