@@ -2,6 +2,8 @@
  * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
+ *
+ * Modified by Coffey Labs in 2026 for INBUXA.
  */
 
 use crate::utils::{
@@ -441,6 +443,75 @@ pub async fn test(test: &TestServer) {
         .jmap_destroy(
             MethodObject::FileNode,
             [&dupe_renamed_id, &dupe_replacement],
+            [("onDestroyRemoveChildren", true)],
+        )
+        .await
+        .destroyed()
+        .for_each(drop);
+
+    // inbuxa: onExists=replace leaves the existing node alone when the create
+    // or update is refused by a later check (here, sharing with an account
+    // that doesn't exist)
+    let response = account
+        .jmap_create(
+            MethodObject::FileNode,
+            [
+                json!({"name": "keep-a.txt"}),
+                json!({"name": "keep-b.txt"}),
+                json!({"name": "move-me.txt"}),
+            ],
+            Vec::<(&str, &str)>::new(),
+        )
+        .await;
+    let keep_a = response.created(0).id().to_string();
+    let keep_b = response.created(1).id().to_string();
+    let move_me = response.created(2).id().to_string();
+    let nobody = types::id::Id::new(999_999).to_string();
+    account
+        .jmap_create(
+            MethodObject::FileNode,
+            [json!({
+                "name": "keep-a.txt",
+                "shareWith": { &nobody: { "mayRead": true } }
+            })],
+            [("onExists", "replace")],
+        )
+        .await
+        .not_created(0);
+    account
+        .jmap_update(
+            MethodObject::FileNode,
+            [(
+                &move_me,
+                json!({
+                    "name": "keep-b.txt",
+                    "shareWith": { &nobody: { "mayRead": true } }
+                }),
+            )],
+            [("onExists", "replace")],
+        )
+        .await
+        .not_updated(&move_me);
+    let response = account
+        .jmap_get(
+            MethodObject::FileNode,
+            [FileNodeProperty::Id],
+            [&keep_a, &keep_b],
+        )
+        .await;
+    let found = response
+        .list()
+        .iter()
+        .map(|node| node.id().to_string())
+        .collect::<AHashSet<_>>();
+    assert!(
+        found.contains(&keep_a) && found.contains(&keep_b),
+        "a refused replace destroyed the existing node: found {found:?} of {keep_a} (create), {keep_b} (update)"
+    );
+    account
+        .jmap_destroy(
+            MethodObject::FileNode,
+            [&keep_a, &keep_b, &move_me],
             [("onDestroyRemoveChildren", true)],
         )
         .await
