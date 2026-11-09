@@ -130,6 +130,7 @@ pub enum GetRequestMethod {
     Migration(Box<GetRequest<crate::object::inbuxa_migration::Migration>>),
     StoreCheck(Box<GetRequest<crate::object::inbuxa_store_check::StoreCheck>>),
     StoreSnapshot(Box<GetRequest<crate::object::inbuxa_store_snapshot::StoreSnapshot>>),
+    BlobStoreChange(Box<GetRequest<crate::object::inbuxa_blob_store_change::BlobStoreChange>>),
     Relay(Box<GetRequest<crate::object::inbuxa_relay::Relay>>),
     RelayMessage(Box<GetRequest<crate::object::inbuxa_relay_message::RelayMessage>>),
     SecurityAcceptance(
@@ -191,6 +192,7 @@ pub enum SetRequestMethod<'x> {
     Migration(Box<SetRequest<'x, crate::object::inbuxa_migration::Migration>>),
     StoreCheck(Box<SetRequest<'x, crate::object::inbuxa_store_check::StoreCheck>>),
     StoreSnapshot(Box<SetRequest<'x, crate::object::inbuxa_store_snapshot::StoreSnapshot>>),
+    BlobStoreChange(Box<SetRequest<'x, crate::object::inbuxa_blob_store_change::BlobStoreChange>>),
     Relay(Box<SetRequest<'x, crate::object::inbuxa_relay::Relay>>),
     RelayMessage(Box<SetRequest<'x, crate::object::inbuxa_relay_message::RelayMessage>>),
     SecurityAcceptance(

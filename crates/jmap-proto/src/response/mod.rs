@@ -115,6 +115,7 @@ pub enum GetResponseMethod {
     Migration(GetResponse<crate::object::inbuxa_migration::Migration>),
     StoreCheck(GetResponse<crate::object::inbuxa_store_check::StoreCheck>),
     StoreSnapshot(GetResponse<crate::object::inbuxa_store_snapshot::StoreSnapshot>),
+    BlobStoreChange(GetResponse<crate::object::inbuxa_blob_store_change::BlobStoreChange>),
     Relay(GetResponse<crate::object::inbuxa_relay::Relay>),
     RelayMessage(GetResponse<crate::object::inbuxa_relay_message::RelayMessage>),
     SecurityAcceptance(GetResponse<crate::object::inbuxa_security_acceptance::SecurityAcceptance>),
@@ -174,6 +175,7 @@ pub enum SetResponseMethod {
     Migration(Box<SetResponse<crate::object::inbuxa_migration::Migration>>),
     StoreCheck(Box<SetResponse<crate::object::inbuxa_store_check::StoreCheck>>),
     StoreSnapshot(Box<SetResponse<crate::object::inbuxa_store_snapshot::StoreSnapshot>>),
+    BlobStoreChange(Box<SetResponse<crate::object::inbuxa_blob_store_change::BlobStoreChange>>),
     Relay(Box<SetResponse<crate::object::inbuxa_relay::Relay>>),
     RelayMessage(Box<SetResponse<crate::object::inbuxa_relay_message::RelayMessage>>),
     SecurityAcceptance(
@@ -1083,6 +1085,23 @@ impl<'x> From<SetResponse<crate::object::inbuxa_store_snapshot::StoreSnapshot>>
 {
     fn from(value: SetResponse<crate::object::inbuxa_store_snapshot::StoreSnapshot>) -> Self {
         ResponseMethod::Set(SetResponseMethod::StoreSnapshot(Box::new(value)))
+    }
+}
+
+// inbuxa: a change of blob store
+impl<'x> From<GetResponse<crate::object::inbuxa_blob_store_change::BlobStoreChange>>
+    for ResponseMethod<'x>
+{
+    fn from(value: GetResponse<crate::object::inbuxa_blob_store_change::BlobStoreChange>) -> Self {
+        ResponseMethod::Get(GetResponseMethod::BlobStoreChange(value))
+    }
+}
+
+impl<'x> From<SetResponse<crate::object::inbuxa_blob_store_change::BlobStoreChange>>
+    for ResponseMethod<'x>
+{
+    fn from(value: SetResponse<crate::object::inbuxa_blob_store_change::BlobStoreChange>) -> Self {
+        ResponseMethod::Set(SetResponseMethod::BlobStoreChange(Box::new(value)))
     }
 }
 

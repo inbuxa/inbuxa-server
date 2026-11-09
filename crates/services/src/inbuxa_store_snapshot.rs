@@ -114,6 +114,12 @@ fn source(server: &Server) -> Result<(SnapshotSource, PathBuf), Refusal> {
             "A snapshot copies blobs kept in the data store or in a filesystem blob store, \
              and this server keeps them in {kind}."
         ))),
+        // blob-store-change spec, BM-8
+        Err(NotSnapshottable::BlobStoreChanging) => Err(Refusal::Unsupported(
+            "The blob store changed and some blobs may still be only in the old one. \
+             Copy them over or dismiss the change (inbuxa:BlobStoreChange) first."
+                .to_string(),
+        )),
     }
 }
 

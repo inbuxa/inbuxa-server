@@ -398,6 +398,11 @@ impl Default for DefaultPermissions {
                 Permission::SysStoreSnapshot => {
                     default.superuser.push(permission);
                 }
+                // inbuxa: blob-store-change spec, BM-9: a copy reads and
+                // writes every account's blobs
+                Permission::SysBlobStoreChange => {
+                    default.superuser.push(permission);
+                }
                 // inbuxa: AL-12: tenant administrators lock and delegate
                 // within their tenant
                 Permission::SysAccountLockGet

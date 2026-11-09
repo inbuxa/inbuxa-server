@@ -33,6 +33,9 @@ back while the server is stopped.
   It needs RocksDB as the data store. With any other data store a create
   is refused, and the refusal says to use the database's own backup:
   PostgreSQL's or MySQL's, or FoundationDB's.
+  While a change of blob store is unresolved, a create is refused too:
+  some blobs may still be only in the old store, which the snapshot
+  leaves out (blob-store-change spec, BM-8).
 - **SN-2.** What it holds:
   - **The data store**: a RocksDB checkpoint of every column family, taken
     at one point in time. Blobs kept in the data store (the default) are

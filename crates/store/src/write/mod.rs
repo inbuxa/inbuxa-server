@@ -30,6 +30,7 @@ pub mod batch;
 pub mod bitpack;
 pub mod blob;
 pub mod blob_check; // inbuxa: store-check spec
+pub mod blob_move; // inbuxa: blob-store-change spec
 pub mod key;
 pub mod log;
 pub mod serialize;

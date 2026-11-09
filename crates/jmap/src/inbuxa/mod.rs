@@ -12,6 +12,7 @@ pub mod account_lock;
 pub mod ai_limits;
 pub mod audit;
 pub mod audit_log;
+pub mod blob_store_change; // inbuxa: a change of blob store
 pub mod data_inventory;
 pub mod deleted_account;
 pub mod deliverability; // inbuxa: the deliverability check

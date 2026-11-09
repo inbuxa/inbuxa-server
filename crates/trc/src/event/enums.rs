@@ -16,7 +16,7 @@
 // 650 to 659 are inbuxa Relay's (relay spec, RL-23, RL-T23).
 // TOTAL_EVENT_COUNT sizes the collector's per-event tables, so it is one
 // more than the highest id; the test below holds it to the variant list
-pub const TOTAL_EVENT_COUNT: usize = 660;
+pub const TOTAL_EVENT_COUNT: usize = 661;
 pub const TOTAL_METRIC_COUNT: usize = 369;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -874,6 +874,9 @@ pub enum StoreEvent {
     CacheUpdate = 577,
     CacheEntryTooLarge = 633,
     BlobMissingMarker = 507,
+    /// inbuxa: blob-store-change spec, BM-3: a blob the blob store lacked
+    /// was found in the one it replaced, and kept.
+    BlobReadThrough = 660,
     DataWrite = 513,
     DataIterate = 512,
     BlobRead = 508,

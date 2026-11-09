@@ -23,6 +23,7 @@ use crate::task_manager::{manager::spawn_task_manager, scheduler::spawn_task_sch
 
 pub mod broadcast;
 // inbuxa: AL-5, delegations end at their date
+pub mod inbuxa_blob_move; // inbuxa: changing the blob store
 pub mod inbuxa_deliverability; // inbuxa: the deliverability check
 pub mod inbuxa_lock_expiry;
 pub mod inbuxa_log_retention; // inbuxa: personal-data catalog, D1
@@ -88,6 +89,10 @@ impl SpawnServices for IpcReceivers {
 
             // inbuxa: store-check spec, SV-8: a check this node ran stopped with it
             inbuxa_store_check::spawn_store_checks(inner.clone());
+
+            // inbuxa: blob-store-change spec, BM-6, BM-10: a copy this node
+            // ran stopped with it; resolved changes stop being read through
+            inbuxa_blob_move::spawn_blob_moves(inner.clone());
 
             // inbuxa: store-snapshot spec, SN-7: a snapshot cut short by a
             // stop leaves a partial directory

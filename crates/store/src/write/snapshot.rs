@@ -47,6 +47,9 @@ pub enum SnapshotSource {
 pub enum NotSnapshottable {
     DataStore(&'static str),
     BlobStore(&'static str),
+    /// inbuxa: blob-store-change spec, BM-8: some blobs are still only in
+    /// the blob store the server used before.
+    BlobStoreChanging,
 }
 
 impl Store {
@@ -110,6 +113,12 @@ impl Store {
             #[cfg(feature = "azure")]
             BlobStore::Azure(_) => Err(NotSnapshottable::BlobStore("Azure")),
             BlobStore::Sharded(_) => Err(NotSnapshottable::BlobStore("a sharded set")),
+            // inbuxa: blob-store-change spec, BM-8: blobs only an old store
+            // has would be left out
+            BlobStore::Moving(moving) if !moving.old_stores().is_empty() => {
+                Err(NotSnapshottable::BlobStoreChanging)
+            }
+            BlobStore::Moving(moving) => self.snapshot_source(&moving.current),
         }
     }
 }
