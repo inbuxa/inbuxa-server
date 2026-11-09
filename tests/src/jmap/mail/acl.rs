@@ -403,6 +403,44 @@ pub async fn test(test: &TestServer) {
         .await
         .unwrap();
 
+    // inbuxa: keywords belong to the message, so changing them needs the
+    // right on every mailbox the message is in, not only one of them
+    jane_client
+        .email_set_mailbox(&email_id_2, &trash_id, true)
+        .await
+        .unwrap();
+    assert_forbidden(
+        john_client
+            .set_default_account_id(jane.id_string())
+            .email_set_keyword(&email_id_2, "$flagged", true)
+            .await,
+    );
+    jane_client
+        .email_set_mailbox(&email_id_2, &trash_id, false)
+        .await
+        .unwrap();
+
+    // inbuxa: $deleted also needs the right to remove messages
+    jane_client
+        .mailbox_update_acl(
+            &inbox_id,
+            john.id_string(),
+            [ACL::ReadItems, ACL::AddItems, ACL::SetKeywords],
+        )
+        .await
+        .unwrap();
+    assert_forbidden(
+        john_client
+            .set_default_account_id(jane.id_string())
+            .email_set_keyword(&email_id_2, "$deleted", true)
+            .await,
+    );
+    john_client
+        .set_default_account_id(jane.id_string())
+        .email_set_keyword(&email_id_2, "$flagged", true)
+        .await
+        .unwrap();
+
     // Try to create a child
     assert_forbidden(
         john_client
