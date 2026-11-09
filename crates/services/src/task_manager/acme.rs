@@ -2,11 +2,13 @@
  * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
+ *
+ * Modified by Coffey Labs in 2026 for INBUXA.
  */
 
 use crate::task_manager::{TaskFailureType, TaskResult};
 use common::{Server, network::acme::AcmeError};
-use registry::schema::structs::TaskDomainManagement;
+use registry::schema::structs::{CertificateManagement, Domain, TaskDomainManagement};
 use std::time::Duration;
 use store::write::now;
 
@@ -41,6 +43,21 @@ const MAX_RETRIES: u32 = 5;
 
 #[allow(unused_variables)]
 async fn acme_management(server: &Server, task: &TaskDomainManagement) -> trc::Result<TaskResult> {
+    // inbuxa: a domain that's gone, or no longer orders its own certificate,
+    // has nothing for this task to do: it goes quietly instead of failing (#327)
+    if !server
+        .registry()
+        .object::<Domain>(task.domain_id)
+        .await?
+        .is_some_and(|domain| {
+            matches!(
+                domain.certificate_management,
+                CertificateManagement::Automatic(_)
+            )
+        })
+    {
+        return Ok(TaskResult::Ignored);
+    }
     let mut last_temporary_error = Ok(TaskResult::temporary(""));
     for retry in 0..MAX_RETRIES {
         last_temporary_error = match Box::pin(server.acme_renew(task.domain_id)).await {

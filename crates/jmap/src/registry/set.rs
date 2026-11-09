@@ -15,7 +15,7 @@ use crate::registry::{
         action::action_set,
         bootstrap::bootstrap_set,
         dkim::validate_dkim_signature,
-        domain::{validate_dns_server, validate_domain},
+        domain::{domain_tasks_to_clear, validate_dns_server, validate_domain},
         map_bootstrap_error,
         principal::{
             AccountUpdate, build_set_error, schedule_account_destruction, validate_account,
@@ -48,7 +48,7 @@ use jmap_tools::{JsonPointer, JsonPointerItem, Key};
 use registry::{
     jmap::{JmapValue, JsonPointerPatch, MaybeUnpatched, RegistryValue},
     schema::{
-        enums::{Permission, TenantStorageQuota},
+        enums::{Permission, TaskType, TenantStorageQuota},
         prelude::{
             OBJ_FILTER_ACCOUNT, OBJ_FILTER_TENANT, OBJ_SINGLETON, Object, ObjectInner, ObjectType,
             Property,
@@ -60,7 +60,10 @@ use registry::{
     },
     types::id::ObjectId,
 };
-use services::task_manager::{domain_check::clear_queued_renewals, lock::TaskLockManager};
+use services::task_manager::{
+    domain_check::{clear_queued_domain_tasks, clear_queued_renewals},
+    lock::TaskLockManager,
+};
 use std::borrow::Cow;
 use store::{
     registry::{
@@ -776,6 +779,20 @@ impl RegistrySet for Server {
                         }
                     };
 
+                    // inbuxa: #327: the queued tasks this save leaves the domain
+                    // without, cleared below once it's written
+                    let cleared_types = match (&modification, &new_object.inner) {
+                        (Modification::Update { object, .. }, ObjectInner::Domain(domain)) => {
+                            match &object.inner {
+                                ObjectInner::Domain(old_domain) => {
+                                    domain_tasks_to_clear(domain, old_domain, &tasks)
+                                }
+                                _ => Vec::new(),
+                            }
+                        }
+                        _ => Vec::new(),
+                    };
+
                     let object_id = match (modification, result) {
                         (Modification::Update { id, object }, RegistryWriteResult::Success(_)) => {
                             cache_invalidator.process_update(id, &object, &new_object);
@@ -863,14 +880,14 @@ impl RegistrySet for Server {
                     };
 
                     // Dispatch tasks
-                    if !tasks.is_empty()
+                    if (!tasks.is_empty() || !cleared_types.is_empty())
                         && let Some(object_id) = object_id
                     {
                         let mut batch = BatchBuilder::new();
 
                         // inbuxa: a new renewal replaces the domain's queued
                         // one, or both would keep renewing from here on (#290)
-                        let replaced = if tasks.iter().any(|task| {
+                        let mut replaced = if tasks.iter().any(|task| {
                             matches!(
                                 task,
                                 Task::AcmeRenewal(_)
@@ -884,6 +901,15 @@ impl RegistrySet for Server {
                         } else {
                             Vec::new()
                         };
+                        replaced.extend(
+                            clear_queued_domain_tasks(
+                                set.server,
+                                object_id,
+                                &cleared_types,
+                                &mut batch,
+                            )
+                            .await?,
+                        );
 
                         for mut task in tasks.drain(..) {
                             match &mut task {
@@ -990,6 +1016,28 @@ impl RegistrySet for Server {
                                     trc::error!(
                                         err.details("Failed to delete cached application bundle")
                                     );
+                                }
+
+                                // inbuxa: #327: a domain's queued tasks go with it
+                                if matches!(object.inner, ObjectInner::Domain(_)) {
+                                    let mut batch = BatchBuilder::new();
+                                    let cleared = clear_queued_domain_tasks(
+                                        set.server,
+                                        id,
+                                        &[
+                                            TaskType::DkimManagement,
+                                            TaskType::DnsManagement,
+                                            TaskType::AcmeRenewal,
+                                        ],
+                                        &mut batch,
+                                    )
+                                    .await?;
+                                    if !cleared.is_empty() {
+                                        set.server.store().write(batch.build_all()).await?;
+                                        for id in cleared {
+                                            set.server.remove_index_lock(id).await;
+                                        }
+                                    }
                                 }
 
                                 // inbuxa: ME-3

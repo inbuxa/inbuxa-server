@@ -167,8 +167,26 @@ pub async fn clear_queued_renewals(
     domain_id: Id,
     batch: &mut BatchBuilder,
 ) -> trc::Result<Vec<u64>> {
+    clear_queued_domain_tasks(server, domain_id, &[TaskType::AcmeRenewal], batch).await
+}
+
+/// inbuxa: adds to `batch` the removal of a domain's queued tasks of the
+/// given types (DKIM management, DNS management, certificate renewal),
+/// whatever their state. For a domain that's gone, a task about to be
+/// replaced, or one the domain no longer runs (#327). Like
+/// [`clear_queued_renewals`], it returns the tasks it locked, and a task
+/// running right now stays.
+pub async fn clear_queued_domain_tasks(
+    server: &Server,
+    domain_id: Id,
+    types: &[TaskType],
+    batch: &mut BatchBuilder,
+) -> trc::Result<Vec<u64>> {
     let mut locked = Vec::new();
-    for (due, id) in queued_tasks(server, &[TaskType::AcmeRenewal]).await? {
+    if types.is_empty() {
+        return Ok(locked);
+    }
+    for (due, id) in queued_tasks(server, types).await? {
         let task = server
             .store()
             .get_value::<Task>(ValueKey::from(ValueClass::TaskQueue(
@@ -176,9 +194,12 @@ pub async fn clear_queued_renewals(
             )))
             .await
             .caused_by(trc::location!())?;
-        if matches!(task, Some(Task::AcmeRenewal(task)) if task.domain_id == domain_id)
-            && server.try_lock_task(id).await
-        {
+        let task_domain_id = match &task {
+            Some(Task::AcmeRenewal(task)) | Some(Task::DkimManagement(task)) => task.domain_id,
+            Some(Task::DnsManagement(task)) => task.domain_id,
+            _ => continue,
+        };
+        if task_domain_id == domain_id && server.try_lock_task(id).await {
             batch
                 .clear(ValueClass::TaskQueue(TaskQueueClass::Task { id }))
                 .clear(ValueClass::TaskQueue(TaskQueueClass::Due { id, due }));
